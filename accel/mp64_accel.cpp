@@ -1836,6 +1836,7 @@ struct PersistentWorkerLaneSnapshot {
     bool auxiliary = false;
     uint64_t thread_token = 0;
     uint64_t completed_commands = 0;
+    uint64_t completed_steps = 0;
 };
 
 struct PersistentWorkerPrivateSnapshot {
@@ -1871,6 +1872,9 @@ public:
             static_cast<std::size_t>(worker_count_),
             0);
         lane_completed_commands_.assign(
+            static_cast<std::size_t>(worker_count_),
+            0);
+        lane_completed_steps_.assign(
             static_cast<std::size_t>(worker_count_),
             0);
         if (auxiliary_worker_count_ == 0)
@@ -1963,9 +1967,58 @@ public:
                         static_cast<std::size_t>(lane_index)],
                     lane_completed_commands_[
                         static_cast<std::size_t>(lane_index)],
+                    lane_completed_steps_[
+                        static_cast<std::size_t>(lane_index)],
                 });
         }
         return result;
+    }
+
+    void validate_private_capacity(
+            uint64_t maximum_additional_waves,
+            uint64_t maximum_additional_commands,
+            uint64_t maximum_additional_steps) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (
+            maximum_additional_waves >
+                std::numeric_limits<uint64_t>::max() -
+                    wave_epoch_
+        ) {
+            throw std::overflow_error(
+                "native private worker wave epoch overflow");
+        }
+        if (
+            maximum_additional_commands >
+                std::numeric_limits<uint64_t>::max() -
+                    next_command_sequence_
+        ) {
+            throw std::overflow_error(
+                "native private command sequence overflow");
+        }
+        for (
+            std::size_t lane = 0;
+            lane < lane_completed_commands_.size();
+            lane++
+        ) {
+            if (
+                maximum_additional_commands >
+                    std::numeric_limits<uint64_t>::max() -
+                        lane_completed_commands_[lane]
+            ) {
+                throw std::overflow_error(
+                    "native private completed-command "
+                    "accounting overflow");
+            }
+            if (
+                maximum_additional_steps >
+                    std::numeric_limits<uint64_t>::max() -
+                        lane_completed_steps_[lane]
+            ) {
+                throw std::overflow_error(
+                    "native private completed-step "
+                    "accounting overflow");
+            }
+        }
     }
 
     std::vector<PrivateFullCoreResult> execute_wave(
@@ -2032,6 +2085,31 @@ public:
         if (wave_epoch_ == std::numeric_limits<uint64_t>::max())
             throw std::overflow_error(
                 "native worker wave epoch overflow");
+        for (const PrivateFullCoreCommand& command : commands) {
+            const std::size_t lane =
+                static_cast<std::size_t>(
+                    command.lane_index);
+            if (
+                lane_completed_commands_[lane] ==
+                    std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "native private completed-command "
+                    "accounting overflow");
+            }
+            const uint64_t maximum_steps =
+                static_cast<uint64_t>(
+                    command.max_steps);
+            if (
+                maximum_steps >
+                    std::numeric_limits<uint64_t>::max() -
+                        lane_completed_steps_[lane]
+            ) {
+                throw std::overflow_error(
+                    "native private completed-step "
+                    "accounting overflow");
+            }
+        }
 
         wave_epoch_++;
         for (std::size_t index = 0;
@@ -2125,6 +2203,10 @@ public:
             lane_thread_tokens_[lane] =
                 result.thread_token;
             lane_completed_commands_[lane]++;
+            lane_completed_steps_[lane] +=
+                static_cast<uint64_t>(
+                    std::max<int64_t>(
+                        result.steps_executed, 0));
             results[result.submission_index] =
                 std::move(result);
         }
@@ -2225,6 +2307,7 @@ private:
     std::vector<HelperSlot> helper_slots_;
     std::vector<uint64_t> lane_thread_tokens_;
     std::vector<uint64_t> lane_completed_commands_;
+    std::vector<uint64_t> lane_completed_steps_;
     int live_auxiliary_workers_ = 0;
     uint64_t launch_count_ = 0;
     uint64_t wave_epoch_ = 0;
@@ -8345,6 +8428,10 @@ classify_private_full_core_instruction(
     switch (family) {
         case 0x0:
             instruction_length = 1;
+            // EI remains a coordinator boundary. A line can already be
+            // asserted while interrupts are masked; executing EI privately
+            // and continuing the command would retire past the newly
+            // eligible interrupt boundary.
             private_instruction =
                 subop == 0x0 ||
                 subop == 0x1 ||
@@ -8352,7 +8439,6 @@ classify_private_full_core_instruction(
                 subop == 0x3 ||
                 subop == 0x9 ||
                 subop == 0xA ||
-                subop == 0xB ||
                 subop == 0xC ||
                 subop == 0xF;
             break;
@@ -8770,6 +8856,46 @@ struct CoreDispatchResult {
     std::array<uint64_t, 7> stop_reasons{};
     std::optional<PendingClusterRequest> pending_cluster_request;
 };
+
+struct FullCoreFrontierReservation {
+    int core_index = -1;
+    int64_t max_steps = 0;
+};
+
+struct FullCoreFrontierOutcome {
+    int64_t steps = 0;
+    int64_t cycles = 0;
+    bool interrupt_boundary = false;
+    std::vector<int> interrupt_cores;
+    std::vector<int> dispatch_boundary_cores;
+    std::vector<int> terminal_cores;
+};
+
+static std::vector<PrivateFullCoreResult>
+execute_private_full_core_wave_under_active_batch(
+    SystemState& system,
+    std::vector<PrivateFullCoreCommand> commands);
+
+static void run_parallel_full_core_round(
+    SystemState& system,
+    const std::vector<FullCoreFrontierReservation>& reservations,
+    const std::vector<StepCallbacks>& callbacks,
+    const py::function& settle_continuation,
+    const py::function& settle_dispatch_error,
+    SystemBatchResult& result,
+    FullCoreFrontierOutcome& outcome);
+
+static int pending_enabled_full_core_interrupt(
+        const SystemState& system,
+        const CPUState& core) {
+    if (core.halted || !core.flag_i)
+        return -1;
+    if (system.shared_interrupts.ipi_line(core.core_id))
+        return IVEC_IPI;
+    if (system.shared_timer.irq_pending)
+        return IVEC_TIMER;
+    return -1;
+}
 
 static PendingClusterRequest classify_pending_cluster_request(
         CPUState& core,
@@ -9249,6 +9375,8 @@ static SystemBatchResult run_full_core_system_batch(
 
     if (
         active_indices.size() == 1 &&
+        system.execution_cores.size() !=
+            system.cores.size() &&
         system.execution_cores[
             static_cast<std::size_t>(
                 active_indices.front())]->profile ==
@@ -9275,6 +9403,147 @@ static SystemBatchResult run_full_core_system_batch(
         result.system_cycles_advanced =
             system.shared_clock.cycles() - clock_start;
         result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+
+    // Element 3 integrates only homogeneous full-core topologies. Reduced
+    // cores and cluster-local resources retain the established serial native
+    // coordinator until Element 4 can include them in the same logical
+    // frontier.
+    if (system.execution_cores.size() == system.cores.size()) {
+        int64_t remaining = max_steps;
+        while (remaining > 0 && !system_all_halted(system)) {
+            if (system_all_idle_or_halted(system))
+                break;
+
+            const int round_start =
+                system.scheduler_cursor %
+                static_cast<int>(core_count);
+            const int64_t active_count =
+                static_cast<int64_t>(
+                    std::count_if(
+                        system.execution_cores.begin(),
+                        system.execution_cores.end(),
+                        [](const CPUState* core) {
+                            return
+                                !core->halted &&
+                                !core->idle;
+                        }));
+            if (active_count == 0)
+                break;
+
+            const int64_t equal_round_quantum =
+                std::min<int64_t>(
+                    max_dispatch_steps,
+                    remaining / active_count +
+                        (
+                            remaining % active_count != 0
+                                ? 1
+                                : 0
+                        ));
+            int64_t unreserved = remaining;
+            std::vector<FullCoreFrontierReservation>
+                reservations;
+            reservations.reserve(
+                static_cast<std::size_t>(
+                    active_count));
+            for (
+                std::size_t offset = 0;
+                offset < core_count;
+                offset++
+            ) {
+                const int core_index = (
+                    round_start +
+                    static_cast<int>(offset)
+                ) % static_cast<int>(core_count);
+                const CPUState& core =
+                    *system.execution_cores[
+                        static_cast<std::size_t>(
+                            core_index)];
+                if (core.halted || core.idle)
+                    continue;
+                const int64_t reservation =
+                    std::min<int64_t>(
+                        equal_round_quantum,
+                        unreserved);
+                reservations.push_back(
+                    FullCoreFrontierReservation{
+                        core_index,
+                        reservation,
+                    });
+                unreserved -= reservation;
+            }
+            if (reservations.empty())
+                break;
+
+            FullCoreFrontierOutcome outcome;
+            try {
+                run_parallel_full_core_round(
+                    system,
+                    reservations,
+                    callbacks,
+                    settle_continuation,
+                    settle_dispatch_error,
+                    result,
+                    outcome);
+            } catch (...) {
+                // Every physical cohort in the failing sub-frontier reached
+                // the same private boundary before ordered settlement began.
+                // Settle those prefixes, all earlier successful boundaries,
+                // and all prior sub-frontiers in this scheduler round.
+                settle_round(
+                    outcome.cycles,
+                    true,
+                    true,
+                    false);
+                throw;
+            }
+
+            result.instructions_executed =
+                checked_scheduler_add(
+                    result.instructions_executed,
+                    outcome.steps,
+                    "aggregate instruction accounting");
+            remaining -= outcome.steps;
+            // A complete equal-credit scheduler round, rather than a
+            // physical cohort or cache/shared sub-frontier, is the unbounded
+            // scheduler's clock, device, and interrupt boundary.
+            settle_round(
+                outcome.cycles,
+                true,
+                false,
+                true);
+            result.rounds++;
+
+            if (outcome.steps != 0)
+                continue;
+            if (!outcome.interrupt_boundary)
+                break;
+
+            bool interrupt_still_eligible = false;
+            for (int core_index : outcome.interrupt_cores) {
+                const CPUState& core =
+                    *system.execution_cores[
+                        static_cast<std::size_t>(
+                            core_index)];
+                if (
+                    pending_enabled_full_core_interrupt(
+                        system, core) >= 0
+                ) {
+                    interrupt_still_eligible = true;
+                    break;
+                }
+            }
+            if (interrupt_still_eligible)
+                break;
+        }
+
+        settle_round(0, false, true, false);
+        result.system_cycles_advanced =
+            system.shared_clock.cycles() -
+            clock_start;
+        result.scheduler_cursor =
+            system.scheduler_cursor;
         return result;
     }
 
@@ -11150,11 +11419,16 @@ acquire_system_scheduler_lock(SystemState& system) {
 }
 
 static std::vector<PrivateFullCoreResult>
-run_private_full_core_wave(
+execute_private_full_core_wave_under_active_batch(
         SystemState& system,
         std::vector<PrivateFullCoreCommand> commands) {
     if (commands.empty())
         return {};
+    if (!system.native_batch_active.load(
+            std::memory_order_acquire)) {
+        throw std::logic_error(
+            "private execution requires an active native system batch");
+    }
     if (!system.worker_pool)
         throw std::logic_error(
             "native worker pool is unavailable");
@@ -11192,21 +11466,9 @@ run_private_full_core_wave(
         command.core = system.cores[
             static_cast<std::size_t>(
                 command.core_index)].get();
-        if (
-            !command.core->halted &&
-            command.core->flag_i
-        ) {
-            if (
-                system.shared_interrupts.ipi_line(
-                    command.core->core_id)
-            ) {
-                command.pending_interrupt_vector =
-                    CYCLE_IVEC_IPI;
-            } else if (system.shared_timer.irq_pending) {
-                command.pending_interrupt_vector =
-                    CYCLE_IVEC_TIMER;
-            }
-        }
+        command.pending_interrupt_vector =
+            pending_enabled_full_core_interrupt(
+                system, *command.core);
         if (command.lane_index == 0)
             inline_core = command.core;
     }
@@ -11229,16 +11491,17 @@ run_private_full_core_wave(
     for (PrivateFullCoreCommand& command : commands)
         command.admission = admission;
 
-    NativeBatchActiveGuard active_guard(system);
     system.mappings_sealed = true;
 
-    std::vector<PrivateFullCoreResult> results;
     {
         py::gil_scoped_release release;
-        results = system.worker_pool->execute_wave(
+        return system.worker_pool->execute_wave(
             std::move(commands));
     }
+}
 
+static void throw_private_full_core_internal_failure(
+        const std::vector<PrivateFullCoreResult>& results) {
     for (const PrivateFullCoreResult& result : results) {
         if (
             result.stop_reason ==
@@ -11253,7 +11516,1291 @@ run_private_full_core_wave(
                 result.internal_error);
         }
     }
+}
+
+static std::vector<PrivateFullCoreResult>
+run_private_full_core_wave(
+        SystemState& system,
+        std::vector<PrivateFullCoreCommand> commands) {
+    if (commands.empty())
+        return {};
+
+    NativeBatchActiveGuard active_guard(system);
+    std::vector<PrivateFullCoreResult> results =
+        execute_private_full_core_wave_under_active_batch(
+            system,
+            std::move(commands));
+    throw_private_full_core_internal_failure(results);
     return results;
+}
+
+struct CoordinatorBoundarySettlement {
+    int64_t total_steps = 0;
+    int64_t total_cycles = 0;
+    int stop_reason = -1;
+    uint64_t continuations = 0;
+    bool closes_dispatch = false;
+    bool terminal = false;
+};
+
+static CoordinatorBoundarySettlement
+validated_coordinator_settlement(
+        const py::object& settled_object,
+        int64_t prefix_steps,
+        int64_t prefix_cycles,
+        int64_t max_steps,
+        const char* context) {
+    py::tuple settled = settled_object.cast<py::tuple>();
+    if (settled.size() != 3) {
+        throw std::runtime_error(
+            std::string(context) +
+            " must return "
+            "(invocation_steps, invocation_cycles, terminal)");
+    }
+
+    CoordinatorBoundarySettlement result;
+    result.total_steps = settled[0].cast<int64_t>();
+    result.total_cycles = settled[1].cast<int64_t>();
+    result.terminal = settled[2].cast<bool>();
+    if (
+        result.total_steps < prefix_steps ||
+        result.total_steps >
+            std::min<int64_t>(
+                max_steps,
+                checked_scheduler_add(
+                    prefix_steps,
+                    1,
+                    "coordinator boundary accounting")) ||
+        result.total_cycles < prefix_cycles
+    ) {
+        throw std::runtime_error(
+            std::string(context) +
+            " returned invalid progress");
+    }
+    if (
+        !result.terminal &&
+        result.total_steps == prefix_steps
+    ) {
+        if (
+            std::string(context) ==
+            "coordinator dispatch error settlement"
+        ) {
+            throw std::runtime_error(
+                "nonterminal native dispatch error "
+                "settlement made no progress");
+        }
+        throw std::runtime_error(
+            "nonterminal native continuation made no progress");
+    }
+    return result;
+}
+
+static CoordinatorBoundarySettlement
+settle_private_full_core_terminal(
+        SystemState& system,
+        int core_index,
+        const PrivateFullCoreResult& private_result,
+        int64_t max_steps,
+        const py::function& settle_continuation) {
+    CPUState& core =
+        *system.execution_cores[
+            static_cast<std::size_t>(core_index)];
+    auto logical_guard =
+        acquire_shared_memory_use(
+            core,
+            /*permit_native_execution=*/true);
+    const int continuation_reason =
+        private_result.stop_reason ==
+            PrivateFullCoreStopReason::TRAP
+        ? RUN_TRAP
+        : RUN_RESET;
+    CoordinatorBoundarySettlement result =
+        validated_coordinator_settlement(
+            settle_continuation(
+                core_index,
+                continuation_reason,
+                private_result.trap_id,
+                private_result.steps_executed,
+                private_result.total_cycles),
+            private_result.steps_executed,
+            private_result.total_cycles,
+            max_steps,
+            "private trap/reset settlement");
+    result.stop_reason = continuation_reason;
+    result.continuations = 1;
+    result.closes_dispatch = true;
+    return result;
+}
+
+static CoordinatorBoundarySettlement
+settle_private_full_core_coordinator_instruction(
+        SystemState& system,
+        int core_index,
+        const PrivateFullCoreResult& private_result,
+        int64_t max_steps,
+        const StepCallbacks& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error) {
+    CPUState& core =
+        *system.execution_cores[
+            static_cast<std::size_t>(core_index)];
+    auto logical_guard =
+        acquire_shared_memory_use(
+            core,
+            /*permit_native_execution=*/true);
+    RunResult raw{};
+    try {
+        py::gil_scoped_release release;
+        SystemBatchExecutionPermissionGuard
+            execution_permission(
+                system.native_batch_active);
+        CPUExecutionGuard execution_guard(core);
+        raw = run_steps(core, callbacks, 1);
+    } catch (py::error_already_set& error) {
+        py::object settled_object =
+            settle_dispatch_error(
+                core_index,
+                error.value());
+        if (settled_object.is_none())
+            throw;
+        CoordinatorBoundarySettlement local =
+            validated_coordinator_settlement(
+                settled_object,
+                0,
+                0,
+                1,
+                "coordinator dispatch error settlement");
+        CoordinatorBoundarySettlement result;
+        result.total_steps =
+            checked_scheduler_add(
+                private_result.steps_executed,
+                local.total_steps,
+                "coordinator dispatch error "
+                "instruction accounting");
+        result.total_cycles =
+            checked_scheduler_add(
+                private_result.total_cycles,
+                local.total_cycles,
+                "coordinator dispatch error "
+                "cycle accounting");
+        if (result.total_steps > max_steps) {
+            throw std::runtime_error(
+                "coordinator dispatch error settlement "
+                "returned invalid progress");
+        }
+        result.terminal = local.terminal;
+        result.closes_dispatch = true;
+        return result;
+    }
+
+    if (
+        raw.steps_executed < 0 ||
+        raw.steps_executed > 1 ||
+        raw.total_cycles < 0
+    ) {
+        throw std::runtime_error(
+            "coordinator boundary dispatch returned "
+            "invalid progress");
+    }
+
+    const int64_t combined_prefix_steps =
+        checked_scheduler_add(
+            private_result.steps_executed,
+            raw.steps_executed,
+            "frontier instruction accounting");
+    const int64_t combined_prefix_cycles =
+        checked_scheduler_add(
+            private_result.total_cycles,
+            raw.total_cycles,
+            "frontier cycle accounting");
+    if (combined_prefix_steps > max_steps) {
+        throw std::logic_error(
+            "coordinator boundary exceeded its reserved budget");
+    }
+
+    if (
+        raw.stop_reason >= RUN_MEX_FALLBACK &&
+        raw.stop_reason <= RUN_RESET
+    ) {
+        CoordinatorBoundarySettlement result =
+            validated_coordinator_settlement(
+                settle_continuation(
+                    core_index,
+                    raw.stop_reason,
+                    raw.trap_id,
+                    combined_prefix_steps,
+                    combined_prefix_cycles),
+                combined_prefix_steps,
+                combined_prefix_cycles,
+                max_steps,
+                "coordinator continuation");
+        result.stop_reason = raw.stop_reason;
+        result.continuations = 1;
+        result.closes_dispatch = true;
+        return result;
+    }
+
+    int normalized_stop_reason = raw.stop_reason;
+    if (
+        normalized_stop_reason == RUN_LIMIT &&
+        combined_prefix_steps < max_steps
+    ) {
+        if (core.halted) {
+            normalized_stop_reason = RUN_HALT;
+        } else if (core.idle) {
+            normalized_stop_reason = RUN_IDLE;
+        }
+    }
+
+    CoordinatorBoundarySettlement result;
+    result.total_steps = combined_prefix_steps;
+    result.total_cycles = combined_prefix_cycles;
+    result.stop_reason = normalized_stop_reason;
+    result.terminal =
+        normalized_stop_reason == RUN_HALT ||
+        normalized_stop_reason == RUN_IDLE;
+    result.closes_dispatch = result.terminal;
+    return result;
+}
+
+static void run_parallel_full_core_subfrontier(
+        SystemState& system,
+        const std::vector<
+            FullCoreFrontierReservation>& reservations,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error,
+        SystemBatchResult& result,
+        FullCoreFrontierOutcome& outcome) {
+    if (reservations.empty())
+        return;
+    if (
+        system.execution_cores.size() !=
+        system.cores.size()
+    ) {
+        throw std::logic_error(
+            "parallel full-core frontiers require a "
+            "homogeneous full-core topology");
+    }
+    if (
+        callbacks.size() !=
+        system.execution_cores.size()
+    ) {
+        throw std::invalid_argument(
+            "parallel full-core frontier callback "
+            "topology is incomplete");
+    }
+
+    int64_t total_reserved = 0;
+    for (
+        const FullCoreFrontierReservation& reservation :
+        reservations
+    ) {
+        if (
+            reservation.core_index < 0 ||
+            reservation.core_index >=
+                system.full_core_count() ||
+            reservation.max_steps <= 0 ||
+            reservation.max_steps >
+                std::numeric_limits<int>::max()
+        ) {
+            throw std::logic_error(
+                "parallel full-core frontier reservation "
+                "is invalid");
+        }
+        total_reserved = checked_scheduler_add(
+            total_reserved,
+            reservation.max_steps,
+            "frontier reservation accounting");
+    }
+
+    // Physical cohorts are an implementation detail. Even the one-lane
+    // reference gathers every cohort before the first shared commit so lane
+    // width cannot change exception-visible peer-private progress.
+    std::vector<PrivateFullCoreResult> private_results;
+    private_results.reserve(reservations.size());
+    const std::size_t physical_width =
+        static_cast<std::size_t>(
+            system.worker_count());
+    for (
+        std::size_t cohort_start = 0;
+        cohort_start < reservations.size();
+        cohort_start += physical_width
+    ) {
+        const std::size_t cohort_size =
+            std::min<std::size_t>(
+                physical_width,
+                reservations.size() -
+                    cohort_start);
+        std::vector<PrivateFullCoreCommand> commands;
+        commands.reserve(cohort_size);
+        for (
+            std::size_t cohort_index = 0;
+            cohort_index < cohort_size;
+            cohort_index++
+        ) {
+            const FullCoreFrontierReservation&
+                reservation =
+                    reservations[
+                        cohort_start +
+                        cohort_index];
+            PrivateFullCoreCommand command;
+            command.lane_index =
+                static_cast<int>(cohort_index);
+            command.core_index =
+                reservation.core_index;
+            command.max_steps =
+                static_cast<int>(
+                    reservation.max_steps);
+            commands.push_back(std::move(command));
+        }
+        std::vector<PrivateFullCoreResult>
+            cohort_results =
+                execute_private_full_core_wave_under_active_batch(
+                    system,
+                    std::move(commands));
+        if (cohort_results.size() != cohort_size) {
+            throw std::logic_error(
+                "private worker cohort returned an "
+                "incomplete frontier");
+        }
+        for (
+            PrivateFullCoreResult& private_result :
+            cohort_results
+        ) {
+            private_results.push_back(
+                std::move(private_result));
+        }
+    }
+    if (private_results.size() != reservations.size()) {
+        throw std::logic_error(
+            "private worker frontier result count mismatch");
+    }
+
+    std::vector<int64_t> per_core_frontier_cycles(
+        system.execution_cores.size(),
+        0);
+    auto merge_fragment = [&](
+            int core_index,
+            CoreDispatchResult fragment) {
+        if (fragment.steps < 0 || fragment.cycles < 0) {
+            throw std::logic_error(
+                "parallel full-core frontier produced "
+                "negative progress");
+        }
+        outcome.steps = checked_scheduler_add(
+            outcome.steps,
+            fragment.steps,
+            "frontier aggregate instruction accounting");
+        if (outcome.steps > total_reserved) {
+            throw std::logic_error(
+                "parallel full-core frontier exceeded "
+                "its aggregate reservation");
+        }
+        const std::size_t index =
+            static_cast<std::size_t>(core_index);
+        per_core_frontier_cycles[index] =
+            checked_scheduler_add(
+                per_core_frontier_cycles[index],
+                fragment.cycles,
+                "frontier per-core cycle accounting");
+        outcome.cycles = std::max(
+            outcome.cycles,
+            per_core_frontier_cycles[index]);
+        merge_core_dispatch(
+            result, core_index, fragment);
+    };
+
+    const PrivateFullCoreResult*
+        first_internal_failure = nullptr;
+    std::vector<bool> dispatch_open(
+        reservations.size(), false);
+    for (
+        std::size_t index = 0;
+        index < reservations.size();
+        index++
+    ) {
+        const FullCoreFrontierReservation& reservation =
+            reservations[index];
+        const PrivateFullCoreResult& private_result =
+            private_results[index];
+        if (
+            private_result.core_index !=
+                reservation.core_index ||
+            private_result.steps_executed < 0 ||
+            private_result.steps_executed >
+                reservation.max_steps ||
+            private_result.total_cycles < 0
+        ) {
+            throw std::logic_error(
+                "private worker returned invalid "
+                "frontier progress");
+        }
+
+        const bool boundary_requires_room =
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    ICACHE_BOUNDARY ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    SHARED_INSTRUCTION ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::TRAP ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::RESET;
+        if (
+            boundary_requires_room &&
+            private_result.steps_executed >=
+                reservation.max_steps
+        ) {
+            throw std::logic_error(
+                "private boundary exhausted its "
+                "coordinator reservation");
+        }
+        if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    INSTRUCTION_LIMIT &&
+            private_result.steps_executed !=
+                reservation.max_steps
+        ) {
+            throw std::logic_error(
+                "private instruction-limit result "
+                "did not exhaust its reservation");
+        }
+        if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    INTERRUPT_BOUNDARY &&
+            (
+                private_result.steps_executed != 0 ||
+                private_result.total_cycles != 0
+            )
+        ) {
+            throw std::logic_error(
+                "private interrupt boundary made progress");
+        }
+
+        if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    INTERNAL_FAILURE
+        ) {
+            if (first_internal_failure == nullptr)
+                first_internal_failure =
+                    &private_result;
+            continue;
+        }
+
+        if (
+            private_result.steps_executed > 0 ||
+            private_result.total_cycles > 0
+        ) {
+            CoreDispatchResult prefix;
+            prefix.steps =
+                private_result.steps_executed;
+            prefix.cycles =
+                private_result.total_cycles;
+            merge_fragment(
+                reservation.core_index,
+                std::move(prefix));
+        }
+
+        if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    INTERRUPT_BOUNDARY
+        ) {
+            outcome.interrupt_boundary = true;
+            outcome.interrupt_cores.push_back(
+                reservation.core_index);
+            continue;
+        }
+
+        dispatch_open[index] = true;
+        if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    INSTRUCTION_LIMIT ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::HALTED ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::IDLE
+        ) {
+            int reason = RUN_LIMIT;
+            if (
+                private_result.steps_executed <
+                    reservation.max_steps
+            ) {
+                if (
+                    private_result.stop_reason ==
+                    PrivateFullCoreStopReason::HALTED
+                ) {
+                    reason = RUN_HALT;
+                } else if (
+                    private_result.stop_reason ==
+                    PrivateFullCoreStopReason::IDLE
+                ) {
+                    reason = RUN_IDLE;
+                }
+            }
+            CoreDispatchResult terminal;
+            terminal.dispatches = 1;
+            terminal.stop_reasons[
+                static_cast<std::size_t>(reason)] = 1;
+            merge_fragment(
+                reservation.core_index,
+                std::move(terminal));
+            if (
+                private_result.stop_reason ==
+                    PrivateFullCoreStopReason::HALTED ||
+                private_result.stop_reason ==
+                    PrivateFullCoreStopReason::IDLE
+            ) {
+                outcome.terminal_cores.push_back(
+                    reservation.core_index);
+            }
+            dispatch_open[index] = false;
+        }
+    }
+
+    if (first_internal_failure != nullptr) {
+        throw std::runtime_error(
+            "private command failed on core " +
+            std::to_string(
+                first_internal_failure->core_index) +
+            ": " +
+            first_internal_failure->internal_error);
+    }
+
+    // Every private cohort is complete and its mapping admission is gone.
+    // Shared/cache/trap/reset boundaries now commit only on the coordinator
+    // and only in the frozen cyclic reservation order.
+    for (
+        std::size_t index = 0;
+        index < reservations.size();
+        index++
+    ) {
+        if (!dispatch_open[index])
+            continue;
+        const FullCoreFrontierReservation& reservation =
+            reservations[index];
+        const PrivateFullCoreResult& private_result =
+            private_results[index];
+
+        CoordinatorBoundarySettlement settlement;
+        if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::TRAP ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::RESET
+        ) {
+            settlement =
+                settle_private_full_core_terminal(
+                    system,
+                    reservation.core_index,
+                    private_result,
+                    reservation.max_steps,
+                    settle_continuation);
+        } else if (
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    ICACHE_BOUNDARY ||
+            private_result.stop_reason ==
+                PrivateFullCoreStopReason::
+                    SHARED_INSTRUCTION
+        ) {
+            settlement =
+                settle_private_full_core_coordinator_instruction(
+                    system,
+                    reservation.core_index,
+                    private_result,
+                    reservation.max_steps,
+                    callbacks[
+                        static_cast<std::size_t>(
+                            reservation.core_index)],
+                    settle_continuation,
+                    settle_dispatch_error);
+        } else {
+            throw std::logic_error(
+                "private frontier left an unsupported "
+                "coordinator boundary");
+        }
+
+        if (
+            settlement.total_steps <
+                private_result.steps_executed ||
+            settlement.total_cycles <
+                private_result.total_cycles
+        ) {
+            throw std::logic_error(
+                "coordinator settlement lost a "
+                "private prefix");
+        }
+        CoreDispatchResult suffix;
+        suffix.steps =
+            settlement.total_steps -
+            private_result.steps_executed;
+        suffix.cycles =
+            settlement.total_cycles -
+            private_result.total_cycles;
+        suffix.dispatches = 1;
+        suffix.continuations =
+            settlement.continuations;
+        if (settlement.stop_reason >= RUN_LIMIT &&
+            settlement.stop_reason <= RUN_RESET) {
+            suffix.stop_reasons[
+                static_cast<std::size_t>(
+                    settlement.stop_reason)] = 1;
+        }
+        merge_fragment(
+            reservation.core_index,
+            std::move(suffix));
+        if (settlement.closes_dispatch) {
+            outcome.dispatch_boundary_cores.push_back(
+                reservation.core_index);
+        }
+        if (settlement.terminal) {
+            outcome.terminal_cores.push_back(
+                reservation.core_index);
+        }
+        dispatch_open[index] = false;
+    }
+}
+
+static void run_parallel_full_core_round(
+        SystemState& system,
+        const std::vector<
+            FullCoreFrontierReservation>& reservations,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error,
+        SystemBatchResult& result,
+        FullCoreFrontierOutcome& outcome) {
+    if (reservations.empty())
+        return;
+    if (
+        system.execution_cores.size() !=
+        system.cores.size()
+    ) {
+        throw std::logic_error(
+            "parallel full-core rounds require a "
+            "homogeneous full-core topology");
+    }
+    if (!system.worker_pool)
+        throw std::logic_error(
+            "native worker pool is unavailable");
+
+    const std::size_t core_count =
+        system.execution_cores.size();
+    if (callbacks.size() != core_count) {
+        throw std::invalid_argument(
+            "parallel full-core round callback "
+            "topology is incomplete");
+    }
+
+    int64_t total_reserved = 0;
+    std::vector<bool> seen_cores(core_count, false);
+    for (
+        const FullCoreFrontierReservation& reservation :
+        reservations
+    ) {
+        if (
+            reservation.core_index < 0 ||
+            reservation.core_index >=
+                system.full_core_count() ||
+            reservation.max_steps < 0 ||
+            reservation.max_steps >
+                std::numeric_limits<int>::max()
+        ) {
+            throw std::logic_error(
+                "parallel full-core round reservation "
+                "is invalid");
+        }
+        const std::size_t core_index =
+            static_cast<std::size_t>(
+                reservation.core_index);
+        if (seen_cores[core_index]) {
+            throw std::logic_error(
+                "parallel full-core round reserved one "
+                "core twice");
+        }
+        seen_cores[core_index] = true;
+        total_reserved = checked_scheduler_add(
+            total_reserved,
+            reservation.max_steps,
+            "round reservation accounting");
+    }
+
+    // One command must either retire an instruction, terminate, interrupt,
+    // or fail. This is therefore a conservative upper bound for both
+    // physical waves and logical raw-dispatch openings in the round. Check
+    // every monotonic counter before any helper can mutate a core.
+    uint64_t capacity_bound =
+        static_cast<uint64_t>(total_reserved);
+    if (
+        reservations.size() >
+            std::numeric_limits<uint64_t>::max() -
+                capacity_bound
+    ) {
+        throw std::overflow_error(
+            "native full-core round capacity overflow");
+    }
+    capacity_bound +=
+        static_cast<uint64_t>(
+            reservations.size());
+    system.worker_pool->validate_private_capacity(
+        capacity_bound,
+        capacity_bound,
+        static_cast<uint64_t>(total_reserved));
+    if (
+        capacity_bound >
+            std::numeric_limits<uint64_t>::max() -
+                system.native_dispatches
+    ) {
+        throw std::overflow_error(
+            "native scheduler dispatch counter overflow");
+    }
+
+    std::vector<int64_t> remaining_steps;
+    std::vector<int64_t> round_credit;
+    remaining_steps.reserve(reservations.size());
+    round_credit.reserve(reservations.size());
+    int64_t round_quantum = 0;
+    for (
+        const FullCoreFrontierReservation& reservation :
+        reservations
+    ) {
+        remaining_steps.push_back(
+            reservation.max_steps);
+        round_credit.push_back(
+            reservation.max_steps);
+        round_quantum = std::max(
+            round_quantum,
+            reservation.max_steps);
+    }
+    std::vector<int64_t> per_reservation_cycles(
+        reservations.size(), 0);
+    std::vector<bool> done(
+        reservations.size(), false);
+    std::vector<bool> dispatch_open(
+        reservations.size(), false);
+    std::vector<bool> reservation_progress(
+        reservations.size(), false);
+    const int round_start_cursor =
+        system.scheduler_cursor;
+
+    auto refresh_round_cursor = [&]() {
+        int cursor = round_start_cursor;
+        for (
+            std::size_t index = 0;
+            index < reservations.size();
+            index++
+        ) {
+            if (reservation_progress[index]) {
+                cursor =
+                    (
+                        reservations[index].core_index +
+                        1
+                    ) % static_cast<int>(core_count);
+            }
+        }
+        system.scheduler_cursor = cursor;
+    };
+
+    auto close_dispatch = [&](
+            std::size_t reservation_index,
+            int stop_reason) {
+        if (!dispatch_open[reservation_index])
+            return;
+        CoreDispatchResult completion;
+        completion.dispatches = 1;
+        if (
+            stop_reason >= RUN_LIMIT &&
+            stop_reason <= RUN_RESET
+        ) {
+            completion.stop_reasons[
+                static_cast<std::size_t>(
+                    stop_reason)] = 1;
+        }
+        merge_core_dispatch(
+            result,
+            reservations[
+                reservation_index].core_index,
+            std::move(completion));
+        dispatch_open[reservation_index] = false;
+    };
+
+    // Preserve the established work-conserving equal-QoS round. When an
+    // earlier core cannot use its credit, a later cyclic peer whose initial
+    // reservation was truncated by the aggregate budget may consume that
+    // slack up to the common round quantum. Credit never flows backward
+    // across an already completed cyclic position.
+    auto release_unused_credit = [&](
+            std::size_t donor_index) {
+        int64_t available =
+            remaining_steps[donor_index];
+        if (available == 0)
+            return;
+        if (
+            available < 0 ||
+            available > round_credit[donor_index]
+        ) {
+            throw std::logic_error(
+                "parallel full-core round has invalid "
+                "unused credit");
+        }
+        remaining_steps[donor_index] = 0;
+        round_credit[donor_index] -= available;
+
+        for (
+            std::size_t recipient_index =
+                donor_index + 1;
+            recipient_index < reservations.size() &&
+                available > 0;
+            recipient_index++
+        ) {
+            if (done[recipient_index])
+                continue;
+            const int64_t headroom =
+                round_quantum -
+                round_credit[recipient_index];
+            if (headroom <= 0)
+                continue;
+            const int64_t transferred =
+                std::min(available, headroom);
+            round_credit[recipient_index] +=
+                transferred;
+            remaining_steps[recipient_index] +=
+                transferred;
+            available -= transferred;
+        }
+    };
+
+    auto earlier_reservation_unfinished = [&](
+            std::size_t reservation_index) {
+        for (
+            std::size_t earlier_index = 0;
+            earlier_index < reservation_index;
+            earlier_index++
+        ) {
+            if (!done[earlier_index])
+                return true;
+        }
+        return false;
+    };
+
+    auto initialize_subfrontier_result = [&]() {
+        SystemBatchResult subfrontier;
+        subfrontier.per_core_instructions.assign(
+            core_count, 0);
+        subfrontier.per_core_cycles.assign(
+            core_count, 0);
+        subfrontier.per_core_dispatches.assign(
+            core_count, 0);
+        subfrontier.per_core_interrupts.assign(
+            core_count, 0);
+        subfrontier.per_core_stop_reasons.assign(
+            core_count, {});
+        return subfrontier;
+    };
+
+    while (true) {
+        std::vector<std::size_t>
+            participating_reservations;
+        participating_reservations.reserve(
+            reservations.size());
+
+        for (
+            std::size_t index = 0;
+            index < reservations.size();
+            index++
+        ) {
+            if (done[index])
+                continue;
+            if (remaining_steps[index] == 0) {
+                if (earlier_reservation_unfinished(index))
+                    continue;
+                close_dispatch(index, RUN_LIMIT);
+                done[index] = true;
+                continue;
+            }
+
+            const int core_index =
+                reservations[index].core_index;
+            CPUState& core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(
+                        core_index)];
+            if (core.halted || core.idle) {
+                close_dispatch(
+                    index,
+                    core.halted
+                        ? RUN_HALT
+                        : RUN_IDLE);
+                release_unused_credit(index);
+                done[index] = true;
+                continue;
+            }
+            if (
+                pending_enabled_full_core_interrupt(
+                    system, core) >= 0
+            ) {
+                close_dispatch(index, RUN_LIMIT);
+                release_unused_credit(index);
+                done[index] = true;
+                outcome.interrupt_boundary = true;
+                outcome.interrupt_cores.push_back(
+                    core_index);
+                continue;
+            }
+
+            if (!dispatch_open[index]) {
+                checked_scheduler_increment(
+                    system.native_dispatches,
+                    "dispatch counter");
+                dispatch_open[index] = true;
+            }
+            participating_reservations.push_back(
+                index);
+        }
+
+        if (participating_reservations.empty())
+            break;
+
+        std::vector<FullCoreFrontierReservation>
+            subfrontier_reservations;
+        subfrontier_reservations.reserve(
+            participating_reservations.size());
+        for (
+            std::size_t reservation_index :
+            participating_reservations
+        ) {
+            subfrontier_reservations.push_back(
+                FullCoreFrontierReservation{
+                    reservations[
+                        reservation_index].core_index,
+                    remaining_steps[
+                        reservation_index],
+                });
+        }
+
+        SystemBatchResult subfrontier_result =
+            initialize_subfrontier_result();
+        FullCoreFrontierOutcome
+            subfrontier_outcome;
+        auto contains_core = [](
+                const std::vector<int>& values,
+                int core_index) {
+            return std::find(
+                values.begin(),
+                values.end(),
+                core_index) != values.end();
+        };
+        bool absorbed = false;
+        auto absorb_subfrontier = [&](
+                bool execution_stopped) {
+            if (absorbed)
+                return;
+
+            std::vector<int64_t> next_remaining_steps =
+                remaining_steps;
+            std::vector<int64_t>
+                next_per_reservation_cycles =
+                    per_reservation_cycles;
+            std::vector<bool> next_reservation_progress =
+                reservation_progress;
+            SystemBatchResult next_result = result;
+            FullCoreFrontierOutcome next_outcome =
+                outcome;
+            int64_t absorbed_steps = 0;
+            int64_t absorbed_max_cycles = 0;
+            for (
+                std::size_t reservation_index :
+                participating_reservations
+            ) {
+                const int core_index =
+                    reservations[
+                        reservation_index].core_index;
+                const std::size_t core_offset =
+                    static_cast<std::size_t>(
+                        core_index);
+                const int64_t steps =
+                    subfrontier_result
+                        .per_core_instructions[
+                            core_offset];
+                const int64_t cycles =
+                    subfrontier_result
+                        .per_core_cycles[
+                            core_offset];
+                if (
+                    steps < 0 ||
+                    steps >
+                        remaining_steps[
+                            reservation_index] ||
+                    cycles < 0
+                ) {
+                    throw std::logic_error(
+                        "parallel full-core "
+                        "subfrontier returned invalid "
+                        "round progress");
+                }
+
+                next_remaining_steps[
+                    reservation_index] -= steps;
+                next_per_reservation_cycles[
+                    reservation_index] =
+                        checked_scheduler_add(
+                            next_per_reservation_cycles[
+                                reservation_index],
+                            cycles,
+                            "cycle accounting");
+                const bool terminal =
+                    contains_core(
+                        subfrontier_outcome
+                            .terminal_cores,
+                        core_index);
+                const bool interrupted =
+                    contains_core(
+                        subfrontier_outcome
+                            .interrupt_cores,
+                        core_index);
+                if (
+                    next_remaining_steps[
+                        reservation_index] > 0 &&
+                    !execution_stopped &&
+                    !terminal &&
+                    !interrupted &&
+                    next_per_reservation_cycles[
+                        reservation_index] ==
+                        std::numeric_limits<int64_t>::max()
+                ) {
+                    throw std::overflow_error(
+                        "native scheduler cycle "
+                        "accounting overflow");
+                }
+                next_outcome.steps =
+                    checked_scheduler_add(
+                        next_outcome.steps,
+                        steps,
+                        "round aggregate instruction "
+                        "accounting");
+                if (next_outcome.steps > total_reserved) {
+                    throw std::logic_error(
+                        "parallel full-core round "
+                        "exceeded its reservation");
+                }
+                next_outcome.cycles = std::max(
+                    next_outcome.cycles,
+                    next_per_reservation_cycles[
+                        reservation_index]);
+                absorbed_steps =
+                    checked_scheduler_add(
+                        absorbed_steps,
+                        steps,
+                        "subfrontier instruction "
+                        "accounting");
+                absorbed_max_cycles = std::max(
+                    absorbed_max_cycles,
+                    cycles);
+
+                CoreDispatchResult progress;
+                progress.steps = steps;
+                progress.cycles = cycles;
+                merge_core_dispatch(
+                    next_result,
+                    core_index,
+                    std::move(progress));
+                if (steps > 0) {
+                    next_reservation_progress[
+                        reservation_index] = true;
+                }
+            }
+
+            if (
+                absorbed_steps !=
+                    subfrontier_outcome.steps ||
+                absorbed_max_cycles !=
+                    subfrontier_outcome.cycles
+            ) {
+                throw std::logic_error(
+                    "parallel full-core subfrontier "
+                    "aggregate accounting mismatch");
+            }
+            if (
+                subfrontier_result.continuations >
+                    std::numeric_limits<uint64_t>::max() -
+                        next_result.continuations
+            ) {
+                throw std::overflow_error(
+                    "native scheduler continuation "
+                    "counter overflow");
+            }
+            next_result.continuations +=
+                subfrontier_result.continuations;
+            if (subfrontier_outcome.interrupt_boundary) {
+                next_outcome.interrupt_boundary = true;
+                next_outcome.interrupt_cores.insert(
+                    next_outcome.interrupt_cores.end(),
+                    subfrontier_outcome
+                        .interrupt_cores.begin(),
+                    subfrontier_outcome
+                        .interrupt_cores.end());
+            }
+
+            remaining_steps =
+                std::move(next_remaining_steps);
+            per_reservation_cycles =
+                std::move(
+                    next_per_reservation_cycles);
+            reservation_progress =
+                std::move(
+                    next_reservation_progress);
+            result = std::move(next_result);
+            outcome = std::move(next_outcome);
+            absorbed = true;
+            refresh_round_cursor();
+        };
+
+        try {
+            run_parallel_full_core_subfrontier(
+                system,
+                subfrontier_reservations,
+                callbacks,
+                settle_continuation,
+                settle_dispatch_error,
+                subfrontier_result,
+                subfrontier_outcome);
+        } catch (...) {
+            absorb_subfrontier(
+                /*execution_stopped=*/true);
+            throw;
+        }
+        absorb_subfrontier(
+            /*execution_stopped=*/false);
+
+        for (
+            std::size_t reservation_index :
+            participating_reservations
+        ) {
+            const int core_index =
+                reservations[
+                    reservation_index].core_index;
+            const std::size_t core_offset =
+                static_cast<std::size_t>(
+                    core_index);
+            int public_stop_reason = -1;
+            uint64_t public_stop_count = 0;
+            for (
+                std::size_t reason = 0;
+                reason <
+                    subfrontier_result
+                        .per_core_stop_reasons[
+                            core_offset].size();
+                reason++
+            ) {
+                const uint64_t count =
+                    subfrontier_result
+                        .per_core_stop_reasons[
+                            core_offset][reason];
+                public_stop_count += count;
+                if (count != 0) {
+                    public_stop_reason =
+                        static_cast<int>(reason);
+                }
+            }
+            if (
+                public_stop_count > 1 ||
+                subfrontier_result
+                    .per_core_dispatches[
+                        core_offset] > 1
+            ) {
+                throw std::logic_error(
+                    "parallel full-core subfrontier "
+                    "closed one dispatch more than once");
+            }
+
+            const bool interrupted =
+                contains_core(
+                    subfrontier_outcome
+                        .interrupt_cores,
+                    core_index);
+            const bool dispatch_boundary =
+                contains_core(
+                    subfrontier_outcome
+                        .dispatch_boundary_cores,
+                    core_index);
+            const bool terminal =
+                contains_core(
+                    subfrontier_outcome
+                        .terminal_cores,
+                    core_index);
+
+            if (interrupted) {
+                close_dispatch(
+                    reservation_index,
+                    RUN_LIMIT);
+                release_unused_credit(
+                    reservation_index);
+                done[reservation_index] = true;
+                continue;
+            }
+            if (dispatch_boundary) {
+                close_dispatch(
+                    reservation_index,
+                    public_stop_reason);
+            }
+            if (terminal) {
+                if (!dispatch_boundary) {
+                    close_dispatch(
+                        reservation_index,
+                        public_stop_reason);
+                }
+                release_unused_credit(
+                    reservation_index);
+                done[reservation_index] = true;
+                continue;
+            }
+            if (
+                remaining_steps[
+                    reservation_index] == 0
+            ) {
+                if (
+                    earlier_reservation_unfinished(
+                        reservation_index)
+                ) {
+                    continue;
+                }
+                if (!dispatch_boundary) {
+                    close_dispatch(
+                        reservation_index,
+                        RUN_LIMIT);
+                }
+                done[reservation_index] = true;
+                continue;
+            }
+            if (
+                !dispatch_boundary &&
+                public_stop_reason != RUN_LIMIT
+            ) {
+                throw std::logic_error(
+                    "parallel full-core subfrontier "
+                    "left an unexplained open dispatch");
+            }
+        }
+    }
+
+    for (
+        std::size_t index = 0;
+        index < reservations.size();
+        index++
+    ) {
+        if (dispatch_open[index]) {
+            throw std::logic_error(
+                "parallel full-core round returned "
+                "with an open dispatch");
+        }
+    }
 }
 
 static const char* private_full_core_stop_reason_name(
@@ -13238,6 +14785,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         lane.thread_token;
                     lane_result["completed_commands"] =
                         lane.completed_commands;
+                    lane_result["completed_steps"] =
+                        lane.completed_steps;
                     lanes.append(
                         std::move(lane_result));
                 }

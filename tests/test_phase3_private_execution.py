@@ -396,6 +396,10 @@ loop:
         lane["completed_commands"] == 0
         for lane in before_lanes
     )
+    assert all(
+        lane["completed_steps"] == 0
+        for lane in before_lanes
+    )
 
     commands = [
         (lane_index, lane_index, 20)
@@ -428,6 +432,9 @@ loop:
     assert tuple(
         lane["completed_commands"] for lane in after_lanes
     ) == (2,) * worker_count
+    assert tuple(
+        lane["completed_steps"] for lane in after_lanes
+    ) == (40,) * worker_count
 
 
 def test_helper_mailboxes_survive_rapid_back_to_back_reposts() -> None:
@@ -458,6 +465,10 @@ def test_helper_mailboxes_survive_rapid_back_to_back_reposts() -> None:
         dict(lane)["completed_commands"]
         for lane in diagnostics["lanes"]
     ) == (1_000, 1_000, 1_000, 1_000)
+    assert tuple(
+        dict(lane)["completed_steps"]
+        for lane in diagnostics["lanes"]
+    ) == (0, 0, 0, 0)
 
 
 def test_results_preserve_submission_order_for_different_job_sizes() -> None:
@@ -617,6 +628,7 @@ def test_eligible_interrupt_yields_before_private_progress(
         (f"csrw {CSR_MBOX}, r1", 1),
         ("csrr r4, 0x31", 0),
         ("call.l r1", 128),
+        ("ei", 0),
         ("t.add", 0),
         ("crc.init", 0),
     ],

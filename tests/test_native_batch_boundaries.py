@@ -442,7 +442,7 @@ def test_system_batch_preserves_class_level_core_batch_overrides(
     assert calls == [1]
 
 
-def test_native_system_loop_settles_prior_round_before_later_callback_error():
+def test_native_system_loop_settles_complete_frontier_before_callback_error():
     system = MegapadSystem(
         ram_size=4096,
         num_cores=2,
@@ -471,9 +471,14 @@ def test_native_system_loop_settles_prior_round_before_later_callback_error():
 
     assert raised.value is failure
     assert system._native_system.native_batch_runs == native_runs_before + 1
-    assert system.cores[0].cycle_count == 5
-    assert system._native_system.system_cycles == 5
-    assert system.timer.counter == 5
+    # P3-D1 gathers the complete private frontier, then commits one pending
+    # coordinator instruction per core in cyclic order. Core 0's cold MUL
+    # commits before core 1's failing callback, but its later HALT is beyond
+    # that frontier and is not speculatively executed.
+    assert system.cores[0].cycle_count == 4
+    assert not system.cores[0].halted
+    assert system._native_system.system_cycles == 4
+    assert system.timer.counter == 4
     assert system._scheduler_cursor == 1
 
 
