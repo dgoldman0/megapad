@@ -1787,20 +1787,99 @@ struct PersistentWorkerPoolSnapshot {
     bool inline_reference = true;
 };
 
-// Phase 3 begins with fixed host-execution lanes and a deliberately dormant
-// helper pool.  Lane zero remains the coordinator/caller thread, preserving
-// the exact one-worker reference path.  Configurations with two or four lanes
-// own N-1 persistent helpers; no guest work reaches them until Element 2 adds
-// a private-segment command/result protocol.
+enum class PrivateFullCoreStopReason : uint8_t {
+    INSTRUCTION_LIMIT = 0,
+    ICACHE_BOUNDARY = 1,
+    SHARED_INSTRUCTION = 2,
+    INTERRUPT_BOUNDARY = 3,
+    HALTED = 4,
+    IDLE = 5,
+    TRAP = 6,
+    RESET = 7,
+    INTERNAL_FAILURE = 8,
+};
+
+class SharedMemoryExecutionAdmission;
+
+struct PrivateFullCoreCommand {
+    uint64_t command_sequence = 0;
+    uint64_t wave_epoch = 0;
+    std::size_t submission_index = 0;
+    int lane_index = 0;
+    int core_index = 0;
+    int max_steps = 0;
+    int pending_interrupt_vector = -1;
+    CPUState* core = nullptr;
+    std::shared_ptr<SharedMemoryExecutionAdmission> admission;
+};
+
+struct PrivateFullCoreResult {
+    uint64_t command_sequence = 0;
+    uint64_t wave_epoch = 0;
+    std::size_t submission_index = 0;
+    int lane_index = 0;
+    int core_index = 0;
+    uint64_t thread_token = 0;
+    uint64_t start_pc = 0;
+    uint64_t end_pc = 0;
+    int64_t steps_executed = 0;
+    int64_t total_cycles = 0;
+    PrivateFullCoreStopReason stop_reason =
+        PrivateFullCoreStopReason::INSTRUCTION_LIMIT;
+    int trap_id = -1;
+    int interrupt_vector = -1;
+    std::string internal_error;
+};
+
+struct PersistentWorkerLaneSnapshot {
+    int lane_index = 0;
+    bool auxiliary = false;
+    uint64_t thread_token = 0;
+    uint64_t completed_commands = 0;
+};
+
+struct PersistentWorkerPrivateSnapshot {
+    uint64_t wave_epoch = 0;
+    uint64_t next_command_sequence = 1;
+    bool wave_active = false;
+    std::vector<PersistentWorkerLaneSnapshot> lanes;
+};
+
+static PrivateFullCoreResult execute_private_full_core_command(
+    const PrivateFullCoreCommand& command) noexcept;
+
+static std::atomic<uint64_t> next_private_thread_token{1};
+
+static uint64_t current_private_thread_token() {
+    static thread_local const uint64_t token =
+        next_private_thread_token.fetch_add(
+            1, std::memory_order_relaxed);
+    return token;
+}
+
+// Lane zero remains the coordinator/caller thread, preserving the exact
+// one-lane reference path. Configurations with two or four lanes own N-1
+// persistent helpers. Each helper has one typed mailbox; helpers can execute
+// only callback-free full-core private commands and never select or commit a
+// guest-visible shared effect.
 class PersistentWorkerPool {
 public:
     explicit PersistentWorkerPool(int worker_count)
         : worker_count_(validated_worker_count(worker_count)),
           auxiliary_worker_count_(worker_count_ - 1) {
+        lane_thread_tokens_.assign(
+            static_cast<std::size_t>(worker_count_),
+            0);
+        lane_completed_commands_.assign(
+            static_cast<std::size_t>(worker_count_),
+            0);
         if (auxiliary_worker_count_ == 0)
             return;
 
         try {
+            helper_slots_.resize(
+                static_cast<std::size_t>(
+                    auxiliary_worker_count_));
             workers_.reserve(
                 static_cast<std::size_t>(auxiliary_worker_count_));
             for (
@@ -1809,7 +1888,9 @@ public:
                 worker_index++
             ) {
                 workers_.emplace_back(
-                    [this]() { wait_until_shutdown(); });
+                    [this, worker_index]() {
+                        worker_main(worker_index);
+                    });
                 launch_count_++;
             }
 
@@ -1824,6 +1905,10 @@ public:
             shutdown_and_join();
             throw;
         }
+
+        // Lane-zero diagnostics are allocated lazily on its first command so
+        // constructing a helper-bearing SystemState does not claim that the
+        // creating thread has executed guest work.
     }
 
     ~PersistentWorkerPool() noexcept {
@@ -1859,19 +1944,259 @@ public:
         };
     }
 
+    PersistentWorkerPrivateSnapshot private_snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        PersistentWorkerPrivateSnapshot result;
+        result.wave_epoch = wave_epoch_;
+        result.next_command_sequence = next_command_sequence_;
+        result.wave_active = wave_active_;
+        result.lanes.reserve(
+            static_cast<std::size_t>(worker_count_));
+        for (int lane_index = 0;
+             lane_index < worker_count_;
+             lane_index++) {
+            result.lanes.push_back(
+                PersistentWorkerLaneSnapshot{
+                    lane_index,
+                    lane_index != 0,
+                    lane_thread_tokens_[
+                        static_cast<std::size_t>(lane_index)],
+                    lane_completed_commands_[
+                        static_cast<std::size_t>(lane_index)],
+                });
+        }
+        return result;
+    }
+
+    std::vector<PrivateFullCoreResult> execute_wave(
+            std::vector<PrivateFullCoreCommand> commands) {
+        if (commands.empty())
+            return {};
+        if (commands.size() >
+            static_cast<std::size_t>(worker_count_)) {
+            throw std::invalid_argument(
+                "a private wave cannot contain more commands than lanes");
+        }
+
+        std::vector<bool> seen_lanes(
+            static_cast<std::size_t>(worker_count_),
+            false);
+        std::vector<CPUState*> seen_cores;
+        seen_cores.reserve(commands.size());
+        for (const PrivateFullCoreCommand& command : commands) {
+            if (
+                command.lane_index < 0 ||
+                command.lane_index >= worker_count_
+            ) {
+                throw std::out_of_range(
+                    "private command lane index is out of range");
+            }
+            if (seen_lanes[
+                    static_cast<std::size_t>(
+                        command.lane_index)]) {
+                throw std::invalid_argument(
+                    "a private wave cannot submit two commands "
+                    "to one lane");
+            }
+            if (command.core == nullptr || !command.admission)
+                throw std::invalid_argument(
+                    "private command ownership is incomplete");
+            if (command.max_steps < 0)
+                throw std::invalid_argument(
+                    "private command step budget cannot be negative");
+            if (
+                std::find(
+                    seen_cores.begin(),
+                    seen_cores.end(),
+                    command.core) != seen_cores.end()
+            ) {
+                throw std::invalid_argument(
+                    "a private wave cannot execute one core twice");
+            }
+            seen_lanes[
+                static_cast<std::size_t>(
+                    command.lane_index)] = true;
+            seen_cores.push_back(command.core);
+        }
+
+        std::vector<PrivateFullCoreResult> results(
+            commands.size());
+        std::optional<PrivateFullCoreCommand> inline_command;
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (stopping_)
+            throw std::runtime_error(
+                "native worker pool is stopping");
+        if (wave_active_)
+            throw std::runtime_error(
+                "native worker pool already has an active wave");
+        if (wave_epoch_ == std::numeric_limits<uint64_t>::max())
+            throw std::overflow_error(
+                "native worker wave epoch overflow");
+
+        wave_epoch_++;
+        for (std::size_t index = 0;
+             index < commands.size();
+             index++) {
+            PrivateFullCoreCommand& command = commands[index];
+            if (
+                next_command_sequence_ ==
+                std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "native private command sequence overflow");
+            }
+            command.command_sequence =
+                next_command_sequence_++;
+            command.wave_epoch = wave_epoch_;
+            command.submission_index = index;
+        }
+
+        for (const PrivateFullCoreCommand& command : commands) {
+            if (command.lane_index == 0) {
+                inline_command = command;
+                continue;
+            }
+            HelperSlot& slot = helper_slots_[
+                static_cast<std::size_t>(
+                    command.lane_index - 1)];
+            if (slot.state != HelperSlotState::IDLE)
+                throw std::logic_error(
+                    "native helper mailbox is not idle");
+            slot.epoch = wave_epoch_;
+            slot.command = command;
+            slot.result.reset();
+            slot.state = HelperSlotState::POSTED;
+        }
+        wave_active_ = true;
+        work_ready_.notify_all();
+        lock.unlock();
+
+        std::optional<PrivateFullCoreResult> inline_result;
+        if (inline_command.has_value()) {
+            inline_result =
+                execute_private_full_core_command(
+                    *inline_command);
+        }
+
+        lock.lock();
+        completion_ready_.wait(
+            lock,
+            [this, &commands]() {
+                for (const PrivateFullCoreCommand& command :
+                     commands) {
+                    if (command.lane_index == 0)
+                        continue;
+                    const HelperSlot& slot = helper_slots_[
+                        static_cast<std::size_t>(
+                            command.lane_index - 1)];
+                    if (
+                        slot.state !=
+                            HelperSlotState::COMPLETED ||
+                        slot.epoch != wave_epoch_
+                    ) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+
+        for (const PrivateFullCoreCommand& command : commands) {
+            PrivateFullCoreResult result;
+            if (command.lane_index == 0) {
+                if (!inline_result.has_value())
+                    throw std::logic_error(
+                        "inline private command result is missing");
+                result = std::move(*inline_result);
+            } else {
+                HelperSlot& slot = helper_slots_[
+                    static_cast<std::size_t>(
+                        command.lane_index - 1)];
+                if (!slot.result.has_value())
+                    throw std::logic_error(
+                        "helper private command result is missing");
+                result = std::move(*slot.result);
+                slot.result.reset();
+                slot.command.reset();
+                slot.state = HelperSlotState::IDLE;
+            }
+            const std::size_t lane =
+                static_cast<std::size_t>(
+                    command.lane_index);
+            lane_thread_tokens_[lane] =
+                result.thread_token;
+            lane_completed_commands_[lane]++;
+            results[result.submission_index] =
+                std::move(result);
+        }
+        wave_active_ = false;
+        lock.unlock();
+        work_ready_.notify_all();
+        return results;
+    }
+
 private:
+    enum class HelperSlotState : uint8_t {
+        IDLE = 0,
+        POSTED = 1,
+        RUNNING = 2,
+        COMPLETED = 3,
+    };
+
+    struct HelperSlot {
+        HelperSlotState state = HelperSlotState::IDLE;
+        uint64_t epoch = 0;
+        std::optional<PrivateFullCoreCommand> command;
+        std::optional<PrivateFullCoreResult> result;
+    };
+
     static int validated_worker_count(int worker_count) {
         validate_worker_count(worker_count);
         return worker_count;
     }
 
-    void wait_until_shutdown() {
+    void worker_main(int worker_index) noexcept {
         std::unique_lock<std::mutex> lock(mutex_);
+        const int lane_index = worker_index + 1;
+        lane_thread_tokens_[
+            static_cast<std::size_t>(lane_index)] =
+            current_private_thread_token();
         live_auxiliary_workers_++;
         state_changed_.notify_all();
-        stop_requested_.wait(
-            lock,
-            [this]() { return stopping_; });
+
+        HelperSlot& slot = helper_slots_[
+            static_cast<std::size_t>(worker_index)];
+        while (true) {
+            work_ready_.wait(
+                lock,
+                [this, &slot]() {
+                    return stopping_ ||
+                        slot.state ==
+                            HelperSlotState::POSTED;
+                });
+            if (
+                stopping_ &&
+                slot.state != HelperSlotState::POSTED
+            ) {
+                break;
+            }
+
+            PrivateFullCoreCommand command =
+                *slot.command;
+            slot.state = HelperSlotState::RUNNING;
+            lock.unlock();
+            PrivateFullCoreResult result =
+                execute_private_full_core_command(command);
+            lock.lock();
+
+            slot.result = std::move(result);
+            slot.state = HelperSlotState::COMPLETED;
+            completion_ready_.notify_all();
+            // Return directly to the outer POSTED wait. The coordinator may
+            // move COMPLETED -> IDLE -> POSTED before this helper next runs;
+            // waiting specifically to observe the transient IDLE state would
+            // lose that repost and deadlock the following wave.
+        }
+
         live_auxiliary_workers_--;
         state_changed_.notify_all();
     }
@@ -1881,7 +2206,8 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
         }
-        stop_requested_.notify_all();
+        work_ready_.notify_all();
+        completion_ready_.notify_all();
         for (std::thread& worker : workers_) {
             if (worker.joinable())
                 worker.join();
@@ -1892,11 +2218,18 @@ private:
     const int worker_count_;
     const int auxiliary_worker_count_;
     mutable std::mutex mutex_;
-    std::condition_variable stop_requested_;
+    std::condition_variable work_ready_;
+    std::condition_variable completion_ready_;
     std::condition_variable state_changed_;
     std::vector<std::thread> workers_;
+    std::vector<HelperSlot> helper_slots_;
+    std::vector<uint64_t> lane_thread_tokens_;
+    std::vector<uint64_t> lane_completed_commands_;
     int live_auxiliary_workers_ = 0;
     uint64_t launch_count_ = 0;
+    uint64_t wave_epoch_ = 0;
+    uint64_t next_command_sequence_ = 1;
+    bool wave_active_ = false;
     bool stopping_ = false;
 };
 
@@ -2313,46 +2646,79 @@ struct ThreadExclusiveMemoryOwner {
 static thread_local ThreadExclusiveMemoryOwner*
     thread_exclusive_memory_owners = nullptr;
 
-// The root shared mapping ownership may be borrowed by nested Python scopes
-// and native callbacks.  Keep the CAS and mutex lease alive until the final
-// descendant closes, even when same-thread scopes are retained or exited out
-// of lexical order.
-class SharedMemoryLease {
+// Mapping-wide admission and per-thread shared locking are distinct. One
+// admission token owns the execution_active transition for an entire logical
+// operation or private-worker wave. Every participating host thread then owns
+// its own shared-mutex lease derived from that token. The coordinator retains
+// the admission through collection, so no helper can release the global
+// execution boundary.
+class SharedMemoryExecutionAdmission {
 public:
-    SharedMemoryLease(MemoryMappings& memory, const char* busy_message)
-        : memory_(memory),
-          memory_lock_(memory.mutex, std::defer_lock) {
+    SharedMemoryExecutionAdmission(
+            MemoryMappings& memory,
+            const char* busy_message)
+        : memory_(memory) {
         bool expected = false;
         if (!memory_.execution_active.compare_exchange_strong(
                 expected, true,
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
             throw std::runtime_error(busy_message);
         }
-        owns_execution_flag_ = true;
-
-        try {
-            memory_lock_.lock();
-        } catch (...) {
-            memory_.execution_active.store(false, std::memory_order_release);
-            owns_execution_flag_ = false;
-            throw;
-        }
     }
 
-    ~SharedMemoryLease() {
-        if (memory_lock_.owns_lock())
-            memory_lock_.unlock();
-        if (owns_execution_flag_)
-            memory_.execution_active.store(false, std::memory_order_release);
+    ~SharedMemoryExecutionAdmission() {
+        memory_.execution_active.store(
+            false, std::memory_order_release);
     }
+
+    SharedMemoryExecutionAdmission(
+        const SharedMemoryExecutionAdmission&) = delete;
+    SharedMemoryExecutionAdmission& operator=(
+        const SharedMemoryExecutionAdmission&) = delete;
+
+    MemoryMappings& memory() const {
+        return memory_;
+    }
+
+private:
+    MemoryMappings& memory_;
+};
+
+// The root shared mapping ownership may be borrowed by nested same-thread
+// Python scopes. Cross-thread participants share only the admission token and
+// acquire their own SharedMemoryLease.
+class SharedMemoryLease {
+public:
+    SharedMemoryLease(MemoryMappings& memory, const char* busy_message)
+        : admission_(
+              std::make_shared<SharedMemoryExecutionAdmission>(
+                  memory, busy_message)),
+          memory_lock_(memory.mutex) {}
+
+    explicit SharedMemoryLease(
+            std::shared_ptr<SharedMemoryExecutionAdmission>
+                admission)
+        : admission_(std::move(admission)),
+          memory_lock_(checked_memory().mutex) {}
 
     SharedMemoryLease(const SharedMemoryLease&) = delete;
     SharedMemoryLease& operator=(const SharedMemoryLease&) = delete;
 
+    const std::shared_ptr<SharedMemoryExecutionAdmission>&
+    admission() const {
+        return admission_;
+    }
+
 private:
-    MemoryMappings& memory_;
+    MemoryMappings& checked_memory() const {
+        if (!admission_)
+            throw std::invalid_argument(
+                "shared memory execution admission is missing");
+        return admission_->memory();
+    }
+
+    std::shared_ptr<SharedMemoryExecutionAdmission> admission_;
     std::shared_lock<std::shared_mutex> memory_lock_;
-    bool owns_execution_flag_ = false;
 };
 
 struct ThreadSharedMemoryOwner {
@@ -2632,6 +2998,103 @@ private:
     bool registered_native_state_ = false;
 };
 
+static std::atomic<bool>& checked_system_batch_active(
+        CPUState& state) {
+    if (state.system_batch_active == nullptr)
+        throw std::invalid_argument(
+            "private execution requires a system-owned core");
+    return *state.system_batch_active;
+}
+
+// A private command participates in one coordinator-owned mapping admission
+// while retaining thread-local mutex and CPU execution ownership. Lane zero
+// consumes the permission on the coordinator's root scope; auxiliary lanes
+// create a per-thread shared lock from the same admission token.
+class PrivateFullCoreExecutionScope {
+public:
+    PrivateFullCoreExecutionScope(
+            CPUState& state,
+            std::shared_ptr<SharedMemoryExecutionAdmission>
+                admission)
+        : permission_(checked_system_batch_active(state)),
+          state_(state),
+          admission_(std::move(admission)),
+          thread_owner_{
+              state.memory,
+              &state,
+              nullptr,
+              nullptr,
+          } {
+        if (!admission_)
+            throw std::invalid_argument(
+                "private execution admission is missing");
+        if (&admission_->memory() != state_.memory)
+            throw std::invalid_argument(
+                "private execution admission does not match core memory");
+
+        ThreadSharedMemoryOwner* current =
+            current_thread_shared_memory_owner(*state_.memory);
+        if (current != nullptr) {
+            if (
+                current->permitted_cpu != &state_ ||
+                !current->lease ||
+                current->lease->admission() != admission_
+            ) {
+                throw std::runtime_error(
+                    "private execution cannot borrow this "
+                    "thread's memory scope");
+            }
+        } else {
+            thread_owner_.lease =
+                std::make_shared<SharedMemoryLease>(
+                    admission_);
+            thread_owner_.previous =
+                thread_shared_memory_owners;
+            thread_shared_memory_owners =
+                &thread_owner_;
+            registered_thread_owner_ = true;
+        }
+
+        try {
+            execution_guard_ =
+                std::make_unique<CPUExecutionGuard>(state_);
+        } catch (...) {
+            if (registered_thread_owner_) {
+                unlink_thread_owner(
+                    thread_shared_memory_owners,
+                    thread_owner_);
+                registered_thread_owner_ = false;
+            }
+            thread_owner_.lease.reset();
+            throw;
+        }
+    }
+
+    ~PrivateFullCoreExecutionScope() {
+        execution_guard_.reset();
+        if (registered_thread_owner_) {
+            unlink_thread_owner(
+                thread_shared_memory_owners,
+                thread_owner_);
+        }
+        thread_owner_.lease.reset();
+    }
+
+    PrivateFullCoreExecutionScope(
+        const PrivateFullCoreExecutionScope&) = delete;
+    PrivateFullCoreExecutionScope& operator=(
+        const PrivateFullCoreExecutionScope&) = delete;
+
+private:
+    SystemBatchExecutionPermissionGuard permission_;
+    CPUState& state_;
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+        admission_;
+    ThreadSharedMemoryOwner thread_owner_;
+    bool registered_thread_owner_ = false;
+    std::unique_ptr<CPUExecutionGuard> execution_guard_;
+};
+
 // Direct DMA-capable device bindings participate in the same one-worker
 // mapping scope as instruction execution.  A secondary-core Python MMIO
 // fallback may re-enter a core-0 proxy on the same thread; that path borrows
@@ -2678,6 +3141,14 @@ public:
 
     SharedMemoryUseGuard(const SharedMemoryUseGuard&) = delete;
     SharedMemoryUseGuard& operator=(const SharedMemoryUseGuard&) = delete;
+
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+    execution_admission() const {
+        if (!thread_owner_.lease)
+            throw std::logic_error(
+                "shared memory execution admission is unavailable");
+        return thread_owner_.lease->admission();
+    }
 
 private:
     void register_thread_state() {
@@ -7771,6 +8242,403 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 }
 
 // ---------------------------------------------------------------------------
+//  Phase 3 private full-core command runner
+// ---------------------------------------------------------------------------
+
+enum class PrivateInstructionDisposition : uint8_t {
+    EXECUTE_PRIVATE = 0,
+    ICACHE_BOUNDARY = 1,
+    SHARED_INSTRUCTION = 2,
+};
+
+static std::optional<uint8_t> private_icache_peek(
+        const CPUState& state,
+        uint64_t address) {
+    if (
+        state.profile != CoreProfile::FULL ||
+        !state.icache_enabled
+    ) {
+        return std::nullopt;
+    }
+    const auto [index, tag] = icache_key(address);
+    if (
+        !state.icache_valid[index] ||
+        state.icache_tags[index] != tag
+    ) {
+        return std::nullopt;
+    }
+    return state.icache_data[index][
+        static_cast<std::size_t>(
+            address &
+            (CPUState::ICACHE_LINE_BYTES - 1))];
+}
+
+static bool private_icache_span_is_resident(
+        const CPUState& state,
+        uint64_t address,
+        int length) {
+    for (int offset = 0; offset < length; offset++) {
+        if (!private_icache_peek(
+                state,
+                address +
+                    static_cast<uint64_t>(offset)).has_value()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static PrivateInstructionDisposition
+classify_private_full_core_instruction(
+        const CPUState& state) {
+    if (
+        state.profile != CoreProfile::FULL ||
+        state.ext_modifier != -1
+    ) {
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
+    }
+
+    const uint64_t instruction_address =
+        state.regs[state.psel];
+    const std::optional<uint8_t> first =
+        private_icache_peek(
+            state, instruction_address);
+    if (!first.has_value()) {
+        return PrivateInstructionDisposition::
+            ICACHE_BOUNDARY;
+    }
+
+    uint8_t opcode = *first;
+    int family = (opcode >> 4) & 0xF;
+    int subop = opcode & 0xF;
+    int modifier = -1;
+    int prefix_length = 0;
+
+    if (family == 0xF) {
+        // F9-FB enter engines that may access shared memory. F0-F6 and F8
+        // are the only accepted single-instruction modifiers; F7 remains
+        // reserved. Reserved and double-prefix forms stay on the coordinator.
+        if (subop == 0x7 || subop >= 0x9)
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        modifier = subop;
+        prefix_length = 1;
+        const std::optional<uint8_t> following =
+            private_icache_peek(
+                state, instruction_address + 1);
+        if (!following.has_value()) {
+            return PrivateInstructionDisposition::
+                ICACHE_BOUNDARY;
+        }
+        opcode = *following;
+        family = (opcode >> 4) & 0xF;
+        subop = opcode & 0xF;
+        if (family == 0xF) {
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        }
+    }
+
+    int instruction_length = 0;
+    bool private_instruction = false;
+    switch (family) {
+        case 0x0:
+            instruction_length = 1;
+            private_instruction =
+                subop == 0x0 ||
+                subop == 0x1 ||
+                subop == 0x2 ||
+                subop == 0x3 ||
+                subop == 0x9 ||
+                subop == 0xA ||
+                subop == 0xB ||
+                subop == 0xC ||
+                subop == 0xF;
+            break;
+        case 0x1:
+        case 0x2:
+        case 0xA:
+        case 0xB:
+            instruction_length = 1;
+            private_instruction = true;
+            break;
+        case 0x3:
+            instruction_length =
+                modifier == 6 ? 1 : 2;
+            private_instruction = true;
+            break;
+        case 0x4:
+            instruction_length = 3;
+            private_instruction = true;
+            break;
+        case 0x5:
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        case 0x6:
+            if (subop == 0x0) {
+                instruction_length =
+                    modifier == 0 ? 10 : 3;
+            } else if (subop == 0x1) {
+                instruction_length = 4;
+            } else if (subop <= 0x7) {
+                instruction_length = 3;
+            } else {
+                instruction_length = 2;
+            }
+            private_instruction = true;
+            break;
+        case 0x7:
+            instruction_length = 2;
+            private_instruction = true;
+            break;
+        case 0x8:
+            instruction_length = 1;
+            private_instruction =
+                subop == 0x6 ||
+                subop == 0xA ||
+                subop == 0xC ||
+                subop == 0xD ||
+                subop == 0xE;
+            break;
+        case 0x9:
+        case 0xD:
+        case 0xE:
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        case 0xC:
+            instruction_length =
+                subop == 0xE ? 3 : 2;
+            private_instruction = true;
+            break;
+        default:
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+    }
+
+    if (!private_instruction) {
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
+    }
+
+    const int total_length =
+        prefix_length + instruction_length;
+    if (!private_icache_span_is_resident(
+            state,
+            instruction_address,
+            total_length)) {
+        return PrivateInstructionDisposition::
+            ICACHE_BOUNDARY;
+    }
+
+    // EXT.SKIP asks next_instruction_size() to read the first byte at the
+    // skipped instruction. Require that exact private-cache read up front
+    // only when the condition is taken.
+    if (
+        family == 0x3 &&
+        modifier == 6 &&
+        eval_cond(state, subop) &&
+        !private_icache_peek(
+            state,
+            instruction_address +
+                static_cast<uint64_t>(
+                    total_length)).has_value()
+    ) {
+        return PrivateInstructionDisposition::
+            ICACHE_BOUNDARY;
+    }
+
+    return PrivateInstructionDisposition::
+        EXECUTE_PRIVATE;
+}
+
+struct PrivateSharedAccessSignal {};
+
+class PrivateSharedAccessSentinel final
+        : public ResumableBusAccess {
+public:
+    uint64_t access(
+            BusOperation,
+            uint64_t,
+            BusWidth,
+            uint64_t,
+            bool) override {
+        throw PrivateSharedAccessSignal{};
+    }
+};
+
+static int trap_id_from_runtime_error(const std::string& what);
+
+static PrivateFullCoreResult execute_private_full_core_command(
+        const PrivateFullCoreCommand& command) noexcept {
+    PrivateFullCoreResult result;
+    result.command_sequence = command.command_sequence;
+    result.wave_epoch = command.wave_epoch;
+    result.submission_index =
+        command.submission_index;
+    result.lane_index = command.lane_index;
+    result.core_index = command.core_index;
+    result.thread_token =
+        current_private_thread_token();
+
+    if (command.core == nullptr) {
+        result.stop_reason =
+            PrivateFullCoreStopReason::INTERNAL_FAILURE;
+        result.internal_error =
+            "private command core is missing";
+        return result;
+    }
+
+    CPUState& core = *command.core;
+    result.start_pc = pc(core);
+    result.end_pc = result.start_pc;
+    std::optional<CPUExecutionCheckpoint>
+        command_checkpoint;
+
+    try {
+        PrivateFullCoreExecutionScope execution_scope(
+            core, command.admission);
+        command_checkpoint.emplace(core);
+
+        if (core.profile != CoreProfile::FULL) {
+            throw std::invalid_argument(
+                "private execution requires a full core");
+        }
+        if (
+            core.system_cycle_execution_pending != nullptr &&
+            core.system_cycle_execution_pending->load(
+                std::memory_order_acquire)
+        ) {
+            throw std::runtime_error(
+                "private execution cannot enter a suspended "
+                "cycle operation");
+        }
+
+        StepCallbacks callbacks{};
+        PrivateSharedAccessSentinel shared_access_sentinel;
+        callbacks.bus_access =
+            &shared_access_sentinel;
+
+        if (command.pending_interrupt_vector >= 0) {
+            result.stop_reason =
+                PrivateFullCoreStopReason::
+                    INTERRUPT_BOUNDARY;
+            result.interrupt_vector =
+                command.pending_interrupt_vector;
+            result.end_pc = pc(core);
+            return result;
+        }
+
+        result.stop_reason =
+            PrivateFullCoreStopReason::INSTRUCTION_LIMIT;
+        for (int step_index = 0;
+             step_index < command.max_steps;
+             step_index++) {
+            if (core.halted) {
+                result.stop_reason =
+                    PrivateFullCoreStopReason::HALTED;
+                break;
+            }
+            if (core.idle) {
+                result.stop_reason =
+                    PrivateFullCoreStopReason::IDLE;
+                break;
+            }
+
+            const PrivateInstructionDisposition
+                disposition =
+                    classify_private_full_core_instruction(
+                        core);
+            if (
+                disposition ==
+                PrivateInstructionDisposition::
+                    ICACHE_BOUNDARY
+            ) {
+                result.stop_reason =
+                    PrivateFullCoreStopReason::
+                        ICACHE_BOUNDARY;
+                break;
+            }
+            if (
+                disposition ==
+                PrivateInstructionDisposition::
+                    SHARED_INSTRUCTION
+            ) {
+                result.stop_reason =
+                    PrivateFullCoreStopReason::
+                        SHARED_INSTRUCTION;
+                break;
+            }
+
+            try {
+                const int cycles =
+                    step_one(core, callbacks);
+                result.total_cycles += cycles;
+                result.steps_executed++;
+            } catch (
+                    const PrivateSharedAccessSignal&) {
+                throw std::logic_error(
+                    "private instruction reached a shared "
+                    "bus access");
+            } catch (const std::runtime_error& error) {
+                const std::string what = error.what();
+                if (what == "TRAP:RESET") {
+                    result.stop_reason =
+                        PrivateFullCoreStopReason::RESET;
+                    break;
+                }
+                if (
+                    what.size() >= 5 &&
+                    what.compare(0, 5, "TRAP:") == 0
+                ) {
+                    result.stop_reason =
+                        PrivateFullCoreStopReason::TRAP;
+                    result.trap_id =
+                        trap_id_from_runtime_error(what);
+                    break;
+                }
+                throw;
+            }
+
+            if (core.halted) {
+                result.stop_reason =
+                    PrivateFullCoreStopReason::HALTED;
+                break;
+            }
+            if (core.idle) {
+                result.stop_reason =
+                    PrivateFullCoreStopReason::IDLE;
+                break;
+            }
+        }
+    } catch (const std::exception& error) {
+        if (command_checkpoint.has_value())
+            command_checkpoint->restore(core);
+        result.steps_executed = 0;
+        result.total_cycles = 0;
+        result.stop_reason =
+            PrivateFullCoreStopReason::INTERNAL_FAILURE;
+        result.trap_id = -1;
+        result.interrupt_vector = -1;
+        result.internal_error = error.what();
+    } catch (...) {
+        if (command_checkpoint.has_value())
+            command_checkpoint->restore(core);
+        result.steps_executed = 0;
+        result.total_cycles = 0;
+        result.stop_reason =
+            PrivateFullCoreStopReason::INTERNAL_FAILURE;
+        result.trap_id = -1;
+        result.interrupt_vector = -1;
+        result.internal_error =
+            "unknown private execution failure";
+    }
+
+    result.end_pc = pc(core);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 //  run_steps — run N steps in C++, calling back to Python for MMIO
 // ---------------------------------------------------------------------------
 
@@ -10281,6 +11149,138 @@ acquire_system_scheduler_lock(SystemState& system) {
         system.scheduler_mutex);
 }
 
+static std::vector<PrivateFullCoreResult>
+run_private_full_core_wave(
+        SystemState& system,
+        std::vector<PrivateFullCoreCommand> commands) {
+    if (commands.empty())
+        return {};
+    if (!system.worker_pool)
+        throw std::logic_error(
+            "native worker pool is unavailable");
+    if (system.main_bus.active_timeout_cycle().has_value()) {
+        throw std::runtime_error(
+            "private execution cannot enter an active "
+            "main-bus grant");
+    }
+    if (system.has_cycle_execution_pending()) {
+        throw std::runtime_error(
+            "private execution cannot enter a suspended "
+            "cycle operation");
+    }
+    if (system.external_events.next_cycle().has_value()) {
+        throw std::runtime_error(
+            "private execution cannot cross a pending "
+            "external event");
+    }
+    if (system.shared_clock.snapshot().has_deadline) {
+        throw std::runtime_error(
+            "private execution cannot cross an active "
+            "event horizon");
+    }
+
+    CPUState* inline_core = nullptr;
+    for (PrivateFullCoreCommand& command : commands) {
+        if (
+            command.core_index < 0 ||
+            command.core_index >=
+                system.full_core_count()
+        ) {
+            throw std::out_of_range(
+                "private command full-core index is out of range");
+        }
+        command.core = system.cores[
+            static_cast<std::size_t>(
+                command.core_index)].get();
+        if (
+            !command.core->halted &&
+            command.core->flag_i
+        ) {
+            if (
+                system.shared_interrupts.ipi_line(
+                    command.core->core_id)
+            ) {
+                command.pending_interrupt_vector =
+                    CYCLE_IVEC_IPI;
+            } else if (system.shared_timer.irq_pending) {
+                command.pending_interrupt_vector =
+                    CYCLE_IVEC_TIMER;
+            }
+        }
+        if (command.lane_index == 0)
+            inline_core = command.core;
+    }
+
+    std::unique_ptr<SharedMemoryUseGuard> wave_memory;
+    if (inline_core != nullptr) {
+        wave_memory =
+            acquire_shared_memory_use(
+                *inline_core,
+                /*permit_native_execution=*/true);
+    } else {
+        py::gil_scoped_release release;
+        wave_memory =
+            std::make_unique<SharedMemoryUseGuard>(
+                system.shared_memory);
+    }
+    const std::shared_ptr<SharedMemoryExecutionAdmission>
+        admission =
+            wave_memory->execution_admission();
+    for (PrivateFullCoreCommand& command : commands)
+        command.admission = admission;
+
+    NativeBatchActiveGuard active_guard(system);
+    system.mappings_sealed = true;
+
+    std::vector<PrivateFullCoreResult> results;
+    {
+        py::gil_scoped_release release;
+        results = system.worker_pool->execute_wave(
+            std::move(commands));
+    }
+
+    for (const PrivateFullCoreResult& result : results) {
+        if (
+            result.stop_reason ==
+            PrivateFullCoreStopReason::INTERNAL_FAILURE
+        ) {
+            throw std::runtime_error(
+                "private command failed on lane " +
+                std::to_string(result.lane_index) +
+                ", core " +
+                std::to_string(result.core_index) +
+                ": " +
+                result.internal_error);
+        }
+    }
+    return results;
+}
+
+static const char* private_full_core_stop_reason_name(
+        PrivateFullCoreStopReason reason) {
+    switch (reason) {
+        case PrivateFullCoreStopReason::INSTRUCTION_LIMIT:
+            return "instruction_limit";
+        case PrivateFullCoreStopReason::ICACHE_BOUNDARY:
+            return "icache_boundary";
+        case PrivateFullCoreStopReason::SHARED_INSTRUCTION:
+            return "shared_instruction";
+        case PrivateFullCoreStopReason::INTERRUPT_BOUNDARY:
+            return "interrupt_boundary";
+        case PrivateFullCoreStopReason::HALTED:
+            return "halted";
+        case PrivateFullCoreStopReason::IDLE:
+            return "idle";
+        case PrivateFullCoreStopReason::TRAP:
+            return "trap";
+        case PrivateFullCoreStopReason::RESET:
+            return "reset";
+        case PrivateFullCoreStopReason::INTERNAL_FAILURE:
+            return "internal_failure";
+    }
+    return "unknown";
+}
+
 static ClusterState& checked_cluster_state(
         SystemState& system,
         int cluster_index) {
@@ -12206,6 +13206,218 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     snapshot.inline_reference;
                 return result;
             })
+        .def(
+            "_private_worker_diagnostics",
+            [](const SystemState& system) {
+                if (!system.worker_pool)
+                    throw std::logic_error(
+                        "native worker pool is unavailable");
+                const PersistentWorkerPrivateSnapshot
+                    snapshot =
+                        system.worker_pool->
+                            private_snapshot();
+                py::dict result;
+                result["schema_version"] = 1;
+                result["wave_epoch"] =
+                    snapshot.wave_epoch;
+                result["next_command_sequence"] =
+                    snapshot.next_command_sequence;
+                result["wave_active"] =
+                    snapshot.wave_active;
+                py::list lanes;
+                for (
+                    const PersistentWorkerLaneSnapshot&
+                        lane : snapshot.lanes
+                ) {
+                    py::dict lane_result;
+                    lane_result["lane_index"] =
+                        lane.lane_index;
+                    lane_result["auxiliary"] =
+                        lane.auxiliary;
+                    lane_result["thread_token"] =
+                        lane.thread_token;
+                    lane_result["completed_commands"] =
+                        lane.completed_commands;
+                    lanes.append(
+                        std::move(lane_result));
+                }
+                result["lanes"] = std::move(lanes);
+                return result;
+            })
+        .def(
+            "_run_private_full_core_commands",
+            [](SystemState& system,
+               const py::list& command_objects) {
+                auto exact_integer = [](
+                        py::handle value,
+                        const char* field_name) {
+                    if (
+                        PyBool_Check(value.ptr()) ||
+                        !PyLong_Check(value.ptr())
+                    ) {
+                        throw py::type_error(
+                            std::string(field_name) +
+                            " must be an integer");
+                    }
+                    try {
+                        return value.cast<long long>();
+                    } catch (const py::cast_error&) {
+                        throw py::value_error(
+                            std::string(field_name) +
+                            " is outside the supported range");
+                    }
+                };
+
+                std::vector<PrivateFullCoreCommand>
+                    commands;
+                commands.reserve(
+                    static_cast<std::size_t>(
+                        command_objects.size()));
+                std::vector<bool> seen_lanes(
+                    static_cast<std::size_t>(
+                        system.worker_count()),
+                    false);
+                std::vector<bool> seen_cores(
+                    static_cast<std::size_t>(
+                        system.full_core_count()),
+                    false);
+                for (py::handle item : command_objects) {
+                    py::tuple command_object;
+                    try {
+                        command_object =
+                            py::cast<py::tuple>(item);
+                    } catch (const py::cast_error&) {
+                        throw py::type_error(
+                            "each private command must be "
+                            "(lane_index, core_index, max_steps)");
+                    }
+                    if (command_object.size() != 3) {
+                        throw py::value_error(
+                            "each private command must contain "
+                            "lane_index, core_index, and max_steps");
+                    }
+                    const long long lane_value =
+                        exact_integer(
+                            command_object[0],
+                            "lane_index");
+                    const long long core_value =
+                        exact_integer(
+                            command_object[1],
+                            "core_index");
+                    const long long steps_value =
+                        exact_integer(
+                            command_object[2],
+                            "max_steps");
+                    if (
+                        lane_value < 0 ||
+                        lane_value >=
+                            system.worker_count()
+                    ) {
+                        throw py::value_error(
+                            "lane_index is outside the "
+                            "configured worker lanes");
+                    }
+                    if (
+                        core_value < 0 ||
+                        core_value >=
+                            system.full_core_count()
+                    ) {
+                        throw py::value_error(
+                            "core_index is outside the "
+                            "full-core topology");
+                    }
+                    if (
+                        steps_value < 0 ||
+                        steps_value >
+                            std::numeric_limits<int>::max()
+                    ) {
+                        throw py::value_error(
+                            "max_steps must be between zero "
+                            "and INT_MAX");
+                    }
+                    const std::size_t lane_index =
+                        static_cast<std::size_t>(
+                            lane_value);
+                    const std::size_t core_index =
+                        static_cast<std::size_t>(
+                            core_value);
+                    if (seen_lanes[lane_index]) {
+                        throw py::value_error(
+                            "a private wave cannot submit "
+                            "two commands to one lane");
+                    }
+                    if (seen_cores[core_index]) {
+                        throw py::value_error(
+                            "a private wave cannot execute "
+                            "one core twice");
+                    }
+                    seen_lanes[lane_index] = true;
+                    seen_cores[core_index] = true;
+
+                    PrivateFullCoreCommand command;
+                    command.lane_index =
+                        static_cast<int>(lane_value);
+                    command.core_index =
+                        static_cast<int>(core_value);
+                    command.max_steps =
+                        static_cast<int>(steps_value);
+                    commands.push_back(
+                        std::move(command));
+                }
+
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const std::vector<
+                    PrivateFullCoreResult> native_results =
+                        run_private_full_core_wave(
+                            system,
+                            std::move(commands));
+                py::list results;
+                for (
+                    const PrivateFullCoreResult& native :
+                    native_results
+                ) {
+                    py::dict result;
+                    result["schema_version"] = 1;
+                    result["command_sequence"] =
+                        native.command_sequence;
+                    result["wave_epoch"] =
+                        native.wave_epoch;
+                    result["lane_index"] =
+                        native.lane_index;
+                    result["core_index"] =
+                        native.core_index;
+                    result["thread_token"] =
+                        native.thread_token;
+                    result["start_pc"] =
+                        native.start_pc;
+                    result["end_pc"] =
+                        native.end_pc;
+                    result["steps_executed"] =
+                        native.steps_executed;
+                    result["total_cycles"] =
+                        native.total_cycles;
+                    result["stop_reason"] =
+                        private_full_core_stop_reason_name(
+                            native.stop_reason);
+                    if (native.trap_id < 0) {
+                        result["trap_id"] = py::none();
+                    } else {
+                        result["trap_id"] =
+                            native.trap_id;
+                    }
+                    if (native.interrupt_vector < 0) {
+                        result["interrupt_vector"] =
+                            py::none();
+                    } else {
+                        result["interrupt_vector"] =
+                            native.interrupt_vector;
+                    }
+                    results.append(std::move(result));
+                }
+                return results;
+            },
+            py::arg("commands"))
         .def_property_readonly(
             "cluster_arbiter_count",
             [](const SystemState& system) {
