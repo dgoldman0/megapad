@@ -187,66 +187,106 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
     """The versioned baseline records native scheduling without peer claims."""
     report = run_report(
         instructions=9,
+        worker_counts=(1, 2, 4),
         repeats=2,
         warmups=0,
         warmup_instructions=1,
+        host_profile=True,
     )
 
     assert report["schema"] == REPORT_SCHEMA
     assert report["schema_version"] == REPORT_SCHEMA_VERSION
-    assert report["determinism"]["canonical_state_matches"]
-    assert report["determinism"]["behavior_oracle_matches"]
+    assert all(report["validation"].values())
     assert report["semantics"]["native_scheduler_expected"] is True
     scope = report["semantics"]["qos_and_fairness_scope"]
     assert scope["contention_exercised"] is False
     assert scope["qos_claim"] == "excluded"
     assert scope["fairness_claim"] == "excluded"
 
+    cross = report["cross_worker_equivalence"]["validation"]
+    assert all(cross.values())
     hashes = set()
-    for sample in report["samples"]:
-        observation = sample["observation"]
-        assert observation["state_schema"] == STATE_SCHEMA
-        assert observation["state_schema_version"] == STATE_SCHEMA_VERSION
-        hashes.add(observation["behavior_oracle_sha256"])
-        state = observation["canonical_state"]
-        execution = state["execution"]
-        assert execution["instructions_executed"] == 9
-        assert execution["per_core_instructions"] == [0, 9, 0, 0, 0]
-        assert execution["per_core_cycles"][0] == 0
-        assert execution["per_core_cycles"][1] == 13
-        assert execution["per_core_cycles"][2:] == [0, 0, 0]
-        assert execution["system_cycles_advanced"] == 13
-        assert execution["native_scheduler"] is True
-        assert execution["native_batch_runs_counter_delta"] == 1
-        assert execution["native_dispatches_counter_delta"] == 1
-        assert execution["python_fallback_instantiated"] is False
-
-        topology = state["topology"]
-        assert topology["active_core_is_system_owned_micro_profile"]
-        assert topology["cluster_enable_mask"] == 0xFFFF_FFFF_FFFF_FFFF
-        assert topology["cluster_enabled"] is True
-        workload = state["workload"]
-        assert workload["cluster_enable_policy"] == (
-            "all_ones_reset_then_host_selects_one_runnable_core"
-        )
-        assert workload["cluster_enable_mask"] == 0xFFFF_FFFF_FFFF_FFFF
-        assert (
-            workload[
-                "other_cores_halted_by_host_for_single_core_baseline"
+    for worker_report in report["worker_reports"]:
+        assert all(worker_report["validation"].values())
+        assert len(worker_report["timed_samples"]) == 2
+        samples = [
+            *worker_report["timed_samples"],
+            worker_report["accounting_probe"],
+        ]
+        for sample in samples:
+            observation = sample["observation"]
+            assert observation["state_schema"] == STATE_SCHEMA
+            assert (
+                observation["state_schema_version"]
+                == STATE_SCHEMA_VERSION
+            )
+            hashes.add(observation["behavior_oracle_sha256"])
+            state = observation["canonical_state"]
+            execution = state["execution"]
+            assert execution["instructions_executed"] == 9
+            assert execution["per_core_instructions"] == [
+                0, 9, 0, 0, 0,
             ]
-            is True
+            assert execution["per_core_cycles"][0] == 0
+            assert execution["per_core_cycles"][1] == 13
+            assert execution["per_core_cycles"][2:] == [0, 0, 0]
+            assert execution["system_cycles_advanced"] == 13
+            assert execution["native_scheduler"] is True
+            assert execution["native_batch_runs_counter_delta"] == 1
+            assert execution["native_dispatches_counter_delta"] == 1
+            assert execution["python_fallback_instantiated"] is False
+
+            topology = state["topology"]
+            assert topology[
+                "active_core_is_system_owned_micro_profile"
+            ]
+            assert (
+                topology["cluster_enable_mask"]
+                == 0xFFFF_FFFF_FFFF_FFFF
+            )
+            assert topology["cluster_enabled"] is True
+            workload = state["workload"]
+            assert workload["cluster_enable_policy"] == (
+                "all_ones_reset_then_host_selects_one_runnable_core"
+            )
+            assert (
+                workload["cluster_enable_mask"]
+                == 0xFFFF_FFFF_FFFF_FFFF
+            )
+            assert (
+                workload[
+                    "other_cores_halted_by_host_for_single_core_baseline"
+                ]
+                is True
+            )
+            assert workload["contention_exercised"] is False
+            assert state["cores"][1]["profile"] == "micro"
+            assert state["cores"][1]["accelerated_wrapper"]
+            assert state["cores"][1][
+                "common_gprs_r0_r15"
+            ][1] == 5
+            assert all(
+                core["halted"]
+                for index, core in enumerate(state["cores"])
+                if index != 1
+            )
+            assert state["main_bus"]["active_grant"] is False
+            assert state["main_bus"]["pending_request_count"] == 0
+
+        profile = worker_report["accounting_probe"][
+            "host_profile_probe"
+        ]
+        assert profile is not None
+        assert all(profile["validation"].values())
+        counts = profile["native_snapshot"]["counts"]
+        assert counts["private_steps"] == 9
+        assert 1 <= counts["worker_commands"] <= 9
+        assert (
+            counts["worker_commands"]
+            == counts["worker_waves"]
+            == counts["checkpoint_captures"]
+            == counts["logical_subfrontiers"]
         )
-        assert workload["contention_exercised"] is False
-        assert state["cores"][1]["profile"] == "micro"
-        assert state["cores"][1]["accelerated_wrapper"]
-        assert state["cores"][1]["common_gprs_r0_r15"][1] == 5
-        assert all(
-            core["halted"]
-            for index, core in enumerate(state["cores"])
-            if index != 1
-        )
-        assert state["main_bus"]["active_grant"] is False
-        assert state["main_bus"]["pending_request_count"] == 0
 
     assert len(hashes) == 1
 
