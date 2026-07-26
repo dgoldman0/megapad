@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1–5 of 6 complete; Element 6 in progress
+**Status:** All six elements complete
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -20,7 +20,7 @@ may produce corrective commits, but they do not create new phase elements.
 | 3 | Full-core coordinator integration and ordered shared-effect commit | Complete |
 | 4 | Reduced-core and cluster integration | Complete |
 | 5 | DMA, external events, record/replay, and deterministic stop handling | Complete |
-| 6 | One/two/four-lane equivalence, sanitizer stress, refreshed benchmarks, and final handoff | In progress |
+| 6 | One/two/four-lane equivalence, sanitizer stress, refreshed benchmarks, and final handoff | Complete |
 
 ## Design-contention ledger
 
@@ -450,6 +450,85 @@ proven one-cycle private subset, coordinator-owned event/DMA ordering,
 exactly-once suspended target effects, scoped external-ingress replay, and
 authoritative stop reasons and cycles. Replay remains deliberately bounded by
 P3-D17 and P3-D19; strict reduced-core timing remains deliberately unsupported
-by P3-D16. Sanitizer stress, the final one/two/four-lane equivalence package,
-refreshed performance measurements, and the versioned completion handoff
-remain Element 6 work.
+by P3-D16. Element 6 supplies the sanitizer stress, final one/two/four-lane
+equivalence package, refreshed performance measurements, and versioned
+completion handoff.
+
+## Element 6 evidence
+
+The implementation checkpoint is
+`ab3d1dab9d06b6a304ff293d257e8c592e3f5ccb`. It extends the Phase 0 report to
+schema 8, defaults to the complete 1/2/4-lane matrix used by the final gate,
+includes ordered public accounting and current cache/ingress state, excludes
+physical-lane diagnostics from architectural hashes, and makes a failed
+validation visible in both human output and process status. It also adds
+isolated foreground ASan/UBSan and TSan targets, with the instrumented
+extension built under `build/sanitizers/` rather than overwriting the optimized
+module.
+
+The final clean optimized concurrency report used four guest full cores,
+one/two/four host-execution lanes, five two-million-instruction workloads,
+one 100,000-instruction warmup, three timed repeats, and a 1,024-byte-per-peer
+strict NIC/disk DMA probe. All 22 report validations passed. Canonical state,
+behavior, and ordered public accounting matched across all three lane widths
+for every workload; strict DMA state, behavior, ordered public results, service
+trace, and 2.00537109375 virtual cycles per payload byte also matched. Every
+configured lane participated in eligible private work. The report was produced
+from a clean `ab3d1da` checkout and has SHA-256
+`0136bd9c2f2c91d63c64eeef74bd7be86651d8b6516d8a31ccdedbcf2c354311`;
+its fixture manifest has SHA-256
+`b3867065c27ffd638315552453de988003d7b9e77b2f5801262fd4ce87c6436f`.
+The approximately 41.1 MiB (43.0 MB) JSON remains ignored, reproducible
+evidence.
+
+Private compute rose from 48.197 MIPS with one lane to 66.724 MIPS with two
+and 96.416 MIPS with four, while median process CPU utilization rose from
+99.97% to 167.08% and 260.92%. This is useful-overlap evidence for the
+admitted private subset, not a universal speedup claim. Shared-memory, MMIO,
+timer, and legacy storage/display workloads did not scale: their four-lane
+rates were respectively 0.325, 0.432, 0.882, and 0.372 of the one-lane
+reference. Those regressions make shared-boundary and orchestration overhead
+the explicit Phase 4 optimization target.
+
+The refreshed Phase 2 I-cache report also came from clean `ab3d1da`. Its
+ignored JSON has SHA-256
+`88525684922dbaa1367c36345312aca1717ca3742d91d549c5b8cbfe4017207c`;
+the hot and disabled medians were 91.202 and 46.937 MIPS, for a diagnostic
+ratio of 1.935. The canonical-state hash remains the Phase 2 value
+`b0bb4266f1fd36a73722cbadad17e2f109eac3f77579b4cc3e44f74de35ccffe`.
+The behavior hash changed to
+`50647ad585bbecd06c1643ecc04d65a7266ee9fae38ac0c318424d01b71a6de4`
+only because hashed evidence metadata now names the supervised worker-free
+Make target instead of `pytest -n 1`; this is not machine-state drift.
+
+Sanitizer and optimized stress evidence was sequential and mutually exclusive:
+
+- a broad ASan/UBSan gate passed 149 tests with no sanitizer finding, but
+  unexpectedly peaked at approximately 5.27 GiB RSS;
+- the final bounded ASan/UBSan gate passed 16 worker-value, 1,000-mailbox-
+  repost, and buffer callback/join tests at approximately 2.18 GiB RSS;
+- a bounded TSan gate passed 15 mailbox, callback-failure, ingress-handoff,
+  UART-geometry `step`, and buffer callback/join tests at approximately
+  1.74 GiB RSS with no race report;
+- an earlier TSan selection passed seven tests and then made no progress for
+  more than two minutes in the continuous `run_batch` UART-geometry case. It
+  was interrupted. The same case passes optimized and ASan/UBSan execution,
+  so this is retained as a TSan-only instrumented liveness limitation, not
+  recorded as an ordinary-runtime pass or failure;
+- the final optimized selected gate passed 155 tests in 62.56 seconds, but
+  unexpectedly peaked at approximately 10.49 GiB RSS. It included the
+  1,024- and 2,048-pixel framebuffer render-race cases; no single cause for the
+  peak is claimed; and
+- the final Make/sanitizer entry-point oracle passed two tests at approximately
+  36.9 MiB RSS.
+
+The broad sanitizer and optimized selections exceeded the project's normal
+resource boundary and must not be repeated without explicit approval. The
+bounded final gates are the safe default evidence. Checkpoint counts overlap
+and are not additive.
+
+The versioned completion and resumption record is
+`docs/megapad-concurrency-phase3-handoff.md`. The P3-D1 through P3-D19 ledger
+above remains authoritative custody for every architectural contention and
+revisit trigger; phase completion does not erase or silently settle those
+choices.
