@@ -706,7 +706,13 @@ class MegapadSystem:
                  realtime_clock: bool = False,
                  rtc_epoch_ms: Optional[int] = None,
                  terminal_cols: int = 80,
-                 terminal_rows: int = 24):
+                 terminal_rows: int = 24,
+                 worker_count: int = 1):
+        if isinstance(worker_count, bool) or not isinstance(worker_count, int):
+            raise TypeError("worker_count must be an integer")
+        if worker_count not in (1, 2, 4):
+            raise ValueError("worker_count must be exactly 1, 2, or 4")
+
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
@@ -745,6 +751,7 @@ class MegapadSystem:
             num_cores,
             self.num_cores,
             num_cores + num_clusters + 2,
+            worker_count,
         )
         self._native_system.attach_mem(self._shared_mem, ram_size)
         if hbw_size > 0:
@@ -1450,6 +1457,11 @@ class MegapadSystem:
             self._ext_mem[addr - self.ext_mem_base] = val & 0xFF
         else:
             self._shared_mem[addr % self.ram_size] = val & 0xFF
+
+    @property
+    def worker_count(self) -> int:
+        """Fixed host-execution lane count for this native system."""
+        return int(self._native_system.worker_count)
 
     @property
     def _scheduler_cursor(self) -> int:

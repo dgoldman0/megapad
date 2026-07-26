@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include <shared_mutex>
 #include <string>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 #include <pybind11/pybind11.h>
@@ -1777,6 +1779,127 @@ struct ClusterState {
     }
 };
 
+struct PersistentWorkerPoolSnapshot {
+    int worker_count = 1;
+    int auxiliary_worker_count = 0;
+    int live_auxiliary_workers = 0;
+    uint64_t launch_count = 0;
+    bool inline_reference = true;
+};
+
+// Phase 3 begins with fixed host-execution lanes and a deliberately dormant
+// helper pool.  Lane zero remains the coordinator/caller thread, preserving
+// the exact one-worker reference path.  Configurations with two or four lanes
+// own N-1 persistent helpers; no guest work reaches them until Element 2 adds
+// a private-segment command/result protocol.
+class PersistentWorkerPool {
+public:
+    explicit PersistentWorkerPool(int worker_count)
+        : worker_count_(validated_worker_count(worker_count)),
+          auxiliary_worker_count_(worker_count_ - 1) {
+        if (auxiliary_worker_count_ == 0)
+            return;
+
+        try {
+            workers_.reserve(
+                static_cast<std::size_t>(auxiliary_worker_count_));
+            for (
+                int worker_index = 0;
+                worker_index < auxiliary_worker_count_;
+                worker_index++
+            ) {
+                workers_.emplace_back(
+                    [this]() { wait_until_shutdown(); });
+                launch_count_++;
+            }
+
+            std::unique_lock<std::mutex> lock(mutex_);
+            state_changed_.wait(
+                lock,
+                [this]() {
+                    return live_auxiliary_workers_ ==
+                        auxiliary_worker_count_;
+                });
+        } catch (...) {
+            shutdown_and_join();
+            throw;
+        }
+    }
+
+    ~PersistentWorkerPool() noexcept {
+        shutdown_and_join();
+    }
+
+    PersistentWorkerPool(const PersistentWorkerPool&) = delete;
+    PersistentWorkerPool& operator=(
+        const PersistentWorkerPool&) = delete;
+    PersistentWorkerPool(PersistentWorkerPool&&) = delete;
+    PersistentWorkerPool& operator=(
+        PersistentWorkerPool&&) = delete;
+
+    static void validate_worker_count(int worker_count) {
+        if (
+            worker_count != 1 &&
+            worker_count != 2 &&
+            worker_count != 4
+        ) {
+            throw std::invalid_argument(
+                "worker_count must be exactly 1, 2, or 4");
+        }
+    }
+
+    PersistentWorkerPoolSnapshot snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return PersistentWorkerPoolSnapshot{
+            worker_count_,
+            auxiliary_worker_count_,
+            live_auxiliary_workers_,
+            launch_count_,
+            worker_count_ == 1,
+        };
+    }
+
+private:
+    static int validated_worker_count(int worker_count) {
+        validate_worker_count(worker_count);
+        return worker_count;
+    }
+
+    void wait_until_shutdown() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        live_auxiliary_workers_++;
+        state_changed_.notify_all();
+        stop_requested_.wait(
+            lock,
+            [this]() { return stopping_; });
+        live_auxiliary_workers_--;
+        state_changed_.notify_all();
+    }
+
+    void shutdown_and_join() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        stop_requested_.notify_all();
+        for (std::thread& worker : workers_) {
+            if (worker.joinable())
+                worker.join();
+        }
+        workers_.clear();
+    }
+
+    const int worker_count_;
+    const int auxiliary_worker_count_;
+    mutable std::mutex mutex_;
+    std::condition_variable stop_requested_;
+    std::condition_variable state_changed_;
+    std::vector<std::thread> workers_;
+    int live_auxiliary_workers_ = 0;
+    uint64_t launch_count_ = 0;
+    bool stopping_ = false;
+};
+
 // SystemState owns full-core lifetimes, exactly one mapping set, and every
 // native SoC-singleton device reached directly by a full core. Python-bus
 // devices and scheduling retain their compatibility paths for later
@@ -1790,7 +1913,9 @@ struct SystemState {
     explicit SystemState(
             int full_core_count,
             int all_core_count = 0,
-            int main_bus_port_count = 0) {
+            int main_bus_port_count = 0,
+            int worker_count = 1) {
+        PersistentWorkerPool::validate_worker_count(worker_count);
         if (full_core_count < 1 || full_core_count > 255)
             throw std::invalid_argument(
                 "full_core_count must be between 1 and 255");
@@ -1884,6 +2009,15 @@ struct SystemState {
         dma_cycle_states[1].requester_id =
             DISK_DMA_REQUESTER_ID;
         advertised_core_count = all_core_count;
+        configured_worker_count = worker_count;
+        worker_pool =
+            std::make_unique<PersistentWorkerPool>(worker_count);
+    }
+
+    ~SystemState() {
+        // Helpers never touch Python and are joined before core, device,
+        // mapping, buffer-exporter, or scheduler state begins to unwind.
+        worker_pool.reset();
     }
 
     CPUState& core(int index) {
@@ -1913,6 +2047,17 @@ struct SystemState {
 
     int all_core_count() const {
         return advertised_core_count;
+    }
+
+    int worker_count() const {
+        return configured_worker_count;
+    }
+
+    PersistentWorkerPoolSnapshot worker_pool_snapshot() const {
+        if (!worker_pool)
+            throw std::logic_error(
+                "native worker pool is unavailable");
+        return worker_pool->snapshot();
     }
 
     int main_bus_port_for_requester(int requester_id) const {
@@ -2038,6 +2183,10 @@ struct SystemState {
     std::atomic<bool> cycle_execution_pending{false};
     int advertised_core_count = 0;
     bool mappings_sealed = false;
+    int configured_worker_count = 1;
+    // Declared last so ordinary reverse member destruction also stops helpers
+    // before any state they will use in later Phase 3 elements.
+    std::unique_ptr<PersistentWorkerPool> worker_pool;
 };
 
 class JournaledBusAccess final : public ResumableBusAccess {
@@ -11991,16 +12140,72 @@ PYBIND11_MODULE(_mp64_accel, m) {
     // Native system ownership.  Borrowed core views keep their parent alive
     // and never take ownership of the pointed-to CPUState.
     py::class_<SystemState>(m, "SystemState")
-        .def(py::init<int, int, int>(),
+        .def(
+             py::init([](
+                     int full_core_count,
+                     int all_core_count,
+                     int main_bus_port_count,
+                     py::object worker_count_object) {
+                 if (
+                     PyBool_Check(worker_count_object.ptr()) ||
+                     !PyLong_Check(worker_count_object.ptr())
+                 ) {
+                     throw py::type_error(
+                         "worker_count must be an integer");
+                 }
+                 long long worker_count;
+                 try {
+                     worker_count =
+                         worker_count_object.cast<long long>();
+                 } catch (const py::cast_error&) {
+                     throw py::value_error(
+                         "worker_count must be exactly 1, 2, or 4");
+                 }
+                 if (
+                     worker_count != 1 &&
+                     worker_count != 2 &&
+                     worker_count != 4
+                 ) {
+                     throw py::value_error(
+                         "worker_count must be exactly 1, 2, or 4");
+                 }
+                 return std::make_unique<SystemState>(
+                     full_core_count,
+                     all_core_count,
+                     main_bus_port_count,
+                     static_cast<int>(worker_count));
+             }),
              py::arg("full_core_count"),
              py::arg("all_core_count") = 0,
-             py::arg("main_bus_port_count") = 0)
+             py::arg("main_bus_port_count") = 0,
+             py::arg("worker_count") = 1)
         .def_property_readonly(
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
             "micro_core_count", &SystemState::micro_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def_property_readonly(
+            "worker_count", &SystemState::worker_count)
+        .def(
+            "_worker_pool_diagnostics",
+            [](const SystemState& system) {
+                const PersistentWorkerPoolSnapshot snapshot =
+                    system.worker_pool_snapshot();
+                py::dict result;
+                result["schema_version"] = 1;
+                result["worker_count"] =
+                    snapshot.worker_count;
+                result["auxiliary_worker_count"] =
+                    snapshot.auxiliary_worker_count;
+                result["live_auxiliary_workers"] =
+                    snapshot.live_auxiliary_workers;
+                result["launch_count"] =
+                    snapshot.launch_count;
+                result["inline_reference"] =
+                    snapshot.inline_reference;
+                return result;
+            })
         .def_property_readonly(
             "cluster_arbiter_count",
             [](const SystemState& system) {

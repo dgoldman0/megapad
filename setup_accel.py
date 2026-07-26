@@ -33,7 +33,9 @@ ext = Extension(
         "-Wextra",
         "-Wno-unused-parameter",
         "-fvisibility=hidden",
+        "-pthread",
     ],
+    extra_link_args=["-pthread"],
 )
 
 setup(
