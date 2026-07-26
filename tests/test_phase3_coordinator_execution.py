@@ -842,21 +842,23 @@ def test_cold_terminal_is_reported_when_credit_remains(
         ),
     ),
 )
+@pytest.mark.parametrize("worker_count", (1, 2, 4))
 def test_hot_private_trap_reset_prefix_is_settled_once(
     boundary: str,
     expected_reason: int,
     expected_trap: int,
     expected_cycles: int,
+    worker_count: int,
 ) -> None:
     system = _system(
-        num_cores=1,
-        worker_count=2,
+        num_cores=4,
+        worker_count=worker_count,
     )
     code = assemble(f"inc r1\n{boundary}")
     system.load_binary(0, code)
     system.boot(entry=0)
     _prime_instruction_cache(
-        (system.cpu._cs,),
+        tuple(cpu._cs for cpu in system.cores),
         system.cpu.mem,
         0,
         len(code),
@@ -864,42 +866,53 @@ def test_hot_private_trap_reset_prefix_is_settled_once(
     original_settlement = (
         system._settle_native_core_continuation
     )
+    caller_thread = threading.get_ident()
     settlements = []
 
     def observe_settlement(*args):
-        settlements.append(args)
+        settlements.append(
+            (*args, threading.get_ident())
+        )
         return original_settlement(*args)
 
     system._settle_native_core_continuation = (
         observe_settlement
     )
 
-    stats = system.run_batch_stats(2)
+    stats = system.run_batch_stats(8)
 
     assert settlements == [
         (
-            0,
+            core_id,
             expected_reason,
             expected_trap,
             1,
             1,
+            caller_thread,
         )
+        for core_id in range(4)
     ]
     expected_reasons = [0] * 7
     expected_reasons[expected_reason] = 1
-    assert stats.instructions_executed == 2
+    assert stats.instructions_executed == 8
     assert stats.system_cycles_advanced == (
         expected_cycles
     )
-    assert stats.per_core_instructions == (2,)
+    assert stats.per_core_instructions == (2, 2, 2, 2)
     assert stats.per_core_cycles == (
         expected_cycles,
+        expected_cycles,
+        expected_cycles,
+        expected_cycles,
     )
-    assert stats.per_core_dispatches == (1,)
+    assert stats.per_core_dispatches == (1, 1, 1, 1)
     assert stats.per_core_stop_reasons == (
         tuple(expected_reasons),
+        tuple(expected_reasons),
+        tuple(expected_reasons),
+        tuple(expected_reasons),
     )
-    assert stats.native_continuations == 1
+    assert stats.native_continuations == 4
 
 
 def _micro_private_frontier_signature(

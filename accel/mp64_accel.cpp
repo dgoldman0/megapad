@@ -13806,102 +13806,64 @@ settle_private_core_terminal(
 }
 
 static CoordinatorBoundarySettlement
-settle_private_core_coordinator_instruction(
-        SystemState& system,
+settle_coordinator_dispatch_error(
         int core_index,
         const PrivateCoreResult& private_result,
         int64_t max_steps,
-        const StepCallbacks& callbacks,
-        const py::function& settle_continuation,
-        const py::function& settle_dispatch_error) {
-    ConcurrencyProfileCounters& profile =
-        system.concurrency_profile;
-    const bool host_profile_enabled =
-        profile.enabled;
-    const std::size_t profile_origin =
-        static_cast<std::size_t>(
-            private_result.stop_reason);
-    if (host_profile_enabled) {
-        host_saturating_increment(
-            profile.coordinator_boundaries);
-        if (
-            profile_origin <
-            profile.coordinator_boundary_origins.size()
-        ) {
-            host_saturating_increment(
-                profile.coordinator_boundary_origins[
-                    profile_origin]);
-        }
+        const py::function& settle_dispatch_error,
+        py::error_already_set& error) {
+    py::object settled_object =
+        settle_dispatch_error(
+            core_index,
+            error.value());
+    if (settled_object.is_none())
+        throw;
+    CoordinatorBoundarySettlement local =
+        validated_coordinator_settlement(
+            settled_object,
+            0,
+            0,
+            1,
+            "coordinator dispatch error settlement");
+    CoordinatorBoundarySettlement result;
+    result.total_steps =
+        checked_scheduler_add(
+            private_result.steps_executed,
+            local.total_steps,
+            "coordinator dispatch error "
+            "instruction accounting");
+    result.total_cycles =
+        checked_scheduler_add(
+            private_result.total_cycles,
+            local.total_cycles,
+            "coordinator dispatch error "
+            "cycle accounting");
+    if (result.total_steps > max_steps) {
+        throw std::runtime_error(
+            "coordinator dispatch error settlement "
+            "returned invalid progress");
     }
-    HostProfileWallTimer boundary_timer(
-        host_profile_enabled,
-        &profile.coordinator_boundary_ns);
-    HostProfileWallTimer origin_timer(
-        host_profile_enabled &&
-            profile_origin <
-                profile
-                    .coordinator_boundary_origin_ns
-                    .size(),
-        profile_origin <
-                profile
-                    .coordinator_boundary_origin_ns
-                    .size()
-            ? &profile
-                .coordinator_boundary_origin_ns[
-                    profile_origin]
-            : nullptr);
-    CPUState& core =
-        *system.execution_cores[
-            static_cast<std::size_t>(core_index)];
-    auto logical_guard =
-        acquire_shared_memory_use(
-            core,
-            /*permit_native_execution=*/true);
-    RunResult raw{};
-    try {
-        py::gil_scoped_release release;
-        SystemBatchExecutionPermissionGuard
-            execution_permission(
-                system.native_batch_active);
-        CPUExecutionGuard execution_guard(core);
-        raw = run_steps(core, callbacks, 1);
-    } catch (py::error_already_set& error) {
-        py::object settled_object =
-            settle_dispatch_error(
-                core_index,
-                error.value());
-        if (settled_object.is_none())
-            throw;
-        CoordinatorBoundarySettlement local =
-            validated_coordinator_settlement(
-                settled_object,
-                0,
-                0,
-                1,
-                "coordinator dispatch error settlement");
-        CoordinatorBoundarySettlement result;
-        result.total_steps =
-            checked_scheduler_add(
-                private_result.steps_executed,
-                local.total_steps,
-                "coordinator dispatch error "
-                "instruction accounting");
-        result.total_cycles =
-            checked_scheduler_add(
-                private_result.total_cycles,
-                local.total_cycles,
-                "coordinator dispatch error "
-                "cycle accounting");
-        if (result.total_steps > max_steps) {
-            throw std::runtime_error(
-                "coordinator dispatch error settlement "
-                "returned invalid progress");
-        }
-        result.terminal = local.terminal;
-        result.closes_dispatch = true;
-        return result;
-    }
+    result.terminal = local.terminal;
+    result.closes_dispatch = true;
+    return result;
+}
 
+static bool coordinator_dispatch_requires_python(
+        const RunResult& raw) {
+    return (
+        raw.stop_reason >= RUN_MEX_FALLBACK &&
+        raw.stop_reason <= RUN_RESET
+    );
+}
+
+static CoordinatorBoundarySettlement
+finalize_coordinator_instruction(
+        CPUState& core,
+        int core_index,
+        const PrivateCoreResult& private_result,
+        int64_t max_steps,
+        const py::function& settle_continuation,
+        const RunResult& raw) {
     if (
         raw.steps_executed < 0 ||
         raw.steps_executed > 1 ||
@@ -13927,10 +13889,7 @@ settle_private_core_coordinator_instruction(
             "coordinator boundary exceeded its reserved budget");
     }
 
-    if (
-        raw.stop_reason >= RUN_MEX_FALLBACK &&
-        raw.stop_reason <= RUN_RESET
-    ) {
+    if (coordinator_dispatch_requires_python(raw)) {
         CoordinatorBoundarySettlement result =
             validated_coordinator_settlement(
                 settle_continuation(
@@ -13970,6 +13929,101 @@ settle_private_core_coordinator_instruction(
         normalized_stop_reason == RUN_IDLE;
     result.closes_dispatch = result.terminal;
     return result;
+}
+
+class CoordinatorBoundaryProfileScope {
+public:
+    CoordinatorBoundaryProfileScope(
+            ConcurrencyProfileCounters& profile,
+            PrivateCoreStopReason origin) {
+        const bool enabled = profile.enabled;
+        const std::size_t origin_index =
+            static_cast<std::size_t>(origin);
+        if (enabled) {
+            host_saturating_increment(
+                profile.coordinator_boundaries);
+            if (
+                origin_index <
+                profile.coordinator_boundary_origins.size()
+            ) {
+                host_saturating_increment(
+                    profile.coordinator_boundary_origins[
+                        origin_index]);
+            }
+        }
+        boundary_timer_.emplace(
+            enabled,
+            &profile.coordinator_boundary_ns);
+        origin_timer_.emplace(
+            enabled &&
+                origin_index <
+                    profile
+                        .coordinator_boundary_origin_ns
+                        .size(),
+            origin_index <
+                    profile
+                        .coordinator_boundary_origin_ns
+                        .size()
+                ? &profile
+                    .coordinator_boundary_origin_ns[
+                        origin_index]
+                : nullptr);
+    }
+
+    CoordinatorBoundaryProfileScope(
+        const CoordinatorBoundaryProfileScope&) = delete;
+    CoordinatorBoundaryProfileScope& operator=(
+        const CoordinatorBoundaryProfileScope&) = delete;
+
+private:
+    std::optional<HostProfileWallTimer>
+        boundary_timer_;
+    std::optional<HostProfileWallTimer>
+        origin_timer_;
+};
+
+static CoordinatorBoundarySettlement
+settle_private_core_coordinator_instruction(
+        SystemState& system,
+        int core_index,
+        const PrivateCoreResult& private_result,
+        int64_t max_steps,
+        const StepCallbacks& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error) {
+    CoordinatorBoundaryProfileScope profile_scope(
+        system.concurrency_profile,
+        private_result.stop_reason);
+    CPUState& core =
+        *system.execution_cores[
+            static_cast<std::size_t>(core_index)];
+    auto logical_guard =
+        acquire_shared_memory_use(
+            core,
+            /*permit_native_execution=*/true);
+    RunResult raw{};
+    try {
+        py::gil_scoped_release release;
+        SystemBatchExecutionPermissionGuard
+            execution_permission(
+                system.native_batch_active);
+        CPUExecutionGuard execution_guard(core);
+        raw = run_steps(core, callbacks, 1);
+    } catch (py::error_already_set& error) {
+        return settle_coordinator_dispatch_error(
+            core_index,
+            private_result,
+            max_steps,
+            settle_dispatch_error,
+            error);
+    }
+    return finalize_coordinator_instruction(
+        core,
+        core_index,
+        private_result,
+        max_steps,
+        settle_continuation,
+        raw);
 }
 
 static void run_parallel_core_subfrontier(
@@ -14519,93 +14573,252 @@ static void run_parallel_core_subfrontier(
     // boundaries settle first in cyclic order. A later live boundary that
     // has become a cluster request is left for the post-commit snapshot
     // instead of bypassing arbitration with stale metadata.
-    for (
-        std::size_t index = 0;
-        index < reservations.size();
-        index++
-    ) {
-        if (
-            !dispatch_open[index] ||
-            initial_cluster_requests[index].has_value()
+    bool complete_full_core_ordinary_pass =
+        reservations.size() > 1 &&
+        !thread_owns_shared_memory(
+            system.shared_memory) &&
+        !thread_owns_exclusive_memory(
+            system.shared_memory);
+    if (complete_full_core_ordinary_pass) {
+        for (
+            std::size_t index = 0;
+            index < reservations.size();
+            index++
         ) {
-            continue;
-        }
-        const CoreFrontierReservation&
-            reservation = reservations[index];
-        const PrivateCoreResult& private_result =
-            private_results[index];
-        CPUState& core =
-            *system.execution_cores[
-                static_cast<std::size_t>(
-                    reservation.core_index)];
-
-        if (
-            core.profile == CoreProfile::MICRO &&
-            private_result.stop_reason ==
-                PrivateCoreStopReason::
-                    SHARED_INSTRUCTION
-        ) {
-            std::optional<DeferredClusterRequest>
-                live_request;
-            {
-                auto memory_guard =
-                    acquire_shared_memory_use(core);
-                live_request =
-                    capture_cluster_request(index);
+            const CoreFrontierReservation&
+                reservation = reservations[index];
+            const PrivateCoreResult&
+                private_result = private_results[index];
+            const CPUState& core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(
+                        reservation.core_index)];
+            if (
+                !dispatch_open[index] ||
+                initial_cluster_requests[index].has_value() ||
+                core.profile != CoreProfile::FULL ||
+                (
+                    private_result.stop_reason !=
+                        PrivateCoreStopReason::
+                            ICACHE_BOUNDARY &&
+                    private_result.stop_reason !=
+                        PrivateCoreStopReason::
+                            SHARED_INSTRUCTION
+                )
+            ) {
+                complete_full_core_ordinary_pass = false;
+                break;
             }
-            if (live_request.has_value()) {
-                initial_cluster_requests[index] =
-                    std::move(live_request);
+        }
+    }
+
+    if (complete_full_core_ordinary_pass) {
+        // One released segment covers every callback-free success. A Python
+        // error or continuation restores the GIL while the exact per-core
+        // logical guard and profile scope remain alive, then resumes later
+        // cyclic peers in a fresh segment only if settlement permits.
+        std::size_t index = 0;
+        std::optional<CoordinatorBoundaryProfileScope>
+            active_profile_scope;
+        std::unique_ptr<SharedMemoryUseGuard>
+            active_logical_guard;
+        RunResult active_raw{};
+        while (index < reservations.size()) {
+            bool active_requires_python = false;
+            try {
+                py::gil_scoped_release release;
+                while (index < reservations.size()) {
+                    const CoreFrontierReservation&
+                        reservation = reservations[index];
+                    const PrivateCoreResult&
+                        private_result =
+                            private_results[index];
+                    CPUState& core =
+                        *system.execution_cores[
+                            static_cast<std::size_t>(
+                                reservation.core_index)];
+
+                    if (core.halted || core.idle) {
+                        outcome.terminal_cores.push_back(
+                            reservation.core_index);
+                        dispatch_open[index] = false;
+                        index++;
+                        continue;
+                    }
+
+                    active_profile_scope.emplace(
+                        system.concurrency_profile,
+                        private_result.stop_reason);
+                    active_logical_guard =
+                        std::make_unique<
+                            SharedMemoryUseGuard>(
+                                *core.memory,
+                                &core);
+                    {
+                        SystemBatchExecutionPermissionGuard
+                            execution_permission(
+                                system.native_batch_active);
+                        CPUExecutionGuard execution_guard(core);
+                        active_raw = run_steps(
+                            core,
+                            callbacks[
+                                static_cast<std::size_t>(
+                                    reservation.core_index)],
+                            1);
+                    }
+
+                    if (
+                        coordinator_dispatch_requires_python(
+                            active_raw)
+                    ) {
+                        active_requires_python = true;
+                        break;
+                    }
+
+                    CoordinatorBoundarySettlement settlement =
+                        finalize_coordinator_instruction(
+                            core,
+                            reservation.core_index,
+                            private_result,
+                            reservation.max_steps,
+                            settle_continuation,
+                            active_raw);
+                    active_logical_guard.reset();
+                    active_profile_scope.reset();
+                    publish_settlement(index, settlement);
+                    index++;
+                }
+            } catch (py::error_already_set& error) {
+                const CoreFrontierReservation&
+                    reservation = reservations[index];
+                const PrivateCoreResult&
+                    private_result = private_results[index];
+                CoordinatorBoundarySettlement settlement =
+                    settle_coordinator_dispatch_error(
+                        reservation.core_index,
+                        private_result,
+                        reservation.max_steps,
+                        settle_dispatch_error,
+                        error);
+                active_logical_guard.reset();
+                active_profile_scope.reset();
+                publish_settlement(index, settlement);
+                index++;
                 continue;
             }
-        }
 
-        if (core.halted || core.idle) {
-            outcome.terminal_cores.push_back(
-                reservation.core_index);
-            dispatch_open[index] = false;
-            continue;
-        }
-
-        CoordinatorBoundarySettlement settlement;
-        if (
-            private_result.stop_reason ==
-                PrivateCoreStopReason::TRAP ||
-            private_result.stop_reason ==
-                PrivateCoreStopReason::RESET
-        ) {
-            settlement =
-                settle_private_core_terminal(
-                    system,
-                    reservation.core_index,
-                    private_result,
-                    reservation.max_steps,
-                    settle_continuation);
-        } else if (
-            private_result.stop_reason ==
-                PrivateCoreStopReason::
-                    ICACHE_BOUNDARY ||
-            private_result.stop_reason ==
-                PrivateCoreStopReason::
-                    SHARED_INSTRUCTION
-        ) {
-            settlement =
-                settle_private_core_coordinator_instruction(
-                    system,
-                    reservation.core_index,
-                    private_result,
-                    reservation.max_steps,
-                    callbacks[
+            if (active_requires_python) {
+                const CoreFrontierReservation&
+                    reservation = reservations[index];
+                const PrivateCoreResult&
+                    private_result = private_results[index];
+                CPUState& core =
+                    *system.execution_cores[
                         static_cast<std::size_t>(
-                            reservation.core_index)],
-                    settle_continuation,
-                    settle_dispatch_error);
-        } else {
-            throw std::logic_error(
-                "private frontier left an unsupported "
-                "coordinator boundary");
+                            reservation.core_index)];
+                CoordinatorBoundarySettlement settlement =
+                    finalize_coordinator_instruction(
+                        core,
+                        reservation.core_index,
+                        private_result,
+                        reservation.max_steps,
+                        settle_continuation,
+                        active_raw);
+                active_logical_guard.reset();
+                active_profile_scope.reset();
+                publish_settlement(index, settlement);
+                index++;
+            }
         }
-        publish_settlement(index, settlement);
+    } else {
+        for (
+            std::size_t index = 0;
+            index < reservations.size();
+            index++
+        ) {
+            if (
+                !dispatch_open[index] ||
+                initial_cluster_requests[index].has_value()
+            ) {
+                continue;
+            }
+            const CoreFrontierReservation&
+                reservation = reservations[index];
+            const PrivateCoreResult& private_result =
+                private_results[index];
+            CPUState& core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(
+                        reservation.core_index)];
+
+            if (
+                core.profile == CoreProfile::MICRO &&
+                private_result.stop_reason ==
+                    PrivateCoreStopReason::
+                        SHARED_INSTRUCTION
+            ) {
+                std::optional<DeferredClusterRequest>
+                    live_request;
+                {
+                    auto memory_guard =
+                        acquire_shared_memory_use(core);
+                    live_request =
+                        capture_cluster_request(index);
+                }
+                if (live_request.has_value()) {
+                    initial_cluster_requests[index] =
+                        std::move(live_request);
+                    continue;
+                }
+            }
+
+            if (core.halted || core.idle) {
+                outcome.terminal_cores.push_back(
+                    reservation.core_index);
+                dispatch_open[index] = false;
+                continue;
+            }
+
+            CoordinatorBoundarySettlement settlement;
+            if (
+                private_result.stop_reason ==
+                    PrivateCoreStopReason::TRAP ||
+                private_result.stop_reason ==
+                    PrivateCoreStopReason::RESET
+            ) {
+                settlement =
+                    settle_private_core_terminal(
+                        system,
+                        reservation.core_index,
+                        private_result,
+                        reservation.max_steps,
+                        settle_continuation);
+            } else if (
+                private_result.stop_reason ==
+                    PrivateCoreStopReason::
+                        ICACHE_BOUNDARY ||
+                private_result.stop_reason ==
+                    PrivateCoreStopReason::
+                        SHARED_INSTRUCTION
+            ) {
+                settlement =
+                    settle_private_core_coordinator_instruction(
+                        system,
+                        reservation.core_index,
+                        private_result,
+                        reservation.max_steps,
+                        callbacks[
+                            static_cast<std::size_t>(
+                                reservation.core_index)],
+                        settle_continuation,
+                        settle_dispatch_error);
+            } else {
+                throw std::logic_error(
+                    "private frontier left an unsupported "
+                    "coordinator boundary");
+            }
+            publish_settlement(index, settlement);
+        }
     }
 
     // Re-snapshot cluster requests from live PCs and live cluster state only
