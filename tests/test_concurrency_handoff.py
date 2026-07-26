@@ -785,6 +785,9 @@ def test_uart_geometry_host_updates_progress_during_native_execution(
     stop = threading.Event()
     failures = []
     host_update_counts = []
+    # Repetition keeps the overlap oracle meaningful without letting a fast
+    # producer fill the staged-event journal for the entire native batch.
+    max_host_updates = 64
     original_read = system.cpu._mmio_read8
 
     def signal_execution_entry(address):
@@ -802,7 +805,10 @@ def test_uart_geometry_host_updates_progress_during_native_execution(
         start.wait()
         count = 0
         try:
-            while not stop.is_set():
+            while (
+                not stop.is_set() and
+                count < max_host_updates
+            ):
                 system.uart_geom.host_set_size(
                     80 + (count % 40),
                     24 + (count % 20),
@@ -843,7 +849,7 @@ def test_uart_geometry_host_updates_progress_during_native_execution(
     assert not worker.is_alive()
     assert failures == []
     assert len(host_update_counts) == 1
-    assert host_update_counts[0] > 0
+    assert 0 < host_update_counts[0] <= max_host_updates
     assert system.cpu._cs.cycle_count > 0
 
 
