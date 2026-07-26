@@ -555,3 +555,60 @@ def test_make_sequential_target_uses_owned_foreground_pytest_process():
     assert "--state \"$pid_file\"" in result.stdout
     assert "--status \"$status_file\"" in result.stdout
     _assert_pytest_commands_are_sequential(result.stdout)
+
+
+def test_make_sanitizer_runner_is_isolated_and_sequential():
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "-n",
+            "_test-sanitize-run",
+            "SANITIZER=thread",
+            "SANITIZE_TEST_PATHS=tests/test_phase3_worker_pool.py",
+            "VENV_PY=python3",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "MP64_ACCEL_SANITIZER=\"thread\"" in result.stdout
+    assert "--build-temp \"$sanitizer_temp\"" in result.stdout
+    assert "--build-lib \"$sanitizer_lib\"" in result.stdout
+    assert "--inplace" not in result.stdout
+    assert "libtsan.so" in result.stdout
+    assert "libstdc++.so" in result.stdout
+    assert "setarch \"$sanitizer_arch\" -R true" in result.stdout
+    assert 'sanitizer_launcher="setarch $sanitizer_arch -R"' in result.stdout
+    assert 'sanitizer_preload="$preload_runtime' in result.stdout
+    assert 'env LD_PRELOAD="$sanitizer_preload"' in result.stdout
+    assert "PYTHONSAFEPATH=1" in result.stdout
+    assert "PYTHONPATH=\"$sanitizer_lib:" in result.stdout
+    assert "python3 -P -m pytest" in result.stdout
+    assert "tests/test_phase3_worker_pool.py" in result.stdout
+    assert "-p no:xdist" in result.stdout
+    _assert_pytest_commands_are_sequential(result.stdout)
+
+
+def test_public_sanitizer_target_rejects_uninstrumented_mode():
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "test-sanitize",
+            "SANITIZER=none",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert (
+        "SANITIZER must be address-undefined or thread"
+        in result.stderr
+    )
+    assert "running build_ext" not in result.stdout

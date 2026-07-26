@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded Phase 0 baseline for the MegaPad one-worker system runner.
+"""Bounded Phase 0 workload baseline across MegaPad host-execution lanes.
 
-This benchmark is deliberately diagnostic rather than aspirational.  It
-records the current ``MegapadSystem.run_batch()`` behavior while the
-deterministic scheduler is built out in stages.
+This benchmark is deliberately diagnostic rather than aspirational. It
+compares the current deterministic ``MegapadSystem.run_batch()`` behavior
+across fixed one-, two-, and four-lane native worker configurations.
 
 The report keeps four quantities separate:
 
@@ -12,9 +12,9 @@ The report keeps four quantities separate:
 * per-core architectural cycle-counter deltas; and
 * authoritative virtual system cycles passed through ``DeviceBus.tick()``.
 
-The native owner contains the authoritative system clock.  The one-worker
-runner advances it from exact core results while keeping aggregate and
-per-core architectural counters distinct.
+The native owner contains the authoritative system clock. The coordinator
+advances it from exact core results while keeping aggregate and per-core
+architectural counters distinct.
 
 Default coverage:
 
@@ -37,6 +37,7 @@ Examples::
     python3 bench_phase0_concurrency.py --instructions 2m \
         --output /tmp/megapad-phase0.json
     python3 bench_phase0_concurrency.py --cores 4 \
+        --worker-counts 1,2,4 \
         --scenarios private_compute,shared_memory --repeats 5
 
 The storage/display case uses a temporary deterministic disk image and a
@@ -90,9 +91,9 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 8
+STATE_SCHEMA_VERSION = 9
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -146,7 +147,7 @@ STATE_COMPARISON_SCOPE = {
         "SystemState-owned native timer, framebuffer (including palette), "
         "RTC, UART geometry, UART, crypto-MMIO-visible, NIC-MMIO-visible, "
         "and TRNG state as observed through every full core",
-        "native system-cycle and event-horizon state, one-worker scheduler "
+        "native system-cycle and event-horizon state, logical scheduler "
         "cursor, complete main-bus arbiter snapshot, observable quiescent "
         "cycle-execution state, complete NIC/disk DMA coordinator and "
         "resumable-FSM diagnostics, the immutable timestamped external-event "
@@ -265,9 +266,11 @@ STATE_COMPARISON_SCOPE = {
             ),
             "reason": (
                 "the counters are reported as per-execution deltas outside "
-                "the behavior hash so host call segmentation cannot change "
-                "canonical state; the active flag is an in-call exclusion "
-                "guard and is false at every completed observation boundary"
+                "the behavior hash because they are host provenance, while "
+                "the replay-visible external-ingress boundary timeline remains "
+                "canonical and may distinguish different public invocation "
+                "sequences; the active flag is an in-call exclusion guard and "
+                "is false at every completed observation boundary"
             ),
         },
         {
@@ -317,8 +320,13 @@ COVERAGE_METADATA = {
         {
             "scenario": "private_compute",
             "classification": "diagnostic_baseline",
-            "covers": "private register/ALU execution",
-            "does_not_claim": "real instruction-cache-pressure coverage",
+            "covers": (
+                "private register/ALU execution with the production "
+                "instruction-cache model"
+            ),
+            "does_not_claim": (
+                "a dedicated instruction-cache capacity/conflict stress test"
+            ),
         },
         {
             "scenario": "shared_memory",
@@ -362,12 +370,12 @@ COVERAGE_METADATA = {
     ],
     "deferred_gates": [
         {
-            "gate": "real_instruction_cache_pressure",
-            "status": "deferred",
+            "gate": "dedicated_instruction_cache_pressure",
+            "status": "covered_by_separate_phase2_oracle",
             "reason": (
-                "the legacy emulator exposes counters/configuration but no "
-                "real guest instruction-cache timing model whose pressure can "
-                "be validated without production changes"
+                "this hot-loop workload records complete production cache "
+                "state, while bench_phase2_icache.py owns alternating hot and "
+                "disabled-cache pressure measurements"
             ),
         },
         {
@@ -481,6 +489,24 @@ def parse_strict_dma_bytes(text: str) -> int:
             "strict DMA bytes must be 512 or 1024"
         )
     return value
+
+
+def parse_worker_counts(text: str) -> list[int]:
+    try:
+        values = [
+            int(item.strip())
+            for item in text.split(",")
+            if item.strip()
+        ]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "worker counts must be a comma-separated subset of 1,2,4"
+        ) from exc
+    if not values or any(value not in {1, 2, 4} for value in values):
+        raise argparse.ArgumentTypeError(
+            "worker counts must be a comma-separated subset of 1,2,4"
+        )
+    return list(dict.fromkeys(values))
 
 
 def _git_output(*args: str) -> str | None:
@@ -655,7 +681,7 @@ class Scenario:
     limitation: str
     coverage_classification: str
     coverage_claim: str
-    build: Callable[[int], Workload]
+    build: Callable[[int, int], Workload]
 
 
 def _base_system(
@@ -663,6 +689,7 @@ def _base_system(
     source: str,
     *,
     storage_image: str | None = None,
+    worker_count: int = 1,
 ) -> tuple[MegapadSystem, dict[str, int]]:
     labels: dict[str, int] = {}
     code = assemble(source, base_addr=CODE_BASE, labels_out=labels)
@@ -670,6 +697,7 @@ def _base_system(
         ram_size=RAM_SIZE,
         storage_image=storage_image,
         num_cores=num_cores,
+        worker_count=worker_count,
     )
 
     # Independent workload instances must not inherit construction-time host
@@ -718,21 +746,42 @@ def _base_system(
     return system, labels
 
 
-def build_private_compute(num_cores: int) -> Workload:
-    system, _ = _base_system(num_cores, PRIVATE_COMPUTE)
+def build_private_compute(
+    num_cores: int,
+    worker_count: int = 1,
+) -> Workload:
+    system, _ = _base_system(
+        num_cores,
+        PRIVATE_COMPUTE,
+        worker_count=worker_count,
+    )
     return Workload(system)
 
 
-def build_shared_memory(num_cores: int) -> Workload:
-    system, _ = _base_system(num_cores, SHARED_MEMORY)
+def build_shared_memory(
+    num_cores: int,
+    worker_count: int = 1,
+) -> Workload:
+    system, _ = _base_system(
+        num_cores,
+        SHARED_MEMORY,
+        worker_count=worker_count,
+    )
     for core_id, cpu in enumerate(system.cores):
         cpu.regs[4] = 0x1020_3040 ^ core_id
         cpu.regs[5] = SHARED_DATA_BASE
     return Workload(system)
 
 
-def build_mmio_poll(num_cores: int) -> Workload:
-    system, _ = _base_system(num_cores, MMIO_POLL)
+def build_mmio_poll(
+    num_cores: int,
+    worker_count: int = 1,
+) -> Workload:
+    system, _ = _base_system(
+        num_cores,
+        MMIO_POLL,
+        worker_count=worker_count,
+    )
     timer_count_low = MMIO_BASE + TIMER_BASE
     system_info_num_cores = MMIO_BASE + SYSINFO_BASE + 0x10
     system.timer.counter = 0
@@ -743,8 +792,15 @@ def build_mmio_poll(num_cores: int) -> Workload:
     return Workload(system)
 
 
-def build_timer_interrupt(num_cores: int) -> Workload:
-    system, labels = _base_system(num_cores, TIMER_INTERRUPT)
+def build_timer_interrupt(
+    num_cores: int,
+    worker_count: int = 1,
+) -> Workload:
+    system, labels = _base_system(
+        num_cores,
+        TIMER_INTERRUPT,
+        worker_count=worker_count,
+    )
     handler = labels["timer_handler"]
     vector_addr = IVT_BASE + IVEC_TIMER * 8
     system.load_binary(vector_addr, handler.to_bytes(8, "little"))
@@ -765,6 +821,7 @@ def build_timer_interrupt(num_cores: int) -> Workload:
 
 def build_legacy_storage_display_orchestration(
     num_cores: int,
+    worker_count: int = 1,
 ) -> Workload:
     temp_dir = tempfile.TemporaryDirectory(prefix="megapad_phase0_")
     image_path = Path(temp_dir.name) / "phase0-storage.img"
@@ -776,6 +833,7 @@ def build_legacy_storage_display_orchestration(
         num_cores,
         VRAM_WRITER,
         storage_image=str(image_path),
+        worker_count=worker_count,
     )
     for core_id, cpu in enumerate(system.cores):
         cpu.regs[4] = 17 + core_id * 29
@@ -881,8 +939,8 @@ SCENARIOS = {
         Scenario(
             "private_compute",
             "Register/ALU loop with no data-memory or MMIO operations.",
-            "Instruction fetch still reads the shared code image; the legacy "
-            "emulator has no guest instruction-cache timing model.",
+            "The compact hot loop exercises real cache refill/hit behavior "
+            "but is not a cache capacity or conflict-pressure workload.",
             "diagnostic_baseline",
             "private register/ALU execution only",
             build_private_compute,
@@ -890,8 +948,9 @@ SCENARIOS = {
         Scenario(
             "shared_memory",
             "All cores repeatedly write and read the same shared RAM word.",
-            "The legacy runner serializes cores and does not model main-bus "
-            "contention, so this records overhead rather than bus bandwidth.",
+            "The unbounded coordinator orders shared accesses but deliberately "
+            "does not apply strict-cycle main-bus timing, so this records "
+            "coordinator overhead rather than physical bus bandwidth.",
             "diagnostic_baseline",
             "same-address shared-memory access pressure",
             build_shared_memory,
@@ -948,6 +1007,178 @@ def _blob_summary(data: bytes | bytearray | memoryview) -> dict:
     return {
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def _assembled_fixture(source: str) -> dict:
+    labels: dict[str, int] = {}
+    image = assemble(source, base_addr=CODE_BASE, labels_out=labels)
+    return {
+        "load_address": CODE_BASE,
+        "assembled_image": _blob_summary(image),
+        "labels": {
+            name: int(address)
+            for name, address in sorted(labels.items())
+        },
+    }
+
+
+def _fixture_manifest(strict_dma_bytes: int) -> dict:
+    sector_zero = bytes(index & 0xFF for index in range(SECTOR_SIZE))
+    sector_one = bytes(
+        (index * 73 + 41) & 0xFF
+        for index in range(SECTOR_SIZE)
+    )
+    nic_payload = bytes(
+        (index * 73 + 41) & 0xFF
+        for index in range(strict_dma_bytes)
+    )
+    disk_payload = bytes(
+        (index * 13 + 7) & 0xFF
+        for index in range(strict_dma_bytes)
+    )
+    manifest = {
+        "schema": "megapad.phase3-benchmark-fixtures",
+        "schema_version": 1,
+        "assembled_programs": {
+            "private_compute": _assembled_fixture(PRIVATE_COMPUTE),
+            "shared_memory": _assembled_fixture(SHARED_MEMORY),
+            "mmio_poll": _assembled_fixture(MMIO_POLL),
+            "timer_interrupt": _assembled_fixture(TIMER_INTERRUPT),
+            "legacy_storage_display_orchestration":
+                _assembled_fixture(VRAM_WRITER),
+            "strict_nic_disk_dma":
+                _assembled_fixture(STRICT_DMA_COMMAND),
+        },
+        "payloads": {
+            "legacy_storage_sector_zero": _blob_summary(sector_zero),
+            "legacy_storage_sector_one": _blob_summary(sector_one),
+            "strict_dma_nic_source": _blob_summary(nic_payload),
+            "strict_dma_storage_media": _blob_summary(disk_payload),
+        },
+    }
+    return {
+        **manifest,
+        "canonical_json_sha256": _json_sha256(manifest),
+    }
+
+
+def _host_worker_snapshot(system: MegapadSystem) -> dict:
+    pool = dict(system._native_system._worker_pool_diagnostics())
+    private = dict(system._native_system._private_worker_diagnostics())
+    lanes = [
+        {
+            "lane_index": int(lane["lane_index"]),
+            "auxiliary": bool(lane["auxiliary"]),
+            "thread_token": int(lane["thread_token"]),
+            "completed_commands": int(lane["completed_commands"]),
+            "completed_steps": int(lane["completed_steps"]),
+        }
+        for lane in private["lanes"]
+    ]
+    return {
+        "pool": {
+            "schema_version": int(pool["schema_version"]),
+            "worker_count": int(pool["worker_count"]),
+            "auxiliary_worker_count": int(
+                pool["auxiliary_worker_count"]
+            ),
+            "live_auxiliary_workers": int(
+                pool["live_auxiliary_workers"]
+            ),
+            "launch_count": int(pool["launch_count"]),
+            "inline_reference": bool(pool["inline_reference"]),
+        },
+        "private": {
+            "schema_version": int(private["schema_version"]),
+            "wave_epoch": int(private["wave_epoch"]),
+            "next_command_sequence": int(
+                private["next_command_sequence"]
+            ),
+            "wave_active": bool(private["wave_active"]),
+            "lanes": lanes,
+        },
+    }
+
+
+def _host_worker_diagnostics(
+    before: dict,
+    after: dict,
+) -> dict:
+    before_lanes = before["private"]["lanes"]
+    after_lanes = after["private"]["lanes"]
+    lane_deltas = [
+        {
+            "lane_index": int(after_lane["lane_index"]),
+            "auxiliary": bool(after_lane["auxiliary"]),
+            "completed_commands": (
+                int(after_lane["completed_commands"])
+                - int(before_lane["completed_commands"])
+            ),
+            "completed_steps": (
+                int(after_lane["completed_steps"])
+                - int(before_lane["completed_steps"])
+            ),
+        }
+        for before_lane, after_lane in zip(
+            before_lanes,
+            after_lanes,
+            strict=True,
+        )
+    ]
+    return {
+        "architectural_hash_scope": "excluded_host_only",
+        "before": before,
+        "after": after,
+        "deltas": {
+            "wave_epochs": (
+                after["private"]["wave_epoch"]
+                - before["private"]["wave_epoch"]
+            ),
+            "command_sequences": (
+                after["private"]["next_command_sequence"]
+                - before["private"]["next_command_sequence"]
+            ),
+            "lanes": lane_deltas,
+        },
+        "every_configured_lane_participated": all(
+            lane["completed_commands"] > 0
+            and lane["completed_steps"] > 0
+            for lane in lane_deltas
+        ),
+    }
+
+
+def _system_run_stats_state(result) -> dict:
+    return {
+        "instructions_executed": int(result.instructions_executed),
+        "system_cycles_advanced": int(result.system_cycles_advanced),
+        "per_core_instructions": [
+            int(value) for value in result.per_core_instructions
+        ],
+        "per_core_cycles": [
+            int(value) for value in result.per_core_cycles
+        ],
+        "per_core_dispatches": [
+            int(value) for value in result.per_core_dispatches
+        ],
+        "per_core_stop_reasons": [
+            [int(value) for value in reasons]
+            for reasons in result.per_core_stop_reasons
+        ],
+        "native_scheduler": bool(result.native_scheduler),
+        "native_rounds": int(result.native_rounds),
+        "native_continuations": int(result.native_continuations),
+        "system_stop_reason": str(result.system_stop_reason),
+        "stop_cycle": int(result.stop_cycle),
+        "event_source_mask": int(result.event_source_mask),
+        "per_core_interrupts": [
+            int(value) for value in result.per_core_interrupts
+        ],
+        "interrupts_delivered": int(result.interrupts_delivered),
+        "external_events_applied": int(result.external_events_applied),
+        "pending_interrupt_core": int(result.pending_interrupt_core),
+        "pending_interrupt_vector": int(result.pending_interrupt_vector),
     }
 
 
@@ -1069,6 +1300,8 @@ def _external_event_record_state(event) -> dict:
         "payload": _blob_summary(bytes(event.payload)),
         "argument0": int(event.argument0),
         "argument1": int(event.argument1),
+        "release_boundary": int(event.release_boundary),
+        "release_phase": _enum_name(event.release_phase),
     }
 
 
@@ -1089,6 +1322,15 @@ def _external_event_journal_state(system: MegapadSystem) -> dict:
             else int(owner.external_event_next_cycle)
         ),
         "next_sequence": int(owner.external_event_next_sequence),
+        "completed_batch_boundaries": int(
+            owner.external_event_batch_boundaries
+        ),
+        "next_before_cycle": (
+            None
+            if owner.external_event_next_before_cycle is None
+            else int(owner.external_event_next_before_cycle)
+        ),
+        "replay_sealed": bool(owner.external_event_replay_sealed),
         "pending": pending,
         "history": history,
         "pending_canonical_json_sha256": _json_sha256(pending),
@@ -1107,6 +1349,7 @@ def _ordered_blob_queue(queue: Iterable[bytes]) -> dict:
 
 def _core_state(cpu) -> dict:
     cs = cpu._cs
+    icache_valid, icache_tags, icache_data = cs.icache_snapshot()
     return {
         "identity": {
             "core_id": int(cpu.core_id),
@@ -1175,6 +1418,9 @@ def _core_state(cpu) -> dict:
             "enabled": int(cpu.icache_enabled),
             "hits": int(cpu.icache_hits),
             "misses": int(cpu.icache_misses),
+            "valid_lines": _blob_summary(icache_valid),
+            "tags": _integer_sequence_summary(icache_tags),
+            "data": _blob_summary(icache_data),
         },
         "privilege_and_mpu": {
             "priv_level": int(cpu.priv_level),
@@ -1690,10 +1936,16 @@ def _state_observation_locked(workload: Workload) -> dict:
     }
 
 
-def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
-    workload = scenario.build(num_cores)
+def _timed_sample(
+    scenario: Scenario,
+    num_cores: int,
+    target: int,
+    worker_count: int = 1,
+) -> dict:
+    workload = scenario.build(num_cores, worker_count)
     gc_enabled_before = gc.isenabled()
     collected_before_timing = gc.collect()
+    workers_before = _host_worker_snapshot(workload.system)
     native_batches_before = int(
         workload.system._native_system.native_batch_runs
     )
@@ -1722,6 +1974,7 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
             int(workload.system._native_system.native_dispatches)
             - native_dispatches_before
         )
+        workers_after = _host_worker_snapshot(workload.system)
         observation = _state_observation(workload)
     finally:
         if gc.isenabled() != gc_enabled_before:
@@ -1742,6 +1995,10 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
             (instructions / wall_s) if wall_s else None,
         "aggregate_mips":
             (instructions / wall_s / 1_000_000.0) if wall_s else None,
+        "host_worker_diagnostics": _host_worker_diagnostics(
+            workers_before,
+            workers_after,
+        ),
         "scheduler_provenance": {
             "native_batch_runs_counter_delta": native_batch_delta,
             "native_dispatches_counter_delta": native_dispatch_delta,
@@ -1770,6 +2027,7 @@ def _write_le_register(write8, offset: int, value: int, width: int) -> None:
 
 def _build_strict_nic_disk_dma(
     payload_bytes: int,
+    worker_count: int = 1,
 ) -> tuple[Workload, dict]:
     if (
         payload_bytes % SECTOR_SIZE != 0
@@ -1798,6 +2056,7 @@ def _build_strict_nic_disk_dma(
             2,
             STRICT_DMA_COMMAND,
             storage_image=str(image_path),
+            worker_count=worker_count,
         )
         nic_source = DMA_DATA_BASE
         disk_target = DMA_DATA_BASE + 0x4000
@@ -1878,6 +2137,7 @@ def _execute_strict_nic_disk_dma(
     system_cycles = 0
     calls = 0
     final = None
+    public_batch_results = []
     cycle_budget = payload_bytes * 8 + 256
     max_calls = (
         cycle_budget + 8
@@ -1893,6 +2153,7 @@ def _execute_strict_nic_disk_dma(
             cycle_budget if cycle_slice is None else cycle_slice,
             max_instructions=STRICT_DMA_MAX_INSTRUCTIONS,
         )
+        public_batch_results.append(_system_run_stats_state(final))
         calls += 1
         instructions += int(final.instructions_executed)
         system_cycles += int(final.system_cycles_advanced)
@@ -1933,6 +2194,7 @@ def _execute_strict_nic_disk_dma(
         "system_cycles_advanced": system_cycles,
         "stop_reason": final.system_stop_reason,
         "service_trace": trace,
+        "ordered_public_batch_results": public_batch_results,
         "before_bus": before,
         "after_bus": owner._main_bus_snapshot(),
     }
@@ -1941,14 +2203,19 @@ def _execute_strict_nic_disk_dma(
 def _strict_nic_disk_dma_sample(
     payload_bytes: int,
     *,
+    worker_count: int = 1,
     cycle_slice: int | None = None,
     used_for_throughput: bool = True,
 ) -> dict:
-    workload, context = _build_strict_nic_disk_dma(payload_bytes)
+    workload, context = _build_strict_nic_disk_dma(
+        payload_bytes,
+        worker_count,
+    )
     system = workload.system
     owner = system._native_system
     gc_enabled_before = gc.isenabled()
     collected_before_timing = gc.collect()
+    workers_before = _host_worker_snapshot(system)
     try:
         if gc_enabled_before:
             gc.disable()
@@ -2084,6 +2351,7 @@ def _strict_nic_disk_dma_sample(
             "native_nic_tx_count": int(native.nic_get_tx_count()),
             "validation": checks,
         })
+        workers_after = _host_worker_snapshot(system)
         observation = _state_observation(workload)
     finally:
         if gc.isenabled() != gc_enabled_before:
@@ -2096,6 +2364,7 @@ def _strict_nic_disk_dma_sample(
     total_bytes = payload_bytes * 2
     return {
         "used_for_throughput": used_for_throughput,
+        "worker_count": worker_count,
         "cycle_slice": cycle_slice,
         "payload_bytes_per_endpoint": payload_bytes,
         "total_dma_payload_bytes": total_bytes,
@@ -2108,6 +2377,10 @@ def _strict_nic_disk_dma_sample(
         "virtual_cycles_per_dma_payload_byte":
             execution["system_cycles_advanced"] / total_bytes,
         **execution,
+        "host_worker_diagnostics": _host_worker_diagnostics(
+            workers_before,
+            workers_after,
+        ),
         "main_bus": {
             "port_count": int(after.port_count),
             "nic_port_id": int(nic_port),
@@ -2135,18 +2408,24 @@ def _strict_nic_disk_dma_report(
     *,
     repeats: int,
     warmups: int,
+    worker_count: int = 1,
 ) -> dict:
     for _ in range(warmups):
         _strict_nic_disk_dma_sample(
             payload_bytes,
+            worker_count=worker_count,
             used_for_throughput=False,
         )
     samples = [
-        _strict_nic_disk_dma_sample(payload_bytes)
+        _strict_nic_disk_dma_sample(
+            payload_bytes,
+            worker_count=worker_count,
+        )
         for _ in range(repeats)
     ]
     sliced = _strict_nic_disk_dma_sample(
         payload_bytes,
+        worker_count=worker_count,
         cycle_slice=1,
         used_for_throughput=False,
     )
@@ -2173,6 +2452,27 @@ def _strict_nic_disk_dma_report(
     sliced_oracle = sliced["observation"][
         "behavior_oracle_sha256"
     ]
+    def state_without_batch_boundary_count_sha256(
+        sample: dict,
+    ) -> str:
+        observation = sample["observation"]
+        state = json.loads(json.dumps(observation["canonical_state"]))
+        state["shared_devices"]["external_events"].pop(
+            "completed_batch_boundaries",
+            None,
+        )
+        return _json_sha256({
+            "canonical_state": state,
+            "workload_metrics": observation["workload_metrics"],
+        })
+
+    timed_state_without_boundary_count = [
+        state_without_batch_boundary_count_sha256(sample)
+        for sample in samples
+    ]
+    sliced_state_without_boundary_count = (
+        state_without_batch_boundary_count_sha256(sliced)
+    )
     rates = [
         sample["dma_payload_bytes_per_s"] for sample in samples
     ]
@@ -2184,9 +2484,12 @@ def _strict_nic_disk_dma_report(
         "sliced_replay_valid": all(sliced["validation"].values()),
         "timed_repeats_deterministic":
             len(set(timed_oracles)) == 1,
-        "sliced_replay_matches_timed_oracle":
-            bool(timed_oracles)
-            and all(value == sliced_oracle for value in timed_oracles),
+        "one_shot_and_sliced_state_equal_except_batch_boundary_count":
+            bool(timed_state_without_boundary_count)
+            and all(
+                value == sliced_state_without_boundary_count
+                for value in timed_state_without_boundary_count
+            ),
         "default_eligible_peer_trace_is_equal_round_robin":
             trace == expected_trace,
     }
@@ -2199,6 +2502,9 @@ def _strict_nic_disk_dma_report(
         "arbitration_contract": ARBITRATION_CONTRACT,
         "configuration": {
             "full_cores": 2,
+            "worker_count": worker_count,
+            "host_execution_lanes": worker_count,
+            "auxiliary_worker_count": worker_count - 1,
             "payload_bytes_per_endpoint": payload_bytes,
             "total_dma_payload_bytes_per_sample": payload_bytes * 2,
             "timed_repeats": repeats,
@@ -2234,6 +2540,10 @@ def _strict_nic_disk_dma_report(
                 samples[0]["virtual_cycles_per_dma_payload_byte"],
             "timed_behavior_oracle_sha256": timed_oracles,
             "sliced_behavior_oracle_sha256": sliced_oracle,
+            "timed_state_without_batch_boundary_count_sha256":
+                timed_state_without_boundary_count,
+            "sliced_state_without_batch_boundary_count_sha256":
+                sliced_state_without_boundary_count,
         },
         "validation": validations,
     }
@@ -2293,6 +2603,7 @@ def _install_accounting(
         "compatibility_system_batch_calls": 0,
         "native_rounds": 0,
         "native_continuations": 0,
+        "ordered_public_batch_results": [],
     }
     original_run_batch_stats = workload.system.run_batch_stats
 
@@ -2316,6 +2627,9 @@ def _install_accounting(
         scheduler_stats["native_rounds"] += int(result.native_rounds)
         scheduler_stats["native_continuations"] += int(
             result.native_continuations
+        )
+        scheduler_stats["ordered_public_batch_results"].append(
+            _system_run_stats_state(result)
         )
 
         dispatches = result.per_core_dispatches or (0,) * core_count
@@ -2365,9 +2679,11 @@ def _accounting_probe(
     scenario: Scenario,
     num_cores: int,
     target: int,
+    worker_count: int = 1,
 ) -> dict:
-    workload = scenario.build(num_cores)
+    workload = scenario.build(num_cores, worker_count)
     core_stats, bus_stats, scheduler_stats = _install_accounting(workload)
+    workers_before = _host_worker_snapshot(workload.system)
     start_cycles = [int(cpu.cycle_count) for cpu in workload.system.cores]
     start_system_cycles = int(workload.system._native_system.system_cycles)
     start_native_batches = int(
@@ -2391,6 +2707,7 @@ def _accounting_probe(
         end_native_dispatches = int(
             workload.system._native_system.native_dispatches
         )
+        workers_after = _host_worker_snapshot(workload.system)
     finally:
         workload.close()
 
@@ -2425,9 +2742,27 @@ def _accounting_probe(
         for entry in core_stats
     )
     virtual_system_cycles = end_system_cycles - start_system_cycles
+    public_accounting = {
+        "execution": execution.as_dict(),
+        "ordered_system_run_stats":
+            scheduler_stats["ordered_public_batch_results"],
+        "per_core": [
+            {
+                "core_id": int(stats["core_id"]),
+                "instructions": int(stats["instructions"]),
+                "scheduler_cycles": int(stats["scheduler_cycles"]),
+                "native_dispatches": int(stats["native_dispatches"]),
+                "native_stop_reasons": stats["native_stop_reasons"],
+                "architectural_cycles": int(cycles),
+            }
+            for stats, cycles in zip(core_stats, per_core_cycles)
+        ],
+        "virtual_system_cycles": int(virtual_system_cycles),
+    }
     return {
         "instrumented": True,
         "used_for_throughput": False,
+        "worker_count": worker_count,
         "execution": execution.as_dict(),
         "per_core": [
             {
@@ -2474,6 +2809,13 @@ def _accounting_probe(
         "virtual_system_cycles": virtual_system_cycles,
         "virtual_system_cycles_availability":
             "available from the authoritative native system clock",
+        "public_accounting_oracle": public_accounting,
+        "public_accounting_oracle_sha256":
+            _json_sha256(public_accounting),
+        "host_worker_diagnostics": _host_worker_diagnostics(
+            workers_before,
+            workers_after,
+        ),
         "observation": observation,
     }
 
@@ -2607,17 +2949,191 @@ def _summary(samples: list[dict], accounting: dict) -> dict:
     }
 
 
-def _run_warmup(scenario: Scenario, num_cores: int, instructions: int) -> None:
-    workload = scenario.build(num_cores)
+def _run_warmup(
+    scenario: Scenario,
+    num_cores: int,
+    instructions: int,
+    worker_count: int = 1,
+) -> None:
+    workload = scenario.build(num_cores, worker_count)
     try:
         workload.execute(instructions)
     finally:
         workload.close()
 
 
+def _cross_worker_equivalence(results: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str, int], list[dict]] = {}
+    for result in results:
+        grouped.setdefault(
+            (result["scenario"], result["full_cores"]),
+            [],
+        ).append(result)
+
+    groups = []
+    for (scenario, full_cores), entries in grouped.items():
+        entries.sort(key=lambda entry: entry["worker_count"])
+        baseline = next(
+            (
+                entry
+                for entry in entries
+                if entry["worker_count"] == 1
+            ),
+            None,
+        )
+        baseline_rate = (
+            None
+            if baseline is None
+            else baseline["summary"][
+                "median_aggregate_instructions_per_s"
+            ]
+        )
+        observations = [
+            entry["accounting_probe"]["observation"]
+            for entry in entries
+        ]
+        accounting_hashes = [
+            entry["accounting_probe"][
+                "public_accounting_oracle_sha256"
+            ]
+            for entry in entries
+        ]
+        members = []
+        for entry, observation, accounting_hash in zip(
+            entries,
+            observations,
+            accounting_hashes,
+            strict=True,
+        ):
+            rate = entry["summary"][
+                "median_aggregate_instructions_per_s"
+            ]
+            ratio = (
+                None
+                if baseline_rate is None or baseline_rate == 0
+                else rate / baseline_rate
+            )
+            entry["summary"]["one_lane_relative_throughput"] = ratio
+            members.append({
+                "worker_count": entry["worker_count"],
+                "canonical_state_sha256":
+                    observation["canonical_state_sha256"],
+                "behavior_oracle_sha256":
+                    observation["behavior_oracle_sha256"],
+                "public_accounting_oracle_sha256": accounting_hash,
+                "median_aggregate_instructions_per_s": rate,
+                "one_lane_relative_throughput": ratio,
+            })
+        validation = {
+            "one_lane_reference_present": baseline is not None,
+            "canonical_state_equal":
+                len({
+                    observation["canonical_state_sha256"]
+                    for observation in observations
+                }) == 1,
+            "behavior_oracle_equal":
+                len({
+                    observation["behavior_oracle_sha256"]
+                    for observation in observations
+                }) == 1,
+            "ordered_public_accounting_cycles_dispatches_stops_equal":
+                len(set(accounting_hashes)) == 1,
+        }
+        validation["equivalent"] = all(validation.values())
+        groups.append({
+            "scenario": scenario,
+            "full_cores": full_cores,
+            "reference_worker_count": (
+                None if baseline is None else 1
+            ),
+            "members": members,
+            "validation": validation,
+        })
+    return groups
+
+
+def _strict_dma_cross_worker_equivalence(
+    worker_reports: list[dict],
+) -> dict:
+    baseline = next(
+        (
+            report
+            for report in worker_reports
+            if report["configuration"]["worker_count"] == 1
+        ),
+        None,
+    )
+    baseline_rate = (
+        None
+        if baseline is None
+        else baseline["summary"]["median_dma_payload_bytes_per_s"]
+    )
+    members = []
+    for report in worker_reports:
+        timed = report["timed_samples"]
+        first = timed[0]
+        rate = report["summary"]["median_dma_payload_bytes_per_s"]
+        public_hashes = [
+            _json_sha256(sample["ordered_public_batch_results"])
+            for sample in timed
+        ]
+        members.append({
+            "worker_count": report["configuration"]["worker_count"],
+            "timed_behavior_oracle_sha256":
+                first["observation"]["behavior_oracle_sha256"],
+            "timed_public_batch_results_sha256": public_hashes[0],
+            "sliced_behavior_oracle_sha256": report[
+                "sliced_oracle_replay"
+            ]["observation"]["behavior_oracle_sha256"],
+            "sliced_public_batch_results_sha256": _json_sha256(
+                report["sliced_oracle_replay"][
+                    "ordered_public_batch_results"
+                ]
+            ),
+            "median_dma_payload_bytes_per_s": rate,
+            "one_lane_relative_throughput": (
+                None
+                if baseline_rate is None or baseline_rate == 0
+                else rate / baseline_rate
+            ),
+            "timed_repeats_public_results_deterministic":
+                len(set(public_hashes)) == 1,
+        })
+    validation = {
+        "one_lane_reference_present": baseline is not None,
+        "timed_behavior_oracle_equal": len({
+            member["timed_behavior_oracle_sha256"]
+            for member in members
+        }) == 1,
+        "timed_ordered_public_results_equal": len({
+            member["timed_public_batch_results_sha256"]
+            for member in members
+        }) == 1,
+        "sliced_behavior_oracle_equal": len({
+            member["sliced_behavior_oracle_sha256"]
+            for member in members
+        }) == 1,
+        "sliced_ordered_public_results_equal": len({
+            member["sliced_public_batch_results_sha256"]
+            for member in members
+        }) == 1,
+        "all_timed_repeats_public_results_deterministic": all(
+            member["timed_repeats_public_results_deterministic"]
+            for member in members
+        ),
+    }
+    validation["equivalent"] = all(validation.values())
+    return {
+        "reference_worker_count": None if baseline is None else 1,
+        "members": members,
+        "validation": validation,
+    }
+
+
 def run_report(
     *,
     core_counts: Iterable[int],
+    worker_counts: Iterable[int] = (1, 2, 4),
     scenario_names: Iterable[str],
     instructions: int,
     repeats: int,
@@ -2626,41 +3142,86 @@ def run_report(
     strict_dma_bytes: int = STRICT_DMA_DEFAULT_BYTES,
 ) -> dict:
     core_counts = list(core_counts)
+    worker_counts = list(worker_counts)
     scenario_names = list(scenario_names)
     selected_scenarios = [SCENARIOS[name] for name in scenario_names]
     results = []
     for scenario in selected_scenarios:
         for num_cores in core_counts:
-            for _ in range(warmups):
-                _run_warmup(scenario, num_cores, warmup_instructions)
-            samples = [
-                _timed_sample(scenario, num_cores, instructions)
-                for _ in range(repeats)
-            ]
-            accounting = _accounting_probe(
-                scenario,
-                num_cores,
-                instructions,
-            )
-            results.append(
-                {
-                    "scenario": scenario.name,
-                    "description": scenario.description,
-                    "known_limitation": scenario.limitation,
-                    "coverage_classification":
-                        scenario.coverage_classification,
-                    "coverage_claim": scenario.coverage_claim,
-                    "full_cores": num_cores,
-                    "timed_samples": samples,
-                    "accounting_probe": accounting,
-                    "summary": _summary(samples, accounting),
-                }
-            )
+            for worker_count in worker_counts:
+                for _ in range(warmups):
+                    _run_warmup(
+                        scenario,
+                        num_cores,
+                        warmup_instructions,
+                        worker_count,
+                    )
+                samples = [
+                    _timed_sample(
+                        scenario,
+                        num_cores,
+                        instructions,
+                        worker_count,
+                    )
+                    for _ in range(repeats)
+                ]
+                accounting = _accounting_probe(
+                    scenario,
+                    num_cores,
+                    instructions,
+                    worker_count,
+                )
+                lane_participation_required = (
+                    scenario.name == "private_compute"
+                    and num_cores >= worker_count
+                )
+                lane_participation_observed = all(
+                    sample["host_worker_diagnostics"][
+                        "every_configured_lane_participated"
+                    ]
+                    for sample in samples
+                ) and accounting["host_worker_diagnostics"][
+                    "every_configured_lane_participated"
+                ]
+                results.append(
+                    {
+                        "scenario": scenario.name,
+                        "description": scenario.description,
+                        "known_limitation": scenario.limitation,
+                        "coverage_classification":
+                            scenario.coverage_classification,
+                        "coverage_claim": scenario.coverage_claim,
+                        "full_cores": num_cores,
+                        "worker_count": worker_count,
+                        "host_execution_lanes": worker_count,
+                        "auxiliary_worker_count": worker_count - 1,
+                        "lane_participation": {
+                            "required": lane_participation_required,
+                            "observed": lane_participation_observed,
+                            "requirement_satisfied": (
+                                lane_participation_observed
+                                if lane_participation_required
+                                else True
+                            ),
+                        },
+                        "timed_samples": samples,
+                        "accounting_probe": accounting,
+                        "summary": _summary(samples, accounting),
+                    }
+                )
 
-    strict_dma = _strict_nic_disk_dma_report(
-        strict_dma_bytes,
-        repeats=repeats,
-        warmups=warmups,
+    cross_worker_groups = _cross_worker_equivalence(results)
+    strict_worker_reports = [
+        _strict_nic_disk_dma_report(
+            strict_dma_bytes,
+            repeats=repeats,
+            warmups=warmups,
+            worker_count=worker_count,
+        )
+        for worker_count in worker_counts
+    ]
+    strict_dma_equivalence = _strict_dma_cross_worker_equivalence(
+        strict_worker_reports
     )
     validation = {
         "all_instruction_accounting_matches": all(
@@ -2756,20 +3317,42 @@ def run_report(
             for result in results
             for sample in result["timed_samples"]
         ),
-        "strict_dma_all_timed_samples_valid":
-            strict_dma["validation"]["all_timed_samples_valid"],
-        "strict_dma_sliced_replay_valid":
-            strict_dma["validation"]["sliced_replay_valid"],
-        "strict_dma_timed_repeats_deterministic":
-            strict_dma["validation"]["timed_repeats_deterministic"],
-        "strict_dma_sliced_replay_matches_timed_oracle":
-            strict_dma["validation"][
-                "sliced_replay_matches_timed_oracle"
-            ],
+        "all_required_private_lanes_participated": all(
+            result["lane_participation"]["requirement_satisfied"]
+            for result in results
+        ),
+        "all_cross_worker_groups_equivalent": all(
+            group["validation"]["equivalent"]
+            for group in cross_worker_groups
+        ),
+        "strict_dma_all_timed_samples_valid": all(
+            report["validation"]["all_timed_samples_valid"]
+            for report in strict_worker_reports
+        ),
+        "strict_dma_sliced_replay_valid": all(
+            report["validation"]["sliced_replay_valid"]
+            for report in strict_worker_reports
+        ),
+        "strict_dma_timed_repeats_deterministic": all(
+            report["validation"]["timed_repeats_deterministic"]
+            for report in strict_worker_reports
+        ),
+        "strict_dma_one_shot_and_sliced_state_equal_except_batch_boundary_count":
+            all(
+                report["validation"][
+                    "one_shot_and_sliced_state_equal_except_batch_boundary_count"
+                ]
+                for report in strict_worker_reports
+            ),
         "strict_dma_default_eligible_peer_trace_is_equal_round_robin":
-            strict_dma["validation"][
-                "default_eligible_peer_trace_is_equal_round_robin"
-            ],
+            all(
+                report["validation"][
+                    "default_eligible_peer_trace_is_equal_round_robin"
+                ]
+                for report in strict_worker_reports
+            ),
+        "strict_dma_cross_worker_equivalent":
+            strict_dma_equivalence["validation"]["equivalent"],
     }
     return {
         "schema": SCHEMA,
@@ -2780,8 +3363,10 @@ def run_report(
         "coverage": COVERAGE_METADATA,
         "main_bus_arbitration_contract": ARBITRATION_CONTRACT,
         "state_comparison_scope": STATE_COMPARISON_SCOPE,
+        "fixture_manifest": _fixture_manifest(strict_dma_bytes),
         "configuration": {
             "full_core_counts": list(core_counts),
+            "worker_counts": list(worker_counts),
             "scenarios": [scenario.name for scenario in selected_scenarios],
             "aggregate_instruction_target_per_sample": instructions,
             "timed_repeats": repeats,
@@ -2789,6 +3374,13 @@ def run_report(
             "warmup_instructions_per_run": warmup_instructions,
             "strict_dma_payload_bytes_per_endpoint":
                 strict_dma_bytes,
+            "execution_order": {
+                "strategy": (
+                    "deterministic scenario, full-core count, then configured "
+                    "worker-count order; warmups precede timed repeats"
+                ),
+                "worker_count_order": list(worker_counts),
+            },
         },
         "measurement_semantics": {
             "timed_throughput":
@@ -2828,6 +3420,9 @@ def run_report(
             "host_cpu_utilization_percent":
                 "process CPU time divided by wall time; may exceed 100% when "
                 "host worker threads overlap",
+            "host_worker_diagnostics":
+                "persistent pool identity and per-lane command/step deltas; "
+                "host-only and excluded from every architectural hash",
             "derived_per_core_throughput":
                 "accounting-replay instruction share multiplied by the "
                 "uninstrumented median aggregate instruction rate; omitted "
@@ -2838,8 +3433,9 @@ def run_report(
                 "the behavior oracle",
             "timestamped_external_event_oracle":
                 "pending and historical external inputs are captured in "
-                "cycle/sequence order with payload size and SHA-256; Phase 0 "
-                "validates that timed and accounting runs remain quiescent",
+                "cycle/sequence/release order with payload size and SHA-256, "
+                "including replay seal and batch-boundary diagnostics; Phase "
+                "0 validates that runs remain quiescent",
             "deterministic_platform_initialization":
                 "the harness pins the virtual RTC to "
                 "2000-01-01T00:00:00Z and UART geometry to 80x24",
@@ -2854,7 +3450,11 @@ def run_report(
         },
         "validation": validation,
         "results": results,
-        "strict_nic_disk_dma": strict_dma,
+        "cross_worker_equivalence_groups": cross_worker_groups,
+        "strict_nic_disk_dma": {
+            "worker_reports": strict_worker_reports,
+            "cross_worker_equivalence": strict_dma_equivalence,
+        },
     }
 
 
@@ -2894,10 +3494,11 @@ def print_human(report: dict) -> None:
     )
     print()
     print(
-        f"{'scenario':<41} {'cores':>5} {'agg MIPS':>10} "
-        f"{'host CPU':>9} {'callbacks':>10} {'deterministic':>14}"
+        f"{'scenario':<41} {'cores':>5} {'lanes':>5} {'agg MIPS':>10} "
+        f"{'vs 1':>7} {'host CPU':>9} {'callbacks':>10} "
+        f"{'deterministic':>14}"
     )
-    print("-" * 96)
+    print("-" * 112)
     for result in report["results"]:
         summary = result["summary"]
         accounting = result["accounting_probe"]
@@ -2909,23 +3510,28 @@ def print_human(report: dict) -> None:
             summary["deterministic_timed_repeats"]
             and summary["accounting_matches_all_timed_repeats"]
         )
+        ratio = summary["one_lane_relative_throughput"]
+        ratio_text = "-" if ratio is None else f"{ratio:.2f}x"
         print(
             f"{result['scenario']:<41} {result['full_cores']:>5} "
+            f"{result['worker_count']:>5} "
             f"{summary['median_aggregate_mips']:>10.2f} "
+            f"{ratio_text:>7} "
             f"{summary['median_host_cpu_utilization_percent']:>8.1f}% "
             f"{callbacks:>10,} {str(deterministic):>14}"
         )
     print()
-    dma = report["strict_nic_disk_dma"]
-    dma_summary = dma["summary"]
-    dma_valid = all(dma["validation"].values())
-    print(
-        "Strict NIC+disk DMA: "
-        f"{dma_summary['median_dma_payload_mib_per_s']:.2f} MiB/s, "
-        f"{dma_summary['virtual_cycles_per_dma_payload_byte']:.3f} "
-        "virtual cycles/payload byte, "
-        f"deterministic={dma_valid}"
-    )
+    for dma in report["strict_nic_disk_dma"]["worker_reports"]:
+        dma_summary = dma["summary"]
+        dma_valid = all(dma["validation"].values())
+        print(
+            "Strict NIC+disk DMA "
+            f"({dma['configuration']['worker_count']} lanes): "
+            f"{dma_summary['median_dma_payload_mib_per_s']:.2f} MiB/s, "
+            f"{dma_summary['virtual_cycles_per_dma_payload_byte']:.3f} "
+            "virtual cycles/payload byte, "
+            f"deterministic={dma_valid}"
+        )
     print()
     print(
         "Virtual system cycles: reported from the authoritative native clock "
@@ -2936,19 +3542,33 @@ def print_human(report: dict) -> None:
         "accounting replay only when it matches every timed repeat; timed "
         "aggregate rates are uninstrumented."
     )
+    print(
+        "Overall architectural validation: "
+        + (
+            "PASS"
+            if all(report["validation"].values())
+            else "FAIL"
+        )
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run a reproducible, bounded Phase 0 baseline for MegaPad's "
-            "one-worker multicore system runner."
+            "deterministic multicore system runner."
         )
     )
     parser.add_argument(
         "--cores",
         type=parse_core_counts,
         default=parse_core_counts("1,2,4"),
+        help="comma-separated subset of 1,2,4 (default: 1,2,4)",
+    )
+    parser.add_argument(
+        "--worker-counts",
+        type=parse_worker_counts,
+        default=parse_worker_counts("1,2,4"),
         help="comma-separated subset of 1,2,4 (default: 1,2,4)",
     )
     parser.add_argument(
@@ -3025,6 +3645,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = run_report(
         core_counts=args.cores,
+        worker_counts=args.worker_counts,
         scenario_names=args.scenarios,
         instructions=args.instructions,
         repeats=args.repeats,
@@ -3042,7 +3663,7 @@ def main(argv: list[str] | None = None) -> int:
         print_human(report)
         if args.output is not None:
             print(f"JSON report: {args.output}")
-    return 0
+    return 0 if all(report["validation"].values()) else 1
 
 
 if __name__ == "__main__":

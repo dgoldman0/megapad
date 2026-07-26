@@ -637,8 +637,8 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
 
     bus_state = phase0._main_bus_state(system)
 
-    assert phase0.SCHEMA_VERSION == 7
-    assert phase0.STATE_SCHEMA_VERSION == 8
+    assert phase0.SCHEMA_VERSION == 8
+    assert phase0.STATE_SCHEMA_VERSION == 9
     assert bus_state["arbitration_contract"] == {
         "hard_qos_role": (
             "determines must/may eligibility and reserved entitlement only"
@@ -705,11 +705,16 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
     ]
     assert journal["next_cycle"] == event_cycle
     assert journal["next_sequence"] == 2
+    assert journal["completed_batch_boundaries"] == 1
+    assert journal["next_before_cycle"] is None
+    assert journal["replay_sealed"] is False
     assert journal["pending"] == journal["history"]
     assert journal["pending"][0]["kind"] == "uart_rx"
     assert journal["pending"][0]["payload"] == phase0._blob_summary(
         b"oracle"
     )
+    assert journal["pending"][0]["release_boundary"] == 0
+    assert journal["pending"][0]["release_phase"] == "scheduler"
 
 
 def test_native_nic_dma_snapshot_rejects_active_system_batch():
@@ -804,7 +809,7 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
     )
 
     observation = sample["observation"]
-    assert observation["state_schema_version"] == 8
+    assert observation["state_schema_version"] == 9
     metrics = observation["workload_metrics"]["strict_nic_disk_dma"]
     assert metrics["published_nic_frames"]["entries"] == [
         metrics["nic_source"]

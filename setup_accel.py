@@ -7,8 +7,52 @@ Usage:
     make accel
 """
 
-from setuptools import setup, Extension
+import os
+
+from setuptools import Extension, setup
 import pybind11
+
+
+_SANITIZER = os.environ.get("MP64_ACCEL_SANITIZER", "none")
+_SANITIZER_FLAGS = {
+    "none": [],
+    "address-undefined": ["-fsanitize=address,undefined"],
+    "thread": ["-fsanitize=thread"],
+}
+if _SANITIZER not in _SANITIZER_FLAGS:
+    choices = ", ".join(_SANITIZER_FLAGS)
+    raise SystemExit(
+        "MP64_ACCEL_SANITIZER must be one of "
+        f"{choices}; got {_SANITIZER!r}"
+    )
+
+_compile_args = [
+    "-std=c++17",
+    "-march=native",
+    "-Wall",
+    "-Wextra",
+    "-Wno-unused-parameter",
+    "-fvisibility=hidden",
+    "-pthread",
+]
+_link_args = ["-pthread"]
+if _SANITIZER == "none":
+    _compile_args.append("-O3")
+else:
+    _instrumentation_args = [
+        "-O1",
+        "-g",
+        "-fno-omit-frame-pointer",
+        "-fno-sanitize-recover=all",
+        *_SANITIZER_FLAGS[_SANITIZER],
+    ]
+    _compile_args.extend(_instrumentation_args)
+    _link_args.extend(
+        [
+            "-fno-sanitize-recover=all",
+            *_SANITIZER_FLAGS[_SANITIZER],
+        ]
+    )
 
 
 ext = Extension(
@@ -25,17 +69,8 @@ ext = Extension(
     ],
     include_dirs=[pybind11.get_include()],
     language="c++",
-    extra_compile_args=[
-        "-std=c++17",
-        "-O3",
-        "-march=native",
-        "-Wall",
-        "-Wextra",
-        "-Wno-unused-parameter",
-        "-fvisibility=hidden",
-        "-pthread",
-    ],
-    extra_link_args=["-pthread"],
+    extra_compile_args=_compile_args,
+    extra_link_args=_link_args,
 )
 
 setup(

@@ -9,6 +9,8 @@
 #   make test-one K=X          Sequential single test/class + monitoring
 #   make test-sequential       Sequential foreground suite
 #   make test-sequential K=X   Sequential foreground subset
+#   make test-sanitize         Foreground Phase 3 ASan+UBSan subset
+#   make test-sanitize SANITIZER=thread
 #   make test-status           One-shot progress dashboard
 #   make test-watch            Auto-refresh dashboard every 5s
 #   make test-failures         Show only failures
@@ -33,6 +35,15 @@ PYTEST   := -m pytest tests/
 PYTEST_CONFIG_ARGS := -o addopts=
 PYTEST_ARGS := $(PYTEST_CONFIG_ARGS) --tb=long
 TEST_PATH ?= tests/
+SANITIZER ?= address-undefined
+SANITIZE_BUILD_ROOT ?= $(CURDIR)/build/sanitizers
+SANITIZE_TEST_PATHS ?= \
+	tests/test_phase3_worker_pool.py \
+	tests/test_phase3_private_execution.py \
+	tests/test_phase3_coordinator_execution.py \
+	tests/test_phase3_reduced_core_execution.py \
+	tests/test_phase3_event_execution.py \
+	tests/test_phase3_benchmark.py
 
 export MP64_RUNTIME_NAMESPACE
 RUNTIME_PATHS := python3 runtime_paths.py
@@ -78,6 +89,99 @@ test-sequential: accel
 		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= \
 			$(VENV_PY) -m pytest $(TEST_PATH) \
 			$(PYTEST_CONFIG_ARGS) --tb=long $(if $(K),-k "$(K)",)
+
+# --- Isolated sanitizer build + bounded foreground Phase 3 suite ---
+# The public target enters the same foreground supervisor used by ordinary
+# tests before building, so sanitizer configurations cannot overlap each
+# other or an ordinary supervised test run.
+.PHONY: test-sanitize _test-sanitize-run
+test-sanitize:
+	@set -eu; \
+	case "$(SANITIZER)" in \
+		address-undefined|thread) ;; \
+		*) \
+			echo "SANITIZER must be address-undefined or thread" >&2; \
+			exit 2; \
+			;; \
+	esac; \
+	$(RESOLVE_TEST_PATHS) \
+	exec $(TEST_SUPERVISOR) foreground \
+		--state "$$pid_file" --status "$$status_file" -- \
+		$(MAKE) --no-print-directory _test-sanitize-run \
+			SANITIZER="$(SANITIZER)" \
+			SANITIZE_BUILD_ROOT="$(SANITIZE_BUILD_ROOT)" \
+			SANITIZE_TEST_PATHS="$(SANITIZE_TEST_PATHS)" \
+			K="$(K)"
+
+# Private half of test-sanitize. Keep the build out of --inplace so neither
+# the optimized extension nor the existing reports in build/ are disturbed.
+_test-sanitize-run:
+	@set -eu; \
+	sanitizer_root="$(SANITIZE_BUILD_ROOT)/$(SANITIZER)"; \
+	sanitizer_temp="$$sanitizer_root/temp"; \
+	sanitizer_lib="$$sanitizer_root/lib"; \
+	MP64_ACCEL_SANITIZER="$(SANITIZER)" \
+		$(VENV_PY) setup_accel.py build_ext --force \
+			--build-temp "$$sanitizer_temp" \
+			--build-lib "$$sanitizer_lib"; \
+	sanitizer_runtime=""; \
+	cxx_runtime=""; \
+	sanitizer_launcher=""; \
+	sanitizer_preload=""; \
+	case "$(SANITIZER)" in \
+		address-undefined) \
+			sanitizer_runtime="$$( $(CXX) -print-file-name=libasan.so )"; \
+			cxx_runtime="$$( $(CXX) -print-file-name=libstdc++.so )"; \
+			ASAN_OPTIONS="$${ASAN_OPTIONS:+$${ASAN_OPTIONS}:}detect_leaks=0:halt_on_error=1:abort_on_error=1"; \
+			UBSAN_OPTIONS="$${UBSAN_OPTIONS:+$${UBSAN_OPTIONS}:}halt_on_error=1:abort_on_error=1:print_stacktrace=1"; \
+			export ASAN_OPTIONS UBSAN_OPTIONS; \
+			;; \
+		thread) \
+			sanitizer_runtime="$$( $(CXX) -print-file-name=libtsan.so )"; \
+			sanitizer_arch="$$(uname -m)"; \
+			if ! setarch "$$sanitizer_arch" -R true >/dev/null 2>&1; then \
+				echo "ThreadSanitizer requires setarch -R on this host" >&2; \
+				exit 2; \
+			fi; \
+			sanitizer_launcher="setarch $$sanitizer_arch -R"; \
+			TSAN_OPTIONS="$${TSAN_OPTIONS:+$${TSAN_OPTIONS}:}halt_on_error=1:abort_on_error=1"; \
+			export TSAN_OPTIONS; \
+			;; \
+		*) \
+			echo "SANITIZER must be address-undefined or thread" >&2; \
+			exit 2; \
+			;; \
+	esac; \
+	if [ -n "$$sanitizer_runtime" ]; then \
+		if [ ! -f "$$sanitizer_runtime" ]; then \
+			echo "Sanitizer runtime is unavailable: $$sanitizer_runtime" >&2; \
+			exit 2; \
+		fi; \
+		preload_runtime="$$sanitizer_runtime"; \
+		if [ -n "$$cxx_runtime" ]; then \
+			if [ ! -f "$$cxx_runtime" ]; then \
+				echo "C++ runtime is unavailable: $$cxx_runtime" >&2; \
+				exit 2; \
+			fi; \
+			preload_runtime="$$preload_runtime:$$cxx_runtime"; \
+		fi; \
+		sanitizer_preload="$$preload_runtime$${LD_PRELOAD:+:$${LD_PRELOAD}}"; \
+	fi; \
+	PYTHONSAFEPATH=1; \
+	PYTHONPATH="$$sanitizer_lib:$(CURDIR)$${PYTHONPATH:+:$${PYTHONPATH}}"; \
+	MP64_ACCEL_SANITIZER="$(SANITIZER)"; \
+	export PYTHONSAFEPATH PYTHONPATH MP64_ACCEL_SANITIZER; \
+	$$sanitizer_launcher env LD_PRELOAD="$$sanitizer_preload" \
+		$(VENV_PY) -P -c \
+		'import pathlib, sys, _mp64_accel; root = pathlib.Path(sys.argv[1]).resolve(); loaded = pathlib.Path(_mp64_accel.__file__).resolve(); print("sanitizer module:", loaded); raise SystemExit(0 if root in loaded.parents else "refusing non-isolated accelerator: " + str(loaded))' \
+		"$$sanitizer_lib"; \
+	exec $$sanitizer_launcher env \
+		LD_PRELOAD="$$sanitizer_preload" \
+		MP64_VIA_MAKE=1 PYTEST_ADDOPTS= \
+		$(VENV_PY) -P -m pytest $(SANITIZE_TEST_PATHS) \
+			$(PYTEST_CONFIG_ARGS) --import-mode=importlib \
+			-p no:xdist -p no:xdist.looponfail \
+			--tb=long --maxfail=1 $(if $(K),-k "$(K)",)
 
 # --- Quick smoke test: BIOS + CPU only ---
 .PHONY: test-quick

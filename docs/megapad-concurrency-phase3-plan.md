@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1–5 of 6 complete; Element 6 not started
+**Status:** Elements 1–5 of 6 complete; Element 6 in progress
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -20,7 +20,7 @@ may produce corrective commits, but they do not create new phase elements.
 | 3 | Full-core coordinator integration and ordered shared-effect commit | Complete |
 | 4 | Reduced-core and cluster integration | Complete |
 | 5 | DMA, external events, record/replay, and deterministic stop handling | Complete |
-| 6 | One/two/four-lane equivalence, sanitizer stress, refreshed benchmarks, and final handoff | Not started |
+| 6 | One/two/four-lane equivalence, sanitizer stress, refreshed benchmarks, and final handoff | In progress |
 
 ## Design-contention ledger
 
@@ -33,9 +33,9 @@ present claim boundary, and the condition for reopening it.
 |---|---|---|---|
 | P3-D1 | An ordered shared callback can fail after peers have already executed private prefixes. The old sequential chunk scheduler left later peers untouched; exact preservation would require whole-frontier rollback or provably boundary-free predecode. | Gather the same complete logical private frontier for one, two, and four lanes before beginning any shared commit. On an ordered callback failure, every gathered peer-private prefix remains committed and its elapsed private time is settled. | This intentionally replaces a host-exception partial-progress artifact; it does not claim transactional callback failure. Reopen before release if callback atomicity becomes architectural, or if a non-speculative predecode proof or explicitly approved rollback design becomes available. |
 | P3-D2 | A logical sub-frontier can contain more cores than physical host lanes. Committing after each lane-sized cohort would make worker count guest-visible. | Buffer every physical cohort, then merge and commit the complete logical sub-frontier in global cyclic order. Advance virtual time once per completed scheduler round by the maximum complete per-core round cycles, never by a sum of cohort or core totals. Production failures identify the logical core, not its incidental physical lane. | Physical lane width and helper completion order are host diagnostics only. This is a fixed determinism invariant, not an optimization choice. |
-| P3-D3 | Unbounded `run_batch` uses a coarse architectural scheduler, while `run_cycle_batch` owns strict ready-cycle and main-bus arbitration. Mixing the two models during worker integration would create a new timing contract. | Element 3 keeps unbounded batches in cyclic coordinator order and leaves strict ready-time/bus ordering to the existing cycle API. | Element 3 claims deterministic architectural batching, not new cycle accuracy. Revisit their convergence with the event/DMA work in Element 5 and the equivalence evidence in Element 6. |
+| P3-D3 | Unbounded `run_batch` uses a coarse architectural scheduler, while `run_cycle_batch` owns strict ready-cycle and main-bus arbitration. Mixing the two models during worker integration would create a new timing contract. | Unbounded batches retain cyclic frontier accounting, while strict batches retain ready-cycle and bus arbitration. Both may use the same persistent pool only for work proven safe within their own timing contract. | Phase 3 deliberately does not make the two APIs cycle-equivalent. P3-D15 records the narrow strict helper subset, and Element 6 compares worker widths within each API rather than comparing timing across APIs. Reopen convergence only with an approved architectural timing model. |
 | P3-D4 | Full cores can use private workers before reduced cores and cluster resources can. | A topology containing any microcores remains on the established serial native coordinator through Element 3. Element 4 removes that temporary gate and uses the one generalized frontier coordinator for every advertised execution core. | This was explicitly incomplete machine concurrency through Element 3, not a claim that the advertised 16-core topology was parallel. The serial mixed production path is deleted rather than retained as legacy. |
-| P3-D5 | A pending enabled interrupt can either force a private zero-progress boundary or be ignored until the old serial chunk ends. An asserted line can also become eligible when an instruction enables interrupts. | Helpers retire no instruction past that boundary. `EI` remains a coordinator instruction, so an already-asserted line is observed before another private command. The coordinator performs end-of-round interrupt settlement and then recomputes runnable work; strict event-time acceptance is not invented here. | This improves the honesty of the private boundary without claiming exact asynchronous timing. Timer, IPI, external-event, and deterministic stop integration is revisited in Element 5. |
+| P3-D5 | A pending enabled interrupt can either force a private zero-progress boundary or be ignored until the old serial chunk ends. An asserted line can also become eligible when an instruction enables interrupts. | Helpers retire no instruction past that boundary. `EI` remains a coordinator instruction, so an already-asserted line is observed before another private command. The unbounded coordinator settles interrupts at its deterministic round boundary; strict execution accepts them at the exact ready-cycle/event frontier recorded by P3-D18. | This preserves the intentionally distinct timing contracts in P3-D3. P3-D18 and P3-D19 close strict event-time and host-ingress ordering; unbounded execution does not acquire strict asynchronous timing by implication. |
 | P3-D6 | Longer private lookahead could use speculative writes and rollback, while the approved first design calls for safe bounded segments. | Element 3 mutates only callback-free, cache-resident private state in place and stops at the first classified shared or uncertain boundary. It adds no speculative write log or rollback path. | Performance is secondary to deterministic state in this milestone. Reopen only as a separately reviewed optimization with one/two/four-lane differential evidence. |
 | P3-D7 | Treating each cache/shared yield as a fresh scheduler credit would make boundary density a secondary QoS weight and would expose helper-wave count through public dispatch statistics. Up-front reservations can also strand budget when an earlier core stops before using its provisional share. | Each core retains its equal round credit across as many deterministic sub-frontiers as needed. Cache refill and ordinary shared instructions keep the logical raw dispatch open; true fallback/trap/reset boundaries close it. Unused terminal or interrupt-shortened credit flows only forward to later peers in the same frozen cyclic round, including a peer whose initial reservation was zero, and no peer exceeds the common quantum. Residual credit never wraps backward. | This is the direct implementation of the established serial scheduler's equal-weight, work-conserving QoS accounting: cache residency, callback density, and host lane count cannot buy extra guest service. It does not override the explicitly changed mixed code-observation interleaving in P3-D10. Reopen only with an architectural scheduling change, not as a performance shortcut. |
 | P3-D8 | Prefix-aware callback-error settlement could be implemented by changing the exposed native scheduler callback from two arguments to four, but that would turn an internal integration need into a low-level callable-contract break and could mask the original guest callback exception with `TypeError`. | Preserve the existing two-argument settlement callable. It returns boundary-local progress; the native coordinator validates that result and composes it with the retained private prefix. | `NativeSystemState.run_full_core_batch` remains an exposed internal seam, not a stable public API, but Element 3 does not gratuitously break it. Revisit only through an explicit versioned native API change. |
@@ -262,6 +262,42 @@ from the full-core coordinator and commit their ordered shared boundaries.
   is not a regression in mixed architectural execution: the Element 4
   unbounded coordinator remains the production path for the advertised
   full/reduced topology.
+
+## Element 6 contract
+
+- The final architectural reference remains one total host-execution lane.
+  Two- and four-lane results must match it for the same initial state and
+  public invocation sequence: complete captured architectural state, ordered
+  shared traces, per-core and authoritative system cycles, instruction and
+  dispatch accounting, stop reason/cycle, interrupt and external-ingress
+  results, and the documented callback-failure state.
+- Host-only worker identity, command counts, physical cohort count, wall time,
+  process CPU utilization, and helper completion order remain outside every
+  architectural hash. Lane diagnostics must nevertheless prove that each
+  configured lane receives eligible private work; host CPU utilization and
+  timing are reported separately as evidence of useful overlap, not as
+  architecture.
+- The existing versioned Phase 0 workload harness is refreshed rather than
+  forked into a duplicate benchmark. Its report gains an explicit 1/2/4
+  `worker_count` dimension, physical-lane provenance, cross-width equivalence
+  validation, complete current ingress-journal diagnostics, fixture hashes,
+  and a schema bump. Guest core count and host lane count remain separate
+  axes.
+- Sanitizer artifacts are built outside the normal in-tree extension and run
+  through the same mutually exclusive foreground supervisor as ordinary
+  tests. Address/undefined-behavior and thread-sanitizer evidence are separate;
+  neither may be inferred from an ordinary optimized run, and an unsupported
+  sanitizer runtime must be reported rather than treated as a pass.
+- Performance is diagnostic. The final report uses a clean optimized artifact,
+  fixed workload and instruction budgets, discarded warmups, repeated samples,
+  exact artifact and fixture provenance, guarded cross-width state equality,
+  and one-lane-relative ratios. No minimum speedup or universal scalability
+  claim is added.
+- The completion handoff versions the exact commit chain, overlapping
+  checkpoint evidence, final equivalence and sanitizer gates, benchmark
+  hashes, prior Akashic SR2 compatibility observation, all design contentions,
+  and remaining limitations. Generated JSON remains reproducible evidence
+  rather than a large tracked artifact.
 
 ## Evidence discipline
 

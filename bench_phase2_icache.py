@@ -37,7 +37,9 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-instruction-cache-baseline"
-REPORT_SCHEMA_VERSION = 1
+# Version 2 updates only the versioned evidence command to the supervised,
+# worker-free test policy. The canonical machine-state schema remains 1.
+REPORT_SCHEMA_VERSION = 2
 STATE_SCHEMA = "megapad.phase2-instruction-cache-state"
 STATE_SCHEMA_VERSION = 1
 ROOT = Path(__file__).resolve().parent
@@ -166,9 +168,10 @@ EVIDENCE_MATRIX = {
     },
     "separate_python_native_gate": {
         "command": (
-            "python3 -m pytest -n 1 --dist loadgroup "
+            "env MP64_RUNTIME_NAMESPACE=phase2-icache "
+            "make test-sequential TEST_PATH='"
             "tests/test_phase2_instruction_cache.py "
-            "tests/test_phase2_instruction_cache_oracle.py"
+            "tests/test_phase2_instruction_cache_oracle.py'"
         ),
         "scope": (
             "store invalidation, cache controls, tag conflicts, strict refill, "
