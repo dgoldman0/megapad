@@ -1540,41 +1540,6 @@ struct CPUState {
     uint64_t icache_undo_hits = 0;
     uint64_t icache_undo_misses = 0;
 
-    // Host-only private decode/admission plans. Entries are never
-    // architectural state: every hit is validated against the complete
-    // encoding bytes visible through this core's instruction-observation
-    // path before it can authorize private execution.
-    static constexpr std::size_t
-        PRIVATE_DECODE_CACHE_ENTRIES = 128;
-    static constexpr std::size_t
-        PRIVATE_DECODE_IDENTITY_BYTES = 16;
-    static_assert(
-        (
-            PRIVATE_DECODE_CACHE_ENTRIES &
-            (PRIVATE_DECODE_CACHE_ENTRIES - 1)
-        ) == 0,
-        "private decode cache must have power-of-two geometry");
-    struct PrivateDecodeCacheEntry {
-        bool valid = false;
-        uint64_t address = 0;
-        uint8_t identity_size = 0;
-        std::array<
-            uint8_t,
-            PRIVATE_DECODE_IDENTITY_BYTES>
-            identity{};
-    };
-    std::array<
-        PrivateDecodeCacheEntry,
-        PRIVATE_DECODE_CACHE_ENTRIES>
-        private_decode_cache{};
-
-    void clear_private_decode_cache() noexcept {
-        for (PrivateDecodeCacheEntry& entry :
-             private_decode_cache) {
-            entry.valid = false;
-        }
-    }
-
     // Privilege level (0=supervisor, 1=user)
     uint8_t  priv_level;
 
@@ -1678,6 +1643,42 @@ struct CPUState {
     };
     AccelHookEntry accel_hooks[MAX_ACCEL_HOOKS];
     int accel_hook_count = 0;
+
+    // Host-only private decode/admission plans live after the established
+    // execution state so adding them does not displace hot architectural
+    // fields. Entries are never architectural state: every hit is validated
+    // against the complete encoding bytes visible through this core's
+    // instruction-observation path before it can authorize private execution.
+    static constexpr std::size_t
+        PRIVATE_DECODE_CACHE_ENTRIES = 128;
+    static constexpr std::size_t
+        PRIVATE_DECODE_IDENTITY_BYTES = 16;
+    static_assert(
+        (
+            PRIVATE_DECODE_CACHE_ENTRIES &
+            (PRIVATE_DECODE_CACHE_ENTRIES - 1)
+        ) == 0,
+        "private decode cache must have power-of-two geometry");
+    struct PrivateDecodeCacheEntry {
+        bool valid = false;
+        uint64_t address = 0;
+        uint8_t identity_size = 0;
+        std::array<
+            uint8_t,
+            PRIVATE_DECODE_IDENTITY_BYTES>
+            identity{};
+    };
+    std::array<
+        PrivateDecodeCacheEntry,
+        PRIVATE_DECODE_CACHE_ENTRIES>
+        private_decode_cache{};
+
+    void clear_private_decode_cache() noexcept {
+        for (PrivateDecodeCacheEntry& entry :
+             private_decode_cache) {
+            entry.valid = false;
+        }
+    }
 
     void register_accel_hook(
         uint64_t addr,
@@ -4200,20 +4201,24 @@ static inline void icache_invalidate_span(
         uint64_t size) {
     if (s.profile != CoreProfile::FULL || size == 0)
         return;
-    s.clear_private_decode_cache();
     const uint64_t first =
         address & ~(CPUState::ICACHE_LINE_BYTES - 1);
     const uint64_t line_count =
         ((address & (CPUState::ICACHE_LINE_BYTES - 1)) +
          size + CPUState::ICACHE_LINE_BYTES - 1) /
         CPUState::ICACHE_LINE_BYTES;
+    bool invalidated = false;
     for (uint64_t number = 0; number < line_count; number++) {
         const uint64_t line_address =
             first + number * CPUState::ICACHE_LINE_BYTES;
         const auto [index, tag] = icache_key(line_address);
-        if (s.icache_valid[index] && s.icache_tags[index] == tag)
+        if (s.icache_valid[index] && s.icache_tags[index] == tag) {
             s.icache_valid[index] = 0;
+            invalidated = true;
+        }
     }
+    if (invalidated)
+        s.clear_private_decode_cache();
 }
 
 static inline void icache_invalidate_all(
@@ -9201,6 +9206,45 @@ static bool private_decode_cache_hit(
     ) {
         return false;
     }
+
+    if (state.profile == CoreProfile::FULL) {
+        if (!state.icache_enabled)
+            return false;
+        std::size_t consumed = 0;
+        uint64_t current = address;
+        while (consumed < entry.identity_size) {
+            const auto [index, tag] =
+                icache_key(current);
+            if (
+                !state.icache_valid[index] ||
+                state.icache_tags[index] != tag
+            ) {
+                return false;
+            }
+            const std::size_t line_offset =
+                static_cast<std::size_t>(
+                    current &
+                    (CPUState::ICACHE_LINE_BYTES - 1));
+            const std::size_t chunk =
+                std::min<std::size_t>(
+                    entry.identity_size - consumed,
+                    CPUState::ICACHE_LINE_BYTES -
+                        line_offset);
+            if (
+                std::memcmp(
+                    state.icache_data[index].data() +
+                        line_offset,
+                    entry.identity.data() + consumed,
+                    chunk) != 0
+            ) {
+                return false;
+            }
+            consumed += chunk;
+            current += static_cast<uint64_t>(chunk);
+        }
+        return true;
+    }
+
     for (
         uint8_t offset = 0;
         offset < entry.identity_size;
@@ -9239,21 +9283,58 @@ static bool private_decode_cache_store(
     candidate.address = address;
     candidate.identity_size =
         static_cast<uint8_t>(identity_size);
-    for (
-        int offset = 0;
-        offset < identity_size;
-        offset++
-    ) {
-        const std::optional<uint8_t> observed =
-            private_decode_identity_byte(
-                state,
-                address +
-                    static_cast<uint64_t>(offset));
-        if (!observed.has_value())
+    if (state.profile == CoreProfile::FULL) {
+        if (!state.icache_enabled)
             return false;
-        candidate.identity[
-            static_cast<std::size_t>(offset)] =
-                *observed;
+        std::size_t copied = 0;
+        uint64_t current = address;
+        while (
+            copied <
+            static_cast<std::size_t>(identity_size)
+        ) {
+            const auto [index, tag] =
+                icache_key(current);
+            if (
+                !state.icache_valid[index] ||
+                state.icache_tags[index] != tag
+            ) {
+                return false;
+            }
+            const std::size_t line_offset =
+                static_cast<std::size_t>(
+                    current &
+                    (CPUState::ICACHE_LINE_BYTES - 1));
+            const std::size_t chunk =
+                std::min<std::size_t>(
+                    static_cast<std::size_t>(
+                        identity_size) - copied,
+                    CPUState::ICACHE_LINE_BYTES -
+                        line_offset);
+            std::memcpy(
+                candidate.identity.data() + copied,
+                state.icache_data[index].data() +
+                    line_offset,
+                chunk);
+            copied += chunk;
+            current += static_cast<uint64_t>(chunk);
+        }
+    } else {
+        for (
+            int offset = 0;
+            offset < identity_size;
+            offset++
+        ) {
+            const std::optional<uint8_t> observed =
+                private_decode_identity_byte(
+                    state,
+                    address +
+                        static_cast<uint64_t>(offset));
+            if (!observed.has_value())
+                return false;
+            candidate.identity[
+                static_cast<std::size_t>(offset)] =
+                    *observed;
+        }
     }
     candidate.valid = true;
     state.private_decode_cache[
@@ -10038,7 +10119,17 @@ static PrivateCoreResult execute_private_core_command_body(
                         command.host_telemetry->
                             classification_calls);
                 }
-                if (command.strict_cycle_one_instruction) {
+                // Full-core frontier admission reuses host plans, but the
+                // established in-worker classifier already walks the same
+                // resident guest-cache bytes cheaply. Complete identity
+                // validation there costs more than decoding, so retain the
+                // direct classifier inside a private span. Microcores still
+                // use the plan because it also removes their duplicate
+                // Python-oracle eligibility decode.
+                if (
+                    command.strict_cycle_one_instruction ||
+                    core.profile == CoreProfile::FULL
+                ) {
                     classification.disposition =
                         classify_private_full_core_instruction(
                             core);

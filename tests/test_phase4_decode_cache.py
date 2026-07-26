@@ -173,7 +173,16 @@ def test_reused_variable_length_decode_matches_python_across_lanes() -> None:
         ) = cache_counts
         assert private_lookups == private_hits + private_misses
         assert frontier_lookups == frontier_hits + frontier_misses
-        assert private_hits + frontier_hits > 0
+        if profile == "full":
+            # A sole full core enters one long private command. Its frontier
+            # admission is cold, and the worker intentionally uses the
+            # cheaper resident-byte classifier instead of revalidating a
+            # complete host-cache identity on every instruction.
+            assert private_lookups == 0
+            assert frontier_lookups > 0
+            assert frontier_hits == 0
+        else:
+            assert private_hits + frontier_hits > 0
         assert proof_reuses == (
             VARIABLE_PRIVATE_STEPS
             if profile == "micro"
@@ -210,6 +219,12 @@ def _full_icache_identity_signature(
 
     execute_once()  # cold fill and old instruction
     execute_once()  # create the private host plan
+
+    # An ordinary store whose line has the same direct-mapped index but a
+    # different tag must not discard an unrelated host admission plan.
+    full._cs.icache_invalidate_span(0x1100, 1)
+    execute_once()
+
     old_cache = full._cs.icache_snapshot()
 
     # Host mutation changes backing RAM but intentionally does not snoop this
@@ -255,9 +270,9 @@ def test_full_decode_identity_follows_guest_icache_and_restore() -> None:
     assert signatures[2] == signatures[1]
     assert signatures[4] == signatures[1]
     architectural, cache_counts = signatures[1]
-    assert architectural[1][1][4:6] == (4, 1)
+    assert architectural[1][1][4:6] == (5, 1)
     assert architectural[2] == assemble("inc r5")[0]
-    assert cache_counts == (5, 1, 4, 0, 2)
+    assert cache_counts == (6, 2, 4, 0, 2)
 
     trailing_signatures = {
         worker_count:
