@@ -1076,11 +1076,22 @@ CREATE SHA3-BUF 64 ALLOT
 \ HASH ( addr len hash-addr -- )  Alias for SHA3.
 : HASH  SHA3 ;
 
-\ SHA256 ( addr len out -- )  SHA-256 hash wrapper.
-: SHA256  ( addr len out -- )
+\ Checked SHA-256 status values mirror the BIOS streaming ABI.
+0 CONSTANT SHA256-OK
+1 CONSTANT SHA256-STATE
+2 CONSTANT SHA256-RANGE
+3 CONSTANT SHA256-CONTEXT-ALIAS
+4 CONSTANT SHA256-LENGTH-OVERFLOW
+
+\ SHA256 ( addr len out -- status )  Checked scoped SHA-256 wrapper.
+: SHA256  ( addr len out -- status )
     >R
-    SHA256-INIT
-    SHA256-UPDATE
+    SHA256-INIT DUP IF
+        >R 2DROP R> R> DROP EXIT
+    THEN DROP
+    SHA256-UPDATE DUP IF
+        R> DROP EXIT
+    THEN DROP
     R> SHA256-FINAL ;
 
 \ Checked SHA-512 status values.  These are part of the public KDOS surface,
@@ -1500,9 +1511,9 @@ VARIABLE _HKDF-COUNTER
 \  Same HMAC/HKDF constructions as §1.7/§1.9, but using SHA-256 instead
 \  of SHA3-256.  SHA-256 block size = 64 bytes, output = 32 bytes.
 \
-\  HMAC-SHA256 ( key klen msg mlen out -- )
-\  HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- )
-\  HKDF-SHA256-EXPAND  ( prk info ilen len out -- )
+\  HMAC-SHA256 ( key klen msg mlen out -- status )
+\  HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- status )
+\  HKDF-SHA256-EXPAND  ( prk info ilen len out -- status )
 
 64 CONSTANT HMAC256-BLKSZ
 
@@ -1512,6 +1523,8 @@ CREATE HMAC256-INNER 32 ALLOT
 VARIABLE _HMAC256-PAD-PTR
 VARIABLE _HMAC256-XBYTE
 VARIABLE _HMAC256-OUT
+VARIABLE _HMAC256-MSG-PTR
+VARIABLE _HMAC256-MSG-LEN
 
 : HMAC256-PAD ( key-addr key-len pad-addr xor-byte -- )
     _HMAC256-XBYTE !
@@ -1528,20 +1541,26 @@ VARIABLE _HMAC256-OUT
     LOOP
 ;
 
-: HMAC-SHA256 ( key-addr key-len msg-addr msg-len out-addr -- )
+: HMAC-SHA256 ( key-addr key-len msg-addr msg-len out-addr -- status )
     _HMAC256-OUT !
-    >R >R
+    _HMAC256-MSG-LEN !
+    _HMAC256-MSG-PTR !
     2DUP HMAC256-IPAD 54 HMAC256-PAD
     HMAC256-OPAD 92 HMAC256-PAD
     \ Inner hash: SHA256(ipad || message)
-    SHA256-INIT
+    SHA256-INIT DUP IF EXIT THEN DROP
     HMAC256-IPAD HMAC256-BLKSZ SHA256-UPDATE
-    R> R> SHA256-UPDATE
+    DUP IF EXIT THEN DROP
+    _HMAC256-MSG-PTR @ _HMAC256-MSG-LEN @ SHA256-UPDATE
+    DUP IF EXIT THEN DROP
     HMAC256-INNER SHA256-FINAL
+    DUP IF EXIT THEN DROP
     \ Outer hash: SHA256(opad || inner)
-    SHA256-INIT
+    SHA256-INIT DUP IF EXIT THEN DROP
     HMAC256-OPAD HMAC256-BLKSZ SHA256-UPDATE
+    DUP IF EXIT THEN DROP
     HMAC256-INNER 32 SHA256-UPDATE
+    DUP IF EXIT THEN DROP
     _HMAC256-OUT @ SHA256-FINAL
 ;
 
@@ -1558,7 +1577,7 @@ VARIABLE _HKDF256-REMAIN
 VARIABLE _HKDF256-TPREV-LEN
 VARIABLE _HKDF256-COUNTER
 
-: HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- )
+: HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- status )
     >R
     2SWAP
     DUP 0= IF
@@ -1569,7 +1588,7 @@ VARIABLE _HKDF256-COUNTER
     HMAC-SHA256
 ;
 
-: HKDF-SHA256-EXPAND ( prk info ilen len out -- )
+: HKDF-SHA256-EXPAND ( prk info ilen len out -- status )
     _HKDF256-OUT-PTR !
     _HKDF256-REMAIN !
     _HKDF256-INFO-LEN !
@@ -1591,6 +1610,7 @@ VARIABLE _HKDF256-COUNTER
         _HKDF256-PRK-PTR @ 32
         _HKDF256-BLOCK R>
         _HKDF256-T HMAC-SHA256
+        DUP IF EXIT THEN DROP
         _HKDF256-REMAIN @ 32 MIN
         _HKDF256-T _HKDF256-OUT-PTR @ ROT CMOVE
         _HKDF256-REMAIN @ 32 MIN
@@ -1599,6 +1619,7 @@ VARIABLE _HKDF256-COUNTER
         32 _HKDF256-TPREV-LEN !
         _HKDF256-COUNTER @ 1+ _HKDF256-COUNTER !
     REPEAT
+    0
 ;
 
 \ PQ-DERIVE ( out -- )

@@ -504,14 +504,17 @@ micro-cluster, `sha.final` retains ownership through digest extraction and
 scrubbing; bare `sha.release` is the sole handoff.
 
 **BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
-`SHA256-STATUS@`, `SHA256-DOUT@`; and the scoped streaming
-`SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`, `SHA512-CLEAR`.
-The SHA-512 layer snapshots all eight 64-bit digest words in private
-per-core RAM, confines R16–R19 replacement to bounded interrupt-masked
-engine windows, and reports checked status values for state, span, alias,
-and 128-bit length failures.
+`SHA256-CLEAR`; and `SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`,
+`SHA512-CLEAR`. Both streaming layers use private per-core contexts, validate
+complete caller spans and the complete algorithm-specific context arena,
+stage output until after engine release, wipe on every terminal path, and
+preserve the caller's ACC/TSRC0/interrupt transaction. SHA-256 reports
+checked state, span, alias, and 64-bit length failures; SHA-512 additionally
+maintains and checks its full 128-bit length.
 **KDOS words:** `SHA256`, `SHA512`, `HMAC-SHA256`,
 `HKDF-SHA256-EXTRACT`, `HKDF-SHA256-EXPAND`.
+Those SHA-256-family KDOS words return the BIOS status unchanged so
+networking and TLS key-schedule callers can fail closed.
 
 ### TRNG (True Random Number Generator)
 

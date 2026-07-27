@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **462** entries.  The numbered
+The live dictionary link chain contains **461** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -652,20 +652,26 @@ of compiled code.
 | 269 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
 | 270 | `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | | Auto-permute and squeeze next XOF block |
 
-### SHA-256 Engine (5 words) — ISA-native (EXT.CRYPTO `FB`)
+### SHA-256 Streaming (4 words) — ISA-native (EXT.CRYPTO `FB`)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 271 | `SHA256-INIT` | `( -- )` | | Initialize SHA-256 state (`sha.init 0`) |
-| 272 | `SHA256-UPDATE` | `( addr len -- )` | | Unchecked feed into the global SHA-256 block buffer (`sha.din`); caller must serialize task reentry and provide a readable span |
-| 273 | `SHA256-FINAL` | `( addr -- )` | | Finalize, DOUT to addr, scrub visible state, then `sha.release` |
-| 274 | `SHA256-STATUS@` | `( -- status )` | | Always returns 0 (engine is synchronous, always ready) |
-| 275 | `SHA256-DOUT@` | `( addr -- )` | | Raw engine-state read; `SHA256-FINAL` has already scrubbed the digest |
+| 271 | `SHA256-INIT` | `( -- status )` | | Reset the calling core's private SHA-256 context |
+| 272 | `SHA256-UPDATE` | `( addr len -- status )` | | Preflight and absorb a complete physical-memory span using the core's dedicated 64-byte block |
+| 273 | `SHA256-FINAL` | `( dst -- status )` | | Validate all 32 output bytes, stage the digest, release, publish once, and erase the context |
+| 274 | `SHA256-CLEAR` | `( -- status )` | | Idempotently abort, release the SHA transaction, zeroize saved/visible state, and return 0 |
+
+Each core owns one 256-byte context. Statuses are `0` OK, `1` STATE,
+`2` RANGE, `3` CONTEXT-ALIAS, and `4` LENGTH-OVERFLOW. `UPDATE` rejects
+spans intersecting any core's complete 4096-byte SHA-256 arena and rejects
+any nonzero high bit-length word, non-byte-aligned or offset-inconsistent
+saved length, or overflowing 64-bit bit-length addition.
+Every failure aborts and wipes. `FINAL` does not modify a non-context
+destination unless all checks and digest extraction succeed.
 
 ### SHA-512 Streaming (4 append-only words) — ISA-native (EXT.CRYPTO `FB`)
 
-These words are appended at the end of the live chain, so none of the
-historical ordinals below move.
+These words remain appended at the end of the live chain.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -682,75 +688,75 @@ publish to a non-context destination.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 276 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
-| 277 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
-| 278 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
-| 279 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
+| 275 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
+| 276 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
+| 277 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
+| 278 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
 
 ### TRNG (3 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 280 | `RANDOM` | `( -- u )` | | Return a 64-bit random number |
-| 281 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
-| 282 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
+| 279 | `RANDOM` | `( -- u )` | | Return a 64-bit random number |
+| 280 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
+| 281 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
 
 ### Field ALU (12 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 283 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
-| 284 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
-| 285 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
-| 286 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
-| 287 | `FADD` | `( a b -- r )` | | (a + b) mod p |
-| 288 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
-| 289 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
-| 290 | `FSQR` | `( a -- r )` | | a² mod p |
-| 291 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
-| 292 | `FPOW` | `( a b -- r )` | | a^b mod p |
-| 293 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
-| 294 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
+| 282 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
+| 283 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
+| 284 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
+| 285 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
+| 286 | `FADD` | `( a b -- r )` | | (a + b) mod p |
+| 287 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
+| 288 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
+| 289 | `FSQR` | `( a -- r )` | | a² mod p |
+| 290 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
+| 291 | `FPOW` | `( a b -- r )` | | a^b mod p |
+| 292 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
+| 293 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
 
 ### NTT Engine (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 296 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
-| 297 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
-| 298 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
-| 299 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
-| 300 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
-| 301 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
-| 302 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
-| 303 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
-| 304 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
+| 295 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
+| 296 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
+| 297 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
+| 298 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
+| 299 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
+| 300 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
+| 301 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
+| 302 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
+| 303 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
 
 ### KEM Engine — ML-KEM-512 (7 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 305 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
-| 306 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
-| 307 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
-| 308 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
-| 309 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
-| 310 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
-| 311 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
+| 304 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
+| 305 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
+| 306 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
+| 307 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
+| 308 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
+| 309 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
+| 310 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
 
 ### Cooperative Multitasking (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 312 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
-| 313 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
-| 314 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
-| 315 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
-| 316 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
-| 317 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
-| 318 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
-| 319 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
-| 320 | `TASK-ID` | `( -- n )` | | Return executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0 |
+| 311 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
+| 312 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
+| 313 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
+| 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
+| 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
+| 316 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
+| 317 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
+| 318 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
+| 319 | `TASK-ID` | `( -- n )` | | Return executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0 |
 
 ---
 
@@ -786,7 +792,7 @@ publish to a non-context destination.
 | Instruction Cache | 5 |
 | AES-256/128-GCM Engine | 11 |
 | SHA-3 / SHAKE | 8 |
-| SHA-256 Engine | 5 |
+| SHA-256 Streaming | 4 |
 | SHA-512 Streaming | 4 |
 | CRC DMA | 4 |
 | TRNG | 3 |
@@ -794,7 +800,7 @@ publish to a non-context destination.
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
-| **Catalogued subtotal** | **370** |
+| **Catalogued subtotal** | **369** |
 
 ### All Immediate Words (34)
 
@@ -803,8 +809,7 @@ publish to a non-context destination.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The appended CRC and SHA-512 ABI entries preserve all older entry positions
-and form this newest segment:
+The SHA-512 ABI remains the newest appended segment:
 
 ```
 SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE → SHA512-INIT → TX-FLUSH

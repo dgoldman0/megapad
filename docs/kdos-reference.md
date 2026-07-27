@@ -193,8 +193,19 @@ accelerator.  Used by the TLS 1.3 cipher suite 0x1301
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `SHA256` | `( addr len out -- )` | Compute SHA-256 hash of *len* bytes at *addr*, write 32-byte digest to *out*. |
-| `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- )` | Compute HMAC-SHA256.  Used internally by HKDF-SHA256 and TLS 1.3 key schedule. |
+| `SHA256-INIT` | `( -- status )` | Initialize this core's checked streaming SHA-256 context. |
+| `SHA256-UPDATE` | `( addr len -- status )` | Preflight and absorb a complete physical-memory span. |
+| `SHA256-FINAL` | `( out -- status )` | On success publish 32 digest bytes; erase the complete context on every path. |
+| `SHA256-CLEAR` | `( -- status )` | Idempotently abort, release, zeroize buffered/staged/visible state, and return 0. |
+| `SHA256` | `( addr len out -- status )` | Checked one-shot SHA-256; returns the first BIOS failure unchanged. |
+| `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- status )` | Checked HMAC-SHA256. Used internally by HKDF-SHA256 and the TLS 1.3 key schedule. |
+
+Streaming state is core-local. `INIT` and `FINAL`/`CLEAR` must execute on the
+same core. `SHA256-OK`, `SHA256-STATE`, `SHA256-RANGE`,
+`SHA256-CONTEXT-ALIAS`, and `SHA256-LENGTH-OVERFLOW` name status values
+0 through 4. Every failure aborts and wipes; a failed `FINAL` does not
+publish to a non-context destination. HMAC and HKDF return the first such
+failure without dropping it.
 
 ### §1.6b SHA-512 Hashing
 
@@ -255,8 +266,8 @@ HMAC-based Key Derivation Function (RFC 5869).  Two families: SHA3-HMAC
 |------|-------------|-------------|
 | `HKDF-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract (SHA3-HMAC): PRK = HMAC(salt, IKM).  32-byte output. |
 | `HKDF-EXPAND` | `( prk info ilen len out -- )` | Expand (SHA3-HMAC): OKM = HMAC(PRK, info \|\| counter).  Up to 255×32 bytes. |
-| `HKDF-SHA256-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract (SHA-256): PRK = HMAC-SHA256(salt, IKM).  32-byte output. |
-| `HKDF-SHA256-EXPAND` | `( prk info ilen len out -- )` | Expand (SHA-256): OKM = HMAC-SHA256(PRK, info \|\| counter).  Up to 255×32 bytes. |
+| `HKDF-SHA256-EXTRACT` | `( salt slen ikm ilen out -- status )` | Checked extract (SHA-256): PRK = HMAC-SHA256(salt, IKM). 32-byte output on success. |
+| `HKDF-SHA256-EXPAND` | `( prk info ilen len out -- status )` | Checked expand (SHA-256): OKM = HMAC-SHA256(PRK, info \|\| counter). Up to 255×32 bytes; returns the first hash failure. |
 
 ---
 
@@ -1559,6 +1570,26 @@ ECDSA-P256-SHA256 and RSA PKCS#1 v1.5 SHA-256 certificate signatures.
 Record plaintext is bounded before scratch-buffer access. Application-data
 and alert sends consume a write sequence number only after TCP accepts the
 encrypted record.
+
+The suite-dispatch and key-schedule words expose checked status rather than
+silently discarding a SHA-256 failure:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TLS-HASH` | `( addr len out -- status )` | Dispatch to the negotiated transcript hash; the SHA3 path returns 0 and the SHA-256 path propagates its checked status. |
+| `TLS-HMAC` | `( key klen msg mlen out -- status )` | Dispatch to the negotiated HMAC and return its status. |
+| `TLS-HKDF-EXTRACT` | `( salt slen ikm ilen out -- status )` | Dispatch HKDF-Extract and return its status. |
+| `TLS-HKDF-EXPAND` | `( prk info ilen len out -- status )` | Dispatch HKDF-Expand and return its status. |
+| `TLS-EXPAND-LABEL` | `( secret label llen context clen olen out -- status )` | Build the TLS 1.3 HKDF label and return the expand status. |
+| `TLS-DERIVE-DERIVED` | `( secret out -- status )` | Derive the TLS 1.3 `"derived"` secret and return status. |
+| `TLS-DERIVE-SECRET` | `( secret label llen out -- status )` | Hash the transcript and derive a traffic secret, stopping at the first failure. |
+| `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Stop at the first hash/HKDF failure; the handshake caller advances state only on zero. |
+| `TLS-KS-APPLICATION` | `( ctx -- status )` | Stop at the first hash/HKDF failure and mark the connection established only on zero. |
+
+Certificate and Finished verification map any nonzero hash status to their
+existing failure result. Record/handshake builders map it to a zero-length or
+failed result, so the higher-level `TLS-*` connection API remains fail-closed
+without advancing connection state after a partially derived key schedule.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

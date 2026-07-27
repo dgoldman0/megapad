@@ -318,20 +318,20 @@ The 8-byte datapath processes a 512-byte disk sector in 64 feed operations.
 
 ### 4.4 SHA-256 (SHA-2) Accelerator
 
-Hardware SHA-256 accelerator for TLS 1.3 cipher suite 0x1301
-(TLS_AES_128_GCM_SHA256) and HMAC/HKDF key derivation.
+SHA-256 for TLS 1.3 cipher suite 0x1301
+(TLS_AES_128_GCM_SHA256) and HMAC/HKDF key derivation is an EXT.CRYPTO ISA
+facility, not an MMIO accelerator. The former `0x940` register window is
+free. Full cores have private engine state; a micro-cluster shares an
+owner-arbitrated engine whose transaction ends only at `sha.release`.
 
-| Register | Offset | R/W | Description |
-|----------|--------|-----|-------------|
-| `SHA256_CMD` | 0x940 | W | 1=init, 2=update, 3=finalize |
-| `SHA256_STATUS` | 0x948 | R | Bit 0: busy, Bit 1: done |
-| `SHA256_DIN` | 0x950 | W | 64-bit data input (8 bytes at a time) |
-| `SHA256_DOUT[0..3]` | 0x958 | R | 256-bit digest output (4 × 64-bit reads) |
-
-**Data flow**: Write 1 to `SHA256_CMD` to initialize. Feed message
-data via `SHA256_DIN` with cmd=2 (update). Write 3 to finalize and
-read the 32-byte digest from `SHA256_DOUT`. The hardware handles
-padding and Merkle-Damgård strengthening internally.
+The BIOS exposes checked per-core `SHA256-INIT`, `SHA256-UPDATE`,
+`SHA256-FINAL`, and `SHA256-CLEAR` transactions. It stores intermediate
+state and a dedicated 64-byte block in a private 256-byte context, validates
+complete caller spans and saved length/offset consistency before access,
+stages digest output until after release, restores outer
+ACC/TSRC0/interrupt state, and wipes every terminal path. See the
+[ISA reference](isa-reference.md#extcrypto--core-crypto-isa-fb) and
+[BIOS Forth reference](bios-forth.md#sha-256-streaming-4-words).
 
 **Performance target**: 64-byte block in ~64 cycles (1 round/cycle,
 64 rounds per block).

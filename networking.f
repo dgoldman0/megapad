@@ -3216,6 +3216,7 @@ VARIABLE _XP-TBSLEN
     DROP                                     \ clean stack (tbs-val not needed here)
     \ Hash tbsCertificate for signature verification later
     _X509-TBS-PTR @ _X509-TBS-LEN @ _X509-TBS-HASH SHA256
+    IF -1 EXIT THEN
     \ Walk inside tbsCertificate
     _X509-TBS-PTR @ DER-ENTER DROP           \ tbs contents start
     \ Field 0: version [0] EXPLICIT — skip if present (tag=0xA0)
@@ -3939,6 +3940,7 @@ CREATE _X509-CERT0 /X509-CERT ALLOT
     _X509-CERT0 XC.TBS-A + @ _X509-TBS-PTR !
     _X509-CERT0 XC.TBS-U + @ _X509-TBS-LEN !
     _X509-TBS-PTR @ _X509-TBS-LEN @ _X509-TBS-HASH SHA256
+    IF -1 EXIT THEN
     _X509-CERT0 XC.PUB-U + @ DUP 256 > IF DROP -1 EXIT THEN
     DUP _X509-PUBKEY-LEN !
     _X509-CERT0 XC.PUB-A + @ _X509-PUBKEY ROT CMOVE
@@ -5072,18 +5074,18 @@ VARIABLE _RMG-H
 VARIABLE _RMG-OFF
 VARIABLE _RMG-N
 
-: _RSA-MGF1-SHA256-223 ( h -- )
+: _RSA-MGF1-SHA256-223 ( h -- status )
     _RMG-H ! 0 _RMG-OFF !
     7 0 DO
         _RSA-PSS-CTR 4 0 FILL I _RSA-PSS-CTR 3 + C!
-        SHA256-INIT
-        _RMG-H @ 32 SHA256-UPDATE
-        _RSA-PSS-CTR 4 SHA256-UPDATE
-        _RSA-PSS-MGF SHA256-FINAL
+        SHA256-INIT DUP IF UNLOOP EXIT THEN DROP
+        _RMG-H @ 32 SHA256-UPDATE DUP IF UNLOOP EXIT THEN DROP
+        _RSA-PSS-CTR 4 SHA256-UPDATE DUP IF UNLOOP EXIT THEN DROP
+        _RSA-PSS-MGF SHA256-FINAL DUP IF UNLOOP EXIT THEN DROP
         223 _RMG-OFF @ - 32 MIN _RMG-N !
         _RSA-PSS-MGF _RSA-PSS-MASK _RMG-OFF @ + _RMG-N @ CMOVE
         _RMG-N @ _RMG-OFF +!
-    LOOP ;
+    LOOP 0 ;
 
 VARIABLE _RPS-HASH
 VARIABLE _RPS-MOD
@@ -5096,7 +5098,7 @@ VARIABLE _RPS-EM
     _RPS-EM @ 255 + C@ 188 <> IF -1 EXIT THEN
     _RPS-EM @ C@ 128 AND IF -1 EXIT THEN
     _RPS-EM @ 223 + _RSA-PSS-H 32 CMOVE
-    _RSA-PSS-H _RSA-MGF1-SHA256-223
+    _RSA-PSS-H _RSA-MGF1-SHA256-223 IF -1 EXIT THEN
     223 0 DO
         _RPS-EM @ I + C@ _RSA-PSS-MASK I + C@ XOR _RSA-PSS-DB I + C!
     LOOP
@@ -5106,7 +5108,7 @@ VARIABLE _RPS-EM
     _RSA-PSS-MPRIME 72 0 FILL
     _RPS-HASH @ _RSA-PSS-MPRIME 8 + 32 CMOVE
     _RSA-PSS-DB 191 + _RSA-PSS-MPRIME 40 + 32 CMOVE
-    _RSA-PSS-MPRIME 72 _RSA-PSS-H2 SHA256
+    _RSA-PSS-MPRIME 72 _RSA-PSS-H2 SHA256 IF -1 EXIT THEN
     _RSA-PSS-H _RSA-PSS-H2 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
 
 \ RFC 8017 EMSA-PSS verification with emBits=2047, SHA-256, MGF1-SHA256,
@@ -5136,6 +5138,7 @@ VARIABLE _RPS-EM
     2DUP _X509-NAME-LINK? 0= IF 2DROP TLS-CERT-CONSTRAINT EXIT THEN
     _XVS-ISSUER ! _XVS-CHILD !
     _XVS-CHILD @ XC.TBS-A + @ _XVS-CHILD @ XC.TBS-U + @ _XVS-HASH SHA256
+    IF TLS-CERT-BAD-SIGNATURE EXIT THEN
     _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-P256 = IF
         _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-P256 <>
         _XVS-ISSUER @ XC.PUB-U + @ 65 <> OR IF TLS-CERT-UNSUPPORTED EXIT THEN
@@ -5526,6 +5529,7 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 -4201 CONSTANT TLS-E-PEER-ALERT
 -4202 CONSTANT TLS-E-POST-HANDSHAKE
 -4203 CONSTANT TLS-E-RECORD
+-4204 CONSTANT TLS-E-STATE
 
 0  CONSTANT TLS-CONNECT-E-OK
 1  CONSTANT TLS-CONNECT-E-CONFIG
@@ -5719,14 +5723,14 @@ CREATE TLS-HS-KYBER-CT  768 ALLOT      \ peer Kyber ciphertext (from SH)
 \ --- Dual-Mode Crypto Dispatch ---
 VARIABLE TLS-USE-SHA256   \ 0 = SHA3/AES-256 (0xFF01), 1 = SHA-256/AES-128 (0x1301)
 
-: TLS-HASH ( addr len out -- )
-    TLS-USE-SHA256 @ IF SHA256 ELSE SHA3 THEN ;
-: TLS-HMAC ( key klen msg mlen out -- )
-    TLS-USE-SHA256 @ IF HMAC-SHA256 ELSE HMAC THEN ;
-: TLS-HKDF-EXTRACT ( salt slen ikm ilen out -- )
-    TLS-USE-SHA256 @ IF HKDF-SHA256-EXTRACT ELSE HKDF-EXTRACT THEN ;
-: TLS-HKDF-EXPAND ( prk info ilen len out -- )
-    TLS-USE-SHA256 @ IF HKDF-SHA256-EXPAND ELSE HKDF-EXPAND THEN ;
+: TLS-HASH ( addr len out -- status )
+    TLS-USE-SHA256 @ IF SHA256 ELSE SHA3 0 THEN ;
+: TLS-HMAC ( key klen msg mlen out -- status )
+    TLS-USE-SHA256 @ IF HMAC-SHA256 ELSE HMAC 0 THEN ;
+: TLS-HKDF-EXTRACT ( salt slen ikm ilen out -- status )
+    TLS-USE-SHA256 @ IF HKDF-SHA256-EXTRACT ELSE HKDF-EXTRACT 0 THEN ;
+: TLS-HKDF-EXPAND ( prk info ilen len out -- status )
+    TLS-USE-SHA256 @ IF HKDF-SHA256-EXPAND ELSE HKDF-EXPAND 0 THEN ;
 : TLS-KEY-LEN ( -- n )
     TLS-USE-SHA256 @ IF 16 ELSE 32 THEN ;
 : TLS-SET-AES-MODE ( -- )
@@ -5755,8 +5759,11 @@ _TLS-ZERO-SECRET 32 0 FILL
 \ Pre-compute hash of empty string for both modes.
 CREATE TLS-EMPTY-HASH-SHA3 32 ALLOT
 SHA3-INIT  TLS-EMPTY-HASH-SHA3 SHA3-FINAL
-CREATE TLS-EMPTY-HASH-SHA256 32 ALLOT
-SHA256-INIT  TLS-EMPTY-HASH-SHA256 SHA256-FINAL
+CREATE TLS-EMPTY-HASH-SHA256
+227 C, 176 C, 196 C, 66 C, 152 C, 252 C, 28 C, 20 C,
+154 C, 251 C, 244 C, 200 C, 153 C, 111 C, 185 C, 36 C,
+39 C, 174 C, 65 C, 228 C, 100 C, 155 C, 147 C, 76 C,
+164 C, 149 C, 153 C, 27 C, 120 C, 82 C, 184 C, 85 C,
 
 \ TLS-EMPTY-HASH ( -- addr )  Return empty-hash buffer for current mode.
 : TLS-EMPTY-HASH ( -- addr )
@@ -5789,7 +5796,7 @@ CREATE TLS-L-FINISHED   102 C, 105 C, 110 C, 105 C, 115 C, 104 C, 101 C, 100 C,
 8 CONSTANT /TLS-L-FINISHED
 
 \ --- TLS-EXPAND-LABEL ---
-\ TLS-EXPAND-LABEL ( secret label llen context clen olen out -- )
+\ TLS-EXPAND-LABEL ( secret label llen context clen olen out -- status )
 \   Construct HkdfLabel and call HKDF-EXPAND.
 \   HkdfLabel = length(2BE) || (6+llen)(1) || "tls13 " || label || clen(1) || ctx
 VARIABLE _TEL-SECRET
@@ -5800,7 +5807,7 @@ VARIABLE _TEL-CLEN
 VARIABLE _TEL-OLEN
 VARIABLE _TEL-OUT
 
-: TLS-EXPAND-LABEL ( secret label llen context clen olen out -- )
+: TLS-EXPAND-LABEL ( secret label llen context clen olen out -- status )
     _TEL-OUT !  _TEL-OLEN !  _TEL-CLEN !  _TEL-CTXP !
     _TEL-LLEN !  _TEL-LABEL !  _TEL-SECRET !
     \ [0-1] output length (big-endian)
@@ -5876,10 +5883,11 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     0 _TCV-CONTENT 64 + 33 + C!            \ trailing 0x00 separator
     \ Hash current transcript (up to but not including this CV message)
     TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ _TCV-HASH TLS-HASH
+    IF -1 EXIT THEN
     \ Append transcript hash
     _TCV-HASH _TCV-CONTENT 98 + 32 CMOVE   \ 64+33+1 = 98
     \ Hash the entire content with SHA-256 (ECDSA uses SHA-256)
-    _TCV-CONTENT 130 _TCV-HASH SHA256
+    _TCV-CONTENT 130 _TCV-HASH SHA256 IF -1 EXIT THEN
     _TCV-ALGO @ TLS-SIG-ECDSA-P256-SHA256 = IF
         _TCV-HASH _TLS-SERVER-PUBKEY
         _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P256-VERIFY
@@ -5910,16 +5918,16 @@ VARIABLE _TTA-LEN
 ;
 
 \ --- TLS-DERIVE-DERIVED ---
-\ TLS-DERIVE-DERIVED ( secret out -- )
+\ TLS-DERIVE-DERIVED ( secret out -- status )
 \   = HKDF-Expand-Label(Secret, "derived", SHA3-256(""), 32)
-: TLS-DERIVE-DERIVED ( secret out -- )
+: TLS-DERIVE-DERIVED ( secret out -- status )
     >R
     TLS-L-DERIVED /TLS-L-DERIVED
     TLS-EMPTY-HASH 32 32 R> TLS-EXPAND-LABEL
 ;
 
 \ --- TLS-DERIVE-SECRET ---
-\ TLS-DERIVE-SECRET ( secret label llen out -- )
+\ TLS-DERIVE-SECRET ( secret label llen out -- status )
 \   = HKDF-Expand-Label(Secret, Label, Hash(Messages), 32)
 \   Messages = current transcript buffer.
 VARIABLE _TDS-SECRET
@@ -5927,100 +5935,114 @@ VARIABLE _TDS-LABEL
 VARIABLE _TDS-LLEN
 VARIABLE _TDS-OUT
 
-: TLS-DERIVE-SECRET ( secret label llen out -- )
+: TLS-DERIVE-SECRET ( secret label llen out -- status )
     _TDS-OUT !  _TDS-LLEN !  _TDS-LABEL !  _TDS-SECRET !
     \ Hash transcript → TLS-HS-HASH
     TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
+    DUP IF EXIT THEN DROP
     \ HKDF-Expand-Label(secret, label, llen, hash, 32, 32, out)
     _TDS-SECRET @ _TDS-LABEL @ _TDS-LLEN @
     TLS-HS-HASH 32 32 _TDS-OUT @ TLS-EXPAND-LABEL
 ;
 
 \ --- Key Schedule Phase 1 ---
-\ TLS-KS-HANDSHAKE ( ctx -- )
+\ TLS-KS-HANDSHAKE ( ctx -- status )
 \   Derive and install handshake traffic keys.
 \   Prerequisite: ctx.SHARED filled, transcript = CH||SH.
 VARIABLE _TKSH-CTX
 
-: TLS-KS-HANDSHAKE ( ctx -- )
+: TLS-KS-HANDSHAKE ( ctx -- status )
     _TKSH-CTX !
     \ Set AES key mode for negotiated suite
     TLS-SET-AES-MODE
     \ 1. Early Secret = HKDF-Extract(0*32, 0*32)
     0 0  _TLS-ZERO-SECRET 32  _TKSH-CTX @ TLS-CTX.EARLY  TLS-HKDF-EXTRACT
+    DUP IF EXIT THEN DROP
     \ 2. derived_es = Expand-Label(ES, "derived", empty_hash, 32)
     _TKSH-CTX @ TLS-CTX.EARLY  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
+    DUP IF EXIT THEN DROP
     \ 3. HS = HKDF-Extract(derived_es, shared_secret)
     TLS-TEMP-SECRET 32  _TKSH-CTX @ TLS-CTX.SHARED 32
     _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-HKDF-EXTRACT
+    DUP IF EXIT THEN DROP
     \ 4. c_hs_traffic = Derive-Secret(HS, "c hs traffic", Hash(CH||SH))
     _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-L-C-HS-TR /TLS-L-C-HS-TR
     _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC  TLS-DERIVE-SECRET
+    DUP IF EXIT THEN DROP
     \ 5. s_hs_traffic = Derive-Secret(HS, "s hs traffic", Hash(CH||SH))
     _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-L-S-HS-TR /TLS-L-S-HS-TR
     _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC  TLS-DERIVE-SECRET
+    DUP IF EXIT THEN DROP
     \ 6-7. Client HS key+IV → WR-KEY/WR-IV
     _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
     TLS-L-KEY /TLS-L-KEY  0 0  TLS-KEY-LEN  _TKSH-CTX @ TLS-CTX.WR-KEY
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
     TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.WR-IV
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     \ 8-9. Server HS key+IV → RD-KEY/RD-IV
     _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
     TLS-L-KEY /TLS-L-KEY  0 0  TLS-KEY-LEN  _TKSH-CTX @ TLS-CTX.RD-KEY
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
     TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.RD-IV
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     \ 10. Zero sequence numbers
     0 _TKSH-CTX @ TLS-CTX.WR-SEQ !
     0 _TKSH-CTX @ TLS-CTX.RD-SEQ !
+    0
 ;
 
 \ --- Key Schedule Phase 2 ---
-\ TLS-KS-APPLICATION ( ctx -- )
+\ TLS-KS-APPLICATION ( ctx -- status )
 \   Derive and install application traffic keys from master secret.
 \   Prerequisite: HS-SECRET set, transcript through server Finished.
 VARIABLE _TKSA-CTX
 
-: TLS-KS-APPLICATION ( ctx -- )
+: TLS-KS-APPLICATION ( ctx -- status )
     _TKSA-CTX !
     _TKSA-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
-    _TKSA-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR IF EXIT THEN
+    _TKSA-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR
+    IF TLS-E-STATE EXIT THEN
     _TKSA-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 =
-    _TKSA-CTX @ TLS-CTX.ALPN-NEGOTIATED @ TLS-ALPN-HTTP11 <> AND IF EXIT THEN
+    _TKSA-CTX @ TLS-CTX.ALPN-NEGOTIATED @ TLS-ALPN-HTTP11 <> AND
+    IF TLS-E-STATE EXIT THEN
     \ 1. derived_hs = Expand-Label(HS, "derived", empty_hash, 32)
     _TKSA-CTX @ TLS-CTX.HS-SECRET  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
+    DUP IF EXIT THEN DROP
     \ 2. MS = HKDF-Extract(derived_hs, 0*32)
     TLS-TEMP-SECRET 32  _TLS-ZERO-SECRET 32
     _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-HKDF-EXTRACT
+    DUP IF EXIT THEN DROP
     \ 3. c_ap_traffic = Derive-Secret(MS, "c ap traffic", Hash(full))
     _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-L-C-AP-TR /TLS-L-C-AP-TR
     _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC  TLS-DERIVE-SECRET
+    DUP IF EXIT THEN DROP
     \ 4. s_ap_traffic = Derive-Secret(MS, "s ap traffic", Hash(full))
     _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-L-S-AP-TR /TLS-L-S-AP-TR
     _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC  TLS-DERIVE-SECRET
+    DUP IF EXIT THEN DROP
     \ 5-6. Client app key+IV → WR-KEY/WR-IV
     _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
     TLS-L-KEY /TLS-L-KEY  0 0  TLS-KEY-LEN  _TKSA-CTX @ TLS-CTX.WR-KEY
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
     TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.WR-IV
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     \ 7-8. Server app key+IV → RD-KEY/RD-IV
     _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
     TLS-L-KEY /TLS-L-KEY  0 0  TLS-KEY-LEN  _TKSA-CTX @ TLS-CTX.RD-KEY
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
     TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.RD-IV
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
     \ 9. Zero sequence numbers
     0 _TKSA-CTX @ TLS-CTX.WR-SEQ !
     0 _TKSA-CTX @ TLS-CTX.RD-SEQ !
     \ 10. Mark connection established
     TLSS-ESTABLISHED _TKSA-CTX @ TLS-CTX.STATE !
     TLSH-CONNECTED _TKSA-CTX @ TLS-CTX.HS-STATE !
+    0
 ;
 
 \ --- ClientHello Builder ---
@@ -6338,11 +6360,13 @@ VARIABLE _TVF-VERIFY
     \ finished_key = HKDF-Expand-Label(secret, "finished", "", 32)
     _TVF-SECRET @
     TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL IF -1 EXIT THEN
     \ Hash transcript → TLS-HS-HASH
     TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
+    IF -1 EXIT THEN
     \ expected = HMAC(finished_key, transcript_hash)
     TLS-FINISHED-KEY 32  TLS-HS-HASH 32  TLS-VERIFY-DATA  TLS-HMAC
+    IF -1 EXIT THEN
     \ Compare with received
     TLS-VERIFY-DATA _TVF-VERIFY @ 32 VERIFY
 ;
@@ -6360,11 +6384,13 @@ VARIABLE _TBF-REC
     \ finished_key = Expand-Label(c_hs_traffic, "finished", "", 32)
     _TBF-CTX @ TLS-CTX.C-HS-TRAFFIC
     TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
-    TLS-EXPAND-LABEL
+    TLS-EXPAND-LABEL IF 0 EXIT THEN
     \ Hash transcript → TLS-HS-HASH
     TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
+    IF 0 EXIT THEN
     \ verify_data = HMAC(finished_key, hash)
     TLS-FINISHED-KEY 32  TLS-HS-HASH 32  TLS-VERIFY-DATA  TLS-HMAC
+    IF 0 EXIT THEN
     \ Build Finished handshake message (36 bytes)
     TLSHT-FINISHED  TLS-FINISHED-MSG C!
     0  TLS-FINISHED-MSG 1 + C!
@@ -6420,7 +6446,7 @@ VARIABLE _TPHM-TYPE
             X25519-SHARED _TPHM-CTX @ TLS-CTX.SHARED 32 CMOVE
         THEN
         \ Key schedule phase 1
-        _TPHM-CTX @ TLS-KS-HANDSHAKE
+        _TPHM-CTX @ TLS-KS-HANDSHAKE IF -1 EXIT THEN
         TLSH-SERVER-HELLO-RCVD _TPHM-CTX @ TLS-CTX.HS-STATE !
         0 EXIT
     THEN
@@ -6497,7 +6523,10 @@ VARIABLE _THC-REC
     _THC-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
     _THC-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR IF 0 EXIT THEN
     _THC-CTX @  _THC-REC @  TLS-BUILD-FINISHED
-    _THC-CTX @ TLS-KS-APPLICATION
+    DUP 0= IF EXIT THEN
+    >R
+    _THC-CTX @ TLS-KS-APPLICATION IF R> DROP 0 EXIT THEN
+    R>
 ;
 
 \ =====================================================================

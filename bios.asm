@@ -107,9 +107,11 @@ boot:
     ldi64 r11, forth_exit
     mov   r17, r11
 
-    ; RAM survives a warm reset.  Streaming SHA-512 contexts can contain
+    ; RAM survives a warm reset.  Streaming SHA-2 contexts can contain
     ; partial message bytes and intermediate digests, so erase every
     ; per-core context before any auto-booted code can observe them.
+    ldi64 r11, sha256_wipe_all_contexts
+    call.l r11
     ldi64 r11, sha512_wipe_all_contexts
     call.l r11
 
@@ -12973,8 +12975,9 @@ w_sha3_dout_fetch:
 ; =====================================================================
 ;  SHA-256 Engine — ISA instructions (EXT.CRYPTO FB 10-16)
 ; =====================================================================
-; SHA-256 is now per-core via ISA instructions.  No MMIO peripheral.
-; State lives in tile accumulators (acc[0..3]) and CSRs:
+; SHA-256 uses scoped ISA transactions.  No MMIO peripheral or global
+; streaming buffer participates in the ABI.  Architectural engine state
+; lives in tile accumulators (acc[0..3]) and CSRs:
 ;   CSR 0x82 = SHA_MODE   (0=SHA-256, 1=SHA-384, 2=SHA-512)
 ;   CSR 0x83 = SHA_MSGLEN  (message length low 64 bits)
 ;   CSR 0x84 = SHA_MSGLEN_HI (message length high 64 bits)
@@ -12987,83 +12990,205 @@ w_sha3_dout_fetch:
 ;   SHA.FINAL        — auto-pad + final compress
 ;   SHA.RELEASE      — release micro-cluster ownership (full-core no-op)
 ;
-; Block buffer lives at sha_blk_buf (64 bytes, addressed via TSRC0 CSR).
-; R0 = block offset counter (auto-managed by SHA.DIN, saved between calls).
+; Each architectural core owns a 256-byte RAM context:
+;   +0x00  packed H0..H7 in ACC0..ACC3 (4 qwords)
+;   +0x20  message length, low/high     (2 qwords, bits)
+;   +0x30  partial-block offset         (qword, 0..63)
+;   +0x38  active marker                (qword, 0 or 1)
+;   +0x40  partial/data block           (64 bytes)
+;   +0x80  staged digest                (32 bytes)
+;   +0xA0  reserved/scrubbed            (96 bytes)
+;
+; _sha256_engine is the only routine that installs saved mode-0 state in
+; the shared SHA bank.  It preserves the caller's ACC0..ACC3, TSRC0, and
+; exact interrupt-enable state, stages FINAL output while still owner,
+; scrubs the SHA-visible state, and issues SHA.RELEASE last.
 
-; SHA256-INIT ( -- )  Initialize SHA-256 state.
-w_sha256_init:
-    sha.init 0                         ; SHA-256 mode, load IV into accumulators
-    ldi64 r7, sha_blk_buf
-    csrw 0x16, r7                      ; TSRC0 = block buffer address
-    ldi r0, 0                          ; R0 = 0 (block offset counter)
-    ldi64 r7, sha_blk_off
-    str r7, r0                         ; save block offset = 0
-    ret.l
-
-; SHA256-UPDATE ( addr len -- )  Feed len bytes to SHA-256 absorber.
-w_sha256_update:
-    ldn r12, r14            ; r12 = len
-    addi r14, 8
-    ldn r9, r14             ; r9 = addr
-    addi r14, 8
+; Erase all 16 per-core contexts on every primary-core boot.
+sha256_wipe_all_contexts:
+    ldi64 r7, sha256_contexts
+    ldi64 r12, 512                     ; 16 * 256 / 8 qwords
+    ldi r1, 0
+.sha256_wipe_all_loop:
+    str r7, r1
+    addi r7, 8
+    dec r12
     cmpi r12, 0
-    breq .sha256_update_done
-    ; Restore SHA block state
-    ldi64 r7, sha_blk_off
-    ldn r0, r7              ; R0 = saved block offset
-    ldi64 r7, sha_blk_buf
-    csrw 0x16, r7           ; TSRC0 = block buffer
-    ldi r11, 0              ; byte counter = 0
-.sha256_update_loop:
-    mov r13, r9
-    add r13, r11            ; src + counter
-    ld.b r1, r13            ; load byte from RAM
-    sha.din r0, r1          ; feed byte; R0 auto-increments, auto-compresses
-    addi r11, 1
-    cmp r11, r12            ; counter < len?
-    brcc .sha256_update_loop
-    ; Save SHA block state
-    ldi64 r7, sha_blk_off
-    str r7, r0              ; save block offset
-.sha256_update_done:
+    brne .sha256_wipe_all_loop
     ret.l
 
-; SHA256-FINAL ( addr -- )  Finalize hash, copy 32 bytes to addr.
-w_sha256_final:
-    ldn r9, r14             ; r9 = dest addr
-    addi r14, 8
-    ; Restore SHA block state
-    ldi64 r7, sha_blk_off
-    ldn r0, r7              ; R0 = saved block offset
-    ldi64 r7, sha_blk_buf
-    csrw 0x16, r7           ; TSRC0 = block buffer
-    sha.final               ; FIPS-180 padding + final compress
-    ; Read 8 × 32-bit hash words, write as big-endian bytes
-    ldi r18, 32             ; shift amount (R18 = free extended reg)
-    ldi r1, 0               ; word index = 0
-.sha256_final_loop:
-    sha.dout r7, r1         ; r7 = H[r1] (32-bit word)  [R2=ram_size, don't clobber!]
-    bswap r7, r7            ; byte-reverse 64-bit
-    shr r7, r18             ; shift right 32 → LE bytes = BE order
-    st.w r9, r7             ; store 4 bytes (LE → correct BE order)
-    addi r9, 4
-    addi r1, 1
-    cmpi r1, 8
-    brcc .sha256_final_loop
+; Resolve this core's private context into R10.
+; Clobbers R0.
+_sha256_context:
+    csrr r0, 0x20                      ; COREID
+    andi r0, 0x0F                      ; architectural cores are 0..15
+    lsli r0, 8                         ; * 256
+    ldi64 r10, sha256_contexts
+    add r10, r0
+    ret.l
 
-    ; FINAL retains micro-cluster ownership.  Scrub the complete SHA-visible
-    ; bank and BIOS block state while still owner, then release explicitly.
-    ldi64 r7, sha_blk_buf
+; Wipe the 256-byte context at R10.
+; Clobbers R0, R7, R12.
+_sha256_wipe_context:
+    mov r7, r10
     ldi r0, 0
-    ldi r12, 8
-.sha256_final_wipe_loop:
+    ldi r12, 32
+.sha256_wipe_context_loop:
     str r7, r0
     addi r7, 8
     dec r12
     cmpi r12, 0
-    brne .sha256_final_wipe_loop
-    ldi64 r7, sha_blk_off
+    brne .sha256_wipe_context_loop
+    ret.l
+
+; Run one bounded SHA-256 engine transaction.
+;   R10 = per-core context
+;   R13 = 0 INIT, 1 COMPRESS full data block, 2 FINAL into stage, 3 CLEAR
+; Clobbers low scratch registers.  Preserves exact caller ACC0..ACC3,
+; TSRC0, and interrupt-enable state.
+_sha256_engine:
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0                       ; saved IE
+    di
+
+    csrr r0, 0x19
+    subi r15, 8
+    str r15, r0                       ; outer ACC0
+    csrr r0, 0x1A
+    subi r15, 8
+    str r15, r0                       ; outer ACC1
+    csrr r0, 0x1B
+    subi r15, 8
+    str r15, r0                       ; outer ACC2
+    csrr r0, 0x1C
+    subi r15, 8
+    str r15, r0                       ; outer ACC3
+    csrr r0, 0x16
+    subi r15, 8
+    str r15, r0                       ; outer TSRC0
+
+    cmpi r13, 0
+    lbreq .sha256_engine_init
+    cmpi r13, 3
+    lbreq .sha256_engine_clear
+
+    ; COMPRESS and FINAL acquire a fresh transaction, then restore the
+    ; complete saved digest and bit length.
+    sha.init 0
+    mov r7, r10
+    ldn r0, r7
+    csrw 0x19, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x1A, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x1B, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x1C, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x83, r0                     ; message length low
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x84, r0                     ; message length high (must be zero)
+
+    mov r7, r10
+    addi r7, 64
+    csrw 0x16, r7                     ; TSRC0 = trusted data block
+
+    cmpi r13, 1
+    breq .sha256_engine_compress
+
+    ; FINAL: restore the partial offset and stage all eight digest words.
+    mov r7, r10
+    addi r7, 48
+    ldn r0, r7
+    sha.final
+
+    mov r12, r10
+    addi r12, 128                     ; trusted digest stage
+    ldi r1, 0
+.sha256_stage_word_loop:
+    sha.dout r7, r1
+    mov r0, r12
+    addi r0, 3
+    ldi r9, 4
+.sha256_stage_byte_loop:
+    st.b r0, r7                       ; low byte goes to end of BE word
+    lsri r7, 8
+    dec r0
+    dec r9
+    cmpi r9, 0
+    brne .sha256_stage_byte_loop
+    addi r12, 4
+    addi r1, 1
+    cmpi r1, 8
+    brcc .sha256_stage_word_loop
+    lbr .sha256_engine_cleanup
+
+.sha256_engine_compress:
+    ldi r0, 0
+    sha.round
+
+    ; Persist the packed 256-bit chaining value before releasing.
+    mov r7, r10
+    csrr r0, 0x19
     str r7, r0
+    addi r7, 8
+    csrr r0, 0x1A
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1B
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1C
+    str r7, r0
+    mov r7, r10
+    addi r7, 48
+    ldi r0, 0
+    str r7, r0                        ; partial offset = 0
+    lbr .sha256_engine_cleanup
+
+.sha256_engine_init:
+    sha.init 0
+    mov r7, r10
+    csrr r0, 0x19
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1A
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1B
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1C
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x83
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x84
+    str r7, r0
+    addi r7, 8
+    ldi r0, 0
+    str r7, r0                        ; partial offset
+    addi r7, 8
+    ldi r0, 1
+    str r7, r0                        ; active marker
+    lbr .sha256_engine_cleanup
+
+.sha256_engine_clear:
+    sha.init 0
+    ldi r0, 0
+    lbr .sha256_engine_cleanup
+
+.sha256_engine_cleanup:
+    ; Remove all mode-0 material before restoring the caller's independent
+    ; accumulator transaction.
+    ldi r0, 0
     csrw 0x19, r0
     csrw 0x1A, r0
     csrw 0x1B, r0
@@ -13072,32 +13197,379 @@ w_sha256_final:
     csrw 0x83, r0
     csrw 0x84, r0
     csrw 0x16, r0
+
+    ; Restore and erase every return-stack snapshot.
+    ldn r0, r15
+    csrw 0x16, r0
+    ldi r7, 0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x1C, r0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x1B, r0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x1A, r0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x19, r0
+    str r15, r7
+    addi r15, 8
+    ldn r1, r15                       ; exact prior IE value
+    str r15, r7
+    addi r15, 8
+
+    ldi r0, 0
     sha.release
+    csrw 0x09, r1
     ret.l
 
-; SHA256-STATUS@ ( -- n )  Read SHA-256 status (always 0 for ISA engine).
-w_sha256_status_fetch:
-    ldi r0, 0
+; Return R0 as a Forth status cell.
+_sha256_return_status:
     subi r14, 8
     str r14, r0
     ret.l
 
-; SHA256-DOUT@ ( addr -- )  Read 32 bytes from SHA-256 hash state to memory.
-w_sha256_dout_fetch:
+; Return R0=1 when [R9,R9+R12) intersects any byte of the complete
+; 16-context SHA-256 arena, otherwise R0=0.
+_sha256_context_alias:
+    cmpi r12, 0
+    breq .sha256_alias_no
+    mov r13, r9
+    add r13, r12                       ; caller end, exclusive
+    ldi64 r7, sha256_contexts
+    ldi64 r1, 4096
+    add r1, r7                         ; arena end, exclusive
+    cmp r9, r1
+    brcc .sha256_alias_start_before_end
+    br .sha256_alias_no
+.sha256_alias_start_before_end:
+    cmp r7, r13
+    brcc .sha256_alias_yes
+.sha256_alias_no:
+    ldi r0, 0
+    ret.l
+.sha256_alias_yes:
+    ldi r0, 1
+    ret.l
+
+; Abort and erase the context at R10 without publishing a status.
+_sha256_abort:
+    ldi64 r11, _sha256_wipe_context
+    call.l r11
+    ldi r13, 3
+    ldi64 r11, _sha256_engine
+    call.l r11
+    ldi64 r11, _sha256_wipe_context
+    call.l r11
+    ret.l
+
+; SHA256-INIT ( -- status )
+w_sha256_init:
+    ldi64 r11, _sha256_context
+    call.l r11
+    ldi64 r11, _sha256_wipe_context
+    call.l r11
+    ldi r13, 0
+    ldi64 r11, _sha256_engine
+    call.l r11
+    ldi r0, 0
+    lbr _sha256_return_status
+
+; SHA256-UPDATE ( addr len -- status )
+; Status: 0 OK, 1 STATE, 2 RANGE, 3 CONTEXT-ALIAS, 4 LENGTH-OVERFLOW.
+w_sha256_update:
+    ldn r12, r14                       ; complete caller length
+    addi r14, 8
+    ldn r9, r14                        ; caller source
+    addi r14, 8
+
+    ldi64 r11, _sha256_context
+    call.l r11
+    mov r7, r10
+    addi r7, 56
+    ldn r0, r7
+    cmpi r0, 1
+    lbrne .sha256_update_state_fail
+
+    ; A SHA-256 context may never carry a nonzero high bit-length word.
+    mov r7, r10
+    addi r7, 40
+    ldn r0, r7
+    cmpi r0, 0
+    lbrne .sha256_update_length_fail
+    addi r7, 8
+    ldn r0, r7                         ; partial offset
+    cmpi r0, 64
+    brcc .sha256_update_offset_ok
+    lbr .sha256_update_state_fail
+.sha256_update_offset_ok:
+    ; Saved bit length must describe exactly the buffered-byte position.
+    ; Reject non-byte-aligned or internally inconsistent private state
+    ; before even a zero-length UPDATE can report success.
+    mov r7, r10
+    addi r7, 32
+    ldn r1, r7                         ; bit length low
+    mov r13, r1
+    andi r13, 7
+    cmpi r13, 0
+    lbrne .sha256_update_state_fail
+    ldi r7, 3
+    shr r1, r7
+    andi r1, 63
+    cmp r0, r1
+    lbrne .sha256_update_state_fail
+    cmpi r12, 0
+    lbreq .sha256_update_ok
+
+    ; Accept only a complete nonwrapping span in one physical window.
+    subi r15, 8
+    str r15, r12
+    mov r10, r12
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    ldn r12, r15
+    ldi r7, 0
+    str r15, r7
+    addi r15, 8
+    cmpi r0, 0
+    lbrne .sha256_update_range_fail
+    ldi64 r11, _sha256_context
+    call.l r11
+
+    ldi64 r11, _sha256_context_alias
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha256_update_alias_fail
+
+    ; SHA-256 uses a single 64-bit bit length.  Reject len*8 when it has a
+    ; high component or when adding the low component wraps.
+    mov r13, r12
+    ldi r1, 61
+    shr r13, r1
+    cmpi r13, 0
+    lbrne .sha256_update_length_fail
+    mov r7, r12
+    lsli r7, 3
+    mov r11, r10
+    addi r11, 32
+    ldn r0, r11                       ; old low
+    mov r1, r0
+    add r7, r0                        ; candidate low
+    cmp r7, r1
+    lbrcc .sha256_update_length_fail
+    str r11, r7
+
+.sha256_update_chunk:
+    ; chunk = min(remaining, 64 - partial_offset)
+    mov r7, r10
+    addi r7, 48
+    ldn r0, r7
+    ldi r1, 64
+    sub r1, r0
+    cmp r12, r1
+    brcc .sha256_update_use_remaining
+    mov r13, r1
+    br .sha256_update_have_chunk
+.sha256_update_use_remaining:
+    mov r13, r12
+.sha256_update_have_chunk:
+    mov r7, r10
+    addi r7, 64
+    add r7, r0
+    mov r1, r13
+.sha256_update_copy_loop:
+    ld.b r0, r9
+    st.b r7, r0
+    inc r9
+    inc r7
+    dec r1
+    cmpi r1, 0
+    brne .sha256_update_copy_loop
+    sub r12, r13
+
+    mov r7, r10
+    addi r7, 48
+    ldn r0, r7
+    add r0, r13
+    str r7, r0
+    ldi r1, 64
+    cmp r0, r1
+    lbrne .sha256_update_after_compress
+
+    subi r15, 8
+    str r15, r9
+    subi r15, 8
+    str r15, r12
+    ldi r13, 1
+    ldi64 r11, _sha256_engine
+    call.l r11
+    ldn r12, r15
+    ldi r0, 0
+    str r15, r0
+    addi r15, 8
+    ldn r9, r15
+    str r15, r0
+    addi r15, 8
+
+    ; A compressed block is no longer persistent context.
+    mov r7, r10
+    addi r7, 64
+    ldi r1, 8
+.sha256_update_data_wipe_loop:
+    str r7, r0
+    addi r7, 8
+    dec r1
+    cmpi r1, 0
+    brne .sha256_update_data_wipe_loop
+
+.sha256_update_after_compress:
+    cmpi r12, 0
+    lbrne .sha256_update_chunk
+.sha256_update_ok:
+    ldi r0, 0
+    lbr _sha256_return_status
+
+.sha256_update_state_fail:
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 1
+    lbr _sha256_return_status
+.sha256_update_range_fail:
+    ldi64 r11, _sha256_context
+    call.l r11
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 2
+    lbr _sha256_return_status
+.sha256_update_alias_fail:
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 3
+    lbr _sha256_return_status
+.sha256_update_length_fail:
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 4
+    lbr _sha256_return_status
+
+; SHA256-FINAL ( dst -- status )
+; Failure never publishes a digest and always aborts/wipes.
+w_sha256_final:
     ldn r9, r14
     addi r14, 8
-    ldi r18, 32             ; shift amount (R18 = free extended reg)
-    ldi r1, 0
-.sha256_dout_loop:
-    sha.dout r7, r1         ; [R2=ram_size, don't clobber!]
-    bswap r7, r7
-    shr r7, r18
-    st.w r9, r7
-    addi r9, 4
-    addi r1, 1
-    cmpi r1, 8
-    brcc .sha256_dout_loop
-    ret.l
+    ldi64 r11, _sha256_context
+    call.l r11
+    mov r7, r10
+    addi r7, 56
+    ldn r0, r7
+    cmpi r0, 1
+    lbrne .sha256_final_state_fail
+    mov r7, r10
+    addi r7, 40
+    ldn r0, r7
+    cmpi r0, 0
+    lbrne .sha256_final_length_fail
+    addi r7, 8
+    ldn r0, r7
+    cmpi r0, 64
+    brcc .sha256_final_offset_ok
+    lbr .sha256_final_state_fail
+.sha256_final_offset_ok:
+    ; The low bit length must be byte-aligned and agree with the exact
+    ; partial-block offset before any destination preflight or publication.
+    mov r7, r10
+    addi r7, 32
+    ldn r1, r7
+    mov r13, r1
+    andi r13, 7
+    cmpi r13, 0
+    lbrne .sha256_final_state_fail
+    ldi r7, 3
+    shr r1, r7
+    andi r1, 63
+    cmp r0, r1
+    lbrne .sha256_final_state_fail
+
+    ; Validate and de-alias all 32 output bytes before entering mode 0.
+    ldi r12, 32
+    mov r10, r12
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha256_final_range_fail
+    ldi64 r11, _sha256_context
+    call.l r11
+    ldi r12, 32
+    ldi64 r11, _sha256_context_alias
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha256_final_alias_fail
+
+    subi r15, 8
+    str r15, r9
+    ldi r13, 2
+    ldi64 r11, _sha256_engine
+    call.l r11
+    ldn r9, r15
+    ldi r0, 0
+    str r15, r0
+    addi r15, 8
+
+    ; Publish only after caller state is restored and ownership released.
+    mov r7, r10
+    addi r7, 128
+    ldi r12, 32
+.sha256_final_publish_loop:
+    ld.b r0, r7
+    st.b r9, r0
+    inc r7
+    inc r9
+    dec r12
+    cmpi r12, 0
+    brne .sha256_final_publish_loop
+    ldi64 r11, _sha256_wipe_context
+    call.l r11
+    ldi r0, 0
+    lbr _sha256_return_status
+
+.sha256_final_state_fail:
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 1
+    lbr _sha256_return_status
+.sha256_final_range_fail:
+    ldi64 r11, _sha256_context
+    call.l r11
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 2
+    lbr _sha256_return_status
+.sha256_final_alias_fail:
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 3
+    lbr _sha256_return_status
+.sha256_final_length_fail:
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 4
+    lbr _sha256_return_status
+
+; SHA256-CLEAR ( -- status )
+; Idempotent explicit abort; never leaves a cluster SHA owner.
+w_sha256_clear:
+    ldi64 r11, _sha256_context
+    call.l r11
+    ldi64 r11, _sha256_abort
+    call.l r11
+    ldi r0, 0
+    lbr _sha256_return_status
 
 ; =====================================================================
 ;  SHA-512 streaming — scoped EXT.CRYPTO mode-2 transactions
@@ -17592,27 +18064,18 @@ d_sha256_final:
     call.l r11
     ret.l
 
-; === SHA256-STATUS@ ===
-d_sha256_status_fetch:
+; === SHA256-CLEAR ===
+d_sha256_clear:
     .dq d_sha256_final
-    .db 14
-    .ascii "SHA256-STATUS@"
-    ldi64 r11, w_sha256_status_fetch
-    call.l r11
-    ret.l
-
-; === SHA256-DOUT@ ===
-d_sha256_dout_fetch:
-    .dq d_sha256_status_fetch
     .db 12
-    .ascii "SHA256-DOUT@"
-    ldi64 r11, w_sha256_dout_fetch
+    .ascii "SHA256-CLEAR"
+    ldi64 r11, w_sha256_clear
     call.l r11
     ret.l
 
 ; === RANDOM ===
 d_random:
-    .dq d_sha256_dout_fetch
+    .dq d_sha256_clear
     .db 6
     .ascii "RANDOM"
     ldi64 r11, w_random
@@ -19419,17 +19882,42 @@ eval_token_buffer:
     .dq 0,0,0,0,0,0,0,0
 
 ; =====================================================================
-;  sha_blk_buf — 64-byte block buffer for SHA-256 ISA engine (TSRC0 target)
+;  sha256_contexts — 16 private, warm-boot-scrubbed streaming contexts
 ; =====================================================================
-sha_blk_buf:
-    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
-    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
-    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
-    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
-
-; sha_blk_off — saved R0 block offset (persists across Forth word calls)
-sha_blk_off:
-    .dq 0
+; 16 * 256 bytes = 512 qwords.
+sha256_contexts:
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
 ; =====================================================================
 ;  sha512_contexts — 16 private, warm-boot-scrubbed streaming contexts

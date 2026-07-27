@@ -230,6 +230,9 @@ ChangeCipherSpec is ignored only when it has the exact one-byte `0x01` form
 permitted during the handshake. Incoming alerts clear peer authorization and
 distinguish clean `close_notify` from fatal or malformed records. Application
 send and receive both require an established, authenticated context.
+Application-key derivation likewise returns `TLS-E-STATE` unless certificate
+authentication, the server-Finished state, and the configured ALPN profile
+are all satisfied; zero means the complete application schedule was installed.
 
 Session resumption is not implemented. Authenticated post-handshake
 `NewSessionTicket` messages are reassembled in the bounded handshake buffer,
@@ -337,11 +340,13 @@ per-context. Handshake transcript, certificate descriptors, cryptographic
 scratch, record buffers, and hybrid key-exchange buffers remain global. The
 current API does not yet enforce a machine-wide TLS/crypto owner, so callers
 must serialize all TLS and cryptographic use. RSA's core-0 phase gate protects
-only RSA scratch; it does not make the BIOS's single `sha_blk_buf` and
-`sha_blk_off` per-core. An unrelated parallel `SHA256-*` operation remains
-forbidden because it can corrupt X.509, PSS, or transcript hashing. The
-cooperative TLS owner is a required integration boundary until all shared
-scratch, including SHA block scratch, becomes per-context.
+only RSA scratch. The BIOS SHA-256 transaction now uses a complete private
+context per core, validates all caller spans, and wipes on every terminal
+path; it is therefore isolated from SHA-256 work on other cores. It is not
+per task, so a cooperative task must not yield with an open `SHA256-INIT`
+transaction and permit another task on the same core to reinitialize it.
+TLS still requires a cooperative owner because its transcript, HMAC/HKDF,
+certificate, record, and key-schedule scratch buffers are module-global.
 
 ## Acceptance Before Provider Credentials
 

@@ -406,7 +406,12 @@ buffer), then tokenises and interprets:
 `CRC-FINAL` `CRC-FINAL@`
 
 **SHA-256 engine (ISA-native, EXT.CRYPTO)**
-`SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-STATUS@` `SHA256-DOUT@`
+`SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-CLEAR`
+
+All four words use a private per-core streaming context and return checked
+status (`0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS,
+`4` LENGTH-OVERFLOW). Failed operations abort and wipe, and failed `FINAL`
+does not publish a digest.
 
 **SHA-512 streaming (ISA-native, EXT.CRYPTO mode 2)**
 `SHA512-INIT` `SHA512-UPDATE` `SHA512-FINAL` `SHA512-CLEAR`

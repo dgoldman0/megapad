@@ -12677,7 +12677,7 @@ class TestBIOSSHA2(unittest.TestCase):
         self._bios_harness.setUp()
         self._bios_labels = self._bios_harness._bios_labels
 
-    def _run_sha512(self, lines, *, ext_mem_mib=0):
+    def _run_sha2(self, lines, *, ext_mem_mib=0):
         sys_obj, buf = self._bios_harness._boot_bios(
             ext_mem_mib=ext_mem_mib,
         )
@@ -12703,9 +12703,13 @@ class TestBIOSSHA2(unittest.TestCase):
         self.assertEqual(cpu.regs[6], marker)
         self.assertEqual(cpu.regs[7], 2)
 
-    def test_sha512_context_geometry_and_dictionary_chain(self):
-        """The private arena is exact and four append-only words are linked."""
+    def test_sha2_context_geometry_and_dictionary_chain(self):
+        """Both private arenas are exact and the hard-replaced chain closes."""
         labels = self._bios_labels
+        self.assertEqual(
+            labels["sha512_contexts"] - labels["sha256_contexts"],
+            16 * 256,
+        )
         self.assertEqual(
             labels["dict_pad"] - labels["sha512_contexts"],
             16 * 512,
@@ -12721,11 +12725,231 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 462)
+        self.assertEqual(len(seen), 461)
+        self.assertNotIn("d_sha256_status_fetch", labels)
+        self.assertNotIn("d_sha256_dout_fetch", labels)
+        self.assertNotIn("sha_blk_buf", labels)
+        self.assertNotIn("sha_blk_off", labels)
+
+    def test_sha256_checked_streaming_splits_and_restores_outer_acc(self):
+        """Checked SHA-256 handles splits, publishes once, and wipes context."""
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            "CREATE abc 3 ALLOT",
+            "97 abc C!  98 abc 1 + C!  99 abc 2 + C!",
+            "CREATE msg 80 ALLOT",
+            ": fill-seq 80 0 DO I msg I + C! LOOP ; fill-seq",
+            "CREATE h-abc 32 ALLOT",
+            "CREATE h-one 32 ALLOT",
+            "CREATE h-split 32 ALLOT",
+            "CREATE outer-a 32 ALLOT  outer-a 32 90 FILL",
+            "CREATE outer-r 32 ALLOT",
+            "outer-a GF-A!",
+            '."  I=" SHA256-INIT .',
+            '."  U=" abc 3 SHA256-UPDATE .',
+            '."  F=" h-abc SHA256-FINAL .',
+            "SHA256-INIT DROP msg 80 SHA256-UPDATE DROP"
+            " h-one SHA256-FINAL DROP",
+            "SHA256-INIT DROP msg 63 SHA256-UPDATE DROP"
+            " msg 63 + 17 SHA256-UPDATE DROP"
+            " h-split SHA256-FINAL DROP",
+            "outer-r GF-R@",
+            '."  EQ=" h-one 32 h-split 32 COMPARE .',
+            '."  ACC=" outer-a 32 outer-r 32 COMPARE .',
+            '."  H0=" h-abc C@ .',
+            '."  H1=" h-abc 1 + C@ .',
+            '."  H2=" h-abc 2 + C@ .',
+            '."  H3=" h-abc 3 + C@ .',
+        ])
+        self.assertIn("I=0 ", text)
+        self.assertIn("U=0 ", text)
+        self.assertIn("F=0 ", text)
+        self.assertIn("EQ=0 ", text)
+        self.assertIn("ACC=0 ", text)
+        self.assertIn("H0=186 ", text)
+        self.assertIn("H1=120 ", text)
+        self.assertIn("H2=22 ", text)
+        self.assertIn("H3=191 ", text)
+        context = self._bios_labels["sha256_contexts"]
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[context:context + 256]),
+            bytes(256),
+        )
+
+    def test_sha256_padding_boundaries_match_hashlib(self):
+        """Lengths around the 56/64-byte boundaries match SHA-256."""
+        message_addr = 0x1B500
+        output_base = 0x1B600
+        lengths = (55, 56, 63, 64, 65)
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = [
+            f": fill-seq 65 0 DO I {message_addr} I + C! LOOP ;",
+            "fill-seq",
+        ]
+        for index, length in enumerate(lengths):
+            output = output_base + index * 32
+            lines.extend([
+                "SHA256-INIT DROP",
+                f"{message_addr} {length} SHA256-UPDATE DROP",
+                f"{output} SHA256-FINAL DROP",
+            ])
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+        self.assertNotIn("???", text)
+
+        message = bytes(range(65))
+        for index, length in enumerate(lengths):
+            output = output_base + index * 32
+            actual = bytes(sys_obj.cpu.mem[output:output + 32])
+            self.assertEqual(actual, hashlib.sha256(message[:length]).digest())
+
+        context = self._bios_labels["sha256_contexts"]
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[context:context + 256]),
+            bytes(256),
+        )
+
+    def test_sha256_rejects_forged_state_and_length_before_absorb(self):
+        """Corrupt active/offset/length metadata aborts with no publication."""
+        context = self._bios_labels["sha256_contexts"]
+        text = self._run_sha2([
+            "CREATE msg 1 ALLOT  65 msg C!",
+            "CREATE h-buf 32 ALLOT  h-buf 32 165 FILL",
+            '."  IU=" msg 0 SHA256-UPDATE .',
+            '."  IF=" h-buf SHA256-FINAL .',
+            "SHA256-INIT DROP",
+            f"2 {context + 56} !",
+            '."  A=" msg 0 SHA256-UPDATE .',
+            "SHA256-INIT DROP",
+            f"64 {context + 48} !",
+            '."  P=" msg 0 SHA256-UPDATE .',
+            "SHA256-INIT DROP",
+            f"1 {context + 32} !",
+            '."  NB=" msg 0 SHA256-UPDATE .',
+            "SHA256-INIT DROP",
+            f"8 {context + 32} !",
+            '."  LM=" h-buf SHA256-FINAL .',
+            "SHA256-INIT DROP",
+            f"1 {context + 40} !",
+            '."  H=" msg 0 SHA256-UPDATE .',
+            "SHA256-INIT DROP",
+            f"-8 {context + 32} !",
+            f"63 {context + 48} !",
+            '."  O=" msg 1 SHA256-UPDATE .',
+            '."  B=" h-buf C@ .',
+            '."  C0=" SHA256-CLEAR .',
+            '."  C1=" SHA256-CLEAR .',
+        ])
+        self.assertIn("IU=1 ", text)
+        self.assertIn("IF=1 ", text)
+        self.assertIn("A=1 ", text)
+        self.assertIn("P=1 ", text)
+        self.assertIn("NB=1 ", text)
+        self.assertIn("LM=1 ", text)
+        self.assertIn("H=4 ", text)
+        self.assertIn("O=4 ", text)
+        self.assertIn("B=165 ", text)
+        self.assertIn("C0=0 ", text)
+        self.assertIn("C1=0 ", text)
+
+    def test_sha256_preflights_spans_and_complete_context_arena(self):
+        """Cross-window and arena aliases abort before caller publication."""
+        other_context = self._bios_labels["sha256_contexts"] + 256
+        text = self._run_sha2([
+            f"165 {other_context} C!",
+            '."  V=" SHA256-INIT DROP'
+            " EXT-MEM-BASE EXT-MEM-SIZE + 1 - 1 SHA256-UPDATE .",
+            '."  X=" SHA256-INIT DROP'
+            " EXT-MEM-BASE EXT-MEM-SIZE + 1 - 2 SHA256-UPDATE .",
+            "VARIABLE bad-out",
+            "EXT-MEM-BASE EXT-MEM-SIZE + 16 - bad-out !",
+            "bad-out @ 16 165 FILL",
+            "SHA256-INIT DROP",
+            '."  O=" bad-out @ SHA256-FINAL .',
+            '."  B0=" bad-out @ C@ .',
+            '."  B15=" bad-out @ 15 + C@ .',
+            "SHA256-INIT DROP",
+            f'."  U=" {other_context} 1 SHA256-UPDATE .',
+            "SHA256-INIT DROP",
+            f'."  F=" {other_context} SHA256-FINAL .',
+            f'."  AB=" {other_context} C@ .',
+        ], ext_mem_mib=64)
+        self.assertIn("V=0 ", text)
+        self.assertIn("X=2 ", text)
+        self.assertIn("O=2 ", text)
+        self.assertIn("B0=165 ", text)
+        self.assertIn("B15=165 ", text)
+        self.assertIn("U=3 ", text)
+        self.assertIn("F=3 ", text)
+        self.assertIn("AB=165 ", text)
+
+    def test_kdos_sha256_hmac_hkdf_exact_source_slices(self):
+        """Exact checked KDOS helpers return status without stack leakage."""
+        with open(KDOS_PATH) as source_file:
+            source_lines = source_file.read().splitlines()
+
+        def source_slice(start_line, end_line):
+            start = source_lines.index(start_line)
+            end = source_lines.index(end_line)
+            return [
+                line
+                for line in source_lines[start:end]
+                if line.strip() and not line.lstrip().startswith("\\")
+            ]
+
+        definitions = source_slice(
+            "0 CONSTANT SHA256-OK",
+            "0 CONSTANT SHA512-OK",
+        )
+        definitions += source_slice(
+            "64 CONSTANT HMAC256-BLKSZ",
+            "\\ PQ-DERIVE ( out -- )",
+        )
+        text = self._run_sha2(definitions + [
+            "CREATE abc 3 ALLOT",
+            "97 abc C!  98 abc 1 + C!  99 abc 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "CREATE bad-buf 32 ALLOT  bad-buf 32 165 FILL",
+            "VARIABLE d0  DEPTH d0 !",
+            '."  HS=" abc 3 h-buf SHA256 .',
+            '."  HD=" DEPTH d0 @ = .',
+            '."  BAD=" -1 1 bad-buf SHA256 .',
+            '."  BB=" bad-buf C@ .',
+            "CREATE hk 4 ALLOT",
+            "74 hk C! 101 hk 1 + C! 102 hk 2 + C! 101 hk 3 + C!",
+            "CREATE hm 28 ALLOT",
+            ': fill-msg S" what do ya want for nothing?"'
+            " DROP hm 28 CMOVE ; fill-msg",
+            "CREATE hmac-out 32 ALLOT",
+            '."  MS=" hk 4 hm 28 hmac-out HMAC-SHA256 .',
+            '."  MD=" DEPTH d0 @ = .',
+            "CREATE salt 13 ALLOT",
+            ": fill-salt 13 0 DO I salt I + C! LOOP ; fill-salt",
+            "CREATE ikm 22 ALLOT  ikm 22 11 FILL",
+            "CREATE prk 32 ALLOT",
+            '."  KS=" salt 13 ikm 22 prk HKDF-SHA256-EXTRACT .',
+            '."  KD=" DEPTH d0 @ = .',
+            '."  S=" SHA256-OK . SHA256-STATE . SHA256-RANGE .'
+            " SHA256-CONTEXT-ALIAS . SHA256-LENGTH-OVERFLOW .",
+            '."  H0=" h-buf C@ .',
+            '."  M0=" hmac-out C@ .',
+            '."  P0=" prk C@ .',
+        ])
+        self.assertIn("HS=0 ", text)
+        self.assertIn("HD=-1 ", text)
+        self.assertIn("BAD=2 ", text)
+        self.assertIn("BB=165 ", text)
+        self.assertIn("MS=0 ", text)
+        self.assertIn("MD=-1 ", text)
+        self.assertIn("KS=0 ", text)
+        self.assertIn("KD=-1 ", text)
+        self.assertIn("S=0 1 2 3 4 ", text)
+        self.assertIn("H0=186 ", text)
+        self.assertIn("M0=91 ", text)
+        self.assertIn("P0=7 ", text)
 
     def test_sha512_abc(self):
         """Streaming SHA-512('abc') returns success and starts ddaf35a1."""
-        text = self._run_sha512([
+        text = self._run_sha2([
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 64 ALLOT",
@@ -12747,7 +12971,7 @@ class TestBIOSSHA2(unittest.TestCase):
 
     def test_sha512_arbitrary_splits_cross_block_boundary(self):
         """Split updates across 128 bytes equal a one-shot 200-byte hash."""
-        text = self._run_sha512([
+        text = self._run_sha2([
             "CREATE msg 200 ALLOT",
             ": fill-seq 200 0 DO I msg I + C! LOOP ; fill-seq",
             "CREATE h-one 64 ALLOT",
@@ -12798,7 +13022,7 @@ class TestBIOSSHA2(unittest.TestCase):
 
     def test_sha512_clear_reuse_and_acc_transparency(self):
         """CLEAR permits reuse, and FINAL restores an outer ACC value."""
-        text = self._run_sha512([
+        text = self._run_sha2([
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE outer-a 32 ALLOT  outer-a 32 90 FILL",
@@ -12819,7 +13043,7 @@ class TestBIOSSHA2(unittest.TestCase):
 
     def test_sha512_inactive_calls_are_checked_and_do_not_publish(self):
         """Inactive UPDATE/FINAL return STATE; FINAL preserves destination."""
-        text = self._run_sha512([
+        text = self._run_sha2([
             "CREATE h-buf 64 ALLOT",
             "h-buf 64 165 FILL",
             '."  U=" 0 0 SHA512-UPDATE .',
@@ -12836,7 +13060,7 @@ class TestBIOSSHA2(unittest.TestCase):
 
     def test_sha512_span_boundaries_are_preflighted_atomically(self):
         """Endpoint spans pass; crossing input/output spans abort safely."""
-        text = self._run_sha512([
+        text = self._run_sha2([
             '."  V=" SHA512-INIT DROP'
             "  EXT-MEM-BASE EXT-MEM-SIZE + 1 - 1 SHA512-UPDATE .",
             "SHA512-CLEAR DROP",
@@ -12861,7 +13085,7 @@ class TestBIOSSHA2(unittest.TestCase):
     def test_sha512_rejects_the_complete_context_arena(self):
         """Input and output may not overlap any core's private context."""
         other_context = self._bios_labels["sha512_contexts"] + 512
-        text = self._run_sha512([
+        text = self._run_sha2([
             "CREATE msg 1 ALLOT  65 msg C!",
             f"165 {other_context} C!",
             "SHA512-INIT DROP",
@@ -12877,7 +13101,7 @@ class TestBIOSSHA2(unittest.TestCase):
     def test_sha512_length_overflow_aborts_before_absorb(self):
         """A 128-bit bit-length wrap returns LENGTH-OVERFLOW and wipes."""
         context = self._bios_labels["sha512_contexts"]
-        text = self._run_sha512([
+        text = self._run_sha2([
             "CREATE msg 1 ALLOT  65 msg C!",
             "SHA512-INIT DROP",
             f"-1 {context + 64} !",
@@ -12887,27 +13111,6 @@ class TestBIOSSHA2(unittest.TestCase):
         ])
         self.assertIn("O=4 ", text)
         self.assertIn("A=1 ", text)
-
-    def test_sha256_final_publishes_then_scrubs_visible_state(self):
-        """SHA-256 publishes its digest before wiping the shared engine."""
-        text = self._run_sha512([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE h-buf 32 ALLOT",
-            "CREATE visible 32 ALLOT",
-            "SHA256-INIT",
-            "msg 3 SHA256-UPDATE",
-            "h-buf SHA256-FINAL",
-            "visible SHA256-DOUT@",
-            '."  H0=" h-buf C@ .',
-            '."  H1=" h-buf 1 + C@ .',
-            '."  V0=" visible C@ .',
-            '."  V31=" visible 31 + C@ .',
-        ])
-        self.assertIn("H0=186 ", text)
-        self.assertIn("H1=120 ", text)
-        self.assertIn("V0=0 ", text)
-        self.assertIn("V31=0 ", text)
 
     def test_kdos_sha512_surface_from_exact_source_slice(self):
         """The exact KDOS wrapper and status constants run over the BIOS ABI."""
@@ -12920,7 +13123,7 @@ class TestBIOSSHA2(unittest.TestCase):
             for line in source_lines[start:end]
             if line.strip() and not line.lstrip().startswith("\\")
         ]
-        text = self._run_sha512(definitions + [
+        text = self._run_sha2(definitions + [
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 64 ALLOT",
@@ -12958,8 +13161,8 @@ class TestKDOSSHA256(_KDOSTestBase):
         """SHA256 of empty string matches reference (e3b0c442...)."""
         text = self._run_kdos([
             "CREATE h-buf 32 ALLOT",
-            "SHA256-INIT",
-            "h-buf SHA256-FINAL",
+            "SHA256-INIT DROP",
+            "h-buf SHA256-FINAL DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
             '."  H2=" h-buf 2 + C@ .',
@@ -12976,9 +13179,9 @@ class TestKDOSSHA256(_KDOSTestBase):
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "SHA256-INIT",
-            "msg 3 SHA256-UPDATE",
-            "h-buf SHA256-FINAL",
+            "SHA256-INIT DROP",
+            "msg 3 SHA256-UPDATE DROP",
+            "h-buf SHA256-FINAL DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
             '."  H2=" h-buf 2 + C@ .',
@@ -12995,9 +13198,9 @@ class TestKDOSSHA256(_KDOSTestBase):
             "CREATE msg 16 ALLOT",
             "msg 16 65 FILL",
             "CREATE h-buf 32 ALLOT",
-            "SHA256-INIT",
-            "msg 16 SHA256-UPDATE",
-            "h-buf SHA256-FINAL",
+            "SHA256-INIT DROP",
+            "msg 16 SHA256-UPDATE DROP",
+            "h-buf SHA256-FINAL DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
             '."  H2=" h-buf 2 + C@ .',
@@ -13015,9 +13218,9 @@ class TestKDOSSHA256(_KDOSTestBase):
             ": fill-seq 200 0 DO I msg I + C! LOOP ;",
             "fill-seq",
             "CREATE h-buf 32 ALLOT",
-            "SHA256-INIT",
-            "msg 200 SHA256-UPDATE",
-            "h-buf SHA256-FINAL",
+            "SHA256-INIT DROP",
+            "msg 200 SHA256-UPDATE DROP",
+            "h-buf SHA256-FINAL DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
             '."  H2=" h-buf 2 + C@ .',
@@ -13029,12 +13232,12 @@ class TestKDOSSHA256(_KDOSTestBase):
         self.assertIn("H3=28 ", text)
 
     def test_sha256_convenience_word(self):
-        """SHA256 ( addr len hash-addr -- ) convenience word."""
+        """SHA256 ( addr len hash-addr -- status ) convenience word."""
         text = self._run_kdos([
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf SHA256",
+            "msg 3 h-buf SHA256 DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
         ])
@@ -13048,8 +13251,8 @@ class TestKDOSSHA256(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h1 32 ALLOT",
             "CREATE h2 32 ALLOT",
-            "msg 3 h1 SHA256",
-            "msg 3 h2 SHA256",
+            "msg 3 h1 SHA256 DROP",
+            "msg 3 h2 SHA256 DROP",
             '."  R1=" h1 C@ .',
             '."  R2=" h2 C@ .',
         ])
@@ -13066,7 +13269,7 @@ class TestKDOSSHA256(_KDOSTestBase):
             ': fill-msg  S" what do ya want for nothing?" DROP hm 28 CMOVE ;',
             'fill-msg',
             "CREATE h-out 32 ALLOT",
-            "hk 4 hm 28 h-out HMAC-SHA256",
+            "hk 4 hm 28 h-out HMAC-SHA256 DROP",
             '."  M0=" h-out C@ .',
             '."  M1=" h-out 1 + C@ .',
             '."  M2=" h-out 2 + C@ .',
@@ -13087,7 +13290,7 @@ class TestKDOSSHA256(_KDOSTestBase):
             ": fill-salt 13 0 DO I salt I + C! LOOP ; fill-salt",
             "CREATE ikm 22 ALLOT  ikm 22 11 FILL",
             "CREATE prk 32 ALLOT",
-            "salt 13 ikm 22 prk HKDF-SHA256-EXTRACT",
+            "salt 13 ikm 22 prk HKDF-SHA256-EXTRACT DROP",
             '."  P0=" prk C@ .',
             '."  P1=" prk 1 + C@ .',
             '."  P2=" prk 2 + C@ .',
@@ -13108,11 +13311,11 @@ class TestKDOSSHA256(_KDOSTestBase):
             ": fill-salt 13 0 DO I salt I + C! LOOP ; fill-salt",
             "CREATE ikm 22 ALLOT  ikm 22 11 FILL",
             "CREATE prk 32 ALLOT",
-            "salt 13 ikm 22 prk HKDF-SHA256-EXTRACT",
+            "salt 13 ikm 22 prk HKDF-SHA256-EXTRACT DROP",
             "CREATE info 10 ALLOT",
             ": fill-info 10 0 DO I 240 + info I + C! LOOP ; fill-info",
             "CREATE okm 42 ALLOT",
-            "prk info 10 42 okm HKDF-SHA256-EXPAND",
+            "prk info 10 42 okm HKDF-SHA256-EXPAND DROP",
             '."  O0=" okm C@ .',
             '."  O1=" okm 1 + C@ .',
             '."  O2=" okm 2 + C@ .',
@@ -13130,7 +13333,7 @@ class TestKDOSSHA256(_KDOSTestBase):
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf TLS-HASH",
+            "msg 3 h-buf TLS-HASH DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
         ])
@@ -13144,7 +13347,7 @@ class TestKDOSSHA256(_KDOSTestBase):
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf TLS-HASH",
+            "msg 3 h-buf TLS-HASH DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
         ])
@@ -18229,7 +18432,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
             "CREATE el-prk 32 ALLOT",
             ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
             "CREATE el-out 32 ALLOT",
-            "el-prk  TLS-L-KEY /TLS-L-KEY  0 0  32  el-out  TLS-EXPAND-LABEL",
+            "el-prk TLS-L-KEY /TLS-L-KEY 0 0 32 el-out"
+            " TLS-EXPAND-LABEL DROP",
             '." K0=" el-out C@ .',
             '." K1=" el-out 1 + C@ .',
             '." K2=" el-out 2 + C@ .',
@@ -18247,7 +18451,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
             "CREATE el-prk 32 ALLOT",
             ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
             "CREATE el-out 12 ALLOT",
-            "el-prk  TLS-L-IV /TLS-L-IV  0 0  12  el-out  TLS-EXPAND-LABEL",
+            "el-prk TLS-L-IV /TLS-L-IV 0 0 12 el-out"
+            " TLS-EXPAND-LABEL DROP",
             '." V0=" el-out C@ .',
             '." V1=" el-out 1 + C@ .',
             '." V2=" el-out 2 + C@ .',
@@ -18280,7 +18485,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ks_handshake_wr_key(self):
         """TLS-KS-HANDSHAKE derives correct client HS key (WR-KEY)."""
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             '." W0=" test-ctx @ TLS-CTX.WR-KEY C@ .',
             '." W1=" test-ctx @ TLS-CTX.WR-KEY 1 + C@ .',
             '." W2=" test-ctx @ TLS-CTX.WR-KEY 2 + C@ .',
@@ -18295,7 +18500,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ks_handshake_rd_key(self):
         """TLS-KS-HANDSHAKE derives correct server HS key (RD-KEY)."""
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             '." R0=" test-ctx @ TLS-CTX.RD-KEY C@ .',
             '." R1=" test-ctx @ TLS-CTX.RD-KEY 1 + C@ .',
             '." R2=" test-ctx @ TLS-CTX.RD-KEY 2 + C@ .',
@@ -18310,7 +18515,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ks_handshake_wr_iv(self):
         """TLS-KS-HANDSHAKE derives correct client HS IV."""
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             '." I0=" test-ctx @ TLS-CTX.WR-IV C@ .',
             '." I1=" test-ctx @ TLS-CTX.WR-IV 1 + C@ .',
             '." I2=" test-ctx @ TLS-CTX.WR-IV 2 + C@ .',
@@ -18325,7 +18530,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ks_handshake_rd_iv(self):
         """TLS-KS-HANDSHAKE derives correct server HS IV."""
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             '." J0=" test-ctx @ TLS-CTX.RD-IV C@ .',
             '." J1=" test-ctx @ TLS-CTX.RD-IV 1 + C@ .',
             '." J2=" test-ctx @ TLS-CTX.RD-IV 2 + C@ .',
@@ -18486,7 +18691,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
                     125, 204, 199, 254, 58, 152, 166, 226,
                     87, 177, 185, 223, 238, 193, 79, 94]
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             # Build fake verify_data with pre-computed bytes
             "CREATE vd-buf 32 ALLOT",
         ]
@@ -18502,7 +18707,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_verify_finished_bad_mac(self):
         """TLS-VERIFY-FINISHED rejects wrong verify_data."""
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             # verify_data = all zeros (wrong)
             "CREATE vd-buf 32 ALLOT  vd-buf 32 0 FILL",
             "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
@@ -18514,7 +18719,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_build_finished_format(self):
         """TLS-BUILD-FINISHED produces encrypted record with correct header."""
         lines = self._TLS_KS_SETUP + [
-            "test-ctx @ TLS-KS-HANDSHAKE",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
             "CREATE fin-rec 128 ALLOT",
             "test-ctx @  fin-rec  TLS-BUILD-FINISHED",
             "VARIABLE fin-rl  fin-rl !",
@@ -18593,13 +18798,14 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
             "test-ctx @ /TLS-CTX 0 FILL",
             "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
             "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
-            "test-ctx @ TLS-KS-APPLICATION",
+            '." KS=" test-ctx @ TLS-KS-APPLICATION .',
             '." STATE=" test-ctx @ TLS-CTX.STATE @ .',
             "CREATE fin-rec 128 ALLOT",
             "test-ctx @ fin-rec TLS-HANDSHAKE-COMPLETE",
             '." RECLEN=" .',
         ]
         text = self._run_kdos(lines)
+        self.assertIn("KS=-4204 ", text)
         self.assertIn("STATE=1 ", text)
         self.assertIn("RECLEN=0 ", text)
 
