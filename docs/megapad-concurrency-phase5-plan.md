@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-27
 
-**Status:** Element 1 of 4 complete; Element 2 not started
+**Status:** Elements 1 and 2 of 4 complete; Element 3 not started
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -31,7 +31,7 @@ elements or sub-elements.
 | Element | Scope | Status |
 |---|---|---|
 | 1 | Rollout policy | Complete |
-| 2 | Production entry-point integration | Pending |
+| 2 | Production entry-point integration | Complete |
 | 3 | Production scheduler consolidation | Pending |
 | 4 | Bounded closure and handoff | Pending |
 
@@ -106,6 +106,23 @@ Element 2 will expose `auto`, one, two, and four lanes through:
 The public spelling will be `lanes`; no duplicate `workers` alias or
 environment-variable configuration will be added. Every entry point will
 report or retain the resolved width rather than silently reverting to auto.
+
+### P5-D2: one public spelling and reconstruction custody
+
+| Contention | Decision | Claim boundary |
+|---|---|---|
+| The implementation calls these objects workers internally, while users configure host execution lanes. Adding both names or an environment override would create multiple precedence paths, and machine reconstruction could silently discard an explicit width. | Use `--lanes` and scenario `machine.lanes`; use `lanes` in `MachineSession.from_bios`; translate once to the existing internal `worker_count`. RAM resize preserves the resolved width exactly. | `auto` is resolved only by `MegapadSystem`. Entry points accept only `auto`, 1, 2, or 4, and do not consult environment variables. Reconfiguration requires constructing a new machine. |
+
+### Element 2 completion record
+
+The main CLI now exposes `--lanes`; shared sessions expose and report the
+same setting; `MachineSession` carries the request; development scenarios
+accept and record `machine.lanes`; and interactive RAM resizing preserves the
+resolved width. The focused five-test entry-point selection passes in
+0.34 test seconds. The foreground command takes 0.85 seconds, peaks at
+324,560 KiB RSS, and reports no process swap. The scenario control uses an
+explicit four-lane session, so the result covers actual helper creation rather
+than only mocked argument propagation.
 
 ## Element 3: production scheduler consolidation
 

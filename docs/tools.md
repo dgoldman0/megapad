@@ -40,6 +40,8 @@ python cli.py [flags]
 | `--nic-peer` | PORT | NIC+1 | UDP peer port for NIC communication. |
 | `--nic-tap` | IFNAME | mp64tap0 | Wire NIC to a Linux TAP device for real L2 networking. Requires a pre-created TAP interface (see below). |
 | `--cores` | N | 1 | Number of CPU cores (1–4 for multicore SoC). |
+| `--clusters` | N | 0 | Number of four-microcore clusters (0–3). |
+| `--lanes` | auto, 1, 2, or 4 | auto | Fixed host execution width. Automatic selection uses guest topology and process CPU affinity. |
 | `--extmem` | MiB | 128 | External memory size in mebibytes. |
 | `--headless` | — | off | Headless mode — no curses display, enables TCP terminal server on port 6464. |
 | `--connect` | HOST:PORT | — | Connect a remote terminal to a headless instance. |

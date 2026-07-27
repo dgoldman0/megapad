@@ -15,6 +15,7 @@ Provides:
 
 Usage:
   python cli.py [--ram SIZE_KIB] [--storage IMAGE] [--load FILE@ADDR] [--bios FILE]
+                [--cores N] [--clusters N] [--lanes {auto,1,2,4}]
                 [--display] [--scale N] [--extmem MiB]
 """
 
@@ -777,9 +778,13 @@ class MegapadCLI(cmd.Cmd):
             ext_mem_size=old_sys.ext_mem_size,
             vram_size=old_sys.vram_size,
             realtime_clock=old_sys.rtc.realtime,
+            worker_count=old_sys.worker_count,
         )
         self.sys.uart.on_tx = self._uart_tx_handler
-        print(f"  RAM resized to {kib} KiB. System recreated (use 'boot' to start).")
+        print(
+            f"  RAM resized to {kib} KiB with {self.sys.worker_count} "
+            "execution lane(s). System recreated (use 'boot' to start)."
+        )
 
     # -- UART --
 
@@ -1496,6 +1501,15 @@ def main():
                         help="Number of full CPU cores (default: 1)")
     parser.add_argument("--clusters", type=int, default=0,
                         help="Number of micro-core clusters, 4 cores each (default: 0, max: 3)")
+    parser.add_argument(
+        "--lanes",
+        choices=("auto", "1", "2", "4"),
+        default="auto",
+        help=(
+            "Host execution lanes (default: auto from guest topology and "
+            "host CPU affinity)"
+        ),
+    )
     parser.add_argument("--display", action="store_true",
                         help="Open a pygame window showing the framebuffer")
     parser.add_argument("--scale", type=int, default=2, metavar="N",
@@ -1570,6 +1584,9 @@ def main():
         nic_backend=nic_backend,
         num_cores=args.cores,
         num_clusters=args.clusters,
+        worker_count=(
+            None if args.lanes == "auto" else int(args.lanes)
+        ),
         ext_mem_size=args.extmem * (1 << 20),
         vram_size=args.vram * (1 << 20),
     )

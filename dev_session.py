@@ -16,6 +16,16 @@ class ScenarioFailure(RuntimeError):
     pass
 
 
+def resolve_lanes(value: object) -> int | None:
+    if value is None or value == "auto":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ScenarioFailure("scenario machine.lanes must be auto, 1, 2, or 4")
+    if value not in (1, 2, 4):
+        raise ScenarioFailure("scenario machine.lanes must be auto, 1, 2, or 4")
+    return value
+
+
 def resolve_path(base: Path, value: str | None) -> Path | None:
     if value is None:
         return None
@@ -53,6 +63,7 @@ def run_scenario(path: Path) -> dict:
         vram_size=int(machine.get("vram_mib", 4)) << 20,
         num_cores=int(machine.get("cores", 1)),
         num_clusters=int(machine.get("clusters", 0)),
+        lanes=resolve_lanes(machine.get("lanes", "auto")),
         cols=int(machine.get("cols", 80)),
         rows=int(machine.get("rows", 30)),
         batch_steps=int(machine.get("batch_steps", 100_000)),
@@ -156,6 +167,11 @@ def run_scenario(path: Path) -> dict:
             "elapsed_s": time.perf_counter() - started,
             "actions": action_reports,
             "captures": captures,
+            "machine": {
+                "full_cores": session.system.num_full_cores,
+                "micro_cores": session.system.num_micro_cores,
+                "lanes": session.system.worker_count,
+            },
             "uart": {
                 "bytes": len(session.raw_output),
                 "batch_callbacks": session.output_batches,

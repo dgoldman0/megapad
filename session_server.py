@@ -24,6 +24,12 @@ def main() -> int:
     parser.add_argument("--vram-mib", type=int, default=4)
     parser.add_argument("--cores", type=int, default=1)
     parser.add_argument("--clusters", type=int, default=0)
+    parser.add_argument(
+        "--lanes",
+        choices=("auto", "1", "2", "4"),
+        default="auto",
+        help="host execution lanes (default: automatic)",
+    )
     parser.add_argument("--cols", type=int, default=80)
     parser.add_argument("--rows", type=int, default=30)
     parser.add_argument("--batch-steps", type=int, default=100_000)
@@ -64,6 +70,7 @@ def main() -> int:
         vram_size=args.vram_mib << 20,
         num_cores=args.cores,
         num_clusters=args.clusters,
+        lanes=None if args.lanes == "auto" else int(args.lanes),
         cols=args.cols,
         rows=args.rows,
         batch_steps=args.batch_steps,
@@ -104,6 +111,10 @@ def main() -> int:
         print(
             f"[shared] clock:  "
             f"{'virtual' if args.virtual_clock else 'realtime'}",
+            flush=True,
+        )
+        print(
+            f"[shared] lanes:  {session.system.worker_count}",
             flush=True,
         )
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)

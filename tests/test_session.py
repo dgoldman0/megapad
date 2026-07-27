@@ -240,6 +240,7 @@ def test_cli_ramsize_preserves_machine_configuration(tmp_path, capsys):
         ext_mem_size=2 << 20,
         vram_size=256,
         realtime_clock=True,
+        worker_count=1,
     )
     cli = MegapadCLI(system)
 
@@ -256,6 +257,7 @@ def test_cli_ramsize_preserves_machine_configuration(tmp_path, capsys):
     assert cli.sys.ext_mem_size == 2 << 20
     assert cli.sys.vram_size == 256
     assert cli.sys.rtc.realtime
+    assert cli.sys.worker_count == 1
     assert cli.sys.uart.on_tx == cli._uart_tx_handler
     assert "RAM resized to 128 KiB" in capsys.readouterr().out
 
@@ -314,10 +316,28 @@ def test_cli_uses_128_mib_external_memory_by_default(monkeypatch):
         cli_main()
 
     assert system_factory.call_args.kwargs["ext_mem_size"] == 128 << 20
+    assert system_factory.call_args.kwargs["worker_count"] is None
 
 
-def test_session_server_uses_128_mib_external_memory_by_default(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["session_server.py"])
+def test_cli_propagates_explicit_execution_lanes(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["cli.py", "--cores", "3", "--lanes", "2"],
+    )
+    with (
+        patch("cli.MegapadSystem", wraps=MegapadSystem) as system_factory,
+        patch.object(MegapadCLI, "cmdloop", return_value=None),
+    ):
+        cli_main()
+
+    assert system_factory.call_args.kwargs["worker_count"] == 2
+
+
+def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["session_server.py", "--lanes", "4"],
+    )
     with (
         patch("session_server.MachineSession.from_bios") as from_bios,
         patch("session_server.SharedMachine"),
@@ -327,6 +347,7 @@ def test_session_server_uses_128_mib_external_memory_by_default(monkeypatch):
         assert session_server_main() == 0
 
     assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
+    assert from_bios.call_args.kwargs["lanes"] == 4
 
 
 def test_machine_session_warm_reset_discards_interrupted_uart_batch():
@@ -356,6 +377,7 @@ def test_json_scenario_runner(tmp_path):
             "bios": str(BIOS),
             "cols": 60,
             "rows": 20,
+            "lanes": 4,
         },
         "actions": [
             {"type": "wait_idle", "max_steps": 2_000_000},
@@ -379,6 +401,8 @@ def test_json_scenario_runner(tmp_path):
 
     assert summary["success"]
     assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
+    assert from_bios.call_args.kwargs["lanes"] == 4
+    assert summary["machine"]["lanes"] == 4
     assert summary["uart"]["byte_callbacks"] == 0
     assert image.is_file()
     assert json.loads(report.read_text())["success"]
