@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **462** entries.  The numbered
+The live dictionary link chain contains **464** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -28,7 +28,7 @@ Each entry is a linked list node:
 
 1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled.  The TX ring buffer address is written to UART TX_RING_BASE (`+0x08`).
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
-3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (FSLOAD).
+3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (`ENTROPY-READY?`).
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -709,13 +709,46 @@ higher-level preflight before any SHA context is initialized.
 | 277 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
 | 278 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
 
-### TRNG (3 words)
+### TRNG (3 historical + 2 append-only words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 279 | `RANDOM` | `( -- u )` | | Return 64 random bits; bus-fault if the shared TRNG is unusable |
 | 280 | `RANDOM8` | `( -- u )` | | Return 8 random bits; bus-fault if the shared TRNG is unusable |
 | 281 | `SEED-RNG` | `( u -- )` | | Supplement future entropy while usable; never restores an unusable source |
+
+The checked append-only entries are:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `ENTROPY-FILL` | `( addr len -- status )` | Preflight a complete writable destination, fill it from checked `RAND8` reads, and wipe it if a detected health loss occurs after publication starts |
+| `ENTROPY-READY?` | `( -- flag )` | Return canonical true only when the hardware `STATUS` byte is exactly one; return false for unavailable or noncanonical values |
+
+Statuses are `0` OK, `1` UNAVAILABLE, `2` RANGE, and `3` PROTECTED.
+Lengths must be nonnegative. An empty span is an unconditional no-op,
+including `(0,0)`, and its unused address is ignored. Every nonempty address
+must be nonnegative; a nonempty null destination is RANGE. Every
+nonempty span must fit wholly and without wrap in one advertised Bank 0,
+external, HBW, or VRAM window. Within Bank 0, only
+`[dict_free, caller-DSP-8)` is admitted: the lower bound protects the entire
+static BIOS/private-state footprint, while the upper bound protects the live
+stacks and the status cell that the word will return. This boundary does not
+prove allocation ownership; the caller must still supply a buffer it manages.
+
+`ENTROPY-FILL` requires `STATUS` to equal exactly one before every byte read
+and after the final byte. An initial unavailable result leaves the destination
+unchanged. A detected loss after one or more bytes erases the entire admitted
+span before returning UNAVAILABLE. It retains no operation state across the
+call. `ENTROPY-READY?` exposes the same exact readiness decision without
+requiring higher-level software to know the TRNG MMIO address.
+
+The BIOS bus-fault handler cannot resume an interrupted Forth return chain.
+Consequently, if a concurrent health transition occurs specifically after a
+successful `STATUS` read but before the corresponding `RAND8` read, that data
+read may bus-fault instead of returning a status and the word cannot promise
+its wipe path. Health transitions caused by a successfully delivered native
+data byte are caught by the following `STATUS` check, including a transition
+on the final byte.
 
 ### Field ALU (12 words)
 
@@ -812,11 +845,12 @@ higher-level preflight before any SHA context is initialized.
 | SHA-512 Streaming | 4 |
 | CRC DMA | 4 |
 | TRNG | 3 |
+| Checked Entropy Boundaries | 2 |
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
-| **Catalogued subtotal** | **369** |
+| **Catalogued subtotal** | **371** |
 
 ### All Immediate Words (34)
 
@@ -825,10 +859,11 @@ higher-level preflight before any SHA context is initialized.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The shared span check closes the newest appended segment:
+The checked entropy boundary closes the newest appended segment:
 
 ```
-SHA2-SPAN-STATUS → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
+ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
+→ SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
 → SHA512-INIT → TX-FLUSH
 → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
 ```

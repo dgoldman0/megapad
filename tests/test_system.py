@@ -84,7 +84,7 @@ from devices import (
     STORAGE_RESULT_MEDIA_FAILURE, STORAGE_RESULT_FLUSH_FAILURE,
     STORAGE_RESULT_MEDIA_REMOVED, STORAGE_RESULT_UNSUPPORTED,
     STORAGE_CAP_GEN_GUARD, STORAGE_CAPS,
-    PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
+    PORT_BRIDGE_BASE, TRNG_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     FB_BASE,
     WOTS_BASE, WotsChainAccel,
 )
@@ -12725,7 +12725,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 462)
+        self.assertEqual(len(seen), 464)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -13763,6 +13763,216 @@ class TestSHA3Streaming(_KDOSTestBase):
         # Both reads should produce the same byte
         self.assertIn("R1=72 ", text)
         self.assertIn("R2=72 ", text)
+
+
+class TestBIOSEntropyFill(unittest.TestCase):
+    """Focused BIOS qualification for checked hardware-entropy publication."""
+
+    _GUARD = 0xA5
+    _LENGTH = 16
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+        self._bios_labels = self._bios_harness._bios_labels
+        self._destination = (
+            self._bios_labels["dict_free"] + 127
+        ) & ~63
+
+    def _boot_entropy(self):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        sys_obj.cpu._cs.init_trng()
+        return sys_obj, buf
+
+    def _guard_destination(self, sys_obj, length=None):
+        if length is None:
+            length = self._LENGTH
+        start = self._destination - 1
+        size = length + 2
+        sys_obj.cpu.mem[start:start + size] = bytes((self._GUARD,)) * size
+
+    def _destination_bytes(self, sys_obj, length=None):
+        if length is None:
+            length = self._LENGTH
+        start = self._destination
+        return bytes(sys_obj.cpu.mem[start:start + length])
+
+    def test_dictionary_append_preserves_every_older_link(self):
+        """Both entropy words extend the prior tail without reordering it."""
+        labels = self._bios_labels
+        self.assertEqual(labels["latest_entry"], labels["d_entropy_ready"])
+        ready_previous = int.from_bytes(
+            self._bios_harness.bios_code[
+                labels["d_entropy_ready"]:labels["d_entropy_ready"] + 8
+            ],
+            "little",
+        )
+        fill_previous = int.from_bytes(
+            self._bios_harness.bios_code[
+                labels["d_entropy_fill"]:labels["d_entropy_fill"] + 8
+            ],
+            "little",
+        )
+        self.assertEqual(ready_previous, labels["d_entropy_fill"])
+        self.assertEqual(fill_previous, labels["d_sha2_span_status"])
+
+    def test_zero_range_protection_and_stack_balance(self):
+        """Qualification is complete, null-aware, protected, and balanced."""
+        protected = self._bios_labels["sha256_contexts"]
+        sys_obj, buf = self._boot_entropy()
+        self._guard_destination(sys_obj)
+        protected_before = bytes(
+            sys_obj.cpu.mem[protected:protected + 32]
+        )
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            '."  Z=" 0 0 ENTROPY-FILL .',
+            '."  E=" -1 0 ENTROPY-FILL .',
+            f'."  N=" {self._destination} -1 ENTROPY-FILL .',
+            '."  A=" -1 1 ENTROPY-FILL .',
+            '."  W=" -2 4 ENTROPY-FILL .',
+            '."  Q=" 0 1 ENTROPY-FILL .',
+            '."  X=" EXT-MEM-BASE 1 ENTROPY-FILL .',
+            f'."  P=" {protected} 1 ENTROPY-FILL .',
+            '."  K=" SP@ 16 - 16 ENTROPY-FILL .',
+            '."  D=" DEPTH .',
+        ])
+        self.assertIn("Z=0 ", text)
+        self.assertIn("E=0 ", text)
+        self.assertIn("N=2 ", text)
+        self.assertIn("A=2 ", text)
+        self.assertIn("W=2 ", text)
+        self.assertIn("Q=2 ", text)
+        self.assertIn("X=2 ", text)
+        self.assertIn("P=3 ", text)
+        self.assertIn("K=3 ", text)
+        self.assertIn("D=0 ", text)
+        self.assertEqual(
+            self._destination_bytes(sys_obj),
+            bytes((self._GUARD,)) * self._LENGTH,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[protected:protected + 32]),
+            protected_before,
+        )
+
+    def test_success_writes_exact_span_and_consumes_exact_byte_count(self):
+        """Guard bytes stay fixed and the seam proves exactly len reads."""
+        sys_obj, buf = self._boot_entropy()
+        self._guard_destination(sys_obj)
+        state = sys_obj.cpu._cs
+        state._trng_test_health_loss_after(self._LENGTH + 1)
+
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            f'."  S=" {self._destination} {self._LENGTH}'
+            " ENTROPY-FILL .",
+            '."  R=" ENTROPY-READY? .',
+            '."  D=" DEPTH .',
+        ])
+
+        self.assertIn("S=0 ", text)
+        self.assertIn("R=-1 ", text)
+        self.assertIn("D=0 ", text)
+        self.assertEqual(
+            sys_obj.cpu.mem[self._destination - 1],
+            self._GUARD,
+        )
+        self.assertEqual(
+            sys_obj.cpu.mem[self._destination + self._LENGTH],
+            self._GUARD,
+        )
+        self.assertTrue(state.trng_usable())
+
+        # Sixteen successful BIOS reads leave exactly the seventeenth seam
+        # byte.  Consuming it directly transitions STATUS to unavailable.
+        value = state._native_singleton_read8(TRNG_BASE)
+        self.assertTrue(0 <= value <= 0xFF)
+        self.assertFalse(state.trng_usable())
+
+    def test_unavailable_before_start_leaves_destination_unchanged(self):
+        """An initial zero STATUS returns UNAVAILABLE without publication."""
+        sys_obj, buf = self._boot_entropy()
+        self._guard_destination(sys_obj)
+        state = sys_obj.cpu._cs
+        state._trng_test_health_loss_after(0)
+
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            f'."  U=" {self._destination} {self._LENGTH}'
+            " ENTROPY-FILL .",
+            '."  R=" ENTROPY-READY? .',
+            '."  Z=" 0 0 ENTROPY-FILL .',
+            '."  D=" DEPTH .',
+        ])
+
+        self.assertIn("U=1 ", text)
+        self.assertIn("R=0 ", text)
+        self.assertIn("Z=0 ", text)
+        self.assertIn("D=0 ", text)
+        self.assertEqual(
+            self._destination_bytes(sys_obj),
+            bytes((self._GUARD,)) * self._LENGTH,
+        )
+
+    def test_mid_fill_and_final_byte_health_loss_wipe_full_span(self):
+        """Every detected post-start failure erases the admitted output."""
+        for successful_bytes in (5, self._LENGTH):
+            with self.subTest(successful_bytes=successful_bytes):
+                sys_obj, buf = self._boot_entropy()
+                self._guard_destination(sys_obj)
+                state = sys_obj.cpu._cs
+                state._trng_test_health_loss_after(successful_bytes)
+
+                text = self._bios_harness._run_forth(sys_obj, buf, [
+                    f'."  U=" {self._destination} {self._LENGTH}'
+                    " ENTROPY-FILL .",
+                    '."  D=" DEPTH .',
+                ])
+
+                self.assertIn("U=1 ", text)
+                self.assertIn("D=0 ", text)
+                self.assertEqual(
+                    self._destination_bytes(sys_obj),
+                    bytes(self._LENGTH),
+                )
+                self.assertEqual(
+                    sys_obj.cpu.mem[self._destination - 1],
+                    self._GUARD,
+                )
+                self.assertEqual(
+                    sys_obj.cpu.mem[
+                        self._destination + self._LENGTH
+                    ],
+                    self._GUARD,
+                )
+                self.assertFalse(state.trng_usable())
+
+    def test_final_byte_refill_failure_wipes_full_span(self):
+        """A failed refill after byte 64 invalidates and erases that fill."""
+        length = 64
+        sys_obj, buf = self._boot_entropy()
+        self._guard_destination(sys_obj, length)
+        state = sys_obj.cpu._cs
+        state._trng_test_fail_next_refill()
+
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            f'."  U=" {self._destination} {length} ENTROPY-FILL .',
+            '."  D=" DEPTH .',
+        ])
+
+        self.assertIn("U=1 ", text)
+        self.assertIn("D=0 ", text)
+        self.assertEqual(
+            self._destination_bytes(sys_obj, length),
+            bytes(length),
+        )
+        self.assertEqual(
+            sys_obj.cpu.mem[self._destination - 1],
+            self._GUARD,
+        )
+        self.assertEqual(
+            sys_obj.cpu.mem[self._destination + length],
+            self._GUARD,
+        )
+        self.assertFalse(state.trng_usable())
 
 
 class TestKDOSTRNG(_KDOSTestBase):

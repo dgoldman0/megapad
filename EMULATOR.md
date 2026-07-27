@@ -467,9 +467,30 @@ modulo-128 position that disagrees with the saved offset.
 `SHA3-MODE!` `SHA3-MODE@` `SHA3-SQUEEZE` `SHA3-SQUEEZE-NEXT`
 
 **TRNG**
-`RANDOM` `RANDOM8` `SEED-RNG` — the raw random reads deliver a bus fault if
-the device is unusable; `SEED-RNG` is supplemental and cannot make an
-unusable source healthy.
+`RANDOM` `RANDOM8` `SEED-RNG` `ENTROPY-FILL` `ENTROPY-READY?` — the raw
+random reads deliver a bus fault if the device is unusable; `SEED-RNG` is
+supplemental and cannot make an unusable source healthy.
+`ENTROPY-FILL ( addr len -- status )` provides the checked bulk boundary with
+`0` OK, `1` UNAVAILABLE, `2` RANGE, and `3` PROTECTED.
+`ENTROPY-READY? ( -- flag )` keeps the MMIO address private and returns
+canonical true only for exact `STATUS == 1`.
+
+The checked word accepts every empty span (including `(0,0)`) as a no-op.
+Nonempty destinations must be nonnegative, non-null, and fit wholly, without wrap,
+in one advertised Bank 0, external, HBW, or VRAM window. Bank 0 is narrowed
+to `[dict_free, caller-DSP-8)`, keeping the static BIOS/private footprint,
+live stacks, and future result cell out of reach. This geometry is a
+protection boundary rather than proof that the caller owns an allocation.
+Exact `USABLE == 1` is required before every byte and after completion. A
+detected post-start loss wipes the entire admitted destination; an initial
+loss writes nothing.
+
+There is no BIOS transaction state between calls. The BIOS bus-fault handler
+cannot resume an interrupted Forth return chain, so a health transition in
+the small interval between a successful status read and its following data
+read can still fault without a recoverable status/wipe. Health loss caused by
+a successfully delivered byte is caught by the following status check,
+including after the final byte.
 
 **Field ALU (GF(p) arithmetic)**
 `FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`

@@ -541,9 +541,38 @@ device model. `RAND8` and `RAND64` fail closed with `IVEC_BUS_FAULT` when
 `USABLE` is clear. `SEED` never substitutes for a healthy entropy source and
 cannot recover a latched failure.
 
-**BIOS words:** `RANDOM`, `RANDOM8`, `SEED-RNG`. The two random-read words
-are raw and therefore propagate the device bus fault if entropy is
-unavailable; `SEED-RNG` is a supplemental mix only.
+**BIOS words:** `RANDOM`, `RANDOM8`, `SEED-RNG`, `ENTROPY-FILL`,
+`ENTROPY-READY?`. The first two random-read words are raw and therefore
+propagate the device bus fault if entropy is unavailable; `SEED-RNG` is a
+supplemental mix only.
+
+`ENTROPY-FILL ( addr len -- status )` is the checked bulk boundary. It
+returns `0` OK, `1` UNAVAILABLE, `2` RANGE, or `3` PROTECTED and retains no
+state across calls. The complete nonnegative, nonwrapping destination is
+qualified before the first read against Bank 0, external, HBW, and VRAM
+geometry. Empty calls, including `(0,0)`, are no-ops and ignore their unused
+address; nonempty addresses must be nonnegative and nonempty null is RANGE.
+Bank 0 is additionally restricted to `[dict_free, caller-DSP-8)`, protecting
+the entire static BIOS/private footprint, live stacks, and the returned-status
+cell. This geometric protection boundary does not prove allocation ownership;
+the caller must still provide a buffer it manages.
+
+`ENTROPY-READY? ( -- flag )` hides the device register address and returns
+canonical true only for exact `STATUS == 1`. Unavailable and reserved status
+encodings both fail closed to false.
+
+The boundary requires exact `USABLE == 1` immediately before every `RAND8`
+and after the final byte. Initial unavailability leaves the destination
+unchanged; detected post-start unavailability wipes the complete admitted
+destination. A transition caused by a successfully delivered final byte is
+therefore a failure, not a published result.
+
+The global BIOS bus-fault handler cannot resume an interrupted Forth call. If
+usability changes in the narrow interval between a successful status read and
+the next data read, `RAND8` can fault before `ENTROPY-FILL` can return or wipe.
+This asynchronous race is deliberately documented instead of being presented
+as a recoverable status path; transitions observed after a successful data
+read do take the checked wipe path.
 
 ### Per-Core Infrastructure
 

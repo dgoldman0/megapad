@@ -873,7 +873,7 @@ SHAKE256 modes, plus XOF squeeze for arbitrary-length output.
 
 ---
 
-## TRNG (3 words)
+## TRNG (5 words)
 
 Hardware true random number generator at `0xFFFF_FF00_0000_0800`.
 The shared device exposes an exact `USABLE` bit and fails closed: random-data
@@ -884,6 +884,33 @@ reads raise a bus fault when disabled, unhealthy, or unable to refill.
 | `RANDOM` | `( -- u )` | Return a 64-bit random number; propagate a TRNG bus fault when unusable. |
 | `RANDOM8` | `( -- u )` | Return an 8-bit random number (0–255); propagate a TRNG bus fault when unusable. |
 | `SEED-RNG` | `( u -- )` | Supplement unread/future entropy bytes when usable; never restores an unusable source. |
+| `ENTROPY-FILL` | `( addr len -- status )` | Checked, bounded entropy fill; preflight the complete destination and wipe it after a detected post-start health loss. |
+| `ENTROPY-READY?` | `( -- flag )` | Canonical true only when the hardware status byte is exactly one; false otherwise. |
+
+`ENTROPY-FILL` returns `0` OK, `1` UNAVAILABLE, `2` RANGE, or `3`
+PROTECTED. Length cells must be nonnegative. Zero length is an unconditional
+no-op, including `(0,0)`, and its unused address is ignored. A nonempty
+address must be nonnegative; null with a nonzero length is RANGE.
+A nonempty destination must fit wholly and without wrap in one advertised
+Bank 0, external, HBW, or VRAM physical window. Bank 0 is further limited to
+`[dict_free, caller-DSP-8)`, excluding the complete static BIOS/private
+footprint, every live stack byte, and the future status cell. This is a
+protection boundary, not an allocation-ownership check; callers remain
+responsible for supplying a buffer they manage.
+
+The word reads `STATUS` before every `RAND8` and after the last byte, and
+accepts only the exact value one. Initial unavailability writes nothing. If a
+health loss is observed after writing begins, the entire qualified destination
+is zeroed before returning UNAVAILABLE. The implementation keeps no
+caller-spanning transaction state. `ENTROPY-READY?` provides the same exact
+readiness check without exposing the MMIO register address to callers.
+
+A narrow hardware race remains explicit: the BIOS bus-fault handler abandons
+the interrupted Forth return chain, so loss of usability between a successful
+status read and its immediately following data read can fault rather than
+return a status, without a recoverable wipe. A health transition caused by a
+successfully returned data byte is detected by the next status read (or the
+mandatory final read) and does take the wipe path.
 
 ---
 

@@ -14329,6 +14329,169 @@ w_seed_rng:
     brcc .seed_rng_loop
     ret.l
 
+; Validate a complete ENTROPY-FILL destination before the first TRNG read.
+;   R9  = destination first byte
+;   R10 = byte count
+;   Returns R0 = 0 OK, 2 RANGE, or 3 PROTECTED.
+;   Preserves R9, R10, and the exact return-stack depth/content.
+;
+; Nonempty spans must be non-null, nonnegative, nonwrapping, and wholly
+; contained in one physical Bank 0, external, HBW, or VRAM window.  Bank 0
+; additionally admits only the caller-manageable interval beginning at
+; dict_free and ending before the result cell that ENTROPY-FILL will publish.
+; This is a protection boundary, not an allocation-ownership proof.  It
+; excludes the static BIOS image, all private BIOS arenas, and the live data
+; and return stacks.  Empty spans ignore their unused address, including the
+; canonical null empty span (0,0).
+_entropy_fill_span_status:
+    cmpi r10, 0
+    lbrmi .entropy_fill_span_range
+    cmpi r10, 0
+    breq .entropy_fill_span_ok
+    cmpi r9, 0
+    lbrmi .entropy_fill_span_range
+    cmpi r9, 0
+    breq .entropy_fill_span_range
+
+    ; The generic helper validates all advertised physical windows and
+    ; rejects address wrap.  Its private 5/6 results are both public RANGE.
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    cmpi r0, 0
+    brne .entropy_fill_span_range
+
+    ; External, HBW, and VRAM spans need no Bank 0 ownership check.
+    cmp r9, r2
+    brcs .entropy_fill_span_nonbank0
+
+    ; Bank 0 bytes below dict_free are the immutable/static BIOS footprint.
+    ldi64 r11, dict_free
+    cmp r9, r11
+    brcc .entropy_fill_span_protected
+
+    ; R14 is the caller's pre-invocation DSP after the two arguments were
+    ; popped.  The returned status occupies [R14-8,R14), so require the
+    ; destination's exclusive end to be no greater than R14-8.
+    mov r7, r9
+    add r7, r10
+    mov r1, r14
+    subi r1, 8
+    cmp r7, r1
+    breq .entropy_fill_span_ok
+    brcc .entropy_fill_span_ok
+    lbr .entropy_fill_span_protected
+
+.entropy_fill_span_nonbank0:
+.entropy_fill_span_ok:
+    ldi r0, 0
+    ret.l
+.entropy_fill_span_range:
+    ldi r0, 2
+    ret.l
+.entropy_fill_span_protected:
+    ldi r0, 3
+    ret.l
+
+; Erase the complete already-qualified destination at R9/R10.
+; This helper is used only after at least one entropy byte was published.
+; It clobbers R1, R7, R12, and R13 while preserving the span arguments.
+_entropy_fill_wipe:
+    mov r7, r9
+    mov r13, r10
+    ldi r1, 0
+.entropy_fill_wipe_loop:
+    st.b r7, r1
+    inc r7
+    dec r13
+    cmpi r13, 0
+    brne .entropy_fill_wipe_loop
+    ret.l
+
+; ENTROPY-FILL ( addr len -- status )
+; Checked hardware-entropy publication.
+;   0 OK, 1 UNAVAILABLE, 2 RANGE, 3 PROTECTED.
+;
+; The complete destination is qualified before any write.  STATUS must be
+; exactly 1 immediately before every RAND8 read and once more after the final
+; byte.  Detected unavailability after publication starts wipes the complete
+; admitted destination.  A zero-length call is an unconditional no-op.
+;
+; There is intentionally no caller-spanning BIOS state.  A bus fault caused
+; by the shared TRNG becoming unusable in the tiny interval between a
+; successful STATUS read and RAND8 cannot be converted by this word: the BIOS
+; bus-fault handler abandons the current Forth return chain.  Native health
+; transitions caused by a successful RAND8 are observable by the following
+; STATUS check and therefore do take the checked wipe path.
+w_entropy_fill:
+    ldn r10, r14
+    addi r14, 8
+    ldn r9, r14
+    addi r14, 8
+
+    ldi64 r11, _entropy_fill_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .entropy_fill_return_status
+    cmpi r10, 0
+    breq .entropy_fill_ok
+
+    ldi r12, 0
+.entropy_fill_loop:
+    ; USABLE is an exact one-bit contract, not a permissive bit mask.
+    ldi64 r11, 0xFFFF_FF00_0000_0810
+    ld.b r1, r11
+    cmpi r1, 1
+    brne .entropy_fill_unavailable
+
+    ldi64 r11, 0xFFFF_FF00_0000_0800
+    ld.b r1, r11
+    mov r7, r9
+    add r7, r12
+    st.b r7, r1
+    inc r12
+    cmp r12, r10
+    brne .entropy_fill_loop
+
+    ; A health loss triggered by the last successful byte must invalidate the
+    ; whole result rather than escape as apparently successful entropy.
+    ldi64 r11, 0xFFFF_FF00_0000_0810
+    ld.b r1, r11
+    cmpi r1, 1
+    brne .entropy_fill_unavailable
+
+.entropy_fill_ok:
+    ldi r0, 0
+    lbr .entropy_fill_return_status
+
+.entropy_fill_unavailable:
+    cmpi r12, 0
+    breq .entropy_fill_unavailable_before_start
+    ldi64 r11, _entropy_fill_wipe
+    call.l r11
+.entropy_fill_unavailable_before_start:
+    ldi r0, 1
+
+.entropy_fill_return_status:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ENTROPY-READY? ( -- flag )
+; Report the checked source state without exposing TRNG MMIO to callers.
+; True is the canonical Forth -1 and is returned only for exact STATUS=1;
+; reserved/noncanonical status values fail closed to false.
+w_entropy_ready:
+    ldi64 r11, 0xFFFF_FF00_0000_0810
+    ld.b r1, r11
+    ldi r0, 0
+    cmpi r1, 1
+    brne .entropy_ready_return
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF
+.entropy_ready_return:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; =====================================================================
 ;  X25519 — Elliptic Curve Diffie-Hellman (RFC 7748)
 ; =====================================================================
@@ -19508,12 +19671,33 @@ d_sha512_clear:
 ; Shared SHA-2 span qualification is append-only so every older built-in
 ; dictionary ordinal remains stable.
 ; === SHA2-SPAN-STATUS ===
-latest_entry:
 d_sha2_span_status:
     .dq d_sha512_clear
     .db 16
     .ascii "SHA2-SPAN-STATUS"
     ldi64 r11, w_sha2_span_status
+    call.l r11
+    ret.l
+
+; Checked entropy publication is append-only so every older built-in
+; dictionary ordinal remains stable.
+; === ENTROPY-FILL ===
+d_entropy_fill:
+    .dq d_sha2_span_status
+    .db 12
+    .ascii "ENTROPY-FILL"
+    ldi64 r11, w_entropy_fill
+    call.l r11
+    ret.l
+
+; Checked entropy readiness is append-only and follows the bulk boundary.
+; === ENTROPY-READY? ===
+latest_entry:
+d_entropy_ready:
+    .dq d_entropy_fill
+    .db 14
+    .ascii "ENTROPY-READY?"
+    ldi64 r11, w_entropy_ready
     call.l r11
     ret.l
 
