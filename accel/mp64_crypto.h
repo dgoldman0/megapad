@@ -10,6 +10,7 @@
 // =========================================================================
 
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <algorithm>
 #include <array>
@@ -41,6 +42,15 @@ static const uint8_t AES_RCON[10] = {
     0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36
 };
 
+// Do not let an optimizing compiler remove clearing of key material and
+// derived state.  This is deliberately local to the native crypto model;
+// it is not intended to be a general-purpose host API.
+static inline void aes_secure_clear(void* address, std::size_t length) {
+    volatile uint8_t* bytes = static_cast<volatile uint8_t*>(address);
+    while (length-- != 0)
+        *bytes++ = 0;
+}
+
 static inline uint8_t gm2(uint8_t v) {
     return ((v << 1) ^ ((v & 0x80) ? 0x1B : 0)) & 0xFF;
 }
@@ -63,6 +73,7 @@ static void aes128_key_expand(const uint8_t key[16], uint8_t rkeys[176]) {
         }
         for (int j = 0; j < 4; j++)
             rkeys[i*4 + j] = rkeys[(i-4)*4 + j] ^ t[j];
+        aes_secure_clear(t, sizeof(t));
     }
 }
 
@@ -84,6 +95,7 @@ static void aes256_key_expand(const uint8_t key[32], uint8_t rkeys[240]) {
         }
         for (int j = 0; j < 4; j++)
             rkeys[i*4 + j] = rkeys[(i-8)*4 + j] ^ t[j];
+        aes_secure_clear(t, sizeof(t));
     }
 }
 
@@ -113,6 +125,7 @@ static void aes_encrypt_block(const uint8_t in[16], uint8_t out[16],
         // AddRoundKey
         const uint8_t* rk = rkeys + r * 16;
         for (int i = 0; i < 16; i++) s[i] ^= rk[i];
+        aes_secure_clear(t, sizeof(t));
     }
     // Final round (no MixColumns)
     uint8_t t[16];
@@ -123,38 +136,32 @@ static void aes_encrypt_block(const uint8_t in[16], uint8_t out[16],
     s[12] = t[12]; s[13] = t[1];  s[14] = t[6];  s[15] = t[11];
     const uint8_t* rk = rkeys + nr * 16;
     for (int i = 0; i < 16; i++) out[i] = s[i] ^ rk[i];
+    aes_secure_clear(t, sizeof(t));
+    aes_secure_clear(s, sizeof(s));
 }
 
 // ── GHASH GF(2^128) multiplication ──────────────────────────────
 
 // We use a simple bitwise approach (same as the Python implementation).
-// 128-bit values are stored as two uint64_t: hi=bits[127:64], lo=bits[63:0],
-// but we represent the 128-bit number as big-endian bit order for GHASH.
-// To keep it simple, use __uint128_t where available.
-
-#ifdef __SIZEOF_INT128__
-using u128 = __uint128_t;
-#else
-// Fallback: manual 128-bit for MSVC etc.
-struct u128 {
-    uint64_t lo, hi;
-    u128() : lo(0), hi(0) {}
-    u128(uint64_t v) : lo(v), hi(0) {}
-    u128(uint64_t h, uint64_t l) : lo(l), hi(h) {}
-    u128 operator^(const u128& o) const { return {hi ^ o.hi, lo ^ o.lo}; }
-    u128& operator^=(const u128& o) { hi ^= o.hi; lo ^= o.lo; return *this; }
-    u128 operator>>(int n) const {
-        if (n >= 64) return {0, hi >> (n - 64)};
-        return {hi >> n, (lo >> n) | (hi << (64 - n))};
-    }
-    u128 operator<<(int n) const {
-        if (n >= 64) return {lo << (n - 64), 0};
-        return {(hi << n) | (lo >> (64 - n)), lo << n};
-    }
-    bool operator&(const u128& o) const { return (lo & o.lo) || (hi & o.hi); }
-    operator bool() const { return lo || hi; }
-};
+// The native model deliberately requires a compiler with an exact unsigned
+// 128-bit integer.  The former hand-written fallback had different shift and
+// construction semantics and was never a qualified GHASH implementation.
+#ifndef __SIZEOF_INT128__
+#error "Megapad native AES-GCM requires compiler unsigned __int128 support"
 #endif
+using u128 = __uint128_t;
+
+// setup_accel.py hashes this complete source file and supplies the digest as a
+// compile definition.  The focused qualification runner derives the digest
+// independently and requires the linked extension to contain the exact marker.
+#ifndef MP64_AES_MODEL_SOURCE_SHA256
+#error "MP64_AES_MODEL_SOURCE_SHA256 must be supplied by setup_accel.py"
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((used))
+#endif
+static const char MP64_AES_MODEL_FINGERPRINT[] =
+    "mp64-aes-gcm-native-sha256:" MP64_AES_MODEL_SOURCE_SHA256;
 
 static inline u128 bytes_to_u128(const uint8_t b[16]) {
     u128 v = 0;
@@ -194,7 +201,6 @@ static inline void inc32(uint8_t counter[16]) {
     }
 }
 
-
 // =========================================================================
 //  AES-GCM Device
 // =========================================================================
@@ -205,7 +211,7 @@ struct CryptoAES {
     uint8_t din[16];
     uint8_t dout[16];
     uint8_t tag[16];
-    uint8_t status;      // 0=idle, 2=done, 3=auth-fail
+    uint8_t status;      // 0=idle, 1=active, 2=done, 3=auth/transaction fail
     uint8_t key_mode;    // 0=AES-256, 1=AES-128
     uint8_t cmd;         // bit 0: 0=encrypt, 1=decrypt
 
@@ -220,25 +226,123 @@ struct CryptoAES {
     uint32_t data_len;
     uint32_t aad_processed;
     uint32_t data_processed;
+    uint8_t din_written;
+    uint32_t key_written_mask;
+    uint16_t iv_written_mask;
+    uint8_t aad_len_written_mask;
+    uint8_t data_len_written_mask;
+    uint16_t tag_written_mask;
+    bool fault_latched;
+
+    void clear_derived_state() {
+        aes_secure_clear(rkeys, sizeof(rkeys));
+        aes_secure_clear(counter, sizeof(counter));
+        aes_secure_clear(j0, sizeof(j0));
+        aes_secure_clear(&h, sizeof(h));
+        aes_secure_clear(&ghash_state, sizeof(ghash_state));
+        nr = 0;
+        aad_processed = 0;
+        data_processed = 0;
+        din_written = 0;
+    }
+
+    void clear_configuration_tracking() {
+        key_written_mask = 0;
+        iv_written_mask = 0;
+        aad_len_written_mask = 0;
+        data_len_written_mask = 0;
+        tag_written_mask = 0;
+    }
 
     void reset() {
-        std::memset(key, 0, 32);
-        std::memset(iv, 0, 12);
-        std::memset(din, 0, 16);
-        std::memset(dout, 0, 16);
-        std::memset(tag, 0, 16);
+        aes_secure_clear(key, sizeof(key));
+        aes_secure_clear(iv, sizeof(iv));
+        aes_secure_clear(din, sizeof(din));
+        aes_secure_clear(dout, sizeof(dout));
+        aes_secure_clear(tag, sizeof(tag));
+        clear_derived_state();
         status = 0;
         key_mode = 0;
         cmd = 0;
         aad_len = 0;
         data_len = 0;
-        nr = 0;
-        ghash_state = 0;
-        aad_processed = 0;
-        data_processed = 0;
+        clear_configuration_tracking();
+        fault_latched = false;
+    }
+
+    // Clear all material derived from the current key while retaining DOUT
+    // long enough for the byte-window ABI to publish the final data block.
+    // Encrypt retains TAG because software must read it after completion.
+    void clear_completed_secrets(bool clear_tag) {
+        aes_secure_clear(key, sizeof(key));
+        aes_secure_clear(iv, sizeof(iv));
+        aes_secure_clear(din, sizeof(din));
+        clear_derived_state();
+        if (clear_tag)
+            aes_secure_clear(tag, sizeof(tag));
+        aad_len = 0;
+        data_len = 0;
+        cmd = 0;
+        key_mode = 0;
+        clear_configuration_tracking();
+        fault_latched = false;
+    }
+
+    // There is no separate abort register in the architectural window.
+    // A malformed feed or an in-flight configuration write therefore
+    // terminates through status 3, wipes register-visible output and tag,
+    // destroys the active key schedule, and invalidates configuration masks.
+    // A later complete configuration can begin a new transaction; a partial
+    // rewrite cannot accidentally combine with the interrupted operation.
+    void latch_transaction_fault() {
+        aes_secure_clear(dout, sizeof(dout));
+        clear_completed_secrets(true);
+        status = 3;
+        fault_latched = true;
+    }
+
+    void reject_operation() {
+        latch_transaction_fault();
+    }
+
+    // The first configuration byte after a terminal transaction begins a new
+    // configuration epoch and removes the preceding block from DOUT.  During
+    // an active transaction the same write first performs the fail-closed
+    // abort; the caller may then continue with a complete field rewrite.
+    void begin_configuration_write() {
+        if (status == 1) {
+            latch_transaction_fault();
+        } else if (status == 2 || status == 3) {
+            aes_secure_clear(dout, sizeof(dout));
+            status = 0;
+        }
+    }
+
+    bool configuration_complete(bool decrypting) const {
+        return key_written_mask == 0xFFFFFFFFu
+            && iv_written_mask == 0x0FFFu
+            && aad_len_written_mask == 0x0Fu
+            && data_len_written_mask == 0x0Fu
+            && (!decrypting || tag_written_mask == 0xFFFFu);
     }
 
     void start_gcm() {
+        const bool decrypting = cmd != 0;
+        if (!configuration_complete(decrypting)) {
+            latch_transaction_fault();
+            return;
+        }
+
+        // CMD is the transaction boundary.  Discard any stale derived state
+        // while retaining the freshly written KEY, IV, and (for open) TAG.
+        clear_derived_state();
+        aes_secure_clear(din, sizeof(din));
+        aes_secure_clear(dout, sizeof(dout));
+        if (!decrypting)
+            aes_secure_clear(tag, sizeof(tag));
+        fault_latched = false;
+        status = 1;
+
         if (key_mode == 1) {
             aes128_key_expand(key, rkeys);
             nr = 10;
@@ -257,10 +361,14 @@ struct CryptoAES {
         j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
         std::memcpy(counter, j0, 16);
 
-        ghash_state = 0;
-        aad_processed = 0;
-        data_processed = 0;
-        status = 2;
+        aes_secure_clear(&ghash_state, sizeof(ghash_state));
+        aes_secure_clear(zero, sizeof(zero));
+        aes_secure_clear(h_bytes, sizeof(h_bytes));
+
+        // Empty and zero-data/AAD-only messages have no data block whose
+        // final byte could otherwise trigger finalization.
+        if (aad_len == 0 && data_len == 0)
+            finalize_tag();
     }
 
     void ghash_update(const uint8_t block[16]) {
@@ -269,8 +377,13 @@ struct CryptoAES {
     }
 
     void finalize_tag() {
+        if (status != 1 || nr == 0) {
+            reject_operation();
+            return;
+        }
+
         // Length block: aad_len*8 (64-bit BE) || data_len*8 (64-bit BE)
-        uint8_t len_block[16];
+        uint8_t len_block[16] = {0};
         uint64_t aad_bits = (uint64_t)aad_len * 8;
         uint64_t data_bits = (uint64_t)data_len * 8;
         for (int i = 7; i >= 0; i--) {
@@ -293,65 +406,80 @@ struct CryptoAES {
         for (int i = 0; i < 16; i++)
             computed_tag[i] = s[i] ^ j0_enc[i];
 
-        if (cmd == 0) {
+        const bool decrypting = cmd != 0;
+        if (!decrypting) {
             // Encrypt: store tag
             std::memcpy(tag, computed_tag, 16);
             status = 2;
         } else {
-            // Decrypt: compare
-            if (std::memcmp(computed_tag, tag, 16) == 0)
-                status = 2;
-            else
-                status = 3;
+            // Decrypt: fixed-work comparison over the complete 128-bit tag.
+            uint8_t difference = 0;
+            for (int i = 0; i < 16; i++)
+                difference |= computed_tag[i] ^ tag[i];
+            status = difference == 0 ? 2 : 3;
+            if (difference != 0)
+                aes_secure_clear(dout, sizeof(dout));
         }
+
+        aes_secure_clear(len_block, sizeof(len_block));
+        aes_secure_clear(s, sizeof(s));
+        aes_secure_clear(j0_enc, sizeof(j0_enc));
+        aes_secure_clear(computed_tag, sizeof(computed_tag));
+        clear_completed_secrets(decrypting);
     }
 
     void process_block() {
-        if (nr == 0) return;  // not initialized
+        if (status != 1 || nr == 0 || din_written != 0) {
+            reject_operation();
+            return;
+        }
 
         if (aad_processed < aad_len) {
-            ghash_update(din);
-            aad_processed += 16;
+            uint32_t remaining = aad_len - aad_processed;
+            uint32_t take = std::min<uint32_t>(remaining, 16);
+            uint8_t aad_block[16] = {0};
+            std::memcpy(aad_block, din, take);
+            ghash_update(aad_block);
+            aad_processed += take;
             std::memset(dout, 0, 16);
-        } else {
-            inc32(counter);
-            uint8_t keystream[16];
-            aes_encrypt_block(counter, keystream, rkeys, nr);
-
-            uint8_t out[16];
-            for (int i = 0; i < 16; i++)
-                out[i] = din[i] ^ keystream[i];
-
-            data_processed += 16;
-            int32_t remaining = (int32_t)data_len - (int32_t)(data_processed - 16);
-            if (remaining < 16) {
-                if (remaining < 0) remaining = 0;
-                for (int i = remaining; i < 16; i++)
-                    out[i] = 0;
-            }
-            std::memcpy(dout, out, 16);
-
-            if (cmd == 0) {
-                // Encrypt: hash ciphertext (output)
-                ghash_update(out);
-            } else {
-                // Decrypt: hash ciphertext (input), with zero-padding for partial
-                if (remaining < 16) {
-                    uint8_t ghash_block[16];
-                    std::memcpy(ghash_block, din, 16);
-                    int r = remaining < 0 ? 0 : remaining;
-                    for (int i = r; i < 16; i++)
-                        ghash_block[i] = 0;
-                    ghash_update(ghash_block);
-                } else {
-                    ghash_update(din);
-                }
-            }
-
-            if (data_processed >= data_len) {
+            aes_secure_clear(aad_block, sizeof(aad_block));
+            aes_secure_clear(din, sizeof(din));
+            if (aad_processed == aad_len && data_len == 0)
                 finalize_tag();
-            }
+            return;
         }
+
+        if (data_processed >= data_len) {
+            reject_operation();
+            return;
+        }
+
+        uint32_t remaining = data_len - data_processed;
+        uint32_t take = std::min<uint32_t>(remaining, 16);
+        inc32(counter);
+        uint8_t keystream[16];
+        aes_encrypt_block(counter, keystream, rkeys, nr);
+
+        uint8_t input_block[16] = {0};
+        uint8_t out[16] = {0};
+        std::memcpy(input_block, din, take);
+        for (uint32_t i = 0; i < take; i++)
+            out[i] = input_block[i] ^ keystream[i];
+        std::memcpy(dout, out, 16);
+
+        if (cmd == 0)
+            ghash_update(out);          // encrypt authenticates ciphertext
+        else
+            ghash_update(input_block);  // decrypt authenticates input
+
+        data_processed += take;
+        aes_secure_clear(keystream, sizeof(keystream));
+        aes_secure_clear(input_block, sizeof(input_block));
+        aes_secure_clear(out, sizeof(out));
+        aes_secure_clear(din, sizeof(din));
+
+        if (data_processed == data_len)
+            finalize_tag();
     }
 
     uint8_t read8(uint32_t offset) const {
@@ -364,28 +492,48 @@ struct CryptoAES {
 
     void write8(uint32_t offset, uint8_t value) {
         if (offset < 0x20) {
+            begin_configuration_write();
             key[offset] = value;
+            key_written_mask |= uint32_t(1) << offset;
         } else if (offset >= 0x20 && offset < 0x2C) {
-            iv[offset - 0x20] = value;
+            begin_configuration_write();
+            const uint32_t idx = offset - 0x20;
+            iv[idx] = value;
+            iv_written_mask |= uint16_t(1) << idx;
         } else if (offset >= 0x30 && offset < 0x34) {
-            int idx = offset - 0x30;
+            begin_configuration_write();
+            const uint32_t idx = offset - 0x30;
             aad_len = (aad_len & ~(0xFFu << (8*idx))) | ((uint32_t)value << (8*idx));
+            aad_len_written_mask |= uint8_t(1) << idx;
         } else if (offset >= 0x34 && offset < 0x38) {
-            int idx = offset - 0x34;
+            begin_configuration_write();
+            const uint32_t idx = offset - 0x34;
             data_len = (data_len & ~(0xFFu << (8*idx))) | ((uint32_t)value << (8*idx));
+            data_len_written_mask |= uint8_t(1) << idx;
         } else if (offset == 0x38) {
+            begin_configuration_write();
             cmd = value & 1;
             start_gcm();
         } else if (offset == 0x3A) {
+            begin_configuration_write();
             key_mode = value & 1;
         } else if (offset >= 0x40 && offset < 0x50) {
             int idx = offset - 0x40;
+            if (status != 1 || idx != din_written) {
+                reject_operation();
+                return;
+            }
             din[idx] = value;
-            if (idx == 15) {
+            din_written++;
+            if (din_written == 16) {
+                din_written = 0;
                 process_block();
             }
         } else if (offset >= 0x60 && offset < 0x70) {
-            tag[offset - 0x60] = value;
+            begin_configuration_write();
+            const uint32_t idx = offset - 0x60;
+            tag[idx] = value;
+            tag_written_mask |= uint16_t(1) << idx;
         }
     }
 };

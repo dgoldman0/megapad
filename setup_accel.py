@@ -7,11 +7,17 @@ Usage:
     make accel
 """
 
+import hashlib
 import os
+from pathlib import Path
 
 from setuptools import Extension, setup
 import pybind11
 
+
+_ROOT = Path(__file__).resolve().parent
+_CRYPTO_SOURCE = _ROOT / "accel" / "mp64_crypto.h"
+_AES_MODEL_SOURCE_SHA256 = hashlib.sha256(_CRYPTO_SOURCE.read_bytes()).hexdigest()
 
 _SANITIZER = os.environ.get("MP64_ACCEL_SANITIZER", "none")
 _SANITIZER_FLAGS = {
@@ -68,6 +74,9 @@ ext = Extension(
         "accel/mp64_uart_geom.h",
     ],
     include_dirs=[pybind11.get_include()],
+    define_macros=[
+        ("MP64_AES_MODEL_SOURCE_SHA256", f'"{_AES_MODEL_SOURCE_SHA256}"'),
+    ],
     language="c++",
     extra_compile_args=_compile_args,
     extra_link_args=_link_args,
