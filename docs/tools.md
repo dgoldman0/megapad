@@ -576,7 +576,6 @@ The test files include several helper functions:
 | Helper | Description |
 |--------|-------------|
 | `make_cpu()` | Create a fresh `MegaPad64` CPU instance |
-| `run_until_halt()` | Execute until the CPU halts or a step limit is reached |
 | `capture_output()` | Attach an output capture callback to the UART; returns a byte list |
 | `bytes_to_str()` | Convert a captured byte buffer to a printable string |
 | `_next_line_chunk()` | Return bytes up to next newline for line-at-a-time UART injection |

@@ -8,7 +8,6 @@ import _mp64_accel
 from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
 from megapad64 import (
-    HaltError,
     IVEC_ILLEGAL_OP,
     IVEC_SW_TRAP,
     Megapad64 as PythonMegapad64,
@@ -357,7 +356,7 @@ def test_step_settles_prior_core_time_before_later_unhandled_trap():
     assert system.timer.counter == 1
 
 
-def test_system_batch_never_fabricates_progress_for_halt_exception():
+def test_system_batch_ignores_instance_core_batch_replacement():
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -367,41 +366,19 @@ def test_system_batch_never_fabricates_progress_for_halt_exception():
         vram_size=0,
     )
 
-    def raise_halt(_max_steps):
-        raise HaltError("no structured progress")
+    system.load_binary(0, assemble("nop"))
+    calls = []
 
-    system.cpu.run_steps_stats = raise_halt
+    def replaced(_max_steps):
+        calls.append("instance replacement")
+        raise AssertionError("production batch entered replaced core method")
 
-    with pytest.raises(HaltError, match="no structured progress"):
-        system.run_batch_stats(1)
+    system.cpu.run_steps_stats = replaced
+    stats = system.run_batch_stats(1)
 
-    assert system._native_system.system_cycles == 0
-
-
-def test_multicore_batch_settles_prior_progress_before_halt_exception():
-    system = MegapadSystem(
-        ram_size=4096,
-        num_cores=2,
-        num_clusters=0,
-        hbw_size=0,
-        ext_mem_size=0,
-        vram_size=0,
-    )
-    system.load_binary(0, assemble("mul r1, r2\nhalt"))
-    system.timer.control = 1
-
-    def raise_halt(_max_steps):
-        raise HaltError("no structured progress")
-
-    system.cores[1].run_steps_stats = raise_halt
-
-    with pytest.raises(HaltError, match="no structured progress"):
-        system.run_batch_stats(1_000)
-
-    assert system.cores[0].cycle_count == 5
-    assert system._native_system.system_cycles == 5
-    assert system.timer.counter == 5
-    assert system._scheduler_cursor == 1
+    assert stats.native_scheduler
+    assert stats.instructions_executed == 1
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -411,7 +388,7 @@ def test_multicore_batch_settles_prior_progress_before_halt_exception():
         "_run_steps_stats_in_memory_scope",
     ),
 )
-def test_system_batch_preserves_class_level_core_batch_overrides(
+def test_system_batch_ignores_class_level_core_batch_replacements(
     monkeypatch,
     method_name: str,
 ) -> None:
@@ -437,9 +414,9 @@ def test_system_batch_preserves_class_level_core_batch_overrides(
 
     stats = system.run_batch_stats(1)
 
-    assert not stats.native_scheduler
+    assert stats.native_scheduler
     assert stats.instructions_executed == 1
-    assert calls == [1]
+    assert calls == []
 
 
 def test_native_system_loop_settles_complete_frontier_before_callback_error():

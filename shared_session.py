@@ -173,9 +173,9 @@ class SharedMachine:
                     try:
                         system.bus.tick(self.idle_tick_cycles)
 
-                        # Match MegapadSystem.run() wake semantics while using
-                        # larger idle ticks. Without this handoff an interrupt
-                        # can become pending while every core stays asleep.
+                        # Settle wake lines after the shared owner's larger
+                        # idle tick. Without this handoff an interrupt can
+                        # become pending while every core stays asleep.
                         if system.timer.irq_pending:
                             for cpu in system.cores:
                                 if cpu.idle and cpu.flag_i:

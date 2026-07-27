@@ -911,7 +911,7 @@ def test_cycle_api_rejects_invalid_or_unsupported_calls_before_mutation():
     )
     heterogeneous.load_binary(0, assemble("nop"))
     heterogeneous.boot(entry=0)
-    with pytest.raises(RuntimeError, match="without micro-core clusters"):
+    with pytest.raises(RuntimeError, match="full-core-only topology"):
         heterogeneous.run_cycle_batch(1)
     assert heterogeneous.cpu.pc == 0
     assert heterogeneous.cpu.cycle_count == 0
@@ -1350,7 +1350,7 @@ def test_timestamped_external_events_apply_at_cycle_then_wake_without_vector():
     with pytest.raises(RuntimeError, match="pending external event"):
         owner.advance_system_to(3)
     with pytest.raises(RuntimeError, match="pending external events"):
-        system._run_native_full_core_batch(1)
+        system._run_native_system_batch(1)
     assert owner.system_cycles == 0
     assert event_rows(owner.external_event_pending) == expected
 

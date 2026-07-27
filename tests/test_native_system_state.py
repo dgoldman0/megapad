@@ -173,10 +173,6 @@ loop:
     )
     system.boot(entry=0)
 
-    def reject_legacy_scheduler(*_args, **_kwargs):
-        raise AssertionError("Python core scheduler handled a native batch")
-
-    system._run_core_batch = reject_legacy_scheduler
     native_runs_before = system._native_system.native_batch_runs
 
     stats = system.run_batch_stats(2_001)
@@ -261,7 +257,6 @@ def test_native_system_batch_rejects_uart_observer_reentry() -> None:
         attempts = (
             ("batch", lambda: system.run_batch_stats(1)),
             ("step", system.step),
-            ("run", lambda: system.run(max_steps=1)),
             ("direct core", lambda: system.cpu.run_steps_stats(1)),
             ("direct idle step", system.cpu.step),
         )
@@ -281,7 +276,6 @@ def test_native_system_batch_rejects_uart_observer_reentry() -> None:
     assert rejections == [
         "batch",
         "step",
-        "run",
         "direct core",
         "direct idle step",
     ]
@@ -2067,10 +2061,7 @@ def test_system_trap_catch_stays_inside_the_core_operation_scope(
     assert _native_step(core1._cs) == 1
 
 
-@pytest.mark.parametrize("operation", ["step", "run_batch"])
-def test_system_trap_catch_masks_an_unused_override_permission(
-    operation: str,
-) -> None:
+def test_system_step_trap_catch_masks_an_unused_override_permission() -> None:
     system = MegapadSystem(
         ram_size=64,
         num_cores=2,
@@ -2096,12 +2087,8 @@ def test_system_trap_catch_masks_an_unused_override_permission(
         rejected.append("same-core trap continuation")
 
     core0._trap = overridden_trap
-    if operation == "step":
-        core0.step = raise_before_native
-        assert system.step() == 1
-    else:
-        core0.run_steps_stats = raise_before_native
-        assert system.run_batch(1) == 1
+    core0.step = raise_before_native
+    assert system.step() == 1
 
     assert rejected == ["same-core trap continuation"]
     assert core0.pc == 0

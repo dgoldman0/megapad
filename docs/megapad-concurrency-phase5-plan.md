@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-27
 
-**Status:** Elements 1 and 2 of 4 complete; Element 3 not started
+**Status:** Elements 1 through 3 of 4 complete; Element 4 pending
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -32,7 +32,7 @@ elements or sub-elements.
 |---|---|---|
 | 1 | Rollout policy | Complete |
 | 2 | Production entry-point integration | Complete |
-| 3 | Production scheduler consolidation | Pending |
+| 3 | Production scheduler consolidation | Complete |
 | 4 | Bounded closure and handoff | Pending |
 
 ## Preserved architecture
@@ -126,18 +126,36 @@ than only mocked argument propagation.
 
 ## Element 3: production scheduler consolidation
 
-The native generalized scheduler already owns every ordinary positive batch,
-including full and reduced cores. The remaining Python per-core batch loop is
-reachable only when tests monkeypatch core batch methods. Element 3 will:
+The native generalized scheduler now owns every ordinary positive batch,
+including full and reduced cores. The former Python per-core batch loop was
+reachable only when tests monkeypatched core batch methods. Element 3:
 
-- make every positive ordinary batch use the native scheduler;
-- remove the method-identity gate and superseded Python chunk loop;
-- remove serial convenience runners with no production callers;
-- retain exact interactive `step()`, the `run_batch()` return-shape adapter,
+- makes every positive ordinary batch use the native scheduler;
+- removes the method-identity gate and superseded Python chunk loop;
+- removes serial convenience runners with no production callers;
+- retains exact interactive `step()`, the `run_batch()` return-shape adapter,
   Python continuation/error/round settlement, and the real full-core-only
   strict-cycle boundary; and
-- replace compatibility-preservation tests with fail-closed production
+- replaces compatibility-preservation tests with fail-closed production
   ownership tests where coverage remains useful.
+
+### P5-D3: one production scheduler versus method-override compatibility
+
+| Contention | Decision | Claim boundary |
+|---|---|---|
+| Preserving per-core batch monkeypatches kept a second Python scheduler alive and allowed test-only method identity to change production execution. Retaining serial facade runners would also preserve an unused competing loop. | Every positive `MegapadSystem` batch enters the native system scheduler. Remove the method-identity gates, Python per-core scheduler, `MegapadSystem.run()`, and `run_until_halt()`. | Interactive `step()` remains a separate debugger/display operation. Standalone core APIs remain available. Native coordinator callbacks still settle Python-only instructions, traps, resets, shared effects, and errors. Strict-cycle execution remains restricted to full-core-only topologies. |
+
+### Element 3 completion record
+
+The complete batch-boundary and native bus-transaction files pass 38 tests
+in 0.12 test seconds. The foreground command takes 0.62 seconds, peaks at
+43,672 KiB RSS, and reports no process swap. A second five-test topology and
+ownership selection passes in 0.25 test seconds; its command takes 0.72
+seconds, peaks at 68,452 KiB RSS, and reports no process swap. Together these
+cover native ownership despite instance/class method replacement, continuation
+and error settlement, active-grant rejection, exact strict-cycle topology
+rejection, full/reduced-core budget ownership, re-entry rejection, and
+one/two/four-lane frontier equivalence.
 
 ## Element 4: bounded closure
 

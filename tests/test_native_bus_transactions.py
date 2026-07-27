@@ -555,13 +555,11 @@ def test_cold_boot_resets_owned_main_bus_state():
     "execute",
     [
         lambda system: system.step(),
-        lambda system: system.run(max_steps=1),
         lambda system: system.run_batch_stats(1),
-        lambda system: system.run_until_halt(max_steps=1),
     ],
-    ids=["step", "run", "run_batch_stats", "run_until_halt"],
+    ids=["step", "run_batch_stats"],
 )
-def test_legacy_execution_rejects_active_grant_before_guest_mutation(execute):
+def test_execution_rejects_active_grant_before_guest_mutation(execute):
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -652,7 +650,7 @@ def test_direct_native_batch_rejects_active_grant_before_guest_mutation():
         owner.run_full_core_batch(
             1,
             callback_sets,
-            system._prepare_native_full_core_batch,
+            system._prepare_native_system_batch,
             system._settle_native_core_continuation,
             system._settle_native_core_dispatch_error,
             system._settle_native_system_round,
