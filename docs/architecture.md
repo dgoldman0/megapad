@@ -518,6 +518,26 @@ bounded partial offset, byte alignment, and low-length/offset agreement.
 Those SHA-256-family KDOS words return the BIOS status unchanged so
 networking and TLS key-schedule callers can fail closed.
 
+### Checked Caller-Managed Spans
+
+`CALLER-SPAN-STATUS ( addr len -- status )` is the protocol-neutral BIOS
+boundary for qualifying a complete caller-managed byte span before a higher
+layer reads or writes it. It returns `0` OK, `2` RANGE, or `3` PROTECTED and
+does not inspect or mutate any named byte.
+
+Zero length is unconditional OK and ignores the unused address. A nonempty
+span must use nonnegative address and length cells, must not be null or wrap,
+and must fit wholly in one Bank 0, external, HBW, or VRAM window advertised by
+SysInfo. Bank 0 is further restricted to `[dict_free, caller-DSP-8)`, which
+excludes the static BIOS/private footprint, live stacks, and the result cell.
+
+The same conservative boundary is appropriate for both reads and writes
+because it describes ordinary memory that may be caller-managed, rather than
+all physically readable bytes. It intentionally rejects even readable static
+BIOS storage. Passing the boundary proves geometry and platform protection
+only: it does not prove allocation ownership, mutability, initialization,
+lifetime, or freedom from aliases in another caller's allocation.
+
 ### TRNG (True Random Number Generator)
 
 The TRNG occupies `+0x0800`–`+0x081F` and is shared by all cores. The
@@ -542,9 +562,10 @@ device model. `RAND8` and `RAND64` fail closed with `IVEC_BUS_FAULT` when
 cannot recover a latched failure.
 
 **BIOS words:** `RANDOM`, `RANDOM8`, `SEED-RNG`, `ENTROPY-FILL`,
-`ENTROPY-READY?`. The first two random-read words are raw and therefore
-propagate the device bus fault if entropy is unavailable; `SEED-RNG` is a
-supplemental mix only.
+`ENTROPY-READY?`. `ENTROPY-FILL` delegates destination qualification to the
+shared `CALLER-SPAN-STATUS` policy. The first two random-read words are raw
+and therefore propagate the device bus fault if entropy is unavailable;
+`SEED-RNG` is a supplemental mix only.
 
 `ENTROPY-FILL ( addr len -- status )` is the checked bulk boundary. It
 returns `0` OK, `1` UNAVAILABLE, `2` RANGE, or `3` PROTECTED and retains no

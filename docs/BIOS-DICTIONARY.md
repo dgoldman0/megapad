@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **464** entries.  The numbered
+The live dictionary link chain contains **465** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -28,7 +28,7 @@ Each entry is a linked list node:
 
 1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled.  The TX ring buffer address is written to UART TX_RING_BASE (`+0x08`).
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
-3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (`ENTROPY-READY?`).
+3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (`CALLER-SPAN-STATUS`).
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -734,6 +734,8 @@ external, HBW, or VRAM window. Within Bank 0, only
 static BIOS/private-state footprint, while the upper bound protects the live
 stacks and the status cell that the word will return. This boundary does not
 prove allocation ownership; the caller must still supply a buffer it manages.
+`ENTROPY-FILL` applies this policy through the shared
+`CALLER-SPAN-STATUS` implementation before reading the TRNG.
 
 `ENTROPY-FILL` requires `STATUS` to equal exactly one before every byte read
 and after the final byte. An initial unavailable result leaves the destination
@@ -749,6 +751,25 @@ read may bus-fault instead of returning a status and the word cannot promise
 its wipe path. Health transitions caused by a successfully delivered native
 data byte are caught by the following `STATUS` check, including a transition
 on the final byte.
+
+### Caller-managed span qualification (1 append-only word)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CALLER-SPAN-STATUS` | `( addr len -- status )` | Purely qualify a complete caller-managed span before a higher-level read or write |
+
+The word returns `0` OK, `2` RANGE, or `3` PROTECTED. Zero length is
+unconditional OK and ignores the unused address. A nonempty span returns
+RANGE for a negative address or length cell, null, wrap, a cross-window
+interval, or an interval outside Bank 0 and the nonempty external, HBW, and
+VRAM windows advertised by SysInfo.
+
+Within Bank 0, only `[dict_free, caller-DSP-8)` is admitted, excluding the
+static BIOS/private footprint, live stacks, and the result cell. This same
+conservative caller-managed policy is used for input and output spans; it
+intentionally does not expose readable static BIOS storage. Success proves
+geometry and platform protection only, not allocation ownership, mutability,
+initialization, lifetime, or freedom from application-level aliases.
 
 ### Field ALU (12 words)
 
@@ -846,11 +867,12 @@ on the final byte.
 | CRC DMA | 4 |
 | TRNG | 3 |
 | Checked Entropy Boundaries | 2 |
+| Caller Span Boundary | 1 |
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
-| **Catalogued subtotal** | **371** |
+| **Catalogued subtotal** | **372** |
 
 ### All Immediate Words (34)
 
@@ -859,10 +881,10 @@ on the final byte.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The checked entropy boundary closes the newest appended segment:
+The caller-managed span boundary closes the newest appended segment:
 
 ```
-ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
+CALLER-SPAN-STATUS → ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
 → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
 → SHA512-INIT → TX-FLUSH
 → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP

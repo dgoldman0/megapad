@@ -12725,7 +12725,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 464)
+        self.assertEqual(len(seen), 465)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -13779,8 +13779,10 @@ class TestBIOSEntropyFill(unittest.TestCase):
             self._bios_labels["dict_free"] + 127
         ) & ~63
 
-    def _boot_entropy(self):
-        sys_obj, buf = self._bios_harness._boot_bios()
+    def _boot_entropy(self, *, ext_mem_mib=0):
+        sys_obj, buf = self._bios_harness._boot_bios(
+            ext_mem_mib=ext_mem_mib,
+        )
         sys_obj.cpu._cs.init_trng()
         return sys_obj, buf
 
@@ -13798,9 +13800,19 @@ class TestBIOSEntropyFill(unittest.TestCase):
         return bytes(sys_obj.cpu.mem[start:start + length])
 
     def test_dictionary_append_preserves_every_older_link(self):
-        """Both entropy words extend the prior tail without reordering it."""
+        """Caller-span qualification extends the checked entropy tail."""
         labels = self._bios_labels
-        self.assertEqual(labels["latest_entry"], labels["d_entropy_ready"])
+        self.assertEqual(
+            labels["latest_entry"],
+            labels["d_caller_span_status"],
+        )
+        caller_span_previous = int.from_bytes(
+            self._bios_harness.bios_code[
+                labels["d_caller_span_status"]:
+                labels["d_caller_span_status"] + 8
+            ],
+            "little",
+        )
         ready_previous = int.from_bytes(
             self._bios_harness.bios_code[
                 labels["d_entropy_ready"]:labels["d_entropy_ready"] + 8
@@ -13813,8 +13825,49 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
+        self.assertEqual(caller_span_previous, labels["d_entropy_ready"])
         self.assertEqual(ready_previous, labels["d_entropy_fill"])
         self.assertEqual(fill_previous, labels["d_sha2_span_status"])
+
+    def test_caller_span_status_is_pure_bounded_and_stack_balanced(self):
+        """The neutral boundary accepts only complete caller-managed spans."""
+        protected = self._bios_labels["sha256_contexts"]
+        sys_obj, buf = self._boot_entropy(ext_mem_mib=64)
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            "CREATE caller-span-good 16 ALLOT",
+            '."  Z0=" 0 0 CALLER-SPAN-STATUS .',
+            '."  ZN=" -1 0 CALLER-SPAN-STATUS .',
+            '."  G=" caller-span-good 16 CALLER-SPAN-STATUS .',
+            '."  NL=" caller-span-good -1 CALLER-SPAN-STATUS .',
+            '."  NA=" -1 1 CALLER-SPAN-STATUS .',
+            '."  N=" 0 1 CALLER-SPAN-STATUS .',
+            '."  X=" EXT-MEM-BASE 1 CALLER-SPAN-STATUS .',
+            '."  H=" HBW-BASE 1 CALLER-SPAN-STATUS .',
+            '."  V=" VRAM-BASE 1 CALLER-SPAN-STATUS .',
+            '."  C=" EXT-MEM-BASE EXT-MEM-SIZE + 1 - 2'
+            " CALLER-SPAN-STATUS .",
+            '."  U=" EXT-MEM-BASE EXT-MEM-SIZE + 1'
+            " CALLER-SPAN-STATUS .",
+            '."  B=" 1 1 CALLER-SPAN-STATUS .',
+            f'."  P=" {protected} 1 CALLER-SPAN-STATUS .',
+            '."  K=" SP@ 16 - 16 CALLER-SPAN-STATUS .',
+            '."  D=" DEPTH .',
+        ])
+        self.assertIn("Z0=0 ", text)
+        self.assertIn("ZN=0 ", text)
+        self.assertIn("G=0 ", text)
+        self.assertIn("NL=2 ", text)
+        self.assertIn("NA=2 ", text)
+        self.assertIn("N=2 ", text)
+        self.assertIn("X=0 ", text)
+        self.assertIn("H=0 ", text)
+        self.assertIn("V=0 ", text)
+        self.assertIn("C=2 ", text)
+        self.assertIn("U=2 ", text)
+        self.assertIn("B=3 ", text)
+        self.assertIn("P=3 ", text)
+        self.assertIn("K=3 ", text)
+        self.assertIn("D=0 ", text)
 
     def test_zero_range_protection_and_stack_balance(self):
         """Qualification is complete, null-aware, protected, and balanced."""

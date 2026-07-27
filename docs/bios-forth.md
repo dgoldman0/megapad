@@ -776,6 +776,31 @@ at `0xFFFF_FF00_0000_0700`.
 
 ---
 
+## Caller-Managed Span Qualification (1 word)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CALLER-SPAN-STATUS` | `( addr len -- status )` | Purely qualify a complete caller-managed span before any higher-level read or write. |
+
+The result is `0` OK, `2` RANGE, or `3` PROTECTED. Zero length is
+unconditional OK and ignores the unused address. For a nonempty span, negative
+address or length cells, null, address wrap, crossing an advertised physical
+window, and an unadvertised range all return RANGE.
+
+Bank 0 admits only `[dict_free, caller-DSP-8)`. This excludes the static
+BIOS/private footprint, live data and return stacks, and the status result
+cell. External, HBW, and VRAM spans are admitted when they fit wholly in the
+corresponding nonempty SysInfo window.
+
+One conservative boundary serves both input reads and output writes because
+it qualifies ordinary caller-manageable memory, not every byte the machine
+could physically read. It is deliberately stricter than a read-only
+accessibility test. Success does not establish allocation ownership,
+mutability, initialization, lifetime, or freedom from higher-level aliases;
+each caller must enforce those properties before using the span.
+
+---
+
 ## SHA-256 Streaming (4 words)
 
 `SHA256-*` uses EXT.CRYPTO mode 0 behind a checked, per-core BIOS
@@ -896,7 +921,9 @@ Bank 0, external, HBW, or VRAM physical window. Bank 0 is further limited to
 `[dict_free, caller-DSP-8)`, excluding the complete static BIOS/private
 footprint, every live stack byte, and the future status cell. This is a
 protection boundary, not an allocation-ownership check; callers remain
-responsible for supplying a buffer they manage.
+responsible for supplying a buffer they manage. The word applies this policy
+through the shared `CALLER-SPAN-STATUS` implementation before its first
+device read.
 
 The word reads `STATUS` before every `RAND8` and after the last byte, and
 accepts only the exact value one. Initial unavailability writes nothing. If a

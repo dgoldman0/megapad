@@ -14329,8 +14329,9 @@ w_seed_rng:
     brcc .seed_rng_loop
     ret.l
 
-; Validate a complete ENTROPY-FILL destination before the first TRNG read.
-;   R9  = destination first byte
+; Validate a complete caller-managed span before an operation reads or writes
+; any named byte.
+;   R9  = first byte
 ;   R10 = byte count
 ;   Returns R0 = 0 OK, 2 RANGE, or 3 PROTECTED.
 ;   Preserves R9, R10, and the exact return-stack depth/content.
@@ -14338,36 +14339,37 @@ w_seed_rng:
 ; Nonempty spans must be non-null, nonnegative, nonwrapping, and wholly
 ; contained in one physical Bank 0, external, HBW, or VRAM window.  Bank 0
 ; additionally admits only the caller-manageable interval beginning at
-; dict_free and ending before the result cell that ENTROPY-FILL will publish.
+; dict_free and ending before the result cell the public status word will
+; publish.
 ; This is a protection boundary, not an allocation-ownership proof.  It
 ; excludes the static BIOS image, all private BIOS arenas, and the live data
 ; and return stacks.  Empty spans ignore their unused address, including the
 ; canonical null empty span (0,0).
-_entropy_fill_span_status:
+_caller_span_status:
     cmpi r10, 0
-    lbrmi .entropy_fill_span_range
+    lbrmi .caller_span_range
     cmpi r10, 0
-    breq .entropy_fill_span_ok
+    breq .caller_span_ok
     cmpi r9, 0
-    lbrmi .entropy_fill_span_range
+    lbrmi .caller_span_range
     cmpi r9, 0
-    breq .entropy_fill_span_range
+    breq .caller_span_range
 
     ; The generic helper validates all advertised physical windows and
     ; rejects address wrap.  Its private 5/6 results are both public RANGE.
     ldi64 r11, disk_dma_span_status
     call.l r11
     cmpi r0, 0
-    brne .entropy_fill_span_range
+    brne .caller_span_range
 
     ; External, HBW, and VRAM spans need no Bank 0 ownership check.
     cmp r9, r2
-    brcs .entropy_fill_span_nonbank0
+    brcs .caller_span_nonbank0
 
     ; Bank 0 bytes below dict_free are the immutable/static BIOS footprint.
     ldi64 r11, dict_free
     cmp r9, r11
-    brcc .entropy_fill_span_protected
+    brcc .caller_span_protected
 
     ; R14 is the caller's pre-invocation DSP after the two arguments were
     ; popped.  The returned status occupies [R14-8,R14), so require the
@@ -14377,19 +14379,35 @@ _entropy_fill_span_status:
     mov r1, r14
     subi r1, 8
     cmp r7, r1
-    breq .entropy_fill_span_ok
-    brcc .entropy_fill_span_ok
-    lbr .entropy_fill_span_protected
+    breq .caller_span_ok
+    brcc .caller_span_ok
+    lbr .caller_span_protected
 
-.entropy_fill_span_nonbank0:
-.entropy_fill_span_ok:
+.caller_span_nonbank0:
+.caller_span_ok:
     ldi r0, 0
     ret.l
-.entropy_fill_span_range:
+.caller_span_range:
     ldi r0, 2
     ret.l
-.entropy_fill_span_protected:
+.caller_span_protected:
     ldi r0, 3
+    ret.l
+
+; CALLER-SPAN-STATUS ( addr len -- status )
+; Pure protocol-neutral qualification of one complete caller-managed span.
+; The same conservative geometry is suitable before either reading or
+; writing ordinary caller memory.  It does not establish allocation
+; ownership, mutability, initialization, lifetime, or inter-caller aliasing.
+w_caller_span_status:
+    ldn r10, r14
+    addi r14, 8
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r11, _caller_span_status
+    call.l r11
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; Erase the complete already-qualified destination at R9/R10.
@@ -14428,7 +14446,7 @@ w_entropy_fill:
     ldn r9, r14
     addi r14, 8
 
-    ldi64 r11, _entropy_fill_span_status
+    ldi64 r11, _caller_span_status
     call.l r11
     cmpi r0, 0
     lbrne .entropy_fill_return_status
@@ -19692,12 +19710,22 @@ d_entropy_fill:
 
 ; Checked entropy readiness is append-only and follows the bulk boundary.
 ; === ENTROPY-READY? ===
-latest_entry:
 d_entropy_ready:
     .dq d_entropy_fill
     .db 14
     .ascii "ENTROPY-READY?"
     ldi64 r11, w_entropy_ready
+    call.l r11
+    ret.l
+
+; Protocol-neutral caller span qualification is the newest append-only word.
+; === CALLER-SPAN-STATUS ===
+latest_entry:
+d_caller_span_status:
+    .dq d_entropy_ready
+    .db 18
+    .ascii "CALLER-SPAN-STATUS"
+    ldi64 r11, w_caller_span_status
     call.l r11
     ret.l
 
