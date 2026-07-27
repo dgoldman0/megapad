@@ -778,10 +778,12 @@ at `0xFFFF_FF00_0000_0700`.
 
 ## SHA-256 Engine (5 words)
 
-Per-core SHA-256 hashing via ISA instructions (EXT.CRYPTO `FB` prefix).
-The engine uses a 64-byte block buffer in RAM (pointed to by TSRC0 CSR)
-and compresses automatically when the buffer fills.  Digest is read
-word-by-word via `sha.dout`.
+SHA-256 uses ISA instructions (EXT.CRYPTO `FB` prefix): local state on a
+full core and a transaction-owned shared engine on a micro-cluster. The
+current BIOS wrapper uses one global 64-byte RAM block and unchecked
+caller reads, so callers must serialize same-core task reentry and provide a
+fully readable input span. `FINAL` reads the digest while still owner, scrubs
+the block and SHA-visible state, and then issues `sha.release`.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -789,7 +791,44 @@ word-by-word via `sha.dout`.
 | `SHA256-UPDATE` | `( addr len -- )` | Feed data bytes into SHA-256 block buffer. |
 | `SHA256-FINAL` | `( addr -- )` | Pad, compress, and copy 32-byte digest to addr. |
 | `SHA256-STATUS@` | `( -- 0 )` | Always 0 — engine is synchronous. |
-| `SHA256-DOUT@` | `( addr -- )` | Read 32 bytes of digest to addr. |
+| `SHA256-DOUT@` | `( addr -- )` | Raw read of the current engine state; after `FINAL` it returns scrubbed state and is not a second digest publication. |
+
+## SHA-512 Streaming (4 words)
+
+`SHA512-*` uses EXT.CRYPTO mode 2 but does not expose the engine's
+R16–R19-backed digest state across a Forth return. Each core has a private
+512-byte BIOS context containing the eight digest words, the 128-bit message
+length, partial-block offset, a dedicated 128-byte data block, and a 64-byte
+publication stage. Every bounded engine window preserves the
+caller's exact R16–R19, ACC0–ACC3, TSRC0, and interrupt-enable state.
+
+`UPDATE` validates the complete physical span, rejects an intersection with
+the entire 8192-byte context arena, and preflights the 128-bit bit-length
+addition before copying any caller byte. `FINAL` validates and de-aliases all
+64 destination bytes before entering mode 2, stages the digest while the
+engine is owned, releases only after cleanup, and publishes afterward. The
+contexts are erased on warm boot, on every checked failure, and after
+successful `FINAL` or `CLEAR`.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA512-INIT` | `( -- status )` | Reset this core's context to the SHA-512 IV. |
+| `SHA512-UPDATE` | `( addr len -- status )` | Absorb an arbitrary validated Bank 0, external, HBW, or VRAM span, including zero-length and cross-block updates. |
+| `SHA512-FINAL` | `( dst -- status )` | On success, write the 64-byte big-endian digest; always erase saved and staged state. |
+| `SHA512-CLEAR` | `( -- status )` | Idempotently abort and zeroize context and visible SHA state, release the engine, and return zero. |
+
+| Status | Name | Meaning |
+|--------|------|---------|
+| `0` | OK | Operation completed. |
+| `1` | STATE | `UPDATE` or `FINAL` was called without an active `INIT`. |
+| `2` | RANGE | The complete caller span is not in one advertised physical-memory window. |
+| `3` | CONTEXT-ALIAS | The caller span intersects any core's private SHA-512 context. |
+| `4` | LENGTH-OVERFLOW | Absorbing the span would wrap the 128-bit bit length. |
+
+`INIT` is required even before a zero-length `UPDATE`. Every nonzero failure
+aborts and wipes the active context. A failed `FINAL` publishes no digest and
+does not modify a non-context destination. Streaming contexts are core-local
+and must be updated, finalized, or cleared on their originating core.
 
 ---
 

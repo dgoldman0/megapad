@@ -468,7 +468,7 @@ class MicroCluster:
         return None if owner is None else int(owner)
 
     def sha_try_acquire(self, global_core_id: int) -> bool:
-        """Acquire SHA INIT-to-FINAL ownership for one local core."""
+        """Acquire SHA INIT-to-RELEASE ownership for one local core."""
         local = global_core_id - self.id_base
         if not 0 <= local < self.n:
             return False
@@ -496,7 +496,7 @@ class MicroCluster:
         return self._sha_locked and self._sha_owner == local
 
     def sha_release(self, global_core_id: int):
-        """Release SHA transaction ownership after the owner's FINAL."""
+        """Release SHA ownership only when called by the current owner."""
         local = global_core_id - self.id_base
         if self._native_cluster_index is not None:
             self._native_system._cluster_sha_release(

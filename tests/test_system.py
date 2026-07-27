@@ -12248,7 +12248,6 @@ class TestKDOSCRC(_KDOSTestBase):
         self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
         self.assertEqual(cpu.pc, 2)
 
-
 class TestKDOSDiagnostics(_KDOSTestBase):
     """Tests for §1.4 Hardware Diagnostics."""
 
@@ -12668,6 +12667,282 @@ class TestKDOSSHA3(_KDOSTestBase):
         self.assertIn("H1=83 ", text)
         self.assertIn("H2=70 ", text)
         self.assertIn("H3=159 ", text)
+
+
+class TestBIOSSHA2(unittest.TestCase):
+    """Focused BIOS qualification for checked SHA-2 transaction cleanup."""
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+        self._bios_labels = self._bios_harness._bios_labels
+
+    def _run_sha512(self, lines, *, ext_mem_mib=0):
+        sys_obj, buf = self._bios_harness._boot_bios(
+            ext_mem_mib=ext_mem_mib,
+        )
+        return self._bios_harness._run_forth(sys_obj, buf, lines)
+
+    def test_accelerated_sha_release_is_full_core_noop(self):
+        """SHA.RELEASE is encoded at FB16 and changes no full-core state."""
+        self.assertEqual(assemble("sha.release"), bytes((0xFB, 0x16)))
+        marker = 0x0123_4567_89AB_CDEF
+        code = assemble(
+            f"ldi64 r2, {marker}\n"
+            "csrw 0x19, r2\n"
+            "ldi r2, 2\n"
+            "csrw 0x82, r2\n"
+            "sha.release\n"
+            "csrr r6, 0x19\n"
+            "csrr r7, 0x82\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[6], marker)
+        self.assertEqual(cpu.regs[7], 2)
+
+    def test_sha512_context_geometry_and_dictionary_chain(self):
+        """The private arena is exact and four append-only words are linked."""
+        labels = self._bios_labels
+        self.assertEqual(
+            labels["dict_pad"] - labels["sha512_contexts"],
+            16 * 512,
+        )
+
+        address = labels["latest_entry"]
+        seen = set()
+        while address:
+            self.assertNotIn(address, seen)
+            self.assertLessEqual(address + 8, len(self._bios_harness.bios_code))
+            seen.add(address)
+            address = int.from_bytes(
+                self._bios_harness.bios_code[address:address + 8],
+                "little",
+            )
+        self.assertEqual(len(seen), 462)
+
+    def test_sha512_abc(self):
+        """Streaming SHA-512('abc') returns success and starts ddaf35a1."""
+        text = self._run_sha512([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 64 ALLOT",
+            '."  I=" SHA512-INIT .',
+            '."  U=" msg 3 SHA512-UPDATE .',
+            '."  F=" h-buf SHA512-FINAL .',
+            '."  H0=" h-buf C@ .',
+            '."  H1=" h-buf 1 + C@ .',
+            '."  H2=" h-buf 2 + C@ .',
+            '."  H3=" h-buf 3 + C@ .',
+        ])
+        self.assertIn("I=0 ", text)
+        self.assertIn("U=0 ", text)
+        self.assertIn("F=0 ", text)
+        self.assertIn("H0=221 ", text)
+        self.assertIn("H1=175 ", text)
+        self.assertIn("H2=53 ", text)
+        self.assertIn("H3=161 ", text)
+
+    def test_sha512_arbitrary_splits_cross_block_boundary(self):
+        """Split updates across 128 bytes equal a one-shot 200-byte hash."""
+        text = self._run_sha512([
+            "CREATE msg 200 ALLOT",
+            ": fill-seq 200 0 DO I msg I + C! LOOP ; fill-seq",
+            "CREATE h-one 64 ALLOT",
+            "CREATE h-split 64 ALLOT",
+            "SHA512-INIT DROP",
+            "msg 200 SHA512-UPDATE DROP",
+            "h-one SHA512-FINAL DROP",
+            "SHA512-INIT DROP",
+            "msg 17 SHA512-UPDATE DROP",
+            "msg 17 + 111 SHA512-UPDATE DROP",
+            "msg 128 + 72 SHA512-UPDATE DROP",
+            "h-split SHA512-FINAL DROP",
+            '."  EQ=" h-one 64 h-split 64 COMPARE .',
+        ])
+        self.assertIn("EQ=0 ", text)
+
+    def test_sha512_padding_boundaries_match_hashlib(self):
+        """Lengths around the 112/128-byte boundaries match SHA-512."""
+        message_addr = 0x1B000
+        output_base = 0x1B100
+        lengths = (111, 112, 127, 128, 129)
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = [
+            f": fill-seq 129 0 DO I {message_addr} I + C! LOOP ;",
+            "fill-seq",
+        ]
+        for index, length in enumerate(lengths):
+            output = output_base + index * 64
+            lines.extend([
+                "SHA512-INIT DROP",
+                f"{message_addr} {length} SHA512-UPDATE DROP",
+                f"{output} SHA512-FINAL DROP",
+            ])
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+        self.assertNotIn("???", text)
+
+        message = bytes(range(129))
+        for index, length in enumerate(lengths):
+            output = output_base + index * 64
+            actual = bytes(sys_obj.cpu.mem[output:output + 64])
+            self.assertEqual(actual, hashlib.sha512(message[:length]).digest())
+
+        context = self._bios_labels["sha512_contexts"]
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[context:context + 512]),
+            bytes(512),
+        )
+
+    def test_sha512_clear_reuse_and_acc_transparency(self):
+        """CLEAR permits reuse, and FINAL restores an outer ACC value."""
+        text = self._run_sha512([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE outer-a 32 ALLOT  outer-a 32 90 FILL",
+            "CREATE outer-r 32 ALLOT",
+            "CREATE h-buf 64 ALLOT",
+            "SHA512-INIT DROP  msg 3 SHA512-UPDATE DROP"
+            "  SHA512-CLEAR DROP",
+            "outer-a GF-A!",
+            "SHA512-INIT DROP  h-buf SHA512-FINAL DROP",
+            "outer-r GF-R@",
+            '."  E0=" h-buf C@ .',
+            '."  E1=" h-buf 1 + C@ .',
+            '."  ACC=" outer-a 32 outer-r 32 COMPARE .',
+        ])
+        self.assertIn("E0=207 ", text)
+        self.assertIn("E1=131 ", text)
+        self.assertIn("ACC=0 ", text)
+
+    def test_sha512_inactive_calls_are_checked_and_do_not_publish(self):
+        """Inactive UPDATE/FINAL return STATE; FINAL preserves destination."""
+        text = self._run_sha512([
+            "CREATE h-buf 64 ALLOT",
+            "h-buf 64 165 FILL",
+            '."  U=" 0 0 SHA512-UPDATE .',
+            '."  F=" h-buf SHA512-FINAL .',
+            '."  B=" h-buf C@ .',
+            '."  C0=" SHA512-CLEAR .',
+            '."  C1=" SHA512-CLEAR .',
+        ])
+        self.assertIn("U=1 ", text)
+        self.assertIn("F=1 ", text)
+        self.assertIn("B=165 ", text)
+        self.assertIn("C0=0 ", text)
+        self.assertIn("C1=0 ", text)
+
+    def test_sha512_span_boundaries_are_preflighted_atomically(self):
+        """Endpoint spans pass; crossing input/output spans abort safely."""
+        text = self._run_sha512([
+            '."  V=" SHA512-INIT DROP'
+            "  EXT-MEM-BASE EXT-MEM-SIZE + 1 - 1 SHA512-UPDATE .",
+            "SHA512-CLEAR DROP",
+            '."  X=" SHA512-INIT DROP'
+            "  EXT-MEM-BASE EXT-MEM-SIZE + 1 - 2 SHA512-UPDATE .",
+            '."  A=" 0 0 SHA512-UPDATE .',
+            "VARIABLE bad-out",
+            "EXT-MEM-BASE EXT-MEM-SIZE + 32 - bad-out !",
+            "bad-out @ 32 165 FILL",
+            "SHA512-INIT DROP",
+            '."  O=" bad-out @ SHA512-FINAL .',
+            '."  B0=" bad-out @ C@ .',
+            '."  B31=" bad-out @ 31 + C@ .',
+        ], ext_mem_mib=64)
+        self.assertIn("V=0 ", text)
+        self.assertIn("X=2 ", text)
+        self.assertIn("A=1 ", text)
+        self.assertIn("O=2 ", text)
+        self.assertIn("B0=165 ", text)
+        self.assertIn("B31=165 ", text)
+
+    def test_sha512_rejects_the_complete_context_arena(self):
+        """Input and output may not overlap any core's private context."""
+        other_context = self._bios_labels["sha512_contexts"] + 512
+        text = self._run_sha512([
+            "CREATE msg 1 ALLOT  65 msg C!",
+            f"165 {other_context} C!",
+            "SHA512-INIT DROP",
+            f'."  U=" {other_context} 1 SHA512-UPDATE .',
+            "SHA512-INIT DROP",
+            f'."  F=" {other_context} SHA512-FINAL .',
+            f'."  B=" {other_context} C@ .',
+        ])
+        self.assertIn("U=3 ", text)
+        self.assertIn("F=3 ", text)
+        self.assertIn("B=165 ", text)
+
+    def test_sha512_length_overflow_aborts_before_absorb(self):
+        """A 128-bit bit-length wrap returns LENGTH-OVERFLOW and wipes."""
+        context = self._bios_labels["sha512_contexts"]
+        text = self._run_sha512([
+            "CREATE msg 1 ALLOT  65 msg C!",
+            "SHA512-INIT DROP",
+            f"-1 {context + 64} !",
+            f"-1 {context + 72} !",
+            '."  O=" msg 1 SHA512-UPDATE .',
+            '."  A=" msg 0 SHA512-UPDATE .',
+        ])
+        self.assertIn("O=4 ", text)
+        self.assertIn("A=1 ", text)
+
+    def test_sha256_final_publishes_then_scrubs_visible_state(self):
+        """SHA-256 publishes its digest before wiping the shared engine."""
+        text = self._run_sha512([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "CREATE visible 32 ALLOT",
+            "SHA256-INIT",
+            "msg 3 SHA256-UPDATE",
+            "h-buf SHA256-FINAL",
+            "visible SHA256-DOUT@",
+            '."  H0=" h-buf C@ .',
+            '."  H1=" h-buf 1 + C@ .',
+            '."  V0=" visible C@ .',
+            '."  V31=" visible 31 + C@ .',
+        ])
+        self.assertIn("H0=186 ", text)
+        self.assertIn("H1=120 ", text)
+        self.assertIn("V0=0 ", text)
+        self.assertIn("V31=0 ", text)
+
+    def test_kdos_sha512_surface_from_exact_source_slice(self):
+        """The exact KDOS wrapper and status constants run over the BIOS ABI."""
+        with open(KDOS_PATH) as source_file:
+            source_lines = source_file.read().splitlines()
+        start = source_lines.index("0 CONSTANT SHA512-OK")
+        end = source_lines.index("\\ --- HMAC-SHA3-256 ---")
+        definitions = [
+            line
+            for line in source_lines[start:end]
+            if line.strip() and not line.lstrip().startswith("\\")
+        ]
+        text = self._run_sha512(definitions + [
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 64 ALLOT",
+            "CREATE bad-buf 64 ALLOT  bad-buf 64 165 FILL",
+            '."  ST=" msg 3 h-buf SHA512 .',
+            '."  BAD=" -1 1 bad-buf SHA512 .',
+            '."  B=" bad-buf C@ .',
+            '."  S=" SHA512-OK . SHA512-STATE . SHA512-RANGE .'
+            " SHA512-CONTEXT-ALIAS . SHA512-LENGTH-OVERFLOW .",
+            '."  H0=" h-buf C@ .',
+            '."  H1=" h-buf 1 + C@ .',
+            '."  H2=" h-buf 2 + C@ .',
+            '."  H3=" h-buf 3 + C@ .',
+        ])
+        self.assertIn("ST=0 ", text)
+        self.assertIn("BAD=2 ", text)
+        self.assertIn("B=165 ", text)
+        self.assertIn("S=0 1 2 3 4 ", text)
+        self.assertIn("H0=221 ", text)
+        self.assertIn("H1=175 ", text)
+        self.assertIn("H2=53 ", text)
+        self.assertIn("H3=161 ", text)
 
 
 class TestKDOSSHA256(_KDOSTestBase):

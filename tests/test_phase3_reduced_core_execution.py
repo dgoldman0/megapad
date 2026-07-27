@@ -330,8 +330,8 @@ def _sha_handoff_signature(worker_count: int) -> tuple:
     cluster = system.clusters[0]
     first, second = cluster.cores[:2]
     programs = (
-        assemble("sha.init 0\nsha.final\nhalt"),
-        assemble("sha.init 1\nsha.final\nhalt"),
+        assemble("sha.init 0\nsha.final\nsha.release\nhalt"),
+        assemble("sha.init 1\nsha.final\nsha.release\nhalt"),
     )
     for cpu in system.cores:
         cpu.halted = True
@@ -344,7 +344,7 @@ def _sha_handoff_signature(worker_count: int) -> tuple:
         cpu.pc = address
         cpu.halted = False
 
-    stats = system.run_batch_stats(4)
+    stats = system.run_batch_stats(6)
     arbiter = system._native_system._cluster_arbiter_snapshot(0)
     return (
         stats.instructions_executed,
@@ -376,10 +376,10 @@ def test_sha_lock_handoff_is_exact_across_worker_counts() -> None:
     assert signatures[2] == signatures[1]
     assert signatures[4] == signatures[1]
     reference = signatures[1]
-    assert reference[0] == 4
-    assert reference[2] == (0, 2, 2, 0, 0)
+    assert reference[0] == 6
+    assert reference[2] == (0, 3, 3, 0, 0)
     assert reference[10:12] == (False, None)
-    assert reference[12:] == (4, 0, 4)
+    assert reference[12:] == (6, 0, 6)
 
 
 def _mex_contention_signature(worker_count: int) -> tuple:
@@ -1118,7 +1118,7 @@ def test_nonengine_f_modifier_cannot_bypass_bus_arbitration(
         ),
         (
             "sha",
-            bytes((0xFB, 0x16)),
+            bytes((0xFB, 0x17)),
             lambda cluster, core:
                 cluster.sha_try_acquire(core.core_id),
         ),

@@ -47,7 +47,7 @@
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
 ;    CRC    ISA-only (EXT.CRYPTO FB 00-05; no MMIO)
-;    SHA256 ISA-only (EXT.CRYPTO FB 10-15; no MMIO)
+;    SHA-2  ISA-only (EXT.CRYPTO FB 10-16; no MMIO)
 ;
 ;  Multicore CSRs
 ;  ----
@@ -107,6 +107,12 @@ boot:
     ldi64 r11, forth_exit
     mov   r17, r11
 
+    ; RAM survives a warm reset.  Streaming SHA-512 contexts can contain
+    ; partial message bytes and intermediate digests, so erase every
+    ; per-core context before any auto-booted code can observe them.
+    ldi64 r11, sha512_wipe_all_contexts
+    call.l r11
+
     ; Enable timer
     ldi64 r11, 0xFFFF_FF00_0000_0108
     ldi r1, 0x01
@@ -133,7 +139,7 @@ boot:
     st.h r11, r1
     addi r11, 2
 
-    ldi  r1, 0                  ; port 5 → disabled (SHA256 is now ISA-only)
+    ldi  r1, 0                  ; port 5 → disabled (SHA-2 is now ISA-only)
     st.h r11, r1
     addi r11, 2
 
@@ -12965,7 +12971,7 @@ w_sha3_dout_fetch:
     ret.l
 
 ; =====================================================================
-;  SHA-256 Engine — ISA instructions (EXT.CRYPTO FB 10-15)
+;  SHA-256 Engine — ISA instructions (EXT.CRYPTO FB 10-16)
 ; =====================================================================
 ; SHA-256 is now per-core via ISA instructions.  No MMIO peripheral.
 ; State lives in tile accumulators (acc[0..3]) and CSRs:
@@ -12979,6 +12985,7 @@ w_sha3_dout_fetch:
 ;   SHA.DIN   Rd, Rs — write Rs[7:0] to block buffer at R0 offset
 ;   SHA.DOUT  Rd, Rs — read hash word Rs[2:0] → Rd (32-bit)
 ;   SHA.FINAL        — auto-pad + final compress
+;   SHA.RELEASE      — release micro-cluster ownership (full-core no-op)
 ;
 ; Block buffer lives at sha_blk_buf (64 bytes, addressed via TSRC0 CSR).
 ; R0 = block offset counter (auto-managed by SHA.DIN, saved between calls).
@@ -13043,6 +13050,29 @@ w_sha256_final:
     addi r1, 1
     cmpi r1, 8
     brcc .sha256_final_loop
+
+    ; FINAL retains micro-cluster ownership.  Scrub the complete SHA-visible
+    ; bank and BIOS block state while still owner, then release explicitly.
+    ldi64 r7, sha_blk_buf
+    ldi r0, 0
+    ldi r12, 8
+.sha256_final_wipe_loop:
+    str r7, r0
+    addi r7, 8
+    dec r12
+    cmpi r12, 0
+    brne .sha256_final_wipe_loop
+    ldi64 r7, sha_blk_off
+    str r7, r0
+    csrw 0x19, r0
+    csrw 0x1A, r0
+    csrw 0x1B, r0
+    csrw 0x1C, r0
+    csrw 0x82, r0
+    csrw 0x83, r0
+    csrw 0x84, r0
+    csrw 0x16, r0
+    sha.release
     ret.l
 
 ; SHA256-STATUS@ ( -- n )  Read SHA-256 status (always 0 for ISA engine).
@@ -13068,6 +13098,642 @@ w_sha256_dout_fetch:
     cmpi r1, 8
     brcc .sha256_dout_loop
     ret.l
+
+; =====================================================================
+;  SHA-512 streaming — scoped EXT.CRYPTO mode-2 transactions
+; =====================================================================
+; SHA-512 needs all eight 64-bit digest words.  H0..H3 occupy ACC0..ACC3
+; and H4..H7 occupy R16..R19, which are live BIOS runtime registers.
+; Consequently no mode-2 state is allowed to survive a BIOS return.
+;
+; Each architectural core owns a 512-byte RAM context:
+;   +0x000  H0..H7                    (8 qwords)
+;   +0x040  message length, low/high  (2 qwords, bits)
+;   +0x050  partial-block offset      (qword, 0..127)
+;   +0x058  active marker             (qword, 0 or 1)
+;   +0x080  partial/data block        (128 bytes)
+;   +0x100  reserved/scrubbed         (128 bytes)
+;   +0x180  staged digest             (64 bytes)
+;   +0x1C0  reserved                  (64 bytes)
+;
+; Caller memory is copied while the normal R16..R19 runtime values are
+; installed.  _sha512_engine is the only routine that exposes mode-2 state
+; in those registers.  It masks interrupts only for that bounded engine
+; window, preserves the caller's exact IE value and ACC0..ACC3/TSRC0 state,
+; and does not call or SEP while H4..H7 are live.
+;
+; SHA.INIT acquires the micro-cluster transaction and SHA.RELEASE is the sole
+; ownership release.  FINAL only computes, leaving DOUT and cleanup protected.
+
+; Erase all 16 per-core contexts.  Called during every primary-core boot so
+; warm-reset RAM cannot retain a partial message, digest, or staged output.
+sha512_wipe_all_contexts:
+    ldi64 r7, sha512_contexts
+    ldi64 r12, 1024                    ; 16 * 512 / 8 qwords
+    ldi r1, 0
+.sha512_wipe_all_loop:
+    str r7, r1
+    addi r7, 8
+    dec r12
+    cmpi r12, 0
+    brne .sha512_wipe_all_loop
+    ret.l
+
+; Resolve this core's private context into R10.
+; Clobbers R0.
+_sha512_context:
+    csrr r0, 0x20                      ; COREID
+    andi r0, 0x0F                      ; architectural cores are 0..15
+    lsli r0, 9                         ; * 512
+    ldi64 r10, sha512_contexts
+    add r10, r0
+    ret.l
+
+; Wipe the 512-byte context at R10.
+; Clobbers R0, R7, R12.
+_sha512_wipe_context:
+    mov r7, r10
+    ldi r0, 0
+    ldi r12, 64
+.sha512_wipe_context_loop:
+    str r7, r0
+    addi r7, 8
+    dec r12
+    cmpi r12, 0
+    brne .sha512_wipe_context_loop
+    ret.l
+
+; Run one bounded SHA-512 engine transaction.
+;   R10 = per-core context
+;   R13 = 0 INIT, 1 COMPRESS full data block, 2 FINAL into stage, 3 CLEAR
+; Clobbers low scratch registers.  Preserves exact R16..R19, caller
+; ACC0..ACC3, TSRC0, and interrupt-enable state.
+_sha512_engine:
+    ; Snapshot and mask IE before the first SHA.INIT can acquire ownership or
+    ; replace the runtime's NEXT/EXIT/TX registers with H4..H7.
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0                       ; saved IE
+    di
+
+    subi r15, 8
+    str r15, r16
+    subi r15, 8
+    str r15, r17
+    subi r15, 8
+    str r15, r18
+    subi r15, 8
+    str r15, r19
+
+    csrr r0, 0x19
+    subi r15, 8
+    str r15, r0                       ; outer ACC0
+    csrr r0, 0x1A
+    subi r15, 8
+    str r15, r0                       ; outer ACC1
+    csrr r0, 0x1B
+    subi r15, 8
+    str r15, r0                       ; outer ACC2
+    csrr r0, 0x1C
+    subi r15, 8
+    str r15, r0                       ; outer ACC3
+    csrr r0, 0x16
+    subi r15, 8
+    str r15, r0                       ; outer TSRC0
+
+    cmpi r13, 0
+    lbreq .sha512_engine_init
+    cmpi r13, 3
+    lbreq .sha512_engine_clear
+
+    ; COMPRESS and FINAL: acquire with INIT, then restore the complete saved
+    ; digest and length before using the trusted per-core data block.
+    sha.init 2
+    mov r7, r10
+    ldn r0, r7
+    csrw 0x19, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x1A, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x1B, r0
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x1C, r0
+    addi r7, 8
+    ldn r16, r7
+    addi r7, 8
+    ldn r17, r7
+    addi r7, 8
+    ldn r18, r7
+    addi r7, 8
+    ldn r19, r7
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x83, r0                     ; message length low
+    addi r7, 8
+    ldn r0, r7
+    csrw 0x84, r0                     ; message length high
+
+    mov r7, r10
+    ldi r1, 128
+    add r7, r1
+    csrw 0x16, r7                     ; TSRC0 = trusted data block
+
+    cmpi r13, 1
+    breq .sha512_engine_compress
+
+    ; FINAL: restore the partial-block offset, finalize, then stage
+    ; all eight digest words before any caller destination is touched.
+    mov r7, r10
+    addi r7, 80
+    ldn r0, r7
+    sha.final
+
+    mov r12, r10
+    ldi r0, 3
+    lsli r0, 7                        ; 384-byte stage offset
+    add r12, r0
+    ldi r1, 0
+.sha512_stage_word_loop:
+    sha.dout r7, r1                   ; digest only enters a low scratch reg
+    mov r0, r12
+    addi r0, 7
+    ldi r9, 8
+.sha512_stage_byte_loop:
+    st.b r0, r7                       ; low byte goes to end of BE word
+    lsri r7, 8
+    dec r0
+    dec r9
+    cmpi r9, 0
+    brne .sha512_stage_byte_loop
+    addi r12, 8
+    addi r1, 1
+    cmpi r1, 8
+    brcc .sha512_stage_word_loop
+    lbr .sha512_engine_cleanup
+
+.sha512_engine_compress:
+    ldi r0, 0                         ; full block starts at offset zero
+    sha.round
+
+    ; Persist all eight updated words before releasing the engine.
+    mov r7, r10
+    csrr r0, 0x19
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1A
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1B
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1C
+    str r7, r0
+    addi r7, 8
+    str r7, r16
+    addi r7, 8
+    str r7, r17
+    addi r7, 8
+    str r7, r18
+    addi r7, 8
+    str r7, r19
+    mov r7, r10
+    addi r7, 80
+    ldi r0, 0
+    str r7, r0                        ; partial offset = 0
+    lbr .sha512_engine_cleanup
+
+.sha512_engine_init:
+    sha.init 2
+
+    ; Snapshot the complete IV state.  The context was zeroed by INIT's
+    ; caller, so its 128-byte data block and length begin canonical.
+    mov r7, r10
+    csrr r0, 0x19
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1A
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1B
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x1C
+    str r7, r0
+    addi r7, 8
+    str r7, r16
+    addi r7, 8
+    str r7, r17
+    addi r7, 8
+    str r7, r18
+    addi r7, 8
+    str r7, r19
+    addi r7, 8
+    csrr r0, 0x83
+    str r7, r0
+    addi r7, 8
+    csrr r0, 0x84
+    str r7, r0
+    addi r7, 8
+    ldi r0, 0
+    str r7, r0                        ; partial offset
+    addi r7, 8
+    ldi r0, 1
+    str r7, r0                        ; active marker
+    lbr .sha512_engine_cleanup
+
+.sha512_engine_clear:
+    ; CLEAR acquires even for an inactive/idempotent abort.  The common
+    ; cleanup path scrubs and then releases ownership.
+    sha.init 2
+    ldi r0, 0
+    lbr .sha512_engine_cleanup
+
+.sha512_engine_cleanup:
+    ; Remove all SHA-512 material from the visible engine before restoring
+    ; the caller's independent Field/crypto accumulator transaction.
+    ldi r0, 0
+    csrw 0x19, r0
+    csrw 0x1A, r0
+    csrw 0x1B, r0
+    csrw 0x1C, r0
+    csrw 0x82, r0
+    csrw 0x83, r0
+    csrw 0x84, r0
+    csrw 0x16, r0
+    mov r16, r0
+    mov r17, r0
+    mov r18, r0
+    mov r19, r0
+
+    ; Restore outer TSRC0/ACC state, scrubbing every return-stack snapshot as
+    ; it is consumed.
+    ldn r0, r15
+    csrw 0x16, r0
+    ldi r7, 0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x1C, r0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x1B, r0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x1A, r0
+    str r15, r7
+    addi r15, 8
+    ldn r0, r15
+    csrw 0x19, r0
+    str r15, r7
+    addi r15, 8
+
+    ldn r19, r15
+    str r15, r7
+    addi r15, 8
+    ldn r18, r15
+    str r15, r7
+    addi r15, 8
+    ldn r17, r15
+    str r15, r7
+    addi r15, 8
+    ldn r16, r15
+    str r15, r7
+    addi r15, 8
+    ldn r1, r15                       ; exact prior IE value
+    str r15, r7
+    addi r15, 8
+
+    ; Ownership remains held through DOUT, scrub, and exact outer-state
+    ; restoration.  RELEASE is ownership-only and is the final shared-engine
+    ; instruction before the caller's IE state is restored.
+    ldi r0, 0
+    sha.release
+    csrw 0x09, r1
+    ret.l
+
+; Return R0 as a Forth status cell.
+_sha512_return_status:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; Return R0=1 when [R9,R9+R12) intersects any byte of the complete
+; 16-context BIOS-owned arena, otherwise R0=0.  The physical-span preflight
+; has already excluded address wrap.  A zero-length span never aliases.
+_sha512_context_alias:
+    cmpi r12, 0
+    breq .sha512_alias_no
+    mov r13, r9
+    add r13, r12                       ; caller end, exclusive
+    ldi64 r7, sha512_contexts
+    ldi64 r1, 8192
+    add r1, r7                         ; arena end, exclusive
+    cmp r9, r1
+    brcc .sha512_alias_start_before_end
+    br .sha512_alias_no
+.sha512_alias_start_before_end:
+    cmp r7, r13
+    brcc .sha512_alias_yes
+.sha512_alias_no:
+    ldi r0, 0
+    ret.l
+.sha512_alias_yes:
+    ldi r0, 1
+    ret.l
+
+; Abort the context at R10 without publishing a public status.  This helper
+; is used by every checked failure path and by idempotent CLEAR.
+_sha512_abort:
+    ldi64 r11, _sha512_wipe_context
+    call.l r11
+    ldi r13, 3
+    ldi64 r11, _sha512_engine
+    call.l r11
+    ldi64 r11, _sha512_wipe_context
+    call.l r11
+    ret.l
+
+; SHA512-INIT ( -- status )
+w_sha512_init:
+    ldi64 r11, _sha512_context
+    call.l r11
+    ldi64 r11, _sha512_wipe_context
+    call.l r11
+    ldi r13, 0
+    ldi64 r11, _sha512_engine
+    call.l r11
+    ldi r0, 0
+    lbr _sha512_return_status
+
+; SHA512-UPDATE ( addr len -- status )
+; Status: 0 OK, 1 STATE, 2 RANGE, 3 CONTEXT-ALIAS, 4 LENGTH-OVERFLOW.
+; Every failure aborts and wipes the current context.
+w_sha512_update:
+    ldn r12, r14                       ; complete caller length
+    addi r14, 8
+    ldn r9, r14                        ; caller source
+    addi r14, 8
+
+    ; INIT is required even for a zero-length update.
+    ldi64 r11, _sha512_context
+    call.l r11
+    mov r7, r10
+    addi r7, 88
+    ldn r0, r7
+    cmpi r0, 0
+    lbreq .sha512_update_state_fail
+    cmpi r12, 0
+    lbreq .sha512_update_ok
+
+    ; Accept a span only when every byte fits one advertised physical window.
+    subi r15, 8
+    str r15, r12
+    mov r10, r12
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    ldn r12, r15
+    ldi r7, 0
+    str r15, r7
+    addi r15, 8
+    cmpi r0, 0
+    lbrne .sha512_update_range_fail
+    ldi64 r11, _sha512_context
+    call.l r11
+
+    ; Caller data may not intersect any core's BIOS-owned SHA-512 context.
+    ldi64 r11, _sha512_context_alias
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha512_update_alias_fail
+
+    ; Preflight the complete 128-bit bit-length addition before copying or
+    ; changing any context byte.  delta = len * 8 as (delta_hi, delta_lo).
+    mov r13, r12
+    ldi r1, 61
+    shr r13, r1                        ; delta high
+    mov r7, r12
+    lsli r7, 3                         ; delta low
+    mov r11, r10
+    addi r11, 64
+    ldn r0, r11                        ; old low
+    mov r1, r0
+    add r7, r0                         ; candidate low
+    cmp r7, r1
+    brcc .sha512_update_length_with_carry
+
+.sha512_update_length_no_carry:
+    addi r11, 8
+    ldn r0, r11                        ; old high
+    mov r1, r0
+    add r0, r13                        ; candidate high
+    cmp r0, r1
+    lbrcc .sha512_update_length_fail
+    br .sha512_update_length_store
+
+.sha512_update_length_with_carry:
+    addi r11, 8
+    ldn r0, r11                        ; old high
+    mov r1, r0
+    add r0, r13
+    cmp r0, r1
+    lbrcc .sha512_update_length_fail
+    mov r1, r0
+    inc r0
+    cmp r0, r1
+    lbrcc .sha512_update_length_fail
+
+.sha512_update_length_store:
+    str r11, r0                        ; new high
+    subi r11, 8
+    str r11, r7                        ; new low
+
+.sha512_update_chunk:
+    ; chunk = min(remaining, 128 - partial_offset)
+    mov r7, r10
+    addi r7, 80
+    ldn r0, r7
+    ldi r1, 128
+    sub r1, r0
+    cmp r12, r1
+    brcc .sha512_update_use_remaining
+    mov r13, r1
+    br .sha512_update_have_chunk
+.sha512_update_use_remaining:
+    mov r13, r12
+.sha512_update_have_chunk:
+    ; Caller access happens only while the normal runtime register set and
+    ; caller IE state are installed.
+    mov r7, r10
+    ldi r1, 128
+    add r7, r1
+    add r7, r0
+    mov r1, r13
+.sha512_update_copy_loop:
+    ld.b r0, r9
+    st.b r7, r0
+    inc r9
+    inc r7
+    dec r1
+    cmpi r1, 0
+    brne .sha512_update_copy_loop
+    sub r12, r13
+
+    mov r7, r10
+    addi r7, 80
+    ldn r0, r7
+    add r0, r13
+    str r7, r0
+    ldi r1, 128
+    cmp r0, r1
+    lbrne .sha512_update_after_compress
+
+    ; Preserve the caller loop state across the bounded engine window.
+    subi r15, 8
+    str r15, r9
+    subi r15, 8
+    str r15, r12
+    ldi r13, 1
+    ldi64 r11, _sha512_engine
+    call.l r11
+    ldn r12, r15
+    ldi r0, 0
+    str r15, r0
+    addi r15, 8
+    ldn r9, r15
+    str r15, r0
+    addi r15, 8
+
+    ; The compressed block is no longer persistent state.
+    mov r7, r10
+    ldi r1, 128
+    add r7, r1
+    ldi r1, 16
+.sha512_update_data_wipe_loop:
+    str r7, r0
+    addi r7, 8
+    dec r1
+    cmpi r1, 0
+    brne .sha512_update_data_wipe_loop
+
+.sha512_update_after_compress:
+    cmpi r12, 0
+    lbrne .sha512_update_chunk
+.sha512_update_ok:
+    ldi r0, 0
+    lbr _sha512_return_status
+
+.sha512_update_state_fail:
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 1
+    lbr _sha512_return_status
+.sha512_update_range_fail:
+    ldi64 r11, _sha512_context
+    call.l r11
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 2
+    lbr _sha512_return_status
+.sha512_update_alias_fail:
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 3
+    lbr _sha512_return_status
+.sha512_update_length_fail:
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 4
+    lbr _sha512_return_status
+
+; SHA512-FINAL ( dst -- status )
+; Failure never writes the destination and always aborts/wipes.
+w_sha512_final:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r11, _sha512_context
+    call.l r11
+    mov r7, r10
+    addi r7, 88
+    ldn r0, r7
+    cmpi r0, 0
+    lbreq .sha512_final_state_fail
+
+    ; Validate and de-alias the complete 64-byte output before mode 2.
+    ldi r12, 64
+    mov r10, r12
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha512_final_range_fail
+    ldi64 r11, _sha512_context
+    call.l r11
+    ldi r12, 64
+    ldi64 r11, _sha512_context_alias
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha512_final_alias_fail
+
+    subi r15, 8
+    str r15, r9
+    ldi r13, 2
+    ldi64 r11, _sha512_engine
+    call.l r11
+    ldn r9, r15
+    ldi r0, 0
+    str r15, r0
+    addi r15, 8
+
+    ; Publish only after runtime state is restored and SHA ownership released.
+    mov r7, r10
+    ldi r1, 3
+    lsli r1, 7
+    add r7, r1
+    ldi r12, 64
+.sha512_final_publish_loop:
+    ld.b r0, r7
+    st.b r9, r0
+    inc r7
+    inc r9
+    dec r12
+    cmpi r12, 0
+    brne .sha512_final_publish_loop
+    ldi64 r11, _sha512_wipe_context
+    call.l r11
+    ldi r0, 0
+    lbr _sha512_return_status
+
+.sha512_final_state_fail:
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 1
+    lbr _sha512_return_status
+.sha512_final_range_fail:
+    ldi64 r11, _sha512_context
+    call.l r11
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 2
+    lbr _sha512_return_status
+.sha512_final_alias_fail:
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 3
+    lbr _sha512_return_status
+
+; SHA512-CLEAR ( -- status )
+; Idempotent explicit abort; never leaves a cluster SHA owner.
+w_sha512_clear:
+    ldi64 r11, _sha512_context
+    call.l r11
+    ldi64 r11, _sha512_abort
+    call.l r11
+    ldi r0, 0
+    lbr _sha512_return_status
 
 ; =====================================================================
 ;  True Random Number Generator (TRNG)
@@ -18266,12 +18932,50 @@ d_crc_final_fetch:
     ret.l
 
 ; === TX-FLUSH ===
-latest_entry:
 d_tx_flush:
     .dq d_crc_final_fetch
     .db 8
     .ascii "TX-FLUSH"
     ldi64 r11, tx_flush
+    call.l r11
+    ret.l
+
+; SHA-512 ABI extensions are append-only so every older built-in dictionary
+; ordinal remains stable.
+; === SHA512-INIT ===
+d_sha512_init:
+    .dq d_tx_flush
+    .db 11
+    .ascii "SHA512-INIT"
+    ldi64 r11, w_sha512_init
+    call.l r11
+    ret.l
+
+; === SHA512-UPDATE ===
+d_sha512_update:
+    .dq d_sha512_init
+    .db 13
+    .ascii "SHA512-UPDATE"
+    ldi64 r11, w_sha512_update
+    call.l r11
+    ret.l
+
+; === SHA512-FINAL ===
+d_sha512_final:
+    .dq d_sha512_update
+    .db 12
+    .ascii "SHA512-FINAL"
+    ldi64 r11, w_sha512_final
+    call.l r11
+    ret.l
+
+; === SHA512-CLEAR ===
+latest_entry:
+d_sha512_clear:
+    .dq d_sha512_final
+    .db 12
+    .ascii "SHA512-CLEAR"
+    ldi64 r11, w_sha512_clear
     call.l r11
     ret.l
 
@@ -18726,6 +19430,79 @@ sha_blk_buf:
 ; sha_blk_off — saved R0 block offset (persists across Forth word calls)
 sha_blk_off:
     .dq 0
+
+; =====================================================================
+;  sha512_contexts — 16 private, warm-boot-scrubbed streaming contexts
+; =====================================================================
+; Each context is 512 bytes; see the SHA-512 implementation for its layout.
+; Keeping the stride a power of two makes COREID indexing independent of
+; caller-controlled state and gives every core distinct data/release/stage
+; storage.
+sha512_contexts:
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
 ; =====================================================================
 ;  dict_pad — 32-byte scratch for DFIND/DINS counted-strings

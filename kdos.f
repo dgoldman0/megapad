@@ -1083,6 +1083,27 @@ CREATE SHA3-BUF 64 ALLOT
     SHA256-UPDATE
     R> SHA256-FINAL ;
 
+\ Checked SHA-512 status values.  These are part of the public KDOS surface,
+\ so callers need not embed the numeric BIOS ABI values.
+0 CONSTANT SHA512-OK
+1 CONSTANT SHA512-STATE
+2 CONSTANT SHA512-RANGE
+3 CONSTANT SHA512-CONTEXT-ALIAS
+4 CONSTANT SHA512-LENGTH-OVERFLOW
+
+\ SHA512 ( addr len out -- status )  Checked scoped SHA-512 wrapper.
+\ The BIOS streaming words keep their intermediate state in a private
+\ per-core context and restore the caller's ACC/TSRC0 transaction.
+: SHA512  ( addr len out -- status )
+    >R
+    SHA512-INIT DUP IF
+        >R 2DROP R> R> DROP EXIT
+    THEN DROP
+    SHA512-UPDATE DUP IF
+        R> DROP EXIT
+    THEN DROP
+    R> SHA512-FINAL ;
+
 \ --- HMAC-SHA3-256 ---
 \ HMAC(K,m) = SHA3((K ^ opad) || SHA3((K ^ ipad) || m))
 \ SHA3-256 rate (block size) = 136 bytes

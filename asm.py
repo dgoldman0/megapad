@@ -95,6 +95,7 @@ CRYPTO_CRC_SUB = {
 CRYPTO_SHA_SUB = {
     "sha.init": 0x10, "sha.round": 0x11, "sha.pad": 0x12,
     "sha.din": 0x13, "sha.dout": 0x14, "sha.final": 0x15,
+    "sha.release": 0x16,
 }
 # Field ALU sub-ops (0x20–0x2F)
 CRYPTO_GF_SUB = {
@@ -111,6 +112,7 @@ CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin", "crc.seed", "sha.din", "sha.dout"
 CRYPTO_IMM_OPS = {"crc.mode", "sha.init", "gf.prime"}
 # All EXT.CRYPTO mnemonics with no operand (2-byte: FB sub)
 CRYPTO_BARE_OPS = {"crc.init", "sha.round", "sha.pad", "sha.final",
+                   "sha.release",
                    "gf.add", "gf.sub", "gf.mul", "gf.sqr",
                    "gf.inv", "gf.pow", "gf.mulr",
                    "gf.mac", "gf.macr", "gf.ceq", "gf.ldprime",

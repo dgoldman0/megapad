@@ -486,25 +486,32 @@ polynomial arithmetic.
 **KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
 `KYBER-DECAPS`, `PQ-EXCHANGE` (hybrid X25519 + ML-KEM).
 
-### SHA-256 (SHA-2 — Per-Core ISA)
+### SHA-2 (Per-Core / Micro-Cluster ISA)
 
-SHA-256 hashing is implemented as per-core ISA instructions via the
-EXT.CRYPTO prefix (`FB`), not MMIO.  Each core has its own independent
-SHA-2 engine with state held in crypto CSRs (0x82–0x84).
+SHA-256/384/512 hashing is implemented with EXT.CRYPTO (`FB`) instructions,
+not MMIO. Full cores have independent state; each micro-cluster arbitrates
+one shared engine.
 
-**Instructions:** `sha.init`, `sha.din`, `sha.final`, `sha.dout`
+**Instructions:** `sha.init`, `sha.round`, `sha.pad`, `sha.din`,
+`sha.dout`, `sha.final`, `sha.release`
 (see `docs/isa-reference.md` § EXT.CRYPTO for full encoding).
 
 The engine implements full FIPS-180-4 SHA-256 compression with K
 constants, Σ/σ/Ch/Maj functions, 16-entry W message schedule with
-on-the-fly expansion, and automatic padding.  A 64-byte block buffer
-in RAM (pointed to by TSRC0 CSR) accumulates input bytes; compression
-runs automatically when the buffer fills or on `sha.final`.
+on-the-fly expansion, and automatic padding. A TSRC0-addressed buffer is
+64 bytes in SHA-256 mode and 128 bytes in SHA-384/512 mode. On a
+micro-cluster, `sha.final` retains ownership through digest extraction and
+scrubbing; bare `sha.release` is the sole handoff.
 
 **BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
-`SHA256-STATUS@`, `SHA256-DOUT@`.
-**KDOS words:** `SHA256`, `HMAC-SHA256`, `HKDF-SHA256-EXTRACT`,
-`HKDF-SHA256-EXPAND`.
+`SHA256-STATUS@`, `SHA256-DOUT@`; and the scoped streaming
+`SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`, `SHA512-CLEAR`.
+The SHA-512 layer snapshots all eight 64-bit digest words in private
+per-core RAM, confines R16–R19 replacement to bounded interrupt-masked
+engine windows, and reports checked status values for state, span, alias,
+and 128-bit length failures.
+**KDOS words:** `SHA256`, `SHA512`, `HMAC-SHA256`,
+`HKDF-SHA256-EXTRACT`, `HKDF-SHA256-EXPAND`.
 
 ### TRNG (True Random Number Generator)
 

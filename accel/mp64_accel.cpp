@@ -2212,7 +2212,7 @@ struct ClusterState {
             if (operation == 0x0) {
                 sha_locked = true;
                 sha_lock_owner = local_core;
-            } else if (operation == 0x5) {
+            } else if (operation == 0x6) {
                 sha_locked = false;
                 sha_lock_owner = -1;
             }
@@ -7883,6 +7883,8 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             cycles += sha_compress(s, cb);
             return cycles;
         }
+        case 0x6: // SHA.RELEASE — ownership-only; full-core no-op
+            return 1;
         default:
             throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO SHA-2 reserved sub-op");
         }
@@ -10662,7 +10664,7 @@ static PendingClusterRequest classify_pending_cluster_request(
                         : 3;
                 } else if (
                     unit == 0x1 &&
-                    request.operation <= 0x5
+                    request.operation <= 0x6
                 ) {
                     request.resource =
                         ClusterResourceKind::SHA;
@@ -10670,7 +10672,8 @@ static PendingClusterRequest classify_pending_cluster_request(
                         (
                             request.operation == 0x1 ||
                             request.operation == 0x2 ||
-                            request.operation == 0x5
+                            request.operation == 0x5 ||
+                            request.operation == 0x6
                         )
                         ? 2
                         : 3;

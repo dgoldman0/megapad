@@ -515,8 +515,8 @@ def test_cluster_crc_lock_blocks_without_retiring_the_contender():
     assert snapshot["grant_counts"]["crc"] == 3
 
 
-def test_direct_sha_transaction_blocks_sibling_until_final():
-    """Direct stepping observes the same SHA INIT-to-FINAL ownership."""
+def test_direct_sha_transaction_blocks_nonowner_release_until_owner_release():
+    """FINAL retains ownership; only the owner's RELEASE permits handoff."""
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -532,11 +532,17 @@ def test_direct_sha_transaction_blocks_sibling_until_final():
     contender_pc = 0x200
     system.load_binary(
         owner_pc,
-        assemble("sha.init 0\nsha.final\nhalt"),
+        assemble(
+            "sha.init 0\n"
+            "sha.final\n"
+            "sha.dout r4, r0\n"
+            "sha.release\n"
+            "halt"
+        ),
     )
     system.load_binary(
         contender_pc,
-        assemble("sha.init 1\nhalt"),
+        assemble("sha.release\nsha.init 1\nhalt"),
     )
     owner.pc = owner_pc
     contender.pc = contender_pc
@@ -557,6 +563,35 @@ def test_direct_sha_transaction_blocks_sibling_until_final():
 
     owner.step()
 
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 0
+
+    contender.step()
+
+    assert contender.pc == contender_pc
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 0
+
+    owner.step()
+
+    assert owner.regs[4] != 0
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 0
+
+    contender.step()
+
+    assert contender.pc == contender_pc
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 0
+
+    owner.step()
+
+    assert not cluster.sha_locked
+    assert cluster.sha_owner is None
+
+    contender.step()
+
+    assert contender.pc == contender_pc + 2
     assert not cluster.sha_locked
     assert cluster.sha_owner is None
 

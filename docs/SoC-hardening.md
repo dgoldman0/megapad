@@ -220,18 +220,19 @@ the instruction exists for stack-grow-down and reverse-fill patterns.
 ## 1. SHA-256/512 Dual-Mode Upgrade
 
 **Priority: high — next crypto task**  
-**Topology: per-core ISA (EXT.CRYPTO FB, Appendix B)**
+**Topology: full-core-local / micro-cluster-shared ISA (EXT.CRYPTO FB, Appendix B)**
 
-> **Note:** SHA-2 is now implemented as per-core ISA instructions
-> (EXT.CRYPTO FB, sub-ops 0x10–0x15).  The MMIO shared instance has been
+> **Note:** SHA-2 is now implemented as ISA instructions
+> (EXT.CRYPTO FB, sub-ops 0x10–0x16).  The MMIO shared instance has been
 > removed.  The datapath design notes below still describe the underlying
 > compression engine, which is the same whether reached via MMIO or ISA
 > decode.
 
 ### Current state
 
-SHA-2 (256/384/512) is per-core ISA via EXT.CRYPTO (prefix FB).
-The MMIO shared instance (`mp64_sha256.v`) has been removed.
+SHA-2 (256/384/512) uses EXT.CRYPTO (prefix FB). Full cores keep local
+state; micro-cores arbitrate a cluster-shared engine. The MMIO shared
+instance (`mp64_sha256.v`) has been removed.
 
 ### What changes
 
@@ -317,6 +318,8 @@ For ISA integration (per Appendix B):
 - Instantiate `mp64_sha2` inside `mp64_cpu.v` (tightly coupled, like
   the string engine and multiplier).
 - Control interface: CPU decode triggers `sha_start` on SHA.ROUND/SHA.FINAL;
+  SHA.RELEASE affects only micro-cluster ownership and does not start the
+  compression datapath.
   SHA sub-module reads W from tile memory via CPU internal port.
 - State (H[0..7]) maps to ACC0–ACC3; mode CSR at 0x82.
 - No MMIO bus involvement for full cores.
@@ -2018,14 +2021,15 @@ accumulator** (ACC0–ACC3) plus **R16–R19** (4 GPRs):
 
 | Register | SHA-256 | SHA-512/384 |
 |----------|---------|-------------|
-| ACC0 | `{h, g, f, e}` (4 × 32-bit packed) | `{b, a}` (2 × 64-bit) |
-| ACC1 | `{d, c, b, a}` (4 × 32-bit packed) | `{d, c}` (2 × 64-bit) |
-| ACC2 | *(unused, zeroed)* | `{f, e}` (2 × 64-bit) |
-| ACC3 | *(unused, zeroed)* | `{h, g}` (2 × 64-bit) |
+| ACC0 | `{H0, H1}` (high/low 32-bit) | `H0` |
+| ACC1 | `{H2, H3}` | `H1` |
+| ACC2 | `{H4, H5}` | `H2` |
+| ACC3 | `{H6, H7}` | `H3` |
+| R16–R19 | Not used for digest state | `H4`–`H7` |
 
-SHA-256 packs all 8 × 32-bit working variables into ACC0–ACC1 (256
-bits).  SHA-512 uses the full 4 × 64-bit = 256 bits across ACC0–ACC3,
-with the upper 4 working variables (e–h) in ACC2–ACC3.
+SHA-256 packs all eight 32-bit digest words across ACC0–ACC3. SHA-384/512
+uses one 64-bit word in each ACC register and the remaining four words in
+R16–R19.
 
 #### Message schedule
 
@@ -2040,13 +2044,14 @@ execution — no separate load step needed.
 
 | Encoding | Mnemonic | Bytes | Cycles | Description |
 |----------|----------|-------|--------|-------------|
-| `FB 10 imm8` | **SHA.INIT imm8** | 3 | 2 | Init hash state: `imm8[1:0]` selects mode (0=SHA-256, 1=SHA-384, 2=SHA-512).  Loads FIPS 180-4 IV into ACC0–ACC3.  Sets internal mode register. |
-| `FB 11` | **SHA.ROUND** | 2 | 64/80 | Execute full compression: run 64 rounds (SHA-256) or 80 rounds (SHA-384/512) over message block at M[TSRC0].  Updates ACC0–ACC3 with intermediate hash.  Includes W schedule expansion. |
+| `FB 10 imm8` | **SHA.INIT imm8** | 3 | 2 | Init hash state: `imm8[1:0]` selects mode (0=SHA-256, 1=SHA-384, 2=SHA-512). Loads the FIPS 180-4 IV into the mode's ACC/R16–R19 mapping and resets length. |
+| `FB 11` | **SHA.ROUND** | 2 | 64/80 | Execute full compression: run 64 rounds (SHA-256) or 80 rounds (SHA-384/512) over message block at M[TSRC0]. Updates the mode's complete digest mapping. Includes W schedule expansion. |
 | `FB 12` | **SHA.PAD** | 2 | 2–3 | Apply FIPS 180-4 padding to partial block at M[TSRC0].  R0 = byte count in current block.  Writes pad bytes + 64/128-bit length to tile memory.  If two-block pad needed, sets C flag (caller must SHA.ROUND the first block, then SHA.ROUND the pad block). |
 | `FB 13 DR` | **SHA.DIN Rd, Rs** | 3 | 1 | Append R[s][7:0] to message buffer at M[TSRC0 + R0].  R0 incremented.  If R0 reaches block size (64 or 128), auto-triggers SHA.ROUND and resets R0=0. |
-| `FB 14 DR` | **SHA.DOUT Rd, Rs** | 3 | 1 | Read digest word: `Rd ← ACC_word[R[s] & 7]`.  Index 0–7 selects working variable a–h (i.e. the accumulated hash, big-endian word order). |
-| `FB 15` | **SHA.FINAL** | 2 | 66–83 | Convenience: SHA.PAD + SHA.ROUND (+ second SHA.ROUND if two-block pad).  On completion, ACC0–ACC3 hold the final digest.  R0 preserved from before call. |
-| `FB 16`–`1F` | *(reserved)* | | | Future: HMAC helpers, etc. |
+| `FB 14 DR` | **SHA.DOUT Rd, Rs** | 3 | 1 | Read digest word `H[R[s] & 7]` into Rd (32 significant bits in SHA-256, 64 in SHA-384/512). |
+| `FB 15` | **SHA.FINAL** | 2 | 66–83 | Convenience: SHA.PAD + SHA.ROUND (+ second SHA.ROUND if two-block pad). On completion the digest remains readable and micro-cluster ownership remains held. |
+| `FB 16` | **SHA.RELEASE** | 2 | 1 | Release micro-cluster ownership without changing engine/register state. Ownership-only no-op on a full core; idempotent while unlocked. |
+| `FB 17`–`1F` | *(reserved)* | | | Future expansion. |
 
 **New CSRs:**
 
@@ -2061,11 +2066,17 @@ The SHA sub-module reads W entries from tile memory via the CPU's
 internal memory port (no bus contention — tile memory is per-core BRAM).
 At 1 round/cycle: SHA-256 = 64 cycles, SHA-512 = 80 cycles.
 
+On a micro-cluster, SHA.INIT acquires the transaction. Every SHA request by
+a nonowner stalls while it is held. FINAL does not hand off: the owner must
+DOUT and scrub first, then issue bare SHA.RELEASE as its last shared-engine
+operation. An unlocked release is harmless. The full-core instruction is a
+no-op because no ownership exists there.
+
 **Flags:**
 - SHA.PAD: C=1 if two-block pad required (message must be compressed
   before final pad block).
 - SHA.ROUND: Z=1 when complete (always, as confirmation).
-- SHA.INIT/DOUT/DIN: no flags modified.
+- SHA.INIT/DOUT/DIN/RELEASE: no flags modified.
 
 **Example — SHA-256 of a 512-byte buffer:**
 
@@ -2081,7 +2092,9 @@ SHA.INIT 0             ; FB 10 00 — SHA-256 mode, load IV
     BR.NE .loop
 SHA.FINAL              ; FB 15 — pad + final round(s)
 SHA.DOUT R0, R0        ; FB 14 00 — read word 0 of digest
-; ACC0–ACC1 hold the full 32-byte digest
+; Read the remaining words and scrub SHA-visible state here.
+SHA.RELEASE            ; FB 16 — sole micro-cluster handoff
+; ACC0–ACC3 hold the full 32-byte digest
 ```
 
 8 blocks × 64 cycles + ~68 cycles (final) = ~580 cycles for 512 bytes.
@@ -2220,6 +2233,7 @@ CSR range 0x80–0x8F reserved for crypto.  6 used, 10 free.
 | SHA.DIN | FB 13 DR | 3 | 4 |
 | SHA.DOUT | FB 14 DR | 3 | 4 |
 | SHA.FINAL | FB 15 | 2 | — |
+| SHA.RELEASE | FB 16 | 2 | — |
 | GF.ADD | FB 20 | 2 | — |
 | GF.SUB | FB 21 | 2 | — |
 | GF.MUL | FB 22 | 2 | — |
@@ -2261,8 +2275,9 @@ state and ignore writes.
 
 **SHA-2 MMIO removal (DONE):** `mp64_sha256.v` removed from SoC and
 FPGA synthesis.  MMIO address 0x940 freed.  SHA256Device removed from
-emulator.  BIOS SHA256 words use ISA instructions (sha.init/sha.din/
-sha.final/sha.dout).
+emulator. BIOS SHA words use ISA instructions (sha.init/sha.din/
+sha.final/sha.dout/sha.release). FINAL retains a micro-cluster transaction;
+RELEASE is the sole handoff after digest extraction and zeroization.
 
 **Field ALU MMIO removal (DONE):** `mp64_field_alu.v` removed from SoC
 and FPGA synthesis.  MMIO address 0x840 freed.  FieldALU device removed
@@ -2288,7 +2303,7 @@ to a core instruction.
 | Category | Current | Proposed | Rationale |
 |----------|---------|----------|-----------|
 | CRC (32/64-bit modes) | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA + cluster-shared (hw lock)** | ✅ DONE — MMIO removed, cluster arbiter for micro-cores |
-| SHA-256/384/512 | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
+| SHA-256/384/512 | ~~Shared MMIO~~ **REMOVED** | **Full-core-local ISA + micro-cluster-shared ISA** | Native/emulator path complete; explicit-release RTL update deferred |
 | Field ALU | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
 | AES-256-GCM | Shared MMIO | Shared MMIO | Large key schedule; AES-NI style would need 240-byte state per core |
 | SHA-3/SHAKE | Shared MMIO | Shared MMIO | 1600-bit Keccak state doesn't fit core registers |
@@ -2352,6 +2367,8 @@ elif ext_op == 0xFB:
             sha_pad(TSRC0, R[0], sha_msglen, sha_mode)
         elif op == 0x5:  # SHA.FINAL
             sha_pad_and_compress(TSRC0, R[0], sha_msglen, sha_mode)
+        elif op == 0x6:  # SHA.RELEASE
+            pass  # ownership-only; cluster arbiter performs the handoff
         # ... SHA.DIN, SHA.DOUT similarly
 
     elif unit == 0x2:  # --- Field ALU ---
@@ -2429,16 +2446,17 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] IO OUT bug fixed (LDXA opcode 8F collision)
 - [x] Smoke tests passing
 
-### §1 — SHA-256/384/512 Unified Engine (→ per-core ISA, Appendix B)
+### §1 — SHA-256/384/512 Unified Engine (→ ISA, Appendix B)
 
 - [x] Spec complete (modes, datapath design, area estimate)
 - [x] RTL: per-core `mp64_sha2_isa` datapath (SHA-256 mode, 64-round) (2026-03-10)
 - [x] RTL: integrate into `mp64_cpu.v` as tightly-coupled sub-module (2026-03-10)
 - [x] RTL: ISA decode for SHA.INIT / SHA.ROUND / SHA.FINAL (FB 10–15) (2026-03-10)
+- [ ] RTL: SHA.RELEASE decode and FINAL-retains cluster ownership (deferred)
 - [x] RTL: testbench `tb_sha2_isa.v` — 7/7 NIST vectors passing (2026-03-10)
 - [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
 - [x] BIOS: crypto words updated to use ISA path (full cores) (2026-03-10)
-- [ ] MMIO fallback for micro-cores (if needed)
+- [x] No MMIO fallback or legacy runtime dispatch
 - [x] Tests (2026-03-10, 1717 passed / 35 skipped / 0 failures)
 
 ### §2 — Forth-Aware String Engine (EXT.STRING, prefix F9)

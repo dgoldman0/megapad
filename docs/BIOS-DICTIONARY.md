@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **458** entries.  The numbered
+The live dictionary link chain contains **462** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -657,10 +657,26 @@ of compiled code.
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 271 | `SHA256-INIT` | `( -- )` | | Initialize SHA-256 state (`sha.init 0`) |
-| 272 | `SHA256-UPDATE` | `( addr len -- )` | | Feed data bytes into SHA-256 block buffer (`sha.din`) |
-| 273 | `SHA256-FINAL` | `( addr -- )` | | Finalize hash (`sha.final` + `sha.dout`), copy 32-byte digest to addr |
+| 272 | `SHA256-UPDATE` | `( addr len -- )` | | Unchecked feed into the global SHA-256 block buffer (`sha.din`); caller must serialize task reentry and provide a readable span |
+| 273 | `SHA256-FINAL` | `( addr -- )` | | Finalize, DOUT to addr, scrub visible state, then `sha.release` |
 | 274 | `SHA256-STATUS@` | `( -- status )` | | Always returns 0 (engine is synchronous, always ready) |
-| 275 | `SHA256-DOUT@` | `( addr -- )` | | Read 32 bytes of digest via `sha.dout` to addr |
+| 275 | `SHA256-DOUT@` | `( addr -- )` | | Raw engine-state read; `SHA256-FINAL` has already scrubbed the digest |
+
+### SHA-512 Streaming (4 append-only words) — ISA-native (EXT.CRYPTO `FB`)
+
+These words are appended at the end of the live chain, so none of the
+historical ordinals below move.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA512-INIT` | `( -- status )` | Initialize the calling core's private SHA-512 context |
+| `SHA512-UPDATE` | `( addr len -- status )` | Preflight and absorb a physical-memory span using a dedicated 128-byte block |
+| `SHA512-FINAL` | `( dst -- status )` | On success publish 64 big-endian digest bytes; erase context and stage on every path |
+| `SHA512-CLEAR` | `( -- status )` | Idempotently abort, release the SHA transaction, zeroize saved/visible state, and return 0 |
+
+Statuses are `0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS, and
+`4` LENGTH-OVERFLOW. Every failure aborts and wipes; failed `FINAL` does not
+publish to a non-context destination.
 
 ### CRC DMA (4 words)
 
@@ -771,13 +787,14 @@ of compiled code.
 | AES-256/128-GCM Engine | 11 |
 | SHA-3 / SHAKE | 8 |
 | SHA-256 Engine | 5 |
+| SHA-512 Streaming | 4 |
 | CRC DMA | 4 |
 | TRNG | 3 |
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
-| **Catalogued subtotal** | **366** |
+| **Catalogued subtotal** | **370** |
 
 ### All Immediate Words (34)
 
@@ -786,11 +803,12 @@ of compiled code.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The appended CRC ABI entries preserve all older entry positions and form this
-newest segment:
+The appended CRC and SHA-512 ABI entries preserve all older entry positions
+and form this newest segment:
 
 ```
-TX-FLUSH → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
+SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE → SHA512-INIT → TX-FLUSH
+→ CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
 ```
 
 ### MMIO Address Map
@@ -809,7 +827,7 @@ TX-FLUSH → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-R
 | `0xFFFF_FF00_0000_0880` | Field ALU | OP_A=+0..+1F, OP_B=+20..+3F, CMD=+40, STATUS=+41, RESULT=+48..+67, RESULT_HI=+68..+87 |
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
-| `0xFFFF_FF00_0000_0940` | ~~SHA-256~~ | Removed — now per-core ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`) |
+| `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |
 | `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`) |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |
 

@@ -190,11 +190,11 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
 
-> **Crypto ISA (no CRC MMIO):** CRC and SHA-256 use EXT.CRYPTO (`FB`).
-> Full cores keep CRC state privately; each micro-core cluster shares a CRC
-> engine behind a transaction lock. Micro-core CRC CSR reads expose that
-> shared state and writes are ignored. See `docs/isa-reference.md`
-> § EXT.CRYPTO for the instruction encoding and exact CRC parameter tuples.
+> **Crypto ISA (no CRC/SHA-2 MMIO):** CRC and SHA-2 use EXT.CRYPTO (`FB`).
+> Full cores keep state privately; each micro-core cluster shares CRC and
+> SHA engines behind transaction locks. SHA.FINAL retains ownership and
+> SHA.RELEASE performs the sole handoff. See `docs/isa-reference.md`
+> § EXT.CRYPTO for the normative encodings and ownership rules.
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
@@ -407,6 +407,13 @@ buffer), then tokenises and interprets:
 
 **SHA-256 engine (ISA-native, EXT.CRYPTO)**
 `SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-STATUS@` `SHA256-DOUT@`
+
+**SHA-512 streaming (ISA-native, EXT.CRYPTO mode 2)**
+`SHA512-INIT` `SHA512-UPDATE` `SHA512-FINAL` `SHA512-CLEAR`
+
+All four words return a checked status (`0` OK, `1` STATE, `2` RANGE,
+`3` CONTEXT-ALIAS, `4` LENGTH-OVERFLOW). KDOS also provides
+`SHA512 ( addr len out -- status )` and symbolic constants for those values.
 
 **Memory BIST**
 `BIST-FULL` `BIST-QUICK` `BIST-STATUS` `BIST-FAIL-ADDR` `BIST-FAIL-DATA`

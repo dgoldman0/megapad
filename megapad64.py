@@ -2205,6 +2205,11 @@ class Megapad64:
             cycles += self._sha_compress()
             return cycles
 
+        elif op == 0x6:  # SHA.RELEASE
+            # Ownership is a micro-cluster scheduler concern.  On a full
+            # core this is deliberately an ownership-only no-op.
+            return 1
+
         else:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO SHA-2 sub-op {op:#x} reserved")
@@ -4251,7 +4256,7 @@ class Megapad64Micro(Megapad64):
 
     def _exec_sha(self, op: int) -> int:
         """Execute one cluster-owned SHA transaction instruction."""
-        if op > 0x5:
+        if op > 0x6:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO SHA-2 sub-op {op:#x} reserved")
         if self._cluster is None:
@@ -4273,7 +4278,7 @@ class Megapad64Micro(Megapad64):
             cycles = super()._exec_sha(op)
         finally:
             cluster.store_shared_engine_state(self)
-        if op == 0x5:
+        if op == 0x6:
             cluster.sha_release(self.core_id)
         return cycles + 3
 

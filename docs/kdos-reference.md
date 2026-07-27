@@ -196,6 +196,27 @@ accelerator.  Used by the TLS 1.3 cipher suite 0x1301
 | `SHA256` | `( addr len out -- )` | Compute SHA-256 hash of *len* bytes at *addr*, write 32-byte digest to *out*. |
 | `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- )` | Compute HMAC-SHA256.  Used internally by HKDF-SHA256 and TLS 1.3 key schedule. |
 
+### §1.6b SHA-512 Hashing
+
+KDOS exposes the scoped BIOS streaming ABI directly and adds a one-shot
+`SHA512` wrapper. The BIOS owns a private context per core; SHA-512's use of
+R16–R19 and ACC0–ACC3 is confined to short interrupt-masked engine windows,
+and the caller's prior register/TSRC0 transaction is restored afterward.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA512-INIT` | `( -- status )` | Initialize this core's streaming SHA-512 context. |
+| `SHA512-UPDATE` | `( addr len -- status )` | Preflight and absorb a physical-memory span; arbitrary splits and 128-byte boundaries are supported. |
+| `SHA512-FINAL` | `( out -- status )` | On success publish 64 digest bytes; erase the complete context on every path. |
+| `SHA512-CLEAR` | `( -- status )` | Idempotently abort, release, zeroize saved/staged/buffered/visible state, and return 0. |
+| `SHA512` | `( addr len out -- status )` | One-shot wrapper; stops at the first failure without losing its status. |
+
+Streaming state is core-local. `INIT` and `FINAL`/`CLEAR` must execute on the
+same core. Checked statuses are exposed both numerically and as
+`SHA512-OK`, `SHA512-STATE`, `SHA512-RANGE`, `SHA512-CONTEXT-ALIAS`, and
+`SHA512-LENGTH-OVERFLOW`. Every failure aborts and wipes; a failed `FINAL`
+does not publish a digest to a non-context destination.
+
 ---
 
 ### §1.7 Unified Crypto Words

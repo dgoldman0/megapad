@@ -366,10 +366,10 @@ BIOS initialises the default mapping at boot:
 | 3 | Disk DMA push | `+0x0210` | Byte-serial disk address write |
 | 6 | FB base push | `+0x0A0C` | Framebuffer base address write |
 
-Ports 4, 5, and 7 are unmapped (written to 0 at boot). CRC and SHA-256 are
+Ports 4, 5, and 7 are unmapped (written to 0 at boot). CRC and SHA-2 are
 ISA-native (EXT.CRYPTO family, `FB` prefix) and do not use the port I/O
 bridge; CRC topology is private on full cores and shared within each
-micro-core cluster.
+micro-core cluster, as is SHA topology with explicit `SHA.RELEASE`.
 
 See `SoC-hardening.md` §5 for the full remap CSR register layout.
 
@@ -709,20 +709,32 @@ or 2, and canonicalizes every other 64-bit value to mode 0. On micro-cores
 the reads expose cluster-shared state and writes to either CRC CSR are
 ignored; use the CRC instructions to mutate shared state.
 
-#### SHA-2 Sub-Operations (sub-op 0x10–0x15)
+#### SHA-2 Sub-Operations (sub-op 0x10–0x16)
 
 | Sub-op | Mnemonic | Operation |
 |--------|----------|-----------|
 | `0x10` | **SHA.INIT** imm8 | Initialise SHA-2 engine. imm8 selects mode: 0=SHA-256, 1=SHA-384, 2=SHA-512. Resets hash state, block buffer, and message length. |
-| `0x11` | **SHA.POLY** | *(reserved for future polynomial config)* |
-| `0x12` | *(reserved)* | |
-| `0x13` | **SHA.DIN Rd** | Feed byte Rd[7:0] into the SHA block buffer. Auto-compresses when 64 bytes accumulated. |
-| `0x14` | **SHA.DOUT Rd, Rs** | Read 8 bytes of digest: Rd ← digest word at index Rs (0–3 for SHA-256, 0–7 for SHA-512). |
-| `0x15` | **SHA.FINAL** | Apply FIPS-180 padding and run final compression. After this, use SHA.DOUT to read the digest. |
+| `0x11` | **SHA.ROUND** | Compress the complete block at TSRC0: 64 bytes for SHA-256, 128 bytes for SHA-384/512. |
+| `0x12` | **SHA.PAD** | Write FIPS-180 padding for the partial block whose byte offset is R0. C reports whether two blocks are required. |
+| `0x13` | **SHA.DIN Rd, Rs** | Feed byte Rs[7:0], advance R0, copy the resulting offset to Rd, and auto-compress at the active mode's block size. |
+| `0x14` | **SHA.DOUT Rd, Rs** | Read digest word H[Rs & 7] into Rd (32 significant bits for SHA-256, 64 for SHA-384/512). |
+| `0x15` | **SHA.FINAL** | Apply FIPS-180 padding and run final compression. The digest remains available to SHA.DOUT and micro-cluster ownership remains held. |
+| `0x16` | **SHA.RELEASE** | End the current micro-cluster SHA transaction without changing SHA or register state. On a full core this ownership-only instruction is a one-cycle no-op. |
+| `0x17`–`0x1F` | *(reserved)* | Trap as `ILLEGAL_OP`. |
 
 **SHA block buffer:** The engine uses TSRC0 (CSR 0x16) as a pointer to a
-64-byte scratch buffer in RAM, and R0 as the current block offset counter.
-The BIOS sets TSRC0 to `sha_blk_buf` (a 64-byte BSS region) before use.
+mode-sized scratch buffer in RAM—64 bytes for SHA-256 and 128 bytes for
+SHA-384/512—and R0 as the current block offset counter. SHA-256 packs two
+32-bit digest words into each ACC0–ACC3 register. SHA-384/512 stores H0–H3
+in ACC0–ACC3 and H4–H7 in R16–R19.
+
+Full cores have no SHA ownership arbitration, so `SHA.RELEASE` changes
+nothing. On a micro-cluster, `SHA.INIT` acquires the shared SHA engine and
+every SHA instruction from a nonowner stalls and retries while it is held.
+`SHA.FINAL` deliberately retains ownership so the owner can perform DOUT,
+zeroization, and caller-state restoration without an interleaving core.
+Bare `SHA.RELEASE` is the sole release operation; an unlocked release is
+idempotent. A trap or software unwind does not release ownership.
 
 **SHA CSRs:**
 
@@ -735,7 +747,12 @@ The BIOS sets TSRC0 to `sha_blk_buf` (a 64-byte BSS region) before use.
 **Cycle counts:** CRC operations take one engine cycle on full cores.
 Micro-cores add cluster arbitration latency and can wait behind the current
 transaction owner. SHA.DIN = 1 cycle (+ ~64 cycles when a full block triggers
-compression). SHA.FINAL = ~64 cycles. SHA.DOUT = 1 cycle.
+compression; ~80 in SHA-384/512 mode). SHA.FINAL = ~64–83 cycles.
+SHA.DOUT and SHA.RELEASE = 1 cycle.
+
+The assembler, Python execution model, and native C++ execution/scheduler
+implement this `SHA.RELEASE` contract. Matching RTL decode and cluster-lock
+changes are intentionally deferred.
 
 #### Field ALU Sub-Operations (sub-op 0x20–0x2D)
 
