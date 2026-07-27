@@ -795,9 +795,9 @@ def test_native_trng_unavailable_contract_and_explicit_reinit() -> None:
     assert not state.trng_usable()
     assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0
     assert state._native_singleton_read8(TRNG_BASE + 0x11) == 0
-    assert state._trng_test_pool_is_zero()
+    assert state._trng_test_zeroized_state() == (True, True)
     assert state._native_singleton_write8(TRNG_BASE + 0x18, 0xA5)
-    assert state._trng_test_pool_is_zero()
+    assert state._trng_test_zeroized_state() == (True, True)
     with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
         state._native_singleton_read8(TRNG_BASE)
     with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
@@ -809,6 +809,34 @@ def test_native_trng_unavailable_contract_and_explicit_reinit() -> None:
     assert state.trng_usable()
     assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0x01
     assert 0 <= state._native_singleton_read8(TRNG_BASE) <= 0xFF
+
+
+def test_native_trng_pending_seed_is_wiped_on_failure_and_disable() -> None:
+    cpu = Megapad64(mem_size=256)
+    state = cpu._cs
+
+    def stage_pending_seed() -> None:
+        state.init_trng()
+        # With 57 bytes consumed, SEED[7] lies just beyond this pool and is
+        # retained for the next checked host refill.
+        for _ in range(57):
+            state._native_singleton_read8(TRNG_BASE)
+        assert state._trng_test_zeroized_state()[1]
+        assert state._native_singleton_write8(
+            TRNG_BASE + 0x1F,
+            0xA5,
+        )
+        assert not state._trng_test_zeroized_state()[1]
+
+    stage_pending_seed()
+    state._trng_test_health_loss_after(0)
+
+    assert state._trng_test_zeroized_state() == (True, True)
+
+    stage_pending_seed()
+    state.disable_trng()
+
+    assert state._trng_test_zeroized_state() == (True, True)
 
 
 def test_native_trng_health_loss_boundary_is_shared_and_sticky() -> None:
@@ -827,9 +855,9 @@ def test_native_trng_health_loss_boundary_is_shared_and_sticky() -> None:
 
     assert not core0.trng_usable()
     assert core0._native_singleton_read8(TRNG_BASE + 0x10) == 0
-    assert core1._trng_test_pool_is_zero()
+    assert core1._trng_test_zeroized_state() == (True, True)
     assert core0._native_singleton_write8(TRNG_BASE + 0x18, 0x5A)
-    assert core1._trng_test_pool_is_zero()
+    assert core1._trng_test_zeroized_state() == (True, True)
     with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
         core0._native_singleton_read8(TRNG_BASE)
 
@@ -846,7 +874,7 @@ def test_native_trng_health_loss_boundary_is_shared_and_sticky() -> None:
     # The eighth byte is delivered, then the shared source fails closed.
     assert core0._native_singleton_read8(TRNG_BASE + 0x10) == 0
     assert core1._native_singleton_read8(TRNG_BASE + 0x10) == 0
-    assert core0._trng_test_pool_is_zero()
+    assert core0._trng_test_zeroized_state() == (True, True)
     with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
         core1._native_singleton_read8(TRNG_BASE + 0x08)
 
@@ -868,7 +896,7 @@ def test_native_trng_refill_failure_is_guest_visible_and_recoverable() -> None:
     assert state.trng_enabled()
     assert not state.trng_usable()
     assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0
-    assert state._trng_test_pool_is_zero()
+    assert state._trng_test_zeroized_state() == (True, True)
     with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
         state._native_singleton_read8(TRNG_BASE)
     with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):

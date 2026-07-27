@@ -98,6 +98,40 @@ def _run_only_secondary(system, code, *, address=0x100, budget=100):
     return system.run_batch(budget)
 
 
+def _count_native_mmio_fallbacks(core):
+    counts = {"reads": 0, "writes": 0}
+    original_read = core._mmio_read8
+    original_write = core._mmio_write8
+
+    def counted_read(address):
+        counts["reads"] += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        counts["writes"] += 1
+        return original_write(address, value)
+
+    core._mmio_read8 = counted_read
+    core._mmio_write8 = counted_write
+    return counts
+
+
+def _install_bus_fault_halt_handler(core, marker):
+    core.ivt_base = 0x200
+    core.sp = 0x800
+    vector = 0x200 + IVEC_BUS_FAULT * 8
+    core.mem[vector:vector + 8] = (0x300).to_bytes(8, "little")
+    core.load_bytes(
+        0x300,
+        assemble(
+            f"""
+            ldi64 r7, {marker}
+            halt
+            """
+        ),
+    )
+
+
 def _install_ipi_probe(system):
     events = []
     system.cpu.flag_i = 1
@@ -684,6 +718,84 @@ def test_secondary_native_remaining_singletons_reach_shared_state():
     assert callback_reads == callback_writes == 0
 
 
+def test_secondary_native_trng_wide_accesses_stay_native():
+    """Native 16- and 32-bit TRNG spans do not fall back bytewise."""
+    system = _new_system(full_cores=2)
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    primary.init_trng()
+    read_wide_status = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x10}
+        ld.h r4, r1
+        ld.w r5, r1
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x18}
+        ldi64 r2, 0xbbaa
+        st.h r1, r2
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x1c}
+        ldi64 r2, 0xddccbbaa
+        st.w r1, r2
+        halt
+        """
+    )
+    fallback_counts = _count_native_mmio_fallbacks(secondary)
+    _run_only_secondary(system, read_wide_status)
+
+    assert secondary.regs[4] == 0x0001
+    assert secondary.regs[5] == 0x00000001
+    assert fallback_counts == {"reads": 0, "writes": 0}
+
+
+@pytest.mark.parametrize(
+    ("access_opcode", "start_offset", "is_write"),
+    (
+        ("ld.h", 0x1F, False),
+        ("ld.w", 0x1D, False),
+        ("st.h", 0x1F, True),
+        ("st.w", 0x1D, True),
+    ),
+)
+def test_secondary_native_trng_cross_window_wide_access_faults_atomically(
+    access_opcode,
+    start_offset,
+    is_write,
+):
+    """A wide access beginning in TRNG cannot escape its decoded window."""
+    system = _new_system(full_cores=2)
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    primary.init_trng()
+    if is_write:
+        # Arrange for an incorrectly executed final SEED byte to enter the
+        # pending-seed buffer, making a partial write directly observable.
+        for _ in range(57):
+            primary._native_singleton_read8(TRNG_BASE)
+        assert primary._trng_test_zeroized_state()[1]
+    handler_marker = 0x43524F53
+    _install_bus_fault_halt_handler(secondary, handler_marker)
+    destination_sentinel = 0xA55A5AA5
+    access_instruction = (
+        f"{access_opcode} r1, r4"
+        if is_write
+        else f"{access_opcode} r4, r1"
+    )
+    cross_window_access = assemble(
+        f"""
+        ldi64 r4, {destination_sentinel}
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + start_offset}
+        {access_instruction}
+        halt
+        """
+    )
+    fallback_counts = _count_native_mmio_fallbacks(secondary)
+    _run_only_secondary(system, cross_window_access)
+
+    assert secondary.regs[4] == destination_sentinel
+    assert secondary.regs[7] == handler_marker
+    assert primary._trng_test_zeroized_state()[1]
+    assert fallback_counts == {"reads": 0, "writes": 0}
+
+
 def test_secondary_native_trng_unusable_window_never_falls_back_to_python():
     """Disabled status/SEED stay native and unusable data faults on main bus."""
     system = _new_system(full_cores=2)
@@ -723,7 +835,7 @@ def test_secondary_native_trng_unusable_window_never_falls_back_to_python():
 
     assert secondary.regs[4] == 0
     assert secondary.regs[5] == 0
-    assert primary._trng_test_pool_is_zero()
+    assert primary._trng_test_zeroized_state() == (True, True)
     assert callback_reads == callback_writes == 0
 
     # A halted core is terminal to the native scheduler.  Use a fresh system
@@ -806,8 +918,36 @@ def test_secondary_native_trng_rand64_publishes_before_final_health_loss():
 
     assert secondary.regs[5] == 0
     assert not primary.trng_usable()
-    assert primary._trng_test_pool_is_zero()
+    assert primary._trng_test_zeroized_state() == (True, True)
     assert callback_reads == callback_writes == 0
+
+
+def test_secondary_native_trng_mid_rand64_failure_does_not_publish_prefix():
+    """A fault after four random bytes leaves the destination unchanged."""
+    system = _new_system(full_cores=2)
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    primary.init_trng()
+    primary._trng_test_health_loss_after(4)
+    handler_marker = 0x50415254
+    _install_bus_fault_halt_handler(secondary, handler_marker)
+    destination_sentinel = 0xA5A55A5AF00DCAFE
+    read_partial_rand64 = assemble(
+        f"""
+        ldi64 r4, {destination_sentinel}
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x08}
+        ld.d r4, r1
+        halt
+        """
+    )
+    fallback_counts = _count_native_mmio_fallbacks(secondary)
+    _run_only_secondary(system, read_partial_rand64)
+
+    assert secondary.regs[4] == destination_sentinel
+    assert secondary.regs[7] == handler_marker
+    assert not primary.trng_usable()
+    assert primary._trng_test_zeroized_state() == (True, True)
+    assert fallback_counts == {"reads": 0, "writes": 0}
 
 
 def test_secondary_native_uart_geometry_reaches_shared_host_state():

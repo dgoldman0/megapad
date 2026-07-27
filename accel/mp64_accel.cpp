@@ -12002,10 +12002,10 @@ static void complete_cycle_bus_target(
             read_value.reset();
         } catch (const std::exception& error) {
             const std::string message = error.what();
-            // Native targets report architectural faults with the TRAP:
-            // prefix.  Preserve those as bus faults for guest delivery;
-            // callback diagnostics remain host errors and retain their text.
-            if (message.rfind("TRAP:", 0) != 0)
+            // Only the exact native target bus-fault sentinel is an
+            // architectural fault.  A host diagnostic that happens to begin
+            // with TRAP: must retain its text instead of being suppressed.
+            if (message != "TRAP:BUS_FAULT")
                 target_error_message = message;
             fault = BusFault::TARGET_FAULT;
             target_effects_committed = true;
@@ -17271,9 +17271,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 "native TRNG test seam cannot mutate while memory is in use");
             s.trng->test_fail_next_host_refill();
         })
-        .def("_trng_test_pool_is_zero", [](CPUState& s) -> bool {
+        .def("_trng_test_zeroized_state", [](CPUState& s) {
             auto memory_guard = acquire_shared_memory_use(s);
-            return s.trng->test_pool_is_zero();
+            return s.trng->test_zeroized_state();
         })
         .def("_native_singleton_read8",
              [](CPUState& s, uint32_t mmio_off) -> int {

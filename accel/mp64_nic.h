@@ -27,6 +27,7 @@
 #include <functional>
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 static constexpr int NIC_MAX_FRAME = 1514;
 static constexpr size_t NIC_DATA_WINDOW_SIZE = 96;
@@ -629,6 +630,14 @@ struct TRNGDevice {
     static constexpr std::size_t POOL_SIZE = 64;
     static constexpr std::size_t SEED_SIZE = 8;
 
+    ~TRNGDevice() noexcept {
+        // Object ownership guarantees quiescence before destruction.  Avoid
+        // taking the mutex here: locking can throw, while teardown must still
+        // make a best effort to erase every guest-influenced secret byte.
+        wipe_pool_unlocked();
+        wipe_seed_unlocked();
+    }
+
     void init() {
         std::lock_guard<std::mutex> lock(mutex);
         wipe_pool_unlocked();
@@ -731,12 +740,19 @@ struct TRNGDevice {
         fail_next_refill = true;
     }
 
-    bool test_pool_is_zero() const {
+    // The pair reports {pool_zero, pending_seed_zero}.
+    std::pair<bool, bool> test_zeroized_state() const {
         std::lock_guard<std::mutex> lock(mutex);
-        return std::all_of(
-            pool.begin(),
-            pool.end(),
-            [](uint8_t byte) { return byte == 0; });
+        const auto is_zero = [](uint8_t byte) {
+            return byte == 0;
+        };
+        return {
+            std::all_of(pool.begin(), pool.end(), is_zero),
+            std::all_of(
+                pending_seed.begin(),
+                pending_seed.end(),
+                is_zero),
+        };
     }
 
 private:
