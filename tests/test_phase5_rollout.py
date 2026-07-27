@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import system as system_module
+from asm import assemble
 from system import MegapadSystem
 
 
@@ -104,3 +105,70 @@ def test_explicit_one_lane_remains_the_helper_free_reference() -> None:
     assert diagnostics["auxiliary_worker_count"] == 0
     assert diagnostics["live_auxiliary_workers"] == 0
     assert diagnostics["inline_reference"]
+
+
+def _rollout_batch_signature(
+    worker_count: int | None,
+) -> tuple[int, tuple]:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=4,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=worker_count,
+    )
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    inc r1
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    stats = system.run_batch_stats(4_003)
+    return (
+        system.worker_count,
+        (
+            stats.instructions_executed,
+            stats.system_cycles_advanced,
+            stats.per_core_instructions,
+            stats.per_core_cycles,
+            stats.per_core_dispatches,
+            stats.per_core_stop_reasons,
+            stats.system_stop_reason,
+            stats.stop_cycle,
+            system._scheduler_cursor,
+            tuple(
+                (
+                    cpu.pc,
+                    cpu.regs[1],
+                    cpu.cycle_count,
+                    cpu.halted,
+                    cpu.idle,
+                )
+                for cpu in system.cores
+            ),
+        ),
+    )
+
+
+def test_production_default_matches_explicit_one_lane_reference(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        system_module,
+        "_available_host_cpu_count",
+        lambda: 64,
+    )
+
+    default_width, default_signature = _rollout_batch_signature(None)
+    reference_width, reference_signature = _rollout_batch_signature(1)
+
+    assert default_width == 4
+    assert reference_width == 1
+    assert default_signature == reference_signature

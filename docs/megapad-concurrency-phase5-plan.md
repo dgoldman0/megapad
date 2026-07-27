@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-27
 
-**Status:** Elements 1 through 3 of 4 complete; Element 4 pending
+**Status:** Complete — all four fixed elements are implemented and verified
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -33,7 +33,7 @@ elements or sub-elements.
 | 1 | Rollout policy | Complete |
 | 2 | Production entry-point integration | Complete |
 | 3 | Production scheduler consolidation | Complete |
-| 4 | Bounded closure and handoff | Pending |
+| 4 | Bounded closure and handoff | Complete |
 
 ## Preserved architecture
 
@@ -66,18 +66,22 @@ Automatic selection is resolved once at construction:
 1. configured guest execution cores select one lane for one core, two lanes
    for two cores, and four lanes for three or more cores;
 2. process CPU affinity, falling back to the host CPU count, selects the same
-   one/two/four capacity ceiling; and
-3. the resolved width is the lower of the guest target and host ceiling.
+   tier: one CPU maps to one lane, two map to two lanes, and three or more map
+   to four lanes; and
+3. the resolved width is the lower of the guest and host tier selections.
 
 An explicit one, two, or four always wins and is never silently clamped.
 This lets constrained hosts request the reference path and lets a caller
 deliberately oversubscribe for testing without hidden policy changes.
+Because there is no supported three-lane width, an affinity mask containing
+exactly three CPUs selects four lanes and can oversubscribe by one; callers
+that want to avoid that can explicitly select one or two.
 
 ### P5-D1: automatic selection versus a fixed global default
 
 | Contention | Decision | Claim boundary |
 |---|---|---|
-| A global four-lane default would create idle helpers for a one-core machine, while a permanent one-lane default would leave production concurrency opt-in. Host-load-adaptive resizing would make resource use unstable and complicate diagnosis. | Resolve once from configured guest concurrency and affinity-aware host capacity on the fixed 1/2/4 ladder. Preserve explicit widths exactly. | The host may choose a different width on a differently constrained process, but prior one/two/four equivalence proves guest results do not change. Selection never consults runtime timing, helper readiness, or guest state, and never changes after construction. |
+| A global four-lane default would create idle helpers for a one-core machine, while a permanent one-lane default would leave production concurrency opt-in. Host-load-adaptive resizing would make resource use unstable and complicate diagnosis. | Resolve once from configured guest concurrency and the affinity-aware host tier on the fixed 1/2/4 ladder. Preserve explicit widths exactly. | The host may choose a different width on a differently constrained process, and the three-CPU tier may oversubscribe by one, but prior one/two/four equivalence proves guest results do not change. Selection never consults runtime timing, helper readiness, or guest state, and never changes after construction. |
 
 Element 1 completes when pure policy tests, facade/native default tests, fixed
 override tests, and worker lifecycle tests pass sequentially and the decision
@@ -95,7 +99,7 @@ one/two/four-lane equivalence.
 
 ## Element 2: production entry-point integration
 
-Element 2 will expose `auto`, one, two, and four lanes through:
+Element 2 exposes `auto`, one, two, and four lanes through:
 
 - the main CLI;
 - `MachineSession.from_bios`;
@@ -103,9 +107,9 @@ Element 2 will expose `auto`, one, two, and four lanes through:
 - development scenario JSON; and
 - machine reconstruction such as interactive RAM resizing.
 
-The public spelling will be `lanes`; no duplicate `workers` alias or
-environment-variable configuration will be added. Every entry point will
-report or retain the resolved width rather than silently reverting to auto.
+The public spelling is `lanes`; no duplicate `workers` alias or
+environment-variable configuration was added. Every entry point reports or
+retains the resolved width rather than silently reverting to auto.
 
 ### P5-D2: one public spelling and reconstruction custody
 
@@ -164,7 +168,7 @@ performance confirmation. It does not include Akashic, unrestricted system
 tests, large persistence tests, broad sanitizer selections, or a repeat of
 the Phase 3/4 high-memory gates.
 
-The final handoff will record:
+The final handoff records:
 
 - exact focused commands and resource use;
 - default, explicit-one, and cross-width behavior;
@@ -175,3 +179,29 @@ The final handoff will record:
 
 All test commands remain foreground, sequential, and resource-monitored.
 Tests that instantiate helper workers require approval before execution.
+
+### P5-D4: bounded rollout closure versus repeated broad qualification
+
+| Contention | Decision | Claim boundary |
+|---|---|---|
+| Repeating the Phase 3/4 comprehensive, sanitizer, and downstream gates would consume substantially more memory, disk, and time than the Python-level rollout changes justify. Omitting performance evidence entirely could still hide accidental reference-only production behavior. | Close with focused production-entry, scheduler-ownership, cross-width, strict-event/DMA, reduced-core, and clock oracles plus a modest four-core private-compute control. | Phase 5 makes no new sanitizer, unrestricted-suite, Akashic/SR2, persistence, framebuffer-stress, bulk-DMA, or universal-performance claim. Earlier evidence remains historical rather than being relabeled as Phase 5 evidence. |
+
+### Element 4 completion record
+
+The complete Phase 5 rollout-policy file passes 17 tests in 0.05 test seconds.
+Its foreground command takes 0.61 seconds, peaks at 43,500 KiB RSS, and
+reports no process swap. The final 14-case integration/oracle selection passes
+in 0.37 test seconds; its command takes 0.87 seconds, peaks at 195,612 KiB
+RSS, and reports no process swap.
+
+The modest four-core private-compute control uses 500,000 instructions, three
+timed repeats, one 100,000-instruction warmup per lane-width case,
+one/two/four lanes, and a 512-byte strict-DMA side probe. It passes every
+architectural validation and reports median aggregate throughput of 42.57,
+65.31, and 107.38 MIPS. Four lanes are 2.52 times the one-lane reference for
+this fixture. The command takes 0.96 seconds, peaks at 69,020 KiB RSS, and
+reports no process swap. These short medians confirm rollout rather than
+establishing a new universal performance baseline.
+
+The durable completion and resumption record is
+`docs/megapad-concurrency-phase5-handoff.md`.
