@@ -112,7 +112,7 @@ device occupies a small range:
 | **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
 | **SHA-3/SHAKE** | `+0x0780` | 96 bytes | Keccak hash / XOF accelerator (SHA3-256, SHA3-512, SHAKE) |
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
-| **TRNG** | `+0x0800` | 64 bytes | Hardware true random number generator |
+| **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
@@ -520,18 +520,30 @@ networking and TLS key-schedule callers can fail closed.
 
 ### TRNG (True Random Number Generator)
 
-A hardware TRNG at MMIO base `+0x0800`.  On FPGA: ring-oscillator entropy
-source with LFSR conditioner and health monitoring.  In the emulator:
-backed by `os.urandom()`.
+The TRNG occupies `+0x0800`–`+0x081F` and is shared by all cores. The
+physical implementation is intended to use a conditioned entropy source
+with health monitoring. The native emulator uses a staged 64-byte pool
+filled from `std::random_device`, but accepts that provider only when it
+reports positive entropy. Consumed bytes are erased. A provider exception or
+health failure erases the pool and supplemental seed, clears usability, and
+remains latched until explicit host reinitialization.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| DATA | `+0x00` | R | 64-bit random value |
-| STATUS | `+0x08` | R | **bit 0:** ready, **bit 1:** health OK |
-| CONTROL | `+0x10` | RW | **bit 0:** enable, **bit 1:** reseed |
-| SEED | `+0x18` | W | Manual seed input |
+| RAND8 | `+0x00` | R | One random byte; bus fault while unusable |
+| RAND64 | `+0x08`–`+0x0F` | R | Eight independent random-byte lanes; a 64-bit little-endian load reads the complete value |
+| STATUS | `+0x10` | R | **bit 0:** USABLE; every other bit is zero |
+| SEED | `+0x18`–`+0x1F` | W | Supplement unread/future host-derived bytes; ignored while unusable |
 
-**BIOS words:** `RANDOM`, `RANDOM8`, `SEED-RNG`.
+The complete window remains decoded while disabled or unhealthy, so
+software can always read a zero `STATUS` without falling through to another
+device model. `RAND8` and `RAND64` fail closed with `IVEC_BUS_FAULT` when
+`USABLE` is clear. `SEED` never substitutes for a healthy entropy source and
+cannot recover a latched failure.
+
+**BIOS words:** `RANDOM`, `RANDOM8`, `SEED-RNG`. The two random-read words
+are raw and therefore propagate the device bus fault if entropy is
+unavailable; `SEED-RNG` is a supplemental mix only.
 
 ### Per-Core Infrastructure
 

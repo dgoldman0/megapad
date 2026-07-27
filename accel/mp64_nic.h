@@ -22,6 +22,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 #include <functional>
 #include <algorithm>
@@ -606,72 +607,248 @@ struct NICDevice {
 
 
 // =========================================================================
-//  TRNG — True Random Number Generator (CSPRNG-backed)
+//  TRNG — native host-entropy device
 // =========================================================================
-//  Simple device that provides random bytes.  Uses a 64-byte pool
-//  refilled from std::random_device (OS entropy source).
+//  Checked device that provides random bytes from a 64-byte pool refilled
+//  from std::random_device (the host OS entropy source).  The MMIO window is
+//  decoded even when entropy is unavailable: STATUS then returns zero and
+//  data-register reads raise an architectural bus fault.
 //
 //  Register map (offsets from TRNG_BASE = 0x0800):
 //    0x00        RAND8    (R) — one random byte
 //    0x08..0x0F  RAND64   (R) — each read returns an independent random byte
-//    0x10        STATUS   (R) — always 1 (entropy ready)
-//    0x18..0x1F  SEED     (W) — XOR into pool to add entropy
+//    0x10        STATUS   (R) — bit 0: USABLE (the only defined status bit)
+//    0x18..0x1F  SEED     (W) — XOR into future pool bytes when usable
 // =========================================================================
 
 #include <random>
 
 struct TRNGDevice {
-    uint8_t  pool[64];
-    int      pool_pos;
-    bool     enabled;
-
-    std::random_device rd;   // OS entropy source
-
     static constexpr uint32_t TRNG_BASE = 0x0800;
     static constexpr uint32_t TRNG_END  = 0x0820;
+    static constexpr std::size_t POOL_SIZE = 64;
+    static constexpr std::size_t SEED_SIZE = 8;
 
     void init() {
-        refill_pool();
-        pool_pos = 0;
+        std::lock_guard<std::mutex> lock(mutex);
+        wipe_pool_unlocked();
+        wipe_seed_unlocked();
+        pool_pos = POOL_SIZE;
         enabled = true;
+        pool_initialized = false;
+        health_failed = false;
+        health_loss_after.reset();
+        fail_next_refill = false;
+        entropy_source.reset();
+        (void)refill_pool_unlocked();
     }
 
-    void refill_pool() {
-        // Fill 64 bytes from OS entropy (4 bytes at a time)
-        for (int i = 0; i < 64; i += 4) {
-            uint32_t r = rd();
-            pool[i]   = r & 0xFF;
-            pool[i+1] = (r >> 8) & 0xFF;
-            pool[i+2] = (r >> 16) & 0xFF;
-            pool[i+3] = (r >> 24) & 0xFF;
-        }
+    void disable() {
+        std::lock_guard<std::mutex> lock(mutex);
+        enabled = false;
+        pool_initialized = false;
+        health_loss_after.reset();
+        fail_next_refill = false;
+        wipe_pool_unlocked();
+        wipe_seed_unlocked();
+        pool_pos = POOL_SIZE;
     }
 
-    uint8_t next_byte() {
-        if (pool_pos >= 64) {
-            refill_pool();
-            pool_pos = 0;
-        }
-        return pool[pool_pos++];
+    bool is_enabled() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return enabled;
     }
 
-    bool handles(uint32_t mmio_offset) const {
-        return enabled && mmio_offset >= TRNG_BASE && mmio_offset < TRNG_END;
+    bool is_usable() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return usable_unlocked();
+    }
+
+    bool handles(uint32_t mmio_offset) const noexcept {
+        return mmio_offset >= TRNG_BASE && mmio_offset < TRNG_END;
+    }
+
+    bool handles_span(
+            uint32_t mmio_offset,
+            uint32_t byte_count) const noexcept {
+        return byte_count <= TRNG_END - TRNG_BASE &&
+               mmio_offset >= TRNG_BASE &&
+               mmio_offset < TRNG_END &&
+               byte_count <= TRNG_END - mmio_offset;
     }
 
     uint8_t read8(uint32_t mmio_offset) {
-        uint32_t off = mmio_offset - TRNG_BASE;
-        if (off == 0x00)                       return next_byte();  // RAND8
-        if (off >= 0x08 && off < 0x10)         return next_byte();  // RAND64
-        if (off == 0x10)                       return 1;            // STATUS
+        std::lock_guard<std::mutex> lock(mutex);
+        const uint32_t off = mmio_offset - TRNG_BASE;
+        if (off == 0x00 ||
+            (off >= 0x08 && off < 0x10)) {
+            return next_byte_unlocked();
+        }
+        if (off == 0x10)
+            return usable_unlocked() ? 0x01 : 0x00;
         return 0;
     }
 
     void write8(uint32_t mmio_offset, uint8_t val) {
-        uint32_t off = mmio_offset - TRNG_BASE;
-        if (off >= 0x18 && off < 0x20) {
-            int idx = off - 0x18;
-            if (idx < 64) pool[idx] ^= val;   // SEED — mix into pool
-        }
+        std::lock_guard<std::mutex> lock(mutex);
+        const uint32_t off = mmio_offset - TRNG_BASE;
+        if (off < 0x18 || off >= 0x20 || !usable_unlocked())
+            return;
+
+        // Guest-provided seed material can supplement a healthy host pool,
+        // but can never resurrect a disabled or failed entropy source.  Mix
+        // into an unread byte when possible; carry bytes beyond this pool
+        // into the next successful host refill.
+        const std::size_t seed_index =
+            static_cast<std::size_t>(off - 0x18);
+        const std::size_t pool_index = pool_pos + seed_index;
+        if (pool_index < POOL_SIZE)
+            pool[pool_index] ^= val;
+        else
+            pending_seed[seed_index] ^= val;
     }
+
+    // Host-only deterministic fault seams.  A zero-byte health-loss
+    // injection takes effect immediately.  A positive count lets exactly
+    // that many data bytes succeed and makes the device unusable immediately
+    // after the final successful byte, so software's post-fill STATUS check
+    // observes the failure.  Injected state is shared across every core;
+    // explicit init() clears it and is the only recovery from a latched
+    // health failure.
+    void test_inject_health_loss_after(
+            std::size_t successful_bytes) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (successful_bytes == 0) {
+            health_loss_after.reset();
+            mark_unusable_unlocked();
+            return;
+        }
+        health_loss_after = successful_bytes;
+    }
+
+    void test_fail_next_host_refill() {
+        std::lock_guard<std::mutex> lock(mutex);
+        fail_next_refill = true;
+    }
+
+    bool test_pool_is_zero() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return std::all_of(
+            pool.begin(),
+            pool.end(),
+            [](uint8_t byte) { return byte == 0; });
+    }
+
+private:
+    static void secure_wipe(
+            uint8_t* bytes,
+            std::size_t length) noexcept {
+        volatile uint8_t* volatile_bytes = bytes;
+        while (length-- != 0)
+            *volatile_bytes++ = 0;
+    }
+
+    void wipe_pool_unlocked() noexcept {
+        secure_wipe(pool.data(), pool.size());
+    }
+
+    void wipe_seed_unlocked() noexcept {
+        secure_wipe(
+            pending_seed.data(),
+            pending_seed.size());
+    }
+
+    bool usable_unlocked() const noexcept {
+        return enabled && pool_initialized && !health_failed;
+    }
+
+    void mark_unusable_unlocked() noexcept {
+        pool_initialized = false;
+        health_failed = true;
+        pool_pos = POOL_SIZE;
+        wipe_pool_unlocked();
+        wipe_seed_unlocked();
+    }
+
+    bool refill_pool_unlocked() noexcept {
+        std::array<uint8_t, POOL_SIZE> candidate{};
+        try {
+            if (fail_next_refill) {
+                fail_next_refill = false;
+                throw std::runtime_error(
+                    "injected host entropy refill failure");
+            }
+            if (!entropy_source.has_value())
+                entropy_source.emplace();
+            if (entropy_source->entropy() <= 0.0)
+                throw std::runtime_error(
+                    "host random source reports no entropy");
+
+            // random_device implementations need not expose a zero-based,
+            // power-of-two result range.  The distribution removes that
+            // representation bias before bytes enter the guest-visible pool.
+            std::uniform_int_distribution<unsigned int>
+                byte_distribution(0, 0xFF);
+            for (uint8_t& byte : candidate)
+                byte = static_cast<uint8_t>(
+                    byte_distribution(*entropy_source));
+        } catch (...) {
+            secure_wipe(candidate.data(), candidate.size());
+            mark_unusable_unlocked();
+            return false;
+        }
+
+        for (
+            std::size_t index = 0;
+            index < candidate.size();
+            index++
+        ) {
+            candidate[index] ^=
+                pending_seed[index % pending_seed.size()];
+        }
+        wipe_seed_unlocked();
+        pool = candidate;
+        secure_wipe(candidate.data(), candidate.size());
+        pool_pos = 0;
+        pool_initialized = true;
+        return true;
+    }
+
+    uint8_t next_byte_unlocked() {
+        if (!usable_unlocked())
+            throw std::runtime_error("TRAP:BUS_FAULT");
+        if (pool_pos >= POOL_SIZE &&
+            !refill_pool_unlocked()) {
+            throw std::runtime_error("TRAP:BUS_FAULT");
+        }
+
+        const uint8_t result = pool[pool_pos];
+        pool[pool_pos++] = 0;
+        if (health_loss_after.has_value()) {
+            (*health_loss_after)--;
+            if (*health_loss_after == 0) {
+                health_loss_after.reset();
+                mark_unusable_unlocked();
+            }
+        }
+        // Keep a checked pool ready ahead of the next request.  A refill
+        // failure after the final old-pool byte makes STATUS unusable without
+        // retracting that already valid byte; the following data read faults.
+        if (usable_unlocked() &&
+            pool_pos >= POOL_SIZE) {
+            (void)refill_pool_unlocked();
+        }
+        return result;
+    }
+
+    mutable std::mutex mutex;
+    std::array<uint8_t, POOL_SIZE> pool{};
+    std::array<uint8_t, SEED_SIZE> pending_seed{};
+    std::size_t pool_pos = POOL_SIZE;
+    bool enabled = false;
+    bool pool_initialized = false;
+    bool health_failed = false;
+    bool fail_next_refill = false;
+    std::optional<std::size_t> health_loss_after;
+    std::optional<std::random_device> entropy_source;
 };

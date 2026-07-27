@@ -26,7 +26,12 @@ from devices import (
     UART_BASE,
     UART_GEOM_BASE,
 )
-from megapad64 import CSR_IPIACK, CSR_MBOX, IVEC_IPI
+from megapad64 import (
+    CSR_IPIACK,
+    CSR_MBOX,
+    IVEC_BUS_FAULT,
+    IVEC_IPI,
+)
 from system import MegapadSystem
 
 
@@ -676,6 +681,132 @@ def test_secondary_native_remaining_singletons_reach_shared_state():
     assert primary.nic_read8(NIC_BASE + 0x02) == 0xA5
     assert primary.crypto_read8(SHA3_BASE + 0x02) == 3
     assert secondary.regs[4] == 1
+    assert callback_reads == callback_writes == 0
+
+
+def test_secondary_native_trng_unusable_window_never_falls_back_to_python():
+    """Disabled status/SEED stay native and unusable data faults on main bus."""
+    system = _new_system(full_cores=2)
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    primary.disable_trng()
+    inspect_unusable = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x10}
+        ld.b r4, r1
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x18}
+        ldi64 r2, 0xa5
+        str r1, r2
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x11}
+        ld.b r5, r1
+        halt
+        """
+    )
+    callback_reads = 0
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
+
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(address, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, inspect_unusable)
+
+    assert secondary.regs[4] == 0
+    assert secondary.regs[5] == 0
+    assert primary._trng_test_pool_is_zero()
+    assert callback_reads == callback_writes == 0
+
+    # A halted core is terminal to the native scheduler.  Use a fresh system
+    # for the fault-delivery half instead of pretending the first core can be
+    # restarted after the disabled-window probe.
+    system = _new_system(full_cores=2)
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    primary.init_trng()
+    primary._trng_test_health_loss_after(0)
+    secondary.ivt_base = 0x200
+    secondary.sp = 0x800
+    bus_fault_vector = 0x200 + IVEC_BUS_FAULT * 8
+    secondary.mem[bus_fault_vector:bus_fault_vector + 8] = (
+        0x300
+    ).to_bytes(8, "little")
+    handler_marker = 0x54524E47
+    secondary.load_bytes(
+        0x300,
+        assemble(
+            f"""
+            ldi64 r7, {handler_marker}
+            halt
+            """
+        ),
+    )
+    read_failed_data = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + TRNG_BASE}
+        ld.b r6, r1
+        halt
+        """
+    )
+
+    _run_only_secondary(system, read_failed_data)
+
+    assert secondary.regs[7] == handler_marker
+    assert secondary.halted
+    assert callback_reads == callback_writes == 0
+
+
+def test_secondary_native_trng_rand64_publishes_before_final_health_loss():
+    """RAND64 completes, then its eighth-byte health loss is observable."""
+    system = _new_system(full_cores=2)
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    primary.init_trng()
+    primary._trng_test_health_loss_after(8)
+    read_rand64_and_status = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x08}
+        ld.d r4, r1
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x10}
+        ld.b r5, r1
+        halt
+        """
+    )
+    callback_reads = 0
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
+
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(address, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, read_rand64_and_status)
+
+    assert secondary.regs[5] == 0
+    assert not primary.trng_usable()
+    assert primary._trng_test_pool_is_zero()
     assert callback_reads == callback_writes == 0
 
 

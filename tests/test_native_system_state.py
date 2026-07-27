@@ -780,6 +780,107 @@ def test_system_remaining_native_peripherals_are_singletons() -> None:
     assert core1.trng_enabled()
 
 
+def test_native_trng_unavailable_contract_and_explicit_reinit() -> None:
+    cpu = Megapad64(mem_size=256)
+    state = cpu._cs
+    state.init_trng()
+
+    assert state.trng_enabled()
+    assert state.trng_usable()
+    assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0x01
+
+    state.disable_trng()
+
+    assert not state.trng_enabled()
+    assert not state.trng_usable()
+    assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0
+    assert state._native_singleton_read8(TRNG_BASE + 0x11) == 0
+    assert state._trng_test_pool_is_zero()
+    assert state._native_singleton_write8(TRNG_BASE + 0x18, 0xA5)
+    assert state._trng_test_pool_is_zero()
+    with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
+        state._native_singleton_read8(TRNG_BASE)
+    with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
+        state._native_singleton_read8(TRNG_BASE + 0x08)
+
+    state.init_trng()
+
+    assert state.trng_enabled()
+    assert state.trng_usable()
+    assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0x01
+    assert 0 <= state._native_singleton_read8(TRNG_BASE) <= 0xFF
+
+
+def test_native_trng_health_loss_boundary_is_shared_and_sticky() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+    core0.init_trng()
+
+    core1._trng_test_health_loss_after(0)
+
+    assert not core0.trng_usable()
+    assert core0._native_singleton_read8(TRNG_BASE + 0x10) == 0
+    assert core1._trng_test_pool_is_zero()
+    assert core0._native_singleton_write8(TRNG_BASE + 0x18, 0x5A)
+    assert core1._trng_test_pool_is_zero()
+    with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
+        core0._native_singleton_read8(TRNG_BASE)
+
+    core0.init_trng()
+    core1._trng_test_health_loss_after(8)
+
+    for index in range(8):
+        reader = core0 if index % 2 == 0 else core1
+        value = reader._native_singleton_read8(
+            TRNG_BASE + 0x08 + index
+        )
+        assert 0 <= value <= 0xFF
+
+    # The eighth byte is delivered, then the shared source fails closed.
+    assert core0._native_singleton_read8(TRNG_BASE + 0x10) == 0
+    assert core1._native_singleton_read8(TRNG_BASE + 0x10) == 0
+    assert core0._trng_test_pool_is_zero()
+    with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
+        core1._native_singleton_read8(TRNG_BASE + 0x08)
+
+    core1.init_trng()
+
+    assert core0.trng_usable()
+    assert core0._native_singleton_read8(TRNG_BASE + 0x10) == 0x01
+
+
+def test_native_trng_refill_failure_is_guest_visible_and_recoverable() -> None:
+    cpu = Megapad64(mem_size=256)
+    state = cpu._cs
+    state.init_trng()
+    state._trng_test_fail_next_refill()
+
+    for _ in range(64):
+        assert 0 <= state._native_singleton_read8(TRNG_BASE) <= 0xFF
+
+    assert state.trng_enabled()
+    assert not state.trng_usable()
+    assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0
+    assert state._trng_test_pool_is_zero()
+    with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
+        state._native_singleton_read8(TRNG_BASE)
+    with pytest.raises(RuntimeError, match=r"^TRAP:BUS_FAULT$"):
+        state._native_singleton_read8(TRNG_BASE + 0x0F)
+
+    state.init_trng()
+
+    assert state.trng_usable()
+    assert state._native_singleton_read8(TRNG_BASE + 0x10) == 0x01
+    assert 0 <= state._native_singleton_read8(TRNG_BASE) <= 0xFF
+
+
 def test_shared_crypto_initialization_does_not_depend_on_wrapper_order() -> None:
     owner = NativeSystemState(2)
     owner.attach_mem(bytearray(4096), 4096)

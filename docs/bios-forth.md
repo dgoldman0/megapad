@@ -876,13 +876,14 @@ SHAKE256 modes, plus XOF squeeze for arbitrary-length output.
 ## TRNG (3 words)
 
 Hardware true random number generator at `0xFFFF_FF00_0000_0800`.
-CSPRNG-backed in emulator, ring-oscillator + SHA-3 conditioner on FPGA.
+The shared device exposes an exact `USABLE` bit and fails closed: random-data
+reads raise a bus fault when disabled, unhealthy, or unable to refill.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `RANDOM` | `( -- u )` | Return a 64-bit random number. |
-| `RANDOM8` | `( -- u )` | Return an 8-bit random number (0–255). |
-| `SEED-RNG` | `( u -- )` | Seed the CSPRNG (emulator only). |
+| `RANDOM` | `( -- u )` | Return a 64-bit random number; propagate a TRNG bus fault when unusable. |
+| `RANDOM8` | `( -- u )` | Return an 8-bit random number (0–255); propagate a TRNG bus fault when unusable. |
+| `SEED-RNG` | `( u -- )` | Supplement unread/future entropy bytes when usable; never restores an unusable source. |
 
 ---
 

@@ -14275,8 +14275,10 @@ w_sha512_clear:
 ; TRNG base = 0xFFFF_FF00_0000_0800
 ;   RAND8    +0x00 (R)  read 1 random byte
 ;   RAND64   +0x08 (R)  read 8 random bytes (64-bit LE)
-;   STATUS   +0x10 (R)  always 1 (entropy available)
-;   SEED     +0x18 (W)  write 64-bit seed to mix in
+;   STATUS   +0x10 (R)  bit 0 USABLE; all other bits zero
+;   SEED     +0x18 (W)  supplement unread/future bytes while usable
+; RAND8/RAND64 raise a bus fault when USABLE is clear.  SEED writes are
+; ignored while unusable and cannot recover a latched health failure.
 
 ; RANDOM ( -- u )  Push a 64-bit hardware random number.
 w_random:

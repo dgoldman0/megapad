@@ -6470,6 +6470,8 @@ static inline uint64_t sys_read64(
             return v;
         }
         if (s.trng->handles(mmio_off)) {
+            if (!s.trng->handles_span(mmio_off, 8))
+                throw std::runtime_error("TRAP:BUS_FAULT");
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
                 v |= (uint64_t)s.trng->read8(mmio_off + i) << (8*i);
@@ -6545,6 +6547,8 @@ static inline void sys_write64(
             return;
         }
         if (s.trng->handles(mmio_off)) {
+            if (!s.trng->handles_span(mmio_off, 8))
+                throw std::runtime_error("TRAP:BUS_FAULT");
             for (int i = 0; i < 8; i++)
                 s.trng->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             icache_invalidate_span(s, addr, 8);
@@ -6612,6 +6616,12 @@ static inline uint16_t sys_read16(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.trng->handles(mmio_off)) {
+            if (!s.trng->handles_span(mmio_off, 2))
+                throw std::runtime_error("TRAP:BUS_FAULT");
+            return s.trng->read8(mmio_off) |
+                   ((uint16_t)s.trng->read8(mmio_off + 1) << 8);
+        }
         if (s.crypto->handles(mmio_off))
             return s.crypto->read8(mmio_off) | ((uint16_t)s.crypto->read8(mmio_off+1) << 8);
         if (s.fb->handles(mmio_off))
@@ -6659,6 +6669,14 @@ static inline void sys_write16(
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 2)) {
+            icache_invalidate_span(s, addr, 2);
+            return;
+        }
+        if (s.trng->handles(mmio_off)) {
+            if (!s.trng->handles_span(mmio_off, 2))
+                throw std::runtime_error("TRAP:BUS_FAULT");
+            s.trng->write8(mmio_off, val & 0xFF);
+            s.trng->write8(mmio_off + 1, (val >> 8) & 0xFF);
             icache_invalidate_span(s, addr, 2);
             return;
         }
@@ -6723,6 +6741,14 @@ static inline uint32_t sys_read32(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.trng->handles(mmio_off)) {
+            if (!s.trng->handles_span(mmio_off, 4))
+                throw std::runtime_error("TRAP:BUS_FAULT");
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++)
+                v |= (uint32_t)s.trng->read8(mmio_off + i) << (8*i);
+            return v;
+        }
         if (s.crypto->handles(mmio_off)) {
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
@@ -6789,6 +6815,14 @@ static inline void sys_write32(
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 4)) {
+            icache_invalidate_span(s, addr, 4);
+            return;
+        }
+        if (s.trng->handles(mmio_off)) {
+            if (!s.trng->handles_span(mmio_off, 4))
+                throw std::runtime_error("TRAP:BUS_FAULT");
+            for (int i = 0; i < 4; i++)
+                s.trng->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             icache_invalidate_span(s, addr, 4);
             return;
         }
@@ -11967,7 +12001,12 @@ static void complete_cycle_bus_target(
             target_effects_committed = true;
             read_value.reset();
         } catch (const std::exception& error) {
-            target_error_message = error.what();
+            const std::string message = error.what();
+            // Native targets report architectural faults with the TRAP:
+            // prefix.  Preserve those as bus faults for guest delivery;
+            // callback diagnostics remain host errors and retain their text.
+            if (message.rfind("TRAP:", 0) != 0)
+                target_error_message = message;
             fault = BusFault::TARGET_FAULT;
             target_effects_committed = true;
             read_value.reset();
@@ -17193,16 +17232,48 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── TRNG device ───────────────────────────────────────
         .def("init_trng", [](CPUState& s) {
-            auto memory_guard = acquire_shared_memory_use(s);
+            require_cycle_device_mutation_allowed(s, "native TRNG");
+            MemoryMutationGuard guard(
+                *s.memory,
+                "native TRNG cannot initialize while memory is in use");
             s.trng->init();
         })
         .def("trng_enabled", [](CPUState& s) -> bool {
             auto memory_guard = acquire_shared_memory_use(s);
-            return s.trng->enabled;
+            return s.trng->is_enabled();
+        })
+        .def("trng_usable", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.trng->is_usable();
         })
         .def("disable_trng", [](CPUState& s) {
+            require_cycle_device_mutation_allowed(s, "native TRNG");
+            MemoryMutationGuard guard(
+                *s.memory,
+                "native TRNG cannot disable while memory is in use");
+            s.trng->disable();
+        })
+        .def("_trng_test_health_loss_after",
+             [](CPUState& s, std::size_t successful_bytes) {
+            require_cycle_device_mutation_allowed(
+                s, "native TRNG test seam");
+            MemoryMutationGuard guard(
+                *s.memory,
+                "native TRNG test seam cannot mutate while memory is in use");
+            s.trng->test_inject_health_loss_after(
+                successful_bytes);
+        })
+        .def("_trng_test_fail_next_refill", [](CPUState& s) {
+            require_cycle_device_mutation_allowed(
+                s, "native TRNG test seam");
+            MemoryMutationGuard guard(
+                *s.memory,
+                "native TRNG test seam cannot mutate while memory is in use");
+            s.trng->test_fail_next_host_refill();
+        })
+        .def("_trng_test_pool_is_zero", [](CPUState& s) -> bool {
             auto memory_guard = acquire_shared_memory_use(s);
-            s.trng->enabled = false;
+            return s.trng->test_pool_is_zero();
         })
         .def("_native_singleton_read8",
              [](CPUState& s, uint32_t mmio_off) -> int {

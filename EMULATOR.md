@@ -180,7 +180,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0700` | 64 B | AES-256/128-GCM (authenticated encryption) |
 | `+0x0780` | 96 B | SHA-3/SHAKE (hashing, key derivation) |
 | `+0x07E0` | 16 B | QoS Config (bus arbitration weights) |
-| `+0x0800` | 64 B | TRNG (hardware CSPRNG) |
+| `+0x0800` | 32 B | TRNG (hardware entropy source) |
 | `+0x0840` | 128 B | Field ALU (GF(2²⁵⁵−19) arithmetic) |
 | `+0x0880` | 16 B | Port I/O Bridge (remap CSR — maps OUT/INP to MMIO targets) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
@@ -201,6 +201,17 @@ falls in the MMIO aperture and routes it through the device bus; everything
 else hits RAM.  Accesses to unmapped MMIO offsets raise `BusError`, which
 the SoC layer converts to `TrapError(IVEC_BUS_FAULT)` — matching the RTL
 bus arbiter timeout behaviour.
+
+The native TRNG owns its complete `+0x0800`–`+0x081F` window even when it is
+disabled or unhealthy. `STATUS` at `+0x10` exposes only bit 0 (`USABLE`);
+reads from `RAND8` at `+0x00` or the eight-byte `RAND64` window at
+`+0x08`–`+0x0F` raise a guest bus fault while that bit is clear. The native
+model fills a wiped 64-byte pool only from a host `std::random_device` that
+reports positive entropy. Source failures are caught, erase current and
+pending material, and remain latched until explicit reinitialization.
+Guest `SEED` writes at `+0x18`–`+0x1F` supplement unread or future
+host-derived bytes; they are ignored while the device is unusable and never
+restore it.
 
 ### BIOS memory layout (runtime)
 
@@ -456,7 +467,9 @@ modulo-128 position that disagrees with the saved offset.
 `SHA3-MODE!` `SHA3-MODE@` `SHA3-SQUEEZE` `SHA3-SQUEEZE-NEXT`
 
 **TRNG**
-`RANDOM` `RANDOM8` `SEED-RNG`
+`RANDOM` `RANDOM8` `SEED-RNG` — the raw random reads deliver a bus fault if
+the device is unusable; `SEED-RNG` is supplemental and cannot make an
+unusable source healthy.
 
 **Field ALU (GF(p) arithmetic)**
 `FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`

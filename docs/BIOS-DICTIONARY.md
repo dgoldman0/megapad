@@ -713,9 +713,9 @@ higher-level preflight before any SHA context is initialized.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 279 | `RANDOM` | `( -- u )` | | Return a 64-bit random number |
-| 280 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
-| 281 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
+| 279 | `RANDOM` | `( -- u )` | | Return 64 random bits; bus-fault if the shared TRNG is unusable |
+| 280 | `RANDOM8` | `( -- u )` | | Return 8 random bits; bus-fault if the shared TRNG is unusable |
+| 281 | `SEED-RNG` | `( u -- )` | | Supplement future entropy while usable; never restores an unusable source |
 
 ### Field ALU (12 words)
 
@@ -845,7 +845,7 @@ SHA2-SPAN-STATUS → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
 | `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |
 | `0xFFFF_FF00_0000_0700` | AES-256-GCM | Key/IV/data/tag registers |
 | `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE | Rate/state/control (96 bytes) |
-| `0xFFFF_FF00_0000_0800` | TRNG | DATA=+0..+7, STATUS=+8 |
+| `0xFFFF_FF00_0000_0800` | TRNG | RAND8=+0, RAND64=+8..+F, STATUS=+10, SEED=+18..+1F |
 | `0xFFFF_FF00_0000_0880` | Field ALU | OP_A=+0..+1F, OP_B=+20..+3F, CMD=+40, STATUS=+41, RESULT=+48..+67, RESULT_HI=+68..+87 |
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
