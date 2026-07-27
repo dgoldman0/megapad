@@ -13235,27 +13235,101 @@ _sha256_return_status:
     str r14, r0
     ret.l
 
-; Return R0=1 when [R9,R9+R12) intersects any byte of the complete
-; 16-context SHA-256 arena, otherwise R0=0.
-_sha256_context_alias:
+; Return R0=1 when [R9,R9+R12) intersects any byte of either complete
+; all-core SHA-2 context arena, otherwise R0=0.  The physical-span
+; preflight has already excluded address wrap.  A zero-length span never
+; aliases.  SHA-256 and SHA-512 share this decision so neither algorithm can
+; expose or overwrite the other algorithm's private state.
+_sha2_context_alias:
     cmpi r12, 0
-    breq .sha256_alias_no
+    breq .sha2_alias_no
     mov r13, r9
     add r13, r12                       ; caller end, exclusive
+
     ldi64 r7, sha256_contexts
     ldi64 r1, 4096
-    add r1, r7                         ; arena end, exclusive
+    add r1, r7                         ; SHA-256 arena end, exclusive
     cmp r9, r1
-    brcc .sha256_alias_start_before_end
-    br .sha256_alias_no
-.sha256_alias_start_before_end:
+    brcc .sha2_alias_sha256_start_before_end
+    br .sha2_alias_check_sha512
+.sha2_alias_sha256_start_before_end:
     cmp r7, r13
-    brcc .sha256_alias_yes
-.sha256_alias_no:
+    brcc .sha2_alias_yes
+
+.sha2_alias_check_sha512:
+    ldi64 r7, sha512_contexts
+    ldi64 r1, 8192
+    add r1, r7                         ; SHA-512 arena end, exclusive
+    cmp r9, r1
+    brcc .sha2_alias_sha512_start_before_end
+    br .sha2_alias_no
+.sha2_alias_sha512_start_before_end:
+    cmp r7, r13
+    brcc .sha2_alias_yes
+
+.sha2_alias_no:
     ldi r0, 0
     ret.l
-.sha256_alias_yes:
+.sha2_alias_yes:
     ldi r0, 1
+    ret.l
+
+; Validate a complete SHA-2 caller span without requiring or mutating an
+; active hash context.
+;   R9  = first byte
+;   R12 = byte count
+;   Returns R0 = 0 OK, 2 RANGE, or 3 CONTEXT-ALIAS.
+;   Preserves R9, R10, R12, and the exact return-stack depth/content.
+; disk_dma_span_status's private 5/6 results are normalized to public RANGE.
+_sha2_span_status:
+    cmpi r12, 0
+    breq .sha2_span_ok
+
+    ; Preserve both the caller's R10 and length across the generic physical
+    ; helper, and erase the temporary return-stack cells before restoring SP.
+    subi r15, 8
+    str r15, r10
+    subi r15, 8
+    str r15, r12
+    mov r10, r12
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    ldn r12, r15
+    ldi r7, 0
+    str r15, r7
+    addi r15, 8
+    ldn r10, r15
+    str r15, r7
+    addi r15, 8
+    cmpi r0, 0
+    brne .sha2_span_range
+
+    ldi64 r11, _sha2_context_alias
+    call.l r11
+    cmpi r0, 0
+    brne .sha2_span_alias
+
+.sha2_span_ok:
+    ldi r0, 0
+    ret.l
+.sha2_span_range:
+    ldi r0, 2
+    ret.l
+.sha2_span_alias:
+    ldi r0, 3
+    ret.l
+
+; SHA2-SPAN-STATUS ( addr len -- status )
+; Pure pre-INIT qualification of a complete physical caller span.
+w_sha2_span_status:
+    ldn r12, r14
+    addi r14, 8
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r11, _sha2_span_status
+    call.l r11
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; Abort and erase the context at R10 without publishing a status.
@@ -13327,25 +13401,14 @@ w_sha256_update:
     cmpi r12, 0
     lbreq .sha256_update_ok
 
-    ; Accept only a complete nonwrapping span in one physical window.
-    subi r15, 8
-    str r15, r12
-    mov r10, r12
-    ldi64 r11, disk_dma_span_status
+    ; Qualify the complete physical span and reject both SHA-2 arenas.
+    ; The helper preserves this context pointer and the caller length.
+    ldi64 r11, _sha2_span_status
     call.l r11
-    ldn r12, r15
-    ldi r7, 0
-    str r15, r7
-    addi r15, 8
-    cmpi r0, 0
-    lbrne .sha256_update_range_fail
-    ldi64 r11, _sha256_context
-    call.l r11
-
-    ldi64 r11, _sha256_context_alias
-    call.l r11
-    cmpi r0, 0
-    lbrne .sha256_update_alias_fail
+    cmpi r0, 2
+    lbreq .sha256_update_range_fail
+    cmpi r0, 3
+    lbreq .sha256_update_alias_fail
 
     ; SHA-256 uses a single 64-bit bit length.  Reject len*8 when it has a
     ; high component or when adding the low component wraps.
@@ -13496,20 +13559,15 @@ w_sha256_final:
     cmp r0, r1
     lbrne .sha256_final_state_fail
 
-    ; Validate and de-alias all 32 output bytes before entering mode 0.
+    ; Validate all 32 output bytes and reject both SHA-2 context arenas
+    ; before entering mode 0.
     ldi r12, 32
-    mov r10, r12
-    ldi64 r11, disk_dma_span_status
+    ldi64 r11, _sha2_span_status
     call.l r11
-    cmpi r0, 0
-    lbrne .sha256_final_range_fail
-    ldi64 r11, _sha256_context
-    call.l r11
-    ldi r12, 32
-    ldi64 r11, _sha256_context_alias
-    call.l r11
-    cmpi r0, 0
-    lbrne .sha256_final_alias_fail
+    cmpi r0, 2
+    lbreq .sha256_final_range_fail
+    cmpi r0, 3
+    lbreq .sha256_final_alias_fail
 
     subi r15, 8
     str r15, r9
@@ -13894,30 +13952,6 @@ _sha512_return_status:
     str r14, r0
     ret.l
 
-; Return R0=1 when [R9,R9+R12) intersects any byte of the complete
-; 16-context BIOS-owned arena, otherwise R0=0.  The physical-span preflight
-; has already excluded address wrap.  A zero-length span never aliases.
-_sha512_context_alias:
-    cmpi r12, 0
-    breq .sha512_alias_no
-    mov r13, r9
-    add r13, r12                       ; caller end, exclusive
-    ldi64 r7, sha512_contexts
-    ldi64 r1, 8192
-    add r1, r7                         ; arena end, exclusive
-    cmp r9, r1
-    brcc .sha512_alias_start_before_end
-    br .sha512_alias_no
-.sha512_alias_start_before_end:
-    cmp r7, r13
-    brcc .sha512_alias_yes
-.sha512_alias_no:
-    ldi r0, 0
-    ret.l
-.sha512_alias_yes:
-    ldi r0, 1
-    ret.l
-
 ; Abort the context at R10 without publishing a public status.  This helper
 ; is used by every checked failure path and by idempotent CLEAR.
 _sha512_abort:
@@ -13957,31 +13991,42 @@ w_sha512_update:
     mov r7, r10
     addi r7, 88
     ldn r0, r7
-    cmpi r0, 0
-    lbreq .sha512_update_state_fail
+    cmpi r0, 1
+    lbrne .sha512_update_state_fail
+
+    ; The partial offset is bounded and must agree exactly with the
+    ; byte-aligned low bit length before even an empty update can succeed.
+    mov r7, r10
+    addi r7, 80
+    ldn r0, r7
+    cmpi r0, 128
+    brcc .sha512_update_offset_ok
+    lbr .sha512_update_state_fail
+.sha512_update_offset_ok:
+    mov r7, r10
+    addi r7, 64
+    ldn r1, r7
+    mov r13, r1
+    andi r13, 7
+    cmpi r13, 0
+    lbrne .sha512_update_state_fail
+    ldi r7, 3
+    shr r1, r7
+    andi r1, 127
+    cmp r0, r1
+    lbrne .sha512_update_state_fail
+
     cmpi r12, 0
     lbreq .sha512_update_ok
 
-    ; Accept a span only when every byte fits one advertised physical window.
-    subi r15, 8
-    str r15, r12
-    mov r10, r12
-    ldi64 r11, disk_dma_span_status
+    ; Accept only one complete physical window and reject both SHA-2 arenas.
+    ; The helper preserves this context pointer and the caller length.
+    ldi64 r11, _sha2_span_status
     call.l r11
-    ldn r12, r15
-    ldi r7, 0
-    str r15, r7
-    addi r15, 8
-    cmpi r0, 0
-    lbrne .sha512_update_range_fail
-    ldi64 r11, _sha512_context
-    call.l r11
-
-    ; Caller data may not intersect any core's BIOS-owned SHA-512 context.
-    ldi64 r11, _sha512_context_alias
-    call.l r11
-    cmpi r0, 0
-    lbrne .sha512_update_alias_fail
+    cmpi r0, 2
+    lbreq .sha512_update_range_fail
+    cmpi r0, 3
+    lbreq .sha512_update_alias_fail
 
     ; Preflight the complete 128-bit bit-length addition before copying or
     ; changing any context byte.  delta = len * 8 as (delta_hi, delta_lo).
@@ -14123,7 +14168,7 @@ w_sha512_update:
     lbr _sha512_return_status
 
 ; SHA512-FINAL ( dst -- status )
-; Failure never writes the destination and always aborts/wipes.
+; Failure never writes a non-context destination and always aborts/wipes.
 w_sha512_final:
     ldn r9, r14
     addi r14, 8
@@ -14132,23 +14177,40 @@ w_sha512_final:
     mov r7, r10
     addi r7, 88
     ldn r0, r7
-    cmpi r0, 0
-    lbreq .sha512_final_state_fail
+    cmpi r0, 1
+    lbrne .sha512_final_state_fail
 
-    ; Validate and de-alias the complete 64-byte output before mode 2.
+    ; Reject forged or internally inconsistent private state before any
+    ; destination qualification or mode-2 engine work.
+    mov r7, r10
+    addi r7, 80
+    ldn r0, r7
+    cmpi r0, 128
+    brcc .sha512_final_offset_ok
+    lbr .sha512_final_state_fail
+.sha512_final_offset_ok:
+    mov r7, r10
+    addi r7, 64
+    ldn r1, r7
+    mov r13, r1
+    andi r13, 7
+    cmpi r13, 0
+    lbrne .sha512_final_state_fail
+    ldi r7, 3
+    shr r1, r7
+    andi r1, 127
+    cmp r0, r1
+    lbrne .sha512_final_state_fail
+
+    ; Validate the complete 64-byte output and reject both SHA-2 arenas
+    ; before mode 2.
     ldi r12, 64
-    mov r10, r12
-    ldi64 r11, disk_dma_span_status
+    ldi64 r11, _sha2_span_status
     call.l r11
-    cmpi r0, 0
-    lbrne .sha512_final_range_fail
-    ldi64 r11, _sha512_context
-    call.l r11
-    ldi r12, 64
-    ldi64 r11, _sha512_context_alias
-    call.l r11
-    cmpi r0, 0
-    lbrne .sha512_final_alias_fail
+    cmpi r0, 2
+    lbreq .sha512_final_range_fail
+    cmpi r0, 3
+    lbreq .sha512_final_alias_fail
 
     subi r15, 8
     str r15, r9
@@ -19433,12 +19495,23 @@ d_sha512_final:
     ret.l
 
 ; === SHA512-CLEAR ===
-latest_entry:
 d_sha512_clear:
     .dq d_sha512_final
     .db 12
     .ascii "SHA512-CLEAR"
     ldi64 r11, w_sha512_clear
+    call.l r11
+    ret.l
+
+; Shared SHA-2 span qualification is append-only so every older built-in
+; dictionary ordinal remains stable.
+; === SHA2-SPAN-STATUS ===
+latest_entry:
+d_sha2_span_status:
+    .dq d_sha512_clear
+    .db 16
+    .ascii "SHA2-SPAN-STATUS"
+    ldi64 r11, w_sha2_span_status
     call.l r11
     ret.l
 

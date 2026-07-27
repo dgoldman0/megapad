@@ -407,11 +407,17 @@ buffer), then tokenises and interprets:
 
 **SHA-256 engine (ISA-native, EXT.CRYPTO)**
 `SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-CLEAR`
+`SHA2-SPAN-STATUS`
 
 All four words use a private per-core streaming context and return checked
 status (`0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS,
 `4` LENGTH-OVERFLOW). Failed operations abort and wipe, and failed `FINAL`
-does not publish a digest.
+does not publish a digest to a non-context destination.
+
+`SHA2-SPAN-STATUS ( addr len -- status )` is a pure pre-`INIT` check shared
+by SHA-256 and SHA-512. It returns only `0` OK, `2` RANGE, or `3`
+CONTEXT-ALIAS after validating one complete physical window and the union of
+both algorithms' all-core BIOS context arenas. An empty span returns zero.
 
 **SHA-512 streaming (ISA-native, EXT.CRYPTO mode 2)**
 `SHA512-INIT` `SHA512-UPDATE` `SHA512-FINAL` `SHA512-CLEAR`
@@ -419,6 +425,9 @@ does not publish a digest.
 All four words return a checked status (`0` OK, `1` STATE, `2` RANGE,
 `3` CONTEXT-ALIAS, `4` LENGTH-OVERFLOW). KDOS also provides
 `SHA512 ( addr len out -- status )` and symbolic constants for those values.
+UPDATE and FINAL reject an active marker other than exactly one, an offset
+outside 0..127, a non-byte-aligned low bit length, or a low-length
+modulo-128 position that disagrees with the saved offset.
 
 **Memory BIST**
 `BIST-FULL` `BIST-QUICK` `BIST-STATUS` `BIST-FAIL-ADDR` `BIST-FAIL-DATA`

@@ -197,13 +197,15 @@ accelerator.  Used by the TLS 1.3 cipher suite 0x1301
 | `SHA256-UPDATE` | `( addr len -- status )` | Preflight and absorb a complete physical-memory span. |
 | `SHA256-FINAL` | `( out -- status )` | On success publish 32 digest bytes; erase the complete context on every path. |
 | `SHA256-CLEAR` | `( -- status )` | Idempotently abort, release, zeroize buffered/staged/visible state, and return 0. |
+| `SHA2-SPAN-STATUS` | `( addr len -- status )` | Pure pre-`INIT` check for one physical window and either SHA-2 context arena; returns only 0, 2, or 3. |
 | `SHA256` | `( addr len out -- status )` | Checked one-shot SHA-256; returns the first BIOS failure unchanged. |
 | `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- status )` | Checked HMAC-SHA256. Used internally by HKDF-SHA256 and the TLS 1.3 key schedule. |
 
 Streaming state is core-local. `INIT` and `FINAL`/`CLEAR` must execute on the
 same core. `SHA256-OK`, `SHA256-STATE`, `SHA256-RANGE`,
 `SHA256-CONTEXT-ALIAS`, and `SHA256-LENGTH-OVERFLOW` name status values
-0 through 4. Every failure aborts and wipes; a failed `FINAL` does not
+0 through 4. UPDATE/FINAL reject the union of the SHA-256 and SHA-512
+all-core context arenas. Every failure aborts and wipes; a failed `FINAL` does not
 publish to a non-context destination. HMAC and HKDF return the first such
 failure without dropping it.
 
@@ -225,8 +227,12 @@ and the caller's prior register/TSRC0 transaction is restored afterward.
 Streaming state is core-local. `INIT` and `FINAL`/`CLEAR` must execute on the
 same core. Checked statuses are exposed both numerically and as
 `SHA512-OK`, `SHA512-STATE`, `SHA512-RANGE`, `SHA512-CONTEXT-ALIAS`, and
-`SHA512-LENGTH-OVERFLOW`. Every failure aborts and wipes; a failed `FINAL`
-does not publish a digest to a non-context destination.
+`SHA512-LENGTH-OVERFLOW`. UPDATE/FINAL use the same union-of-SHA-2-arenas
+decision as `SHA2-SPAN-STATUS`. They also require an exact active marker,
+offset below 128, byte-aligned low length, and matching low-length
+modulo-128 position before an empty UPDATE or destination preflight. Every
+failure aborts and wipes; a failed `FINAL` does not publish a digest to a
+non-context destination.
 
 ---
 

@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **461** entries.  The numbered
+The live dictionary link chain contains **462** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -663,7 +663,7 @@ of compiled code.
 
 Each core owns one 256-byte context. Statuses are `0` OK, `1` STATE,
 `2` RANGE, `3` CONTEXT-ALIAS, and `4` LENGTH-OVERFLOW. `UPDATE` rejects
-spans intersecting any core's complete 4096-byte SHA-256 arena and rejects
+spans intersecting either complete all-core SHA-2 context arena and rejects
 any nonzero high bit-length word, non-byte-aligned or offset-inconsistent
 saved length, or overflowing 64-bit bit-length addition.
 Every failure aborts and wipes. `FINAL` does not modify a non-context
@@ -671,7 +671,7 @@ destination unless all checks and digest extraction succeed.
 
 ### SHA-512 Streaming (4 append-only words) — ISA-native (EXT.CRYPTO `FB`)
 
-These words remain appended at the end of the live chain.
+These words retain their append-only dictionary positions.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -682,7 +682,23 @@ These words remain appended at the end of the live chain.
 
 Statuses are `0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS, and
 `4` LENGTH-OVERFLOW. Every failure aborts and wipes; failed `FINAL` does not
-publish to a non-context destination.
+publish to a non-context destination. SHA-512 input and output checks reject
+both the SHA-256 and SHA-512 context arenas. Before an empty UPDATE can
+succeed or FINAL can inspect its destination, the active marker must be
+exactly one, the partial offset must be below 128, the low bit length must be
+byte-aligned, and its modulo-128 byte position must equal that offset.
+
+### Shared SHA-2 span qualification (1 append-only word)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA2-SPAN-STATUS` | `( addr len -- status )` | Without requiring `INIT` or mutating a context, validate one complete physical span and reject either all-core SHA-2 context arena. |
+
+`SHA2-SPAN-STATUS` returns only `0` OK, `2` RANGE, or `3`
+CONTEXT-ALIAS. Empty spans succeed without inspecting the address. Internal
+physical-span results for address overflow and an unadvertised/cross-window
+range are both normalized to `2`. The word is suitable for atomic
+higher-level preflight before any SHA context is initialized.
 
 ### CRC DMA (4 words)
 
@@ -809,10 +825,11 @@ publish to a non-context destination.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The SHA-512 ABI remains the newest appended segment:
+The shared span check closes the newest appended segment:
 
 ```
-SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE → SHA512-INIT → TX-FLUSH
+SHA2-SPAN-STATUS → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
+→ SHA512-INIT → TX-FLUSH
 → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
 ```
 

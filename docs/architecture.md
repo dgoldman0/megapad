@@ -505,12 +505,14 @@ scrubbing; bare `sha.release` is the sole handoff.
 
 **BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
 `SHA256-CLEAR`; and `SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`,
-`SHA512-CLEAR`. Both streaming layers use private per-core contexts, validate
-complete caller spans and the complete algorithm-specific context arena,
+`SHA512-CLEAR`. `SHA2-SPAN-STATUS` provides a pure pre-`INIT` physical-span
+and shared context-arena check. Both streaming layers use private per-core
+contexts, validate complete caller spans against the union of both SHA-2 arenas,
 stage output until after engine release, wipe on every terminal path, and
 preserve the caller's ACC/TSRC0/interrupt transaction. SHA-256 reports
 checked state, span, alias, and 64-bit length failures; SHA-512 additionally
-maintains and checks its full 128-bit length.
+maintains its full 128-bit length and validates its exact active marker,
+bounded partial offset, byte alignment, and low-length/offset agreement.
 **KDOS words:** `SHA256`, `SHA512`, `HMAC-SHA256`,
 `HKDF-SHA256-EXTRACT`, `HKDF-SHA256-EXPAND`.
 Those SHA-256-family KDOS words return the BIOS status unchanged so

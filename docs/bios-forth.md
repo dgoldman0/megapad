@@ -787,7 +787,7 @@ engine windows preserve the caller's exact ACC0–ACC3, TSRC0, and
 interrupt-enable state.
 
 `UPDATE` validates the complete physical span before reading any byte,
-rejects an intersection with the entire 4096-byte context arena, and rejects
+rejects an intersection with either complete SHA-2 context arena, and rejects
 a nonzero high length word or overflowing 64-bit bit-length addition. Both
 `UPDATE` and `FINAL` also require a byte-aligned saved length whose
 modulo-64-byte position exactly matches the saved partial-block offset.
@@ -802,6 +802,7 @@ the calling core's complete context.
 | `SHA256-UPDATE` | `( addr len -- status )` | Absorb an arbitrary validated Bank 0, external, HBW, or VRAM span, including zero-length and cross-block updates. |
 | `SHA256-FINAL` | `( dst -- status )` | On success, write the 32-byte big-endian digest; always erase saved and staged state. |
 | `SHA256-CLEAR` | `( -- status )` | Idempotently abort and zeroize context and visible SHA state, release the engine, and return zero. |
+| `SHA2-SPAN-STATUS` | `( addr len -- status )` | Pure pre-`INIT` physical-window and union-of-SHA-2-arenas check; returns only 0, 2, or 3. |
 
 Statuses are `0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS, and
 `4` LENGTH-OVERFLOW. `INIT` is required before even a zero-length `UPDATE`;
@@ -818,12 +819,18 @@ publication stage. Every bounded engine window preserves the
 caller's exact R16–R19, ACC0–ACC3, TSRC0, and interrupt-enable state.
 
 `UPDATE` validates the complete physical span, rejects an intersection with
-the entire 8192-byte context arena, and preflights the 128-bit bit-length
+either complete SHA-2 context arena, and preflights the 128-bit bit-length
 addition before copying any caller byte. `FINAL` validates and de-aliases all
 64 destination bytes before entering mode 2, stages the digest while the
 engine is owned, releases only after cleanup, and publishes afterward. The
 contexts are erased on warm boot, on every checked failure, and after
 successful `FINAL` or `CLEAR`.
+
+Before even a zero-length `UPDATE` can succeed, and before `FINAL` validates
+the destination, the saved active marker must be exactly one, the partial
+offset must be below 128, the low bit length must be byte-aligned, and
+`((low >> 3) & 127)` must equal the saved offset. Any mismatch returns STATE
+and aborts the context.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

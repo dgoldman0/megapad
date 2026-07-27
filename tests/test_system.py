@@ -12725,11 +12725,52 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 461)
+        self.assertEqual(len(seen), 462)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
         self.assertNotIn("sha_blk_off", labels)
+
+    def test_sha2_span_status_is_pure_and_covers_both_context_arenas(self):
+        """Pre-INIT span qualification normalizes range and protects SHA-2."""
+        sha256_calling = self._bios_labels["sha256_contexts"]
+        sha256_other = self._bios_labels["sha256_contexts"] + 256
+        sha512_calling = self._bios_labels["sha512_contexts"]
+        sha512_other = self._bios_labels["sha512_contexts"] + 512
+        text = self._run_sha2([
+            "CREATE sha2-good 64 ALLOT",
+            f"165 {sha256_other} C!",
+            f"90 {sha512_other} C!",
+            '."  E=" -1 0 SHA2-SPAN-STATUS .',
+            '."  G=" sha2-good 64 SHA2-SPAN-STATUS .',
+            '."  W=" -1 2 SHA2-SPAN-STATUS .',
+            '."  X=" EXT-MEM-BASE EXT-MEM-SIZE + 1 - 2'
+            " SHA2-SPAN-STATUS .",
+            f'."  S2=" {sha256_other} 1 SHA2-SPAN-STATUS .',
+            f'."  S5=" {sha512_other} 1 SHA2-SPAN-STATUS .',
+            f'."  B2=" {sha256_other} C@ .',
+            f'."  B5=" {sha512_other} C@ .',
+            "SHA256-INIT DROP",
+            f'."  P2=" {sha256_calling} 1 SHA2-SPAN-STATUS .',
+            '."  U=" sha2-good 0 SHA256-UPDATE .',
+            "SHA256-CLEAR DROP",
+            "SHA512-INIT DROP",
+            f'."  P5=" {sha512_calling} 1 SHA2-SPAN-STATUS .',
+            '."  V=" sha2-good 0 SHA512-UPDATE .',
+            "SHA512-CLEAR DROP",
+        ], ext_mem_mib=64)
+        self.assertIn("E=0 ", text)
+        self.assertIn("G=0 ", text)
+        self.assertIn("W=2 ", text)
+        self.assertIn("X=2 ", text)
+        self.assertIn("S2=3 ", text)
+        self.assertIn("S5=3 ", text)
+        self.assertIn("B2=165 ", text)
+        self.assertIn("B5=90 ", text)
+        self.assertIn("P2=3 ", text)
+        self.assertIn("U=0 ", text)
+        self.assertIn("P5=3 ", text)
+        self.assertIn("V=0 ", text)
 
     def test_sha256_checked_streaming_splits_and_restores_outer_acc(self):
         """Checked SHA-256 handles splits, publishes once, and wipes context."""
@@ -12854,8 +12895,10 @@ class TestBIOSSHA2(unittest.TestCase):
     def test_sha256_preflights_spans_and_complete_context_arena(self):
         """Cross-window and arena aliases abort before caller publication."""
         other_context = self._bios_labels["sha256_contexts"] + 256
+        sha512_context = self._bios_labels["sha512_contexts"] + 512
         text = self._run_sha2([
             f"165 {other_context} C!",
+            f"90 {sha512_context} C!",
             '."  V=" SHA256-INIT DROP'
             " EXT-MEM-BASE EXT-MEM-SIZE + 1 - 1 SHA256-UPDATE .",
             '."  X=" SHA256-INIT DROP'
@@ -12871,7 +12914,12 @@ class TestBIOSSHA2(unittest.TestCase):
             f'."  U=" {other_context} 1 SHA256-UPDATE .',
             "SHA256-INIT DROP",
             f'."  F=" {other_context} SHA256-FINAL .',
+            "SHA256-INIT DROP",
+            f'."  U5=" {sha512_context} 1 SHA256-UPDATE .',
+            "SHA256-INIT DROP",
+            f'."  F5=" {sha512_context} SHA256-FINAL .',
             f'."  AB=" {other_context} C@ .',
+            f'."  A5=" {sha512_context} C@ .',
         ], ext_mem_mib=64)
         self.assertIn("V=0 ", text)
         self.assertIn("X=2 ", text)
@@ -12880,7 +12928,10 @@ class TestBIOSSHA2(unittest.TestCase):
         self.assertIn("B15=165 ", text)
         self.assertIn("U=3 ", text)
         self.assertIn("F=3 ", text)
+        self.assertIn("U5=3 ", text)
+        self.assertIn("F5=3 ", text)
         self.assertIn("AB=165 ", text)
+        self.assertIn("A5=90 ", text)
 
     def test_kdos_sha256_hmac_hkdf_exact_source_slices(self):
         """Exact checked KDOS helpers return status without stack leakage."""
@@ -13058,6 +13109,46 @@ class TestBIOSSHA2(unittest.TestCase):
         self.assertIn("C0=0 ", text)
         self.assertIn("C1=0 ", text)
 
+    def test_sha512_rejects_forged_private_state_before_empty_or_final(self):
+        """Marker, offset, alignment, and modulo position are exact."""
+        context = self._bios_labels["sha512_contexts"]
+        text = self._run_sha2([
+            "CREATE msg 1 ALLOT  65 msg C!",
+            "CREATE h-buf 64 ALLOT  h-buf 64 165 FILL",
+
+            "SHA512-INIT DROP",
+            f"2 {context + 88} !",
+            '."  UM=" msg 0 SHA512-UPDATE .',
+            "SHA512-INIT DROP",
+            f"128 {context + 80} !",
+            '."  UO=" msg 0 SHA512-UPDATE .',
+            "SHA512-INIT DROP",
+            f"1 {context + 64} !",
+            '."  UA=" msg 0 SHA512-UPDATE .',
+            "SHA512-INIT DROP",
+            f"8 {context + 64} !",
+            f"0 {context + 80} !",
+            '."  UX=" msg 0 SHA512-UPDATE .',
+
+            "SHA512-INIT DROP",
+            f"2 {context + 88} !",
+            '."  FM=" h-buf SHA512-FINAL .',
+            "SHA512-INIT DROP",
+            f"128 {context + 80} !",
+            '."  FO=" h-buf SHA512-FINAL .',
+            "SHA512-INIT DROP",
+            f"1 {context + 64} !",
+            '."  FA=" h-buf SHA512-FINAL .',
+            "SHA512-INIT DROP",
+            f"8 {context + 64} !",
+            f"0 {context + 80} !",
+            '."  FX=" h-buf SHA512-FINAL .',
+            '."  B=" h-buf C@ .',
+        ])
+        for marker in ("UM", "UO", "UA", "UX", "FM", "FO", "FA", "FX"):
+            self.assertIn(f"{marker}=1 ", text)
+        self.assertIn("B=165 ", text)
+
     def test_sha512_span_boundaries_are_preflighted_atomically(self):
         """Endpoint spans pass; crossing input/output spans abort safely."""
         text = self._run_sha2([
@@ -13083,20 +13174,30 @@ class TestBIOSSHA2(unittest.TestCase):
         self.assertIn("B31=165 ", text)
 
     def test_sha512_rejects_the_complete_context_arena(self):
-        """Input and output may not overlap any core's private context."""
+        """Input/output reject both algorithms' complete context arenas."""
         other_context = self._bios_labels["sha512_contexts"] + 512
+        sha256_context = self._bios_labels["sha256_contexts"] + 256
         text = self._run_sha2([
             "CREATE msg 1 ALLOT  65 msg C!",
             f"165 {other_context} C!",
+            f"90 {sha256_context} C!",
             "SHA512-INIT DROP",
             f'."  U=" {other_context} 1 SHA512-UPDATE .',
             "SHA512-INIT DROP",
             f'."  F=" {other_context} SHA512-FINAL .',
+            "SHA512-INIT DROP",
+            f'."  U2=" {sha256_context} 1 SHA512-UPDATE .',
+            "SHA512-INIT DROP",
+            f'."  F2=" {sha256_context} SHA512-FINAL .',
             f'."  B=" {other_context} C@ .',
+            f'."  B2=" {sha256_context} C@ .',
         ])
         self.assertIn("U=3 ", text)
         self.assertIn("F=3 ", text)
+        self.assertIn("U2=3 ", text)
+        self.assertIn("F2=3 ", text)
         self.assertIn("B=165 ", text)
+        self.assertIn("B2=90 ", text)
 
     def test_sha512_length_overflow_aborts_before_absorb(self):
         """A 128-bit bit-length wrap returns LENGTH-OVERFLOW and wipes."""
@@ -13104,8 +13205,9 @@ class TestBIOSSHA2(unittest.TestCase):
         text = self._run_sha2([
             "CREATE msg 1 ALLOT  65 msg C!",
             "SHA512-INIT DROP",
-            f"-1 {context + 64} !",
+            f"-8 {context + 64} !",
             f"-1 {context + 72} !",
+            f"127 {context + 80} !",
             '."  O=" msg 1 SHA512-UPDATE .',
             '."  A=" msg 0 SHA512-UPDATE .',
         ])
