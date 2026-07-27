@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
+import os
 import threading
 import weakref
 from typing import Optional, TYPE_CHECKING
@@ -98,6 +99,49 @@ EXT_MEM_BASE = 0x0010_0000          # right after 1 MiB Bank 0
 # Default 4 MiB: enough for double-buffered 1280×720 RGBA8888.
 VRAM_BASE         = 0xFF00_0000
 VRAM_DEFAULT_SIZE = 4 * (1 << 20)    # 4 MiB
+
+
+def _worker_width_for_capacity(capacity: int) -> int:
+    """Map a positive core capacity onto a supported fixed lane width."""
+    if capacity >= 3:
+        return 4
+    if capacity >= 2:
+        return 2
+    return 1
+
+
+def _available_host_cpu_count() -> int:
+    """Return the affinity-aware host CPU capacity for rollout selection."""
+    try:
+        affinity = os.sched_getaffinity(0)
+    except (AttributeError, NotImplementedError, OSError):
+        count = os.cpu_count()
+    else:
+        count = len(affinity)
+    return max(1, int(count or 1))
+
+
+def _resolve_worker_count(
+    requested: Optional[int],
+    total_execution_cores: int,
+    *,
+    host_cpu_count: Optional[int] = None,
+) -> int:
+    """Resolve the immutable host-execution lane count for one system."""
+    if requested is not None:
+        if isinstance(requested, bool) or not isinstance(requested, int):
+            raise TypeError("worker_count must be an integer or None")
+        if requested not in (1, 2, 4):
+            raise ValueError("worker_count must be exactly 1, 2, or 4")
+        return requested
+
+    guest_width = _worker_width_for_capacity(total_execution_cores)
+    host_width = _worker_width_for_capacity(
+        _available_host_cpu_count()
+        if host_cpu_count is None
+        else host_cpu_count
+    )
+    return min(guest_width, host_width)
 
 # Boot vector: on reset, PC (R3) is loaded with this address.
 # BIOS is expected to be loaded here.
@@ -739,12 +783,7 @@ class MegapadSystem:
                  rtc_epoch_ms: Optional[int] = None,
                  terminal_cols: int = 80,
                  terminal_rows: int = 24,
-                 worker_count: int = 1):
-        if isinstance(worker_count, bool) or not isinstance(worker_count, int):
-            raise TypeError("worker_count must be an integer")
-        if worker_count not in (1, 2, 4):
-            raise ValueError("worker_count must be exactly 1, 2, or 4")
-
+                 worker_count: Optional[int] = None):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
@@ -756,6 +795,10 @@ class MegapadSystem:
         # Total core count matches RTL NUM_ALL_CORES
         self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
         self.num_cores = num_cores + self.num_micro_cores
+        worker_count = _resolve_worker_count(
+            worker_count,
+            self.num_cores,
+        )
         self._scheduler_lock = threading.RLock()
 
         # Shared memory — all cores reference the same bytearray
