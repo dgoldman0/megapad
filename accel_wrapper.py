@@ -228,6 +228,9 @@ class Megapad64:
         # Keep a pure-Python fallback for MEX FP operations
         self._py_fallback: Optional[_PyMegapad64] = None
         self._last_python_fallback_cancelled = False
+        # Host-owned PHY response selection is consumed through the private
+        # native bridge and intentionally survives architectural CPU reset.
+        self._external_phy_response_plan = None
 
     @classmethod
     def _from_system_state(
@@ -298,6 +301,17 @@ class Megapad64:
         """Attach external memory (HyperRAM/SDRAM) buffer to C++ state."""
         self._cs.attach_ext_mem(buf, base, size)
         self._ext_mem_buf = buf  # Python fallback uses the original object
+
+    def set_external_phy_response_plan(self, plan) -> None:
+        """Install or clear deterministic external TACC PHY responses."""
+        _PyMegapad64.set_external_phy_response_plan(self, plan)
+        if self._py_fallback is not None:
+            self._py_fallback.set_external_phy_response_plan(plan)
+
+    _native_external_phy_response = (
+        _PyMegapad64._native_external_phy_response
+    )
+    _native_external_phy_fault = _PyMegapad64._native_external_phy_fault
 
     def attach_vram(self, buf: bytearray, base: int, size: int):
         """Attach dedicated VRAM buffer to C++ state."""
@@ -864,6 +878,9 @@ def {_attr}(self, v):
                 mem_size=self.mem_size,
                 core_id=self.core_id,
                 num_cores=self.num_cores,
+            )
+            self._py_fallback.set_external_phy_response_plan(
+                self._external_phy_response_plan
             )
         return self._py_fallback
 

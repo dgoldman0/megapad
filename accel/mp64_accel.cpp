@@ -1953,6 +1953,18 @@ struct ResumableInstruction {
     uint8_t tacc_timed_format_ew = 0;
     bool tacc_timed_format_signed = false;
     uint8_t tacc_timed_acknowledged_beats = 0;
+    bool tacc_timed_external_phy = false;
+    uint8_t tacc_timed_external_word_index = 0;
+    uint8_t tacc_timed_external_acknowledged_words = 0;
+    bool tacc_timed_external_response_active = false;
+    uint64_t tacc_timed_external_response_cycle = 0;
+    bool tacc_timed_external_response_error = false;
+    bool tacc_timed_external_response_timeout = false;
+    std::array<uint8_t, 64> tacc_timed_external_beat_data{};
+    bool tacc_timed_transfer_faulted = false;
+    uint8_t tacc_timed_fault_beat_index = 0;
+    uint8_t tacc_timed_fault_word_index = 0;
+    uint64_t tacc_timed_fault_address = 0;
     std::optional<uint64_t> tacc_timed_completion_cycle;
     std::size_t replay_cursor = 0;
     std::size_t tile_replay_cursor = 0;
@@ -2759,7 +2771,8 @@ struct TileMemoryTransport {
             const TaccImageTransferStage& stage,
             uint64_t grant_sequence,
             uint64_t completion_cycle,
-            bool has_read_data) const {
+            bool has_read_data,
+            bool external_phy = false) const {
         if (
             !active_port_grant.has_value() ||
             active_port_grant->grant_sequence != grant_sequence ||
@@ -2773,10 +2786,17 @@ struct TileMemoryTransport {
         if (
             grant.grant_cycle ==
                 std::numeric_limits<uint64_t>::max() ||
-            completion_cycle != grant.grant_cycle + 1
+            (
+                external_phy
+                ? completion_cycle <= grant.grant_cycle
+                : completion_cycle != grant.grant_cycle + 1
+            )
         ) {
             throw std::invalid_argument(
-                "internal tile-memory ACK must follow its grant by one cycle");
+                external_phy
+                    ? "external tile-memory ACK must follow its grant"
+                    : "internal tile-memory ACK must follow its grant "
+                      "by one cycle");
         }
         if (
             (
@@ -2849,7 +2869,8 @@ struct TileMemoryTransport {
             uint64_t grant_sequence,
             uint64_t completion_cycle,
             const std::optional<
-                std::array<uint8_t, BEAT_BYTES>>& read_data) {
+                std::array<uint8_t, BEAT_BYTES>>& read_data,
+            bool external_phy = false) {
         if (
             !active_port_grant.has_value() ||
             active_port_grant->grant_sequence != grant_sequence
@@ -2860,10 +2881,17 @@ struct TileMemoryTransport {
         if (
             grant.grant_cycle ==
                 std::numeric_limits<uint64_t>::max() ||
-            completion_cycle != grant.grant_cycle + 1
+            (
+                external_phy
+                ? completion_cycle <= grant.grant_cycle
+                : completion_cycle != grant.grant_cycle + 1
+            )
         ) {
             throw std::invalid_argument(
-                "internal tile-memory ACK must follow its grant by one cycle");
+                external_phy
+                    ? "external tile-memory ACK must follow its grant"
+                    : "internal tile-memory ACK must follow its grant "
+                      "by one cycle");
         }
         if (
             grant.request.operation == BusOperation::READ &&
@@ -7358,6 +7386,12 @@ static inline bool fp32_pack_overflows(double value) {
 }
 
 struct StepCallbacks {
+    struct ExternalPhyResponse {
+        bool responded = false;
+        uint64_t latency_cycles = 0;
+        bool error = false;
+    };
+
     std::function<uint8_t(uint64_t)> mmio_read8;
     std::function<void(uint64_t, uint8_t)> mmio_write8;
     std::function<void(int, int)> on_output;   // (port, value)
@@ -7377,6 +7411,23 @@ struct StepCallbacks {
         BusOperation::READ;
     uint8_t tacc_timed_transfer_format_ew = 0;
     bool tacc_timed_transfer_format_signed = false;
+    bool tacc_timed_transfer_faulted = false;
+    uint64_t tacc_timed_transfer_fault_address = 0;
+    std::function<ExternalPhyResponse(
+        BusOperation,
+        uint8_t,
+        uint8_t,
+        uint64_t,
+        std::optional<uint64_t>)>
+        tacc_external_phy_response;
+    std::function<void(
+        BusOperation,
+        uint8_t,
+        uint8_t,
+        uint64_t,
+        std::optional<uint64_t>,
+        bool)>
+        tacc_external_phy_raise_fault;
 };
 
 static bool python_bridge_has_memory_override(
@@ -7452,6 +7503,90 @@ static bool python_bridge_has_tacc_span_policy_override(
         py::hasattr(owner, "_tacc_span_validator") &&
         !owner.attr("_tacc_span_validator").is_none()
     );
+}
+
+static void install_python_external_phy_callbacks(
+        StepCallbacks& callbacks,
+        const py::function& bridge) {
+    if (!py::hasattr(bridge, "__self__"))
+        return;
+    py::object owner = bridge.attr("__self__");
+    if (
+        owner.is_none() ||
+        !py::hasattr(owner, "_native_external_phy_response") ||
+        !py::hasattr(owner, "_native_external_phy_fault")
+    ) {
+        return;
+    }
+
+    py::function response =
+        owner.attr("_native_external_phy_response")
+            .cast<py::function>();
+    py::function raise_fault =
+        owner.attr("_native_external_phy_fault")
+            .cast<py::function>();
+    callbacks.tacc_external_phy_response =
+        [response](
+                BusOperation operation,
+                uint8_t beat_index,
+                uint8_t word_index,
+                uint64_t address,
+                std::optional<uint64_t> write_data) {
+            py::gil_scoped_acquire acquire;
+            const char* direction =
+                operation == BusOperation::READ
+                ? "load"
+                : "store";
+            py::object result = response(
+                direction,
+                beat_index,
+                word_index,
+                address,
+                write_data.has_value()
+                    ? py::cast(*write_data)
+                    : py::none());
+            StepCallbacks::ExternalPhyResponse selected{};
+            if (result.is_none())
+                return selected;
+            py::tuple response_fields =
+                result.cast<py::tuple>();
+            if (response_fields.size() != 2) {
+                throw std::runtime_error(
+                    "native external PHY response must contain "
+                    "latency and error");
+            }
+            selected.responded = true;
+            selected.latency_cycles =
+                response_fields[0].cast<uint64_t>();
+            selected.error =
+                response_fields[1].cast<bool>();
+            return selected;
+        };
+    callbacks.tacc_external_phy_raise_fault =
+        [raise_fault](
+                BusOperation operation,
+                uint8_t beat_index,
+                uint8_t word_index,
+                uint64_t address,
+                std::optional<uint64_t> write_data,
+                bool timeout) {
+            py::gil_scoped_acquire acquire;
+            const char* direction =
+                operation == BusOperation::READ
+                ? "load"
+                : "store";
+            raise_fault(
+                direction,
+                beat_index,
+                word_index,
+                address,
+                write_data.has_value()
+                    ? py::cast(*write_data)
+                    : py::none(),
+                timeout ? "timeout" : "error");
+            throw std::logic_error(
+                "external PHY fault helper returned");
+        };
 }
 
 // ---------------------------------------------------------------------------
@@ -7642,6 +7777,7 @@ static constexpr int MEX_TACC_CANCELLED = -2;
 
 struct NativeTaccSpan {
     uint8_t* data = nullptr;
+    bool external_phy = false;
 };
 
 static inline bool native_tacc_resolve_span(
@@ -7677,6 +7813,7 @@ static inline bool native_tacc_resolve_span(
                 uint8_t* memory,
                 uint64_t base,
                 uint64_t region_size,
+                bool external_phy,
                 NativeTaccSpan& output) noexcept {
             if (
                 memory == nullptr ||
@@ -7688,6 +7825,7 @@ static inline bool native_tacc_resolve_span(
             if (!region_span_fits(region_size, offset, size))
                 return -1;
             output.data = memory + offset;
+            output.external_phy = external_phy;
             return 1;
         };
 
@@ -7698,6 +7836,7 @@ static inline bool native_tacc_resolve_span(
         s.memory->vram_mem,
         s.memory->vram_base,
         s.memory->vram_size,
+        false,
         resolved);
     if (result != 0)
         return result > 0;
@@ -7705,6 +7844,7 @@ static inline bool native_tacc_resolve_span(
         s.memory->ext_mem,
         s.memory->ext_mem_base,
         s.memory->ext_mem_size,
+        true,
         resolved);
     if (result != 0)
         return result > 0;
@@ -7712,6 +7852,7 @@ static inline bool native_tacc_resolve_span(
         s.memory->hbw_mem,
         s.memory->hbw_base,
         s.memory->hbw_size,
+        false,
         resolved);
     if (result != 0)
         return result > 0;
@@ -7719,6 +7860,7 @@ static inline bool native_tacc_resolve_span(
         s.memory->mem,
         0,
         s.memory->mem_size,
+        false,
         resolved);
     return result > 0;
 }
@@ -7890,6 +8032,196 @@ static inline bool native_tacc_write_tile(
     return true;
 }
 
+static constexpr uint64_t EXTERNAL_PHY_TIMEOUT_CYCLES = 255;
+static constexpr std::size_t EXTERNAL_PHY_WORD_BYTES = 8;
+static constexpr std::size_t EXTERNAL_PHY_WORDS_PER_BEAT =
+    TILE_BYTES / EXTERNAL_PHY_WORD_BYTES;
+
+static StepCallbacks::ExternalPhyResponse
+native_tacc_external_phy_response(
+        const StepCallbacks& callbacks,
+        BusOperation operation,
+        uint8_t beat_index,
+        uint8_t word_index,
+        uint64_t address,
+        std::optional<uint64_t> write_data) {
+    StepCallbacks::ExternalPhyResponse response{
+        true,
+        1,
+        false,
+    };
+    if (callbacks.tacc_external_phy_response) {
+        response = callbacks.tacc_external_phy_response(
+            operation,
+            beat_index,
+            word_index,
+            address,
+            write_data);
+    }
+    if (
+        response.responded &&
+        response.latency_cycles == 0
+    ) {
+        throw std::invalid_argument(
+            "external PHY response latency must be positive");
+    }
+    return response;
+}
+
+[[noreturn]] static void native_tacc_raise_external_phy_fault(
+        CPUState& state,
+        const StepCallbacks& callbacks,
+        BusOperation operation,
+        uint8_t beat_index,
+        uint8_t word_index,
+        uint64_t address,
+        std::optional<uint64_t> write_data,
+        bool timeout,
+        uint64_t fault_cycles,
+        uint64_t stall_cycles) {
+    state.trap_addr = address;
+    state.ext_modifier = -1;
+    state.cycle_count += fault_cycles;
+    if (state.perf_enable) {
+        state.perf_cycles += fault_cycles;
+        state.perf_stalls += stall_cycles;
+    }
+    if (callbacks.tacc_external_phy_raise_fault) {
+        try {
+            callbacks.tacc_external_phy_raise_fault(
+                operation,
+                beat_index,
+                word_index,
+                address,
+                write_data,
+                timeout);
+        } catch (py::error_already_set& error) {
+            py::gil_scoped_acquire acquire;
+            py::object exception =
+                py::reinterpret_borrow<py::object>(
+                    error.value());
+            exception.attr("_mp64_accel_callback_error") =
+                py::bool_(true);
+            exception.attr("fault_cycles") =
+                py::int_(fault_cycles);
+            throw;
+        }
+        throw std::logic_error(
+            "external PHY fault callback returned");
+    }
+    throw std::runtime_error("TRAP:BUS_FAULT");
+}
+
+static bool native_tacc_transfer_external_beat(
+        CPUState& state,
+        const StepCallbacks& callbacks,
+        BusOperation operation,
+        uint8_t beat_index,
+        uint64_t address,
+        const NativeTaccSpan& span,
+        uint64_t operation_epoch,
+        uint8_t* data,
+        uint64_t& elapsed_phy_cycles) {
+    for (
+        std::size_t word = 0;
+        word < EXTERNAL_PHY_WORDS_PER_BEAT;
+        word++
+    ) {
+        const std::size_t byte_offset =
+            word * EXTERNAL_PHY_WORD_BYTES;
+        const uint64_t word_address =
+            address + static_cast<uint64_t>(byte_offset);
+        std::optional<uint64_t> write_data;
+        if (operation == BusOperation::WRITE) {
+            uint64_t value = 0;
+            for (
+                std::size_t byte = 0;
+                byte < EXTERNAL_PHY_WORD_BYTES;
+                byte++
+            ) {
+                value |= static_cast<uint64_t>(
+                    data[byte_offset + byte])
+                    << (8 * byte);
+            }
+            write_data = value;
+        }
+        const StepCallbacks::ExternalPhyResponse response =
+            native_tacc_external_phy_response(
+                callbacks,
+                operation,
+                beat_index,
+                static_cast<uint8_t>(word),
+                word_address,
+                write_data);
+        if (state.tacc_epoch != operation_epoch)
+            return false;
+
+        const bool timeout =
+            !response.responded ||
+            response.latency_cycles >
+                EXTERNAL_PHY_TIMEOUT_CYCLES;
+        const uint64_t latency =
+            timeout
+            ? EXTERNAL_PHY_TIMEOUT_CYCLES
+            : response.latency_cycles;
+        if (
+            latency >
+            std::numeric_limits<uint64_t>::max() -
+                elapsed_phy_cycles
+        ) {
+            throw std::overflow_error(
+                "external PHY elapsed-cycle accounting overflow");
+        }
+        elapsed_phy_cycles += latency;
+        if (timeout || response.error) {
+            const uint64_t issued_beats =
+                static_cast<uint64_t>(beat_index) + 1;
+            const uint64_t fault_cycles =
+                2 + elapsed_phy_cycles;
+            const uint64_t stall_cycles =
+                fault_cycles - (2 + issued_beats);
+            native_tacc_raise_external_phy_fault(
+                state,
+                callbacks,
+                operation,
+                beat_index,
+                static_cast<uint8_t>(word),
+                word_address,
+                write_data,
+                timeout,
+                fault_cycles,
+                stall_cycles);
+        }
+
+        if (
+            state.perf_enable &&
+            state.perf_extmem ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "external-memory performance counter overflow");
+        }
+        if (operation == BusOperation::READ) {
+            std::memcpy(
+                data + byte_offset,
+                span.data + byte_offset,
+                EXTERNAL_PHY_WORD_BYTES);
+        } else {
+            std::memcpy(
+                span.data + byte_offset,
+                data + byte_offset,
+                EXTERNAL_PHY_WORD_BYTES);
+            icache_invalidate_span(
+                state,
+                word_address,
+                EXTERNAL_PHY_WORD_BYTES);
+        }
+        if (state.perf_enable)
+            state.perf_extmem++;
+    }
+    return true;
+}
+
 static inline uint64_t native_tacc_image_read(
         const std::array<uint8_t, TACC_IMAGE_BYTES>& image,
         int lane,
@@ -7997,24 +8329,41 @@ static int exec_native_tacc_lifecycle(
             s.tacc_epoch;
         std::array<uint8_t, TACC_IMAGE_BYTES>
             staged{};
+        uint64_t elapsed_phy_cycles = 0;
         for (std::size_t beat = 0; beat < 4; beat++) {
             Tile data{};
             const std::size_t offset =
                 beat * TILE_BYTES;
             NativeTaccSpan beat_span{
                 image_span.data + offset,
+                image_span.external_phy,
             };
             try {
-                if (!native_tacc_read_tile(
+                const bool completed =
+                    image_span.external_phy
+                    ? native_tacc_transfer_external_beat(
+                        s,
+                        cb,
+                        BusOperation::READ,
+                        static_cast<uint8_t>(beat),
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        data.data(),
+                        elapsed_phy_cycles)
+                    : native_tacc_read_tile(
                         s,
                         cb,
                         base + offset,
                         beat_span,
                         operation_epoch,
-                        data)) {
+                        data);
+                if (!completed) {
                     return MEX_TACC_CANCELLED;
                 }
             } catch (py::error_already_set& error) {
+                if (image_span.external_phy)
+                    throw;
                 native_tacc_annotate_callback_fault(
                     s,
                     error,
@@ -8042,6 +8391,14 @@ static int exec_native_tacc_lifecycle(
             static_cast<uint8_t>(ew);
         s.tacc_format_signed =
             static_cast<uint8_t>(signed_mode);
+        if (image_span.external_phy) {
+            const uint64_t stalls =
+                elapsed_phy_cycles - 4;
+            if (s.perf_enable)
+                s.perf_stalls += stalls;
+            return static_cast<int>(
+                elapsed_phy_cycles);
+        }
         return 4;
     }
 
@@ -8074,23 +8431,40 @@ static int exec_native_tacc_lifecycle(
         NativeTaccOperation operation(s);
         const uint64_t operation_epoch =
             s.tacc_epoch;
+        uint64_t elapsed_phy_cycles = 0;
         for (std::size_t beat = 0; beat < 4; beat++) {
             const std::size_t offset =
                 beat * TILE_BYTES;
             NativeTaccSpan beat_span{
                 image_span.data + offset,
+                image_span.external_phy,
             };
             try {
-                if (!native_tacc_write_tile(
+                const bool completed =
+                    image_span.external_phy
+                    ? native_tacc_transfer_external_beat(
+                        s,
+                        cb,
+                        BusOperation::WRITE,
+                        static_cast<uint8_t>(beat),
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        image.data() + offset,
+                        elapsed_phy_cycles)
+                    : native_tacc_write_tile(
                         s,
                         cb,
                         base + offset,
                         beat_span,
                         operation_epoch,
-                        image.data() + offset)) {
+                        image.data() + offset);
+                if (!completed) {
                     return MEX_TACC_CANCELLED;
                 }
             } catch (py::error_already_set& error) {
+                if (image_span.external_phy)
+                    throw;
                 native_tacc_annotate_callback_fault(
                     s,
                     error,
@@ -8102,6 +8476,14 @@ static int exec_native_tacc_lifecycle(
         if (operation.cancelled())
             return MEX_TACC_CANCELLED;
         s.tacc_dirty = false;
+        if (image_span.external_phy) {
+            const uint64_t stalls =
+                elapsed_phy_cycles - 4;
+            if (s.perf_enable)
+                s.perf_stalls += stalls;
+            return static_cast<int>(
+                elapsed_phy_cycles);
+        }
         return 4;
     }
 
@@ -8374,6 +8756,12 @@ static int exec_mex(
             throw std::logic_error(
                 "timed TACC image replay diverged from its "
                 "classified instruction");
+        }
+        if (cb.tacc_timed_transfer_faulted) {
+            s.trap_addr =
+                cb.tacc_timed_transfer_fault_address;
+            throw std::runtime_error(
+                "TRAP:BUS_FAULT");
         }
         // The registered transport has already performed all four physical
         // beats and published any LOAD image atomically. Replaying the
@@ -10855,6 +11243,7 @@ struct SystemInstructionTraits {
     uint64_t tacc_timed_base_address = 0;
     uint8_t tacc_timed_format_ew = 0;
     bool tacc_timed_format_signed = false;
+    bool tacc_timed_external_phy = false;
 };
 
 static bool tacc_mode_is_legal(const CPUState& state) noexcept {
@@ -11192,6 +11581,17 @@ static SystemInstructionTraits native_tacc_instruction_traits(
                 function == 0x4
                 ? state.tsrc0
                 : state.tdst;
+            NativeTaccSpan image_span;
+            if (!native_tacc_resolve_span(
+                    state,
+                    traits.tacc_timed_base_address,
+                    TACC_IMAGE_BYTES,
+                    image_span)) {
+                throw std::logic_error(
+                    "admitted TACC image span could not be resolved");
+            }
+            traits.tacc_timed_external_phy =
+                image_span.external_phy;
             if (function == 0x4) {
                 const int ew = state.tmode & 0x7;
                 traits.tacc_timed_format_ew =
@@ -14419,6 +14819,8 @@ static bool restore_cycle_instruction_checkpoint(
     const bool live_force_pending =
         core.tacc_force_pending;
     const uint64_t live_epoch = core.tacc_epoch;
+    const uint64_t live_perf_extmem =
+        core.perf_extmem;
     instruction.checkpoint.restore(core);
     core.tacc = live_image;
     core.tacc_owner = live_owner;
@@ -14429,6 +14831,7 @@ static bool restore_cycle_instruction_checkpoint(
     core.tacc_busy = live_busy;
     core.tacc_force_pending = live_force_pending;
     core.tacc_epoch = live_epoch;
+    core.perf_extmem = live_perf_extmem;
     if (
         instruction.tacc_timed_image_transfer &&
         instruction.tacc_timed_operation ==
@@ -14441,18 +14844,44 @@ static bool restore_cycle_instruction_checkpoint(
             throw std::logic_error(
                 "timed TACC STORE acknowledged too many beats");
         }
-        for (
-            uint8_t beat = 0;
-            beat <
-                instruction.tacc_timed_acknowledged_beats;
-            beat++
-        ) {
-            icache_invalidate_span(
-                core,
-                instruction.tacc_timed_base_address +
-                    static_cast<uint64_t>(beat) *
-                        TileMemoryTransport::BEAT_BYTES,
-                TileMemoryTransport::BEAT_BYTES);
+        if (instruction.tacc_timed_external_phy) {
+            if (
+                instruction.
+                    tacc_timed_external_acknowledged_words >
+                TileMemoryTransport::IMAGE_BEATS *
+                    EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                throw std::logic_error(
+                    "timed external TACC STORE "
+                    "acknowledged too many PHY words");
+            }
+            for (
+                uint8_t word = 0;
+                word < instruction.
+                    tacc_timed_external_acknowledged_words;
+                word++
+            ) {
+                icache_invalidate_span(
+                    core,
+                    instruction.tacc_timed_base_address +
+                        static_cast<uint64_t>(word) *
+                            EXTERNAL_PHY_WORD_BYTES,
+                    EXTERNAL_PHY_WORD_BYTES);
+            }
+        } else {
+            for (
+                uint8_t beat = 0;
+                beat <
+                    instruction.tacc_timed_acknowledged_beats;
+                beat++
+            ) {
+                icache_invalidate_span(
+                    core,
+                    instruction.tacc_timed_base_address +
+                        static_cast<uint64_t>(beat) *
+                            TileMemoryTransport::BEAT_BYTES,
+                    TileMemoryTransport::BEAT_BYTES);
+            }
         }
     }
     return true;
@@ -14906,6 +15335,8 @@ static CycleCoreProgress run_cycle_core_once(
                 traits.tacc_timed_format_ew;
             instruction.tacc_timed_format_signed =
                 traits.tacc_timed_format_signed;
+            instruction.tacc_timed_external_phy =
+                traits.tacc_timed_external_phy;
             instruction.tacc_operation_epoch =
                 core.tacc_epoch;
             instruction.tacc_busy_published = true;
@@ -15001,6 +15432,10 @@ static CycleCoreProgress run_cycle_core_once(
                 instruction->tacc_timed_format_ew;
             callbacks.tacc_timed_transfer_format_signed =
                 instruction->tacc_timed_format_signed;
+            callbacks.tacc_timed_transfer_faulted =
+                instruction->tacc_timed_transfer_faulted;
+            callbacks.tacc_timed_transfer_fault_address =
+                instruction->tacc_timed_fault_address;
         }
     }
 
@@ -15084,6 +15519,21 @@ static CycleCoreProgress run_cycle_core_once(
         instruction &&
         instruction->tacc_python_fallback &&
         raw.stop_reason == RUN_MEX_FALLBACK;
+    const bool timed_tacc_transport_fault =
+        instruction &&
+        instruction->tacc_timed_image_transfer &&
+        instruction->tacc_timed_transfer_faulted &&
+        raw.stop_reason == RUN_TRAP &&
+        raw.trap_id == IVEC_BUS_FAULT;
+    if (
+        instruction &&
+        instruction->tacc_timed_image_transfer &&
+        instruction->tacc_timed_transfer_faulted &&
+        !timed_tacc_transport_fault
+    ) {
+        throw std::logic_error(
+            "timed TACC transport fault did not replay as a bus fault");
+    }
     if (
         (
             raw.stop_reason == RUN_MEX_FALLBACK ||
@@ -15121,7 +15571,10 @@ static CycleCoreProgress run_cycle_core_once(
             discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
-        if (!bounded_tacc_fallback) {
+        if (
+            !bounded_tacc_fallback &&
+            !timed_tacc_transport_fault
+        ) {
             const uint64_t predicted_cycles =
                 raw.stop_reason == RUN_TRAP &&
                 raw.trap_id == IVEC_SW_TRAP &&
@@ -15257,12 +15710,58 @@ static CycleCoreProgress run_cycle_core_once(
                           "returned an invalid terminal outcome");
             }
         }
-        completion_cycle = checked_cycle_add(
-            instruction
-                ? instruction->start_cycle
-                : cycle_state.ready_cycle,
-            static_cast<uint64_t>(retired_cycles),
-            "cycle-bounded continuation completion");
+        if (timed_tacc_transport_fault) {
+            if (
+                !instruction->
+                    tacc_timed_completion_cycle.has_value() ||
+                *instruction->tacc_timed_completion_cycle <
+                    instruction->start_cycle
+            ) {
+                throw std::logic_error(
+                    "timed TACC transport fault lacks its "
+                    "completion frontier");
+            }
+            completion_cycle =
+                *instruction->tacc_timed_completion_cycle;
+            const uint64_t elapsed_cycles =
+                completion_cycle -
+                instruction->start_cycle;
+            const uint64_t base_cycles =
+                3 + static_cast<uint64_t>(
+                    instruction->
+                        tacc_timed_fault_beat_index);
+            if (elapsed_cycles < base_cycles) {
+                throw std::logic_error(
+                    "timed TACC transport fault preceded "
+                    "its service frontier");
+            }
+            const uint64_t stall_cycles =
+                elapsed_cycles - base_cycles;
+            core.cycle_count = checked_cycle_add(
+                core.cycle_count,
+                elapsed_cycles,
+                "TACC fault core cycle counter");
+            if (core.perf_enable) {
+                core.perf_cycles = checked_cycle_add(
+                    core.perf_cycles,
+                    elapsed_cycles,
+                    "TACC fault performance cycle counter");
+                core.perf_stalls = checked_cycle_add(
+                    core.perf_stalls,
+                    stall_cycles,
+                    "TACC fault performance stall counter");
+            }
+            retired_steps = 0;
+            retired_cycles =
+                static_cast<int64_t>(elapsed_cycles);
+        } else {
+            completion_cycle = checked_cycle_add(
+                instruction
+                    ? instruction->start_cycle
+                    : cycle_state.ready_cycle,
+                static_cast<uint64_t>(retired_cycles),
+                "cycle-bounded continuation completion");
+        }
         if (
             bounded_tacc_fallback &&
             completion_cycle != cycle_state.ready_cycle
@@ -15393,16 +15892,24 @@ static CycleCoreProgress run_cycle_core_once(
         instruction &&
         instruction->tacc_timed_image_transfer
     ) {
-        if (
-            retired_steps != 1 ||
-            terminal ||
-            core.tacc_epoch !=
-                instruction->tacc_operation_epoch
-        ) {
+        const bool valid_timed_fault =
+            instruction->tacc_timed_transfer_faulted &&
+            retired_steps == 0 &&
+            core.tacc_epoch ==
+                instruction->tacc_operation_epoch;
+        const bool valid_timed_retirement =
+            !instruction->tacc_timed_transfer_faulted &&
+            retired_steps == 1 &&
+            !terminal &&
+            core.tacc_epoch ==
+                instruction->tacc_operation_epoch;
+        if (!valid_timed_fault &&
+            !valid_timed_retirement) {
             throw std::logic_error(
                 "timed TACC transfer reached an invalid retirement");
         }
         if (
+            !instruction->tacc_timed_transfer_faulted &&
             instruction->tacc_timed_operation ==
                 BusOperation::WRITE
         ) {
@@ -15780,12 +16287,179 @@ next_cycle_tile_port_arbitration(
 }
 
 static std::optional<uint64_t>
+cycle_tacc_external_write_data(
+        const TileMemoryPortGrant& grant,
+        uint8_t word_index) {
+    if (grant.request.operation != BusOperation::WRITE)
+        return std::nullopt;
+    const std::size_t byte_offset =
+        static_cast<std::size_t>(word_index) *
+        EXTERNAL_PHY_WORD_BYTES;
+    uint64_t value = 0;
+    for (
+        std::size_t byte = 0;
+        byte < EXTERNAL_PHY_WORD_BYTES;
+        byte++
+    ) {
+        value |= static_cast<uint64_t>(
+            grant.request.data[byte_offset + byte])
+            << (8 * byte);
+    }
+    return value;
+}
+
+static ResumableInstruction&
+cycle_tacc_instruction_for_grant(
+        SystemState& system,
+        const TileMemoryPortGrant& grant) {
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[
+            static_cast<std::size_t>(core_index)];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->
+            tacc_timed_image_transfer ||
+        cycle_state.instruction->
+            tacc_timed_operation_token !=
+                grant.request.identity.operation_token
+    ) {
+        throw std::logic_error(
+            "external PHY grant has no suspended TACC instruction");
+    }
+    return *cycle_state.instruction;
+}
+
+static const ResumableInstruction&
+cycle_tacc_instruction_for_grant(
+        const SystemState& system,
+        const TileMemoryPortGrant& grant) {
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    const FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[
+            static_cast<std::size_t>(core_index)];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->
+            tacc_timed_image_transfer ||
+        cycle_state.instruction->
+            tacc_timed_operation_token !=
+                grant.request.identity.operation_token
+    ) {
+        throw std::logic_error(
+            "external PHY grant has no suspended TACC instruction");
+    }
+    return *cycle_state.instruction;
+}
+
+static void launch_cycle_tacc_external_phy_word(
+        SystemState& system,
+        const TileMemoryPortGrant& grant,
+        uint64_t launch_cycle,
+        const std::vector<StepCallbacks>& callbacks) {
+    ResumableInstruction& instruction =
+        cycle_tacc_instruction_for_grant(
+            system,
+            grant);
+    if (
+        !instruction.tacc_timed_external_phy ||
+        instruction.tacc_timed_transfer_complete ||
+        instruction.tacc_timed_transfer_faulted ||
+        instruction.tacc_timed_external_response_active ||
+        instruction.tacc_timed_external_word_index >=
+            EXTERNAL_PHY_WORDS_PER_BEAT
+    ) {
+        throw std::logic_error(
+            "external PHY word launch has invalid transfer state");
+    }
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    const uint8_t word_index =
+        instruction.tacc_timed_external_word_index;
+    const uint64_t word_address =
+        grant.request.address +
+        static_cast<uint64_t>(word_index) *
+            EXTERNAL_PHY_WORD_BYTES;
+    StepCallbacks::ExternalPhyResponse response;
+    try {
+        response = native_tacc_external_phy_response(
+            callbacks[static_cast<std::size_t>(core_index)],
+            grant.request.operation,
+            grant.request.beat_index,
+            word_index,
+            word_address,
+            cycle_tacc_external_write_data(
+                grant,
+                word_index));
+    } catch (...) {
+        (void)system.tile_memory_transport.cancel(
+            system.tacc_image_stage,
+            grant.request.identity.engine_id,
+            grant.request.identity.operation_token,
+            grant.request.identity.engine_epoch,
+            grant.request.identity.caller_epoch);
+        CPUState& core =
+            *system.cores[
+                static_cast<std::size_t>(core_index)];
+        finish_cycle_tacc_terminal(core);
+        FullCoreCycleState& cycle_state =
+            system.full_core_cycle_states[
+                static_cast<std::size_t>(core_index)];
+        cycle_state.instruction.reset();
+        cycle_state.ready_cycle = launch_cycle;
+        system.refresh_cycle_execution_pending();
+        throw;
+    }
+    const bool timeout =
+        !response.responded ||
+        response.latency_cycles >
+            EXTERNAL_PHY_TIMEOUT_CYCLES;
+    const uint64_t latency =
+        timeout
+        ? EXTERNAL_PHY_TIMEOUT_CYCLES
+        : response.latency_cycles;
+    instruction.tacc_timed_external_response_cycle =
+        checked_cycle_add(
+            launch_cycle,
+            latency,
+            "external PHY word response");
+    instruction.tacc_timed_external_response_error =
+        !timeout && response.error;
+    instruction.tacc_timed_external_response_timeout =
+        timeout;
+    instruction.tacc_timed_external_response_active =
+        true;
+}
+
+static std::optional<uint64_t>
 cycle_tile_port_completion_cycle(
         const SystemState& system) {
     const auto& active =
         system.tile_memory_transport.active_port_grant;
     if (!active.has_value())
         return std::nullopt;
+    if (active->request.image_transfer) {
+        const ResumableInstruction& instruction =
+            cycle_tacc_instruction_for_grant(
+                system,
+                *active);
+        if (instruction.tacc_timed_external_phy) {
+            if (
+                !instruction.
+                    tacc_timed_external_response_active
+            ) {
+                throw std::logic_error(
+                    "external PHY grant has no active word response");
+            }
+            return instruction.
+                tacc_timed_external_response_cycle;
+        }
+    }
     return checked_cycle_add(
         active->grant_cycle,
         1,
@@ -15794,7 +16468,8 @@ cycle_tile_port_completion_cycle(
 
 static void complete_cycle_tile_target(
         SystemState& system,
-        uint64_t completion_cycle) {
+        uint64_t completion_cycle,
+        const std::vector<StepCallbacks>& callbacks) {
     const auto& active =
         system.tile_memory_transport.active_port_grant;
     if (!active.has_value()) {
@@ -15865,17 +16540,156 @@ static void complete_cycle_tile_target(
         (void)system.tile_memory_transport.try_grant_stage(
             system.tacc_image_stage,
             completion_cycle);
-        system.tile_memory_transport
-            .validate_image_port_completion(
-                system.tacc_image_stage,
-                grant.grant_sequence,
-                completion_cycle,
-                grant.request.operation ==
-                    BusOperation::READ);
 
         CPUState& core = *system.cores[index];
         std::optional<std::array<uint8_t, 64>> read_data;
-        {
+        const bool external_phy =
+            cycle_state.instruction->
+                tacc_timed_external_phy;
+        if (external_phy) {
+            ResumableInstruction& instruction =
+                *cycle_state.instruction;
+            if (
+                !instruction.
+                    tacc_timed_external_response_active ||
+                instruction.
+                    tacc_timed_external_response_cycle !=
+                        completion_cycle ||
+                instruction.tacc_timed_external_word_index >=
+                    EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                throw std::logic_error(
+                    "external PHY response does not match its "
+                    "active word");
+            }
+
+            const uint8_t word_index =
+                instruction.
+                    tacc_timed_external_word_index;
+            const uint64_t word_address =
+                grant.request.address +
+                static_cast<uint64_t>(word_index) *
+                    EXTERNAL_PHY_WORD_BYTES;
+            const bool faulted =
+                instruction.
+                    tacc_timed_external_response_error ||
+                instruction.
+                    tacc_timed_external_response_timeout;
+            instruction.
+                tacc_timed_external_response_active = false;
+            if (faulted) {
+                const bool canceled =
+                    system.tile_memory_transport.cancel(
+                        system.tacc_image_stage,
+                        engine_id,
+                        grant.request.identity.operation_token,
+                        grant.request.identity.engine_epoch,
+                        grant.request.identity.caller_epoch);
+                if (!canceled) {
+                    throw std::logic_error(
+                        "faulted external PHY transfer could not "
+                        "release its tile grant");
+                }
+                instruction.tacc_timed_transfer_faulted = true;
+                instruction.tacc_timed_fault_beat_index =
+                    grant.request.beat_index;
+                instruction.tacc_timed_fault_word_index =
+                    word_index;
+                instruction.tacc_timed_fault_address =
+                    word_address;
+                instruction.tacc_timed_transfer_complete = true;
+                instruction.tacc_timed_completion_cycle =
+                    completion_cycle;
+                cycle_state.ready_cycle = completion_cycle;
+                system.refresh_cycle_execution_pending();
+                return;
+            }
+
+            if (
+                core.perf_enable &&
+                core.perf_extmem ==
+                    std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "external-memory performance counter overflow");
+            }
+            const std::size_t byte_offset =
+                static_cast<std::size_t>(word_index) *
+                EXTERNAL_PHY_WORD_BYTES;
+            {
+                auto memory_guard =
+                    acquire_shared_memory_use(core);
+                NativeTaccSpan word_span;
+                if (
+                    !native_tacc_resolve_span(
+                        core,
+                        word_address,
+                        EXTERNAL_PHY_WORD_BYTES,
+                        word_span) ||
+                    !word_span.external_phy
+                ) {
+                    throw std::logic_error(
+                        "admitted external PHY word lost its "
+                        "routed-memory target");
+                }
+                if (
+                    grant.request.operation ==
+                        BusOperation::READ
+                ) {
+                    std::memcpy(
+                        instruction.
+                            tacc_timed_external_beat_data.data() +
+                            byte_offset,
+                        word_span.data,
+                        EXTERNAL_PHY_WORD_BYTES);
+                } else {
+                    std::memcpy(
+                        word_span.data,
+                        grant.request.data.data() +
+                            byte_offset,
+                        EXTERNAL_PHY_WORD_BYTES);
+                    icache_invalidate_span(
+                        core,
+                        word_address,
+                        EXTERNAL_PHY_WORD_BYTES);
+                }
+            }
+            if (core.perf_enable)
+                core.perf_extmem++;
+            if (
+                instruction.
+                    tacc_timed_external_acknowledged_words ==
+                TileMemoryTransport::IMAGE_BEATS *
+                    EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                throw std::logic_error(
+                    "external TACC transfer acknowledged too "
+                    "many PHY words");
+            }
+            instruction.
+                tacc_timed_external_acknowledged_words++;
+
+            if (
+                static_cast<std::size_t>(word_index) + 1 <
+                EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                instruction.tacc_timed_external_word_index++;
+                launch_cycle_tacc_external_phy_word(
+                    system,
+                    grant,
+                    completion_cycle,
+                    callbacks);
+                system.refresh_cycle_execution_pending();
+                return;
+            }
+            if (
+                grant.request.operation ==
+                    BusOperation::READ
+            ) {
+                read_data = instruction.
+                    tacc_timed_external_beat_data;
+            }
+        } else {
             auto memory_guard =
                 acquire_shared_memory_use(core);
             if (
@@ -15896,13 +16710,22 @@ static void complete_cycle_tile_target(
             }
         }
 
+        system.tile_memory_transport
+            .validate_image_port_completion(
+                system.tacc_image_stage,
+                grant.grant_sequence,
+                completion_cycle,
+                grant.request.operation ==
+                    BusOperation::READ,
+                external_phy);
         const std::optional<TileMemoryPortCompletion>
             completed =
                 system.tile_memory_transport.complete_port(
                     system.tacc_image_stage,
                     grant.grant_sequence,
                     completion_cycle,
-                    read_data);
+                    read_data,
+                    external_phy);
         if (!completed.has_value()) {
             throw std::logic_error(
                 "TACC image completion rejected its active grant");
@@ -17114,7 +17937,8 @@ static SystemBatchResult run_full_core_cycle_batch(
         if (tile_target_frontier) {
             complete_cycle_tile_target(
                 system,
-                scheduler_cycle);
+                scheduler_cycle,
+                callbacks);
         }
         if (external_frontier) {
             const uint64_t applied =
@@ -17308,8 +18132,27 @@ static SystemBatchResult run_full_core_cycle_batch(
             !system.tile_memory_transport
                 .active_port_grant.has_value()
         ) {
-            (void)system.tile_memory_transport.try_grant_port(
-                scheduler_cycle);
+            const std::optional<TileMemoryPortGrant> grant =
+                system.tile_memory_transport.try_grant_port(
+                    scheduler_cycle);
+            if (grant.has_value() &&
+                grant->request.image_transfer) {
+                ResumableInstruction& instruction =
+                    cycle_tacc_instruction_for_grant(
+                        system,
+                        *grant);
+                if (instruction.tacc_timed_external_phy) {
+                    instruction.
+                        tacc_timed_external_word_index = 0;
+                    instruction.
+                        tacc_timed_external_beat_data.fill(0);
+                    launch_cycle_tacc_external_phy_word(
+                        system,
+                        *grant,
+                        scheduler_cycle,
+                        callbacks);
+                }
+            }
         }
 
         if (scheduler_cycle >= post_dispatch_deadline) {
@@ -23384,6 +24227,9 @@ static std::vector<StepCallbacks> build_system_step_callbacks(
         core_callbacks.tacc_span_policy_override =
             python_bridge_has_tacc_span_policy_override(
                 mmio_read8);
+        install_python_external_phy_callbacks(
+            core_callbacks,
+            mmio_read8);
         core_callbacks.mmio_read8 =
             [mmio_read8](uint64_t address) -> uint8_t {
                 py::gil_scoped_acquire acquire;
@@ -28461,6 +29307,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.tacc_span_policy_override =
             python_bridge_has_tacc_span_policy_override(
                 mmio_read8);
+        install_python_external_phy_callbacks(
+            cb,
+            mmio_read8);
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             return mmio_read8(addr).cast<uint8_t>();
         };
@@ -28526,6 +29375,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.tacc_span_policy_override =
             python_bridge_has_tacc_span_policy_override(
                 mmio_read8);
+        install_python_external_phy_callbacks(
+            cb,
+            mmio_read8);
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             py::gil_scoped_acquire acq;
             return mmio_read8(addr).cast<uint8_t>();

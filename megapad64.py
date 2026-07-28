@@ -1643,6 +1643,63 @@ class Megapad64:
             raise TypeError("external PHY error flag must be bool")
         return response
 
+    def _native_external_phy_response(
+        self,
+        direction: str,
+        beat_index: int,
+        word_index: int,
+        address: int,
+        write_data: Optional[int],
+    ) -> Optional[tuple[int, bool]]:
+        """Select one PHY response for the native execution bridge."""
+        request = ExternalPhyWordRequest(
+            direction=direction,
+            beat_index=beat_index,
+            word_index=word_index,
+            address=address,
+            write_data=write_data,
+        )
+        response = Megapad64._external_phy_response(self, request)
+        if response is None:
+            return None
+        return response.latency_cycles, response.error
+
+    def _native_external_phy_fault(
+        self,
+        direction: str,
+        beat_index: int,
+        word_index: int,
+        address: int,
+        write_data: Optional[int],
+        fault_kind: str,
+    ) -> None:
+        """Raise a rich PHY trap without performing native-owned accounting."""
+        request = ExternalPhyWordRequest(
+            direction=direction,
+            beat_index=beat_index,
+            word_index=word_index,
+            address=address,
+            write_data=write_data,
+        )
+        if fault_kind == "timeout":
+            message = (
+                "external TACC PHY word received no response within "
+                f"{EXTERNAL_PHY_TIMEOUT_CYCLES} cycles"
+            )
+        elif fault_kind == "error":
+            message = "external TACC PHY word returned an explicit error"
+        else:
+            raise ValueError(
+                "external PHY fault kind must be 'error' or 'timeout'"
+            )
+        error = TrapError(
+            IVEC_BUS_FAULT,
+            f"{message} @ {request.address:#018x}",
+        )
+        error.external_phy_fault = fault_kind
+        error.external_phy_request = request
+        raise error
+
     def _tacc_account_external_beat(self, elapsed_cycles: int) -> None:
         # Every issued tile beat owns one of the four architected service
         # cycles.  Only elapsed PHY time beyond that cycle is a stall.
