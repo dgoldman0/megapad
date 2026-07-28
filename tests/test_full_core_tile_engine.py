@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from asm import assemble
 from megapad64 import (
     CSR_ACC0,
@@ -12,6 +14,7 @@ from megapad64 import (
     CSR_TCTRL,
     CSR_TDST,
     CSR_TMODE,
+    CSR_TACC_CTL,
     CSR_TACC_STATUS,
     CSR_TSRC0,
     CSR_TSRC1,
@@ -19,9 +22,11 @@ from megapad64 import (
     CSR_TSTRIDE_R,
     CSR_TTILE_H,
     CSR_TTILE_W,
+    IVEC_PRIV_FAULT,
+    TrapError,
     TACC_OWNER_NONE,
 )
-from system import MegapadSystem
+from system import MegapadSystem, MicroCluster
 
 
 def _system(*, full_cores: int = 4, clusters: int = 3) -> MegapadSystem:
@@ -215,6 +220,9 @@ def test_all_seven_physical_tacc_domains_can_be_claimed_independently():
         owner = cluster.cores[0]
         cluster.load_shared_engine_state(owner)
         owner.tacc[0] = index
+        owner.tacc_valid = True
+        owner.tacc_dirty = True
+        owner.tacc_format_ew = 0
         cluster.store_shared_engine_state(owner)
         owner.csr_write(CSR_ACC0, 0x100 + index)
 
@@ -342,3 +350,155 @@ def test_reset_scopes_follow_physical_engine_ownership():
     assert not any(second_cluster._shared_engine_snapshot()["tacc"])
     assert full1.tacc[0] == 2
     assert full1.csr_read(CSR_TACC_STATUS) & 0xF == 0xF
+
+
+def test_micro_force_release_uses_cluster_privilege_not_caller_shadow():
+    system = _system(full_cores=1, clusters=1)
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner, sibling = cluster.cores[:2]
+    system.load_binary(0, assemble("t.acc.try"))
+    owner.pc = 0
+    owner.step()
+
+    cluster.cl_priv_level = 1
+    sibling.priv_level = 0
+    with pytest.raises(TrapError) as raised:
+        sibling.csr_write(CSR_TACC_CTL, 1)
+    assert raised.value.ivec_id == IVEC_PRIV_FAULT
+    assert owner.csr_read(CSR_TACC_STATUS) & 0b11 == 0b11
+
+    cluster.cl_priv_level = 0
+    sibling.priv_level = 1
+    sibling.csr_write(CSR_TACC_CTL, 1)
+
+    status = owner.csr_read(CSR_TACC_STATUS)
+    assert status & 0x3FF == 0
+    assert (status >> 16) & 0x1F == TACC_OWNER_NONE
+
+
+@pytest.mark.parametrize("fault_at_completion", (False, True))
+def test_reentrant_force_observes_busy_and_wins_at_terminal_boundary(
+    fault_at_completion: bool,
+):
+    memory = bytearray(4096)
+    cluster = MicroCluster(
+        cluster_id=0,
+        id_base=4,
+        shared_mem=memory,
+        mem_size=len(memory),
+    )
+    cluster.set_enabled(True)
+    owner, sibling = cluster.cores[:2]
+    owner.tmode = 0
+    owner.mem[0:3] = assemble("t.acc.try")
+    owner.pc = 0
+    owner.step()
+    owner.mem[0:3] = assemble("t.acc.clear")
+    owner.pc = 0
+    owner.step()
+
+    owner.tsrc0 = 0x100
+    owner.mem[0:3] = assemble("t.acc.load")
+    owner.mem[0x100:0x200] = bytes(range(256))
+    owner.pc = 0
+    original_read8 = owner.mem_read8
+    probed = False
+    injected = RuntimeError("injected TACC transfer failure")
+
+    def force_during_read(address: int) -> int:
+        nonlocal probed
+        if address == 0x100 and not probed:
+            probed = True
+            active = sibling.csr_read(CSR_TACC_STATUS)
+            assert active & (1 << 4)
+            assert (active >> 16) & 0x1F == owner.core_id
+            sibling.csr_write(CSR_TACC_CTL, 1)
+            pending = sibling.csr_read(CSR_TACC_STATUS)
+            assert pending & (1 << 4)
+            assert pending & (1 << 9)
+            if fault_at_completion:
+                raise injected
+        return original_read8(address)
+
+    owner.mem_read8 = force_during_read
+    if fault_at_completion:
+        with pytest.raises(RuntimeError) as raised:
+            owner.step()
+        assert raised.value is injected
+    else:
+        owner.step()
+
+    assert probed
+    terminal = sibling.csr_read(CSR_TACC_STATUS)
+    assert terminal & 0x3FF == 0
+    assert (terminal >> 16) & 0x1F == TACC_OWNER_NONE
+    assert not any(cluster._shared_engine_snapshot()["tacc"])
+
+
+def test_stale_cluster_stage_cannot_commit_after_engine_reset():
+    memory = bytearray(4096)
+    cluster = MicroCluster(
+        cluster_id=0,
+        id_base=4,
+        shared_mem=memory,
+        mem_size=len(memory),
+    )
+    cluster.set_enabled(True)
+    owner = cluster.cores[0]
+    owner.mem[0:3] = assemble("t.acc.try")
+    owner.pc = 0
+    owner.step()
+    cluster.load_shared_engine_state(owner)
+    old_epoch = owner.tacc_epoch
+
+    cluster.reset_shared_resources()
+    owner.tacc[0] = 0xA5
+    owner.tacc_valid = True
+    owner.tacc_dirty = True
+    owner.tacc_format_ew = 0
+
+    assert cluster.store_shared_engine_state(owner) is False
+    state = cluster._shared_engine_snapshot()
+    assert state["tacc_epoch"] == old_epoch + 1
+    assert state["tacc_owner"] == TACC_OWNER_NONE
+    assert not state["tacc_valid"]
+    assert not any(state["tacc"])
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda state: state.update(tacc=bytes(255)),
+        lambda state: state.update(tacc=256),
+        lambda state: state.update(tacc_owner=8),
+        lambda state: state.update(
+            tacc_valid=True,
+            tacc_format_ew=7,
+        ),
+        lambda state: state.update(tacc_force_pending=True),
+    ),
+)
+def test_cluster_snapshot_validation_is_atomic_and_deep(mutate):
+    memory = bytearray(4096)
+    cluster = MicroCluster(
+        cluster_id=0,
+        id_base=4,
+        shared_mem=memory,
+        mem_size=len(memory),
+    )
+    before = cluster._shared_engine_snapshot()
+    candidate = cluster._shared_engine_snapshot()
+    mutate(candidate)
+
+    with pytest.raises(ValueError):
+        cluster._commit_shared_engine_state(candidate)
+
+    assert cluster._shared_engine_snapshot() == before
+    candidate["acc"][0] = 0xDEAD
+    if (
+        isinstance(candidate["tacc"], bytearray)
+        and len(candidate["tacc"]) == 256
+    ):
+        candidate["tacc"][0] = 0xA5
+    assert cluster._shared_engine_snapshot() == before

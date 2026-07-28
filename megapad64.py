@@ -805,7 +805,13 @@ class Megapad64:
         self.tacc_busy: bool = False
         self.tacc_force_pending: bool = False
         self.tacc_epoch: int = 0
+        self._tacc_active_epoch: Optional[int] = None
         self._tacc_fault_cycles: Optional[int] = None
+        self._tacc_instruction_executed = False
+        self._tacc_busy_publish_hook = None
+        self._tacc_image_stage_acquire_hook = None
+        self._tacc_image_stage_update_hook = None
+        self._tacc_image_stage_release_hook = None
         # System/cluster routing may install an additional whole-span policy
         # check.  It returns None when allowed or (ivec, first_bad_address)
         # when an equivalent routed-memory permission denies the request.
@@ -1341,7 +1347,7 @@ class Megapad64:
     def _tacc_control_write(self, value: int):
         if not (value & 1):
             return
-        if self.priv_level != 0:
+        if self._tacc_control_privilege() != 0:
             self._tacc_trap(
                 IVEC_PRIV_FAULT,
                 "TACC force-release requires supervisor privilege",
@@ -1350,6 +1356,10 @@ class Megapad64:
             self.tacc_force_pending = True
         else:
             self._tacc_wipe()
+
+    def _tacc_control_privilege(self) -> int:
+        """Return the privilege domain that authorizes TACC recovery."""
+        return self.priv_level
 
     def _tacc_format_from_tmode(self) -> tuple[int, int]:
         ew = self.tmode & 0x7
@@ -1458,6 +1468,51 @@ class Megapad64:
             TACC_IMAGE_BYTES,
             write=write,
         )
+
+    def _tacc_image_stage_acquire(
+        self,
+        direction: str,
+        base: int,
+        format_ew: int,
+        format_signed: int,
+        image: bytes,
+    ):
+        hook = self._tacc_image_stage_acquire_hook
+        if hook is None:
+            return None
+        token = hook(
+            direction,
+            u64(base),
+            int(format_ew),
+            bool(format_signed),
+            bytes(image),
+        )
+        if token is None:
+            raise RuntimeError(
+                "TACC image-stage contention requires the timed coordinator"
+            )
+        return token
+
+    def _tacc_image_stage_update(
+        self,
+        token,
+        beat_index: int,
+        image: bytes | bytearray,
+    ) -> bool:
+        if token is None:
+            return True
+        hook = self._tacc_image_stage_update_hook
+        if hook is None:
+            raise RuntimeError("TACC image-stage update hook is missing")
+        return bool(hook(token, beat_index, bytes(image)))
+
+    def _tacc_image_stage_release(self, token) -> bool:
+        if token is None:
+            return True
+        hook = self._tacc_image_stage_release_hook
+        if hook is None:
+            raise RuntimeError("TACC image-stage release hook is missing")
+        return bool(hook(token))
 
     def _tacc_read_beat(self, addr: int) -> bytearray:
         base = u64(addr)
@@ -3505,12 +3560,32 @@ class Megapad64:
             self.csr_write(byte1, self.regs[rn])
         return 0
 
+    def _tacc_begin_atomic_operation(self) -> bool:
+        """Publish BUSY and remember the reset-cancellation epoch."""
+        self._tacc_active_epoch = u64(self.tacc_epoch)
+        self.tacc_busy = True
+        if self._tacc_busy_publish_hook is not None:
+            self._tacc_busy_publish_hook()
+        return True
+
     def _tacc_finish_atomic_operation(self):
+        active_epoch = self._tacc_active_epoch
+        self._tacc_active_epoch = None
+        if (
+            active_epoch is not None
+            and u64(self.tacc_epoch) != active_epoch
+        ):
+            # Reset won while the operation was in flight.  Discard any local
+            # result assembled after reset without incrementing the epoch a
+            # second time.
+            self._tacc_wipe(bump_epoch=False)
+            return
         self.tacc_busy = False
         if self.tacc_force_pending:
             self._tacc_wipe()
 
     def _exec_tacc_lifecycle(self, ss: int, funct_byte: int) -> int:
+        self._tacc_instruction_executed = True
         funct = funct_byte & 0x7
         if ss != 0 or funct_byte != funct or funct not in range(2, 7):
             self._tacc_trap(
@@ -3519,7 +3594,8 @@ class Megapad64:
             )
 
         if funct == 2:  # TACC.TRY
-            self.tacc_busy = True
+            if not self._tacc_begin_atomic_operation():
+                return 0
             try:
                 if self.tacc_owner == TACC_OWNER_NONE:
                     self.tacc_owner = self.core_id
@@ -3532,7 +3608,8 @@ class Megapad64:
         if funct == 3:  # TACC.CLEAR
             self._tacc_require_mine()
             ew, signed = self._tacc_format_from_tmode()
-            self.tacc_busy = True
+            if not self._tacc_begin_atomic_operation():
+                return 0
             try:
                 self.tacc[:] = bytes(TACC_IMAGE_BYTES)
                 self.tacc_valid = True
@@ -3548,15 +3625,38 @@ class Megapad64:
             ew, signed = self._tacc_format_from_tmode()
             base = u64(self.tsrc0)
             self._tacc_preflight_image(base)
-            self.tacc_busy = True
+            if not self._tacc_begin_atomic_operation():
+                return 4
+            stage_token = None
             try:
-                staged = bytearray()
+                staged = bytearray(TACC_IMAGE_BYTES)
+                stage_token = self._tacc_image_stage_acquire(
+                    "load",
+                    base,
+                    ew,
+                    signed,
+                    bytes(staged),
+                )
+                stage_live = True
                 for beat_index, offset in enumerate(
                     range(0, TACC_IMAGE_BYTES, 64),
                     start=1,
                 ):
                     self._tacc_fault_cycles = 2 + beat_index
-                    staged.extend(self._tacc_read_beat(u64(base + offset)))
+                    staged[offset:offset + 64] = self._tacc_read_beat(
+                        u64(base + offset)
+                    )
+                    if ew not in (EW_U8, EW_U16) and offset >= 128:
+                        staged[offset:offset + 64] = bytes(64)
+                    stage_live = self._tacc_image_stage_update(
+                        stage_token,
+                        beat_index,
+                        staged,
+                    )
+                    if not stage_live:
+                        break
+                if not stage_live:
+                    return 4
                 active = self._tacc_active_bytes(ew)
                 staged[active:] = bytes(TACC_IMAGE_BYTES - active)
                 self.tacc[:] = staged
@@ -3565,6 +3665,7 @@ class Megapad64:
                 self.tacc_format_ew = ew
                 self.tacc_format_signed = signed
             finally:
+                self._tacc_image_stage_release(stage_token)
                 self._tacc_finish_atomic_operation()
             return 4
 
@@ -3575,8 +3676,18 @@ class Megapad64:
             image = bytearray(self.tacc)
             active = self._tacc_active_bytes(self.tacc_format_ew)
             image[active:] = bytes(TACC_IMAGE_BYTES - active)
-            self.tacc_busy = True
+            if not self._tacc_begin_atomic_operation():
+                return 4
+            stage_token = None
             try:
+                stage_token = self._tacc_image_stage_acquire(
+                    "store",
+                    base,
+                    self.tacc_format_ew,
+                    self.tacc_format_signed,
+                    bytes(image),
+                )
+                stage_live = True
                 for beat_index, offset in enumerate(
                     range(0, TACC_IMAGE_BYTES, 64),
                     start=1,
@@ -3586,14 +3697,24 @@ class Megapad64:
                         u64(base + offset),
                         image[offset:offset + 64],
                     )
-                self.tacc_dirty = False
+                    stage_live = self._tacc_image_stage_update(
+                        stage_token,
+                        beat_index,
+                        image,
+                    )
+                    if not stage_live:
+                        break
+                if stage_live:
+                    self.tacc_dirty = False
             finally:
+                self._tacc_image_stage_release(stage_token)
                 self._tacc_finish_atomic_operation()
             return 4
 
         # TACC.RELEASE
         self._tacc_require_mine()
-        self.tacc_busy = True
+        if not self._tacc_begin_atomic_operation():
+            return 0
         try:
             self._tacc_wipe()
         finally:
@@ -3603,6 +3724,7 @@ class Megapad64:
 
     def _exec_tacc_tamac(self, ss: int, funct_byte: int,
                           broadcast_reg: int) -> int:
+        self._tacc_instruction_executed = True
         if funct_byte != 0x06 or ss == 2:
             self._tacc_trap(
                 IVEC_ILLEGAL_OP,
@@ -3623,7 +3745,8 @@ class Megapad64:
         for address in source_addresses:
             self._tacc_preflight_span(address, 64)
 
-        self.tacc_busy = True
+        if not self._tacc_begin_atomic_operation():
+            return 0
         try:
             if ss == 0:
                 self._tacc_fault_cycles = 2
@@ -3716,6 +3839,27 @@ class Megapad64:
         funct_byte = self.fetch8()
         funct = funct_byte & 0x07  # low 3 bits = sub-function
 
+        raw_tamac = (
+            op == 0x1
+            and (
+                (
+                    ss != 2
+                    and (funct_byte & 0x07) in (6, 7)
+                )
+                or (ss == 2 and funct_byte == 0x06)
+            )
+        )
+        raw_tacc_lifecycle = (
+            self._ext_modifier == 8
+            and op == 0x3
+            and (funct_byte & 0x07) >= 2
+        )
+        if raw_tamac or raw_tacc_lifecycle:
+            # Mark the route before fetching a TAMAC broadcast operand so
+            # cancellation remains strict even if that final encoding byte
+            # faults or invokes a reset callback.
+            self._tacc_instruction_executed = True
+
         # Read broadcast register if SS=01
         broadcast_reg = -1
         if ss == 1:
@@ -3723,14 +3867,15 @@ class Megapad64:
 
         # TACC instructions validate and preflight before the generic MEX
         # source loader can touch memory.
-        if (op == 0x1
-                and ((ss != 2 and (funct_byte & 0x07) in (6, 7))
-                     or (ss == 2 and funct_byte == 0x06))):
-            self._tacc_fault_cycles = 1
-            return self._exec_tacc_tamac(ss, funct_byte, broadcast_reg)
-        if (self._ext_modifier == 8 and op == 0x3
-                and (funct_byte & 0x07) >= 2):
+        if raw_tamac:
             self._tacc_fault_cycles = 2
+            return self._exec_tacc_tamac(ss, funct_byte, broadcast_reg)
+        if raw_tacc_lifecycle:
+            self._tacc_fault_cycles = (
+                2
+                if (funct_byte & 0x07) in (4, 5)
+                else 1
+            )
             return self._exec_tacc_lifecycle(ss, funct_byte)
 
         # Element width from TMODE (3-bit EW: 0-3 = int, 4 = fp16, 5 = bf16)
@@ -4805,6 +4950,39 @@ class Megapad64Micro(Megapad64):
             and not self._cluster.sha_is_owner(self.core_id)
         )
 
+    def _tacc_control_privilege(self) -> int:
+        """Microcore recovery is authorized by the cluster privilege domain."""
+        if self._cluster is not None:
+            return self._cluster.cl_priv_level
+        return super()._tacc_control_privilege()
+
+    def _tacc_begin_atomic_operation(self) -> bool:
+        """Publish a shared-engine operation before routed-memory callbacks."""
+        super()._tacc_begin_atomic_operation()
+        try:
+            if self._cluster is not None:
+                admitted = self._cluster.begin_shared_tacc_operation(self)
+                if not admitted:
+                    self._tacc_active_epoch = None
+                    return False
+        except BaseException:
+            self.tacc_busy = False
+            self._tacc_active_epoch = None
+            raise
+        return True
+
+    def _tacc_finish_atomic_operation(self):
+        """Merge sideband force state, then publish one terminal boundary."""
+        cluster = self._cluster
+        prepared = False
+        try:
+            if cluster is not None:
+                prepared = cluster.prepare_shared_tacc_completion(self)
+        finally:
+            super()._tacc_finish_atomic_operation()
+        if cluster is not None and prepared:
+            cluster.complete_shared_tacc_operation(self)
+
     @staticmethod
     def _mex_uses_legacy_acc(n: int, funct_byte: int) -> bool:
         source_selector = (n >> 2) & 0x3
@@ -4871,6 +5049,12 @@ class Megapad64Micro(Megapad64):
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"{names[n]} (1802 SCRT) not available on micro-core")
         return super()._exec_sys(n)
+
+    def _reset_state(self):
+        """Cancel only this caller's staged request, not shared TACC state."""
+        if self._cluster is not None:
+            self._cluster.cancel_tacc_caller(self.core_id)
+        super()._reset_state()
 
     # -- IMM family: trap GLO/GHI/PLO/PHI --
 

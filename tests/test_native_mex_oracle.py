@@ -159,6 +159,17 @@ def _snapshot(cpu: Any, watchers: Watchers) -> dict[str, Any]:
             cpu.ttile_h,
             cpu.ttile_w,
         ),
+        "tacc": (
+            bytes(cpu.tacc),
+            cpu.tacc_owner,
+            bool(cpu.tacc_valid),
+            bool(cpu.tacc_dirty),
+            cpu.tacc_format_ew,
+            cpu.tacc_format_signed,
+            bool(cpu.tacc_busy),
+            bool(cpu.tacc_force_pending),
+            cpu.tacc_epoch,
+        ),
         "interrupt": (cpu.ivt_base, cpu.ivec_id, cpu.trap_addr, cpu.ef_flags),
         "pc": cpu.pc,
         "halted": bool(cpu.halted),
@@ -298,6 +309,83 @@ def _format_difference(oracle: Any, native: Any) -> str:
             f"native[{start}:{end}]={native[start:end].hex()}"
         )
     return f"oracle={oracle!r}, native={native!r}"
+
+
+@pytest.mark.parametrize(
+    ("raw", "tmode"),
+    [
+        pytest.param("e106", EW_FP16, id="fp16-tamac"),
+        pytest.param("e50607", EW_BF16, id="bf16-tamac-broadcast"),
+        pytest.param("ed06", EW_FP16, id="fp16-tamac-inplace"),
+        pytest.param("e107", EW_FP16, id="reserved-tmul-function"),
+        pytest.param("e126", EW_FP16, id="noncanonical-tamac"),
+        pytest.param("e906", EW_U8, id="illegal-tamac-immediate"),
+        pytest.param("f8e302", EW_U8, id="tacc-try"),
+        pytest.param("f8e322", EW_U8, id="noncanonical-lifecycle"),
+        pytest.param("f8e70200", EW_U8, id="noncanonical-lifecycle-selector"),
+    ],
+)
+def test_raw_tacc_namespace_reaches_python_before_native_mutation(
+    raw: str,
+    tmode: int,
+) -> None:
+    cpu = NativeMegapad64(mem_size=MEM_SIZE)
+    watchers = _seed_common_state(
+        cpu,
+        tmode=tmode,
+        src0=bytes((index * 3 + 1) & 0xFF for index in range(64)),
+        src1=bytes((index * 5 + 7) & 0xFF for index in range(64)),
+    )
+    cpu.tacc = bytes((index * 11 + 9) & 0xFF for index in range(256))
+    cpu.tacc_owner = cpu.core_id
+    cpu.tacc_valid = True
+    cpu.tacc_dirty = True
+    cpu.tacc_format_ew = tmode & 0x7
+    cpu.tacc_format_signed = 0
+    cpu.tacc_busy = False
+    cpu.tacc_force_pending = False
+    cpu.tacc_epoch = 17
+    cpu.load_bytes(0, bytes.fromhex(raw))
+    cpu.pc = 0
+    before = _snapshot(cpu, watchers)
+    pre_fallback: list[dict[str, Any]] = []
+
+    def stop_at_fallback() -> int:
+        pre_fallback.append(_snapshot(cpu, watchers))
+        return 97
+
+    cpu._step_python_fallback = stop_at_fallback
+
+    assert cpu.step() == 97
+    assert pre_fallback == [before]
+    assert _snapshot(cpu, watchers) == before
+
+
+@pytest.mark.parametrize("immediate", [0x07, 0x0E, 0x86])
+def test_non_tacc_immediate_tmul_stays_native(immediate: int) -> None:
+    cpu = NativeMegapad64(mem_size=MEM_SIZE)
+    source = bytes([3]) * 64
+    watchers = _seed_common_state(
+        cpu,
+        tmode=EW_U8,
+        src0=source,
+        src1=bytes(64),
+    )
+    cpu.load_bytes(0, bytes((0xE9, immediate)))
+    cpu.pc = 0
+    before = _snapshot(cpu, watchers)
+    pre_fallback = _install_dispatch_probe(
+        cpu,
+        "native",
+        watchers,
+    )
+
+    assert cpu.step() == 2
+    _assert_dispatch("native", before, pre_fallback)
+    assert bytes(cpu.mem[DST0:DST0 + 64]) == bytes(
+        [(3 * immediate) & 0xFF]
+    ) * 64
+    assert _snapshot(cpu, watchers)["tacc"] == before["tacc"]
 
 
 def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:

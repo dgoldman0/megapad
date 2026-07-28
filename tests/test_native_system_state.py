@@ -26,6 +26,12 @@ from devices import (
     WOTS_BASE,
 )
 from nic_backends import LoopbackBackend
+from megapad64 import (
+    CSR_TACC_CTL,
+    CSR_TACC_STATUS,
+    IVEC_PRIV_FAULT,
+    TACC_OWNER_NONE,
+)
 from system import MegapadSystem
 
 
@@ -90,6 +96,223 @@ def _set_pc(state, value: int) -> None:
     state.psel = 3
     state.xsel = 2
     state.set_reg(3, value)
+
+
+def _valid_tacc_state(
+    owner: int,
+    *,
+    epoch: int = 7,
+    busy: bool = True,
+    force_pending: bool = True,
+) -> dict:
+    return {
+        "tacc": bytes((index * 13 + 5) & 0xFF for index in range(256)),
+        "tacc_owner": owner,
+        "tacc_valid": True,
+        "tacc_dirty": True,
+        "tacc_format_ew": 1,
+        "tacc_format_signed": 1,
+        "tacc_busy": busy,
+        "tacc_force_pending": force_pending,
+        "tacc_epoch": epoch,
+    }
+
+
+def test_native_full_tacc_restore_is_exact_validated_and_atomic() -> None:
+    core = _mp64_accel.CPUState()
+    core.core_id = 3
+    state = _valid_tacc_state(3)
+
+    core.tacc_restore(state)
+
+    assert dict(core.tacc_snapshot()) == state
+    state["tacc"] = bytes(256)
+    assert dict(core.tacc_snapshot())["tacc"] != bytes(256)
+    baseline = dict(core.tacc_snapshot())
+
+    transient_try = {
+        "tacc": bytes(256),
+        "tacc_owner": TACC_OWNER_NONE,
+        "tacc_valid": False,
+        "tacc_dirty": False,
+        "tacc_format_ew": 0,
+        "tacc_format_signed": 0,
+        "tacc_busy": True,
+        "tacc_force_pending": True,
+        "tacc_epoch": 8,
+    }
+    core.tacc_restore(transient_try)
+    assert dict(core.tacc_snapshot()) == transient_try
+    core.tacc_restore(baseline)
+
+    malformed_states = []
+
+    extra = dict(baseline)
+    extra["unexpected"] = 0
+    malformed_states.append(extra)
+
+    wrong_owner = dict(baseline)
+    wrong_owner["tacc_owner"] = 2
+    malformed_states.append(wrong_owner)
+
+    idle_pending = dict(baseline)
+    idle_pending["tacc_busy"] = False
+    malformed_states.append(idle_pending)
+
+    unowned_dirty = dict(baseline)
+    unowned_dirty.update({
+        "tacc": bytes(256),
+        "tacc_owner": TACC_OWNER_NONE,
+        "tacc_valid": False,
+        "tacc_dirty": True,
+        "tacc_format_ew": 0,
+        "tacc_format_signed": 0,
+        "tacc_busy": True,
+        "tacc_force_pending": False,
+    })
+    malformed_states.append(unowned_dirty)
+
+    invalid_image = dict(baseline)
+    invalid_image.update({
+        "tacc_owner": 3,
+        "tacc_valid": False,
+        "tacc_dirty": False,
+        "tacc_format_ew": 0,
+        "tacc_format_signed": 0,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+    })
+    malformed_states.append(invalid_image)
+
+    for malformed in malformed_states:
+        with pytest.raises(ValueError):
+            core.tacc_restore(malformed)
+        assert dict(core.tacc_snapshot()) == baseline
+
+
+@pytest.mark.parametrize(
+    ("full_cores", "all_cores", "cluster_index", "owner_id"),
+    [
+        pytest.param(4, 16, 0, 4, id="production-cluster-0"),
+        pytest.param(4, 16, 1, 8, id="production-cluster-1"),
+        pytest.param(4, 16, 2, 12, id="production-cluster-2"),
+        pytest.param(1, 5, 0, 1, id="compact-cluster"),
+    ],
+)
+def test_native_cluster_tacc_restore_uses_absolute_owner_domains(
+    full_cores: int,
+    all_cores: int,
+    cluster_index: int,
+    owner_id: int,
+) -> None:
+    system = NativeSystemState(full_cores, all_cores)
+    state = dict(system._cluster_tile_snapshot(cluster_index))
+    state.update(_valid_tacc_state(owner_id, epoch=23))
+    state["acc"] = [11, 22, 33, 44]
+    state["sha_mode"] = 3
+    state["sha_msglen_lo"] = 0x1234
+    state["sha_msglen_hi"] = 0x5678
+
+    system._cluster_tile_update(cluster_index, state)
+
+    assert dict(system._cluster_tile_snapshot(cluster_index)) == state
+    state["acc"][0] = 0xFFFF
+    assert dict(
+        system._cluster_tile_snapshot(cluster_index)
+    )["acc"][0] == 11
+    baseline = dict(system._cluster_tile_snapshot(cluster_index))
+
+    wrong_owner = dict(baseline)
+    wrong_owner["tacc_owner"] = owner_id + 4
+    with pytest.raises(ValueError, match="absolute core-ID domain"):
+        system._cluster_tile_update(cluster_index, wrong_owner)
+    assert dict(system._cluster_tile_snapshot(cluster_index)) == baseline
+
+    late_invalid_field = dict(baseline)
+    late_invalid_field["acc"] = [99, 98, 97, 96]
+    late_invalid_field["sha_mode"] = 4
+    with pytest.raises(ValueError, match="SHA mode"):
+        system._cluster_tile_update(cluster_index, late_invalid_field)
+    assert dict(system._cluster_tile_snapshot(cluster_index)) == baseline
+
+    extra = dict(baseline)
+    extra["unexpected"] = 0
+    with pytest.raises(ValueError, match="exactly 13 fields"):
+        system._cluster_tile_update(cluster_index, extra)
+    assert dict(system._cluster_tile_snapshot(cluster_index)) == baseline
+
+
+def test_native_guest_tacc_csrs_are_not_silent_placeholders() -> None:
+    cpu = Megapad64(mem_size=4096, core_id=2)
+    cpu._cs.tacc_restore(
+        _valid_tacc_state(
+            2,
+            epoch=41,
+            busy=True,
+            force_pending=False,
+        )
+    )
+    cpu.regs[1] = 1
+    cpu.load_bytes(
+        0,
+        assemble(
+            f"csrr r0, {CSR_TACC_STATUS}\n"
+            f"csrw {CSR_TACC_CTL}, r1"
+        ),
+    )
+    cpu.pc = 0
+    cpu._step_python_fallback = lambda: pytest.fail(
+        "native TACC CSR entered Python fallback"
+    )
+
+    assert cpu.step() == 1
+    assert cpu.regs[0] == (
+        0x1 |
+        0x2 |
+        0x4 |
+        0x8 |
+        0x10 |
+        (1 << 5) |
+        (1 << 8) |
+        (2 << 16)
+    )
+    assert cpu.step() == 1
+    assert cpu.tacc_force_pending
+    assert cpu.tacc_epoch == 41
+
+    cpu._cs.tacc_restore(
+        _valid_tacc_state(
+            2,
+            epoch=41,
+            busy=False,
+            force_pending=False,
+        )
+    )
+    cpu.pc = 2
+    assert cpu.step() == 1
+    assert cpu.tacc_owner == TACC_OWNER_NONE
+    assert bytes(cpu.tacc) == bytes(256)
+    assert cpu.tacc_epoch == 42
+
+    cpu._cs.tacc_restore(
+        _valid_tacc_state(
+            2,
+            epoch=50,
+            busy=False,
+            force_pending=False,
+        )
+    )
+    cpu.priv_level = 1
+    cpu.pc = 2
+    with pytest.raises(TrapError) as raised:
+        cpu.step()
+    assert raised.value.ivec_id == IVEC_PRIV_FAULT
+    assert dict(cpu._cs.tacc_snapshot()) == _valid_tacc_state(
+        2,
+        epoch=50,
+        busy=False,
+        force_pending=False,
+    )
 
 
 def test_native_system_state_validates_topology_and_core_bounds() -> None:

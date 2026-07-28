@@ -504,11 +504,14 @@ cluster-dispatch cost after winning the cluster grant. `TACC_STATUS` and
 `TACC_CTL` are CSR operations, not MEX requests, and retain the ordinary
 one-cycle CSR latency after any explicit CSR backpressure. Failed `TACC.TRY`
 uses the same base latency as successful `TRY`. A validation fault consumes
-decode plus any cluster-admission delay but no source or transfer beat. A
-transport fault additionally consumes every issued beat and wait cycle
-through the faulting acknowledgement. `PERF_CYCLES` and `PERF_STALLS` use
-these same rules in Python, native execution, and RTL. Microcores gain the
-currently missing per-caller `PERF_STALLS` path along with `PERF_TILE_OPS`.
+decode plus any cluster-admission delay but no source or transfer beat:
+`TACC_STATUS`, `TACC_CTL`, and non-transfer lifecycle validation faults take
+one full-core base cycle, while `TAMAC`, `TACC.LOAD`, and `TACC.STORE`
+validation faults take two. A transport fault additionally consumes every
+issued beat and wait cycle through the faulting acknowledgement.
+`PERF_CYCLES` and `PERF_STALLS` use these same rules in Python, native
+execution, and RTL. Microcores gain the currently missing per-caller
+`PERF_STALLS` path along with `PERF_TILE_OPS`.
 
 Reset scope is also explicit:
 
@@ -798,12 +801,14 @@ Work:
   owner domain, valid/format coherence, and busy/pending coherence before
   commit;
 - model in-flight operations in the cycle API so sibling status reads observe
-  `BUSY`, supervisor control writes can set `FORCE_PENDING`, and reset or
-  cluster disable cancels late commits by epoch; prove a deferred force
-  release runs after either normal retirement or trap completion and an
-  accepted force write wins over same-cycle TACC admission;
+  `BUSY`, direct or reentrant supervisor control writes can set
+  `FORCE_PENDING`, and reset or cluster disable cancels late commits by epoch;
+  prove a deferred force release runs after either normal retirement or trap
+  completion;
 - include the chip-wide image-transfer staging owner, partial image, beat
   index, and epoch in system-level snapshot, rollback, and reset handling;
+  establish its validated compatibility API here, while timed tenure,
+  interleaved beats, and contention begin in Landing 1.5;
 - add and transport per-microcore `PERF_STALLS` and `PERF_TILE_OPS` state;
 - move TACC state watchers into the native MEX oracle before adding native
   arithmetic; and
@@ -908,6 +913,8 @@ Work:
 - prove simultaneous claims on the four private full-core engines succeed
   independently;
 - send competing same-cluster claims through ordinary round-robin admission;
+- make an accepted force write win over same-cycle TACC admission in the
+  timed scheduler;
 - retire losing cluster claims without internal wait or scheduler eligibility
   change;
 - model all seven physical engines as distinct requestors of the timed

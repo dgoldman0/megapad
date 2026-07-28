@@ -31,6 +31,11 @@ from megapad64 import (
     CSR_SHA_MODE,
     CSR_SHA_MSGLEN,
     CSR_SHA_MSGLEN_HI,
+    CSR_PERF_CTRL,
+    CSR_PERF_STALLS,
+    CSR_PERF_TILEOPS,
+    CSR_TACC_CTL,
+    CSR_TACC_STATUS,
     CSR_TCTRL,
     CSR_TDST,
     CSR_TMODE,
@@ -1081,6 +1086,395 @@ def test_native_cluster_state_is_shared_locally_and_isolated_globally():
     assert sibling.csr_read(CSR_CRC_MODE) == 1
     assert other.csr_read(CSR_CRC_ACC) == 0xAAAA_BBBB_CCCC_DDDD
     assert other.csr_read(CSR_CRC_MODE) == 2
+
+
+def test_tacc_fallback_keeps_microcore_performance_state_caller_private():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner, sibling = cluster.cores[:2]
+    system.load_binary(0, assemble("t.acc.try"))
+    owner.csr_write(CSR_PERF_CTRL, 1)
+    sibling.csr_write(CSR_PERF_CTRL, 1)
+    owner.perf_stalls = 7
+    sibling.perf_stalls = 11
+    owner.pc = 0
+
+    owner.step()
+
+    status = sibling.csr_read(CSR_TACC_STATUS)
+    assert (status >> 16) & 0x1F == owner.core_id
+    assert owner.csr_read(CSR_PERF_TILEOPS) == 1
+    assert sibling.csr_read(CSR_PERF_TILEOPS) == 0
+    assert owner.csr_read(CSR_PERF_STALLS) == 7
+    assert sibling.csr_read(CSR_PERF_STALLS) == 11
+
+    cluster.load_shared_engine_state(sibling)
+    assert cluster.store_shared_engine_state(sibling)
+    assert owner.csr_read(CSR_PERF_TILEOPS) == 1
+    assert sibling.csr_read(CSR_PERF_TILEOPS) == 0
+    assert owner.csr_read(CSR_PERF_STALLS) == 7
+    assert sibling.csr_read(CSR_PERF_STALLS) == 11
+
+
+def test_exceptional_micro_tacc_fallback_restores_authoritative_cluster_state():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner = cluster.cores[0]
+    owner.tmode = 0
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.step()
+    before = cluster._shared_engine_snapshot()
+
+    source = 0x100
+    owner.tsrc0 = source
+    owner.mem[source:source + 256] = bytes(range(256))
+    system.load_binary(0, assemble("t.acc.load"))
+    owner.pc = 0
+    original_read8 = owner.mem_read8
+    injected = RuntimeError("injected micro TACC read failure")
+
+    def fail_first_tacc_read(address: int) -> int:
+        if address == source:
+            raise injected
+        return original_read8(address)
+
+    owner.mem_read8 = fail_first_tacc_read
+    with pytest.raises(RuntimeError) as raised:
+        owner.step()
+    assert raised.value is injected
+
+    after = cluster._shared_engine_snapshot()
+    assert after == before
+    staged = dict(owner._cs.tacc_snapshot())
+    for name in (
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    ):
+        assert staged[name] == after[name]
+    assert staged["tacc"] == bytes(after["tacc"])
+
+
+@pytest.mark.parametrize(
+    "execution_surface",
+    ("step", "core-batch", "system-batch"),
+)
+def test_micro_tacc_reset_callback_cancels_without_retirement(
+    execution_surface: str,
+):
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner = cluster.cores[0]
+    owner.tmode = 0
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.step()
+
+    before = cluster._shared_engine_snapshot()
+    caller_epoch_before = cluster._caller_tacc_epoch(owner.core_id)
+    cycles_before = owner.cycle_count
+    perf_cycles_before = owner.perf_cycles
+    tileops_before = owner.perf_tileops
+    source0 = 0x100
+    source1 = 0x140
+    owner.tsrc0 = source0
+    owner.tsrc1 = source1
+    owner.mem[source0:source0 + 64] = bytes([2]) * 64
+    owner.mem[source1:source1 + 64] = bytes([3]) * 64
+    owner.regs[5] = 0xA5A5_5A5A_DEAD_BEEF
+    system.load_binary(0, assemble("t.amac"))
+    owner.pc = 0
+    original_read8 = owner.mem_read8
+    callback_count = 0
+
+    def reset_during_source_read(address: int) -> int:
+        nonlocal callback_count
+        if address == source0 and callback_count == 0:
+            callback_count += 1
+            owner._reset_state_in_memory_scope()
+        return original_read8(address)
+
+    owner.mem_read8 = reset_during_source_read
+    if execution_surface == "step":
+        assert owner.step() == 0
+    elif execution_surface == "core-batch":
+        stats = owner.run_steps_stats(1)
+        assert stats.steps_executed == 0
+        assert stats.total_cycles == 0
+        assert stats.stop_reason == 0
+    else:
+        for cpu in system.cores:
+            cpu.halted = cpu is not owner
+            cpu.idle = False
+        stats = system.run_batch_stats(1)
+        assert stats.instructions_executed == 0
+        assert stats.per_core_instructions == (0,) * system.num_cores
+        assert stats.per_core_cycles == (0,) * system.num_cores
+
+    assert callback_count == 1
+    assert owner.pc == 0
+    assert owner.regs[5] == 0
+    assert owner.cycle_count == cycles_before
+    assert owner.perf_cycles == perf_cycles_before
+    assert owner.perf_tileops == tileops_before
+    assert cluster._caller_tacc_epoch(owner.core_id) == caller_epoch_before + 1
+    assert cluster._shared_engine_snapshot() == before
+    staged = dict(owner._cs.tacc_snapshot())
+    assert staged["tacc"] == bytes(before["tacc"])
+    for name in (
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    ):
+        assert staged[name] == before[name]
+
+
+@pytest.mark.parametrize(
+    "execution_surface",
+    ("step", "core-batch", "system-batch"),
+)
+def test_guest_micro_reset_retires_without_discarding_shared_tacc(
+    execution_surface: str,
+):
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner = cluster.cores[0]
+    owner.tmode = 0
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.step()
+
+    before = cluster._shared_engine_snapshot()
+    caller_epoch_before = cluster._caller_tacc_epoch(owner.core_id)
+    cycles_before = owner.cycle_count
+    owner.regs[5] = 0xA5A5_5A5A_DEAD_BEEF
+    system.load_binary(0, assemble("reset"))
+    owner.pc = 0
+
+    if execution_surface == "step":
+        assert owner.step() == 1
+    elif execution_surface == "core-batch":
+        stats = owner.run_steps_stats(1)
+        assert stats.steps_executed == 1
+        assert stats.total_cycles == 1
+        assert stats.stop_reason == 0
+    else:
+        for cpu in system.cores:
+            cpu.halted = cpu is not owner
+            cpu.idle = False
+        stats = system.run_batch_stats(1)
+        assert stats.instructions_executed == 1
+        assert stats.per_core_instructions[owner.core_id] == 1
+        assert stats.per_core_cycles[owner.core_id] == 1
+
+    assert owner.pc == 0
+    assert owner.regs[5] == 0
+    assert owner.cycle_count == cycles_before + 1
+    assert cluster._caller_tacc_epoch(owner.core_id) == caller_epoch_before + 1
+    assert cluster._shared_engine_snapshot() == before
+
+
+def test_scratchpad_tacc_reset_callback_uses_executed_route_for_cancellation():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner = cluster.cores[0]
+    owner.tmode = 0
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.step()
+
+    before = cluster._shared_engine_snapshot()
+    caller_epoch_before = cluster._caller_tacc_epoch(owner.core_id)
+    cycles_before = owner.cycle_count
+    tileops_before = owner.perf_tileops
+    source0 = 0x100
+    source1 = 0x140
+    owner.tsrc0 = source0
+    owner.tsrc1 = source1
+    owner.mem[source0:source0 + 64] = bytes([2]) * 64
+    owner.mem[source1:source1 + 64] = bytes([3]) * 64
+    system.load_binary(0, assemble("nop"))
+    scratchpad_code = assemble("t.amac")
+    for offset, value in enumerate(scratchpad_code):
+        cluster.spad_write8(offset, value)
+    owner.pc = CLUSTER_SPAD_ADDR
+    original_read8 = owner.mem_read8
+    callback_count = 0
+
+    def reset_during_source_read(address: int) -> int:
+        nonlocal callback_count
+        if address == source0 and callback_count == 0:
+            callback_count += 1
+            owner._reset_state_in_memory_scope()
+        return original_read8(address)
+
+    owner.mem_read8 = reset_during_source_read
+
+    assert owner.step() == 0
+    assert callback_count == 1
+    assert owner.pc == 0
+    assert owner.cycle_count == cycles_before
+    assert owner.perf_tileops == tileops_before
+    assert cluster._caller_tacc_epoch(owner.core_id) == caller_epoch_before + 1
+    assert cluster._shared_engine_snapshot() == before
+
+
+def test_scratchpad_guest_reset_ignores_bank_zero_tacc_alias():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner = cluster.cores[0]
+    owner.tmode = 0
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.step()
+
+    before = cluster._shared_engine_snapshot()
+    caller_epoch_before = cluster._caller_tacc_epoch(owner.core_id)
+    cycles_before = owner.cycle_count
+    owner.regs[5] = 0xA5A5_5A5A_DEAD_BEEF
+    system.load_binary(0, assemble("t.amac"))
+    scratchpad_code = assemble("reset")
+    for offset, value in enumerate(scratchpad_code):
+        cluster.spad_write8(offset, value)
+    owner.pc = CLUSTER_SPAD_ADDR
+
+    assert owner.step() == 1
+    assert owner.pc == 0
+    assert owner.regs[5] == 0
+    assert owner.cycle_count == cycles_before + 1
+    assert cluster._caller_tacc_epoch(owner.core_id) == caller_epoch_before + 1
+    assert cluster._shared_engine_snapshot() == before
+
+
+@pytest.mark.parametrize("fault_at_completion", (False, True))
+def test_accelerated_micro_tacc_reentrant_force_wins_at_terminal_boundary(
+    fault_at_completion: bool,
+):
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    cluster.cl_priv_level = 0
+    owner, sibling = cluster.cores[:2]
+    owner.tmode = 0
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.step()
+
+    source = 0x100
+    owner.tsrc0 = source
+    owner.mem[source:source + 256] = bytes(range(256))
+    system.load_binary(0, assemble("t.acc.load"))
+    owner.pc = 0
+    original_read8 = owner.mem_read8
+    injected = TrapError(
+        IVEC_ILLEGAL_OP,
+        "injected accelerated micro TACC failure",
+    )
+    probed = False
+
+    def force_during_read(address: int) -> int:
+        nonlocal probed
+        if address == source and not probed:
+            probed = True
+            active = sibling.csr_read(CSR_TACC_STATUS)
+            assert active & (1 << 4)
+            assert active & (1 << 1) == 0
+            assert (active >> 16) & 0x1F == owner.core_id
+
+            sibling.csr_write(CSR_TACC_CTL, 1)
+            pending = sibling.csr_read(CSR_TACC_STATUS)
+            assert pending & (1 << 4)
+            assert pending & (1 << 9)
+            assert (pending >> 16) & 0x1F == owner.core_id
+            if fault_at_completion:
+                raise injected
+        return original_read8(address)
+
+    owner.mem_read8 = force_during_read
+    if fault_at_completion:
+        with pytest.raises(TrapError) as raised:
+            owner.step()
+        assert raised.value is injected
+    else:
+        owner.step()
+
+    assert probed
+    terminal = sibling.csr_read(CSR_TACC_STATUS)
+    assert terminal & 0x3FF == 0
+    assert (terminal >> 16) & 0x1F == 31
+    assert not any(cluster._shared_engine_snapshot()["tacc"])
 
 
 def test_native_cluster_reset_preserves_scratchpad_and_api_boundaries():

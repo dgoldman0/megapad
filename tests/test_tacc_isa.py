@@ -130,12 +130,12 @@ def test_assembler_sizes_lifecycle_labels_and_rejects_ambiguous_forms() -> None:
 @pytest.mark.parametrize(
     ("raw", "end_pc", "fault_cycles"),
     [
-        (bytes.fromhex("e107"), 2, 1),       # reserved TMUL function 7
-        (bytes.fromhex("e126"), 2, 1),       # noncanonical TAMAC function
-        (bytes.fromhex("e906"), 2, 1),       # illegal immediate selector
-        (bytes.fromhex("f8e307"), 3, 2),     # reserved lifecycle function 7
-        (bytes.fromhex("f8e322"), 3, 2),     # noncanonical lifecycle function
-        (bytes.fromhex("f8e70200"), 4, 2),   # noncanonical lifecycle selector
+        (bytes.fromhex("e107"), 2, 2),       # reserved TMUL function 7
+        (bytes.fromhex("e126"), 2, 2),       # noncanonical TAMAC function
+        (bytes.fromhex("e906"), 2, 2),       # illegal immediate selector
+        (bytes.fromhex("f8e307"), 3, 1),     # reserved lifecycle function 7
+        (bytes.fromhex("f8e322"), 3, 1),     # noncanonical lifecycle function
+        (bytes.fromhex("f8e70200"), 4, 1),   # noncanonical lifecycle selector
     ],
 )
 def test_reserved_and_noncanonical_encodings_trap_after_complete_decode(
@@ -242,9 +242,9 @@ def test_failed_try_retires_normally_without_mutating_foreign_state() -> None:
 @pytest.mark.parametrize(
     ("instruction", "fault_cycles"),
     [
-        ("t.acc.clear", 2),
+        ("t.acc.clear", 1),
         ("t.acc.load", 2),
-        ("t.amac", 1),
+        ("t.amac", 2),
     ],
 )
 def test_unsupported_modes_fault_before_reads_or_mutation(
@@ -681,7 +681,7 @@ def test_trap_handler_saves_complete_instruction_return_pc() -> None:
 
     total = cpu.run(max_steps=1)
 
-    assert total == 2
+    assert total == 1
     assert cpu.pc == 0x300
     assert cpu.mem_read64(cpu.sp) == 3
 
