@@ -11892,6 +11892,7 @@ struct PendingClusterRequest {
     int operation = -1;
     bool sha_transaction = false;
     bool sha_lock_protected = false;
+    bool tacc_request = false;
     int continuation_reason = RUN_EXT_FALLBACK;
     uint8_t encoding_length = 0;
     std::array<uint8_t, 16> encoding{};
@@ -11923,6 +11924,7 @@ struct CoreFrontierOutcome {
     bool coordinator_state_changed = false;
     std::vector<int> interrupt_cores;
     std::vector<int> cluster_deferred_cores;
+    std::vector<int> cluster_round_deferred_cores;
     std::vector<int> cluster_lost_cores;
     std::vector<FrontierCreditTransfer>
         cluster_credit_transfers;
@@ -12133,6 +12135,28 @@ static PendingClusterRequest classify_pending_cluster_request(
                 source_selector == 0x2
                 ? 0
                 : function & 0x7;
+            request.tacc_request =
+                (
+                    mex_operation == 0x1 &&
+                    (
+                        (
+                            source_selector != 0x2 &&
+                            (
+                                (function & 0x7) == 0x6 ||
+                                (function & 0x7) == 0x7
+                            )
+                        ) ||
+                        (
+                            source_selector == 0x2 &&
+                            function == 0x06
+                        )
+                    )
+                ) ||
+                (
+                    modifier == 0x8 &&
+                    mex_operation == 0x3 &&
+                    (function & 0x7) >= 0x2
+                );
             request.sha_lock_protected =
                 mex_operation == 0x2 ||
                 (
@@ -15844,7 +15868,8 @@ static void run_parallel_core_subfrontier(
         const py::function& settle_continuation,
         const py::function& settle_dispatch_error,
         SystemBatchResult& result,
-        CoreFrontierOutcome& outcome) {
+        CoreFrontierOutcome& outcome,
+        std::vector<bool>& tacc_admission_fenced) {
     if (reservations.empty())
         return;
     ConcurrencyProfileCounters& profile =
@@ -16307,6 +16332,18 @@ static void run_parallel_core_subfrontier(
     std::vector<std::optional<DeferredClusterRequest>>
         initial_cluster_requests(
             reservations.size());
+    // This fence is a coordinator-frontier fact, not architectural engine
+    // state. FORCE_PENDING carries a busy engine across later frontiers;
+    // an idle force needs only to keep same-frontier TACC requests from
+    // validating against the just-wiped image.
+    std::vector<uint64_t> tacc_frontier_epochs;
+    tacc_frontier_epochs.reserve(
+        system.cluster_states.size());
+    for (const ClusterState& cluster :
+         system.cluster_states) {
+        tacc_frontier_epochs.push_back(
+            cluster.tacc_epoch);
+    }
     for (
         std::size_t index = 0;
         index < reservations.size();
@@ -16631,6 +16668,26 @@ static void run_parallel_core_subfrontier(
         }
     }
 
+    // Reset, cancellation, or a force pulse accepted through a reentrant
+    // control path can advance an engine epoch without appearing as this
+    // frontier's guest CSRW. Apply that cancellation first and require every
+    // surviving TACC request to revalidate on a later frontier.
+    for (
+        std::size_t cluster_index = 0;
+        cluster_index <
+            system.cluster_states.size();
+        cluster_index++
+    ) {
+        if (
+            system.cluster_states[cluster_index]
+                .tacc_epoch !=
+            tacc_frontier_epochs[cluster_index]
+        ) {
+            tacc_admission_fenced[cluster_index] =
+                true;
+        }
+    }
+
     // Re-snapshot cluster requests from live PCs and live cluster state only
     // after every earlier ordinary effect is committed.
     std::vector<std::optional<DeferredClusterRequest>>
@@ -16659,6 +16716,10 @@ static void run_parallel_core_subfrontier(
         }
     }
 
+    std::vector<bool> tacc_admission_deferred(
+        reservations.size(), false);
+    std::vector<bool> tacc_force_blocked(
+        reservations.size(), false);
     struct ClusterGrantGroup {
         int cluster_index = -1;
         ClusterResourceKind resource =
@@ -16704,6 +16765,25 @@ static void run_parallel_core_subfrontier(
                         group.resource
                 ) {
                     group.candidates.push_back(index);
+                    const bool tacc_request =
+                        group.resource ==
+                            ClusterResourceKind::
+                                TILE_ENGINE &&
+                        request->request.tacc_request;
+                    tacc_force_blocked[index] =
+                        tacc_request &&
+                        cluster.tacc_force_pending;
+                    tacc_admission_deferred[index] =
+                        tacc_request &&
+                        !tacc_force_blocked[index] &&
+                        tacc_admission_fenced[
+                            cluster_index];
+                    if (
+                        tacc_force_blocked[index] ||
+                        tacc_admission_deferred[index]
+                    ) {
+                        continue;
+                    }
                     local_candidates.push_back(
                         request->local_core);
                     sha_lock_protected.push_back(
@@ -16724,9 +16804,14 @@ static void run_parallel_core_subfrontier(
                         group.candidates.begin(),
                         group.candidates.end(),
                         [&](std::size_t index) {
-                            return cluster_requests[index]
-                                ->local_core ==
-                                *local_winner;
+                            return (
+                                cluster_requests[index]
+                                    ->local_core ==
+                                    *local_winner &&
+                                !tacc_force_blocked[index] &&
+                                !tacc_admission_deferred[
+                                    index]
+                            );
                         });
                 if (selected ==
                     group.candidates.end()) {
@@ -16755,10 +16840,18 @@ static void run_parallel_core_subfrontier(
         });
 
     // Arbitration choices are frozen together, not discovered in winner
-    // commit order. Every nonselected request is a loser, including requests
-    // that hard eligibility left without a winner. A cyclic-earlier loser can
-    // therefore fund a later zero-credit winner even when the loser's own
-    // resource group appears later in the commit sequence.
+    // commit order. Every nonselected admissible request is a loser,
+    // including requests that hard eligibility left without a winner.
+    // Force-fenced TACC requests remain deferred for fresh validation at a
+    // later frontier. They may donate otherwise stranded aggregate credit to
+    // a cyclic-later admissible request without retiring or advancing their
+    // own PC; the outer round accounts that transfer and leaves the fenced
+    // request pending for a later call.
+    // FORCE_PENDING requests close this round as ineligible losers; their PC
+    // remains unchanged and a later progressing frontier may retry them only
+    // after the active operation has had an opportunity to terminate.
+    // A cyclic-earlier loser can fund a later zero-credit winner even when
+    // the loser's own resource group appears later in the commit sequence.
     std::vector<bool> frozen_cluster_losers(
         reservations.size(), false);
     std::vector<int64_t> frozen_transferable_credit(
@@ -16766,6 +16859,13 @@ static void run_parallel_core_subfrontier(
     for (const ClusterGrantGroup& group : groups) {
         for (std::size_t index :
              group.candidates) {
+            if (tacc_admission_deferred[index]) {
+                frozen_transferable_credit[index] =
+                    reservations[index].max_steps -
+                    private_results[index]
+                        .steps_executed;
+                continue;
+            }
             if (
                 group.winner.has_value() &&
                 index == *group.winner
@@ -16901,8 +17001,17 @@ static void run_parallel_core_subfrontier(
         if (!group.winner.has_value()) {
             for (std::size_t index :
                  group.candidates) {
-                outcome.cluster_lost_cores.push_back(
-                    reservations[index].core_index);
+                if (tacc_admission_deferred[index]) {
+                    outcome.cluster_round_deferred_cores
+                        .push_back(
+                            reservations[index]
+                                .core_index);
+                } else {
+                    outcome.cluster_lost_cores
+                        .push_back(
+                            reservations[index]
+                                .core_index);
+                }
                 dispatch_open[index] = false;
             }
             continue;
@@ -16921,8 +17030,7 @@ static void run_parallel_core_subfrontier(
                 acquire_shared_memory_use(guard_core);
             const std::optional<
                 DeferredClusterRequest> live =
-                    capture_cluster_request(
-                        winner);
+                    capture_cluster_request(winner);
             stable =
                 live.has_value() &&
                 live->cluster_index ==
@@ -16940,6 +17048,8 @@ static void run_parallel_core_subfrontier(
                 live->request.sha_lock_protected ==
                     frozen_winner.request
                         .sha_lock_protected &&
+                live->request.tacc_request ==
+                    frozen_winner.request.tacc_request &&
                 live->request.continuation_reason ==
                     frozen_winner.request
                         .continuation_reason &&
@@ -16948,6 +17058,18 @@ static void run_parallel_core_subfrontier(
                         .encoding_length &&
                 live->request.encoding ==
                     frozen_winner.request.encoding &&
+                !(
+                    live->request.tacc_request &&
+                    (
+                        tacc_admission_fenced[
+                            static_cast<std::size_t>(
+                                group.cluster_index)] ||
+                        system.cluster_states[
+                            static_cast<std::size_t>(
+                                group.cluster_index)]
+                            .tacc_force_pending
+                    )
+                ) &&
                 system.cluster_states[
                     static_cast<std::size_t>(
                         group.cluster_index)]
@@ -16964,6 +17086,13 @@ static void run_parallel_core_subfrontier(
                 if (frozen_cluster_losers[index]) {
                     outcome.cluster_lost_cores.push_back(
                         reservations[index].core_index);
+                } else if (
+                    tacc_admission_deferred[index]
+                ) {
+                    outcome.cluster_round_deferred_cores
+                        .push_back(
+                            reservations[index]
+                                .core_index);
                 } else {
                     outcome.cluster_deferred_cores.push_back(
                         reservations[index].core_index);
@@ -16977,8 +17106,20 @@ static void run_parallel_core_subfrontier(
              group.candidates) {
             if (index == winner)
                 continue;
-            outcome.cluster_lost_cores.push_back(
-                reservations[index].core_index);
+            if (frozen_cluster_losers[index]) {
+                outcome.cluster_lost_cores.push_back(
+                    reservations[index].core_index);
+            } else if (
+                tacc_admission_deferred[index]
+            ) {
+                outcome.cluster_round_deferred_cores
+                    .push_back(
+                        reservations[index].core_index);
+            } else {
+                outcome.cluster_deferred_cores
+                    .push_back(
+                        reservations[index].core_index);
+            }
             dispatch_open[index] = false;
         }
 
@@ -17380,6 +17521,12 @@ static void run_parallel_core_round(
             core_count, {});
         return subfrontier;
     };
+
+    // FORCE admission is fenced for the complete scheduler round. A round
+    // may need several subfrontiers to redistribute aggregate credit, but
+    // they all model the same architectural admission frontier.
+    std::vector<bool> tacc_admission_fenced(
+        system.cluster_states.size(), false);
 
     while (true) {
         std::vector<bool> immediate_cluster_request(
@@ -17830,7 +17977,8 @@ static void run_parallel_core_round(
                 settle_continuation,
                 settle_dispatch_error,
                 subfrontier_result,
-                subfrontier_outcome);
+                subfrontier_outcome,
+                tacc_admission_fenced);
         } catch (...) {
             absorb_subfrontier(
                 /*execution_stopped=*/true);
@@ -17905,6 +18053,11 @@ static void run_parallel_core_round(
                     subfrontier_outcome
                         .cluster_deferred_cores,
                     core_index);
+            const bool cluster_round_deferred =
+                contains_core(
+                    subfrontier_outcome
+                        .cluster_round_deferred_cores,
+                    core_index);
 
             if (interrupted) {
                 close_dispatch(
@@ -17932,6 +18085,20 @@ static void run_parallel_core_round(
                         reservation_index);
                     done[reservation_index] = true;
                 }
+                continue;
+            }
+            if (cluster_round_deferred) {
+                // A FORCE epoch fence lasts through this entire scheduler
+                // round. Close the pending instruction without retirement
+                // and return any unused credit so it can revalidate in the
+                // next round rather than spinning through subfrontiers that
+                // model the same admission edge.
+                close_dispatch(
+                    reservation_index,
+                    RUN_EXT_FALLBACK);
+                release_unused_credit(
+                    reservation_index);
+                done[reservation_index] = true;
                 continue;
             }
             if (dispatch_boundary) {

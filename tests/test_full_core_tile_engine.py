@@ -22,6 +22,7 @@ from megapad64 import (
     CSR_TSTRIDE_R,
     CSR_TTILE_H,
     CSR_TTILE_W,
+    IVEC_ILLEGAL_OP,
     IVEC_PRIV_FAULT,
     TrapError,
     TACC_OWNER_NONE,
@@ -38,6 +39,14 @@ def _system(*, full_cores: int = 4, clusters: int = 3) -> MegapadSystem:
         ext_mem_size=0,
         vram_size=0,
     )
+
+
+def _cluster_tacc_domain(cluster: MicroCluster) -> dict:
+    return {
+        name: value
+        for name, value in cluster._shared_engine_snapshot().items()
+        if name.startswith("tacc")
+    }
 
 
 def test_production_topology_has_four_full_core_and_three_cluster_domains():
@@ -237,6 +246,227 @@ def test_all_seven_physical_tacc_domains_can_be_claimed_independently():
         cluster.cores[0].csr_read(CSR_ACC0)
         for cluster in system.clusters
     ] == list(range(0x101, 0x108))
+
+
+def test_same_frontier_full_core_claims_use_four_private_tacc_engines():
+    system = _system(clusters=0)
+    addresses = (0x00, 0x40, 0x80, 0xC0)
+    instruction = assemble("t.acc.try")
+
+    for cpu, address in zip(system.cores, addresses):
+        system.load_binary(address, instruction)
+        cpu.pc = address
+        cpu.halted = False
+        cpu.idle = False
+
+    stats = system.run_batch_stats(4)
+
+    assert stats.native_scheduler
+    assert stats.native_rounds == 1
+    assert stats.per_core_instructions == (1, 1, 1, 1)
+    assert stats.per_core_cycles == (2, 2, 2, 2)
+    assert tuple(cpu.pc for cpu in system.cores) == tuple(
+        address + len(instruction)
+        for address in addresses
+    )
+    for cpu in system.cores:
+        status = cpu.csr_read(CSR_TACC_STATUS)
+        assert status & 0b11 == 0b11
+        assert status & (1 << 4) == 0
+        assert (status >> 16) & 0x1F == cpu.core_id
+
+
+def test_competing_cluster_try_uses_rr_and_failed_claim_keeps_mex_eligible():
+    system = _system(full_cores=1, clusters=1)
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    loser, winner = cluster.cores[:2]
+    loser_address = 0x100
+    winner_address = 0x180
+    try_size = len(assemble("t.acc.try"))
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    system.load_binary(
+        loser_address,
+        assemble("t.acc.try\nt.add\nhalt"),
+    )
+    system.load_binary(
+        winner_address,
+        assemble("t.acc.try\nhalt"),
+    )
+    loser.pc = loser_address
+    loser.halted = False
+    winner.pc = winner_address
+    winner.halted = False
+    loser.tsrc0 = 0x300
+    loser.tsrc1 = 0x340
+    loser.tdst = 0x380
+    loser.mem[0x300:0x340] = bytes([2]) * 64
+    loser.mem[0x340:0x380] = bytes([5]) * 64
+
+    claimed = system.run_batch_stats(1)
+
+    assert claimed.per_core_instructions[winner.core_id] == 1
+    assert loser.pc == loser_address
+    assert winner.pc == winner_address + try_size
+    assert (winner.csr_read(CSR_TACC_STATUS) >> 16) & 0x1F == winner.core_id
+    arbiter = system._native_system._cluster_arbiter_snapshot(0)
+    assert arbiter["grant_counts"]["tile_engine"] == 1
+    assert arbiter["last_grants"]["tile_engine"] == 1
+
+    winner.halted = True
+    owned = _cluster_tacc_domain(cluster)
+    failed = system.run_batch_stats(1)
+
+    assert failed.system_stop_reason == "instruction_limit"
+    assert failed.per_core_instructions[loser.core_id] == 1
+    assert loser.pc == loser_address + try_size
+    assert loser.csr_read(CSR_TACC_STATUS) & 0b11 == 0b01
+    assert _cluster_tacc_domain(cluster) == owned
+    arbiter = system._native_system._cluster_arbiter_snapshot(0)
+    assert arbiter["grant_counts"]["tile_engine"] == 2
+    assert arbiter["last_grants"]["tile_engine"] == 0
+
+    stateless = system.run_batch_stats(1)
+
+    assert stateless.per_core_instructions[loser.core_id] == 1
+    assert bytes(loser.mem[0x380:0x3C0]) == bytes([7]) * 64
+    assert _cluster_tacc_domain(cluster) == owned
+    arbiter = system._native_system._cluster_arbiter_snapshot(0)
+    assert arbiter["grant_counts"]["tile_engine"] == 3
+    assert arbiter["last_grants"]["tile_engine"] == 0
+
+
+def test_same_frontier_force_fences_tacc_but_not_stateless_mex():
+    system = _system(full_cores=1, clusters=1)
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    cluster.cl_priv_level = 0
+    claimant, force_writer, legacy_mex, owner = cluster.cores
+
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0x20, assemble(instruction))
+        owner.pc = 0x20
+        owner.halted = False
+        owner.step()
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    force_address = 0x100
+    legacy_address = 0x180
+    claim_address = 0x200
+    system.load_binary(
+        force_address,
+        assemble(f"csrw {CSR_TACC_CTL}, r1\nhalt"),
+    )
+    system.load_binary(legacy_address, assemble("t.add\nhalt"))
+    system.load_binary(claim_address, assemble("t.acc.try\nhalt"))
+    force_writer.pc = force_address
+    force_writer.regs[1] = 1
+    force_writer.halted = False
+    legacy_mex.pc = legacy_address
+    legacy_mex.halted = False
+    legacy_mex.tsrc0 = 0x300
+    legacy_mex.tsrc1 = 0x340
+    legacy_mex.tdst = 0x380
+    legacy_mex.mem[0x300:0x340] = bytes([3]) * 64
+    legacy_mex.mem[0x340:0x380] = bytes([4]) * 64
+    claimant.pc = claim_address
+    claimant.halted = False
+
+    fenced = system.run_batch_stats(2)
+
+    assert fenced.per_core_instructions[force_writer.core_id] == 1
+    assert fenced.per_core_instructions[legacy_mex.core_id] == 1
+    assert fenced.per_core_instructions[claimant.core_id] == 0
+    assert claimant.pc == claim_address
+    assert bytes(legacy_mex.mem[0x380:0x3C0]) == bytes([7]) * 64
+    released = _cluster_tacc_domain(cluster)
+    assert released["tacc_owner"] == TACC_OWNER_NONE
+    assert not released["tacc_valid"]
+    assert not released["tacc_busy"]
+    assert not released["tacc_force_pending"]
+    arbiter = system._native_system._cluster_arbiter_snapshot(0)
+    assert arbiter["grant_counts"]["tile_engine"] == 1
+    assert arbiter["last_grants"]["tile_engine"] == 2
+
+    admitted = system.run_batch_stats(1)
+
+    assert admitted.per_core_instructions[claimant.core_id] == 1
+    assert claimant.pc == claim_address + len(assemble("t.acc.try"))
+    status = claimant.csr_read(CSR_TACC_STATUS)
+    assert status & 0b11 == 0b11
+    assert (status >> 16) & 0x1F == claimant.core_id
+    arbiter = system._native_system._cluster_arbiter_snapshot(0)
+    assert arbiter["grant_counts"]["tile_engine"] == 2
+    assert arbiter["last_grants"]["tile_engine"] == 0
+
+
+def test_granted_nonowner_store_faults_before_memory_or_stage_mutation():
+    system = _system(full_cores=1, clusters=1)
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    nonowner, owner = cluster.cores[:2]
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.halted = False
+        owner.step()
+
+    cluster.load_shared_engine_state(owner)
+    image = bytearray(owner.tacc)
+    image[0] = 0xA5
+    owner.tacc = bytes(image)
+    assert cluster.store_shared_engine_state(owner)
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    destination = 0x400
+    sentinel = bytes([0xCC]) * 256
+    nonowner.mem[destination:destination + 256] = sentinel
+    nonowner.tdst = destination
+    nonowner.perf_enable = 1
+    system.load_binary(0x100, assemble("t.acc.store"))
+    nonowner.pc = 0x100
+    nonowner.halted = False
+    nonowner.ivt_base = 0x800
+    nonowner.sp = 0xF00
+    handler = 0xA00
+    vector = nonowner.ivt_base + IVEC_ILLEGAL_OP * 8
+    nonowner.mem[vector:vector + 8] = handler.to_bytes(8, "little")
+    destination_writes = []
+    original_write8 = nonowner.mem_write8
+
+    def observe_write(address: int, value: int):
+        if destination <= address < destination + 256:
+            destination_writes.append((address, value))
+        return original_write8(address, value)
+
+    nonowner.mem_write8 = observe_write
+    before_tacc = _cluster_tacc_domain(cluster)
+    before_stage = dict(
+        system._native_system._tacc_image_stage_snapshot()
+    )
+
+    stats = system.run_batch_stats(1)
+
+    assert stats.native_scheduler
+    assert nonowner.ivec_id == IVEC_ILLEGAL_OP
+    assert nonowner.pc == handler
+    assert nonowner.perf_tileops == 0
+    assert destination_writes == []
+    assert bytes(nonowner.mem[destination:destination + 256]) == sentinel
+    assert _cluster_tacc_domain(cluster) == before_tacc
+    assert dict(
+        system._native_system._tacc_image_stage_snapshot()
+    ) == before_stage
+    arbiter = system._native_system._cluster_arbiter_snapshot(0)
+    assert arbiter["grant_counts"]["tile_engine"] == 1
+    assert arbiter["last_grants"]["tile_engine"] == 0
 
 
 def test_acc_zero_is_sampled_and_cleared_only_on_the_granted_caller():

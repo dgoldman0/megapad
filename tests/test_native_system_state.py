@@ -29,6 +29,7 @@ from nic_backends import LoopbackBackend
 from megapad64 import (
     CSR_TACC_CTL,
     CSR_TACC_STATUS,
+    IVEC_IPI,
     IVEC_PRIV_FAULT,
     TACC_OWNER_NONE,
 )
@@ -313,6 +314,128 @@ def test_native_guest_tacc_csrs_are_not_silent_placeholders() -> None:
         busy=False,
         force_pending=False,
     )
+
+
+def test_cluster_tacc_ownership_survives_interrupt_and_preemption() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    cluster.set_enabled(True)
+    owner, sibling = cluster.cores[:2]
+    for instruction in ("t.acc.try", "t.acc.clear"):
+        system.load_binary(0, assemble(instruction))
+        owner.pc = 0
+        owner.halted = False
+        owner.step()
+    owned = dict(cluster._shared_engine_snapshot())
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    handler = 0x600
+    handler_encoding = assemble("nop")
+    system.load_binary(handler, handler_encoding)
+    owner.ivt_base = 0x400
+    owner.sp = 0xF00
+    owner.mem[
+        owner.ivt_base + IVEC_IPI * 8:
+        owner.ivt_base + IVEC_IPI * 8 + 8
+    ] = handler.to_bytes(8, "little")
+    owner.pc = 0x100
+    owner.flag_i = True
+    owner.halted = False
+    assert system.cores[0]._cs.ipi_send(owner.core_id)
+
+    interrupted = system.run_batch_stats(1)
+
+    # The unbounded scheduler accepts the interrupt before the next fetch,
+    # then may spend the still-available instruction budget in the handler.
+    assert interrupted.instructions_executed == 1
+    assert interrupted.per_core_instructions[owner.core_id] == 1
+    assert owner.ivec_id == IVEC_IPI
+    assert owner.pc == handler + len(handler_encoding)
+    assert dict(cluster._shared_engine_snapshot()) == owned
+
+    owner.halted = True
+    system.load_binary(0x180, assemble("nop"))
+    sibling.pc = 0x180
+    sibling.halted = False
+
+    preempted = system.run_batch_stats(1)
+
+    assert preempted.per_core_instructions[sibling.core_id] == 1
+    assert dict(cluster._shared_engine_snapshot()) == owned
+    status = owner.csr_read(CSR_TACC_STATUS)
+    assert status & 0b11 == 0b11
+    assert (status >> 16) & 0x1F == owner.core_id
+
+
+def test_micro_reset_cancels_only_its_cluster_caller_epoch() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=2,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    for cluster in system.clusters:
+        cluster.set_enabled(True)
+    system.load_binary(0, assemble("t.acc.try\nt.acc.clear"))
+    full_owner = system.cores[0]
+    cluster_owners = (
+        system.clusters[0].cores[0],
+        system.clusters[1].cores[0],
+    )
+    for owner in (full_owner,) + cluster_owners:
+        owner.pc = 0
+        owner.halted = False
+        owner.step()
+        owner.step()
+
+    full_domains = tuple(
+        dict(cpu._cs.tacc_snapshot())
+        for cpu in system.cores[:system.num_full_cores]
+    )
+    cluster_domains = tuple(
+        dict(cluster._shared_engine_snapshot())
+        for cluster in system.clusters
+    )
+    caller_epochs = tuple(
+        tuple(
+            system._native_system
+            ._cluster_tacc_caller_epochs_snapshot(index)
+        )
+        for index in range(2)
+    )
+    stage = dict(system._native_system._tacc_image_stage_snapshot())
+    cancelled = system.clusters[0].cores[2]
+
+    cancelled._reset_state()
+
+    expected_first_epochs = list(caller_epochs[0])
+    expected_first_epochs[2] += 1
+    assert tuple(
+        system._native_system._cluster_tacc_caller_epochs_snapshot(0)
+    ) == tuple(expected_first_epochs)
+    assert tuple(
+        system._native_system._cluster_tacc_caller_epochs_snapshot(1)
+    ) == caller_epochs[1]
+    assert tuple(
+        dict(cpu._cs.tacc_snapshot())
+        for cpu in system.cores[:system.num_full_cores]
+    ) == full_domains
+    assert tuple(
+        dict(cluster._shared_engine_snapshot())
+        for cluster in system.clusters
+    ) == cluster_domains
+    assert dict(system._native_system._tacc_image_stage_snapshot()) == stage
 
 
 def test_native_system_state_validates_topology_and_core_bounds() -> None:
