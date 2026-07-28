@@ -1,11 +1,18 @@
 # Full TACC ISA and implementation handoff
 
-- Status: Phase 1 complete; emulator oracle and acceptance matrix locked
+- Status: Phase 1 complete and integrated with the Phase 5 production
+  scheduler; Phase 2 is next
 - Date: 2026-07-28
-- Feature branch: `feature/megapad-full-tacc`
+- Phase-1 feature branch: `feature/megapad-full-tacc`
+- Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
+- Integration branch: `integration/phase5-full-tacc`
+- Phase-5 merge: `5f1e4e51a48a3394504b95d92cefb111b92fd616`
+- Combined TACC merge: `895fca8e2e26c7f91cc525e90e5edd3ab13cb0f4`
 - Phase-0 base commit: `c8e8118e82a899ec3f101f63d277a1bf4ef5f84a`
-- Isolated worktree:
+- Phase-1 worktree:
   `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc`
+- Integration worktree:
+  `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-phase5-full-tacc-integration`
 
 This document supersedes the condensed workspace-root
 `CHIP_MATH_UPDATE_HANDOFF.md`. The original correctly identified persistent
@@ -1776,3 +1783,82 @@ Phase 2:
 - [ ] FP16/BF16 TACC accumulation.
 - [ ] Differential SoC closure.
 - [ ] Approved synthesis, routed timing, and resource acceptance.
+
+## 18. Phase 1 integration closure
+
+Phase 1 was integrated only after the previously unmerged Phase 5 production
+concurrency rollout. Commit `5f1e4e5` merges Phase 5 onto the newer main
+security and networking base. Commit `895fca8` then merges the full-TACC
+feature tip and resolves the two overlapping scheduler files.
+
+The combined contract is:
+
+- every positive production batch remains owned by Phase 5's single native
+  system coordinator, with `worker_count=None` resolving once to the supported
+  one-, two-, or four-lane policy;
+- cluster-capable public `step()` uses that same native coordinator when no
+  core has a deliberate step override, so direct stepping and batching see
+  the same common tile-engine admission;
+- exact cycle-bounded execution remains limited to its proved full-core-only
+  topology;
+- every full core has a private ACC/TACC engine and each microcluster shares
+  one ACC/TACC engine, for seven physical ownership domains; and
+- dedicated multi-core TACC oracle fixtures explicitly use one worker.
+  Cross-width
+  behavior is tested only by the named Phase 5 and TACC contention gates, so
+  reference semantics do not silently depend on host affinity.
+
+### 18.1 Combined-tree evidence
+
+All emulator tests below ran sequentially with
+`MP64_RUNTIME_NAMESPACE=megapad-p5-tacc-integration`.
+
+| Gate | Result |
+|---|---:|
+| Accelerator rebuild | passed |
+| Native batch boundaries | 25 passed |
+| Public-step versus cluster batch admission | 1 passed |
+| Native exact-cycle execution | 56 passed |
+| Native system state, including TACC and TRNG state | 87 passed |
+| Phase-1 TACC capstone matrix | 281 passed |
+| Phase 5 rollout policy | 17 passed |
+| Phase 5 cross-entrypoint closure selection | 14 passed |
+| TACC one-/two-/four-worker contention | 1 passed |
+| Complete reduced-core execution | 34 passed |
+| Full fallback, private-engine, and microcluster sweep | 91 passed |
+| Checked BIOS SHA-2 | 18 passed |
+| BIOS entropy and caller-span boundary | 7 passed |
+| Akashic host packaging/import against this integration worktree | 14 passed |
+
+The 281-case TACC capstone comprises 69 ISA cases, 28 portable-core cases,
+8 system TACC cases, 21 disk-tool cases, 51 native MEX/TACC cases, 35
+cycle-API cases, 2 focused private-engine ownership/reset cases, 17
+tile-memory arbitration cases, 15 timed scheduler cases, and 11 portable,
+9 native, and 15 timed external-PHY cases.
+
+`git diff --check` passed, no unresolved paths or stale compatibility
+scheduler symbols remain, and the merged `networking.f` is byte-identical to
+the newer main version. The Akashic host-only packaging selector imported
+`diskutil` and the network boot harness directly from the isolated integration
+worktree without modifying the concurrent Akashic checkout.
+
+### 18.2 Deliberately unclaimed heavyweight evidence
+
+This bounded merge did not rerun the 400-million-step KDOS AES smoke, the
+800-million-step Akashic AES contract, the 2-billion-step maximum-SNI guest
+case, the approximately 1.98-billion-step staged hostname lifecycle, or the
+0.8–1.6-billion-step Akashic SR2 gates. It also did not rerun unrestricted,
+sanitizer, persistence, FPGA, or synthesis suites. Those jobs require fresh
+resource approval and must run individually.
+
+The additional eight-case native-TRNG concurrency-handoff selector was not
+rerun because it constructs helper-worker systems outside the approved named
+worker gates. Its native state-machine coverage is represented here by the
+complete 87-case native-system-state file, not claimed as an equivalent
+replacement for that selector.
+
+The checked SHA, entropy, caller-span, and DNS/SNI changes were already in the
+TACC base or newer main, merged without semantic conflict, and were retained
+by source audit. The focused combined-tree checks above are integration
+evidence; they do not relabel earlier downstream or heavyweight results as
+fresh evidence.
