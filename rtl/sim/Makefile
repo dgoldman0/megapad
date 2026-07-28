@@ -49,7 +49,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
-        soc_smoke soc_tile_icache soc_elaborate
+        full_core_tile soc_smoke soc_tile_icache soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -380,7 +380,7 @@ tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tile.v \
 # Phase 5: Integration (QoS, multicore, SoC)
 # ==========================================================================
 
-phase5: qos multicore_smoke core_bus_mux tile_port_arbiter \
+phase5: qos multicore_smoke core_bus_mux tile_port_arbiter full_core_tile \
         soc_smoke soc_tile_icache soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
@@ -422,10 +422,20 @@ tb_tile_port_arbiter.vvp: tb_tile_port_arbiter.v \
                           $(SOC)/mp64_tile_port_arbiter.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Standalone full-SoC elaboration (catches integration/port drift) ---
+# Shared full-SoC source set for integration elaboration and benches.
 SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
                             $(PERIPH)/*.v $(CRYPTO)/*.v $(GPU)/*.v $(PRIM)/*.v)
 
+# --- Four private full-core tile engines on the shared memory port ---
+full_core_tile: tb_full_core_tile.vvp
+	$(VVP) $<
+
+tb_full_core_tile.vvp: tb_full_core_tile.v $(SOC_ELAB_SRC) \
+                       ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_full_core_tile -o $@ \
+		tb_full_core_tile.v $(SOC_ELAB_SRC)
+
+# --- Standalone full-SoC elaboration (catches integration/port drift) ---
 soc_smoke: tb_soc_smoke.vvp
 	$(VVP) $<
 

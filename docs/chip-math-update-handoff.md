@@ -1336,6 +1336,39 @@ give cluster callers private configuration shadows, and record the corrected
 topology synthesis baseline.
 ```
 
+#### Landing 2.2 topology sublanding — 2026-07-28
+
+The buildable topology portion is implemented separately before the shared
+state refactor. All four production full cores now instantiate a private tile
+engine, while each microcluster retains its private shared engine. The memory
+arbiter accepts seven production sources with three-bit owners and equal
+round-robin service in the fixed 0–3 full-core/4–6 cluster map. Parameter-
+reduced verification builds compact only their instantiated sources and core
+IDs. `CLUSTER_EN` now drives the real cluster enable inputs, and each full-core
+tile write invalidates only its paired private I-cache.
+
+Sequential evidence for this sublanding:
+
+- `tile_port_arbiter`: 50 assertions passed, including all seven sources,
+  delayed acknowledgements, retained pulses, and explicit 6-to-0 wrap;
+- `full_core_tile`: 10 assertions passed, including four isolated CSR domains,
+  simultaneous execution, one completion per engine, production owner order,
+  and live cluster-enable wiring;
+- `soc_tile_icache`: 11 assertions passed for paired core-0/core-1
+  invalidation and explicitly noncoherent cluster writes;
+- reduced-parameter `soc_smoke`: 7 assertions passed, including compact
+  requestor and absolute core-ID mapping; and
+- `soc_elaborate`: passed with the seven production engine instances.
+
+This is intentionally not the Landing 2.2 completion point. The existing
+full-core CPU/tile and cluster-SHA/tile legacy ACC copies still diverge, and
+cluster tile configuration is still globally shared. Those are architectural
+correctness blockers and remain on the active path for the next sublanding.
+One nonblocking cancellation detail is deferred with the already planned
+transfer/lifecycle work: disabling a cluster resets its engine but does not
+yet purge a request that the shared memory arbiter captured before disable.
+No heavyweight implementation run has been performed without approval.
+
 ### Landing 2.3 — TACC state and lifecycle
 
 Primary files:

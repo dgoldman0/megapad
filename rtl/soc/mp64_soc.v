@@ -14,7 +14,7 @@
 // MMIO peripherals:  UART, Timer, Disk (SD), Mailbox, NIC,
 //                    AES, SHA-3, CRC, TRNG, Field ALU, NTT, KEM
 //
-// Tile engine:  CSR path from core 0, 512-bit memory port, ext tile port
+// Tile engines: one private engine per full core and one per microcluster
 //
 // Conventions:
 //   - Cores use active-high `rst`; peripherals use active-low `rst_n`.
@@ -102,7 +102,7 @@ module mp64_soc #(
     // Each core has:
     //   - I-cache (fetch path, refills via bus)
     //   - Data bus port (load/store → bus arbiter)
-    //   - CSR/MEX ports (tile engine, only core 0 wired)
+    //   - CSR/MEX ports to a private tile engine
 
     // Per-core wires
     wire [63:0] core_bus_addr  [0:NUM_CORES-1];
@@ -140,12 +140,12 @@ module mp64_soc #(
     wire [63:0] ic_stat_hits       [0:NUM_CORES-1];
     wire [63:0] ic_stat_misses     [0:NUM_CORES-1];
 
-    // The core-0 tile engine is a writer local to core 0.  Its completed
-    // 64-byte stores join the CPU data-port invalidation stream below.
-    wire        c0_tile_icache_inv_line;
-    wire [63:0] c0_tile_icache_inv_addr;
+    // Every full core has a paired private tile writer.  Completed 64-byte
+    // stores join only that core's CPU data-port invalidation stream.
+    wire        core_tile_icache_inv_line[0:NUM_CORES-1];
+    wire [63:0] core_tile_icache_inv_addr[0:NUM_CORES-1];
 
-    // CSR/MEX (only core 0 → tile engine)
+    // Per-core CSR/MEX path to the paired private tile engine.
     wire        core_csr_wen   [0:NUM_CORES-1];
     wire [7:0]  core_csr_addr  [0:NUM_CORES-1];
     wire [63:0] core_csr_wdata [0:NUM_CORES-1];
@@ -178,11 +178,9 @@ module mp64_soc #(
     wire        core_tacc_ctl_done [0:NUM_CORES-1];
     wire [2:0]  core_tacc_ctl_fault[0:NUM_CORES-1];
 
-    // Core 0 is the only full-core tile engine until the topology landing.
-    // Keep its TACC/reset metadata explicit so cores 1–3 can be replaced
-    // without another CPU-interface change.
-    wire [63:0] c0_tacc_status_raw;
-    wire [TACC_EPOCH_BITS-1:0] c0_tile_engine_epoch;
+    wire [63:0] core_tacc_status_raw[0:NUM_CORES-1];
+    wire [TACC_EPOCH_BITS-1:0]
+                 core_tile_engine_epoch[0:NUM_CORES-1];
 
     // Interrupts
     wire        irq_uart_w;
@@ -311,30 +309,23 @@ module mp64_soc #(
                 .ef_flags        (4'b0000)
             );
 
-            if (ci == 0) begin : g_icache_inv_merge
-                // MEX execution keeps the CPU data port quiescent until the
-                // tile engine's final ACK.  If that invariant is ever broken,
-                // use the cache's oversize fail-safe to flush without
-                // resetting statistics rather than dropping either write.
-                wire inv_collision = cpu_icache_inv_line[ci]
-                                   && c0_tile_icache_inv_line;
-                assign icache_inv_all[ci] = cpu_icache_inv_all[ci];
-                assign icache_inv_line[ci] = cpu_icache_inv_line[ci]
-                                           || c0_tile_icache_inv_line;
-                assign icache_inv_addr[ci] = c0_tile_icache_inv_line
-                                           ? c0_tile_icache_inv_addr
-                                           : cpu_icache_inv_addr[ci];
-                assign icache_inv_size[ci] = inv_collision
-                                           ? 7'd65
-                                           : c0_tile_icache_inv_line
-                                           ? 7'd64
-                                           : cpu_icache_inv_size[ci];
-            end else begin : g_icache_inv_passthrough
-                assign icache_inv_all[ci]  = cpu_icache_inv_all[ci];
-                assign icache_inv_line[ci] = cpu_icache_inv_line[ci];
-                assign icache_inv_addr[ci] = cpu_icache_inv_addr[ci];
-                assign icache_inv_size[ci] = cpu_icache_inv_size[ci];
-            end
+            // MEX execution keeps the CPU data port quiescent until the
+            // paired tile engine's final ACK.  If that invariant is ever
+            // broken, use the cache's oversize fail-safe to flush without
+            // resetting statistics rather than dropping either write.
+            wire inv_collision = cpu_icache_inv_line[ci]
+                               && core_tile_icache_inv_line[ci];
+            assign icache_inv_all[ci] = cpu_icache_inv_all[ci];
+            assign icache_inv_line[ci] = cpu_icache_inv_line[ci]
+                                       || core_tile_icache_inv_line[ci];
+            assign icache_inv_addr[ci] = core_tile_icache_inv_line[ci]
+                                       ? core_tile_icache_inv_addr[ci]
+                                       : cpu_icache_inv_addr[ci];
+            assign icache_inv_size[ci] = inv_collision
+                                       ? 7'd65
+                                       : core_tile_icache_inv_line[ci]
+                                       ? 7'd64
+                                       : cpu_icache_inv_size[ci];
 
             mp64_icache u_icache (
                 .clk         (sys_clk),
@@ -367,29 +358,17 @@ module mp64_soc #(
                 .stat_misses (ic_stat_misses[ci])
             );
 
-            // Tie off CSR/MEX for cores > 0 (only core 0 drives tile engine)
-            if (ci > 0) begin : g_mex_tieoff
-                assign core_csr_rdata[ci] = 64'd0;
-                assign core_mex_done[ci]  = 1'b1;
-                assign core_mex_busy[ci]  = 1'b0;
-                assign core_mex_fault[ci] = MEX_FAULT_ILLEGAL;
-                assign core_mex_fault_addr[ci] = 64'd0;
-                assign core_mex_stall_cycle[ci] = 1'b0;
-                assign core_tacc_status[ci] =
-                    {43'd0, TACC_OWNER_NONE, 16'd0};
-                assign core_tacc_ctl_done[ci] = 1'b1;
-                assign core_tacc_ctl_fault[ci] = MEX_FAULT_ILLEGAL;
+`ifndef SYNTHESIS
+            always @(posedge sys_clk) begin
+                if (!rst_h && cpu_icache_inv_line[ci]
+                           && core_tile_icache_inv_line[ci])
+                    $error("core %0d CPU and tile writes completed in the same cycle",
+                           ci);
             end
+`endif
 
         end // g_core
     endgenerate
-
-`ifndef SYNTHESIS
-    always @(posedge sys_clk) begin
-        if (!rst_h && cpu_icache_inv_line[0] && c0_tile_icache_inv_line)
-            $error("core-0 CPU and tile writes completed in the same cycle");
-    end
-`endif
 
     // ========================================================================
     // Micro-Core Clusters
@@ -427,7 +406,7 @@ module mp64_soc #(
             ) u_cluster (
                 .clk         (sys_clk),
                 .rst         (rst_h),
-                .cluster_en  (1'b1),
+                .cluster_en  (sysinfo_cluster_en[ki]),
                 .tile_engine_reset(1'b0),
                 .micro_reset ({CORES_PER_CLUSTER{1'b0}}),
 
@@ -777,85 +756,90 @@ module mp64_soc #(
     // ========================================================================
     // Tile Memory Port Arbiter
     // ========================================================================
-    // Muxes (1 + NUM_CLUSTERS) tile engines onto the single memory subsystem
-    // tile port and ext tile port.  Sources: core 0 tile engine + 3 clusters.
-    // One pending transaction per engine preserves one-cycle request pulses;
-    // simultaneously pending peers are served in equal round-robin order.
+    // Production has seven physical sources: full-core-private engines occupy
+    // lanes 0..3 and microcluster-private engines lanes 4..6.  Parameter-
+    // reduced verification builds compact only the instantiated requestors.
+    localparam integer TILE_SOURCE_COUNT = NUM_CORES + NUM_CLUSTERS;
+    localparam integer TILE_OWNER_BITS =
+        (TILE_SOURCE_COUNT <= 1) ? 1 : $clog2(TILE_SOURCE_COUNT);
+    localparam integer FULL_TILE_SOURCE_COUNT = NUM_CORES;
+    localparam integer CLUSTER_TILE_SOURCE_BASE = NUM_CORES;
 
-    // Core 0 tile engine wires (internal)
-    wire        c0_tile_req;
-    wire [31:0] c0_tile_addr;
-    wire        c0_tile_wen;
-    wire [511:0]c0_tile_wdata;
-    wire        c0_ext_tile_req;
-    wire [63:0] c0_ext_tile_addr;
-    wire        c0_ext_tile_wen;
-    wire [511:0]c0_ext_tile_wdata;
+    wire        core_tile_req      [0:NUM_CORES-1];
+    wire [31:0] core_tile_addr     [0:NUM_CORES-1];
+    wire        core_tile_wen      [0:NUM_CORES-1];
+    wire [511:0]core_tile_wdata    [0:NUM_CORES-1];
+    wire        core_ext_tile_req  [0:NUM_CORES-1];
+    wire [63:0] core_ext_tile_addr [0:NUM_CORES-1];
+    wire        core_ext_tile_wen  [0:NUM_CORES-1];
+    wire [511:0]core_ext_tile_wdata[0:NUM_CORES-1];
 
-    wire [3:0]    tile_src_req_bus;
-    wire [127:0]  tile_src_addr_bus;
-    wire [3:0]    tile_src_wen_bus;
-    wire [2047:0] tile_src_wdata_bus;
-    wire [3:0]    ext_tile_src_req_bus;
-    wire [255:0]  ext_tile_src_addr_bus;
-    wire [3:0]    ext_tile_src_wen_bus;
-    wire [2047:0] ext_tile_src_wdata_bus;
-    wire [3:0] tile_src_ack;
-    wire [3:0] ext_tile_src_ack;
+    wire [TILE_SOURCE_COUNT-1:0]     tile_src_req_bus;
+    wire [TILE_SOURCE_COUNT*32-1:0]  tile_src_addr_bus;
+    wire [TILE_SOURCE_COUNT-1:0]     tile_src_wen_bus;
+    wire [TILE_SOURCE_COUNT*512-1:0] tile_src_wdata_bus;
+    wire [TILE_SOURCE_COUNT-1:0]     ext_tile_src_req_bus;
+    wire [TILE_SOURCE_COUNT*64-1:0]  ext_tile_src_addr_bus;
+    wire [TILE_SOURCE_COUNT-1:0]     ext_tile_src_wen_bus;
+    wire [TILE_SOURCE_COUNT*512-1:0] ext_tile_src_wdata_bus;
+    wire [TILE_SOURCE_COUNT-1:0] tile_src_ack;
+    wire [TILE_SOURCE_COUNT-1:0] ext_tile_src_ack;
     wire       tile_write_commit;
-    wire [1:0] tile_write_owner;
+    wire [TILE_OWNER_BITS-1:0] tile_write_owner;
     wire       tile_write_ext;
     wire [63:0]tile_write_addr;
 
-    assign tile_src_req_bus[0] = c0_tile_req;
-    assign tile_src_addr_bus[0 +: 32] = c0_tile_addr;
-    assign tile_src_wen_bus[0] = c0_tile_wen;
-    assign tile_src_wdata_bus[0 +: 512] = c0_tile_wdata;
-    assign ext_tile_src_req_bus[0] = c0_ext_tile_req;
-    assign ext_tile_src_addr_bus[0 +: 64] = c0_ext_tile_addr;
-    assign ext_tile_src_wen_bus[0] = c0_ext_tile_wen;
-    assign ext_tile_src_wdata_bus[0 +: 512] = c0_ext_tile_wdata;
-
-    // The physical topology reserves three cluster lanes, while the SoC's
-    // reduced simulation configurations may instantiate only the first one or
-    // two.  Tie every absent lane off without indexing outside the configured
-    // cluster arrays.
     genvar tai;
     generate
-        for (tai = 0; tai < 3; tai = tai + 1) begin : g_tile_arb_lane
-            if (tai < NUM_CLUSTERS) begin : g_present
-                assign tile_src_req_bus[tai+1] = cluster_tile_req[tai];
-                assign tile_src_addr_bus[(tai+1)*32 +: 32] =
-                    cluster_tile_addr[tai];
-                assign tile_src_wen_bus[tai+1] = cluster_tile_wen[tai];
-                assign tile_src_wdata_bus[(tai+1)*512 +: 512] =
-                    cluster_tile_wdata[tai];
-                assign ext_tile_src_req_bus[tai+1] =
-                    cluster_ext_tile_req[tai];
-                assign ext_tile_src_addr_bus[(tai+1)*64 +: 64] =
-                    cluster_ext_tile_addr[tai];
-                assign ext_tile_src_wen_bus[tai+1] =
-                    cluster_ext_tile_wen[tai];
-                assign ext_tile_src_wdata_bus[(tai+1)*512 +: 512] =
-                    cluster_ext_tile_wdata[tai];
-                assign cluster_tile_rdata[tai] = tile_mem_rdata;
-                assign cluster_tile_ack[tai] = tile_src_ack[tai+1];
-                assign cluster_ext_tile_rdata[tai] = ext_tile_rdata;
-                assign cluster_ext_tile_ack[tai] = ext_tile_src_ack[tai+1];
-            end else begin : g_absent
-                assign tile_src_req_bus[tai+1] = 1'b0;
-                assign tile_src_addr_bus[(tai+1)*32 +: 32] = 32'd0;
-                assign tile_src_wen_bus[tai+1] = 1'b0;
-                assign tile_src_wdata_bus[(tai+1)*512 +: 512] = 512'd0;
-                assign ext_tile_src_req_bus[tai+1] = 1'b0;
-                assign ext_tile_src_addr_bus[(tai+1)*64 +: 64] = 64'd0;
-                assign ext_tile_src_wen_bus[tai+1] = 1'b0;
-                assign ext_tile_src_wdata_bus[(tai+1)*512 +: 512] = 512'd0;
-            end
+        for (tai = 0; tai < NUM_CORES;
+             tai = tai + 1) begin : g_full_tile_arb_lane
+            assign tile_src_req_bus[tai] = core_tile_req[tai];
+            assign tile_src_addr_bus[tai*32 +: 32] =
+                core_tile_addr[tai];
+            assign tile_src_wen_bus[tai] = core_tile_wen[tai];
+            assign tile_src_wdata_bus[tai*512 +: 512] =
+                core_tile_wdata[tai];
+            assign ext_tile_src_req_bus[tai] =
+                core_ext_tile_req[tai];
+            assign ext_tile_src_addr_bus[tai*64 +: 64] =
+                core_ext_tile_addr[tai];
+            assign ext_tile_src_wen_bus[tai] =
+                core_ext_tile_wen[tai];
+            assign ext_tile_src_wdata_bus[tai*512 +: 512] =
+                core_ext_tile_wdata[tai];
+        end
+
+        for (tai = 0; tai < NUM_CLUSTERS;
+             tai = tai + 1) begin : g_cluster_tile_arb_lane
+            localparam integer TILE_LANE = CLUSTER_TILE_SOURCE_BASE + tai;
+            assign tile_src_req_bus[TILE_LANE] =
+                cluster_tile_req[tai];
+            assign tile_src_addr_bus[TILE_LANE*32 +: 32] =
+                cluster_tile_addr[tai];
+            assign tile_src_wen_bus[TILE_LANE] =
+                cluster_tile_wen[tai];
+            assign tile_src_wdata_bus[TILE_LANE*512 +: 512] =
+                cluster_tile_wdata[tai];
+            assign ext_tile_src_req_bus[TILE_LANE] =
+                cluster_ext_tile_req[tai];
+            assign ext_tile_src_addr_bus[TILE_LANE*64 +: 64] =
+                cluster_ext_tile_addr[tai];
+            assign ext_tile_src_wen_bus[TILE_LANE] =
+                cluster_ext_tile_wen[tai];
+            assign ext_tile_src_wdata_bus[TILE_LANE*512 +: 512] =
+                cluster_ext_tile_wdata[tai];
+            assign cluster_tile_rdata[tai] = tile_mem_rdata;
+            assign cluster_tile_ack[tai] = tile_src_ack[TILE_LANE];
+            assign cluster_ext_tile_rdata[tai] = ext_tile_rdata;
+            assign cluster_ext_tile_ack[tai] =
+                ext_tile_src_ack[TILE_LANE];
         end
     endgenerate
 
-    mp64_tile_port_arbiter u_tile_port_arbiter (
+    mp64_tile_port_arbiter #(
+        .SOURCE_COUNT(TILE_SOURCE_COUNT),
+        .OWNER_BITS  (TILE_OWNER_BITS)
+    ) u_tile_port_arbiter (
         .clk            (sys_clk),
         .rst            (rst_h),
         .src_tile_req   (tile_src_req_bus),
@@ -885,87 +869,100 @@ module mp64_soc #(
     );
 
     // Read data is shared physically, but ACK is returned only to the captured
-    // owner.  A core-0 completed write invalidates its own private I-cache;
-    // cluster tile writes remain explicitly noncoherent to full cores.
-    assign c0_tile_icache_inv_line = tile_write_commit
-                                   && tile_write_owner == 2'd0;
-    assign c0_tile_icache_inv_addr = tile_write_ext
-                                   ? tile_write_addr
-                                   : {tile_write_addr[63:6], 6'd0};
+    // owner.  Each full-core write invalidates only its paired private
+    // I-cache; cluster tile writes remain explicitly noncoherent to full cores.
+    genvar fti;
+    generate
+        for (fti = 0; fti < NUM_CORES;
+             fti = fti + 1) begin : g_full_tile
+            localparam [TILE_OWNER_BITS-1:0] TILE_OWNER = fti;
+            wire status_mine =
+                core_tacc_status_raw[fti][TACC_STATUS_BIT_CLAIMED] &&
+                core_tacc_status_raw[fti][
+                    TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] ==
+                core_tile_caller_id[fti];
 
-    // ========================================================================
-    // Tile Engine — Core 0 (connected to core 0 CSR/MEX, tile arb port 0)
-    // ========================================================================
-    wire c0_tacc_mine =
-        c0_tacc_status_raw[TACC_STATUS_BIT_CLAIMED] &&
-        c0_tacc_status_raw[
-            TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] ==
-        core_tile_caller_id[0];
-    assign core_tacc_status[0] =
-        (c0_tacc_status_raw & ~(64'd1 << TACC_STATUS_BIT_MINE)) |
-        (c0_tacc_mine ? (64'd1 << TACC_STATUS_BIT_MINE) : 64'd0);
+            assign core_tacc_status[fti] =
+                (core_tacc_status_raw[fti] &
+                 ~(64'd1 << TACC_STATUS_BIT_MINE)) |
+                (status_mine ?
+                 (64'd1 << TACC_STATUS_BIT_MINE) : 64'd0);
+            assign core_tile_icache_inv_line[fti] =
+                tile_write_commit && tile_write_owner == TILE_OWNER;
+            assign core_tile_icache_inv_addr[fti] =
+                tile_write_ext ? tile_write_addr
+                               : {tile_write_addr[63:6], 6'd0};
 
-    mp64_tile u_tile (
-        .clk       (sys_clk),
-        .rst_n     (sys_rst_n),
-        .engine_reset(1'b0),
-        .caller_cancel(4'b0000),
-        .caller_epochs(32'd0),
-        .engine_epoch(c0_tile_engine_epoch),
+            mp64_tile u_tile (
+                    .clk       (sys_clk),
+                    .rst_n     (sys_rst_n),
+                    .engine_reset(1'b0),
+                    .caller_cancel(4'b0000),
+                    .caller_epochs({(4*TACC_EPOCH_BITS){1'b0}}),
+                    .engine_epoch(core_tile_engine_epoch[fti]),
 
-        // CSR/MEX from core 0
-        .csr_wen       (core_csr_wen[0]),
-        .csr_addr      (core_csr_addr[0]),
-        .csr_wdata     (core_csr_wdata[0]),
-        .csr_rdata     (core_csr_rdata[0]),
-        .mex_valid     (core_mex_valid[0]),
-        .mex_ss        (core_mex_ss[0]),
-        .mex_op        (core_mex_op[0]),
-        .mex_funct     (core_mex_funct[0]),
-        .mex_funct_byte(core_mex_funct_byte[0]),
-        .mex_gpr_val   (core_mex_gpr_val[0]),
-        .mex_imm8      (core_mex_imm8[0]),
-        .mex_ext_mod   (core_mex_ext_mod[0]),
-        .mex_ext_active(core_mex_ext_active[0]),
-        .mex_caller_id (core_tile_caller_id[0]),
-        .mex_priv      (core_tile_priv[0]),
-        .mex_mpu_base  (core_tile_mpu_base[0]),
-        .mex_mpu_limit (core_tile_mpu_limit[0]),
-        .mex_mpu_enabled(core_tile_mpu_enabled[0]),
-        .mex_allow_cluster_spad(core_tile_allow_cluster_spad[0]),
-        .mex_engine_epoch(c0_tile_engine_epoch),
-        .mex_caller_epoch({TACC_EPOCH_BITS{1'b0}}),
-        .mex_caller_slot(2'd0),
-        .mex_done      (core_mex_done[0]),
-        .mex_busy      (core_mex_busy[0]),
-        .mex_fault     (core_mex_fault[0]),
-        .mex_fault_addr(core_mex_fault_addr[0]),
-        .mex_stall_cycle(core_mex_stall_cycle[0]),
+                    .csr_wen       (core_csr_wen[fti]),
+                    .csr_addr      (core_csr_addr[fti]),
+                    .csr_wdata     (core_csr_wdata[fti]),
+                    .csr_rdata     (core_csr_rdata[fti]),
+                    .mex_valid     (core_mex_valid[fti]),
+                    .mex_ss        (core_mex_ss[fti]),
+                    .mex_op        (core_mex_op[fti]),
+                    .mex_funct     (core_mex_funct[fti]),
+                    .mex_funct_byte(core_mex_funct_byte[fti]),
+                    .mex_gpr_val   (core_mex_gpr_val[fti]),
+                    .mex_imm8      (core_mex_imm8[fti]),
+                    .mex_ext_mod   (core_mex_ext_mod[fti]),
+                    .mex_ext_active(core_mex_ext_active[fti]),
+                    .mex_caller_id (core_tile_caller_id[fti]),
+                    .mex_priv      (core_tile_priv[fti]),
+                    .mex_mpu_base  (core_tile_mpu_base[fti]),
+                    .mex_mpu_limit (core_tile_mpu_limit[fti]),
+                    .mex_mpu_enabled(core_tile_mpu_enabled[fti]),
+                    .mex_allow_cluster_spad(
+                        core_tile_allow_cluster_spad[fti]),
+                    .mex_engine_epoch(core_tile_engine_epoch[fti]),
+                    .mex_caller_epoch({TACC_EPOCH_BITS{1'b0}}),
+                    .mex_caller_slot(2'd0),
+                    .mex_done      (core_mex_done[fti]),
+                    .mex_busy      (core_mex_busy[fti]),
+                    .mex_fault     (core_mex_fault[fti]),
+                    .mex_fault_addr(core_mex_fault_addr[fti]),
+                    .mex_stall_cycle(core_mex_stall_cycle[fti]),
 
-        .tacc_status_raw(c0_tacc_status_raw),
-        .tacc_ctl_valid(core_tacc_ctl_valid[0]),
-        .tacc_ctl_caller_id(core_tile_caller_id[0]),
-        .tacc_ctl_priv (core_tile_priv[0]),
-        .tacc_ctl_wdata(core_tacc_ctl_wdata[0]),
-        .tacc_ctl_done (core_tacc_ctl_done[0]),
-        .tacc_ctl_fault(core_tacc_ctl_fault[0]),
+                    .tacc_status_raw(core_tacc_status_raw[fti]),
+                    .tacc_ctl_valid(core_tacc_ctl_valid[fti]),
+                    .tacc_ctl_caller_id(core_tile_caller_id[fti]),
+                    .tacc_ctl_priv (core_tile_priv[fti]),
+                    .tacc_ctl_wdata(core_tacc_ctl_wdata[fti]),
+                    .tacc_ctl_done (core_tacc_ctl_done[fti]),
+                    .tacc_ctl_fault(core_tacc_ctl_fault[fti]),
 
-        // Internal tile memory port → tile arbiter port 0
-        .tile_req      (c0_tile_req),
-        .tile_addr     (c0_tile_addr),
-        .tile_wen      (c0_tile_wen),
-        .tile_wdata    (c0_tile_wdata),
-        .tile_rdata    (tile_mem_rdata),
-        .tile_ack      (tile_src_ack[0]),
+                    .tile_req      (core_tile_req[fti]),
+                    .tile_addr     (core_tile_addr[fti]),
+                    .tile_wen      (core_tile_wen[fti]),
+                    .tile_wdata    (core_tile_wdata[fti]),
+                    .tile_rdata    (tile_mem_rdata),
+                    .tile_ack      (tile_src_ack[fti]),
 
-        // External tile port → tile arbiter port 0
-        .ext_tile_req  (c0_ext_tile_req),
-        .ext_tile_addr (c0_ext_tile_addr),
-        .ext_tile_wen  (c0_ext_tile_wen),
-        .ext_tile_wdata(c0_ext_tile_wdata),
-        .ext_tile_rdata(ext_tile_rdata),
-        .ext_tile_ack  (ext_tile_src_ack[0])
-    );
+                    .ext_tile_req  (core_ext_tile_req[fti]),
+                    .ext_tile_addr (core_ext_tile_addr[fti]),
+                    .ext_tile_wen  (core_ext_tile_wen[fti]),
+                    .ext_tile_wdata(core_ext_tile_wdata[fti]),
+                    .ext_tile_rdata(ext_tile_rdata),
+                    .ext_tile_ack  (ext_tile_src_ack[fti])
+            );
+        end
+    endgenerate
+
+`ifndef SYNTHESIS
+    initial begin
+        if (NUM_CORES < 1 || NUM_CORES > FULL_TILE_SOURCE_COUNT)
+            $fatal(1, "mp64_soc supports one to four full cores");
+        if (NUM_CLUSTERS < 1 || NUM_CLUSTERS > 3)
+            $fatal(1, "mp64_soc supports one to three microclusters");
+    end
+`endif
 
     // ========================================================================
     // ========================================================================

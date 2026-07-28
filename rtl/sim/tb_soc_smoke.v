@@ -124,6 +124,15 @@ module tb_soc_smoke;
         // --- Check 1: UART TX should be idle-high after reset ---
         check("UART TX idle after reset", uart_txd === 1'b1);
 
+        // Reduced configurations compact both the physical requestor slots and
+        // the absolute core IDs while production remains 4+3.
+        check("Reduced tile requestors are compact",
+              u_soc.TILE_SOURCE_COUNT == 2
+              && u_soc.CLUSTER_TILE_SOURCE_BASE == 1
+              && $bits(u_soc.tile_src_req_bus) == 2);
+        check("Reduced cluster core IDs begin after instantiated full cores",
+              u_soc.g_cluster[0].u_cluster.CLUSTER_ID_BASE == 8'd1);
+
         // --- Check 2: Debug LEDs should be non-zero after reset ---
         repeat (5) @(posedge clk);
         check("Debug LEDs active after reset", debug_leds !== 8'h00);
