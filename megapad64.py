@@ -65,6 +65,8 @@ CSR_ACC0        = 0x19
 CSR_ACC1        = 0x1A
 CSR_ACC2        = 0x1B
 CSR_ACC3        = 0x1C
+CSR_TACC_STATUS = 0x1D
+CSR_TACC_CTL    = 0x1E
 CSR_COREID      = 0x20  # Read-only: core ID (0..N-1)
 CSR_NCORES      = 0x21  # Read-only: number of cores
 CSR_MBOX        = 0x22  # Read: pending IPI mask, Write: send IPI
@@ -175,6 +177,11 @@ EW_U32   = 2  # 16 lanes × 32-bit
 EW_U64   = 3  #  8 lanes × 64-bit
 EW_FP16  = 4  # 32 lanes × IEEE 754 half-precision
 EW_BF16  = 5  # 32 lanes × bfloat16
+
+TACC_IMAGE_BYTES = 256
+TACC_OWNER_NONE = 31
+TACC_CANONICAL_NAN = 0x7FC0_0000
+TACC_LEGAL_EW = frozenset((EW_U8, EW_U16, EW_U32, EW_FP16, EW_BF16))
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -330,6 +337,144 @@ def _fp_is_nan(raw: int, ew: int) -> bool:
         return ((raw >> 10) & 0x1F) == 0x1F and (raw & 0x3FF) != 0
     else:  # EW_BF16
         return ((raw >> 7) & 0xFF) == 0xFF and (raw & 0x7F) != 0
+
+
+def _decode_ieee_exact(raw: int, exp_bits: int, frac_bits: int,
+                       bias: int) -> tuple[str, int, int, int]:
+    """Decode an IEEE value without using host floating point.
+
+    Finite nonzero values are returned as
+    ``(-1)**sign * significand * 2**exponent``.
+    """
+    sign = (raw >> (exp_bits + frac_bits)) & 1
+    exp_mask = (1 << exp_bits) - 1
+    frac_mask = (1 << frac_bits) - 1
+    exp_field = (raw >> frac_bits) & exp_mask
+    fraction = raw & frac_mask
+    if exp_field == exp_mask:
+        return ("nan" if fraction else "inf", sign, 0, 0)
+    if exp_field == 0:
+        if fraction == 0:
+            return ("zero", sign, 0, 0)
+        return ("finite", sign, fraction, 1 - bias - frac_bits)
+    return (
+        "finite",
+        sign,
+        (1 << frac_bits) | fraction,
+        exp_field - bias - frac_bits,
+    )
+
+
+def _round_shift_rne(value: int, shift: int) -> int:
+    """Return ``value / 2**shift`` rounded to nearest, ties to even."""
+    if shift <= 0:
+        return value << -shift
+    quotient, remainder = divmod(value, 1 << shift)
+    halfway = 1 << (shift - 1)
+    if remainder > halfway or (remainder == halfway and (quotient & 1)):
+        quotient += 1
+    return quotient
+
+
+def _round_exact_to_fp32(sign: int, magnitude: int, exponent: int) -> int:
+    """Round ``magnitude * 2**exponent`` directly to IEEE binary32."""
+    sign_bit = (sign & 1) << 31
+    if magnitude == 0:
+        return sign_bit
+
+    top_bit = magnitude.bit_length() - 1
+    unbiased = top_bit + exponent
+
+    if unbiased >= -126:
+        significand = _round_shift_rne(magnitude, top_bit - 23)
+        if significand >= (1 << 24):
+            significand >>= 1
+            unbiased += 1
+        if unbiased > 127:
+            return sign_bit | 0x7F80_0000
+        return (
+            sign_bit
+            | ((unbiased + 127) << 23)
+            | (significand & 0x007F_FFFF)
+        )
+
+    # Subnormals use a fixed 2**-149 quantum.
+    scale = exponent + 149
+    fraction = (
+        magnitude << scale
+        if scale >= 0
+        else _round_shift_rne(magnitude, -scale)
+    )
+    if fraction == 0:
+        return sign_bit
+    if fraction >= (1 << 23):
+        return sign_bit | 0x0080_0000
+    return sign_bit | fraction
+
+
+def _tacc_fp32_add_product(acc_bits: int, src_a: int, src_b: int,
+                           ew: int) -> int:
+    """Add one exact FP16/BF16 product to a binary32 accumulator.
+
+    This is a small integer oracle for the TACC contract.  It performs one
+    binary32 RNE rounding after the exact product and addition, canonicalizes
+    every NaN, and retains IEEE signed-zero behavior.
+    """
+    acc = _decode_ieee_exact(acc_bits & 0xFFFF_FFFF, 8, 23, 127)
+    if ew == EW_FP16:
+        a = _decode_ieee_exact(src_a & 0xFFFF, 5, 10, 15)
+        b = _decode_ieee_exact(src_b & 0xFFFF, 5, 10, 15)
+    elif ew == EW_BF16:
+        a = _decode_ieee_exact(src_a & 0xFFFF, 8, 7, 127)
+        b = _decode_ieee_exact(src_b & 0xFFFF, 8, 7, 127)
+    else:
+        raise ValueError(f"not a TACC floating format: {ew}")
+
+    if acc[0] == "nan" or a[0] == "nan" or b[0] == "nan":
+        return TACC_CANONICAL_NAN
+
+    product_sign = a[1] ^ b[1]
+    if ((a[0] == "inf" and b[0] == "zero")
+            or (a[0] == "zero" and b[0] == "inf")):
+        return TACC_CANONICAL_NAN
+    if a[0] == "inf" or b[0] == "inf":
+        product = ("inf", product_sign, 0, 0)
+    elif a[0] == "zero" or b[0] == "zero":
+        product = ("zero", product_sign, 0, 0)
+    else:
+        product = ("finite", product_sign, a[2] * b[2], a[3] + b[3])
+
+    if acc[0] == "inf":
+        if product[0] == "inf" and acc[1] != product[1]:
+            return TACC_CANONICAL_NAN
+        return (acc[1] << 31) | 0x7F80_0000
+    if product[0] == "inf":
+        return (product[1] << 31) | 0x7F80_0000
+
+    terms = []
+    if acc[0] == "finite":
+        terms.append((-acc[2] if acc[1] else acc[2], acc[3]))
+    if product[0] == "finite":
+        terms.append(
+            (-product[2] if product[1] else product[2], product[3])
+        )
+
+    if not terms:
+        # RNE addition produces -0 only when both exact zero operands are -0.
+        return ((acc[1] & product[1]) << 31)
+
+    common_exponent = min(term[1] for term in terms)
+    total = sum(
+        signed_magnitude << (term_exponent - common_exponent)
+        for signed_magnitude, term_exponent in terms
+    )
+    if total == 0:
+        return 0
+    return _round_exact_to_fp32(
+        1 if total < 0 else 0,
+        abs(total),
+        common_exponent,
+    )
 
 def sign_extend(val: int, bits: int) -> int:
     """Sign-extend a *bits*-wide value to 64 bits."""
@@ -651,6 +796,20 @@ class Megapad64:
         self.tsrc1: int = 0
         self.tdst:  int = 0
         self.acc = [0, 0, 0, 0]  # ACC0-ACC3
+        self.tacc = bytearray(TACC_IMAGE_BYTES)
+        self.tacc_owner: int = TACC_OWNER_NONE
+        self.tacc_valid: bool = False
+        self.tacc_dirty: bool = False
+        self.tacc_format_ew: int = 0
+        self.tacc_format_signed: int = 0
+        self.tacc_busy: bool = False
+        self.tacc_force_pending: bool = False
+        self.tacc_epoch: int = 0
+        self._tacc_fault_cycles: Optional[int] = None
+        # System/cluster routing may install an additional whole-span policy
+        # check.  It returns None when allowed or (ivec, first_bad_address)
+        # when an equivalent routed-memory permission denies the request.
+        self._tacc_span_validator: Optional[callable] = None
 
         # System CSRs
         self.ivt_base: int  = 0
@@ -1140,6 +1299,245 @@ class Megapad64:
         self._update_flags_arith(a, b, result, is_sub=True)
         self.flag_g = 1 if u64(a) > u64(b) else 0
 
+    # -- Full-width tile accumulator helpers --
+
+    def _tacc_trap(self, ivec: int, message: str, addr: Optional[int] = None):
+        if addr is not None:
+            self.trap_addr = u64(addr)
+        # A faulting extended instruction consumed its complete encoding.
+        self._ext_modifier = -1
+        error = TrapError(ivec, message)
+        if self._tacc_fault_cycles is not None:
+            error.fault_cycles = self._tacc_fault_cycles
+        raise error
+
+    def _tacc_wipe(self, *, bump_epoch: bool = True):
+        self.tacc[:] = bytes(TACC_IMAGE_BYTES)
+        self.tacc_owner = TACC_OWNER_NONE
+        self.tacc_valid = False
+        self.tacc_dirty = False
+        self.tacc_format_ew = 0
+        self.tacc_format_signed = 0
+        self.tacc_busy = False
+        self.tacc_force_pending = False
+        if bump_epoch:
+            self.tacc_epoch = u64(self.tacc_epoch + 1)
+
+    def _tacc_status(self) -> int:
+        claimed = self.tacc_owner != TACC_OWNER_NONE
+        mine = claimed and self.tacc_owner == self.core_id
+        return (
+            (1 if claimed else 0)
+            | ((1 if mine else 0) << 1)
+            | ((1 if self.tacc_valid else 0) << 2)
+            | ((1 if self.tacc_dirty else 0) << 3)
+            | ((1 if self.tacc_busy else 0) << 4)
+            | ((self.tacc_format_ew & 0x7) << 5)
+            | ((self.tacc_format_signed & 1) << 8)
+            | ((1 if self.tacc_force_pending else 0) << 9)
+            | ((self.tacc_owner & 0x1F) << 16)
+        )
+
+    def _tacc_control_write(self, value: int):
+        if not (value & 1):
+            return
+        if self.priv_level != 0:
+            self._tacc_trap(
+                IVEC_PRIV_FAULT,
+                "TACC force-release requires supervisor privilege",
+            )
+        if self.tacc_busy:
+            self.tacc_force_pending = True
+        else:
+            self._tacc_wipe()
+
+    def _tacc_format_from_tmode(self) -> tuple[int, int]:
+        ew = self.tmode & 0x7
+        if ew not in TACC_LEGAL_EW:
+            self._tacc_trap(
+                IVEC_ILLEGAL_OP,
+                f"unsupported TACC element-width code {ew}",
+            )
+        signed = 0 if ew in (EW_FP16, EW_BF16) else ((self.tmode >> 4) & 1)
+        return ew, signed
+
+    def _tacc_require_mine(self, *, valid: bool = False):
+        if self.tacc_owner != self.core_id:
+            self._tacc_trap(
+                IVEC_ILLEGAL_OP,
+                "TACC operation requires caller ownership",
+            )
+        if valid and not self.tacc_valid:
+            self._tacc_trap(
+                IVEC_ILLEGAL_OP,
+                "TACC operation requires valid accumulator state",
+            )
+
+    def _tacc_require_matching_format(self) -> tuple[int, int]:
+        ew, signed = self._tacc_format_from_tmode()
+        if (ew != self.tacc_format_ew
+                or signed != self.tacc_format_signed):
+            self._tacc_trap(
+                IVEC_ILLEGAL_OP,
+                "TACC format does not match the latched accumulator format",
+            )
+        return ew, signed
+
+    def _tacc_preflight_span(self, addr: int, size: int, *,
+                             write: bool = False):
+        """Validate a TACC source/image span without legacy Bank-0 wrapping."""
+        start = u64(addr)
+        end = start + size
+        if end > (1 << 64):
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                "TACC span wraps the architectural address space",
+                0,
+            )
+        if start < self.MMIO_END and end > self.MMIO_START:
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                "MMIO is not a legal TACC memory target",
+                max(start, self.MMIO_START),
+            )
+
+        regions = []
+        if self._vram_mem is not None:
+            regions.append((self._vram_base, self._vram_size))
+        if self._ext_mem is not None:
+            regions.append((self._ext_mem_base, self._ext_mem_size))
+        if self._hbw_mem is not None:
+            regions.append((self._hbw_base, self._hbw_size))
+        regions.append((0, self.mem_size))
+
+        region_found = False
+        for base, region_size in regions:
+            region_end = base + region_size
+            if base <= start < region_end:
+                if end > region_end:
+                    self._tacc_trap(
+                        IVEC_BUS_FAULT,
+                        "TACC span crosses a routed-memory boundary",
+                        region_end,
+                    )
+                region_found = True
+                break
+        if not region_found:
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                "TACC span starts outside routed memory",
+                start,
+            )
+
+        if self._tacc_span_validator is not None:
+            try:
+                denied = self._tacc_span_validator(start, size, write)
+            except TrapError as exc:
+                if self._tacc_fault_cycles is not None:
+                    exc.fault_cycles = self._tacc_fault_cycles
+                self._ext_modifier = -1
+                raise
+            if denied is not None:
+                ivec, first_forbidden = denied
+                self._tacc_trap(
+                    ivec,
+                    "TACC span denied by routed-memory policy",
+                    first_forbidden,
+                )
+
+    def _tacc_preflight_image(self, addr: int, *, write: bool = False):
+        base = u64(addr)
+        if base & 0x3F:
+            self._tacc_trap(
+                IVEC_ALIGN_FAULT,
+                "TACC image must be 64-byte aligned",
+                base,
+            )
+        self._tacc_preflight_span(
+            base,
+            TACC_IMAGE_BYTES,
+            write=write,
+        )
+
+    def _tacc_read_beat(self, addr: int) -> bytearray:
+        base = u64(addr)
+        beat = bytearray(64)
+        try:
+            for offset in range(64):
+                beat[offset] = self.mem_read8(u64(base + offset))
+            return beat
+        except TrapError as exc:
+            if exc.ivec_id in (IVEC_BUS_FAULT, IVEC_ALIGN_FAULT):
+                self.trap_addr = base
+            if self._tacc_fault_cycles is not None:
+                exc.fault_cycles = self._tacc_fault_cycles
+            self._ext_modifier = -1
+            raise
+        except (IndexError, BufferError) as exc:
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                f"TACC source beat fault @ {base:#018x}: {exc}",
+                base,
+            )
+
+    def _tacc_write_beat(self, addr: int, data: bytearray):
+        base = u64(addr)
+        # The emulator's routed interface is byte-oriented, but the
+        # architectural acknowledgement is one 64-byte tile beat.  Preserve
+        # the old physical bytes so a callback fault cannot expose a partial
+        # current beat.
+        buf, physical_offset, region_size = self._resolve_addr(base)
+        if physical_offset + 64 > region_size:
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                "TACC destination beat crosses routed memory",
+                base,
+            )
+        previous = bytes(buf[physical_offset:physical_offset + 64])
+        try:
+            for offset in range(64):
+                self.mem_write8(u64(base + offset), data[offset])
+        except TrapError as exc:
+            buf[physical_offset:physical_offset + 64] = previous
+            self._icache_invalidate_span(base, 64)
+            if exc.ivec_id in (IVEC_BUS_FAULT, IVEC_ALIGN_FAULT):
+                self.trap_addr = base
+            if self._tacc_fault_cycles is not None:
+                exc.fault_cycles = self._tacc_fault_cycles
+            self._ext_modifier = -1
+            raise
+        except (IndexError, BufferError) as exc:
+            buf[physical_offset:physical_offset + 64] = previous
+            self._icache_invalidate_span(base, 64)
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                f"TACC destination beat fault @ {base:#018x}: {exc}",
+                base,
+            )
+
+    @staticmethod
+    def _tacc_active_bytes(ew: int) -> int:
+        return TACC_IMAGE_BYTES if ew in (EW_U8, EW_U16) else 128
+
+    @staticmethod
+    def _tacc_lane_read(image: bytearray, lane: int, lane_bits: int) -> int:
+        lane_bytes = lane_bits // 8
+        offset = lane * lane_bytes
+        return int.from_bytes(
+            image[offset:offset + lane_bytes],
+            "little",
+        )
+
+    @staticmethod
+    def _tacc_lane_write(image: bytearray, lane: int, lane_bits: int,
+                         value: int):
+        lane_bytes = lane_bits // 8
+        offset = lane * lane_bytes
+        mask = (1 << lane_bits) - 1
+        image[offset:offset + lane_bytes] = (
+            value & mask
+        ).to_bytes(lane_bytes, "little")
+
     # -- CSR read/write --
 
     def csr_read(self, addr: int) -> int:
@@ -1170,6 +1568,8 @@ class Megapad64:
             CSR_ACC1:       lambda: self.acc[1],
             CSR_ACC2:       lambda: self.acc[2],
             CSR_ACC3:       lambda: self.acc[3],
+            CSR_TACC_STATUS: self._tacc_status,
+            CSR_TACC_CTL:    lambda: 0,
             CSR_COREID:     lambda: self.core_id,
             CSR_NCORES:     lambda: self.num_cores,
             CSR_MBOX:       lambda: self._ipi_pending_mask,
@@ -1246,6 +1646,7 @@ class Megapad64:
             CSR_ACC1:     lambda v: self.acc.__setitem__(1, v),
             CSR_ACC2:     lambda v: self.acc.__setitem__(2, v),
             CSR_ACC3:     lambda v: self.acc.__setitem__(3, v),
+            CSR_TACC_CTL: lambda v: self._tacc_control_write(v),
             # COREID, NCORES are read-only — writes ignored
             CSR_MBOX:     lambda v: self._ipi_send(v),
             CSR_IPIACK:   lambda v: self._ipi_ack(v),
@@ -2431,6 +2832,7 @@ class Megapad64:
             self.cycle_count += 1
             return 1
 
+        self._tacc_fault_cycles = None
         self._ifetch_window_addr = None
         byte0 = self.fetch8()
         f = (byte0 >> 4) & 0xF  # family
@@ -2495,28 +2897,38 @@ class Megapad64:
                     self.perf_cycles += cycles
                 return cycles
 
-        # Dispatch on family
-        if   f == 0x0: cycles += self._exec_sys(n)
-        elif f == 0x1: cycles += self._exec_inc(n)
-        elif f == 0x2: cycles += self._exec_dec(n)
-        elif f == 0x3: cycles += self._exec_br(n)
-        elif f == 0x4: cycles += self._exec_lbr(n)
-        elif f == 0x5: cycles += self._exec_mem(n)
-        elif f == 0x6: cycles += self._exec_imm(n)
-        elif f == 0x7: cycles += self._exec_alu(n)
-        elif f == 0x8: cycles += self._exec_memalu(n)
-        elif f == 0x9: cycles += self._exec_io(n)
-        elif f == 0xA: cycles += self._exec_sep(n)
-        elif f == 0xB: cycles += self._exec_sex(n)
-        elif f == 0xC: cycles += self._exec_muldiv(n)
-        elif f == 0xD: cycles += self._exec_csr(n)
-        elif f == 0xE: cycles += self._exec_mex(n)
-        elif f == 0xF:
-            # Should not reach here (handled above), but double EXT = trap
-            raise TrapError(IVEC_ILLEGAL_OP, "Double EXT prefix")
+        try:
+            # Dispatch on family
+            if   f == 0x0: cycles += self._exec_sys(n)
+            elif f == 0x1: cycles += self._exec_inc(n)
+            elif f == 0x2: cycles += self._exec_dec(n)
+            elif f == 0x3: cycles += self._exec_br(n)
+            elif f == 0x4: cycles += self._exec_lbr(n)
+            elif f == 0x5: cycles += self._exec_mem(n)
+            elif f == 0x6: cycles += self._exec_imm(n)
+            elif f == 0x7: cycles += self._exec_alu(n)
+            elif f == 0x8: cycles += self._exec_memalu(n)
+            elif f == 0x9: cycles += self._exec_io(n)
+            elif f == 0xA: cycles += self._exec_sep(n)
+            elif f == 0xB: cycles += self._exec_sex(n)
+            elif f == 0xC: cycles += self._exec_muldiv(n)
+            elif f == 0xD: cycles += self._exec_csr(n)
+            elif f == 0xE: cycles += self._exec_mex(n)
+            elif f == 0xF:
+                # Should not reach here (handled above), but double EXT = trap
+                raise TrapError(IVEC_ILLEGAL_OP, "Double EXT prefix")
+        except TrapError as exc:
+            fault_cycles = getattr(exc, "fault_cycles", None)
+            self._tacc_fault_cycles = None
+            if fault_cycles is not None:
+                self.cycle_count += fault_cycles
+                if self.perf_enable:
+                    self.perf_cycles += fault_cycles
+            raise
 
         # Clear EXT modifier after use
         self._ext_modifier = -1
+        self._tacc_fault_cycles = None
         self.cycle_count += cycles
 
         # Update performance counters
@@ -2956,6 +3368,7 @@ class Megapad64:
 
     # -- 0x9: I/O --
     MMIO_START = 0xFFFF_FF00_0000_0000
+    MMIO_END = 0xFFFF_FF80_0000_0000
 
     def _exec_io(self, n: int) -> int:
         if 1 <= n <= 7:      # OUT N
@@ -3087,8 +3500,213 @@ class Megapad64:
         if w_bit == 0:  # CSRR: Rd ← CSR[addr]
             self.regs[rn] = u64(self.csr_read(byte1))
         else:           # CSRW: CSR[addr] ← Rs
+            if byte1 == CSR_TACC_CTL:
+                self._tacc_fault_cycles = 1
             self.csr_write(byte1, self.regs[rn])
         return 0
+
+    def _tacc_finish_atomic_operation(self):
+        self.tacc_busy = False
+        if self.tacc_force_pending:
+            self._tacc_wipe()
+
+    def _exec_tacc_lifecycle(self, ss: int, funct_byte: int) -> int:
+        funct = funct_byte & 0x7
+        if ss != 0 or funct_byte != funct or funct not in range(2, 7):
+            self._tacc_trap(
+                IVEC_ILLEGAL_OP,
+                "noncanonical or reserved TACC lifecycle encoding",
+            )
+
+        if funct == 2:  # TACC.TRY
+            self.tacc_busy = True
+            try:
+                if self.tacc_owner == TACC_OWNER_NONE:
+                    self.tacc_owner = self.core_id
+                # Same-owner TRY is deliberately idempotent.  A competing
+                # owner observes failure through STATUS.MINE without a trap.
+            finally:
+                self._tacc_finish_atomic_operation()
+            return 0
+
+        if funct == 3:  # TACC.CLEAR
+            self._tacc_require_mine()
+            ew, signed = self._tacc_format_from_tmode()
+            self.tacc_busy = True
+            try:
+                self.tacc[:] = bytes(TACC_IMAGE_BYTES)
+                self.tacc_valid = True
+                self.tacc_dirty = True
+                self.tacc_format_ew = ew
+                self.tacc_format_signed = signed
+            finally:
+                self._tacc_finish_atomic_operation()
+            return 0
+
+        if funct == 4:  # TACC.LOAD
+            self._tacc_require_mine()
+            ew, signed = self._tacc_format_from_tmode()
+            base = u64(self.tsrc0)
+            self._tacc_preflight_image(base)
+            self.tacc_busy = True
+            try:
+                staged = bytearray()
+                for beat_index, offset in enumerate(
+                    range(0, TACC_IMAGE_BYTES, 64),
+                    start=1,
+                ):
+                    self._tacc_fault_cycles = 2 + beat_index
+                    staged.extend(self._tacc_read_beat(u64(base + offset)))
+                active = self._tacc_active_bytes(ew)
+                staged[active:] = bytes(TACC_IMAGE_BYTES - active)
+                self.tacc[:] = staged
+                self.tacc_valid = True
+                self.tacc_dirty = False
+                self.tacc_format_ew = ew
+                self.tacc_format_signed = signed
+            finally:
+                self._tacc_finish_atomic_operation()
+            return 4
+
+        if funct == 5:  # TACC.STORE
+            self._tacc_require_mine(valid=True)
+            base = u64(self.tdst)
+            self._tacc_preflight_image(base, write=True)
+            image = bytearray(self.tacc)
+            active = self._tacc_active_bytes(self.tacc_format_ew)
+            image[active:] = bytes(TACC_IMAGE_BYTES - active)
+            self.tacc_busy = True
+            try:
+                for beat_index, offset in enumerate(
+                    range(0, TACC_IMAGE_BYTES, 64),
+                    start=1,
+                ):
+                    self._tacc_fault_cycles = 2 + beat_index
+                    self._tacc_write_beat(
+                        u64(base + offset),
+                        image[offset:offset + 64],
+                    )
+                self.tacc_dirty = False
+            finally:
+                self._tacc_finish_atomic_operation()
+            return 4
+
+        # TACC.RELEASE
+        self._tacc_require_mine()
+        self.tacc_busy = True
+        try:
+            self._tacc_wipe()
+        finally:
+            # _tacc_wipe already clears BUSY and FORCE_PENDING.
+            self._tacc_finish_atomic_operation()
+        return 0
+
+    def _exec_tacc_tamac(self, ss: int, funct_byte: int,
+                          broadcast_reg: int) -> int:
+        if funct_byte != 0x06 or ss == 2:
+            self._tacc_trap(
+                IVEC_ILLEGAL_OP,
+                "noncanonical or unsupported TAMAC encoding",
+            )
+        if ss not in (0, 1, 3):
+            self._tacc_trap(IVEC_ILLEGAL_OP, "unsupported TAMAC source form")
+
+        self._tacc_require_mine(valid=True)
+        ew, signed = self._tacc_require_matching_format()
+
+        if ss == 0:
+            source_addresses = (u64(self.tsrc0), u64(self.tsrc1))
+        elif ss == 1:
+            source_addresses = (u64(self.tsrc0),)
+        else:
+            source_addresses = (u64(self.tdst), u64(self.tsrc0))
+        for address in source_addresses:
+            self._tacc_preflight_span(address, 64)
+
+        self.tacc_busy = True
+        try:
+            if ss == 0:
+                self._tacc_fault_cycles = 2
+                src_a = self._tacc_read_beat(source_addresses[0])
+                self._tacc_fault_cycles = 3
+                src_b = self._tacc_read_beat(source_addresses[1])
+            elif ss == 1:
+                self._tacc_fault_cycles = 2
+                src_a = self._tacc_read_beat(source_addresses[0])
+                src_b = bytearray(64)
+                source_bits = 16 if ew in (EW_FP16, EW_BF16) else (8 << ew)
+                source_bytes = source_bits // 8
+                scalar = self.regs[broadcast_reg] & ((1 << source_bits) - 1)
+                for lane in range(64 // source_bytes):
+                    offset = lane * source_bytes
+                    src_b[offset:offset + source_bytes] = scalar.to_bytes(
+                        source_bytes,
+                        "little",
+                    )
+            else:
+                self._tacc_fault_cycles = 2
+                src_a = self._tacc_read_beat(source_addresses[0])
+                self._tacc_fault_cycles = 3
+                src_b = self._tacc_read_beat(source_addresses[1])
+
+            staged = bytearray(self.tacc)
+            if ew in (EW_U8, EW_U16, EW_U32):
+                source_bits = (8, 16, 32)[ew]
+                accumulator_bits = (32, 64, 64)[ew]
+                source_bytes = source_bits // 8
+                lane_count = 512 // source_bits
+                accumulator_mask = (1 << accumulator_bits) - 1
+                for lane in range(lane_count):
+                    offset = lane * source_bytes
+                    a = int.from_bytes(
+                        src_a[offset:offset + source_bytes],
+                        "little",
+                    )
+                    b = int.from_bytes(
+                        src_b[offset:offset + source_bytes],
+                        "little",
+                    )
+                    if signed:
+                        sign_bit = 1 << (source_bits - 1)
+                        if a & sign_bit:
+                            a -= 1 << source_bits
+                        if b & sign_bit:
+                            b -= 1 << source_bits
+                    old = self._tacc_lane_read(
+                        staged,
+                        lane,
+                        accumulator_bits,
+                    )
+                    self._tacc_lane_write(
+                        staged,
+                        lane,
+                        accumulator_bits,
+                        (old + a * b) & accumulator_mask,
+                    )
+                arithmetic_cycles = (4, 2, 1)[ew]
+            else:
+                for lane in range(32):
+                    offset = lane * 2
+                    a = int.from_bytes(src_a[offset:offset + 2], "little")
+                    b = int.from_bytes(src_b[offset:offset + 2], "little")
+                    old = self._tacc_lane_read(staged, lane, 32)
+                    self._tacc_lane_write(
+                        staged,
+                        lane,
+                        32,
+                        _tacc_fp32_add_product(old, a, b, ew),
+                    )
+                arithmetic_cycles = 4
+
+            active = self._tacc_active_bytes(ew)
+            staged[active:] = bytes(TACC_IMAGE_BYTES - active)
+            self.tacc[:] = staged
+            self.tacc_dirty = True
+        finally:
+            self._tacc_finish_atomic_operation()
+
+        source_cycles = 1 if ss == 1 else 2
+        return source_cycles + arithmetic_cycles
 
     # -- 0xE: MEX --
     def _exec_mex(self, n: int) -> int:
@@ -3102,6 +3720,18 @@ class Megapad64:
         broadcast_reg = -1
         if ss == 1:
             broadcast_reg = self.fetch8() & 0xF
+
+        # TACC instructions validate and preflight before the generic MEX
+        # source loader can touch memory.
+        if (op == 0x1
+                and ((ss != 2 and (funct_byte & 0x07) in (6, 7))
+                     or (ss == 2 and funct_byte == 0x06))):
+            self._tacc_fault_cycles = 1
+            return self._exec_tacc_tamac(ss, funct_byte, broadcast_reg)
+        if (self._ext_modifier == 8 and op == 0x3
+                and (funct_byte & 0x07) >= 2):
+            self._tacc_fault_cycles = 2
+            return self._exec_tacc_lifecycle(ss, funct_byte)
 
         # Element width from TMODE (3-bit EW: 0-3 = int, 4 = fp16, 5 = bf16)
         ew_bits = self.tmode & 0x7
@@ -3928,6 +4558,7 @@ class Megapad64:
         self.tmode = self.tctrl = 0
         self.tsrc0 = self.tsrc1 = self.tdst = 0
         self.acc = [0, 0, 0, 0]
+        self._tacc_wipe()
         self.tstride_r = 0
         self.tstride_c = 0
         self.ttile_h = 8
@@ -3970,6 +4601,12 @@ class Megapad64:
             b1 = self._icache_read_byte(u64(self.pc + 1))
             f2 = (b1 >> 4) & 0xF
             n2 = b1 & 0xF
+            if n == 0x8 and f2 == 0xE and n2 == 0x3:
+                funct = self._icache_read_byte(u64(self.pc + 2))
+                if (funct & 0x07) >= 2:
+                    # Extended TACC lifecycle encodings are complete at the
+                    # function byte, including reserved/noncanonical forms.
+                    return 3
             if f2 == 0xF and n2 == 0x9:  # REX + F9
                 return 4  # REX byte + F9 + sub-op + reg-byte
             if f2 == 0xF and n2 == 0xA:  # REX + FA
@@ -4029,6 +4666,7 @@ class Megapad64:
             except TrapError as e:
                 # If IVT is set up, enter trap handler; otherwise propagate
                 if self.ivt_base != 0:
+                    total += getattr(e, "fault_cycles", 0)
                     self._trap(e.ivec_id)
                 else:
                     raise

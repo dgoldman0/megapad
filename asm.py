@@ -534,6 +534,10 @@ def _instruction_size(lineno: int, text: str) -> int:
     # -- MEX --
     if mnem_lower.startswith("t."):
         sub_name = mnem_lower[2:]
+        if sub_name in {
+            "acc.try", "acc.clear", "acc.load", "acc.store", "acc.release",
+        }:
+            return 3
         # Extended ops use EXT.8 prefix: +1 byte
         ext_talu = {"vshr", "vshl", "vsel", "vclz"}
         ext_tsys = {"load2d", "store2d"}
@@ -926,8 +930,48 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         ext_talu_ops = {"vshr": 0, "vshl": 1, "vsel": 2, "vclz": 3}
         # Extended TSYS ops via EXT.8 prefix (0xF8)
         ext_tsys_ops = {"load2d": 0, "store2d": 1}
+        tacc_lifecycle_ops = {
+            "acc.try": 2,
+            "acc.clear": 3,
+            "acc.load": 4,
+            "acc.store": 5,
+            "acc.release": 6,
+        }
 
-        if sub_name in ext_tsys_ops:
+        if sub_name in tacc_lifecycle_ops:
+            if ops:
+                raise AsmError(
+                    lineno,
+                    f"t.{sub_name} does not take operands",
+                )
+            out.append(0xF8)
+            out.append(0xE3)
+            out.append(tacc_lifecycle_ops[sub_name])
+            return out
+        elif sub_name == "amac":
+            if not ops:
+                ss = 0
+            elif len(ops) == 1 and ops[0].lower() == "inplace":
+                ss = 3
+            elif len(ops) == 1 and ops[0].lower().startswith("r"):
+                reg = _parse_reg(ops[0])
+                if reg > 15:
+                    raise AsmError(
+                        lineno,
+                        "t.amac broadcast supports only R0-R15",
+                    )
+                ss = 1
+            else:
+                raise AsmError(
+                    lineno,
+                    "t.amac expects no operand, R0-R15, or 'inplace'",
+                )
+            out.append(0xE0 | (ss << 2) | 0x1)
+            out.append(0x06)
+            if ss == 1:
+                out.append(reg)
+            return out
+        elif sub_name in ext_tsys_ops:
             ext_funct = ext_tsys_ops[sub_name]
             out.append(0xF8)            # EXT prefix, modifier=8
             out.append(0xE3)            # MEX byte: ss=0, op=3 (TSYS)
