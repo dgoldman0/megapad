@@ -595,6 +595,68 @@ def test_complete_span_permission_preflight_precedes_store_writes() -> None:
     assert cpu.cycle_count - cycles_before == 2
 
 
+@pytest.mark.parametrize("instruction", ("t.acc.load", "t.acc.store"))
+def test_user_image_preflight_applies_complete_active_mpu_window(
+    instruction: str,
+) -> None:
+    cpu = Megapad64(mem_size=4096)
+    _claim_and_clear(cpu, EW_U8)
+    cpu.tacc[:] = bytes([0xD2]) * TACC_IMAGE_BYTES
+    cpu.tacc_dirty = True
+    cpu.tsrc0 = IMAGE_A
+    cpu.tdst = IMAGE_A
+    cpu.mem[IMAGE_A:IMAGE_A + TACC_IMAGE_BYTES] = bytes(
+        [0xA5]
+    ) * TACC_IMAGE_BYTES
+    before_memory = bytes(
+        cpu.mem[IMAGE_A:IMAGE_A + TACC_IMAGE_BYTES]
+    )
+    before_tacc = _tacc_snapshot(cpu)
+    cycles_before = cpu.cycle_count
+    cpu.priv_level = 1
+    cpu.mpu_base = IMAGE_A
+    cpu.mpu_limit = IMAGE_A + 128
+
+    with pytest.raises(TrapError) as raised:
+        _step(cpu, instruction)
+
+    assert raised.value.ivec_id == IVEC_PRIV_FAULT
+    assert cpu.trap_addr == IMAGE_A + 128
+    assert bytes(
+        cpu.mem[IMAGE_A:IMAGE_A + TACC_IMAGE_BYTES]
+    ) == before_memory
+    assert _tacc_snapshot(cpu) == before_tacc
+    assert cpu.cycle_count - cycles_before == 2
+
+
+@pytest.mark.parametrize("instruction", ("t.acc.load", "t.acc.store"))
+def test_user_image_preflight_rejects_hbw_before_any_beat(
+    instruction: str,
+) -> None:
+    cpu = Megapad64(mem_size=4096)
+    _claim_and_clear(cpu, EW_U8)
+    hbw_base = 0x1_0000
+    hbw = bytearray([0xA5]) * TACC_IMAGE_BYTES
+    cpu.attach_hbw(hbw, hbw_base, len(hbw))
+    cpu.tacc[:] = bytes([0xD2]) * TACC_IMAGE_BYTES
+    cpu.tacc_dirty = True
+    cpu.tsrc0 = hbw_base
+    cpu.tdst = hbw_base
+    before_hbw = bytes(hbw)
+    before_tacc = _tacc_snapshot(cpu)
+    cycles_before = cpu.cycle_count
+    cpu.priv_level = 1
+
+    with pytest.raises(TrapError) as raised:
+        _step(cpu, instruction)
+
+    assert raised.value.ivec_id == IVEC_PRIV_FAULT
+    assert cpu.trap_addr == hbw_base
+    assert bytes(hbw) == before_hbw
+    assert _tacc_snapshot(cpu) == before_tacc
+    assert cpu.cycle_count - cycles_before == 2
+
+
 def test_image_preflight_rejects_alignment_span_and_mmio_before_writes() -> None:
     cpu = Megapad64(mem_size=4096)
     _claim_and_clear(cpu, EW_U8)

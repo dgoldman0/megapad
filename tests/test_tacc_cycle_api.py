@@ -13,10 +13,8 @@ from megapad64 import (
     EW_U16,
     EW_U32,
     EW_U8,
-    IVEC_BUS_FAULT,
     TACC_IMAGE_BYTES,
     TACC_OWNER_NONE,
-    TrapError,
 )
 from system import MegapadSystem
 
@@ -209,8 +207,8 @@ def _install_tamac(system: MegapadSystem, *, halt_address: int = 2) -> None:
         pytest.param("t.acc.try", 2, id="try-2"),
         pytest.param("t.acc.clear", 2, id="clear-2"),
         pytest.param("t.acc.release", 2, id="release-2"),
-        pytest.param("t.acc.load", 6, id="load-6"),
-        pytest.param("t.acc.store", 6, id="store-6"),
+        pytest.param("t.acc.load", 9, id="load-9"),
+        pytest.param("t.acc.store", 9, id="store-9"),
     ],
 )
 def test_cycle_api_locks_lifecycle_and_transfer_latencies(
@@ -442,6 +440,86 @@ def test_misaligned_load_validation_fault_never_publishes_busy():
     assert not system._native_system.cycle_execution_pending
 
 
+@pytest.mark.parametrize("instruction", ("t.acc.load", "t.acc.store"))
+def test_cycle_image_preflight_faults_outside_user_mpu_without_a_beat(
+    instruction: str,
+):
+    system = _system()
+    cpu = system.cpu
+    _claim_and_clear(system)
+    base = 0x200
+    cpu.tsrc0 = base
+    cpu.tdst = base
+    cpu.tacc = bytes([0xD2]) * TACC_IMAGE_BYTES
+    cpu.tacc_dirty = True
+    cpu.mem[base:base + TACC_IMAGE_BYTES] = bytes(
+        [0xA5]
+    ) * TACC_IMAGE_BYTES
+    code = assemble(instruction)
+    system.load_binary(0, code)
+    cpu.pc = 0
+    before_tacc = _tacc_domain(cpu)
+    before_memory = bytes(
+        cpu.mem[base:base + TACC_IMAGE_BYTES]
+    )
+    cycles_before = cpu.cycle_count
+    tileops_before = cpu.perf_tileops
+    cpu.priv_level = 1
+    cpu.mpu_base = base
+    cpu.mpu_limit = base + 128
+
+    faulted = system.run_cycle_batch(2, max_instructions=1)
+
+    assert faulted.instructions_executed == 0
+    assert faulted.per_core_cycles == (2,)
+    assert faulted.system_cycles_advanced == 2
+    assert cpu.pc == len(code)
+    assert cpu.trap_addr == base + 128
+    assert cpu.cycle_count - cycles_before == 2
+    assert cpu.perf_tileops == tileops_before
+    assert _tacc_domain(cpu) == before_tacc
+    assert bytes(
+        cpu.mem[base:base + TACC_IMAGE_BYTES]
+    ) == before_memory
+    transport = system._native_system._tacc_transport_snapshot()
+    assert transport["stage"]["grant_count"] == 0
+    assert transport["port"]["grant_count"] == 0
+    assert not system._native_system.cycle_execution_pending
+
+
+@pytest.mark.parametrize("instruction", ("t.acc.load", "t.acc.store"))
+def test_cycle_image_transfer_allows_user_span_inside_active_mpu(
+    instruction: str,
+):
+    system = _system()
+    cpu = system.cpu
+    _claim_and_clear(system)
+    base = 0x200
+    image = bytes(range(TACC_IMAGE_BYTES))
+    cpu.tsrc0 = base
+    cpu.tdst = base
+    cpu.tacc = image
+    cpu.tacc_dirty = True
+    cpu.mem[base:base + TACC_IMAGE_BYTES] = image
+    code = assemble(instruction)
+    system.load_binary(0, code)
+    cpu.pc = 0
+    cpu.priv_level = 1
+    cpu.mpu_base = base
+    cpu.mpu_limit = base + TACC_IMAGE_BYTES
+
+    retired = system.run_cycle_batch(9, max_instructions=1)
+
+    assert retired.instructions_executed == 1
+    assert retired.per_core_cycles == (9,)
+    assert retired.system_cycles_advanced == 9
+    assert cpu.pc == len(code)
+    assert not cpu.tacc_busy
+    transport = system._native_system._tacc_transport_snapshot()
+    assert transport["stage"]["grant_count"] == 1
+    assert transport["port"]["grant_count"] == 4
+
+
 def test_unowned_clear_validation_fault_is_one_cycle_without_busy():
     system = _system()
     cpu = system.cpu
@@ -470,7 +548,7 @@ def test_unowned_clear_validation_fault_is_one_cycle_without_busy():
     assert not system._native_system.cycle_execution_pending
 
 
-def test_force_pending_wipes_load_that_traps_at_terminal_boundary():
+def test_force_pending_wipes_load_at_fourth_ack_terminal_boundary():
     system = _system()
     cpu = system.cpu
     _claim_and_clear(system)
@@ -488,27 +566,12 @@ def test_force_pending_wipes_load_that_traps_at_terminal_boundary():
     cycles_before = cpu.cycle_count
     perf_before = cpu.perf_cycles
     tileops_before = cpu.perf_tileops
-    original_read8 = cpu.mem_read8
-    callback_count = 0
-
-    def fault_on_fourth_beat(address: int) -> int:
-        nonlocal callback_count
-        if address == source + 192:
-            callback_count += 1
-            raise TrapError(
-                IVEC_BUS_FAULT,
-                "injected fourth-beat LOAD fault",
-            )
-        return original_read8(address)
-
-    cpu.mem_read8 = fault_on_fourth_beat
     before_terminal = system.run_cycle_batch(5, max_instructions=1)
 
     assert before_terminal.instructions_executed == 0
     assert before_terminal.per_core_cycles == (0,)
     assert before_terminal.system_cycles_advanced == 5
     assert _tacc_status(cpu)["busy"]
-    assert callback_count == 0
 
     cpu.csr_write(CSR_TACC_CTL, 1)
 
@@ -516,18 +579,16 @@ def test_force_pending_wipes_load_that_traps_at_terminal_boundary():
     assert pending["busy"]
     assert pending["force_pending"]
 
-    terminal = system.run_cycle_batch(1, max_instructions=1)
+    terminal = system.run_cycle_batch(4, max_instructions=1)
 
-    assert terminal.instructions_executed == 0
-    assert terminal.per_core_instructions == (0,)
-    assert terminal.per_core_cycles == (6,)
-    assert terminal.system_cycles_advanced == 1
-    assert callback_count == 1
+    assert terminal.instructions_executed == 1
+    assert terminal.per_core_instructions == (1,)
+    assert terminal.per_core_cycles == (9,)
+    assert terminal.system_cycles_advanced == 4
     assert cpu.pc == len(code)
-    assert cpu.trap_addr == source + 192
-    assert cpu.cycle_count - cycles_before == 6
-    assert cpu.perf_cycles - perf_before == 6
-    assert cpu.perf_tileops == tileops_before
+    assert cpu.cycle_count - cycles_before == 9
+    assert cpu.perf_cycles - perf_before == 9
+    assert cpu.perf_tileops == tileops_before + 1
     assert _tacc_status(cpu) == {
         "claimed": False,
         "mine": False,

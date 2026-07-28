@@ -1945,6 +1945,15 @@ struct ResumableInstruction {
     bool tacc_busy_published = false;
     bool tacc_validation_trap_expected = false;
     uint64_t tacc_operation_epoch = 0;
+    bool tacc_timed_image_transfer = false;
+    bool tacc_timed_transfer_complete = false;
+    BusOperation tacc_timed_operation = BusOperation::READ;
+    uint64_t tacc_timed_operation_token = 0;
+    uint64_t tacc_timed_base_address = 0;
+    uint8_t tacc_timed_format_ew = 0;
+    bool tacc_timed_format_signed = false;
+    uint8_t tacc_timed_acknowledged_beats = 0;
+    std::optional<uint64_t> tacc_timed_completion_cycle;
     std::size_t replay_cursor = 0;
     std::size_t tile_replay_cursor = 0;
     std::size_t access_order_replay_cursor = 0;
@@ -2116,8 +2125,8 @@ struct TaccStageGrant {
 // retains its own equal-RR history.  Production has seven physical requestors;
 // reduced verification systems compact the instantiated full-core and cluster
 // requestors without changing the arbitration contract.
-// Landing 1.5 scheduler integration consumes these primitives later; the
-// diagnostic hooks below exercise their edge-level contract directly.
+// Strict cycle mode and the diagnostic hooks below share these same
+// edge-level primitives.
 struct TileMemoryTransport {
     static constexpr int PRODUCTION_ENGINE_COUNT = 7;
     static constexpr int MICRO_CORES_PER_CLUSTER = 4;
@@ -2743,6 +2752,95 @@ struct TileMemoryTransport {
                     "tile-memory issue sequence exhausted before "
                     "the image transfer could resume");
             }
+        }
+    }
+
+    void validate_image_port_completion(
+            const TaccImageTransferStage& stage,
+            uint64_t grant_sequence,
+            uint64_t completion_cycle,
+            bool has_read_data) const {
+        if (
+            !active_port_grant.has_value() ||
+            active_port_grant->grant_sequence != grant_sequence ||
+            !active_port_grant->request.image_transfer
+        ) {
+            throw std::logic_error(
+                "tile-memory image ACK does not match its active grant");
+        }
+        const TileMemoryPortGrant& grant =
+            *active_port_grant;
+        if (
+            grant.grant_cycle ==
+                std::numeric_limits<uint64_t>::max() ||
+            completion_cycle != grant.grant_cycle + 1
+        ) {
+            throw std::invalid_argument(
+                "internal tile-memory ACK must follow its grant by one cycle");
+        }
+        if (
+            (
+                grant.request.operation == BusOperation::READ
+            ) != has_read_data
+        ) {
+            throw std::invalid_argument(
+                grant.request.operation == BusOperation::READ
+                    ? "successful tile-memory read completion "
+                      "requires 64 bytes"
+                    : "tile-memory write completion cannot "
+                      "return read data");
+        }
+
+        const int engine_id =
+            grant.request.identity.engine_id;
+        if (!valid_engine_id(engine_id)) {
+            throw std::logic_error(
+                "tile-memory image ACK has an invalid engine");
+        }
+        const std::size_t index =
+            static_cast<std::size_t>(engine_id);
+        const TaccEngineTransportState& state =
+            engines[index];
+        if (
+            state.phase != TaccTransportPhase::ACTIVE ||
+            state.identity.owner_core_id !=
+                grant.request.identity.owner_core_id ||
+            !state.identity.matches(
+                engine_id,
+                grant.request.identity.operation_token,
+                grant.request.identity.engine_epoch,
+                grant.request.identity.caller_epoch) ||
+            state.stage_token !=
+                grant.request.stage_token ||
+            state.beat_index !=
+                grant.request.beat_index ||
+            !stage.owned_by(
+                engine_id,
+                state.identity.owner_core_id,
+                state.stage_token)
+        ) {
+            throw std::logic_error(
+                "tile-memory image ACK does not match its live journal");
+        }
+        if (
+            state.beat_index + 1 < IMAGE_BEATS &&
+            pending_port_requests[index].has_value()
+        ) {
+            throw std::logic_error(
+                "tile-memory image engine has a second pending beat");
+        }
+        if (
+            state.beat_index + 1 < IMAGE_BEATS &&
+            (
+                completion_cycle ==
+                    std::numeric_limits<uint64_t>::max() ||
+                last_issue_sequences[index] ==
+                    std::numeric_limits<uint64_t>::max()
+            )
+        ) {
+            throw std::overflow_error(
+                "tile-memory issue sequence exhausted before "
+                "the image transfer completed");
         }
     }
 
@@ -4592,33 +4690,39 @@ struct SystemState {
                     .active_port_grant->request
                     .identity.owner_core_id == core_id
             );
-        if (
+        const bool transport_canceled =
             tile_memory_transport.cancel_owner(
                 tacc_image_stage,
-                core_id)
+                core_id);
+        bool instruction_canceled = false;
+        if (
+            core_id >= 0 &&
+            core_id < full_core_count()
         ) {
-            if (
+            FullCoreCycleState& cycle_state =
+                full_core_cycle_states[
+                    static_cast<std::size_t>(
+                        core_id)];
+            const bool matching_ordinary =
                 ordinary_tile_access_live &&
-                core_id >= 0 &&
-                core_id < full_core_count()
-            ) {
-                FullCoreCycleState& cycle_state =
-                    full_core_cycle_states[
-                        static_cast<std::size_t>(
-                            core_id)];
-                if (
-                    cycle_state.instruction &&
-                    cycle_state.instruction->
-                        pending_tile_request.has_value() &&
-                    cycle_state.instruction->
-                        pending_tile_request->
-                        owner_core_id == core_id
-                ) {
-                    cycle_state.instruction.reset();
-                    cycle_state.ready_cycle =
-                        shared_clock.cycles();
-                }
+                cycle_state.instruction &&
+                cycle_state.instruction->
+                    pending_tile_request.has_value() &&
+                cycle_state.instruction->
+                    pending_tile_request->
+                    owner_core_id == core_id;
+            const bool matching_timed_image =
+                cycle_state.instruction &&
+                cycle_state.instruction->
+                    tacc_timed_image_transfer;
+            if (matching_ordinary || matching_timed_image) {
+                cycle_state.instruction.reset();
+                cycle_state.ready_cycle =
+                    shared_clock.cycles();
+                instruction_canceled = true;
             }
+        }
+        if (transport_canceled || instruction_canceled) {
             refresh_cycle_execution_pending();
         }
     }
@@ -4737,6 +4841,15 @@ struct SystemState {
     bool has_cycle_execution_pending() const {
         return cycle_execution_pending.load(
             std::memory_order_acquire);
+    }
+
+    bool has_resumable_core_instruction() const noexcept {
+        return std::any_of(
+            full_core_cycle_states.begin(),
+            full_core_cycle_states.end(),
+            [](const FullCoreCycleState& state) {
+                return state.instruction != nullptr;
+            });
     }
 
     void refresh_cycle_execution_pending() {
@@ -7255,9 +7368,15 @@ struct StepCallbacks {
     bool has_mmio;
     bool tacc_read_via_callback = false;
     bool tacc_write_via_callback = false;
+    bool tacc_span_policy_override = false;
     ResumableBusAccess* bus_access = nullptr;
     ResumableTileAccess* tile_access = nullptr;
     bool strict_cycle_dma = false;
+    bool tacc_timed_transfer_replay = false;
+    BusOperation tacc_timed_transfer_operation =
+        BusOperation::READ;
+    uint8_t tacc_timed_transfer_format_ew = 0;
+    bool tacc_timed_transfer_format_signed = false;
 };
 
 static bool python_bridge_has_memory_override(
@@ -7321,6 +7440,18 @@ static bool python_bridge_has_memory_override(
             resolved_function);
     }
     return true;
+}
+
+static bool python_bridge_has_tacc_span_policy_override(
+        const py::function& bridge) {
+    if (!py::hasattr(bridge, "__self__"))
+        return false;
+    py::object owner = bridge.attr("__self__");
+    return (
+        !owner.is_none() &&
+        py::hasattr(owner, "_tacc_span_validator") &&
+        !owner.attr("_tacc_span_validator").is_none()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -8199,10 +8330,10 @@ static int exec_mex(
 
     // Match raw TACC bytes before SS=imm8 normalizes its data byte to function
     // zero, and before generic MEX can touch a tile, ACC, or destination.
-    // Strict-cycle replay publishes BUSY in advance and owns its exact bus
-    // timeline, so every bus-access-backed invocation deliberately retains
-    // the Python continuation. Microcores likewise retain their cluster
-    // oracle; this native path is only a full core's private tile engine.
+    // Strict-cycle replay publishes BUSY in advance and owns its exact tile
+    // timeline. The admitted image-transfer replay is recognized below;
+    // every other bus-access-backed invocation retains the Python
+    // continuation. Microcores likewise retain their cluster oracle.
     const bool raw_tamac =
         op == 0x1 &&
         (
@@ -8219,6 +8350,37 @@ static int exec_mex(
         s.ext_modifier == 0x8 &&
         op == 0x3 &&
         (funct_byte & 0x7) >= 0x2;
+    if (cb.tacc_timed_transfer_replay) {
+        const int expected_function =
+            cb.tacc_timed_transfer_operation ==
+                BusOperation::READ
+            ? 0x4
+            : cb.tacc_timed_transfer_operation ==
+                    BusOperation::WRITE
+                ? 0x5
+                : -1;
+        if (
+            !raw_tacc_lifecycle ||
+            expected_function < 0 ||
+            ss != 0 ||
+            funct_byte != expected_function ||
+            s.profile != CoreProfile::FULL ||
+            s.tacc_owner != s.core_id ||
+            !s.tacc_busy ||
+            !TileMemoryTransport::valid_format(
+                cb.tacc_timed_transfer_format_ew,
+                cb.tacc_timed_transfer_format_signed)
+        ) {
+            throw std::logic_error(
+                "timed TACC image replay diverged from its "
+                "classified instruction");
+        }
+        // The registered transport has already performed all four physical
+        // beats and published any LOAD image atomically. Replaying the
+        // decoder here commits PC/performance state and the six-cycle base
+        // latency without repeating a target effect or releasing BUSY early.
+        return 4;
+    }
     if (raw_tamac || raw_tacc_lifecycle) {
         if (
             cb.bus_access != nullptr ||
@@ -8246,6 +8408,7 @@ static int exec_mex(
         const int lifecycle_function =
             funct_byte & 0x7;
         if (
+            cb.tacc_span_policy_override ||
             (
                 lifecycle_function == 0x4 &&
                 cb.tacc_read_via_callback
@@ -10687,6 +10850,11 @@ struct SystemInstructionTraits {
     bool tacc_python_fallback = false;
     bool tacc_publish_busy = false;
     bool tacc_validation_trap_expected = false;
+    bool tacc_timed_image_transfer = false;
+    BusOperation tacc_timed_operation = BusOperation::READ;
+    uint64_t tacc_timed_base_address = 0;
+    uint8_t tacc_timed_format_ew = 0;
+    bool tacc_timed_format_signed = false;
 };
 
 static bool tacc_mode_is_legal(const CPUState& state) noexcept {
@@ -10732,51 +10900,92 @@ static bool native_tacc_span_preflight_valid(
         0xFFFF'FF00'0000'0000ULL;
     constexpr uint64_t TACC_MMIO_END =
         0xFFFF'FF80'0000'0000ULL;
-    const uint64_t end = address + size;
+    const uint64_t last_address = address + (size - 1);
     if (
         address < TACC_MMIO_END &&
-        end > TACC_MMIO_START
+        last_address >= TACC_MMIO_START
     ) {
         return false;
     }
 
-    const auto contains =
-        [address, end](
+    const auto resolve_region =
+        [address, last_address](
                 const uint8_t* memory,
                 uint64_t base,
                 uint64_t region_size) noexcept {
             if (
                 memory == nullptr ||
                 region_size == 0 ||
-                region_size >
+                region_size - 1 >
                     std::numeric_limits<uint64_t>::max() -
                         base
             ) {
-                return false;
+                return 0;
             }
-            return (
-                base <= address &&
-                end <= base + region_size
-            );
+            const uint64_t region_last =
+                base + (region_size - 1);
+            if (address < base || address > region_last)
+                return 0;
+            return last_address <= region_last ? 1 : -1;
         };
-    return (
-        contains(
-            state.memory->vram_mem,
-            state.memory->vram_base,
-            state.memory->vram_size) ||
-        contains(
+
+    bool routed = false;
+    bool routed_to_hbw = false;
+    int result = resolve_region(
+        state.memory->vram_mem,
+        state.memory->vram_base,
+        state.memory->vram_size);
+    if (result != 0) {
+        if (result < 0)
+            return false;
+        routed = true;
+    }
+    if (!routed) {
+        result = resolve_region(
             state.memory->ext_mem,
             state.memory->ext_mem_base,
-            state.memory->ext_mem_size) ||
-        contains(
+            state.memory->ext_mem_size);
+        if (result != 0) {
+            if (result < 0)
+                return false;
+            routed = true;
+        }
+    }
+    if (!routed) {
+        result = resolve_region(
             state.memory->hbw_mem,
             state.memory->hbw_base,
-            state.memory->hbw_size) ||
-        contains(
+            state.memory->hbw_size);
+        if (result != 0) {
+            if (result < 0)
+                return false;
+            routed = true;
+            routed_to_hbw = true;
+        }
+    }
+    if (!routed) {
+        result = resolve_region(
             state.memory->mem,
             0,
-            state.memory->mem_size)
-    );
+            state.memory->mem_size);
+        if (result <= 0)
+            return false;
+        routed = true;
+    }
+    if (state.priv_level) {
+        if (routed_to_hbw)
+            return false;
+        if (
+            state.mpu_limit > state.mpu_base &&
+            (
+                address < state.mpu_base ||
+                last_address >= state.mpu_limit
+            )
+        ) {
+            return false;
+        }
+    }
+    return routed;
 }
 
 static uint64_t native_tamac_cycle_bound(
@@ -10944,6 +11153,9 @@ static SystemInstructionTraits native_tacc_instruction_traits(
             admitted =
                 state.tacc_owner == state.core_id &&
                 state.tacc_valid &&
+                TileMemoryTransport::valid_format(
+                    state.tacc_format_ew,
+                    state.tacc_format_signed != 0) &&
                 (state.tdst & 0x3F) == 0 &&
                 native_tacc_span_preflight_valid(
                     state,
@@ -10968,6 +11180,33 @@ static SystemInstructionTraits native_tacc_instruction_traits(
             : 2;
         traits.tacc_publish_busy = true;
         traits.tacc_validation_trap_expected = false;
+        if (function == 0x4 || function == 0x5) {
+            traits.has_unjournaled_shared_access = false;
+            traits.tacc_python_fallback = false;
+            traits.tacc_timed_image_transfer = true;
+            traits.tacc_timed_operation =
+                function == 0x4
+                ? BusOperation::READ
+                : BusOperation::WRITE;
+            traits.tacc_timed_base_address =
+                function == 0x4
+                ? state.tsrc0
+                : state.tdst;
+            if (function == 0x4) {
+                const int ew = state.tmode & 0x7;
+                traits.tacc_timed_format_ew =
+                    static_cast<uint8_t>(ew);
+                traits.tacc_timed_format_signed =
+                    native_tacc_format_signed(
+                        state,
+                        ew) != 0;
+            } else {
+                traits.tacc_timed_format_ew =
+                    state.tacc_format_ew;
+                traits.tacc_timed_format_signed =
+                    state.tacc_format_signed != 0;
+            }
+        }
     }
     return traits;
 }
@@ -11045,8 +11284,12 @@ static SystemInstructionTraits classify_system_instruction(
                 opcode_address,
                 modifier,
                 subop);
-        if (tacc.tacc_python_fallback)
+        if (
+            tacc.tacc_python_fallback ||
+            tacc.tacc_timed_image_transfer
+        ) {
             return tacc;
+        }
         // Ordinary full-core MEX traffic is replayed through the independent
         // 64-byte tile-memory journal in strict cycle mode.
         return {};
@@ -14146,16 +14389,19 @@ static uint64_t checked_cycle_add(
 static bool restore_cycle_instruction_checkpoint(
         ResumableInstruction& instruction,
         CPUState& core) {
+    const bool tacc_managed_instruction =
+        instruction.tacc_python_fallback ||
+        instruction.tacc_timed_image_transfer;
     // The epoch protects validation-only fallbacks too. They do not publish
     // BUSY, but restoring their pre-reset checkpoint would still resurrect
     // detached PC/register state.
     if (
-        instruction.tacc_python_fallback &&
+        tacc_managed_instruction &&
         core.tacc_epoch != instruction.tacc_operation_epoch
     ) {
         return false;
     }
-    if (!instruction.tacc_python_fallback) {
+    if (!tacc_managed_instruction) {
         instruction.checkpoint.restore(core);
         return true;
     }
@@ -14183,6 +14429,32 @@ static bool restore_cycle_instruction_checkpoint(
     core.tacc_busy = live_busy;
     core.tacc_force_pending = live_force_pending;
     core.tacc_epoch = live_epoch;
+    if (
+        instruction.tacc_timed_image_transfer &&
+        instruction.tacc_timed_operation ==
+            BusOperation::WRITE
+    ) {
+        if (
+            instruction.tacc_timed_acknowledged_beats >
+                TileMemoryTransport::IMAGE_BEATS
+        ) {
+            throw std::logic_error(
+                "timed TACC STORE acknowledged too many beats");
+        }
+        for (
+            uint8_t beat = 0;
+            beat <
+                instruction.tacc_timed_acknowledged_beats;
+            beat++
+        ) {
+            icache_invalidate_span(
+                core,
+                instruction.tacc_timed_base_address +
+                    static_cast<uint64_t>(beat) *
+                        TileMemoryTransport::BEAT_BYTES,
+                TileMemoryTransport::BEAT_BYTES);
+        }
+    }
     return true;
 }
 
@@ -14285,6 +14557,49 @@ static uint64_t pending_guest_instruction_count(
                 state.instruction->kind ==
                     CycleOperationKind::GUEST_INSTRUCTION;
         }));
+}
+
+static void discard_stale_cycle_tacc_transfers(
+        SystemState& system,
+        uint64_t current_cycle) {
+    for (std::size_t index = 0;
+         index < system.cores.size();
+         index++) {
+        const CPUState& core = *system.cores[index];
+        const FullCoreCycleState& cycle_state =
+            system.full_core_cycle_states[index];
+        const bool stale_instruction =
+            cycle_state.instruction &&
+            cycle_state.instruction->
+                tacc_timed_image_transfer &&
+            core.tacc_epoch !=
+                cycle_state.instruction->
+                    tacc_operation_epoch;
+        const int engine_id =
+            system.tacc_engine_for_core(core.core_id);
+        const TaccEngineTransportState& transport_state =
+            system.tile_memory_transport.engines[
+                static_cast<std::size_t>(engine_id)];
+        const bool live_transport =
+            transport_state.phase ==
+                TaccTransportPhase::WAITING_STAGE ||
+            transport_state.phase ==
+                TaccTransportPhase::ACTIVE;
+        const bool stale_transport =
+            live_transport &&
+            !system.tile_transport_identity_is_live(
+                engine_id,
+                transport_state.identity.owner_core_id,
+                transport_state.identity.engine_epoch,
+                transport_state.identity.caller_epoch);
+        if (!stale_instruction && !stale_transport)
+            continue;
+
+        system.cancel_tacc_image_stage_for_core(
+            core.core_id);
+        system.full_core_cycle_states[index].ready_cycle =
+            current_cycle;
+    }
 }
 
 static CycleCoreProgress run_cycle_interrupt_once(
@@ -14417,13 +14732,18 @@ static CycleCoreProgress run_cycle_core_once(
     CPUState& core = *system.cores[index];
     FullCoreCycleState& cycle_state =
         system.full_core_cycle_states[index];
-    const auto discard_cancelled_tacc_fallback = [&]() {
+    const auto discard_cancelled_tacc_instruction = [&]() {
         if (
             !cycle_state.instruction ||
-            !cycle_state.instruction->tacc_python_fallback
+            (
+                !cycle_state.instruction->
+                    tacc_python_fallback &&
+                !cycle_state.instruction->
+                    tacc_timed_image_transfer
+            )
         ) {
             throw std::logic_error(
-                "TACC cancellation has no suspended fallback");
+                "TACC cancellation has no suspended operation");
         }
         system.cancel_tacc_image_stage_for_core(core.core_id);
         cycle_state.ready_cycle =
@@ -14444,11 +14764,15 @@ static CycleCoreProgress run_cycle_core_once(
 
     if (
         cycle_state.instruction &&
-        cycle_state.instruction->tacc_python_fallback &&
+        (
+            cycle_state.instruction->tacc_python_fallback ||
+            cycle_state.instruction->
+                tacc_timed_image_transfer
+        ) &&
         core.tacc_epoch !=
             cycle_state.instruction->tacc_operation_epoch
     ) {
-        discard_cancelled_tacc_fallback();
+        discard_cancelled_tacc_instruction();
         return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
     }
     if (core.halted)
@@ -14461,8 +14785,20 @@ static CycleCoreProgress run_cycle_core_once(
     }
 
     if (!cycle_state.instruction) {
-        const SystemInstructionTraits traits =
+        SystemInstructionTraits traits =
             classify_system_instruction(core);
+        if (
+            traits.tacc_timed_image_transfer &&
+            base_callbacks.tacc_span_policy_override
+        ) {
+            // The private Python policy hook has no deterministic,
+            // checkpointable strict-cycle protocol.  Refuse it before
+            // publishing BUSY or transport state instead of predicting a
+            // six-cycle continuation whose policy fault may complete in two.
+            throw std::invalid_argument(
+                "strict-cycle TACC image transfers do not support "
+                "a custom span validator");
+        }
         const uint64_t remaining =
             cycle_deadline - cycle_state.ready_cycle;
         if (core.profile == CoreProfile::FULL ||
@@ -14502,6 +14838,82 @@ static CycleCoreProgress run_cycle_core_once(
             if (traits.tacc_publish_busy)
                 core.tacc_busy = true;
         }
+        if (traits.tacc_timed_image_transfer) {
+            if (!cycle_state.instruction) {
+                throw std::logic_error(
+                    "timed TACC transfer lacks a checkpoint");
+            }
+            if (
+                cycle_state.next_tile_operation_token ==
+                    std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "timed TACC operation token overflow");
+            }
+
+            ResumableInstruction& instruction =
+                *cycle_state.instruction;
+            const int engine_id =
+                system.tacc_engine_for_core(core.core_id);
+            const uint64_t operation_token =
+                cycle_state.next_tile_operation_token;
+            std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+            if (
+                traits.tacc_timed_operation ==
+                    BusOperation::WRITE
+            ) {
+                image = core.tacc;
+                const std::size_t active =
+                    native_tacc_active_bytes(
+                        traits.tacc_timed_format_ew);
+                std::fill(
+                    image.begin() +
+                        static_cast<std::ptrdiff_t>(active),
+                    image.end(),
+                    0);
+            }
+
+            try {
+                (void)system.tile_memory_transport.start(
+                    engine_id,
+                    core.core_id,
+                    traits.tacc_timed_operation ==
+                            BusOperation::READ
+                        ? TaccImageTransferStage::Direction::LOAD
+                        : TaccImageTransferStage::Direction::STORE,
+                    traits.tacc_timed_base_address,
+                    traits.tacc_timed_format_ew,
+                    traits.tacc_timed_format_signed,
+                    core.tacc_epoch,
+                    0,
+                    operation_token,
+                    instruction.start_cycle,
+                    image);
+            } catch (...) {
+                cycle_state.instruction.reset();
+                system.refresh_cycle_execution_pending();
+                throw;
+            }
+
+            instruction.tacc_timed_image_transfer = true;
+            instruction.tacc_timed_operation =
+                traits.tacc_timed_operation;
+            instruction.tacc_timed_operation_token =
+                operation_token;
+            instruction.tacc_timed_base_address =
+                traits.tacc_timed_base_address;
+            instruction.tacc_timed_format_ew =
+                traits.tacc_timed_format_ew;
+            instruction.tacc_timed_format_signed =
+                traits.tacc_timed_format_signed;
+            instruction.tacc_operation_epoch =
+                core.tacc_epoch;
+            instruction.tacc_busy_published = true;
+            cycle_state.next_tile_operation_token++;
+            core.tacc_busy = true;
+            system.refresh_cycle_execution_pending();
+            return CycleCoreProgress::WAITING_TILE;
+        }
         if (
             traits.has_unjournaled_shared_access &&
             remaining < traits.unjournaled_cycle_bound
@@ -14519,6 +14931,13 @@ static CycleCoreProgress run_cycle_core_once(
 
     ResumableInstruction* instruction =
         cycle_state.instruction.get();
+    if (
+        instruction &&
+        instruction->tacc_timed_image_transfer &&
+        !instruction->tacc_timed_transfer_complete
+    ) {
+        return CycleCoreProgress::WAITING_TILE;
+    }
     if (instruction &&
         instruction->retire_cycle.has_value() &&
         *instruction->retire_cycle > cycle_deadline) {
@@ -14540,7 +14959,7 @@ static CycleCoreProgress run_cycle_core_once(
         if (!restore_cycle_instruction_checkpoint(
                 *instruction,
                 core)) {
-            discard_cancelled_tacc_fallback();
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         for (const TileReplayRecord& record :
@@ -14566,6 +14985,23 @@ static CycleCoreProgress run_cycle_core_once(
             core_index);
         callbacks.bus_access = bus_access.get();
         callbacks.tile_access = tile_access.get();
+        if (instruction->tacc_timed_image_transfer) {
+            if (
+                !instruction->tacc_timed_transfer_complete ||
+                !instruction->
+                    tacc_timed_completion_cycle.has_value()
+            ) {
+                throw std::logic_error(
+                    "timed TACC replay began before its final ACK");
+            }
+            callbacks.tacc_timed_transfer_replay = true;
+            callbacks.tacc_timed_transfer_operation =
+                instruction->tacc_timed_operation;
+            callbacks.tacc_timed_transfer_format_ew =
+                instruction->tacc_timed_format_ew;
+            callbacks.tacc_timed_transfer_format_signed =
+                instruction->tacc_timed_format_signed;
+        }
     }
 
     auto logical_guard =
@@ -14586,7 +15022,7 @@ static CycleCoreProgress run_cycle_core_once(
         if (!restore_cycle_instruction_checkpoint(
                 *instruction,
                 core)) {
-            discard_cancelled_tacc_fallback();
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         cycle_state.ready_cycle =
@@ -14601,7 +15037,7 @@ static CycleCoreProgress run_cycle_core_once(
         if (!restore_cycle_instruction_checkpoint(
                 *instruction,
                 core)) {
-            discard_cancelled_tacc_fallback();
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         cycle_state.ready_cycle =
@@ -14614,7 +15050,7 @@ static CycleCoreProgress run_cycle_core_once(
                 *instruction,
                 core)
         ) {
-            discard_cancelled_tacc_fallback();
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         throw;
@@ -14661,7 +15097,7 @@ static CycleCoreProgress run_cycle_core_once(
                 *instruction,
                 core)
         ) {
-            discard_cancelled_tacc_fallback();
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         throw std::runtime_error(
@@ -14682,7 +15118,7 @@ static CycleCoreProgress run_cycle_core_once(
             core.tacc_epoch !=
                 instruction->tacc_operation_epoch
         ) {
-            discard_cancelled_tacc_fallback();
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         if (!bounded_tacc_fallback) {
@@ -14707,7 +15143,7 @@ static CycleCoreProgress run_cycle_core_once(
                 if (!restore_cycle_instruction_checkpoint(
                         *instruction,
                         core)) {
-                    discard_cancelled_tacc_fallback();
+                    discard_cancelled_tacc_instruction();
                     return CycleCoreProgress::
                         BLOCKED_BY_CYCLE_LIMIT;
                 }
@@ -14783,7 +15219,7 @@ static CycleCoreProgress run_cycle_core_once(
                 // The control plane won while Python held a detached image.
                 // Its live state is authoritative; do not restore or account
                 // any part of the discarded instruction.
-                discard_cancelled_tacc_fallback();
+                discard_cancelled_tacc_instruction();
                 return CycleCoreProgress::
                     BLOCKED_BY_CYCLE_LIMIT;
             }
@@ -14853,6 +15289,14 @@ static CycleCoreProgress run_cycle_core_once(
             throw std::runtime_error(
                 "cycle-bounded core made invalid progress");
         }
+        if (
+            instruction &&
+            instruction->tacc_timed_image_transfer &&
+            raw.total_cycles != 6
+        ) {
+            throw std::logic_error(
+                "timed TACC replay changed its six-cycle base latency");
+        }
 
         const uint64_t start_cycle =
             instruction
@@ -14878,13 +15322,34 @@ static CycleCoreProgress run_cycle_core_once(
                 instruction->completed_tile_accesses.back()
                     .completion_cycle);
         }
+        if (
+            instruction &&
+            instruction->tacc_timed_image_transfer
+        ) {
+            if (
+                !instruction->
+                    tacc_timed_completion_cycle.has_value()
+            ) {
+                throw std::logic_error(
+                    "timed TACC retirement lacks its final ACK");
+            }
+            completion_cycle = std::max(
+                completion_cycle,
+                *instruction->tacc_timed_completion_cycle);
+        }
 
         if (completion_cycle > cycle_deadline) {
             if (!instruction) {
                 throw std::logic_error(
                     "cycle-boundary instruction lacked a checkpoint");
             }
-            instruction->checkpoint.restore(core);
+            if (!restore_cycle_instruction_checkpoint(
+                    *instruction,
+                    core)) {
+                discard_cancelled_tacc_instruction();
+                return CycleCoreProgress::
+                    BLOCKED_BY_CYCLE_LIMIT;
+            }
             instruction->retire_cycle =
                 completion_cycle;
             cycle_state.ready_cycle =
@@ -14924,6 +15389,27 @@ static CycleCoreProgress run_cycle_core_once(
         batch_result.per_core_stop_reasons[index][RUN_LIMIT]++;
     }
 
+    if (
+        instruction &&
+        instruction->tacc_timed_image_transfer
+    ) {
+        if (
+            retired_steps != 1 ||
+            terminal ||
+            core.tacc_epoch !=
+                instruction->tacc_operation_epoch
+        ) {
+            throw std::logic_error(
+                "timed TACC transfer reached an invalid retirement");
+        }
+        if (
+            instruction->tacc_timed_operation ==
+                BusOperation::WRITE
+        ) {
+            core.tacc_dirty = false;
+        }
+        finish_cycle_tacc_terminal(core);
+    }
     cycle_state.ready_cycle = completion_cycle;
     cycle_state.instruction.reset();
     system.refresh_cycle_execution_pending();
@@ -15210,6 +15696,51 @@ static bool held_tile_request_matches_grant(
 }
 
 static std::optional<uint64_t>
+next_cycle_tacc_stage_arbitration(
+        const SystemState& system,
+        uint64_t current_cycle) {
+    const TileMemoryTransport& transport =
+        system.tile_memory_transport;
+    if (system.tacc_image_stage.active())
+        return std::nullopt;
+
+    std::optional<uint64_t> earliest;
+    for (const TaccEngineTransportState& state :
+         transport.engines) {
+        if (
+            state.phase !=
+                TaccTransportPhase::WAITING_STAGE
+        ) {
+            continue;
+        }
+        const uint64_t registered_cycle =
+            checked_cycle_add(
+                state.ready_cycle,
+                1,
+                "TACC image-stage registered request");
+        uint64_t candidate =
+            std::max(current_cycle, registered_cycle);
+        if (
+            transport.last_stage_arbitration_cycle.has_value() &&
+            candidate <=
+                *transport.last_stage_arbitration_cycle
+        ) {
+            candidate = checked_cycle_add(
+                *transport.last_stage_arbitration_cycle,
+                1,
+                "TACC image-stage arbitration retry");
+        }
+        if (
+            !earliest.has_value() ||
+            candidate < *earliest
+        ) {
+            earliest = candidate;
+        }
+    }
+    return earliest;
+}
+
+static std::optional<uint64_t>
 next_cycle_tile_port_arbitration(
         const SystemState& system,
         uint64_t current_cycle) {
@@ -15272,8 +15803,139 @@ static void complete_cycle_tile_target(
     }
     const TileMemoryPortGrant grant = *active;
     if (grant.request.image_transfer) {
-        throw std::runtime_error(
-            "cycle-bounded TACC image transport is not integrated");
+        const int engine_id =
+            grant.request.identity.engine_id;
+        const int owner_core_id =
+            grant.request.identity.owner_core_id;
+        if (
+            engine_id < 0 ||
+            engine_id >= system.full_core_count() ||
+            owner_core_id != engine_id
+        ) {
+            throw std::logic_error(
+                "cycle scheduler received a non-full-core "
+                "TACC image grant");
+        }
+        if (
+            !system.tile_transport_identity_is_live(
+                engine_id,
+                owner_core_id,
+                grant.request.identity.engine_epoch,
+                grant.request.identity.caller_epoch)
+        ) {
+            // A reset/cancel epoch won before this registered ACK. Discard
+            // the stale fabric state without touching its memory target.
+            system.cancel_tacc_image_stage_for_core(
+                owner_core_id);
+            return;
+        }
+
+        const int core_index =
+            full_core_index_for_requester(
+                system,
+                owner_core_id);
+        const std::size_t index =
+            static_cast<std::size_t>(core_index);
+        FullCoreCycleState& cycle_state =
+            system.full_core_cycle_states[index];
+        if (
+            !cycle_state.instruction ||
+            !cycle_state.instruction->
+                tacc_timed_image_transfer ||
+            cycle_state.instruction->
+                tacc_timed_transfer_complete ||
+            cycle_state.instruction->
+                tacc_timed_operation_token !=
+                    grant.request.identity.operation_token ||
+            cycle_state.instruction->
+                tacc_operation_epoch !=
+                    grant.request.identity.engine_epoch ||
+            cycle_state.instruction->
+                tacc_timed_operation !=
+                    grant.request.operation
+        ) {
+            throw std::logic_error(
+                "TACC image grant has no matching suspended instruction");
+        }
+
+        // Arbitration samples pre-edge ownership. In particular, beat four
+        // cannot release the image stage and grant it to a waiter on this
+        // same edge; the recorded arbitration forces the next attempt to
+        // completion_cycle + 1.
+        (void)system.tile_memory_transport.try_grant_stage(
+            system.tacc_image_stage,
+            completion_cycle);
+        system.tile_memory_transport
+            .validate_image_port_completion(
+                system.tacc_image_stage,
+                grant.grant_sequence,
+                completion_cycle,
+                grant.request.operation ==
+                    BusOperation::READ);
+
+        CPUState& core = *system.cores[index];
+        std::optional<std::array<uint8_t, 64>> read_data;
+        {
+            auto memory_guard =
+                acquire_shared_memory_use(core);
+            if (
+                grant.request.operation ==
+                    BusOperation::READ
+            ) {
+                std::array<uint8_t, 64> data{};
+                tile_read_64bytes_direct(
+                    core,
+                    grant.request.address,
+                    data);
+                read_data = data;
+            } else {
+                tile_write_64bytes_direct(
+                    core,
+                    grant.request.address,
+                    grant.request.data);
+            }
+        }
+
+        const std::optional<TileMemoryPortCompletion>
+            completed =
+                system.tile_memory_transport.complete_port(
+                    system.tacc_image_stage,
+                    grant.grant_sequence,
+                    completion_cycle,
+                    read_data);
+        if (!completed.has_value()) {
+            throw std::logic_error(
+                "TACC image completion rejected its active grant");
+        }
+        const TaccEngineTransportState& transport_state =
+            system.tile_memory_transport.engines[
+                static_cast<std::size_t>(engine_id)];
+        cycle_state.instruction->
+            tacc_timed_acknowledged_beats =
+                transport_state.beat_index;
+        if (completed->image_transfer_complete) {
+            if (
+                grant.request.operation ==
+                    BusOperation::READ
+            ) {
+                core.tacc = transport_state.image;
+                core.tacc_valid = true;
+                core.tacc_dirty = false;
+                core.tacc_format_ew =
+                    transport_state.format_ew;
+                core.tacc_format_signed =
+                    static_cast<uint8_t>(
+                        transport_state.format_signed);
+            }
+            cycle_state.instruction->
+                tacc_timed_transfer_complete = true;
+            cycle_state.instruction->
+                tacc_timed_completion_cycle =
+                    completion_cycle;
+            cycle_state.ready_cycle = completion_cycle;
+        }
+        system.refresh_cycle_execution_pending();
+        return;
     }
     const int core_index = full_core_index_for_requester(
         system,
@@ -16228,6 +16890,9 @@ static SystemBatchResult run_full_core_cycle_batch(
         system,
         dma_callbacks,
         clock_start);
+    discard_stale_cycle_tacc_transfers(
+        system,
+        clock_start);
 
     const std::optional<uint64_t> initial_timer_cycle =
         next_cycle_timer_irq(system);
@@ -16267,6 +16932,9 @@ static SystemBatchResult run_full_core_cycle_batch(
     std::optional<uint64_t> instruction_stop_cycle;
 
     while (true) {
+        discard_stale_cycle_tacc_transfers(
+            system,
+            scheduler_cycle);
         const bool instruction_limit_reached =
             result.instructions_executed >= max_instructions;
         const uint64_t effective_deadline =
@@ -16322,7 +16990,13 @@ static SystemBatchResult run_full_core_cycle_batch(
                 (
                     state.instruction->pending_request.has_value() ||
                     state.instruction->
-                        pending_tile_request.has_value()
+                        pending_tile_request.has_value() ||
+                    (
+                        state.instruction->
+                            tacc_timed_image_transfer &&
+                        !state.instruction->
+                            tacc_timed_transfer_complete
+                    )
                 )) {
                 continue;
             }
@@ -16350,6 +17024,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                     scheduler_cycle);
         }
         const std::optional<uint64_t>
+            next_stage_arbitration_cycle =
+                next_cycle_tacc_stage_arbitration(
+                    system,
+                    scheduler_cycle);
+        const std::optional<uint64_t>
             next_tile_arbitration_cycle =
                 next_cycle_tile_port_arbitration(
                     system,
@@ -16367,6 +17046,11 @@ static SystemBatchResult run_full_core_cycle_batch(
             next_cycle = std::min(
                 next_cycle,
                 *system.cycle_target_completion_cycle);
+        }
+        if (next_stage_arbitration_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_stage_arbitration_cycle);
         }
         if (next_tile_arbitration_cycle.has_value()) {
             next_cycle = std::min(
@@ -16521,7 +17205,13 @@ static SystemBatchResult run_full_core_cycle_batch(
                 (
                     state.instruction->pending_request.has_value() ||
                     state.instruction->
-                        pending_tile_request.has_value()
+                        pending_tile_request.has_value() ||
+                    (
+                        state.instruction->
+                            tacc_timed_image_transfer &&
+                        !state.instruction->
+                            tacc_timed_transfer_complete
+                    )
                 )) {
                 continue;
             }
@@ -16604,6 +17294,14 @@ static SystemBatchResult run_full_core_cycle_batch(
                         1,
                         "main bus target completion");
             }
+        }
+        if (
+            scheduler_cycle < post_dispatch_deadline &&
+            !system.tacc_image_stage.active()
+        ) {
+            (void)system.tile_memory_transport.try_grant_stage(
+                system.tacc_image_stage,
+                scheduler_cycle);
         }
         if (
             scheduler_cycle < post_dispatch_deadline &&
@@ -22683,6 +23381,9 @@ static std::vector<StepCallbacks> build_system_step_callbacks(
             python_bridge_has_memory_override(
                 mmio_write8,
                 "mem_write8");
+        core_callbacks.tacc_span_policy_override =
+            python_bridge_has_tacc_span_policy_override(
+                mmio_read8);
         core_callbacks.mmio_read8 =
             [mmio_read8](uint64_t address) -> uint8_t {
                 py::gil_scoped_acquire acquire;
@@ -25891,6 +26592,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "tile transport cannot restore during "
                         "an active native system batch");
                 }
+                if (system.has_resumable_core_instruction()) {
+                    throw std::runtime_error(
+                        "tile transport cannot restore while a core "
+                        "instruction is suspended");
+                }
                 if (
                     system.tacc_image_stage.active() &&
                     !system.tile_memory_transport
@@ -25943,6 +26649,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     throw std::runtime_error(
                         "tile transport cannot reset during "
                         "an active native system batch");
+                }
+                if (system.has_resumable_core_instruction()) {
+                    throw std::runtime_error(
+                        "tile transport cannot reset while a core "
+                        "instruction is suspended");
                 }
                 system.tile_memory_transport.reset(
                     system.tacc_image_stage);
@@ -27747,6 +28458,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
             python_bridge_has_memory_override(
                 mmio_write8,
                 "mem_write8");
+        cb.tacc_span_policy_override =
+            python_bridge_has_tacc_span_policy_override(
+                mmio_read8);
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             return mmio_read8(addr).cast<uint8_t>();
         };
@@ -27809,6 +28523,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
             python_bridge_has_memory_override(
                 mmio_write8,
                 "mem_write8");
+        cb.tacc_span_policy_override =
+            python_bridge_has_tacc_span_policy_override(
+                mmio_read8);
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             py::gil_scoped_acquire acq;
             return mmio_read8(addr).cast<uint8_t>();

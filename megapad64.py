@@ -1473,15 +1473,22 @@ class Megapad64:
 
         regions = []
         if self._vram_mem is not None:
-            regions.append((self._vram_base, self._vram_size))
+            regions.append(
+                (self._vram_base, self._vram_size, False)
+            )
         if self._ext_mem is not None:
-            regions.append((self._ext_mem_base, self._ext_mem_size))
+            regions.append(
+                (self._ext_mem_base, self._ext_mem_size, False)
+            )
         if self._hbw_mem is not None:
-            regions.append((self._hbw_base, self._hbw_size))
-        regions.append((0, self.mem_size))
+            regions.append(
+                (self._hbw_base, self._hbw_size, True)
+            )
+        regions.append((0, self.mem_size, False))
 
         region_found = False
-        for base, region_size in regions:
+        routed_to_hbw = False
+        for base, region_size, is_hbw in regions:
             region_end = base + region_size
             if base <= start < region_end:
                 if end > region_end:
@@ -1491,6 +1498,7 @@ class Megapad64:
                         region_end,
                     )
                 region_found = True
+                routed_to_hbw = is_hbw
                 break
         if not region_found:
             self._tacc_trap(
@@ -1498,6 +1506,28 @@ class Megapad64:
                 "TACC span starts outside routed memory",
                 start,
             )
+
+        if self.priv_level:
+            if routed_to_hbw:
+                self._tacc_trap(
+                    IVEC_PRIV_FAULT,
+                    "user-mode TACC image access to HBW is forbidden",
+                    start,
+                )
+            if self.mpu_limit > self.mpu_base and (
+                start < self.mpu_base or end > self.mpu_limit
+            ):
+                first_forbidden = (
+                    start
+                    if start < self.mpu_base
+                    or start >= self.mpu_limit
+                    else self.mpu_limit
+                )
+                self._tacc_trap(
+                    IVEC_PRIV_FAULT,
+                    "TACC image span is outside the active MPU window",
+                    first_forbidden,
+                )
 
         if self._tacc_span_validator is not None:
             try:
