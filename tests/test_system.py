@@ -19263,6 +19263,63 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         self.assertIn("SNI=auth.openai.com", text)
         self.assertIn("ALPN=http/1.1", text)
 
+    def test_client_hello_admits_dns_max_sni_without_overflow(self):
+        """The DNS maximum fits every profile and oversize fails pre-write."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            "TLS-ALPN-HTTP11 test-ctx @ TLS-CTX.ALPN-PROFILE !",
+            ": max-sni",
+            "  TLS-SNI-HOST TLS-SNI-HOST-STORAGE 0 FILL",
+            "  TLS-SNI-HOST TLS-SNI-HOST-CAPACITY 97 FILL",
+            "  46 TLS-SNI-HOST 63 + C!",
+            "  46 TLS-SNI-HOST 127 + C!",
+            "  46 TLS-SNI-HOST 191 + C!",
+            ";",
+            "max-sni",
+            "TLS-SNI-HOST-CAPACITY TLS-SNI-LEN !",
+            '." DNS=" TLS-SNI-HOST TLS-SNI-LEN @ FALSE DNS-NAME-VALID? .',
+            '." WORST=" 915 TLS-SNI-HOST-CAPACITY 9 + + 15 + 77 + 9 + .',
+            '." CAP=" TLS-CH-BUF-CAPACITY .',
+            "TLS-HELLO-STANDARD test-ctx @ TLS-CTX.HELLO-PROFILE !",
+            "TLS-CH-BUF TLS-CH-BUF-CAPACITY 165 FILL",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO",
+            "VARIABLE max-ch-len max-ch-len !",
+            "VARIABLE max-ch-addr max-ch-addr !",
+            '." LEN=" max-ch-len @ .',
+            '." RECORD=" TLS-CH-BUF 3 + NW16@ .',
+            '." FIRST=" TLS-CH-BUF 93 + C@ .',
+            '." LAST=" TLS-CH-BUF 345 + C@ .',
+            '." NEXT=" TLS-CH-BUF 438 + C@ .',
+            '." END=" TLS-CH-BUF TLS-CH-BUF-CAPACITY + 1- C@ .',
+            "TLS-CH-BUF TLS-CH-BUF-CAPACITY 90 FILL",
+            "13 TLS-HS-TR-LEN !",
+            "TLS-SNI-HOST-CAPACITY 1+ TLS-SNI-LEN !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO",
+            '." BADLEN=" .',
+            '." BADADDR=" .',
+            '." BADFIRST=" TLS-CH-BUF C@ .',
+            '." BADEND=" TLS-CH-BUF TLS-CH-BUF-CAPACITY + 1- C@ .',
+            '." BADTR=" TLS-HS-TR-LEN @ .',
+            '." BADSTATE=" test-ctx @ TLS-CTX.STATE @ .',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("DNS=-1 ", text)
+        self.assertIn("WORST=1278 ", text)
+        self.assertIn("CAP=1280 ", text)
+        self.assertIn("LEN=438 ", text)
+        self.assertIn("RECORD=433 ", text)
+        self.assertIn("FIRST=97 ", text)
+        self.assertIn("LAST=97 ", text)
+        self.assertIn("NEXT=165 ", text)
+        self.assertIn("END=165 ", text)
+        self.assertIn("BADLEN=0 ", text)
+        self.assertIn("BADADDR=0 ", text)
+        self.assertIn("BADFIRST=90 ", text)
+        self.assertIn("BADEND=90 ", text)
+        self.assertIn("BADTR=13 ", text)
+        self.assertIn("BADSTATE=0 ", text)
+
     def test_build_ch_hybrid_key_share_group(self):
         """Explicit hybrid ClientHello uses the private ML-KEM group."""
         # key_share ext starts at offset 93 (86+7 for supported_versions)

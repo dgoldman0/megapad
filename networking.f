@@ -1694,6 +1694,7 @@ VARIABLE _DHST-SIP
 \        answer    var  name + type + class + TTL + rdlen + rdata
 
 12 CONSTANT /DNS-HDR
+253 CONSTANT DNS-NAME-MAX
 CREATE DNS-BUF  512 ALLOT  \ max DNS message
 \ DNS-SERVER-IP is declared in §16.5 (DHCP) so DHCP-PARSE-ACK can set it.
 
@@ -1706,7 +1707,7 @@ VARIABLE _DDV-LEN
 VARIABLE _DDV-LABEL
 : DNS-DOMAIN-VALID?  ( addr len -- flag )
     _DDV-LEN !  _DDV-ADDR !
-    _DDV-LEN @ 0= _DDV-LEN @ 253 > OR IF 0 EXIT THEN
+    _DDV-LEN @ 1 < _DDV-LEN @ DNS-NAME-MAX > OR IF 0 EXIT THEN
     0 _DDV-LABEL !
     _DDV-LEN @ 0 DO
         _DDV-ADDR @ I + C@ 46 = IF
@@ -3271,7 +3272,7 @@ VARIABLE _DNV-DOTS
 
 : DNS-NAME-VALID? ( addr len allow-wildcard -- flag )
     _DNV-WILDCARD ! _DNV-U ! _DNV-A !
-    _DNV-U @ 0= _DNV-U @ 253 > OR IF FALSE EXIT THEN
+    _DNV-U @ 1 < _DNV-U @ DNS-NAME-MAX > OR IF FALSE EXIT THEN
     0 _DNV-LABEL-U ! 0 _DNV-DOTS !
     _DNV-U @ 0 DO
         _DNV-A @ I + C@
@@ -3960,7 +3961,7 @@ VARIABLE _XH-END
 
 : X509-DESC-CHECK-HOST ( hostname hlen cert -- flag )
     _XH-CERT ! _XCH-HLEN ! _XCH-HOST !
-    _XCH-HLEN @ 0= _XCH-HLEN @ 253 > OR IF -1 EXIT THEN
+    _XCH-HLEN @ 1 < _XCH-HLEN @ DNS-NAME-MAX > OR IF -1 EXIT THEN
     _XCH-HOST @ _XCH-HLEN @ FALSE DNS-NAME-VALID? 0= IF -1 EXIT THEN
     _XH-CERT @ XC.SAN-U + @ 0= IF -1 EXIT THEN
     _XH-CERT @ XC.SAN-A + @ DUP _XH-POS !
@@ -4111,7 +4112,7 @@ VARIABLE _TTL-ANCHOR
         _TTL-POS @ _BE16@ _TTL-FLAGS !
         _TTL-POS @ 2 + _BE16@ _TTL-SCOPE-U !
         _TTL-POS @ 4 + _BE32@ _TTL-CERT-U !
-        _TTL-SCOPE-U @ 253 > _TTL-CERT-U @ 8192 > OR IF
+        _TTL-SCOPE-U @ DNS-NAME-MAX > _TTL-CERT-U @ 8192 > OR IF
             TLS-TRUST-RESET TLS-CERT-MALFORMED UNLOOP EXIT
         THEN
         _TTL-POS @ 8 + DUP _TTS-A !
@@ -5263,7 +5264,11 @@ VARIABLE _XPV-ANCHOR
     TLS-CERT-CONSTRAINT ;
 
 \ --- SNI host buffer (used by §16.7d and §16.10 ClientHello) ---
-CREATE TLS-SNI-HOST 64 ALLOT
+\ DNS names admit the RFC maximum of 253 bytes.  Keep the expanded byte arena
+\ out of the system dictionary when external memory is available.
+DNS-NAME-MAX CONSTANT TLS-SNI-HOST-CAPACITY
+256 CONSTANT TLS-SNI-HOST-STORAGE
+TLS-SNI-HOST-STORAGE XBUF TLS-SNI-HOST
 VARIABLE TLS-SNI-LEN
 
 \ TLS 1.3 handshake message types used by certificate and handshake layers.
@@ -5388,7 +5393,7 @@ VARIABLE _TPC-KEEP
     REPEAT
 
     TLS-PEER-CERT-COUNT @ 0= IF TLS-CERT-MALFORMED _TPC-RESULT EXIT THEN
-    TLS-SNI-LEN @ 0= TLS-SNI-LEN @ 64 > OR IF
+    TLS-SNI-LEN @ DUP 1 < SWAP TLS-SNI-HOST-CAPACITY > OR IF
         TLS-CERT-HOSTNAME _TPC-RESULT EXIT
     THEN
     TLS-PEER-CERTS TLS-PEER-CERT-COUNT @
@@ -5746,7 +5751,10 @@ TLS-HS-TR-MAX 4 + CONSTANT TLS-HS-RBUF-MAX
 TLS-HS-RBUF-MAX XBUF TLS-HS-RBUF
 VARIABLE TLS-HS-RBUF-LEN
 VARIABLE TLS-HS-RBUF-ERROR
-1280 XBUF TLS-CH-BUF             \ enlarged for hybrid PQ key_share
+\ The largest admitted hybrid ClientHello is 1278 bytes; the builder measures
+\ the complete record against this arena before changing any handshake state.
+1280 CONSTANT TLS-CH-BUF-CAPACITY
+TLS-CH-BUF-CAPACITY XBUF TLS-CH-BUF
 CREATE TLS-HS-HASH 32 ALLOT
 CREATE TLS-TEMP-SECRET 32 ALLOT
 CREATE TLS-TEMP-SECRET2 32 ALLOT
@@ -6066,17 +6074,31 @@ VARIABLE _TBCH-FIXED
     TLS-CH-BUF _TBCH-POS @ + C!  1 _TBCH-POS +! ;
 
 : TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
+    DUP 0= IF DROP 0 0 EXIT THEN
     _TBCH-CTX !
-    TLS-SNI-LEN @ 64 > IF 0 0 EXIT THEN
-    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-NONE <
-    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 > OR IF 0 0 EXIT THEN
-    _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-STANDARD <
-    _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-HYBRID > OR IF 0 0 EXIT THEN
+    TLS-SNI-LEN @ DUP 0< SWAP TLS-SNI-HOST-CAPACITY > OR IF
+        0 0 EXIT
+    THEN
+    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @
+    DUP TLS-ALPN-NONE < SWAP TLS-ALPN-HTTP11 > OR IF 0 0 EXIT THEN
+    _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @
+    DUP TLS-HELLO-STANDARD < SWAP TLS-HELLO-HYBRID > OR IF 0 0 EXIT THEN
     _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-HYBRID =
     _TBCH-HYBRID !
     TLS-SNI-LEN @ 0> IF
-        TLS-SNI-HOST TLS-SNI-LEN @ FALSE DNS-NAME-VALID? 0= IF 0 0 EXIT THEN
+        TLS-SNI-HOST TLS-SNI-LEN @ FALSE DNS-NAME-VALID? 0=
+        IF 0 0 EXIT THEN
     THEN
+    \ Compute and bound the complete record before changing any TLS state.
+    _TBCH-HYBRID @ IF 915 77 ELSE 77 75 THEN
+    _TBCH-FIXED !
+    TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN
+    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 =
+    IF 15 + THEN
+    DUP _TBCH-FIXED @ + 9 + TLS-CH-BUF-CAPACITY > IF
+        DROP 0 0 EXIT
+    THEN
+    >R
     TLS-TR-RESET
     TLS-HS-RBUF-RESET
     _TPC-RESET
@@ -6093,15 +6115,7 @@ VARIABLE _TBCH-FIXED
         TLS-HS-KYBER-SEED TLS-HS-KYBER-PK TLS-HS-KYBER-SK KYBER-KEYGEN
     THEN
     TLS-GROUP-X25519 TLS-HS-GROUP !   \ default until server picks
-    \ --- Compute extension lengths ---
-    \ Standard: versions 7 + key_share 42 + signatures 10 +
-    \ signature_algorithms_cert 10 + groups 8 = 77.
-    \ Hybrid: versions 7 + key_share 878 + signatures 10 +
-    \ signature_algorithms_cert 10 + groups 10 = 915.
-    _TBCH-HYBRID @ IF 915 77 ELSE 77 75 THEN _TBCH-FIXED !
-    TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN   \ +SNI ext
-    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF 15 + THEN
-    >R  \ R: ext_len
+    \ R: preflighted extension length
     \ --- [0] TLS Record Header (5 bytes) ---
     TLS-CT-HANDSHAKE _TBCH-C!                     \ [0] = 22
     3 _TBCH-C!   1 _TBCH-C!                       \ [1-2] = 0x0301
@@ -7076,7 +7090,7 @@ VARIABLE _TLSC-CH-LEN
         DROP 2DROP DROP 0 EXIT
     THEN
     _TLSC-ALPN !
-    TLS-SNI-LEN @ 0= TLS-SNI-LEN @ 64 > OR
+    TLS-SNI-LEN @ DUP 1 < SWAP TLS-SNI-HOST-CAPACITY > OR
     TLS-TRUST-COUNT @ 0= OR IF
         TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
         2DROP DROP 0 EXIT
