@@ -1,6 +1,6 @@
 # Full TACC ISA and implementation handoff
 
-- Status: Phase 0 complete; ISA and architectural contracts locked
+- Status: Phase 1 complete; emulator oracle and acceptance matrix locked
 - Date: 2026-07-28
 - Feature branch: `feature/megapad-full-tacc`
 - Phase-0 base commit: `c8e8118e82a899ec3f101f63d277a1bf4ef5f84a`
@@ -973,9 +973,29 @@ running either, regardless of prior resource observations, and run them
 sequentially:
 
 ```sh
-python -m pytest -q tests/test_tacc_contention.py
-python -m pytest -q tests/test_phase3_reduced_core_execution.py -k tacc
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_tacc_contention.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_phase3_reduced_core_execution.py
 ```
+
+Phase-1 worker-gate record, 2026-07-28: explicit approval was obtained and
+both commands passed sequentially. The contention oracle passed its one
+production-topology scenario, and the complete reduced-core suite passed 34
+selections across one, two, and four scheduler workers. The complete reduced
+suite is intentional: it has no meaningful TACC-only selector, and the
+cluster retirement invariant is shared by TACC, CRC, SHA, and ordinary MEX
+requests.
+
+The first complete reduced-core run exposed two closure defects. A stale test
+looked for the removed `tile_engine_locked` snapshot key instead of the
+authoritative SHA transaction lock, and coordinator settlement accepted any
+terminal zero-step cluster callback as if it were a TACC cancellation.
+Commit `3f0176d` corrected the schema assertion, introduced an explicit
+cancellation tag, restricted zero-retirement to genuine TACC requests, and
+prevented cancelled requests from publishing an arbitration grant. The
+34-selection rerun covers both tagged and untagged false-cancellation attempts;
+the dedicated microcore reset test also passed on step, core-batch, and
+system-batch surfaces while proving that grant counters and round-robin state
+remain unchanged.
 
 Commit:
 
@@ -1044,11 +1064,12 @@ acceptance even though they are intentionally absent from the ordinary
 capstone block.
 
 Phase-1 ordinary capstone record, 2026-07-28: all commands above passed
-sequentially (281 selected tests in total, including the focused BIOS and
-sample-image documentation checks). The zero-match
-`tests/test_megapad64.py -k tacc` draft selector was replaced by that file's
-complete 28-test suite. The approval-gated worker suites are not included in
-this pass count.
+sequentially after the final cancellation-invariant correction (281 selected
+tests in total, including the focused BIOS and sample-image documentation
+checks). The zero-match `tests/test_megapad64.py -k tacc` draft selector was
+replaced by that file's complete 28-test suite. The approval-gated worker
+suites add 35 green selections and are intentionally not included in the
+ordinary pass count, for 316 Phase-1 acceptance selections overall.
 
 Commit:
 
@@ -1740,9 +1761,8 @@ Phase 1:
 - [x] Seven-engine topology and cluster-private caller shadows.
 - [x] Ownership and state transport.
 - [x] Native execution parity.
-- [ ] Contention/QoS closure. Implementation and ordinary sequential gates are
-  green; the explicit 1/2/4-worker and reduced-core gates still require
-  resource approval.
+- [x] Contention/QoS closure, including the explicitly approved one-, two-,
+  and four-worker contention and complete reduced-core gates.
 - [x] Guest words, public docs, and capstone kernels.
 
 Phase 2:
