@@ -1462,6 +1462,7 @@ enum class CoreProfile : uint8_t {
 };
 
 class ResumableBusAccess;
+class ResumableTileAccess;
 
 struct CPUState {
     CoreProfile profile = CoreProfile::FULL;
@@ -1891,6 +1892,27 @@ struct BusReplayRecord {
     std::optional<std::string> target_error_message;
 };
 
+struct TileAccessRequest {
+    int engine_id = -1;
+    int owner_core_id = -1;
+    uint64_t operation_token = 0;
+    uint64_t ready_cycle = 0;
+    BusOperation operation = BusOperation::READ;
+    uint64_t address = 0;
+    std::array<uint8_t, 64> data{};
+};
+
+struct TileReplayRecord {
+    TileAccessRequest request{};
+    uint64_t completion_cycle = 0;
+    std::optional<std::array<uint8_t, 64>> read_data;
+};
+
+enum class CycleSharedAccessKind : uint8_t {
+    MAIN_BUS = 0,
+    TILE_MEMORY = 1,
+};
+
 enum class CycleOperationKind : uint8_t {
     GUEST_INSTRUCTION = 0,
     INTERRUPT_ENTRY = 1,
@@ -1915,17 +1937,23 @@ struct ResumableInstruction {
     int interrupt_vector = -1;
     std::vector<BusReplayRecord> completed_accesses;
     std::optional<BusRequest> pending_request;
+    std::vector<TileReplayRecord> completed_tile_accesses;
+    std::optional<TileAccessRequest> pending_tile_request;
+    std::vector<CycleSharedAccessKind> completed_access_order;
     std::optional<uint64_t> retire_cycle;
     bool tacc_python_fallback = false;
     bool tacc_busy_published = false;
     bool tacc_validation_trap_expected = false;
     uint64_t tacc_operation_epoch = 0;
     std::size_t replay_cursor = 0;
+    std::size_t tile_replay_cursor = 0;
+    std::size_t access_order_replay_cursor = 0;
 };
 
 struct FullCoreCycleState {
     uint64_t ready_cycle = 0;
     uint64_t next_issue_sequence = 1;
+    uint64_t next_tile_operation_token = 1;
     std::unique_ptr<ResumableInstruction> instruction;
 };
 
@@ -2652,6 +2680,72 @@ struct TileMemoryTransport {
         return grant;
     }
 
+    void validate_ordinary_port_completion(
+            const TaccImageTransferStage& stage,
+            uint64_t grant_sequence,
+            uint64_t completion_cycle,
+            bool has_read_data) const {
+        if (
+            !active_port_grant.has_value() ||
+            active_port_grant->grant_sequence != grant_sequence ||
+            active_port_grant->request.image_transfer
+        ) {
+            throw std::logic_error(
+                "ordinary tile-memory ACK does not match its active grant");
+        }
+        const TileMemoryPortGrant& grant =
+            *active_port_grant;
+        if (
+            grant.grant_cycle ==
+                std::numeric_limits<uint64_t>::max() ||
+            completion_cycle != grant.grant_cycle + 1
+        ) {
+            throw std::invalid_argument(
+                "internal tile-memory ACK must follow its grant by one cycle");
+        }
+        if (
+            (
+                grant.request.operation == BusOperation::READ
+            ) != has_read_data
+        ) {
+            throw std::invalid_argument(
+                grant.request.operation == BusOperation::READ
+                    ? "successful tile-memory read completion "
+                      "requires 64 bytes"
+                    : "tile-memory write completion cannot "
+                      "return read data");
+        }
+        if (
+            stage.active() &&
+            stage.owner_engine_id ==
+                grant.request.identity.engine_id
+        ) {
+            const int engine_id = stage.owner_engine_id;
+            const TaccEngineTransportState& state =
+                engines[
+                    static_cast<std::size_t>(
+                        engine_id)];
+            if (
+                state.phase == TaccTransportPhase::ACTIVE &&
+                !pending_port_requests[
+                    static_cast<std::size_t>(
+                        engine_id)].has_value() &&
+                (
+                    completion_cycle ==
+                        std::numeric_limits<uint64_t>::max() ||
+                    last_issue_sequences[
+                        static_cast<std::size_t>(
+                            engine_id)] ==
+                        std::numeric_limits<uint64_t>::max()
+                )
+            ) {
+                throw std::overflow_error(
+                    "tile-memory issue sequence exhausted before "
+                    "the image transfer could resume");
+            }
+        }
+    }
+
     std::optional<TileMemoryPortCompletion> complete_port(
             TaccImageTransferStage& stage,
             uint64_t grant_sequence,
@@ -3118,6 +3212,7 @@ private:
 };
 
 struct BusYieldSignal {};
+struct TileYieldSignal {};
 
 class ResumableBusAccess {
 public:
@@ -3129,6 +3224,21 @@ public:
         BusWidth width,
         uint64_t write_data,
         bool port_io
+    ) = 0;
+};
+
+class ResumableTileAccess {
+public:
+    virtual ~ResumableTileAccess() = default;
+
+    virtual void read(
+        uint64_t address,
+        std::array<uint8_t, 64>& data
+    ) = 0;
+
+    virtual void write(
+        uint64_t address,
+        const std::array<uint8_t, 64>& data
     ) = 0;
 };
 
@@ -4458,11 +4568,57 @@ struct SystemState {
 
     void cancel_tacc_image_stage_for_core(int core_id) {
         (void)tacc_engine_for_core(core_id);
+        const bool ordinary_tile_access_live =
+            std::any_of(
+                tile_memory_transport
+                    .pending_port_requests.begin(),
+                tile_memory_transport
+                    .pending_port_requests.end(),
+                [core_id](const auto& pending) {
+                    return (
+                        pending.has_value() &&
+                        !pending->image_transfer &&
+                        pending->identity.owner_core_id ==
+                            core_id
+                    );
+                }) ||
+            (
+                tile_memory_transport
+                    .active_port_grant.has_value() &&
+                !tile_memory_transport
+                    .active_port_grant->request
+                    .image_transfer &&
+                tile_memory_transport
+                    .active_port_grant->request
+                    .identity.owner_core_id == core_id
+            );
         if (
             tile_memory_transport.cancel_owner(
                 tacc_image_stage,
                 core_id)
         ) {
+            if (
+                ordinary_tile_access_live &&
+                core_id >= 0 &&
+                core_id < full_core_count()
+            ) {
+                FullCoreCycleState& cycle_state =
+                    full_core_cycle_states[
+                        static_cast<std::size_t>(
+                            core_id)];
+                if (
+                    cycle_state.instruction &&
+                    cycle_state.instruction->
+                        pending_tile_request.has_value() &&
+                    cycle_state.instruction->
+                        pending_tile_request->
+                        owner_core_id == core_id
+                ) {
+                    cycle_state.instruction.reset();
+                    cycle_state.ready_cycle =
+                        shared_clock.cycles();
+                }
+            }
             refresh_cycle_execution_pending();
         }
     }
@@ -4562,6 +4718,7 @@ struct SystemState {
             }
             state.ready_cycle = shared_clock.cycles();
             state.next_issue_sequence = 1;
+            state.next_tile_operation_token = 1;
             state.instruction.reset();
         }
         for (DmaCycleState& state : dma_cycle_states) {
@@ -4654,6 +4811,40 @@ struct SystemState {
     std::unique_ptr<PersistentWorkerPool> worker_pool;
 };
 
+static uint64_t cycle_instruction_access_frontier(
+        const ResumableInstruction& instruction) noexcept {
+    uint64_t ready_cycle = instruction.start_cycle;
+    if (!instruction.completed_accesses.empty()) {
+        ready_cycle = std::max(
+            ready_cycle,
+            instruction.completed_accesses.back()
+                .result.completion_cycle);
+    }
+    if (!instruction.completed_tile_accesses.empty()) {
+        ready_cycle = std::max(
+            ready_cycle,
+            instruction.completed_tile_accesses.back()
+                .completion_cycle);
+    }
+    return ready_cycle;
+}
+
+static void consume_cycle_shared_access_order(
+        ResumableInstruction& instruction,
+        CycleSharedAccessKind expected_kind) {
+    if (
+        instruction.access_order_replay_cursor >=
+            instruction.completed_access_order.size() ||
+        instruction.completed_access_order[
+            instruction.access_order_replay_cursor] !=
+                expected_kind
+    ) {
+        throw std::runtime_error(
+            "resumable instruction shared-access order diverged");
+    }
+    instruction.access_order_replay_cursor++;
+}
+
 class JournaledBusAccess final : public ResumableBusAccess {
 public:
     JournaledBusAccess(SystemState& system, int core_index)
@@ -4689,6 +4880,9 @@ public:
                 width,
                 write_data,
                 port_io);
+            consume_cycle_shared_access_order(
+                instruction,
+                CycleSharedAccessKind::MAIN_BUS);
             instruction.replay_cursor++;
             if (record.target_error_message.has_value()) {
                 throw std::runtime_error(
@@ -4700,20 +4894,28 @@ public:
             return record.result.read_value.value_or(0);
         }
 
-        if (instruction.pending_request.has_value())
+        if (
+            instruction.pending_request.has_value() ||
+            instruction.pending_tile_request.has_value()
+        ) {
             throw std::logic_error(
-                "a suspended instruction already has a pending request");
+                "a suspended instruction already has a pending access");
+        }
+        if (
+            instruction.access_order_replay_cursor !=
+                instruction.completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction reordered a main-bus access");
+        }
         if (cycle_state.next_issue_sequence ==
             std::numeric_limits<uint64_t>::max()) {
             throw std::overflow_error(
                 "main bus issue sequence overflow");
         }
 
-        uint64_t ready_cycle = instruction.start_cycle;
-        if (!instruction.completed_accesses.empty()) {
-            ready_cycle = instruction.completed_accesses.back()
-                .result.completion_cycle;
-        }
+        const uint64_t ready_cycle =
+            cycle_instruction_access_frontier(instruction);
 
         const int requester_id =
             system_.cores[static_cast<std::size_t>(core_index_)]->core_id;
@@ -4754,6 +4956,157 @@ private:
                 system_.main_bus_port_for_requester(requester_id)) {
             throw std::runtime_error(
                 "resumable instruction bus replay diverged");
+        }
+    }
+
+    SystemState& system_;
+    int core_index_;
+};
+
+class JournaledTileAccess final : public ResumableTileAccess {
+public:
+    JournaledTileAccess(SystemState& system, int core_index)
+        : system_(system),
+          core_index_(core_index) {}
+
+    void read(
+            uint64_t address,
+            std::array<uint8_t, 64>& data) override {
+        std::array<uint8_t, 64> request_data{};
+        access(BusOperation::READ, address, request_data);
+        data = request_data;
+    }
+
+    void write(
+            uint64_t address,
+            const std::array<uint8_t, 64>& data) override {
+        std::array<uint8_t, 64> staged = data;
+        access(BusOperation::WRITE, address, staged);
+    }
+
+private:
+    void access(
+            BusOperation operation,
+            uint64_t address,
+            std::array<uint8_t, 64>& data) {
+        FullCoreCycleState& cycle_state =
+            system_.full_core_cycle_states[
+                static_cast<std::size_t>(core_index_)];
+        if (!cycle_state.instruction) {
+            throw std::logic_error(
+                "journaled tile access has no suspended instruction");
+        }
+        ResumableInstruction& instruction =
+            *cycle_state.instruction;
+
+        if (
+            instruction.tile_replay_cursor <
+                instruction.completed_tile_accesses.size()
+        ) {
+            const TileReplayRecord& record =
+                instruction.completed_tile_accesses[
+                    instruction.tile_replay_cursor];
+            validate_replay(
+                record.request,
+                operation,
+                address,
+                data);
+            consume_cycle_shared_access_order(
+                instruction,
+                CycleSharedAccessKind::TILE_MEMORY);
+            instruction.tile_replay_cursor++;
+            if (operation == BusOperation::READ) {
+                if (!record.read_data.has_value()) {
+                    throw std::logic_error(
+                        "completed tile read has no replay payload");
+                }
+                data = *record.read_data;
+            } else if (record.read_data.has_value()) {
+                throw std::logic_error(
+                    "completed tile write has a replay payload");
+            }
+            return;
+        }
+
+        if (
+            instruction.pending_request.has_value() ||
+            instruction.pending_tile_request.has_value()
+        ) {
+            throw std::logic_error(
+                "a suspended instruction already has a pending access");
+        }
+        if (
+            instruction.access_order_replay_cursor !=
+                instruction.completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction reordered a tile-memory access");
+        }
+        if (
+            cycle_state.next_tile_operation_token ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "tile-memory operation token overflow");
+        }
+
+        CPUState& core =
+            *system_.cores[
+                static_cast<std::size_t>(core_index_)];
+        const int engine_id =
+            system_.tacc_engine_for_core(core.core_id);
+        const uint64_t operation_token =
+            cycle_state.next_tile_operation_token;
+        const uint64_t ready_cycle =
+            cycle_instruction_access_frontier(instruction);
+        const TileMemoryPortRequest submitted =
+            system_.tile_memory_transport.submit_ordinary(
+                engine_id,
+                core.core_id,
+                operation_token,
+                0,
+                0,
+                ready_cycle,
+                address,
+                operation,
+                data);
+        instruction.pending_tile_request = TileAccessRequest{
+            submitted.identity.engine_id,
+            submitted.identity.owner_core_id,
+            submitted.identity.operation_token,
+            submitted.ready_cycle,
+            submitted.operation,
+            submitted.address,
+            submitted.data,
+        };
+        cycle_state.next_tile_operation_token++;
+        system_.cycle_execution_pending.store(
+            true,
+            std::memory_order_release);
+        throw TileYieldSignal{};
+    }
+
+    void validate_replay(
+            const TileAccessRequest& recorded,
+            BusOperation operation,
+            uint64_t address,
+            const std::array<uint8_t, 64>& data) const {
+        const CPUState& core =
+            *system_.cores[
+                static_cast<std::size_t>(core_index_)];
+        if (
+            recorded.engine_id !=
+                system_.tacc_engine_for_core(core.core_id) ||
+            recorded.owner_core_id != core.core_id ||
+            recorded.operation != operation ||
+            recorded.address != address ||
+            (
+                operation == BusOperation::WRITE &&
+                recorded.data != data
+            )
+        ) {
+            throw std::runtime_error(
+                "resumable instruction tile replay diverged");
         }
     }
 
@@ -6903,6 +7256,7 @@ struct StepCallbacks {
     bool tacc_read_via_callback = false;
     bool tacc_write_via_callback = false;
     ResumableBusAccess* bus_access = nullptr;
+    ResumableTileAccess* tile_access = nullptr;
     bool strict_cycle_dma = false;
 };
 
@@ -7053,7 +7407,10 @@ static inline __int128 floor_shift_right(__int128 value, unsigned shift) {
 //  Unified tile memory access (64-byte reads/writes with address decoding)
 // ---------------------------------------------------------------------------
 
-static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
+static inline void tile_read_64bytes_direct(
+        CPUState& s,
+        uint64_t addr,
+        Tile& out) {
     if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
         const uint64_t off = addr - s.memory->vram_base;
         if (region_span_fits(s.memory->vram_size, off, TILE_BYTES))
@@ -7089,7 +7446,10 @@ static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
         out.fill(0);
 }
 
-static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& data) {
+static inline void tile_write_64bytes_direct(
+        CPUState& s,
+        uint64_t addr,
+        const Tile& data) {
     if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
         const uint64_t off = addr - s.memory->vram_base;
         if (region_span_fits(s.memory->vram_size, off, TILE_BYTES)) {
@@ -7121,6 +7481,30 @@ static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& da
         std::memcpy(s.memory->mem + a, data.data(), TILE_BYTES);
         icache_invalidate_span(s, addr, TILE_BYTES);
     }
+}
+
+static inline void tile_read_64bytes(
+        CPUState& s,
+        const StepCallbacks& callbacks,
+        uint64_t addr,
+        Tile& out) {
+    if (callbacks.tile_access != nullptr) {
+        callbacks.tile_access->read(addr, out);
+        return;
+    }
+    tile_read_64bytes_direct(s, addr, out);
+}
+
+static inline void tile_write_64bytes(
+        CPUState& s,
+        const StepCallbacks& callbacks,
+        uint64_t addr,
+        const Tile& data) {
+    if (callbacks.tile_access != nullptr) {
+        callbacks.tile_access->write(addr, data);
+        return;
+    }
+    tile_write_64bytes_direct(s, addr, data);
 }
 
 static constexpr int MEX_TACC_CANCELLED = -2;
@@ -7907,10 +8291,10 @@ static int exec_mex(
 
     // Read source tiles
     Tile src_a{}, src_b{}, dst{};
-    tile_read_64bytes(s, s.tsrc0, src_a);
+    tile_read_64bytes(s, cb, s.tsrc0, src_a);
 
     if (ss == 0x0) {  // tile-tile
-        tile_read_64bytes(s, s.tsrc1, src_b);
+        tile_read_64bytes(s, cb, s.tsrc1, src_b);
     } else if (ss == 0x1) {  // broadcast
         uint64_t bval = (broadcast_reg >= 0) ? s.regs[broadcast_reg] : 0;
         uint64_t mask = (elem_bytes < 8) ? ((1ULL << (elem_bytes*8)) - 1) : MASK64;
@@ -7921,8 +8305,8 @@ static int exec_mex(
         src_b = src_a;
         src_a.fill(funct_byte);
     } else {  // ss == 3, in-place
-        tile_read_64bytes(s, s.tdst, src_a);
-        tile_read_64bytes(s, s.tsrc0, src_b);
+        tile_read_64bytes(s, cb, s.tdst, src_a);
+        tile_read_64bytes(s, cb, s.tsrc0, src_b);
     }
 
     // Python's floating-point helpers own NaN payload/sign propagation and
@@ -7956,7 +8340,7 @@ static int exec_mex(
             }
 
             if (op == 0x1 && (funct == 3 || funct == 4)) {
-                tile_read_64bytes(s, s.tdst, fp_existing);
+                tile_read_64bytes(s, cb, s.tdst, fp_existing);
                 fp_existing_loaded = true;
                 if (!tile_is_finite(fp_existing))
                     return -1;
@@ -8091,7 +8475,7 @@ static int exec_mex(
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }
-        tile_write_64bytes(s, s.tdst, dst);
+        tile_write_64bytes(s, cb, s.tdst, dst);
         return 1;
     }
 
@@ -8139,7 +8523,7 @@ static int exec_mex(
                 }
                 tile_set_elem(dst, lane, 2, r);
             }
-            tile_write_64bytes(s, s.tdst, dst);
+            tile_write_64bytes(s, cb, s.tdst, dst);
             return 0;
         }
 
@@ -8233,7 +8617,7 @@ static int exec_mex(
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }
-        tile_write_64bytes(s, s.tdst, dst);
+        tile_write_64bytes(s, cb, s.tdst, dst);
         return 0;
     }
 
@@ -8246,7 +8630,7 @@ static int exec_mex(
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fa * fb, ew_bits));
                 }
-                tile_write_64bytes(s, s.tdst, dst);
+                tile_write_64bytes(s, cb, s.tdst, dst);
                 return 1;
             }
             if (funct == 1) {  // DOT — FP16/BF16 → FP32 accumulate
@@ -8281,34 +8665,34 @@ static int exec_mex(
                     else
                         tile_set_elem(dst1, lane - 16, 4, fp32bits);
                 }
-                tile_write_64bytes(s, s.tdst, dst0);
-                tile_write_64bytes(s, s.tdst + 64, dst1);
+                tile_write_64bytes(s, cb, s.tdst, dst0);
+                tile_write_64bytes(s, cb, s.tdst + 64, dst1);
                 return 2;
             }
             if (funct == 3) {  // MAC — fp mul-accumulate: dst += a*b
                 // Preloaded by the transactional finite-input check above.
                 if (!fp_existing_loaded)
-                    tile_read_64bytes(s, s.tdst, fp_existing);
+                    tile_read_64bytes(s, cb, s.tdst, fp_existing);
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fc + fa * fb, ew_bits));
                 }
-                tile_write_64bytes(s, s.tdst, dst);
+                tile_write_64bytes(s, cb, s.tdst, dst);
                 return 2;
             }
             if (funct == 4) {  // FMA — dst = a*b + dst
                 // Preloaded by the transactional finite-input check above.
                 if (!fp_existing_loaded)
-                    tile_read_64bytes(s, s.tdst, fp_existing);
+                    tile_read_64bytes(s, cb, s.tdst, fp_existing);
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fa * fb + fc, ew_bits));
                 }
-                tile_write_64bytes(s, s.tdst, dst);
+                tile_write_64bytes(s, cb, s.tdst, dst);
                 return 2;
             }
             if (funct == 5) {  // DOTACC — 4-way chunked dot, FP32 accumulate
@@ -8358,7 +8742,7 @@ static int exec_mex(
                 }
                 tile_set_elem(dst, lane, elem_bytes, r);
             }
-            tile_write_64bytes(s, s.tdst, dst);
+            tile_write_64bytes(s, cb, s.tdst, dst);
             return 1;
         }
         // Non-MUL integer functions were routed to Python before source reads.
@@ -10588,56 +10972,6 @@ static SystemInstructionTraits native_tacc_instruction_traits(
     return traits;
 }
 
-static uint64_t native_legacy_mex_cycle_bound(
-        CPUState& state,
-        uint64_t opcode_address,
-        int modifier,
-        int subop) {
-    const int source_selector = (subop >> 2) & 0x3;
-    const int operation = subop & 0x3;
-    const uint8_t function_byte =
-        icache_peek_byte_without_accounting(
-            state,
-            opcode_address + 1);
-    const int function =
-        source_selector == 0x2
-        ? 0
-        : function_byte & 0x7;
-    const int element_width = state.tmode & 0x7;
-    const bool floating = element_width >= EW_FP16;
-
-    // exec_mex() reports extra cycles beyond the ordinary one-cycle issue.
-    // Its native path is data-independent with respect to latency, so decode
-    // the exact bound before allowing an unjournaled tile-memory mutation.
-    uint64_t extra_cycles = 0;
-    if (modifier == 0x8 && operation == 0x0) {
-        extra_cycles = 1;
-    } else if (operation == 0x1) {
-        if (floating) {
-            switch (function) {
-                case 0:
-                    extra_cycles = 1;
-                    break;
-                case 1:
-                case 5:
-                    extra_cycles = 3;
-                    break;
-                case 2:
-                case 3:
-                case 4:
-                    extra_cycles = 2;
-                    break;
-                default:
-                    extra_cycles = 1;
-                    break;
-            }
-        } else if (function == 0) {
-            extra_cycles = 1;
-        }
-    }
-    return 1 + (modifier >= 0 ? 1 : 0) + extra_cycles;
-}
-
 static SystemInstructionTraits classify_system_instruction(
         CPUState& state) {
     uint64_t address = pc(state);
@@ -10713,15 +11047,9 @@ static SystemInstructionTraits classify_system_instruction(
                 subop);
         if (tacc.tacc_python_fallback)
             return tacc;
-        return {
-            false,
-            true,
-            native_legacy_mex_cycle_bound(
-                state,
-                opcode_address,
-                modifier,
-                subop),
-        };
+        // Ordinary full-core MEX traffic is replayed through the independent
+        // 64-byte tile-memory journal in strict cycle mode.
+        return {};
     }
     return {};
 }
@@ -13932,6 +14260,7 @@ static void execute_cycle_interrupt_entry(
 enum class CycleCoreProgress {
     RETIRED,
     WAITING_BUS,
+    WAITING_TILE,
     BLOCKED_BY_CYCLE_LIMIT,
     TERMINAL,
 };
@@ -13978,6 +14307,7 @@ static CycleCoreProgress run_cycle_interrupt_once(
     }
     operation->checkpoint.restore(core);
     operation->replay_cursor = 0;
+    operation->access_order_replay_cursor = 0;
     JournaledBusAccess bus_access(system, core_index);
     StepCallbacks callbacks = base_callbacks;
     callbacks.bus_access = &bus_access;
@@ -13993,6 +14323,13 @@ static CycleCoreProgress run_cycle_interrupt_once(
             core,
             operation->interrupt_vector,
             callbacks);
+        if (
+            operation->access_order_replay_cursor !=
+                operation->completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "cycle interrupt left shared-access order unconsumed");
+        }
 
         uint64_t completion_cycle = operation->start_cycle;
         if (!operation->completed_accesses.empty()) {
@@ -14169,24 +14506,12 @@ static CycleCoreProgress run_cycle_core_once(
             traits.has_unjournaled_shared_access &&
             remaining < traits.unjournaled_cycle_bound
         ) {
-            // Preserve the original issue boundary as a suspended operation.
-            // The native MEX body runs only once its complete decoded latency
-            // fits, so direct tile-memory writes never need rollback and host
-            // call partitioning cannot consume guest cycles silently.
+            // The bounded Python TACC continuation already published its
+            // immutable completion frontier above. Preserve the original
+            // issue boundary until that complete operation fits.
             if (!cycle_state.instruction) {
                 throw std::logic_error(
-                    "cycle-bounded legacy MEX lacks a checkpoint");
-            }
-            if (!traits.tacc_python_fallback) {
-                const uint64_t predicted_completion =
-                    checked_cycle_add(
-                        cycle_state.instruction->start_cycle,
-                        traits.unjournaled_cycle_bound,
-                        "cycle-bounded legacy MEX completion");
-                cycle_state.instruction->retire_cycle =
-                    predicted_completion;
-                cycle_state.ready_cycle =
-                    predicted_completion;
+                    "cycle-bounded shared access lacks a checkpoint");
             }
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
@@ -14210,6 +14535,7 @@ static CycleCoreProgress run_cycle_core_once(
 
     StepCallbacks callbacks = base_callbacks;
     std::unique_ptr<JournaledBusAccess> bus_access;
+    std::unique_ptr<JournaledTileAccess> tile_access;
     if (instruction) {
         if (!restore_cycle_instruction_checkpoint(
                 *instruction,
@@ -14217,11 +14543,29 @@ static CycleCoreProgress run_cycle_core_once(
             discard_cancelled_tacc_fallback();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
+        for (const TileReplayRecord& record :
+             instruction->completed_tile_accesses) {
+            if (
+                record.request.operation ==
+                    BusOperation::WRITE
+            ) {
+                icache_invalidate_span(
+                    core,
+                    record.request.address,
+                    64);
+            }
+        }
         instruction->replay_cursor = 0;
+        instruction->tile_replay_cursor = 0;
+        instruction->access_order_replay_cursor = 0;
         bus_access = std::make_unique<JournaledBusAccess>(
             system,
             core_index);
+        tile_access = std::make_unique<JournaledTileAccess>(
+            system,
+            core_index);
         callbacks.bus_access = bus_access.get();
+        callbacks.tile_access = tile_access.get();
     }
 
     auto logical_guard =
@@ -14248,6 +14592,21 @@ static CycleCoreProgress run_cycle_core_once(
         cycle_state.ready_cycle =
             instruction->pending_request->ready_cycle;
         return CycleCoreProgress::WAITING_BUS;
+    } catch (const TileYieldSignal&) {
+        if (!instruction ||
+            !instruction->pending_tile_request.has_value()) {
+            throw std::logic_error(
+                "tile yield did not publish an immutable request");
+        }
+        if (!restore_cycle_instruction_checkpoint(
+                *instruction,
+                core)) {
+            discard_cancelled_tacc_fallback();
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
+        cycle_state.ready_cycle =
+            instruction->pending_tile_request->ready_cycle;
+        return CycleCoreProgress::WAITING_TILE;
     } catch (...) {
         if (
             instruction &&
@@ -14259,6 +14618,30 @@ static CycleCoreProgress run_cycle_core_once(
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
         throw;
+    }
+
+    if (instruction) {
+        if (
+            instruction->pending_request.has_value() ||
+            instruction->pending_tile_request.has_value()
+        ) {
+            throw std::logic_error(
+                "completed instruction retained a pending shared access");
+        }
+        if (
+            instruction->tile_replay_cursor !=
+                instruction->completed_tile_accesses.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction left tile replay records unconsumed");
+        }
+        if (
+            instruction->access_order_replay_cursor !=
+                instruction->completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction left shared-access order unconsumed");
+        }
     }
 
     const bool bounded_tacc_fallback =
@@ -14487,6 +14870,13 @@ static CycleCoreProgress run_cycle_core_once(
                 completion_cycle,
                 instruction->completed_accesses.back()
                     .result.completion_cycle);
+        }
+        if (instruction &&
+            !instruction->completed_tile_accesses.empty()) {
+            completion_cycle = std::max(
+                completion_cycle,
+                instruction->completed_tile_accesses.back()
+                    .completion_cycle);
         }
 
         if (completion_cycle > cycle_deadline) {
@@ -14802,6 +15192,174 @@ static bool held_dma_request_matches_grant(
                granted.ordering.port_io;
 }
 
+static bool held_tile_request_matches_grant(
+        const TileAccessRequest& pending,
+        const TileMemoryPortRequest& granted) {
+    return (
+        !granted.image_transfer &&
+        pending.engine_id == granted.identity.engine_id &&
+        pending.owner_core_id ==
+            granted.identity.owner_core_id &&
+        pending.operation_token ==
+            granted.identity.operation_token &&
+        pending.ready_cycle == granted.ready_cycle &&
+        pending.operation == granted.operation &&
+        pending.address == granted.address &&
+        pending.data == granted.data
+    );
+}
+
+static std::optional<uint64_t>
+next_cycle_tile_port_arbitration(
+        const SystemState& system,
+        uint64_t current_cycle) {
+    const TileMemoryTransport& transport =
+        system.tile_memory_transport;
+    if (transport.active_port_grant.has_value())
+        return std::nullopt;
+
+    std::optional<uint64_t> earliest;
+    for (const auto& pending :
+         transport.pending_port_requests) {
+        if (!pending.has_value())
+            continue;
+        const uint64_t registered_cycle =
+            checked_cycle_add(
+                pending->ready_cycle,
+                1,
+                "tile-memory registered request");
+        uint64_t candidate =
+            std::max(current_cycle, registered_cycle);
+        if (
+            transport.last_port_arbitration_cycle.has_value() &&
+            candidate <=
+                *transport.last_port_arbitration_cycle
+        ) {
+            candidate = checked_cycle_add(
+                *transport.last_port_arbitration_cycle,
+                1,
+                "tile-memory arbitration retry");
+        }
+        if (!earliest.has_value() ||
+            candidate < *earliest) {
+            earliest = candidate;
+        }
+    }
+    return earliest;
+}
+
+static std::optional<uint64_t>
+cycle_tile_port_completion_cycle(
+        const SystemState& system) {
+    const auto& active =
+        system.tile_memory_transport.active_port_grant;
+    if (!active.has_value())
+        return std::nullopt;
+    return checked_cycle_add(
+        active->grant_cycle,
+        1,
+        "tile-memory target completion");
+}
+
+static void complete_cycle_tile_target(
+        SystemState& system,
+        uint64_t completion_cycle) {
+    const auto& active =
+        system.tile_memory_transport.active_port_grant;
+    if (!active.has_value()) {
+        throw std::logic_error(
+            "tile-memory completion has no active grant");
+    }
+    const TileMemoryPortGrant grant = *active;
+    if (grant.request.image_transfer) {
+        throw std::runtime_error(
+            "cycle-bounded TACC image transport is not integrated");
+    }
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    const std::size_t index =
+        static_cast<std::size_t>(core_index);
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[index];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->
+            pending_tile_request.has_value() ||
+        !held_tile_request_matches_grant(
+            *cycle_state.instruction->pending_tile_request,
+            grant.request)
+    ) {
+        throw std::logic_error(
+            "granted tile beat has no matching suspended request");
+    }
+
+    ResumableInstruction& instruction =
+        *cycle_state.instruction;
+    if (
+        instruction.completed_tile_accesses.size() ==
+            instruction.completed_tile_accesses.max_size() ||
+        instruction.completed_access_order.size() ==
+            instruction.completed_access_order.max_size()
+    ) {
+        throw std::overflow_error(
+            "tile-memory replay journal is full");
+    }
+    instruction.completed_tile_accesses.reserve(
+        instruction.completed_tile_accesses.size() + 1);
+    instruction.completed_access_order.reserve(
+        instruction.completed_access_order.size() + 1);
+    system.tile_memory_transport
+        .validate_ordinary_port_completion(
+            system.tacc_image_stage,
+            grant.grant_sequence,
+            completion_cycle,
+            grant.request.operation == BusOperation::READ);
+
+    CPUState& core = *system.cores[index];
+    std::optional<std::array<uint8_t, 64>> read_data;
+    {
+        auto memory_guard =
+            acquire_shared_memory_use(core);
+        if (grant.request.operation == BusOperation::READ) {
+            std::array<uint8_t, 64> data{};
+            tile_read_64bytes_direct(
+                core,
+                grant.request.address,
+                data);
+            read_data = data;
+        } else {
+            tile_write_64bytes_direct(
+                core,
+                grant.request.address,
+                grant.request.data);
+        }
+    }
+
+    const std::optional<TileMemoryPortCompletion>
+        completed =
+            system.tile_memory_transport.complete_port(
+                system.tacc_image_stage,
+                grant.grant_sequence,
+                completion_cycle,
+                read_data);
+    if (!completed.has_value()) {
+        throw std::logic_error(
+            "tile-memory completion rejected its active grant");
+    }
+    instruction.completed_tile_accesses.push_back(
+        TileReplayRecord{
+            *instruction.pending_tile_request,
+            completion_cycle,
+            read_data,
+        });
+    instruction.completed_access_order.push_back(
+        CycleSharedAccessKind::TILE_MEMORY);
+    instruction.pending_tile_request.reset();
+    cycle_state.ready_cycle = completion_cycle;
+    system.refresh_cycle_execution_pending();
+}
+
 static void complete_cycle_bus_target(
         SystemState& system,
         uint64_t completion_cycle,
@@ -14900,6 +15458,21 @@ static void complete_cycle_bus_target(
         throw std::runtime_error(
             "active grant diverged from its suspended request");
     }
+    ResumableInstruction& instruction =
+        *cycle_state.instruction;
+    if (
+        instruction.completed_accesses.size() ==
+            instruction.completed_accesses.max_size() ||
+        instruction.completed_access_order.size() ==
+            instruction.completed_access_order.max_size()
+    ) {
+        throw std::overflow_error(
+            "main-bus replay journal is full");
+    }
+    instruction.completed_accesses.reserve(
+        instruction.completed_accesses.size() + 1);
+    instruction.completed_access_order.reserve(
+        instruction.completed_access_order.size() + 1);
 
     std::optional<uint64_t> read_value;
     BusFault fault = BusFault::NONE;
@@ -14949,12 +15522,14 @@ static void complete_cycle_bus_target(
         read_value,
         fault,
         target_effects_committed);
-    cycle_state.instruction->completed_accesses.push_back(
+    instruction.completed_accesses.push_back(
         BusReplayRecord{
             std::move(result),
             std::move(target_error_message),
         });
-    cycle_state.instruction->pending_request.reset();
+    instruction.completed_access_order.push_back(
+        CycleSharedAccessKind::MAIN_BUS);
+    instruction.pending_request.reset();
     cycle_state.ready_cycle = completion_cycle;
     system.cycle_target_completion_cycle.reset();
     refresh_cycle_dma_requests(
@@ -15332,7 +15907,11 @@ static uint64_t run_strict_cycle_private_prefix(
             state.ready_cycle > scheduler_cycle ||
             (
                 state.instruction &&
-                state.instruction->pending_request.has_value()
+                (
+                    state.instruction->pending_request.has_value() ||
+                    state.instruction->
+                        pending_tile_request.has_value()
+                )
             )
         ) {
             continue;
@@ -15715,6 +16294,16 @@ static SystemBatchResult run_full_core_cycle_batch(
             throw std::logic_error(
                 "main-bus target completion fell behind the scheduler");
         }
+        const std::optional<uint64_t>
+            next_tile_completion_cycle =
+                cycle_tile_port_completion_cycle(system);
+        if (
+            next_tile_completion_cycle.has_value() &&
+            *next_tile_completion_cycle < scheduler_cycle
+        ) {
+            throw std::logic_error(
+                "tile-memory target completion fell behind the scheduler");
+        }
         std::optional<uint64_t> next_core_cycle;
         const uint64_t suspended_guest_count =
             pending_guest_instruction_count(system);
@@ -15730,7 +16319,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
             if (state.instruction &&
-                state.instruction->pending_request.has_value()) {
+                (
+                    state.instruction->pending_request.has_value() ||
+                    state.instruction->
+                        pending_tile_request.has_value()
+                )) {
                 continue;
             }
             if (!state.instruction &&
@@ -15756,6 +16349,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                     pending,
                     scheduler_cycle);
         }
+        const std::optional<uint64_t>
+            next_tile_arbitration_cycle =
+                next_cycle_tile_port_arbitration(
+                    system,
+                    scheduler_cycle);
 
         uint64_t next_cycle = effective_deadline;
         if (next_core_cycle.has_value())
@@ -15769,6 +16367,16 @@ static SystemBatchResult run_full_core_cycle_batch(
             next_cycle = std::min(
                 next_cycle,
                 *system.cycle_target_completion_cycle);
+        }
+        if (next_tile_arbitration_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_tile_arbitration_cycle);
+        }
+        if (next_tile_completion_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_tile_completion_cycle);
         }
         if (next_timer_cycle.has_value()) {
             next_cycle = std::min(
@@ -15795,13 +16403,17 @@ static SystemBatchResult run_full_core_cycle_batch(
             system.cycle_target_completion_cycle.has_value() &&
             *system.cycle_target_completion_cycle ==
                 scheduler_cycle;
+        const bool tile_target_frontier =
+            next_tile_completion_cycle.has_value() &&
+            *next_tile_completion_cycle == scheduler_cycle;
 
-        // Boundary order is fixed: settle virtual devices, commit the bus
-        // target that sampled pre-edge state, apply timestamped host input,
-        // snapshot interrupt lines, then dispatch cores.
+        // Boundary order is fixed: settle virtual devices, commit main-bus
+        // then tile-memory targets that sampled pre-edge state, apply
+        // timestamped host input, snapshot interrupt lines, then dispatch.
         if (timer_frontier ||
             external_frontier ||
-            target_frontier) {
+            target_frontier ||
+            tile_target_frontier) {
             settle_cycle_clock_to(
                 system,
                 scheduler_cycle,
@@ -15814,6 +16426,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                 callbacks,
                 dma_callbacks,
                 settle_round);
+        }
+        if (tile_target_frontier) {
+            complete_cycle_tile_target(
+                system,
+                scheduler_cycle);
         }
         if (external_frontier) {
             const uint64_t applied =
@@ -15901,7 +16518,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
             if (state.instruction &&
-                state.instruction->pending_request.has_value()) {
+                (
+                    state.instruction->pending_request.has_value() ||
+                    state.instruction->
+                        pending_tile_request.has_value()
+                )) {
                 continue;
             }
             if (state.ready_cycle > scheduler_cycle)
@@ -15920,20 +16541,13 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
 
-            // One cycle is the ordinary speculative commit window. Native
-            // legacy MEX cannot be replayed after its direct destination
-            // write, so it may use the complete already-clipped event window.
-            // run_cycle_core_once() checks the exact decoded native latency
-            // before any mutation.
+            // One cycle is the ordinary speculative commit window. Shared
+            // main-bus and tile-memory effects both yield into independent
+            // replay journals before they can cross this boundary.
             uint64_t dispatch_deadline =
                 effective_deadline;
-            const bool direct_legacy_mex =
-                !state.instruction &&
-                classify_system_instruction(core)
-                    .has_unjournaled_shared_access;
             if (
-                scheduler_cycle < effective_deadline &&
-                !direct_legacy_mex
+                scheduler_cycle < effective_deadline
             ) {
                 dispatch_deadline = std::min(
                     effective_deadline,
@@ -15990,6 +16604,14 @@ static SystemBatchResult run_full_core_cycle_batch(
                         1,
                         "main bus target completion");
             }
+        }
+        if (
+            scheduler_cycle < post_dispatch_deadline &&
+            !system.tile_memory_transport
+                .active_port_grant.has_value()
+        ) {
+            (void)system.tile_memory_transport.try_grant_port(
+                scheduler_cycle);
         }
 
         if (scheduler_cycle >= post_dispatch_deadline) {

@@ -575,11 +575,19 @@ def test_cycle_api_executes_mex_on_the_calling_full_core_engine():
     system.cpu.mem[0x100:0x140] = bytes(range(64))
     system.cpu.mem[0x140:0x180] = bytes(range(64, 128))
 
+    deferred = system.run_cycle_batch(5, max_instructions=1)
+
+    assert deferred.instructions_executed == 0
+    assert system.cpu.pc == 0
+    assert system.cpu.cycle_count == 0
+    assert bytes(system.cpu.mem[0x180:0x1C0]) == bytes(64)
+    assert system._native_system.cycle_execution_pending
+
     result = system.run_cycle_batch(1, max_instructions=1)
 
     assert result.instructions_executed == 1
     assert system.cpu.pc == 2
-    assert system.cpu.cycle_count == 1
+    assert system.cpu.cycle_count == 6
     assert bytes(system.cpu.mem[0x180:0x1C0]) == bytes(
         (left + right) & 0xFF
         for left, right in zip(range(64), range(64, 128))
@@ -646,7 +654,7 @@ def test_cycle_api_defers_prefixed_mex_before_destination_mutation():
     sliced.cpu.mem[0x140:0x180] = bytes([1]) * 64
     sliced.cpu.mem[0x180:0x1C0] = bytes([0xA5]) * 64
 
-    deferred = sliced.run_cycle_batch(2, max_instructions=1)
+    deferred = sliced.run_cycle_batch(5, max_instructions=1)
 
     assert deferred.instructions_executed == 0
     assert sliced.cpu.pc == 0
@@ -658,7 +666,7 @@ def test_cycle_api_defers_prefixed_mex_before_destination_mutation():
 
     assert retired.instructions_executed == 1
     assert sliced.cpu.pc == 3
-    assert sliced.cpu.cycle_count == 3
+    assert sliced.cpu.cycle_count == 6
     assert bytes(sliced.cpu.mem[0x180:0x1C0]) == bytes([4]) * 64
     assert not sliced._native_system.cycle_execution_pending
 
@@ -670,7 +678,7 @@ def test_cycle_api_defers_prefixed_mex_before_destination_mutation():
     whole.cpu.mem[0x140:0x180] = bytes([1]) * 64
     whole.cpu.mem[0x180:0x1C0] = bytes([0xA5]) * 64
 
-    uninterrupted = whole.run_cycle_batch(3, max_instructions=1)
+    uninterrupted = whole.run_cycle_batch(6, max_instructions=1)
 
     assert uninterrupted.instructions_executed == 1
     assert (
