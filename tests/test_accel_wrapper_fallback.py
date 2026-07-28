@@ -12,8 +12,11 @@ from megapad64 import (
     CSR_TACC_STATUS,
     EW_BF16,
     EW_U8,
+    IVEC_BUS_FAULT,
     TACC_OWNER_NONE,
+    TrapError,
 )
+from system import MegapadSystem
 
 
 @pytest.mark.parametrize(
@@ -155,6 +158,220 @@ def test_fallback_callback_runtime_error_is_not_native_control_flow():
 
     assert raised.value is callback_error
     assert cpu.pc == len(instruction)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param("HALT", id="halt-control-string"),
+        pytest.param("TRAP:BUS_FAULT", id="trap-control-string"),
+    ],
+)
+@pytest.mark.parametrize(
+    "execution",
+    [
+        pytest.param("step", id="direct-step"),
+        pytest.param("core-batch", id="core-batch"),
+        pytest.param("system-batch", id="system-batch"),
+    ],
+)
+def test_native_tacc_callback_control_strings_propagate_by_identity(
+    message: str,
+    execution: str,
+) -> None:
+    system = None
+    if execution == "system-batch":
+        system = MegapadSystem(
+            ram_size=4096,
+            num_cores=1,
+            num_clusters=0,
+            hbw_size=0,
+            ext_mem_size=0,
+            vram_size=0,
+        )
+        cpu = system.cpu
+    else:
+        cpu = Megapad64(mem_size=4096)
+
+    source0 = 0x400
+    source1 = 0x440
+    cpu.mem[source0:source0 + 64] = bytes([2]) * 64
+    cpu.mem[source1:source1 + 64] = bytes([3]) * 64
+    cpu.tmode = EW_U8
+    cpu.tsrc0 = source0
+    cpu.tsrc1 = source1
+    cpu._cs.tacc_restore({
+        "tacc": bytes(256),
+        "tacc_owner": cpu.core_id,
+        "tacc_valid": True,
+        "tacc_dirty": False,
+        "tacc_format_ew": EW_U8,
+        "tacc_format_signed": 0,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+        "tacc_epoch": 7,
+    })
+    instruction = assemble("t.amac")
+    if system is None:
+        cpu.load_bytes(0, instruction)
+    else:
+        system.load_binary(0, instruction)
+    cpu.pc = 0
+    before_tacc = dict(cpu._cs.tacc_snapshot())
+    cycles_before = cpu.cycle_count
+    perf_cycles_before = cpu.perf_cycles
+    tileops_before = cpu.perf_tileops
+    original_read8 = cpu.mem_read8
+    injected = RuntimeError(message)
+    callback_count = 0
+
+    def fail_first_source_read(address: int) -> int:
+        nonlocal callback_count
+        if address == source0:
+            callback_count += 1
+            assert cpu.tacc_busy
+            raise injected
+        return original_read8(address)
+
+    cpu.mem_read8 = fail_first_source_read
+
+    with pytest.raises(RuntimeError) as raised:
+        if execution == "step":
+            cpu.step()
+        elif execution == "core-batch":
+            cpu.run_steps_stats(max_steps=1)
+        else:
+            assert system is not None
+            system.run_batch_stats(1)
+
+    assert raised.value is injected
+    assert callback_count == 1
+    assert cpu.pc == len(instruction)
+    assert cpu.cycle_count == cycles_before
+    assert cpu.perf_cycles == perf_cycles_before
+    assert cpu.perf_tileops == tileops_before
+    assert dict(cpu._cs.tacc_snapshot()) == before_tacc
+    assert not cpu.tacc_busy
+
+
+@pytest.mark.parametrize(
+    "execution",
+    [
+        pytest.param("step", id="direct-step"),
+        pytest.param("core-batch", id="core-batch"),
+    ],
+)
+def test_tacc_honors_class_level_memory_route_overrides(
+    execution: str,
+) -> None:
+    class RoutedMegapad64(Megapad64):
+        def mem_read8(self, address: int) -> int:
+            if address == self._fault_address:
+                self._callback_count += 1
+                assert self.tacc_busy
+                raise self._injected
+            return super().mem_read8(address)
+
+    cpu = RoutedMegapad64(mem_size=4096)
+    source0 = 0x400
+    source1 = 0x440
+    cpu.mem[source0:source0 + 64] = bytes([2]) * 64
+    cpu.mem[source1:source1 + 64] = bytes([3]) * 64
+    cpu.tmode = EW_U8
+    cpu.tsrc0 = source0
+    cpu.tsrc1 = source1
+    cpu._cs.tacc_restore({
+        "tacc": bytes(256),
+        "tacc_owner": cpu.core_id,
+        "tacc_valid": True,
+        "tacc_dirty": False,
+        "tacc_format_ew": EW_U8,
+        "tacc_format_signed": 0,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+        "tacc_epoch": 13,
+    })
+    instruction = assemble("t.amac")
+    cpu.load_bytes(0, instruction)
+    cpu.pc = 0
+    cpu._fault_address = source0
+    cpu._callback_count = 0
+    cpu._injected = ValueError("class-level TACC route")
+    before_tacc = dict(cpu._cs.tacc_snapshot())
+
+    with pytest.raises(ValueError) as raised:
+        if execution == "step":
+            cpu.step()
+        else:
+            cpu.run_steps_stats(max_steps=1)
+
+    assert raised.value is cpu._injected
+    assert cpu._callback_count == 1
+    assert cpu.pc == len(instruction)
+    assert cpu.cycle_count == 0
+    assert cpu.perf_cycles == 0
+    assert cpu.perf_tileops == 0
+    assert dict(cpu._cs.tacc_snapshot()) == before_tacc
+    assert not cpu.tacc_busy
+
+
+def test_system_tacc_callback_trap_reports_exact_fault_cycles() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cpu = system.cpu
+    source0 = 0x400
+    source1 = 0x440
+    cpu.mem[source0:source0 + 64] = bytes([2]) * 64
+    cpu.mem[source1:source1 + 64] = bytes([3]) * 64
+    cpu.tmode = EW_U8
+    cpu.tsrc0 = source0
+    cpu.tsrc1 = source1
+    cpu._cs.tacc_restore({
+        "tacc": bytes(256),
+        "tacc_owner": cpu.core_id,
+        "tacc_valid": True,
+        "tacc_dirty": False,
+        "tacc_format_ew": EW_U8,
+        "tacc_format_signed": 0,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+        "tacc_epoch": 11,
+    })
+    system.load_binary(0, assemble("t.amac"))
+    cpu.pc = 0
+    before_tacc = dict(cpu._cs.tacc_snapshot())
+    cycles_before = cpu.cycle_count
+    perf_cycles_before = cpu.perf_cycles
+    tileops_before = cpu.perf_tileops
+    original_read8 = cpu.mem_read8
+
+    def fault_first_source_read(address: int) -> int:
+        if address == source0:
+            assert cpu.tacc_busy
+            raise TrapError(IVEC_BUS_FAULT)
+        return original_read8(address)
+
+    cpu.mem_read8 = fault_first_source_read
+
+    stats = system.run_batch_stats(1)
+
+    assert stats.instructions_executed == 1
+    assert stats.per_core_instructions == (1,)
+    assert stats.per_core_cycles == (2,)
+    assert stats.system_cycles_advanced == 2
+    assert cpu.pc == len(assemble("t.amac"))
+    assert cpu.trap_addr == source0
+    assert cpu.cycle_count - cycles_before == 2
+    assert cpu.perf_cycles - perf_cycles_before == 2
+    assert cpu.perf_tileops == tileops_before
+    assert dict(cpu._cs.tacc_snapshot()) == before_tacc
+    assert not cpu.tacc_busy
 
 
 @pytest.mark.parametrize("exceptional", (False, True))

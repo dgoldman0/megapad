@@ -8,9 +8,13 @@ import _mp64_accel
 from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
 from megapad64 import (
+    EW_FP16,
+    EW_U8,
     HaltError,
+    IVEC_ALIGN_FAULT,
     IVEC_ILLEGAL_OP,
     IVEC_SW_TRAP,
+    TACC_CANONICAL_NAN,
     Megapad64 as PythonMegapad64,
     TrapError,
 )
@@ -74,6 +78,17 @@ def _reset_visible_state(cpu) -> tuple:
             cpu.ttile_w,
         ),
         tuple(cpu.acc),
+        (
+            bytes(cpu.tacc),
+            cpu.tacc_owner,
+            cpu.tacc_valid,
+            cpu.tacc_dirty,
+            cpu.tacc_format_ew,
+            cpu.tacc_format_signed,
+            cpu.tacc_busy,
+            cpu.tacc_force_pending,
+            cpu.tacc_epoch,
+        ),
         (cpu.ivt_base, cpu.ivec_id, cpu.trap_addr, cpu.ef_flags),
         (cpu.halted, cpu.idle, cpu.priv_level, cpu.mpu_base, cpu.mpu_limit),
         (
@@ -181,6 +196,185 @@ def test_structured_batch_composes_native_prefix_and_python_fallback_cycles():
         stats.stop_reason,
     ) == (2, 2, 0)
     assert cpu.cycle_count == 2
+
+
+def test_tacc_batch_crosses_native_lifecycle_and_tamac_without_a_boundary():
+    cpu = NativeMegapad64(mem_size=4096)
+    source0 = 0x400
+    source1 = 0x440
+    destination = 0x480
+    cpu.mem[source0:source0 + 64] = bytes([2]) * 64
+    cpu.mem[source1:source1 + 64] = bytes([3]) * 64
+    cpu.mem[destination:destination + 64] = bytes([0xA5]) * 64
+    cpu.tmode = EW_U8
+    cpu.tctrl = 0x5A
+    cpu.tsrc0 = source0
+    cpu.tsrc1 = source1
+    cpu.tdst = destination
+    cpu.acc = [
+        0x1111_1111_1111_1111,
+        0x2222_2222_2222_2222,
+        0x3333_3333_3333_3333,
+        0x4444_4444_4444_4444,
+    ]
+    program = assemble("nop\nt.acc.try\nt.acc.clear\nt.amac\nnop")
+    cpu.load_bytes(0, program)
+    cpu.pc = 0
+    legacy_before = (
+        tuple(cpu.acc),
+        cpu.tmode,
+        cpu.tctrl,
+        cpu.tsrc0,
+        cpu.tsrc1,
+        cpu.tdst,
+        bytes(cpu.mem[destination:destination + 64]),
+    )
+
+    def forbid_fallback():
+        pytest.fail("legal TACC batch instruction entered Python fallback")
+
+    cpu._step_python_fallback = forbid_fallback
+
+    stats = cpu.run_steps_stats(max_steps=5)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (5, 13, 0)
+    assert cpu.pc == len(program)
+    assert cpu.cycle_count == 13
+    assert cpu.perf_cycles == 13
+    assert cpu.perf_tileops == 3
+    assert (
+        tuple(cpu.acc),
+        cpu.tmode,
+        cpu.tctrl,
+        cpu.tsrc0,
+        cpu.tsrc1,
+        cpu.tdst,
+        bytes(cpu.mem[destination:destination + 64]),
+    ) == legacy_before
+    assert bytes(cpu.tacc) == (6).to_bytes(4, "little") * 64
+    assert (
+        cpu.tacc_owner,
+        cpu.tacc_valid,
+        cpu.tacc_dirty,
+        cpu.tacc_format_ew,
+        cpu.tacc_format_signed,
+        cpu.tacc_busy,
+        cpu.tacc_force_pending,
+        cpu.tacc_epoch,
+    ) == (cpu.core_id, True, True, EW_U8, 0, False, False, 0)
+
+
+def test_exceptional_fp_tacc_fallback_is_one_explicit_batch_boundary():
+    cpu = NativeMegapad64(mem_size=4096)
+    source0 = 0x400
+    source1 = 0x440
+    fp16_nan = (0x7E01).to_bytes(2, "little")
+    fp16_one = (0x3C00).to_bytes(2, "little")
+    cpu.mem[source0:source0 + 64] = fp16_nan + fp16_one * 31
+    cpu.mem[source1:source1 + 64] = fp16_one * 32
+    cpu.tmode = EW_FP16
+    cpu.tsrc0 = source0
+    cpu.tsrc1 = source1
+    cpu._cs.tacc_restore({
+        "tacc": bytes(256),
+        "tacc_owner": cpu.core_id,
+        "tacc_valid": True,
+        "tacc_dirty": False,
+        "tacc_format_ew": EW_FP16,
+        "tacc_format_signed": 0,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+        "tacc_epoch": 9,
+    })
+    program = assemble("nop\nt.amac\nnop")
+    cpu.load_bytes(0, program)
+    cpu.pc = 0
+    original_fallback = cpu._step_python_fallback
+    fallback_calls = 0
+
+    def counted_fallback(*args, **kwargs):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return original_fallback(*args, **kwargs)
+
+    cpu._step_python_fallback = counted_fallback
+
+    first = cpu.run_steps_stats(max_steps=3)
+
+    assert (
+        first.steps_executed,
+        first.total_cycles,
+        first.stop_reason,
+    ) == (2, 8, 0)
+    assert fallback_calls == 1
+    assert cpu.pc == len(assemble("nop\nt.amac"))
+    assert cpu.cycle_count == 8
+    assert cpu.perf_cycles == 8
+    assert cpu.perf_tileops == 1
+    assert int.from_bytes(bytes(cpu.tacc[:4]), "little") == TACC_CANONICAL_NAN
+    assert cpu.tacc_dirty
+    assert not cpu.tacc_busy
+
+    second = cpu.run_steps_stats(max_steps=1)
+
+    assert (
+        second.steps_executed,
+        second.total_cycles,
+        second.stop_reason,
+    ) == (1, 1, 0)
+    assert fallback_calls == 1
+    assert cpu.pc == len(program)
+    assert cpu.cycle_count == 9
+
+
+def test_tacc_batch_preflight_trap_preserves_native_prefix_metadata():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.tmode = EW_U8
+    cpu.tsrc0 = 0x201
+    cpu._cs.tacc_restore({
+        "tacc": bytes([0x5A]) * 256,
+        "tacc_owner": cpu.core_id,
+        "tacc_valid": True,
+        "tacc_dirty": True,
+        "tacc_format_ew": EW_U8,
+        "tacc_format_signed": 0,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+        "tacc_epoch": 11,
+    })
+    before_tacc = dict(cpu._cs.tacc_snapshot())
+    program = assemble("nop\nt.acc.load")
+    cpu.load_bytes(0, program)
+    cpu.pc = 0
+    original_fallback = cpu._step_python_fallback
+    fallback_calls = 0
+
+    def counted_fallback(*args, **kwargs):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return original_fallback(*args, **kwargs)
+
+    cpu._step_python_fallback = counted_fallback
+
+    with pytest.raises(TrapError) as raised:
+        cpu.run_steps_stats(max_steps=2)
+
+    error = raised.value
+    assert error.ivec_id == IVEC_ALIGN_FAULT
+    assert error.steps_executed == 2
+    assert error.native_prefix_steps == 1
+    assert error.native_prefix_cycles == 1
+    assert fallback_calls == 1
+    assert cpu.pc == len(program)
+    assert cpu.trap_addr == 0x201
+    assert cpu.cycle_count == 3
+    assert cpu.perf_cycles == 3
+    assert cpu.perf_tileops == 0
+    assert dict(cpu._cs.tacc_snapshot()) == before_tacc
 
 
 def test_structured_batch_composes_software_trap_cycles():

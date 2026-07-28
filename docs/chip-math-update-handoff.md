@@ -855,8 +855,13 @@ Work:
 - implement lifecycle operations and `TACC_STATUS` natively;
 - implement integer `TAMAC` using unsigned/wider intermediates without C++
   signed-overflow undefined behavior;
-- implement FP `TAMAC` or deliberately retain transactional fallback for
-  edge cases until native behavior is bit-exact;
+- deliberately retain every FP `TAMAC` on the exact integer oracle until the
+  complete binary32 add-product path, including wide exponent alignment and
+  one-point RNE, is ported bit-for-bit;
+- keep callback-overridden and system-routed TACC memory operations on the
+  transactional oracle in this landing; Landing 1.5 replaces that synchronous
+  seam with the timed seven-engine transport, while ordinary resolved
+  RAM/HBW/external/VRAM spans execute natively here;
 - preflight the complete operation before TACC mutation;
 - implement the locked per-form cycle table, extended instruction sizing,
   rewind, stall, and performance-counter behavior exactly;

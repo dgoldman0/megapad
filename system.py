@@ -2479,6 +2479,11 @@ class MegapadSystem:
         annotate: bool,
     ) -> tuple[int, int, bool]:
         """Reproduce _run_core_batch's tested TrapError accounting."""
+        fault_cycles = int(getattr(error, "fault_cycles", 0))
+        if fault_cycles < 0:
+            raise RuntimeError(
+                "native dispatch reported negative trap cycles"
+            ) from error
         if annotate:
             error.steps_executed = prefix_steps + 1
             error.native_prefix_steps = prefix_steps
@@ -2488,7 +2493,8 @@ class MegapadSystem:
                 cpu._trap(error.ivec_id)
         return (
             int(getattr(error, "steps_executed", 1)),
-            int(getattr(error, "native_prefix_cycles", 0)),
+            int(getattr(error, "native_prefix_cycles", 0))
+            + fault_cycles,
             True,
         )
 
@@ -2639,6 +2645,8 @@ class MegapadSystem:
                 prefix_cycles=0,
                 annotate=False,
             )
+        if getattr(error, "_mp64_accel_callback_error", False):
+            return None
         if isinstance(error, RuntimeError):
             message = str(error)
             if message == "HALT":

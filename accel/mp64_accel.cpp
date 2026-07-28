@@ -5730,6 +5730,84 @@ static inline bool fp32_pack_overflows(double value) {
            std::fabs(value) >= FP32_PACK_OVERFLOW_THRESHOLD;
 }
 
+struct StepCallbacks {
+    std::function<uint8_t(uint64_t)> mmio_read8;
+    std::function<void(uint64_t, uint8_t)> mmio_write8;
+    std::function<void(int, int)> on_output;   // (port, value)
+    // CSR overrides for system-level patching (IPI etc.)
+    std::function<uint64_t(int)> csr_read_override;  // returns value, or -1 for default
+    uint64_t mmio_start;
+    uint64_t mmio_end;
+    bool has_mmio;
+    bool tacc_read_via_callback = false;
+    bool tacc_write_via_callback = false;
+    ResumableBusAccess* bus_access = nullptr;
+    bool strict_cycle_dma = false;
+};
+
+static bool python_bridge_has_memory_override(
+        const py::function& bridge,
+        const char* method_name) {
+    if (!py::hasattr(bridge, "__self__"))
+        return false;
+    py::object owner = bridge.attr("__self__");
+    if (
+        owner.is_none() ||
+        !py::hasattr(owner, "__dict__")
+    ) {
+        return false;
+    }
+    py::dict attributes =
+        owner.attr("__dict__").cast<py::dict>();
+    if (attributes.contains(py::str(method_name)))
+        return true;
+
+    if (
+        !py::hasattr(bridge, "__func__") ||
+        !py::hasattr(owner, method_name)
+    ) {
+        return true;
+    }
+    py::object resolved_method =
+        owner.attr(method_name);
+    if (!py::hasattr(resolved_method, "__func__"))
+        return true;
+
+    const char* bridge_method_name =
+        std::string(method_name) == "mem_read8"
+        ? "_mmio_read8"
+        : "_mmio_write8";
+    const py::object bridge_function =
+        bridge.attr("__func__");
+    const py::object resolved_function =
+        resolved_method.attr("__func__");
+    const py::tuple method_resolution_order =
+        py::type::of(owner).attr("__mro__").cast<py::tuple>();
+    for (py::handle class_handle :
+         method_resolution_order) {
+        py::object class_object =
+            py::reinterpret_borrow<py::object>(
+                class_handle);
+        py::dict definitions(
+            class_object.attr("__dict__"));
+        if (!definitions.contains(
+                py::str(bridge_method_name))) {
+            continue;
+        }
+        py::object defined_bridge =
+            definitions[py::str(bridge_method_name)];
+        if (!defined_bridge.is(bridge_function))
+            continue;
+        if (!definitions.contains(py::str(method_name)))
+            return true;
+        py::object canonical_memory_method =
+            definitions[py::str(method_name)];
+        return !canonical_memory_method.is(
+            resolved_function);
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //  Tile helpers for MEX
 // ---------------------------------------------------------------------------
@@ -5884,12 +5962,686 @@ static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& da
     }
 }
 
+static constexpr int MEX_TACC_CANCELLED = -2;
+
+struct NativeTaccSpan {
+    uint8_t* data = nullptr;
+};
+
+static inline bool native_tacc_resolve_span(
+        CPUState& s,
+        uint64_t address,
+        uint64_t size,
+        NativeTaccSpan& resolved) noexcept {
+    resolved = {};
+    if (
+        s.memory == nullptr ||
+        size == 0 ||
+        size - 1 >
+            std::numeric_limits<uint64_t>::max() -
+                address
+    ) {
+        return false;
+    }
+
+    constexpr uint64_t TACC_MMIO_START =
+        0xFFFF'FF00'0000'0000ULL;
+    constexpr uint64_t TACC_MMIO_END =
+        0xFFFF'FF80'0000'0000ULL;
+    const uint64_t end = address + size;
+    if (
+        address < TACC_MMIO_END &&
+        end > TACC_MMIO_START
+    ) {
+        return false;
+    }
+
+    const auto resolve_region =
+        [address, size](
+                uint8_t* memory,
+                uint64_t base,
+                uint64_t region_size,
+                NativeTaccSpan& output) noexcept {
+            if (
+                memory == nullptr ||
+                !region_contains(base, region_size, address)
+            ) {
+                return 0;
+            }
+            const uint64_t offset = address - base;
+            if (!region_span_fits(region_size, offset, size))
+                return -1;
+            output.data = memory + offset;
+            return 1;
+        };
+
+    // Match the Python TACC preflight routing order. Once a region owns the
+    // first byte, crossing its boundary is a fault rather than permission to
+    // fall through to a lower-priority overlapping mapping.
+    int result = resolve_region(
+        s.memory->vram_mem,
+        s.memory->vram_base,
+        s.memory->vram_size,
+        resolved);
+    if (result != 0)
+        return result > 0;
+    result = resolve_region(
+        s.memory->ext_mem,
+        s.memory->ext_mem_base,
+        s.memory->ext_mem_size,
+        resolved);
+    if (result != 0)
+        return result > 0;
+    result = resolve_region(
+        s.memory->hbw_mem,
+        s.memory->hbw_base,
+        s.memory->hbw_size,
+        resolved);
+    if (result != 0)
+        return result > 0;
+    result = resolve_region(
+        s.memory->mem,
+        0,
+        s.memory->mem_size,
+        resolved);
+    return result > 0;
+}
+
+static inline bool native_tacc_format_is_legal(int ew) noexcept {
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16 ||
+        ew == EW_U32 ||
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    );
+}
+
+static inline int native_tacc_format_signed(
+        const CPUState& s,
+        int ew) noexcept {
+    return (
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    ) ? 0 : static_cast<int>((s.tmode >> 4) & 0x1);
+}
+
+static inline std::size_t native_tacc_active_bytes(int ew) noexcept {
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16
+    ) ? TACC_IMAGE_BYTES : TACC_IMAGE_BYTES / 2;
+}
+
+class NativeTaccOperation {
+public:
+    explicit NativeTaccOperation(CPUState& state) noexcept
+        : state_(state),
+          epoch_(state.tacc_epoch) {
+        state_.tacc_busy = true;
+    }
+
+    NativeTaccOperation(const NativeTaccOperation&) = delete;
+    NativeTaccOperation& operator=(
+        const NativeTaccOperation&) = delete;
+
+    ~NativeTaccOperation() noexcept {
+        if (cancelled()) {
+            state_.reset_tacc(false);
+            return;
+        }
+        state_.tacc_busy = false;
+        if (state_.tacc_force_pending)
+            state_.reset_tacc();
+    }
+
+    bool cancelled() const noexcept {
+        return state_.tacc_epoch != epoch_;
+    }
+
+private:
+    CPUState& state_;
+    uint64_t epoch_;
+};
+
+static inline void native_tacc_annotate_callback_fault(
+        CPUState& s,
+        py::error_already_set& error,
+        int fault_cycles,
+        uint64_t beat_address) {
+    py::gil_scoped_acquire acquire;
+    py::object exception =
+        py::reinterpret_borrow<py::object>(
+            error.value());
+    exception.attr("_mp64_accel_callback_error") =
+        py::bool_(true);
+    if (!py::hasattr(exception, "ivec_id"))
+        return;
+    const int ivec =
+        exception.attr("ivec_id").cast<int>();
+    exception.attr("fault_cycles") =
+        py::int_(fault_cycles);
+    s.ext_modifier = -1;
+    if (
+        ivec == IVEC_BUS_FAULT ||
+        ivec == IVEC_ALIGN_FAULT
+    ) {
+        s.trap_addr = beat_address;
+    }
+    s.cycle_count +=
+        static_cast<uint64_t>(fault_cycles);
+    if (s.perf_enable) {
+        s.perf_cycles +=
+            static_cast<uint64_t>(fault_cycles);
+    }
+}
+
+static inline bool native_tacc_read_tile(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t address,
+        const NativeTaccSpan& span,
+        uint64_t operation_epoch,
+        Tile& output) {
+    for (std::size_t offset = 0; offset < TILE_BYTES; offset++) {
+        output[offset] = (
+            cb.tacc_read_via_callback &&
+            cb.mmio_read8
+        )
+            ? cb.mmio_read8(
+                address + static_cast<uint64_t>(offset))
+            : span.data[offset];
+        if (s.tacc_epoch != operation_epoch)
+            return false;
+    }
+    return true;
+}
+
+static inline bool native_tacc_write_tile(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t address,
+        const NativeTaccSpan& span,
+        uint64_t operation_epoch,
+        const uint8_t* data) {
+    Tile previous{};
+    std::memcpy(
+        previous.data(),
+        span.data,
+        TILE_BYTES);
+    try {
+        for (std::size_t offset = 0;
+             offset < TILE_BYTES;
+             offset++) {
+            if (
+                cb.tacc_write_via_callback &&
+                cb.mmio_write8
+            ) {
+                cb.mmio_write8(
+                    address +
+                        static_cast<uint64_t>(offset),
+                    data[offset]);
+            } else {
+                span.data[offset] = data[offset];
+            }
+            if (s.tacc_epoch != operation_epoch) {
+                std::memcpy(
+                    span.data,
+                    previous.data(),
+                    TILE_BYTES);
+                icache_invalidate_span(
+                    s,
+                    address,
+                    TILE_BYTES);
+                return false;
+            }
+        }
+    } catch (...) {
+        std::memcpy(
+            span.data,
+            previous.data(),
+            TILE_BYTES);
+        icache_invalidate_span(
+            s,
+            address,
+            TILE_BYTES);
+        throw;
+    }
+    icache_invalidate_span(
+        s,
+        address,
+        TILE_BYTES);
+    return true;
+}
+
+static inline uint64_t native_tacc_image_read(
+        const std::array<uint8_t, TACC_IMAGE_BYTES>& image,
+        int lane,
+        int lane_bits) noexcept {
+    const int lane_bytes = lane_bits / 8;
+    const std::size_t offset =
+        static_cast<std::size_t>(lane * lane_bytes);
+    uint64_t value = 0;
+    for (int index = 0; index < lane_bytes; index++) {
+        value |= static_cast<uint64_t>(
+            image[offset + static_cast<std::size_t>(index)])
+            << (8 * index);
+    }
+    return value;
+}
+
+static inline void native_tacc_image_write(
+        std::array<uint8_t, TACC_IMAGE_BYTES>& image,
+        int lane,
+        int lane_bits,
+        uint64_t value) noexcept {
+    const int lane_bytes = lane_bits / 8;
+    const std::size_t offset =
+        static_cast<std::size_t>(lane * lane_bytes);
+    for (int index = 0; index < lane_bytes; index++) {
+        image[offset + static_cast<std::size_t>(index)] =
+            static_cast<uint8_t>(value >> (8 * index));
+    }
+}
+
+static inline int64_t native_tacc_sign_extend(
+        uint64_t value,
+        int bits) noexcept {
+    const uint64_t sign = 1ULL << (bits - 1);
+    if ((value & sign) == 0)
+        return static_cast<int64_t>(value);
+    return static_cast<int64_t>(
+        static_cast<__int128>(value) -
+        (static_cast<__int128>(1) << bits));
+}
+
+static int exec_native_tacc_lifecycle(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int source_selector,
+        uint8_t function_byte) {
+    const int function = function_byte & 0x7;
+    if (
+        source_selector != 0 ||
+        function_byte != function ||
+        function < 2 ||
+        function > 6
+    ) {
+        return -1;
+    }
+
+    if (function == 2) {
+        NativeTaccOperation operation(s);
+        if (s.tacc_owner == TACC_OWNER_NONE)
+            s.tacc_owner = s.core_id;
+        return operation.cancelled()
+            ? MEX_TACC_CANCELLED
+            : 0;
+    }
+
+    if (s.tacc_owner != s.core_id)
+        return -1;
+
+    if (function == 3 || function == 4) {
+        const int ew = s.tmode & 0x7;
+        if (!native_tacc_format_is_legal(ew))
+            return -1;
+        const int signed_mode =
+            native_tacc_format_signed(s, ew);
+
+        if (function == 3) {
+            NativeTaccOperation operation(s);
+            s.tacc.fill(0);
+            s.tacc_valid = true;
+            s.tacc_dirty = true;
+            s.tacc_format_ew =
+                static_cast<uint8_t>(ew);
+            s.tacc_format_signed =
+                static_cast<uint8_t>(signed_mode);
+            return operation.cancelled()
+                ? MEX_TACC_CANCELLED
+                : 0;
+        }
+
+        const uint64_t base = s.tsrc0;
+        NativeTaccSpan image_span;
+        if (
+            (base & 0x3F) != 0 ||
+            !native_tacc_resolve_span(
+                s,
+                base,
+                TACC_IMAGE_BYTES,
+                image_span)
+        ) {
+            return -1;
+        }
+
+        NativeTaccOperation operation(s);
+        const uint64_t operation_epoch =
+            s.tacc_epoch;
+        std::array<uint8_t, TACC_IMAGE_BYTES>
+            staged{};
+        for (std::size_t beat = 0; beat < 4; beat++) {
+            Tile data{};
+            const std::size_t offset =
+                beat * TILE_BYTES;
+            NativeTaccSpan beat_span{
+                image_span.data + offset,
+            };
+            try {
+                if (!native_tacc_read_tile(
+                        s,
+                        cb,
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        data)) {
+                    return MEX_TACC_CANCELLED;
+                }
+            } catch (py::error_already_set& error) {
+                native_tacc_annotate_callback_fault(
+                    s,
+                    error,
+                    3 + static_cast<int>(beat),
+                    base + offset);
+                throw;
+            }
+            std::copy(
+                data.begin(),
+                data.end(),
+                staged.begin() + offset);
+        }
+        const std::size_t active =
+            native_tacc_active_bytes(ew);
+        std::fill(
+            staged.begin() + active,
+            staged.end(),
+            0);
+        if (operation.cancelled())
+            return MEX_TACC_CANCELLED;
+        s.tacc = staged;
+        s.tacc_valid = true;
+        s.tacc_dirty = false;
+        s.tacc_format_ew =
+            static_cast<uint8_t>(ew);
+        s.tacc_format_signed =
+            static_cast<uint8_t>(signed_mode);
+        return 4;
+    }
+
+    if (function == 5) {
+        if (!s.tacc_valid)
+            return -1;
+        const uint64_t base = s.tdst;
+        NativeTaccSpan image_span;
+        if (
+            (base & 0x3F) != 0 ||
+            !native_tacc_resolve_span(
+                s,
+                base,
+                TACC_IMAGE_BYTES,
+                image_span)
+        ) {
+            return -1;
+        }
+
+        std::array<uint8_t, TACC_IMAGE_BYTES>
+            image = s.tacc;
+        const std::size_t active =
+            native_tacc_active_bytes(
+                s.tacc_format_ew);
+        std::fill(
+            image.begin() + active,
+            image.end(),
+            0);
+
+        NativeTaccOperation operation(s);
+        const uint64_t operation_epoch =
+            s.tacc_epoch;
+        for (std::size_t beat = 0; beat < 4; beat++) {
+            const std::size_t offset =
+                beat * TILE_BYTES;
+            NativeTaccSpan beat_span{
+                image_span.data + offset,
+            };
+            try {
+                if (!native_tacc_write_tile(
+                        s,
+                        cb,
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        image.data() + offset)) {
+                    return MEX_TACC_CANCELLED;
+                }
+            } catch (py::error_already_set& error) {
+                native_tacc_annotate_callback_fault(
+                    s,
+                    error,
+                    3 + static_cast<int>(beat),
+                    base + offset);
+                throw;
+            }
+        }
+        if (operation.cancelled())
+            return MEX_TACC_CANCELLED;
+        s.tacc_dirty = false;
+        return 4;
+    }
+
+    NativeTaccOperation operation(s);
+    s.reset_tacc();
+    return 0;
+}
+
+static int exec_native_tacc_tamac(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int source_selector,
+        uint8_t function_byte,
+        int broadcast_reg) {
+    if (
+        function_byte != 0x06 ||
+        (
+            source_selector != 0 &&
+            source_selector != 1 &&
+            source_selector != 3
+        )
+    ) {
+        return -1;
+    }
+    if (
+        s.tacc_owner != s.core_id ||
+        !s.tacc_valid
+    ) {
+        return -1;
+    }
+
+    const int ew = s.tmode & 0x7;
+    if (!native_tacc_format_is_legal(ew))
+        return -1;
+    const int signed_mode =
+        native_tacc_format_signed(s, ew);
+    if (
+        s.tacc_format_ew != ew ||
+        s.tacc_format_signed != signed_mode
+    ) {
+        return -1;
+    }
+
+    // The Python integer oracle remains authoritative for every floating
+    // TACC form until a later landing supplies a bit-exact native FP path.
+    if (ew == EW_FP16 || ew == EW_BF16)
+        return -1;
+
+    uint64_t source_addresses[2]{};
+    int source_count = 0;
+    if (source_selector == 0) {
+        source_addresses[0] = s.tsrc0;
+        source_addresses[1] = s.tsrc1;
+        source_count = 2;
+    } else if (source_selector == 1) {
+        source_addresses[0] = s.tsrc0;
+        source_count = 1;
+    } else {
+        source_addresses[0] = s.tdst;
+        source_addresses[1] = s.tsrc0;
+        source_count = 2;
+    }
+
+    NativeTaccSpan source_spans[2]{};
+    for (int index = 0; index < source_count; index++) {
+        if (!native_tacc_resolve_span(
+                s,
+                source_addresses[index],
+                TILE_BYTES,
+                source_spans[index])) {
+            return -1;
+        }
+    }
+
+    NativeTaccOperation operation(s);
+    const uint64_t operation_epoch =
+        s.tacc_epoch;
+    Tile source_a{};
+    Tile source_b{};
+    try {
+        if (!native_tacc_read_tile(
+                s,
+                cb,
+                source_addresses[0],
+                source_spans[0],
+                operation_epoch,
+                source_a)) {
+            return MEX_TACC_CANCELLED;
+        }
+    } catch (py::error_already_set& error) {
+        native_tacc_annotate_callback_fault(
+            s,
+            error,
+            2,
+            source_addresses[0]);
+        throw;
+    }
+    if (source_selector == 1) {
+        const int source_bits = 8 << ew;
+        const int source_bytes = source_bits / 8;
+        const uint64_t source_mask =
+            source_bits == 64
+            ? MASK64
+            : (1ULL << source_bits) - 1;
+        const uint64_t scalar =
+            s.regs[broadcast_reg] & source_mask;
+        for (int lane = 0;
+             lane < static_cast<int>(
+                 TILE_BYTES / source_bytes);
+             lane++) {
+            tile_set_elem(
+                source_b,
+                lane,
+                source_bytes,
+                scalar);
+        }
+    } else {
+        try {
+            if (!native_tacc_read_tile(
+                    s,
+                    cb,
+                    source_addresses[1],
+                    source_spans[1],
+                    operation_epoch,
+                    source_b)) {
+                return MEX_TACC_CANCELLED;
+            }
+        } catch (py::error_already_set& error) {
+            native_tacc_annotate_callback_fault(
+                s,
+                error,
+                3,
+                source_addresses[1]);
+            throw;
+        }
+    }
+
+    std::array<uint8_t, TACC_IMAGE_BYTES>
+        staged = s.tacc;
+    const int source_bits = 8 << ew;
+    const int source_bytes = source_bits / 8;
+    const int accumulator_bits =
+        ew == EW_U8 ? 32 : 64;
+    const int lane_count =
+        static_cast<int>(TILE_BYTES * 8) /
+        source_bits;
+    for (int lane = 0; lane < lane_count; lane++) {
+        const uint64_t a = tile_get_elem(
+            source_a,
+            lane,
+            source_bytes);
+        const uint64_t b = tile_get_elem(
+            source_b,
+            lane,
+            source_bytes);
+        const uint64_t old =
+            native_tacc_image_read(
+                staged,
+                lane,
+                accumulator_bits);
+        uint64_t result = 0;
+        if (signed_mode) {
+            const __int128 product =
+                static_cast<__int128>(
+                    native_tacc_sign_extend(
+                        a,
+                        source_bits)) *
+                static_cast<__int128>(
+                    native_tacc_sign_extend(
+                        b,
+                        source_bits));
+            result = old +
+                static_cast<uint64_t>(product);
+        } else {
+            const __uint128_t product =
+                static_cast<__uint128_t>(a) *
+                static_cast<__uint128_t>(b);
+            result = old +
+                static_cast<uint64_t>(product);
+        }
+        if (accumulator_bits == 32)
+            result &= 0xFFFF'FFFFULL;
+        native_tacc_image_write(
+            staged,
+            lane,
+            accumulator_bits,
+            result);
+    }
+    const std::size_t active =
+        native_tacc_active_bytes(ew);
+    std::fill(
+        staged.begin() + active,
+        staged.end(),
+        0);
+    if (operation.cancelled())
+        return MEX_TACC_CANCELLED;
+    s.tacc = staged;
+    s.tacc_dirty = true;
+
+    const int source_cycles =
+        source_selector == 1 ? 1 : 2;
+    const int arithmetic_cycles =
+        ew == EW_U8 ? 4 :
+        ew == EW_U16 ? 2 : 1;
+    return source_cycles + arithmetic_cycles;
+}
+
 // ---------------------------------------------------------------------------
 //  MEX core — native only where behavior is exact and mutation-free fallback
 //  is possible.  Returning -1 asks the Python oracle to execute the operation.
 // ---------------------------------------------------------------------------
 
-static int exec_mex(CPUState& s, int n) {
+static int exec_mex(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int n) {
     int ss = (n >> 2) & 0x3;
     int op = n & 0x3;
 
@@ -5900,14 +6652,12 @@ static int exec_mex(CPUState& s, int n) {
     if (ss == 1)
         broadcast_reg = fetch8(s) & 0xF;
 
-    // Keep the complete Phase-0 TACC namespace on the executable Python
-    // oracle until the native arithmetic landing. Match raw bytes before
-    // SS=imm8 normalizes its data byte to function zero, and before generic
-    // MEX can read a source, clear ACC_ZERO, or write a destination.
-    //
-    // Function seven is part of the reserved TAMAC boundary and must reach
-    // Python so it traps identically. Immediate-splat remains legacy TMUL
-    // except for the exact E9 06 encoding reserved as illegal TAMAC.
+    // Match raw TACC bytes before SS=imm8 normalizes its data byte to function
+    // zero, and before generic MEX can touch a tile, ACC, or destination.
+    // Strict-cycle replay publishes BUSY in advance and owns its exact bus
+    // timeline, so every bus-access-backed invocation deliberately retains
+    // the Python continuation. Microcores likewise retain their cluster
+    // oracle; this native path is only a full core's private tile engine.
     const bool raw_tamac =
         op == 0x1 &&
         (
@@ -5924,8 +6674,50 @@ static int exec_mex(CPUState& s, int n) {
         s.ext_modifier == 0x8 &&
         op == 0x3 &&
         (funct_byte & 0x7) >= 0x2;
-    if (raw_tamac || raw_tacc_lifecycle)
-        return -1;
+    if (raw_tamac || raw_tacc_lifecycle) {
+        if (
+            cb.bus_access != nullptr ||
+            s.profile != CoreProfile::FULL ||
+            s.tacc_busy ||
+            s.tacc_force_pending ||
+            s.priv_level != 0
+        ) {
+            return -1;
+        }
+        if (raw_tamac) {
+            // An overridden route may run arbitrary Python policy and raise
+            // exception classes whose architectural translation belongs to
+            // the executable oracle. Keep that exceptional seam
+            // transactional; ordinary resolved buffers remain native.
+            if (cb.tacc_read_via_callback)
+                return -1;
+            return exec_native_tacc_tamac(
+                s,
+                cb,
+                ss,
+                funct_byte,
+                broadcast_reg);
+        }
+        const int lifecycle_function =
+            funct_byte & 0x7;
+        if (
+            (
+                lifecycle_function == 0x4 &&
+                cb.tacc_read_via_callback
+            ) ||
+            (
+                lifecycle_function == 0x5 &&
+                cb.tacc_write_via_callback
+            )
+        ) {
+            return -1;
+        }
+        return exec_native_tacc_lifecycle(
+            s,
+            cb,
+            ss,
+            funct_byte);
+    }
 
     int ew_bits = s.tmode & 0x7;
     bool is_fp = ew_bits >= EW_FP16;
@@ -6521,19 +7313,6 @@ static int exec_mex(CPUState& s, int n) {
 //  py_on_output is callback for OUT port instruction
 //  py_csr_read/write override CSR access (for IPI patching in system.py)
 // ---------------------------------------------------------------------------
-
-struct StepCallbacks {
-    std::function<uint8_t(uint64_t)> mmio_read8;
-    std::function<void(uint64_t, uint8_t)> mmio_write8;
-    std::function<void(int, int)> on_output;   // (port, value)
-    // CSR overrides for system-level patching (IPI etc.)
-    std::function<uint64_t(int)> csr_read_override;  // returns value, or -1 for default
-    uint64_t mmio_start;
-    uint64_t mmio_end;
-    bool has_mmio;
-    ResumableBusAccess* bus_access = nullptr;
-    bool strict_cycle_dma = false;
-};
 
 struct DmaEndpointCallbacks {
     int requester_id = 0;
@@ -9772,7 +10551,11 @@ static int step_one(
     }
 
     case 0xE: {  // MEX
-        int rc = exec_mex(s, n);
+        int rc = exec_mex(s, cb, n);
+        if (rc == MEX_TACC_CANCELLED) {
+            s.ext_modifier = -1;
+            return 0;
+        }
         if (rc < 0) {
             // FP tile op — rewind PC to the start of the instruction
             // (including any EXT prefix) so the Python fallback can
@@ -10989,6 +11772,7 @@ struct RunResult {
     int steps_executed;
     int stop_reason;
     int trap_id;
+    bool tacc_cancelled = false;
 };
 
 enum RunStopReason {
@@ -11026,6 +11810,10 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
 
         try {
             int cycles = step_one(s, cb);
+            if (cycles == 0) {
+                result.tacc_cancelled = true;
+                break;
+            }
             result.total_cycles += cycles;
             result.steps_executed++;
         } catch (const std::runtime_error& e) {
@@ -11897,7 +12685,11 @@ static RunResult run_one_system_instruction(
     RunResult result{0, 0, RUN_LIMIT, -1};
     try {
         result.total_cycles = step_one(core, callbacks);
-        result.steps_executed = 1;
+        if (result.total_cycles == 0) {
+            result.tacc_cancelled = true;
+        } else {
+            result.steps_executed = 1;
+        }
     } catch (const std::runtime_error& error) {
         const std::string what = error.what();
         if (what == "HALT") {
@@ -14866,6 +15658,30 @@ finalize_coordinator_instruction(
         throw std::runtime_error(
             "coordinator boundary dispatch returned "
             "invalid progress");
+    }
+    if (raw.tacc_cancelled) {
+        if (
+            raw.steps_executed != 0 ||
+            raw.total_cycles != 0 ||
+            raw.stop_reason != RUN_LIMIT
+        ) {
+            throw std::runtime_error(
+                "cancelled TACC boundary returned "
+                "invalid progress");
+        }
+        CoordinatorBoundarySettlement result;
+        result.total_steps =
+            private_result.steps_executed;
+        result.total_cycles =
+            private_result.total_cycles;
+        result.stop_reason = RUN_LIMIT;
+        // Match the established detached-fallback cancellation contract:
+        // close this scheduler invocation even though reset left the core
+        // runnable, so the cancelled instruction is not silently replaced
+        // by a later instruction from the same public batch budget.
+        result.terminal = true;
+        result.closes_dispatch = true;
+        return result;
     }
 
     const int64_t combined_prefix_steps =
@@ -18313,6 +19129,14 @@ static std::vector<StepCallbacks> build_system_step_callbacks(
         core_callbacks.mmio_end =
             0xFFFFFF8000000000ULL;
         core_callbacks.has_mmio = true;
+        core_callbacks.tacc_read_via_callback =
+            python_bridge_has_memory_override(
+                mmio_read8,
+                "mem_read8");
+        core_callbacks.tacc_write_via_callback =
+            python_bridge_has_memory_override(
+                mmio_write8,
+                "mem_write8");
         core_callbacks.mmio_read8 =
             [mmio_read8](uint64_t address) -> uint8_t {
                 py::gil_scoped_acquire acquire;
@@ -22900,6 +23724,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.mmio_start = mmio_start;
         cb.mmio_end = mmio_end;
         cb.has_mmio = true;
+        cb.tacc_read_via_callback =
+            python_bridge_has_memory_override(
+                mmio_read8,
+                "mem_read8");
+        cb.tacc_write_via_callback =
+            python_bridge_has_memory_override(
+                mmio_write8,
+                "mem_write8");
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             return mmio_read8(addr).cast<uint8_t>();
         };
@@ -22954,6 +23786,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.mmio_start = mmio_start;
         cb.mmio_end = mmio_end;
         cb.has_mmio = true;
+        cb.tacc_read_via_callback =
+            python_bridge_has_memory_override(
+                mmio_read8,
+                "mem_read8");
+        cb.tacc_write_via_callback =
+            python_bridge_has_memory_override(
+                mmio_write8,
+                "mem_write8");
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             py::gil_scoped_acquire acq;
             return mmio_read8(addr).cast<uint8_t>();

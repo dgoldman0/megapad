@@ -33,8 +33,15 @@ from megapad64 import (
     EW_U64,
     EW_U8,
     HaltError,
+    IVEC_ALIGN_FAULT,
+    IVEC_BUS_FAULT,
+    IVEC_ILLEGAL_OP,
     MASK64,
+    TACC_CANONICAL_NAN,
+    TACC_IMAGE_BYTES,
+    TACC_OWNER_NONE,
     Megapad64 as PythonMegapad64,
+    TrapError,
     _float_to_bf16,
     _float_to_fp16,
 )
@@ -65,6 +72,28 @@ def _integer_tile(ew: int, values: list[int]) -> bytes:
     mask = (1 << (8 * elem_bytes)) - 1
     repeated = [values[i % len(values)] & mask for i in range(lanes)]
     return b"".join(value.to_bytes(elem_bytes, "little") for value in repeated)
+
+
+def _integer_accumulator_image(ew: int, values: list[int]) -> bytes:
+    accumulator_bytes = 4 if ew == EW_U8 else 8
+    lanes = _lane_count(ew)
+    mask = (1 << (8 * accumulator_bytes)) - 1
+    active = b"".join(
+        (values[lane % len(values)] & mask).to_bytes(
+            accumulator_bytes,
+            "little",
+        )
+        for lane in range(lanes)
+    )
+    return active + bytes(TACC_IMAGE_BYTES - len(active))
+
+
+def _fp_accumulator_image(values: list[int]) -> bytes:
+    active = b"".join(
+        (values[lane % len(values)] & 0xFFFF_FFFF).to_bytes(4, "little")
+        for lane in range(32)
+    )
+    return active + bytes(TACC_IMAGE_BYTES - len(active))
 
 
 def _floating_tile(ew: int, values: list[float]) -> bytes:
@@ -127,6 +156,40 @@ def _seed_common_state(
         "dst0": _watch_bank(cpu, DST0),
         "dst1": _watch_bank(cpu, DST1),
     }
+
+
+def _restore_tacc_state(
+    cpu: Any,
+    *,
+    image: bytes | bytearray,
+    owner: int | None = None,
+    valid: bool = True,
+    dirty: bool = True,
+    ew: int = EW_U8,
+    signed: int = 0,
+    epoch: int = 17,
+) -> None:
+    image = bytes(image)
+    assert len(image) == TACC_IMAGE_BYTES
+    owner = cpu.core_id if owner is None else owner
+    state = {
+        "tacc": image,
+        "tacc_owner": owner,
+        "tacc_valid": valid,
+        "tacc_dirty": dirty,
+        "tacc_format_ew": ew,
+        "tacc_format_signed": signed,
+        "tacc_busy": False,
+        "tacc_force_pending": False,
+        "tacc_epoch": epoch,
+    }
+    if isinstance(cpu, NativeMegapad64):
+        cpu._cs.tacc_restore(state)
+        return
+    cpu.tacc[:] = image
+    for name, value in state.items():
+        if name != "tacc":
+            setattr(cpu, name, value)
 
 
 def _snapshot(cpu: Any, watchers: Watchers) -> dict[str, Any]:
@@ -312,39 +375,30 @@ def _format_difference(oracle: Any, native: Any) -> str:
 
 
 @pytest.mark.parametrize(
-    ("raw", "tmode"),
+    "raw",
     [
-        pytest.param("e106", EW_FP16, id="fp16-tamac"),
-        pytest.param("e50607", EW_BF16, id="bf16-tamac-broadcast"),
-        pytest.param("ed06", EW_FP16, id="fp16-tamac-inplace"),
-        pytest.param("e107", EW_FP16, id="reserved-tmul-function"),
-        pytest.param("e126", EW_FP16, id="noncanonical-tamac"),
-        pytest.param("e906", EW_U8, id="illegal-tamac-immediate"),
-        pytest.param("f8e302", EW_U8, id="tacc-try"),
-        pytest.param("f8e322", EW_U8, id="noncanonical-lifecycle"),
-        pytest.param("f8e70200", EW_U8, id="noncanonical-lifecycle-selector"),
+        pytest.param("e107", id="reserved-tmul-function"),
+        pytest.param("e126", id="noncanonical-tamac"),
+        pytest.param("e906", id="illegal-tamac-immediate"),
+        pytest.param("f8e307", id="reserved-lifecycle-function"),
+        pytest.param("f8e322", id="noncanonical-lifecycle"),
+        pytest.param("f8e70200", id="noncanonical-lifecycle-selector"),
     ],
 )
-def test_raw_tacc_namespace_reaches_python_before_native_mutation(
+def test_invalid_tacc_namespace_reaches_python_before_native_mutation(
     raw: str,
-    tmode: int,
 ) -> None:
     cpu = NativeMegapad64(mem_size=MEM_SIZE)
     watchers = _seed_common_state(
         cpu,
-        tmode=tmode,
+        tmode=EW_U8,
         src0=bytes((index * 3 + 1) & 0xFF for index in range(64)),
         src1=bytes((index * 5 + 7) & 0xFF for index in range(64)),
     )
-    cpu.tacc = bytes((index * 11 + 9) & 0xFF for index in range(256))
-    cpu.tacc_owner = cpu.core_id
-    cpu.tacc_valid = True
-    cpu.tacc_dirty = True
-    cpu.tacc_format_ew = tmode & 0x7
-    cpu.tacc_format_signed = 0
-    cpu.tacc_busy = False
-    cpu.tacc_force_pending = False
-    cpu.tacc_epoch = 17
+    _restore_tacc_state(
+        cpu,
+        image=bytes((index * 11 + 9) & 0xFF for index in range(256)),
+    )
     cpu.load_bytes(0, bytes.fromhex(raw))
     cpu.pc = 0
     before = _snapshot(cpu, watchers)
@@ -370,6 +424,11 @@ def test_non_tacc_immediate_tmul_stays_native(immediate: int) -> None:
         tmode=EW_U8,
         src0=source,
         src1=bytes(64),
+    )
+    _restore_tacc_state(
+        cpu,
+        image=bytes((index * 17 + 3) & 0xFF for index in range(256)),
+        ew=EW_U8,
     )
     cpu.load_bytes(0, bytes((0xE9, immediate)))
     cpu.pc = 0
@@ -417,6 +476,954 @@ def _assert_native_matches_oracle(
         + "\n  ".join(differences)
     )
     return oracle
+
+
+def _execute_tacc_sequence(
+    cpu_type: CPUFactory,
+    instruction: str,
+    setup: Callable[[Any], Watchers],
+    *,
+    repeats: int,
+    expected_dispatch: Dispatch | None = None,
+) -> dict[str, Any]:
+    cpu = cpu_type(mem_size=MEM_SIZE)
+    watchers = setup(cpu)
+    encoded = bytes(assemble(instruction))
+    cpu.load_bytes(0, encoded * repeats)
+    cpu.pc = 0
+    before = _snapshot(cpu, watchers)
+    pre_fallback: list[dict[str, Any]] = []
+    if cpu_type is NativeMegapad64 and expected_dispatch is not None:
+        pre_fallback = _install_dispatch_probe(
+            cpu,
+            expected_dispatch,
+            watchers,
+        )
+
+    cycles = []
+    states = []
+    for _ in range(repeats):
+        before_step = _snapshot(cpu, watchers)
+        fallback_count = len(pre_fallback)
+        cycles.append(cpu.step())
+        if cpu_type is NativeMegapad64 and expected_dispatch is not None:
+            _assert_dispatch(
+                expected_dispatch,
+                before_step,
+                pre_fallback[fallback_count:],
+            )
+        states.append(_snapshot(cpu, watchers))
+
+    return {
+        "encoded": encoded,
+        "before": before,
+        "cycles": tuple(cycles),
+        "states": tuple(states),
+    }
+
+
+def _assert_tacc_sequence_matches_oracle(
+    instruction: str,
+    setup: Callable[[Any], Watchers],
+    *,
+    repeats: int = 1,
+    expected_dispatch: Dispatch,
+) -> dict[str, Any]:
+    oracle = _execute_tacc_sequence(
+        PythonMegapad64,
+        instruction,
+        setup,
+        repeats=repeats,
+    )
+    native = _execute_tacc_sequence(
+        NativeMegapad64,
+        instruction,
+        setup,
+        repeats=repeats,
+        expected_dispatch=expected_dispatch,
+    )
+    assert native["cycles"] == oracle["cycles"]
+    for step_index, (oracle_state, native_state) in enumerate(
+        zip(oracle["states"], native["states"], strict=True),
+        start=1,
+    ):
+        differences = _state_differences(oracle_state, native_state)
+        assert not differences, (
+            f"native TACC diverged for {instruction!r}, step {step_index}:\n  "
+            + "\n  ".join(differences)
+        )
+    return oracle
+
+
+def _execute_trapping_tacc(
+    cpu_type: CPUFactory,
+    instruction: str,
+    setup: Callable[[Any], Watchers],
+    *,
+    expected_dispatch: Dispatch | None = None,
+) -> dict[str, Any]:
+    cpu = cpu_type(mem_size=MEM_SIZE)
+    watchers = setup(cpu)
+    encoded = bytes(assemble(instruction))
+    cpu.load_bytes(0, encoded)
+    cpu.pc = 0
+    before = _snapshot(cpu, watchers)
+    pre_fallback: list[dict[str, Any]] = []
+    if cpu_type is NativeMegapad64 and expected_dispatch is not None:
+        pre_fallback = _install_dispatch_probe(
+            cpu,
+            expected_dispatch,
+            watchers,
+        )
+
+    with pytest.raises(TrapError) as raised:
+        cpu.step()
+
+    if cpu_type is NativeMegapad64 and expected_dispatch is not None:
+        _assert_dispatch(expected_dispatch, before, pre_fallback)
+    return {
+        "encoded": encoded,
+        "ivec_id": raised.value.ivec_id,
+        "before": before,
+        "after": _snapshot(cpu, watchers),
+    }
+
+
+def _assert_trapping_tacc_matches_oracle(
+    instruction: str,
+    setup: Callable[[Any], Watchers],
+    *,
+    expected_dispatch: Dispatch | None = None,
+) -> dict[str, Any]:
+    oracle = _execute_trapping_tacc(
+        PythonMegapad64,
+        instruction,
+        setup,
+    )
+    native = _execute_trapping_tacc(
+        NativeMegapad64,
+        instruction,
+        setup,
+        expected_dispatch=expected_dispatch,
+    )
+    assert native["ivec_id"] == oracle["ivec_id"]
+    differences = _state_differences(oracle["after"], native["after"])
+    assert not differences, (
+        f"native TACC trap diverged for {instruction!r}:\n  "
+        + "\n  ".join(differences)
+    )
+    return oracle
+
+
+def _assert_tacc_retirement(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    instruction_bytes: int,
+    cycles: int,
+) -> None:
+    assert after["pc"] == before["pc"] + instruction_bytes
+    assert after["cycle_count"] - before["cycle_count"] == cycles
+    before_perf = before["performance"]
+    after_perf = after["performance"]
+    assert after_perf[0] == before_perf[0]
+    assert after_perf[1] - before_perf[1] == cycles
+    assert after_perf[2] == before_perf[2]
+    assert after_perf[3] == before_perf[3] + 1
+    assert after_perf[4] == before_perf[4]
+
+
+def _assert_tacc_fault_accounting(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    instruction_bytes: int,
+    cycles: int,
+) -> None:
+    assert after["pc"] == before["pc"] + instruction_bytes
+    assert after["cycle_count"] - before["cycle_count"] == cycles
+    before_perf = before["performance"]
+    after_perf = after["performance"]
+    assert after_perf[0] == before_perf[0]
+    assert after_perf[1] - before_perf[1] == cycles
+    assert after_perf[2:] == before_perf[2:]
+
+
+def _assert_tacc_legacy_isolation(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    allow_destination_write: bool = False,
+    allow_trap_state: bool = False,
+) -> None:
+    psel = before["selectors"][0]
+    assert tuple(
+        value for index, value in enumerate(after["regs"]) if index != psel
+    ) == tuple(
+        value for index, value in enumerate(before["regs"]) if index != psel
+    )
+    for key in (
+        "selectors",
+        "acc",
+        "flags",
+        "flags_packed",
+        "scalar",
+        "cursor",
+        "tile",
+        "bist",
+        "protection",
+        "identity",
+    ):
+        assert after[key] == before[key], key
+    if not allow_trap_state:
+        assert after["interrupt"] == before["interrupt"]
+    for key in ("memory:src0", "memory:src1"):
+        assert after[key] == before[key], key
+    if not allow_destination_write:
+        for key in ("memory:dst0", "memory:dst1"):
+            assert after[key] == before[key], key
+
+
+@pytest.mark.parametrize(
+    ("case", "instruction", "ew", "signed", "expected_cycles"),
+    [
+        pytest.param(
+            "try",
+            "t.acc.try",
+            EW_U8,
+            0,
+            2,
+            id="try-claims-free-engine",
+        ),
+        pytest.param(
+            "try-owned",
+            "t.acc.try",
+            EW_U8,
+            0,
+            2,
+            id="try-is-idempotent-for-owner",
+        ),
+        pytest.param(
+            "clear",
+            "t.acc.clear",
+            EW_U16,
+            1,
+            2,
+            id="clear-latches-signed-u16",
+        ),
+        pytest.param(
+            "load",
+            "t.acc.load",
+            EW_U32,
+            1,
+            6,
+            id="load-canonicalizes-u32-image",
+        ),
+        pytest.param(
+            "store",
+            "t.acc.store",
+            EW_U16,
+            1,
+            6,
+            id="store-clears-dirty",
+        ),
+        pytest.param(
+            "release",
+            "t.acc.release",
+            EW_U8,
+            0,
+            2,
+            id="release-wipes-and-bumps-epoch",
+        ),
+    ],
+)
+def test_tacc_lifecycle_and_transfers_dispatch_natively(
+    case: str,
+    instruction: str,
+    ew: int,
+    signed: int,
+    expected_cycles: int,
+) -> None:
+    load_image = bytes((index * 5 + 3) & 0xFF for index in range(256))
+    stored_image = bytes((index * 7 + 11) & 0xFF for index in range(256))
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=ew | (signed << 4),
+            src0=bytes([0x31]) * 64,
+            src1=bytes([0x42]) * 64,
+        )
+        if case == "try":
+            _restore_tacc_state(
+                cpu,
+                image=bytes(TACC_IMAGE_BYTES),
+                owner=TACC_OWNER_NONE,
+                valid=False,
+                dirty=False,
+                ew=0,
+                signed=0,
+            )
+        elif case == "load":
+            _restore_tacc_state(
+                cpu,
+                image=bytes([0xA5]) * TACC_IMAGE_BYTES,
+                ew=EW_U8,
+            )
+            cpu.mem[SRC0:SRC0 + TACC_IMAGE_BYTES] = load_image
+        elif case == "store":
+            _restore_tacc_state(
+                cpu,
+                image=stored_image,
+                ew=ew,
+                signed=signed,
+            )
+        else:
+            _restore_tacc_state(
+                cpu,
+                image=bytes([0xA5]) * TACC_IMAGE_BYTES,
+                ew=EW_U8,
+            )
+        return watchers
+
+    result = _assert_tacc_sequence_matches_oracle(
+        instruction,
+        setup,
+        expected_dispatch="native",
+    )
+    before = result["before"]
+    after = result["states"][0]
+    assert result["cycles"] == (expected_cycles,)
+    _assert_tacc_retirement(
+        before,
+        after,
+        instruction_bytes=len(result["encoded"]),
+        cycles=expected_cycles,
+    )
+    _assert_tacc_legacy_isolation(
+        before,
+        after,
+        allow_destination_write=case == "store",
+    )
+
+    image, owner, valid, dirty, latched_ew, latched_signed, busy, pending, epoch = (
+        after["tacc"]
+    )
+    assert not busy
+    assert not pending
+    if case == "try":
+        assert owner == 0
+        assert not valid
+        assert not dirty
+        assert image == bytes(TACC_IMAGE_BYTES)
+    elif case == "try-owned":
+        assert after["tacc"] == before["tacc"]
+    elif case == "clear":
+        assert (owner, valid, dirty) == (0, True, True)
+        assert (latched_ew, latched_signed) == (EW_U16, 1)
+        assert image == bytes(TACC_IMAGE_BYTES)
+    elif case == "load":
+        assert (owner, valid, dirty) == (0, True, False)
+        assert (latched_ew, latched_signed) == (EW_U32, 1)
+        assert image == load_image[:128] + bytes(128)
+    elif case == "store":
+        assert (owner, valid, dirty) == (0, True, False)
+        assert after["memory:bank0"][DST0:DST0 + 256] == stored_image
+    else:
+        assert owner == TACC_OWNER_NONE
+        assert not valid
+        assert not dirty
+        assert (latched_ew, latched_signed) == (0, 0)
+        assert image == bytes(TACC_IMAGE_BYTES)
+        assert epoch == before["tacc"][-1] + 1
+
+
+@pytest.mark.parametrize(
+    (
+        "ew",
+        "signed",
+        "instruction",
+        "source_a_values",
+        "source_b_values",
+        "initial_values",
+        "repeats",
+        "expected_cycles",
+    ),
+    [
+        pytest.param(
+            EW_U8,
+            0,
+            "t.amac",
+            [0xFF, 0x80, 1, 0],
+            [0xFF, 2, 0xFF, 0],
+            [0xFFFF_FFF0, 0x8000_0000, 0xFFFF_FFFF, 0],
+            2,
+            7,
+            id="u8-unsigned-tile-wrap-repeat",
+        ),
+        pytest.param(
+            EW_U8,
+            1,
+            "t.amac r7",
+            [0x80, 0x7F, 0xFF, 1],
+            [0x80],
+            [0x8000_0000, 0x7FFF_FFFF, 1, 0xFFFF_FFFF],
+            1,
+            6,
+            id="u8-signed-broadcast-extremes",
+        ),
+        pytest.param(
+            EW_U16,
+            0,
+            "t.amac r7",
+            [0xFFFF, 0x8000, 1, 0],
+            [0xFFFF],
+            [0xFFFF_FFFF_FFFF_FFF0, 0, 1, MASK64],
+            2,
+            4,
+            id="u16-unsigned-broadcast-wrap-repeat",
+        ),
+        pytest.param(
+            EW_U16,
+            1,
+            "t.amac",
+            [0x8000, 0x7FFF, 0xFFFF, 1],
+            [0xFFFF, 2, 3, 0x8000],
+            [MASK64, 0x7FFF_FFFF_FFFF_FFFF, 1, 0],
+            1,
+            5,
+            id="u16-signed-tile-extremes",
+        ),
+        pytest.param(
+            EW_U32,
+            0,
+            "t.amac",
+            [0xFFFF_FFFF, 0x8000_0000, 1, 0],
+            [0xFFFF_FFFF, 2, 0xFFFF_FFFF, 0],
+            [MASK64, 0x8000_0000_0000_0000, 1, 0],
+            2,
+            4,
+            id="u32-unsigned-tile-wrap-repeat",
+        ),
+        pytest.param(
+            EW_U32,
+            1,
+            "t.amac inplace",
+            [0x8000_0000, 0x7FFF_FFFF, 0xFFFF_FFFF, 1],
+            [0xFFFF_FFFF, 2, 3, 0x8000_0000],
+            [MASK64, 0x7FFF_FFFF_FFFF_FFFF, 1, 0],
+            1,
+            4,
+            id="u32-signed-inplace-extremes",
+        ),
+    ],
+)
+def test_integer_tacc_tamac_dispatches_natively_with_exact_widening(
+    ew: int,
+    signed: int,
+    instruction: str,
+    source_a_values: list[int],
+    source_b_values: list[int],
+    initial_values: list[int],
+    repeats: int,
+    expected_cycles: int,
+) -> None:
+    source_a = _integer_tile(ew, source_a_values)
+    source_b = _integer_tile(ew, source_b_values)
+    initial_image = _integer_accumulator_image(ew, initial_values)
+
+    def setup(cpu: Any) -> Watchers:
+        if instruction.endswith("inplace"):
+            watchers = _seed_common_state(
+                cpu,
+                tmode=ew | (signed << 4),
+                src0=source_b,
+                src1=bytes([0xD7]) * 64,
+                dst0=source_a,
+            )
+        else:
+            watchers = _seed_common_state(
+                cpu,
+                tmode=ew | (signed << 4),
+                src0=source_a,
+                src1=source_b,
+            )
+        if "r7" in instruction:
+            source_mask = (1 << (8 << ew)) - 1
+            cpu.regs[7] = (
+                0xA5A5_5A5A_0000_0000
+                | (source_b_values[0] & source_mask)
+            )
+        _restore_tacc_state(
+            cpu,
+            image=initial_image,
+            ew=ew,
+            signed=signed,
+        )
+        return watchers
+
+    result = _assert_tacc_sequence_matches_oracle(
+        instruction,
+        setup,
+        repeats=repeats,
+        expected_dispatch="native",
+    )
+    assert result["cycles"] == (expected_cycles,) * repeats
+    previous = result["before"]
+    for after in result["states"]:
+        _assert_tacc_retirement(
+            previous,
+            after,
+            instruction_bytes=len(result["encoded"]),
+            cycles=expected_cycles,
+        )
+        previous = after
+    _assert_tacc_legacy_isolation(result["before"], result["states"][-1])
+
+    source_bits = 8 << ew
+    source_mask = (1 << source_bits) - 1
+    accumulator_bits = 32 if ew == EW_U8 else 64
+    accumulator_mask = (1 << accumulator_bits) - 1
+    lane_a = source_a_values[0] & source_mask
+    lane_b = source_b_values[0] & source_mask
+    if signed:
+        sign_bit = 1 << (source_bits - 1)
+        if lane_a & sign_bit:
+            lane_a -= 1 << source_bits
+        if lane_b & sign_bit:
+            lane_b -= 1 << source_bits
+    expected_lane0 = (
+        initial_values[0] + repeats * lane_a * lane_b
+    ) & accumulator_mask
+    lane_bytes = accumulator_bits // 8
+    final_image = result["states"][-1]["tacc"][0]
+    assert int.from_bytes(final_image[:lane_bytes], "little") == expected_lane0
+    if ew == EW_U32:
+        assert final_image[128:] == bytes(128)
+
+
+@pytest.mark.parametrize(
+    (
+        "ew",
+        "instruction",
+        "source_a_values",
+        "source_b_values",
+        "expected_cycles",
+        "expected_lane0",
+    ),
+    [
+        pytest.param(
+            EW_FP16,
+            "t.amac",
+            [0x0001, 0x8000, 0x3C00, 0xBC00],
+            [0x3C00, 0x4000, 0x3800, 0x0001],
+            7,
+            None,
+            id="fp16-finite-subnormal-signed-zero",
+        ),
+        pytest.param(
+            EW_BF16,
+            "t.amac r7",
+            [0x0001, 0x8000, 0x3F80, 0xBF80],
+            [0x3F00],
+            6,
+            None,
+            id="bf16-finite-subnormal-signed-zero-broadcast",
+        ),
+        pytest.param(
+            EW_FP16,
+            "t.amac inplace",
+            [0x7E01, 0x3C00, 0x4000, 0x0000],
+            [0x3C00, 0x3C00, 0x3C00, 0x3C00],
+            7,
+            TACC_CANONICAL_NAN,
+            id="fp16-nan-inplace",
+        ),
+        pytest.param(
+            EW_BF16,
+            "t.amac",
+            [0x7F80, 0x3F80, 0x4000, 0x0000],
+            [0x0000, 0x3F80, 0x3F80, 0x3F80],
+            7,
+            TACC_CANONICAL_NAN,
+            id="bf16-infinity-times-zero",
+        ),
+    ],
+)
+def test_fp_tacc_tamac_retains_bit_exact_transactional_fallback(
+    ew: int,
+    instruction: str,
+    source_a_values: list[int],
+    source_b_values: list[int],
+    expected_cycles: int,
+    expected_lane0: int | None,
+) -> None:
+    source_a = _integer_tile(ew, source_a_values)
+    source_b = _integer_tile(ew, source_b_values)
+    initial_image = _fp_accumulator_image(
+        [0, 0x8000_0000, 0x3F80_0001, 0xBF80_0000]
+    )
+
+    def setup(cpu: Any) -> Watchers:
+        if instruction.endswith("inplace"):
+            watchers = _seed_common_state(
+                cpu,
+                tmode=ew,
+                src0=source_b,
+                src1=bytes([0xD7]) * 64,
+                dst0=source_a,
+            )
+        else:
+            watchers = _seed_common_state(
+                cpu,
+                tmode=ew,
+                src0=source_a,
+                src1=source_b,
+            )
+        if "r7" in instruction:
+            cpu.regs[7] = 0xA5A5_5A5A_0000_0000 | source_b_values[0]
+        _restore_tacc_state(cpu, image=initial_image, ew=ew)
+        return watchers
+
+    result = _assert_tacc_sequence_matches_oracle(
+        instruction,
+        setup,
+        expected_dispatch="fallback",
+    )
+    before = result["before"]
+    after = result["states"][0]
+    assert result["cycles"] == (expected_cycles,)
+    _assert_tacc_retirement(
+        before,
+        after,
+        instruction_bytes=len(result["encoded"]),
+        cycles=expected_cycles,
+    )
+    _assert_tacc_legacy_isolation(before, after)
+    assert after["tacc"][0][128:] == bytes(128)
+    if expected_lane0 is not None:
+        assert int.from_bytes(after["tacc"][0][:4], "little") == expected_lane0
+
+
+@pytest.mark.parametrize(
+    ("case", "instruction", "expected_ivec", "expected_trap_addr"),
+    [
+        pytest.param(
+            "misaligned-load",
+            "t.acc.load",
+            IVEC_ALIGN_FAULT,
+            SRC0 + 1,
+            id="load-alignment-before-read",
+        ),
+        pytest.param(
+            "crossing-store",
+            "t.acc.store",
+            IVEC_BUS_FAULT,
+            MEM_SIZE,
+            id="store-complete-span-before-write",
+        ),
+        pytest.param(
+            "second-tamac-source",
+            "t.amac",
+            IVEC_BUS_FAULT,
+            MEM_SIZE,
+            id="tamac-all-sources-before-first-read",
+        ),
+        pytest.param(
+            "unowned-tamac",
+            "t.amac",
+            IVEC_ILLEGAL_OP,
+            0xBADC_0DE,
+            id="tamac-ownership-before-read",
+        ),
+        pytest.param(
+            "format-mismatch",
+            "t.amac",
+            IVEC_ILLEGAL_OP,
+            0xBADC_0DE,
+            id="tamac-format-before-read",
+        ),
+    ],
+)
+def test_tacc_preflight_faults_before_any_memory_or_state_mutation(
+    case: str,
+    instruction: str,
+    expected_ivec: int,
+    expected_trap_addr: int,
+) -> None:
+    initial_image = bytes((index * 13 + 5) & 0xFF for index in range(256))
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=EW_U8,
+            src0=bytes([2]) * 64,
+            src1=bytes([3]) * 64,
+        )
+        _restore_tacc_state(cpu, image=initial_image, ew=EW_U8)
+        cpu.trap_addr = 0xBADC_0DE
+        accesses: list[int] = []
+        watchers["callback-count"] = lambda: len(accesses).to_bytes(8, "little")
+        if case == "misaligned-load":
+            cpu.tsrc0 = SRC0 + 1
+            original_read8 = cpu.mem_read8
+
+            def counting_read8(address: int) -> int:
+                accesses.append(address)
+                return original_read8(address)
+
+            cpu.mem_read8 = counting_read8
+        elif case == "crossing-store":
+            cpu.tdst = MEM_SIZE - 128
+            original_write8 = cpu.mem_write8
+
+            def counting_write8(address: int, value: int) -> None:
+                accesses.append(address)
+                original_write8(address, value)
+
+            cpu.mem_write8 = counting_write8
+        else:
+            if case == "unowned-tamac":
+                _restore_tacc_state(
+                    cpu,
+                    image=bytes(TACC_IMAGE_BYTES),
+                    owner=TACC_OWNER_NONE,
+                    valid=False,
+                    dirty=False,
+                    ew=0,
+                )
+            elif case == "format-mismatch":
+                cpu.tmode = EW_U16
+            elif case != "second-tamac-source":
+                raise AssertionError(f"unknown preflight case: {case}")
+            cpu.tsrc1 = MEM_SIZE - 32
+            original_read8 = cpu.mem_read8
+
+            def counting_read8(address: int) -> int:
+                accesses.append(address)
+                return original_read8(address)
+
+            cpu.mem_read8 = counting_read8
+        return watchers
+
+    result = _assert_trapping_tacc_matches_oracle(
+        instruction,
+        setup,
+        expected_dispatch="fallback",
+    )
+    before = result["before"]
+    after = result["after"]
+    assert result["ivec_id"] == expected_ivec
+    assert after["interrupt"][2] == expected_trap_addr
+    assert after["memory:callback-count"] == bytes(8)
+    assert after["tacc"] == before["tacc"]
+    assert after["memory:bank0"] == before["memory:bank0"]
+    _assert_tacc_fault_accounting(
+        before,
+        after,
+        instruction_bytes=len(result["encoded"]),
+        cycles=2,
+    )
+    _assert_tacc_legacy_isolation(
+        before,
+        after,
+        allow_trap_state=True,
+    )
+
+
+def test_tacc_load_second_beat_fault_is_atomic_with_exact_metadata() -> None:
+    initial_image = bytes([0x5A]) * TACC_IMAGE_BYTES
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=EW_U8,
+            src0=bytes([0xC3]) * 64,
+            src1=bytes([0xD4]) * 64,
+        )
+        cpu.mem[SRC0:SRC0 + TACC_IMAGE_BYTES] = bytes([0xC3]) * 256
+        _restore_tacc_state(cpu, image=initial_image, ew=EW_U8)
+        original_read8 = cpu.mem_read8
+        reads: list[int] = []
+
+        def faulting_read8(address: int) -> int:
+            reads.append(address)
+            if address == SRC0 + 64:
+                assert cpu.tacc_busy
+                cpu.trap_addr = address
+                raise TrapError(IVEC_BUS_FAULT)
+            return original_read8(address)
+
+        cpu.mem_read8 = faulting_read8
+        watchers["callback-count"] = lambda: len(reads).to_bytes(8, "little")
+        return watchers
+
+    result = _assert_trapping_tacc_matches_oracle(
+        "t.acc.load",
+        setup,
+        expected_dispatch="fallback",
+    )
+    before = result["before"]
+    after = result["after"]
+    assert result["ivec_id"] == IVEC_BUS_FAULT
+    assert after["interrupt"][2] == SRC0 + 64
+    assert int.from_bytes(after["memory:callback-count"], "little") == 65
+    assert after["tacc"] == before["tacc"]
+    assert after["memory:bank0"] == before["memory:bank0"]
+    _assert_tacc_fault_accounting(
+        before,
+        after,
+        instruction_bytes=len(result["encoded"]),
+        cycles=4,
+    )
+    _assert_tacc_legacy_isolation(
+        before,
+        after,
+        allow_trap_state=True,
+    )
+
+
+@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
+def test_tacc_store_second_beat_fault_preserves_acknowledged_prefix_and_state(
+    dirty: bool,
+) -> None:
+    initial_image = bytes(range(TACC_IMAGE_BYTES))
+    destination_before = bytes([0xCC]) * TACC_IMAGE_BYTES
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=EW_U8,
+            src0=bytes([0x31]) * 64,
+            src1=bytes([0x42]) * 64,
+        )
+        cpu.mem[DST0:DST0 + TACC_IMAGE_BYTES] = destination_before
+        _restore_tacc_state(
+            cpu,
+            image=initial_image,
+            dirty=dirty,
+            ew=EW_U8,
+        )
+        original_write8 = cpu.mem_write8
+        writes: list[int] = []
+
+        def faulting_write8(address: int, value: int) -> None:
+            writes.append(address)
+            if address == DST0 + 73:
+                assert cpu.tacc_busy
+                cpu.trap_addr = address
+                raise TrapError(IVEC_BUS_FAULT)
+            original_write8(address, value)
+
+        cpu.mem_write8 = faulting_write8
+        watchers["callback-count"] = lambda: len(writes).to_bytes(8, "little")
+        return watchers
+
+    result = _assert_trapping_tacc_matches_oracle(
+        "t.acc.store",
+        setup,
+        expected_dispatch="fallback",
+    )
+    before = result["before"]
+    after = result["after"]
+    assert result["ivec_id"] == IVEC_BUS_FAULT
+    assert after["interrupt"][2] == DST0 + 64
+    assert int.from_bytes(after["memory:callback-count"], "little") == 74
+    assert after["tacc"] == before["tacc"]
+    expected_destination = (
+        initial_image[:64] + destination_before[64:]
+    )
+    assert (
+        after["memory:bank0"][DST0:DST0 + TACC_IMAGE_BYTES]
+        == expected_destination
+    )
+    _assert_tacc_fault_accounting(
+        before,
+        after,
+        instruction_bytes=len(result["encoded"]),
+        cycles=4,
+    )
+    _assert_tacc_legacy_isolation(
+        before,
+        after,
+        allow_destination_write=True,
+        allow_trap_state=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("region", "attach_name", "base"),
+    [
+        pytest.param("hbw", "attach_hbw", 0x1_0000, id="hbw"),
+        pytest.param("ext", "attach_ext_mem", 0x2_0000, id="ext"),
+        pytest.param("vram", "attach_vram", 0x3_0000, id="vram"),
+    ],
+)
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param("t.amac", id="tamac-read"),
+        pytest.param("t.acc.load", id="image-load"),
+        pytest.param("t.acc.store", id="image-store"),
+    ],
+)
+def test_native_tacc_uses_preflight_resolved_attached_memory(
+    region: str,
+    attach_name: str,
+    base: int,
+    operation: str,
+) -> None:
+    source_a = _integer_tile(EW_U16, [1, 2, 0xFFFF, 0x8000])
+    source_b = _integer_tile(EW_U16, [3, 4, 2, 2])
+    load_image = bytes((index * 9 + 5) & 0xFF for index in range(256))
+    stored_image = bytes((index * 7 + 11) & 0xFF for index in range(256))
+
+    def setup(cpu: Any) -> Watchers:
+        aperture = bytearray([0xA5] * TACC_IMAGE_BYTES)
+        getattr(cpu, attach_name)(
+            aperture,
+            base,
+            len(aperture),
+        )
+        watchers = _seed_common_state(
+            cpu,
+            tmode=EW_U16,
+            src0=bytes([0x31]) * 64,
+            src1=bytes([0x42]) * 64,
+        )
+        watchers[region] = lambda: bytes(aperture)
+        if operation == "t.amac":
+            aperture[:64] = source_a
+            aperture[64:128] = source_b
+            cpu.tsrc0 = base
+            cpu.tsrc1 = base + 64
+            _restore_tacc_state(
+                cpu,
+                image=bytes(TACC_IMAGE_BYTES),
+                ew=EW_U16,
+            )
+        elif operation == "t.acc.load":
+            aperture[:] = load_image
+            cpu.tsrc0 = base
+            _restore_tacc_state(
+                cpu,
+                image=bytes([0xCC]) * TACC_IMAGE_BYTES,
+                ew=EW_U8,
+            )
+        else:
+            cpu.tdst = base
+            _restore_tacc_state(
+                cpu,
+                image=stored_image,
+                ew=EW_U16,
+            )
+        return watchers
+
+    _assert_tacc_sequence_matches_oracle(
+        operation,
+        setup,
+        expected_dispatch="native",
+    )
 
 
 @pytest.mark.parametrize(

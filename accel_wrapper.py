@@ -574,6 +574,11 @@ def {_attr}(self, v):
             )
             return cycles
         except RuntimeError as e:
+            if getattr(e, "_mp64_accel_callback_error", False):
+                # Native TACC preserves Python callback exceptions verbatim.
+                # Their text is guest-controlled and must not be interpreted
+                # as one of the C++ executor's control strings.
+                raise
             msg = str(e)
             if msg == "HALT":
                 if self.on_halt:
@@ -904,6 +909,8 @@ def {_attr}(self, v):
                 max_steps=max_steps,
             )
         except RuntimeError as e:
+            if getattr(e, "_mp64_accel_callback_error", False):
+                raise
             msg = str(e)
             if msg == "HALT":
                 return CoreRunStats(0, 0, 1)
