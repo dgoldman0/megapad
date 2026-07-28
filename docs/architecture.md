@@ -12,13 +12,13 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 ┌───────────────────────────────────────────────────────────┐
 │                    Megapad-64 CPU (×16 cores)             │
 │  4 full cores         ┌──────────────────┐  ┌───────────┐ │
-│  32 × 64-bit GPRs     │   Tile Engine    │  │ Perf Ctrs │ │
-│  4 KiB I-Cache        │  (MEX extension) │  │ (4 × 64b) │ │
-│  8-bit Flags          │  FP16 / bf16     │  └───────────┘ │
-│  256-bit Accumulator  │  DMA queue       │                │
-│  Perf counters        └──────────────────┘                │
+│  32 × 64-bit GPRs     │  4 private tile  │  │ Perf Ctrs │ │
+│  4 KiB I-Cache        │ engines (MEX)    │  │ (4 × 64b) │ │
+│  8-bit Flags          │ ACC + 2,048-bit  │  └───────────┘ │
+│  Perf counters        │ TACC per engine  │                │
+│                       └──────────────────┘                │
 │  + 3 micro-clusters (4 scalar μ-cores ea., shared MUL/DIV │
-│    + tile/MEX engine, 1 KiB scratchpad, HW barrier)       │
+│    + one shared tile/ACC/TACC engine, scratchpad, barrier) │
 └───────────────┬───────────────────────────────────────────┘
                 │  64-bit data bus (weighted round-robin QoS)
     ┌───────────┴───────────────────────────┐
@@ -400,10 +400,59 @@ The tile engine extends beyond the base TALU/TMUL/TRED/TSYS with:
   for non-contiguous tile loads (e.g., 8×8 patches from a 640-wide framebuffer)
 - **FP16 / bfloat16** — 32-lane half-precision tile operations with
   FP32 accumulation for DOT/SUM/SUMSQ
+- **Full-width TACC** — one explicit 2,048-bit persistent lane accumulator per
+  physical engine, with widened integer and binary32 feedback accumulation
 
-All extended tile operations are implemented in both the emulator
-(`megapad64.py`) and RTL (`rtl/gpu/mp64_tile.v`, `rtl/gpu/mp64_fp16_alu.v`),
-with 53 tile testbench tests passing.
+The pre-TACC extended tile operations are implemented in both the emulator and
+RTL.  TACC is implemented by the Python oracle, native accelerator, and
+strict-cycle model in emulator Phase 1.  Restoring all private full-core
+engines and implementing TACC in portable RTL are Phase 2 work; current RTL
+must not be treated as TACC-capable.
+
+### Tile Engine Domains and Explicit TACC Control
+
+The architectural topology is seven physical engines:
+
+1. four private engines, one paired with each full core; and
+2. three shared engines, one round-robin engine in each four-microcore
+   cluster.
+
+Every engine owns one legacy 256-bit ACC and one independent 2,048-bit TACC.
+A full core owns all of its engine-facing context privately.  Each microcore
+instead has private cursor, `TMODE`, `TCTRL`, source, destination, and stride
+shadows, while ACC, TACC, and TACC lifecycle metadata are shared by the
+cluster's physical engine.  The selected caller's shadows are sampled with its
+granted MEX request.
+
+TACC follows the chip's software-visible control ethos.  Software explicitly
+claims, clears or loads, accumulates, stores, and releases it.  Hardware never
+infers a lifetime, spills or evicts an owner, or blocks inside a claim.
+`TACC.TRY` retires after one attempt; the caller reads caller-relative
+`TACC_STATUS.MINE` and chooses retry, `PAUSE`, backoff, or abandonment.
+Ownership reserves only the persistent bank, so nonowners retain stateless and
+legacy-ACC MEX service.
+
+Cluster admission, the chip-wide TACC image stage, and the seven-source
+tile-memory port use deterministic equal round-robin service in this work.
+Existing hard QoS remains visible and future software-programmable weights may
+change service order, but no weight may change ownership, arithmetic, image,
+fault, or retirement semantics.
+
+The canonical TACC image is 256 bytes aligned to 64 bytes and transfers as
+four 64-byte beats.  Only one image transfer owns the chip-wide staging image
+at a time, although ordinary tile traffic may interleave between its beats.
+External images further serialize into 32 PHY words.  With default one-cycle
+responses, emulator Phase 1 measures 34 cycles through instruction-step
+execution and 37 cycles through the registered strict-system path; internal
+images measure 6 and 9 respectively.
+
+Interrupts and traps preserve TACC.  Software saves dirty state and its format
+before migrating an owner, then releases; same-core resumption may retain it.
+Whole-SoC reset wipes all seven domains, a full-core reset wipes only its
+paired engine, and cluster disable/reset wipes only that cluster engine.
+Individual microcore reset cancels only that caller's work.  Supervisor
+`FORCE_RELEASE` is the explicit dead-owner recovery mechanism and zeroizes the
+bank before another TACC operation is admitted.
 
 ### Crypto Accelerators
 
@@ -612,6 +661,12 @@ Each micro-cluster contains 4 scalar micro-cores sharing a MUL/DIV unit,
 a tile/MEX engine (round-robin arbitrated, +3 cycle overhead), 1 KiB
 scratchpad, and a hardware barrier.  Micro-cores run the same 64-bit
 native ISA as full cores **minus** the CDP1802-heritage features:
+
+Each microcore retains private shadows for `SB`, `SR`, `SC`, `SW`, `TMODE`,
+`TCTRL`, `TSRC0`, `TSRC1`, `TDST`, `TSTRIDE_R`, `TSTRIDE_C`, `TTILE_H`, and
+`TTILE_W`.  Legacy ACC and TACC are not shadowed: they are the shared
+cluster-engine state, with caller-relative ownership reporting and
+deterministic common admission.
 
 | Stripped Feature | Families / Sub-ops | Rationale |
 |------------------|--------------------|-----------|
@@ -942,6 +997,10 @@ the MEX instruction family.  Key concepts:
 - Operations run on **lanes** within a tile (64×8-bit, 32×16-bit, etc.)
 - Source/destination addresses are set via CSRs (TSRC0, TSRC1, TDST)
 - Results of reductions and dot products go to the **256-bit accumulator**
+- Widened lane products may persist in the separate **2,048-bit TACC**
+- Full cores have private engines; each microcluster shares one engine while
+  retaining caller-private configuration shadows
+- TACC lifetime and waiting policy are explicit software decisions
 
 In KDOS, tile operations power the buffer subsystem (B.SUM, B.MIN, B.MAX,
 B.ADD, B.SUB) and several kernels (kadd, ksum, kstats, knorm, kcorrelate).

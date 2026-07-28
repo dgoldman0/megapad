@@ -1188,7 +1188,8 @@ TILE PROPERTIES
   64 bytes per tile
   1/2/4/8 byte element widths
   Hardware ALU, multiply, reduction
-  256-bit accumulator for multi-tile ops
+  256-bit legacy ACC0-ACC3 reductions
+  2048-bit persistent full-width TACC
 
 TILE OPERATIONS (via buffers)
   buf B.SUM     Sum reduction (tile engine)
@@ -1200,17 +1201,74 @@ TILE OPERATIONS (via buffers)
 
 BIOS TILE WORDS
   TADD TSUB TAND TOR TXOR TMIN TMAX TABS
-  TMUL TDOT
+  TMUL TDOT TMAC TFMA TAMAC
   TSUM TEMIN TEMAX TPOPCNT TL1
   TTRANS TZERO TLOADC TMOVBANK
+
+TACC LIFECYCLE
+  TACC-TRY       Nonblocking claim instruction
+  TACC-CLAIM?    Claim and return MINE; no spin
+  TACC-CLEAR     Latch TMODE and start at zero
+  TACC-LOAD      Load 256 bytes from TSRC0
+  TAMAC          Accumulate TSRC0 * TSRC1
+  TACC-STORE     Store 256 bytes to TDST
+  TACC-RELEASE   Zeroize and release
+  TACC-STATUS@   Read visible ownership/state
+
+There are seven physical TACC ownership domains:
+one private engine for each of four full cores,
+and one shared engine for each microcluster.
+Claims reserve persistent TACC state, not ordinary
+tile operations. TRY never waits. Software chooses
+whether and how long to retry:
+
+  : TACC-CLAIM-N  ( attempts -- flag )
+    0 DO
+      TACC-CLAIM? IF TRUE UNLOOP EXIT THEN
+      PAUSE
+    LOOP FALSE ;
+
+IMAGE AND FORMAT
+  LOAD/STORE use a 64-byte-aligned 256-byte image.
+  U8/U16 use all 256 bytes. U32/FP16/BF16 use
+  bytes 0-127 and keep bytes 128-255 zero.
+  Save the latched format with a context image.
+  Traps and task switches do not release ownership.
+
+U8 TWO-STEP KERNEL
+  : U8-2MAC  ( a0 b0 a1 b1 dst -- flag )
+    TACC-CLAIM? 0= IF
+      2DROP 2DROP DROP FALSE EXIT
+    THEN
+    >R 0 TMODE! TACC-CLEAR
+    TSRC1! TSRC0! TAMAC
+    TSRC1! TSRC0! TAMAC
+    R> TDST! TACC-STORE TACC-RELEASE TRUE ;
+
+For source pairs 2*3 and 4*5, every stored U32
+lane is 26. Only the final accumulator is stored.
+
+FP16 TWO-STEP KERNEL
+  : FP16-2MAC  ( a0 b0 a1 b1 dst -- flag )
+    TACC-CLAIM? 0= IF
+      2DROP 2DROP DROP FALSE EXIT
+    THEN
+    >R 4 TMODE! TACC-CLEAR
+    TSRC1! TSRC0! TAMAC
+    TSRC1! TSRC0! TAMAC
+    R> TDST! TACC-STORE TACC-RELEASE TRUE ;
+
+FP16 pairs 1.0*2.0 and 0.5*4.0 produce FP32
+4.0 (0x40800000) in each active output lane.
 
 The tile engine operates on tile-aligned data
 and provides hardware-accelerated SIMD operations
 for buffer processing.
 
-MEX CSR INTERFACE
-  Operations via memory-mapped control registers
-  Source selection: register, immediate, memory
+MEX / CSR INTERFACE
+  MEX operations are instructions, not MMIO.
+  TMODE, TCTRL, TSRC0/1 and TDST are CSRs.
+  MEX source forms select tile, GPR, or in-place.
   See docs/tile-engine.md for full MEX encoding
 """,
 

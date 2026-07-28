@@ -44,6 +44,7 @@ from megapad64 import (
     CSR_SB, CSR_SR, CSR_SC, CSR_SW,
     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+    CSR_TACC_STATUS, CSR_TACC_CTL,
     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
     CSR_IVEC_ID, CSR_TRAP_ADDR,
     CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
@@ -65,6 +66,7 @@ from megapad64 import (
     # Micro-cluster constants
     NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
     MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
+    TACC_OWNER_NONE,
     # FP helpers (needed for Python fallback in MEX FP)
     _fp16_to_float, _float_to_fp16, _bf16_to_float, _float_to_bf16,
     _fp_decode, _fp_encode, _fp_is_nan,
@@ -225,6 +227,10 @@ class Megapad64:
 
         # Keep a pure-Python fallback for MEX FP operations
         self._py_fallback: Optional[_PyMegapad64] = None
+        self._last_python_fallback_cancelled = False
+        # Host-owned PHY response selection is consumed through the private
+        # native bridge and intentionally survives architectural CPU reset.
+        self._external_phy_response_plan = None
 
     @classmethod
     def _from_system_state(
@@ -295,6 +301,17 @@ class Megapad64:
         """Attach external memory (HyperRAM/SDRAM) buffer to C++ state."""
         self._cs.attach_ext_mem(buf, base, size)
         self._ext_mem_buf = buf  # Python fallback uses the original object
+
+    def set_external_phy_response_plan(self, plan) -> None:
+        """Install or clear deterministic external TACC PHY responses."""
+        _PyMegapad64.set_external_phy_response_plan(self, plan)
+        if self._py_fallback is not None:
+            self._py_fallback.set_external_phy_response_plan(plan)
+
+    _native_external_phy_response = (
+        _PyMegapad64._native_external_phy_response
+    )
+    _native_external_phy_fault = _PyMegapad64._native_external_phy_fault
 
     def attach_vram(self, buf: bytearray, base: int, size: int):
         """Attach dedicated VRAM buffer to C++ state."""
@@ -370,6 +387,9 @@ class Megapad64:
         'crc_acc', 'crc_mode',
         'sha_mode', 'sha_msglen_lo', 'sha_msglen_hi',
         'gf_prime_sel',
+        'tacc_owner', 'tacc_valid', 'tacc_dirty',
+        'tacc_format_ew', 'tacc_format_signed',
+        'tacc_busy', 'tacc_force_pending', 'tacc_epoch',
         'core_id', 'num_cores',
     ):
         exec(f"""
@@ -401,6 +421,14 @@ def {_attr}(self, v):
     def acc(self, value):
         for i, v in enumerate(value[:4]):
             self._cs.set_acc(i, u64(v))
+
+    @property
+    def tacc(self):
+        return _TaccProxy(self._cs)
+
+    @tacc.setter
+    def tacc(self, value):
+        self._cs.tacc = bytes(value)
 
     # ── I/O ports ────────────────────────────────────────
 
@@ -560,6 +588,11 @@ def {_attr}(self, v):
             )
             return cycles
         except RuntimeError as e:
+            if getattr(e, "_mp64_accel_callback_error", False):
+                # Native TACC preserves Python callback exceptions verbatim.
+                # Their text is guest-controlled and must not be interpreted
+                # as one of the C++ executor's control strings.
+                raise
             msg = str(e)
             if msg == "HALT":
                 if self.on_halt:
@@ -638,17 +671,126 @@ def {_attr}(self, v):
         error.native_prefix_steps = result.steps_executed
         error.native_prefix_cycles = result.total_cycles
 
-    def _step_python_fallback(self):
+    def _step_python_fallback(
+        self,
+        *,
+        strict_tacc_epoch: Optional[bool] = None,
+    ):
         """Fall back to pure-Python step() for complex instructions.
         Returns cycle count."""
         with self._cs._memory_use():
+            if strict_tacc_epoch is not None:
+                return self._step_python_fallback_in_memory_scope(
+                    strict_tacc_epoch=strict_tacc_epoch,
+                )
             return self._step_python_fallback_in_memory_scope()
 
-    def _step_python_fallback_in_memory_scope(self):
+    def _step_python_fallback_in_memory_scope(
+        self,
+        *,
+        strict_tacc_epoch: Optional[bool] = None,
+    ):
         """Execute one Python-oracle instruction with shared mapping ownership."""
         # Sync C++ state → Python fallback CPU
         fb = self._get_fallback()
         _sync_cs_to_py(self._cs, fb)
+        fallback_tacc_epoch = self._cs.tacc_epoch
+        cluster = getattr(self, "_cluster", None)
+        fallback_tacc_caller_epoch = (
+            cluster._caller_tacc_epoch(self.core_id)
+            if cluster is not None
+            else None
+        )
+        self._last_python_fallback_cancelled = False
+        fb._tacc_instruction_executed = False
+
+        def publish_tacc_busy():
+            self._cs.tacc_busy = True
+
+        fb._tacc_busy_publish_hook = publish_tacc_busy
+        if self._system_owner is not None:
+            owner = self._system_owner
+            owner_core_id = int(self.core_id)
+            full_core_count = int(owner.full_core_count)
+            owner_engine_id = (
+                owner_core_id
+                if owner_core_id < full_core_count
+                else full_core_count
+                + (owner_core_id - full_core_count) // MICRO_PER_CLUSTER
+            )
+
+            def acquire_tacc_image_stage(
+                direction,
+                base_address,
+                format_ew,
+                format_signed,
+                initial_image,
+            ):
+                engine_epoch = int(fb.tacc_epoch)
+                caller_epoch = int(
+                    getattr(fb, "_shared_engine_caller_epoch", 0)
+                )
+                accepted, stage_epoch = owner._tacc_image_stage_acquire(
+                    owner_core_id,
+                    direction,
+                    base_address,
+                    format_ew,
+                    format_signed,
+                    engine_epoch,
+                    caller_epoch,
+                    initial_image,
+                )
+                if not accepted:
+                    return None
+                return (
+                    owner_engine_id,
+                    owner_core_id,
+                    int(stage_epoch),
+                    engine_epoch,
+                    caller_epoch,
+                )
+
+            def update_tacc_image_stage(token, beat_index, image):
+                (
+                    engine_id,
+                    core_id,
+                    stage_epoch,
+                    engine_epoch,
+                    caller_epoch,
+                ) = token
+                return owner._tacc_image_stage_update(
+                    engine_id,
+                    core_id,
+                    stage_epoch,
+                    engine_epoch,
+                    caller_epoch,
+                    beat_index,
+                    image,
+                )
+
+            def release_tacc_image_stage(token):
+                (
+                    engine_id,
+                    core_id,
+                    stage_epoch,
+                    engine_epoch,
+                    caller_epoch,
+                ) = token
+                return owner._tacc_image_stage_release(
+                    engine_id,
+                    core_id,
+                    stage_epoch,
+                    engine_epoch,
+                    caller_epoch,
+                )
+
+            fb._tacc_image_stage_acquire_hook = acquire_tacc_image_stage
+            fb._tacc_image_stage_update_hook = update_tacc_image_stage
+            fb._tacc_image_stage_release_hook = release_tacc_image_stage
+        else:
+            fb._tacc_image_stage_acquire_hook = None
+            fb._tacc_image_stage_update_hook = None
+            fb._tacc_image_stage_release_hook = None
         fb.mem = self.mem               # share memory
         fb.mem_size = self.mem_size     # replacement may change geometry
         fb.mem_read8 = self.mem_read8    # use patched MMIO
@@ -699,9 +841,36 @@ def {_attr}(self, v):
         # successful and exceptional paths so a caught guest exception cannot
         # leave the two backends at different instruction boundaries.
         try:
-            return fb.step()
+            cycles = fb.step()
         finally:
-            _sync_py_to_cs(fb, self._cs)
+            cancel_detached_tacc = (
+                bool(strict_tacc_epoch)
+                if strict_tacc_epoch is not None
+                else bool(fb._tacc_instruction_executed)
+            )
+            caller_cancelled = (
+                fallback_tacc_caller_epoch is not None
+                and getattr(self, "_cluster", None) is not None
+                and self._cluster._caller_tacc_epoch(self.core_id)
+                != fallback_tacc_caller_epoch
+            )
+            if caller_cancelled and cancel_detached_tacc:
+                # A microcaller reset is narrower than a shared-engine reset:
+                # the cluster TACC epoch may remain unchanged while this
+                # caller's detached operation is no longer allowed to
+                # publish any architectural state.
+                _sync_cs_to_py(self._cs, fb)
+                cancelled = True
+            else:
+                cancelled = _sync_py_to_cs(
+                    fb,
+                    self._cs,
+                    expected_tacc_epoch=fallback_tacc_epoch,
+                    tacc_epoch_cancelled=caller_cancelled,
+                    cancel_detached_state=cancel_detached_tacc,
+                )
+            self._last_python_fallback_cancelled = cancelled
+        return 0 if self._last_python_fallback_cancelled else cycles
 
     def _get_fallback(self) -> _PyMegapad64:
         if self._py_fallback is None:
@@ -709,6 +878,9 @@ def {_attr}(self, v):
                 mem_size=self.mem_size,
                 core_id=self.core_id,
                 num_cores=self.num_cores,
+            )
+            self._py_fallback.set_external_phy_response_plan(
+                self._external_phy_response_plan
             )
         return self._py_fallback
 
@@ -754,6 +926,8 @@ def {_attr}(self, v):
                 max_steps=max_steps,
             )
         except RuntimeError as e:
+            if getattr(e, "_mp64_accel_callback_error", False):
+                raise
             msg = str(e)
             if msg == "HALT":
                 return CoreRunStats(0, 0, 1)
@@ -772,8 +946,24 @@ def {_attr}(self, v):
             try:
                 continuation_cycles = self._step_python_fallback()
             except TrapError as error:
+                cancelled = self._last_python_fallback_cancelled
+                self._last_python_fallback_cancelled = False
+                if cancelled:
+                    return CoreRunStats(
+                        result.steps_executed,
+                        result.total_cycles,
+                        0,
+                    )
                 self._annotate_batch_trap(error, result)
                 raise
+            cancelled = self._last_python_fallback_cancelled
+            self._last_python_fallback_cancelled = False
+            if cancelled:
+                return CoreRunStats(
+                    result.steps_executed,
+                    result.total_cycles,
+                    0,
+                )
             return CoreRunStats(
                 result.steps_executed + 1,
                 result.total_cycles + continuation_cycles,
@@ -844,6 +1034,10 @@ def {_attr}(self, v):
 
     def _reset_state_in_memory_scope(self):
         """Reset architectural state inside the system one-worker scope."""
+        if self._system_owner is not None:
+            self._system_owner._cancel_tacc_image_stage_for_core(
+                self.core_id
+            )
         for i in range(32):
             self._cs.set_reg(i, 0)
         self._cs.psel = 3
@@ -860,6 +1054,7 @@ def {_attr}(self, v):
         self._cs.tsrc0 = self._cs.tsrc1 = self._cs.tdst = 0
         for i in range(4):
             self._cs.set_acc(i, 0)
+        self._cs.tacc_reset()
         self._cs.tstride_r = 0
         self.tstride_c = 0
         self._cs.ttile_h = 8
@@ -1054,10 +1249,21 @@ class Megapad64Micro(Megapad64):
                 _sync_py_to_cs(fallback, self._cs)
                 self._enforce_reduced_state()
 
-    def _step_python_fallback_in_memory_scope(self):
+    def _step_python_fallback_in_memory_scope(
+        self,
+        *,
+        strict_tacc_epoch: Optional[bool] = None,
+    ):
         try:
-            return super()._step_python_fallback_in_memory_scope()
+            return super()._step_python_fallback_in_memory_scope(
+                strict_tacc_epoch=strict_tacc_epoch,
+            )
         finally:
+            # Cluster state is authoritative.  Refresh the transient native
+            # CPU staging image even when the oracle raised or a callback
+            # reset/disabled the cluster while the instruction was active.
+            if self._cluster is not None:
+                self._cluster.load_shared_engine_state(self)
             # A reduced core may disable its own cluster through SysInfo
             # during this fallback. The generic Python-to-native sync reflects
             # the instruction's pre-write running state, so reassert the reset
@@ -1079,6 +1285,8 @@ class Megapad64Micro(Megapad64):
         self.pc = self.mem_read64(self.ivt_base + ivec_id * 8)
 
     def _reset_state_in_memory_scope(self):
+        if self._cluster is not None:
+            self._cluster.cancel_tacc_caller(self.core_id)
         super()._reset_state_in_memory_scope()
         self._enforce_reduced_state()
 
@@ -1133,6 +1341,36 @@ class _AccProxy:
     def __iter__(self): return (self._cs.get_acc(i) for i in range(4))
     def __repr__(self): return repr(list(self))
 
+
+class _TaccProxy:
+    """Provide mutable bytearray-like access to native TACC storage."""
+
+    __slots__ = ('_cs',)
+
+    def __init__(self, cs):
+        self._cs = cs
+
+    def __getitem__(self, index):
+        return self._cs.tacc[index]
+
+    def __setitem__(self, index, value):
+        image = bytearray(self._cs.tacc)
+        image[index] = value
+        self._cs.tacc = bytes(image)
+
+    def __len__(self):
+        return len(self._cs.tacc)
+
+    def __iter__(self):
+        return iter(self._cs.tacc)
+
+    def __bytes__(self):
+        return self._cs.tacc
+
+    def __repr__(self):
+        return repr(bytearray(self._cs.tacc))
+
+
 class _PortOutProxy:
     __slots__ = ('_cs',)
     def __init__(self, cs): self._cs = cs
@@ -1181,6 +1419,19 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.tdst = cs.tdst
     for i in range(4):
         py_cpu.acc[i] = cs.get_acc(i)
+    tacc_state = dict(cs.tacc_snapshot())
+    py_cpu.tacc[:] = tacc_state["tacc"]
+    for name in (
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    ):
+        setattr(py_cpu, name, tacc_state[name])
     py_cpu.ivt_base = cs.ivt_base
     py_cpu.ivec_id = cs.ivec_id
     py_cpu.trap_addr = cs.trap_addr
@@ -1222,8 +1473,31 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.sha_msglen_hi = cs.sha_msglen_hi
     py_cpu.gf_prime_sel = cs.gf_prime_sel
 
-def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
-    """Copy Python Megapad64 state → C++ CPUState after fallback."""
+def _sync_py_to_cs(
+    py_cpu: _PyMegapad64,
+    cs,
+    *,
+    expected_tacc_epoch: Optional[int] = None,
+    tacc_epoch_cancelled: bool = False,
+    cancel_detached_state: bool = False,
+):
+    """Copy Python state into C++, or reject a stale detached TACC result.
+
+    Returns ``True`` when an epoch change cancelled the detached operation.
+    Cancellation is checked before copying any architectural field so reset
+    state cannot be resurrected piecemeal.
+    """
+    stale_tacc_epoch = (
+        tacc_epoch_cancelled
+        or (
+        expected_tacc_epoch is not None
+        and cs.tacc_epoch != expected_tacc_epoch
+        )
+    )
+    if stale_tacc_epoch and cancel_detached_state:
+        _sync_cs_to_py(cs, py_cpu)
+        return True
+
     for i in range(32):
         cs.set_reg(i, u64(py_cpu.regs[i]))
     cs.psel = py_cpu.psel
@@ -1251,6 +1525,58 @@ def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     cs.tdst = py_cpu.tdst
     for i in range(4):
         cs.set_acc(i, u64(py_cpu.acc[i]))
+    live_force_pending = bool(cs.tacc_force_pending)
+    if stale_tacc_epoch:
+        # Generic fallbacks retain their historical architectural transport,
+        # but an independently reset TACC domain still remains authoritative.
+        current = dict(cs.tacc_snapshot())
+        py_cpu.tacc[:] = current["tacc"]
+        for name in (
+            "tacc_owner",
+            "tacc_valid",
+            "tacc_dirty",
+            "tacc_format_ew",
+            "tacc_format_signed",
+            "tacc_busy",
+            "tacc_force_pending",
+            "tacc_epoch",
+        ):
+            setattr(py_cpu, name, current[name])
+    else:
+        cs.tacc_restore({
+            "tacc": bytes(py_cpu.tacc),
+            "tacc_owner": py_cpu.tacc_owner,
+            "tacc_valid": py_cpu.tacc_valid,
+            "tacc_dirty": py_cpu.tacc_dirty,
+            "tacc_format_ew": py_cpu.tacc_format_ew,
+            "tacc_format_signed": py_cpu.tacc_format_signed,
+            "tacc_busy": py_cpu.tacc_busy,
+            "tacc_force_pending": py_cpu.tacc_force_pending,
+            "tacc_epoch": py_cpu.tacc_epoch,
+        })
+        if (
+            live_force_pending
+            and expected_tacc_epoch is not None
+            and cs.tacc_epoch == expected_tacc_epoch
+        ):
+            # A control-sideband write accepted during a detached full-core
+            # fallback must win at this terminal boundary. If the Python
+            # stage already consumed an inherited pending force, its epoch
+            # advanced and this guard prevents a second wipe.
+            cs.tacc_reset()
+            current = dict(cs.tacc_snapshot())
+            py_cpu.tacc[:] = current["tacc"]
+            for name in (
+                "tacc_owner",
+                "tacc_valid",
+                "tacc_dirty",
+                "tacc_format_ew",
+                "tacc_format_signed",
+                "tacc_busy",
+                "tacc_force_pending",
+                "tacc_epoch",
+            ):
+                setattr(py_cpu, name, current[name])
     cs.ivt_base = py_cpu.ivt_base
     cs.ivec_id = py_cpu.ivec_id
     cs.trap_addr = py_cpu.trap_addr
@@ -1291,6 +1617,7 @@ def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     cs.sha_msglen_lo = py_cpu.sha_msglen_lo
     cs.sha_msglen_hi = py_cpu.sha_msglen_hi
     cs.gf_prime_sel = py_cpu.gf_prime_sel
+    return False
 
 # ── CSR access (Python-side, matching megapad64.py) ──────
 
@@ -1324,6 +1651,23 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_ACC1: lambda: cs.get_acc(1),
         CSR_ACC2: lambda: cs.get_acc(2),
         CSR_ACC3: lambda: cs.get_acc(3),
+        CSR_TACC_STATUS: lambda: (
+            (1 if cs.tacc_owner != TACC_OWNER_NONE else 0)
+            | (
+                2
+                if cs.tacc_owner != TACC_OWNER_NONE
+                and cs.tacc_owner == cs.core_id
+                else 0
+            )
+            | (4 if cs.tacc_valid else 0)
+            | (8 if cs.tacc_dirty else 0)
+            | (16 if cs.tacc_busy else 0)
+            | ((cs.tacc_format_ew & 0x7) << 5)
+            | ((cs.tacc_format_signed & 1) << 8)
+            | (0x200 if cs.tacc_force_pending else 0)
+            | ((cs.tacc_owner & 0x1F) << 16)
+        ),
+        CSR_TACC_CTL: lambda: 0,
         CSR_COREID: lambda: cs.core_id,
         CSR_NCORES: lambda: cs.num_cores,
         CSR_MBOX: lambda: cs.ipi_pending_mask(),
@@ -1333,6 +1677,7 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_MEGAPAD_SZ: lambda: 64,
         CSR_CPUID: lambda: 0x4D503634,
         CSR_TSTRIDE_R: lambda: cs.tstride_r,
+        CSR_TSTRIDE_C: lambda: cs.tstride_c,
         CSR_TTILE_H: lambda: cs.ttile_h,
         CSR_TTILE_W: lambda: cs.ttile_w,
         CSR_BIST_STATUS: lambda: cs.bist_status,
@@ -1381,9 +1726,21 @@ def _csr_write_py(cpu, addr: int, val: int):
     elif addr == CSR_ACC1:    cs.set_acc(1, val)
     elif addr == CSR_ACC2:    cs.set_acc(2, val)
     elif addr == CSR_ACC3:    cs.set_acc(3, val)
+    elif addr == CSR_TACC_CTL:
+        if val & 1:
+            if cs.priv_level != 0:
+                raise TrapError(
+                    IVEC_PRIV_FAULT,
+                    "TACC force-release requires supervisor privilege",
+                )
+            if cs.tacc_busy:
+                cs.tacc_force_pending = True
+            else:
+                cs.tacc_reset()
     elif addr == CSR_MBOX:    cs.ipi_send(val)
     elif addr == CSR_IPIACK:  cs.ipi_ack(val)
     elif addr == CSR_TSTRIDE_R: cs.tstride_r = val
+    elif addr == CSR_TSTRIDE_C: cs.tstride_c = val
     elif addr == CSR_TTILE_H: cs.ttile_h = val
     elif addr == CSR_TTILE_W: cs.ttile_w = val
     elif addr == CSR_BIST_CMD:

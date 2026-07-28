@@ -107,6 +107,17 @@ def disasm_one(mem: bytearray | bytes, addr: int, mem_size: int) -> tuple[str, i
         b1 = rb(addr + 1)
         f2 = (b1 >> 4) & 0xF
         n2 = b1 & 0xF
+        if n == 0x8 and f2 == 0xE and n2 == 0x3:
+            funct = rb(addr + 2)
+            lifecycle_names = {
+                2: "t.acc.try",
+                3: "t.acc.clear",
+                4: "t.acc.load",
+                5: "t.acc.store",
+                6: "t.acc.release",
+            }
+            if funct in lifecycle_names:
+                return lifecycle_names[funct], 3
         inner, inner_len = _disasm_core(mem, addr + 1, mem_size, f2, n2)
         return f"EXT.{n} {inner}", 1 + inner_len
 
@@ -219,7 +230,16 @@ def _disasm_core(mem, addr, mem_size, f, n) -> tuple[str, int]:
     elif f == 0xE:
         ss = (n >> 2) & 3
         op = n & 3
-        funct = rb(addr + 1) & 0x07
+        funct_byte = rb(addr + 1)
+        funct = funct_byte & 0x07
+        if op == 1 and funct_byte == 0x06:
+            if ss == 0:
+                return "t.amac", 2
+            if ss == 1:
+                reg = rb(addr + 2) & 0xF
+                return f"t.amac r{reg}", 3
+            if ss == 3:
+                return "t.amac inplace", 2
         op_names = {0: "TALU", 1: "TMUL", 2: "TRED", 3: "TSYS"}
         name = op_names.get(op, f"MEX.{op}")
         if ss == 1:

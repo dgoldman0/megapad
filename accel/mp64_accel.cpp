@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -66,6 +67,7 @@ enum CSR {
     CSR_TMODE=0x14, CSR_TCTRL=0x15,
     CSR_TSRC0=0x16, CSR_TSRC1=0x17, CSR_TDST=0x18,
     CSR_ACC0=0x19, CSR_ACC1=0x1A, CSR_ACC2=0x1B, CSR_ACC3=0x1C,
+    CSR_TACC_STATUS=0x1D, CSR_TACC_CTL=0x1E,
     CSR_COREID=0x20, CSR_NCORES=0x21, CSR_MBOX=0x22, CSR_IPIACK=0x23,
     CSR_IVEC_ID=0x24, CSR_TRAP_ADDR=0x25,
     CSR_MEGAPAD_SZ=0x30, CSR_CPUID=0x31,
@@ -92,6 +94,9 @@ enum IVEC {
 
 // Tile EW codes
 enum EW { EW_U8=0, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16 };
+
+static constexpr std::size_t TACC_IMAGE_BYTES = 256;
+static constexpr uint8_t TACC_OWNER_NONE = 31;
 
 // ---------------------------------------------------------------------------
 //  Memory mappings
@@ -1457,6 +1462,7 @@ enum class CoreProfile : uint8_t {
 };
 
 class ResumableBusAccess;
+class ResumableTileAccess;
 
 struct CPUState {
     CoreProfile profile = CoreProfile::FULL;
@@ -1479,6 +1485,32 @@ struct CPUState {
     uint64_t tmode, tctrl;
     uint64_t tsrc0, tsrc1, tdst;
     uint64_t acc[4];
+
+    // Physical tile-engine accumulator state. This is authoritative for a
+    // full core and transient compatibility staging for a microcore, whose
+    // physical engine state lives in its owning ClusterState.
+    std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
+    uint8_t tacc_owner = TACC_OWNER_NONE;
+    bool tacc_valid = false;
+    bool tacc_dirty = false;
+    uint8_t tacc_format_ew = 0;
+    uint8_t tacc_format_signed = 0;
+    bool tacc_busy = false;
+    bool tacc_force_pending = false;
+    uint64_t tacc_epoch = 0;
+
+    void reset_tacc(bool bump_epoch = true) noexcept {
+        tacc.fill(0);
+        tacc_owner = TACC_OWNER_NONE;
+        tacc_valid = false;
+        tacc_dirty = false;
+        tacc_format_ew = 0;
+        tacc_format_signed = 0;
+        tacc_busy = false;
+        tacc_force_pending = false;
+        if (bump_epoch)
+            tacc_epoch++;
+    }
 
     // System CSRs
     uint64_t ivt_base;
@@ -1715,6 +1747,14 @@ struct CPUState {
     X(uint64_t, tsrc0) \
     X(uint64_t, tsrc1) \
     X(uint64_t, tdst) \
+    X(uint8_t, tacc_owner) \
+    X(bool, tacc_valid) \
+    X(bool, tacc_dirty) \
+    X(uint8_t, tacc_format_ew) \
+    X(uint8_t, tacc_format_signed) \
+    X(bool, tacc_busy) \
+    X(bool, tacc_force_pending) \
+    X(uint64_t, tacc_epoch) \
     X(uint64_t, ivt_base) \
     X(uint64_t, ivec_id) \
     X(uint64_t, trap_addr) \
@@ -1757,6 +1797,7 @@ struct CPUState {
 struct CPUExecutionCheckpoint {
     std::array<uint64_t, 32> regs{};
     std::array<uint64_t, 4> acc{};
+    std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
     std::array<uint8_t, 8> port_out{};
     std::array<uint8_t, 8> port_in{};
     std::array<uint32_t, 8> port_map{};
@@ -1785,6 +1826,7 @@ struct CPUExecutionCheckpoint {
             std::begin(state.acc),
             std::end(state.acc),
             acc.begin());
+        tacc = state.tacc;
         std::copy(
             std::begin(state.port_out),
             std::end(state.port_out),
@@ -1814,6 +1856,7 @@ struct CPUExecutionCheckpoint {
     void restore(CPUState& state) const {
         std::copy(regs.begin(), regs.end(), std::begin(state.regs));
         std::copy(acc.begin(), acc.end(), std::begin(state.acc));
+        state.tacc = tacc;
         std::copy(
             port_out.begin(),
             port_out.end(),
@@ -1849,6 +1892,27 @@ struct BusReplayRecord {
     std::optional<std::string> target_error_message;
 };
 
+struct TileAccessRequest {
+    int engine_id = -1;
+    int owner_core_id = -1;
+    uint64_t operation_token = 0;
+    uint64_t ready_cycle = 0;
+    BusOperation operation = BusOperation::READ;
+    uint64_t address = 0;
+    std::array<uint8_t, 64> data{};
+};
+
+struct TileReplayRecord {
+    TileAccessRequest request{};
+    uint64_t completion_cycle = 0;
+    std::optional<std::array<uint8_t, 64>> read_data;
+};
+
+enum class CycleSharedAccessKind : uint8_t {
+    MAIN_BUS = 0,
+    TILE_MEMORY = 1,
+};
+
 enum class CycleOperationKind : uint8_t {
     GUEST_INSTRUCTION = 0,
     INTERRUPT_ENTRY = 1,
@@ -1873,13 +1937,44 @@ struct ResumableInstruction {
     int interrupt_vector = -1;
     std::vector<BusReplayRecord> completed_accesses;
     std::optional<BusRequest> pending_request;
+    std::vector<TileReplayRecord> completed_tile_accesses;
+    std::optional<TileAccessRequest> pending_tile_request;
+    std::vector<CycleSharedAccessKind> completed_access_order;
     std::optional<uint64_t> retire_cycle;
+    bool tacc_python_fallback = false;
+    bool tacc_busy_published = false;
+    bool tacc_validation_trap_expected = false;
+    uint64_t tacc_operation_epoch = 0;
+    bool tacc_timed_image_transfer = false;
+    bool tacc_timed_transfer_complete = false;
+    BusOperation tacc_timed_operation = BusOperation::READ;
+    uint64_t tacc_timed_operation_token = 0;
+    uint64_t tacc_timed_base_address = 0;
+    uint8_t tacc_timed_format_ew = 0;
+    bool tacc_timed_format_signed = false;
+    uint8_t tacc_timed_acknowledged_beats = 0;
+    bool tacc_timed_external_phy = false;
+    uint8_t tacc_timed_external_word_index = 0;
+    uint8_t tacc_timed_external_acknowledged_words = 0;
+    bool tacc_timed_external_response_active = false;
+    uint64_t tacc_timed_external_response_cycle = 0;
+    bool tacc_timed_external_response_error = false;
+    bool tacc_timed_external_response_timeout = false;
+    std::array<uint8_t, 64> tacc_timed_external_beat_data{};
+    bool tacc_timed_transfer_faulted = false;
+    uint8_t tacc_timed_fault_beat_index = 0;
+    uint8_t tacc_timed_fault_word_index = 0;
+    uint64_t tacc_timed_fault_address = 0;
+    std::optional<uint64_t> tacc_timed_completion_cycle;
     std::size_t replay_cursor = 0;
+    std::size_t tile_replay_cursor = 0;
+    std::size_t access_order_replay_cursor = 0;
 };
 
 struct FullCoreCycleState {
     uint64_t ready_cycle = 0;
     uint64_t next_issue_sequence = 1;
+    uint64_t next_tile_operation_token = 1;
     std::unique_ptr<ResumableInstruction> instruction;
 };
 
@@ -1892,7 +1987,1358 @@ struct DmaCycleState {
     std::optional<BusRequest> pending_request;
 };
 
+struct TaccImageTransferStage {
+    static constexpr int NO_OWNER = -1;
+
+    enum class Direction : uint8_t {
+        NONE = 0,
+        LOAD = 1,
+        STORE = 2,
+    };
+
+    Direction direction = Direction::NONE;
+    int owner_engine_id = NO_OWNER;
+    int owner_core_id = NO_OWNER;
+    uint64_t engine_epoch = 0;
+    uint64_t caller_epoch = 0;
+    uint64_t stage_epoch = 0;
+    uint64_t base_address = 0;
+    uint8_t format_ew = 0;
+    bool format_signed = false;
+    uint8_t beat_index = 0;
+    std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+    int last_grant_engine_id = NO_OWNER;
+    uint64_t grant_sequence = 0;
+
+    bool active() const noexcept {
+        return direction != Direction::NONE;
+    }
+
+    void clear_active(bool bump_epoch) noexcept {
+        direction = Direction::NONE;
+        owner_engine_id = NO_OWNER;
+        owner_core_id = NO_OWNER;
+        engine_epoch = 0;
+        caller_epoch = 0;
+        base_address = 0;
+        format_ew = 0;
+        format_signed = false;
+        beat_index = 0;
+        image.fill(0);
+        if (
+            bump_epoch &&
+            stage_epoch !=
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            stage_epoch++;
+        }
+    }
+
+    void cancel(bool reset_round_robin = false) noexcept {
+        clear_active(true);
+        if (reset_round_robin) {
+            last_grant_engine_id = NO_OWNER;
+            grant_sequence = 0;
+        }
+    }
+
+    bool owned_by(
+            int engine_id,
+            int core_id,
+            uint64_t token) const noexcept {
+        return (
+            active() &&
+            owner_engine_id == engine_id &&
+            owner_core_id == core_id &&
+            stage_epoch == token
+        );
+    }
+};
+
+enum class TaccTransportPhase : uint8_t {
+    IDLE = 0,
+    WAITING_STAGE = 1,
+    ACTIVE = 2,
+    COMPLETE = 3,
+    CANCELED = 4,
+};
+
+struct TaccTransportIdentity {
+    int engine_id = -1;
+    int owner_core_id = -1;
+    uint64_t operation_token = 0;
+    uint64_t engine_epoch = 0;
+    uint64_t caller_epoch = 0;
+
+    bool matches(
+            int expected_engine_id,
+            uint64_t expected_operation_token,
+            uint64_t expected_engine_epoch,
+            uint64_t expected_caller_epoch) const noexcept {
+        return (
+            engine_id == expected_engine_id &&
+            operation_token == expected_operation_token &&
+            engine_epoch == expected_engine_epoch &&
+            caller_epoch == expected_caller_epoch
+        );
+    }
+};
+
+struct TaccEngineTransportState {
+    TaccTransportPhase phase = TaccTransportPhase::IDLE;
+    TaccTransportIdentity identity{};
+    TaccImageTransferStage::Direction direction =
+        TaccImageTransferStage::Direction::NONE;
+    uint64_t base_address = 0;
+    uint8_t format_ew = 0;
+    bool format_signed = false;
+    uint64_t ready_cycle = 0;
+    uint64_t stage_token = 0;
+    uint64_t stage_grant_cycle = 0;
+    uint8_t beat_index = 0;
+    std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+    uint64_t last_operation_token = 0;
+};
+
+struct TileMemoryPortRequest {
+    TaccTransportIdentity identity{};
+    uint64_t ready_cycle = 0;
+    uint64_t issue_sequence = 0;
+    uint64_t stage_token = 0;
+    bool image_transfer = false;
+    uint8_t beat_index = 0;
+    BusOperation operation = BusOperation::READ;
+    uint64_t address = 0;
+    std::array<uint8_t, 64> data{};
+};
+
+struct TileMemoryPortGrant {
+    TileMemoryPortRequest request{};
+    uint64_t grant_sequence = 0;
+    uint64_t grant_cycle = 0;
+};
+
+struct TileMemoryPortCompletion {
+    TileMemoryPortGrant grant{};
+    uint64_t completion_cycle = 0;
+    std::optional<std::array<uint8_t, 64>> read_data;
+    bool image_transfer_complete = false;
+};
+
+struct TaccStageGrant {
+    TaccTransportIdentity identity{};
+    uint64_t ready_cycle = 0;
+    uint64_t stage_token = 0;
+    uint64_t grant_cycle = 0;
+};
+
+// Standalone native model of the physical tile fabric.  It deliberately does
+// not route through MainBusArbiter: tile traffic is a 64-byte transaction and
+// retains its own equal-RR history.  Production has seven physical requestors;
+// reduced verification systems compact the instantiated full-core and cluster
+// requestors without changing the arbitration contract.
+// Strict cycle mode and the diagnostic hooks below share these same
+// edge-level primitives.
+struct TileMemoryTransport {
+    static constexpr int PRODUCTION_ENGINE_COUNT = 7;
+    static constexpr int MICRO_CORES_PER_CLUSTER = 4;
+    static constexpr std::size_t BEAT_BYTES = 64;
+    static constexpr uint8_t IMAGE_BEATS = 4;
+
+    int full_engine_count = 0;
+    int all_core_count = 0;
+    std::vector<TaccEngineTransportState> engines;
+    std::vector<
+        std::optional<TileMemoryPortRequest>>
+        pending_port_requests;
+    std::optional<TileMemoryPortGrant> active_port_grant;
+    std::vector<uint64_t> stage_grant_counts;
+    std::vector<uint64_t> port_grant_counts;
+    std::vector<uint64_t> last_issue_sequences;
+    std::optional<uint64_t> last_stage_arbitration_cycle;
+    std::optional<uint64_t> last_port_arbitration_cycle;
+    int stage_last_grant_engine_id = -1;
+    uint64_t stage_grant_count = 0;
+    int port_last_grant_engine_id = -1;
+    uint64_t port_grant_count = 0;
+    uint64_t next_port_grant_sequence = 1;
+
+    TileMemoryTransport() = default;
+
+    TileMemoryTransport(
+            int configured_full_core_count,
+            int configured_all_core_count) {
+        configure(
+            configured_full_core_count,
+            configured_all_core_count);
+    }
+
+    void configure(
+            int configured_full_core_count,
+            int configured_all_core_count) {
+        if (
+            configured_full_core_count < 1 ||
+            configured_all_core_count <
+                configured_full_core_count
+        ) {
+            throw std::invalid_argument(
+                "tile-memory topology must contain every full core");
+        }
+        full_engine_count = configured_full_core_count;
+        all_core_count = configured_all_core_count;
+        const int micro_core_count =
+            all_core_count - full_engine_count;
+        const int cluster_count =
+            (
+                micro_core_count +
+                MICRO_CORES_PER_CLUSTER - 1
+            ) / MICRO_CORES_PER_CLUSTER;
+        const std::size_t count =
+            static_cast<std::size_t>(
+                full_engine_count + cluster_count);
+        engines.assign(count, {});
+        pending_port_requests.assign(count, std::nullopt);
+        stage_grant_counts.assign(count, 0);
+        port_grant_counts.assign(count, 0);
+        last_issue_sequences.assign(count, 0);
+        active_port_grant.reset();
+        last_stage_arbitration_cycle.reset();
+        last_port_arbitration_cycle.reset();
+        stage_last_grant_engine_id = -1;
+        stage_grant_count = 0;
+        port_last_grant_engine_id = -1;
+        port_grant_count = 0;
+        next_port_grant_sequence = 1;
+    }
+
+    int engine_count() const noexcept {
+        return static_cast<int>(engines.size());
+    }
+
+    bool valid_engine_id(int engine_id) const noexcept {
+        return engine_id >= 0 && engine_id < engine_count();
+    }
+
+    bool owner_maps_to_engine(
+            int engine_id,
+            int owner_core_id) const noexcept {
+        if (!valid_engine_id(engine_id))
+            return false;
+        if (engine_id < full_engine_count)
+            return owner_core_id == engine_id;
+        const int cluster_base =
+            full_engine_count +
+            (
+                engine_id - full_engine_count
+            ) * MICRO_CORES_PER_CLUSTER;
+        return (
+            owner_core_id >= cluster_base &&
+            owner_core_id <
+                std::min(
+                    cluster_base + MICRO_CORES_PER_CLUSTER,
+                    all_core_count)
+        );
+    }
+
+    bool has_pending_work() const noexcept {
+        return (
+            active_port_grant.has_value() ||
+            std::any_of(
+                pending_port_requests.begin(),
+                pending_port_requests.end(),
+                [](const auto& request) {
+                    return request.has_value();
+                }) ||
+            std::any_of(
+                engines.begin(),
+                engines.end(),
+                [](const TaccEngineTransportState& state) {
+                    return (
+                        state.phase ==
+                            TaccTransportPhase::WAITING_STAGE ||
+                        state.phase ==
+                            TaccTransportPhase::ACTIVE
+                    );
+                })
+        );
+    }
+
+    bool owns_stage(
+            const TaccImageTransferStage& stage) const noexcept {
+        if (
+            !stage.active() ||
+            !valid_engine_id(stage.owner_engine_id)
+        ) {
+            return false;
+        }
+        const TaccEngineTransportState& state =
+            engines[
+                static_cast<std::size_t>(
+                    stage.owner_engine_id)];
+        return (
+            state.phase == TaccTransportPhase::ACTIVE &&
+            state.identity.owner_core_id ==
+                stage.owner_core_id &&
+            state.stage_token == stage.stage_epoch
+        );
+    }
+
+    void restore_stage_history(
+            int last_grant_engine_id,
+            uint64_t grant_count) noexcept {
+        stage_last_grant_engine_id =
+            last_grant_engine_id;
+        stage_grant_count = grant_count;
+        std::fill(
+            stage_grant_counts.begin(),
+            stage_grant_counts.end(),
+            0);
+        if (
+            valid_engine_id(last_grant_engine_id) &&
+            grant_count != 0
+        ) {
+            stage_grant_counts[
+                static_cast<std::size_t>(
+                    last_grant_engine_id)] =
+                        grant_count;
+        }
+    }
+
+    static bool valid_format(
+            uint8_t format_ew,
+            bool format_signed) noexcept {
+        const bool legal =
+            format_ew == EW_U8 ||
+            format_ew == EW_U16 ||
+            format_ew == EW_U32 ||
+            format_ew == EW_FP16 ||
+            format_ew == EW_BF16;
+        return (
+            legal &&
+            !(
+                (
+                    format_ew == EW_FP16 ||
+                    format_ew == EW_BF16
+                ) &&
+                format_signed
+            )
+        );
+    }
+
+    static bool valid_image_span(uint64_t base_address) noexcept {
+        return (
+            (base_address & (BEAT_BYTES - 1)) == 0 &&
+            base_address <=
+                std::numeric_limits<uint64_t>::max() -
+                    (TACC_IMAGE_BYTES - 1)
+        );
+    }
+
+    static bool valid_beat_span(uint64_t address) noexcept {
+        return (
+            (address & (BEAT_BYTES - 1)) == 0 &&
+            address <=
+                std::numeric_limits<uint64_t>::max() -
+                    (BEAT_BYTES - 1)
+        );
+    }
+
+    static bool engine_has_inactive_image_bytes(
+            uint8_t format_ew) noexcept {
+        return format_ew != EW_U8 && format_ew != EW_U16;
+    }
+
+    void reset(TaccImageTransferStage& stage) noexcept {
+        std::fill(
+            engines.begin(),
+            engines.end(),
+            TaccEngineTransportState{});
+        std::fill(
+            pending_port_requests.begin(),
+            pending_port_requests.end(),
+            std::nullopt);
+        active_port_grant.reset();
+        std::fill(
+            stage_grant_counts.begin(),
+            stage_grant_counts.end(),
+            0);
+        std::fill(
+            port_grant_counts.begin(),
+            port_grant_counts.end(),
+            0);
+        std::fill(
+            last_issue_sequences.begin(),
+            last_issue_sequences.end(),
+            0);
+        last_stage_arbitration_cycle.reset();
+        last_port_arbitration_cycle.reset();
+        stage_last_grant_engine_id = -1;
+        stage_grant_count = 0;
+        port_last_grant_engine_id = -1;
+        port_grant_count = 0;
+        // Grant identity is monotonic across resets so a late ACK from an
+        // abandoned timeline cannot alias the first grant after reset.
+        stage.cancel(true);
+    }
+
+    const TaccEngineTransportState& start(
+            int engine_id,
+            int owner_core_id,
+            TaccImageTransferStage::Direction direction,
+            uint64_t base_address,
+            uint8_t format_ew,
+            bool format_signed,
+            uint64_t engine_epoch,
+            uint64_t caller_epoch,
+            uint64_t operation_token,
+            uint64_t ready_cycle,
+            const std::array<uint8_t, TACC_IMAGE_BYTES>& image) {
+        if (!valid_engine_id(engine_id))
+            throw std::out_of_range(
+                "TACC transport engine ID is outside the configured topology");
+        if (!owner_maps_to_engine(engine_id, owner_core_id))
+            throw std::invalid_argument(
+                "TACC transport owner does not map to its physical engine");
+        if (
+            engine_id < full_engine_count &&
+            caller_epoch != 0
+        ) {
+            throw std::invalid_argument(
+                "full-core TACC transports use caller epoch zero");
+        }
+        if (
+            direction != TaccImageTransferStage::Direction::LOAD &&
+            direction != TaccImageTransferStage::Direction::STORE
+        ) {
+            throw std::invalid_argument(
+                "TACC transport direction must be load or store");
+        }
+        if (!valid_image_span(base_address))
+            throw std::invalid_argument(
+                "TACC transport image span must be aligned and nonwrapping");
+        if (!valid_format(format_ew, format_signed))
+            throw std::invalid_argument(
+                "TACC transport format is not legal");
+        if (operation_token == 0)
+            throw std::invalid_argument(
+                "TACC transport operation token must be positive");
+        if (ready_cycle == std::numeric_limits<uint64_t>::max())
+            throw std::invalid_argument(
+                "TACC transport ready cycle leaves no registered grant edge");
+        if (
+            direction == TaccImageTransferStage::Direction::LOAD &&
+            std::any_of(
+                image.begin(),
+                image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        ) {
+            throw std::invalid_argument(
+                "TACC LOAD transport must begin with a zero image");
+        }
+        if (
+            direction == TaccImageTransferStage::Direction::STORE &&
+            engine_has_inactive_image_bytes(format_ew) &&
+            std::any_of(
+                image.begin() + 128,
+                image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        ) {
+            throw std::invalid_argument(
+                "inactive TACC STORE image bytes must be zero");
+        }
+
+        TaccEngineTransportState& state =
+            engines[static_cast<std::size_t>(engine_id)];
+        if (
+            state.phase == TaccTransportPhase::WAITING_STAGE ||
+            state.phase == TaccTransportPhase::ACTIVE
+        ) {
+            throw std::runtime_error(
+                "physical tile engine already has a live TACC transport");
+        }
+        if (operation_token <= state.last_operation_token) {
+            throw std::invalid_argument(
+                "TACC operation token must advance monotonically per engine");
+        }
+        if (
+            active_port_grant.has_value() &&
+            active_port_grant->request.identity.engine_id ==
+                engine_id &&
+            active_port_grant->request.image_transfer
+        ) {
+            throw std::runtime_error(
+                "physical tile engine has unfinished image-port traffic");
+        }
+
+        TaccEngineTransportState prepared;
+        prepared.phase = TaccTransportPhase::WAITING_STAGE;
+        prepared.identity = {
+            engine_id,
+            owner_core_id,
+            operation_token,
+            engine_epoch,
+            caller_epoch,
+        };
+        prepared.direction = direction;
+        prepared.base_address = base_address;
+        prepared.format_ew = format_ew;
+        prepared.format_signed = format_signed;
+        prepared.ready_cycle = ready_cycle;
+        prepared.image = image;
+        prepared.last_operation_token = operation_token;
+        state = prepared;
+        return state;
+    }
+
+    std::optional<TaccStageGrant> try_grant_stage(
+            TaccImageTransferStage& stage,
+            uint64_t cycle) {
+        if (
+            last_stage_arbitration_cycle.has_value() &&
+            cycle < *last_stage_arbitration_cycle
+        ) {
+            throw std::invalid_argument(
+                "TACC image-stage arbitration cycle cannot move backward");
+        }
+        if (
+            last_stage_arbitration_cycle.has_value() &&
+            *last_stage_arbitration_cycle == cycle
+        ) {
+            return std::nullopt;
+        }
+        last_stage_arbitration_cycle = cycle;
+        if (stage.active())
+            return std::nullopt;
+
+        const int winner = select_stage_candidate(
+            stage_last_grant_engine_id,
+            cycle);
+        if (winner < 0)
+            return std::nullopt;
+        if (
+            stage.stage_epoch ==
+                std::numeric_limits<uint64_t>::max() ||
+            stage.grant_sequence ==
+                std::numeric_limits<uint64_t>::max() ||
+            stage_grant_count ==
+                std::numeric_limits<uint64_t>::max() ||
+            stage_grant_counts[
+                static_cast<std::size_t>(winner)] ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "TACC image-stage grant counter overflow");
+        }
+
+        TaccEngineTransportState& state =
+            engines[static_cast<std::size_t>(winner)];
+        if (
+            !pending_port_requests[
+                static_cast<std::size_t>(
+                    winner)].has_value() &&
+            !engine_port_is_active(winner) &&
+            (
+                cycle ==
+                    std::numeric_limits<uint64_t>::max() ||
+                last_issue_sequences[
+                    static_cast<std::size_t>(
+                        winner)] ==
+                    std::numeric_limits<uint64_t>::max()
+            )
+        ) {
+            throw std::overflow_error(
+                "TACC image-stage winner cannot issue its first beat");
+        }
+        stage.stage_epoch++;
+        stage.grant_sequence++;
+        stage.last_grant_engine_id = winner;
+        stage_grant_count++;
+        stage_last_grant_engine_id = winner;
+        stage.owner_engine_id = winner;
+        stage.owner_core_id = state.identity.owner_core_id;
+        stage.engine_epoch = state.identity.engine_epoch;
+        stage.caller_epoch = state.identity.caller_epoch;
+        stage.base_address = state.base_address;
+        stage.format_ew = state.format_ew;
+        stage.format_signed = state.format_signed;
+        stage.beat_index = 0;
+        stage.image = state.image;
+        stage.direction = state.direction;
+        stage_grant_counts[
+            static_cast<std::size_t>(winner)]++;
+
+        state.phase = TaccTransportPhase::ACTIVE;
+        state.stage_token = stage.stage_epoch;
+        state.stage_grant_cycle = cycle;
+        queue_image_beat_if_possible(stage, winner, cycle);
+        return TaccStageGrant{
+            state.identity,
+            state.ready_cycle,
+            state.stage_token,
+            cycle,
+        };
+    }
+
+    TileMemoryPortRequest submit_ordinary(
+            int engine_id,
+            int owner_core_id,
+            uint64_t operation_token,
+            uint64_t engine_epoch,
+            uint64_t caller_epoch,
+            uint64_t ready_cycle,
+            uint64_t address,
+            BusOperation operation,
+            const std::array<uint8_t, BEAT_BYTES>& data) {
+        if (!valid_engine_id(engine_id))
+            throw std::out_of_range(
+                "tile-memory engine ID is outside the configured topology");
+        if (!owner_maps_to_engine(engine_id, owner_core_id))
+            throw std::invalid_argument(
+                "tile-memory owner does not map to its physical engine");
+        if (
+            engine_id < full_engine_count &&
+            caller_epoch != 0
+        ) {
+            throw std::invalid_argument(
+                "full-core tile-memory requests use caller epoch zero");
+        }
+        if (operation_token == 0)
+            throw std::invalid_argument(
+                "tile-memory operation token must be positive");
+        if (ready_cycle == std::numeric_limits<uint64_t>::max())
+            throw std::invalid_argument(
+                "tile-memory ready cycle leaves no registered grant edge");
+        if (!valid_beat_span(address))
+            throw std::invalid_argument(
+                "tile-memory beat must be aligned and nonwrapping");
+        if (
+            operation != BusOperation::READ &&
+            operation != BusOperation::WRITE
+        ) {
+            throw std::invalid_argument(
+                "tile-memory operation must be read or write");
+        }
+        if (
+            engines[static_cast<std::size_t>(engine_id)].phase ==
+                TaccTransportPhase::ACTIVE
+        ) {
+            throw std::runtime_error(
+                "an active TACC image transfer owns this engine's port");
+        }
+        return submit_port_request(
+            {
+                {
+                    engine_id,
+                    owner_core_id,
+                    operation_token,
+                    engine_epoch,
+                    caller_epoch,
+                },
+                ready_cycle,
+                0,
+                0,
+                false,
+                0,
+                operation,
+                address,
+                data,
+            });
+    }
+
+    std::optional<TileMemoryPortGrant> try_grant_port(
+            uint64_t cycle) {
+        if (active_port_grant.has_value())
+            return std::nullopt;
+        if (
+            last_port_arbitration_cycle.has_value() &&
+            cycle < *last_port_arbitration_cycle
+        ) {
+            throw std::invalid_argument(
+                "tile-memory port arbitration cycle cannot move backward");
+        }
+        if (
+            last_port_arbitration_cycle.has_value() &&
+            *last_port_arbitration_cycle == cycle
+        ) {
+            return std::nullopt;
+        }
+        last_port_arbitration_cycle = cycle;
+
+        const int winner = select_port_candidate(cycle);
+        if (winner < 0)
+            return std::nullopt;
+        if (
+            port_grant_count ==
+                std::numeric_limits<uint64_t>::max() ||
+            port_grant_counts[
+                static_cast<std::size_t>(winner)] ==
+                std::numeric_limits<uint64_t>::max() ||
+            next_port_grant_sequence ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "tile-memory port grant counter overflow");
+        }
+
+        TileMemoryPortGrant grant{
+            *pending_port_requests[
+                static_cast<std::size_t>(winner)],
+            next_port_grant_sequence++,
+            cycle,
+        };
+        pending_port_requests[
+            static_cast<std::size_t>(winner)]
+            .reset();
+        port_grant_count++;
+        port_grant_counts[
+            static_cast<std::size_t>(winner)]++;
+        port_last_grant_engine_id = winner;
+        active_port_grant = grant;
+        return grant;
+    }
+
+    void validate_ordinary_port_completion(
+            const TaccImageTransferStage& stage,
+            uint64_t grant_sequence,
+            uint64_t completion_cycle,
+            bool has_read_data) const {
+        if (
+            !active_port_grant.has_value() ||
+            active_port_grant->grant_sequence != grant_sequence ||
+            active_port_grant->request.image_transfer
+        ) {
+            throw std::logic_error(
+                "ordinary tile-memory ACK does not match its active grant");
+        }
+        const TileMemoryPortGrant& grant =
+            *active_port_grant;
+        if (
+            grant.grant_cycle ==
+                std::numeric_limits<uint64_t>::max() ||
+            completion_cycle != grant.grant_cycle + 1
+        ) {
+            throw std::invalid_argument(
+                "internal tile-memory ACK must follow its grant by one cycle");
+        }
+        if (
+            (
+                grant.request.operation == BusOperation::READ
+            ) != has_read_data
+        ) {
+            throw std::invalid_argument(
+                grant.request.operation == BusOperation::READ
+                    ? "successful tile-memory read completion "
+                      "requires 64 bytes"
+                    : "tile-memory write completion cannot "
+                      "return read data");
+        }
+        if (
+            stage.active() &&
+            stage.owner_engine_id ==
+                grant.request.identity.engine_id
+        ) {
+            const int engine_id = stage.owner_engine_id;
+            const TaccEngineTransportState& state =
+                engines[
+                    static_cast<std::size_t>(
+                        engine_id)];
+            if (
+                state.phase == TaccTransportPhase::ACTIVE &&
+                !pending_port_requests[
+                    static_cast<std::size_t>(
+                        engine_id)].has_value() &&
+                (
+                    completion_cycle ==
+                        std::numeric_limits<uint64_t>::max() ||
+                    last_issue_sequences[
+                        static_cast<std::size_t>(
+                            engine_id)] ==
+                        std::numeric_limits<uint64_t>::max()
+                )
+            ) {
+                throw std::overflow_error(
+                    "tile-memory issue sequence exhausted before "
+                    "the image transfer could resume");
+            }
+        }
+    }
+
+    void validate_image_port_completion(
+            const TaccImageTransferStage& stage,
+            uint64_t grant_sequence,
+            uint64_t completion_cycle,
+            bool has_read_data,
+            bool external_phy = false) const {
+        if (
+            !active_port_grant.has_value() ||
+            active_port_grant->grant_sequence != grant_sequence ||
+            !active_port_grant->request.image_transfer
+        ) {
+            throw std::logic_error(
+                "tile-memory image ACK does not match its active grant");
+        }
+        const TileMemoryPortGrant& grant =
+            *active_port_grant;
+        if (
+            grant.grant_cycle ==
+                std::numeric_limits<uint64_t>::max() ||
+            (
+                external_phy
+                ? completion_cycle <= grant.grant_cycle
+                : completion_cycle != grant.grant_cycle + 1
+            )
+        ) {
+            throw std::invalid_argument(
+                external_phy
+                    ? "external tile-memory ACK must follow its grant"
+                    : "internal tile-memory ACK must follow its grant "
+                      "by one cycle");
+        }
+        if (
+            (
+                grant.request.operation == BusOperation::READ
+            ) != has_read_data
+        ) {
+            throw std::invalid_argument(
+                grant.request.operation == BusOperation::READ
+                    ? "successful tile-memory read completion "
+                      "requires 64 bytes"
+                    : "tile-memory write completion cannot "
+                      "return read data");
+        }
+
+        const int engine_id =
+            grant.request.identity.engine_id;
+        if (!valid_engine_id(engine_id)) {
+            throw std::logic_error(
+                "tile-memory image ACK has an invalid engine");
+        }
+        const std::size_t index =
+            static_cast<std::size_t>(engine_id);
+        const TaccEngineTransportState& state =
+            engines[index];
+        if (
+            state.phase != TaccTransportPhase::ACTIVE ||
+            state.identity.owner_core_id !=
+                grant.request.identity.owner_core_id ||
+            !state.identity.matches(
+                engine_id,
+                grant.request.identity.operation_token,
+                grant.request.identity.engine_epoch,
+                grant.request.identity.caller_epoch) ||
+            state.stage_token !=
+                grant.request.stage_token ||
+            state.beat_index !=
+                grant.request.beat_index ||
+            !stage.owned_by(
+                engine_id,
+                state.identity.owner_core_id,
+                state.stage_token)
+        ) {
+            throw std::logic_error(
+                "tile-memory image ACK does not match its live journal");
+        }
+        if (
+            state.beat_index + 1 < IMAGE_BEATS &&
+            pending_port_requests[index].has_value()
+        ) {
+            throw std::logic_error(
+                "tile-memory image engine has a second pending beat");
+        }
+        if (
+            state.beat_index + 1 < IMAGE_BEATS &&
+            (
+                completion_cycle ==
+                    std::numeric_limits<uint64_t>::max() ||
+                last_issue_sequences[index] ==
+                    std::numeric_limits<uint64_t>::max()
+            )
+        ) {
+            throw std::overflow_error(
+                "tile-memory issue sequence exhausted before "
+                "the image transfer completed");
+        }
+    }
+
+    std::optional<TileMemoryPortCompletion> complete_port(
+            TaccImageTransferStage& stage,
+            uint64_t grant_sequence,
+            uint64_t completion_cycle,
+            const std::optional<
+                std::array<uint8_t, BEAT_BYTES>>& read_data,
+            bool external_phy = false) {
+        if (
+            !active_port_grant.has_value() ||
+            active_port_grant->grant_sequence != grant_sequence
+        ) {
+            return std::nullopt;
+        }
+        const TileMemoryPortGrant grant = *active_port_grant;
+        if (
+            grant.grant_cycle ==
+                std::numeric_limits<uint64_t>::max() ||
+            (
+                external_phy
+                ? completion_cycle <= grant.grant_cycle
+                : completion_cycle != grant.grant_cycle + 1
+            )
+        ) {
+            throw std::invalid_argument(
+                external_phy
+                    ? "external tile-memory ACK must follow its grant"
+                    : "internal tile-memory ACK must follow its grant "
+                      "by one cycle");
+        }
+        if (
+            grant.request.operation == BusOperation::READ &&
+            !read_data.has_value()
+        ) {
+            throw std::invalid_argument(
+                "successful tile-memory read completion requires 64 bytes");
+        }
+        if (
+            grant.request.operation == BusOperation::WRITE &&
+            read_data.has_value()
+        ) {
+            throw std::invalid_argument(
+                "tile-memory write completion cannot return read data");
+        }
+
+        TaccEngineTransportState* image_state = nullptr;
+        if (grant.request.image_transfer) {
+            const int engine_id =
+                grant.request.identity.engine_id;
+            TaccEngineTransportState& state =
+                engines[static_cast<std::size_t>(engine_id)];
+            if (
+                state.phase != TaccTransportPhase::ACTIVE ||
+                !state.identity.matches(
+                    engine_id,
+                    grant.request.identity.operation_token,
+                    grant.request.identity.engine_epoch,
+                    grant.request.identity.caller_epoch) ||
+                state.stage_token !=
+                    grant.request.stage_token ||
+                state.beat_index !=
+                    grant.request.beat_index ||
+                !stage.owned_by(
+                    engine_id,
+                    state.identity.owner_core_id,
+                    state.stage_token)
+            ) {
+                throw std::logic_error(
+                    "tile-memory image ACK does not match its live journal");
+            }
+            if (
+                state.beat_index + 1 < IMAGE_BEATS &&
+                (
+                    completion_cycle ==
+                        std::numeric_limits<uint64_t>::max() ||
+                    last_issue_sequences[
+                        static_cast<std::size_t>(
+                            engine_id)] ==
+                        std::numeric_limits<uint64_t>::max()
+                )
+            ) {
+                throw std::overflow_error(
+                    "tile-memory issue sequence exhausted before "
+                    "the image transfer completed");
+            }
+            image_state = &state;
+        } else if (
+            stage.active() &&
+            stage.owner_engine_id ==
+                grant.request.identity.engine_id
+        ) {
+            const int engine_id = stage.owner_engine_id;
+            const TaccEngineTransportState& state =
+                engines[static_cast<std::size_t>(engine_id)];
+            if (
+                state.phase == TaccTransportPhase::ACTIVE &&
+                !pending_port_requests[
+                    static_cast<std::size_t>(
+                        engine_id)].has_value() &&
+                (
+                    completion_cycle ==
+                        std::numeric_limits<uint64_t>::max() ||
+                    last_issue_sequences[
+                        static_cast<std::size_t>(
+                            engine_id)] ==
+                        std::numeric_limits<uint64_t>::max()
+                )
+            ) {
+                throw std::overflow_error(
+                    "tile-memory issue sequence exhausted before "
+                    "the image transfer could resume");
+            }
+        }
+
+        active_port_grant.reset();
+        bool image_transfer_complete = false;
+        if (grant.request.image_transfer) {
+            const int engine_id =
+                grant.request.identity.engine_id;
+            TaccEngineTransportState& state =
+                *image_state;
+
+            const std::size_t offset =
+                static_cast<std::size_t>(
+                    state.beat_index) * BEAT_BYTES;
+            if (
+                state.direction ==
+                    TaccImageTransferStage::Direction::LOAD &&
+                (
+                    !engine_has_inactive_image_bytes(
+                        state.format_ew) ||
+                    offset < 128
+                )
+            ) {
+                std::copy(
+                    read_data->begin(),
+                    read_data->end(),
+                    state.image.begin() +
+                        static_cast<std::ptrdiff_t>(offset));
+            }
+            state.beat_index++;
+            stage.beat_index = state.beat_index;
+            stage.image = state.image;
+            if (state.beat_index == IMAGE_BEATS) {
+                state.phase = TaccTransportPhase::COMPLETE;
+                image_transfer_complete = true;
+                stage.clear_active(false);
+            } else {
+                queue_image_beat_if_possible(
+                    stage,
+                    engine_id,
+                    completion_cycle);
+            }
+        } else if (stage.active()) {
+            // A pre-existing ordinary request from the stage winner may
+            // finish first.  Its completion exposes the engine's next image
+            // beat without allowing same-edge admission.
+            queue_image_beat_if_possible(
+                stage,
+                stage.owner_engine_id,
+                completion_cycle);
+        }
+
+        return TileMemoryPortCompletion{
+            grant,
+            completion_cycle,
+            read_data,
+            image_transfer_complete,
+        };
+    }
+
+    bool cancel(
+            TaccImageTransferStage& stage,
+            int engine_id,
+            uint64_t operation_token,
+            uint64_t engine_epoch,
+            uint64_t caller_epoch) noexcept {
+        if (!valid_engine_id(engine_id))
+            return false;
+        TaccEngineTransportState& state =
+            engines[static_cast<std::size_t>(engine_id)];
+        if (
+            (
+                state.phase != TaccTransportPhase::WAITING_STAGE &&
+                state.phase != TaccTransportPhase::ACTIVE
+            ) ||
+            !state.identity.matches(
+                engine_id,
+                operation_token,
+                engine_epoch,
+                caller_epoch)
+        ) {
+            return false;
+        }
+
+        auto& pending =
+            pending_port_requests[
+                static_cast<std::size_t>(engine_id)];
+        if (
+            pending.has_value() &&
+            pending->image_transfer &&
+            pending->identity.operation_token ==
+                operation_token
+        ) {
+            pending.reset();
+        }
+        if (
+            active_port_grant.has_value() &&
+            active_port_grant->request.image_transfer &&
+            active_port_grant->request.identity.matches(
+                engine_id,
+                operation_token,
+                engine_epoch,
+                caller_epoch)
+        ) {
+            active_port_grant.reset();
+        }
+        if (
+            stage.owned_by(
+                engine_id,
+                state.identity.owner_core_id,
+                state.stage_token)
+        ) {
+            stage.cancel();
+        }
+        state.phase = TaccTransportPhase::CANCELED;
+        return true;
+    }
+
+    bool cancel_owner(
+            TaccImageTransferStage& stage,
+            int owner_core_id) noexcept {
+        bool canceled = false;
+        for (int engine_id = 0;
+             engine_id < engine_count();
+             engine_id++) {
+            TaccEngineTransportState& state =
+                engines[static_cast<std::size_t>(engine_id)];
+            if (
+                (
+                    state.phase ==
+                        TaccTransportPhase::WAITING_STAGE ||
+                    state.phase ==
+                        TaccTransportPhase::ACTIVE
+                ) &&
+                state.identity.owner_core_id == owner_core_id
+            ) {
+                canceled =
+                    cancel(
+                        stage,
+                        engine_id,
+                        state.identity.operation_token,
+                        state.identity.engine_epoch,
+                        state.identity.caller_epoch) ||
+                    canceled;
+            }
+            auto& pending =
+                pending_port_requests[
+                    static_cast<std::size_t>(engine_id)];
+            if (
+                pending.has_value() &&
+                !pending->image_transfer &&
+                pending->identity.owner_core_id ==
+                    owner_core_id
+            ) {
+                pending.reset();
+                canceled = true;
+            }
+        }
+        if (
+            active_port_grant.has_value() &&
+            !active_port_grant->request.image_transfer &&
+            active_port_grant->request.identity.owner_core_id ==
+                owner_core_id
+        ) {
+            active_port_grant.reset();
+            canceled = true;
+        }
+        if (
+            stage.active() &&
+            stage.owner_core_id == owner_core_id
+        ) {
+            stage.cancel();
+            canceled = true;
+        }
+        return canceled;
+    }
+
+    bool cancel_engine(
+            TaccImageTransferStage& stage,
+            int engine_id) noexcept {
+        if (!valid_engine_id(engine_id))
+            return false;
+        bool canceled = false;
+        TaccEngineTransportState& state =
+            engines[static_cast<std::size_t>(engine_id)];
+        if (
+            state.phase == TaccTransportPhase::WAITING_STAGE ||
+            state.phase == TaccTransportPhase::ACTIVE
+        ) {
+            canceled =
+                cancel(
+                    stage,
+                    engine_id,
+                    state.identity.operation_token,
+                    state.identity.engine_epoch,
+                    state.identity.caller_epoch) ||
+                canceled;
+        }
+        auto& pending =
+            pending_port_requests[
+                static_cast<std::size_t>(engine_id)];
+        if (pending.has_value()) {
+            pending.reset();
+            canceled = true;
+        }
+        if (
+            active_port_grant.has_value() &&
+            active_port_grant->request.identity.engine_id ==
+                engine_id
+        ) {
+            active_port_grant.reset();
+            canceled = true;
+        }
+        if (
+            stage.active() &&
+            stage.owner_engine_id == engine_id
+        ) {
+            stage.cancel();
+            canceled = true;
+        }
+        return canceled;
+    }
+
+private:
+    int select_stage_candidate(
+            int last_grant_engine_id,
+            uint64_t cycle) const noexcept {
+        const int first =
+            valid_engine_id(last_grant_engine_id)
+            ? (last_grant_engine_id + 1) % engine_count()
+            : 0;
+        for (int offset = 0; offset < engine_count(); offset++) {
+            const int candidate =
+                (first + offset) % engine_count();
+            const TaccEngineTransportState& state =
+                engines[
+                    static_cast<std::size_t>(
+                        candidate)];
+            if (
+                state.phase ==
+                    TaccTransportPhase::WAITING_STAGE &&
+                state.ready_cycle < cycle
+            ) {
+                return candidate;
+            }
+        }
+        return -1;
+    }
+
+    int select_port_candidate(uint64_t cycle) const noexcept {
+        const int first =
+            valid_engine_id(port_last_grant_engine_id)
+            ? (port_last_grant_engine_id + 1) % engine_count()
+            : 0;
+        for (int offset = 0; offset < engine_count(); offset++) {
+            const int candidate =
+                (first + offset) % engine_count();
+            const auto& request =
+                pending_port_requests[
+                    static_cast<std::size_t>(
+                        candidate)];
+            if (
+                request.has_value() &&
+                request->ready_cycle < cycle
+            ) {
+                return candidate;
+            }
+        }
+        return -1;
+    }
+
+    bool engine_port_is_active(int engine_id) const noexcept {
+        return (
+            active_port_grant.has_value() &&
+            active_port_grant->request.identity.engine_id ==
+                engine_id
+        );
+    }
+
+    TileMemoryPortRequest submit_port_request(
+            TileMemoryPortRequest request) {
+        const int engine_id = request.identity.engine_id;
+        const std::size_t index =
+            static_cast<std::size_t>(engine_id);
+        if (
+            pending_port_requests[index].has_value() ||
+            engine_port_is_active(engine_id)
+        ) {
+            throw std::runtime_error(
+                "physical tile engine already has a pending port beat");
+        }
+        if (
+            last_issue_sequences[index] ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "tile-memory issue sequence overflow");
+        }
+        request.issue_sequence =
+            ++last_issue_sequences[index];
+        pending_port_requests[index] = request;
+        return request;
+    }
+
+    void queue_image_beat_if_possible(
+            const TaccImageTransferStage& stage,
+            int engine_id,
+            uint64_t ready_cycle) {
+        if (!valid_engine_id(engine_id))
+            return;
+        const std::size_t index =
+            static_cast<std::size_t>(engine_id);
+        TaccEngineTransportState& state =
+            engines[index];
+        if (
+            state.phase != TaccTransportPhase::ACTIVE ||
+            pending_port_requests[index].has_value() ||
+            engine_port_is_active(engine_id) ||
+            state.beat_index >= IMAGE_BEATS ||
+            !stage.owned_by(
+                engine_id,
+                state.identity.owner_core_id,
+                state.stage_token)
+        ) {
+            return;
+        }
+        if (ready_cycle == std::numeric_limits<uint64_t>::max())
+            throw std::overflow_error(
+                "tile-memory image beat has no registered grant edge");
+
+        std::array<uint8_t, BEAT_BYTES> data{};
+        const std::size_t offset =
+            static_cast<std::size_t>(
+                state.beat_index) * BEAT_BYTES;
+        const BusOperation operation =
+            state.direction ==
+                TaccImageTransferStage::Direction::LOAD
+            ? BusOperation::READ
+            : BusOperation::WRITE;
+        if (operation == BusOperation::WRITE) {
+            std::copy(
+                state.image.begin() +
+                    static_cast<std::ptrdiff_t>(offset),
+                state.image.begin() +
+                    static_cast<std::ptrdiff_t>(
+                        offset + BEAT_BYTES),
+                data.begin());
+        }
+        submit_port_request(
+            {
+                state.identity,
+                ready_cycle,
+                0,
+                state.stage_token,
+                true,
+                state.beat_index,
+                operation,
+                state.base_address + offset,
+                data,
+            });
+    }
+};
+
 struct BusYieldSignal {};
+struct TileYieldSignal {};
 
 class ResumableBusAccess {
 public:
@@ -1904,6 +3350,21 @@ public:
         BusWidth width,
         uint64_t write_data,
         bool port_io
+    ) = 0;
+};
+
+class ResumableTileAccess {
+public:
+    virtual ~ResumableTileAccess() = default;
+
+    virtual void read(
+        uint64_t address,
+        std::array<uint8_t, 64>& data
+    ) = 0;
+
+    virtual void write(
+        uint64_t address,
+        const std::array<uint8_t, 64>& data
     ) = 0;
 };
 
@@ -2004,11 +3465,10 @@ enum class ClusterResourceKind : uint8_t {
     BUS = 1,
     MUL_DIV = 2,
     CRC = 3,
-    SHA = 4,
-    MEX = 5,
+    TILE_ENGINE = 4,
 };
 
-static constexpr std::size_t CLUSTER_RESOURCE_KIND_COUNT = 6;
+static constexpr std::size_t CLUSTER_RESOURCE_KIND_COUNT = 5;
 
 static const char* cluster_resource_name(
         ClusterResourceKind kind) {
@@ -2019,10 +3479,8 @@ static const char* cluster_resource_name(
             return "mul_div";
         case ClusterResourceKind::CRC:
             return "crc";
-        case ClusterResourceKind::SHA:
-            return "sha";
-        case ClusterResourceKind::MEX:
-            return "mex";
+        case ClusterResourceKind::TILE_ENGINE:
+            return "tile_engine";
         case ClusterResourceKind::NONE:
             return "none";
     }
@@ -2044,24 +3502,24 @@ struct ClusterState {
     int crc_mode = 0;
     std::array<uint8_t, 1024> scratchpad{};
 
-    // Compatibility-visible shared tile/SHA bank. The unbounded scheduler
-    // still executes these complex operations through the Python ISA oracle,
-    // but the state now has one native owner per cluster rather than one copy
-    // per reduced core.
-    uint64_t sb = 0;
-    uint64_t sr = 0;
-    uint64_t sc = 0;
-    uint64_t sw = 1;
-    uint64_t tmode = 0;
-    uint64_t tctrl = 0;
-    uint64_t tsrc0 = 0;
-    uint64_t tsrc1 = 0;
-    uint64_t tdst = 0;
+    // Authoritative physical tile-engine state shared by the cluster.
+    // Configuration, source/destination selectors, and addressing cursors
+    // remain caller-private in each microcore CPUState and are sampled only
+    // when that caller wins admission.
     std::array<uint64_t, 4> acc{};
-    uint64_t tstride_r = 0;
-    uint64_t tstride_c = 0;
-    uint64_t ttile_h = 8;
-    uint64_t ttile_w = 8;
+    std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
+    uint8_t tacc_owner = TACC_OWNER_NONE;
+    bool tacc_valid = false;
+    bool tacc_dirty = false;
+    uint8_t tacc_format_ew = 0;
+    uint8_t tacc_format_signed = 0;
+    bool tacc_busy = false;
+    bool tacc_force_pending = false;
+    uint64_t tacc_epoch = 0;
+    std::array<uint64_t, 4> tacc_caller_epochs{};
+
+    // SHA transaction working state shares the engine ACC. The granted
+    // caller's private TSRC0 remains outside this structure.
     int sha_mode = 0;
     uint64_t sha_msglen_lo = 0;
     uint64_t sha_msglen_hi = 0;
@@ -2080,6 +3538,7 @@ struct ClusterState {
                 "native cluster must contain between one and four cores");
         }
         reset();
+        tacc_caller_epochs.fill(0);
     }
 
     void reset_arbitration() {
@@ -2095,20 +3554,19 @@ struct ClusterState {
     void reset_shared_engines() {
         crc_acc = 0xFFFF'FFFFULL;
         crc_mode = 0;
-        sb = 0;
-        sr = 0;
-        sc = 0;
-        sw = 1;
-        tmode = 0;
-        tctrl = 0;
-        tsrc0 = 0;
-        tsrc1 = 0;
-        tdst = 0;
         acc.fill(0);
-        tstride_r = 0;
-        tstride_c = 0;
-        ttile_h = 8;
-        ttile_w = 8;
+        tacc.fill(0);
+        tacc_owner = TACC_OWNER_NONE;
+        tacc_valid = false;
+        tacc_dirty = false;
+        tacc_format_ew = 0;
+        tacc_format_signed = 0;
+        tacc_busy = false;
+        tacc_force_pending = false;
+        tacc_epoch++;
+        for (int index = 0; index < core_count; index++)
+            tacc_caller_epochs[
+                static_cast<std::size_t>(index)]++;
         sha_mode = 0;
         sha_msglen_lo = 0;
         sha_msglen_hi = 0;
@@ -2121,19 +3579,26 @@ struct ClusterState {
 
     bool local_core_is_eligible(
             ClusterResourceKind kind,
-            int local_core) const {
+            int local_core,
+            bool sha_lock_protected) const {
         if (local_core < 0 || local_core >= core_count)
             return false;
         if (kind == ClusterResourceKind::CRC && crc_locked)
             return local_core == crc_lock_owner;
-        if (kind == ClusterResourceKind::SHA && sha_locked)
+        if (
+            kind == ClusterResourceKind::TILE_ENGINE &&
+            sha_lock_protected &&
+            sha_locked
+        ) {
             return local_core == sha_lock_owner;
+        }
         return true;
     }
 
     std::optional<int> choose(
             ClusterResourceKind kind,
-            const std::vector<int>& candidates) const {
+            const std::vector<int>& candidates,
+            const std::vector<bool>& sha_lock_protected) const {
         const std::size_t resource_index =
             static_cast<std::size_t>(kind);
         if (
@@ -2143,14 +3608,32 @@ struct ClusterState {
             throw std::invalid_argument(
                 "cluster arbitration requires a shared resource");
         }
+        if (candidates.size() != sha_lock_protected.size()) {
+            throw std::invalid_argument(
+                "cluster arbitration candidate metadata is incomplete");
+        }
 
         std::array<bool, 4> pending{};
-        for (int local_core : candidates) {
+        std::array<bool, 4> pending_sha_lock_protected{};
+        for (std::size_t index = 0; index < candidates.size(); index++) {
+            const int local_core = candidates[index];
             if (local_core < 0 || local_core >= core_count) {
                 throw std::out_of_range(
                     "cluster request has an invalid local core");
             }
-            pending[static_cast<std::size_t>(local_core)] = true;
+            const std::size_t local_index =
+                static_cast<std::size_t>(local_core);
+            if (
+                pending[local_index] &&
+                pending_sha_lock_protected[local_index] !=
+                    sha_lock_protected[index]
+            ) {
+                throw std::invalid_argument(
+                    "one core submitted conflicting cluster requests");
+            }
+            pending[local_index] = true;
+            pending_sha_lock_protected[local_index] =
+                sha_lock_protected[index];
         }
 
         const int last = last_grants[resource_index];
@@ -2160,7 +3643,11 @@ struct ClusterState {
                 candidate -= core_count;
             if (
                 pending[static_cast<std::size_t>(candidate)] &&
-                local_core_is_eligible(kind, candidate)
+                local_core_is_eligible(
+                    kind,
+                    candidate,
+                    pending_sha_lock_protected[
+                        static_cast<std::size_t>(candidate)])
             ) {
                 return candidate;
             }
@@ -2171,7 +3658,8 @@ struct ClusterState {
     void commit(
             ClusterResourceKind kind,
             int local_core,
-            int operation) {
+            int operation,
+            bool sha_transaction) {
         const std::size_t resource_index =
             static_cast<std::size_t>(kind);
         if (
@@ -2208,7 +3696,10 @@ struct ClusterState {
                 crc_locked = false;
                 crc_lock_owner = -1;
             }
-        } else if (kind == ClusterResourceKind::SHA) {
+        } else if (
+            kind == ClusterResourceKind::TILE_ENGINE &&
+            sha_transaction
+        ) {
             if (operation == 0x0) {
                 sha_locked = true;
                 sha_lock_owner = local_core;
@@ -3016,6 +4507,9 @@ struct SystemState {
         const int required_cluster_ports =
             (micro_core_count + MICRO_CORES_PER_CLUSTER - 1) /
             MICRO_CORES_PER_CLUSTER;
+        tile_memory_transport.configure(
+            full_core_count,
+            all_core_count);
         const int minimum_main_bus_ports =
             full_core_count + required_cluster_ports + 2;
         if (main_bus_port_count == 0)
@@ -3136,6 +4630,152 @@ struct SystemState {
         return advertised_core_count;
     }
 
+    int tacc_engine_for_core(int core_id) const {
+        if (core_id < 0 || core_id >= advertised_core_count) {
+            throw std::out_of_range(
+                "TACC image-stage caller is outside the system topology");
+        }
+        if (core_id < full_core_count())
+            return core_id;
+        return (
+            full_core_count() +
+            (
+                core_id - full_core_count()
+            ) / MICRO_CORES_PER_CLUSTER
+        );
+    }
+
+    bool tile_transport_identity_is_live(
+            int engine_id,
+            int owner_core_id,
+            uint64_t engine_epoch,
+            uint64_t caller_epoch) const noexcept {
+        if (
+            !tile_memory_transport.owner_maps_to_engine(
+                engine_id,
+                owner_core_id)
+        ) {
+            return false;
+        }
+        if (engine_id < full_core_count()) {
+            const CPUState& core =
+                *cores[static_cast<std::size_t>(engine_id)];
+            return (
+                owner_core_id == engine_id &&
+                engine_epoch == core.tacc_epoch &&
+                caller_epoch == 0
+            );
+        }
+        const int cluster_index =
+            engine_id - full_core_count();
+        if (
+            cluster_index < 0 ||
+            cluster_index >=
+                static_cast<int>(cluster_states.size())
+        ) {
+            return false;
+        }
+        const ClusterState& cluster =
+            cluster_states[
+                static_cast<std::size_t>(
+                    cluster_index)];
+        const int local_core =
+            owner_core_id - cluster.global_id_base;
+        return (
+            local_core >= 0 &&
+            local_core < cluster.core_count &&
+            engine_epoch == cluster.tacc_epoch &&
+            caller_epoch ==
+                cluster.tacc_caller_epochs[
+                    static_cast<std::size_t>(
+                        local_core)]
+        );
+    }
+
+    void cancel_tacc_image_stage_for_core(int core_id) {
+        (void)tacc_engine_for_core(core_id);
+        const bool ordinary_tile_access_live =
+            std::any_of(
+                tile_memory_transport
+                    .pending_port_requests.begin(),
+                tile_memory_transport
+                    .pending_port_requests.end(),
+                [core_id](const auto& pending) {
+                    return (
+                        pending.has_value() &&
+                        !pending->image_transfer &&
+                        pending->identity.owner_core_id ==
+                            core_id
+                    );
+                }) ||
+            (
+                tile_memory_transport
+                    .active_port_grant.has_value() &&
+                !tile_memory_transport
+                    .active_port_grant->request
+                    .image_transfer &&
+                tile_memory_transport
+                    .active_port_grant->request
+                    .identity.owner_core_id == core_id
+            );
+        const bool transport_canceled =
+            tile_memory_transport.cancel_owner(
+                tacc_image_stage,
+                core_id);
+        bool instruction_canceled = false;
+        if (
+            core_id >= 0 &&
+            core_id < full_core_count()
+        ) {
+            FullCoreCycleState& cycle_state =
+                full_core_cycle_states[
+                    static_cast<std::size_t>(
+                        core_id)];
+            const bool matching_ordinary =
+                ordinary_tile_access_live &&
+                cycle_state.instruction &&
+                cycle_state.instruction->
+                    pending_tile_request.has_value() &&
+                cycle_state.instruction->
+                    pending_tile_request->
+                    owner_core_id == core_id;
+            const bool matching_timed_image =
+                cycle_state.instruction &&
+                cycle_state.instruction->
+                    tacc_timed_image_transfer;
+            if (matching_ordinary || matching_timed_image) {
+                cycle_state.instruction.reset();
+                cycle_state.ready_cycle =
+                    shared_clock.cycles();
+                instruction_canceled = true;
+            }
+        }
+        if (transport_canceled || instruction_canceled) {
+            refresh_cycle_execution_pending();
+        }
+    }
+
+    void cancel_tacc_image_stage_for_cluster(
+            int cluster_index) {
+        if (
+            cluster_index < 0 ||
+            cluster_index >=
+                static_cast<int>(cluster_states.size())
+        ) {
+            throw std::out_of_range(
+                "cluster index is out of range");
+        }
+        const int engine_id =
+            full_core_count() + cluster_index;
+        if (
+            tile_memory_transport.cancel_engine(
+                tacc_image_stage,
+                engine_id)
+        ) {
+            refresh_cycle_execution_pending();
+        }
+    }
+
     int worker_count() const {
         return configured_worker_count;
     }
@@ -3191,9 +4831,26 @@ struct SystemState {
 
     void reset_cycle_execution() {
         cycle_target_completion_cycle.reset();
-        for (FullCoreCycleState& state : full_core_cycle_states) {
+        for (std::size_t index = 0;
+             index < full_core_cycle_states.size();
+             index++) {
+            FullCoreCycleState& state =
+                full_core_cycle_states[index];
+            if (
+                state.instruction &&
+                state.instruction->tacc_busy_published
+            ) {
+                CPUState& core = *cores[index];
+                if (core.tacc_force_pending) {
+                    core.reset_tacc();
+                } else {
+                    core.tacc_busy = false;
+                    core.tacc_epoch++;
+                }
+            }
             state.ready_cycle = shared_clock.cycles();
             state.next_issue_sequence = 1;
+            state.next_tile_operation_token = 1;
             state.instruction.reset();
         }
         for (DmaCycleState& state : dma_cycle_states) {
@@ -3206,6 +4863,7 @@ struct SystemState {
         cycle_execution_pending.store(
             false,
             std::memory_order_release);
+        tile_memory_transport.reset(tacc_image_stage);
     }
 
     bool has_cycle_execution_pending() const {
@@ -3213,8 +4871,19 @@ struct SystemState {
             std::memory_order_acquire);
     }
 
+    bool has_resumable_core_instruction() const noexcept {
+        return std::any_of(
+            full_core_cycle_states.begin(),
+            full_core_cycle_states.end(),
+            [](const FullCoreCycleState& state) {
+                return state.instruction != nullptr;
+            });
+    }
+
     void refresh_cycle_execution_pending() {
         const bool pending =
+            tacc_image_stage.active() ||
+            tile_memory_transport.has_pending_work() ||
             cycle_target_completion_cycle.has_value() ||
             std::any_of(
                 full_core_cycle_states.begin(),
@@ -3258,6 +4927,8 @@ struct SystemState {
     std::vector<CPUState*> execution_cores;
     std::vector<FullCoreCycleState> full_core_cycle_states;
     std::array<DmaCycleState, 2> dma_cycle_states{};
+    TaccImageTransferStage tacc_image_stage{};
+    TileMemoryTransport tile_memory_transport{};
     std::optional<uint64_t> cycle_target_completion_cycle;
     // Serializes native scheduling with clock/deadline mutation. Recursive
     // acquisition is required when a Python round-settlement callback advances
@@ -3280,6 +4951,40 @@ struct SystemState {
     // before any state they will use in later Phase 3 elements.
     std::unique_ptr<PersistentWorkerPool> worker_pool;
 };
+
+static uint64_t cycle_instruction_access_frontier(
+        const ResumableInstruction& instruction) noexcept {
+    uint64_t ready_cycle = instruction.start_cycle;
+    if (!instruction.completed_accesses.empty()) {
+        ready_cycle = std::max(
+            ready_cycle,
+            instruction.completed_accesses.back()
+                .result.completion_cycle);
+    }
+    if (!instruction.completed_tile_accesses.empty()) {
+        ready_cycle = std::max(
+            ready_cycle,
+            instruction.completed_tile_accesses.back()
+                .completion_cycle);
+    }
+    return ready_cycle;
+}
+
+static void consume_cycle_shared_access_order(
+        ResumableInstruction& instruction,
+        CycleSharedAccessKind expected_kind) {
+    if (
+        instruction.access_order_replay_cursor >=
+            instruction.completed_access_order.size() ||
+        instruction.completed_access_order[
+            instruction.access_order_replay_cursor] !=
+                expected_kind
+    ) {
+        throw std::runtime_error(
+            "resumable instruction shared-access order diverged");
+    }
+    instruction.access_order_replay_cursor++;
+}
 
 class JournaledBusAccess final : public ResumableBusAccess {
 public:
@@ -3316,6 +5021,9 @@ public:
                 width,
                 write_data,
                 port_io);
+            consume_cycle_shared_access_order(
+                instruction,
+                CycleSharedAccessKind::MAIN_BUS);
             instruction.replay_cursor++;
             if (record.target_error_message.has_value()) {
                 throw std::runtime_error(
@@ -3327,20 +5035,28 @@ public:
             return record.result.read_value.value_or(0);
         }
 
-        if (instruction.pending_request.has_value())
+        if (
+            instruction.pending_request.has_value() ||
+            instruction.pending_tile_request.has_value()
+        ) {
             throw std::logic_error(
-                "a suspended instruction already has a pending request");
+                "a suspended instruction already has a pending access");
+        }
+        if (
+            instruction.access_order_replay_cursor !=
+                instruction.completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction reordered a main-bus access");
+        }
         if (cycle_state.next_issue_sequence ==
             std::numeric_limits<uint64_t>::max()) {
             throw std::overflow_error(
                 "main bus issue sequence overflow");
         }
 
-        uint64_t ready_cycle = instruction.start_cycle;
-        if (!instruction.completed_accesses.empty()) {
-            ready_cycle = instruction.completed_accesses.back()
-                .result.completion_cycle;
-        }
+        const uint64_t ready_cycle =
+            cycle_instruction_access_frontier(instruction);
 
         const int requester_id =
             system_.cores[static_cast<std::size_t>(core_index_)]->core_id;
@@ -3381,6 +5097,157 @@ private:
                 system_.main_bus_port_for_requester(requester_id)) {
             throw std::runtime_error(
                 "resumable instruction bus replay diverged");
+        }
+    }
+
+    SystemState& system_;
+    int core_index_;
+};
+
+class JournaledTileAccess final : public ResumableTileAccess {
+public:
+    JournaledTileAccess(SystemState& system, int core_index)
+        : system_(system),
+          core_index_(core_index) {}
+
+    void read(
+            uint64_t address,
+            std::array<uint8_t, 64>& data) override {
+        std::array<uint8_t, 64> request_data{};
+        access(BusOperation::READ, address, request_data);
+        data = request_data;
+    }
+
+    void write(
+            uint64_t address,
+            const std::array<uint8_t, 64>& data) override {
+        std::array<uint8_t, 64> staged = data;
+        access(BusOperation::WRITE, address, staged);
+    }
+
+private:
+    void access(
+            BusOperation operation,
+            uint64_t address,
+            std::array<uint8_t, 64>& data) {
+        FullCoreCycleState& cycle_state =
+            system_.full_core_cycle_states[
+                static_cast<std::size_t>(core_index_)];
+        if (!cycle_state.instruction) {
+            throw std::logic_error(
+                "journaled tile access has no suspended instruction");
+        }
+        ResumableInstruction& instruction =
+            *cycle_state.instruction;
+
+        if (
+            instruction.tile_replay_cursor <
+                instruction.completed_tile_accesses.size()
+        ) {
+            const TileReplayRecord& record =
+                instruction.completed_tile_accesses[
+                    instruction.tile_replay_cursor];
+            validate_replay(
+                record.request,
+                operation,
+                address,
+                data);
+            consume_cycle_shared_access_order(
+                instruction,
+                CycleSharedAccessKind::TILE_MEMORY);
+            instruction.tile_replay_cursor++;
+            if (operation == BusOperation::READ) {
+                if (!record.read_data.has_value()) {
+                    throw std::logic_error(
+                        "completed tile read has no replay payload");
+                }
+                data = *record.read_data;
+            } else if (record.read_data.has_value()) {
+                throw std::logic_error(
+                    "completed tile write has a replay payload");
+            }
+            return;
+        }
+
+        if (
+            instruction.pending_request.has_value() ||
+            instruction.pending_tile_request.has_value()
+        ) {
+            throw std::logic_error(
+                "a suspended instruction already has a pending access");
+        }
+        if (
+            instruction.access_order_replay_cursor !=
+                instruction.completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction reordered a tile-memory access");
+        }
+        if (
+            cycle_state.next_tile_operation_token ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "tile-memory operation token overflow");
+        }
+
+        CPUState& core =
+            *system_.cores[
+                static_cast<std::size_t>(core_index_)];
+        const int engine_id =
+            system_.tacc_engine_for_core(core.core_id);
+        const uint64_t operation_token =
+            cycle_state.next_tile_operation_token;
+        const uint64_t ready_cycle =
+            cycle_instruction_access_frontier(instruction);
+        const TileMemoryPortRequest submitted =
+            system_.tile_memory_transport.submit_ordinary(
+                engine_id,
+                core.core_id,
+                operation_token,
+                0,
+                0,
+                ready_cycle,
+                address,
+                operation,
+                data);
+        instruction.pending_tile_request = TileAccessRequest{
+            submitted.identity.engine_id,
+            submitted.identity.owner_core_id,
+            submitted.identity.operation_token,
+            submitted.ready_cycle,
+            submitted.operation,
+            submitted.address,
+            submitted.data,
+        };
+        cycle_state.next_tile_operation_token++;
+        system_.cycle_execution_pending.store(
+            true,
+            std::memory_order_release);
+        throw TileYieldSignal{};
+    }
+
+    void validate_replay(
+            const TileAccessRequest& recorded,
+            BusOperation operation,
+            uint64_t address,
+            const std::array<uint8_t, 64>& data) const {
+        const CPUState& core =
+            *system_.cores[
+                static_cast<std::size_t>(core_index_)];
+        if (
+            recorded.engine_id !=
+                system_.tacc_engine_for_core(core.core_id) ||
+            recorded.owner_core_id != core.core_id ||
+            recorded.operation != operation ||
+            recorded.address != address ||
+            (
+                operation == BusOperation::WRITE &&
+                recorded.data != data
+            )
+        ) {
+            throw std::runtime_error(
+                "resumable instruction tile replay diverged");
         }
     }
 
@@ -5119,6 +6986,54 @@ static inline void update_flags_cmp(CPUState& s, uint64_t a, uint64_t b,
 //  CSR read/write
 // ---------------------------------------------------------------------------
 
+static uint64_t tacc_status(const CPUState& state) noexcept {
+    const bool claimed = state.tacc_owner != TACC_OWNER_NONE;
+    const bool mine =
+        claimed && state.tacc_owner == state.core_id;
+    return (
+        (claimed ? 1ULL : 0ULL) |
+        (mine ? 1ULL << 1 : 0ULL) |
+        (state.tacc_valid ? 1ULL << 2 : 0ULL) |
+        (state.tacc_dirty ? 1ULL << 3 : 0ULL) |
+        (state.tacc_busy ? 1ULL << 4 : 0ULL) |
+        (
+            static_cast<uint64_t>(
+                state.tacc_format_ew & 0x7
+            ) << 5
+        ) |
+        (
+            static_cast<uint64_t>(
+                state.tacc_format_signed & 0x1
+            ) << 8
+        ) |
+        (state.tacc_force_pending ? 1ULL << 9 : 0ULL) |
+        (
+            static_cast<uint64_t>(
+                state.tacc_owner & 0x1F
+            ) << 16
+        )
+    );
+}
+
+static void tacc_control_write(
+        CPUState& state,
+        uint64_t value) {
+    // Reserved bits are ignored, including in user mode. Only the
+    // FORCE_RELEASE pulse itself is privileged.
+    if ((value & 0x1) == 0)
+        return;
+    if (state.priv_level != 0) {
+        throw std::runtime_error(
+            "TRAP:PRIV_FAULT:"
+            "TACC force-release requires supervisor privilege");
+    }
+    if (state.tacc_busy) {
+        state.tacc_force_pending = true;
+    } else {
+        state.reset_tacc();
+    }
+}
+
 static uint64_t csr_read(CPUState& s, int addr) {
     switch (addr) {
         case CSR_FLAGS:     return flags_pack(s);
@@ -5147,6 +7062,8 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_ACC1:      return s.acc[1];
         case CSR_ACC2:      return s.acc[2];
         case CSR_ACC3:      return s.acc[3];
+        case CSR_TACC_STATUS:return tacc_status(s);
+        case CSR_TACC_CTL:   return 0;
         case CSR_COREID:    return s.core_id;
         case CSR_NCORES:    return s.num_cores;
         case CSR_MBOX:
@@ -5159,6 +7076,7 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_MEGAPAD_SZ:return 64;
         case CSR_CPUID:     return 0x4D503634;  // "MP64"
         case CSR_TSTRIDE_R: return s.tstride_r;
+        case CSR_TSTRIDE_C: return s.tstride_c;
         case CSR_TTILE_H:   return s.ttile_h;
         case CSR_TTILE_W:   return s.ttile_w;
         case CSR_BIST_STATUS:    return s.bist_status;
@@ -5212,6 +7130,8 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_ACC1:      s.acc[1] = val; break;
         case CSR_ACC2:      s.acc[2] = val; break;
         case CSR_ACC3:      s.acc[3] = val; break;
+        case CSR_TACC_STATUS: break;  // read-only
+        case CSR_TACC_CTL:  tacc_control_write(s, val); break;
         case CSR_MBOX:
             if (s.interrupts != nullptr)
                 s.interrupts->send_ipi(
@@ -5223,6 +7143,7 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
                     s.core_id, static_cast<uint8_t>(val));
             break;
         case CSR_TSTRIDE_R: s.tstride_r = val; break;
+        case CSR_TSTRIDE_C: s.tstride_c = val; break;
         case CSR_TTILE_H:   s.ttile_h = val; break;
         case CSR_TTILE_W:   s.ttile_w = val; break;
         case CSR_BIST_CMD:
@@ -5464,6 +7385,210 @@ static inline bool fp32_pack_overflows(double value) {
            std::fabs(value) >= FP32_PACK_OVERFLOW_THRESHOLD;
 }
 
+struct StepCallbacks {
+    struct ExternalPhyResponse {
+        bool responded = false;
+        uint64_t latency_cycles = 0;
+        bool error = false;
+    };
+
+    std::function<uint8_t(uint64_t)> mmio_read8;
+    std::function<void(uint64_t, uint8_t)> mmio_write8;
+    std::function<void(int, int)> on_output;   // (port, value)
+    // CSR overrides for system-level patching (IPI etc.)
+    std::function<uint64_t(int)> csr_read_override;  // returns value, or -1 for default
+    uint64_t mmio_start;
+    uint64_t mmio_end;
+    bool has_mmio;
+    bool tacc_read_via_callback = false;
+    bool tacc_write_via_callback = false;
+    bool tacc_span_policy_override = false;
+    ResumableBusAccess* bus_access = nullptr;
+    ResumableTileAccess* tile_access = nullptr;
+    bool strict_cycle_dma = false;
+    bool tacc_timed_transfer_replay = false;
+    BusOperation tacc_timed_transfer_operation =
+        BusOperation::READ;
+    uint8_t tacc_timed_transfer_format_ew = 0;
+    bool tacc_timed_transfer_format_signed = false;
+    bool tacc_timed_transfer_faulted = false;
+    uint64_t tacc_timed_transfer_fault_address = 0;
+    std::function<ExternalPhyResponse(
+        BusOperation,
+        uint8_t,
+        uint8_t,
+        uint64_t,
+        std::optional<uint64_t>)>
+        tacc_external_phy_response;
+    std::function<void(
+        BusOperation,
+        uint8_t,
+        uint8_t,
+        uint64_t,
+        std::optional<uint64_t>,
+        bool)>
+        tacc_external_phy_raise_fault;
+};
+
+static bool python_bridge_has_memory_override(
+        const py::function& bridge,
+        const char* method_name) {
+    if (!py::hasattr(bridge, "__self__"))
+        return false;
+    py::object owner = bridge.attr("__self__");
+    if (
+        owner.is_none() ||
+        !py::hasattr(owner, "__dict__")
+    ) {
+        return false;
+    }
+    py::dict attributes =
+        owner.attr("__dict__").cast<py::dict>();
+    if (attributes.contains(py::str(method_name)))
+        return true;
+
+    if (
+        !py::hasattr(bridge, "__func__") ||
+        !py::hasattr(owner, method_name)
+    ) {
+        return true;
+    }
+    py::object resolved_method =
+        owner.attr(method_name);
+    if (!py::hasattr(resolved_method, "__func__"))
+        return true;
+
+    const char* bridge_method_name =
+        std::string(method_name) == "mem_read8"
+        ? "_mmio_read8"
+        : "_mmio_write8";
+    const py::object bridge_function =
+        bridge.attr("__func__");
+    const py::object resolved_function =
+        resolved_method.attr("__func__");
+    const py::tuple method_resolution_order =
+        py::type::of(owner).attr("__mro__").cast<py::tuple>();
+    for (py::handle class_handle :
+         method_resolution_order) {
+        py::object class_object =
+            py::reinterpret_borrow<py::object>(
+                class_handle);
+        py::dict definitions(
+            class_object.attr("__dict__"));
+        if (!definitions.contains(
+                py::str(bridge_method_name))) {
+            continue;
+        }
+        py::object defined_bridge =
+            definitions[py::str(bridge_method_name)];
+        if (!defined_bridge.is(bridge_function))
+            continue;
+        if (!definitions.contains(py::str(method_name)))
+            return true;
+        py::object canonical_memory_method =
+            definitions[py::str(method_name)];
+        return !canonical_memory_method.is(
+            resolved_function);
+    }
+    return true;
+}
+
+static bool python_bridge_has_tacc_span_policy_override(
+        const py::function& bridge) {
+    if (!py::hasattr(bridge, "__self__"))
+        return false;
+    py::object owner = bridge.attr("__self__");
+    return (
+        !owner.is_none() &&
+        py::hasattr(owner, "_tacc_span_validator") &&
+        !owner.attr("_tacc_span_validator").is_none()
+    );
+}
+
+static void install_python_external_phy_callbacks(
+        StepCallbacks& callbacks,
+        const py::function& bridge) {
+    if (!py::hasattr(bridge, "__self__"))
+        return;
+    py::object owner = bridge.attr("__self__");
+    if (
+        owner.is_none() ||
+        !py::hasattr(owner, "_native_external_phy_response") ||
+        !py::hasattr(owner, "_native_external_phy_fault")
+    ) {
+        return;
+    }
+
+    py::function response =
+        owner.attr("_native_external_phy_response")
+            .cast<py::function>();
+    py::function raise_fault =
+        owner.attr("_native_external_phy_fault")
+            .cast<py::function>();
+    callbacks.tacc_external_phy_response =
+        [response](
+                BusOperation operation,
+                uint8_t beat_index,
+                uint8_t word_index,
+                uint64_t address,
+                std::optional<uint64_t> write_data) {
+            py::gil_scoped_acquire acquire;
+            const char* direction =
+                operation == BusOperation::READ
+                ? "load"
+                : "store";
+            py::object result = response(
+                direction,
+                beat_index,
+                word_index,
+                address,
+                write_data.has_value()
+                    ? py::cast(*write_data)
+                    : py::none());
+            StepCallbacks::ExternalPhyResponse selected{};
+            if (result.is_none())
+                return selected;
+            py::tuple response_fields =
+                result.cast<py::tuple>();
+            if (response_fields.size() != 2) {
+                throw std::runtime_error(
+                    "native external PHY response must contain "
+                    "latency and error");
+            }
+            selected.responded = true;
+            selected.latency_cycles =
+                response_fields[0].cast<uint64_t>();
+            selected.error =
+                response_fields[1].cast<bool>();
+            return selected;
+        };
+    callbacks.tacc_external_phy_raise_fault =
+        [raise_fault](
+                BusOperation operation,
+                uint8_t beat_index,
+                uint8_t word_index,
+                uint64_t address,
+                std::optional<uint64_t> write_data,
+                bool timeout) {
+            py::gil_scoped_acquire acquire;
+            const char* direction =
+                operation == BusOperation::READ
+                ? "load"
+                : "store";
+            raise_fault(
+                direction,
+                beat_index,
+                word_index,
+                address,
+                write_data.has_value()
+                    ? py::cast(*write_data)
+                    : py::none(),
+                timeout ? "timeout" : "error");
+            throw std::logic_error(
+                "external PHY fault helper returned");
+        };
+}
+
 // ---------------------------------------------------------------------------
 //  Tile helpers for MEX
 // ---------------------------------------------------------------------------
@@ -5548,7 +7673,10 @@ static inline __int128 floor_shift_right(__int128 value, unsigned shift) {
 //  Unified tile memory access (64-byte reads/writes with address decoding)
 // ---------------------------------------------------------------------------
 
-static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
+static inline void tile_read_64bytes_direct(
+        CPUState& s,
+        uint64_t addr,
+        Tile& out) {
     if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
         const uint64_t off = addr - s.memory->vram_base;
         if (region_span_fits(s.memory->vram_size, off, TILE_BYTES))
@@ -5584,7 +7712,10 @@ static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
         out.fill(0);
 }
 
-static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& data) {
+static inline void tile_write_64bytes_direct(
+        CPUState& s,
+        uint64_t addr,
+        const Tile& data) {
     if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
         const uint64_t off = addr - s.memory->vram_base;
         if (region_span_fits(s.memory->vram_size, off, TILE_BYTES)) {
@@ -5618,12 +7749,957 @@ static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& da
     }
 }
 
+static inline void tile_read_64bytes(
+        CPUState& s,
+        const StepCallbacks& callbacks,
+        uint64_t addr,
+        Tile& out) {
+    if (callbacks.tile_access != nullptr) {
+        callbacks.tile_access->read(addr, out);
+        return;
+    }
+    tile_read_64bytes_direct(s, addr, out);
+}
+
+static inline void tile_write_64bytes(
+        CPUState& s,
+        const StepCallbacks& callbacks,
+        uint64_t addr,
+        const Tile& data) {
+    if (callbacks.tile_access != nullptr) {
+        callbacks.tile_access->write(addr, data);
+        return;
+    }
+    tile_write_64bytes_direct(s, addr, data);
+}
+
+static constexpr int MEX_TACC_CANCELLED = -2;
+
+struct NativeTaccSpan {
+    uint8_t* data = nullptr;
+    bool external_phy = false;
+};
+
+static inline bool native_tacc_resolve_span(
+        CPUState& s,
+        uint64_t address,
+        uint64_t size,
+        NativeTaccSpan& resolved) noexcept {
+    resolved = {};
+    if (
+        s.memory == nullptr ||
+        size == 0 ||
+        size - 1 >
+            std::numeric_limits<uint64_t>::max() -
+                address
+    ) {
+        return false;
+    }
+
+    constexpr uint64_t TACC_MMIO_START =
+        0xFFFF'FF00'0000'0000ULL;
+    constexpr uint64_t TACC_MMIO_END =
+        0xFFFF'FF80'0000'0000ULL;
+    const uint64_t end = address + size;
+    if (
+        address < TACC_MMIO_END &&
+        end > TACC_MMIO_START
+    ) {
+        return false;
+    }
+
+    const auto resolve_region =
+        [address, size](
+                uint8_t* memory,
+                uint64_t base,
+                uint64_t region_size,
+                bool external_phy,
+                NativeTaccSpan& output) noexcept {
+            if (
+                memory == nullptr ||
+                !region_contains(base, region_size, address)
+            ) {
+                return 0;
+            }
+            const uint64_t offset = address - base;
+            if (!region_span_fits(region_size, offset, size))
+                return -1;
+            output.data = memory + offset;
+            output.external_phy = external_phy;
+            return 1;
+        };
+
+    // Match the Python TACC preflight routing order. Once a region owns the
+    // first byte, crossing its boundary is a fault rather than permission to
+    // fall through to a lower-priority overlapping mapping.
+    int result = resolve_region(
+        s.memory->vram_mem,
+        s.memory->vram_base,
+        s.memory->vram_size,
+        false,
+        resolved);
+    if (result != 0)
+        return result > 0;
+    result = resolve_region(
+        s.memory->ext_mem,
+        s.memory->ext_mem_base,
+        s.memory->ext_mem_size,
+        true,
+        resolved);
+    if (result != 0)
+        return result > 0;
+    result = resolve_region(
+        s.memory->hbw_mem,
+        s.memory->hbw_base,
+        s.memory->hbw_size,
+        false,
+        resolved);
+    if (result != 0)
+        return result > 0;
+    result = resolve_region(
+        s.memory->mem,
+        0,
+        s.memory->mem_size,
+        false,
+        resolved);
+    return result > 0;
+}
+
+static inline bool native_tacc_format_is_legal(int ew) noexcept {
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16 ||
+        ew == EW_U32 ||
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    );
+}
+
+static inline int native_tacc_format_signed(
+        const CPUState& s,
+        int ew) noexcept {
+    return (
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    ) ? 0 : static_cast<int>((s.tmode >> 4) & 0x1);
+}
+
+static inline std::size_t native_tacc_active_bytes(int ew) noexcept {
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16
+    ) ? TACC_IMAGE_BYTES : TACC_IMAGE_BYTES / 2;
+}
+
+class NativeTaccOperation {
+public:
+    explicit NativeTaccOperation(CPUState& state) noexcept
+        : state_(state),
+          epoch_(state.tacc_epoch) {
+        state_.tacc_busy = true;
+    }
+
+    NativeTaccOperation(const NativeTaccOperation&) = delete;
+    NativeTaccOperation& operator=(
+        const NativeTaccOperation&) = delete;
+
+    ~NativeTaccOperation() noexcept {
+        if (cancelled()) {
+            state_.reset_tacc(false);
+            return;
+        }
+        state_.tacc_busy = false;
+        if (state_.tacc_force_pending)
+            state_.reset_tacc();
+    }
+
+    bool cancelled() const noexcept {
+        return state_.tacc_epoch != epoch_;
+    }
+
+private:
+    CPUState& state_;
+    uint64_t epoch_;
+};
+
+static inline void native_tacc_annotate_callback_fault(
+        CPUState& s,
+        py::error_already_set& error,
+        int fault_cycles,
+        uint64_t beat_address) {
+    py::gil_scoped_acquire acquire;
+    py::object exception =
+        py::reinterpret_borrow<py::object>(
+            error.value());
+    exception.attr("_mp64_accel_callback_error") =
+        py::bool_(true);
+    if (!py::hasattr(exception, "ivec_id"))
+        return;
+    const int ivec =
+        exception.attr("ivec_id").cast<int>();
+    exception.attr("fault_cycles") =
+        py::int_(fault_cycles);
+    s.ext_modifier = -1;
+    if (
+        ivec == IVEC_BUS_FAULT ||
+        ivec == IVEC_ALIGN_FAULT
+    ) {
+        s.trap_addr = beat_address;
+    }
+    s.cycle_count +=
+        static_cast<uint64_t>(fault_cycles);
+    if (s.perf_enable) {
+        s.perf_cycles +=
+            static_cast<uint64_t>(fault_cycles);
+    }
+}
+
+static inline bool native_tacc_read_tile(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t address,
+        const NativeTaccSpan& span,
+        uint64_t operation_epoch,
+        Tile& output) {
+    for (std::size_t offset = 0; offset < TILE_BYTES; offset++) {
+        output[offset] = (
+            cb.tacc_read_via_callback &&
+            cb.mmio_read8
+        )
+            ? cb.mmio_read8(
+                address + static_cast<uint64_t>(offset))
+            : span.data[offset];
+        if (s.tacc_epoch != operation_epoch)
+            return false;
+    }
+    return true;
+}
+
+static inline bool native_tacc_write_tile(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t address,
+        const NativeTaccSpan& span,
+        uint64_t operation_epoch,
+        const uint8_t* data) {
+    Tile previous{};
+    std::memcpy(
+        previous.data(),
+        span.data,
+        TILE_BYTES);
+    try {
+        for (std::size_t offset = 0;
+             offset < TILE_BYTES;
+             offset++) {
+            if (
+                cb.tacc_write_via_callback &&
+                cb.mmio_write8
+            ) {
+                cb.mmio_write8(
+                    address +
+                        static_cast<uint64_t>(offset),
+                    data[offset]);
+            } else {
+                span.data[offset] = data[offset];
+            }
+            if (s.tacc_epoch != operation_epoch) {
+                std::memcpy(
+                    span.data,
+                    previous.data(),
+                    TILE_BYTES);
+                icache_invalidate_span(
+                    s,
+                    address,
+                    TILE_BYTES);
+                return false;
+            }
+        }
+    } catch (...) {
+        std::memcpy(
+            span.data,
+            previous.data(),
+            TILE_BYTES);
+        icache_invalidate_span(
+            s,
+            address,
+            TILE_BYTES);
+        throw;
+    }
+    icache_invalidate_span(
+        s,
+        address,
+        TILE_BYTES);
+    return true;
+}
+
+static constexpr uint64_t EXTERNAL_PHY_TIMEOUT_CYCLES = 255;
+static constexpr std::size_t EXTERNAL_PHY_WORD_BYTES = 8;
+static constexpr std::size_t EXTERNAL_PHY_WORDS_PER_BEAT =
+    TILE_BYTES / EXTERNAL_PHY_WORD_BYTES;
+
+static StepCallbacks::ExternalPhyResponse
+native_tacc_external_phy_response(
+        const StepCallbacks& callbacks,
+        BusOperation operation,
+        uint8_t beat_index,
+        uint8_t word_index,
+        uint64_t address,
+        std::optional<uint64_t> write_data) {
+    StepCallbacks::ExternalPhyResponse response{
+        true,
+        1,
+        false,
+    };
+    if (callbacks.tacc_external_phy_response) {
+        response = callbacks.tacc_external_phy_response(
+            operation,
+            beat_index,
+            word_index,
+            address,
+            write_data);
+    }
+    if (
+        response.responded &&
+        response.latency_cycles == 0
+    ) {
+        throw std::invalid_argument(
+            "external PHY response latency must be positive");
+    }
+    return response;
+}
+
+[[noreturn]] static void native_tacc_raise_external_phy_fault(
+        CPUState& state,
+        const StepCallbacks& callbacks,
+        BusOperation operation,
+        uint8_t beat_index,
+        uint8_t word_index,
+        uint64_t address,
+        std::optional<uint64_t> write_data,
+        bool timeout,
+        uint64_t fault_cycles,
+        uint64_t stall_cycles) {
+    state.trap_addr = address;
+    state.ext_modifier = -1;
+    state.cycle_count += fault_cycles;
+    if (state.perf_enable) {
+        state.perf_cycles += fault_cycles;
+        state.perf_stalls += stall_cycles;
+    }
+    if (callbacks.tacc_external_phy_raise_fault) {
+        try {
+            callbacks.tacc_external_phy_raise_fault(
+                operation,
+                beat_index,
+                word_index,
+                address,
+                write_data,
+                timeout);
+        } catch (py::error_already_set& error) {
+            py::gil_scoped_acquire acquire;
+            py::object exception =
+                py::reinterpret_borrow<py::object>(
+                    error.value());
+            exception.attr("_mp64_accel_callback_error") =
+                py::bool_(true);
+            exception.attr("fault_cycles") =
+                py::int_(fault_cycles);
+            throw;
+        }
+        throw std::logic_error(
+            "external PHY fault callback returned");
+    }
+    throw std::runtime_error("TRAP:BUS_FAULT");
+}
+
+static bool native_tacc_transfer_external_beat(
+        CPUState& state,
+        const StepCallbacks& callbacks,
+        BusOperation operation,
+        uint8_t beat_index,
+        uint64_t address,
+        const NativeTaccSpan& span,
+        uint64_t operation_epoch,
+        uint8_t* data,
+        uint64_t& elapsed_phy_cycles) {
+    for (
+        std::size_t word = 0;
+        word < EXTERNAL_PHY_WORDS_PER_BEAT;
+        word++
+    ) {
+        const std::size_t byte_offset =
+            word * EXTERNAL_PHY_WORD_BYTES;
+        const uint64_t word_address =
+            address + static_cast<uint64_t>(byte_offset);
+        std::optional<uint64_t> write_data;
+        if (operation == BusOperation::WRITE) {
+            uint64_t value = 0;
+            for (
+                std::size_t byte = 0;
+                byte < EXTERNAL_PHY_WORD_BYTES;
+                byte++
+            ) {
+                value |= static_cast<uint64_t>(
+                    data[byte_offset + byte])
+                    << (8 * byte);
+            }
+            write_data = value;
+        }
+        const StepCallbacks::ExternalPhyResponse response =
+            native_tacc_external_phy_response(
+                callbacks,
+                operation,
+                beat_index,
+                static_cast<uint8_t>(word),
+                word_address,
+                write_data);
+        if (state.tacc_epoch != operation_epoch)
+            return false;
+
+        const bool timeout =
+            !response.responded ||
+            response.latency_cycles >
+                EXTERNAL_PHY_TIMEOUT_CYCLES;
+        const uint64_t latency =
+            timeout
+            ? EXTERNAL_PHY_TIMEOUT_CYCLES
+            : response.latency_cycles;
+        if (
+            latency >
+            std::numeric_limits<uint64_t>::max() -
+                elapsed_phy_cycles
+        ) {
+            throw std::overflow_error(
+                "external PHY elapsed-cycle accounting overflow");
+        }
+        elapsed_phy_cycles += latency;
+        if (timeout || response.error) {
+            const uint64_t issued_beats =
+                static_cast<uint64_t>(beat_index) + 1;
+            const uint64_t fault_cycles =
+                2 + elapsed_phy_cycles;
+            const uint64_t stall_cycles =
+                fault_cycles - (2 + issued_beats);
+            native_tacc_raise_external_phy_fault(
+                state,
+                callbacks,
+                operation,
+                beat_index,
+                static_cast<uint8_t>(word),
+                word_address,
+                write_data,
+                timeout,
+                fault_cycles,
+                stall_cycles);
+        }
+
+        if (
+            state.perf_enable &&
+            state.perf_extmem ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "external-memory performance counter overflow");
+        }
+        if (operation == BusOperation::READ) {
+            std::memcpy(
+                data + byte_offset,
+                span.data + byte_offset,
+                EXTERNAL_PHY_WORD_BYTES);
+        } else {
+            std::memcpy(
+                span.data + byte_offset,
+                data + byte_offset,
+                EXTERNAL_PHY_WORD_BYTES);
+            icache_invalidate_span(
+                state,
+                word_address,
+                EXTERNAL_PHY_WORD_BYTES);
+        }
+        if (state.perf_enable)
+            state.perf_extmem++;
+    }
+    return true;
+}
+
+static inline uint64_t native_tacc_image_read(
+        const std::array<uint8_t, TACC_IMAGE_BYTES>& image,
+        int lane,
+        int lane_bits) noexcept {
+    const int lane_bytes = lane_bits / 8;
+    const std::size_t offset =
+        static_cast<std::size_t>(lane * lane_bytes);
+    uint64_t value = 0;
+    for (int index = 0; index < lane_bytes; index++) {
+        value |= static_cast<uint64_t>(
+            image[offset + static_cast<std::size_t>(index)])
+            << (8 * index);
+    }
+    return value;
+}
+
+static inline void native_tacc_image_write(
+        std::array<uint8_t, TACC_IMAGE_BYTES>& image,
+        int lane,
+        int lane_bits,
+        uint64_t value) noexcept {
+    const int lane_bytes = lane_bits / 8;
+    const std::size_t offset =
+        static_cast<std::size_t>(lane * lane_bytes);
+    for (int index = 0; index < lane_bytes; index++) {
+        image[offset + static_cast<std::size_t>(index)] =
+            static_cast<uint8_t>(value >> (8 * index));
+    }
+}
+
+static inline int64_t native_tacc_sign_extend(
+        uint64_t value,
+        int bits) noexcept {
+    const uint64_t sign = 1ULL << (bits - 1);
+    if ((value & sign) == 0)
+        return static_cast<int64_t>(value);
+    return static_cast<int64_t>(
+        static_cast<__int128>(value) -
+        (static_cast<__int128>(1) << bits));
+}
+
+static int exec_native_tacc_lifecycle(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int source_selector,
+        uint8_t function_byte) {
+    const int function = function_byte & 0x7;
+    if (
+        source_selector != 0 ||
+        function_byte != function ||
+        function < 2 ||
+        function > 6
+    ) {
+        return -1;
+    }
+
+    if (function == 2) {
+        NativeTaccOperation operation(s);
+        if (s.tacc_owner == TACC_OWNER_NONE)
+            s.tacc_owner = s.core_id;
+        return operation.cancelled()
+            ? MEX_TACC_CANCELLED
+            : 0;
+    }
+
+    if (s.tacc_owner != s.core_id)
+        return -1;
+
+    if (function == 3 || function == 4) {
+        const int ew = s.tmode & 0x7;
+        if (!native_tacc_format_is_legal(ew))
+            return -1;
+        const int signed_mode =
+            native_tacc_format_signed(s, ew);
+
+        if (function == 3) {
+            NativeTaccOperation operation(s);
+            s.tacc.fill(0);
+            s.tacc_valid = true;
+            s.tacc_dirty = true;
+            s.tacc_format_ew =
+                static_cast<uint8_t>(ew);
+            s.tacc_format_signed =
+                static_cast<uint8_t>(signed_mode);
+            return operation.cancelled()
+                ? MEX_TACC_CANCELLED
+                : 0;
+        }
+
+        const uint64_t base = s.tsrc0;
+        NativeTaccSpan image_span;
+        if (
+            (base & 0x3F) != 0 ||
+            !native_tacc_resolve_span(
+                s,
+                base,
+                TACC_IMAGE_BYTES,
+                image_span)
+        ) {
+            return -1;
+        }
+
+        NativeTaccOperation operation(s);
+        const uint64_t operation_epoch =
+            s.tacc_epoch;
+        std::array<uint8_t, TACC_IMAGE_BYTES>
+            staged{};
+        uint64_t elapsed_phy_cycles = 0;
+        for (std::size_t beat = 0; beat < 4; beat++) {
+            Tile data{};
+            const std::size_t offset =
+                beat * TILE_BYTES;
+            NativeTaccSpan beat_span{
+                image_span.data + offset,
+                image_span.external_phy,
+            };
+            try {
+                const bool completed =
+                    image_span.external_phy
+                    ? native_tacc_transfer_external_beat(
+                        s,
+                        cb,
+                        BusOperation::READ,
+                        static_cast<uint8_t>(beat),
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        data.data(),
+                        elapsed_phy_cycles)
+                    : native_tacc_read_tile(
+                        s,
+                        cb,
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        data);
+                if (!completed) {
+                    return MEX_TACC_CANCELLED;
+                }
+            } catch (py::error_already_set& error) {
+                if (image_span.external_phy)
+                    throw;
+                native_tacc_annotate_callback_fault(
+                    s,
+                    error,
+                    3 + static_cast<int>(beat),
+                    base + offset);
+                throw;
+            }
+            std::copy(
+                data.begin(),
+                data.end(),
+                staged.begin() + offset);
+        }
+        const std::size_t active =
+            native_tacc_active_bytes(ew);
+        std::fill(
+            staged.begin() + active,
+            staged.end(),
+            0);
+        if (operation.cancelled())
+            return MEX_TACC_CANCELLED;
+        s.tacc = staged;
+        s.tacc_valid = true;
+        s.tacc_dirty = false;
+        s.tacc_format_ew =
+            static_cast<uint8_t>(ew);
+        s.tacc_format_signed =
+            static_cast<uint8_t>(signed_mode);
+        if (image_span.external_phy) {
+            const uint64_t stalls =
+                elapsed_phy_cycles - 4;
+            if (s.perf_enable)
+                s.perf_stalls += stalls;
+            return static_cast<int>(
+                elapsed_phy_cycles);
+        }
+        return 4;
+    }
+
+    if (function == 5) {
+        if (!s.tacc_valid)
+            return -1;
+        const uint64_t base = s.tdst;
+        NativeTaccSpan image_span;
+        if (
+            (base & 0x3F) != 0 ||
+            !native_tacc_resolve_span(
+                s,
+                base,
+                TACC_IMAGE_BYTES,
+                image_span)
+        ) {
+            return -1;
+        }
+
+        std::array<uint8_t, TACC_IMAGE_BYTES>
+            image = s.tacc;
+        const std::size_t active =
+            native_tacc_active_bytes(
+                s.tacc_format_ew);
+        std::fill(
+            image.begin() + active,
+            image.end(),
+            0);
+
+        NativeTaccOperation operation(s);
+        const uint64_t operation_epoch =
+            s.tacc_epoch;
+        uint64_t elapsed_phy_cycles = 0;
+        for (std::size_t beat = 0; beat < 4; beat++) {
+            const std::size_t offset =
+                beat * TILE_BYTES;
+            NativeTaccSpan beat_span{
+                image_span.data + offset,
+                image_span.external_phy,
+            };
+            try {
+                const bool completed =
+                    image_span.external_phy
+                    ? native_tacc_transfer_external_beat(
+                        s,
+                        cb,
+                        BusOperation::WRITE,
+                        static_cast<uint8_t>(beat),
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        image.data() + offset,
+                        elapsed_phy_cycles)
+                    : native_tacc_write_tile(
+                        s,
+                        cb,
+                        base + offset,
+                        beat_span,
+                        operation_epoch,
+                        image.data() + offset);
+                if (!completed) {
+                    return MEX_TACC_CANCELLED;
+                }
+            } catch (py::error_already_set& error) {
+                if (image_span.external_phy)
+                    throw;
+                native_tacc_annotate_callback_fault(
+                    s,
+                    error,
+                    3 + static_cast<int>(beat),
+                    base + offset);
+                throw;
+            }
+        }
+        if (operation.cancelled())
+            return MEX_TACC_CANCELLED;
+        s.tacc_dirty = false;
+        if (image_span.external_phy) {
+            const uint64_t stalls =
+                elapsed_phy_cycles - 4;
+            if (s.perf_enable)
+                s.perf_stalls += stalls;
+            return static_cast<int>(
+                elapsed_phy_cycles);
+        }
+        return 4;
+    }
+
+    NativeTaccOperation operation(s);
+    s.reset_tacc();
+    return 0;
+}
+
+static int exec_native_tacc_tamac(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int source_selector,
+        uint8_t function_byte,
+        int broadcast_reg) {
+    if (
+        function_byte != 0x06 ||
+        (
+            source_selector != 0 &&
+            source_selector != 1 &&
+            source_selector != 3
+        )
+    ) {
+        return -1;
+    }
+    if (
+        s.tacc_owner != s.core_id ||
+        !s.tacc_valid
+    ) {
+        return -1;
+    }
+
+    const int ew = s.tmode & 0x7;
+    if (!native_tacc_format_is_legal(ew))
+        return -1;
+    const int signed_mode =
+        native_tacc_format_signed(s, ew);
+    if (
+        s.tacc_format_ew != ew ||
+        s.tacc_format_signed != signed_mode
+    ) {
+        return -1;
+    }
+
+    // The Python integer oracle remains authoritative for every floating
+    // TACC form until a later landing supplies a bit-exact native FP path.
+    if (ew == EW_FP16 || ew == EW_BF16)
+        return -1;
+
+    uint64_t source_addresses[2]{};
+    int source_count = 0;
+    if (source_selector == 0) {
+        source_addresses[0] = s.tsrc0;
+        source_addresses[1] = s.tsrc1;
+        source_count = 2;
+    } else if (source_selector == 1) {
+        source_addresses[0] = s.tsrc0;
+        source_count = 1;
+    } else {
+        source_addresses[0] = s.tdst;
+        source_addresses[1] = s.tsrc0;
+        source_count = 2;
+    }
+
+    NativeTaccSpan source_spans[2]{};
+    for (int index = 0; index < source_count; index++) {
+        if (!native_tacc_resolve_span(
+                s,
+                source_addresses[index],
+                TILE_BYTES,
+                source_spans[index])) {
+            return -1;
+        }
+    }
+
+    NativeTaccOperation operation(s);
+    const uint64_t operation_epoch =
+        s.tacc_epoch;
+    Tile source_a{};
+    Tile source_b{};
+    try {
+        if (!native_tacc_read_tile(
+                s,
+                cb,
+                source_addresses[0],
+                source_spans[0],
+                operation_epoch,
+                source_a)) {
+            return MEX_TACC_CANCELLED;
+        }
+    } catch (py::error_already_set& error) {
+        native_tacc_annotate_callback_fault(
+            s,
+            error,
+            2,
+            source_addresses[0]);
+        throw;
+    }
+    if (source_selector == 1) {
+        const int source_bits = 8 << ew;
+        const int source_bytes = source_bits / 8;
+        const uint64_t source_mask =
+            source_bits == 64
+            ? MASK64
+            : (1ULL << source_bits) - 1;
+        const uint64_t scalar =
+            s.regs[broadcast_reg] & source_mask;
+        for (int lane = 0;
+             lane < static_cast<int>(
+                 TILE_BYTES / source_bytes);
+             lane++) {
+            tile_set_elem(
+                source_b,
+                lane,
+                source_bytes,
+                scalar);
+        }
+    } else {
+        try {
+            if (!native_tacc_read_tile(
+                    s,
+                    cb,
+                    source_addresses[1],
+                    source_spans[1],
+                    operation_epoch,
+                    source_b)) {
+                return MEX_TACC_CANCELLED;
+            }
+        } catch (py::error_already_set& error) {
+            native_tacc_annotate_callback_fault(
+                s,
+                error,
+                3,
+                source_addresses[1]);
+            throw;
+        }
+    }
+
+    std::array<uint8_t, TACC_IMAGE_BYTES>
+        staged = s.tacc;
+    const int source_bits = 8 << ew;
+    const int source_bytes = source_bits / 8;
+    const int accumulator_bits =
+        ew == EW_U8 ? 32 : 64;
+    const int lane_count =
+        static_cast<int>(TILE_BYTES * 8) /
+        source_bits;
+    for (int lane = 0; lane < lane_count; lane++) {
+        const uint64_t a = tile_get_elem(
+            source_a,
+            lane,
+            source_bytes);
+        const uint64_t b = tile_get_elem(
+            source_b,
+            lane,
+            source_bytes);
+        const uint64_t old =
+            native_tacc_image_read(
+                staged,
+                lane,
+                accumulator_bits);
+        uint64_t result = 0;
+        if (signed_mode) {
+            const __int128 product =
+                static_cast<__int128>(
+                    native_tacc_sign_extend(
+                        a,
+                        source_bits)) *
+                static_cast<__int128>(
+                    native_tacc_sign_extend(
+                        b,
+                        source_bits));
+            result = old +
+                static_cast<uint64_t>(product);
+        } else {
+            const __uint128_t product =
+                static_cast<__uint128_t>(a) *
+                static_cast<__uint128_t>(b);
+            result = old +
+                static_cast<uint64_t>(product);
+        }
+        if (accumulator_bits == 32)
+            result &= 0xFFFF'FFFFULL;
+        native_tacc_image_write(
+            staged,
+            lane,
+            accumulator_bits,
+            result);
+    }
+    const std::size_t active =
+        native_tacc_active_bytes(ew);
+    std::fill(
+        staged.begin() + active,
+        staged.end(),
+        0);
+    if (operation.cancelled())
+        return MEX_TACC_CANCELLED;
+    s.tacc = staged;
+    s.tacc_dirty = true;
+
+    const int source_cycles =
+        source_selector == 1 ? 1 : 2;
+    const int arithmetic_cycles =
+        ew == EW_U8 ? 4 :
+        ew == EW_U16 ? 2 : 1;
+    return source_cycles + arithmetic_cycles;
+}
+
 // ---------------------------------------------------------------------------
 //  MEX core — native only where behavior is exact and mutation-free fallback
 //  is possible.  Returning -1 asks the Python oracle to execute the operation.
 // ---------------------------------------------------------------------------
 
-static int exec_mex(CPUState& s, int n) {
+static int exec_mex(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int n) {
     int ss = (n >> 2) & 0x3;
     int op = n & 0x3;
 
@@ -5633,6 +8709,111 @@ static int exec_mex(CPUState& s, int n) {
     int broadcast_reg = -1;
     if (ss == 1)
         broadcast_reg = fetch8(s) & 0xF;
+
+    // Match raw TACC bytes before SS=imm8 normalizes its data byte to function
+    // zero, and before generic MEX can touch a tile, ACC, or destination.
+    // Strict-cycle replay publishes BUSY in advance and owns its exact tile
+    // timeline. The admitted image-transfer replay is recognized below;
+    // every other bus-access-backed invocation retains the Python
+    // continuation. Microcores likewise retain their cluster oracle.
+    const bool raw_tamac =
+        op == 0x1 &&
+        (
+            (
+                ss != 0x2 &&
+                (
+                    (funct_byte & 0x7) == 0x6 ||
+                    (funct_byte & 0x7) == 0x7
+                )
+            ) ||
+            (ss == 0x2 && funct_byte == 0x06)
+        );
+    const bool raw_tacc_lifecycle =
+        s.ext_modifier == 0x8 &&
+        op == 0x3 &&
+        (funct_byte & 0x7) >= 0x2;
+    if (cb.tacc_timed_transfer_replay) {
+        const int expected_function =
+            cb.tacc_timed_transfer_operation ==
+                BusOperation::READ
+            ? 0x4
+            : cb.tacc_timed_transfer_operation ==
+                    BusOperation::WRITE
+                ? 0x5
+                : -1;
+        if (
+            !raw_tacc_lifecycle ||
+            expected_function < 0 ||
+            ss != 0 ||
+            funct_byte != expected_function ||
+            s.profile != CoreProfile::FULL ||
+            s.tacc_owner != s.core_id ||
+            !s.tacc_busy ||
+            !TileMemoryTransport::valid_format(
+                cb.tacc_timed_transfer_format_ew,
+                cb.tacc_timed_transfer_format_signed)
+        ) {
+            throw std::logic_error(
+                "timed TACC image replay diverged from its "
+                "classified instruction");
+        }
+        if (cb.tacc_timed_transfer_faulted) {
+            s.trap_addr =
+                cb.tacc_timed_transfer_fault_address;
+            throw std::runtime_error(
+                "TRAP:BUS_FAULT");
+        }
+        // The registered transport has already performed all four physical
+        // beats and published any LOAD image atomically. Replaying the
+        // decoder here commits PC/performance state and the six-cycle base
+        // latency without repeating a target effect or releasing BUSY early.
+        return 4;
+    }
+    if (raw_tamac || raw_tacc_lifecycle) {
+        if (
+            cb.bus_access != nullptr ||
+            s.profile != CoreProfile::FULL ||
+            s.tacc_busy ||
+            s.tacc_force_pending ||
+            s.priv_level != 0
+        ) {
+            return -1;
+        }
+        if (raw_tamac) {
+            // An overridden route may run arbitrary Python policy and raise
+            // exception classes whose architectural translation belongs to
+            // the executable oracle. Keep that exceptional seam
+            // transactional; ordinary resolved buffers remain native.
+            if (cb.tacc_read_via_callback)
+                return -1;
+            return exec_native_tacc_tamac(
+                s,
+                cb,
+                ss,
+                funct_byte,
+                broadcast_reg);
+        }
+        const int lifecycle_function =
+            funct_byte & 0x7;
+        if (
+            cb.tacc_span_policy_override ||
+            (
+                lifecycle_function == 0x4 &&
+                cb.tacc_read_via_callback
+            ) ||
+            (
+                lifecycle_function == 0x5 &&
+                cb.tacc_write_via_callback
+            )
+        ) {
+            return -1;
+        }
+        return exec_native_tacc_lifecycle(
+            s,
+            cb,
+            ss,
+            funct_byte);
+    }
 
     int ew_bits = s.tmode & 0x7;
     bool is_fp = ew_bits >= EW_FP16;
@@ -5661,10 +8842,10 @@ static int exec_mex(CPUState& s, int n) {
 
     // Read source tiles
     Tile src_a{}, src_b{}, dst{};
-    tile_read_64bytes(s, s.tsrc0, src_a);
+    tile_read_64bytes(s, cb, s.tsrc0, src_a);
 
     if (ss == 0x0) {  // tile-tile
-        tile_read_64bytes(s, s.tsrc1, src_b);
+        tile_read_64bytes(s, cb, s.tsrc1, src_b);
     } else if (ss == 0x1) {  // broadcast
         uint64_t bval = (broadcast_reg >= 0) ? s.regs[broadcast_reg] : 0;
         uint64_t mask = (elem_bytes < 8) ? ((1ULL << (elem_bytes*8)) - 1) : MASK64;
@@ -5675,8 +8856,8 @@ static int exec_mex(CPUState& s, int n) {
         src_b = src_a;
         src_a.fill(funct_byte);
     } else {  // ss == 3, in-place
-        tile_read_64bytes(s, s.tdst, src_a);
-        tile_read_64bytes(s, s.tsrc0, src_b);
+        tile_read_64bytes(s, cb, s.tdst, src_a);
+        tile_read_64bytes(s, cb, s.tsrc0, src_b);
     }
 
     // Python's floating-point helpers own NaN payload/sign propagation and
@@ -5710,7 +8891,7 @@ static int exec_mex(CPUState& s, int n) {
             }
 
             if (op == 0x1 && (funct == 3 || funct == 4)) {
-                tile_read_64bytes(s, s.tdst, fp_existing);
+                tile_read_64bytes(s, cb, s.tdst, fp_existing);
                 fp_existing_loaded = true;
                 if (!tile_is_finite(fp_existing))
                     return -1;
@@ -5845,7 +9026,7 @@ static int exec_mex(CPUState& s, int n) {
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }
-        tile_write_64bytes(s, s.tdst, dst);
+        tile_write_64bytes(s, cb, s.tdst, dst);
         return 1;
     }
 
@@ -5893,7 +9074,7 @@ static int exec_mex(CPUState& s, int n) {
                 }
                 tile_set_elem(dst, lane, 2, r);
             }
-            tile_write_64bytes(s, s.tdst, dst);
+            tile_write_64bytes(s, cb, s.tdst, dst);
             return 0;
         }
 
@@ -5987,7 +9168,7 @@ static int exec_mex(CPUState& s, int n) {
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }
-        tile_write_64bytes(s, s.tdst, dst);
+        tile_write_64bytes(s, cb, s.tdst, dst);
         return 0;
     }
 
@@ -6000,7 +9181,7 @@ static int exec_mex(CPUState& s, int n) {
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fa * fb, ew_bits));
                 }
-                tile_write_64bytes(s, s.tdst, dst);
+                tile_write_64bytes(s, cb, s.tdst, dst);
                 return 1;
             }
             if (funct == 1) {  // DOT — FP16/BF16 → FP32 accumulate
@@ -6035,34 +9216,34 @@ static int exec_mex(CPUState& s, int n) {
                     else
                         tile_set_elem(dst1, lane - 16, 4, fp32bits);
                 }
-                tile_write_64bytes(s, s.tdst, dst0);
-                tile_write_64bytes(s, s.tdst + 64, dst1);
+                tile_write_64bytes(s, cb, s.tdst, dst0);
+                tile_write_64bytes(s, cb, s.tdst + 64, dst1);
                 return 2;
             }
             if (funct == 3) {  // MAC — fp mul-accumulate: dst += a*b
                 // Preloaded by the transactional finite-input check above.
                 if (!fp_existing_loaded)
-                    tile_read_64bytes(s, s.tdst, fp_existing);
+                    tile_read_64bytes(s, cb, s.tdst, fp_existing);
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fc + fa * fb, ew_bits));
                 }
-                tile_write_64bytes(s, s.tdst, dst);
+                tile_write_64bytes(s, cb, s.tdst, dst);
                 return 2;
             }
             if (funct == 4) {  // FMA — dst = a*b + dst
                 // Preloaded by the transactional finite-input check above.
                 if (!fp_existing_loaded)
-                    tile_read_64bytes(s, s.tdst, fp_existing);
+                    tile_read_64bytes(s, cb, s.tdst, fp_existing);
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fa * fb + fc, ew_bits));
                 }
-                tile_write_64bytes(s, s.tdst, dst);
+                tile_write_64bytes(s, cb, s.tdst, dst);
                 return 2;
             }
             if (funct == 5) {  // DOTACC — 4-way chunked dot, FP32 accumulate
@@ -6112,7 +9293,7 @@ static int exec_mex(CPUState& s, int n) {
                 }
                 tile_set_elem(dst, lane, elem_bytes, r);
             }
-            tile_write_64bytes(s, s.tdst, dst);
+            tile_write_64bytes(s, cb, s.tdst, dst);
             return 1;
         }
         // Non-MUL integer functions were routed to Python before source reads.
@@ -6228,19 +9409,6 @@ static int exec_mex(CPUState& s, int n) {
 //  py_on_output is callback for OUT port instruction
 //  py_csr_read/write override CSR access (for IPI patching in system.py)
 // ---------------------------------------------------------------------------
-
-struct StepCallbacks {
-    std::function<uint8_t(uint64_t)> mmio_read8;
-    std::function<void(uint64_t, uint8_t)> mmio_write8;
-    std::function<void(int, int)> on_output;   // (port, value)
-    // CSR overrides for system-level patching (IPI etc.)
-    std::function<uint64_t(int)> csr_read_override;  // returns value, or -1 for default
-    uint64_t mmio_start;
-    uint64_t mmio_end;
-    bool has_mmio;
-    ResumableBusAccess* bus_access = nullptr;
-    bool strict_cycle_dma = false;
-};
 
 struct DmaEndpointCallbacks {
     int requester_id = 0;
@@ -8066,15 +11234,392 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
 struct SystemInstructionTraits {
     bool needs_bus_journal = false;
     bool has_unjournaled_shared_access = false;
+    uint64_t unjournaled_cycle_bound = 0;
+    bool tacc_python_fallback = false;
+    bool tacc_publish_busy = false;
+    bool tacc_validation_trap_expected = false;
+    bool tacc_timed_image_transfer = false;
+    BusOperation tacc_timed_operation = BusOperation::READ;
+    uint64_t tacc_timed_base_address = 0;
+    uint8_t tacc_timed_format_ew = 0;
+    bool tacc_timed_format_signed = false;
+    bool tacc_timed_external_phy = false;
 };
+
+static bool tacc_mode_is_legal(const CPUState& state) noexcept {
+    const int ew = state.tmode & 0x7;
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16 ||
+        ew == EW_U32 ||
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    );
+}
+
+static bool tacc_mode_matches_latched_format(
+        const CPUState& state) noexcept {
+    if (!tacc_mode_is_legal(state))
+        return false;
+    const int ew = state.tmode & 0x7;
+    const int signed_mode =
+        ew == EW_FP16 || ew == EW_BF16
+        ? 0
+        : (state.tmode >> 4) & 0x1;
+    return (
+        state.tacc_format_ew == ew &&
+        state.tacc_format_signed == signed_mode
+    );
+}
+
+static bool native_tacc_span_preflight_valid(
+        const CPUState& state,
+        uint64_t address,
+        uint64_t size) noexcept {
+    if (
+        state.memory == nullptr ||
+        size == 0 ||
+        size - 1 >
+            std::numeric_limits<uint64_t>::max() -
+                address
+    ) {
+        return false;
+    }
+    constexpr uint64_t TACC_MMIO_START =
+        0xFFFF'FF00'0000'0000ULL;
+    constexpr uint64_t TACC_MMIO_END =
+        0xFFFF'FF80'0000'0000ULL;
+    const uint64_t last_address = address + (size - 1);
+    if (
+        address < TACC_MMIO_END &&
+        last_address >= TACC_MMIO_START
+    ) {
+        return false;
+    }
+
+    const auto resolve_region =
+        [address, last_address](
+                const uint8_t* memory,
+                uint64_t base,
+                uint64_t region_size) noexcept {
+            if (
+                memory == nullptr ||
+                region_size == 0 ||
+                region_size - 1 >
+                    std::numeric_limits<uint64_t>::max() -
+                        base
+            ) {
+                return 0;
+            }
+            const uint64_t region_last =
+                base + (region_size - 1);
+            if (address < base || address > region_last)
+                return 0;
+            return last_address <= region_last ? 1 : -1;
+        };
+
+    bool routed = false;
+    bool routed_to_hbw = false;
+    int result = resolve_region(
+        state.memory->vram_mem,
+        state.memory->vram_base,
+        state.memory->vram_size);
+    if (result != 0) {
+        if (result < 0)
+            return false;
+        routed = true;
+    }
+    if (!routed) {
+        result = resolve_region(
+            state.memory->ext_mem,
+            state.memory->ext_mem_base,
+            state.memory->ext_mem_size);
+        if (result != 0) {
+            if (result < 0)
+                return false;
+            routed = true;
+        }
+    }
+    if (!routed) {
+        result = resolve_region(
+            state.memory->hbw_mem,
+            state.memory->hbw_base,
+            state.memory->hbw_size);
+        if (result != 0) {
+            if (result < 0)
+                return false;
+            routed = true;
+            routed_to_hbw = true;
+        }
+    }
+    if (!routed) {
+        result = resolve_region(
+            state.memory->mem,
+            0,
+            state.memory->mem_size);
+        if (result <= 0)
+            return false;
+        routed = true;
+    }
+    if (state.priv_level) {
+        if (routed_to_hbw)
+            return false;
+        if (
+            state.mpu_limit > state.mpu_base &&
+            (
+                address < state.mpu_base ||
+                last_address >= state.mpu_limit
+            )
+        ) {
+            return false;
+        }
+    }
+    return routed;
+}
+
+static uint64_t native_tamac_cycle_bound(
+        const CPUState& state,
+        int source_selector) noexcept {
+    const int ew = state.tmode & 0x7;
+    const bool broadcast = source_selector == 0x1;
+    if (ew == EW_U8)
+        return broadcast ? 6 : 7;
+    if (ew == EW_U16)
+        return broadcast ? 4 : 5;
+    if (ew == EW_U32)
+        return broadcast ? 3 : 4;
+    if (ew == EW_FP16 || ew == EW_BF16)
+        return broadcast ? 6 : 7;
+    return 1;
+}
+
+static SystemInstructionTraits native_tacc_instruction_traits(
+        CPUState& state,
+        uint64_t opcode_address,
+        int modifier,
+        int subop) {
+    const int source_selector = (subop >> 2) & 0x3;
+    const int operation = subop & 0x3;
+    const uint8_t function_byte =
+        icache_peek_byte_without_accounting(
+            state,
+            opcode_address + 1);
+
+    const bool raw_tamac =
+        operation == 0x1 &&
+        (
+            (
+                source_selector != 0x2 &&
+                (
+                    (function_byte & 0x7) == 0x6 ||
+                    (function_byte & 0x7) == 0x7
+                )
+            ) ||
+            (
+                source_selector == 0x2 &&
+                function_byte == 0x06
+            )
+        );
+    const bool raw_lifecycle =
+        modifier == 0x8 &&
+        operation == 0x3 &&
+        (function_byte & 0x7) >= 0x2;
+    if (!raw_tamac && !raw_lifecycle)
+        return {};
+
+    const int lifecycle_function = function_byte & 0x7;
+    const bool raw_lifecycle_transfer =
+        raw_lifecycle &&
+        (
+            lifecycle_function == 0x4 ||
+            lifecycle_function == 0x5
+        );
+    // A rejected operation reaches only its architected validation boundary:
+    // one cycle for lifecycle control, two for TAMAC or an image transfer.
+    // Admission below replaces this bound with the exact normal latency.
+    SystemInstructionTraits traits{
+        false,
+        true,
+        raw_tamac || raw_lifecycle_transfer
+            ? 2ULL
+            : 1ULL,
+        true,
+        false,
+        true,
+    };
+    if (raw_tamac) {
+        const bool canonical =
+            source_selector != 0x2 &&
+            function_byte == 0x06 &&
+            (
+                source_selector == 0x0 ||
+                source_selector == 0x1 ||
+                source_selector == 0x3
+            );
+        bool source_spans_valid = false;
+        if (source_selector == 0x0) {
+            source_spans_valid =
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tsrc0,
+                    64) &&
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tsrc1,
+                    64);
+        } else if (source_selector == 0x1) {
+            source_spans_valid =
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tsrc0,
+                    64);
+        } else if (source_selector == 0x3) {
+            source_spans_valid =
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tdst,
+                    64) &&
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tsrc0,
+                    64);
+        }
+        const bool admitted =
+            canonical &&
+            state.tacc_owner == state.core_id &&
+            state.tacc_valid &&
+            tacc_mode_matches_latched_format(state) &&
+            !state.tacc_busy &&
+            !state.tacc_force_pending &&
+            source_spans_valid;
+        if (admitted) {
+            traits.unjournaled_cycle_bound =
+                native_tamac_cycle_bound(
+                    state,
+                    source_selector);
+            traits.tacc_publish_busy = true;
+            traits.tacc_validation_trap_expected = false;
+        }
+        return traits;
+    }
+
+    const int function = function_byte & 0x7;
+    const bool canonical =
+        source_selector == 0x0 &&
+        function_byte == function &&
+        function >= 0x2 &&
+        function <= 0x6;
+    if (!canonical)
+        return traits;
+
+    bool admitted = false;
+    switch (function) {
+        case 0x2:  // TACC.TRY
+            admitted =
+                !state.tacc_busy &&
+                !state.tacc_force_pending;
+            break;
+        case 0x3:  // TACC.CLEAR
+            admitted =
+                state.tacc_owner == state.core_id &&
+                tacc_mode_is_legal(state) &&
+                !state.tacc_busy &&
+                !state.tacc_force_pending;
+            break;
+        case 0x4:  // TACC.LOAD
+            admitted =
+                state.tacc_owner == state.core_id &&
+                tacc_mode_is_legal(state) &&
+                (state.tsrc0 & 0x3F) == 0 &&
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tsrc0,
+                    TACC_IMAGE_BYTES) &&
+                !state.tacc_busy &&
+                !state.tacc_force_pending;
+            break;
+        case 0x5:  // TACC.STORE
+            admitted =
+                state.tacc_owner == state.core_id &&
+                state.tacc_valid &&
+                TileMemoryTransport::valid_format(
+                    state.tacc_format_ew,
+                    state.tacc_format_signed != 0) &&
+                (state.tdst & 0x3F) == 0 &&
+                native_tacc_span_preflight_valid(
+                    state,
+                    state.tdst,
+                    TACC_IMAGE_BYTES) &&
+                !state.tacc_busy &&
+                !state.tacc_force_pending;
+            break;
+        case 0x6:  // TACC.RELEASE
+            admitted =
+                state.tacc_owner == state.core_id &&
+                !state.tacc_busy &&
+                !state.tacc_force_pending;
+            break;
+        default:
+            break;
+    }
+    if (admitted) {
+        traits.unjournaled_cycle_bound =
+            function == 0x4 || function == 0x5
+            ? 6
+            : 2;
+        traits.tacc_publish_busy = true;
+        traits.tacc_validation_trap_expected = false;
+        if (function == 0x4 || function == 0x5) {
+            traits.has_unjournaled_shared_access = false;
+            traits.tacc_python_fallback = false;
+            traits.tacc_timed_image_transfer = true;
+            traits.tacc_timed_operation =
+                function == 0x4
+                ? BusOperation::READ
+                : BusOperation::WRITE;
+            traits.tacc_timed_base_address =
+                function == 0x4
+                ? state.tsrc0
+                : state.tdst;
+            NativeTaccSpan image_span;
+            if (!native_tacc_resolve_span(
+                    state,
+                    traits.tacc_timed_base_address,
+                    TACC_IMAGE_BYTES,
+                    image_span)) {
+                throw std::logic_error(
+                    "admitted TACC image span could not be resolved");
+            }
+            traits.tacc_timed_external_phy =
+                image_span.external_phy;
+            if (function == 0x4) {
+                const int ew = state.tmode & 0x7;
+                traits.tacc_timed_format_ew =
+                    static_cast<uint8_t>(ew);
+                traits.tacc_timed_format_signed =
+                    native_tacc_format_signed(
+                        state,
+                        ew) != 0;
+            } else {
+                traits.tacc_timed_format_ew =
+                    state.tacc_format_ew;
+                traits.tacc_timed_format_signed =
+                    state.tacc_format_signed != 0;
+            }
+        }
+    }
+    return traits;
+}
 
 static SystemInstructionTraits classify_system_instruction(
         CPUState& state) {
     uint64_t address = pc(state);
+    uint64_t opcode_address = address;
     uint8_t opcode =
         icache_peek_byte_without_accounting(state, address);
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
+    int modifier = -1;
 
     if (family == 0xF) {
         if (subop == 0x9 || subop == 0xA)
@@ -8082,8 +11627,12 @@ static SystemInstructionTraits classify_system_instruction(
         if (subop == 0xB)
             return {true, false};
 
+        modifier = subop;
+        opcode_address = address + 1;
         opcode =
-            icache_peek_byte_without_accounting(state, address + 1);
+            icache_peek_byte_without_accounting(
+                state,
+                opcode_address);
         family = (opcode >> 4) & 0xF;
         subop = opcode & 0xF;
         if (family == 0xF && (subop == 0x9 || subop == 0xA))
@@ -8128,8 +11677,23 @@ static SystemInstructionTraits classify_system_instruction(
     }
     if (family == 0x9 && subop != 0x0 && subop != 0x8)
         return {true, false};
-    if (family == 0xE)
-        return {false, true};
+    if (family == 0xE) {
+        const SystemInstructionTraits tacc =
+            native_tacc_instruction_traits(
+                state,
+                opcode_address,
+                modifier,
+                subop);
+        if (
+            tacc.tacc_python_fallback ||
+            tacc.tacc_timed_image_transfer
+        ) {
+            return tacc;
+        }
+        // Ordinary full-core MEX traffic is replayed through the independent
+        // 64-byte tile-memory journal in strict cycle mode.
+        return {};
+    }
     return {};
 }
 
@@ -9119,7 +12683,11 @@ static int step_one(
     }
 
     case 0xE: {  // MEX
-        int rc = exec_mex(s, n);
+        int rc = exec_mex(s, cb, n);
+        if (rc == MEX_TACC_CANCELLED) {
+            s.ext_modifier = -1;
+            return 0;
+        }
         if (rc < 0) {
             // FP tile op — rewind PC to the start of the instruction
             // (including any EXT prefix) so the Python fallback can
@@ -10336,6 +13904,7 @@ struct RunResult {
     int steps_executed;
     int stop_reason;
     int trap_id;
+    bool tacc_cancelled = false;
 };
 
 enum RunStopReason {
@@ -10373,6 +13942,10 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
 
         try {
             int cycles = step_one(s, cb);
+            if (cycles == 0) {
+                result.tacc_cancelled = true;
+                break;
+            }
             result.total_cycles += cycles;
             result.steps_executed++;
         } catch (const std::runtime_error& e) {
@@ -10449,6 +14022,9 @@ struct PendingClusterRequest {
     ClusterResourceKind resource =
         ClusterResourceKind::NONE;
     int operation = -1;
+    bool sha_transaction = false;
+    bool sha_lock_protected = false;
+    bool tacc_request = false;
     int continuation_reason = RUN_EXT_FALLBACK;
     uint8_t encoding_length = 0;
     std::array<uint8_t, 16> encoding{};
@@ -10480,6 +14056,7 @@ struct CoreFrontierOutcome {
     bool coordinator_state_changed = false;
     std::vector<int> interrupt_cores;
     std::vector<int> cluster_deferred_cores;
+    std::vector<int> cluster_round_deferred_cores;
     std::vector<int> cluster_lost_cores;
     std::vector<FrontierCreditTransfer>
         cluster_credit_transfers;
@@ -10656,18 +14233,71 @@ static PendingClusterRequest classify_pending_cluster_request(
                 decoded_length = 2;
             }
             break;
+        case 0xD: {
+            const uint8_t csr =
+                read_instruction_byte(address + 1);
+            const bool shared_acc =
+                csr >= CSR_ACC0 && csr <= CSR_ACC3;
+            const bool shared_sha =
+                csr == CSR_SHA_MODE ||
+                csr == CSR_SHA_MSGLEN ||
+                csr == CSR_SHA_MSGLEN_HI;
+            if (shared_acc || shared_sha) {
+                request.resource =
+                    ClusterResourceKind::TILE_ENGINE;
+                request.sha_lock_protected = true;
+                request.operation =
+                    (static_cast<int>(opcode) << 8) |
+                    static_cast<int>(csr);
+                decoded_length = 2;
+            }
+            break;
+        }
         case 0xE: {
-            request.resource = ClusterResourceKind::MEX;
+            request.resource =
+                ClusterResourceKind::TILE_ENGINE;
             request.operation = subop;
             const uint8_t function =
                 read_instruction_byte(address + 1);
             const int source_selector =
                 (subop >> 2) & 0x3;
-            const int mex_operation = subop & 0x3;
+            const int mex_operation =
+                subop & 0x3;
             const int effective_function =
                 source_selector == 0x2
                 ? 0
                 : function & 0x7;
+            request.tacc_request =
+                (
+                    mex_operation == 0x1 &&
+                    (
+                        (
+                            source_selector != 0x2 &&
+                            (
+                                (function & 0x7) == 0x6 ||
+                                (function & 0x7) == 0x7
+                            )
+                        ) ||
+                        (
+                            source_selector == 0x2 &&
+                            function == 0x06
+                        )
+                    )
+                ) ||
+                (
+                    modifier == 0x8 &&
+                    mex_operation == 0x3 &&
+                    (function & 0x7) >= 0x2
+                );
+            request.sha_lock_protected =
+                mex_operation == 0x2 ||
+                (
+                    mex_operation == 0x1 &&
+                    (
+                        effective_function == 0x1 ||
+                        effective_function == 0x5
+                    )
+                );
             decoded_length =
                 2 +
                 (source_selector == 0x1 ? 1 : 0) +
@@ -10701,7 +14331,9 @@ static PendingClusterRequest classify_pending_cluster_request(
                     request.operation <= 0x6
                 ) {
                     request.resource =
-                        ClusterResourceKind::SHA;
+                        ClusterResourceKind::TILE_ENGINE;
+                    request.sha_transaction = true;
+                    request.sha_lock_protected = true;
                     decoded_length =
                         (
                             request.operation == 0x1 ||
@@ -11154,13 +14786,124 @@ static uint64_t checked_cycle_add(
     return cycle + delta;
 }
 
+static bool restore_cycle_instruction_checkpoint(
+        ResumableInstruction& instruction,
+        CPUState& core) {
+    const bool tacc_managed_instruction =
+        instruction.tacc_python_fallback ||
+        instruction.tacc_timed_image_transfer;
+    // The epoch protects validation-only fallbacks too. They do not publish
+    // BUSY, but restoring their pre-reset checkpoint would still resurrect
+    // detached PC/register state.
+    if (
+        tacc_managed_instruction &&
+        core.tacc_epoch != instruction.tacc_operation_epoch
+    ) {
+        return false;
+    }
+    if (!tacc_managed_instruction) {
+        instruction.checkpoint.restore(core);
+        return true;
+    }
+
+    const std::array<uint8_t, TACC_IMAGE_BYTES> live_image =
+        core.tacc;
+    const uint8_t live_owner = core.tacc_owner;
+    const bool live_valid = core.tacc_valid;
+    const bool live_dirty = core.tacc_dirty;
+    const uint8_t live_format_ew =
+        core.tacc_format_ew;
+    const uint8_t live_format_signed =
+        core.tacc_format_signed;
+    const bool live_busy = core.tacc_busy;
+    const bool live_force_pending =
+        core.tacc_force_pending;
+    const uint64_t live_epoch = core.tacc_epoch;
+    const uint64_t live_perf_extmem =
+        core.perf_extmem;
+    instruction.checkpoint.restore(core);
+    core.tacc = live_image;
+    core.tacc_owner = live_owner;
+    core.tacc_valid = live_valid;
+    core.tacc_dirty = live_dirty;
+    core.tacc_format_ew = live_format_ew;
+    core.tacc_format_signed = live_format_signed;
+    core.tacc_busy = live_busy;
+    core.tacc_force_pending = live_force_pending;
+    core.tacc_epoch = live_epoch;
+    core.perf_extmem = live_perf_extmem;
+    if (
+        instruction.tacc_timed_image_transfer &&
+        instruction.tacc_timed_operation ==
+            BusOperation::WRITE
+    ) {
+        if (
+            instruction.tacc_timed_acknowledged_beats >
+                TileMemoryTransport::IMAGE_BEATS
+        ) {
+            throw std::logic_error(
+                "timed TACC STORE acknowledged too many beats");
+        }
+        if (instruction.tacc_timed_external_phy) {
+            if (
+                instruction.
+                    tacc_timed_external_acknowledged_words >
+                TileMemoryTransport::IMAGE_BEATS *
+                    EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                throw std::logic_error(
+                    "timed external TACC STORE "
+                    "acknowledged too many PHY words");
+            }
+            for (
+                uint8_t word = 0;
+                word < instruction.
+                    tacc_timed_external_acknowledged_words;
+                word++
+            ) {
+                icache_invalidate_span(
+                    core,
+                    instruction.tacc_timed_base_address +
+                        static_cast<uint64_t>(word) *
+                            EXTERNAL_PHY_WORD_BYTES,
+                    EXTERNAL_PHY_WORD_BYTES);
+            }
+        } else {
+            for (
+                uint8_t beat = 0;
+                beat <
+                    instruction.tacc_timed_acknowledged_beats;
+                beat++
+            ) {
+                icache_invalidate_span(
+                    core,
+                    instruction.tacc_timed_base_address +
+                        static_cast<uint64_t>(beat) *
+                            TileMemoryTransport::BEAT_BYTES,
+                    TileMemoryTransport::BEAT_BYTES);
+            }
+        }
+    }
+    return true;
+}
+
+static void finish_cycle_tacc_terminal(CPUState& core) noexcept {
+    core.tacc_busy = false;
+    if (core.tacc_force_pending)
+        core.reset_tacc();
+}
+
 static RunResult run_one_system_instruction(
         CPUState& core,
         const StepCallbacks& callbacks) {
     RunResult result{0, 0, RUN_LIMIT, -1};
     try {
         result.total_cycles = step_one(core, callbacks);
-        result.steps_executed = 1;
+        if (result.total_cycles == 0) {
+            result.tacc_cancelled = true;
+        } else {
+            result.steps_executed = 1;
+        }
     } catch (const std::runtime_error& error) {
         const std::string what = error.what();
         if (what == "HALT") {
@@ -11218,6 +14961,7 @@ static void execute_cycle_interrupt_entry(
 enum class CycleCoreProgress {
     RETIRED,
     WAITING_BUS,
+    WAITING_TILE,
     BLOCKED_BY_CYCLE_LIMIT,
     TERMINAL,
 };
@@ -11244,6 +14988,49 @@ static uint64_t pending_guest_instruction_count(
         }));
 }
 
+static void discard_stale_cycle_tacc_transfers(
+        SystemState& system,
+        uint64_t current_cycle) {
+    for (std::size_t index = 0;
+         index < system.cores.size();
+         index++) {
+        const CPUState& core = *system.cores[index];
+        const FullCoreCycleState& cycle_state =
+            system.full_core_cycle_states[index];
+        const bool stale_instruction =
+            cycle_state.instruction &&
+            cycle_state.instruction->
+                tacc_timed_image_transfer &&
+            core.tacc_epoch !=
+                cycle_state.instruction->
+                    tacc_operation_epoch;
+        const int engine_id =
+            system.tacc_engine_for_core(core.core_id);
+        const TaccEngineTransportState& transport_state =
+            system.tile_memory_transport.engines[
+                static_cast<std::size_t>(engine_id)];
+        const bool live_transport =
+            transport_state.phase ==
+                TaccTransportPhase::WAITING_STAGE ||
+            transport_state.phase ==
+                TaccTransportPhase::ACTIVE;
+        const bool stale_transport =
+            live_transport &&
+            !system.tile_transport_identity_is_live(
+                engine_id,
+                transport_state.identity.owner_core_id,
+                transport_state.identity.engine_epoch,
+                transport_state.identity.caller_epoch);
+        if (!stale_instruction && !stale_transport)
+            continue;
+
+        system.cancel_tacc_image_stage_for_core(
+            core.core_id);
+        system.full_core_cycle_states[index].ready_cycle =
+            current_cycle;
+    }
+}
+
 static CycleCoreProgress run_cycle_interrupt_once(
         SystemState& system,
         int core_index,
@@ -11264,6 +15051,7 @@ static CycleCoreProgress run_cycle_interrupt_once(
     }
     operation->checkpoint.restore(core);
     operation->replay_cursor = 0;
+    operation->access_order_replay_cursor = 0;
     JournaledBusAccess bus_access(system, core_index);
     StepCallbacks callbacks = base_callbacks;
     callbacks.bus_access = &bus_access;
@@ -11279,6 +15067,13 @@ static CycleCoreProgress run_cycle_interrupt_once(
             core,
             operation->interrupt_vector,
             callbacks);
+        if (
+            operation->access_order_replay_cursor !=
+                operation->completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "cycle interrupt left shared-access order unconsumed");
+        }
 
         uint64_t completion_cycle = operation->start_cycle;
         if (!operation->completed_accesses.empty()) {
@@ -11366,6 +15161,25 @@ static CycleCoreProgress run_cycle_core_once(
     CPUState& core = *system.cores[index];
     FullCoreCycleState& cycle_state =
         system.full_core_cycle_states[index];
+    const auto discard_cancelled_tacc_instruction = [&]() {
+        if (
+            !cycle_state.instruction ||
+            (
+                !cycle_state.instruction->
+                    tacc_python_fallback &&
+                !cycle_state.instruction->
+                    tacc_timed_image_transfer
+            )
+        ) {
+            throw std::logic_error(
+                "TACC cancellation has no suspended operation");
+        }
+        system.cancel_tacc_image_stage_for_core(core.core_id);
+        cycle_state.ready_cycle =
+            system.shared_clock.cycles();
+        cycle_state.instruction.reset();
+        system.refresh_cycle_execution_pending();
+    };
 
     if (cycle_state.instruction &&
         cycle_state.instruction->kind ==
@@ -11377,6 +15191,19 @@ static CycleCoreProgress run_cycle_core_once(
             batch_result);
     }
 
+    if (
+        cycle_state.instruction &&
+        (
+            cycle_state.instruction->tacc_python_fallback ||
+            cycle_state.instruction->
+                tacc_timed_image_transfer
+        ) &&
+        core.tacc_epoch !=
+            cycle_state.instruction->tacc_operation_epoch
+    ) {
+        discard_cancelled_tacc_instruction();
+        return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+    }
     if (core.halted)
         return CycleCoreProgress::TERMINAL;
     if (core.idle)
@@ -11387,13 +15214,19 @@ static CycleCoreProgress run_cycle_core_once(
     }
 
     if (!cycle_state.instruction) {
-        const SystemInstructionTraits traits =
+        SystemInstructionTraits traits =
             classify_system_instruction(core);
-        if (traits.has_unjournaled_shared_access) {
-            throw std::runtime_error(
-                "cycle-bounded execution does not yet support "
-                "MEX shared-memory operations because the selected "
-                "full-core tile topology remains unresolved");
+        if (
+            traits.tacc_timed_image_transfer &&
+            base_callbacks.tacc_span_policy_override
+        ) {
+            // The private Python policy hook has no deterministic,
+            // checkpointable strict-cycle protocol.  Refuse it before
+            // publishing BUSY or transport state instead of predicting a
+            // six-cycle continuation whose policy fault may complete in two.
+            throw std::invalid_argument(
+                "strict-cycle TACC image transfers do not support "
+                "a custom span validator");
         }
         const uint64_t remaining =
             cycle_deadline - cycle_state.ready_cycle;
@@ -11408,10 +15241,134 @@ static CycleCoreProgress run_cycle_core_once(
                 true,
                 std::memory_order_release);
         }
+        if (traits.tacc_python_fallback) {
+            if (!cycle_state.instruction) {
+                throw std::logic_error(
+                    "cycle-bounded TACC fallback lacks a checkpoint");
+            }
+            ResumableInstruction& instruction =
+                *cycle_state.instruction;
+            instruction.tacc_python_fallback = true;
+            instruction.tacc_busy_published =
+                traits.tacc_publish_busy;
+            instruction.tacc_validation_trap_expected =
+                traits.tacc_validation_trap_expected;
+            instruction.tacc_operation_epoch =
+                core.tacc_epoch;
+            const uint64_t predicted_completion =
+                checked_cycle_add(
+                    instruction.start_cycle,
+                    traits.unjournaled_cycle_bound,
+                    "cycle-bounded TACC completion");
+            instruction.retire_cycle =
+                predicted_completion;
+            cycle_state.ready_cycle =
+                predicted_completion;
+            if (traits.tacc_publish_busy)
+                core.tacc_busy = true;
+        }
+        if (traits.tacc_timed_image_transfer) {
+            if (!cycle_state.instruction) {
+                throw std::logic_error(
+                    "timed TACC transfer lacks a checkpoint");
+            }
+            if (
+                cycle_state.next_tile_operation_token ==
+                    std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "timed TACC operation token overflow");
+            }
+
+            ResumableInstruction& instruction =
+                *cycle_state.instruction;
+            const int engine_id =
+                system.tacc_engine_for_core(core.core_id);
+            const uint64_t operation_token =
+                cycle_state.next_tile_operation_token;
+            std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+            if (
+                traits.tacc_timed_operation ==
+                    BusOperation::WRITE
+            ) {
+                image = core.tacc;
+                const std::size_t active =
+                    native_tacc_active_bytes(
+                        traits.tacc_timed_format_ew);
+                std::fill(
+                    image.begin() +
+                        static_cast<std::ptrdiff_t>(active),
+                    image.end(),
+                    0);
+            }
+
+            try {
+                (void)system.tile_memory_transport.start(
+                    engine_id,
+                    core.core_id,
+                    traits.tacc_timed_operation ==
+                            BusOperation::READ
+                        ? TaccImageTransferStage::Direction::LOAD
+                        : TaccImageTransferStage::Direction::STORE,
+                    traits.tacc_timed_base_address,
+                    traits.tacc_timed_format_ew,
+                    traits.tacc_timed_format_signed,
+                    core.tacc_epoch,
+                    0,
+                    operation_token,
+                    instruction.start_cycle,
+                    image);
+            } catch (...) {
+                cycle_state.instruction.reset();
+                system.refresh_cycle_execution_pending();
+                throw;
+            }
+
+            instruction.tacc_timed_image_transfer = true;
+            instruction.tacc_timed_operation =
+                traits.tacc_timed_operation;
+            instruction.tacc_timed_operation_token =
+                operation_token;
+            instruction.tacc_timed_base_address =
+                traits.tacc_timed_base_address;
+            instruction.tacc_timed_format_ew =
+                traits.tacc_timed_format_ew;
+            instruction.tacc_timed_format_signed =
+                traits.tacc_timed_format_signed;
+            instruction.tacc_timed_external_phy =
+                traits.tacc_timed_external_phy;
+            instruction.tacc_operation_epoch =
+                core.tacc_epoch;
+            instruction.tacc_busy_published = true;
+            cycle_state.next_tile_operation_token++;
+            core.tacc_busy = true;
+            system.refresh_cycle_execution_pending();
+            return CycleCoreProgress::WAITING_TILE;
+        }
+        if (
+            traits.has_unjournaled_shared_access &&
+            remaining < traits.unjournaled_cycle_bound
+        ) {
+            // The bounded Python TACC continuation already published its
+            // immutable completion frontier above. Preserve the original
+            // issue boundary until that complete operation fits.
+            if (!cycle_state.instruction) {
+                throw std::logic_error(
+                    "cycle-bounded shared access lacks a checkpoint");
+            }
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
     }
 
     ResumableInstruction* instruction =
         cycle_state.instruction.get();
+    if (
+        instruction &&
+        instruction->tacc_timed_image_transfer &&
+        !instruction->tacc_timed_transfer_complete
+    ) {
+        return CycleCoreProgress::WAITING_TILE;
+    }
     if (instruction &&
         instruction->retire_cycle.has_value() &&
         *instruction->retire_cycle > cycle_deadline) {
@@ -11428,13 +15385,58 @@ static CycleCoreProgress run_cycle_core_once(
 
     StepCallbacks callbacks = base_callbacks;
     std::unique_ptr<JournaledBusAccess> bus_access;
+    std::unique_ptr<JournaledTileAccess> tile_access;
     if (instruction) {
-        instruction->checkpoint.restore(core);
+        if (!restore_cycle_instruction_checkpoint(
+                *instruction,
+                core)) {
+            discard_cancelled_tacc_instruction();
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
+        for (const TileReplayRecord& record :
+             instruction->completed_tile_accesses) {
+            if (
+                record.request.operation ==
+                    BusOperation::WRITE
+            ) {
+                icache_invalidate_span(
+                    core,
+                    record.request.address,
+                    64);
+            }
+        }
         instruction->replay_cursor = 0;
+        instruction->tile_replay_cursor = 0;
+        instruction->access_order_replay_cursor = 0;
         bus_access = std::make_unique<JournaledBusAccess>(
             system,
             core_index);
+        tile_access = std::make_unique<JournaledTileAccess>(
+            system,
+            core_index);
         callbacks.bus_access = bus_access.get();
+        callbacks.tile_access = tile_access.get();
+        if (instruction->tacc_timed_image_transfer) {
+            if (
+                !instruction->tacc_timed_transfer_complete ||
+                !instruction->
+                    tacc_timed_completion_cycle.has_value()
+            ) {
+                throw std::logic_error(
+                    "timed TACC replay began before its final ACK");
+            }
+            callbacks.tacc_timed_transfer_replay = true;
+            callbacks.tacc_timed_transfer_operation =
+                instruction->tacc_timed_operation;
+            callbacks.tacc_timed_transfer_format_ew =
+                instruction->tacc_timed_format_ew;
+            callbacks.tacc_timed_transfer_format_signed =
+                instruction->tacc_timed_format_signed;
+            callbacks.tacc_timed_transfer_faulted =
+                instruction->tacc_timed_transfer_faulted;
+            callbacks.tacc_timed_transfer_fault_address =
+                instruction->tacc_timed_fault_address;
+        }
     }
 
     auto logical_guard =
@@ -11452,20 +15454,102 @@ static CycleCoreProgress run_cycle_core_once(
             throw std::logic_error(
                 "bus yield did not publish an immutable request");
         }
-        instruction->checkpoint.restore(core);
+        if (!restore_cycle_instruction_checkpoint(
+                *instruction,
+                core)) {
+            discard_cancelled_tacc_instruction();
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
         cycle_state.ready_cycle =
             instruction->pending_request->ready_cycle;
         return CycleCoreProgress::WAITING_BUS;
+    } catch (const TileYieldSignal&) {
+        if (!instruction ||
+            !instruction->pending_tile_request.has_value()) {
+            throw std::logic_error(
+                "tile yield did not publish an immutable request");
+        }
+        if (!restore_cycle_instruction_checkpoint(
+                *instruction,
+                core)) {
+            discard_cancelled_tacc_instruction();
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
+        cycle_state.ready_cycle =
+            instruction->pending_tile_request->ready_cycle;
+        return CycleCoreProgress::WAITING_TILE;
     } catch (...) {
-        if (instruction)
-            instruction->checkpoint.restore(core);
+        if (
+            instruction &&
+            !restore_cycle_instruction_checkpoint(
+                *instruction,
+                core)
+        ) {
+            discard_cancelled_tacc_instruction();
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
         throw;
     }
 
-    if (raw.stop_reason == RUN_MEX_FALLBACK ||
-        raw.stop_reason == RUN_EXT_FALLBACK) {
-        if (instruction)
-            instruction->checkpoint.restore(core);
+    if (instruction) {
+        if (
+            instruction->pending_request.has_value() ||
+            instruction->pending_tile_request.has_value()
+        ) {
+            throw std::logic_error(
+                "completed instruction retained a pending shared access");
+        }
+        if (
+            instruction->tile_replay_cursor !=
+                instruction->completed_tile_accesses.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction left tile replay records unconsumed");
+        }
+        if (
+            instruction->access_order_replay_cursor !=
+                instruction->completed_access_order.size()
+        ) {
+            throw std::runtime_error(
+                "resumable instruction left shared-access order unconsumed");
+        }
+    }
+
+    const bool bounded_tacc_fallback =
+        instruction &&
+        instruction->tacc_python_fallback &&
+        raw.stop_reason == RUN_MEX_FALLBACK;
+    const bool timed_tacc_transport_fault =
+        instruction &&
+        instruction->tacc_timed_image_transfer &&
+        instruction->tacc_timed_transfer_faulted &&
+        raw.stop_reason == RUN_TRAP &&
+        raw.trap_id == IVEC_BUS_FAULT;
+    if (
+        instruction &&
+        instruction->tacc_timed_image_transfer &&
+        instruction->tacc_timed_transfer_faulted &&
+        !timed_tacc_transport_fault
+    ) {
+        throw std::logic_error(
+            "timed TACC transport fault did not replay as a bus fault");
+    }
+    if (
+        (
+            raw.stop_reason == RUN_MEX_FALLBACK ||
+            raw.stop_reason == RUN_EXT_FALLBACK
+        ) &&
+        !bounded_tacc_fallback
+    ) {
+        if (
+            instruction &&
+            !restore_cycle_instruction_checkpoint(
+                *instruction,
+                core)
+        ) {
+            discard_cancelled_tacc_instruction();
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
         throw std::runtime_error(
             "cycle-bounded execution cannot enter an "
             "unbounded Python ISA fallback");
@@ -11476,66 +15560,222 @@ static CycleCoreProgress run_cycle_core_once(
     int64_t retired_steps = 0;
     bool terminal = false;
 
-    if (raw.stop_reason == RUN_TRAP ||
+    if (bounded_tacc_fallback ||
+        raw.stop_reason == RUN_TRAP ||
         raw.stop_reason == RUN_RESET) {
-        const uint64_t predicted_cycles =
-            raw.stop_reason == RUN_TRAP &&
-            raw.trap_id == IVEC_SW_TRAP &&
-            core.ivt_base != 0
-            ? 3
-            : 1;
-        const uint64_t predicted_completion =
-            checked_cycle_add(
-                instruction
-                    ? instruction->start_cycle
-                    : cycle_state.ready_cycle,
-                predicted_cycles,
-                "cycle-bounded trap completion");
-        if (predicted_completion > cycle_deadline) {
-            if (!instruction) {
-                throw std::logic_error(
-                    "cycle-boundary trap lacked a checkpoint");
-            }
-            instruction->checkpoint.restore(core);
-            instruction->retire_cycle =
-                predicted_completion;
-            cycle_state.ready_cycle =
-                predicted_completion;
+        if (
+            bounded_tacc_fallback &&
+            core.tacc_epoch !=
+                instruction->tacc_operation_epoch
+        ) {
+            discard_cancelled_tacc_instruction();
             return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
+        if (
+            !bounded_tacc_fallback &&
+            !timed_tacc_transport_fault
+        ) {
+            const uint64_t predicted_cycles =
+                raw.stop_reason == RUN_TRAP &&
+                raw.trap_id == IVEC_SW_TRAP &&
+                core.ivt_base != 0
+                ? 3
+                : 1;
+            const uint64_t predicted_completion =
+                checked_cycle_add(
+                    instruction
+                        ? instruction->start_cycle
+                        : cycle_state.ready_cycle,
+                    predicted_cycles,
+                    "cycle-bounded trap completion");
+            if (predicted_completion > cycle_deadline) {
+                if (!instruction) {
+                    throw std::logic_error(
+                        "cycle-boundary trap lacked a checkpoint");
+                }
+                if (!restore_cycle_instruction_checkpoint(
+                        *instruction,
+                        core)) {
+                    discard_cancelled_tacc_instruction();
+                    return CycleCoreProgress::
+                        BLOCKED_BY_CYCLE_LIMIT;
+                }
+                instruction->retire_cycle =
+                    predicted_completion;
+                cycle_state.ready_cycle =
+                    predicted_completion;
+                return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+            }
+        }
 
-        py::object settled_object = settle_continuation(
-            core_index,
-            raw.stop_reason,
-            raw.trap_id,
-            0,
-            0);
+        py::object settled_object;
+        try {
+            settled_object = settle_continuation(
+                core_index,
+                raw.stop_reason,
+                raw.trap_id,
+                0,
+                0);
+        } catch (...) {
+            if (bounded_tacc_fallback) {
+                system.cancel_tacc_image_stage_for_core(
+                    core.core_id);
+                finish_cycle_tacc_terminal(core);
+                cycle_state.ready_cycle =
+                    system.shared_clock.cycles();
+                cycle_state.instruction.reset();
+                system.refresh_cycle_execution_pending();
+            }
+            throw;
+        }
         py::tuple settled =
             settled_object.cast<py::tuple>();
-        if (settled.size() != 3) {
+        const std::size_t expected_tuple_size =
+            bounded_tacc_fallback ? 4 : 3;
+        if (settled.size() != expected_tuple_size) {
             throw std::runtime_error(
-                "native continuation must return "
-                "(invocation_steps, invocation_cycles, terminal)");
+                bounded_tacc_fallback
+                    ? "bounded TACC continuation must return "
+                      "(invocation_steps, invocation_cycles, "
+                      "terminal, cancelled)"
+                    : "native continuation must return "
+                      "(invocation_steps, invocation_cycles, "
+                      "terminal)");
         }
         retired_steps = settled[0].cast<int64_t>();
         retired_cycles = settled[1].cast<int64_t>();
         terminal = settled[2].cast<bool>();
+        const bool cancelled =
+            bounded_tacc_fallback
+            ? settled[3].cast<bool>()
+            : false;
         if (retired_steps < 0 ||
             retired_steps > 1 ||
             retired_cycles < 0) {
             throw std::runtime_error(
                 "native continuation returned invalid progress");
         }
-        completion_cycle = checked_cycle_add(
-            instruction
-                ? instruction->start_cycle
-                : cycle_state.ready_cycle,
-            static_cast<uint64_t>(retired_cycles),
-            "cycle-bounded continuation completion");
+        if (bounded_tacc_fallback) {
+            if (
+                cancelled &&
+                (
+                    retired_steps != 0 ||
+                    retired_cycles != 0 ||
+                    terminal
+                )
+            ) {
+                throw std::runtime_error(
+                    "cancelled bounded TACC continuation "
+                    "reported architectural progress");
+            }
+            if (cancelled) {
+                // The control plane won while Python held a detached image.
+                // Its live state is authoritative; do not restore or account
+                // any part of the discarded instruction.
+                discard_cancelled_tacc_instruction();
+                return CycleCoreProgress::
+                    BLOCKED_BY_CYCLE_LIMIT;
+            }
+            if (!instruction->retire_cycle.has_value()) {
+                throw std::logic_error(
+                    "bounded TACC continuation lacks "
+                    "a classified completion cycle");
+            }
+            const uint64_t expected_cycles =
+                *instruction->retire_cycle -
+                instruction->start_cycle;
+            if (
+                static_cast<uint64_t>(retired_cycles) !=
+                    expected_cycles
+            ) {
+                throw std::runtime_error(
+                    "bounded TACC continuation did not "
+                    "match its classified cycle count");
+            }
+            const bool terminal_trap =
+                retired_steps == 0 && terminal;
+            const bool normal_retirement =
+                retired_steps == 1 && !terminal;
+            const bool valid_outcome =
+                instruction->tacc_validation_trap_expected
+                ? terminal_trap
+                : normal_retirement || terminal_trap;
+            if (!valid_outcome) {
+                throw std::runtime_error(
+                    instruction->
+                            tacc_validation_trap_expected
+                        ? "bounded TACC validation did not "
+                          "produce its architected trap"
+                        : "admitted bounded TACC operation "
+                          "returned an invalid terminal outcome");
+            }
+        }
+        if (timed_tacc_transport_fault) {
+            if (
+                !instruction->
+                    tacc_timed_completion_cycle.has_value() ||
+                *instruction->tacc_timed_completion_cycle <
+                    instruction->start_cycle
+            ) {
+                throw std::logic_error(
+                    "timed TACC transport fault lacks its "
+                    "completion frontier");
+            }
+            completion_cycle =
+                *instruction->tacc_timed_completion_cycle;
+            const uint64_t elapsed_cycles =
+                completion_cycle -
+                instruction->start_cycle;
+            const uint64_t base_cycles =
+                3 + static_cast<uint64_t>(
+                    instruction->
+                        tacc_timed_fault_beat_index);
+            if (elapsed_cycles < base_cycles) {
+                throw std::logic_error(
+                    "timed TACC transport fault preceded "
+                    "its service frontier");
+            }
+            const uint64_t stall_cycles =
+                elapsed_cycles - base_cycles;
+            core.cycle_count = checked_cycle_add(
+                core.cycle_count,
+                elapsed_cycles,
+                "TACC fault core cycle counter");
+            if (core.perf_enable) {
+                core.perf_cycles = checked_cycle_add(
+                    core.perf_cycles,
+                    elapsed_cycles,
+                    "TACC fault performance cycle counter");
+                core.perf_stalls = checked_cycle_add(
+                    core.perf_stalls,
+                    stall_cycles,
+                    "TACC fault performance stall counter");
+            }
+            retired_steps = 0;
+            retired_cycles =
+                static_cast<int64_t>(elapsed_cycles);
+        } else {
+            completion_cycle = checked_cycle_add(
+                instruction
+                    ? instruction->start_cycle
+                    : cycle_state.ready_cycle,
+                static_cast<uint64_t>(retired_cycles),
+                "cycle-bounded continuation completion");
+        }
+        if (
+            bounded_tacc_fallback &&
+            completion_cycle != cycle_state.ready_cycle
+        ) {
+            throw std::runtime_error(
+                "bounded TACC continuation would revise "
+                "its classified completion cycle");
+        }
         if (completion_cycle > cycle_deadline) {
             throw std::runtime_error(
                 "native continuation crossed its cycle bound");
         }
+        if (bounded_tacc_fallback)
+            finish_cycle_tacc_terminal(core);
         batch_result.continuations++;
         batch_result.per_core_stop_reasons[index][
             static_cast<std::size_t>(raw.stop_reason)]++;
@@ -11547,6 +15787,14 @@ static CycleCoreProgress run_cycle_core_once(
             raw.total_cycles <= 0) {
             throw std::runtime_error(
                 "cycle-bounded core made invalid progress");
+        }
+        if (
+            instruction &&
+            instruction->tacc_timed_image_transfer &&
+            raw.total_cycles != 6
+        ) {
+            throw std::logic_error(
+                "timed TACC replay changed its six-cycle base latency");
         }
 
         const uint64_t start_cycle =
@@ -11566,13 +15814,41 @@ static CycleCoreProgress run_cycle_core_once(
                 instruction->completed_accesses.back()
                     .result.completion_cycle);
         }
+        if (instruction &&
+            !instruction->completed_tile_accesses.empty()) {
+            completion_cycle = std::max(
+                completion_cycle,
+                instruction->completed_tile_accesses.back()
+                    .completion_cycle);
+        }
+        if (
+            instruction &&
+            instruction->tacc_timed_image_transfer
+        ) {
+            if (
+                !instruction->
+                    tacc_timed_completion_cycle.has_value()
+            ) {
+                throw std::logic_error(
+                    "timed TACC retirement lacks its final ACK");
+            }
+            completion_cycle = std::max(
+                completion_cycle,
+                *instruction->tacc_timed_completion_cycle);
+        }
 
         if (completion_cycle > cycle_deadline) {
             if (!instruction) {
                 throw std::logic_error(
                     "cycle-boundary instruction lacked a checkpoint");
             }
-            instruction->checkpoint.restore(core);
+            if (!restore_cycle_instruction_checkpoint(
+                    *instruction,
+                    core)) {
+                discard_cancelled_tacc_instruction();
+                return CycleCoreProgress::
+                    BLOCKED_BY_CYCLE_LIMIT;
+            }
             instruction->retire_cycle =
                 completion_cycle;
             cycle_state.ready_cycle =
@@ -11612,6 +15888,35 @@ static CycleCoreProgress run_cycle_core_once(
         batch_result.per_core_stop_reasons[index][RUN_LIMIT]++;
     }
 
+    if (
+        instruction &&
+        instruction->tacc_timed_image_transfer
+    ) {
+        const bool valid_timed_fault =
+            instruction->tacc_timed_transfer_faulted &&
+            retired_steps == 0 &&
+            core.tacc_epoch ==
+                instruction->tacc_operation_epoch;
+        const bool valid_timed_retirement =
+            !instruction->tacc_timed_transfer_faulted &&
+            retired_steps == 1 &&
+            !terminal &&
+            core.tacc_epoch ==
+                instruction->tacc_operation_epoch;
+        if (!valid_timed_fault &&
+            !valid_timed_retirement) {
+            throw std::logic_error(
+                "timed TACC transfer reached an invalid retirement");
+        }
+        if (
+            !instruction->tacc_timed_transfer_faulted &&
+            instruction->tacc_timed_operation ==
+                BusOperation::WRITE
+        ) {
+            core.tacc_dirty = false;
+        }
+        finish_cycle_tacc_terminal(core);
+    }
     cycle_state.ready_cycle = completion_cycle;
     cycle_state.instruction.reset();
     system.refresh_cycle_execution_pending();
@@ -11880,6 +16185,666 @@ static bool held_dma_request_matches_grant(
                granted.ordering.port_io;
 }
 
+static bool held_tile_request_matches_grant(
+        const TileAccessRequest& pending,
+        const TileMemoryPortRequest& granted) {
+    return (
+        !granted.image_transfer &&
+        pending.engine_id == granted.identity.engine_id &&
+        pending.owner_core_id ==
+            granted.identity.owner_core_id &&
+        pending.operation_token ==
+            granted.identity.operation_token &&
+        pending.ready_cycle == granted.ready_cycle &&
+        pending.operation == granted.operation &&
+        pending.address == granted.address &&
+        pending.data == granted.data
+    );
+}
+
+static std::optional<uint64_t>
+next_cycle_tacc_stage_arbitration(
+        const SystemState& system,
+        uint64_t current_cycle) {
+    const TileMemoryTransport& transport =
+        system.tile_memory_transport;
+    if (system.tacc_image_stage.active())
+        return std::nullopt;
+
+    std::optional<uint64_t> earliest;
+    for (const TaccEngineTransportState& state :
+         transport.engines) {
+        if (
+            state.phase !=
+                TaccTransportPhase::WAITING_STAGE
+        ) {
+            continue;
+        }
+        const uint64_t registered_cycle =
+            checked_cycle_add(
+                state.ready_cycle,
+                1,
+                "TACC image-stage registered request");
+        uint64_t candidate =
+            std::max(current_cycle, registered_cycle);
+        if (
+            transport.last_stage_arbitration_cycle.has_value() &&
+            candidate <=
+                *transport.last_stage_arbitration_cycle
+        ) {
+            candidate = checked_cycle_add(
+                *transport.last_stage_arbitration_cycle,
+                1,
+                "TACC image-stage arbitration retry");
+        }
+        if (
+            !earliest.has_value() ||
+            candidate < *earliest
+        ) {
+            earliest = candidate;
+        }
+    }
+    return earliest;
+}
+
+static std::optional<uint64_t>
+next_cycle_tile_port_arbitration(
+        const SystemState& system,
+        uint64_t current_cycle) {
+    const TileMemoryTransport& transport =
+        system.tile_memory_transport;
+    if (transport.active_port_grant.has_value())
+        return std::nullopt;
+
+    std::optional<uint64_t> earliest;
+    for (const auto& pending :
+         transport.pending_port_requests) {
+        if (!pending.has_value())
+            continue;
+        const uint64_t registered_cycle =
+            checked_cycle_add(
+                pending->ready_cycle,
+                1,
+                "tile-memory registered request");
+        uint64_t candidate =
+            std::max(current_cycle, registered_cycle);
+        if (
+            transport.last_port_arbitration_cycle.has_value() &&
+            candidate <=
+                *transport.last_port_arbitration_cycle
+        ) {
+            candidate = checked_cycle_add(
+                *transport.last_port_arbitration_cycle,
+                1,
+                "tile-memory arbitration retry");
+        }
+        if (!earliest.has_value() ||
+            candidate < *earliest) {
+            earliest = candidate;
+        }
+    }
+    return earliest;
+}
+
+static std::optional<uint64_t>
+cycle_tacc_external_write_data(
+        const TileMemoryPortGrant& grant,
+        uint8_t word_index) {
+    if (grant.request.operation != BusOperation::WRITE)
+        return std::nullopt;
+    const std::size_t byte_offset =
+        static_cast<std::size_t>(word_index) *
+        EXTERNAL_PHY_WORD_BYTES;
+    uint64_t value = 0;
+    for (
+        std::size_t byte = 0;
+        byte < EXTERNAL_PHY_WORD_BYTES;
+        byte++
+    ) {
+        value |= static_cast<uint64_t>(
+            grant.request.data[byte_offset + byte])
+            << (8 * byte);
+    }
+    return value;
+}
+
+static ResumableInstruction&
+cycle_tacc_instruction_for_grant(
+        SystemState& system,
+        const TileMemoryPortGrant& grant) {
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[
+            static_cast<std::size_t>(core_index)];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->
+            tacc_timed_image_transfer ||
+        cycle_state.instruction->
+            tacc_timed_operation_token !=
+                grant.request.identity.operation_token
+    ) {
+        throw std::logic_error(
+            "external PHY grant has no suspended TACC instruction");
+    }
+    return *cycle_state.instruction;
+}
+
+static const ResumableInstruction&
+cycle_tacc_instruction_for_grant(
+        const SystemState& system,
+        const TileMemoryPortGrant& grant) {
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    const FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[
+            static_cast<std::size_t>(core_index)];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->
+            tacc_timed_image_transfer ||
+        cycle_state.instruction->
+            tacc_timed_operation_token !=
+                grant.request.identity.operation_token
+    ) {
+        throw std::logic_error(
+            "external PHY grant has no suspended TACC instruction");
+    }
+    return *cycle_state.instruction;
+}
+
+static void launch_cycle_tacc_external_phy_word(
+        SystemState& system,
+        const TileMemoryPortGrant& grant,
+        uint64_t launch_cycle,
+        const std::vector<StepCallbacks>& callbacks) {
+    ResumableInstruction& instruction =
+        cycle_tacc_instruction_for_grant(
+            system,
+            grant);
+    if (
+        !instruction.tacc_timed_external_phy ||
+        instruction.tacc_timed_transfer_complete ||
+        instruction.tacc_timed_transfer_faulted ||
+        instruction.tacc_timed_external_response_active ||
+        instruction.tacc_timed_external_word_index >=
+            EXTERNAL_PHY_WORDS_PER_BEAT
+    ) {
+        throw std::logic_error(
+            "external PHY word launch has invalid transfer state");
+    }
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    const uint8_t word_index =
+        instruction.tacc_timed_external_word_index;
+    const uint64_t word_address =
+        grant.request.address +
+        static_cast<uint64_t>(word_index) *
+            EXTERNAL_PHY_WORD_BYTES;
+    StepCallbacks::ExternalPhyResponse response;
+    try {
+        response = native_tacc_external_phy_response(
+            callbacks[static_cast<std::size_t>(core_index)],
+            grant.request.operation,
+            grant.request.beat_index,
+            word_index,
+            word_address,
+            cycle_tacc_external_write_data(
+                grant,
+                word_index));
+    } catch (...) {
+        (void)system.tile_memory_transport.cancel(
+            system.tacc_image_stage,
+            grant.request.identity.engine_id,
+            grant.request.identity.operation_token,
+            grant.request.identity.engine_epoch,
+            grant.request.identity.caller_epoch);
+        CPUState& core =
+            *system.cores[
+                static_cast<std::size_t>(core_index)];
+        finish_cycle_tacc_terminal(core);
+        FullCoreCycleState& cycle_state =
+            system.full_core_cycle_states[
+                static_cast<std::size_t>(core_index)];
+        cycle_state.instruction.reset();
+        cycle_state.ready_cycle = launch_cycle;
+        system.refresh_cycle_execution_pending();
+        throw;
+    }
+    const bool timeout =
+        !response.responded ||
+        response.latency_cycles >
+            EXTERNAL_PHY_TIMEOUT_CYCLES;
+    const uint64_t latency =
+        timeout
+        ? EXTERNAL_PHY_TIMEOUT_CYCLES
+        : response.latency_cycles;
+    instruction.tacc_timed_external_response_cycle =
+        checked_cycle_add(
+            launch_cycle,
+            latency,
+            "external PHY word response");
+    instruction.tacc_timed_external_response_error =
+        !timeout && response.error;
+    instruction.tacc_timed_external_response_timeout =
+        timeout;
+    instruction.tacc_timed_external_response_active =
+        true;
+}
+
+static std::optional<uint64_t>
+cycle_tile_port_completion_cycle(
+        const SystemState& system) {
+    const auto& active =
+        system.tile_memory_transport.active_port_grant;
+    if (!active.has_value())
+        return std::nullopt;
+    if (active->request.image_transfer) {
+        const ResumableInstruction& instruction =
+            cycle_tacc_instruction_for_grant(
+                system,
+                *active);
+        if (instruction.tacc_timed_external_phy) {
+            if (
+                !instruction.
+                    tacc_timed_external_response_active
+            ) {
+                throw std::logic_error(
+                    "external PHY grant has no active word response");
+            }
+            return instruction.
+                tacc_timed_external_response_cycle;
+        }
+    }
+    return checked_cycle_add(
+        active->grant_cycle,
+        1,
+        "tile-memory target completion");
+}
+
+static void complete_cycle_tile_target(
+        SystemState& system,
+        uint64_t completion_cycle,
+        const std::vector<StepCallbacks>& callbacks) {
+    const auto& active =
+        system.tile_memory_transport.active_port_grant;
+    if (!active.has_value()) {
+        throw std::logic_error(
+            "tile-memory completion has no active grant");
+    }
+    const TileMemoryPortGrant grant = *active;
+    if (grant.request.image_transfer) {
+        const int engine_id =
+            grant.request.identity.engine_id;
+        const int owner_core_id =
+            grant.request.identity.owner_core_id;
+        if (
+            engine_id < 0 ||
+            engine_id >= system.full_core_count() ||
+            owner_core_id != engine_id
+        ) {
+            throw std::logic_error(
+                "cycle scheduler received a non-full-core "
+                "TACC image grant");
+        }
+        if (
+            !system.tile_transport_identity_is_live(
+                engine_id,
+                owner_core_id,
+                grant.request.identity.engine_epoch,
+                grant.request.identity.caller_epoch)
+        ) {
+            // A reset/cancel epoch won before this registered ACK. Discard
+            // the stale fabric state without touching its memory target.
+            system.cancel_tacc_image_stage_for_core(
+                owner_core_id);
+            return;
+        }
+
+        const int core_index =
+            full_core_index_for_requester(
+                system,
+                owner_core_id);
+        const std::size_t index =
+            static_cast<std::size_t>(core_index);
+        FullCoreCycleState& cycle_state =
+            system.full_core_cycle_states[index];
+        if (
+            !cycle_state.instruction ||
+            !cycle_state.instruction->
+                tacc_timed_image_transfer ||
+            cycle_state.instruction->
+                tacc_timed_transfer_complete ||
+            cycle_state.instruction->
+                tacc_timed_operation_token !=
+                    grant.request.identity.operation_token ||
+            cycle_state.instruction->
+                tacc_operation_epoch !=
+                    grant.request.identity.engine_epoch ||
+            cycle_state.instruction->
+                tacc_timed_operation !=
+                    grant.request.operation
+        ) {
+            throw std::logic_error(
+                "TACC image grant has no matching suspended instruction");
+        }
+
+        // Arbitration samples pre-edge ownership. In particular, beat four
+        // cannot release the image stage and grant it to a waiter on this
+        // same edge; the recorded arbitration forces the next attempt to
+        // completion_cycle + 1.
+        (void)system.tile_memory_transport.try_grant_stage(
+            system.tacc_image_stage,
+            completion_cycle);
+
+        CPUState& core = *system.cores[index];
+        std::optional<std::array<uint8_t, 64>> read_data;
+        const bool external_phy =
+            cycle_state.instruction->
+                tacc_timed_external_phy;
+        if (external_phy) {
+            ResumableInstruction& instruction =
+                *cycle_state.instruction;
+            if (
+                !instruction.
+                    tacc_timed_external_response_active ||
+                instruction.
+                    tacc_timed_external_response_cycle !=
+                        completion_cycle ||
+                instruction.tacc_timed_external_word_index >=
+                    EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                throw std::logic_error(
+                    "external PHY response does not match its "
+                    "active word");
+            }
+
+            const uint8_t word_index =
+                instruction.
+                    tacc_timed_external_word_index;
+            const uint64_t word_address =
+                grant.request.address +
+                static_cast<uint64_t>(word_index) *
+                    EXTERNAL_PHY_WORD_BYTES;
+            const bool faulted =
+                instruction.
+                    tacc_timed_external_response_error ||
+                instruction.
+                    tacc_timed_external_response_timeout;
+            instruction.
+                tacc_timed_external_response_active = false;
+            if (faulted) {
+                const bool canceled =
+                    system.tile_memory_transport.cancel(
+                        system.tacc_image_stage,
+                        engine_id,
+                        grant.request.identity.operation_token,
+                        grant.request.identity.engine_epoch,
+                        grant.request.identity.caller_epoch);
+                if (!canceled) {
+                    throw std::logic_error(
+                        "faulted external PHY transfer could not "
+                        "release its tile grant");
+                }
+                instruction.tacc_timed_transfer_faulted = true;
+                instruction.tacc_timed_fault_beat_index =
+                    grant.request.beat_index;
+                instruction.tacc_timed_fault_word_index =
+                    word_index;
+                instruction.tacc_timed_fault_address =
+                    word_address;
+                instruction.tacc_timed_transfer_complete = true;
+                instruction.tacc_timed_completion_cycle =
+                    completion_cycle;
+                cycle_state.ready_cycle = completion_cycle;
+                system.refresh_cycle_execution_pending();
+                return;
+            }
+
+            if (
+                core.perf_enable &&
+                core.perf_extmem ==
+                    std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "external-memory performance counter overflow");
+            }
+            const std::size_t byte_offset =
+                static_cast<std::size_t>(word_index) *
+                EXTERNAL_PHY_WORD_BYTES;
+            {
+                auto memory_guard =
+                    acquire_shared_memory_use(core);
+                NativeTaccSpan word_span;
+                if (
+                    !native_tacc_resolve_span(
+                        core,
+                        word_address,
+                        EXTERNAL_PHY_WORD_BYTES,
+                        word_span) ||
+                    !word_span.external_phy
+                ) {
+                    throw std::logic_error(
+                        "admitted external PHY word lost its "
+                        "routed-memory target");
+                }
+                if (
+                    grant.request.operation ==
+                        BusOperation::READ
+                ) {
+                    std::memcpy(
+                        instruction.
+                            tacc_timed_external_beat_data.data() +
+                            byte_offset,
+                        word_span.data,
+                        EXTERNAL_PHY_WORD_BYTES);
+                } else {
+                    std::memcpy(
+                        word_span.data,
+                        grant.request.data.data() +
+                            byte_offset,
+                        EXTERNAL_PHY_WORD_BYTES);
+                    icache_invalidate_span(
+                        core,
+                        word_address,
+                        EXTERNAL_PHY_WORD_BYTES);
+                }
+            }
+            if (core.perf_enable)
+                core.perf_extmem++;
+            if (
+                instruction.
+                    tacc_timed_external_acknowledged_words ==
+                TileMemoryTransport::IMAGE_BEATS *
+                    EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                throw std::logic_error(
+                    "external TACC transfer acknowledged too "
+                    "many PHY words");
+            }
+            instruction.
+                tacc_timed_external_acknowledged_words++;
+
+            if (
+                static_cast<std::size_t>(word_index) + 1 <
+                EXTERNAL_PHY_WORDS_PER_BEAT
+            ) {
+                instruction.tacc_timed_external_word_index++;
+                launch_cycle_tacc_external_phy_word(
+                    system,
+                    grant,
+                    completion_cycle,
+                    callbacks);
+                system.refresh_cycle_execution_pending();
+                return;
+            }
+            if (
+                grant.request.operation ==
+                    BusOperation::READ
+            ) {
+                read_data = instruction.
+                    tacc_timed_external_beat_data;
+            }
+        } else {
+            auto memory_guard =
+                acquire_shared_memory_use(core);
+            if (
+                grant.request.operation ==
+                    BusOperation::READ
+            ) {
+                std::array<uint8_t, 64> data{};
+                tile_read_64bytes_direct(
+                    core,
+                    grant.request.address,
+                    data);
+                read_data = data;
+            } else {
+                tile_write_64bytes_direct(
+                    core,
+                    grant.request.address,
+                    grant.request.data);
+            }
+        }
+
+        system.tile_memory_transport
+            .validate_image_port_completion(
+                system.tacc_image_stage,
+                grant.grant_sequence,
+                completion_cycle,
+                grant.request.operation ==
+                    BusOperation::READ,
+                external_phy);
+        const std::optional<TileMemoryPortCompletion>
+            completed =
+                system.tile_memory_transport.complete_port(
+                    system.tacc_image_stage,
+                    grant.grant_sequence,
+                    completion_cycle,
+                    read_data,
+                    external_phy);
+        if (!completed.has_value()) {
+            throw std::logic_error(
+                "TACC image completion rejected its active grant");
+        }
+        const TaccEngineTransportState& transport_state =
+            system.tile_memory_transport.engines[
+                static_cast<std::size_t>(engine_id)];
+        cycle_state.instruction->
+            tacc_timed_acknowledged_beats =
+                transport_state.beat_index;
+        if (completed->image_transfer_complete) {
+            if (
+                grant.request.operation ==
+                    BusOperation::READ
+            ) {
+                core.tacc = transport_state.image;
+                core.tacc_valid = true;
+                core.tacc_dirty = false;
+                core.tacc_format_ew =
+                    transport_state.format_ew;
+                core.tacc_format_signed =
+                    static_cast<uint8_t>(
+                        transport_state.format_signed);
+            }
+            cycle_state.instruction->
+                tacc_timed_transfer_complete = true;
+            cycle_state.instruction->
+                tacc_timed_completion_cycle =
+                    completion_cycle;
+            cycle_state.ready_cycle = completion_cycle;
+        }
+        system.refresh_cycle_execution_pending();
+        return;
+    }
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.identity.owner_core_id);
+    const std::size_t index =
+        static_cast<std::size_t>(core_index);
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[index];
+    if (
+        !cycle_state.instruction ||
+        !cycle_state.instruction->
+            pending_tile_request.has_value() ||
+        !held_tile_request_matches_grant(
+            *cycle_state.instruction->pending_tile_request,
+            grant.request)
+    ) {
+        throw std::logic_error(
+            "granted tile beat has no matching suspended request");
+    }
+
+    ResumableInstruction& instruction =
+        *cycle_state.instruction;
+    if (
+        instruction.completed_tile_accesses.size() ==
+            instruction.completed_tile_accesses.max_size() ||
+        instruction.completed_access_order.size() ==
+            instruction.completed_access_order.max_size()
+    ) {
+        throw std::overflow_error(
+            "tile-memory replay journal is full");
+    }
+    instruction.completed_tile_accesses.reserve(
+        instruction.completed_tile_accesses.size() + 1);
+    instruction.completed_access_order.reserve(
+        instruction.completed_access_order.size() + 1);
+    system.tile_memory_transport
+        .validate_ordinary_port_completion(
+            system.tacc_image_stage,
+            grant.grant_sequence,
+            completion_cycle,
+            grant.request.operation == BusOperation::READ);
+
+    CPUState& core = *system.cores[index];
+    std::optional<std::array<uint8_t, 64>> read_data;
+    {
+        auto memory_guard =
+            acquire_shared_memory_use(core);
+        if (grant.request.operation == BusOperation::READ) {
+            std::array<uint8_t, 64> data{};
+            tile_read_64bytes_direct(
+                core,
+                grant.request.address,
+                data);
+            read_data = data;
+        } else {
+            tile_write_64bytes_direct(
+                core,
+                grant.request.address,
+                grant.request.data);
+        }
+    }
+
+    const std::optional<TileMemoryPortCompletion>
+        completed =
+            system.tile_memory_transport.complete_port(
+                system.tacc_image_stage,
+                grant.grant_sequence,
+                completion_cycle,
+                read_data);
+    if (!completed.has_value()) {
+        throw std::logic_error(
+            "tile-memory completion rejected its active grant");
+    }
+    instruction.completed_tile_accesses.push_back(
+        TileReplayRecord{
+            *instruction.pending_tile_request,
+            completion_cycle,
+            read_data,
+        });
+    instruction.completed_access_order.push_back(
+        CycleSharedAccessKind::TILE_MEMORY);
+    instruction.pending_tile_request.reset();
+    cycle_state.ready_cycle = completion_cycle;
+    system.refresh_cycle_execution_pending();
+}
+
 static void complete_cycle_bus_target(
         SystemState& system,
         uint64_t completion_cycle,
@@ -11978,6 +16943,21 @@ static void complete_cycle_bus_target(
         throw std::runtime_error(
             "active grant diverged from its suspended request");
     }
+    ResumableInstruction& instruction =
+        *cycle_state.instruction;
+    if (
+        instruction.completed_accesses.size() ==
+            instruction.completed_accesses.max_size() ||
+        instruction.completed_access_order.size() ==
+            instruction.completed_access_order.max_size()
+    ) {
+        throw std::overflow_error(
+            "main-bus replay journal is full");
+    }
+    instruction.completed_accesses.reserve(
+        instruction.completed_accesses.size() + 1);
+    instruction.completed_access_order.reserve(
+        instruction.completed_access_order.size() + 1);
 
     std::optional<uint64_t> read_value;
     BusFault fault = BusFault::NONE;
@@ -12027,12 +17007,14 @@ static void complete_cycle_bus_target(
         read_value,
         fault,
         target_effects_committed);
-    cycle_state.instruction->completed_accesses.push_back(
+    instruction.completed_accesses.push_back(
         BusReplayRecord{
             std::move(result),
             std::move(target_error_message),
         });
-    cycle_state.instruction->pending_request.reset();
+    instruction.completed_access_order.push_back(
+        CycleSharedAccessKind::MAIN_BUS);
+    instruction.pending_request.reset();
     cycle_state.ready_cycle = completion_cycle;
     system.cycle_target_completion_cycle.reset();
     refresh_cycle_dma_requests(
@@ -12410,7 +17392,11 @@ static uint64_t run_strict_cycle_private_prefix(
             state.ready_cycle > scheduler_cycle ||
             (
                 state.instruction &&
-                state.instruction->pending_request.has_value()
+                (
+                    state.instruction->pending_request.has_value() ||
+                    state.instruction->
+                        pending_tile_request.has_value()
+                )
             )
         ) {
             continue;
@@ -12727,6 +17713,9 @@ static SystemBatchResult run_full_core_cycle_batch(
         system,
         dma_callbacks,
         clock_start);
+    discard_stale_cycle_tacc_transfers(
+        system,
+        clock_start);
 
     const std::optional<uint64_t> initial_timer_cycle =
         next_cycle_timer_irq(system);
@@ -12766,6 +17755,9 @@ static SystemBatchResult run_full_core_cycle_batch(
     std::optional<uint64_t> instruction_stop_cycle;
 
     while (true) {
+        discard_stale_cycle_tacc_transfers(
+            system,
+            scheduler_cycle);
         const bool instruction_limit_reached =
             result.instructions_executed >= max_instructions;
         const uint64_t effective_deadline =
@@ -12793,6 +17785,16 @@ static SystemBatchResult run_full_core_cycle_batch(
             throw std::logic_error(
                 "main-bus target completion fell behind the scheduler");
         }
+        const std::optional<uint64_t>
+            next_tile_completion_cycle =
+                cycle_tile_port_completion_cycle(system);
+        if (
+            next_tile_completion_cycle.has_value() &&
+            *next_tile_completion_cycle < scheduler_cycle
+        ) {
+            throw std::logic_error(
+                "tile-memory target completion fell behind the scheduler");
+        }
         std::optional<uint64_t> next_core_cycle;
         const uint64_t suspended_guest_count =
             pending_guest_instruction_count(system);
@@ -12808,7 +17810,17 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
             if (state.instruction &&
-                state.instruction->pending_request.has_value()) {
+                (
+                    state.instruction->pending_request.has_value() ||
+                    state.instruction->
+                        pending_tile_request.has_value() ||
+                    (
+                        state.instruction->
+                            tacc_timed_image_transfer &&
+                        !state.instruction->
+                            tacc_timed_transfer_complete
+                    )
+                )) {
                 continue;
             }
             if (!state.instruction &&
@@ -12834,6 +17846,16 @@ static SystemBatchResult run_full_core_cycle_batch(
                     pending,
                     scheduler_cycle);
         }
+        const std::optional<uint64_t>
+            next_stage_arbitration_cycle =
+                next_cycle_tacc_stage_arbitration(
+                    system,
+                    scheduler_cycle);
+        const std::optional<uint64_t>
+            next_tile_arbitration_cycle =
+                next_cycle_tile_port_arbitration(
+                    system,
+                    scheduler_cycle);
 
         uint64_t next_cycle = effective_deadline;
         if (next_core_cycle.has_value())
@@ -12847,6 +17869,21 @@ static SystemBatchResult run_full_core_cycle_batch(
             next_cycle = std::min(
                 next_cycle,
                 *system.cycle_target_completion_cycle);
+        }
+        if (next_stage_arbitration_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_stage_arbitration_cycle);
+        }
+        if (next_tile_arbitration_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_tile_arbitration_cycle);
+        }
+        if (next_tile_completion_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_tile_completion_cycle);
         }
         if (next_timer_cycle.has_value()) {
             next_cycle = std::min(
@@ -12873,13 +17910,17 @@ static SystemBatchResult run_full_core_cycle_batch(
             system.cycle_target_completion_cycle.has_value() &&
             *system.cycle_target_completion_cycle ==
                 scheduler_cycle;
+        const bool tile_target_frontier =
+            next_tile_completion_cycle.has_value() &&
+            *next_tile_completion_cycle == scheduler_cycle;
 
-        // Boundary order is fixed: settle virtual devices, commit the bus
-        // target that sampled pre-edge state, apply timestamped host input,
-        // snapshot interrupt lines, then dispatch cores.
+        // Boundary order is fixed: settle virtual devices, commit main-bus
+        // then tile-memory targets that sampled pre-edge state, apply
+        // timestamped host input, snapshot interrupt lines, then dispatch.
         if (timer_frontier ||
             external_frontier ||
-            target_frontier) {
+            target_frontier ||
+            tile_target_frontier) {
             settle_cycle_clock_to(
                 system,
                 scheduler_cycle,
@@ -12892,6 +17933,12 @@ static SystemBatchResult run_full_core_cycle_batch(
                 callbacks,
                 dma_callbacks,
                 settle_round);
+        }
+        if (tile_target_frontier) {
+            complete_cycle_tile_target(
+                system,
+                scheduler_cycle,
+                callbacks);
         }
         if (external_frontier) {
             const uint64_t applied =
@@ -12979,7 +18026,17 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
             if (state.instruction &&
-                state.instruction->pending_request.has_value()) {
+                (
+                    state.instruction->pending_request.has_value() ||
+                    state.instruction->
+                        pending_tile_request.has_value() ||
+                    (
+                        state.instruction->
+                            tacc_timed_image_transfer &&
+                        !state.instruction->
+                            tacc_timed_transfer_complete
+                    )
+                )) {
                 continue;
             }
             if (state.ready_cycle > scheduler_cycle)
@@ -12998,13 +18055,14 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
 
-            // One cycle is the largest speculative commit window. A longer
-            // instruction is checkpointed and replayed at its retire cycle,
-            // so timer/input/bus frontiers can never observe future core
-            // state or return it to the caller.
+            // One cycle is the ordinary speculative commit window. Shared
+            // main-bus and tile-memory effects both yield into independent
+            // replay journals before they can cross this boundary.
             uint64_t dispatch_deadline =
                 effective_deadline;
-            if (scheduler_cycle < effective_deadline) {
+            if (
+                scheduler_cycle < effective_deadline
+            ) {
                 dispatch_deadline = std::min(
                     effective_deadline,
                     checked_cycle_add(
@@ -13059,6 +18117,41 @@ static SystemBatchResult run_full_core_cycle_batch(
                         grant->grant_cycle,
                         1,
                         "main bus target completion");
+            }
+        }
+        if (
+            scheduler_cycle < post_dispatch_deadline &&
+            !system.tacc_image_stage.active()
+        ) {
+            (void)system.tile_memory_transport.try_grant_stage(
+                system.tacc_image_stage,
+                scheduler_cycle);
+        }
+        if (
+            scheduler_cycle < post_dispatch_deadline &&
+            !system.tile_memory_transport
+                .active_port_grant.has_value()
+        ) {
+            const std::optional<TileMemoryPortGrant> grant =
+                system.tile_memory_transport.try_grant_port(
+                    scheduler_cycle);
+            if (grant.has_value() &&
+                grant->request.image_transfer) {
+                ResumableInstruction& instruction =
+                    cycle_tacc_instruction_for_grant(
+                        system,
+                        *grant);
+                if (instruction.tacc_timed_external_phy) {
+                    instruction.
+                        tacc_timed_external_word_index = 0;
+                    instruction.
+                        tacc_timed_external_beat_data.fill(0);
+                    launch_cycle_tacc_external_phy_word(
+                        system,
+                        *grant,
+                        scheduler_cycle,
+                        callbacks);
+                }
             }
         }
 
@@ -13719,6 +18812,7 @@ struct CoordinatorBoundarySettlement {
     uint64_t continuations = 0;
     bool closes_dispatch = false;
     bool terminal = false;
+    bool cancelled = false;
 };
 
 static CoordinatorBoundarySettlement
@@ -13727,19 +18821,34 @@ validated_coordinator_settlement(
         int64_t prefix_steps,
         int64_t prefix_cycles,
         int64_t max_steps,
-        const char* context) {
+        const char* context,
+        bool permit_cancellation = false) {
     py::tuple settled = settled_object.cast<py::tuple>();
-    if (settled.size() != 3) {
+    const bool has_cancellation_tag =
+        settled.size() == 4;
+    if (
+        settled.size() != 3 &&
+        !(permit_cancellation && has_cancellation_tag)
+    ) {
         throw std::runtime_error(
             std::string(context) +
-            " must return "
-            "(invocation_steps, invocation_cycles, terminal)");
+            " must return " +
+            (
+                permit_cancellation
+                    ? "(invocation_steps, invocation_cycles, "
+                      "terminal[, cancelled])"
+                    : "(invocation_steps, invocation_cycles, "
+                      "terminal)"
+            ));
     }
 
     CoordinatorBoundarySettlement result;
     result.total_steps = settled[0].cast<int64_t>();
     result.total_cycles = settled[1].cast<int64_t>();
     result.terminal = settled[2].cast<bool>();
+    result.cancelled =
+        has_cancellation_tag &&
+        settled[3].cast<bool>();
     if (
         result.total_steps < prefix_steps ||
         result.total_steps >
@@ -13754,6 +18863,18 @@ validated_coordinator_settlement(
         throw std::runtime_error(
             std::string(context) +
             " returned invalid progress");
+    }
+    if (
+        result.cancelled &&
+        (
+            result.total_steps != prefix_steps ||
+            result.total_cycles != prefix_cycles ||
+            !result.terminal
+        )
+    ) {
+        throw std::runtime_error(
+            std::string(context) +
+            " reported cancellation with architectural progress");
     }
     if (
         !result.terminal &&
@@ -13914,6 +19035,31 @@ finalize_coordinator_instruction(
             "coordinator boundary dispatch returned "
             "invalid progress");
     }
+    if (raw.tacc_cancelled) {
+        if (
+            raw.steps_executed != 0 ||
+            raw.total_cycles != 0 ||
+            raw.stop_reason != RUN_LIMIT
+        ) {
+            throw std::runtime_error(
+                "cancelled TACC boundary returned "
+                "invalid progress");
+        }
+        CoordinatorBoundarySettlement result;
+        result.total_steps =
+            private_result.steps_executed;
+        result.total_cycles =
+            private_result.total_cycles;
+        result.stop_reason = RUN_LIMIT;
+        // Match the established detached-fallback cancellation contract:
+        // close this scheduler invocation even though reset left the core
+        // runnable, so the cancelled instruction is not silently replaced
+        // by a later instruction from the same public batch budget.
+        result.terminal = true;
+        result.closes_dispatch = true;
+        result.cancelled = true;
+        return result;
+    }
 
     const int64_t combined_prefix_steps =
         checked_scheduler_add(
@@ -13942,7 +19088,8 @@ finalize_coordinator_instruction(
                 combined_prefix_steps,
                 combined_prefix_cycles,
                 max_steps,
-                "coordinator continuation");
+                "coordinator continuation",
+                /*permit_cancellation=*/true);
         result.stop_reason = raw.stop_reason;
         result.continuations = 1;
         result.closes_dispatch = true;
@@ -14075,7 +19222,8 @@ static void run_parallel_core_subfrontier(
         const py::function& settle_continuation,
         const py::function& settle_dispatch_error,
         SystemBatchResult& result,
-        CoreFrontierOutcome& outcome) {
+        CoreFrontierOutcome& outcome,
+        std::vector<bool>& tacc_admission_fenced) {
     if (reservations.empty())
         return;
     ConcurrencyProfileCounters& profile =
@@ -14538,6 +19686,18 @@ static void run_parallel_core_subfrontier(
     std::vector<std::optional<DeferredClusterRequest>>
         initial_cluster_requests(
             reservations.size());
+    // This fence is a coordinator-frontier fact, not architectural engine
+    // state. FORCE_PENDING carries a busy engine across later frontiers;
+    // an idle force needs only to keep same-frontier TACC requests from
+    // validating against the just-wiped image.
+    std::vector<uint64_t> tacc_frontier_epochs;
+    tacc_frontier_epochs.reserve(
+        system.cluster_states.size());
+    for (const ClusterState& cluster :
+         system.cluster_states) {
+        tacc_frontier_epochs.push_back(
+            cluster.tacc_epoch);
+    }
     for (
         std::size_t index = 0;
         index < reservations.size();
@@ -14862,6 +20022,26 @@ static void run_parallel_core_subfrontier(
         }
     }
 
+    // Reset, cancellation, or a force pulse accepted through a reentrant
+    // control path can advance an engine epoch without appearing as this
+    // frontier's guest CSRW. Apply that cancellation first and require every
+    // surviving TACC request to revalidate on a later frontier.
+    for (
+        std::size_t cluster_index = 0;
+        cluster_index <
+            system.cluster_states.size();
+        cluster_index++
+    ) {
+        if (
+            system.cluster_states[cluster_index]
+                .tacc_epoch !=
+            tacc_frontier_epochs[cluster_index]
+        ) {
+            tacc_admission_fenced[cluster_index] =
+                true;
+        }
+    }
+
     // Re-snapshot cluster requests from live PCs and live cluster state only
     // after every earlier ordinary effect is committed.
     std::vector<std::optional<DeferredClusterRequest>>
@@ -14890,6 +20070,10 @@ static void run_parallel_core_subfrontier(
         }
     }
 
+    std::vector<bool> tacc_admission_deferred(
+        reservations.size(), false);
+    std::vector<bool> tacc_force_blocked(
+        reservations.size(), false);
     struct ClusterGrantGroup {
         int cluster_index = -1;
         ClusterResourceKind resource =
@@ -14919,6 +20103,7 @@ static void run_parallel_core_subfrontier(
                 static_cast<ClusterResourceKind>(
                     resource_index);
             std::vector<int> local_candidates;
+            std::vector<bool> sha_lock_protected;
             for (
                 std::size_t index = 0;
                 index < cluster_requests.size();
@@ -14934,8 +20119,30 @@ static void run_parallel_core_subfrontier(
                         group.resource
                 ) {
                     group.candidates.push_back(index);
+                    const bool tacc_request =
+                        group.resource ==
+                            ClusterResourceKind::
+                                TILE_ENGINE &&
+                        request->request.tacc_request;
+                    tacc_force_blocked[index] =
+                        tacc_request &&
+                        cluster.tacc_force_pending;
+                    tacc_admission_deferred[index] =
+                        tacc_request &&
+                        !tacc_force_blocked[index] &&
+                        tacc_admission_fenced[
+                            cluster_index];
+                    if (
+                        tacc_force_blocked[index] ||
+                        tacc_admission_deferred[index]
+                    ) {
+                        continue;
+                    }
                     local_candidates.push_back(
                         request->local_core);
+                    sha_lock_protected.push_back(
+                        request->request
+                            .sha_lock_protected);
                 }
             }
             if (group.candidates.empty())
@@ -14943,16 +20150,22 @@ static void run_parallel_core_subfrontier(
             const std::optional<int> local_winner =
                 cluster.choose(
                     group.resource,
-                    local_candidates);
+                    local_candidates,
+                    sha_lock_protected);
             if (local_winner.has_value()) {
                 const auto selected =
                     std::find_if(
                         group.candidates.begin(),
                         group.candidates.end(),
                         [&](std::size_t index) {
-                            return cluster_requests[index]
-                                ->local_core ==
-                                *local_winner;
+                            return (
+                                cluster_requests[index]
+                                    ->local_core ==
+                                    *local_winner &&
+                                !tacc_force_blocked[index] &&
+                                !tacc_admission_deferred[
+                                    index]
+                            );
                         });
                 if (selected ==
                     group.candidates.end()) {
@@ -14981,10 +20194,18 @@ static void run_parallel_core_subfrontier(
         });
 
     // Arbitration choices are frozen together, not discovered in winner
-    // commit order. Every nonselected request is a loser, including requests
-    // that hard eligibility left without a winner. A cyclic-earlier loser can
-    // therefore fund a later zero-credit winner even when the loser's own
-    // resource group appears later in the commit sequence.
+    // commit order. Every nonselected admissible request is a loser,
+    // including requests that hard eligibility left without a winner.
+    // Force-fenced TACC requests remain deferred for fresh validation at a
+    // later frontier. They may donate otherwise stranded aggregate credit to
+    // a cyclic-later admissible request without retiring or advancing their
+    // own PC; the outer round accounts that transfer and leaves the fenced
+    // request pending for a later call.
+    // FORCE_PENDING requests close this round as ineligible losers; their PC
+    // remains unchanged and a later progressing frontier may retry them only
+    // after the active operation has had an opportunity to terminate.
+    // A cyclic-earlier loser can fund a later zero-credit winner even when
+    // the loser's own resource group appears later in the commit sequence.
     std::vector<bool> frozen_cluster_losers(
         reservations.size(), false);
     std::vector<int64_t> frozen_transferable_credit(
@@ -14992,6 +20213,13 @@ static void run_parallel_core_subfrontier(
     for (const ClusterGrantGroup& group : groups) {
         for (std::size_t index :
              group.candidates) {
+            if (tacc_admission_deferred[index]) {
+                frozen_transferable_credit[index] =
+                    reservations[index].max_steps -
+                    private_results[index]
+                        .steps_executed;
+                continue;
+            }
             if (
                 group.winner.has_value() &&
                 index == *group.winner
@@ -15127,8 +20355,17 @@ static void run_parallel_core_subfrontier(
         if (!group.winner.has_value()) {
             for (std::size_t index :
                  group.candidates) {
-                outcome.cluster_lost_cores.push_back(
-                    reservations[index].core_index);
+                if (tacc_admission_deferred[index]) {
+                    outcome.cluster_round_deferred_cores
+                        .push_back(
+                            reservations[index]
+                                .core_index);
+                } else {
+                    outcome.cluster_lost_cores
+                        .push_back(
+                            reservations[index]
+                                .core_index);
+                }
                 dispatch_open[index] = false;
             }
             continue;
@@ -15147,8 +20384,7 @@ static void run_parallel_core_subfrontier(
                 acquire_shared_memory_use(guard_core);
             const std::optional<
                 DeferredClusterRequest> live =
-                    capture_cluster_request(
-                        winner);
+                    capture_cluster_request(winner);
             stable =
                 live.has_value() &&
                 live->cluster_index ==
@@ -15161,6 +20397,13 @@ static void run_parallel_core_subfrontier(
                     frozen_winner.request.resource &&
                 live->request.operation ==
                     frozen_winner.request.operation &&
+                live->request.sha_transaction ==
+                    frozen_winner.request.sha_transaction &&
+                live->request.sha_lock_protected ==
+                    frozen_winner.request
+                        .sha_lock_protected &&
+                live->request.tacc_request ==
+                    frozen_winner.request.tacc_request &&
                 live->request.continuation_reason ==
                     frozen_winner.request
                         .continuation_reason &&
@@ -15169,12 +20412,26 @@ static void run_parallel_core_subfrontier(
                         .encoding_length &&
                 live->request.encoding ==
                     frozen_winner.request.encoding &&
+                !(
+                    live->request.tacc_request &&
+                    (
+                        tacc_admission_fenced[
+                            static_cast<std::size_t>(
+                                group.cluster_index)] ||
+                        system.cluster_states[
+                            static_cast<std::size_t>(
+                                group.cluster_index)]
+                            .tacc_force_pending
+                    )
+                ) &&
                 system.cluster_states[
                     static_cast<std::size_t>(
                         group.cluster_index)]
                     .local_core_is_eligible(
                         group.resource,
-                        frozen_winner.local_core);
+                        frozen_winner.local_core,
+                        frozen_winner.request
+                            .sha_lock_protected);
         }
 
         if (!stable) {
@@ -15183,6 +20440,13 @@ static void run_parallel_core_subfrontier(
                 if (frozen_cluster_losers[index]) {
                     outcome.cluster_lost_cores.push_back(
                         reservations[index].core_index);
+                } else if (
+                    tacc_admission_deferred[index]
+                ) {
+                    outcome.cluster_round_deferred_cores
+                        .push_back(
+                            reservations[index]
+                                .core_index);
                 } else {
                     outcome.cluster_deferred_cores.push_back(
                         reservations[index].core_index);
@@ -15196,8 +20460,20 @@ static void run_parallel_core_subfrontier(
              group.candidates) {
             if (index == winner)
                 continue;
-            outcome.cluster_lost_cores.push_back(
-                reservations[index].core_index);
+            if (frozen_cluster_losers[index]) {
+                outcome.cluster_lost_cores.push_back(
+                    reservations[index].core_index);
+            } else if (
+                tacc_admission_deferred[index]
+            ) {
+                outcome.cluster_round_deferred_cores
+                    .push_back(
+                        reservations[index].core_index);
+            } else {
+                outcome.cluster_deferred_cores
+                    .push_back(
+                        reservations[index].core_index);
+            }
             dispatch_open[index] = false;
         }
 
@@ -15285,12 +20561,21 @@ static void run_parallel_core_subfrontier(
                             reservation.core_index)],
                     settle_continuation,
                     settle_dispatch_error);
-            if (
-                settlement.total_steps !=
+            const int64_t expected_retirement =
                 checked_scheduler_add(
                     private_result.steps_executed,
                     1,
-                    "cluster grant retirement accounting")
+                    "cluster grant retirement accounting");
+            const bool cancelled_tacc_at_terminal =
+                settlement.cancelled &&
+                granted.request.tacc_request &&
+                settlement.terminal &&
+                settlement.total_steps ==
+                    private_result.steps_executed;
+            if (
+                settlement.total_steps !=
+                    expected_retirement &&
+                !cancelled_tacc_at_terminal
             ) {
                 throw std::runtime_error(
                     "granted cluster continuation must "
@@ -15311,10 +20596,13 @@ static void run_parallel_core_subfrontier(
             // checkpoint prevents a failed winner from orphaning that lock
             // or partially publishing shared-engine state.
             publish_settlement(winner, settlement);
-            granted_cluster.commit(
-                granted.request.resource,
-                granted.local_core,
-                granted.request.operation);
+            if (!cancelled_tacc_at_terminal) {
+                granted_cluster.commit(
+                    granted.request.resource,
+                    granted.local_core,
+                    granted.request.operation,
+                    granted.request.sha_transaction);
+            }
         } catch (...) {
             granted_cluster = cluster_checkpoint;
             throw;
@@ -15590,6 +20878,12 @@ static void run_parallel_core_round(
             core_count, {});
         return subfrontier;
     };
+
+    // FORCE admission is fenced for the complete scheduler round. A round
+    // may need several subfrontiers to redistribute aggregate credit, but
+    // they all model the same architectural admission frontier.
+    std::vector<bool> tacc_admission_fenced(
+        system.cluster_states.size(), false);
 
     while (true) {
         std::vector<bool> immediate_cluster_request(
@@ -16040,7 +21334,8 @@ static void run_parallel_core_round(
                 settle_continuation,
                 settle_dispatch_error,
                 subfrontier_result,
-                subfrontier_outcome);
+                subfrontier_outcome,
+                tacc_admission_fenced);
         } catch (...) {
             absorb_subfrontier(
                 /*execution_stopped=*/true);
@@ -16115,6 +21410,11 @@ static void run_parallel_core_round(
                     subfrontier_outcome
                         .cluster_deferred_cores,
                     core_index);
+            const bool cluster_round_deferred =
+                contains_core(
+                    subfrontier_outcome
+                        .cluster_round_deferred_cores,
+                    core_index);
 
             if (interrupted) {
                 close_dispatch(
@@ -16142,6 +21442,20 @@ static void run_parallel_core_round(
                         reservation_index);
                     done[reservation_index] = true;
                 }
+                continue;
+            }
+            if (cluster_round_deferred) {
+                // A FORCE epoch fence lasts through this entire scheduler
+                // round. Close the pending instruction without retirement
+                // and return any unused credit so it can revalidate in the
+                // next round rather than spinning through subfrontiers that
+                // model the same admission edge.
+                close_dispatch(
+                    reservation_index,
+                    RUN_EXT_FALLBACK);
+                release_unused_credit(
+                    reservation_index);
+                done[reservation_index] = true;
                 continue;
             }
             if (dispatch_boundary) {
@@ -16425,6 +21739,2477 @@ static ClusterState& checked_cluster_state(
         static_cast<std::size_t>(cluster_index)];
 }
 
+struct PreparedTaccState {
+    std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+    uint8_t owner = TACC_OWNER_NONE;
+    bool valid = false;
+    bool dirty = false;
+    uint8_t format_ew = 0;
+    uint8_t format_signed = 0;
+    bool busy = false;
+    bool force_pending = false;
+    uint64_t epoch = 0;
+};
+
+static constexpr std::array<const char*, 9>
+    TACC_SNAPSHOT_FIELDS{{
+        "tacc",
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    }};
+
+static constexpr std::array<const char*, 13>
+    CLUSTER_TILE_SNAPSHOT_FIELDS{{
+        "acc",
+        "tacc",
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+        "sha_mode",
+        "sha_msglen_lo",
+        "sha_msglen_hi",
+    }};
+
+template <std::size_t N>
+static void validate_exact_snapshot_schema(
+        const py::dict& state,
+        const std::array<const char*, N>& expected,
+        const char* snapshot_name) {
+    if (static_cast<std::size_t>(state.size()) != N) {
+        throw std::invalid_argument(
+            std::string(snapshot_name) +
+            " snapshot must contain exactly " +
+            std::to_string(N) +
+            " fields");
+    }
+    for (const char* field : expected) {
+        if (!state.contains(py::str(field))) {
+            throw std::invalid_argument(
+                std::string(snapshot_name) +
+                " snapshot is missing field " +
+                field);
+        }
+    }
+}
+
+static py::handle snapshot_field(
+        const py::dict& state,
+        const char* field) {
+    return state[py::str(field)];
+}
+
+static bool snapshot_bool(
+        const py::dict& state,
+        const char* field) {
+    const py::handle value = snapshot_field(state, field);
+    if (!PyBool_Check(value.ptr())) {
+        throw std::invalid_argument(
+            std::string(field) +
+            " must be a bool");
+    }
+    return value.cast<bool>();
+}
+
+static int snapshot_int(
+        const py::dict& state,
+        const char* field) {
+    const py::handle value = snapshot_field(state, field);
+    if (
+        PyBool_Check(value.ptr()) ||
+        !PyLong_Check(value.ptr())
+    ) {
+        throw std::invalid_argument(
+            std::string(field) +
+            " must be an integer");
+    }
+    return value.cast<int>();
+}
+
+static uint64_t snapshot_u64(
+        const py::dict& state,
+        const char* field) {
+    const py::handle value = snapshot_field(state, field);
+    if (
+        PyBool_Check(value.ptr()) ||
+        !PyLong_Check(value.ptr())
+    ) {
+        throw std::invalid_argument(
+            std::string(field) +
+            " must be an unsigned 64-bit integer");
+    }
+    return value.cast<uint64_t>();
+}
+
+static constexpr std::array<const char*, 16>
+    TACC_IMAGE_STAGE_SNAPSHOT_FIELDS{{
+        "schema_version",
+        "engine_count",
+        "active",
+        "direction",
+        "owner_engine_id",
+        "owner_core_id",
+        "engine_epoch",
+        "caller_epoch",
+        "stage_epoch",
+        "base_address",
+        "format_ew",
+        "format_signed",
+        "beat_index",
+        "image",
+        "last_grant_engine_id",
+        "grant_sequence",
+    }};
+
+struct PreparedTaccImageTransferStage {
+    TaccImageTransferStage::Direction direction =
+        TaccImageTransferStage::Direction::NONE;
+    int owner_engine_id =
+        TaccImageTransferStage::NO_OWNER;
+    int owner_core_id =
+        TaccImageTransferStage::NO_OWNER;
+    uint64_t engine_epoch = 0;
+    uint64_t caller_epoch = 0;
+    uint64_t stage_epoch = 0;
+    uint64_t base_address = 0;
+    uint8_t format_ew = 0;
+    bool format_signed = false;
+    uint8_t beat_index = 0;
+    std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+    int last_grant_engine_id =
+        TaccImageTransferStage::NO_OWNER;
+    uint64_t grant_sequence = 0;
+};
+
+static TaccImageTransferStage::Direction
+tacc_image_stage_direction_from_snapshot(
+        const py::dict& state) {
+    const py::handle value =
+        snapshot_field(state, "direction");
+    if (!py::isinstance<py::str>(value)) {
+        throw std::invalid_argument(
+            "TACC image-stage direction must be a string");
+    }
+    const std::string direction =
+        value.cast<std::string>();
+    if (direction == "none")
+        return TaccImageTransferStage::Direction::NONE;
+    if (direction == "load")
+        return TaccImageTransferStage::Direction::LOAD;
+    if (direction == "store")
+        return TaccImageTransferStage::Direction::STORE;
+    throw std::invalid_argument(
+        "TACC image-stage direction must be none, load, or store");
+}
+
+static int optional_snapshot_int(
+        const py::dict& state,
+        const char* field) {
+    const py::handle value = snapshot_field(state, field);
+    if (value.is_none())
+        return TaccImageTransferStage::NO_OWNER;
+    return snapshot_int(state, field);
+}
+
+static PreparedTaccImageTransferStage
+prepare_tacc_image_transfer_stage(
+        SystemState& system,
+        const py::dict& state) {
+    validate_exact_snapshot_schema(
+        state,
+        TACC_IMAGE_STAGE_SNAPSHOT_FIELDS,
+        "TACC image-transfer stage");
+    PreparedTaccImageTransferStage prepared;
+
+    if (snapshot_int(state, "schema_version") != 1) {
+        throw std::invalid_argument(
+            "TACC image-stage snapshot schema version must be one");
+    }
+    const int engine_count =
+        system.full_core_count() +
+        static_cast<int>(system.cluster_states.size());
+    if (snapshot_int(state, "engine_count") != engine_count) {
+        throw std::invalid_argument(
+            "TACC image-stage engine count does not match "
+            "the system topology");
+    }
+    const bool active =
+        snapshot_bool(state, "active");
+    prepared.direction =
+        tacc_image_stage_direction_from_snapshot(state);
+    prepared.owner_engine_id =
+        optional_snapshot_int(state, "owner_engine_id");
+    prepared.owner_core_id =
+        optional_snapshot_int(state, "owner_core_id");
+    prepared.engine_epoch =
+        snapshot_u64(state, "engine_epoch");
+    prepared.caller_epoch =
+        snapshot_u64(state, "caller_epoch");
+    prepared.stage_epoch =
+        snapshot_u64(state, "stage_epoch");
+    prepared.base_address =
+        snapshot_u64(state, "base_address");
+
+    const py::handle image_value =
+        snapshot_field(state, "image");
+    if (!py::isinstance<py::bytes>(image_value)) {
+        throw std::invalid_argument(
+            "TACC image-stage image must be bytes");
+    }
+    const std::string image =
+        py::reinterpret_borrow<py::bytes>(
+            image_value);
+    if (image.size() != prepared.image.size()) {
+        throw std::invalid_argument(
+            "TACC image-stage image must be "
+            "exactly 256 bytes");
+    }
+    std::copy(
+        image.begin(),
+        image.end(),
+        prepared.image.begin());
+
+    const int format_ew =
+        snapshot_int(state, "format_ew");
+    if (format_ew < 0 || format_ew > 7) {
+        throw std::invalid_argument(
+            "TACC image-stage format EW must fit three bits");
+    }
+    prepared.format_ew =
+        static_cast<uint8_t>(format_ew);
+    prepared.format_signed =
+        snapshot_bool(state, "format_signed");
+    const int beat_index =
+        snapshot_int(state, "beat_index");
+    if (beat_index < 0 || beat_index > 4) {
+        throw std::invalid_argument(
+            "TACC image-stage beat index must be between "
+            "zero and four");
+    }
+    prepared.beat_index =
+        static_cast<uint8_t>(beat_index);
+    prepared.last_grant_engine_id =
+        optional_snapshot_int(
+            state,
+            "last_grant_engine_id");
+    if (
+        prepared.last_grant_engine_id <
+            TaccImageTransferStage::NO_OWNER ||
+        prepared.last_grant_engine_id >= engine_count
+    ) {
+        throw std::invalid_argument(
+            "TACC image-stage last grant is outside "
+            "the physical engine topology");
+    }
+    prepared.grant_sequence =
+        snapshot_u64(state, "grant_sequence");
+    if (
+        (
+            prepared.last_grant_engine_id ==
+            TaccImageTransferStage::NO_OWNER
+        ) !=
+        (prepared.grant_sequence == 0)
+    ) {
+        throw std::invalid_argument(
+            "TACC image-stage RR cursor and grant sequence "
+            "must either both be empty or both be established");
+    }
+
+    if (!active) {
+        if (
+            prepared.direction !=
+                TaccImageTransferStage::Direction::NONE ||
+            prepared.owner_engine_id !=
+                TaccImageTransferStage::NO_OWNER ||
+            prepared.owner_core_id !=
+                TaccImageTransferStage::NO_OWNER ||
+            prepared.engine_epoch != 0 ||
+            prepared.caller_epoch != 0 ||
+            prepared.base_address != 0 ||
+            prepared.format_ew != 0 ||
+            prepared.format_signed ||
+            prepared.beat_index != 0 ||
+            std::any_of(
+                prepared.image.begin(),
+                prepared.image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        ) {
+            throw std::invalid_argument(
+                "inactive TACC image stage must clear its "
+                "direction, owners, transfer fields, and image");
+        }
+        if (system.tacc_image_stage.active()) {
+            throw std::invalid_argument(
+                "inactive TACC image-stage restore cannot "
+                "clear a live transfer tenure");
+        }
+        return prepared;
+    }
+
+    if (
+        prepared.direction ==
+            TaccImageTransferStage::Direction::NONE ||
+        prepared.owner_engine_id < 0 ||
+        prepared.owner_engine_id >= engine_count ||
+        prepared.owner_core_id < 0 ||
+        prepared.owner_core_id >= TACC_OWNER_NONE
+    ) {
+        throw std::invalid_argument(
+            "active TACC image stage requires valid physical "
+            "and absolute owners");
+    }
+    const int mapped_engine =
+        system.tacc_engine_for_core(
+            prepared.owner_core_id);
+    if (mapped_engine != prepared.owner_engine_id) {
+        throw std::invalid_argument(
+            "TACC image-stage core owner does not map to "
+            "its physical engine owner");
+    }
+    if (
+        prepared.last_grant_engine_id !=
+        prepared.owner_engine_id
+    ) {
+        throw std::invalid_argument(
+            "active TACC image stage must match the latest "
+            "physical-engine grant");
+    }
+    if ((prepared.base_address & 0x3F) != 0) {
+        throw std::invalid_argument(
+            "TACC image-stage base address must be "
+            "64-byte aligned");
+    }
+    if (
+        prepared.base_address >
+        std::numeric_limits<uint64_t>::max() -
+            (TACC_IMAGE_BYTES - 1)
+    ) {
+        throw std::invalid_argument(
+            "TACC image-stage span wraps the address space");
+    }
+    if (
+        prepared.format_ew != EW_U8 &&
+        prepared.format_ew != EW_U16 &&
+        prepared.format_ew != EW_U32 &&
+        prepared.format_ew != EW_FP16 &&
+        prepared.format_ew != EW_BF16
+    ) {
+        throw std::invalid_argument(
+            "active TACC image stage requires a legal format");
+    }
+    if (
+        (
+            prepared.format_ew == EW_FP16 ||
+            prepared.format_ew == EW_BF16
+        ) &&
+        prepared.format_signed
+    ) {
+        throw std::invalid_argument(
+            "floating TACC image stage cannot be signed");
+    }
+
+    const TaccImageTransferStage& current =
+        system.tacc_image_stage;
+    if (
+        !current.active() ||
+        current.owner_engine_id !=
+            prepared.owner_engine_id ||
+        current.owner_core_id !=
+            prepared.owner_core_id ||
+        current.stage_epoch !=
+            prepared.stage_epoch
+    ) {
+        throw std::invalid_argument(
+            "active TACC image-stage restore has no matching "
+            "live transfer tenure");
+    }
+    if (
+        prepared.direction != current.direction ||
+        prepared.base_address != current.base_address ||
+        prepared.format_ew != current.format_ew ||
+        prepared.format_signed != current.format_signed ||
+        prepared.engine_epoch != current.engine_epoch ||
+        prepared.caller_epoch != current.caller_epoch ||
+        prepared.last_grant_engine_id !=
+            current.last_grant_engine_id ||
+        prepared.grant_sequence !=
+            current.grant_sequence
+    ) {
+        throw std::invalid_argument(
+            "active TACC image-stage restore cannot change "
+            "immutable tenure or round-robin fields");
+    }
+    if (prepared.beat_index > current.beat_index) {
+        throw std::invalid_argument(
+            "active TACC image-stage restore cannot fabricate "
+            "future beat acknowledgements");
+    }
+    if (
+        prepared.direction ==
+            TaccImageTransferStage::Direction::STORE &&
+        prepared.image != current.image
+    ) {
+        throw std::invalid_argument(
+            "active TACC STORE restore cannot rewrite its "
+            "captured image");
+    }
+    const std::size_t acknowledged_bytes =
+        static_cast<std::size_t>(
+            prepared.beat_index) * 64;
+    if (
+        prepared.direction ==
+            TaccImageTransferStage::Direction::LOAD &&
+        !std::equal(
+            prepared.image.begin(),
+            prepared.image.begin() +
+                static_cast<std::ptrdiff_t>(
+                    acknowledged_bytes),
+            current.image.begin())
+    ) {
+        throw std::invalid_argument(
+            "active TACC LOAD rollback cannot rewrite an "
+            "acknowledged prefix");
+    }
+    const uint64_t live_engine_epoch =
+        prepared.owner_engine_id <
+            system.full_core_count()
+        ? system.cores[
+              static_cast<std::size_t>(
+                  prepared.owner_engine_id)]
+              ->tacc_epoch
+        : system.cluster_states[
+              static_cast<std::size_t>(
+                  prepared.owner_engine_id -
+                  system.full_core_count())]
+              .tacc_epoch;
+    if (prepared.engine_epoch != live_engine_epoch) {
+        throw std::invalid_argument(
+            "TACC image-stage engine epoch is stale");
+    }
+    const bool engine_busy =
+        prepared.owner_engine_id <
+            system.full_core_count()
+        ? system.cores[
+              static_cast<std::size_t>(
+                  prepared.owner_engine_id)]
+              ->tacc_busy
+        : system.cluster_states[
+              static_cast<std::size_t>(
+                  prepared.owner_engine_id -
+                  system.full_core_count())]
+              .tacc_busy;
+    const uint8_t engine_owner =
+        prepared.owner_engine_id <
+            system.full_core_count()
+        ? system.cores[
+              static_cast<std::size_t>(
+                  prepared.owner_engine_id)]
+              ->tacc_owner
+        : system.cluster_states[
+              static_cast<std::size_t>(
+                  prepared.owner_engine_id -
+                  system.full_core_count())]
+              .tacc_owner;
+    if (
+        !engine_busy ||
+        engine_owner != prepared.owner_core_id
+    ) {
+        throw std::invalid_argument(
+            "active TACC image-stage restore requires the "
+            "caller's BUSY owned engine");
+    }
+    if (
+        prepared.owner_core_id <
+            system.full_core_count() &&
+        prepared.caller_epoch != 0
+    ) {
+        throw std::invalid_argument(
+            "full-core TACC image stages use caller epoch zero");
+    }
+    if (prepared.owner_core_id >= system.full_core_count()) {
+        ClusterState& cluster =
+            system.cluster_states[
+                static_cast<std::size_t>(
+                    prepared.owner_engine_id -
+                    system.full_core_count())];
+        const int local_core =
+            prepared.owner_core_id -
+            cluster.global_id_base;
+        if (
+            local_core < 0 ||
+            local_core >= cluster.core_count ||
+            cluster.tacc_caller_epochs[
+                static_cast<std::size_t>(
+                    local_core)] !=
+                prepared.caller_epoch
+        ) {
+            throw std::invalid_argument(
+                "TACC image-stage caller epoch is stale");
+        }
+    }
+    if (
+        prepared.direction ==
+            TaccImageTransferStage::Direction::LOAD &&
+        prepared.beat_index < 4 &&
+        std::any_of(
+            prepared.image.begin() +
+                static_cast<std::ptrdiff_t>(
+                    prepared.beat_index * 64),
+            prepared.image.end(),
+            [](uint8_t byte) {
+                return byte != 0;
+            })
+    ) {
+        throw std::invalid_argument(
+            "TACC LOAD stage has data beyond its acknowledged prefix");
+    }
+    if (
+        prepared.direction ==
+            TaccImageTransferStage::Direction::LOAD &&
+        prepared.format_ew != EW_U8 &&
+        prepared.format_ew != EW_U16 &&
+        (
+            std::any_of(
+                prepared.image.begin() + 128,
+                prepared.image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        )
+    ) {
+        throw std::invalid_argument(
+            "inactive TACC LOAD image bytes must remain zero");
+    }
+    return prepared;
+}
+
+static py::dict snapshot_tacc_image_transfer_stage(
+        const SystemState& system) {
+    const TaccImageTransferStage& stage =
+        system.tacc_image_stage;
+    py::dict snapshot;
+    snapshot["schema_version"] = 1;
+    snapshot["engine_count"] =
+        system.full_core_count() +
+        static_cast<int>(
+            system.cluster_states.size());
+    snapshot["active"] = stage.active();
+    switch (stage.direction) {
+        case TaccImageTransferStage::Direction::NONE:
+            snapshot["direction"] = "none";
+            break;
+        case TaccImageTransferStage::Direction::LOAD:
+            snapshot["direction"] = "load";
+            break;
+        case TaccImageTransferStage::Direction::STORE:
+            snapshot["direction"] = "store";
+            break;
+    }
+    if (stage.owner_engine_id == TaccImageTransferStage::NO_OWNER) {
+        snapshot["owner_engine_id"] = py::none();
+    } else {
+        snapshot["owner_engine_id"] =
+            stage.owner_engine_id;
+    }
+    if (stage.owner_core_id == TaccImageTransferStage::NO_OWNER) {
+        snapshot["owner_core_id"] = py::none();
+    } else {
+        snapshot["owner_core_id"] =
+            stage.owner_core_id;
+    }
+    snapshot["engine_epoch"] = stage.engine_epoch;
+    snapshot["caller_epoch"] = stage.caller_epoch;
+    snapshot["stage_epoch"] = stage.stage_epoch;
+    snapshot["base_address"] = stage.base_address;
+    snapshot["format_ew"] = stage.format_ew;
+    snapshot["format_signed"] = stage.format_signed;
+    snapshot["beat_index"] = stage.beat_index;
+    snapshot["image"] = py::bytes(
+        reinterpret_cast<const char*>(
+            stage.image.data()),
+        stage.image.size());
+    if (
+        stage.last_grant_engine_id ==
+        TaccImageTransferStage::NO_OWNER
+    ) {
+        snapshot["last_grant_engine_id"] =
+            py::none();
+    } else {
+        snapshot["last_grant_engine_id"] =
+            stage.last_grant_engine_id;
+    }
+    snapshot["grant_sequence"] = stage.grant_sequence;
+    return snapshot;
+}
+
+static void commit_tacc_image_transfer_stage(
+        TaccImageTransferStage& stage,
+        const PreparedTaccImageTransferStage& prepared) noexcept {
+    stage.direction = prepared.direction;
+    stage.owner_engine_id = prepared.owner_engine_id;
+    stage.owner_core_id = prepared.owner_core_id;
+    stage.engine_epoch = prepared.engine_epoch;
+    stage.caller_epoch = prepared.caller_epoch;
+    stage.stage_epoch = prepared.stage_epoch;
+    stage.base_address = prepared.base_address;
+    stage.format_ew = prepared.format_ew;
+    stage.format_signed = prepared.format_signed;
+    stage.beat_index = prepared.beat_index;
+    stage.image = prepared.image;
+    stage.last_grant_engine_id =
+        prepared.last_grant_engine_id;
+    stage.grant_sequence = prepared.grant_sequence;
+}
+
+static bool tacc_image_stage_owner_is_live(
+        const SystemState& system,
+        const TaccImageTransferStage& stage) noexcept {
+    if (!stage.active())
+        return false;
+    const int full_core_count = system.full_core_count();
+    if (
+        stage.owner_engine_id < 0 ||
+        stage.owner_core_id < 0
+    ) {
+        return false;
+    }
+    if (stage.owner_engine_id < full_core_count) {
+        if (
+            stage.owner_core_id != stage.owner_engine_id ||
+            stage.caller_epoch != 0
+        ) {
+            return false;
+        }
+        const CPUState& core =
+            *system.cores[
+                static_cast<std::size_t>(
+                    stage.owner_engine_id)];
+        return (
+            core.tacc_epoch == stage.engine_epoch &&
+            core.tacc_busy &&
+            core.tacc_owner == stage.owner_core_id
+        );
+    }
+
+    const int cluster_index =
+        stage.owner_engine_id - full_core_count;
+    if (
+        cluster_index < 0 ||
+        cluster_index >=
+            static_cast<int>(
+                system.cluster_states.size())
+    ) {
+        return false;
+    }
+    const ClusterState& cluster =
+        system.cluster_states[
+            static_cast<std::size_t>(
+                cluster_index)];
+    const int local_core =
+        stage.owner_core_id - cluster.global_id_base;
+    if (
+        local_core < 0 ||
+        local_core >= cluster.core_count
+    ) {
+        return false;
+    }
+    return (
+        cluster.tacc_epoch == stage.engine_epoch &&
+        cluster.tacc_caller_epochs[
+            static_cast<std::size_t>(
+                local_core)] == stage.caller_epoch &&
+        cluster.tacc_busy &&
+        cluster.tacc_owner == stage.owner_core_id
+    );
+}
+
+static const char* tacc_transport_phase_name(
+        TaccTransportPhase phase) {
+    switch (phase) {
+        case TaccTransportPhase::IDLE:
+            return "idle";
+        case TaccTransportPhase::WAITING_STAGE:
+            return "waiting_stage";
+        case TaccTransportPhase::ACTIVE:
+            return "active";
+        case TaccTransportPhase::COMPLETE:
+            return "complete";
+        case TaccTransportPhase::CANCELED:
+            return "canceled";
+    }
+    throw std::logic_error("invalid TACC transport phase");
+}
+
+static const char* tacc_transport_direction_name(
+        TaccImageTransferStage::Direction direction) {
+    switch (direction) {
+        case TaccImageTransferStage::Direction::NONE:
+            return "none";
+        case TaccImageTransferStage::Direction::LOAD:
+            return "load";
+        case TaccImageTransferStage::Direction::STORE:
+            return "store";
+    }
+    throw std::logic_error("invalid TACC transport direction");
+}
+
+static const char* tile_memory_operation_name(
+        BusOperation operation) {
+    switch (operation) {
+        case BusOperation::READ:
+            return "read";
+        case BusOperation::WRITE:
+            return "write";
+    }
+    throw std::logic_error("invalid tile-memory operation");
+}
+
+static py::object optional_nonnegative_int(int value) {
+    if (value < 0)
+        return py::none();
+    return py::int_(value);
+}
+
+static py::object optional_u64(
+        const std::optional<uint64_t>& value) {
+    if (!value.has_value())
+        return py::none();
+    return py::int_(*value);
+}
+
+static py::dict snapshot_tacc_engine_transport(
+        const TaccEngineTransportState& state,
+        int engine_id) {
+    py::dict snapshot;
+    snapshot["engine_id"] = engine_id;
+    snapshot["phase"] =
+        tacc_transport_phase_name(state.phase);
+    snapshot["owner_core_id"] =
+        optional_nonnegative_int(
+            state.identity.owner_core_id);
+    snapshot["operation_token"] =
+        state.identity.operation_token;
+    snapshot["last_operation_token"] =
+        state.last_operation_token;
+    snapshot["engine_epoch"] =
+        state.identity.engine_epoch;
+    snapshot["caller_epoch"] =
+        state.identity.caller_epoch;
+    snapshot["direction"] =
+        tacc_transport_direction_name(
+            state.direction);
+    snapshot["base_address"] =
+        state.base_address;
+    snapshot["format_ew"] =
+        state.format_ew;
+    snapshot["format_signed"] =
+        state.format_signed;
+    snapshot["ready_cycle"] =
+        state.ready_cycle;
+    snapshot["stage_token"] =
+        state.stage_token;
+    snapshot["stage_grant_cycle"] =
+        state.stage_grant_cycle;
+    snapshot["beat_index"] =
+        state.beat_index;
+    snapshot["image"] = py::bytes(
+        reinterpret_cast<const char*>(
+            state.image.data()),
+        state.image.size());
+    return snapshot;
+}
+
+static py::dict snapshot_tile_memory_request(
+        const TileMemoryPortRequest& request) {
+    py::dict snapshot;
+    snapshot["engine_id"] =
+        request.identity.engine_id;
+    snapshot["owner_core_id"] =
+        request.identity.owner_core_id;
+    snapshot["operation_token"] =
+        request.identity.operation_token;
+    snapshot["engine_epoch"] =
+        request.identity.engine_epoch;
+    snapshot["caller_epoch"] =
+        request.identity.caller_epoch;
+    snapshot["ready_cycle"] =
+        request.ready_cycle;
+    snapshot["issue_sequence"] =
+        request.issue_sequence;
+    snapshot["stage_token"] =
+        request.stage_token;
+    snapshot["image_transfer"] =
+        request.image_transfer;
+    snapshot["beat_index"] =
+        request.beat_index;
+    snapshot["direction"] =
+        tile_memory_operation_name(
+            request.operation);
+    snapshot["address"] =
+        request.address;
+    if (request.operation == BusOperation::WRITE) {
+        snapshot["data"] = py::bytes(
+            reinterpret_cast<const char*>(
+                request.data.data()),
+            request.data.size());
+    } else {
+        snapshot["data"] = py::bytes();
+    }
+    return snapshot;
+}
+
+static py::dict snapshot_tile_memory_grant(
+        const TileMemoryPortGrant& grant) {
+    py::dict snapshot;
+    snapshot["request"] =
+        snapshot_tile_memory_request(
+            grant.request);
+    snapshot["grant_sequence"] =
+        grant.grant_sequence;
+    snapshot["grant_cycle"] =
+        grant.grant_cycle;
+    return snapshot;
+}
+
+static py::dict snapshot_tacc_stage_grant(
+        const TaccStageGrant& grant) {
+    py::dict snapshot;
+    snapshot["engine_id"] =
+        grant.identity.engine_id;
+    snapshot["owner_core_id"] =
+        grant.identity.owner_core_id;
+    snapshot["operation_token"] =
+        grant.identity.operation_token;
+    snapshot["engine_epoch"] =
+        grant.identity.engine_epoch;
+    snapshot["caller_epoch"] =
+        grant.identity.caller_epoch;
+    snapshot["ready_cycle"] =
+        grant.ready_cycle;
+    snapshot["stage_token"] =
+        grant.stage_token;
+    snapshot["grant_cycle"] =
+        grant.grant_cycle;
+    return snapshot;
+}
+
+static py::dict snapshot_tile_memory_completion(
+        const TileMemoryPortCompletion& completion) {
+    py::dict snapshot;
+    snapshot["grant"] =
+        snapshot_tile_memory_grant(
+            completion.grant);
+    snapshot["completion_cycle"] =
+        completion.completion_cycle;
+    if (completion.read_data.has_value()) {
+        snapshot["read_data"] = py::bytes(
+            reinterpret_cast<const char*>(
+                completion.read_data->data()),
+            completion.read_data->size());
+    } else {
+        snapshot["read_data"] = py::none();
+    }
+    snapshot["image_transfer_complete"] =
+        completion.image_transfer_complete;
+    return snapshot;
+}
+
+static py::dict snapshot_tile_memory_transport(
+        const SystemState& system) {
+    const TileMemoryTransport& transport =
+        system.tile_memory_transport;
+    const TaccImageTransferStage& stage =
+        system.tacc_image_stage;
+
+    py::dict stage_snapshot;
+    stage_snapshot["active"] = stage.active();
+    stage_snapshot["direction"] =
+        tacc_transport_direction_name(
+            stage.direction);
+    stage_snapshot["owner_engine_id"] =
+        optional_nonnegative_int(
+            stage.owner_engine_id);
+    stage_snapshot["owner_core_id"] =
+        optional_nonnegative_int(
+            stage.owner_core_id);
+    uint64_t operation_token = 0;
+    uint64_t stage_grant_cycle = 0;
+    if (
+        stage.active() &&
+        transport.valid_engine_id(
+            stage.owner_engine_id)
+    ) {
+        const TaccEngineTransportState& owner =
+            transport.engines[
+                static_cast<std::size_t>(
+                    stage.owner_engine_id)];
+        operation_token =
+            owner.identity.operation_token;
+        stage_grant_cycle =
+            owner.stage_grant_cycle;
+    }
+    stage_snapshot["operation_token"] =
+        operation_token;
+    stage_snapshot["engine_epoch"] =
+        stage.engine_epoch;
+    stage_snapshot["caller_epoch"] =
+        stage.caller_epoch;
+    stage_snapshot["stage_token"] =
+        stage.stage_epoch;
+    stage_snapshot["base_address"] =
+        stage.base_address;
+    stage_snapshot["format_ew"] =
+        stage.format_ew;
+    stage_snapshot["format_signed"] =
+        stage.format_signed;
+    stage_snapshot["beat_index"] =
+        stage.beat_index;
+    stage_snapshot["image"] = py::bytes(
+        reinterpret_cast<const char*>(
+            stage.image.data()),
+        stage.image.size());
+    stage_snapshot["grant_cycle"] =
+        stage_grant_cycle;
+    stage_snapshot["last_grant_engine_id"] =
+        optional_nonnegative_int(
+            transport.stage_last_grant_engine_id);
+    stage_snapshot["grant_count"] =
+        transport.stage_grant_count;
+    stage_snapshot["grant_counts"] =
+        transport.stage_grant_counts;
+    stage_snapshot["last_arbitration_cycle"] =
+        optional_u64(
+            transport.last_stage_arbitration_cycle);
+
+    py::list pending;
+    for (const auto& request :
+         transport.pending_port_requests) {
+        if (request.has_value()) {
+            pending.append(
+                snapshot_tile_memory_request(
+                    *request));
+        } else {
+            pending.append(py::none());
+        }
+    }
+    py::dict port_snapshot;
+    port_snapshot["pending"] =
+        std::move(pending);
+    if (transport.active_port_grant.has_value()) {
+        port_snapshot["active_grant"] =
+            snapshot_tile_memory_grant(
+                *transport.active_port_grant);
+    } else {
+        port_snapshot["active_grant"] =
+            py::none();
+    }
+    port_snapshot["last_grant_engine_id"] =
+        optional_nonnegative_int(
+            transport.port_last_grant_engine_id);
+    port_snapshot["grant_count"] =
+        transport.port_grant_count;
+    port_snapshot["grant_counts"] =
+        transport.port_grant_counts;
+    port_snapshot["last_issue_sequences"] =
+        transport.last_issue_sequences;
+    port_snapshot["last_arbitration_cycle"] =
+        optional_u64(
+            transport.last_port_arbitration_cycle);
+
+    py::list engines;
+    for (int engine_id = 0;
+         engine_id < transport.engine_count();
+         engine_id++) {
+        engines.append(
+            snapshot_tacc_engine_transport(
+                transport.engines[
+                    static_cast<std::size_t>(
+                        engine_id)],
+                engine_id));
+    }
+
+    py::dict snapshot;
+    snapshot["schema_version"] = 1;
+    snapshot["engine_count"] =
+        transport.engine_count();
+    snapshot["stage"] =
+        std::move(stage_snapshot);
+    snapshot["port"] =
+        std::move(port_snapshot);
+    snapshot["engines"] =
+        std::move(engines);
+    return snapshot;
+}
+
+static constexpr std::array<const char*, 5>
+    TILE_TRANSPORT_SNAPSHOT_FIELDS{{
+        "schema_version",
+        "engine_count",
+        "stage",
+        "port",
+        "engines",
+    }};
+
+static constexpr std::array<const char*, 18>
+    TILE_TRANSPORT_STAGE_FIELDS{{
+        "active",
+        "direction",
+        "owner_engine_id",
+        "owner_core_id",
+        "operation_token",
+        "engine_epoch",
+        "caller_epoch",
+        "stage_token",
+        "base_address",
+        "format_ew",
+        "format_signed",
+        "beat_index",
+        "image",
+        "grant_cycle",
+        "last_grant_engine_id",
+        "grant_count",
+        "grant_counts",
+        "last_arbitration_cycle",
+    }};
+
+static constexpr std::array<const char*, 7>
+    TILE_TRANSPORT_PORT_FIELDS{{
+        "pending",
+        "active_grant",
+        "last_grant_engine_id",
+        "grant_count",
+        "grant_counts",
+        "last_issue_sequences",
+        "last_arbitration_cycle",
+    }};
+
+static constexpr std::array<const char*, 16>
+    TILE_TRANSPORT_ENGINE_FIELDS{{
+        "engine_id",
+        "phase",
+        "owner_core_id",
+        "operation_token",
+        "last_operation_token",
+        "engine_epoch",
+        "caller_epoch",
+        "direction",
+        "base_address",
+        "format_ew",
+        "format_signed",
+        "ready_cycle",
+        "stage_token",
+        "stage_grant_cycle",
+        "beat_index",
+        "image",
+    }};
+
+static constexpr std::array<const char*, 13>
+    TILE_MEMORY_REQUEST_FIELDS{{
+        "engine_id",
+        "owner_core_id",
+        "operation_token",
+        "engine_epoch",
+        "caller_epoch",
+        "ready_cycle",
+        "issue_sequence",
+        "stage_token",
+        "image_transfer",
+        "beat_index",
+        "direction",
+        "address",
+        "data",
+    }};
+
+static constexpr std::array<const char*, 3>
+    TILE_MEMORY_GRANT_FIELDS{{
+        "request",
+        "grant_sequence",
+        "grant_cycle",
+    }};
+
+static std::optional<uint64_t> optional_snapshot_u64(
+        const py::dict& state,
+        const char* field) {
+    const py::handle value =
+        snapshot_field(state, field);
+    if (value.is_none())
+        return std::nullopt;
+    if (
+        PyBool_Check(value.ptr()) ||
+        !PyLong_Check(value.ptr())
+    ) {
+        throw std::invalid_argument(
+            std::string(field) +
+            " must be an unsigned 64-bit integer or None");
+    }
+    return value.cast<uint64_t>();
+}
+
+template <std::size_t N>
+static std::array<uint8_t, N> snapshot_fixed_bytes(
+        const py::dict& state,
+        const char* field,
+        const char* snapshot_name) {
+    const py::handle value =
+        snapshot_field(state, field);
+    if (!py::isinstance<py::bytes>(value)) {
+        throw std::invalid_argument(
+            std::string(snapshot_name) +
+            " field " + field +
+            " must be bytes");
+    }
+    const std::string bytes =
+        py::reinterpret_borrow<py::bytes>(
+            value);
+    if (bytes.size() != N) {
+        throw std::invalid_argument(
+            std::string(snapshot_name) +
+            " field " + field +
+            " has the wrong byte length");
+    }
+    std::array<uint8_t, N> result{};
+    std::copy(
+        bytes.begin(),
+        bytes.end(),
+        result.begin());
+    return result;
+}
+
+static std::vector<uint64_t> snapshot_u64_vector(
+        const py::dict& state,
+        const char* field,
+        const char* snapshot_name,
+        std::size_t expected_size) {
+    const py::handle value =
+        snapshot_field(state, field);
+    if (
+        py::isinstance<py::str>(value) ||
+        py::isinstance<py::bytes>(value) ||
+        !py::isinstance<py::sequence>(value)
+    ) {
+        throw std::invalid_argument(
+            std::string(snapshot_name) +
+            " field " + field +
+            " must be a sequence");
+    }
+    const py::sequence sequence =
+        py::reinterpret_borrow<py::sequence>(
+            value);
+    if (
+        sequence.size() !=
+            expected_size
+    ) {
+        throw std::invalid_argument(
+            std::string(snapshot_name) +
+            " field " + field +
+            " must contain exactly " +
+            std::to_string(expected_size) +
+            " entries");
+    }
+    std::vector<uint64_t> result(expected_size, 0);
+    for (
+        std::size_t index = 0;
+        index < expected_size;
+        index++
+    ) {
+        const py::handle item =
+            sequence[
+                static_cast<py::ssize_t>(index)];
+        if (
+            PyBool_Check(item.ptr()) ||
+            !PyLong_Check(item.ptr())
+        ) {
+            throw std::invalid_argument(
+                std::string(snapshot_name) +
+                " field " + field +
+                " must contain unsigned 64-bit integers");
+        }
+        result[index] =
+            item.cast<uint64_t>();
+    }
+    return result;
+}
+
+static TaccTransportPhase tacc_transport_phase_from_snapshot(
+        const py::dict& state) {
+    const py::handle value =
+        snapshot_field(state, "phase");
+    if (!py::isinstance<py::str>(value))
+        throw std::invalid_argument(
+            "TACC transport phase must be a string");
+    const std::string phase =
+        value.cast<std::string>();
+    if (phase == "idle")
+        return TaccTransportPhase::IDLE;
+    if (phase == "waiting_stage")
+        return TaccTransportPhase::WAITING_STAGE;
+    if (phase == "active")
+        return TaccTransportPhase::ACTIVE;
+    if (phase == "complete")
+        return TaccTransportPhase::COMPLETE;
+    if (phase == "canceled")
+        return TaccTransportPhase::CANCELED;
+    throw std::invalid_argument(
+        "TACC transport phase is not recognized");
+}
+
+static BusOperation tile_memory_operation_from_snapshot(
+        const py::dict& state) {
+    const py::handle value =
+        snapshot_field(state, "direction");
+    if (!py::isinstance<py::str>(value))
+        throw std::invalid_argument(
+            "tile-memory direction must be a string");
+    const std::string direction =
+        value.cast<std::string>();
+    if (direction == "read")
+        return BusOperation::READ;
+    if (direction == "write")
+        return BusOperation::WRITE;
+    throw std::invalid_argument(
+        "tile-memory direction must be read or write");
+}
+
+static TaccEngineTransportState
+prepare_tacc_engine_transport(
+        const py::dict& snapshot,
+        int expected_engine_id,
+        const TileMemoryTransport& topology) {
+    validate_exact_snapshot_schema(
+        snapshot,
+        TILE_TRANSPORT_ENGINE_FIELDS,
+        "TACC engine transport");
+    if (
+        snapshot_int(snapshot, "engine_id") !=
+            expected_engine_id
+    ) {
+        throw std::invalid_argument(
+            "TACC engine snapshot order does not match its engine ID");
+    }
+
+    TaccEngineTransportState state;
+    state.phase =
+        tacc_transport_phase_from_snapshot(
+            snapshot);
+    state.identity.engine_id =
+        state.phase == TaccTransportPhase::IDLE
+        ? -1
+        : expected_engine_id;
+    state.identity.owner_core_id =
+        optional_snapshot_int(
+            snapshot,
+            "owner_core_id");
+    state.identity.operation_token =
+        snapshot_u64(
+            snapshot,
+            "operation_token");
+    state.last_operation_token =
+        snapshot_u64(
+            snapshot,
+            "last_operation_token");
+    state.identity.engine_epoch =
+        snapshot_u64(
+            snapshot,
+            "engine_epoch");
+    state.identity.caller_epoch =
+        snapshot_u64(
+            snapshot,
+            "caller_epoch");
+    state.direction =
+        tacc_image_stage_direction_from_snapshot(
+            snapshot);
+    state.base_address =
+        snapshot_u64(
+            snapshot,
+            "base_address");
+    const int format_ew =
+        snapshot_int(snapshot, "format_ew");
+    if (format_ew < 0 || format_ew > 7)
+        throw std::invalid_argument(
+            "TACC transport format EW must fit three bits");
+    state.format_ew =
+        static_cast<uint8_t>(format_ew);
+    state.format_signed =
+        snapshot_bool(
+            snapshot,
+            "format_signed");
+    state.ready_cycle =
+        snapshot_u64(
+            snapshot,
+            "ready_cycle");
+    state.stage_token =
+        snapshot_u64(
+            snapshot,
+            "stage_token");
+    state.stage_grant_cycle =
+        snapshot_u64(
+            snapshot,
+            "stage_grant_cycle");
+    const int beat_index =
+        snapshot_int(snapshot, "beat_index");
+    if (
+        beat_index < 0 ||
+        beat_index >
+            TileMemoryTransport::IMAGE_BEATS
+    ) {
+        throw std::invalid_argument(
+            "TACC transport beat index must be between zero and four");
+    }
+    state.beat_index =
+        static_cast<uint8_t>(beat_index);
+    state.image =
+        snapshot_fixed_bytes<TACC_IMAGE_BYTES>(
+            snapshot,
+            "image",
+            "TACC engine transport");
+
+    if (state.phase == TaccTransportPhase::IDLE) {
+        if (
+            state.identity.owner_core_id != -1 ||
+            state.identity.operation_token != 0 ||
+            state.last_operation_token != 0 ||
+            state.identity.engine_epoch != 0 ||
+            state.identity.caller_epoch != 0 ||
+            state.direction !=
+                TaccImageTransferStage::Direction::NONE ||
+            state.base_address != 0 ||
+            state.format_ew != 0 ||
+            state.format_signed ||
+            state.ready_cycle != 0 ||
+            state.stage_token != 0 ||
+            state.stage_grant_cycle != 0 ||
+            state.beat_index != 0 ||
+            std::any_of(
+                state.image.begin(),
+                state.image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        ) {
+            throw std::invalid_argument(
+                "idle TACC transport must clear all operation state");
+        }
+        return state;
+    }
+
+    if (
+        !topology.owner_maps_to_engine(
+            expected_engine_id,
+            state.identity.owner_core_id)
+    ) {
+        throw std::invalid_argument(
+            "TACC transport owner does not map to its physical engine");
+    }
+    if (
+        expected_engine_id <
+            topology.full_engine_count &&
+        state.identity.caller_epoch != 0
+    ) {
+        throw std::invalid_argument(
+            "full-core TACC transport caller epoch must be zero");
+    }
+    if (
+        state.identity.operation_token == 0 ||
+        state.last_operation_token !=
+            state.identity.operation_token
+    ) {
+        throw std::invalid_argument(
+            "live or journaled TACC transport token is not canonical");
+    }
+    if (
+        state.direction !=
+            TaccImageTransferStage::Direction::LOAD &&
+        state.direction !=
+            TaccImageTransferStage::Direction::STORE
+    ) {
+        throw std::invalid_argument(
+            "non-idle TACC transport requires load or store direction");
+    }
+    if (
+        !TileMemoryTransport::valid_image_span(
+            state.base_address) ||
+        !TileMemoryTransport::valid_format(
+            state.format_ew,
+            state.format_signed)
+    ) {
+        throw std::invalid_argument(
+            "TACC transport has an invalid image span or format");
+    }
+    if (
+        state.ready_cycle ==
+            std::numeric_limits<uint64_t>::max()
+    ) {
+        throw std::invalid_argument(
+            "TACC transport ready cycle leaves no registered grant edge");
+    }
+
+    switch (state.phase) {
+        case TaccTransportPhase::WAITING_STAGE:
+            if (
+                state.stage_token != 0 ||
+                state.stage_grant_cycle != 0 ||
+                state.beat_index != 0
+            ) {
+                throw std::invalid_argument(
+                    "waiting TACC transport cannot claim stage progress");
+            }
+            break;
+        case TaccTransportPhase::ACTIVE:
+            if (
+                state.stage_token == 0 ||
+                state.beat_index >=
+                    TileMemoryTransport::IMAGE_BEATS
+            ) {
+                throw std::invalid_argument(
+                    "active TACC transport has invalid stage progress");
+            }
+            break;
+        case TaccTransportPhase::COMPLETE:
+            if (
+                state.stage_token == 0 ||
+                state.beat_index !=
+                    TileMemoryTransport::IMAGE_BEATS
+            ) {
+                throw std::invalid_argument(
+                    "complete TACC transport must journal four beats");
+            }
+            break;
+        case TaccTransportPhase::CANCELED:
+            if (
+                state.stage_token == 0 &&
+                (
+                    state.stage_grant_cycle != 0 ||
+                    state.beat_index != 0
+                )
+            ) {
+                throw std::invalid_argument(
+                    "pre-grant cancellation cannot claim stage progress");
+            }
+            if (
+                state.beat_index >=
+                    TileMemoryTransport::IMAGE_BEATS
+            ) {
+                throw std::invalid_argument(
+                    "completed TACC transport cannot be canceled");
+            }
+            break;
+        case TaccTransportPhase::IDLE:
+            break;
+    }
+
+    if (
+        state.direction ==
+            TaccImageTransferStage::Direction::LOAD
+    ) {
+        const std::size_t acknowledged =
+            static_cast<std::size_t>(
+                state.beat_index) *
+                TileMemoryTransport::BEAT_BYTES;
+        if (
+            acknowledged < state.image.size() &&
+            std::any_of(
+                state.image.begin() +
+                    static_cast<std::ptrdiff_t>(
+                        acknowledged),
+                state.image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        ) {
+            throw std::invalid_argument(
+                "TACC LOAD journal has data beyond acknowledged beats");
+        }
+    }
+    if (
+        TileMemoryTransport::engine_has_inactive_image_bytes(
+            state.format_ew) &&
+        std::any_of(
+            state.image.begin() + 128,
+            state.image.end(),
+            [](uint8_t byte) {
+                return byte != 0;
+            })
+    ) {
+        throw std::invalid_argument(
+            "inactive TACC transport image bytes must be zero");
+    }
+    return state;
+}
+
+static TileMemoryPortRequest prepare_tile_memory_request(
+        const py::dict& snapshot,
+        const TileMemoryTransport& topology) {
+    validate_exact_snapshot_schema(
+        snapshot,
+        TILE_MEMORY_REQUEST_FIELDS,
+        "tile-memory request");
+    TileMemoryPortRequest request;
+    request.identity.engine_id =
+        snapshot_int(snapshot, "engine_id");
+    request.identity.owner_core_id =
+        snapshot_int(snapshot, "owner_core_id");
+    request.identity.operation_token =
+        snapshot_u64(
+            snapshot,
+            "operation_token");
+    request.identity.engine_epoch =
+        snapshot_u64(
+            snapshot,
+            "engine_epoch");
+    request.identity.caller_epoch =
+        snapshot_u64(
+            snapshot,
+            "caller_epoch");
+    request.ready_cycle =
+        snapshot_u64(
+            snapshot,
+            "ready_cycle");
+    request.issue_sequence =
+        snapshot_u64(
+            snapshot,
+            "issue_sequence");
+    request.stage_token =
+        snapshot_u64(
+            snapshot,
+            "stage_token");
+    request.image_transfer =
+        snapshot_bool(
+            snapshot,
+            "image_transfer");
+    const int beat_index =
+        snapshot_int(snapshot, "beat_index");
+    if (
+        beat_index < 0 ||
+        beat_index >=
+            TileMemoryTransport::IMAGE_BEATS
+    ) {
+        throw std::invalid_argument(
+            "tile-memory beat index must be between zero and three");
+    }
+    request.beat_index =
+        static_cast<uint8_t>(beat_index);
+    request.operation =
+        tile_memory_operation_from_snapshot(
+            snapshot);
+    request.address =
+        snapshot_u64(snapshot, "address");
+
+    const py::handle data_value =
+        snapshot_field(snapshot, "data");
+    if (!py::isinstance<py::bytes>(data_value))
+        throw std::invalid_argument(
+            "tile-memory request data must be bytes");
+    const std::string data =
+        py::reinterpret_borrow<py::bytes>(
+            data_value);
+    if (
+        request.operation == BusOperation::READ &&
+        !data.empty()
+    ) {
+        throw std::invalid_argument(
+            "tile-memory read request data must be empty");
+    }
+    if (
+        request.operation == BusOperation::WRITE &&
+        data.size() !=
+            TileMemoryTransport::BEAT_BYTES
+    ) {
+        throw std::invalid_argument(
+            "tile-memory write request data must contain 64 bytes");
+    }
+    if (request.operation == BusOperation::WRITE) {
+        std::copy(
+            data.begin(),
+            data.end(),
+            request.data.begin());
+    }
+
+    if (
+        !topology.valid_engine_id(
+            request.identity.engine_id) ||
+        !topology.owner_maps_to_engine(
+            request.identity.engine_id,
+            request.identity.owner_core_id)
+    ) {
+        throw std::invalid_argument(
+            "tile-memory request has invalid physical ownership");
+    }
+    if (
+        request.identity.engine_id <
+            topology.full_engine_count &&
+        request.identity.caller_epoch != 0
+    ) {
+        throw std::invalid_argument(
+            "full-core tile-memory request caller epoch must be zero");
+    }
+    if (
+        request.identity.operation_token == 0 ||
+        request.issue_sequence == 0 ||
+        request.ready_cycle ==
+            std::numeric_limits<uint64_t>::max() ||
+        !TileMemoryTransport::valid_beat_span(
+            request.address)
+    ) {
+        throw std::invalid_argument(
+            "tile-memory request token, sequence, cycle, or span is invalid");
+    }
+    if (
+        request.image_transfer !=
+            (request.stage_token != 0)
+    ) {
+        throw std::invalid_argument(
+            "tile-memory image flag and stage token must agree");
+    }
+    if (
+        !request.image_transfer &&
+        request.beat_index != 0
+    ) {
+        throw std::invalid_argument(
+            "ordinary tile-memory request beat index must be zero");
+    }
+    return request;
+}
+
+static TileMemoryPortGrant prepare_tile_memory_grant(
+        const py::dict& snapshot,
+        const TileMemoryTransport& topology) {
+    validate_exact_snapshot_schema(
+        snapshot,
+        TILE_MEMORY_GRANT_FIELDS,
+        "tile-memory grant");
+    const py::handle request_value =
+        snapshot_field(snapshot, "request");
+    if (!py::isinstance<py::dict>(request_value))
+        throw std::invalid_argument(
+            "tile-memory grant request must be a dict");
+    TileMemoryPortGrant grant;
+    grant.request =
+        prepare_tile_memory_request(
+            py::reinterpret_borrow<py::dict>(
+                request_value),
+            topology);
+    grant.grant_sequence =
+        snapshot_u64(
+            snapshot,
+            "grant_sequence");
+    grant.grant_cycle =
+        snapshot_u64(
+            snapshot,
+            "grant_cycle");
+    if (
+        grant.grant_sequence == 0 ||
+        grant.grant_cycle <=
+            grant.request.ready_cycle ||
+        grant.grant_cycle ==
+            std::numeric_limits<uint64_t>::max()
+    ) {
+        throw std::invalid_argument(
+            "tile-memory grant violates registered timing or sequence");
+    }
+    return grant;
+}
+
+struct PreparedTileMemoryTransport {
+    explicit PreparedTileMemoryTransport(
+            const SystemState& system)
+        : transport(
+              system.full_core_count(),
+              system.all_core_count()) {}
+
+    TileMemoryTransport transport;
+    TaccImageTransferStage stage{};
+};
+
+static PreparedTileMemoryTransport
+prepare_tile_memory_transport(
+        const SystemState& system,
+        const py::dict& snapshot) {
+    validate_exact_snapshot_schema(
+        snapshot,
+        TILE_TRANSPORT_SNAPSHOT_FIELDS,
+        "tile-memory transport");
+    if (snapshot_int(snapshot, "schema_version") != 1)
+        throw std::invalid_argument(
+            "tile-memory transport schema version must be one");
+    if (
+        snapshot_int(snapshot, "engine_count") !=
+            system.tile_memory_transport.engine_count()
+    ) {
+        throw std::invalid_argument(
+            "tile-memory transport engine count must match "
+            "the configured topology");
+    }
+
+    PreparedTileMemoryTransport prepared(system);
+    const py::handle engines_value =
+        snapshot_field(snapshot, "engines");
+    if (
+        py::isinstance<py::str>(engines_value) ||
+        py::isinstance<py::bytes>(engines_value) ||
+        !py::isinstance<py::sequence>(engines_value)
+    ) {
+        throw std::invalid_argument(
+            "tile-memory transport engines must be a sequence");
+    }
+    const py::sequence engines =
+        py::reinterpret_borrow<py::sequence>(
+            engines_value);
+    if (
+        engines.size() !=
+            prepared.transport.engines.size()
+    ) {
+        throw std::invalid_argument(
+            "tile-memory transport engine journals must match "
+            "the configured topology");
+    }
+    for (int engine_id = 0;
+         engine_id < prepared.transport.engine_count();
+         engine_id++) {
+        const py::handle engine_value =
+            engines[
+                static_cast<py::ssize_t>(
+                    engine_id)];
+        if (!py::isinstance<py::dict>(engine_value))
+            throw std::invalid_argument(
+                "TACC engine journal must be a dict");
+        prepared.transport.engines[
+            static_cast<std::size_t>(engine_id)] =
+            prepare_tacc_engine_transport(
+                py::reinterpret_borrow<py::dict>(
+                    engine_value),
+                engine_id,
+                prepared.transport);
+    }
+
+    const py::handle stage_value =
+        snapshot_field(snapshot, "stage");
+    if (!py::isinstance<py::dict>(stage_value))
+        throw std::invalid_argument(
+            "tile-memory transport stage must be a dict");
+    const py::dict stage_snapshot =
+        py::reinterpret_borrow<py::dict>(
+            stage_value);
+    validate_exact_snapshot_schema(
+        stage_snapshot,
+        TILE_TRANSPORT_STAGE_FIELDS,
+        "tile-memory transport stage");
+    const bool stage_active =
+        snapshot_bool(
+            stage_snapshot,
+            "active");
+    prepared.stage.direction =
+        tacc_image_stage_direction_from_snapshot(
+            stage_snapshot);
+    prepared.stage.owner_engine_id =
+        optional_snapshot_int(
+            stage_snapshot,
+            "owner_engine_id");
+    prepared.stage.owner_core_id =
+        optional_snapshot_int(
+            stage_snapshot,
+            "owner_core_id");
+    const uint64_t operation_token =
+        snapshot_u64(
+            stage_snapshot,
+            "operation_token");
+    prepared.stage.engine_epoch =
+        snapshot_u64(
+            stage_snapshot,
+            "engine_epoch");
+    prepared.stage.caller_epoch =
+        snapshot_u64(
+            stage_snapshot,
+            "caller_epoch");
+    prepared.stage.stage_epoch =
+        snapshot_u64(
+            stage_snapshot,
+            "stage_token");
+    prepared.stage.base_address =
+        snapshot_u64(
+            stage_snapshot,
+            "base_address");
+    const int stage_format_ew =
+        snapshot_int(
+            stage_snapshot,
+            "format_ew");
+    if (
+        stage_format_ew < 0 ||
+        stage_format_ew > 7
+    ) {
+        throw std::invalid_argument(
+            "tile-memory stage format EW must fit three bits");
+    }
+    prepared.stage.format_ew =
+        static_cast<uint8_t>(
+            stage_format_ew);
+    prepared.stage.format_signed =
+        snapshot_bool(
+            stage_snapshot,
+            "format_signed");
+    const int stage_beat_index =
+        snapshot_int(
+            stage_snapshot,
+            "beat_index");
+    if (
+        stage_beat_index < 0 ||
+        stage_beat_index >
+            TileMemoryTransport::IMAGE_BEATS
+    ) {
+        throw std::invalid_argument(
+            "tile-memory stage beat index must be between zero and four");
+    }
+    prepared.stage.beat_index =
+        static_cast<uint8_t>(
+            stage_beat_index);
+    prepared.stage.image =
+        snapshot_fixed_bytes<TACC_IMAGE_BYTES>(
+            stage_snapshot,
+            "image",
+            "tile-memory transport stage");
+    const uint64_t stage_grant_cycle =
+        snapshot_u64(
+            stage_snapshot,
+            "grant_cycle");
+    prepared.transport.stage_last_grant_engine_id =
+        optional_snapshot_int(
+            stage_snapshot,
+            "last_grant_engine_id");
+    prepared.transport.stage_grant_count =
+        snapshot_u64(
+            stage_snapshot,
+            "grant_count");
+    prepared.stage.last_grant_engine_id =
+        prepared.transport.stage_last_grant_engine_id;
+    prepared.stage.grant_sequence =
+        prepared.transport.stage_grant_count;
+    prepared.transport.stage_grant_counts =
+        snapshot_u64_vector(
+            stage_snapshot,
+            "grant_counts",
+            "tile-memory transport stage",
+            prepared.transport.engines.size());
+    prepared.transport.last_stage_arbitration_cycle =
+        optional_snapshot_u64(
+            stage_snapshot,
+            "last_arbitration_cycle");
+    const uint64_t stage_count_sum =
+        std::accumulate(
+            prepared.transport
+                .stage_grant_counts.begin(),
+            prepared.transport
+                .stage_grant_counts.end(),
+            uint64_t{0});
+    if (
+        stage_count_sum !=
+            prepared.transport.stage_grant_count ||
+        (
+            prepared.transport.stage_grant_count == 0
+        ) !=
+            (
+                prepared.transport.stage_last_grant_engine_id ==
+                    TaccImageTransferStage::NO_OWNER
+            ) ||
+        (
+            prepared.transport.stage_last_grant_engine_id !=
+                TaccImageTransferStage::NO_OWNER &&
+            !prepared.transport.valid_engine_id(
+                prepared.transport
+                    .stage_last_grant_engine_id)
+        )
+    ) {
+        throw std::invalid_argument(
+            "tile-memory stage round-robin history is incoherent");
+    }
+
+    int active_engine_id = -1;
+    for (int engine_id = 0;
+         engine_id < prepared.transport.engine_count();
+         engine_id++) {
+        if (
+            prepared.transport.engines[
+                static_cast<std::size_t>(
+                    engine_id)].phase ==
+                TaccTransportPhase::ACTIVE
+        ) {
+            if (active_engine_id >= 0)
+                throw std::invalid_argument(
+                    "only one TACC image transport may own the stage");
+            active_engine_id = engine_id;
+        }
+    }
+    if (!stage_active) {
+        if (
+            prepared.stage.direction !=
+                TaccImageTransferStage::Direction::NONE ||
+            prepared.stage.owner_engine_id !=
+                TaccImageTransferStage::NO_OWNER ||
+            prepared.stage.owner_core_id !=
+                TaccImageTransferStage::NO_OWNER ||
+            operation_token != 0 ||
+            prepared.stage.engine_epoch != 0 ||
+            prepared.stage.caller_epoch != 0 ||
+            prepared.stage.base_address != 0 ||
+            prepared.stage.format_ew != 0 ||
+            prepared.stage.format_signed ||
+            prepared.stage.beat_index != 0 ||
+            stage_grant_cycle != 0 ||
+            active_engine_id >= 0 ||
+            std::any_of(
+                prepared.stage.image.begin(),
+                prepared.stage.image.end(),
+                [](uint8_t byte) {
+                    return byte != 0;
+                })
+        ) {
+            throw std::invalid_argument(
+                "inactive tile-memory stage must clear its live tenure");
+        }
+    } else {
+        if (
+            !prepared.transport.valid_engine_id(
+                prepared.stage.owner_engine_id) ||
+            active_engine_id !=
+                prepared.stage.owner_engine_id ||
+            prepared.stage.owner_engine_id !=
+                prepared.transport
+                    .stage_last_grant_engine_id ||
+            !TileMemoryTransport::valid_image_span(
+                prepared.stage.base_address) ||
+            !TileMemoryTransport::valid_format(
+                prepared.stage.format_ew,
+                prepared.stage.format_signed) ||
+            prepared.stage.beat_index >=
+                TileMemoryTransport::IMAGE_BEATS
+        ) {
+            throw std::invalid_argument(
+                "active tile-memory stage ownership is incoherent");
+        }
+        const TaccEngineTransportState& owner =
+            prepared.transport.engines[
+                static_cast<std::size_t>(
+                    active_engine_id)];
+        if (
+            owner.identity.owner_core_id !=
+                prepared.stage.owner_core_id ||
+            owner.identity.operation_token !=
+                operation_token ||
+            owner.identity.engine_epoch !=
+                prepared.stage.engine_epoch ||
+            owner.identity.caller_epoch !=
+                prepared.stage.caller_epoch ||
+            owner.stage_token !=
+                prepared.stage.stage_epoch ||
+            owner.stage_grant_cycle !=
+                stage_grant_cycle ||
+            owner.direction !=
+                prepared.stage.direction ||
+            owner.base_address !=
+                prepared.stage.base_address ||
+            owner.format_ew !=
+                prepared.stage.format_ew ||
+            owner.format_signed !=
+                prepared.stage.format_signed ||
+            owner.beat_index !=
+                prepared.stage.beat_index ||
+            owner.image !=
+                prepared.stage.image
+        ) {
+            throw std::invalid_argument(
+                "active tile-memory stage does not match its engine journal");
+        }
+    }
+
+    const py::handle port_value =
+        snapshot_field(snapshot, "port");
+    if (!py::isinstance<py::dict>(port_value))
+        throw std::invalid_argument(
+            "tile-memory transport port must be a dict");
+    const py::dict port_snapshot =
+        py::reinterpret_borrow<py::dict>(
+            port_value);
+    validate_exact_snapshot_schema(
+        port_snapshot,
+        TILE_TRANSPORT_PORT_FIELDS,
+        "tile-memory transport port");
+    prepared.transport.port_last_grant_engine_id =
+        optional_snapshot_int(
+            port_snapshot,
+            "last_grant_engine_id");
+    prepared.transport.port_grant_count =
+        snapshot_u64(
+            port_snapshot,
+            "grant_count");
+    prepared.transport.port_grant_counts =
+        snapshot_u64_vector(
+            port_snapshot,
+            "grant_counts",
+            "tile-memory transport port",
+            prepared.transport.engines.size());
+    prepared.transport.last_issue_sequences =
+        snapshot_u64_vector(
+            port_snapshot,
+            "last_issue_sequences",
+            "tile-memory transport port",
+            prepared.transport.engines.size());
+    prepared.transport.last_port_arbitration_cycle =
+        optional_snapshot_u64(
+            port_snapshot,
+            "last_arbitration_cycle");
+    const uint64_t port_count_sum =
+        std::accumulate(
+            prepared.transport
+                .port_grant_counts.begin(),
+            prepared.transport
+                .port_grant_counts.end(),
+            uint64_t{0});
+    if (
+        port_count_sum !=
+            prepared.transport.port_grant_count ||
+        (
+            prepared.transport.port_grant_count == 0
+        ) !=
+            (
+                prepared.transport
+                    .port_last_grant_engine_id == -1
+            ) ||
+        (
+            prepared.transport
+                .port_last_grant_engine_id != -1 &&
+            !prepared.transport.valid_engine_id(
+                prepared.transport
+                    .port_last_grant_engine_id)
+        )
+    ) {
+        throw std::invalid_argument(
+            "tile-memory port round-robin history is incoherent");
+    }
+
+    const py::handle pending_value =
+        snapshot_field(
+            port_snapshot,
+            "pending");
+    if (
+        py::isinstance<py::str>(pending_value) ||
+        py::isinstance<py::bytes>(pending_value) ||
+        !py::isinstance<py::sequence>(pending_value)
+    ) {
+        throw std::invalid_argument(
+            "tile-memory pending requests must be a sequence");
+    }
+    const py::sequence pending =
+        py::reinterpret_borrow<py::sequence>(
+            pending_value);
+    if (
+        pending.size() !=
+            prepared.transport.engines.size()
+    ) {
+        throw std::invalid_argument(
+            "tile-memory pending slots must match "
+            "the configured topology");
+    }
+    for (int engine_id = 0;
+         engine_id < prepared.transport.engine_count();
+         engine_id++) {
+        const py::handle request_value =
+            pending[
+                static_cast<py::ssize_t>(
+                    engine_id)];
+        if (request_value.is_none())
+            continue;
+        if (!py::isinstance<py::dict>(request_value))
+            throw std::invalid_argument(
+                "tile-memory pending request must be a dict or None");
+        TileMemoryPortRequest request =
+            prepare_tile_memory_request(
+                py::reinterpret_borrow<py::dict>(
+                    request_value),
+                prepared.transport);
+        if (
+            request.identity.engine_id != engine_id ||
+            request.issue_sequence !=
+                prepared.transport
+                    .last_issue_sequences[
+                        static_cast<std::size_t>(
+                            engine_id)]
+        ) {
+            throw std::invalid_argument(
+                "tile-memory pending slot or issue sequence is incoherent");
+        }
+        prepared.transport.pending_port_requests[
+            static_cast<std::size_t>(engine_id)] =
+            request;
+    }
+
+    const py::handle active_grant_value =
+        snapshot_field(
+            port_snapshot,
+            "active_grant");
+    if (!active_grant_value.is_none()) {
+        if (!py::isinstance<py::dict>(
+                active_grant_value)) {
+            throw std::invalid_argument(
+                "tile-memory active grant must be a dict or None");
+        }
+        TileMemoryPortGrant grant =
+            prepare_tile_memory_grant(
+                py::reinterpret_borrow<py::dict>(
+                    active_grant_value),
+                prepared.transport);
+        const int engine_id =
+            grant.request.identity.engine_id;
+        if (
+            prepared.transport.pending_port_requests[
+                static_cast<std::size_t>(
+                    engine_id)].has_value() ||
+            engine_id !=
+                prepared.transport
+                    .port_last_grant_engine_id ||
+            grant.request.issue_sequence !=
+                prepared.transport
+                    .last_issue_sequences[
+                        static_cast<std::size_t>(
+                            engine_id)]
+        ) {
+            throw std::invalid_argument(
+                "tile-memory active grant history is incoherent");
+        }
+        prepared.transport.active_port_grant =
+            grant;
+    }
+
+    const auto validate_image_request =
+        [&](const TileMemoryPortRequest& request) {
+            if (!request.image_transfer)
+                return;
+            if (!stage_active)
+                throw std::invalid_argument(
+                    "image beat cannot outlive its stage tenure");
+            const TaccEngineTransportState& owner =
+                prepared.transport.engines[
+                    static_cast<std::size_t>(
+                        prepared.stage
+                            .owner_engine_id)];
+            const std::size_t offset =
+                static_cast<std::size_t>(
+                    owner.beat_index) *
+                    TileMemoryTransport::BEAT_BYTES;
+            const BusOperation expected_operation =
+                owner.direction ==
+                    TaccImageTransferStage::Direction::LOAD
+                ? BusOperation::READ
+                : BusOperation::WRITE;
+            if (
+                !request.identity.matches(
+                    owner.identity.engine_id,
+                    owner.identity.operation_token,
+                    owner.identity.engine_epoch,
+                    owner.identity.caller_epoch) ||
+                request.identity.owner_core_id !=
+                    owner.identity.owner_core_id ||
+                request.stage_token !=
+                    owner.stage_token ||
+                request.beat_index !=
+                    owner.beat_index ||
+                request.operation !=
+                    expected_operation ||
+                request.address !=
+                    owner.base_address + offset
+            ) {
+                throw std::invalid_argument(
+                    "tile-memory image beat does not match its journal");
+            }
+            if (
+                request.operation ==
+                    BusOperation::WRITE &&
+                !std::equal(
+                    request.data.begin(),
+                    request.data.end(),
+                    owner.image.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            offset))
+            ) {
+                throw std::invalid_argument(
+                    "tile-memory STORE beat data is not immutable");
+            }
+            if (
+                owner.beat_index + 1 <
+                    TileMemoryTransport::IMAGE_BEATS &&
+                prepared.transport.last_issue_sequences[
+                    static_cast<std::size_t>(
+                        owner.identity.engine_id)] ==
+                    std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::invalid_argument(
+                    "tile-memory image journal cannot issue "
+                    "its remaining beats");
+            }
+        };
+    for (const auto& request :
+         prepared.transport.pending_port_requests) {
+        if (request.has_value())
+            validate_image_request(*request);
+    }
+    if (
+        prepared.transport.active_port_grant
+            .has_value()
+    ) {
+        validate_image_request(
+            prepared.transport.active_port_grant
+                ->request);
+    }
+    if (stage_active) {
+        const int owner =
+            prepared.stage.owner_engine_id;
+        const bool owner_pending =
+            prepared.transport.pending_port_requests[
+                static_cast<std::size_t>(
+                    owner)].has_value();
+        const bool owner_active =
+            prepared.transport.active_port_grant
+                .has_value() &&
+            prepared.transport.active_port_grant
+                ->request.identity.engine_id == owner;
+        if (!owner_pending && !owner_active)
+            throw std::invalid_argument(
+                "active TACC stage has no resumable physical-port beat");
+    }
+    for (const TaccEngineTransportState& state :
+         prepared.transport.engines) {
+        if (
+            (
+                state.phase ==
+                    TaccTransportPhase::WAITING_STAGE ||
+                state.phase ==
+                    TaccTransportPhase::ACTIVE
+            ) &&
+            !system.tile_transport_identity_is_live(
+                state.identity.engine_id,
+                state.identity.owner_core_id,
+                state.identity.engine_epoch,
+                state.identity.caller_epoch)
+        ) {
+            throw std::invalid_argument(
+                "live TACC transport epoch does not match "
+                "the configured engine owner");
+        }
+    }
+    const auto validate_live_request =
+        [&](const TileMemoryPortRequest& request) {
+            if (
+                !system.tile_transport_identity_is_live(
+                    request.identity.engine_id,
+                    request.identity.owner_core_id,
+                    request.identity.engine_epoch,
+                    request.identity.caller_epoch)
+            ) {
+                throw std::invalid_argument(
+                    "tile-memory request epoch does not match "
+                    "the configured engine owner");
+            }
+        };
+    for (const auto& request :
+         prepared.transport.pending_port_requests) {
+        if (request.has_value())
+            validate_live_request(*request);
+    }
+    if (prepared.transport.active_port_grant.has_value()) {
+        validate_live_request(
+            prepared.transport.active_port_grant->request);
+    }
+    return prepared;
+}
+
+static bool tacc_ew_is_legal(uint8_t ew) noexcept {
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16 ||
+        ew == EW_U32 ||
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    );
+}
+
+static PreparedTaccState prepare_tacc_state(
+        const py::dict& state) {
+    PreparedTaccState prepared;
+    const py::handle image_value =
+        snapshot_field(state, "tacc");
+    if (!py::isinstance<py::bytes>(image_value)) {
+        throw std::invalid_argument(
+            "TACC image must be bytes");
+    }
+    const std::string image =
+        py::reinterpret_borrow<py::bytes>(
+            image_value);
+    if (image.size() != prepared.image.size()) {
+        throw std::invalid_argument(
+            "TACC image must be exactly 256 bytes");
+    }
+    std::copy(
+        image.begin(),
+        image.end(),
+        prepared.image.begin());
+
+    const int owner =
+        snapshot_int(state, "tacc_owner");
+    const int format_ew =
+        snapshot_int(state, "tacc_format_ew");
+    const int format_signed =
+        snapshot_int(state, "tacc_format_signed");
+    if (owner < 0 || owner > TACC_OWNER_NONE) {
+        throw std::invalid_argument(
+            "TACC owner must fit the absolute five-bit owner field");
+    }
+    if (format_ew < 0 || format_ew > 7) {
+        throw std::invalid_argument(
+            "TACC format EW must fit its three-bit field");
+    }
+    if (format_signed < 0 || format_signed > 1) {
+        throw std::invalid_argument(
+            "TACC format signedness must be zero or one");
+    }
+
+    prepared.owner = static_cast<uint8_t>(owner);
+    prepared.valid = snapshot_bool(state, "tacc_valid");
+    prepared.dirty = snapshot_bool(state, "tacc_dirty");
+    prepared.format_ew =
+        static_cast<uint8_t>(format_ew);
+    prepared.format_signed =
+        static_cast<uint8_t>(format_signed);
+    prepared.busy = snapshot_bool(state, "tacc_busy");
+    prepared.force_pending =
+        snapshot_bool(state, "tacc_force_pending");
+    prepared.epoch =
+        snapshot_u64(state, "tacc_epoch");
+
+    if (prepared.owner == TACC_OWNER_NONE) {
+        if (
+            prepared.valid ||
+            prepared.dirty ||
+            prepared.format_ew != 0 ||
+            prepared.format_signed != 0
+        ) {
+            throw std::invalid_argument(
+                "unowned TACC state must be invalid, clean, "
+                "and unformatted");
+        }
+    } else {
+        if (
+            !prepared.valid &&
+            (
+                prepared.dirty ||
+                prepared.format_ew != 0 ||
+                prepared.format_signed != 0
+            )
+        ) {
+            throw std::invalid_argument(
+                "invalid TACC state cannot be dirty or formatted");
+        }
+        if (
+            prepared.valid &&
+            !tacc_ew_is_legal(prepared.format_ew)
+        ) {
+            throw std::invalid_argument(
+                "valid TACC state requires a legal element width");
+        }
+        if (
+            prepared.valid &&
+            (
+                prepared.format_ew == EW_FP16 ||
+                prepared.format_ew == EW_BF16
+            ) &&
+            prepared.format_signed != 0
+        ) {
+            throw std::invalid_argument(
+                "floating TACC state cannot set integer signedness");
+        }
+    }
+    const bool image_is_zero =
+        std::all_of(
+            prepared.image.begin(),
+            prepared.image.end(),
+            [](uint8_t byte) {
+                return byte == 0;
+            });
+    if (!prepared.valid && !image_is_zero) {
+        throw std::invalid_argument(
+            "invalid TACC state must have a zero image");
+    }
+    if (
+        prepared.valid &&
+        prepared.format_ew != EW_U8 &&
+        prepared.format_ew != EW_U16 &&
+        std::any_of(
+            prepared.image.begin() + 128,
+            prepared.image.end(),
+            [](uint8_t byte) {
+                return byte != 0;
+            })
+    ) {
+        throw std::invalid_argument(
+            "inactive TACC image bytes must be zero");
+    }
+    if (
+        prepared.force_pending &&
+        !prepared.busy
+    ) {
+        throw std::invalid_argument(
+            "TACC force-pending state requires an active operation");
+    }
+    return prepared;
+}
+
+template <typename State>
+static py::dict snapshot_tacc_state(
+        const State& state) {
+    py::dict snapshot;
+    snapshot["tacc"] = py::bytes(
+        reinterpret_cast<const char*>(
+            state.tacc.data()),
+        state.tacc.size());
+    snapshot["tacc_owner"] = state.tacc_owner;
+    snapshot["tacc_valid"] = state.tacc_valid;
+    snapshot["tacc_dirty"] = state.tacc_dirty;
+    snapshot["tacc_format_ew"] =
+        state.tacc_format_ew;
+    snapshot["tacc_format_signed"] =
+        state.tacc_format_signed;
+    snapshot["tacc_busy"] = state.tacc_busy;
+    snapshot["tacc_force_pending"] =
+        state.tacc_force_pending;
+    snapshot["tacc_epoch"] = state.tacc_epoch;
+    return snapshot;
+}
+
+template <typename State>
+static void commit_tacc_state(
+        State& state,
+        const PreparedTaccState& prepared) noexcept {
+    state.tacc = prepared.image;
+    state.tacc_owner = prepared.owner;
+    state.tacc_valid = prepared.valid;
+    state.tacc_dirty = prepared.dirty;
+    state.tacc_format_ew = prepared.format_ew;
+    state.tacc_format_signed =
+        prepared.format_signed;
+    state.tacc_busy = prepared.busy;
+    state.tacc_force_pending =
+        prepared.force_pending;
+    state.tacc_epoch = prepared.epoch;
+}
+
 static std::vector<StepCallbacks> build_system_step_callbacks(
         const SystemState& system,
         const py::list& callback_sets,
@@ -16464,6 +24249,20 @@ static std::vector<StepCallbacks> build_system_step_callbacks(
         core_callbacks.mmio_end =
             0xFFFFFF8000000000ULL;
         core_callbacks.has_mmio = true;
+        core_callbacks.tacc_read_via_callback =
+            python_bridge_has_memory_override(
+                mmio_read8,
+                "mem_read8");
+        core_callbacks.tacc_write_via_callback =
+            python_bridge_has_memory_override(
+                mmio_write8,
+                "mem_write8");
+        core_callbacks.tacc_span_policy_override =
+            python_bridge_has_tacc_span_policy_override(
+                mmio_read8);
+        install_python_external_phy_callbacks(
+            core_callbacks,
+            mmio_read8);
         core_callbacks.mmio_read8 =
             [mmio_read8](uint64_t address) -> uint8_t {
                 py::gil_scoped_acquire acquire;
@@ -16711,6 +24510,79 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("tsrc0", &CPUState::tsrc0)
         .def_readwrite("tsrc1", &CPUState::tsrc1)
         .def_readwrite("tdst", &CPUState::tdst)
+        .def_property(
+            "tacc",
+            [](const CPUState& state) {
+                return py::bytes(
+                    reinterpret_cast<const char*>(
+                        state.tacc.data()),
+                    state.tacc.size());
+            },
+            [](CPUState& state, const py::bytes& image) {
+                const std::string bytes = image;
+                if (bytes.size() != state.tacc.size()) {
+                    throw std::invalid_argument(
+                        "TACC image must be exactly 256 bytes");
+                }
+                std::copy(
+                    bytes.begin(),
+                    bytes.end(),
+                    state.tacc.begin());
+            })
+        .def_readwrite(
+            "tacc_owner",
+            &CPUState::tacc_owner)
+        .def_readwrite(
+            "tacc_valid",
+            &CPUState::tacc_valid)
+        .def_readwrite(
+            "tacc_dirty",
+            &CPUState::tacc_dirty)
+        .def_readwrite(
+            "tacc_format_ew",
+            &CPUState::tacc_format_ew)
+        .def_readwrite(
+            "tacc_format_signed",
+            &CPUState::tacc_format_signed)
+        .def_readwrite(
+            "tacc_busy",
+            &CPUState::tacc_busy)
+        .def_readwrite(
+            "tacc_force_pending",
+            &CPUState::tacc_force_pending)
+        .def_readwrite(
+            "tacc_epoch",
+            &CPUState::tacc_epoch)
+        .def(
+            "tacc_snapshot",
+            [](const CPUState& state) {
+                return snapshot_tacc_state(state);
+            })
+        .def(
+            "tacc_restore",
+            [](CPUState& state, const py::dict& snapshot) {
+                validate_exact_snapshot_schema(
+                    snapshot,
+                    TACC_SNAPSHOT_FIELDS,
+                    "TACC");
+                const PreparedTaccState prepared =
+                    prepare_tacc_state(snapshot);
+                if (
+                    state.profile == CoreProfile::FULL &&
+                    prepared.owner != TACC_OWNER_NONE &&
+                    prepared.owner != state.core_id
+                ) {
+                    throw std::invalid_argument(
+                        "full-core TACC owner must be that core's absolute ID");
+                }
+                commit_tacc_state(state, prepared);
+            },
+            py::arg("state"))
+        .def(
+            "tacc_reset",
+            [](CPUState& state) {
+                state.reset_tacc();
+            })
         .def_readwrite("ivt_base", &CPUState::ivt_base)
         .def_readwrite("ivec_id", &CPUState::ivec_id)
         .def_readwrite("trap_addr", &CPUState::trap_addr)
@@ -18668,6 +26540,1005 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     system.cluster_states.size());
             })
         .def(
+            "_tacc_image_stage_snapshot",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return snapshot_tacc_image_transfer_stage(
+                    system);
+            })
+        .def(
+            "_tacc_image_stage_restore",
+            [](SystemState& system, const py::dict& snapshot) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (
+                    system.tile_memory_transport
+                        .has_pending_work()
+                ) {
+                    throw std::runtime_error(
+                        "legacy image-stage restore cannot "
+                        "replace timed tile traffic");
+                }
+                const PreparedTaccImageTransferStage prepared =
+                    prepare_tacc_image_transfer_stage(
+                        system,
+                        snapshot);
+                commit_tacc_image_transfer_stage(
+                    system.tacc_image_stage,
+                    prepared);
+                system.tile_memory_transport
+                    .restore_stage_history(
+                        prepared.last_grant_engine_id,
+                        prepared.grant_sequence);
+                system.refresh_cycle_execution_pending();
+            },
+            py::arg("snapshot"))
+        .def(
+            "_tacc_image_stage_acquire",
+            [](SystemState& system,
+               int owner_core_id,
+               const std::string& direction,
+               uint64_t base_address,
+               int format_ew,
+               bool format_signed,
+               uint64_t engine_epoch,
+               uint64_t caller_epoch,
+               const py::bytes& initial_image) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (
+                    system.tile_memory_transport
+                        .has_pending_work()
+                ) {
+                    return py::make_tuple(
+                        false,
+                        system.tacc_image_stage
+                            .stage_epoch);
+                }
+                const int owner_engine_id =
+                    system.tacc_engine_for_core(
+                    owner_core_id);
+                if (owner_core_id >= TACC_OWNER_NONE) {
+                    throw std::invalid_argument(
+                        "TACC image-stage owner does not fit "
+                        "the architectural core-ID field");
+                }
+                TaccImageTransferStage::Direction parsed_direction;
+                if (direction == "load") {
+                    parsed_direction =
+                        TaccImageTransferStage::Direction::LOAD;
+                } else if (direction == "store") {
+                    parsed_direction =
+                        TaccImageTransferStage::Direction::STORE;
+                } else {
+                    throw std::invalid_argument(
+                        "TACC image-stage acquisition direction "
+                        "must be load or store");
+                }
+                if ((base_address & 0x3F) != 0) {
+                    throw std::invalid_argument(
+                        "TACC image-stage base address must be "
+                        "64-byte aligned");
+                }
+                if (
+                    base_address >
+                    std::numeric_limits<uint64_t>::max() -
+                        (TACC_IMAGE_BYTES - 1)
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage span wraps the "
+                        "address space");
+                }
+                if (
+                    format_ew != EW_U8 &&
+                    format_ew != EW_U16 &&
+                    format_ew != EW_U32 &&
+                    format_ew != EW_FP16 &&
+                    format_ew != EW_BF16
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage acquisition requires "
+                        "a legal format");
+                }
+                if (
+                    (
+                        format_ew == EW_FP16 ||
+                        format_ew == EW_BF16
+                    ) &&
+                    format_signed
+                ) {
+                    throw std::invalid_argument(
+                        "floating TACC image-stage acquisition "
+                        "cannot be signed");
+                }
+                const std::string image = initial_image;
+                if (
+                    image.size() !=
+                    system.tacc_image_stage
+                        .image.size()
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage initial image must "
+                        "be exactly 256 bytes");
+                }
+                if (
+                    parsed_direction ==
+                        TaccImageTransferStage::Direction::LOAD &&
+                    std::any_of(
+                        image.begin(),
+                        image.end(),
+                        [](char byte) {
+                            return byte != 0;
+                        })
+                ) {
+                    throw std::invalid_argument(
+                        "TACC LOAD stage must start with a zero image");
+                }
+                if (
+                    parsed_direction ==
+                        TaccImageTransferStage::Direction::STORE &&
+                    format_ew != EW_U8 &&
+                    format_ew != EW_U16 &&
+                    std::any_of(
+                        image.begin() + 128,
+                        image.end(),
+                        [](char byte) {
+                            return byte != 0;
+                        })
+                ) {
+                    throw std::invalid_argument(
+                        "TACC STORE stage inactive image bytes "
+                        "must be zero");
+                }
+                const uint64_t live_engine_epoch =
+                    owner_engine_id <
+                        system.full_core_count()
+                    ? system.cores[
+                          static_cast<std::size_t>(
+                              owner_engine_id)]
+                          ->tacc_epoch
+                    : system.cluster_states[
+                          static_cast<std::size_t>(
+                              owner_engine_id -
+                              system.full_core_count())]
+                          .tacc_epoch;
+                if (engine_epoch != live_engine_epoch) {
+                    throw std::invalid_argument(
+                        "TACC image-stage acquisition uses a "
+                        "stale engine epoch");
+                }
+                const bool live_busy =
+                    owner_engine_id <
+                        system.full_core_count()
+                    ? system.cores[
+                          static_cast<std::size_t>(
+                              owner_engine_id)]
+                          ->tacc_busy
+                    : system.cluster_states[
+                          static_cast<std::size_t>(
+                              owner_engine_id -
+                              system.full_core_count())]
+                          .tacc_busy;
+                const uint8_t live_owner =
+                    owner_engine_id <
+                        system.full_core_count()
+                    ? system.cores[
+                          static_cast<std::size_t>(
+                              owner_engine_id)]
+                          ->tacc_owner
+                    : system.cluster_states[
+                          static_cast<std::size_t>(
+                              owner_engine_id -
+                              system.full_core_count())]
+                          .tacc_owner;
+                const bool live_valid =
+                    owner_engine_id <
+                        system.full_core_count()
+                    ? system.cores[
+                          static_cast<std::size_t>(
+                              owner_engine_id)]
+                          ->tacc_valid
+                    : system.cluster_states[
+                          static_cast<std::size_t>(
+                              owner_engine_id -
+                              system.full_core_count())]
+                          .tacc_valid;
+                const uint8_t live_format_ew =
+                    owner_engine_id <
+                        system.full_core_count()
+                    ? system.cores[
+                          static_cast<std::size_t>(
+                              owner_engine_id)]
+                          ->tacc_format_ew
+                    : system.cluster_states[
+                          static_cast<std::size_t>(
+                              owner_engine_id -
+                              system.full_core_count())]
+                          .tacc_format_ew;
+                const uint8_t live_format_signed =
+                    owner_engine_id <
+                        system.full_core_count()
+                    ? system.cores[
+                          static_cast<std::size_t>(
+                              owner_engine_id)]
+                          ->tacc_format_signed
+                    : system.cluster_states[
+                          static_cast<std::size_t>(
+                              owner_engine_id -
+                              system.full_core_count())]
+                          .tacc_format_signed;
+                if (!live_busy || live_owner != owner_core_id) {
+                    throw std::invalid_argument(
+                        "TACC image-stage acquisition requires "
+                        "the caller's BUSY owned engine");
+                }
+                if (
+                    parsed_direction ==
+                        TaccImageTransferStage::Direction::STORE &&
+                    (
+                        !live_valid ||
+                        live_format_ew != format_ew ||
+                        live_format_signed !=
+                            static_cast<uint8_t>(
+                                format_signed ? 1 : 0)
+                    )
+                ) {
+                    throw std::invalid_argument(
+                        "TACC STORE stage does not match valid "
+                        "latched engine state");
+                }
+                if (
+                    owner_core_id <
+                        system.full_core_count() &&
+                    caller_epoch != 0
+                ) {
+                    throw std::invalid_argument(
+                        "full-core image-stage acquisition uses "
+                        "caller epoch zero");
+                }
+                if (owner_core_id >= system.full_core_count()) {
+                    ClusterState& cluster =
+                        system.cluster_states[
+                            static_cast<std::size_t>(
+                                owner_engine_id -
+                                system.full_core_count())];
+                    const int local_core =
+                        owner_core_id -
+                        cluster.global_id_base;
+                    if (
+                        local_core < 0 ||
+                        local_core >= cluster.core_count ||
+                        cluster.tacc_caller_epochs[
+                            static_cast<std::size_t>(
+                                local_core)] !=
+                            caller_epoch
+                    ) {
+                        throw std::invalid_argument(
+                            "TACC image-stage acquisition uses a "
+                            "stale microcaller epoch");
+                    }
+                }
+                TaccImageTransferStage& stage =
+                    system.tacc_image_stage;
+                if (
+                    stage.active() &&
+                    !tacc_image_stage_owner_is_live(
+                        system,
+                        stage)
+                ) {
+                    // Keep direct execution excluded across stale-tenure
+                    // replacement. Publishing a false pending edge between
+                    // cancellation and the replacement grant would expose a
+                    // lock-free admission window.
+                    system.cycle_execution_pending.store(
+                        true,
+                        std::memory_order_release);
+                    stage.cancel();
+                }
+                if (stage.active()) {
+                    return py::make_tuple(
+                        false,
+                        stage.stage_epoch);
+                }
+                if (
+                    stage.grant_sequence ==
+                        std::numeric_limits<uint64_t>::max() ||
+                    system.tile_memory_transport
+                        .stage_grant_count ==
+                            std::numeric_limits<uint64_t>::max() ||
+                    system.tile_memory_transport
+                        .stage_grant_counts[
+                            static_cast<std::size_t>(
+                                owner_engine_id)] ==
+                            std::numeric_limits<uint64_t>::max() ||
+                    stage.stage_epoch ==
+                        std::numeric_limits<uint64_t>::max()
+                ) {
+                    // A stale active tenure may have been cancelled above.
+                    // Recompute the aggregate bit before failing so direct
+                    // execution is not excluded by a tenure that no longer
+                    // exists.
+                    system.refresh_cycle_execution_pending();
+                    throw std::overflow_error(
+                        "TACC image-stage tenure counter overflow");
+                }
+                // Direct execution checks this atomic without taking the
+                // scheduler mutex. Publish exclusion before direction makes
+                // the new tenure visible, then publish direction last.
+                system.cycle_execution_pending.store(
+                    true,
+                    std::memory_order_release);
+                stage.stage_epoch++;
+                stage.grant_sequence++;
+                stage.last_grant_engine_id =
+                    owner_engine_id;
+                system.tile_memory_transport
+                    .stage_grant_count++;
+                system.tile_memory_transport
+                    .stage_last_grant_engine_id =
+                        owner_engine_id;
+                system.tile_memory_transport
+                    .stage_grant_counts[
+                        static_cast<std::size_t>(
+                            owner_engine_id)]++;
+                stage.owner_engine_id =
+                    owner_engine_id;
+                stage.owner_core_id = owner_core_id;
+                stage.engine_epoch = engine_epoch;
+                stage.caller_epoch = caller_epoch;
+                stage.base_address = base_address;
+                stage.format_ew =
+                    static_cast<uint8_t>(format_ew);
+                stage.format_signed = format_signed;
+                std::copy(
+                    image.begin(),
+                    image.end(),
+                    stage.image.begin());
+                stage.beat_index = 0;
+                stage.direction = parsed_direction;
+                return py::make_tuple(
+                    true,
+                    stage.stage_epoch);
+            },
+            py::arg("owner_core_id"),
+            py::arg("direction"),
+            py::arg("base_address"),
+            py::arg("format_ew"),
+            py::arg("format_signed"),
+            py::arg("engine_epoch"),
+            py::arg("caller_epoch"),
+            py::arg("initial_image"))
+        .def(
+            "_tacc_image_stage_update",
+            [](SystemState& system,
+               int owner_engine_id,
+               int owner_core_id,
+               uint64_t stage_epoch,
+               uint64_t engine_epoch,
+               uint64_t caller_epoch,
+               int beat_index,
+               const py::bytes& image_value) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (
+                    system.tile_memory_transport
+                        .has_pending_work()
+                ) {
+                    throw std::runtime_error(
+                        "legacy image-stage update cannot "
+                        "mutate timed tile traffic");
+                }
+                if (
+                    system.tacc_engine_for_core(owner_core_id) !=
+                    owner_engine_id
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage update owners do not map");
+                }
+                if (beat_index < 0 || beat_index > 4) {
+                    throw std::invalid_argument(
+                        "TACC image-stage beat index must be "
+                        "between zero and four");
+                }
+                const std::string image = image_value;
+                if (
+                    image.size() !=
+                    system.tacc_image_stage
+                        .image.size()
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage image must "
+                        "be exactly 256 bytes");
+                }
+                TaccImageTransferStage& stage =
+                    system.tacc_image_stage;
+                if (
+                    !stage.owned_by(
+                        owner_engine_id,
+                        owner_core_id,
+                        stage_epoch) ||
+                    stage.engine_epoch != engine_epoch ||
+                    stage.caller_epoch != caller_epoch
+                ) {
+                    return false;
+                }
+                if (!tacc_image_stage_owner_is_live(
+                        system,
+                        stage)) {
+                    stage.cancel();
+                    system.refresh_cycle_execution_pending();
+                    return false;
+                }
+                if (
+                    beat_index !=
+                    static_cast<int>(stage.beat_index) + 1
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage updates must acknowledge "
+                        "exactly the next beat");
+                }
+                if (
+                    stage.direction ==
+                        TaccImageTransferStage::Direction::STORE &&
+                    std::memcmp(
+                        image.data(),
+                        stage.image.data(),
+                        stage.image.size()) != 0
+                ) {
+                    throw std::invalid_argument(
+                        "TACC STORE stage image is immutable "
+                        "during its tenure");
+                }
+                const std::size_t old_prefix =
+                    static_cast<std::size_t>(
+                        stage.beat_index) * 64;
+                if (
+                    stage.direction ==
+                        TaccImageTransferStage::Direction::LOAD &&
+                    std::memcmp(
+                        image.data(),
+                        stage.image.data(),
+                        old_prefix) != 0
+                ) {
+                    throw std::invalid_argument(
+                        "TACC LOAD stage update cannot rewrite "
+                        "an acknowledged prefix");
+                }
+                if (
+                    stage.direction ==
+                        TaccImageTransferStage::Direction::LOAD &&
+                    beat_index < 4 &&
+                    std::any_of(
+                        image.begin() + beat_index * 64,
+                        image.end(),
+                        [](char byte) {
+                            return byte != 0;
+                        })
+                ) {
+                    throw std::invalid_argument(
+                        "TACC LOAD stage update has data beyond "
+                        "its acknowledged prefix");
+                }
+                if (
+                    stage.direction ==
+                        TaccImageTransferStage::Direction::LOAD &&
+                    stage.format_ew != EW_U8 &&
+                    stage.format_ew != EW_U16 &&
+                    std::any_of(
+                        image.begin() + 128,
+                        image.end(),
+                        [](char byte) {
+                            return byte != 0;
+                        })
+                ) {
+                    throw std::invalid_argument(
+                        "inactive TACC LOAD image bytes must "
+                        "remain zero");
+                }
+                std::copy(
+                    image.begin(),
+                    image.end(),
+                    stage.image.begin());
+                stage.beat_index =
+                    static_cast<uint8_t>(beat_index);
+                return true;
+            },
+            py::arg("owner_engine_id"),
+            py::arg("owner_core_id"),
+            py::arg("stage_epoch"),
+            py::arg("engine_epoch"),
+            py::arg("caller_epoch"),
+            py::arg("beat_index"),
+            py::arg("image"))
+        .def(
+            "_tacc_image_stage_release",
+            [](SystemState& system,
+               int owner_engine_id,
+               int owner_core_id,
+               uint64_t stage_epoch,
+               uint64_t engine_epoch,
+               uint64_t caller_epoch) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (
+                    system.tile_memory_transport
+                        .has_pending_work()
+                ) {
+                    throw std::runtime_error(
+                        "legacy image-stage release cannot "
+                        "mutate timed tile traffic");
+                }
+                if (
+                    system.tacc_engine_for_core(owner_core_id) !=
+                    owner_engine_id
+                ) {
+                    throw std::invalid_argument(
+                        "TACC image-stage release owners do not map");
+                }
+                TaccImageTransferStage& stage =
+                    system.tacc_image_stage;
+                if (
+                    !stage.owned_by(
+                        owner_engine_id,
+                        owner_core_id,
+                        stage_epoch) ||
+                    stage.engine_epoch != engine_epoch ||
+                    stage.caller_epoch != caller_epoch
+                ) {
+                    return false;
+                }
+                if (!tacc_image_stage_owner_is_live(
+                        system,
+                        stage)) {
+                    stage.cancel();
+                    system.refresh_cycle_execution_pending();
+                    return false;
+                }
+                stage.clear_active(false);
+                system.refresh_cycle_execution_pending();
+                return true;
+            },
+            py::arg("owner_engine_id"),
+            py::arg("owner_core_id"),
+            py::arg("stage_epoch"),
+            py::arg("engine_epoch"),
+            py::arg("caller_epoch"))
+        .def(
+            "_cancel_tacc_image_stage_for_core",
+            [](SystemState& system, int core_id) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                system.cancel_tacc_image_stage_for_core(
+                    core_id);
+            },
+            py::arg("core_id"))
+        .def_property_readonly_static(
+            "TILE_MEMORY_ENGINE_COUNT",
+            [](py::object) {
+                return TileMemoryTransport::
+                    PRODUCTION_ENGINE_COUNT;
+            })
+        .def_property_readonly_static(
+            "TILE_MEMORY_BEAT_BYTES",
+            [](py::object) {
+                return TileMemoryTransport::BEAT_BYTES;
+            })
+        .def(
+            "_tacc_transport_start",
+            [](SystemState& system,
+               int engine_id,
+               int owner_core_id,
+               const std::string& direction,
+               uint64_t base_address,
+               int format_ew,
+               bool format_signed,
+               uint64_t engine_epoch,
+               uint64_t caller_epoch,
+               uint64_t operation_token,
+               uint64_t ready_cycle,
+               const py::bytes& initial_image) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile transport cannot change during "
+                        "an active native system batch");
+                }
+                if (
+                    system.tacc_image_stage.active() &&
+                    !system.tile_memory_transport
+                        .owns_stage(
+                            system.tacc_image_stage)
+                ) {
+                    throw std::runtime_error(
+                        "timed TACC transport cannot start while "
+                        "the legacy image stage is active");
+                }
+                TaccImageTransferStage::Direction parsed_direction;
+                if (direction == "load") {
+                    parsed_direction =
+                        TaccImageTransferStage::Direction::LOAD;
+                } else if (direction == "store") {
+                    parsed_direction =
+                        TaccImageTransferStage::Direction::STORE;
+                } else {
+                    throw std::invalid_argument(
+                        "TACC transport direction must be load or store");
+                }
+                if (format_ew < 0 || format_ew > 7)
+                    throw std::invalid_argument(
+                        "TACC transport format EW must fit three bits");
+                const std::string image_value =
+                    initial_image;
+                if (
+                    image_value.size() !=
+                        TACC_IMAGE_BYTES
+                ) {
+                    throw std::invalid_argument(
+                        "TACC transport image must be exactly 256 bytes");
+                }
+                std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+                std::copy(
+                    image_value.begin(),
+                    image_value.end(),
+                    image.begin());
+                if (
+                    !system.tile_transport_identity_is_live(
+                        engine_id,
+                        owner_core_id,
+                        engine_epoch,
+                        caller_epoch)
+                ) {
+                    throw std::invalid_argument(
+                        "TACC transport epoch does not match "
+                        "the configured engine owner");
+                }
+                const TaccEngineTransportState& state =
+                    system.tile_memory_transport.start(
+                        engine_id,
+                        owner_core_id,
+                        parsed_direction,
+                        base_address,
+                        static_cast<uint8_t>(format_ew),
+                        format_signed,
+                        engine_epoch,
+                        caller_epoch,
+                        operation_token,
+                        ready_cycle,
+                        image);
+                system.refresh_cycle_execution_pending();
+                return snapshot_tacc_engine_transport(
+                    state,
+                    engine_id);
+            },
+            py::arg("engine_id"),
+            py::arg("owner_core_id"),
+            py::arg("direction"),
+            py::arg("base_address"),
+            py::arg("format_ew"),
+            py::arg("format_signed"),
+            py::arg("engine_epoch"),
+            py::arg("caller_epoch"),
+            py::arg("operation_token"),
+            py::arg("ready_cycle"),
+            py::arg("initial_image"))
+        .def(
+            "_tacc_transport_stage_try_grant",
+            [](SystemState& system,
+               uint64_t cycle) -> py::object {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile transport cannot arbitrate during "
+                        "an active native system batch");
+                }
+                const std::optional<TaccStageGrant> grant =
+                    system.tile_memory_transport
+                        .try_grant_stage(
+                            system.tacc_image_stage,
+                            cycle);
+                system.refresh_cycle_execution_pending();
+                if (!grant.has_value())
+                    return py::none();
+                return snapshot_tacc_stage_grant(
+                    *grant);
+            },
+            py::arg("cycle"))
+        .def(
+            "_tacc_transport_cancel",
+            [](SystemState& system,
+               int engine_id,
+               uint64_t operation_token,
+               uint64_t engine_epoch,
+               uint64_t caller_epoch) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile transport cannot cancel during "
+                        "an active native system batch");
+                }
+                const bool canceled =
+                    system.tile_memory_transport.cancel(
+                        system.tacc_image_stage,
+                        engine_id,
+                        operation_token,
+                        engine_epoch,
+                        caller_epoch);
+                system.refresh_cycle_execution_pending();
+                return canceled;
+            },
+            py::arg("engine_id"),
+            py::arg("operation_token"),
+            py::arg("engine_epoch"),
+            py::arg("caller_epoch"))
+        .def(
+            "_tile_memory_port_submit",
+            [](SystemState& system,
+               int engine_id,
+               int owner_core_id,
+               uint64_t operation_token,
+               uint64_t engine_epoch,
+               uint64_t caller_epoch,
+               uint64_t ready_cycle,
+               uint64_t address,
+               const std::string& direction,
+               const py::bytes& data_value) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile-memory port cannot change during "
+                        "an active native system batch");
+                }
+                if (
+                    system.tacc_image_stage.active() &&
+                    !system.tile_memory_transport
+                        .owns_stage(
+                            system.tacc_image_stage)
+                ) {
+                    throw std::runtime_error(
+                        "timed tile traffic cannot start while "
+                        "the legacy image stage is active");
+                }
+                BusOperation operation;
+                if (direction == "read") {
+                    operation = BusOperation::READ;
+                } else if (direction == "write") {
+                    operation = BusOperation::WRITE;
+                } else {
+                    throw std::invalid_argument(
+                        "tile-memory direction must be read or write");
+                }
+                const std::string data = data_value;
+                if (
+                    operation == BusOperation::READ &&
+                    !data.empty()
+                ) {
+                    throw std::invalid_argument(
+                        "tile-memory read submission data must be empty");
+                }
+                if (
+                    operation == BusOperation::WRITE &&
+                    data.size() !=
+                        TileMemoryTransport::BEAT_BYTES
+                ) {
+                    throw std::invalid_argument(
+                        "tile-memory write submission requires 64 bytes");
+                }
+                std::array<
+                    uint8_t,
+                    TileMemoryTransport::BEAT_BYTES> beat{};
+                if (operation == BusOperation::WRITE) {
+                    std::copy(
+                        data.begin(),
+                        data.end(),
+                        beat.begin());
+                }
+                if (
+                    !system.tile_transport_identity_is_live(
+                        engine_id,
+                        owner_core_id,
+                        engine_epoch,
+                        caller_epoch)
+                ) {
+                    throw std::invalid_argument(
+                        "tile-memory request epoch does not match "
+                        "the configured engine owner");
+                }
+                const TileMemoryPortRequest request =
+                    system.tile_memory_transport
+                        .submit_ordinary(
+                            engine_id,
+                            owner_core_id,
+                            operation_token,
+                            engine_epoch,
+                            caller_epoch,
+                            ready_cycle,
+                            address,
+                            operation,
+                            beat);
+                system.refresh_cycle_execution_pending();
+                return snapshot_tile_memory_request(
+                    request);
+            },
+            py::arg("engine_id"),
+            py::arg("owner_core_id"),
+            py::arg("operation_token"),
+            py::arg("engine_epoch"),
+            py::arg("caller_epoch"),
+            py::arg("ready_cycle"),
+            py::arg("address"),
+            py::arg("direction"),
+            py::arg("data") = py::bytes(""))
+        .def(
+            "_tile_memory_port_try_grant",
+            [](SystemState& system,
+               uint64_t cycle) -> py::object {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile-memory port cannot arbitrate during "
+                        "an active native system batch");
+                }
+                const std::optional<TileMemoryPortGrant> grant =
+                    system.tile_memory_transport
+                        .try_grant_port(cycle);
+                if (!grant.has_value())
+                    return py::none();
+                return snapshot_tile_memory_grant(
+                    *grant);
+            },
+            py::arg("cycle"))
+        .def(
+            "_tile_memory_port_complete",
+            [](SystemState& system,
+               uint64_t grant_sequence,
+               uint64_t completion_cycle,
+               const py::bytes& read_data_value)
+                -> py::object {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile-memory port cannot complete during "
+                        "an active native system batch");
+                }
+                const std::string data =
+                    read_data_value;
+                std::optional<
+                    std::array<
+                        uint8_t,
+                        TileMemoryTransport::BEAT_BYTES>>
+                    read_data;
+                if (!data.empty()) {
+                    if (
+                        data.size() !=
+                            TileMemoryTransport::BEAT_BYTES
+                    ) {
+                        throw std::invalid_argument(
+                            "tile-memory read completion requires 64 bytes");
+                    }
+                    read_data.emplace();
+                    std::copy(
+                        data.begin(),
+                        data.end(),
+                        read_data->begin());
+                }
+                const std::optional<
+                    TileMemoryPortCompletion> completion =
+                    system.tile_memory_transport
+                        .complete_port(
+                            system.tacc_image_stage,
+                            grant_sequence,
+                            completion_cycle,
+                            read_data);
+                system.refresh_cycle_execution_pending();
+                if (!completion.has_value())
+                    return py::none();
+                return snapshot_tile_memory_completion(
+                    *completion);
+            },
+            py::arg("grant_sequence"),
+            py::arg("completion_cycle"),
+            py::arg("read_data") = py::bytes(""))
+        .def(
+            "_tacc_transport_snapshot",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return snapshot_tile_memory_transport(
+                    system);
+            })
+        .def(
+            "_tacc_transport_restore",
+            [](SystemState& system,
+               const py::dict& snapshot) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile transport cannot restore during "
+                        "an active native system batch");
+                }
+                if (system.has_resumable_core_instruction()) {
+                    throw std::runtime_error(
+                        "tile transport cannot restore while a core "
+                        "instruction is suspended");
+                }
+                if (
+                    system.tacc_image_stage.active() &&
+                    !system.tile_memory_transport
+                        .owns_stage(
+                            system.tacc_image_stage)
+                ) {
+                    throw std::runtime_error(
+                        "timed tile transport restore cannot "
+                        "replace the legacy image stage");
+                }
+                PreparedTileMemoryTransport prepared =
+                    prepare_tile_memory_transport(
+                        system,
+                        snapshot);
+                uint64_t next_grant_sequence =
+                    system.tile_memory_transport
+                        .next_port_grant_sequence;
+                if (
+                    prepared.transport.active_port_grant
+                        .has_value()
+                ) {
+                    if (
+                        next_grant_sequence ==
+                            std::numeric_limits<uint64_t>::max()
+                    ) {
+                        throw std::overflow_error(
+                            "tile-memory grant sequence exhausted "
+                            "during restore");
+                    }
+                    prepared.transport.active_port_grant
+                        ->grant_sequence =
+                            next_grant_sequence++;
+                }
+                prepared.transport.next_port_grant_sequence =
+                    next_grant_sequence;
+                system.tile_memory_transport =
+                    std::move(prepared.transport);
+                system.tacc_image_stage =
+                    prepared.stage;
+                system.refresh_cycle_execution_pending();
+            },
+            py::arg("snapshot"))
+        .def(
+            "_tacc_transport_reset",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "tile transport cannot reset during "
+                        "an active native system batch");
+                }
+                if (system.has_resumable_core_instruction()) {
+                    throw std::runtime_error(
+                        "tile transport cannot reset while a core "
+                        "instruction is suspended");
+                }
+                system.tile_memory_transport.reset(
+                    system.tacc_image_stage);
+                system.refresh_cycle_execution_pending();
+            })
+        .def(
             "reset_cluster_arbitration",
             [](SystemState& system, int cluster_index) {
                 // External callers wait for a native batch; a guest MMIO
@@ -18687,11 +27558,133 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 // mutex is the serialization boundary for CLUSTER_EN writes.
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
+                system.cancel_tacc_image_stage_for_cluster(
+                    cluster_index);
                 checked_cluster_state(
                     system,
                     cluster_index).reset();
             },
             py::arg("cluster_index"))
+        .def(
+            "_cluster_tacc_caller_epochs_snapshot",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                py::list epochs;
+                for (int index = 0;
+                     index < cluster.core_count;
+                     index++) {
+                    epochs.append(
+                        cluster.tacc_caller_epochs[
+                            static_cast<std::size_t>(
+                                index)]);
+                }
+                return epochs;
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_tacc_caller_epochs_restore",
+            [](SystemState& system,
+               int cluster_index,
+               const py::sequence& values) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    values.size() !=
+                    static_cast<py::size_t>(
+                        cluster.core_count)
+                ) {
+                    throw std::invalid_argument(
+                        "cluster TACC caller-epoch image must "
+                        "contain one value per microcore");
+                }
+                std::array<uint64_t, 4> prepared =
+                    cluster.tacc_caller_epochs;
+                for (int index = 0;
+                     index < cluster.core_count;
+                     index++) {
+                    const py::handle value =
+                        values[
+                            static_cast<py::ssize_t>(
+                                index)];
+                    if (
+                        PyBool_Check(value.ptr()) ||
+                        !PyLong_Check(value.ptr())
+                    ) {
+                        throw std::invalid_argument(
+                            "cluster TACC caller epochs must "
+                            "be unsigned 64-bit integers");
+                    }
+                    prepared[
+                        static_cast<std::size_t>(index)] =
+                        value.cast<uint64_t>();
+                }
+                const TaccImageTransferStage& stage =
+                    system.tacc_image_stage;
+                if (
+                    stage.active() &&
+                    stage.owner_engine_id ==
+                        system.full_core_count() +
+                            cluster_index
+                ) {
+                    const int local =
+                        stage.owner_core_id -
+                        cluster.global_id_base;
+                    if (
+                        local < 0 ||
+                        local >= cluster.core_count ||
+                        prepared[
+                            static_cast<std::size_t>(
+                                local)] !=
+                            stage.caller_epoch
+                    ) {
+                        throw std::invalid_argument(
+                            "cluster caller-epoch restore would "
+                            "invalidate the active image stage");
+                    }
+                }
+                cluster.tacc_caller_epochs = prepared;
+            },
+            py::arg("cluster_index"),
+            py::arg("epochs"))
+        .def(
+            "_cluster_tacc_cancel_caller",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    local_core < 0 ||
+                    local_core >= cluster.core_count
+                ) {
+                    throw std::out_of_range(
+                        "cluster TACC caller is out of range");
+                }
+                cluster.tacc_caller_epochs[
+                    static_cast<std::size_t>(
+                        local_core)]++;
+                system.cancel_tacc_image_stage_for_core(
+                    cluster.global_id_base +
+                        local_core);
+                return cluster.tacc_caller_epochs[
+                    static_cast<std::size_t>(
+                        local_core)];
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
         .def(
             "_cluster_crc_snapshot",
             [](SystemState& system, int cluster_index) {
@@ -19028,23 +28021,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     checked_cluster_state(
                         system,
                         cluster_index);
-                py::dict state;
-                state["sb"] = cluster.sb;
-                state["sr"] = cluster.sr;
-                state["sc"] = cluster.sc;
-                state["sw"] = cluster.sw;
-                state["tmode"] = cluster.tmode;
-                state["tctrl"] = cluster.tctrl;
-                state["tsrc0"] = cluster.tsrc0;
-                state["tsrc1"] = cluster.tsrc1;
-                state["tdst"] = cluster.tdst;
+                py::dict state =
+                    snapshot_tacc_state(cluster);
                 state["acc"] = cluster.acc;
-                state["tstride_r"] =
-                    cluster.tstride_r;
-                state["tstride_c"] =
-                    cluster.tstride_c;
-                state["ttile_h"] = cluster.ttile_h;
-                state["ttile_w"] = cluster.ttile_w;
                 state["sha_mode"] = cluster.sha_mode;
                 state["sha_msglen_lo"] =
                     cluster.sha_msglen_lo;
@@ -19064,61 +28043,77 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     checked_cluster_state(
                         system,
                         cluster_index);
-                const uint64_t sb =
-                    state["sb"].cast<uint64_t>();
-                const uint64_t sr =
-                    state["sr"].cast<uint64_t>();
-                const uint64_t sc =
-                    state["sc"].cast<uint64_t>();
-                const uint64_t sw =
-                    state["sw"].cast<uint64_t>();
-                const uint64_t tmode =
-                    state["tmode"].cast<uint64_t>();
-                const uint64_t tctrl =
-                    state["tctrl"].cast<uint64_t>();
-                const uint64_t tsrc0 =
-                    state["tsrc0"].cast<uint64_t>();
-                const uint64_t tsrc1 =
-                    state["tsrc1"].cast<uint64_t>();
-                const uint64_t tdst =
-                    state["tdst"].cast<uint64_t>();
-                const std::array<uint64_t, 4> acc =
-                    state["acc"].cast<
-                        std::array<uint64_t, 4>>();
-                const uint64_t tstride_r =
-                    state["tstride_r"].cast<uint64_t>();
-                const uint64_t tstride_c =
-                    state["tstride_c"].cast<uint64_t>();
-                const uint64_t ttile_h =
-                    state["ttile_h"].cast<uint64_t>();
-                const uint64_t ttile_w =
-                    state["ttile_w"].cast<uint64_t>();
+                validate_exact_snapshot_schema(
+                    state,
+                    CLUSTER_TILE_SNAPSHOT_FIELDS,
+                    "cluster tile-engine");
+                const PreparedTaccState tacc =
+                    prepare_tacc_state(state);
+                if (
+                    tacc.owner != TACC_OWNER_NONE &&
+                    (
+                        tacc.owner < cluster.global_id_base ||
+                        tacc.owner >=
+                            cluster.global_id_base +
+                                cluster.core_count
+                    )
+                ) {
+                    throw std::invalid_argument(
+                        "cluster TACC owner is outside the cluster's "
+                        "absolute core-ID domain");
+                }
+                const py::handle acc_value =
+                    snapshot_field(state, "acc");
+                if (
+                    !py::isinstance<py::sequence>(
+                        acc_value) ||
+                    py::isinstance<py::str>(acc_value) ||
+                    py::isinstance<py::bytes>(acc_value)
+                ) {
+                    throw std::invalid_argument(
+                        "cluster ACC must be a four-element sequence");
+                }
+                const py::sequence acc_sequence =
+                    py::reinterpret_borrow<py::sequence>(
+                        acc_value);
+                if (acc_sequence.size() != 4) {
+                    throw std::invalid_argument(
+                        "cluster ACC must contain exactly four words");
+                }
+                std::array<uint64_t, 4> acc{};
+                for (std::size_t index = 0;
+                     index < acc.size();
+                     index++) {
+                    const py::handle word =
+                        acc_sequence[
+                            static_cast<py::ssize_t>(
+                                index)];
+                    if (
+                        PyBool_Check(word.ptr()) ||
+                        !PyLong_Check(word.ptr())
+                    ) {
+                        throw std::invalid_argument(
+                            "cluster ACC words must be unsigned "
+                            "64-bit integers");
+                    }
+                    acc[index] = word.cast<uint64_t>();
+                }
                 const int sha_mode =
-                    state["sha_mode"].cast<int>();
+                    snapshot_int(state, "sha_mode");
                 if (sha_mode < 0 || sha_mode > 3) {
                     throw std::invalid_argument(
                         "cluster SHA mode must fit its two-bit field");
                 }
                 const uint64_t sha_msglen_lo =
-                    state["sha_msglen_lo"].cast<
-                        uint64_t>();
+                    snapshot_u64(
+                        state,
+                        "sha_msglen_lo");
                 const uint64_t sha_msglen_hi =
-                    state["sha_msglen_hi"].cast<
-                        uint64_t>();
-                cluster.sb = sb;
-                cluster.sr = sr;
-                cluster.sc = sc;
-                cluster.sw = sw;
-                cluster.tmode = tmode;
-                cluster.tctrl = tctrl;
-                cluster.tsrc0 = tsrc0;
-                cluster.tsrc1 = tsrc1;
-                cluster.tdst = tdst;
+                    snapshot_u64(
+                        state,
+                        "sha_msglen_hi");
                 cluster.acc = acc;
-                cluster.tstride_r = tstride_r;
-                cluster.tstride_c = tstride_c;
-                cluster.ttile_h = ttile_h;
-                cluster.ttile_w = ttile_w;
+                commit_tacc_state(cluster, tacc);
                 cluster.sha_mode = sha_mode;
                 cluster.sha_msglen_lo = sha_msglen_lo;
                 cluster.sha_msglen_hi = sha_msglen_hi;
@@ -19153,7 +28148,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         cluster.grant_counts[resource_index];
                 }
                 py::dict snapshot;
-                snapshot["schema_version"] = 1;
+                snapshot["schema_version"] = 2;
                 snapshot["cluster_id"] =
                     cluster.cluster_id;
                 snapshot["global_id_base"] =
@@ -20334,6 +29329,20 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.mmio_start = mmio_start;
         cb.mmio_end = mmio_end;
         cb.has_mmio = true;
+        cb.tacc_read_via_callback =
+            python_bridge_has_memory_override(
+                mmio_read8,
+                "mem_read8");
+        cb.tacc_write_via_callback =
+            python_bridge_has_memory_override(
+                mmio_write8,
+                "mem_write8");
+        cb.tacc_span_policy_override =
+            python_bridge_has_tacc_span_policy_override(
+                mmio_read8);
+        install_python_external_phy_callbacks(
+            cb,
+            mmio_read8);
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             return mmio_read8(addr).cast<uint8_t>();
         };
@@ -20388,6 +29397,20 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.mmio_start = mmio_start;
         cb.mmio_end = mmio_end;
         cb.has_mmio = true;
+        cb.tacc_read_via_callback =
+            python_bridge_has_memory_override(
+                mmio_read8,
+                "mem_read8");
+        cb.tacc_write_via_callback =
+            python_bridge_has_memory_override(
+                mmio_write8,
+                "mem_write8");
+        cb.tacc_span_policy_override =
+            python_bridge_has_tacc_span_policy_override(
+                mmio_read8);
+        install_python_external_phy_callbacks(
+            cb,
+            mmio_read8);
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
             py::gil_scoped_acquire acq;
             return mmio_read8(addr).cast<uint8_t>();

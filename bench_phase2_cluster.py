@@ -27,9 +27,9 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-cluster-resource-baseline"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 STATE_SCHEMA = "megapad.phase2-cluster-resource-state"
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 MILESTONE = {
     "phase": 2,
@@ -99,7 +99,7 @@ EXPLICIT_EXCLUSIONS = [
     },
 ]
 
-RESOURCE_NAMES = ("bus", "mul_div", "crc", "sha", "mex")
+RESOURCE_NAMES = ("bus", "mul_div", "crc", "tile_engine")
 ALL_CORE_CODE_BASE = 0x100
 ALL_CORE_PROGRAM = assemble(
     """

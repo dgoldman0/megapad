@@ -513,7 +513,7 @@ capability, plus an interrupt enable/disable mechanism.
 
 ---
 
-## Tile Engine (39 words)
+## Tile Engine (47 words)
 
 The tile engine (MEX extension) performs **SIMD operations** on 64-byte
 memory tiles.  Tiles are divided into lanes based on element width
@@ -588,6 +588,105 @@ my-data TSRC0!            \ point source at data
 TSUM                      \ ACC = sum of all 64 bytes
 ACC@ .                    \ print the result
 ```
+
+### Full-width TACC
+
+TACC is a persistent 2,048-bit lane accumulator attached to each physical
+tile engine.  Full cores 0–3 each have a private engine and TACC.  The four
+microcores in each of the three microclusters share that cluster's engine and
+TACC, giving seven independent ownership domains in the production topology.
+Claiming TACC reserves only its persistent state; it does not reserve the
+tile engine from ordinary MEX work.
+
+The BIOS exposes the ISA lifecycle directly:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TAMAC` | `( -- )` | Accumulate `TSRC0[i] * TSRC1[i]` into every TACC lane.  TACC must be owned, valid, and in the current `TMODE` format. |
+| `TACC-TRY` | `( -- )` | Try to claim the local engine's TACC.  This always retires without waiting and returns no hidden flag. |
+| `TACC-CLEAR` | `( -- )` | Require ownership, latch the current `TMODE` format, zero all lanes, and mark the state valid and dirty. |
+| `TACC-LOAD` | `( -- )` | Require ownership and atomically load the canonical 256-byte image at `TSRC0`, latching the current format. |
+| `TACC-STORE` | `( -- )` | Require valid owned state, store the canonical image at `TDST`, and clear `DIRTY` after the complete store succeeds. |
+| `TACC-RELEASE` | `( -- )` | Require ownership, zeroize and invalidate TACC, then release it. |
+| `TACC-STATUS@` | `( -- status )` | Read caller-relative TACC status CSR `0x1D`. |
+| `TACC-CLAIM?` | `( -- flag )` | Execute `TACC-TRY` and return true exactly when status says `MINE`.  It never spins. |
+
+`TACC-STATUS@` reports `CLAIMED`, caller-relative `MINE`, `VALID`, `DIRTY`,
+`BUSY`, the latched element width and signedness, `FORCE_PENDING`, and the
+absolute owner core ID.  A successful `TACC-TRY` establishes ownership but
+not a valid value.  Initialize with `TACC-CLEAR` or `TACC-LOAD` before
+`TAMAC` or `TACC-STORE`.  A full core uses the same explicit lifecycle as a
+microcore even though its private claim cannot lose to another core.
+
+`TACC-LOAD` and `TACC-STORE` always transfer four consecutive 64-byte beats
+at a 64-byte-aligned address.  U8 and U16 modes use all 256 image bytes.
+U32, FP16, and BF16 modes use bytes 0–127 and keep bytes 128–255 zero.
+Integer results are widened U32 or U64 lanes; FP16/BF16 products accumulate
+as binary32 lanes.  Save the latched format alongside a context image.
+Task switches and traps do not release ownership, so ordinary software must
+store and release explicitly; the privileged force-release CSR is recovery
+for a dead owner.
+
+Waiting policy remains visible in software.  This bounded helper yields
+between failed claims and lets its caller choose the retry budget:
+
+```forth
+: TACC-CLAIM-N  ( attempts -- flag )
+    0 DO
+        TACC-CLAIM? IF TRUE UNLOOP EXIT THEN
+        PAUSE
+    LOOP
+    FALSE ;
+```
+
+`TACC-CLAIM?` is idempotently true when the same core already owns TACC.
+Tasks sharing a core must therefore track task ownership themselves rather
+than treating it as a recursive lock.
+
+This U8 kernel forms two products per lane and writes only the final widened
+image.  Its four source tiles and 256-byte destination must be 64-byte
+aligned:
+
+```forth
+: U8-2MAC  ( a0 b0 a1 b1 dst -- flag )
+    TACC-CLAIM? 0= IF
+        2DROP 2DROP DROP FALSE EXIT
+    THEN
+    >R
+    0 TMODE!
+    TACC-CLEAR
+    TSRC1! TSRC0! TAMAC
+    TSRC1! TSRC0! TAMAC
+    R> TDST!
+    TACC-STORE
+    TACC-RELEASE
+    TRUE ;
+```
+
+For example, source pairs filled with `2,3` and `4,5` produce 64 U32 result
+lanes equal to 26.  There is no intermediate product or accumulator store.
+
+The FP16 form has the same data movement but produces 32 binary32 lanes in
+the first 128 output bytes:
+
+```forth
+: FP16-2MAC  ( a0 b0 a1 b1 dst -- flag )
+    TACC-CLAIM? 0= IF
+        2DROP 2DROP DROP FALSE EXIT
+    THEN
+    >R
+    4 TMODE!
+    TACC-CLEAR
+    TSRC1! TSRC0! TAMAC
+    TSRC1! TSRC0! TAMAC
+    R> TDST!
+    TACC-STORE
+    TACC-RELEASE
+    TRUE ;
+```
+
+FP16 pairs `1.0 * 2.0` and `0.5 * 4.0` produce binary32 `4.0`
+(`0x40800000`) in every active lane; the upper 128 image bytes are zero.
 
 ---
 

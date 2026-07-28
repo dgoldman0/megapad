@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **465** entries.  The numbered
+The live dictionary link chain contains **473** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -28,7 +28,7 @@ Each entry is a linked list node:
 
 1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled.  The TX ring buffer address is written to UART TX_RING_BASE (`+0x08`).
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
-3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (`CALLER-SPAN-STATUS`).
+3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (`TACC-CLAIM?`).
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -828,6 +828,23 @@ initialization, lifetime, or freedom from application-level aliases.
 | 318 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
 | 319 | `TASK-ID` | `( -- n )` | | Return executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0 |
 
+### Full-width TACC (8 append-only words)
+
+These headers are appended after the previously newest entry rather than
+inserted into the historical Tile Engine table.  Therefore every ordinal
+through 465 remains stable.
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 466 | `TAMAC` | `( -- )` | | Accumulate the `TSRC0` × `TSRC1` tile products into owned, valid TACC lanes (`t.amac`, `E1 06`) |
+| 467 | `TACC-TRY` | `( -- )` | | Atomically try to claim TACC; always retires without waiting and returns no flag (`F8 E3 02`) |
+| 468 | `TACC-CLEAR` | `( -- )` | | Latch the current legal `TMODE`, zero TACC, and establish valid dirty state (`F8 E3 03`) |
+| 469 | `TACC-LOAD` | `( -- )` | | Atomically load the canonical 256-byte image at `TSRC0` and latch its current format (`F8 E3 04`) |
+| 470 | `TACC-STORE` | `( -- )` | | Store the canonical 256-byte image at `TDST`; clear `DIRTY` only after complete success (`F8 E3 05`) |
+| 471 | `TACC-RELEASE` | `( -- )` | | Zeroize, invalidate, and release caller-owned TACC (`F8 E3 06`) |
+| 472 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
+| 473 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
+
 ---
 
 ## Summary Statistics
@@ -872,7 +889,8 @@ initialization, lifetime, or freedom from application-level aliases.
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
-| **Catalogued subtotal** | **372** |
+| Full-width TACC | 8 |
+| **Catalogued subtotal** | **380** |
 
 ### All Immediate Words (34)
 
@@ -881,10 +899,12 @@ initialization, lifetime, or freedom from application-level aliases.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The caller-managed span boundary closes the newest appended segment:
+The TACC guest interface closes the newest appended segment:
 
 ```
-CALLER-SPAN-STATUS → ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
+TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
+→ TACC-CLEAR → TACC-TRY → TAMAC → CALLER-SPAN-STATUS
+→ ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
 → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
 → SHA512-INIT → TX-FLUSH
 → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP

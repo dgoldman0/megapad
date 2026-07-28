@@ -5,12 +5,17 @@ the CPU.  It processes data in **tiles** — 64-byte aligned memory regions —
 and can perform element-wise arithmetic, dot products, reductions, and
 utility operations across 8 to 64 lanes simultaneously.
 
-Each of the 4 full cores has a dedicated tile engine instance.  The 3
-micro-core clusters each have a **shared** tile engine, round-robin
-arbitrated across the cluster's 4 micro-cores (+3 cycle overhead per
-dispatch).  From a software perspective, all 16 cores can issue the
-same MEX instructions — micro-cores simply stall if the shared engine
-is busy.
+The production chip has exactly seven physical tile engines.  Full cores
+0–3 each have a private engine; each of the three four-microcore clusters
+shares one engine behind a deterministic round-robin arbiter (+3 cycles after
+a microcore wins cluster admission).  All 16 cores issue the same MEX ISA.
+
+A full core's tile configuration, legacy accumulator, and full-width tile
+accumulator are private.  Microcores keep private shadows of their cursor,
+mode, control, source, destination, and stride CSRs, while the legacy
+accumulator and TACC belong to the cluster's shared physical engine.  A
+granted request samples the issuing microcore's shadows, so a sibling changing
+its own configuration cannot retarget an in-flight operation.
 
 This guide covers:
 - What a tile is and how the engine thinks about data
@@ -19,6 +24,7 @@ This guide covers:
 - Extended operations (VSHR/VSHL/VCLZ, LOAD2D/STORE2D)
 - Source selection modes (tile×tile, broadcast, imm8 splat, in-place)
 - The 256-bit accumulator
+- The explicit 2,048-bit full-width tile accumulator (TACC)
 - FP16 / BF16 half-precision support
 - BIOS Forth words for tile operations
 - How KDOS uses the tile engine for buffers, kernels, and pipelines
@@ -29,8 +35,9 @@ This guide covers:
 ## What Is a Tile?
 
 A **tile** is simply 64 contiguous bytes in memory, aligned to a 64-byte
-boundary.  The tile engine doesn't have its own register file — it reads
-from and writes to main memory through address pointers stored in CSRs.
+boundary.  Ordinary tile operands do not live in a separate tile register
+file: the engine reads and writes them through address pointers stored in
+CSRs.  Legacy ACC and TACC are separate architectural result state.
 
 Depending on the element width, a single tile contains:
 
@@ -41,9 +48,10 @@ Depending on the element width, a single tile contains:
 | 32-bit | 16 | u32 / i32 | 16 values |
 | 64-bit | 8 | u64 / i64 | 8 values |
 
-Every tile operation processes **all lanes in parallel** in a single
-instruction.  For a 1024-byte buffer at 8-bit width, that's 16 tiles ×
-1 instruction = 16 instructions to process the entire buffer.
+Architecturally, every tile operation processes **all lanes** in a single
+instruction; an implementation may schedule those lanes over fixed arithmetic
+beats.  For a 1024-byte buffer at 8-bit width, that's 16 tiles × 1 instruction
+= 16 instructions to process the entire buffer.
 
 ---
 
@@ -135,6 +143,10 @@ ACC3 (0x1C)    ACC2 (0x1B)    ACC1 (0x1A)    ACC0 (0x19)
 - Low 64 bits (`ACC0`) are sufficient for most use cases
 - Full 256-bit width prevents overflow during large accumulations
 - The Z (zero) flag is set when the accumulated result equals zero
+
+This legacy accumulator is distinct from TACC.  Existing `TDOT`, `TDOTACC`,
+`TRED`, `TMAC`, `TFMA`, and `TCTRL` behavior is unchanged by the TACC
+extension.
 
 ### Cursor Registers
 
@@ -242,6 +254,8 @@ TALU operations compute a per-lane function and write the result tile to
 | `3` | **MAC** | `dst[i] += a[i] × b[i]` | `[TDST]` (in-place) | +1 |
 | `4` | **FMA** | `dst[i] = a[i] × b[i] + c[i]` | `[TDST]` (c = TDST) | +1 |
 | `5` | **DOTACC** | $\text{ACC}[k] += \text{dot}(\text{chunk}_k)$ | ACC0–ACC3 | +3 |
+| `6` | **TAMAC** | `TACC[i] += widen(a[i] × b[i])` | 2,048-bit TACC | mode/source dependent |
+| `7` | reserved | Illegal operation | — | — |
 
 **DOT** is the workhorse for correlation and linear algebra.  It
 multiplies corresponding lanes and sums the products into the accumulator,
@@ -261,6 +275,12 @@ GEMM accumulation pattern.
 **DOTACC** splits the tile into 4 equal chunks and produces 4 independent
 dot products, one per accumulator register (ACC0–ACC3).  Useful for 4-wide
 vector dot products in GEMM inner loops.
+
+**TAMAC** accumulates widened products lane-by-lane into persistent TACC
+state.  Tile×tile (`E1 06`), register broadcast (`E5 06 Rn`), and in-place
+(`ED 06`) forms are legal.  Immediate splat is not: its function byte is the
+immediate, so that source selector traps before reading memory or changing
+TACC.  `TAMAC` never writes `TDST`.
 
 ### Multi-Tile Dot Product Pattern
 
@@ -454,6 +474,188 @@ precision loss during large summations.
 
 ---
 
+## Full-Width Tile Accumulator (TACC)
+
+> **Implementation status:** the Python oracle, native accelerator, and
+> strict-cycle system model implement this contract in emulator Phase 1.
+> Portable RTL implementation is Phase 2 work; the existing RTL must not yet
+> be described as implementing TACC.
+
+Each physical tile engine owns one 2,048-bit TACC bank plus owner, valid,
+dirty, format, busy, force-pending, and cancellation metadata.  Software
+controls its complete lifetime:
+
+1. claim with `TACC.TRY`;
+2. initialize with `TACC.CLEAR` or restore with `TACC.LOAD`;
+3. execute one or more `TAMAC` instructions;
+4. save with `TACC.STORE` when required; and
+5. zeroize and relinquish it with `TACC.RELEASE`.
+
+There is no implicit claim, blocking wait, spill, eviction, migration, or
+release.  Ownership reserves only persistent TACC state, not the engine:
+nonowners may continue stateless MEX work and legacy-ACC operations.  Current
+cluster admission, image-stage acquisition, and tile-memory service are equal
+round-robin.  Future software-controlled QoS weights may change service order,
+but never TACC arithmetic, ownership, image, fault, or retirement semantics.
+
+### Lifecycle instructions
+
+Lifecycle operations use the extended-TSYS namespace.  The canonical source
+selector is zero and the upper five function bits are zero; noncanonical
+aliases trap.
+
+| Encoding | Assembly | BIOS word | Operation |
+|---|---|---|---|
+| `F8 E3 02` | `t.acc.try` | `TACC-TRY` | Claim a free bank or retain self-ownership; never wait |
+| `F8 E3 03` | `t.acc.clear` | `TACC-CLEAR` | Require ownership, latch `TMODE` format, and clear active lanes |
+| `F8 E3 04` | `t.acc.load` | `TACC-LOAD` | Load the canonical image at `TSRC0` |
+| `F8 E3 05` | `t.acc.store` | `TACC-STORE` | Store the canonical image at `TDST` |
+| `F8 E3 06` | `t.acc.release` | `TACC-RELEASE` | Zeroize, invalidate, and release |
+| `F8 E3 07` | — | — | Reserved; illegal operation |
+
+`TACC.TRY` by the existing owner is idempotent.  Losing a claim retires
+normally with no mutation; software reads `TACC_STATUS.MINE` to decide whether
+to proceed.  Every other protected operation requires ownership.  `TAMAC` and
+`STORE` additionally require valid state.
+
+### Status and recovery control
+
+`TACC_STATUS` is a read-only CSR at `0x1D`.  `MINE` is caller-relative; every
+other field describes the physical engine.
+
+| Bits | Field | Meaning |
+|---|---|---|
+| `[0]` | `CLAIMED` | A caller owns this bank |
+| `[1]` | `MINE` | The reading core is that owner |
+| `[2]` | `VALID` | `CLEAR` or `LOAD` established value and format |
+| `[3]` | `DIRTY` | State changed since the last successful `LOAD` or `STORE` |
+| `[4]` | `BUSY` | A TACC operation is in flight |
+| `[7:5]` | `FORMAT_EW` | Latched element-width code; zero when invalid |
+| `[8]` | `FORMAT_SIGNED` | Latched integer signedness |
+| `[9]` | `FORCE_PENDING` | Privileged recovery is queued behind active work |
+| `[20:16]` | `OWNER` | Absolute core ID; 31 means no owner |
+
+`TACC_CTL` at `0x1E` reads as zero.  A supervisor write of bit 0 pulses
+`FORCE_RELEASE`; a user write with bit 0 set raises `IVEC_PRIV_FAULT`.
+Recovery zeroizes the bank and clears ownership.  An accepted force pulse has
+priority over same-cycle admission.  If work is active, it first reaches its
+normal retirement-or-trap boundary, then the queued force wins before any new
+TACC admission.  Normal software uses `TACC.RELEASE`; force-release exists for
+a terminated or otherwise dead owner.
+
+Production full-core owner IDs are 0–3; microcluster core-ID bases are 4, 8,
+and 12.  `OWNER` always reports the absolute issuing core ID rather than a
+cluster-local index.
+
+### Formats and arithmetic
+
+`CLEAR` and `LOAD` latch the current `TMODE.EW` and integer signed bit.
+`TAMAC` must match that format.  Saturation and shift-rounding bits are not
+part of the TACC format and do not affect accumulation.
+
+| `TMODE.EW` | Input lanes | Accumulator lane | Active image |
+|---:|---:|---|---:|
+| 0 — U8/S8 | 64 | 32-bit integer | 256 bytes |
+| 1 — U16/S16 | 32 | 64-bit integer | 256 bytes |
+| 2 — U32/S32 | 16 | 64-bit integer | 128 bytes |
+| 4 — FP16 | 32 | binary32 | 128 bytes |
+| 5 — BF16 | 32 | binary32 | 128 bytes |
+
+EW 3, 6, and 7 are illegal for `CLEAR`, `LOAD`, and `TAMAC`.  Integer
+products are exact, extended according to signedness, and accumulated modulo
+the lane width without saturation.  Broadcast uses only the low active-width
+bits of its GPR.  FP16/BF16 products enter binary32 before one
+round-to-nearest-even addition per lane per `TAMAC`; subnormals and IEEE
+signed zero are preserved.  NaN input, `0 × infinity`, or invalid infinity
+addition produces canonical quiet NaN `0x7FC00000`, which remains canonical
+on later accumulations.  Inactive high bank bits are always zero after
+initialization or accumulation.
+
+### Canonical image, memory, and faults
+
+`TACC.LOAD` and `TACC.STORE` transfer exactly 256 bytes aligned to 64 bytes as
+four consecutive 64-byte beats.  Lanes and bytes within each lane are
+little-endian.  U8/S8 and U16/S16 use the full image.  U32/S32, FP16, and BF16
+use bytes 0–127; `STORE` writes zeros to bytes 128–255 and `LOAD` ignores them
+and commits zeros.  Transfers do not advance or rewrite source, destination,
+or cursor CSRs.  A saved context therefore consists of the 256-byte image plus
+its format.
+
+Internal memory, attached RAM, and external RAM use the same image.  MMIO is
+not a legal image target.  The entire span is preflighted under the caller's
+ordinary routed-memory, privilege, and active-MPU policy before a store issues
+its first beat.  User-mode HBW images are forbidden.
+
+- Misalignment raises `IVEC_ALIGN_FAULT` with the base in `TRAP_ADDR`.
+- Nonownership, invalid state, format mismatch, unsupported mode, and
+  noncanonical encoding raise `IVEC_ILLEGAL_OP` before source access or
+  mutation and leave `TRAP_ADDR` unchanged.
+- A forbidden span faults at its first forbidden byte and issues no store
+  beat.
+- A source or transport bus error reports the faulting beat or external PHY
+  word address.
+- `LOAD` stages privately and publishes only after its final acknowledgement;
+  every load fault leaves the old bank unchanged.
+- A failed external `STORE` may leave only its acknowledged memory prefix
+  visible.  TACC remains valid and retains its preinstruction `DIRTY` value.
+- A faulting instruction does not retire or increment `PERF_TILE_OPS`.
+
+Every TACC trap saves the architectural PC after the complete decoded
+instruction, matching the existing MEX return-PC convention.  An unsuccessful
+`TACC.TRY`, by contrast, retires normally and does increment `PERF_TILE_OPS`.
+
+External images serialize each 64-byte beat into eight 64-bit PHY words.
+Each successful word increments `PERF_EXTMEM`.  A response on cycle 255 wins;
+no response, or a response later than 255 cycles, becomes an acknowledged bus
+fault at the exact current word rather than hanging the engine.
+
+### Context switching, reset, and cancellation
+
+Interrupts and ordinary traps preserve ownership and TACC.  A task may retain
+state when it deliberately resumes on the same core, but ownership identifies
+a core rather than an OS task.  Before migrating an owning task, software must
+save any dirty state, retain the format alongside its image, and release the
+bank.  Restore by claiming the destination engine, setting the saved `TMODE`
+format, and loading the image.
+
+Whole-SoC reset wipes all seven banks.  Resetting one full-core execution
+domain wipes only its paired private engine; cluster disable or cluster-engine
+reset wipes only that shared engine.  Resetting one microcore cancels that
+caller's pending or active operation but does not wipe its cluster's shared
+TACC.  Epoch-tagged cancellation rejects late acknowledgements, while already
+acknowledged external store words remain visible.
+
+### Phase 1 measured timing
+
+These are uncontended full-core measurements.  “Instruction step” is the
+functional Python/native execution API; “strict system” includes image-stage
+capture and the registered tile-memory request/ACK path.
+
+| Image path | Instruction step | Strict system | Successful `PERF_EXTMEM` |
+|---|---:|---:|---:|
+| Internal/attached memory | 6 cycles, 0 added stalls | 9 cycles, 3 stalls | 0 |
+| External, default one-cycle PHY response | 34 cycles, 28 stalls | 37 cycles, 31 stalls | 32 |
+| External, two-cycle PHY response | 66 cycles, 60 stalls | 69 cycles, 63 stalls | 32 |
+
+The default external result is the six-cycle base path with four tile beats
+replaced by 32 serialized PHY-word responses; the strict path adds three
+registered-fabric cycles.  Contention and longer PHY responses add elapsed
+stall cycles.  A microcore MEX instruction also pays the existing fixed
+three-cycle cluster-dispatch cost after it wins admission.
+
+Other uncontended full-core base totals are:
+
+| Operation | Base cycles |
+|---|---:|
+| `CSRR TACC_STATUS` or `CSRW TACC_CTL` | 1 |
+| `TACC.TRY`, `TACC.CLEAR`, or `TACC.RELEASE` | 2 |
+| Integer tile×tile/in-place `TAMAC`, U8/U16/U32 | 7 / 5 / 4 |
+| Integer broadcast `TAMAC`, U8/U16/U32 | 6 / 4 / 3 |
+| FP16/BF16 tile×tile or in-place `TAMAC` | 7 |
+| FP16/BF16 broadcast `TAMAC` | 6 |
+
+---
+
 ## Complete MEX Opcode Map
 
 For assembler authors and low-level debugging, here is every MEX byte:
@@ -499,6 +701,8 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `ACC1@` | `( -- n )` | Read accumulator bits [127:64] |
 | `ACC2@` | `( -- n )` | Read accumulator bits [191:128] |
 | `ACC3@` | `( -- n )` | Read accumulator bits [255:192] |
+| `TACC-STATUS@` | `( -- u )` | Read raw `TACC_STATUS` |
+| `TACC-CLAIM?` | `( -- flag )` | Try once and return canonical true only when `MINE=1` |
 
 ### ALU Operations
 
@@ -523,6 +727,25 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TMAC` | `( -- )` | Multiply-accumulate in-place → `[TDST]` |
 | `TFMA` | `( -- )` | Fused multiply-add: `a×b + dst` → `[TDST]` |
 | `TDOTACC` | `( -- )` | 4-way chunked dot product → ACC0–ACC3 |
+| `TAMAC` | `( -- )` | Accumulate widened `[TSRC0] × [TSRC1]` products into TACC |
+
+### TACC Lifecycle
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TACC-TRY` | `( -- )` | Attempt one nonblocking claim |
+| `TACC-CLEAR` | `( -- )` | Initialize owned TACC in the current `TMODE` format |
+| `TACC-LOAD` | `( -- )` | Load the 256-byte image at `TSRC0` |
+| `TACC-STORE` | `( -- )` | Store the 256-byte image at `TDST` |
+| `TACC-RELEASE` | `( -- )` | Zeroize and release owned TACC |
+
+The convenience word does not hide a spin.  Software chooses whether and how
+long to retry:
+
+```forth
+: TACC-ACQUIRE
+  BEGIN TACC-CLAIM? 0= WHILE PAUSE REPEAT ;
+```
 
 ### Reductions
 
@@ -709,6 +932,38 @@ my-a my-b kcorrelate .   \ Prints 5376
 
 ---
 
+## Worked Examples: Avoiding Intermediate Tile Stores
+
+The integer path can accumulate several tile pairs directly into TACC and
+publish one canonical image at the end:
+
+```forth
+TACC-ACQUIRE
+0 TMODE!  TACC-CLEAR             \ 64 U8 lanes → 64 widened 32-bit lanes
+int-a       TSRC0!  int-b       TSRC1!  TAMAC
+int-a 64 +  TSRC0!  int-b 64 +  TSRC1!  TAMAC
+int-image TDST!  TACC-STORE
+TACC-RELEASE
+```
+
+The same lifecycle applies to floating work; only the format and sources
+change:
+
+```forth
+TACC-ACQUIRE
+4 TMODE!  TACC-CLEAR             \ 32 FP16 products accumulate as binary32
+fp-a       TSRC0!  fp-b       TSRC1!  TAMAC
+fp-a 64 +  TSRC0!  fp-b 64 +  TSRC1!  TAMAC
+fp-image TDST!  TACC-STORE
+TACC-RELEASE
+```
+
+Both examples avoid the destination-tile load/add/store traffic required by
+legacy `TMAC`/`TFMA` accumulation.  The stored result remains the canonical
+256-byte TACC image rather than a silently narrowed tile.
+
+---
+
 ## Performance Tips
 
 1. **Always use `TMODE` 0 (8-bit) when possible** — 64 lanes is the
@@ -718,7 +973,7 @@ my-a my-b kcorrelate .   \ Prints 5376
    `ACC_ACC` once.  Don't re-set them every tile.
 
 3. **Keep data tile-aligned** — use `TALIGN` before allocating buffers.
-   Misaligned access still works but may cause unexpected boundary effects.
+   TACC images require 64-byte alignment and trap if misaligned.
 
 4. **Use KDOS buffer words** — `B.SUM`, `B.ADD`, etc. handle the
    tile-iteration loop for you, correctly.
@@ -728,3 +983,10 @@ my-a my-b kcorrelate .   \ Prints 5376
 
 6. **MOVBANK for bulk copies** — 64 bytes per instruction, useful for
    data staging.
+
+7. **Claim explicitly and keep retry policy visible** — use one
+   `TACC-CLAIM?` when work is optional, or a software `PAUSE`/backoff loop when
+   waiting is appropriate.  Ownership never supplies a hidden hardware spin.
+
+8. **Keep TACC across the inner loop** — perform all `TAMAC` operations before
+   one final store.  Do not store and reload the image between tile pairs.

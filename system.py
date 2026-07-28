@@ -48,6 +48,8 @@ from megapad64 import (
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
+    TACC_IMAGE_BYTES, TACC_OWNER_NONE, TACC_LEGAL_EW,
+    EW_FP16, EW_BF16,
 )
 from devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
@@ -55,14 +57,17 @@ from devices import (
     MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
     CppRTCProxy,
-    MailboxDevice, SpinlockDevice,
-    NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
     SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
     PortBridgeCSR,
     WotsChainAccel,
 )
+
+# Public system stepping must honor deliberate per-core step overrides, while
+# positive production batches remain owned unconditionally by the native
+# system scheduler.
+_CANONICAL_STEP = Megapad64.step
 
 # ---------------------------------------------------------------------------
 #  Memory map constants
@@ -229,7 +234,7 @@ class MicroCluster:
       - 1 KiB scratchpad RAM (cluster-local, not on main bus)
       - Shared MUL/DIV unit (cooperatively arbitrated in native batches)
       - Shared CRC accumulator, mode, and transaction lock
-      - Shared tile and SHA compatibility state
+      - Shared tile-engine ACC/TACC and SHA compatibility state
       - Hardware barrier register
       - BIST controller for scratchpad/multiplier
 
@@ -237,27 +242,182 @@ class MicroCluster:
     register.  When disabled, all micro-cores are held in reset.
     """
 
+    _CALLER_PRIVATE_TILE_FIELDS = (
+        "sb", "sr", "sc", "sw",
+        "tmode", "tctrl",
+        "tsrc0", "tsrc1", "tdst",
+        "tstride_r", "tstride_c", "ttile_h", "ttile_w",
+    )
+    _SHARED_SHA_FIELDS = (
+        "sha_mode", "sha_msglen_lo", "sha_msglen_hi",
+    )
+    _SHARED_TACC_METADATA_FIELDS = (
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    )
+    _SHARED_ENGINE_FIELDS = frozenset(
+        ("acc", "tacc")
+        + _SHARED_TACC_METADATA_FIELDS
+        + _SHARED_SHA_FIELDS
+    )
+
     @staticmethod
-    def _new_shared_engine_state() -> dict:
+    def _new_shared_engine_state(*, tacc_epoch: int = 0) -> dict:
         return {
-            "sb": 0,
-            "sr": 0,
-            "sc": 0,
-            "sw": 1,
-            "tmode": 0,
-            "tctrl": 0,
-            "tsrc0": 0,
-            "tsrc1": 0,
-            "tdst": 0,
             "acc": [0, 0, 0, 0],
-            "tstride_r": 0,
-            "tstride_c": 0,
-            "ttile_h": 8,
-            "ttile_w": 8,
+            "tacc": bytearray(TACC_IMAGE_BYTES),
+            "tacc_owner": TACC_OWNER_NONE,
+            "tacc_valid": False,
+            "tacc_dirty": False,
+            "tacc_format_ew": 0,
+            "tacc_format_signed": 0,
+            "tacc_busy": False,
+            "tacc_force_pending": False,
+            "tacc_epoch": u64(tacc_epoch),
             "sha_mode": 0,
             "sha_msglen_lo": 0,
             "sha_msglen_hi": 0,
         }
+
+    @staticmethod
+    def _checked_u64(value, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"cluster tile {name} must be an integer")
+        if not 0 <= value < (1 << 64):
+            raise ValueError(f"cluster tile {name} is outside uint64")
+        return value
+
+    @staticmethod
+    def _checked_bool(value, name: str) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"cluster tile {name} must be bool")
+        return value
+
+    def _validate_shared_engine_state(self, state: dict) -> dict:
+        """Validate and deep-copy one complete authoritative engine image."""
+        if not isinstance(state, dict):
+            try:
+                state = dict(state)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "cluster tile snapshot must be a mapping"
+                ) from exc
+        if set(state) != self._SHARED_ENGINE_FIELDS:
+            missing = sorted(self._SHARED_ENGINE_FIELDS - set(state))
+            extra = sorted(set(state) - self._SHARED_ENGINE_FIELDS)
+            raise ValueError(
+                "cluster tile snapshot schema mismatch: "
+                f"missing={missing}, extra={extra}"
+            )
+
+        try:
+            acc_values = list(state["acc"])
+        except TypeError as exc:
+            raise ValueError("cluster tile acc must be an iterable") from exc
+        if len(acc_values) != 4:
+            raise ValueError("cluster tile acc must contain four uint64 words")
+        acc = [
+            self._checked_u64(value, f"acc[{index}]")
+            for index, value in enumerate(acc_values)
+        ]
+
+        tacc_value = state["tacc"]
+        if not isinstance(tacc_value, (bytes, bytearray, memoryview)):
+            raise ValueError("cluster tile tacc must be byte-addressable")
+        try:
+            tacc = bytearray(tacc_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cluster tile tacc must be byte-addressable") from exc
+        if len(tacc) != TACC_IMAGE_BYTES:
+            raise ValueError(
+                f"cluster tile tacc must be {TACC_IMAGE_BYTES} bytes"
+            )
+
+        owner = self._checked_u64(state["tacc_owner"], "tacc_owner")
+        if owner != TACC_OWNER_NONE and not (
+            self.id_base <= owner < self.id_base + self.n
+        ):
+            raise ValueError(
+                "cluster tile tacc_owner is not an absolute caller ID "
+                f"for cluster {self.cluster_id}"
+            )
+        valid = self._checked_bool(state["tacc_valid"], "tacc_valid")
+        dirty = self._checked_bool(state["tacc_dirty"], "tacc_dirty")
+        busy = self._checked_bool(state["tacc_busy"], "tacc_busy")
+        force_pending = self._checked_bool(
+            state["tacc_force_pending"],
+            "tacc_force_pending",
+        )
+        format_ew = self._checked_u64(
+            state["tacc_format_ew"],
+            "tacc_format_ew",
+        )
+        format_signed = self._checked_u64(
+            state["tacc_format_signed"],
+            "tacc_format_signed",
+        )
+        if format_ew > 7 or format_signed > 1:
+            raise ValueError("cluster tile TACC format metadata is out of range")
+        if force_pending and not busy:
+            raise ValueError("cluster tile FORCE_PENDING requires BUSY")
+        if dirty and not valid:
+            raise ValueError("cluster tile DIRTY requires VALID")
+        if valid:
+            if owner == TACC_OWNER_NONE:
+                raise ValueError("cluster tile VALID requires an owner")
+            if format_ew not in TACC_LEGAL_EW:
+                raise ValueError("cluster tile VALID uses an illegal format")
+            if format_ew in (EW_FP16, EW_BF16) and format_signed:
+                raise ValueError(
+                    "cluster tile floating TACC format cannot be signed"
+                )
+            active_bytes = (
+                TACC_IMAGE_BYTES if format_ew in (0, 1) else 128
+            )
+            if any(tacc[active_bytes:]):
+                raise ValueError(
+                    "cluster tile inactive TACC image bytes must be zero"
+                )
+        else:
+            if dirty or format_ew or format_signed:
+                raise ValueError(
+                    "cluster tile invalid TACC must clear dirty and format"
+                )
+            if any(tacc):
+                raise ValueError(
+                    "cluster tile invalid TACC image must be zero"
+                )
+        if owner == TACC_OWNER_NONE and valid:
+            raise ValueError(
+                "cluster tile unowned TACC cannot be valid"
+            )
+
+        normalized = {
+            name: self._checked_u64(state[name], name)
+            for name in self._SHARED_SHA_FIELDS
+        }
+        normalized.update({
+            "acc": acc,
+            "tacc": tacc,
+            "tacc_owner": owner,
+            "tacc_valid": valid,
+            "tacc_dirty": dirty,
+            "tacc_format_ew": format_ew,
+            "tacc_format_signed": format_signed,
+            "tacc_busy": busy,
+            "tacc_force_pending": force_pending,
+            "tacc_epoch": self._checked_u64(
+                state["tacc_epoch"],
+                "tacc_epoch",
+            ),
+        })
+        return normalized
 
     def __init__(self, cluster_id: int, id_base: int,
                  n: int = MICRO_PER_CLUSTER,
@@ -284,6 +444,19 @@ class MicroCluster:
         self._sha_locked = False
         self._sha_owner: Optional[int] = None
         self._tile_state = self._new_shared_engine_state()
+        self._tacc_caller_epochs = [0] * n
+        if self._native_cluster_index is not None:
+            self._tacc_caller_epochs = [
+                int(value)
+                for value in self._native_system
+                ._cluster_tacc_caller_epochs_snapshot(
+                    self._native_cluster_index
+                )
+            ]
+        self._active_tacc_caller: Optional[int] = None
+        self._active_tacc_engine_epoch: Optional[int] = None
+        self._active_tacc_caller_epoch: Optional[int] = None
+        self._engine_reset_generation = 0
 
         # Barrier register
         self.barrier_arrive = 0   # N-bit mask
@@ -429,15 +602,37 @@ class MicroCluster:
 
     def reset_shared_resources(self):
         """Reset cluster engines, transaction locks, and grant cursors."""
+        next_tacc_epoch = u64(
+            int(self._shared_engine_snapshot()["tacc_epoch"]) + 1
+        )
         if self._native_cluster_index is not None:
             self._native_system.reset_cluster_state(
                 self._native_cluster_index
             )
-            return
-        self.reset_crc()
+            self._tacc_caller_epochs = [
+                int(value)
+                for value in self._native_system
+                ._cluster_tacc_caller_epochs_snapshot(
+                    self._native_cluster_index
+                )
+            ]
+        else:
+            self.reset_crc()
+            self._tacc_caller_epochs = [
+                u64(value + 1)
+                for value in self._tacc_caller_epochs
+            ]
         self._sha_locked = False
         self._sha_owner = None
-        self._tile_state = self._new_shared_engine_state()
+        self._tile_state = self._new_shared_engine_state(
+            tacc_epoch=next_tacc_epoch
+        )
+        self._active_tacc_caller = None
+        self._active_tacc_engine_epoch = None
+        self._active_tacc_caller_epoch = None
+        self._engine_reset_generation = u64(
+            self._engine_reset_generation + 1
+        )
 
     def crc_try_acquire(self, global_core_id: int) -> bool:
         """Acquire the CRC transaction for a core, or report contention."""
@@ -675,7 +870,7 @@ class MicroCluster:
             return
         self.scratchpad[:] = image
 
-    # -- Shared tile and SHA compatibility bank --
+    # -- Shared tile-engine ACC/TACC and SHA compatibility bank --
 
     def _shared_engine_snapshot(self) -> dict:
         if self._native_cluster_index is not None:
@@ -684,41 +879,200 @@ class MicroCluster:
                     self._native_cluster_index
                 )
             )
-            state["acc"] = list(state["acc"])
-            return state
-        state = dict(self._tile_state)
-        state["acc"] = list(self._tile_state["acc"])
-        return state
+            return self._validate_shared_engine_state(state)
+        return self._validate_shared_engine_state(self._tile_state)
 
-    def load_shared_engine_state(self, cpu) -> None:
-        state = self._shared_engine_snapshot()
-        for name in (
-            "sb", "sr", "sc", "sw", "tmode", "tctrl",
-            "tsrc0", "tsrc1", "tdst", "tstride_r", "tstride_c",
-            "ttile_h", "ttile_w", "sha_mode", "sha_msglen_lo",
-            "sha_msglen_hi",
-        ):
-            setattr(cpu, name, int(state[name]))
-        cpu.acc = list(state["acc"])
-
-    def store_shared_engine_state(self, cpu) -> None:
-        state = {
-            name: int(getattr(cpu, name))
-            for name in (
-                "sb", "sr", "sc", "sw", "tmode", "tctrl",
-                "tsrc0", "tsrc1", "tdst", "tstride_r", "tstride_c",
-                "ttile_h", "ttile_w", "sha_mode", "sha_msglen_lo",
-                "sha_msglen_hi",
+    def _caller_tacc_epoch(self, core_id: int) -> int:
+        local = core_id - self.id_base
+        if not 0 <= local < self.n:
+            raise ValueError(
+                f"core {core_id} is not a caller of cluster {self.cluster_id}"
             )
-        }
-        state["acc"] = [int(value) for value in cpu.acc]
         if self._native_cluster_index is not None:
+            self._tacc_caller_epochs = [
+                int(value)
+                for value in self._native_system
+                ._cluster_tacc_caller_epochs_snapshot(
+                    self._native_cluster_index
+                )
+            ]
+        return self._tacc_caller_epochs[local]
+
+    def _commit_shared_engine_state(self, state: dict) -> dict:
+        """Validate once, then atomically replace the authoritative image."""
+        state = self._validate_shared_engine_state(state)
+        if self._native_cluster_index is not None:
+            native_state = dict(state)
+            native_state["tacc"] = bytes(state["tacc"])
             self._native_system._cluster_tile_update(
                 self._native_cluster_index,
-                state,
+                native_state,
             )
+        self._tile_state = self._validate_shared_engine_state(state)
+        return self._validate_shared_engine_state(state)
+
+    def load_shared_engine_state(self, cpu) -> None:
+        """Stage only physical engine state into one granted microcore.
+
+        Caller-private tile configuration already lives on ``cpu`` and must
+        survive this compatibility boundary unchanged.
+        """
+        state = self._shared_engine_snapshot()
+        for name in self._SHARED_SHA_FIELDS:
+            setattr(cpu, name, int(state[name]))
+        cpu.acc = list(state["acc"])
+        # Python oracle CPUs own a mutable bytearray, while the native wrapper
+        # exposes a deep immutable bytes snapshot plus a whole-image setter.
+        # Replace the complete image in either case; never mutate a temporary
+        # native getter result in place.
+        current_tacc = cpu.tacc
+        cpu.tacc = (
+            bytearray(state["tacc"])
+            if isinstance(current_tacc, bytearray)
+            else bytes(state["tacc"])
+        )
+        for name in self._SHARED_TACC_METADATA_FIELDS:
+            setattr(cpu, name, state[name])
+        cpu._shared_engine_tacc_epoch = state["tacc_epoch"]
+        cpu._shared_engine_caller_epoch = self._caller_tacc_epoch(
+            cpu.core_id
+        )
+        cpu._shared_engine_reset_generation = self._engine_reset_generation
+
+    def store_shared_engine_state(self, cpu) -> bool:
+        """Commit a validated stage only while its cancellation token is live."""
+        state = {
+            name: int(getattr(cpu, name))
+            for name in self._SHARED_SHA_FIELDS
+        }
+        state["acc"] = [int(value) for value in cpu.acc]
+        state["tacc"] = bytearray(cpu.tacc)
+        for name in self._SHARED_TACC_METADATA_FIELDS:
+            state[name] = getattr(cpu, name)
+        state = self._validate_shared_engine_state(state)
+
+        current = self._shared_engine_snapshot()
+        caller_epoch = self._caller_tacc_epoch(cpu.core_id)
+        expected_engine_epoch = getattr(
+            cpu,
+            "_shared_engine_tacc_epoch",
+            current["tacc_epoch"],
+        )
+        expected_caller_epoch = getattr(
+            cpu,
+            "_shared_engine_caller_epoch",
+            caller_epoch,
+        )
+        expected_reset_generation = getattr(
+            cpu,
+            "_shared_engine_reset_generation",
+            self._engine_reset_generation,
+        )
+        if (
+            current["tacc_epoch"] != expected_engine_epoch
+            or caller_epoch != expected_caller_epoch
+            or self._engine_reset_generation != expected_reset_generation
+        ):
+            self.load_shared_engine_state(cpu)
+            return False
+        if state["tacc_epoch"] not in (
+            expected_engine_epoch,
+            u64(expected_engine_epoch + 1),
+        ):
+            raise ValueError(
+                "cluster tile commit may advance TACC epoch by at most one"
+            )
+
+        committed = self._commit_shared_engine_state(state)
+        cpu._shared_engine_tacc_epoch = committed["tacc_epoch"]
+        cpu._shared_engine_caller_epoch = caller_epoch
+        cpu._shared_engine_reset_generation = self._engine_reset_generation
+        return True
+
+    def begin_shared_tacc_operation(self, cpu) -> bool:
+        """Publish BUSY and bind the operation to engine and caller epochs."""
+        if self._active_tacc_caller is not None:
+            # The physical engine admits one TACC request at a time.  Control
+            # writes use their separate sideband and therefore do not pass
+            # through this gate.
+            self.load_shared_engine_state(cpu)
+            return False
+        if not self.store_shared_engine_state(cpu):
+            return False
+        self._active_tacc_caller = cpu.core_id
+        self._active_tacc_engine_epoch = cpu.tacc_epoch
+        self._active_tacc_caller_epoch = self._caller_tacc_epoch(cpu.core_id)
+        return True
+
+    def prepare_shared_tacc_completion(self, cpu) -> bool:
+        """Merge an accepted control-sideband request before completion."""
+        expected = (
+            cpu.core_id,
+            getattr(cpu, "_shared_engine_tacc_epoch", None),
+            getattr(cpu, "_shared_engine_caller_epoch", None),
+        )
+        active = (
+            self._active_tacc_caller,
+            self._active_tacc_engine_epoch,
+            self._active_tacc_caller_epoch,
+        )
+        current = self._shared_engine_snapshot()
+        if (
+            expected != active
+            or current["tacc_epoch"] != expected[1]
+            or self._caller_tacc_epoch(cpu.core_id) != expected[2]
+        ):
+            self.load_shared_engine_state(cpu)
+            return False
+        cpu.tacc_force_pending = current["tacc_force_pending"]
+        return True
+
+    def complete_shared_tacc_operation(self, cpu) -> bool:
+        """Publish one normal-or-trap terminal state and release BUSY."""
+        try:
+            return self.store_shared_engine_state(cpu)
+        finally:
+            if self._active_tacc_caller == cpu.core_id:
+                self._active_tacc_caller = None
+                self._active_tacc_engine_epoch = None
+                self._active_tacc_caller_epoch = None
+
+    def cancel_tacc_caller(self, core_id: int) -> None:
+        """Cancel one caller without discarding its cluster's shared bank."""
+        local = core_id - self.id_base
+        if not 0 <= local < self.n:
+            raise ValueError(
+                f"core {core_id} is not a caller of cluster {self.cluster_id}"
+            )
+        if self._native_cluster_index is not None:
+            self._tacc_caller_epochs[local] = int(
+                self._native_system._cluster_tacc_cancel_caller(
+                    self._native_cluster_index,
+                    local,
+                )
+            )
+        else:
+            self._tacc_caller_epochs[local] = u64(
+                self._tacc_caller_epochs[local] + 1
+            )
+        if self._active_tacc_caller != core_id:
             return
-        self._tile_state = state
+
+        state = self._shared_engine_snapshot()
+        if state["tacc_force_pending"]:
+            replacement = self._new_shared_engine_state(
+                tacc_epoch=u64(state["tacc_epoch"] + 1)
+            )
+            replacement["acc"] = list(state["acc"])
+            for name in self._SHARED_SHA_FIELDS:
+                replacement[name] = state[name]
+            self._commit_shared_engine_state(replacement)
+        else:
+            state["tacc_busy"] = False
+            self._commit_shared_engine_state(state)
+        self._active_tacc_caller = None
+        self._active_tacc_engine_epoch = None
+        self._active_tacc_caller_epoch = None
 
     # -- Enable / disable --
 
@@ -2072,6 +2426,17 @@ class MegapadSystem:
         """Whether exact cycle-bounded execution has a proved topology."""
         return self.num_clusters == 0
 
+    def _native_system_step_eligible(self) -> bool:
+        """Whether one public step can use the common native coordinator."""
+        if self.num_clusters == 0:
+            return False
+        for cpu in self.cores:
+            if "step" in vars(cpu):
+                return False
+            if getattr(type(cpu), "step", None) is not _CANONICAL_STEP:
+                return False
+        return True
+
     def _prepare_native_system_batch(self) -> None:
         """Apply wake checks for every native execution core."""
         for cpu in self.cores:
@@ -2099,6 +2464,11 @@ class MegapadSystem:
         annotate: bool,
     ) -> tuple[int, int, bool]:
         """Settle a coordinator-owned Python continuation exactly once."""
+        fault_cycles = int(getattr(error, "fault_cycles", 0))
+        if fault_cycles < 0:
+            raise RuntimeError(
+                "native dispatch reported negative trap cycles"
+            ) from error
         if annotate:
             error.steps_executed = prefix_steps + 1
             error.native_prefix_steps = prefix_steps
@@ -2108,7 +2478,8 @@ class MegapadSystem:
                 cpu._trap(error.ivec_id)
         return (
             int(getattr(error, "steps_executed", 1)),
-            int(getattr(error, "native_prefix_cycles", 0)),
+            int(getattr(error, "native_prefix_cycles", 0))
+            + fault_cycles,
             True,
         )
 
@@ -2119,7 +2490,7 @@ class MegapadSystem:
         trap_id: int,
         prefix_steps: int,
         prefix_cycles: int,
-    ) -> tuple[int, int, bool]:
+    ) -> tuple[int, int, bool] | tuple[int, int, bool, bool]:
         """Settle a raw native boundary and return whole-invocation progress."""
         cpu = self.cores[core_index]
         try:
@@ -2134,6 +2505,20 @@ class MegapadSystem:
                     f"invalid native continuation reason {stop_reason}"
                 )
         except TrapError as error:
+            cancelled = (
+                stop_reason in (3, 4)
+                and bool(
+                    getattr(
+                        cpu,
+                        "_last_python_fallback_cancelled",
+                        False,
+                    )
+                )
+            )
+            if stop_reason in (3, 4):
+                cpu._last_python_fallback_cancelled = False
+            if cancelled:
+                return prefix_steps, prefix_cycles, True, True
             return self._settle_native_batch_trap_error(
                 cpu,
                 error,
@@ -2141,9 +2526,92 @@ class MegapadSystem:
                 prefix_cycles=prefix_cycles,
                 annotate=stop_reason in (3, 4, 5),
             )
+        cancelled = (
+            stop_reason in (3, 4)
+            and bool(
+                getattr(
+                    cpu,
+                    "_last_python_fallback_cancelled",
+                    False,
+                )
+            )
+        )
+        if stop_reason in (3, 4):
+            cpu._last_python_fallback_cancelled = False
+        if cancelled:
+            # A reset won while a detached TACC instruction was executing.
+            # Close this coordinator dispatch without counting or charging
+            # the cancelled instruction.
+            return prefix_steps, prefix_cycles, True, True
         return (
             prefix_steps + 1,
             prefix_cycles + continuation_cycles,
+            False,
+        )
+
+    def _settle_native_cycle_continuation(
+        self,
+        core_index: int,
+        stop_reason: int,
+        trap_id: int,
+        prefix_steps: int,
+        prefix_cycles: int,
+    ) -> tuple[int, int, bool] | tuple[int, int, bool, bool]:
+        """Settle a bounded fallback without losing TACC fault latency."""
+        if stop_reason not in (3, 4):
+            return self._settle_native_core_continuation(
+                core_index,
+                stop_reason,
+                trap_id,
+                prefix_steps,
+                prefix_cycles,
+            )
+
+        cpu = self.cores[core_index]
+        try:
+            continuation_cycles = cpu._step_python_fallback(
+                strict_tacc_epoch=True,
+            )
+        except TrapError as error:
+            cancelled = bool(
+                getattr(
+                    cpu,
+                    "_last_python_fallback_cancelled",
+                    False,
+                )
+            )
+            cpu._last_python_fallback_cancelled = False
+            if cancelled:
+                return 0, 0, False, True
+            fault_cycles = int(getattr(error, "fault_cycles", 1))
+            if fault_cycles < 0:
+                raise RuntimeError(
+                    "bounded TACC fallback reported negative fault cycles"
+                ) from error
+            if cpu.ivt_base != 0:
+                with _cpu_memory_use(cpu):
+                    cpu._trap(error.ivec_id)
+            # A fault reaches its terminal trap boundary but does not retire
+            # the TACC instruction or increment PERF_TILE_OPS.
+            return 0, prefix_cycles + fault_cycles, True, False
+        cancelled = bool(
+            getattr(
+                cpu,
+                "_last_python_fallback_cancelled",
+                False,
+            )
+        )
+        cpu._last_python_fallback_cancelled = False
+        if cancelled:
+            # Reset/disable advanced the engine or microcaller token while
+            # the Python oracle held a detached checkpoint. The native cycle
+            # scheduler must drop that instruction without retiring it or
+            # charging its nominal latency.
+            return 0, 0, False, True
+        return (
+            prefix_steps + 1,
+            prefix_cycles + continuation_cycles,
+            False,
             False,
         )
 
@@ -2162,6 +2630,8 @@ class MegapadSystem:
                 prefix_cycles=0,
                 annotate=False,
             )
+        if getattr(error, "_mp64_accel_callback_error", False):
+            return None
         if isinstance(error, RuntimeError):
             message = str(error)
             if message == "HALT":
@@ -2268,7 +2738,7 @@ class MegapadSystem:
                 callback_sets,
                 dma_callback_sets,
                 self._prepare_native_cycle_batch,
-                self._settle_native_core_continuation,
+                self._settle_native_cycle_continuation,
                 self._settle_native_system_round,
                 max_instructions,
             )
@@ -2357,9 +2827,10 @@ class MegapadSystem:
         ]
 
     def step(self) -> int:
-        """Execute one instruction on each active core (round-robin).
+        """Execute one coordinated instruction round across active cores.
 
-        Returns total cycles consumed across all cores.
+        Returns the elapsed system cycles, with a minimum compatibility value
+        of one when no core can retire.
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
@@ -2374,6 +2845,19 @@ class MegapadSystem:
     def _step_locked(self) -> int:
         """Execute one deterministic round under the scheduler lock."""
         self._require_cycle_unbounded_execution()
+        if self._native_system_step_eligible():
+            self._prepare_native_system_batch()
+            active_cores = sum(
+                1
+                for cpu in self.cores
+                if not cpu.halted and not cpu.idle
+            )
+            if active_cores == 0:
+                self.bus.tick(1)
+                return 1
+            result = self._run_native_system_batch(active_cores)
+            return max(result.system_cycles_advanced, 1)
+
         total_cycles = 0
         elapsed_cycles = 0
         pending_error = None
