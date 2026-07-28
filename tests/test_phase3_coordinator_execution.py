@@ -672,7 +672,7 @@ def test_exact_cycle_ceiling_does_not_mask_callback_failure() -> None:
         system._native_system.run_full_core_batch(
             4,
             callback_sets,
-            system._prepare_native_full_core_batch,
+            system._prepare_native_system_batch,
             inflate_first_continuation,
             system._settle_native_core_dispatch_error,
             lambda *args: settled_rounds.append(args),

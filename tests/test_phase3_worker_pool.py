@@ -132,7 +132,7 @@ def test_worker_count_rejects_nonfixed_integer_values(
         )
 
 
-@pytest.mark.parametrize("worker_count", [True, 1.0, "2", None])
+@pytest.mark.parametrize("worker_count", [True, 1.0, "2"])
 def test_native_and_facade_reject_noninteger_worker_counts(
     worker_count,
 ) -> None:
@@ -146,6 +146,20 @@ def test_native_and_facade_reject_noninteger_worker_counts(
             vram_size=0,
             worker_count=worker_count,
         )
+
+
+def test_native_rejects_none_while_facade_uses_it_for_auto() -> None:
+    with pytest.raises(TypeError):
+        NativeSystemState(1, worker_count=None)
+
+    system = MegapadSystem(
+        ram_size=4096,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=None,
+    )
+    assert system.worker_count == 1
 
 
 @pytest.mark.parametrize(

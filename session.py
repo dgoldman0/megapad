@@ -276,6 +276,7 @@ class MachineSession:
         vram_size: int = 4 << 20,
         num_cores: int = 1,
         num_clusters: int = 0,
+        lanes: int | None = None,
         cols: int = 80,
         rows: int = 30,
         batch_steps: int = 100_000,
@@ -290,6 +291,7 @@ class MachineSession:
             vram_size=vram_size,
             num_cores=num_cores,
             num_clusters=num_clusters,
+            worker_count=lanes,
             nic_backend=nic_backend,
             realtime_clock=realtime_clock,
         )

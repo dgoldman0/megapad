@@ -9,7 +9,12 @@ that need to interact with the guest without opening pygame.
 ```python
 from session import MachineSession
 
-with MachineSession.from_bios("bios.asm", cols=80, rows=30) as session:
+with MachineSession.from_bios(
+    "bios.asm",
+    cols=80,
+    rows=30,
+    lanes=None,
+) as session:
     session.boot()
     boot = session.wait_for_idle(max_steps=2_000_000)
     if boot.reason != "idle":
@@ -33,6 +38,11 @@ time, output byte count, and whether a text wait matched.
 backend to the owned system. Closing the session stops that backend and releases
 its listener, TAP descriptor, or tunnel resources.
 
+`lanes=None` selects one, two, or four fixed host execution lanes from the
+configured guest topology and the process CPU affinity. Pass `lanes=1` for
+the helper-free diagnostic reference, or `lanes=2`/`lanes=4` for an explicit
+width. The selection is immutable for the machine lifetime.
+
 Direct sessions use deterministic cycle-derived RTC time by default. Pass
 `realtime_clock=True` for interactive or external-network work whose deadlines
 must continue to track host time while the emulator is idle or variably loaded.
@@ -50,6 +60,9 @@ Start the machine owner from the workspace root:
 ```bash
 python3 megapad/session_server.py
 ```
+
+The shared server accepts the same policy as
+`--lanes {auto,1,2,4}` and prints the resolved width at startup.
 
 To attach the shared machine to an already configured Linux TAP interface:
 
@@ -210,6 +223,7 @@ Example:
     "bios": "bios.asm",
     "cols": 80,
     "rows": 30,
+    "lanes": "auto",
     "batch_steps": 100000
   },
   "actions": [

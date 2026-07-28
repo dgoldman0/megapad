@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
+import os
 import threading
 import weakref
 from typing import Optional, TYPE_CHECKING
@@ -31,7 +32,6 @@ from _mp64_accel import (
     ExternalEventReleasePhase,
 )
 from accel_wrapper import (
-    HaltError,
     IVEC_BUS_FAULT,
     IVEC_IPI,
     IVEC_PRIV_FAULT,
@@ -64,14 +64,6 @@ from devices import (
     WotsChainAccel,
 )
 
-# Capture the full-core batch extension seams before user/test monkeypatches.
-# The Phase-1 native loop bypasses these two methods, so any replacement must
-# retain the compatibility scheduler that dynamically dispatches through them.
-_CANONICAL_RUN_STEPS_STATS = Megapad64.run_steps_stats
-_CANONICAL_RUN_STEPS_STATS_IN_SCOPE = (
-    Megapad64._run_steps_stats_in_memory_scope
-)
-
 # ---------------------------------------------------------------------------
 #  Memory map constants
 # ---------------------------------------------------------------------------
@@ -98,6 +90,49 @@ EXT_MEM_BASE = 0x0010_0000          # right after 1 MiB Bank 0
 # Default 4 MiB: enough for double-buffered 1280×720 RGBA8888.
 VRAM_BASE         = 0xFF00_0000
 VRAM_DEFAULT_SIZE = 4 * (1 << 20)    # 4 MiB
+
+
+def _worker_width_for_capacity(capacity: int) -> int:
+    """Map a positive core capacity onto a supported fixed lane width."""
+    if capacity >= 3:
+        return 4
+    if capacity >= 2:
+        return 2
+    return 1
+
+
+def _available_host_cpu_count() -> int:
+    """Return the affinity-aware host CPU capacity for rollout selection."""
+    try:
+        affinity = os.sched_getaffinity(0)
+    except (AttributeError, NotImplementedError, OSError):
+        count = os.cpu_count()
+    else:
+        count = len(affinity)
+    return max(1, int(count or 1))
+
+
+def _resolve_worker_count(
+    requested: Optional[int],
+    total_execution_cores: int,
+    *,
+    host_cpu_count: Optional[int] = None,
+) -> int:
+    """Resolve the immutable host-execution lane count for one system."""
+    if requested is not None:
+        if isinstance(requested, bool) or not isinstance(requested, int):
+            raise TypeError("worker_count must be an integer or None")
+        if requested not in (1, 2, 4):
+            raise ValueError("worker_count must be exactly 1, 2, or 4")
+        return requested
+
+    guest_width = _worker_width_for_capacity(total_execution_cores)
+    host_width = _worker_width_for_capacity(
+        _available_host_cpu_count()
+        if host_cpu_count is None
+        else host_cpu_count
+    )
+    return min(guest_width, host_width)
 
 # Boot vector: on reset, PC (R3) is loaded with this address.
 # BIOS is expected to be loaded here.
@@ -719,7 +754,7 @@ class MegapadSystem:
     """
 
     _COMPLETE_SNAPSHOT_UNSUPPORTED_REASON = (
-        "complete machine snapshots are unavailable for the native Phase 2 "
+        "complete machine snapshots are unavailable for the native system "
         "timeline; MP64SNAP v1 omits the shared clock, main bus, suspended "
         "execution, external-event journal, interrupts, and authoritative "
         "native device state"
@@ -739,12 +774,7 @@ class MegapadSystem:
                  rtc_epoch_ms: Optional[int] = None,
                  terminal_cols: int = 80,
                  terminal_rows: int = 24,
-                 worker_count: int = 1):
-        if isinstance(worker_count, bool) or not isinstance(worker_count, int):
-            raise TypeError("worker_count must be an integer")
-        if worker_count not in (1, 2, 4):
-            raise ValueError("worker_count must be exactly 1, 2, or 4")
-
+                 worker_count: Optional[int] = None):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
@@ -756,6 +786,10 @@ class MegapadSystem:
         # Total core count matches RTL NUM_ALL_CORES
         self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
         self.num_cores = num_cores + self.num_micro_cores
+        worker_count = _resolve_worker_count(
+            worker_count,
+            self.num_cores,
+        )
         self._scheduler_lock = threading.RLock()
 
         # Shared memory — all cores reference the same bytearray
@@ -774,11 +808,9 @@ class MegapadSystem:
         self.vram_base = VRAM_BASE if vram_size > 0 else 0
         self.vram_end = (VRAM_BASE + vram_size) if vram_size > 0 else 0
 
-        # Native Phase-1 owner for all full-core CPUState lifetimes and their
-        # single shared mapping set.  Attach each exporter exactly once before
-        # borrowing the first core, which seals the mapping against divergent
-        # per-core replacement. Heterogeneous micro-cores and Python-bus
-        # devices retain their explicit compatibility paths.
+        # Native owner for every execution core and the single shared mapping
+        # set. Attach each exporter exactly once before borrowing the first
+        # core, which seals mappings against divergent per-core replacement.
         self._native_system = NativeSystemState(
             num_cores,
             self.num_cores,
@@ -913,9 +945,9 @@ class MegapadSystem:
         self.bus.register(self.storage)
         self.bus.register(self.audio)
         self.bus.register(self.sysinfo)
-        # Retain the Python NIC for micro-core MMIO and backend/status facade
-        # compatibility. Full-core native execution and Python continuations
-        # probe their SystemState singleton before reaching this bus entry.
+        # Retain the Python NIC for backend lifecycle and status. Native
+        # execution and Python continuations probe the SystemState singleton
+        # before reaching this bus entry.
         self.bus.register(self.nic)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
@@ -1623,10 +1655,8 @@ class MegapadSystem:
             if MMIO_START <= addr < MMIO_END:
                 offset = addr - MMIO_START
                 try:
-                    # Native full-core instructions and their Python
-                    # continuations must observe the same SystemState-owned
-                    # SoC singleton. Micro-cores retain the Python bus path
-                    # until heterogeneous scheduling moves in Phase 2.
+                    # Every native core and its Python continuations must
+                    # observe the same SystemState-owned SoC singleton.
                     if native_state is not None:
                         native_value = (
                             native_state._native_singleton_read8(offset)
@@ -2038,56 +2068,12 @@ class MegapadSystem:
             if cpu.irq_ipi and cpu.flag_i and not cpu.halted and not cpu.idle:
                 cpu._trap(IVEC_IPI)
 
-    def _native_full_core_batch_eligible(self) -> bool:
-        """Whether strict-cycle execution can use only canonical full cores."""
-        if self.num_clusters != 0:
-            return False
-        for cpu in self.cores[:self.num_full_cores]:
-            cpu_vars = vars(cpu)
-            if (
-                "run_steps_stats" in cpu_vars
-                or "_run_steps_stats_in_memory_scope" in cpu_vars
-            ):
-                return False
-            cpu_type = type(cpu)
-            if (
-                getattr(cpu_type, "run_steps_stats", None)
-                is not _CANONICAL_RUN_STEPS_STATS
-                or getattr(
-                    cpu_type,
-                    "_run_steps_stats_in_memory_scope",
-                    None,
-                )
-                is not _CANONICAL_RUN_STEPS_STATS_IN_SCOPE
-            ):
-                return False
-        return True
+    def _strict_cycle_topology_supported(self) -> bool:
+        """Whether exact cycle-bounded execution has a proved topology."""
+        return self.num_clusters == 0
 
-    def _native_system_batch_eligible(self) -> bool:
-        """Whether every advertised core can use the native system scheduler."""
-        for cpu in self.cores:
-            cpu_vars = vars(cpu)
-            if (
-                "run_steps_stats" in cpu_vars
-                or "_run_steps_stats_in_memory_scope" in cpu_vars
-            ):
-                return False
-            cpu_type = type(cpu)
-            if (
-                getattr(cpu_type, "run_steps_stats", None)
-                is not _CANONICAL_RUN_STEPS_STATS
-                or getattr(
-                    cpu_type,
-                    "_run_steps_stats_in_memory_scope",
-                    None,
-                )
-                is not _CANONICAL_RUN_STEPS_STATS_IN_SCOPE
-            ):
-                return False
-        return True
-
-    def _prepare_native_full_core_batch(self) -> None:
-        """Apply compatibility wake checks for every native execution core."""
+    def _prepare_native_system_batch(self) -> None:
+        """Apply wake checks for every native execution core."""
         for cpu in self.cores:
             if cpu.idle and cpu.irq_ipi and cpu.flag_i:
                 cpu.idle = False
@@ -2112,7 +2098,7 @@ class MegapadSystem:
         prefix_cycles: int,
         annotate: bool,
     ) -> tuple[int, int, bool]:
-        """Reproduce _run_core_batch's tested TrapError accounting."""
+        """Settle a coordinator-owned Python continuation exactly once."""
         if annotate:
             error.steps_executed = prefix_steps + 1
             error.native_prefix_steps = prefix_steps
@@ -2166,7 +2152,7 @@ class MegapadSystem:
         core_index: int,
         error: BaseException,
     ):
-        """Handle callback exceptions interpreted by the legacy wrapper."""
+        """Settle callback exceptions reported by the native coordinator."""
         cpu = self.cores[core_index]
         if isinstance(error, TrapError):
             return self._settle_native_batch_trap_error(
@@ -2201,7 +2187,7 @@ class MegapadSystem:
         drain_uart: bool,
         deliver_interrupts: bool,
     ) -> None:
-        """Settle one completed native scheduler round in legacy order."""
+        """Settle one completed native round in architectural device order."""
         if advance_clock:
             self.bus.tick(cycles)
         if drain_uart:
@@ -2209,13 +2195,8 @@ class MegapadSystem:
         if deliver_interrupts:
             self._deliver_pending_interrupts()
 
-    def _run_native_full_core_batch(self, n: int) -> SystemRunStats:
-        """Adapt the all-core SystemState scheduler to the public result type.
-
-        The method name remains as a compatibility seam for tests and callers
-        introduced during Phase 1; callback and result topology now includes
-        full and reduced cores in global core-ID order.
-        """
+    def _run_native_system_batch(self, n: int) -> SystemRunStats:
+        """Adapt the all-core native scheduler to the public result type."""
         callback_sets = [
             (
                 cpu._mmio_read8,
@@ -2228,7 +2209,7 @@ class MegapadSystem:
         result = self._native_system.run_full_core_batch(
             n,
             callback_sets,
-            self._prepare_native_full_core_batch,
+            self._prepare_native_system_batch,
             self._settle_native_core_continuation,
             self._settle_native_core_dispatch_error,
             self._settle_native_system_round,
@@ -2375,35 +2356,6 @@ class MegapadSystem:
             ),
         ]
 
-    def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
-        """Run one core under one logical operation and recover exact progress."""
-        total_steps = 0
-        total_cycles = 0
-        while total_steps < max_steps:
-            with _cpu_logical_memory_use(cpu):
-                try:
-                    stats = cpu.run_steps_stats(max_steps - total_steps)
-                except TrapError as error:
-                    if cpu.ivt_base != 0:
-                        with _cpu_memory_use(cpu):
-                            cpu._trap(error.ivec_id)
-                    total_steps += getattr(error, "steps_executed", 1)
-                    total_cycles += getattr(
-                        error,
-                        "native_prefix_cycles",
-                        0,
-                    )
-                    break
-                total_steps += stats.steps_executed
-                total_cycles += stats.total_cycles
-                if (
-                    stats.stop_reason != 0
-                    or stats.steps_executed == 0
-                ):
-                    break
-
-        return total_steps, total_cycles
-
     def step(self) -> int:
         """Execute one instruction on each active core (round-robin).
 
@@ -2473,36 +2425,8 @@ class MegapadSystem:
 
         return max(total_cycles, 1)
 
-    def run(self, max_steps: int = 1_000_000) -> int:
-        """Run until all cores HALT, or max_steps."""
-        self._reject_native_batch_reentry()
-        self._require_cycle_unbounded_execution()
-        total = 0
-        for _ in range(max_steps):
-            with self._scheduler_lock:
-                self._release_external_events_before_batch_locked()
-            if self.all_halted:
-                break
-            if self.all_idle_or_halted and not self.uart.has_rx_data:
-                # All cores idle/halted with no pending input — tick bus
-                self.bus.tick(1)
-                total += 1
-                # Check if timer IRQ should wake someone
-                if self.timer.irq_pending:
-                    for cpu in self.cores:
-                        if cpu.idle and cpu.flag_i:
-                            cpu.idle = False
-                            break
-                # Check if IPI should wake someone
-                for cpu in self.cores:
-                    if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                        cpu.idle = False
-                continue
-            total += self.step()
-        return total
-
     def run_batch(self, n: int = 100_000) -> int:
-        """Compatibility adapter returning aggregate executed instructions."""
+        """Return the aggregate instructions from one native system batch."""
         return self.run_batch_stats(n).instructions_executed
 
     def run_batch_stats(self, n: int = 100_000) -> SystemRunStats:
@@ -2566,10 +2490,10 @@ class MegapadSystem:
                     "cycle-bounded execution cannot adopt an external "
                     "active main-bus grant"
                 )
-            if not self._native_full_core_batch_eligible():
+            if not self._strict_cycle_topology_supported():
                 raise RuntimeError(
-                    "cycle-bounded execution currently requires canonical "
-                    "native full cores without micro-core clusters"
+                    "cycle-bounded execution currently requires a "
+                    "full-core-only topology"
                 )
             if max_system_cycles == 0 or max_instructions == 0:
                 return self._run_native_full_core_cycle_batch(
@@ -2606,135 +2530,7 @@ class MegapadSystem:
 
         self._reject_native_batch_reentry()
         self._require_cycle_unbounded_execution()
-        if self._native_system_batch_eligible():
-            return self._run_native_full_core_batch(n)
-
-        # Compatibility path for heterogeneous topologies and deliberate
-        # per-instance run_steps_stats overrides.
-        clock_start = int(self._native_system.system_cycles)
-
-        # --- wake checks (same as step()) ---
-        for cpu in self.cores:
-            if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                cpu.idle = False
-            if cpu.idle and cpu.core_id == 0:
-                if self.uart.has_rx_data:
-                    cpu.idle = False
-                elif self.timer.irq_pending and cpu.flag_i:
-                    cpu.idle = False
-                elif self._any_nic_rx():
-                    cpu.idle = False
-
-        if self.all_halted or self.all_idle_or_halted:
-            zeros = (0,) * self.num_cores
-            return SystemRunStats(0, 0, zeros, zeros)
-
-        per_core_instructions = [0] * self.num_cores
-        per_core_cycles = [0] * self.num_cores
-        active_indices = [
-            index
-            for index, cpu in enumerate(self.cores)
-            if not cpu.halted and not cpu.idle
-        ]
-
-        # ---------- Native fast path (one active core) ----------
-        if len(active_indices) == 1:
-            core_index = active_indices[0]
-            cpu = self.cores[core_index]
-            steps, cycles = self._run_core_batch(cpu, n)
-            per_core_instructions[core_index] = steps
-            per_core_cycles[core_index] = cycles
-            if steps > 0:
-                self._scheduler_cursor = (
-                    core_index + 1
-                ) % self.num_cores
-            self.bus.tick(cycles)
-            self._drain_native_uart_output()
-            self._deliver_pending_interrupts()
-            return SystemRunStats(
-                steps,
-                int(self._native_system.system_cycles) - clock_start,
-                tuple(per_core_instructions),
-                tuple(per_core_cycles),
-            )
-
-        # ---------- Deterministic full-core rounds ----------
-        if self.num_cores > 1:
-            max_dispatch_steps = 1000
-            total = 0
-            remaining = n
-            while remaining > 0 and not self.all_halted:
-                if self.all_idle_or_halted:
-                    break
-                round_steps = 0
-                round_cycles = 0
-                round_error = None
-                round_start = self._scheduler_cursor
-                ordered_indices = (
-                    (round_start + offset) % self.num_cores
-                    for offset in range(self.num_cores)
-                )
-                for core_index in ordered_indices:
-                    cpu = self.cores[core_index]
-                    if cpu.halted or cpu.idle:
-                        continue
-                    dispatch_steps = min(
-                        max_dispatch_steps,
-                        remaining - round_steps,
-                    )
-                    if dispatch_steps <= 0:
-                        break
-                    try:
-                        steps, cycles = self._run_core_batch(
-                            cpu,
-                            dispatch_steps,
-                        )
-                    except Exception as error:
-                        round_error = error
-                        break
-                    per_core_instructions[core_index] += steps
-                    per_core_cycles[core_index] += cycles
-                    round_steps += steps
-                    round_cycles = max(round_cycles, cycles)
-                    if steps > 0:
-                        self._scheduler_cursor = (
-                            core_index + 1
-                        ) % self.num_cores
-
-                total += round_steps
-                remaining -= round_steps
-                self.bus.tick(round_cycles)
-                if round_error is not None:
-                    self._drain_native_uart_output()
-                    raise round_error
-
-                self._deliver_pending_interrupts()
-                if round_steps == 0:
-                    break
-            self._drain_native_uart_output()
-            return SystemRunStats(
-                total,
-                int(self._native_system.system_cycles) - clock_start,
-                tuple(per_core_instructions),
-                tuple(per_core_cycles),
-            )
-
-        # ---------- Single core fallback (shouldn't reach here) ----------
-        zeros = (0,) * self.num_cores
-        return SystemRunStats(0, 0, zeros, zeros)
-
-    def run_until_halt(self, max_steps: int = 10_000_000) -> int:
-        """Run until all cores HALT."""
-        self._reject_native_batch_reentry()
-        total = 0
-        for _ in range(max_steps):
-            if self.all_halted:
-                break
-            try:
-                total += self.step()
-            except HaltError:
-                break
-        return total
+        return self._run_native_system_batch(n)
 
     # -----------------------------------------------------------------
     #  State queries
