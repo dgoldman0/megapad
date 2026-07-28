@@ -883,6 +883,7 @@ module mp64_soc #(
         for (fti = 0; fti < NUM_CORES;
              fti = fti + 1) begin : g_full_tile
             localparam [TILE_OWNER_BITS-1:0] TILE_OWNER = fti;
+            localparam [TACC_CALLER_BITS-1:0] TACC_CALLER = fti;
             wire status_mine =
                 core_tacc_status_raw[fti][TACC_STATUS_BIT_CLAIMED] &&
                 core_tacc_status_raw[fti][
@@ -900,7 +901,10 @@ module mp64_soc #(
                 tile_write_ext ? tile_write_addr
                                : {tile_write_addr[63:6], 6'd0};
 
-            mp64_tile u_tile (
+            mp64_tile #(
+                    .TACC_CALLER_BASE (TACC_CALLER),
+                    .TACC_CALLER_COUNT(1)
+                ) u_tile (
                     .clk       (sys_clk),
                     .rst_n     (sys_rst_n),
                     .engine_reset(1'b0),
@@ -931,6 +935,7 @@ module mp64_soc #(
                     .mex_engine_epoch(core_tile_engine_epoch[fti]),
                     .mex_caller_epoch({TACC_EPOCH_BITS{1'b0}}),
                     .mex_caller_slot(2'd0),
+                    .mex_retire    (1'b1),
                     .mex_done      (core_mex_done[fti]),
                     .mex_busy      (core_mex_busy[fti]),
                     .mex_fault     (core_mex_fault[fti]),

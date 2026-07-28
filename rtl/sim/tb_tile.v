@@ -102,6 +102,7 @@ module tb_tile;
         .caller_cancel (caller_cancel),
         .caller_epochs (caller_epochs),
         .engine_epoch  (engine_epoch),
+        .mex_retire    (1'b1),
         .csr_wen       (csr_wen),
         .csr_addr      (csr_addr),
         .csr_wdata     (csr_wdata),
@@ -1233,11 +1234,11 @@ module tb_tile;
                      64'hDEAD_BEEF_CAFE_4000, 8'd0);  // low BF16 = 2.0
         check512(tile_mem[2], {32{16'h4000}}, "broadcast low BF16 element");
 
-        // ====== TEST 55: Landing 2.1 TACC leaf plumbing ======
-        // Arithmetic/lifecycle execution lands later.  For now the leaf must
-        // fail closed, preserve the full function byte, avoid legacy memory
+        // ====== TEST 55: TACC lifecycle plumbing ======
+        // Lifecycle execution is live while future arithmetic remains
+        // fail-closed. Preserve the full function byte, avoid legacy memory
         // effects, de-duplicate held control requests, and cancel stale work.
-        $display("\n=== TEST 55: TACC plumbing and cancellation ===");
+        $display("\n=== TEST 55: TACC lifecycle and cancellation ===");
         begin : tacc_plumbing
             integer ctl_done_count;
             integer stale_done_count;
@@ -1247,7 +1248,7 @@ module tb_tile;
 
             check64(tacc_status_raw,
                     {43'd0, TACC_OWNER_NONE, 16'd0},
-                    "TACC_STATUS raw owner-none placeholder");
+                    "TACC_STATUS raw FREE state");
 
             tacc_mem_req_count = 0;
             tacc_monitor = 1'b1;
@@ -1261,19 +1262,26 @@ module tb_tile;
                    "noncanonical TAMAC cannot alias a legacy function");
             mex_dispatch_raw(2'd0, MEX_TSYS, ETSYS_TACC_TRY,
                              8'h02, 4'd8, 1'b1);
-            check3(mex_fault, MEX_FAULT_ILLEGAL,
-                   "canonical lifecycle fails closed before implementation");
+            check3(mex_fault, MEX_FAULT_NONE,
+                   "canonical lifecycle retires normally");
+            // The direct test receiver accepts on this edge; sample persistent
+            // state after nonblocking terminal updates have committed.
+            @(negedge clk);
+            check64(tacc_status_raw,
+                    (64'd1 << TACC_STATUS_BIT_CLAIMED) |
+                    (64'd0 << TACC_STATUS_OWNER_LSB),
+                    "canonical TRY claims caller zero");
             mex_dispatch_raw(2'd0, MEX_TSYS, 3'd7,
                              8'h07, 4'd8, 1'b1);
             check3(mex_fault, MEX_FAULT_ILLEGAL,
                    "reserved lifecycle function fails closed");
             tacc_monitor = 1'b0;
             if (tacc_mem_req_count !== 0) begin
-                $display("  FAIL: TACC placeholder issued %0d memory requests",
+                $display("  FAIL: TACC lifecycle issued %0d memory requests",
                          tacc_mem_req_count);
                 fail_cnt = fail_cnt + 1;
             end else begin
-                $display("  PASS: TACC placeholder issued no memory requests");
+                $display("  PASS: TACC lifecycle issued no memory requests");
                 pass_cnt = pass_cnt + 1;
             end
 

@@ -60,6 +60,7 @@ module tb_tile_write_ack;
         .caller_cancel  (4'd0),
         .caller_epochs  (32'd0),
         .engine_epoch   (),
+        .mex_retire     (1'b1),
         .csr_wen        (csr_wen),
         .csr_addr       (csr_addr),
         .csr_wdata      (csr_wdata),

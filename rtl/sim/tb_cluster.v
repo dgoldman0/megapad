@@ -1713,6 +1713,111 @@ module tb_cluster;
         check64("cancelled MEX does not advance RR",
                 uut.legacy_last, 64'd0);
 
+        // Cancel a lifecycle instruction after the leaf has published its
+        // response but on the edge where this arbiter would retire it.  The
+        // leaf must keep the mutation staged until that edge, allowing the
+        // caller epoch to suppress both retirement and the TRY claim.
+        tb_mex_ss[0*2 +: 2] = 2'd0;
+        tb_mex_op[0*2 +: 2] = MEX_TSYS;
+        tb_mex_funct[0*3 +: 3] = ETSYS_TACC_TRY;
+        tb_mex_funct_byte[0*8 +: 8] = {5'd0, ETSYS_TACC_TRY};
+        tb_mex_ext_mod[0*4 +: 4] = 4'd8;
+        tb_mex_ext_active[0] = 1'b1;
+        tb_cancel_done_count = 0;
+        @(negedge clk);
+        tb_mex_req[0] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.u_tile.u_tacc.req_done &&
+                uut.mex_state == uut.MEX_ACTIVE) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [post-publication TACC cancel setup timeout]");
+            fail_count = fail_count + 1;
+        end
+        check64("published TACC response retains BUSY before commit",
+                {62'd0,
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_BUSY],
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_CLAIMED]},
+                64'd2);
+        micro_reset[0] = 1'b1;
+        @(posedge clk);
+        #1;
+        if (uut.mex_done_reg)
+            tb_cancel_done_count = tb_cancel_done_count + 1;
+        @(negedge clk);
+        tb_mex_req[0] = 1'b0;
+        micro_reset[0] = 1'b0;
+        repeat (3) begin
+            @(negedge clk);
+            if (uut.mex_done_reg)
+                tb_cancel_done_count = tb_cancel_done_count + 1;
+        end
+        check64("sampling-edge TACC cancel has no routed completion",
+                tb_cancel_done_count, 64'd0);
+        check64("sampling-edge TACC cancel suppresses TRY mutation",
+                uut.te_tacc_status_raw,
+                {43'd0, TACC_OWNER_NONE, 16'd0});
+        check64("cancelled TACC returns both arbitration domains idle",
+                {60'd0, uut.legacy_state, uut.mex_state},
+                {60'd0, uut.LEGACY_IDLE, uut.MEX_IDLE});
+        check64("cancelled TACC does not advance common RR",
+                uut.legacy_last, 64'd0);
+
+        // Repeat the claim, this time allowing the cluster to capture the leaf
+        // response.  Cancel while registered mex_done is being delivered to
+        // the microcore: this is the final retirement window, one edge later
+        // than the leaf-publication case above.
+        tb_cancel_done_count = 0;
+        @(negedge clk);
+        tb_mex_req[0] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.mex_state == uut.MEX_WAIT_DROP &&
+                uut.mex_done_reg &&
+                uut.legacy_state == uut.LEGACY_ACTIVE) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [registered-delivery TACC cancel setup timeout]");
+            fail_count = fail_count + 1;
+        end
+        check64("registered TACC delivery retains staged state",
+                {62'd0,
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_BUSY],
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_CLAIMED]},
+                64'd2);
+        micro_reset[0] = 1'b1;
+        @(posedge clk);
+        #1;
+        if (uut.mex_done_reg)
+            tb_cancel_done_count = tb_cancel_done_count + 1;
+        @(negedge clk);
+        tb_mex_req[0] = 1'b0;
+        micro_reset[0] = 1'b0;
+        repeat (3) begin
+            @(negedge clk);
+            if (uut.mex_done_reg)
+                tb_cancel_done_count = tb_cancel_done_count + 1;
+        end
+        check64("retirement-edge TACC cancel has no late completion",
+                tb_cancel_done_count, 64'd0);
+        check64("retirement-edge TACC cancel suppresses TRY mutation",
+                uut.te_tacc_status_raw,
+                {43'd0, TACC_OWNER_NONE, 16'd0});
+        check64("retirement-edge cancel releases TACC arbitration",
+                {60'd0, uut.legacy_state, uut.mex_state},
+                {60'd0, uut.LEGACY_IDLE, uut.MEX_IDLE});
+        check64("retirement-edge TACC cancel does not advance RR",
+                uut.legacy_last, 64'd0);
+
         // Cancel a live compression child, then run a fresh ROUND.  The child
         // must reset rather than publishing its stale digest as fresh work.
         drive_private_tile_csr(1, CSR_TSRC0, 64'h0200);

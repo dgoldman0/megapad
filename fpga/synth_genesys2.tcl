@@ -50,6 +50,7 @@ set rtl_files [list \
     ${RTL_DIR}/bus/mp64_bus.v                      \
     ${RTL_DIR}/mem/mp64_memory.v                   \
     ${RTL_DIR}/mem/mp64_extmem.v                   \
+    ${RTL_DIR}/gpu/mp64_tacc.v                     \
     ${RTL_DIR}/gpu/mp64_tile.v                     \
     ${RTL_DIR}/periph/mp64_uart.v                  \
     ${RTL_DIR}/periph/mp64_timer.v                 \

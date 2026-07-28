@@ -13,7 +13,11 @@
 
 `include "mp64_pkg.vh"
 
-module mp64_tile (
+module mp64_tile #(
+    parameter [TACC_CALLER_BITS-1:0] TACC_CALLER_BASE =
+        {TACC_CALLER_BITS{1'b0}},
+    parameter integer TACC_CALLER_COUNT = 1
+) (
     input  wire        clk,
     input  wire        rst_n,
 
@@ -45,20 +49,21 @@ module mp64_tile (
     input  wire [3:0]  caller_cancel,
     input  wire [31:0] caller_epochs,
     output reg  [7:0]  engine_epoch,
-    output reg         mex_done,       // operation complete
-    output reg         mex_busy,       // engine busy (stall CPU)
-    output reg  [2:0]  mex_fault,
+    input  wire        mex_retire,     // receiver accepts terminal response
+    output wire        mex_done,       // operation complete
+    output wire        mex_busy,       // engine busy (stall CPU)
+    output wire [2:0]  mex_fault,
     output reg  [63:0] mex_fault_addr,
     output reg         mex_stall_cycle,
 
-    // === TACC CSR sidebands (state arrives in Landing 2.3) ===
+    // === TACC CSR sidebands ===
     output wire [63:0] tacc_status_raw,
     input  wire        tacc_ctl_valid,
     input  wire [4:0]  tacc_ctl_caller_id,
     input  wire        tacc_ctl_priv,
     input  wire [63:0] tacc_ctl_wdata,
-    output reg         tacc_ctl_done,
-    output reg  [2:0]  tacc_ctl_fault,
+    output wire        tacc_ctl_done,
+    output wire [2:0]  tacc_ctl_fault,
 
     // === Legacy ACC and caller-private configuration preload ===
     output wire [255:0] legacy_acc_state,
@@ -97,10 +102,6 @@ module mp64_tile (
     input  wire        ext_tile_ack
 );
 
-    // Landing 2.1 exposes the physical-engine view but deliberately creates
-    // no TACC state.  OWNER_NONE occupies status bits [20:16].
-    assign tacc_status_raw = {43'd0, TACC_OWNER_NONE, 16'd0};
-
     // ========================================================================
     // CSR registers
     // ========================================================================
@@ -124,15 +125,6 @@ module mp64_tile (
 
     assign legacy_acc_state = {acc[3], acc[2], acc[1], acc[0]};
     assign acc_zero_consumed = tctrl_acc_zero_clear;
-
-    // The control transport is independent of MEX.  Landing 2.3 consumes the
-    // captured caller and data; for now a supervisor write is acknowledged
-    // without state mutation.  tacc_ctl_seen turns a held valid level into
-    // exactly one completion.
-    reg        tacc_ctl_seen;
-    reg [4:0]  tacc_ctl_caller_id_reg;
-    reg        tacc_ctl_priv_reg;
-    reg [63:0] tacc_ctl_wdata_reg;
 
     // CSR read mux
     always @(*) begin
@@ -232,46 +224,6 @@ module mp64_tile (
         end
     end
 
-    // Independent, level-valid-de-duplicated TACC control transport.
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            tacc_ctl_seen          <= 1'b0;
-            tacc_ctl_done          <= 1'b0;
-            tacc_ctl_fault         <= MEX_FAULT_NONE;
-            tacc_ctl_caller_id_reg <= 5'd0;
-            tacc_ctl_priv_reg      <= 1'b0;
-            tacc_ctl_wdata_reg     <= 64'd0;
-        end else if (engine_reset) begin
-            // Mark a held request seen so reset cannot create a late
-            // completion after the engine returns to service.
-            tacc_ctl_seen  <= tacc_ctl_valid;
-            tacc_ctl_done  <= 1'b0;
-            tacc_ctl_fault <= MEX_FAULT_NONE;
-        end else begin
-            tacc_ctl_done <= 1'b0;
-            if (!tacc_ctl_valid) begin
-                tacc_ctl_seen <= 1'b0;
-            end else if (!tacc_ctl_seen) begin
-                tacc_ctl_seen          <= 1'b1;
-                tacc_ctl_done          <= 1'b1;
-                tacc_ctl_caller_id_reg <= tacc_ctl_caller_id;
-                tacc_ctl_priv_reg      <= tacc_ctl_priv;
-                tacc_ctl_wdata_reg     <= tacc_ctl_wdata;
-
-                // Only FORCE_RELEASE (bit 0) is privileged; reserved bits are
-                // ignored in either mode. Unknown control values fail closed.
-                case ({tacc_ctl_priv, tacc_ctl_wdata[0]})
-                    2'b00, 2'b01, 2'b10:
-                        tacc_ctl_fault <= MEX_FAULT_NONE;
-                    2'b11:
-                        tacc_ctl_fault <= MEX_FAULT_PRIV;
-                    default:
-                        tacc_ctl_fault <= MEX_FAULT_PRIV;
-                endcase
-            end
-        end
-    end
-
     // ========================================================================
     // Address classification — internal = Bank 0 OR HBW banks
     // ========================================================================
@@ -325,8 +277,14 @@ module mp64_tile (
     localparam S_STORE2_WAIT = 5'd17;  // wait final internal WMUL store
     localparam S_EXT_STORE2_WAIT = 5'd18; // wait final external WMUL store
     localparam S_STORE2D_WRITE_WAIT = 5'd19; // wait row write acknowledgement
+    localparam S_TACC_WAIT   = 5'd20;  // held lifecycle request / terminal
 
     reg [4:0]   state;
+    reg         mex_done_reg;
+    reg         mex_busy_reg;
+    reg [2:0]   mex_fault_reg;
+    wire        mex_done_internal;
+    wire [2:0]  mex_fault_internal;
     reg [511:0] tile_a;
     reg [511:0] tile_b;
     reg [511:0] tile_c;          // existing TDST (MAC/FMA)
@@ -390,13 +348,17 @@ module mp64_tile (
             if (((|legacy_acc_wen) || csr_acc_write) &&
                 mex_acc_mutation_cycle)
                 $error("mp64_tile: concurrent external/CSR and MEX ACC mutation");
+            if ((mex_fault_internal != MEX_FAULT_NONE) &&
+                !mex_done_internal)
+                $error("mp64_tile: MEX fault without completion");
+            if ((tacc_ctl_fault != MEX_FAULT_NONE) && !tacc_ctl_done)
+                $error("mp64_tile: TACC control fault without acknowledgement");
         end
     end
 `endif
 
-    // TACC arithmetic/lifecycle execution is deliberately not present before
-    // Landing 2.3. Catch the complete assigned/reserved namespaces using
-    // both transports so no malformed variant can fall through to a legacy
+    // Catch the complete assigned/reserved TACC namespaces using both
+    // transports so no malformed variant can fall through to a legacy
     // low-three-bit operation and touch memory or legacy ACC.
     wire intercept_tacc_tmul =
         (mex_op == MEX_TMUL) &&
@@ -407,8 +369,102 @@ module mp64_tile (
         (mex_op == MEX_TSYS) && mex_ext_active &&
         (mex_ext_mod == 4'd8) &&
         ((mex_funct >= 3'd2) || (mex_funct_byte[2:0] >= 3'd2));
-    wire intercept_unimplemented_tacc =
+    wire intercept_tacc_namespace =
         intercept_tacc_tmul || intercept_tacc_lifecycle;
+
+    // A full core presents MEX as a one-cycle pulse.  The request mux therefore
+    // presents the live dispatch in S_IDLE and the captured copy in
+    // S_TACC_WAIT.  If an accepted FORCE defeats admission, the captured copy
+    // remains valid until the state leaf is ready and revalidates it.
+    wire tacc_req_from_input =
+        (state == S_IDLE) && mex_valid && intercept_tacc_namespace &&
+        !incoming_cancelled;
+    // Drop held valid as soon as the leaf publishes its terminal pulse.  This
+    // gives the leaf's level de-duplicator a clean boundary before a following
+    // MEX request.  Cancellation also drops held valid on its terminal edge,
+    // allowing the leaf to clear its de-dup latch before an immediately
+    // following caller is captured.
+    wire tacc_req_from_hold =
+        (state == S_TACC_WAIT) && !tacc_req_done && !active_cancelled;
+    wire tacc_req_valid = tacc_req_from_input || tacc_req_from_hold;
+    wire [1:0] tacc_req_ss =
+        tacc_req_from_input ? mex_ss : ss_reg;
+    wire [1:0] tacc_req_op =
+        tacc_req_from_input ? mex_op : op_reg;
+    wire [2:0] tacc_req_funct =
+        tacc_req_from_input ? mex_funct : funct_reg;
+    wire [7:0] tacc_req_funct_byte =
+        tacc_req_from_input ? mex_funct_byte : funct_byte_reg;
+    wire [3:0] tacc_req_ext_mod =
+        tacc_req_from_input ? mex_ext_mod : ext_mod_reg;
+    wire tacc_req_ext_active =
+        tacc_req_from_input ? mex_ext_active : ext_active_reg;
+    wire [4:0] tacc_req_caller_id =
+        tacc_req_from_input ? mex_caller_id : caller_id_reg;
+    wire [1:0] tacc_req_caller_slot =
+        tacc_req_from_input ? mex_caller_slot : caller_slot_reg;
+    wire tacc_req_is_tamac =
+        (tacc_req_op == MEX_TMUL) &&
+        ((tacc_req_funct == TMUL_TAMAC) ||
+         (tacc_req_funct_byte[2:0] == TMUL_TAMAC));
+    wire tacc_req_canonical =
+        tacc_req_is_tamac ?
+            ((tacc_req_op == MEX_TMUL) &&
+             (tacc_req_funct == TMUL_TAMAC) &&
+             (tacc_req_funct_byte == {5'd0, TMUL_TAMAC}) &&
+             (tacc_req_ss != 2'd2) && !tacc_req_ext_active) :
+            ((tacc_req_op == MEX_TSYS) && tacc_req_ext_active &&
+             (tacc_req_ext_mod == 4'd8) && (tacc_req_ss == 2'd0) &&
+             (tacc_req_funct_byte == {5'd0, tacc_req_funct}) &&
+             (tacc_req_funct >= ETSYS_TACC_TRY) &&
+             (tacc_req_funct <= ETSYS_TACC_RESERVED));
+    wire tacc_req_cancel =
+        tacc_req_from_input ? incoming_cancelled : active_cancelled;
+    wire tacc_req_ready;
+    wire tacc_req_done;
+    wire tacc_req_busy;
+    wire [2:0] tacc_req_fault;
+    wire [2047:0] tacc_bank_state;
+    mp64_tacc #(
+        .CALLER_BASE (TACC_CALLER_BASE),
+        .CALLER_COUNT(TACC_CALLER_COUNT)
+    ) u_tacc (
+        .clk                   (clk),
+        .rst_n                 (rst_n),
+        .engine_reset          (engine_reset),
+        .req_valid             (tacc_req_valid),
+        .req_ready             (tacc_req_ready),
+        .req_is_tamac          (tacc_req_is_tamac),
+        .req_funct             (tacc_req_funct),
+        .req_canonical         (tacc_req_canonical),
+        .req_caller_id         (tacc_req_caller_id),
+        .req_caller_slot       (tacc_req_caller_slot),
+        .req_format_ew         (mode_ew),
+        .req_format_signed     (mode_signed),
+        .req_cancel            (tacc_req_cancel),
+        .req_retire            (mex_retire),
+        .req_done              (tacc_req_done),
+        .req_busy              (tacc_req_busy),
+        .req_fault             (tacc_req_fault),
+        .force_valid           (tacc_ctl_valid),
+        .force_ready           (),
+        .force_priv            (tacc_ctl_priv),
+        .force_wdata           (tacc_ctl_wdata),
+        .force_caller_id       (tacc_ctl_caller_id),
+        .force_done            (tacc_ctl_done),
+        .force_fault           (tacc_ctl_fault),
+        .status_raw            (tacc_status_raw),
+        .bank_state            (tacc_bank_state)
+    );
+
+    assign mex_done_internal = mex_done_reg | tacc_req_done;
+    assign mex_fault_internal =
+        tacc_req_done ? tacc_req_fault :
+        (mex_done_reg ? mex_fault_reg : MEX_FAULT_NONE);
+
+    assign mex_done = mex_done_internal;
+    assign mex_busy = mex_busy_reg && !tacc_req_done;
+    assign mex_fault = mex_fault_internal;
 
     // Count only cycles in which the leaf is genuinely blocked on a target
     // acknowledgement.  Dispatch, compute, and fixed completion cycles are
@@ -425,6 +481,8 @@ module mp64_tile (
                 S_EXT_LOAD_A, S_EXT_LOAD_B, S_EXT_STORE,
                 S_EXT_STORE2_WAIT:
                     mex_stall_cycle = !ext_tile_ack;
+                S_TACC_WAIT:
+                    mex_stall_cycle = !tacc_req_busy && !tacc_req_done;
                 default:
                     mex_stall_cycle = 1'b0;
             endcase
@@ -2010,9 +2068,9 @@ module mp64_tile (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= S_IDLE;
-            mex_done      <= 1'b0;
-            mex_busy      <= 1'b0;
-            mex_fault     <= MEX_FAULT_NONE;
+            mex_done_reg  <= 1'b0;
+            mex_busy_reg  <= 1'b0;
+            mex_fault_reg <= MEX_FAULT_NONE;
             mex_fault_addr<= 64'd0;
             tile_req      <= 1'b0;
             tile_wen      <= 1'b0;
@@ -2052,9 +2110,9 @@ module mp64_tile (
             acc[3]        <= 64'd0;
         end else if (engine_reset) begin
             state         <= S_IDLE;
-            mex_done      <= 1'b0;
-            mex_busy      <= 1'b0;
-            mex_fault     <= MEX_FAULT_NONE;
+            mex_done_reg  <= 1'b0;
+            mex_busy_reg  <= 1'b0;
+            mex_fault_reg <= MEX_FAULT_NONE;
             mex_fault_addr<= 64'd0;
             tile_req      <= 1'b0;
             tile_wen      <= 1'b0;
@@ -2073,7 +2131,7 @@ module mp64_tile (
             engine_reset_seen <= 1'b1;
         end else begin
             engine_reset_seen <= 1'b0;
-            mex_done     <= 1'b0;
+            mex_done_reg <= 1'b0;
             tile_req     <= 1'b0;
             tile_wen     <= 1'b0;
             ext_tile_req <= 1'b0;
@@ -2106,9 +2164,9 @@ module mp64_tile (
                 // accepted by a memory target are not rolled back; their late
                 // acknowledgements are ignored in S_IDLE.
                 state         <= S_IDLE;
-                mex_done      <= 1'b0;
-                mex_busy      <= 1'b0;
-                mex_fault     <= MEX_FAULT_NONE;
+                mex_done_reg  <= 1'b0;
+                mex_busy_reg  <= 1'b0;
+                mex_fault_reg <= MEX_FAULT_NONE;
                 mex_fault_addr<= 64'd0;
                 tile_req      <= 1'b0;
                 tile_wen      <= 1'b0;
@@ -2118,15 +2176,19 @@ module mp64_tile (
             end else begin
             case (state)
             S_IDLE: begin
-                mex_busy <= 1'b0;
+                mex_busy_reg <= 1'b0;
+                if (!mex_valid) begin
+                    mex_fault_reg  <= MEX_FAULT_NONE;
+                    mex_fault_addr <= 64'd0;
+                end
                 if (mex_valid) begin
                     if (incoming_cancelled) begin
                         // A stale request belongs to an execution context
                         // that no longer waits for completion.  Drop it before
                         // any memory, ACC, or completion side effect.
                         state          <= S_IDLE;
-                        mex_busy       <= 1'b0;
-                        mex_fault      <= MEX_FAULT_NONE;
+                        mex_busy_reg   <= 1'b0;
+                        mex_fault_reg  <= MEX_FAULT_NONE;
                         mex_fault_addr <= 64'd0;
                     end else begin
                         op_reg        <= mex_op;
@@ -2148,18 +2210,17 @@ module mp64_tile (
                         caller_slot_reg  <= mex_caller_slot;
                         tctrl_accumulate_reg <= tctrl[0];
                         tctrl_acc_zero_reg   <= tctrl[1];
-                        mex_busy      <= 1'b1;
-                        mex_fault     <= MEX_FAULT_NONE;
+                        mex_busy_reg  <= 1'b1;
+                        mex_fault_reg <= MEX_FAULT_NONE;
                         mex_fault_addr<= 64'd0;
                         needs_load_c  <= 1'b0;
 
-                        // TACC encodings are reserved now, but execution does
-                        // not arrive until later landings.  Complete them as
-                        // precise illegal instructions without entering any
-                        // legacy memory or accumulator state.
-                        if (intercept_unimplemented_tacc) begin
-                            mex_fault <= MEX_FAULT_ILLEGAL;
-                            state     <= S_DONE;
+                        // The dedicated state leaf admits lifecycle operations
+                        // and fails future image/arithmetic requests closed.
+                        // Keep the captured copy live because a simultaneous
+                        // privileged FORCE may deliberately defer admission.
+                        if (intercept_tacc_namespace) begin
+                            state <= S_TACC_WAIT;
                         end
                     // TSYS.ZERO — write zeros
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
@@ -2720,10 +2781,20 @@ module mp64_tile (
                 end
             end
 
+            S_TACC_WAIT: begin
+                if (tacc_req_done && mex_retire) begin
+                    mex_busy_reg <= 1'b0;
+                    state        <= S_IDLE;
+                end else begin
+                    mex_busy_reg <= 1'b1;
+                    state        <= S_TACC_WAIT;
+                end
+            end
+
             S_DONE: begin
-                mex_done <= 1'b1;
-                mex_busy <= 1'b0;
-                state    <= S_IDLE;
+                mex_done_reg <= 1'b1;
+                mex_busy_reg <= 1'b0;
+                state        <= S_IDLE;
             end
             default: state <= S_IDLE;
             endcase

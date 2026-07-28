@@ -317,6 +317,223 @@ module tb_full_core_tile;
               && u_soc.core_csr_rdata[2] == 64'hF200_0000_0000_0002
               && u_soc.core_csr_rdata[3] == 64'hF300_0000_0000_0003);
 
+        // All four private full-core TACC domains claim simultaneously.
+        // Exact OWNER fields prove that each generated tile received its
+        // fixed caller-domain parameter rather than sharing one bank.
+        force u_soc.core_mex_funct[0] = ETSYS_TACC_TRY;
+        force u_soc.core_mex_funct[1] = ETSYS_TACC_TRY;
+        force u_soc.core_mex_funct[2] = ETSYS_TACC_TRY;
+        force u_soc.core_mex_funct[3] = ETSYS_TACC_TRY;
+        force u_soc.core_mex_funct_byte[0] =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.core_mex_funct_byte[1] =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.core_mex_funct_byte[2] =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.core_mex_funct_byte[3] =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.core_mex_ext_mod[0] = 4'd8;
+        force u_soc.core_mex_ext_mod[1] = 4'd8;
+        force u_soc.core_mex_ext_mod[2] = 4'd8;
+        force u_soc.core_mex_ext_mod[3] = 4'd8;
+        force u_soc.core_mex_ext_active[0] = 1'b1;
+        force u_soc.core_mex_ext_active[1] = 1'b1;
+        force u_soc.core_mex_ext_active[2] = 1'b1;
+        force u_soc.core_mex_ext_active[3] = 1'b1;
+        force u_soc.core_mex_valid[0] = 1'b1;
+        force u_soc.core_mex_valid[1] = 1'b1;
+        force u_soc.core_mex_valid[2] = 1'b1;
+        force u_soc.core_mex_valid[3] = 1'b1;
+        clock;
+        force u_soc.core_mex_valid[0] = 1'b0;
+        force u_soc.core_mex_valid[1] = 1'b0;
+        force u_soc.core_mex_valid[2] = 1'b0;
+        force u_soc.core_mex_valid[3] = 1'b0;
+        check("all four private TACC claims publish BUSY together",
+              u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_BUSY]
+              && u_soc.core_tacc_status_raw[1][TACC_STATUS_BIT_BUSY]
+              && u_soc.core_tacc_status_raw[2][TACC_STATUS_BIT_BUSY]
+              && u_soc.core_tacc_status_raw[3][TACC_STATUS_BIT_BUSY]);
+        clock;
+        clock;
+        check("all four private TACC domains claim their fixed callers",
+              u_soc.core_tacc_status_raw[0][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd0
+              && u_soc.core_tacc_status_raw[1][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd1
+              && u_soc.core_tacc_status_raw[2][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd2
+              && u_soc.core_tacc_status_raw[3][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd3
+              && u_soc.core_tacc_status_raw[0][
+                  TACC_STATUS_BIT_CLAIMED]
+              && u_soc.core_tacc_status_raw[1][
+                  TACC_STATUS_BIT_CLAIMED]
+              && u_soc.core_tacc_status_raw[2][
+                  TACC_STATUS_BIT_CLAIMED]
+              && u_soc.core_tacc_status_raw[3][
+                  TACC_STATUS_BIT_CLAIMED]);
+        check("full-core TACC status inserts caller-relative MINE",
+              u_soc.core_tacc_status[0][TACC_STATUS_BIT_MINE]
+              && u_soc.core_tacc_status[1][TACC_STATUS_BIT_MINE]
+              && u_soc.core_tacc_status[2][TACC_STATUS_BIT_MINE]
+              && u_soc.core_tacc_status[3][TACC_STATUS_BIT_MINE]);
+
+        // The three shared microcluster engines are distinct TACC domains.
+        // Drive their post-arbiter leaf boundaries together, then make a
+        // sibling lose TRY without trapping or stealing cluster 0's bank.
+        force u_soc.g_cluster[0].u_cluster.te_mex_ss = 2'd0;
+        force u_soc.g_cluster[1].u_cluster.te_mex_ss = 2'd0;
+        force u_soc.g_cluster[2].u_cluster.te_mex_ss = 2'd0;
+        force u_soc.g_cluster[0].u_cluster.te_mex_op = MEX_TSYS;
+        force u_soc.g_cluster[1].u_cluster.te_mex_op = MEX_TSYS;
+        force u_soc.g_cluster[2].u_cluster.te_mex_op = MEX_TSYS;
+        force u_soc.g_cluster[0].u_cluster.te_mex_funct =
+            ETSYS_TACC_TRY;
+        force u_soc.g_cluster[1].u_cluster.te_mex_funct =
+            ETSYS_TACC_TRY;
+        force u_soc.g_cluster[2].u_cluster.te_mex_funct =
+            ETSYS_TACC_TRY;
+        force u_soc.g_cluster[0].u_cluster.te_mex_funct_byte =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.g_cluster[1].u_cluster.te_mex_funct_byte =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.g_cluster[2].u_cluster.te_mex_funct_byte =
+            {5'd0, ETSYS_TACC_TRY};
+        force u_soc.g_cluster[0].u_cluster.te_mex_ext_mod = 4'd8;
+        force u_soc.g_cluster[1].u_cluster.te_mex_ext_mod = 4'd8;
+        force u_soc.g_cluster[2].u_cluster.te_mex_ext_mod = 4'd8;
+        force u_soc.g_cluster[0].u_cluster.te_mex_ext_active = 1'b1;
+        force u_soc.g_cluster[1].u_cluster.te_mex_ext_active = 1'b1;
+        force u_soc.g_cluster[2].u_cluster.te_mex_ext_active = 1'b1;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_id = 5'd4;
+        force u_soc.g_cluster[1].u_cluster.te_mex_caller_id = 5'd8;
+        force u_soc.g_cluster[2].u_cluster.te_mex_caller_id = 5'd12;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_slot = 2'd0;
+        force u_soc.g_cluster[1].u_cluster.te_mex_caller_slot = 2'd0;
+        force u_soc.g_cluster[2].u_cluster.te_mex_caller_slot = 2'd0;
+        force u_soc.g_cluster[0].u_cluster.te_mex_engine_epoch = 8'd0;
+        force u_soc.g_cluster[1].u_cluster.te_mex_engine_epoch = 8'd0;
+        force u_soc.g_cluster[2].u_cluster.te_mex_engine_epoch = 8'd0;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_epoch = 8'd0;
+        force u_soc.g_cluster[1].u_cluster.te_mex_caller_epoch = 8'd0;
+        force u_soc.g_cluster[2].u_cluster.te_mex_caller_epoch = 8'd0;
+        // This topology bench drives the post-arbiter leaf boundary directly;
+        // the cluster handshake itself is covered in tb_cluster.
+        force u_soc.g_cluster[0].u_cluster.te_mex_retire = 1'b1;
+        force u_soc.g_cluster[1].u_cluster.te_mex_retire = 1'b1;
+        force u_soc.g_cluster[2].u_cluster.te_mex_retire = 1'b1;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b1;
+        force u_soc.g_cluster[1].u_cluster.te_mex_valid = 1'b1;
+        force u_soc.g_cluster[2].u_cluster.te_mex_valid = 1'b1;
+        clock;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b0;
+        force u_soc.g_cluster[1].u_cluster.te_mex_valid = 1'b0;
+        force u_soc.g_cluster[2].u_cluster.te_mex_valid = 1'b0;
+        check("all three cluster TACC domains publish BUSY together",
+              u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_BUSY]
+              && u_soc.g_cluster[1].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_BUSY]
+              && u_soc.g_cluster[2].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_BUSY]);
+        clock;
+        clock;
+        check("all seven physical TACC domains retain distinct owners",
+              u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd4
+              && u_soc.g_cluster[1].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd8
+              && u_soc.g_cluster[2].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd12
+              && u_soc.core_tacc_status_raw[0][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd0
+              && u_soc.core_tacc_status_raw[3][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd3);
+        check("cluster status inserts MINE only for the owning sibling",
+              u_soc.g_cluster[0].u_cluster.mc_tacc_status[
+                  0*64 + TACC_STATUS_BIT_MINE]
+              && !u_soc.g_cluster[0].u_cluster.mc_tacc_status[
+                  1*64 + TACC_STATUS_BIT_MINE]
+              && u_soc.g_cluster[1].u_cluster.mc_tacc_status[
+                  0*64 + TACC_STATUS_BIT_MINE]
+              && !u_soc.g_cluster[1].u_cluster.mc_tacc_status[
+                  1*64 + TACC_STATUS_BIT_MINE]
+              && u_soc.g_cluster[2].u_cluster.mc_tacc_status[
+                  0*64 + TACC_STATUS_BIT_MINE]
+              && !u_soc.g_cluster[2].u_cluster.mc_tacc_status[
+                  1*64 + TACC_STATUS_BIT_MINE]);
+
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_id = 5'd5;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_slot = 2'd1;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b1;
+        clock;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b0;
+        clock;
+        check("cluster sibling TRY loses without stealing ownership",
+              u_soc.g_cluster[0].u_cluster.te_mex_done
+              && u_soc.g_cluster[0].u_cluster.te_mex_fault
+                    == MEX_FAULT_NONE
+              && u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd4);
+        clock;
+
+        // Release the four full-core domains before the existing stateless
+        // memory-arbitration test, then reset its completion counters.
+        force u_soc.core_mex_funct[0] = ETSYS_TACC_RELEASE;
+        force u_soc.core_mex_funct[1] = ETSYS_TACC_RELEASE;
+        force u_soc.core_mex_funct[2] = ETSYS_TACC_RELEASE;
+        force u_soc.core_mex_funct[3] = ETSYS_TACC_RELEASE;
+        force u_soc.core_mex_funct_byte[0] =
+            {5'd0, ETSYS_TACC_RELEASE};
+        force u_soc.core_mex_funct_byte[1] =
+            {5'd0, ETSYS_TACC_RELEASE};
+        force u_soc.core_mex_funct_byte[2] =
+            {5'd0, ETSYS_TACC_RELEASE};
+        force u_soc.core_mex_funct_byte[3] =
+            {5'd0, ETSYS_TACC_RELEASE};
+        force u_soc.core_mex_valid[0] = 1'b1;
+        force u_soc.core_mex_valid[1] = 1'b1;
+        force u_soc.core_mex_valid[2] = 1'b1;
+        force u_soc.core_mex_valid[3] = 1'b1;
+        clock;
+        force u_soc.core_mex_valid[0] = 1'b0;
+        force u_soc.core_mex_valid[1] = 1'b0;
+        force u_soc.core_mex_valid[2] = 1'b0;
+        force u_soc.core_mex_valid[3] = 1'b0;
+        clock;
+        clock;
+        check("all four private RELEASE operations wipe their domains",
+              u_soc.core_tacc_status_raw[0]
+                  == {43'd0, TACC_OWNER_NONE, 16'd0}
+              && u_soc.core_tacc_status_raw[1]
+                  == {43'd0, TACC_OWNER_NONE, 16'd0}
+              && u_soc.core_tacc_status_raw[2]
+                  == {43'd0, TACC_OWNER_NONE, 16'd0}
+              && u_soc.core_tacc_status_raw[3]
+                  == {43'd0, TACC_OWNER_NONE, 16'd0});
+        done_count0 = 0;
+        done_count1 = 0;
+        done_count2 = 0;
+        done_count3 = 0;
+
+        force u_soc.core_mex_funct[0] = TSYS_ZERO;
+        force u_soc.core_mex_funct[1] = TSYS_ZERO;
+        force u_soc.core_mex_funct[2] = TSYS_ZERO;
+        force u_soc.core_mex_funct[3] = TSYS_ZERO;
+        force u_soc.core_mex_funct_byte[0] = {5'd0, TSYS_ZERO};
+        force u_soc.core_mex_funct_byte[1] = {5'd0, TSYS_ZERO};
+        force u_soc.core_mex_funct_byte[2] = {5'd0, TSYS_ZERO};
+        force u_soc.core_mex_funct_byte[3] = {5'd0, TSYS_ZERO};
+        force u_soc.core_mex_ext_mod[0] = 4'd0;
+        force u_soc.core_mex_ext_mod[1] = 4'd0;
+        force u_soc.core_mex_ext_mod[2] = 4'd0;
+        force u_soc.core_mex_ext_mod[3] = 4'd0;
+        force u_soc.core_mex_ext_active[0] = 1'b0;
+        force u_soc.core_mex_ext_active[1] = 1'b0;
+        force u_soc.core_mex_ext_active[2] = 1'b0;
+        force u_soc.core_mex_ext_active[3] = 1'b0;
+
         // Give each engine a distinct internal destination.
         force u_soc.core_csr_addr[0] = CSR_TDST;
         force u_soc.core_csr_addr[1] = CSR_TDST;

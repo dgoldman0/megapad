@@ -46,6 +46,7 @@ read_verilog -sv -Irtl/pkg \
 
 # ---- GPU / Tile engine -------------------------------------------------------
 read_verilog -sv -Irtl/pkg \
+    rtl/gpu/mp64_tacc.v     \
     rtl/gpu/mp64_tile.v
 
 # ---- Peripherals -------------------------------------------------------------

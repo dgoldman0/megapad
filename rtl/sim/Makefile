@@ -47,7 +47,8 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
+        peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic \
+        nic_lint nic_bus mailbox trng tile tacc tacc_cycles \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
         full_core_tile soc_smoke soc_tile_icache soc_elaborate
 
@@ -218,7 +219,8 @@ cluster: tb_cluster.vvp
 
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
                 $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v $(PRIM)/mp64_mul.v \
-                $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
+                $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+                $(CORE)/mp64_fp16_alu.v \
                 $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
@@ -273,7 +275,8 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
 # Phase 4: Peripherals, Crypto & GPU
 # ==========================================================================
 
-phase4: peripherals disk_controller disk_bus_dma crypto ntt kem nic mailbox trng tile
+phase4: peripherals disk_controller disk_bus_dma crypto ntt kem nic mailbox \
+        trng tile tacc tacc_cycles
 	@echo ""
 	@echo "--- Phase 4 complete ---"
 
@@ -363,16 +366,34 @@ trng: tb_trng.vvp
 tb_trng.vvp: tb_trng.v $(PERIPH)/mp64_trng.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
+# --- TACC lifecycle state ---
+tacc: tb_tacc.vvp
+	$(VVP) $<
+
+tb_tacc.vvp: tb_tacc.v $(GPU)/mp64_tacc.v ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Tile-engine TACC timing ---
+tacc_cycles: tb_tacc_cycles.vvp
+	$(VVP) $<
+
+tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
+                    $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
+                    ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
 # --- Tile engine ---
 tile: tb_tile.vvp tb_tile_write_ack.vvp
 	$(VVP) tb_tile.vvp
 	$(VVP) tb_tile_write_ack.vvp
 
-tb_tile.vvp: tb_tile.v $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
+tb_tile.vvp: tb_tile.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+             $(CORE)/mp64_fp16_alu.v \
              ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tile.v \
+tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
+                       $(GPU)/mp64_tile.v \
                        $(CORE)/mp64_fp16_alu.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 

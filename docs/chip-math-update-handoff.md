@@ -1,7 +1,7 @@
 # Full TACC ISA and implementation handoff
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
-  scheduler; Phase 2 Landings 2.1 and 2.2 complete; Landing 2.3 is next
+  scheduler; Phase 2 Landings 2.1 through 2.3 complete; Landing 2.4 is next
 - Date: 2026-07-28
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -1417,7 +1417,9 @@ Nonblocking findings intentionally remain documented rather than entering
 the feature's critical path:
 
 - cluster disable does not yet purge a tile-memory request already captured
-  by the SoC arbiter; Landing 2.3 owns that reset-scope requirement;
+  by the SoC arbiter; this becomes build-critical in Landing 2.4 when TACC
+  image transfers begin using that path, so its cancel/drain sideband moves
+  with that landing rather than widening lifecycle-only Landing 2.3;
 - production microcore Field/GF inputs remain dangling because Field ALU SoC
   integration is an explicit non-goal;
 - unused cursor and sideband signals, a default-topology-only parameter
@@ -1440,7 +1442,11 @@ Primary files:
 - `rtl/soc/mp64_tile_port_arbiter.v`
 - new `rtl/sim/tb_tacc.v`
 - new `rtl/sim/tb_tacc_cycles.v`
+- `rtl/sim/tb_cluster.v`
+- `rtl/sim/tb_full_core_tile.v`
+- `rtl/sim/tb_tile.v`
 - `rtl/sim/Makefile`
+- FPGA and Yosys explicit RTL source manifests
 
 Work:
 
@@ -1462,19 +1468,24 @@ Work:
 - implement the locked system, paired-full-core, cluster, and individual
   microcore reset scopes with distinct engine and per-caller epochs and
   explicit reset/cancel sidebands;
-- on cluster disable, cancel its captured but unissued memory request, ignore
-  any already-issued stale acknowledgement, and prevent subsequent beats; and
+- hold a lifecycle response and its staged mutation until the receiver's
+  explicit retirement handshake, with cancellation taking priority at both
+  the leaf-publication and registered microcore-delivery edges;
+- carry cluster-disable cancellation of captured/issued tile-memory work into
+  Landing 2.4, before lifecycle expands into image traffic; and
 - add simulation assertions for legal metadata transitions, owner-only
   mutation, and fault-implies-completion.
 
 The focused bench covers all seven independent domains, simultaneous
-full-core claims, cluster contention, clear, release, reset, cluster disable,
-individual microcore reset without cluster-state loss, mode latch, every
+full-core claims, cluster contention, clear, release, reset, individual
+microcore reset without cluster-state loss, mode latch, every lifecycle
 protected-operation fault, privilege source, cancellation epochs, and
-force-release after both successful and faulting active operations, including
-same-cycle force/admission priority. The cycle bench makes request capture,
-cluster admission, and lifecycle/CSR timing fail-closed rather than relying
-on waveform inspection.
+same-cycle force/admission priority. It also targets cancellation before
+cluster capture and during final registered microcore delivery. Multi-cycle
+force-after-fault and cluster-disable memory draining join the first tokened
+image-transfer bench. The cycle bench makes request capture, cluster
+admission, retirement, and lifecycle/CSR timing fail-closed rather than
+relying on waveform inspection.
 
 Focused gates, run sequentially:
 
@@ -1497,6 +1508,86 @@ ownership, validity, dirty tracking, format latching, and zeroization.
 Enforce nonblocking cluster claims and safe privileged recovery without
 reserving otherwise stateless tile service.
 ```
+
+#### Landing 2.3 completion — 2026-07-28
+
+Landing 2.3 is implemented in the isolated Phase-2 worktree. Each generated
+tile engine now contains one authoritative TACC state leaf with a declared
+2,048-bit bank, fixed caller domain, owner, validity, dirty and normalized
+format metadata, BUSY, FORCE_PENDING, and raw physical status. The four
+full-core instances accept only their fixed core IDs; each cluster instance
+accepts only `CLUSTER_ID_BASE + caller_slot`. `MINE` remains absent from raw
+status and is inserted at the existing full-core and per-microcore CSR
+fanouts.
+
+`TRY`, `CLEAR`, and `RELEASE` validate before admission and publish BUSY only
+for accepted work. The leaf holds its response and staged mutation until an
+explicit receiver-retire handshake. Full-core engines accept that response on
+the CPU delivery edge; a cluster accepts it only when registered completion is
+delivered to the granted microcore and the common arbitration turn advances.
+Physical BUSY therefore remains visible through response delivery, and a
+caller cancellation in either the leaf-publication or registered-delivery
+window suppresses completion and mutation together without a second 2,048-bit
+rollback bank. Free, self-owned, and foreign-owned `TRY` all retire normally
+with the locked nonblocking behavior. Protected owner or format failures,
+noncanonical encodings, `LOAD`, `STORE`, and `TAMAC` fail before BUSY and
+cannot enter legacy memory or ACC paths. Engine reset wipes immediately.
+
+The independent control transport now performs real privileged recovery.
+Reserved-only writes remain no-ops, user FORCE faults, an idle supervisor
+FORCE wipes immediately, and a FORCE accepted while a lifecycle response is
+pending survives either retirement or caller cancellation and leaves the bank
+wiped at that terminal edge. An authorized same-cycle FORCE deasserts
+lifecycle readiness. Because full-core MEX is a one-cycle pulse, the tile
+holds the complete displaced request and its original cancellation tokens,
+accounts the wait as a stall, and revalidates it after recovery instead of
+dropping it. Cancellation drops held valid on its terminal edge so an
+immediately following request cannot deadlock behind the leaf's de-duplication
+latch.
+
+Sequential verification for this landing currently records:
+
+- `tacc`: 166 lifecycle, status, ownership, format, privilege, force,
+  cancellation, and reset checks passed;
+- `tacc_cycles`: 44 direct leaf-cycle, terminal-cancellation, and
+  force-displacement checks passed;
+- `tile`: 85 datapath/lifecycle checks and 34 write-ack checks passed;
+- `cluster`: 136 checks passed, including cancellation at both leaf-response
+  publication and final registered microcore delivery;
+- `full_core_tile`: 22 assertions passed; simultaneous claims proved all
+  seven physical domains, fixed owners, caller-relative MINE shaping, losing
+  cluster contention, and private full-core release alongside the existing
+  private-engine checks;
+- `tile_port_arbiter`: the existing 50 checks passed;
+- reduced-parameter `soc_smoke`: 7 checks passed;
+- `soc_tile_icache`: the existing 11 checks passed; and
+- `soc_elaborate`: passed with only the repository's established sized-hex
+  warnings; focused `mp64_tacc` Yosys `hierarchy`, `proc`, and `check` also
+  passed.
+
+The critical-path boundary is deliberate. The premature untagged
+LOAD/STORE/TAMAC terminal seam was removed: Landing 2.4 must add tokened image
+staging and stale-response drain rather than accepting a late terminal from a
+canceled operation, and arithmetic gets its whole-bank terminal commit in its
+own landing. Until one of those paths can write nonzero data, synthesis may
+constant-fold the declared zero-only bank; no resource claim is made from
+Landing 2.3 alone.
+
+Nonblocking work retained in the plan rather than expanded here:
+
+- cluster-disable cancellation and stale tile-port response draining move to
+  Landing 2.4, before the first TACC image beat can issue;
+- deferred FORCE visibility across a multi-cycle success or fault, including
+  the Phase-1 rule that an already accepted FORCE survives individual caller
+  cancellation, must be exercised when the first tokened multi-cycle
+  operation lands; and
+- the leaf does not yet materialize Phase 1's separate wipe-generation token
+  because no independently returning memory or arithmetic result exists in
+  this landing; lifecycle staging is closed by the retire handshake. Landing
+  2.4 must add that token with its transfer stage. Existing RTL caller and
+  engine cancellation tokens are eight bits while the oracle uses 64-bit
+  epochs; reset/disable draining and wraparound hardening remain explicit
+  transfer-controller requirements rather than inflating idle lifecycle state.
 
 ### Landing 2.4 — canonical TACC image transfer
 
@@ -1546,6 +1637,9 @@ Work:
   preinstruction dirty bit whether it began clean or dirty;
 - ignore acknowledgements associated with a pre-reset operation epoch and
   never commit a staged load after reset;
+- add per-source cancel to the shared tile-port arbiter so cluster disable
+  drops captured unissued work, drains and suppresses stale issued
+  acknowledgements, and cannot consume a re-enabled source's fresh pulse;
 - emit zeroes for every inactive canonical-image byte and normalize ignored
   inactive load bytes to zero;
 - keep ownership after both operations; and
@@ -1935,7 +2029,7 @@ Phase 2:
 
 - [x] RTL encodings and precise fault plumbing.
 - [x] Seven-engine restoration, private/shadow state, and common admission.
-- [ ] Lifecycle state and privileged recovery.
+- [x] Lifecycle state and privileged recovery.
 - [ ] Canonical four-beat image transfer.
 - [ ] Integer accumulation.
 - [ ] Shared exact FP32 arithmetic.

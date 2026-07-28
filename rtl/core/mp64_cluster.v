@@ -1671,6 +1671,17 @@ module mp64_cluster #(
     wire [63:0] te_mex_fault_addr;
     wire [TACC_EPOCH_BITS-1:0] te_engine_epoch;
     wire [63:0] te_tacc_status_raw;
+    // The tile holds a TACC terminal response until the registered cluster
+    // completion is delivered to the microcore.  This edge is also where the
+    // common arbitration domain advances; a caller reset keeps retire low and
+    // reaches the leaf through te_caller_cancel instead.
+    wire te_mex_retire =
+        legacy_state == LEGACY_ACTIVE &&
+        legacy_kind == LEGACY_KIND_MEX &&
+        legacy_grant == mex_grant &&
+        mex_state == MEX_WAIT_DROP &&
+        mex_done_reg &&
+        !micro_reset[mex_grant];
 
     wire [63:0] te_cfg_tmode     = cfg_tmode[mex_grant];
     wire [63:0] te_cfg_tctrl     = cfg_tctrl[mex_grant];
@@ -2127,7 +2138,10 @@ module mp64_cluster #(
     // ====================================================================
     // Shared Tile Engine Instance
     // ====================================================================
-    mp64_tile u_tile (
+    mp64_tile #(
+        .TACC_CALLER_BASE (CLUSTER_ID_BASE[TACC_CALLER_BITS-1:0]),
+        .TACC_CALLER_COUNT(N)
+    ) u_tile (
         .clk           (clk),
         .rst_n         (~cl_rst),
         .engine_reset  (tile_engine_reset),
@@ -2160,6 +2174,7 @@ module mp64_cluster #(
         .mex_engine_epoch(te_mex_engine_epoch),
         .mex_caller_epoch(te_mex_caller_epoch),
         .mex_caller_slot(te_mex_caller_slot),
+        .mex_retire    (te_mex_retire),
         .mex_done      (te_mex_done),
         .mex_busy      (te_mex_busy),
         .mex_fault     (te_mex_fault),
