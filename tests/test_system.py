@@ -4855,6 +4855,233 @@ class TestBIOS(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+#  Full-TACC BIOS words
+# ---------------------------------------------------------------------------
+
+class TestBIOSTACC(unittest.TestCase):
+    """Guest-visible wrappers for the explicit full-TACC lifecycle."""
+
+    _WORDS = (
+        "TAMAC",
+        "TACC-TRY",
+        "TACC-CLEAR",
+        "TACC-LOAD",
+        "TACC-STORE",
+        "TACC-RELEASE",
+        "TACC-STATUS@",
+        "TACC-CLAIM?",
+    )
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+        self._labels = self._bios_harness._bios_labels
+        self._code = self._bios_harness.bios_code
+
+    def _run(self, lines):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+        return sys_obj, text
+
+    @staticmethod
+    def _aligned_regions(labels):
+        # Keep fixtures clear of the user dictionary compiled by kernel tests.
+        base = (labels["dict_free"] + 4095) & ~63
+        return tuple(base + offset for offset in (0, 64, 128, 192, 512))
+
+    def test_tacc_dictionary_append_only(self):
+        """The eight ABI words extend, rather than renumber, the old tail."""
+        labels = self._labels
+        chain = (
+            ("d_tacc_claim_q", "d_tacc_status_fetch"),
+            ("d_tacc_status_fetch", "d_tacc_release"),
+            ("d_tacc_release", "d_tacc_store"),
+            ("d_tacc_store", "d_tacc_load"),
+            ("d_tacc_load", "d_tacc_clear"),
+            ("d_tacc_clear", "d_tacc_try"),
+            ("d_tacc_try", "d_tamac"),
+            ("d_tamac", "d_caller_span_status"),
+            ("d_caller_span_status", "d_entropy_ready"),
+        )
+        self.assertEqual(labels["latest_entry"], labels["d_tacc_claim_q"])
+        for current, previous in chain:
+            link = int.from_bytes(
+                self._code[labels[current]:labels[current] + 8],
+                "little",
+            )
+            self.assertEqual(link, labels[previous])
+
+        address = labels["latest_entry"]
+        seen = set()
+        while address:
+            self.assertNotIn(address, seen)
+            seen.add(address)
+            address = int.from_bytes(
+                self._code[address:address + 8],
+                "little",
+            )
+        self.assertEqual(len(seen), 473)
+
+    def test_tacc_wrapper_encodings(self):
+        """Thin words begin with the locked architectural instruction bytes."""
+        expected = {
+            "w_tamac": assemble("t.amac"),
+            "w_tacc_try": assemble("t.acc.try"),
+            "w_tacc_clear": assemble("t.acc.clear"),
+            "w_tacc_load": assemble("t.acc.load"),
+            "w_tacc_store": assemble("t.acc.store"),
+            "w_tacc_release": assemble("t.acc.release"),
+            "w_tacc_status_fetch": assemble("csrr r0, 0x1D"),
+            "w_tacc_claim_q": (
+                assemble("t.acc.try") + assemble("csrr r0, 0x1D")
+            ),
+        }
+        for label, encoding in expected.items():
+            start = self._labels[label]
+            self.assertEqual(self._code[start:start + len(encoding)], encoding)
+
+    def test_tacc_words_visible(self):
+        """Every full-TACC ABI word is discoverable in the live dictionary."""
+        _, text = self._run(["WORDS"])
+        for word in self._WORDS:
+            self.assertIn(word, text)
+
+    def test_tacc_claim_status_release(self):
+        """Claim returns a Forth flag and raw status remains caller-relative."""
+        _, text = self._run([
+            '." FREE=" TACC-STATUS@ .',
+            '." CLAIM=" TACC-CLAIM? .',
+            '." BITS=" TACC-STATUS@ 3 AND .',
+            "TACC-RELEASE",
+            '." END=" TACC-STATUS@ .',
+        ])
+        self.assertIn(f"FREE={31 << 16} ", text)
+        self.assertIn("CLAIM=-1 ", text)
+        self.assertIn("BITS=3 ", text)
+        self.assertIn(f"END={31 << 16} ", text)
+
+    def test_tacc_claim_is_nonblocking(self):
+        """A foreign owner produces FALSE without a retry or state mutation."""
+        sys_obj, buf = self._bios_harness._boot_bios()
+        sys_obj.cpu.tacc_owner = 1
+        fields = (
+            "tacc_owner",
+            "tacc_valid",
+            "tacc_dirty",
+            "tacc_format_ew",
+            "tacc_format_signed",
+            "tacc_busy",
+            "tacc_force_pending",
+            "tacc_epoch",
+        )
+        before = (
+            bytes(sys_obj.cpu.tacc),
+            tuple(getattr(sys_obj.cpu, field) for field in fields),
+        )
+        text = self._bios_harness._run_forth(
+            sys_obj,
+            buf,
+            ['." CLAIM=" TACC-CLAIM? .', '." DEPTH=" DEPTH .'],
+        )
+        after = (
+            bytes(sys_obj.cpu.tacc),
+            tuple(getattr(sys_obj.cpu, field) for field in fields),
+        )
+        self.assertIn("CLAIM=0 ", text)
+        self.assertIn("DEPTH=0 ", text)
+        self.assertEqual(after, before)
+
+    def test_tacc_load_store_words(self):
+        """The thin lifecycle words round-trip one canonical aligned image."""
+        source, _, _, _, destination = self._aligned_regions(self._labels)
+        sys_obj, buf = self._bios_harness._boot_bios()
+        image = bytes(range(256))
+        sys_obj.cpu.mem[source:source + 256] = image
+        sys_obj.cpu.mem[destination - 1:destination + 257] = b"\xA5" * 258
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            f"{source} TSRC0!",
+            f"{destination} TDST!",
+            "0 TMODE!",
+            "TACC-CLAIM? DROP",
+            "TACC-LOAD",
+            "TACC-STORE",
+            "TACC-RELEASE",
+            '." DEPTH=" DEPTH .',
+        ])
+        self.assertIn("DEPTH=0 ", text)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[destination:destination + 256]),
+            image,
+        )
+        self.assertEqual(sys_obj.cpu.mem[destination - 1], 0xA5)
+        self.assertEqual(sys_obj.cpu.mem[destination + 256], 0xA5)
+        self.assertEqual(sys_obj.cpu.tacc_owner, 31)
+
+    def test_tacc_integer_and_fp_kernels_avoid_intermediate_stores(self):
+        """Two integer and FP products accumulate before one final image store."""
+        a0, b0, a1, b1, destination = self._aligned_regions(self._labels)
+        sys_obj, buf = self._bios_harness._boot_bios()
+        sys_obj.cpu.mem[a0:a0 + 64] = bytes((2,)) * 64
+        sys_obj.cpu.mem[b0:b0 + 64] = bytes((3,)) * 64
+        sys_obj.cpu.mem[a1:a1 + 64] = bytes((4,)) * 64
+        sys_obj.cpu.mem[b1:b1 + 64] = bytes((5,)) * 64
+        sys_obj.cpu.mem[destination:destination + 256] = b"\xA5" * 256
+
+        integer_kernel = (
+            ": U8-2MAC "
+            "TACC-CLAIM? 0= IF 2DROP 2DROP DROP FALSE EXIT THEN "
+            ">R 0 TMODE! TACC-CLEAR "
+            "TSRC1! TSRC0! TAMAC TSRC1! TSRC0! TAMAC "
+            "R> TDST! TACC-STORE TACC-RELEASE TRUE ;"
+        )
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            integer_kernel,
+            f"{a0} {b0} {a1} {b1} {destination} U8-2MAC .",
+        ])
+        self.assertIn("-1 ", text)
+        self.assertEqual(
+            [
+                int.from_bytes(
+                    sys_obj.cpu.mem[offset:offset + 4],
+                    "little",
+                )
+                for offset in range(destination, destination + 256, 4)
+            ],
+            [26] * 64,
+        )
+        self.assertEqual(sys_obj.cpu.tacc_owner, 31)
+
+        sys_obj, buf = self._bios_harness._boot_bios()
+        sys_obj.cpu.mem[a0:a0 + 64] = b"\x00\x3C" * 32
+        sys_obj.cpu.mem[b0:b0 + 64] = b"\x00\x40" * 32
+        sys_obj.cpu.mem[a1:a1 + 64] = b"\x00\x38" * 32
+        sys_obj.cpu.mem[b1:b1 + 64] = b"\x00\x44" * 32
+        sys_obj.cpu.mem[destination:destination + 256] = b"\xA5" * 256
+
+        fp_kernel = (
+            ": FP16-2MAC "
+            "TACC-CLAIM? 0= IF 2DROP 2DROP DROP FALSE EXIT THEN "
+            ">R 4 TMODE! TACC-CLEAR "
+            "TSRC1! TSRC0! TAMAC TSRC1! TSRC0! TAMAC "
+            "R> TDST! TACC-STORE TACC-RELEASE TRUE ;"
+        )
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            fp_kernel,
+            f"{a0} {b0} {a1} {b1} {destination} FP16-2MAC .",
+        ])
+        self.assertIn("-1 ", text)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[destination:destination + 128]),
+            b"\x00\x00\x80\x40" * 32,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[destination + 128:destination + 256]),
+            bytes(128),
+        )
+        self.assertEqual(sys_obj.cpu.tacc_owner, 31)
+
+
+# ---------------------------------------------------------------------------
 #  Multicore BIOS tests (4-core)
 # ---------------------------------------------------------------------------
 
@@ -12727,7 +12954,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 465)
+        self.assertEqual(len(seen), 473)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -13802,11 +14029,17 @@ class TestBIOSEntropyFill(unittest.TestCase):
         return bytes(sys_obj.cpu.mem[start:start + length])
 
     def test_dictionary_append_preserves_every_older_link(self):
-        """Caller-span qualification extends the checked entropy tail."""
+        """The full-TACC ABI extends the checked caller-span tail."""
         labels = self._bios_labels
         self.assertEqual(
             labels["latest_entry"],
-            labels["d_caller_span_status"],
+            labels["d_tacc_claim_q"],
+        )
+        claim_previous = int.from_bytes(
+            self._bios_harness.bios_code[
+                labels["d_tacc_claim_q"]:labels["d_tacc_claim_q"] + 8
+            ],
+            "little",
         )
         caller_span_previous = int.from_bytes(
             self._bios_harness.bios_code[
@@ -13827,6 +14060,7 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
+        self.assertEqual(claim_previous, labels["d_tacc_status_fetch"])
         self.assertEqual(caller_span_previous, labels["d_entropy_ready"])
         self.assertEqual(ready_previous, labels["d_entropy_fill"])
         self.assertEqual(fill_previous, labels["d_sha2_span_status"])

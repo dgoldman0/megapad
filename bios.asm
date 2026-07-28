@@ -2832,6 +2832,53 @@ w_tdotacc:
     t.dotacc
     ret.l
 
+; TAMAC ( -- ) full-width lane-wise accumulate into the owned TACC
+w_tamac:
+    t.amac
+    ret.l
+
+; TACC lifecycle operations (no stack args).  Addressed operations use the
+; caller's existing TSRC0/TDST CSR shadows, just like the underlying ISA.
+w_tacc_try:
+    t.acc.try
+    ret.l
+w_tacc_clear:
+    t.acc.clear
+    ret.l
+w_tacc_load:
+    t.acc.load
+    ret.l
+w_tacc_store:
+    t.acc.store
+    ret.l
+w_tacc_release:
+    t.acc.release
+    ret.l
+
+; TACC-STATUS@ ( -- u ) raw caller-relative TACC_STATUS value
+w_tacc_status_fetch:
+    csrr r0, 0x1D
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TACC-CLAIM? ( -- flag ) make one nonblocking claim attempt and return MINE.
+; This deliberately contains no PAUSE, retry loop, or hidden scheduler policy.
+w_tacc_claim_q:
+    t.acc.try
+    csrr r0, 0x1D
+    andi r0, 0x02
+    cmpi r0, 0
+    breq .tacc_claim_no
+    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF
+    br .tacc_claim_push
+.tacc_claim_no:
+    ldi r0, 0
+.tacc_claim_push:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; TMODE@ ( -- n ) read current tile mode
 w_tmode_fetch:
     csrr r0, 0x14
@@ -19718,14 +19765,88 @@ d_entropy_ready:
     call.l r11
     ret.l
 
-; Protocol-neutral caller span qualification is the newest append-only word.
+; Protocol-neutral caller span qualification remains append-only.
 ; === CALLER-SPAN-STATUS ===
-latest_entry:
 d_caller_span_status:
     .dq d_entropy_ready
     .db 18
     .ascii "CALLER-SPAN-STATUS"
     ldi64 r11, w_caller_span_status
+    call.l r11
+    ret.l
+
+; Full-TACC guest ABI words are append-only so every older built-in dictionary
+; ordinal remains stable.
+; === TAMAC ===
+d_tamac:
+    .dq d_caller_span_status
+    .db 5
+    .ascii "TAMAC"
+    ldi64 r11, w_tamac
+    call.l r11
+    ret.l
+
+; === TACC-TRY ===
+d_tacc_try:
+    .dq d_tamac
+    .db 8
+    .ascii "TACC-TRY"
+    ldi64 r11, w_tacc_try
+    call.l r11
+    ret.l
+
+; === TACC-CLEAR ===
+d_tacc_clear:
+    .dq d_tacc_try
+    .db 10
+    .ascii "TACC-CLEAR"
+    ldi64 r11, w_tacc_clear
+    call.l r11
+    ret.l
+
+; === TACC-LOAD ===
+d_tacc_load:
+    .dq d_tacc_clear
+    .db 9
+    .ascii "TACC-LOAD"
+    ldi64 r11, w_tacc_load
+    call.l r11
+    ret.l
+
+; === TACC-STORE ===
+d_tacc_store:
+    .dq d_tacc_load
+    .db 10
+    .ascii "TACC-STORE"
+    ldi64 r11, w_tacc_store
+    call.l r11
+    ret.l
+
+; === TACC-RELEASE ===
+d_tacc_release:
+    .dq d_tacc_store
+    .db 12
+    .ascii "TACC-RELEASE"
+    ldi64 r11, w_tacc_release
+    call.l r11
+    ret.l
+
+; === TACC-STATUS@ ===
+d_tacc_status_fetch:
+    .dq d_tacc_release
+    .db 12
+    .ascii "TACC-STATUS@"
+    ldi64 r11, w_tacc_status_fetch
+    call.l r11
+    ret.l
+
+; === TACC-CLAIM? ===
+latest_entry:
+d_tacc_claim_q:
+    .dq d_tacc_status_fetch
+    .db 11
+    .ascii "TACC-CLAIM?"
+    ldi64 r11, w_tacc_claim_q
     call.l r11
     ret.l
 
