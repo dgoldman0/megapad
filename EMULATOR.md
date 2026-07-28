@@ -5,9 +5,10 @@ memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
 > **Branch:** `main`
-> **Status:** Fully functional.  360-word BIOS v1.0 Forth system running on
+> **Status:** Fully functional.  473-word BIOS v1.0 Forth system running on
 > a 16-core heterogeneous SoC (4 full cores + 3×4 micro-clusters) with
-> 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile engine
+> seven physical tile engines, seven 2,048-bit full-width TACCs,
+> 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile execution
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
 > (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512, WOTS+ Chain
 > Accel), optional
@@ -103,7 +104,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │  │  32 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
 │  │  full ISA     │    │ ┌─────────┐ ┌───────┐        │  │
-│  │  tile engine  │    │ │ SysInfo │ │Mailbox│  NIC   │  │
+│  │  private tile │    │ │ SysInfo │ │Mailbox│  NIC   │  │
 │  │  (2516 lines) │    │ └─────────┘ └───────┘        │  │
 │  │  extended ops │    │ ┌──────────┐ ┌─────┐         │  │
 │  │  FP16/BF16   │    │ │ Spinlock │ │ CRC │ DevBus  │  │
@@ -117,12 +118,13 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │                      └────────────────────────────┘  │
 │                                                          │
 │  3 × MicroCluster (4 μ-cores ea., shared MUL/DIV +       │
-│    tile/MEX engine, 1K scratchpad, HW barrier)            │
+│    one tile/MEX/TACC engine, 1K scratchpad, HW barrier)   │
+│  + 4 private full-core tile/MEX/TACC engines              │
 │                                                          │
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (14,957 lines) — Forth BIOS v1.0, 363 words
+    bios.asm  (14,957 lines) — Forth BIOS v1.0, 473 words
     bios.rom  (~26 KB)       — precompiled binary
 ```
 
@@ -136,9 +138,9 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `asm.py` | 909 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
 | `devices.py` | 2,542 | 19 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, WOTS+ Chain Accel, Port I/O Bridge |
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
-| `system.py` | 1,018 | 16-core heterogeneous SoC — 4 full cores + 3×4 micro-clusters, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `system.py` | 1,018 | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,557 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 14,957 | Forth BIOS v1.0 — subroutine-threaded interpreter, 363 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache, cooperative multitasking) |
+| `bios.asm` | 14,957 | Forth BIOS v1.0 — subroutine-threaded interpreter, 473 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
 | `test_megapad64.py` | 2,647 | CPU + tile engine test suite — 25 tests |
 | `test_system.py` | 24,761 | System integration tests — 1,634 tests (77 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile, port I/O bridge, bus timeout) |
 | `test_networking.py` | 187 | Real-networking tests — 13 tests |
@@ -354,7 +356,7 @@ buffer), then tokenises and interprets:
 | R17 | EXIT handler (`sep r17` = pop return address from RSP, branch) |
 | R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |
 
-### Built-in words (366)
+### Built-in words (473)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -407,7 +409,54 @@ buffer), then tokenises and interprets:
 `TADD` `TSUB` `TAND` `TOR` `TXOR` `TMUL` `TDOT` `TSUM`
 `TMIN` `TMAX` `TTRANS` `TZERO` `TPOPCNT` `TL1` `TEMIN` `TEMAX` `TABS`
 `TSUMSQ` `TMINIDX` `TMAXIDX` `TWMUL` `TMAC` `TFMA` `TDOTACC`
+`TAMAC` `TACC-TRY` `TACC-CLEAR` `TACC-LOAD` `TACC-STORE` `TACC-RELEASE`
+`TACC-STATUS@` `TACC-CLAIM?`
 `ACC@` `ACC1@` `ACC2@` `ACC3@` `TI` `CYCLES`
+
+### Full-width TACC model
+
+The emulator implements one persistent 2,048-bit tile accumulator for each
+physical tile engine: full cores 0–3 each have a private engine and TACC,
+while each four-microcore cluster shares one engine and TACC. Microcores keep
+their tile configuration and address CSRs private; legacy ACC, TACC,
+ownership, and status follow the shared physical engine. `OWNER` is always an
+absolute core ID and `MINE` is shaped for the caller reading the status CSR.
+
+Control is deliberately explicit. Software performs
+`TRY → CLEAR/LOAD → TAMAC… → STORE if needed → RELEASE`; there is no hidden
+claim, wait, spill, eviction, or release. A failed `TRY` retires normally.
+Owning the persistent TACC does not reserve the engine, so nonowners may
+continue ordinary stateless and legacy-ACC MEX work. A guest that wants to
+wait chooses its own policy:
+
+```forth
+: TACC-ACQUIRE
+  BEGIN TACC-CLAIM? 0= WHILE PAUSE REPEAT ;
+```
+
+The canonical image is always 256 bytes aligned to 64 bytes and is transferred
+as four 64-byte beats. U8/U16 use all 256 bytes; U32/FP16/BF16 use the low
+128 bytes and keep the high half zero. The format is metadata, not part of the
+image, so context-switch code saves it separately. External-memory transfers
+further serialize each beat into eight little-endian 64-bit PHY words.
+
+Functional stepping and strict-system execution share architectural results
+but expose their respective timing boundaries:
+
+| Transfer | Functional/native step | Strict system |
+|---|---:|---:|
+| Internal uncontended image | 6 cycles | 9 cycles |
+| External, one-cycle word response | 34 cycles, 28 stalls | 37 cycles, 31 stalls |
+| External, two-cycle word response | 66 cycles, 60 stalls | 69 cycles, 63 stalls |
+
+Tests can install deterministic external responses with
+`set_external_phy_response_plan()`. The callback receives one
+`ExternalPhyWordRequest` per launched word and returns
+`ExternalPhyWordResponse(latency_cycles=N, error=...)`; returning `None`
+models no response. Cycle 255 still succeeds, while a later or absent response
+times out at 255 with the exact word address. LOAD is atomic. A failing STORE
+retains its acknowledged eight-byte prefix, preserves the accumulator's prior
+valid/dirty state, and can be followed by normal recovery.
 
 **Performance counters**
 `PERF-CYCLES` `PERF-STALLS` `PERF-TILEOPS` `PERF-EXTMEM` `PERF-RESET`
@@ -697,7 +746,7 @@ PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
 adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 360 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 473 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch, network stack,
 TLS 1.3, socket API, post-quantum crypto), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC

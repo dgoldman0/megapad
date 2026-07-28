@@ -4946,6 +4946,19 @@ class TestBIOSTACC(unittest.TestCase):
         for word in self._WORDS:
             self.assertIn(word, text)
 
+    def test_tacc_sample_image_help(self):
+        """The injected tile guide teaches the explicit lifecycle and kernels."""
+        topic = DOCS["tile-engine"]
+        for text in (
+            "seven physical TACC ownership domains",
+            "TACC-CLAIM?",
+            "PAUSE",
+            "U8-2MAC",
+            "FP16-2MAC",
+            "MEX operations are instructions, not MMIO",
+        ):
+            self.assertIn(text, topic)
+
     def test_tacc_claim_status_release(self):
         """Claim returns a Forth flag and raw status remains caller-relative."""
         _, text = self._run([

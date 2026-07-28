@@ -513,6 +513,22 @@ issued beat and wait cycle through the faulting acknowledgement.
 execution, and RTL. Microcores gain the currently missing per-caller
 `PERF_STALLS` path along with `PERF_TILE_OPS`.
 
+Phase-1 measurement locked the registered-system and external-PHY additions:
+
+| Image path | Functional/native step | Strict timed system |
+|---|---:|---:|
+| Internal, uncontended | 6 cycles | 9 cycles |
+| External, one-cycle response per 64-bit word | 34 cycles / 28 stalls | 37 cycles / 31 stalls |
+| External, two-cycle response per 64-bit word | 66 cycles / 60 stalls | 69 cycles / 63 stalls |
+
+An external image is four 64-byte beats and 32 serialized 64-bit words, so
+both execution modes increment `PERF_EXTMEM` by 32 on success. A response at
+word-relative cycle 255 wins; no response or a later response faults at cycle
+255 and reports that word's exact address. The measured model also confirms
+atomic external LOAD, acknowledged-prefix STORE behavior, reset cancellation
+without late callbacks or effects, and successful reuse after a timeout or
+explicit error.
+
 Reset scope is also explicit:
 
 - whole-SoC reset wipes all seven engines;
@@ -944,6 +960,10 @@ Focused gates, run sequentially:
 python setup_accel.py build_ext --inplace
 python -m pytest -q tests/test_full_core_tile_engine.py -k "ownership or reset"
 python -m pytest -q tests/test_tile_engine_memory_arbitration.py
+python -m pytest -q tests/test_timed_tile_scheduler.py
+python -m pytest -q tests/test_tacc_external_phy.py
+python -m pytest -q tests/test_native_tacc_external_phy.py
+python -m pytest -q tests/test_timed_tacc_external_phy.py
 git diff --check
 ```
 
@@ -1003,14 +1023,32 @@ Do not regenerate `fpga/bios.hex` merely because BIOS source changed.
 Focused capstone gates:
 
 ```sh
-python -m pytest -q tests/test_tacc_isa.py
-python -m pytest -q tests/test_megapad64.py -k tacc
-python -m pytest -q tests/test_system.py -k tacc
-python -m pytest -q tests/test_native_mex_oracle.py -k tacc
-python -m pytest -q tests/test_tacc_cycle_api.py
-python -m pytest -q tests/test_tile_engine_memory_arbitration.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_tacc_isa.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_megapad64.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_system.py K=tacc
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_system.py K=TestDiskUtil
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_native_mex_oracle.py K=tacc
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_tacc_cycle_api.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_full_core_tile_engine.py K='ownership or reset'
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_tile_engine_memory_arbitration.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_timed_tile_scheduler.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_tacc_external_phy.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_native_tacc_external_phy.py
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc make test-sequential TEST_PATH=tests/test_timed_tacc_external_phy.py
 git diff --check
 ```
+
+After explicit worker-spawning approval, close the two resource gates
+sequentially as described in Landing 1.5. They remain part of Phase-1
+acceptance even though they are intentionally absent from the ordinary
+capstone block.
+
+Phase-1 ordinary capstone record, 2026-07-28: all commands above passed
+sequentially (281 selected tests in total, including the focused BIOS and
+sample-image documentation checks). The zero-match
+`tests/test_megapad64.py -k tacc` draft selector was replaced by that file's
+complete 28-test suite. The approval-gated worker suites are not included in
+this pass count.
 
 Commit:
 
@@ -1698,12 +1736,14 @@ Phase 0:
 
 Phase 1:
 
-- [ ] Python executable oracle.
-- [ ] Seven-engine topology and cluster-private caller shadows.
-- [ ] Ownership and state transport.
-- [ ] Native execution parity.
-- [ ] Contention/QoS closure.
-- [ ] Guest words, public docs, and capstone kernels.
+- [x] Python executable oracle.
+- [x] Seven-engine topology and cluster-private caller shadows.
+- [x] Ownership and state transport.
+- [x] Native execution parity.
+- [ ] Contention/QoS closure. Implementation and ordinary sequential gates are
+  green; the explicit 1/2/4-worker and reduced-core gates still require
+  resource approval.
+- [x] Guest words, public docs, and capstone kernels.
 
 Phase 2:
 

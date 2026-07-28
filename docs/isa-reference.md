@@ -5,7 +5,8 @@ general-purpose registers, a rich flag set, and a built-in SIMD tile
 engine.  Its heritage traces to the RCA CDP1802, but it extends that
 architecture enormously with 64-bit registers, hardware multiply/divide,
 a full condition-code set, a 256-bit accumulator, and 64-byte tile
-operations.  The tile engine includes FP16/BF16 support, saturating
+operations.  The tile engine includes a separate 2,048-bit full-width tile
+accumulator (TACC), FP16/BF16 support, saturating
 arithmetic, rounding shifts, strided 2D addressing, and a full suite of
 SIMD operations across 8 to 64 lanes.
 
@@ -29,7 +30,7 @@ every register, every encoding.
 | Q flip-flop | 1-bit output latch |
 | T register | 16-bit saved `{0,XSEL[4:0],0,PSEL[4:0]}` (for MARK/RET) |
 | Flags | 8-bit packed `[S I G P V N C Z]` |
-| Tile engine | 64-byte tiles, 256-bit accumulator, SIMD lanes, FP16/BF16 |
+| Tile engine | 64-byte tiles, 256-bit legacy ACC, 2,048-bit TACC, SIMD lanes, FP16/BF16 |
 
 The indirection through `PSEL`, `XSEL`, and `SPSEL` means any GPR can
 serve as the program counter, data pointer, or stack pointer.  In practice,
@@ -505,6 +506,12 @@ The low nibble `n` decodes as `[SS:2][OP:2]`:
 | 3 | **MAC** | 2 | `dst[i] += srcA[i] × srcB[i]` (multiply-accumulate in-place) |
 | 4 | **FMA** | 2 | `dst[i] = srcA[i] × srcB[i] + dst[i]` (fused multiply-add) |
 | 5 | **DOTACC** | 4 | `ACC[k] += dot(chunk_k)` for k=0..3 (4-way dot product) |
+| 6 | **TAMAC** | varies | `TACC[i] += widen(srcA[i] × srcB[i])` |
+| 7 | reserved | — | Illegal operation |
+
+`TAMAC` is canonical only as tile×tile (`E1 06`), register broadcast
+(`E5 06 Rn`), or in-place (`ED 06`).  Immediate splat is illegal.  Nonzero
+upper five function bits trap rather than aliasing function 6.
 
 ### TRED Sub-Functions (OP=2, result → ACC)
 
@@ -552,6 +559,150 @@ instead of `0xE`, it accesses extended operations:
 |-------|------|-----------|
 | 0 | **LOAD2D** | Strided gather using TSTRIDE_R/TTILE_H/TTILE_W CSRs |
 | 1 | **STORE2D** | Strided scatter using TSTRIDE_R/TTILE_H/TTILE_W CSRs |
+
+**TACC lifecycle** (EXT.8 prefix followed by canonical tile×tile TSYS):
+
+| Encoding | ISA name | Assembly | Semantics |
+|---|---|---|---|
+| `F8 E3 02` | **TACC.TRY** | `t.acc.try` | Nonblocking claim or idempotent self-claim |
+| `F8 E3 03` | **TACC.CLEAR** | `t.acc.clear` | Require ownership; latch format and clear |
+| `F8 E3 04` | **TACC.LOAD** | `t.acc.load` | Load the canonical image at `TSRC0` |
+| `F8 E3 05` | **TACC.STORE** | `t.acc.store` | Store the canonical image at `TDST` |
+| `F8 E3 06` | **TACC.RELEASE** | `t.acc.release` | Zeroize, invalidate, and release |
+| `F8 E3 07` | reserved | — | Illegal operation |
+
+For lifecycle instructions the embedded MEX source selector must be zero and
+the upper five function bits must be zero.
+
+### Full-width TACC contract
+
+> **Implementation status:** emulator Phase 1 implements this ISA in the
+> Python oracle, native accelerator, and strict-cycle system model.  Portable
+> RTL implementation follows in Phase 2 and must conform to this contract.
+
+There is one 2,048-bit TACC per physical tile engine: four private full-core
+domains and three cluster-shared microcore domains.  Full-core tile state is
+private.  Within a microcluster, cursor/mode/control/source/destination/stride
+CSRs are caller-private shadows, while legacy ACC, TACC, and TACC lifecycle
+metadata belong to the shared engine.
+
+Production full-core IDs are 0–3 and microcluster core-ID bases are 4, 8, and
+12.  `OWNER` always contains the absolute core ID, never a cluster-local
+index.
+
+`TACC_STATUS` (`0x1D`) is read-only.  `MINE` is caller-relative; all other
+fields describe the physical engine.
+
+| Bits | Name | Meaning |
+|---|---|---|
+| `[0]` | `CLAIMED` | One caller owns the engine's TACC |
+| `[1]` | `MINE` | The reading core is that owner |
+| `[2]` | `VALID` | `CLEAR` or `LOAD` established value and format |
+| `[3]` | `DIRTY` | State changed since the last successful `LOAD` or `STORE` |
+| `[4]` | `BUSY` | A TACC operation is in flight |
+| `[7:5]` | `FORMAT_EW` | Latched `TMODE.EW`; zero when invalid |
+| `[8]` | `FORMAT_SIGNED` | Latched integer signedness |
+| `[9]` | `FORCE_PENDING` | Privileged release is queued behind active work |
+| `[15:10]` | reserved | Read as zero |
+| `[20:16]` | `OWNER` | Absolute core ID; 31 means no owner |
+| `[63:21]` | reserved | Read as zero |
+
+`TACC_CTL` (`0x1E`) reads as zero.  Bit 0 is a supervisor-only,
+write-one `FORCE_RELEASE` pulse; bits 63:1 are ignored.  If an operation is
+active, force-release becomes pending and zeroizes immediately after that
+operation's retirement-or-trap boundary, before any new TACC admission.  An
+accepted force pulse has priority over same-cycle TACC admission.
+
+Software owns scheduling policy.  `TACC.TRY` never blocks and a losing claim
+retires normally without mutation; software tests `TACC_STATUS.MINE` and
+chooses whether to retry, pause, back off, or abandon the work.  Ownership
+reserves TACC state only.  Nonowners may still execute stateless and
+legacy-ACC MEX operations.  Current arbitration is equal round-robin; future
+software weights may change admission order but not ISA semantics.
+
+The lifecycle is explicit:
+
+```
+FREE --TRY--> OWNED_INVALID
+OWNED_INVALID --CLEAR--> OWNED_VALID_DIRTY
+OWNED_INVALID --LOAD-->  OWNED_VALID_CLEAN
+OWNED_VALID --TAMAC-->   OWNED_VALID_DIRTY
+OWNED_VALID --STORE-->   OWNED_VALID_CLEAN
+OWNED_* --RELEASE-->     FREE
+```
+
+`CLEAR` and `LOAD` latch `TMODE.EW` and integer signedness.  A later `TAMAC`
+must match them.  Saturation and shift-rounding bits are not part of the TACC
+format.  Legal formats are:
+
+| EW | Inputs | TACC lane | Active image |
+|---:|---:|---|---:|
+| 0 — U8/S8 | 64 | 32-bit integer | 256 bytes |
+| 1 — U16/S16 | 32 | 64-bit integer | 256 bytes |
+| 2 — U32/S32 | 16 | 64-bit integer | 128 bytes |
+| 4 — FP16 | 32 | binary32 | 128 bytes |
+| 5 — BF16 | 32 | binary32 | 128 bytes |
+
+EW 3, 6, and 7 are illegal.  Physical lane `i` begins at bit `i × lane_width`;
+inactive high bits are zero.  Integer products are exact, sign- or
+zero-extended, and accumulated modulo the TACC lane width without saturation.
+Broadcast consumes only the low active-width bits of the selected GPR.
+FP16/BF16 products enter binary32 before one round-to-nearest-even addition
+per lane.  Binary32 subnormals and IEEE signed zero are preserved.  NaN input,
+`0 × infinity`, or invalid infinity addition produces canonical quiet NaN
+`0x7FC00000`, and later `TAMAC` operations leave that lane canonical NaN.
+
+The canonical image is always 256 bytes aligned to 64 bytes and moves as four
+consecutive 64-byte beats.  Lanes and lane bytes are little-endian.  For
+U32/S32, FP16, and BF16, bytes 128–255 store as zero and load as ignored input
+that commits as zero.  Image transfers do not change address or cursor CSRs;
+software must save the format alongside the image.  Internal memory, attached
+RAM, and external RAM use the same image; MMIO is illegal.
+
+Before a transfer, the complete span is checked under the caller's routed
+memory, privilege, HBW, and active-MPU policy.  Misalignment raises
+`IVEC_ALIGN_FAULT`.  A forbidden span faults at its first forbidden byte and
+a store issues no beat.  LOAD is atomic at the final acknowledgement.  An
+external STORE transport failure may retain only acknowledged memory words;
+TACC stays valid and keeps its preinstruction dirty state.  External transfers
+serialize 32 64-bit PHY words; a response at cycle 255 succeeds, while no
+response or a later response becomes `IVEC_BUS_FAULT` at the exact word
+address.
+
+Nonownership, invalid state, format mismatch, unsupported mode, reserved
+encoding, and illegal source selector raise `IVEC_ILLEGAL_OP` before source
+access or mutation and leave `TRAP_ADDR` unchanged.  User-mode force-release
+raises `IVEC_PRIV_FAULT`.  Every trap saves the architectural PC after the
+complete decoded instruction.  Faulting operations do not retire or increment
+`PERF_TILE_OPS`; a losing nonblocking `TACC.TRY` does both.
+
+Interrupts and ordinary traps preserve ownership.  Before task migration,
+software saves dirty state and its format as required, then releases; same-core
+resumption may retain ownership deliberately.  Whole-SoC reset wipes all
+seven domains.  A full-core reset wipes only its paired engine, cluster
+disable/reset wipes only that cluster engine, and individual microcore reset
+cancels only that caller's request.  Supervisor `TACC_CTL.FORCE_RELEASE` is
+dead-owner recovery, not an ordinary lifecycle operation.
+
+Uncontended full-core cycle totals are:
+
+| Operation/path | Instruction-step cycles | Strict-system cycles |
+|---|---:|---:|
+| `CSRR TACC_STATUS` or `CSRW TACC_CTL` | 1 | 1 plus explicit CSR backpressure |
+| `TACC.TRY`, `TACC.CLEAR`, `TACC.RELEASE` | 2 | 2 plus admission stalls |
+| Internal/attached `TACC.LOAD` or `STORE` | 6 | 9 |
+| External image, default one-cycle PHY response | 34 | 37 |
+| External image, two-cycle PHY response | 66 | 69 |
+| Integer tile×tile/in-place `TAMAC`, U8/U16/U32 | 7 / 5 / 4 | base plus transport/admission stalls |
+| Integer broadcast `TAMAC`, U8/U16/U32 | 6 / 4 / 3 | base plus transport/admission stalls |
+| FP16/BF16 tile×tile/in-place `TAMAC` | 7 | base plus transport/admission stalls |
+| FP16/BF16 broadcast `TAMAC` | 6 | base plus transport/admission stalls |
+
+The default external paths serialize all 32 PHY words and record 28
+instruction-step stalls or 31 strict-system stalls; successful completion
+increments `PERF_EXTMEM` by 32.  Microcore MEX adds the existing fixed
+three-cycle cluster-dispatch cost after winning admission.  Contention and PHY
+latency add elapsed stall cycles.
 
 ---
 
@@ -852,6 +1003,8 @@ low nibble of the opcode byte.
 | `0x1A` | **ACC1** | 64 | RW | Accumulator bits 127:64 |
 | `0x1B` | **ACC2** | 64 | RW | Accumulator bits 191:128 |
 | `0x1C` | **ACC3** | 64 | RW | Accumulator bits 255:192 |
+| `0x1D` | **TACC_STATUS** | 64 | R | Caller-relative ownership and physical TACC state |
+| `0x1E` | **TACC_CTL** | 64 | W / R0 | Supervisor bit 0 pulses `FORCE_RELEASE`; reads return zero |
 | | | | | |
 | `0x20` | **COREID** | 64 | R | Core ID (0..N−1, multicore) |
 | `0x21` | **NCORES** | 64 | R | Total number of cores |

@@ -280,8 +280,23 @@ See the ISA Reference for the full instruction list.
 | MULDIV | `MUL R1, R2`, `DIV R3, R4`, `UMOD R5, R6` |
 | I/O | `OUT1 R1`, `INP3 R2` |
 | CSR | `CSRR R1, 0x14`, `CSRW 0x15, R2` |
-| MEX | `T.ADD`, `T.DOT`, `T.SUM`, `T.ZERO`, `T.TRANS` |
+| MEX | `T.ADD`, `T.DOT`, `T.SUM`, `T.ZERO`, `T.TRANS`, `T.AMAC`, `T.ACC.TRY`, `T.ACC.CLEAR`, `T.ACC.LOAD`, `T.ACC.STORE`, `T.ACC.RELEASE` |
 | EXT | `LDI64` (via prefix), `SKIP` conditions |
+
+Full-TACC assembly keeps ownership and waiting visible:
+
+```asm
+    t.acc.try              ; nonblocking; inspect TACC_STATUS.MINE
+    csrr r1, 0x1D          ; TACC_STATUS
+    t.acc.clear            ; latch TMODE and initialize the owned bank
+    t.amac                 ; TSRC0 × TSRC1, widened lane-wise into TACC
+    t.acc.store            ; canonical 256-byte image to TDST
+    t.acc.release          ; zeroize and relinquish ownership
+```
+
+`t.amac r7` selects scalar broadcast from the low active element of R7, and
+`t.amac inplace` uses TDST and TSRC0 as its sources. The lifecycle spellings
+have no implicit wait or scheduler policy.
 
 ### How Two-Pass Assembly Works
 
@@ -408,7 +423,7 @@ fs.save("myimage.img")
 | `scheduler` | Doc | Task scheduler guide |
 | `screens` | Doc | Interactive TUI guide (9 screens) |
 | `storage` | Doc | MP64FS & storage guide |
-| `tile-engine` | Doc | Tile engine overview |
+| `tile-engine` | Doc | Seven-engine tile/TACC topology, lifecycle, explicit waiting, and multi-step kernels |
 | `reference` | Doc | Quick reference card (with DESCRIBE) |
 | `hello-world` | Tutorial | First Forth program |
 | `first-kernel` | Tutorial | Creating a kernel |
@@ -435,6 +450,13 @@ that cover every layer of the system.
 | `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
 | `test_system.py` | 1,316 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto, PQC, network stack, privilege, framebuffer, ext mem, userland |
 | `test_networking.py` | 48 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, TCP, IP stack integration, hardening, end-to-end |
+| `test_tacc_isa.py` | — | Locked encodings, ownership, formats, arithmetic, image, and fault oracle |
+| `test_full_core_tile_engine.py` | — | Four private full-core engines and three cluster-shared domains |
+| `test_tacc_cycle_api.py` | — | Exact lifecycle, arithmetic, transfer, cancellation, and counter timing |
+| `test_tile_engine_memory_arbitration.py` | — | Seven-source memory-port and shared image-stage arbitration |
+| `test_native_tacc_external_phy.py` | — | Native 64-bit external-PHY serialization and fault semantics |
+| `test_timed_tacc_external_phy.py` | — | Strict-cycle external response, timeout, reset, and recovery behavior |
+| `test_tacc_contention.py` | — | Approval-gated exact 1/2/4-worker contention comparison |
 
 ### Test Classes in `test_system.py`
 
@@ -532,6 +554,17 @@ make test-one K=TestKDOS
 # Run a specific test
 make test-one K=test_buffer_create
 ```
+
+Full-TACC development uses the isolated sequential runner:
+
+```bash
+MP64_RUNTIME_NAMESPACE=megapad-full-tacc \
+  make test-sequential TEST_PATH=tests/test_tacc_cycle_api.py
+```
+
+`tests/test_tacc_contention.py` and the reduced-core TACC gate construct
+native worker-backed systems. Obtain resource approval and run each by itself;
+do not overlap either with another test suite.
 
 ### Fast Tests with C++ Accelerator (recommended)
 

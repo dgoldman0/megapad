@@ -1,32 +1,37 @@
 # Extended TPU Specification
 
 **Branch:** `features/extended-tpu-impl`  
-**Status:** Implemented (emulator + RTL)  
+**Status:** Original extended TPU implemented; full TACC is emulator Phase 1,
+RTL Phase 2
 **Author:** auto-generated from design discussion  
 **Depends on:** Base tile engine (mp64_tile.v), ISA v2.1, quad-core SoC
 
-> All features below are implemented in `megapad64.py` (emulator),
-> `rtl/gpu/mp64_tile.v` (RTL), and the BIOS (265 dictionary words),
-> with 754 passing tests unless marked ☐ (not yet implemented).
+> The original extended-TPU features retain their implementation status below.
+> The later full-width TACC extension is implemented in the Python/native
+> emulator and strict-cycle model in Phase 1.  Its portable RTL is deliberately
+> deferred to Phase 2 and must conform to the emulator oracle.
 
 ---
 
 ## 1. Overview
 
-The Extended TPU adds five capability families to the Megapad-64's
+The Extended TPU and full-TACC update add six capability families to the
+Megapad-64's
 existing tile engine and SoC infrastructure:
 
 | Family | Purpose | Area Estimate | Status |
 |--------|---------|---------------|--------|
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
 | **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium | ✅ FP16/BF16 done; ☐ scalar FP32 |
+| **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator Phase 1; ☐ RTL Phase 2 |
 | **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, 32/64-bit CRC tuples | Large | ✅ Implemented (emulator + BIOS + KDOS) |
 | **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | ✅ CSRs + QoS done; DMA design only |
 | **Reliability / BIST** | Memory self-test, tile datapath check, perf counters | Small | ✅ Implemented |
 
 All new features are **backward-compatible** — existing code runs
-unchanged. New instructions use the existing MEX (0xE_) encoding space
-or new CSRs in the 0x40–0x7F range. Crypto accelerators are MMIO-mapped
+unchanged. New instructions use the existing MEX (0xE_) encoding space or an
+EXT prefix, and most new CSRs are in the 0x40–0x7F range.  TACC uses the
+adjacent tile CSRs `0x1D` and `0x1E`.  Crypto accelerators are MMIO-mapped
 peripherals.
 
 ---
@@ -36,8 +41,9 @@ peripherals.
 ### 2.1 TMUL / MAC Family
 
 The existing tile engine has two TMUL functions: lane-wise MUL (funct 0)
-and DOT product (funct 1). We extend with widening MUL, FMA, and
-lane-wise accumulation.
+and DOT product (funct 1).  The original extension adds widening MUL,
+destination-tile MAC/FMA, and DOTACC.  The later full-TACC update assigns
+function 6 to persistent widened accumulation.
 
 | Funct | Mnemonic | Operation | Result |
 |-------|----------|-----------|--------|
@@ -47,6 +53,8 @@ lane-wise accumulation.
 | 3 | **MAC** | `dst[i] += a[i] × b[i]` (in-place accumulate) | `[TDST]` |
 | 4 | **FMA** | `dst[i] = a[i] × b[i] + c[i]` | `[TDST]` (c = TDST) |
 | 5 | **DOTACC** | `ACC[k] += dot(a_chunk_k, b_chunk_k)` for k=0..3 | ACC0–ACC3 |
+| 6 | **TAMAC** | `TACC[i] += widen(a[i] × b[i])` | TACC |
+| 7 | reserved | Illegal operation | — |
 
 **WMUL** doubles the element width in the output: 8→16, 16→32, 32→64.
 Input tile has N elements; output tile has N elements at double width
@@ -178,6 +186,60 @@ This supports loading non-contiguous tiles from 2D images (e.g., an
 
 A new TSYS instruction **LOAD2D** (extended via FAM_EXT) performs
 the strided gather; **STORE2D** does the strided scatter.
+
+### 2.6 Full-Width Persistent TACC
+
+The full-TACC update adds one 2,048-bit accumulator to each physical tile
+engine without widening the ordinary tile lane or memory datapath.  There are
+seven independent domains: one private engine for each of full cores 0–3 and
+one shared engine for each four-microcore cluster.  Microcores retain private
+configuration shadows, while legacy ACC, TACC, and lifecycle metadata belong
+to their shared engine.
+
+TACC is intentionally explicit software-visible state.  Software performs
+`TRY → CLEAR/LOAD → TAMAC... → STORE → RELEASE`; hardware does not infer a
+lifetime, block inside a claim, evict an owner, or spill state.  A losing
+`TACC.TRY` retires normally, and software reads caller-relative
+`TACC_STATUS.MINE` to choose its own retry or backoff policy.  Ownership does
+not reserve the engine from nonowner stateless or legacy-ACC MEX work.
+
+`TAMAC` supports tile×tile (`E1 06`), register broadcast (`E5 06 Rn`), and
+in-place (`ED 06`) forms.  Its integer formats widen U8/S8 products into 32-bit
+lanes and U16/S16 or U32/S32 products into 64-bit lanes.  FP16 and BF16
+products accumulate in binary32 with one round-to-nearest-even feedback
+addition per lane.  U64 and EW 6–7 remain unsupported.
+
+Lifecycle operations use `F8 E3 02` through `F8 E3 06` for `TRY`, `CLEAR`,
+`LOAD`, `STORE`, and `RELEASE`.  `TACC_STATUS` at CSR `0x1D` exposes claimed,
+mine, valid, dirty, busy, latched format, force-pending, and absolute owner.
+Supervisor-only `TACC_CTL.FORCE_RELEASE` at `0x1E` is the explicit dead-owner
+recovery path.
+
+The canonical image is always 256 bytes aligned to 64 bytes and moves as four
+serialized 64-byte beats.  U8/S8 and U16/S16 occupy all 256 bytes; U32/S32,
+FP16, and BF16 occupy the low 128 bytes and normalize the high half to zero.
+External images further serialize into 32 64-bit PHY words.  A response at
+cycle 255 wins; no response or a later response faults at the exact word
+address.  LOAD publishes atomically, while a faulting external STORE may leave
+only its acknowledged prefix visible.
+
+Uncontended emulator Phase-1 image timing is:
+
+| Path | Instruction step | Strict registered system |
+|---|---:|---:|
+| Internal/attached image | 6 cycles | 9 cycles |
+| External, one-cycle PHY words | 34 cycles | 37 cycles |
+| External, two-cycle PHY words | 66 cycles | 69 cycles |
+
+The strict external default records 31 stalls and 32 successful external
+words.  Contention and longer responses add elapsed stall cycles; microcore
+MEX also pays the existing fixed three-cycle post-grant cluster cost.
+
+Interrupts and traps preserve ownership.  Migration requires saving dirty
+state and its format as needed, then releasing.  Reset wipes only its defined
+engine domain; individual microcore reset cancels that caller without wiping
+shared cluster TACC.  The complete normative contract is in
+`docs/isa-reference.md` and the programming guide in `docs/tile-engine.md`.
 
 ---
 
@@ -515,7 +577,8 @@ New per-core CSRs:
 | Range | Family |
 |-------|--------|
 | 0x00–0x09 | CPU core (existing) |
-| 0x10–0x1C | Tile engine (existing) |
+| 0x10–0x1C | Tile engine legacy configuration and ACC |
+| **0x1D–0x1E** | **TACC status and supervisor recovery control** |
 | 0x20–0x25 | Multicore (existing) |
 | 0x30–0x31 | System info (existing) |
 | **0x40–0x43** | **Strided/2D tile addressing** |
@@ -543,8 +606,9 @@ EW  = element width, 3-bit (extended from 2-bit):
 
 ### New MEX Functions (via existing funct codes)
 
-TMUL funct 2–5 (WMUL, MAC, FMA, DOTACC) and TRED funct 5–7 (SUMSQ,
-MINIDX, MAXIDX) fit within the existing 3-bit funct field.
+TMUL funct 2–5 (WMUL, MAC, FMA, DOTACC), TMUL function 6 (TAMAC), and
+TRED funct 5–7 (SUMSQ, MINIDX, MAXIDX) fit within the existing 3-bit
+function field.  TMUL function 7 remains reserved.
 
 ### Extended Tile Ops (FAM_EXT = 0xF)
 
@@ -554,6 +618,16 @@ MINIDX, MAXIDX) fit within the existing 3-bit funct field.
 0xF8: EXTALU SS=2 (imm8)
 0xFC: EXTALU SS=3 (in-place)
 0xF1: EXTSYS (LOAD2D, STORE2D, PREFETCH, FENCE)
+```
+
+Canonical TACC lifecycle instructions are three bytes:
+
+```
+F8 E3 02  TACC.TRY
+F8 E3 03  TACC.CLEAR
+F8 E3 04  TACC.LOAD
+F8 E3 05  TACC.STORE
+F8 E3 06  TACC.RELEASE
 ```
 
 ---
@@ -601,11 +675,9 @@ Each feature gets:
 
 ## 11. Open Questions
 
-1. **FP16 accumulator width**: Should DOT/SUM with fp16 inputs use
-   FP32 or FP64 accumulators? FP32 matches industry practice (TPU,
-   Tensor Cores) but FP64 eliminates all precision concerns for our
-   64-lane tiles. **Recommendation**: FP32 — keeps ACC register
-   interpretation simple (2 × FP32 per ACC slot).
+1. **FP16 accumulator width — resolved**: Legacy DOT/SUM and full TACC use
+   binary32 accumulation for FP16/BF16 inputs.  TACC applies one
+   round-to-nearest-even binary32 feedback addition per active lane.
 
 2. **AES key scheduling**: Pre-expand the key schedule in software
    (saves ~200 LUTs) or in hardware (saves 240 bytes of key schedule
