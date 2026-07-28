@@ -359,8 +359,8 @@ def _sha_handoff_signature(worker_count: int) -> tuple:
         tuple(cpu.pc for cpu in (first, second)),
         cluster.sha_locked,
         cluster.sha_owner,
-        arbiter["grant_counts"]["sha"],
-        arbiter["last_grants"]["sha"],
+        arbiter["grant_counts"]["tile_engine"],
+        arbiter["last_grants"]["tile_engine"],
         arbiter["grant_sequence"],
     )
 
@@ -418,8 +418,8 @@ def _mex_contention_signature(worker_count: int) -> tuple:
         stats.native_rounds,
         system._scheduler_cursor,
         bytes(system.cpu.mem[0x380:0x3C0]),
-        arbiter["grant_counts"]["mex"],
-        arbiter["last_grants"]["mex"],
+        arbiter["grant_counts"]["tile_engine"],
+        arbiter["last_grants"]["tile_engine"],
         arbiter["grant_sequence"],
     )
 
@@ -480,8 +480,8 @@ def _cross_resource_credit_signature(
         mul_loser.pc,
         mex_winner.pc,
         mul_winner.pc,
-        arbiter["grant_counts"]["mex"],
-        arbiter["last_grants"]["mex"],
+        arbiter["grant_counts"]["tile_engine"],
+        arbiter["last_grants"]["tile_engine"],
         arbiter["grant_counts"]["mul_div"],
         arbiter["last_grants"]["mul_div"],
         arbiter["grant_sequence"],
@@ -621,8 +621,8 @@ def _hard_ineligible_credit_signature(
         cluster.crc_locked,
         cluster.crc_owner,
         arbiter["grant_counts"]["crc"],
-        arbiter["grant_counts"]["mex"],
-        arbiter["last_grants"]["mex"],
+        arbiter["grant_counts"]["tile_engine"],
+        arbiter["last_grants"]["tile_engine"],
         arbiter["grant_sequence"],
     )
 
@@ -703,7 +703,7 @@ def _frozen_ineligible_release_signature(
         crc_loser.pc,
         cluster.crc_locked,
         cluster.crc_owner,
-        arbiter["grant_counts"]["mex"],
+        arbiter["grant_counts"]["tile_engine"],
         arbiter["grant_counts"]["crc"],
         arbiter["last_grants"]["crc"],
         arbiter["grant_sequence"],
@@ -1117,7 +1117,7 @@ def test_nonengine_f_modifier_cannot_bypass_bus_arbitration(
                 cluster.crc_try_acquire(core.core_id),
         ),
         (
-            "sha",
+            "tile_engine",
             bytes((0xFB, 0x17)),
             lambda cluster, core:
                 cluster.sha_try_acquire(core.core_id),
@@ -1265,7 +1265,7 @@ def _mex_encoding_identity_signature(
         later.pc,
         tuple(trace),
         arbiter["grant_counts"]["mul_div"],
-        arbiter["grant_counts"]["mex"],
+        arbiter["grant_counts"]["tile_engine"],
         arbiter["grant_sequence"],
     )
     return (
@@ -1439,7 +1439,7 @@ def _bus_opcode_mutation_signature(
         system._scheduler_cursor,
         system.cpu.mem[0x3C0],
         tuple(trace),
-        arbiter["grant_counts"]["mex"],
+        arbiter["grant_counts"]["tile_engine"],
         arbiter["grant_counts"]["bus"],
         arbiter["grant_sequence"],
     )

@@ -44,6 +44,7 @@ from megapad64 import (
     CSR_SB, CSR_SR, CSR_SC, CSR_SW,
     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+    CSR_TACC_STATUS, CSR_TACC_CTL,
     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
     CSR_IVEC_ID, CSR_TRAP_ADDR,
     CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
@@ -65,6 +66,7 @@ from megapad64 import (
     # Micro-cluster constants
     NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
     MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
+    TACC_OWNER_NONE,
     # FP helpers (needed for Python fallback in MEX FP)
     _fp16_to_float, _float_to_fp16, _bf16_to_float, _float_to_bf16,
     _fp_decode, _fp_encode, _fp_is_nan,
@@ -370,6 +372,9 @@ class Megapad64:
         'crc_acc', 'crc_mode',
         'sha_mode', 'sha_msglen_lo', 'sha_msglen_hi',
         'gf_prime_sel',
+        'tacc_owner', 'tacc_valid', 'tacc_dirty',
+        'tacc_format_ew', 'tacc_format_signed',
+        'tacc_busy', 'tacc_force_pending', 'tacc_epoch',
         'core_id', 'num_cores',
     ):
         exec(f"""
@@ -401,6 +406,14 @@ def {_attr}(self, v):
     def acc(self, value):
         for i, v in enumerate(value[:4]):
             self._cs.set_acc(i, u64(v))
+
+    @property
+    def tacc(self):
+        return _TaccProxy(self._cs)
+
+    @tacc.setter
+    def tacc(self, value):
+        self._cs.tacc = bytes(value)
 
     # ── I/O ports ────────────────────────────────────────
 
@@ -860,6 +873,7 @@ def {_attr}(self, v):
         self._cs.tsrc0 = self._cs.tsrc1 = self._cs.tdst = 0
         for i in range(4):
             self._cs.set_acc(i, 0)
+        self._cs.tacc_reset()
         self._cs.tstride_r = 0
         self.tstride_c = 0
         self._cs.ttile_h = 8
@@ -1133,6 +1147,36 @@ class _AccProxy:
     def __iter__(self): return (self._cs.get_acc(i) for i in range(4))
     def __repr__(self): return repr(list(self))
 
+
+class _TaccProxy:
+    """Provide mutable bytearray-like access to native TACC storage."""
+
+    __slots__ = ('_cs',)
+
+    def __init__(self, cs):
+        self._cs = cs
+
+    def __getitem__(self, index):
+        return self._cs.tacc[index]
+
+    def __setitem__(self, index, value):
+        image = bytearray(self._cs.tacc)
+        image[index] = value
+        self._cs.tacc = bytes(image)
+
+    def __len__(self):
+        return len(self._cs.tacc)
+
+    def __iter__(self):
+        return iter(self._cs.tacc)
+
+    def __bytes__(self):
+        return self._cs.tacc
+
+    def __repr__(self):
+        return repr(bytearray(self._cs.tacc))
+
+
 class _PortOutProxy:
     __slots__ = ('_cs',)
     def __init__(self, cs): self._cs = cs
@@ -1181,6 +1225,19 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.tdst = cs.tdst
     for i in range(4):
         py_cpu.acc[i] = cs.get_acc(i)
+    tacc_state = dict(cs.tacc_snapshot())
+    py_cpu.tacc[:] = tacc_state["tacc"]
+    for name in (
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    ):
+        setattr(py_cpu, name, tacc_state[name])
     py_cpu.ivt_base = cs.ivt_base
     py_cpu.ivec_id = cs.ivec_id
     py_cpu.trap_addr = cs.trap_addr
@@ -1251,6 +1308,17 @@ def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     cs.tdst = py_cpu.tdst
     for i in range(4):
         cs.set_acc(i, u64(py_cpu.acc[i]))
+    cs.tacc_restore({
+        "tacc": bytes(py_cpu.tacc),
+        "tacc_owner": py_cpu.tacc_owner,
+        "tacc_valid": py_cpu.tacc_valid,
+        "tacc_dirty": py_cpu.tacc_dirty,
+        "tacc_format_ew": py_cpu.tacc_format_ew,
+        "tacc_format_signed": py_cpu.tacc_format_signed,
+        "tacc_busy": py_cpu.tacc_busy,
+        "tacc_force_pending": py_cpu.tacc_force_pending,
+        "tacc_epoch": py_cpu.tacc_epoch,
+    })
     cs.ivt_base = py_cpu.ivt_base
     cs.ivec_id = py_cpu.ivec_id
     cs.trap_addr = py_cpu.trap_addr
@@ -1324,6 +1392,23 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_ACC1: lambda: cs.get_acc(1),
         CSR_ACC2: lambda: cs.get_acc(2),
         CSR_ACC3: lambda: cs.get_acc(3),
+        CSR_TACC_STATUS: lambda: (
+            (1 if cs.tacc_owner != TACC_OWNER_NONE else 0)
+            | (
+                2
+                if cs.tacc_owner != TACC_OWNER_NONE
+                and cs.tacc_owner == cs.core_id
+                else 0
+            )
+            | (4 if cs.tacc_valid else 0)
+            | (8 if cs.tacc_dirty else 0)
+            | (16 if cs.tacc_busy else 0)
+            | ((cs.tacc_format_ew & 0x7) << 5)
+            | ((cs.tacc_format_signed & 1) << 8)
+            | (0x200 if cs.tacc_force_pending else 0)
+            | ((cs.tacc_owner & 0x1F) << 16)
+        ),
+        CSR_TACC_CTL: lambda: 0,
         CSR_COREID: lambda: cs.core_id,
         CSR_NCORES: lambda: cs.num_cores,
         CSR_MBOX: lambda: cs.ipi_pending_mask(),
@@ -1333,6 +1418,7 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_MEGAPAD_SZ: lambda: 64,
         CSR_CPUID: lambda: 0x4D503634,
         CSR_TSTRIDE_R: lambda: cs.tstride_r,
+        CSR_TSTRIDE_C: lambda: cs.tstride_c,
         CSR_TTILE_H: lambda: cs.ttile_h,
         CSR_TTILE_W: lambda: cs.ttile_w,
         CSR_BIST_STATUS: lambda: cs.bist_status,
@@ -1381,9 +1467,21 @@ def _csr_write_py(cpu, addr: int, val: int):
     elif addr == CSR_ACC1:    cs.set_acc(1, val)
     elif addr == CSR_ACC2:    cs.set_acc(2, val)
     elif addr == CSR_ACC3:    cs.set_acc(3, val)
+    elif addr == CSR_TACC_CTL:
+        if val & 1:
+            if cs.priv_level != 0:
+                raise TrapError(
+                    IVEC_PRIV_FAULT,
+                    "TACC force-release requires supervisor privilege",
+                )
+            if cs.tacc_busy:
+                cs.tacc_force_pending = True
+            else:
+                cs.tacc_reset()
     elif addr == CSR_MBOX:    cs.ipi_send(val)
     elif addr == CSR_IPIACK:  cs.ipi_ack(val)
     elif addr == CSR_TSTRIDE_R: cs.tstride_r = val
+    elif addr == CSR_TSTRIDE_C: cs.tstride_c = val
     elif addr == CSR_TTILE_H: cs.ttile_h = val
     elif addr == CSR_TTILE_W: cs.ttile_w = val
     elif addr == CSR_BIST_CMD:

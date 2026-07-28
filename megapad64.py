@@ -4702,10 +4702,11 @@ class Megapad64:
 # ---------------------------------------------------------------------------
 # Differences from the full Megapad64 core:
 #   - No I-cache (no CSR_ICACHE_*)
-#   - No tile/MEX engine — family 0xE traps as ILLEGAL_OP
+#   - No private tile/MEX engine — clustered callers use the shared engine;
+#     standalone family 0xE traps as ILLEGAL_OP
 #   - No tile datapath self-test (CSR_TILE_SELFTEST/DETAIL → 0)
 #   - MUL/DIV delegated to cluster's shared unit (or trap if standalone)
-#   - Only PERF_CYCLES counter (stalls/tileops/extmem → 0)
+#   - PERF_CYCLES, PERF_STALLS, and PERF_TILEOPS are caller-private
 #   - CPUID returns micro-core variant ID
 #   - Barrier CSRs (0x74/0x75) forwarded to cluster
 #   - BIST CSRs (0x60-0x63) forwarded to cluster
@@ -4727,12 +4728,27 @@ class Megapad64Micro(Megapad64):
 
     SHARED resources via cluster:
     - MUL/DIV unit (round-robin arbitrated)
-    - Tile/MEX engine (round-robin arbitrated)
+    - Tile/MEX ACC and TACC state (round-robin arbitrated)
     - CRC engine (hardware-lock arbitrated; INIT acquires, FIN releases)
+
+    Tile selectors, mode, control, and shape/stride registers remain private
+    to each caller and are sampled only when that caller is granted the
+    physical engine.
 
     SEP and SEX ARE available on micro-cores (zero area cost — they
     only update the psel/xsel pointer, which micro-cores already have).
     """
+
+    _PRIVATE_TILE_CSRS = (
+        CSR_SB, CSR_SR, CSR_SC, CSR_SW,
+        CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
+        CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
+    )
+    _SHARED_ACC_CSRS = (CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3)
+    _SHARED_TACC_CSRS = (CSR_TACC_STATUS, CSR_TACC_CTL)
+    _SHARED_SHA_CSRS = (
+        CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI,
+    )
 
     def __init__(self, mem_size: int = 1 << 20, core_id: int = 0,
                  num_cores: int = NUM_ALL_CORES):
@@ -4782,6 +4798,30 @@ class Megapad64Micro(Megapad64):
 
     # -- MEX (tile engine) — shared via cluster tile engine --
 
+    def _sha_lock_is_owned_by_other(self) -> bool:
+        return bool(
+            self._cluster is not None
+            and self._cluster.sha_locked
+            and not self._cluster.sha_is_owner(self.core_id)
+        )
+
+    @staticmethod
+    def _mex_uses_legacy_acc(n: int, funct_byte: int) -> bool:
+        source_selector = (n >> 2) & 0x3
+        operation = n & 0x3
+        function = (
+            0
+            if source_selector == 0x2
+            else funct_byte & 0x7
+        )
+        return (
+            operation == 0x2
+            or (
+                operation == 0x1
+                and function in (0x1, 0x5)
+            )
+        )
+
     def _exec_mex(self, n: int) -> int:
         """Tile/MEX uses the cluster's shared tile engine.
 
@@ -4792,12 +4832,34 @@ class Megapad64Micro(Megapad64):
             self.fetch8()  # consume the funct byte
             raise TrapError(IVEC_ILLEGAL_OP,
                             "MEX (tile engine) not available on standalone micro-core")
+        funct_byte = self.fetch8()
+        if (
+            self._mex_uses_legacy_acc(n, funct_byte)
+            and self._sha_lock_is_owned_by_other()
+        ):
+            retry_len = 3 if self._ext_modifier >= 0 else 2
+            self.pc = u64(self.pc - retry_len)
+            return 3
+        self.pc = u64(self.pc - 1)
         self._cluster.load_shared_engine_state(self)
         try:
             cycles = super()._exec_mex(n)
         finally:
             self._cluster.store_shared_engine_state(self)
         return cycles + 3  # shared unit arbitration overhead
+
+    def _exec_csr(self, n: int) -> int:
+        """Retry SHA-protected shared CSR accesses without retirement."""
+        csr = self.fetch8()
+        protected = csr in (
+            self._SHARED_ACC_CSRS + self._SHARED_SHA_CSRS
+        )
+        if protected and self._sha_lock_is_owned_by_other():
+            retry_len = 3 if self._ext_modifier >= 0 else 2
+            self.pc = u64(self.pc - retry_len)
+            return 3
+        self.pc = u64(self.pc - 1)
+        return super()._exec_csr(n)
 
     # -- SYS family: trap 1802-heritage sub-ops --
 
@@ -4934,21 +4996,22 @@ class Megapad64Micro(Megapad64):
                     CSR_IVT_BASE, CSR_IE, CSR_PRIV,
                     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
                     CSR_IVEC_ID, CSR_TRAP_ADDR, CSR_MEGAPAD_SZ,
-                    CSR_PERF_CYCLES, CSR_PERF_CTRL):
+                    CSR_PERF_CYCLES, CSR_PERF_STALLS,
+                    CSR_PERF_TILEOPS, CSR_PERF_CTRL):
             return super().csr_read(addr)
-        # Tile engine CSRs — forwarded to shared tile engine via parent
-        if addr in (CSR_SB, CSR_SR, CSR_SC, CSR_SW,
-                    CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
-                    CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
-                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
-                    CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI):
+        if addr in self._PRIVATE_TILE_CSRS:
+            return super().csr_read(addr)
+        # ACC, TACC lifecycle, and SHA transaction state belong to the
+        # cluster engine. Stage them only for this caller-relative read.
+        if addr in (
+            self._SHARED_ACC_CSRS
+            + self._SHARED_TACC_CSRS
+            + self._SHARED_SHA_CSRS
+        ):
             if not self._cluster:
                 return super().csr_read(addr)
             self._cluster.load_shared_engine_state(self)
-            try:
-                return super().csr_read(addr)
-            finally:
-                self._cluster.store_shared_engine_state(self)
+            return super().csr_read(addr)
         if addr == CSR_CPUID:
             return CPUID_MICRO
         # D/DF/Q/T CSRs — not present, always return 0
@@ -4974,7 +5037,7 @@ class Megapad64Micro(Megapad64):
             if self._cluster:
                 return self._cluster.bist_csr_read(addr)
             return 0
-        # Removed CSRs: tile, I-cache, perf stalls/tileops/extmem → 0
+        # Removed CSRs: tile self-test, I-cache, and PERF_EXTMEM → 0.
         return 0
 
     def csr_write(self, addr: int, val: int):
@@ -4987,12 +5050,13 @@ class Megapad64Micro(Megapad64):
                     CSR_IVEC_ID, CSR_PERF_CTRL,
                     CSR_MBOX, CSR_IPIACK):
             return super().csr_write(addr, val)
-        # Tile engine CSRs — forwarded to shared tile engine via parent
-        if addr in (CSR_SB, CSR_SR, CSR_SC, CSR_SW,
-                    CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
-                    CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
-                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
-                    CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI):
+        if addr in self._PRIVATE_TILE_CSRS:
+            return super().csr_write(addr, val)
+        if addr in (
+            self._SHARED_ACC_CSRS
+            + self._SHARED_TACC_CSRS
+            + self._SHARED_SHA_CSRS
+        ):
             if not self._cluster:
                 return super().csr_write(addr, val)
             self._cluster.load_shared_engine_state(self)

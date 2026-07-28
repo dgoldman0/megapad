@@ -48,6 +48,7 @@ from megapad64 import (
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
+    TACC_IMAGE_BYTES, TACC_OWNER_NONE,
 )
 from devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
@@ -71,6 +72,7 @@ _CANONICAL_RUN_STEPS_STATS = Megapad64.run_steps_stats
 _CANONICAL_RUN_STEPS_STATS_IN_SCOPE = (
     Megapad64._run_steps_stats_in_memory_scope
 )
+_CANONICAL_STEP = Megapad64.step
 
 # ---------------------------------------------------------------------------
 #  Memory map constants
@@ -194,7 +196,7 @@ class MicroCluster:
       - 1 KiB scratchpad RAM (cluster-local, not on main bus)
       - Shared MUL/DIV unit (cooperatively arbitrated in native batches)
       - Shared CRC accumulator, mode, and transaction lock
-      - Shared tile and SHA compatibility state
+      - Shared tile-engine ACC/TACC and SHA compatibility state
       - Hardware barrier register
       - BIST controller for scratchpad/multiplier
 
@@ -202,27 +204,62 @@ class MicroCluster:
     register.  When disabled, all micro-cores are held in reset.
     """
 
+    _CALLER_PRIVATE_TILE_FIELDS = (
+        "sb", "sr", "sc", "sw",
+        "tmode", "tctrl",
+        "tsrc0", "tsrc1", "tdst",
+        "tstride_r", "tstride_c", "ttile_h", "ttile_w",
+    )
+    _SHARED_SHA_FIELDS = (
+        "sha_mode", "sha_msglen_lo", "sha_msglen_hi",
+    )
+    _SHARED_TACC_METADATA_FIELDS = (
+        "tacc_owner",
+        "tacc_valid",
+        "tacc_dirty",
+        "tacc_format_ew",
+        "tacc_format_signed",
+        "tacc_busy",
+        "tacc_force_pending",
+        "tacc_epoch",
+    )
+
     @staticmethod
-    def _new_shared_engine_state() -> dict:
+    def _new_shared_engine_state(*, tacc_epoch: int = 0) -> dict:
         return {
-            "sb": 0,
-            "sr": 0,
-            "sc": 0,
-            "sw": 1,
-            "tmode": 0,
-            "tctrl": 0,
-            "tsrc0": 0,
-            "tsrc1": 0,
-            "tdst": 0,
             "acc": [0, 0, 0, 0],
-            "tstride_r": 0,
-            "tstride_c": 0,
-            "ttile_h": 8,
-            "ttile_w": 8,
+            "tacc": bytearray(TACC_IMAGE_BYTES),
+            "tacc_owner": TACC_OWNER_NONE,
+            "tacc_valid": False,
+            "tacc_dirty": False,
+            "tacc_format_ew": 0,
+            "tacc_format_signed": 0,
+            "tacc_busy": False,
+            "tacc_force_pending": False,
+            "tacc_epoch": u64(tacc_epoch),
             "sha_mode": 0,
             "sha_msglen_lo": 0,
             "sha_msglen_hi": 0,
         }
+
+    @classmethod
+    def _copy_shared_engine_state(cls, state: dict) -> dict:
+        """Return a deep copy of one authoritative cluster engine state."""
+        copied = {
+            name: int(state[name])
+            for name in cls._SHARED_SHA_FIELDS
+        }
+        copied["acc"] = [int(value) for value in state["acc"]]
+        copied["tacc"] = bytearray(state["tacc"])
+        for name in cls._SHARED_TACC_METADATA_FIELDS:
+            value = state[name]
+            copied[name] = bool(value) if name in (
+                "tacc_valid",
+                "tacc_dirty",
+                "tacc_busy",
+                "tacc_force_pending",
+            ) else int(value)
+        return copied
 
     def __init__(self, cluster_id: int, id_base: int,
                  n: int = MICRO_PER_CLUSTER,
@@ -394,15 +431,20 @@ class MicroCluster:
 
     def reset_shared_resources(self):
         """Reset cluster engines, transaction locks, and grant cursors."""
+        next_tacc_epoch = u64(
+            int(self._tile_state.get("tacc_epoch", 0)) + 1
+        )
         if self._native_cluster_index is not None:
             self._native_system.reset_cluster_state(
                 self._native_cluster_index
             )
-            return
-        self.reset_crc()
+        else:
+            self.reset_crc()
         self._sha_locked = False
         self._sha_owner = None
-        self._tile_state = self._new_shared_engine_state()
+        self._tile_state = self._new_shared_engine_state(
+            tacc_epoch=next_tacc_epoch
+        )
 
     def crc_try_acquire(self, global_core_id: int) -> bool:
         """Acquire the CRC transaction for a core, or report contention."""
@@ -640,7 +682,7 @@ class MicroCluster:
             return
         self.scratchpad[:] = image
 
-    # -- Shared tile and SHA compatibility bank --
+    # -- Shared tile-engine ACC/TACC and SHA compatibility bank --
 
     def _shared_engine_snapshot(self) -> dict:
         if self._native_cluster_index is not None:
@@ -649,41 +691,52 @@ class MicroCluster:
                     self._native_cluster_index
                 )
             )
-            state["acc"] = list(state["acc"])
-            return state
-        state = dict(self._tile_state)
-        state["acc"] = list(self._tile_state["acc"])
-        return state
+            return self._copy_shared_engine_state(state)
+        return self._copy_shared_engine_state(self._tile_state)
 
     def load_shared_engine_state(self, cpu) -> None:
+        """Stage only physical engine state into one granted microcore.
+
+        Caller-private tile configuration already lives on ``cpu`` and must
+        survive this compatibility boundary unchanged.
+        """
         state = self._shared_engine_snapshot()
-        for name in (
-            "sb", "sr", "sc", "sw", "tmode", "tctrl",
-            "tsrc0", "tsrc1", "tdst", "tstride_r", "tstride_c",
-            "ttile_h", "ttile_w", "sha_mode", "sha_msglen_lo",
-            "sha_msglen_hi",
-        ):
+        for name in self._SHARED_SHA_FIELDS:
             setattr(cpu, name, int(state[name]))
         cpu.acc = list(state["acc"])
+        # Python oracle CPUs own a mutable bytearray, while the native wrapper
+        # exposes a deep immutable bytes snapshot plus a whole-image setter.
+        # Replace the complete image in either case; never mutate a temporary
+        # native getter result in place.
+        current_tacc = cpu.tacc
+        cpu.tacc = (
+            bytearray(state["tacc"])
+            if isinstance(current_tacc, bytearray)
+            else bytes(state["tacc"])
+        )
+        for name in self._SHARED_TACC_METADATA_FIELDS:
+            setattr(cpu, name, state[name])
 
     def store_shared_engine_state(self, cpu) -> None:
+        """Commit physical engine state without absorbing caller shadows."""
         state = {
             name: int(getattr(cpu, name))
-            for name in (
-                "sb", "sr", "sc", "sw", "tmode", "tctrl",
-                "tsrc0", "tsrc1", "tdst", "tstride_r", "tstride_c",
-                "ttile_h", "ttile_w", "sha_mode", "sha_msglen_lo",
-                "sha_msglen_hi",
-            )
+            for name in self._SHARED_SHA_FIELDS
         }
         state["acc"] = [int(value) for value in cpu.acc]
+        state["tacc"] = bytearray(cpu.tacc)
+        for name in self._SHARED_TACC_METADATA_FIELDS:
+            state[name] = getattr(cpu, name)
+        state = self._copy_shared_engine_state(state)
+
         if self._native_cluster_index is not None:
+            native_state = dict(state)
+            native_state["tacc"] = bytes(state["tacc"])
             self._native_system._cluster_tile_update(
                 self._native_cluster_index,
-                state,
+                native_state,
             )
-            return
-        self._tile_state = state
+        self._tile_state = self._copy_shared_engine_state(state)
 
     # -- Enable / disable --
 
@@ -2086,6 +2139,20 @@ class MegapadSystem:
                 return False
         return True
 
+    def _native_system_step_eligible(self) -> bool:
+        """Whether one public step can use the common native coordinator."""
+        if (
+            self.num_clusters == 0
+            or not self._native_system_batch_eligible()
+        ):
+            return False
+        for cpu in self.cores:
+            if "step" in vars(cpu):
+                return False
+            if getattr(type(cpu), "step", None) is not _CANONICAL_STEP:
+                return False
+        return True
+
     def _prepare_native_full_core_batch(self) -> None:
         """Apply compatibility wake checks for every native execution core."""
         for cpu in self.cores:
@@ -2405,9 +2472,10 @@ class MegapadSystem:
         return total_steps, total_cycles
 
     def step(self) -> int:
-        """Execute one instruction on each active core (round-robin).
+        """Execute one coordinated instruction round across active cores.
 
-        Returns total cycles consumed across all cores.
+        Returns the elapsed system cycles, with a minimum compatibility value
+        of one when no core can retire.
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
@@ -2422,6 +2490,19 @@ class MegapadSystem:
     def _step_locked(self) -> int:
         """Execute one deterministic round under the scheduler lock."""
         self._require_cycle_unbounded_execution()
+        if self._native_system_step_eligible():
+            self._prepare_native_full_core_batch()
+            active_cores = sum(
+                1
+                for cpu in self.cores
+                if not cpu.halted and not cpu.idle
+            )
+            if active_cores == 0:
+                self.bus.tick(1)
+                return 1
+            result = self._run_native_full_core_batch(active_cores)
+            return max(result.system_cycles_advanced, 1)
+
         total_cycles = 0
         elapsed_cycles = 0
         pending_error = None

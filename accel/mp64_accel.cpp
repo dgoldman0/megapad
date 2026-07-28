@@ -93,6 +93,9 @@ enum IVEC {
 // Tile EW codes
 enum EW { EW_U8=0, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16 };
 
+static constexpr std::size_t TACC_IMAGE_BYTES = 256;
+static constexpr uint8_t TACC_OWNER_NONE = 31;
+
 // ---------------------------------------------------------------------------
 //  Memory mappings
 // ---------------------------------------------------------------------------
@@ -1480,6 +1483,32 @@ struct CPUState {
     uint64_t tsrc0, tsrc1, tdst;
     uint64_t acc[4];
 
+    // Physical tile-engine accumulator state. This is authoritative for a
+    // full core and transient compatibility staging for a microcore, whose
+    // physical engine state lives in its owning ClusterState.
+    std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
+    uint8_t tacc_owner = TACC_OWNER_NONE;
+    bool tacc_valid = false;
+    bool tacc_dirty = false;
+    uint8_t tacc_format_ew = 0;
+    uint8_t tacc_format_signed = 0;
+    bool tacc_busy = false;
+    bool tacc_force_pending = false;
+    uint64_t tacc_epoch = 0;
+
+    void reset_tacc(bool bump_epoch = true) noexcept {
+        tacc.fill(0);
+        tacc_owner = TACC_OWNER_NONE;
+        tacc_valid = false;
+        tacc_dirty = false;
+        tacc_format_ew = 0;
+        tacc_format_signed = 0;
+        tacc_busy = false;
+        tacc_force_pending = false;
+        if (bump_epoch)
+            tacc_epoch++;
+    }
+
     // System CSRs
     uint64_t ivt_base;
     uint64_t ivec_id;
@@ -1715,6 +1744,14 @@ struct CPUState {
     X(uint64_t, tsrc0) \
     X(uint64_t, tsrc1) \
     X(uint64_t, tdst) \
+    X(uint8_t, tacc_owner) \
+    X(bool, tacc_valid) \
+    X(bool, tacc_dirty) \
+    X(uint8_t, tacc_format_ew) \
+    X(uint8_t, tacc_format_signed) \
+    X(bool, tacc_busy) \
+    X(bool, tacc_force_pending) \
+    X(uint64_t, tacc_epoch) \
     X(uint64_t, ivt_base) \
     X(uint64_t, ivec_id) \
     X(uint64_t, trap_addr) \
@@ -1757,6 +1794,7 @@ struct CPUState {
 struct CPUExecutionCheckpoint {
     std::array<uint64_t, 32> regs{};
     std::array<uint64_t, 4> acc{};
+    std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
     std::array<uint8_t, 8> port_out{};
     std::array<uint8_t, 8> port_in{};
     std::array<uint32_t, 8> port_map{};
@@ -1785,6 +1823,7 @@ struct CPUExecutionCheckpoint {
             std::begin(state.acc),
             std::end(state.acc),
             acc.begin());
+        tacc = state.tacc;
         std::copy(
             std::begin(state.port_out),
             std::end(state.port_out),
@@ -1814,6 +1853,7 @@ struct CPUExecutionCheckpoint {
     void restore(CPUState& state) const {
         std::copy(regs.begin(), regs.end(), std::begin(state.regs));
         std::copy(acc.begin(), acc.end(), std::begin(state.acc));
+        state.tacc = tacc;
         std::copy(
             port_out.begin(),
             port_out.end(),
@@ -2004,11 +2044,10 @@ enum class ClusterResourceKind : uint8_t {
     BUS = 1,
     MUL_DIV = 2,
     CRC = 3,
-    SHA = 4,
-    MEX = 5,
+    TILE_ENGINE = 4,
 };
 
-static constexpr std::size_t CLUSTER_RESOURCE_KIND_COUNT = 6;
+static constexpr std::size_t CLUSTER_RESOURCE_KIND_COUNT = 5;
 
 static const char* cluster_resource_name(
         ClusterResourceKind kind) {
@@ -2019,10 +2058,8 @@ static const char* cluster_resource_name(
             return "mul_div";
         case ClusterResourceKind::CRC:
             return "crc";
-        case ClusterResourceKind::SHA:
-            return "sha";
-        case ClusterResourceKind::MEX:
-            return "mex";
+        case ClusterResourceKind::TILE_ENGINE:
+            return "tile_engine";
         case ClusterResourceKind::NONE:
             return "none";
     }
@@ -2044,24 +2081,23 @@ struct ClusterState {
     int crc_mode = 0;
     std::array<uint8_t, 1024> scratchpad{};
 
-    // Compatibility-visible shared tile/SHA bank. The unbounded scheduler
-    // still executes these complex operations through the Python ISA oracle,
-    // but the state now has one native owner per cluster rather than one copy
-    // per reduced core.
-    uint64_t sb = 0;
-    uint64_t sr = 0;
-    uint64_t sc = 0;
-    uint64_t sw = 1;
-    uint64_t tmode = 0;
-    uint64_t tctrl = 0;
-    uint64_t tsrc0 = 0;
-    uint64_t tsrc1 = 0;
-    uint64_t tdst = 0;
+    // Authoritative physical tile-engine state shared by the cluster.
+    // Configuration, source/destination selectors, and addressing cursors
+    // remain caller-private in each microcore CPUState and are sampled only
+    // when that caller wins admission.
     std::array<uint64_t, 4> acc{};
-    uint64_t tstride_r = 0;
-    uint64_t tstride_c = 0;
-    uint64_t ttile_h = 8;
-    uint64_t ttile_w = 8;
+    std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
+    uint8_t tacc_owner = TACC_OWNER_NONE;
+    bool tacc_valid = false;
+    bool tacc_dirty = false;
+    uint8_t tacc_format_ew = 0;
+    uint8_t tacc_format_signed = 0;
+    bool tacc_busy = false;
+    bool tacc_force_pending = false;
+    uint64_t tacc_epoch = 0;
+
+    // SHA transaction working state shares the engine ACC. The granted
+    // caller's private TSRC0 remains outside this structure.
     int sha_mode = 0;
     uint64_t sha_msglen_lo = 0;
     uint64_t sha_msglen_hi = 0;
@@ -2095,20 +2131,16 @@ struct ClusterState {
     void reset_shared_engines() {
         crc_acc = 0xFFFF'FFFFULL;
         crc_mode = 0;
-        sb = 0;
-        sr = 0;
-        sc = 0;
-        sw = 1;
-        tmode = 0;
-        tctrl = 0;
-        tsrc0 = 0;
-        tsrc1 = 0;
-        tdst = 0;
         acc.fill(0);
-        tstride_r = 0;
-        tstride_c = 0;
-        ttile_h = 8;
-        ttile_w = 8;
+        tacc.fill(0);
+        tacc_owner = TACC_OWNER_NONE;
+        tacc_valid = false;
+        tacc_dirty = false;
+        tacc_format_ew = 0;
+        tacc_format_signed = 0;
+        tacc_busy = false;
+        tacc_force_pending = false;
+        tacc_epoch++;
         sha_mode = 0;
         sha_msglen_lo = 0;
         sha_msglen_hi = 0;
@@ -2121,19 +2153,26 @@ struct ClusterState {
 
     bool local_core_is_eligible(
             ClusterResourceKind kind,
-            int local_core) const {
+            int local_core,
+            bool sha_lock_protected) const {
         if (local_core < 0 || local_core >= core_count)
             return false;
         if (kind == ClusterResourceKind::CRC && crc_locked)
             return local_core == crc_lock_owner;
-        if (kind == ClusterResourceKind::SHA && sha_locked)
+        if (
+            kind == ClusterResourceKind::TILE_ENGINE &&
+            sha_lock_protected &&
+            sha_locked
+        ) {
             return local_core == sha_lock_owner;
+        }
         return true;
     }
 
     std::optional<int> choose(
             ClusterResourceKind kind,
-            const std::vector<int>& candidates) const {
+            const std::vector<int>& candidates,
+            const std::vector<bool>& sha_lock_protected) const {
         const std::size_t resource_index =
             static_cast<std::size_t>(kind);
         if (
@@ -2143,14 +2182,32 @@ struct ClusterState {
             throw std::invalid_argument(
                 "cluster arbitration requires a shared resource");
         }
+        if (candidates.size() != sha_lock_protected.size()) {
+            throw std::invalid_argument(
+                "cluster arbitration candidate metadata is incomplete");
+        }
 
         std::array<bool, 4> pending{};
-        for (int local_core : candidates) {
+        std::array<bool, 4> pending_sha_lock_protected{};
+        for (std::size_t index = 0; index < candidates.size(); index++) {
+            const int local_core = candidates[index];
             if (local_core < 0 || local_core >= core_count) {
                 throw std::out_of_range(
                     "cluster request has an invalid local core");
             }
-            pending[static_cast<std::size_t>(local_core)] = true;
+            const std::size_t local_index =
+                static_cast<std::size_t>(local_core);
+            if (
+                pending[local_index] &&
+                pending_sha_lock_protected[local_index] !=
+                    sha_lock_protected[index]
+            ) {
+                throw std::invalid_argument(
+                    "one core submitted conflicting cluster requests");
+            }
+            pending[local_index] = true;
+            pending_sha_lock_protected[local_index] =
+                sha_lock_protected[index];
         }
 
         const int last = last_grants[resource_index];
@@ -2160,7 +2217,11 @@ struct ClusterState {
                 candidate -= core_count;
             if (
                 pending[static_cast<std::size_t>(candidate)] &&
-                local_core_is_eligible(kind, candidate)
+                local_core_is_eligible(
+                    kind,
+                    candidate,
+                    pending_sha_lock_protected[
+                        static_cast<std::size_t>(candidate)])
             ) {
                 return candidate;
             }
@@ -2171,7 +2232,8 @@ struct ClusterState {
     void commit(
             ClusterResourceKind kind,
             int local_core,
-            int operation) {
+            int operation,
+            bool sha_transaction) {
         const std::size_t resource_index =
             static_cast<std::size_t>(kind);
         if (
@@ -2208,7 +2270,10 @@ struct ClusterState {
                 crc_locked = false;
                 crc_lock_owner = -1;
             }
-        } else if (kind == ClusterResourceKind::SHA) {
+        } else if (
+            kind == ClusterResourceKind::TILE_ENGINE &&
+            sha_transaction
+        ) {
             if (operation == 0x0) {
                 sha_locked = true;
                 sha_lock_owner = local_core;
@@ -5159,6 +5224,7 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_MEGAPAD_SZ:return 64;
         case CSR_CPUID:     return 0x4D503634;  // "MP64"
         case CSR_TSTRIDE_R: return s.tstride_r;
+        case CSR_TSTRIDE_C: return s.tstride_c;
         case CSR_TTILE_H:   return s.ttile_h;
         case CSR_TTILE_W:   return s.ttile_w;
         case CSR_BIST_STATUS:    return s.bist_status;
@@ -5223,6 +5289,7 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
                     s.core_id, static_cast<uint8_t>(val));
             break;
         case CSR_TSTRIDE_R: s.tstride_r = val; break;
+        case CSR_TSTRIDE_C: s.tstride_c = val; break;
         case CSR_TTILE_H:   s.ttile_h = val; break;
         case CSR_TTILE_W:   s.ttile_w = val; break;
         case CSR_BIST_CMD:
@@ -8066,15 +8133,68 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
 struct SystemInstructionTraits {
     bool needs_bus_journal = false;
     bool has_unjournaled_shared_access = false;
+    uint64_t unjournaled_cycle_bound = 0;
 };
+
+static uint64_t native_legacy_mex_cycle_bound(
+        CPUState& state,
+        uint64_t opcode_address,
+        int modifier,
+        int subop) {
+    const int source_selector = (subop >> 2) & 0x3;
+    const int operation = subop & 0x3;
+    const uint8_t function_byte =
+        icache_peek_byte_without_accounting(
+            state,
+            opcode_address + 1);
+    const int function =
+        source_selector == 0x2
+        ? 0
+        : function_byte & 0x7;
+    const int element_width = state.tmode & 0x7;
+    const bool floating = element_width >= EW_FP16;
+
+    // exec_mex() reports extra cycles beyond the ordinary one-cycle issue.
+    // Its native path is data-independent with respect to latency, so decode
+    // the exact bound before allowing an unjournaled tile-memory mutation.
+    uint64_t extra_cycles = 0;
+    if (modifier == 0x8 && operation == 0x0) {
+        extra_cycles = 1;
+    } else if (operation == 0x1) {
+        if (floating) {
+            switch (function) {
+                case 0:
+                    extra_cycles = 1;
+                    break;
+                case 1:
+                case 5:
+                    extra_cycles = 3;
+                    break;
+                case 2:
+                case 3:
+                case 4:
+                    extra_cycles = 2;
+                    break;
+                default:
+                    extra_cycles = 1;
+                    break;
+            }
+        } else if (function == 0) {
+            extra_cycles = 1;
+        }
+    }
+    return 1 + (modifier >= 0 ? 1 : 0) + extra_cycles;
+}
 
 static SystemInstructionTraits classify_system_instruction(
         CPUState& state) {
     uint64_t address = pc(state);
+    uint64_t opcode_address = address;
     uint8_t opcode =
         icache_peek_byte_without_accounting(state, address);
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
+    int modifier = -1;
 
     if (family == 0xF) {
         if (subop == 0x9 || subop == 0xA)
@@ -8082,8 +8202,12 @@ static SystemInstructionTraits classify_system_instruction(
         if (subop == 0xB)
             return {true, false};
 
+        modifier = subop;
+        opcode_address = address + 1;
         opcode =
-            icache_peek_byte_without_accounting(state, address + 1);
+            icache_peek_byte_without_accounting(
+                state,
+                opcode_address);
         family = (opcode >> 4) & 0xF;
         subop = opcode & 0xF;
         if (family == 0xF && (subop == 0x9 || subop == 0xA))
@@ -8128,8 +8252,17 @@ static SystemInstructionTraits classify_system_instruction(
     }
     if (family == 0x9 && subop != 0x0 && subop != 0x8)
         return {true, false};
-    if (family == 0xE)
-        return {false, true};
+    if (family == 0xE) {
+        return {
+            false,
+            true,
+            native_legacy_mex_cycle_bound(
+                state,
+                opcode_address,
+                modifier,
+                subop),
+        };
+    }
     return {};
 }
 
@@ -10449,6 +10582,8 @@ struct PendingClusterRequest {
     ClusterResourceKind resource =
         ClusterResourceKind::NONE;
     int operation = -1;
+    bool sha_transaction = false;
+    bool sha_lock_protected = false;
     int continuation_reason = RUN_EXT_FALLBACK;
     uint8_t encoding_length = 0;
     std::array<uint8_t, 16> encoding{};
@@ -10656,18 +10791,49 @@ static PendingClusterRequest classify_pending_cluster_request(
                 decoded_length = 2;
             }
             break;
+        case 0xD: {
+            const uint8_t csr =
+                read_instruction_byte(address + 1);
+            const bool shared_acc =
+                csr >= CSR_ACC0 && csr <= CSR_ACC3;
+            const bool shared_sha =
+                csr == CSR_SHA_MODE ||
+                csr == CSR_SHA_MSGLEN ||
+                csr == CSR_SHA_MSGLEN_HI;
+            if (shared_acc || shared_sha) {
+                request.resource =
+                    ClusterResourceKind::TILE_ENGINE;
+                request.sha_lock_protected = true;
+                request.operation =
+                    (static_cast<int>(opcode) << 8) |
+                    static_cast<int>(csr);
+                decoded_length = 2;
+            }
+            break;
+        }
         case 0xE: {
-            request.resource = ClusterResourceKind::MEX;
+            request.resource =
+                ClusterResourceKind::TILE_ENGINE;
             request.operation = subop;
             const uint8_t function =
                 read_instruction_byte(address + 1);
             const int source_selector =
                 (subop >> 2) & 0x3;
-            const int mex_operation = subop & 0x3;
+            const int mex_operation =
+                subop & 0x3;
             const int effective_function =
                 source_selector == 0x2
                 ? 0
                 : function & 0x7;
+            request.sha_lock_protected =
+                mex_operation == 0x2 ||
+                (
+                    mex_operation == 0x1 &&
+                    (
+                        effective_function == 0x1 ||
+                        effective_function == 0x5
+                    )
+                );
             decoded_length =
                 2 +
                 (source_selector == 0x1 ? 1 : 0) +
@@ -10701,7 +10867,9 @@ static PendingClusterRequest classify_pending_cluster_request(
                     request.operation <= 0x6
                 ) {
                     request.resource =
-                        ClusterResourceKind::SHA;
+                        ClusterResourceKind::TILE_ENGINE;
+                    request.sha_transaction = true;
+                    request.sha_lock_protected = true;
                     decoded_length =
                         (
                             request.operation == 0x1 ||
@@ -11389,12 +11557,6 @@ static CycleCoreProgress run_cycle_core_once(
     if (!cycle_state.instruction) {
         const SystemInstructionTraits traits =
             classify_system_instruction(core);
-        if (traits.has_unjournaled_shared_access) {
-            throw std::runtime_error(
-                "cycle-bounded execution does not yet support "
-                "MEX shared-memory operations because the selected "
-                "full-core tile topology remains unresolved");
-        }
         const uint64_t remaining =
             cycle_deadline - cycle_state.ready_cycle;
         if (core.profile == CoreProfile::FULL ||
@@ -11407,6 +11569,28 @@ static CycleCoreProgress run_cycle_core_once(
             system.cycle_execution_pending.store(
                 true,
                 std::memory_order_release);
+        }
+        if (
+            traits.has_unjournaled_shared_access &&
+            remaining < traits.unjournaled_cycle_bound
+        ) {
+            // Preserve the original issue boundary as a suspended operation.
+            // The native MEX body runs only once its complete decoded latency
+            // fits, so direct tile-memory writes never need rollback and host
+            // call partitioning cannot consume guest cycles silently.
+            if (!cycle_state.instruction) {
+                throw std::logic_error(
+                    "cycle-bounded legacy MEX lacks a checkpoint");
+            }
+            const uint64_t predicted_completion =
+                checked_cycle_add(
+                    cycle_state.instruction->start_cycle,
+                    traits.unjournaled_cycle_bound,
+                    "cycle-bounded legacy MEX completion");
+            cycle_state.instruction->retire_cycle =
+                predicted_completion;
+            cycle_state.ready_cycle = predicted_completion;
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
         }
     }
 
@@ -12998,13 +13182,21 @@ static SystemBatchResult run_full_core_cycle_batch(
                 continue;
             }
 
-            // One cycle is the largest speculative commit window. A longer
-            // instruction is checkpointed and replayed at its retire cycle,
-            // so timer/input/bus frontiers can never observe future core
-            // state or return it to the caller.
+            // One cycle is the ordinary speculative commit window. Native
+            // legacy MEX cannot be replayed after its direct destination
+            // write, so it may use the complete already-clipped event window.
+            // run_cycle_core_once() checks the exact decoded native latency
+            // before any mutation.
             uint64_t dispatch_deadline =
                 effective_deadline;
-            if (scheduler_cycle < effective_deadline) {
+            const bool direct_legacy_mex =
+                !state.instruction &&
+                classify_system_instruction(core)
+                    .has_unjournaled_shared_access;
+            if (
+                scheduler_cycle < effective_deadline &&
+                !direct_legacy_mex
+            ) {
                 dispatch_deadline = std::min(
                     effective_deadline,
                     checked_cycle_add(
@@ -14919,6 +15111,7 @@ static void run_parallel_core_subfrontier(
                 static_cast<ClusterResourceKind>(
                     resource_index);
             std::vector<int> local_candidates;
+            std::vector<bool> sha_lock_protected;
             for (
                 std::size_t index = 0;
                 index < cluster_requests.size();
@@ -14936,6 +15129,9 @@ static void run_parallel_core_subfrontier(
                     group.candidates.push_back(index);
                     local_candidates.push_back(
                         request->local_core);
+                    sha_lock_protected.push_back(
+                        request->request
+                            .sha_lock_protected);
                 }
             }
             if (group.candidates.empty())
@@ -14943,7 +15139,8 @@ static void run_parallel_core_subfrontier(
             const std::optional<int> local_winner =
                 cluster.choose(
                     group.resource,
-                    local_candidates);
+                    local_candidates,
+                    sha_lock_protected);
             if (local_winner.has_value()) {
                 const auto selected =
                     std::find_if(
@@ -15161,6 +15358,11 @@ static void run_parallel_core_subfrontier(
                     frozen_winner.request.resource &&
                 live->request.operation ==
                     frozen_winner.request.operation &&
+                live->request.sha_transaction ==
+                    frozen_winner.request.sha_transaction &&
+                live->request.sha_lock_protected ==
+                    frozen_winner.request
+                        .sha_lock_protected &&
                 live->request.continuation_reason ==
                     frozen_winner.request
                         .continuation_reason &&
@@ -15174,7 +15376,9 @@ static void run_parallel_core_subfrontier(
                         group.cluster_index)]
                     .local_core_is_eligible(
                         group.resource,
-                        frozen_winner.local_core);
+                        frozen_winner.local_core,
+                        frozen_winner.request
+                            .sha_lock_protected);
         }
 
         if (!stable) {
@@ -15314,7 +15518,8 @@ static void run_parallel_core_subfrontier(
             granted_cluster.commit(
                 granted.request.resource,
                 granted.local_core,
-                granted.request.operation);
+                granted.request.operation,
+                granted.request.sha_transaction);
         } catch (...) {
             granted_cluster = cluster_checkpoint;
             throw;
@@ -16425,6 +16630,164 @@ static ClusterState& checked_cluster_state(
         static_cast<std::size_t>(cluster_index)];
 }
 
+struct PreparedTaccState {
+    std::array<uint8_t, TACC_IMAGE_BYTES> image{};
+    uint8_t owner = TACC_OWNER_NONE;
+    bool valid = false;
+    bool dirty = false;
+    uint8_t format_ew = 0;
+    uint8_t format_signed = 0;
+    bool busy = false;
+    bool force_pending = false;
+    uint64_t epoch = 0;
+};
+
+static bool tacc_ew_is_legal(uint8_t ew) noexcept {
+    return (
+        ew == EW_U8 ||
+        ew == EW_U16 ||
+        ew == EW_U32 ||
+        ew == EW_FP16 ||
+        ew == EW_BF16
+    );
+}
+
+static PreparedTaccState prepare_tacc_state(
+        const py::dict& state) {
+    PreparedTaccState prepared;
+    const std::string image =
+        state["tacc"].cast<py::bytes>();
+    if (image.size() != prepared.image.size()) {
+        throw std::invalid_argument(
+            "TACC image must be exactly 256 bytes");
+    }
+    std::copy(
+        image.begin(),
+        image.end(),
+        prepared.image.begin());
+
+    const int owner =
+        state["tacc_owner"].cast<int>();
+    const int format_ew =
+        state["tacc_format_ew"].cast<int>();
+    const int format_signed =
+        state["tacc_format_signed"].cast<int>();
+    if (owner < 0 || owner > TACC_OWNER_NONE) {
+        throw std::invalid_argument(
+            "TACC owner must fit the absolute five-bit owner field");
+    }
+    if (format_ew < 0 || format_ew > 7) {
+        throw std::invalid_argument(
+            "TACC format EW must fit its three-bit field");
+    }
+    if (format_signed < 0 || format_signed > 1) {
+        throw std::invalid_argument(
+            "TACC format signedness must be zero or one");
+    }
+
+    prepared.owner = static_cast<uint8_t>(owner);
+    prepared.valid = state["tacc_valid"].cast<bool>();
+    prepared.dirty = state["tacc_dirty"].cast<bool>();
+    prepared.format_ew =
+        static_cast<uint8_t>(format_ew);
+    prepared.format_signed =
+        static_cast<uint8_t>(format_signed);
+    prepared.busy = state["tacc_busy"].cast<bool>();
+    prepared.force_pending =
+        state["tacc_force_pending"].cast<bool>();
+    prepared.epoch =
+        state["tacc_epoch"].cast<uint64_t>();
+
+    if (prepared.owner == TACC_OWNER_NONE) {
+        if (
+            prepared.valid ||
+            prepared.dirty ||
+            prepared.format_ew != 0 ||
+            prepared.format_signed != 0
+        ) {
+            throw std::invalid_argument(
+                "unowned TACC state must be invalid and unformatted");
+        }
+    } else {
+        if (
+            !prepared.valid &&
+            (
+                prepared.dirty ||
+                prepared.format_ew != 0 ||
+                prepared.format_signed != 0
+            )
+        ) {
+            throw std::invalid_argument(
+                "invalid TACC state cannot be dirty or formatted");
+        }
+        if (
+            prepared.valid &&
+            !tacc_ew_is_legal(prepared.format_ew)
+        ) {
+            throw std::invalid_argument(
+                "valid TACC state requires a legal element width");
+        }
+        if (
+            prepared.valid &&
+            (
+                prepared.format_ew == EW_FP16 ||
+                prepared.format_ew == EW_BF16
+            ) &&
+            prepared.format_signed != 0
+        ) {
+            throw std::invalid_argument(
+                "floating TACC state cannot set integer signedness");
+        }
+    }
+    if (
+        prepared.force_pending &&
+        !prepared.busy
+    ) {
+        throw std::invalid_argument(
+            "TACC force-pending state requires an active operation");
+    }
+    return prepared;
+}
+
+template <typename State>
+static py::dict snapshot_tacc_state(
+        const State& state) {
+    py::dict snapshot;
+    snapshot["tacc"] = py::bytes(
+        reinterpret_cast<const char*>(
+            state.tacc.data()),
+        state.tacc.size());
+    snapshot["tacc_owner"] = state.tacc_owner;
+    snapshot["tacc_valid"] = state.tacc_valid;
+    snapshot["tacc_dirty"] = state.tacc_dirty;
+    snapshot["tacc_format_ew"] =
+        state.tacc_format_ew;
+    snapshot["tacc_format_signed"] =
+        state.tacc_format_signed;
+    snapshot["tacc_busy"] = state.tacc_busy;
+    snapshot["tacc_force_pending"] =
+        state.tacc_force_pending;
+    snapshot["tacc_epoch"] = state.tacc_epoch;
+    return snapshot;
+}
+
+template <typename State>
+static void commit_tacc_state(
+        State& state,
+        const PreparedTaccState& prepared) noexcept {
+    state.tacc = prepared.image;
+    state.tacc_owner = prepared.owner;
+    state.tacc_valid = prepared.valid;
+    state.tacc_dirty = prepared.dirty;
+    state.tacc_format_ew = prepared.format_ew;
+    state.tacc_format_signed =
+        prepared.format_signed;
+    state.tacc_busy = prepared.busy;
+    state.tacc_force_pending =
+        prepared.force_pending;
+    state.tacc_epoch = prepared.epoch;
+}
+
 static std::vector<StepCallbacks> build_system_step_callbacks(
         const SystemState& system,
         const py::list& callback_sets,
@@ -16711,6 +17074,75 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("tsrc0", &CPUState::tsrc0)
         .def_readwrite("tsrc1", &CPUState::tsrc1)
         .def_readwrite("tdst", &CPUState::tdst)
+        .def_property(
+            "tacc",
+            [](const CPUState& state) {
+                return py::bytes(
+                    reinterpret_cast<const char*>(
+                        state.tacc.data()),
+                    state.tacc.size());
+            },
+            [](CPUState& state, const py::bytes& image) {
+                const std::string bytes = image;
+                if (bytes.size() != state.tacc.size()) {
+                    throw std::invalid_argument(
+                        "TACC image must be exactly 256 bytes");
+                }
+                std::copy(
+                    bytes.begin(),
+                    bytes.end(),
+                    state.tacc.begin());
+            })
+        .def_readwrite(
+            "tacc_owner",
+            &CPUState::tacc_owner)
+        .def_readwrite(
+            "tacc_valid",
+            &CPUState::tacc_valid)
+        .def_readwrite(
+            "tacc_dirty",
+            &CPUState::tacc_dirty)
+        .def_readwrite(
+            "tacc_format_ew",
+            &CPUState::tacc_format_ew)
+        .def_readwrite(
+            "tacc_format_signed",
+            &CPUState::tacc_format_signed)
+        .def_readwrite(
+            "tacc_busy",
+            &CPUState::tacc_busy)
+        .def_readwrite(
+            "tacc_force_pending",
+            &CPUState::tacc_force_pending)
+        .def_readwrite(
+            "tacc_epoch",
+            &CPUState::tacc_epoch)
+        .def(
+            "tacc_snapshot",
+            [](const CPUState& state) {
+                return snapshot_tacc_state(state);
+            })
+        .def(
+            "tacc_restore",
+            [](CPUState& state, const py::dict& snapshot) {
+                const PreparedTaccState prepared =
+                    prepare_tacc_state(snapshot);
+                if (
+                    state.profile == CoreProfile::FULL &&
+                    prepared.owner != TACC_OWNER_NONE &&
+                    prepared.owner != state.core_id
+                ) {
+                    throw std::invalid_argument(
+                        "full-core TACC owner must be that core's absolute ID");
+                }
+                commit_tacc_state(state, prepared);
+            },
+            py::arg("state"))
+        .def(
+            "tacc_reset",
+            [](CPUState& state) {
+                state.reset_tacc();
+            })
         .def_readwrite("ivt_base", &CPUState::ivt_base)
         .def_readwrite("ivec_id", &CPUState::ivec_id)
         .def_readwrite("trap_addr", &CPUState::trap_addr)
@@ -19028,23 +19460,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     checked_cluster_state(
                         system,
                         cluster_index);
-                py::dict state;
-                state["sb"] = cluster.sb;
-                state["sr"] = cluster.sr;
-                state["sc"] = cluster.sc;
-                state["sw"] = cluster.sw;
-                state["tmode"] = cluster.tmode;
-                state["tctrl"] = cluster.tctrl;
-                state["tsrc0"] = cluster.tsrc0;
-                state["tsrc1"] = cluster.tsrc1;
-                state["tdst"] = cluster.tdst;
+                py::dict state =
+                    snapshot_tacc_state(cluster);
                 state["acc"] = cluster.acc;
-                state["tstride_r"] =
-                    cluster.tstride_r;
-                state["tstride_c"] =
-                    cluster.tstride_c;
-                state["ttile_h"] = cluster.ttile_h;
-                state["ttile_w"] = cluster.ttile_w;
                 state["sha_mode"] = cluster.sha_mode;
                 state["sha_msglen_lo"] =
                     cluster.sha_msglen_lo;
@@ -19064,35 +19482,24 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     checked_cluster_state(
                         system,
                         cluster_index);
-                const uint64_t sb =
-                    state["sb"].cast<uint64_t>();
-                const uint64_t sr =
-                    state["sr"].cast<uint64_t>();
-                const uint64_t sc =
-                    state["sc"].cast<uint64_t>();
-                const uint64_t sw =
-                    state["sw"].cast<uint64_t>();
-                const uint64_t tmode =
-                    state["tmode"].cast<uint64_t>();
-                const uint64_t tctrl =
-                    state["tctrl"].cast<uint64_t>();
-                const uint64_t tsrc0 =
-                    state["tsrc0"].cast<uint64_t>();
-                const uint64_t tsrc1 =
-                    state["tsrc1"].cast<uint64_t>();
-                const uint64_t tdst =
-                    state["tdst"].cast<uint64_t>();
+                const PreparedTaccState tacc =
+                    prepare_tacc_state(state);
+                if (
+                    tacc.owner != TACC_OWNER_NONE &&
+                    (
+                        tacc.owner < cluster.global_id_base ||
+                        tacc.owner >=
+                            cluster.global_id_base +
+                                cluster.core_count
+                    )
+                ) {
+                    throw std::invalid_argument(
+                        "cluster TACC owner is outside the cluster's "
+                        "absolute core-ID domain");
+                }
                 const std::array<uint64_t, 4> acc =
                     state["acc"].cast<
                         std::array<uint64_t, 4>>();
-                const uint64_t tstride_r =
-                    state["tstride_r"].cast<uint64_t>();
-                const uint64_t tstride_c =
-                    state["tstride_c"].cast<uint64_t>();
-                const uint64_t ttile_h =
-                    state["ttile_h"].cast<uint64_t>();
-                const uint64_t ttile_w =
-                    state["ttile_w"].cast<uint64_t>();
                 const int sha_mode =
                     state["sha_mode"].cast<int>();
                 if (sha_mode < 0 || sha_mode > 3) {
@@ -19105,20 +19512,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 const uint64_t sha_msglen_hi =
                     state["sha_msglen_hi"].cast<
                         uint64_t>();
-                cluster.sb = sb;
-                cluster.sr = sr;
-                cluster.sc = sc;
-                cluster.sw = sw;
-                cluster.tmode = tmode;
-                cluster.tctrl = tctrl;
-                cluster.tsrc0 = tsrc0;
-                cluster.tsrc1 = tsrc1;
-                cluster.tdst = tdst;
                 cluster.acc = acc;
-                cluster.tstride_r = tstride_r;
-                cluster.tstride_c = tstride_c;
-                cluster.ttile_h = ttile_h;
-                cluster.ttile_w = ttile_w;
+                commit_tacc_state(cluster, tacc);
                 cluster.sha_mode = sha_mode;
                 cluster.sha_msglen_lo = sha_msglen_lo;
                 cluster.sha_msglen_hi = sha_msglen_hi;
@@ -19153,7 +19548,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         cluster.grant_counts[resource_index];
                 }
                 py::dict snapshot;
-                snapshot["schema_version"] = 1;
+                snapshot["schema_version"] = 2;
                 snapshot["cluster_id"] =
                     cluster.cluster_id;
                 snapshot["global_id_base"] =

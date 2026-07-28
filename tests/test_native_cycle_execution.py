@@ -567,31 +567,123 @@ def test_partitioned_sha_round_matches_one_shot_and_eight_dword_loads():
     )
 
 
-def test_cycle_api_rejects_unresolved_full_core_mex_before_mutation():
+def test_cycle_api_executes_mex_on_the_calling_full_core_engine():
     system = _system(assemble("t.add\nhalt"))
     system.cpu.tsrc0 = 0x100
     system.cpu.tsrc1 = 0x140
     system.cpu.tdst = 0x180
-    system.cpu.mem[0x100:0x1C0] = bytes(range(192))
-    before = (
+    system.cpu.mem[0x100:0x140] = bytes(range(64))
+    system.cpu.mem[0x140:0x180] = bytes(range(64, 128))
+
+    result = system.run_cycle_batch(1, max_instructions=1)
+
+    assert result.instructions_executed == 1
+    assert system.cpu.pc == 2
+    assert system.cpu.cycle_count == 1
+    assert bytes(system.cpu.mem[0x180:0x1C0]) == bytes(
+        (left + right) & 0xFF
+        for left, right in zip(range(64), range(64, 128))
+    )
+    assert not system._native_system.cycle_execution_pending
+
+
+def test_cycle_api_defers_long_mex_before_accumulator_mutation():
+    system = _system(assemble("t.dot\nhalt"))
+    system.cpu.tmode = 4
+    system.cpu.tsrc0 = 0x100
+    system.cpu.tsrc1 = 0x140
+    system.cpu.mem[0x100:0x140] = b"\x00\x3c" * 32
+    system.cpu.mem[0x140:0x180] = b"\x00\x3c" * 32
+    system.cpu.acc[0] = 0xA5A5_A5A5
+
+    deferred = system.run_cycle_batch(3, max_instructions=1)
+
+    assert deferred.instructions_executed == 0
+    assert system.cpu.pc == 0
+    assert system.cpu.cycle_count == 0
+    assert system.cpu.acc[0] == 0xA5A5_A5A5
+    assert system._native_system.cycle_execution_pending
+
+    retired = system.run_cycle_batch(1, max_instructions=1)
+
+    assert retired.instructions_executed == 1
+    assert system.cpu.pc == 2
+    assert system.cpu.cycle_count == 4
+    assert system.cpu.acc[0] == 0x4200_0000
+    assert not system._native_system.cycle_execution_pending
+
+    uninterrupted = _system(assemble("t.dot\nhalt"))
+    uninterrupted.cpu.tmode = 4
+    uninterrupted.cpu.tsrc0 = 0x100
+    uninterrupted.cpu.tsrc1 = 0x140
+    uninterrupted.cpu.mem[0x100:0x140] = b"\x00\x3c" * 32
+    uninterrupted.cpu.mem[0x140:0x180] = b"\x00\x3c" * 32
+    uninterrupted.cpu.acc[0] = 0xA5A5_A5A5
+
+    whole = uninterrupted.run_cycle_batch(4, max_instructions=1)
+
+    assert whole.instructions_executed == 1
+    assert (
+        system._native_system.system_cycles,
         system.cpu.pc,
         system.cpu.cycle_count,
-        bytes(system.cpu.mem[0x100:0x1C0]),
-        system._native_system.system_cycles,
-        system._native_system._main_bus_snapshot().next_grant_sequence,
+        tuple(system.cpu.acc),
+    ) == (
+        uninterrupted._native_system.system_cycles,
+        uninterrupted.cpu.pc,
+        uninterrupted.cpu.cycle_count,
+        tuple(uninterrupted.cpu.acc),
     )
 
-    with pytest.raises(RuntimeError, match="tile topology remains unresolved"):
-        system.run_cycle_batch(100, max_instructions=1)
 
+def test_cycle_api_defers_prefixed_mex_before_destination_mutation():
+    program = assemble("t.vshr\nhalt")
+    sliced = _system(program)
+    sliced.cpu.tsrc0 = 0x100
+    sliced.cpu.tsrc1 = 0x140
+    sliced.cpu.tdst = 0x180
+    sliced.cpu.mem[0x100:0x140] = bytes([8]) * 64
+    sliced.cpu.mem[0x140:0x180] = bytes([1]) * 64
+    sliced.cpu.mem[0x180:0x1C0] = bytes([0xA5]) * 64
+
+    deferred = sliced.run_cycle_batch(2, max_instructions=1)
+
+    assert deferred.instructions_executed == 0
+    assert sliced.cpu.pc == 0
+    assert sliced.cpu.cycle_count == 0
+    assert bytes(sliced.cpu.mem[0x180:0x1C0]) == bytes([0xA5]) * 64
+    assert sliced._native_system.cycle_execution_pending
+
+    retired = sliced.run_cycle_batch(1, max_instructions=1)
+
+    assert retired.instructions_executed == 1
+    assert sliced.cpu.pc == 3
+    assert sliced.cpu.cycle_count == 3
+    assert bytes(sliced.cpu.mem[0x180:0x1C0]) == bytes([4]) * 64
+    assert not sliced._native_system.cycle_execution_pending
+
+    whole = _system(program)
+    whole.cpu.tsrc0 = 0x100
+    whole.cpu.tsrc1 = 0x140
+    whole.cpu.tdst = 0x180
+    whole.cpu.mem[0x100:0x140] = bytes([8]) * 64
+    whole.cpu.mem[0x140:0x180] = bytes([1]) * 64
+    whole.cpu.mem[0x180:0x1C0] = bytes([0xA5]) * 64
+
+    uninterrupted = whole.run_cycle_batch(3, max_instructions=1)
+
+    assert uninterrupted.instructions_executed == 1
     assert (
-        system.cpu.pc,
-        system.cpu.cycle_count,
-        bytes(system.cpu.mem[0x100:0x1C0]),
-        system._native_system.system_cycles,
-        system._native_system._main_bus_snapshot().next_grant_sequence,
-    ) == before
-    assert not system._native_system.cycle_execution_pending
+        sliced._native_system.system_cycles,
+        sliced.cpu.pc,
+        sliced.cpu.cycle_count,
+        bytes(sliced.cpu.mem[0x180:0x1C0]),
+    ) == (
+        whole._native_system.system_cycles,
+        whole.cpu.pc,
+        whole.cpu.cycle_count,
+        bytes(whole.cpu.mem[0x180:0x1C0]),
+    )
 
 
 def test_warm_boot_cancels_suspended_execution_and_restores_bus_credit():
@@ -637,7 +729,7 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
 
     bus_state = phase0._main_bus_state(system)
 
-    assert phase0.SCHEMA_VERSION == 10
+    assert phase0.SCHEMA_VERSION == 11
     assert phase0.STATE_SCHEMA_VERSION == 9
     assert bus_state["arbitration_contract"] == {
         "hard_qos_role": (

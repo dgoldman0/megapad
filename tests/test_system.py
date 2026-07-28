@@ -5286,6 +5286,7 @@ class TestMicroCluster(unittest.TestCase):
             (CSR_SC,    0x00200),
             (CSR_SW,    0x0000F),
             (CSR_TSTRIDE_R, 128),
+            (CSR_TSTRIDE_C, 16),
             (CSR_TTILE_H,  4),
             (CSR_TTILE_W, 32),
         ]
@@ -5301,6 +5302,7 @@ class TestMicroCluster(unittest.TestCase):
         self.assertEqual(mc.csr_read(CSR_ACC0),  0x1111_2222_3333_4444)
         self.assertEqual(mc.csr_read(CSR_SB) & 0xF, 0x03)
         self.assertEqual(mc.csr_read(CSR_TSTRIDE_R), 128)
+        self.assertEqual(mc.csr_read(CSR_TSTRIDE_C), 16)
         self.assertEqual(mc.csr_read(CSR_TTILE_H), 4)
         self.assertEqual(mc.csr_read(CSR_TTILE_W), 32)
 

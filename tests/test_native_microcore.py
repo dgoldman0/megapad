@@ -21,13 +21,25 @@ from megapad64 import (
     CLUSTER_SPAD_ADDR,
     CPUID_MICRO,
     CSR_ACC0,
+    CSR_SB,
+    CSR_SC,
     CSR_CPUID,
     CSR_CRC_ACC,
     CSR_CRC_MODE,
+    CSR_SR,
+    CSR_SW,
     CSR_SHA_MODE,
     CSR_SHA_MSGLEN,
     CSR_SHA_MSGLEN_HI,
+    CSR_TCTRL,
+    CSR_TDST,
+    CSR_TMODE,
     CSR_TSRC0,
+    CSR_TSRC1,
+    CSR_TSTRIDE_C,
+    CSR_TSTRIDE_R,
+    CSR_TTILE_H,
+    CSR_TTILE_W,
     IVEC_ILLEGAL_OP,
     Megapad64 as PythonMegapad64,
     Megapad64Micro as PythonMegapad64Micro,
@@ -450,6 +462,223 @@ def test_cluster_mul_uses_independent_equal_round_robin_credit():
     assert snapshot["grant_counts"]["mul_div"] == 2
 
 
+def test_cluster_tile_engine_rotates_across_acc_sha_and_mex_producers():
+    """All legacy ACC producers share one deterministic physical-engine turn."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.sysinfo.write8(0x18, 0x01)
+    cluster = system.clusters[0]
+    acc_writer, sha_instruction, mex_writer, sha_csr_reader = (
+        cluster.cores
+    )
+    programs = (
+        f"csrw {CSR_ACC0}, r1\nhalt",
+        "sha.release\nhalt",
+        "t.add\nhalt",
+        f"csrr r4, {CSR_SHA_MODE}\nhalt",
+    )
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    for cpu, address, source in zip(
+        cluster.cores,
+        (0x100, 0x180, 0x200, 0x280),
+        programs,
+    ):
+        system.load_binary(address, assemble(source))
+        cpu.pc = address
+        cpu.halted = False
+
+    acc_writer.regs[1] = 0xCAFE_BABE
+    mex_writer.tsrc0 = 0x300
+    mex_writer.tsrc1 = 0x340
+    mex_writer.tdst = 0x380
+    system.cpu.mem[0x300:0x340] = bytes(range(64))
+    system.cpu.mem[0x340:0x380] = bytes(
+        reversed(range(64))
+    )
+
+    for grant_count, expected_local in enumerate(
+        (1, 2, 3, 0),
+        start=1,
+    ):
+        stats = system.run_batch_stats(1)
+
+        expected_progress = [0] * len(system.cores)
+        expected_progress[system.num_full_cores + expected_local] = 1
+        assert stats.per_core_instructions == tuple(expected_progress)
+        snapshot = system._native_system._cluster_arbiter_snapshot(0)
+        assert snapshot["schema_version"] == 2
+        assert set(snapshot["last_grants"]) == {
+            "bus",
+            "mul_div",
+            "crc",
+            "tile_engine",
+        }
+        assert snapshot["last_grants"]["tile_engine"] == expected_local
+        assert snapshot["grant_counts"]["tile_engine"] == grant_count
+        cluster.cores[expected_local].halted = True
+
+    assert acc_writer.csr_read(CSR_ACC0) == 0xCAFE_BABE
+    assert sha_csr_reader.regs[4] == 0
+    assert bytes(system.cpu.mem[0x380:0x3C0]) == bytes([63]) * 64
+
+
+def test_cluster_tile_engine_recontention_is_equal_round_robin():
+    """Pending callers receive a second turn only after every peer's first."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.sysinfo.write8(0x18, 0x01)
+    cluster = system.clusters[0]
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    program = assemble(
+        f"csrw {CSR_ACC0}, r1\n"
+        f"csrw {CSR_ACC0}, r1\n"
+        "halt"
+    )
+    for local, cpu in enumerate(cluster.cores):
+        address = 0x100 + local * 0x40
+        system.load_binary(address, program)
+        cpu.pc = address
+        cpu.regs[1] = 0x100 + local
+        cpu.halted = False
+
+    observed = []
+    for expected_local in (1, 2, 3, 0, 1, 2, 3, 0):
+        stats = system.run_batch_stats(1)
+        expected_progress = [0] * len(system.cores)
+        expected_progress[system.num_full_cores + expected_local] = 1
+        assert stats.per_core_instructions == tuple(expected_progress)
+        observed.append(
+            system._native_system
+            ._cluster_arbiter_snapshot(0)["last_grants"]["tile_engine"]
+        )
+
+    assert observed == [1, 2, 3, 0, 1, 2, 3, 0]
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert snapshot["grant_counts"]["tile_engine"] == 8
+
+
+def test_public_step_uses_the_same_cluster_tile_admission_as_batch():
+    """The public execution APIs select the same first common-engine winner."""
+    def configured_system() -> MegapadSystem:
+        candidate = MegapadSystem(
+            ram_size=4096,
+            num_cores=1,
+            num_clusters=1,
+            hbw_size=0,
+            ext_mem_size=0,
+            vram_size=0,
+        )
+        candidate.sysinfo.write8(0x18, 0x01)
+        for cpu in candidate.cores:
+            cpu.halted = True
+            cpu.idle = False
+        for local, cpu in enumerate(candidate.clusters[0].cores):
+            address = 0x100 + local * 0x40
+            candidate.load_binary(
+                address,
+                assemble(f"csrw {CSR_ACC0}, r1\nhalt"),
+            )
+            cpu.pc = address
+            cpu.regs[1] = 0xA0 + local
+            cpu.halted = False
+        return candidate
+
+    stepped = configured_system()
+    batched = configured_system()
+
+    stepped.step()
+    batch = batched.run_batch_stats(4)
+
+    assert batch.instructions_executed == 4
+    assert tuple(cpu.pc for cpu in stepped.cores) == tuple(
+        cpu.pc for cpu in batched.cores
+    )
+    assert stepped.clusters[0].cores[0].csr_read(CSR_ACC0) == (
+        batched.clusters[0].cores[0].csr_read(CSR_ACC0)
+    )
+    assert dict(
+        stepped._native_system._cluster_arbiter_snapshot(0)
+    ) == dict(
+        batched._native_system._cluster_arbiter_snapshot(0)
+    )
+
+
+@pytest.mark.parametrize(
+    "private_csr",
+    (
+        CSR_SB,
+        CSR_SR,
+        CSR_SC,
+        CSR_SW,
+        CSR_TMODE,
+        CSR_TCTRL,
+        CSR_TSRC0,
+        CSR_TSRC1,
+        CSR_TDST,
+        CSR_TSTRIDE_R,
+        CSR_TSTRIDE_C,
+        CSR_TTILE_H,
+        CSR_TTILE_W,
+    ),
+)
+def test_private_tile_csr_instruction_bypasses_engine_admission(
+    private_csr: int,
+) -> None:
+    """A caller shadow can retire beside one admitted shared ACC CSR access."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.sysinfo.write8(0x18, 0x01)
+    private_writer, acc_writer = system.clusters[0].cores[:2]
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    system.load_binary(
+        0x100,
+        assemble(f"csrw {private_csr}, r1\nhalt"),
+    )
+    system.load_binary(
+        0x180,
+        assemble(f"csrw {CSR_ACC0}, r1\nhalt"),
+    )
+    private_writer.pc = 0x100
+    private_writer.regs[1] = 1
+    private_writer.halted = False
+    acc_writer.pc = 0x180
+    acc_writer.regs[1] = 0x1234
+    acc_writer.halted = False
+
+    stats = system.run_batch_stats(2)
+
+    assert stats.per_core_instructions == (0, 1, 1, 0, 0)
+    assert private_writer.csr_read(private_csr) == 1
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert snapshot["grant_counts"]["tile_engine"] == 1
+    assert snapshot["last_grants"]["tile_engine"] == 1
+
+
 def test_cluster_crc_lock_blocks_without_retiring_the_contender():
     """A locked-out CRC request preserves its PC and instruction budget."""
     system = MegapadSystem(
@@ -603,8 +832,209 @@ def test_direct_sha_transaction_blocks_nonowner_release_until_owner_release():
     assert owner.csr_read(CSR_SHA_MODE) == 1
 
 
+def test_sha_lock_protects_acc_producers_but_allows_stateless_mex():
+    """A live digest excludes ACC writers without monopolizing tile ALU work."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.sysinfo.write8(0x18, 0x01)
+    cluster = system.clusters[0]
+    owner, acc_writer, stateless, reducer = cluster.cores
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+
+    system.load_binary(
+        0x100,
+        assemble("sha.init 0\nsha.release\nhalt"),
+    )
+    owner.pc = 0x100
+    owner.halted = False
+    assert system.run_batch_stats(1).instructions_executed == 1
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 0
+    digest = tuple(owner.csr_read(csr) for csr in (
+        CSR_ACC0,
+        CSR_ACC0 + 1,
+        CSR_ACC0 + 2,
+        CSR_ACC0 + 3,
+    ))
+    assert digest[0] == 0x6A09_E667_BB67_AE85
+    owner.halted = True
+
+    system.load_binary(
+        0x180,
+        assemble(f"csrw {CSR_ACC0}, r1\nhalt"),
+    )
+    acc_writer.pc = 0x180
+    acc_writer.regs[1] = 0xDEAD_BEEF
+    acc_writer.halted = False
+
+    system.load_binary(0x200, assemble("t.add\nhalt"))
+    stateless.pc = 0x200
+    stateless.tsrc0 = 0x300
+    stateless.tsrc1 = 0x340
+    stateless.tdst = 0x380
+    stateless.mem[0x300:0x340] = bytes(range(64))
+    stateless.mem[0x340:0x380] = bytes(reversed(range(64)))
+    stateless.halted = False
+
+    system.load_binary(0x280, assemble("t.sum\nhalt"))
+    reducer.pc = 0x280
+    reducer.tsrc0 = 0x3C0
+    reducer.mem[0x3C0:0x400] = bytes([1]) * 64
+    reducer.halted = False
+
+    stateless_result = system.run_batch_stats(1)
+
+    assert stateless_result.per_core_instructions == (0, 0, 0, 1, 0)
+    assert acc_writer.pc == 0x180
+    assert reducer.pc == 0x280
+    assert tuple(owner.csr_read(csr) for csr in (
+        CSR_ACC0,
+        CSR_ACC0 + 1,
+        CSR_ACC0 + 2,
+        CSR_ACC0 + 3,
+    )) == digest
+    assert bytes(stateless.mem[0x380:0x3C0]) == bytes([63]) * 64
+
+    owner.halted = False
+    assert system.run_batch_stats(1).per_core_instructions == (
+        0, 1, 0, 0, 0
+    )
+    assert not cluster.sha_locked
+
+    assert system.run_batch_stats(1).per_core_instructions == (
+        0, 0, 1, 0, 0
+    )
+    assert owner.csr_read(CSR_ACC0) == 0xDEAD_BEEF
+
+
+def test_direct_micro_steps_apply_the_same_sha_acc_exclusion():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.sysinfo.write8(0x18, 0x01)
+    cluster = system.clusters[0]
+    owner, acc_writer, stateless, reducer = cluster.cores
+
+    system.load_binary(
+        0x100,
+        assemble("sha.init 0\nsha.release\nhalt"),
+    )
+    owner.pc = 0x100
+    owner.step()
+    digest = tuple(
+        owner.csr_read(CSR_ACC0 + offset)
+        for offset in range(4)
+    )
+    assert cluster.sha_locked
+
+    system.load_binary(
+        0x180,
+        assemble(f"csrw {CSR_ACC0}, r1\nhalt"),
+    )
+    acc_writer.pc = 0x180
+    acc_writer.regs[1] = 0xDEAD_BEEF
+    acc_writer.step()
+    assert acc_writer.pc == 0x180
+
+    system.load_binary(0x200, assemble("t.add\nhalt"))
+    stateless.pc = 0x200
+    stateless.tsrc0 = 0x300
+    stateless.tsrc1 = 0x340
+    stateless.tdst = 0x380
+    stateless.mem[0x300:0x340] = bytes(range(64))
+    stateless.mem[0x340:0x380] = bytes(reversed(range(64)))
+    stateless.step()
+    assert stateless.pc == 0x202
+    assert bytes(stateless.mem[0x380:0x3C0]) == bytes([63]) * 64
+
+    system.load_binary(0x280, assemble("t.sum\nhalt"))
+    reducer.pc = 0x280
+    reducer.tsrc0 = 0x3C0
+    reducer.mem[0x3C0:0x400] = bytes([1]) * 64
+    reducer.step()
+    assert reducer.pc == 0x280
+    assert tuple(
+        owner.csr_read(CSR_ACC0 + offset)
+        for offset in range(4)
+    ) == digest
+
+    owner.step()
+    assert not cluster.sha_locked
+    acc_writer.step()
+    assert acc_writer.pc == 0x182
+    assert owner.csr_read(CSR_ACC0) == 0xDEAD_BEEF
+
+
+def test_cluster_sha_samples_the_granted_callers_private_tsrc0():
+    payload = bytes(range(64))
+    decoy = bytes(reversed(range(64)))
+    program = assemble("sha.init 0\nsha.round\nhalt")
+
+    full_system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    full_system.load_binary(0x100, program)
+    full_system.cpu.pc = 0x100
+    full_system.cpu.tsrc0 = 0x300
+    full_system.cpu.mem[0x300:0x340] = payload
+    assert full_system.run_batch_stats(2).instructions_executed == 2
+    expected = tuple(
+        full_system.cpu.csr_read(CSR_ACC0 + offset)
+        for offset in range(4)
+    )
+
+    micro_system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    micro_system.sysinfo.write8(0x18, 0x01)
+    cluster = micro_system.clusters[0]
+    owner, sibling = cluster.cores[:2]
+    for cpu in micro_system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    micro_system.load_binary(0x100, program)
+    owner.pc = 0x100
+    owner.tsrc0 = 0x300
+    owner.halted = False
+    sibling.tsrc0 = 0x340
+    owner.mem[0x300:0x340] = payload
+    owner.mem[0x340:0x380] = decoy
+
+    assert micro_system.run_batch_stats(2).instructions_executed == 2
+
+    assert tuple(
+        owner.csr_read(CSR_ACC0 + offset)
+        for offset in range(4)
+    ) == expected
+    assert owner.csr_read(CSR_TSRC0) == 0x300
+    assert sibling.csr_read(CSR_TSRC0) == 0x340
+
+
 def test_native_cluster_state_is_shared_locally_and_isolated_globally():
-    """Scratchpad, tile, and CRC state have exactly one owner per cluster."""
+    """Tile configuration is private while engine results stay cluster-local."""
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -623,7 +1053,8 @@ def test_native_cluster_state_is_shared_locally_and_isolated_globally():
     first.csr_write(CSR_SHA_MSGLEN, 0x808)
     first.csr_write(CSR_SHA_MSGLEN_HI, 1)
 
-    assert sibling.csr_read(CSR_TSRC0) == 0x1234_5678
+    assert first.csr_read(CSR_TSRC0) == 0x1234_5678
+    assert sibling.csr_read(CSR_TSRC0) == 0
     assert sibling.csr_read(CSR_ACC0) == 0xCAFE_BABE
     assert sibling.csr_read(CSR_SHA_MODE) == 2
     assert sibling.csr_read(CSR_SHA_MSGLEN) == 0x808
@@ -677,7 +1108,8 @@ def test_native_cluster_reset_preserves_scratchpad_and_api_boundaries():
 
     system._native_system.reset_cluster_arbitration(0)
 
-    assert sibling.csr_read(CSR_TSRC0) == 0x1234
+    assert first.csr_read(CSR_TSRC0) == 0x1234
+    assert sibling.csr_read(CSR_TSRC0) == 0
     assert sibling.csr_read(CSR_CRC_ACC) == 0x5678
     assert sibling.csr_read(CSR_CRC_MODE) == 2
     assert not cluster.crc_locked
