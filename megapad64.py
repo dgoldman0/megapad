@@ -10,8 +10,9 @@ read byte 0, switch on the F nibble, consume additional bytes as documented.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
 import struct
-from typing import Optional
+from typing import Callable, Optional
 
 # ---------------------------------------------------------------------------
 #  Constants
@@ -182,6 +183,43 @@ TACC_IMAGE_BYTES = 256
 TACC_OWNER_NONE = 31
 TACC_CANONICAL_NAN = 0x7FC0_0000
 TACC_LEGAL_EW = frozenset((EW_U8, EW_U16, EW_U32, EW_FP16, EW_BF16))
+EXTERNAL_PHY_WORD_BYTES = 8
+EXTERNAL_PHY_WORDS_PER_TILE_BEAT = 8
+EXTERNAL_PHY_TIMEOUT_CYCLES = 255
+
+
+@dataclass(frozen=True)
+class ExternalPhyWordRequest:
+    """One 64-bit word launched by an external TACC image transfer.
+
+    ``beat_index`` and ``word_index`` are both zero-based.  ``write_data`` is
+    the little-endian 64-bit STORE payload and is ``None`` for a LOAD.
+    """
+
+    direction: str
+    beat_index: int
+    word_index: int
+    address: int
+    write_data: Optional[int]
+
+
+@dataclass(frozen=True)
+class ExternalPhyWordResponse:
+    """Deterministic response selected for one external PHY word.
+
+    ``latency_cycles`` is measured from word launch and must be at least one.
+    A response at cycle 255 is accepted, while a larger latency loses to the
+    255-cycle timeout.
+    """
+
+    latency_cycles: int = 1
+    error: bool = False
+
+
+ExternalPhyResponsePlan = Callable[
+    [ExternalPhyWordRequest],
+    Optional[ExternalPhyWordResponse],
+]
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -807,6 +845,7 @@ class Megapad64:
         self.tacc_epoch: int = 0
         self._tacc_active_epoch: Optional[int] = None
         self._tacc_fault_cycles: Optional[int] = None
+        self._tacc_transport_stalls: int = 0
         self._tacc_instruction_executed = False
         self._tacc_busy_publish_hook = None
         self._tacc_image_stage_acquire_hook = None
@@ -816,6 +855,11 @@ class Megapad64:
         # check.  It returns None when allowed or (ivec, first_bad_address)
         # when an equivalent routed-memory permission denies the request.
         self._tacc_span_validator: Optional[callable] = None
+        # Host-owned deterministic response selection for external TACC PHY
+        # words.  It intentionally survives architectural CPU reset.
+        self._external_phy_response_plan: Optional[
+            ExternalPhyResponsePlan
+        ] = None
 
         # System CSRs
         self.ivt_base: int  = 0
@@ -852,7 +896,7 @@ class Megapad64:
         self.perf_cycles: int  = 0   # total clock cycles
         self.perf_stalls: int  = 0   # stall cycles (bus/memory wait)
         self.perf_tileops: int = 0   # tile engine operations completed
-        self.perf_extmem: int  = 0   # external memory beats
+        self.perf_extmem: int  = 0   # acknowledged 64-bit external PHY words
 
         # Memory BIST state
         self.bist_status: int    = 0   # 0=idle, 2=pass, 3=fail
@@ -964,6 +1008,20 @@ class Megapad64:
         self._ext_mem = buf
         self._ext_mem_base = base
         self._ext_mem_size = size
+
+    def set_external_phy_response_plan(
+        self,
+        plan: Optional[ExternalPhyResponsePlan],
+    ) -> None:
+        """Install or clear deterministic responses for external TACC words.
+
+        The plan is called exactly once when each 64-bit word is launched.
+        Returning ``None`` means that word never responds.  Passing ``None``
+        here clears the plan and restores successful one-cycle responses.
+        """
+        if plan is not None and not callable(plan):
+            raise TypeError("external PHY response plan must be callable")
+        self._external_phy_response_plan = plan
 
     def attach_vram(self, buf: bytearray, base: int, size: int):
         """Attach dedicated VRAM buffer."""
@@ -1315,6 +1373,8 @@ class Megapad64:
         error = TrapError(ivec, message)
         if self._tacc_fault_cycles is not None:
             error.fault_cycles = self._tacc_fault_cycles
+        if self._tacc_transport_stalls:
+            error.fault_stalls = self._tacc_transport_stalls
         raise error
 
     def _tacc_wipe(self, *, bump_epoch: bool = True):
@@ -1514,8 +1574,194 @@ class Megapad64:
             raise RuntimeError("TACC image-stage release hook is missing")
         return bool(hook(token))
 
-    def _tacc_read_beat(self, addr: int) -> bytearray:
+    def _tacc_external_beat_offset(self, base: int) -> Optional[int]:
+        if self._ext_mem is None:
+            return None
+        region_end = self._ext_mem_base + self._ext_mem_size
+        beat_end = base + (
+            EXTERNAL_PHY_WORD_BYTES * EXTERNAL_PHY_WORDS_PER_TILE_BEAT
+        )
+        if self._ext_mem_base <= base and beat_end <= region_end:
+            return base - self._ext_mem_base
+        return None
+
+    def _external_phy_response(
+        self,
+        request: ExternalPhyWordRequest,
+    ) -> Optional[ExternalPhyWordResponse]:
+        plan = self._external_phy_response_plan
+        response = (
+            ExternalPhyWordResponse()
+            if plan is None
+            else plan(request)
+        )
+        if response is None:
+            return None
+        if not isinstance(response, ExternalPhyWordResponse):
+            raise TypeError(
+                "external PHY response plan must return "
+                "ExternalPhyWordResponse or None"
+            )
+        latency = response.latency_cycles
+        if isinstance(latency, bool) or not isinstance(latency, int):
+            raise TypeError("external PHY latency_cycles must be an integer")
+        if latency < 1:
+            raise ValueError(
+                "external PHY latency_cycles must be at least one"
+            )
+        if not isinstance(response.error, bool):
+            raise TypeError("external PHY error flag must be bool")
+        return response
+
+    def _tacc_account_external_beat(self, elapsed_cycles: int) -> None:
+        # Every issued tile beat owns one of the four architected service
+        # cycles.  Only elapsed PHY time beyond that cycle is a stall.
+        stalls = max(1, elapsed_cycles) - 1
+        self._tacc_transport_stalls += stalls
+        if self._tacc_fault_cycles is not None:
+            self._tacc_fault_cycles += stalls
+
+    def _tacc_external_phy_fault(
+        self,
+        request: ExternalPhyWordRequest,
+        fault_kind: str,
+        elapsed_cycles: int,
+    ) -> None:
+        self._tacc_account_external_beat(elapsed_cycles)
+        if fault_kind == "timeout":
+            message = (
+                "external TACC PHY word received no response within "
+                f"{EXTERNAL_PHY_TIMEOUT_CYCLES} cycles"
+            )
+        else:
+            message = "external TACC PHY word returned an explicit error"
+        try:
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                f"{message} @ {request.address:#018x}",
+                request.address,
+            )
+        except TrapError as error:
+            error.external_phy_fault = fault_kind
+            error.external_phy_request = request
+            raise
+
+    def _tacc_read_external_beat(
+        self,
+        base: int,
+        physical_offset: int,
+        beat_index: int,
+    ) -> bytearray:
+        assert self._ext_mem is not None
+        beat = bytearray(64)
+        elapsed_cycles = 0
+        for word_index in range(EXTERNAL_PHY_WORDS_PER_TILE_BEAT):
+            byte_offset = word_index * EXTERNAL_PHY_WORD_BYTES
+            word_address = u64(base + byte_offset)
+            request = ExternalPhyWordRequest(
+                direction="load",
+                beat_index=beat_index,
+                word_index=word_index,
+                address=word_address,
+                write_data=None,
+            )
+            response = self._external_phy_response(request)
+            if (
+                response is None
+                or response.latency_cycles > EXTERNAL_PHY_TIMEOUT_CYCLES
+            ):
+                self._tacc_external_phy_fault(
+                    request,
+                    "timeout",
+                    elapsed_cycles + EXTERNAL_PHY_TIMEOUT_CYCLES,
+                )
+            assert response is not None
+            elapsed_cycles += response.latency_cycles
+            if response.error:
+                self._tacc_external_phy_fault(
+                    request,
+                    "error",
+                    elapsed_cycles,
+                )
+            memory_offset = physical_offset + byte_offset
+            beat[byte_offset:byte_offset + EXTERNAL_PHY_WORD_BYTES] = (
+                self._ext_mem[
+                    memory_offset:memory_offset + EXTERNAL_PHY_WORD_BYTES
+                ]
+            )
+            if self.perf_enable:
+                self.perf_extmem += 1
+        self._tacc_account_external_beat(elapsed_cycles)
+        return beat
+
+    def _tacc_write_external_beat(
+        self,
+        base: int,
+        physical_offset: int,
+        beat_index: int,
+        data: bytearray,
+    ) -> None:
+        assert self._ext_mem is not None
+        elapsed_cycles = 0
+        for word_index in range(EXTERNAL_PHY_WORDS_PER_TILE_BEAT):
+            byte_offset = word_index * EXTERNAL_PHY_WORD_BYTES
+            word_address = u64(base + byte_offset)
+            word_bytes = bytes(
+                data[byte_offset:byte_offset + EXTERNAL_PHY_WORD_BYTES]
+            )
+            request = ExternalPhyWordRequest(
+                direction="store",
+                beat_index=beat_index,
+                word_index=word_index,
+                address=word_address,
+                write_data=int.from_bytes(word_bytes, "little"),
+            )
+            response = self._external_phy_response(request)
+            if (
+                response is None
+                or response.latency_cycles > EXTERNAL_PHY_TIMEOUT_CYCLES
+            ):
+                self._tacc_external_phy_fault(
+                    request,
+                    "timeout",
+                    elapsed_cycles + EXTERNAL_PHY_TIMEOUT_CYCLES,
+                )
+            assert response is not None
+            elapsed_cycles += response.latency_cycles
+            if response.error:
+                self._tacc_external_phy_fault(
+                    request,
+                    "error",
+                    elapsed_cycles,
+                )
+            memory_offset = physical_offset + byte_offset
+            self._ext_mem[
+                memory_offset:memory_offset + EXTERNAL_PHY_WORD_BYTES
+            ] = word_bytes
+            self._icache_invalidate_span(
+                word_address,
+                EXTERNAL_PHY_WORD_BYTES,
+            )
+            if self.perf_enable:
+                self.perf_extmem += 1
+        self._tacc_account_external_beat(elapsed_cycles)
+
+    def _tacc_read_beat(
+        self,
+        addr: int,
+        *,
+        beat_index: int = 0,
+        external_phy: bool = False,
+    ) -> bytearray:
         base = u64(addr)
+        if external_phy:
+            external_offset = self._tacc_external_beat_offset(base)
+            if external_offset is not None:
+                return self._tacc_read_external_beat(
+                    base,
+                    external_offset,
+                    beat_index,
+                )
         beat = bytearray(64)
         try:
             for offset in range(64):
@@ -1535,8 +1781,25 @@ class Megapad64:
                 base,
             )
 
-    def _tacc_write_beat(self, addr: int, data: bytearray):
+    def _tacc_write_beat(
+        self,
+        addr: int,
+        data: bytearray,
+        *,
+        beat_index: int = 0,
+        external_phy: bool = False,
+    ):
         base = u64(addr)
+        if external_phy:
+            external_offset = self._tacc_external_beat_offset(base)
+            if external_offset is not None:
+                self._tacc_write_external_beat(
+                    base,
+                    external_offset,
+                    beat_index,
+                    data,
+                )
+                return
         # The emulator's routed interface is byte-oriented, but the
         # architectural acknowledgement is one 64-byte tile beat.  Preserve
         # the old physical bytes so a callback fault cannot expose a partial
@@ -2888,6 +3151,7 @@ class Megapad64:
             return 1
 
         self._tacc_fault_cycles = None
+        self._tacc_transport_stalls = 0
         self._ifetch_window_addr = None
         byte0 = self.fetch8()
         f = (byte0 >> 4) & 0xF  # family
@@ -2974,16 +3238,22 @@ class Megapad64:
                 raise TrapError(IVEC_ILLEGAL_OP, "Double EXT prefix")
         except TrapError as exc:
             fault_cycles = getattr(exc, "fault_cycles", None)
+            fault_stalls = getattr(exc, "fault_stalls", 0)
             self._tacc_fault_cycles = None
+            self._tacc_transport_stalls = 0
             if fault_cycles is not None:
                 self.cycle_count += fault_cycles
                 if self.perf_enable:
                     self.perf_cycles += fault_cycles
+            if self.perf_enable:
+                self.perf_stalls += fault_stalls
             raise
 
         # Clear EXT modifier after use
         self._ext_modifier = -1
         self._tacc_fault_cycles = None
+        transport_stalls = self._tacc_transport_stalls
+        self._tacc_transport_stalls = 0
         self.cycle_count += cycles
 
         # Update performance counters
@@ -2992,6 +3262,7 @@ class Megapad64:
             # Stall cycles: any cycles beyond the base 1 for memory ops
             if f in (0x5, 0x8) and cycles > 1:    # MEM, MEMALU
                 self.perf_stalls += cycles - 1
+            self.perf_stalls += transport_stalls
             # Tile ops: MEX family
             if f == 0xE:
                 self.perf_tileops += 1
@@ -3642,9 +3913,15 @@ class Megapad64:
                     range(0, TACC_IMAGE_BYTES, 64),
                     start=1,
                 ):
-                    self._tacc_fault_cycles = 2 + beat_index
+                    self._tacc_fault_cycles = (
+                        2
+                        + beat_index
+                        + self._tacc_transport_stalls
+                    )
                     staged[offset:offset + 64] = self._tacc_read_beat(
-                        u64(base + offset)
+                        u64(base + offset),
+                        beat_index=beat_index - 1,
+                        external_phy=True,
                     )
                     if ew not in (EW_U8, EW_U16) and offset >= 128:
                         staged[offset:offset + 64] = bytes(64)
@@ -3656,7 +3933,7 @@ class Megapad64:
                     if not stage_live:
                         break
                 if not stage_live:
-                    return 4
+                    return 4 + self._tacc_transport_stalls
                 active = self._tacc_active_bytes(ew)
                 staged[active:] = bytes(TACC_IMAGE_BYTES - active)
                 self.tacc[:] = staged
@@ -3667,7 +3944,7 @@ class Megapad64:
             finally:
                 self._tacc_image_stage_release(stage_token)
                 self._tacc_finish_atomic_operation()
-            return 4
+            return 4 + self._tacc_transport_stalls
 
         if funct == 5:  # TACC.STORE
             self._tacc_require_mine(valid=True)
@@ -3692,10 +3969,16 @@ class Megapad64:
                     range(0, TACC_IMAGE_BYTES, 64),
                     start=1,
                 ):
-                    self._tacc_fault_cycles = 2 + beat_index
+                    self._tacc_fault_cycles = (
+                        2
+                        + beat_index
+                        + self._tacc_transport_stalls
+                    )
                     self._tacc_write_beat(
                         u64(base + offset),
                         image[offset:offset + 64],
+                        beat_index=beat_index - 1,
+                        external_phy=True,
                     )
                     stage_live = self._tacc_image_stage_update(
                         stage_token,
@@ -3709,7 +3992,7 @@ class Megapad64:
             finally:
                 self._tacc_image_stage_release(stage_token)
                 self._tacc_finish_atomic_operation()
-            return 4
+            return 4 + self._tacc_transport_stalls
 
         # TACC.RELEASE
         self._tacc_require_mine()

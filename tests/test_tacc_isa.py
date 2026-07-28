@@ -494,8 +494,10 @@ def test_load_uses_routed_attached_memory() -> None:
     _claim_and_clear(cpu, EW_U8)
     cpu.tsrc0 = external_base
 
-    assert _step(cpu, "t.acc.load") == 6
+    assert _step(cpu, "t.acc.load") == 34
     assert bytes(cpu.tacc) == bytes([0xA6]) * 256
+    assert cpu.perf_stalls == 28
+    assert cpu.perf_extmem == 32
 
 
 def test_load_fault_is_atomic_and_reports_faulting_beat() -> None:
