@@ -60,6 +60,26 @@ module mp64_tile (
     output reg         tacc_ctl_done,
     output reg  [2:0]  tacc_ctl_fault,
 
+    // === Legacy ACC and caller-private configuration preload ===
+    output wire [255:0] legacy_acc_state,
+    input  wire [3:0]   legacy_acc_wen,
+    input  wire [255:0] legacy_acc_wdata,
+    input  wire         cfg_load,
+    input  wire [63:0]  cfg_tmode,
+    input  wire [63:0]  cfg_tctrl,
+    input  wire [63:0]  cfg_tsrc0,
+    input  wire [63:0]  cfg_tsrc1,
+    input  wire [63:0]  cfg_tdst,
+    input  wire [63:0]  cfg_sb,
+    input  wire [63:0]  cfg_sr,
+    input  wire [63:0]  cfg_sc,
+    input  wire [63:0]  cfg_sw,
+    input  wire [63:0]  cfg_tstride_r,
+    input  wire [63:0]  cfg_tstride_c,
+    input  wire [63:0]  cfg_ttile_h,
+    input  wire [63:0]  cfg_ttile_w,
+    output wire         acc_zero_consumed,
+
     // === Tile memory port (512-bit, directly to BRAM Port A) ===
     output reg         tile_req,
     output reg  [31:0] tile_addr,
@@ -101,6 +121,9 @@ module mp64_tile (
     reg [63:0] tstride_c;    // column stride in bytes (reserved)
     reg [63:0] ttile_h;      // tile height (rows, 1-8)
     reg [63:0] ttile_w;      // tile width (bytes per row, 1-64)
+
+    assign legacy_acc_state = {acc[3], acc[2], acc[1], acc[0]};
+    assign acc_zero_consumed = tctrl_acc_zero_clear;
 
     // The control transport is independent of MEX.  Landing 2.3 consumes the
     // captured caller and data; for now a supervisor write is acknowledged
@@ -144,10 +167,6 @@ module mp64_tile (
             tdst        <= 64'd0;
             tmode       <= 64'd0;
             tctrl       <= 64'd0;
-            acc[0]      <= 64'd0;
-            acc[1]      <= 64'd0;
-            acc[2]      <= 64'd0;
-            acc[3]      <= 64'd0;
             tile_bank   <= 64'd0;
             tile_row    <= 64'd0;
             tile_col    <= 64'd0;
@@ -162,10 +181,6 @@ module mp64_tile (
             tdst        <= 64'd0;
             tmode       <= 64'd0;
             tctrl       <= 64'd0;
-            acc[0]      <= 64'd0;
-            acc[1]      <= 64'd0;
-            acc[2]      <= 64'd0;
-            acc[3]      <= 64'd0;
             tile_bank   <= 64'd0;
             tile_row    <= 64'd0;
             tile_col    <= 64'd0;
@@ -175,17 +190,27 @@ module mp64_tile (
             ttile_h     <= 64'd8;
             ttile_w     <= 64'd8;
         end else begin
-            if (csr_wen) begin
+            if (cfg_load) begin
+                tmode       <= cfg_tmode;
+                tctrl       <= cfg_tctrl;
+                tsrc0       <= cfg_tsrc0;
+                tsrc1       <= cfg_tsrc1;
+                tdst        <= cfg_tdst;
+                tile_bank   <= cfg_sb;
+                tile_row    <= cfg_sr;
+                tile_col    <= cfg_sc;
+                tile_stride <= cfg_sw;
+                tstride_r   <= cfg_tstride_r;
+                tstride_c   <= cfg_tstride_c;
+                ttile_h     <= cfg_ttile_h;
+                ttile_w     <= cfg_ttile_w;
+            end else if (csr_wen) begin
                 case (csr_addr)
                     CSR_TMODE: tmode       <= csr_wdata;
                     CSR_TCTRL: tctrl       <= csr_wdata;
                     CSR_TSRC0: tsrc0       <= csr_wdata;
                     CSR_TSRC1: tsrc1       <= csr_wdata;
                     CSR_TDST:  tdst        <= csr_wdata;
-                    CSR_ACC0:  acc[0]      <= csr_wdata;
-                    CSR_ACC1:  acc[1]      <= csr_wdata;
-                    CSR_ACC2:  acc[2]      <= csr_wdata;
-                    CSR_ACC3:  acc[3]      <= csr_wdata;
                     CSR_SB:    tile_bank   <= csr_wdata;
                     CSR_SR:    tile_row    <= csr_wdata;
                     CSR_SC:    tile_col    <= csr_wdata;
@@ -202,7 +227,7 @@ module mp64_tile (
             // and therefore wins over clearing the one-shot consumed by the
             // operation that just reached its terminal boundary.
             if (tctrl_acc_zero_clear &&
-                !(csr_wen && csr_addr == CSR_TCTRL))
+                !cfg_load && !(csr_wen && csr_addr == CSR_TCTRL))
                 tctrl[1] <= 1'b0;
         end
     end
@@ -345,8 +370,32 @@ module mp64_tile (
          caller_cancel[caller_slot_reg] ||
          (active_caller_epoch_now != caller_epoch_reg));
 
-    // TACC arithmetic/lifecycle execution is deliberately not present in
-    // Landing 2.1.  Catch the complete assigned/reserved namespaces using
+    wire csr_acc_write =
+        csr_wen && ((csr_addr == CSR_ACC0) || (csr_addr == CSR_ACC1) ||
+                    (csr_addr == CSR_ACC2) || (csr_addr == CSR_ACC3));
+    wire mex_acc_mutation_cycle =
+        !active_cancelled &&
+        (((state == S_COMPUTE) && (op_reg == MEX_TMUL) &&
+          ((funct_reg == TMUL_DOT) || (funct_reg == TMUL_DOTACC))) ||
+         (state == S_REDUCE));
+
+`ifndef SYNTHESIS
+    // The cluster/common-ACC admission point must prevent simultaneous
+    // architectural writers. Keep the priority deterministic in hardware,
+    // but fail loudly in simulation if an integration violates the contract.
+    always @(posedge clk) begin
+        if (rst_n && !engine_reset) begin
+            if ((|legacy_acc_wen) && csr_acc_write)
+                $error("mp64_tile: concurrent legacy ACC restore and CSR write");
+            if (((|legacy_acc_wen) || csr_acc_write) &&
+                mex_acc_mutation_cycle)
+                $error("mp64_tile: concurrent external/CSR and MEX ACC mutation");
+        end
+    end
+`endif
+
+    // TACC arithmetic/lifecycle execution is deliberately not present before
+    // Landing 2.3. Catch the complete assigned/reserved namespaces using
     // both transports so no malformed variant can fall through to a legacy
     // low-three-bit operation and touch memory or legacy ACC.
     wire intercept_tacc_tmul =
@@ -393,10 +442,24 @@ module mp64_tile (
 
     // Source B selection
     reg [511:0] src_b_selected;
+    reg [511:0] gpr_broadcast;
     always @(*) begin
+        case (mode_ew)
+            TMODE_8:
+                gpr_broadcast = {64{gpr_val_reg[7:0]}};
+            TMODE_16, TMODE_FP16, TMODE_BF16:
+                gpr_broadcast = {32{gpr_val_reg[15:0]}};
+            TMODE_32:
+                gpr_broadcast = {16{gpr_val_reg[31:0]}};
+            TMODE_64:
+                gpr_broadcast = {8{gpr_val_reg[63:0]}};
+            default:
+                gpr_broadcast = 512'd0;
+        endcase
+
         case (ss_reg)
             2'd0: src_b_selected = tile_b;
-            2'd1: src_b_selected = {8{gpr_val_reg}};
+            2'd1: src_b_selected = gpr_broadcast;
             2'd2: src_b_selected = {64{imm8_reg}};
             2'd3: src_b_selected = tile_a;      // in-place
             default: src_b_selected = 512'd0;
@@ -1983,6 +2046,10 @@ module mp64_tile (
             request_engine_epoch_reg <= 8'd0;
             caller_epoch_reg <= 8'd0;
             caller_slot_reg  <= 2'd0;
+            acc[0]        <= 64'd0;
+            acc[1]        <= 64'd0;
+            acc[2]        <= 64'd0;
+            acc[3]        <= 64'd0;
         end else if (engine_reset) begin
             state         <= S_IDLE;
             mex_done      <= 1'b0;
@@ -1997,6 +2064,10 @@ module mp64_tile (
             tctrl_accumulate_reg <= 1'b0;
             tctrl_acc_zero_reg   <= 1'b0;
             tctrl_acc_zero_clear <= 1'b0;
+            acc[0]        <= 64'd0;
+            acc[1]        <= 64'd0;
+            acc[2]        <= 64'd0;
+            acc[3]        <= 64'd0;
             if (!engine_reset_seen)
                 engine_epoch <= engine_epoch + 8'd1;
             engine_reset_seen <= 1'b1;
@@ -2008,6 +2079,27 @@ module mp64_tile (
             ext_tile_req <= 1'b0;
             ext_tile_wen <= 1'b0;
             tctrl_acc_zero_clear <= 1'b0;
+
+            // ACC has one procedural owner. Cluster context restores and
+            // direct CSR writes are lane-masked here; terminal MEX updates
+            // later in this block deliberately take priority.
+            if (legacy_acc_wen[0])
+                acc[0] <= legacy_acc_wdata[0*64 +: 64];
+            if (legacy_acc_wen[1])
+                acc[1] <= legacy_acc_wdata[1*64 +: 64];
+            if (legacy_acc_wen[2])
+                acc[2] <= legacy_acc_wdata[2*64 +: 64];
+            if (legacy_acc_wen[3])
+                acc[3] <= legacy_acc_wdata[3*64 +: 64];
+            if (csr_wen) begin
+                case (csr_addr)
+                    CSR_ACC0: acc[0] <= csr_wdata;
+                    CSR_ACC1: acc[1] <= csr_wdata;
+                    CSR_ACC2: acc[2] <= csr_wdata;
+                    CSR_ACC3: acc[3] <= csr_wdata;
+                    default: ;
+                endcase
+            end
 
             if (active_cancelled) begin
                 // Cancellation is terminal but non-retiring.  Requests already

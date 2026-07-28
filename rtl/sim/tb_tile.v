@@ -61,6 +61,8 @@ module tb_tile;
     wire [63:0] tacc_status_raw;
     wire        tacc_ctl_done;
     wire [2:0]  tacc_ctl_fault;
+    wire [255:0] legacy_acc_state;
+    wire         acc_zero_consumed;
 
     // === Tile memory port — simple 1-cycle BRAM model ===
     wire        tile_req;
@@ -134,6 +136,24 @@ module tb_tile;
         .tacc_ctl_wdata(tacc_ctl_wdata),
         .tacc_ctl_done (tacc_ctl_done),
         .tacc_ctl_fault(tacc_ctl_fault),
+        .legacy_acc_state(legacy_acc_state),
+        .legacy_acc_wen(4'd0),
+        .legacy_acc_wdata(256'd0),
+        .cfg_load      (1'b0),
+        .cfg_tmode     (64'd0),
+        .cfg_tctrl     (64'd0),
+        .cfg_tsrc0     (64'd0),
+        .cfg_tsrc1     (64'd0),
+        .cfg_tdst      (64'd0),
+        .cfg_sb        (64'd0),
+        .cfg_sr        (64'd0),
+        .cfg_sc        (64'd0),
+        .cfg_sw        (64'd0),
+        .cfg_tstride_r (64'd0),
+        .cfg_tstride_c (64'd0),
+        .cfg_ttile_h   (64'd0),
+        .cfg_ttile_w   (64'd0),
+        .acc_zero_consumed(acc_zero_consumed),
         .tile_req      (tile_req),
         .tile_addr     (tile_addr),
         .tile_wen      (tile_wen),
@@ -1170,11 +1190,54 @@ module tb_tile;
         expected_tile = {8{64'hDEAD_BEEF_CAFE_F00D}};
         check512(tile_mem[2], expected_tile, "VSEL 64-bit all-select");
 
-        // ====== TEST 54: Landing 2.1 TACC leaf plumbing ======
+        // ====== TEST 54: scalar broadcast uses only the low active element ======
+        $display("\n=== TEST 54: low-element scalar broadcast ===");
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TCTRL, 64'd0);
+
+        tile_mem[0] = {64{8'h01}};
+        csr_write(CSR_TMODE, TMODE_8);
+        mex_dispatch(2'd1, MEX_TMUL, TMUL_MUL,
+                     64'hA7_A6_A5_A4_A3_A2_A1_03, 8'd0);
+        check512(tile_mem[2], {64{8'h03}}, "broadcast low EW8 element");
+
+        tile_mem[0] = {32{16'h0001}};
+        csr_write(CSR_TMODE, TMODE_16);
+        mex_dispatch(2'd1, MEX_TMUL, TMUL_MUL,
+                     64'hA3A2_A1A0_BEEF_0003, 8'd0);
+        check512(tile_mem[2], {32{16'h0003}}, "broadcast low EW16 element");
+
+        tile_mem[0] = {16{32'h0000_0001}};
+        csr_write(CSR_TMODE, TMODE_32);
+        mex_dispatch(2'd1, MEX_TMUL, TMUL_MUL,
+                     64'hDEAD_BEEF_0000_0003, 8'd0);
+        check512(tile_mem[2], {16{32'h0000_0003}}, "broadcast low EW32 element");
+
+        tile_mem[0] = {8{64'h0000_0000_0000_0001}};
+        csr_write(CSR_TMODE, TMODE_64);
+        mex_dispatch(2'd1, MEX_TMUL, TMUL_MUL,
+                     64'h0123_4567_89AB_CDEF, 8'd0);
+        check512(tile_mem[2], {8{64'h0123_4567_89AB_CDEF}},
+                 "broadcast full EW64 element");
+
+        tile_mem[0] = {32{16'h3C00}};  // FP16 1.0
+        csr_write(CSR_TMODE, TMODE_FP16);
+        mex_dispatch(2'd1, MEX_TMUL, TMUL_MUL,
+                     64'hDEAD_BEEF_CAFE_4000, 8'd0);  // low FP16 = 2.0
+        check512(tile_mem[2], {32{16'h4000}}, "broadcast low FP16 element");
+
+        tile_mem[0] = {32{16'h3F80}};  // BF16 1.0
+        csr_write(CSR_TMODE, TMODE_BF16);
+        mex_dispatch(2'd1, MEX_TMUL, TMUL_MUL,
+                     64'hDEAD_BEEF_CAFE_4000, 8'd0);  // low BF16 = 2.0
+        check512(tile_mem[2], {32{16'h4000}}, "broadcast low BF16 element");
+
+        // ====== TEST 55: Landing 2.1 TACC leaf plumbing ======
         // Arithmetic/lifecycle execution lands later.  For now the leaf must
         // fail closed, preserve the full function byte, avoid legacy memory
         // effects, de-duplicate held control requests, and cancel stale work.
-        $display("\n=== TEST 54: TACC plumbing and cancellation ===");
+        $display("\n=== TEST 55: TACC plumbing and cancellation ===");
         begin : tacc_plumbing
             integer ctl_done_count;
             integer stale_done_count;

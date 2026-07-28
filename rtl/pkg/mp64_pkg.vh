@@ -128,6 +128,7 @@ localparam [4:0] CPU_SHA_LOAD   = 5'd18; // SHA-2: loading W from tile memory
 localparam [4:0] CPU_SHA_WAIT   = 5'd19; // SHA-2: waiting for compression engine
 localparam [4:0] CPU_GF_WAIT    = 5'd20; // Field ALU: waiting for GF engine
 localparam [4:0] CPU_CSR_WAIT   = 5'd21; // acknowledged accelerator CSR access
+localparam [4:0] CPU_TILE_CSR_WAIT = 5'd22; // acknowledged shared-engine CSR
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;
@@ -172,6 +173,7 @@ localparam [3:0] ISA_SHA_PAD   = 4'd2;   // SHA.PAD
 localparam [3:0] ISA_SHA_DIN   = 4'd3;   // SHA.DIN Rd, Rs
 localparam [3:0] ISA_SHA_DOUT  = 4'd4;   // SHA.DOUT Rd, Rs
 localparam [3:0] ISA_SHA_FINAL = 4'd5;   // SHA.FINAL
+localparam [3:0] ISA_SHA_RELEASE = 4'd6; // SHA.RELEASE
 
 // --- EXT.CRYPTO CSR addresses ---
 localparam [7:0] CSR_CRC_ACC  = 8'h80;

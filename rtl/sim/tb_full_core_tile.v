@@ -144,6 +144,14 @@ module tb_full_core_tile;
         force u_soc.core_csr_wen[1] = 1'b0;
         force u_soc.core_csr_wen[2] = 1'b0;
         force u_soc.core_csr_wen[3] = 1'b0;
+        force u_soc.core_legacy_acc_wen[0] = 4'b0000;
+        force u_soc.core_legacy_acc_wen[1] = 4'b0000;
+        force u_soc.core_legacy_acc_wen[2] = 4'b0000;
+        force u_soc.core_legacy_acc_wen[3] = 4'b0000;
+        force u_soc.core_legacy_acc_wdata[0] = 256'd0;
+        force u_soc.core_legacy_acc_wdata[1] = 256'd0;
+        force u_soc.core_legacy_acc_wdata[2] = 256'd0;
+        force u_soc.core_legacy_acc_wdata[3] = 256'd0;
         force u_soc.core_mex_valid[0] = 1'b0;
         force u_soc.core_mex_valid[1] = 1'b0;
         force u_soc.core_mex_valid[2] = 1'b0;
@@ -227,6 +235,87 @@ module tb_full_core_tile;
               u_soc.core_csr_rdata[2] == 64'h3000);
         check("core 3 has private tile CSR state",
               u_soc.core_csr_rdata[3] == 64'h4000);
+
+        // The tile bank is the sole persistent legacy ACC.  Seed each
+        // physical engine through its direct CSR port and prove that the
+        // paired CPU sees that same state without a second CPU-local copy.
+        force u_soc.core_csr_addr[0] = CSR_ACC0;
+        force u_soc.core_csr_addr[1] = CSR_ACC0;
+        force u_soc.core_csr_addr[2] = CSR_ACC0;
+        force u_soc.core_csr_addr[3] = CSR_ACC0;
+        force u_soc.core_csr_wdata[0] = 64'hA000_0000_0000_0000;
+        force u_soc.core_csr_wdata[1] = 64'hA100_0000_0000_0001;
+        force u_soc.core_csr_wdata[2] = 64'hA200_0000_0000_0002;
+        force u_soc.core_csr_wdata[3] = 64'hA300_0000_0000_0003;
+        force u_soc.core_csr_wen[0] = 1'b1;
+        force u_soc.core_csr_wen[1] = 1'b1;
+        force u_soc.core_csr_wen[2] = 1'b1;
+        force u_soc.core_csr_wen[3] = 1'b1;
+        clock;
+        force u_soc.core_csr_wen[0] = 1'b0;
+        force u_soc.core_csr_wen[1] = 1'b0;
+        force u_soc.core_csr_wen[2] = 1'b0;
+        force u_soc.core_csr_wen[3] = 1'b0;
+        #1;
+        check("direct tile ACC writes reach all four CPU-facing states",
+              u_soc.g_core[0].u_cpu.legacy_acc_state[63:0]
+                  == 64'hA000_0000_0000_0000
+              && u_soc.g_core[1].u_cpu.legacy_acc_state[63:0]
+                  == 64'hA100_0000_0000_0001
+              && u_soc.g_core[2].u_cpu.legacy_acc_state[63:0]
+                  == 64'hA200_0000_0000_0002
+              && u_soc.g_core[3].u_cpu.legacy_acc_state[63:0]
+                  == 64'hA300_0000_0000_0003);
+        check("simultaneous tile ACC CSR seeds remain engine-private",
+              u_soc.core_csr_rdata[0] == 64'hA000_0000_0000_0000
+              && u_soc.core_csr_rdata[1] == 64'hA100_0000_0000_0001
+              && u_soc.core_csr_rdata[2] == 64'hA200_0000_0000_0002
+              && u_soc.core_csr_rdata[3] == 64'hA300_0000_0000_0003);
+
+        // Drive the CPU's legacy/SHA masked writeback boundary.  Each core
+        // selects a different lane; exact whole-bank checks prove the mask,
+        // the return path, and isolation between all four private engines.
+        force u_soc.core_legacy_acc_wdata[0] =
+            {64'hF000_0000_0000_0000, 192'd0};
+        force u_soc.core_legacy_acc_wdata[1] =
+            {64'd0, 64'hF100_0000_0000_0001, 128'd0};
+        force u_soc.core_legacy_acc_wdata[2] =
+            {128'd0, 64'hF200_0000_0000_0002, 64'd0};
+        force u_soc.core_legacy_acc_wdata[3] =
+            {192'd0, 64'hF300_0000_0000_0003};
+        force u_soc.core_legacy_acc_wen[0] = 4'b1000;
+        force u_soc.core_legacy_acc_wen[1] = 4'b0100;
+        force u_soc.core_legacy_acc_wen[2] = 4'b0010;
+        force u_soc.core_legacy_acc_wen[3] = 4'b0001;
+        clock;
+        force u_soc.core_legacy_acc_wen[0] = 4'b0000;
+        force u_soc.core_legacy_acc_wen[1] = 4'b0000;
+        force u_soc.core_legacy_acc_wen[2] = 4'b0000;
+        force u_soc.core_legacy_acc_wen[3] = 4'b0000;
+        #1;
+        check("CPU masked legacy writes update only their paired tile bank",
+              u_soc.core_legacy_acc_state[0]
+                  == {64'hF000_0000_0000_0000, 128'd0,
+                      64'hA000_0000_0000_0000}
+              && u_soc.core_legacy_acc_state[1]
+                  == {64'd0, 64'hF100_0000_0000_0001, 64'd0,
+                      64'hA100_0000_0000_0001}
+              && u_soc.core_legacy_acc_state[2]
+                  == {128'd0, 64'hF200_0000_0000_0002,
+                      64'hA200_0000_0000_0002}
+              && u_soc.core_legacy_acc_state[3]
+                  == {192'd0, 64'hF300_0000_0000_0003});
+
+        force u_soc.core_csr_addr[0] = CSR_ACC3;
+        force u_soc.core_csr_addr[1] = CSR_ACC2;
+        force u_soc.core_csr_addr[2] = CSR_ACC1;
+        force u_soc.core_csr_addr[3] = CSR_ACC0;
+        #1;
+        check("CPU masked lanes read back through the same tile CSR banks",
+              u_soc.core_csr_rdata[0] == 64'hF000_0000_0000_0000
+              && u_soc.core_csr_rdata[1] == 64'hF100_0000_0000_0001
+              && u_soc.core_csr_rdata[2] == 64'hF200_0000_0000_0002
+              && u_soc.core_csr_rdata[3] == 64'hF300_0000_0000_0003);
 
         // Give each engine a distinct internal destination.
         force u_soc.core_csr_addr[0] = CSR_TDST;

@@ -133,6 +133,8 @@ module mp64_cpu_micro (
     output reg  [7:0]  tile_csr_addr,
     output reg  [63:0] tile_csr_wdata,
     input  wire [63:0] tile_csr_rdata,
+    output reg         tile_csr_req,
+    input  wire        tile_csr_done,
 
     // === Cluster CSR interface (to cluster controller) ===
     // Used for: BIST, barrier, cluster priv/MPU/IVT
@@ -198,7 +200,6 @@ module mp64_cpu_micro (
     // CPU FSM
     // ====================================================================
     reg [4:0]  cpu_state;
-
     function [7:0] mex_fault_vector;
         input [2:0] fault;
         begin
@@ -251,8 +252,18 @@ module mp64_cpu_micro (
     // Combinational CSR address — cluster muxes rdata on this
     always @(*) cl_csr_addr = ibuf[1];
 
-    // Combinational tile CSR address — cluster tile engine muxes rdata
-    always @(*) tile_csr_addr = ibuf[1];
+    // Caller-private tile CSRs retain their immediate combinational read
+    // path.  Shared ACC transactions select a captured address for the
+    // entire acknowledged request.
+    reg        tile_csr_write;
+    reg [7:0]  tile_csr_addr_hold;
+    reg [3:0]  tile_csr_dst_reg;
+    always @(*) begin
+        if (tile_csr_req)
+            tile_csr_addr = tile_csr_addr_hold;
+        else
+            tile_csr_addr = ibuf[1];
+    end
 
     // ====================================================================
     // Interrupt pending
@@ -347,8 +358,11 @@ module mp64_cpu_micro (
             tacc_ctl_wdata <= 64'd0;
             tacc_priv_fault <= 1'b0;
             tile_csr_wen   <= 1'b0;
-            tile_csr_addr  <= 8'd0;
             tile_csr_wdata <= 64'd0;
+            tile_csr_req   <= 1'b0;
+            tile_csr_write <= 1'b0;
+            tile_csr_addr_hold <= 8'd0;
+            tile_csr_dst_reg   <= 4'd0;
 
             cl_csr_wen   <= 1'b0;
             cl_csr_wdata <= 64'd0;
@@ -381,7 +395,8 @@ module mp64_cpu_micro (
                     (cpu_state == CPU_SHA_WAIT   && !sha_done) ||
                     (cpu_state == CPU_GF_WAIT    && !gf_done) ||
                     (cpu_state == CPU_MEX_WAIT   && mex_stall_cycle) ||
-                    (cpu_state == CPU_CSR_WAIT   && !tacc_ctl_done))
+                    (cpu_state == CPU_CSR_WAIT   && !tacc_ctl_done) ||
+                    (cpu_state == CPU_TILE_CSR_WAIT && !tile_csr_done))
                     perf_stalls <= perf_stalls + 64'd1;
                 if (cpu_state == CPU_MEX_WAIT && mex_done &&
                     mex_fault == MEX_FAULT_NONE)
@@ -492,6 +507,20 @@ module mp64_cpu_micro (
                             dst_reg    <= ibuf[2][7:4];
                             ext_active <= 1'b0;
                             cpu_state  <= CPU_CRYPTO;
+                        end else if (ibuf[1][7:4] == 4'd1 &&
+                                     ibuf[1][3:0] > ISA_SHA_RELEASE) begin
+                            // Reserved SHA sub-ops are complete two-byte
+                            // instructions and must fail closed.
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            trap_return_pc <= R[psel];
+                            mem_data <= {56'd0, flags};
+                            flags[6] <= 1'b0;
+                            ivec_id <= IRQX_ILLEGAL_OP;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            ext_active <= 1'b0;
+                            cpu_state <= CPU_MEM_WRITE;
                         end else if (ibuf[1][7:4] == 4'd1) begin
                             // SHA-2 unit (1) → cluster SHA arbiter
                             sha_req    <= 1'b1;
@@ -877,22 +906,33 @@ module mp64_cpu_micro (
                             end
                             // D/Q/T CSRs: silently ignored (stripped)
                             CSR_D, CSR_DF, CSR_QREG, CSR_TREG: ;
-                            // Tile CSRs: forward to cluster-shared tile engine
+                            // Caller-private tile configuration remains an
+                            // immediate write pulse.
                             CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
-                            CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
                             CSR_SB, CSR_SR, CSR_SC, CSR_SW,
                             CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W: begin
                                 tile_csr_wen   <= 1'b1;
-                                tile_csr_addr  <= ibuf[1];
                                 tile_csr_wdata <= R[nib[2:0]];
+                            end
+                            // The accumulator is shared engine state.  Hold
+                            // the complete transaction until the cluster
+                            // acknowledges ownership and completion.
+                            CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+                            CSR_SHA_MODE, CSR_SHA_MSGLEN,
+                            CSR_SHA_MSGLEN_HI: begin
+                                tile_csr_req       <= 1'b1;
+                                tile_csr_write     <= 1'b1;
+                                tile_csr_wen       <= 1'b1;
+                                tile_csr_addr_hold <= ibuf[1];
+                                tile_csr_wdata     <= R[nib[2:0]];
+                                cpu_state          <= CPU_TILE_CSR_WAIT;
                             end
                             // Cluster CSRs: forward to cluster controller
                             CSR_BIST_CMD, CSR_BIST_STATUS,
                             CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA,
                             CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
                             CSR_CL_IVTBASE,
-                            CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
-                            CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI: begin
+                            CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS: begin
                                 cl_csr_wen   <= 1'b1;
                                 cl_csr_wdata <= R[nib[2:0]];
                             end
@@ -933,12 +973,25 @@ module mp64_cpu_micro (
                             CSR_PERF_STALLS: R[nib[2:0]] <= perf_stalls;
                             CSR_PERF_TILEOPS:R[nib[2:0]] <= perf_tileops;
                             CSR_PERF_CTRL:   R[nib[2:0]] <= {63'd0, perf_enable};
-                            // Tile CSR reads: forwarded to cluster tile engine
+                            // Caller-private tile CSR reads remain immediate.
                             CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
-                            CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
                             CSR_SB, CSR_SR, CSR_SC, CSR_SW,
                             CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W:
                                 R[nib[2:0]] <= tile_csr_rdata;
+                            // Shared ACC reads use the same acknowledged path
+                            // as writes and capture the architectural GPR
+                            // destination before entering the wait state.
+                            CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+                            CSR_SHA_MODE, CSR_SHA_MSGLEN,
+                            CSR_SHA_MSGLEN_HI: begin
+                                tile_csr_req       <= 1'b1;
+                                tile_csr_write     <= 1'b0;
+                                tile_csr_wen       <= 1'b0;
+                                tile_csr_addr_hold <= ibuf[1];
+                                tile_csr_wdata     <= 64'd0;
+                                tile_csr_dst_reg   <= nib[2:0];
+                                cpu_state          <= CPU_TILE_CSR_WAIT;
+                            end
                             // Cluster CSR reads: forwarded
                             CSR_BIST_CMD, CSR_BIST_STATUS,
                             CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA,
@@ -946,9 +999,8 @@ module mp64_cpu_micro (
                             CSR_CL_IVTBASE,
                             CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS:
                                 R[nib[2:0]] <= cl_csr_rdata;
-                            // CRC + SHA CSRs: forwarded to cluster
-                            CSR_CRC_ACC, CSR_CRC_MODE,
-                            CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI:
+                            // Shared CRC state remains a diagnostic snapshot.
+                            CSR_CRC_ACC, CSR_CRC_MODE:
                                 R[nib[2:0]] <= cl_csr_rdata;
                             default: R[nib[2:0]] <= 64'd0;
                         endcase
@@ -1203,6 +1255,22 @@ module mp64_cpu_micro (
                     end
                 end else begin
                     tacc_ctl_valid <= 1'b1;
+                end
+            end
+
+            // ============================================================
+            // TILE_CSR_WAIT: acknowledged shared accumulator access
+            // ============================================================
+            CPU_TILE_CSR_WAIT: begin
+                if (tile_csr_done) begin
+                    tile_csr_req <= 1'b0;
+                    tile_csr_wen <= 1'b0;
+                    if (!tile_csr_write)
+                        R[tile_csr_dst_reg] <= tile_csr_rdata;
+                    cpu_state <= CPU_FETCH;
+                end else begin
+                    tile_csr_req <= 1'b1;
+                    tile_csr_wen <= tile_csr_write;
                 end
             end
 

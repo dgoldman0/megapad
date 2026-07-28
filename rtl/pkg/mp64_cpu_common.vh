@@ -38,6 +38,7 @@ localparam CPU_STRING     = 5'd14;  // EXT.STRING engine stall
 localparam CPU_SKIP       = 5'd15;  // SKIP: fetch next byte for length
 localparam CPU_DICT       = 5'd16;  // EXT.DICT engine stall
 localparam CPU_CSR_WAIT   = 5'd21;  // acknowledged accelerator CSR access
+localparam CPU_TILE_CSR_WAIT = 5'd22; // acknowledged shared tile CSR access
 
 // ========================================================================
 // ALU operation codes (4-bit, shared between mp64_alu and CPU FSMs)

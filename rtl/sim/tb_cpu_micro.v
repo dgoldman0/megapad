@@ -11,12 +11,14 @@
 //   5. MULDIV trap: MUL triggers illegal opcode exception
 //   6. MEX trap: tile instruction triggers illegal opcode exception
 //   7. CSR: read CPUID returns micro-core identifier
+//   8. Shared ACC CSRs: held request and acknowledged read/write completion
 //
 
 `timescale 1ns / 1ps
 `include "mp64_pkg.vh"
 
 module tb_cpu_micro;
+
 
     // ========================================================================
     // Clock / Reset
@@ -133,14 +135,46 @@ module tb_cpu_micro;
     reg  [2:0]  next_tacc_ctl_fault;
     reg         tacc_ctl_ack_enable;
     wire        tacc_priv_fault;
+    wire        tile_csr_req;
+    wire        tile_csr_wen;
+    wire [7:0]  tile_csr_addr;
+    wire [63:0] tile_csr_wdata;
+    reg  [63:0] tile_csr_rdata;
+    reg         tile_csr_done;
+    reg         tile_csr_ack_enable;
+    integer     tile_csr_delay_cycles;
+    integer     tile_csr_countdown;
+    reg         tile_csr_seen;
+    reg         tile_csr_seen_wen;
+    reg  [7:0]  tile_csr_seen_addr;
+    reg  [63:0] tile_csr_seen_wdata;
+    reg  [63:0] tile_acc [0:3];
+    reg  [1:0]  tile_sha_mode;
     reg         cl_priv_level;
     integer     mex_dispatch_count;
     integer     tacc_ctl_dispatch_count;
     integer     tacc_priv_fault_count;
+    integer     tile_csr_dispatch_count;
+    integer     tile_csr_write_count;
+    integer     tile_csr_read_count;
+    integer     tile_csr_hold_cycles;
+    integer     tile_csr_hold_errors;
+
+    always @(*) begin
+        case (tile_csr_addr)
+            CSR_ACC0: tile_csr_rdata = tile_acc[0];
+            CSR_ACC1: tile_csr_rdata = tile_acc[1];
+            CSR_ACC2: tile_csr_rdata = tile_acc[2];
+            CSR_ACC3: tile_csr_rdata = tile_acc[3];
+            CSR_SHA_MODE: tile_csr_rdata = {62'd0, tile_sha_mode};
+            default:  tile_csr_rdata = 64'd0;
+        endcase
+    end
 
     always @(negedge clk) begin
         mex_done <= 1'b0;
         tacc_ctl_done <= 1'b0;
+        tile_csr_done <= 1'b0;
         if (mex_req && mex_ack_enable) begin
             mex_dispatch_count = mex_dispatch_count + 1;
             mex_fault <= next_mex_fault;
@@ -154,6 +188,52 @@ module tb_cpu_micro;
         end
         if (tacc_priv_fault)
             tacc_priv_fault_count = tacc_priv_fault_count + 1;
+
+        // A shared-ACC transaction may remain pending for an arbitrary
+        // number of cycles.  Capture its first presentation, verify every
+        // held cycle, and acknowledge it only after the configured delay.
+        if (!rst_n || !tile_csr_req) begin
+            tile_csr_seen <= 1'b0;
+            tile_csr_countdown = 0;
+        end else if (!tile_csr_seen) begin
+            tile_csr_seen       <= 1'b1;
+            tile_csr_seen_wen   <= tile_csr_wen;
+            tile_csr_seen_addr  <= tile_csr_addr;
+            tile_csr_seen_wdata <= tile_csr_wdata;
+            tile_csr_countdown = tile_csr_delay_cycles;
+            tile_csr_dispatch_count = tile_csr_dispatch_count + 1;
+        end else begin
+            tile_csr_hold_cycles = tile_csr_hold_cycles + 1;
+            if (tile_csr_wen !== tile_csr_seen_wen ||
+                tile_csr_addr !== tile_csr_seen_addr ||
+                tile_csr_wdata !== tile_csr_seen_wdata) begin
+                $display("FAIL tile CSR changed while held: wen=%b/%b addr=%h/%h data=%h/%h",
+                         tile_csr_wen, tile_csr_seen_wen,
+                         tile_csr_addr, tile_csr_seen_addr,
+                         tile_csr_wdata, tile_csr_seen_wdata);
+                tile_csr_hold_errors = tile_csr_hold_errors + 1;
+            end
+            if (tile_csr_ack_enable) begin
+                if (tile_csr_countdown > 0) begin
+                    tile_csr_countdown = tile_csr_countdown - 1;
+                end else begin
+                    if (tile_csr_wen) begin
+                        case (tile_csr_addr)
+                            CSR_ACC0: tile_acc[0] <= tile_csr_wdata;
+                            CSR_ACC1: tile_acc[1] <= tile_csr_wdata;
+                            CSR_ACC2: tile_acc[2] <= tile_csr_wdata;
+                            CSR_ACC3: tile_acc[3] <= tile_csr_wdata;
+                            CSR_SHA_MODE:
+                                tile_sha_mode <= tile_csr_wdata[1:0];
+                        endcase
+                        tile_csr_write_count = tile_csr_write_count + 1;
+                    end else begin
+                        tile_csr_read_count = tile_csr_read_count + 1;
+                    end
+                    tile_csr_done <= 1'b1;
+                end
+            end
+        end
     end
 
     mp64_cpu_micro u_cpu (
@@ -210,10 +290,12 @@ module tb_cpu_micro;
         .tacc_ctl_done(tacc_ctl_done),
         .tacc_ctl_fault(tacc_ctl_fault),
         .tacc_priv_fault(tacc_priv_fault),
-        .tile_csr_wen(),
-        .tile_csr_addr(),
-        .tile_csr_wdata(),
-        .tile_csr_rdata(64'd0),
+        .tile_csr_wen(tile_csr_wen),
+        .tile_csr_addr(tile_csr_addr),
+        .tile_csr_wdata(tile_csr_wdata),
+        .tile_csr_rdata(tile_csr_rdata),
+        .tile_csr_req(tile_csr_req),
+        .tile_csr_done(tile_csr_done),
         .cl_csr_addr  (cl_csr_addr),
         .cl_csr_wen   (cl_csr_wen),
         .cl_csr_wdata (cl_csr_wdata),
@@ -398,10 +480,27 @@ module tb_cpu_micro;
         tacc_ctl_fault = MEX_FAULT_NONE;
         next_tacc_ctl_fault = MEX_FAULT_NONE;
         tacc_ctl_ack_enable = 1'b1;
+        tile_csr_done = 1'b0;
+        tile_csr_ack_enable = 1'b1;
+        tile_csr_delay_cycles = 0;
+        tile_csr_countdown = 0;
+        tile_csr_seen = 1'b0;
+        tile_csr_seen_wen = 1'b0;
+        tile_csr_seen_addr = 8'd0;
+        tile_csr_seen_wdata = 64'd0;
+        tile_acc[0] = 64'd0;
+        tile_acc[1] = 64'd0;
+        tile_acc[2] = 64'd0;
+        tile_acc[3] = 64'd0;
         cl_priv_level = 1'b0;
         mex_dispatch_count = 0;
         tacc_ctl_dispatch_count = 0;
         tacc_priv_fault_count = 0;
+        tile_csr_dispatch_count = 0;
+        tile_csr_write_count = 0;
+        tile_csr_read_count = 0;
+        tile_csr_hold_cycles = 0;
+        tile_csr_hold_errors = 0;
 
         // ============================================================
         // TEST 1: NOP + HALT
@@ -839,6 +938,75 @@ module tb_cpu_micro;
                       "user reserved-only control is acknowledged");
         check64_value(tacc_priv_fault_count, 64'd0,
                       "reserved-only control does not fault privilege");
+
+        // ============================================================
+        // TEST 17: shared engine CSR requests are acknowledged and held.
+        // ============================================================
+        $display("Test 17: acknowledged shared engine CSRs");
+        clear_mem;
+        // Exercise both the authoritative ACC and SHA metadata paths.
+        mem[0] = 8'h60; mem[1] = 8'h40; mem[2] = 8'h5A;
+        mem[3] = 8'hDC; mem[4] = CSR_ACC2;
+        mem[5] = 8'hD5; mem[6] = CSR_ACC2;
+        mem[7] = 8'h60; mem[8] = 8'h60; mem[9] = 8'h02;
+        mem[10] = 8'hDE; mem[11] = CSR_SHA_MODE;
+        mem[12] = 8'hD7; mem[13] = CSR_SHA_MODE;
+        mem[14] = 8'h02;
+        tile_acc[2] = 64'hDEAD_BEEF_CAFE_BABE;
+        tile_sha_mode = 2'd0;
+        tile_csr_delay_cycles = 6;
+        tile_csr_ack_enable = 1'b1;
+        tile_csr_dispatch_count = 0;
+        tile_csr_write_count = 0;
+        tile_csr_read_count = 0;
+        tile_csr_hold_cycles = 0;
+        tile_csr_hold_errors = 0;
+        reset_cpu;
+
+        timeout = 1;
+        for (i = 0; i < 400; i = i + 1) begin
+            @(posedge clk);
+            if (u_cpu.cpu_state == CPU_TILE_CSR_WAIT && tile_csr_req) begin
+                timeout = 0;
+                i = 400;
+            end
+        end
+        if (timeout)
+            $fatal(1, "shared ACC write did not enter TILE_CSR_WAIT");
+
+        repeat (3) begin
+            @(negedge clk);
+            check64_value(tile_csr_req, 64'd1,
+                          "ACC write request remains held");
+            check64_value(tile_csr_wen, 64'd1,
+                          "ACC write direction remains held");
+            check64_value(tile_csr_addr, CSR_ACC2,
+                          "ACC write address remains held");
+            check64_value(tile_csr_wdata, 64'h5A,
+                          "ACC write data remains held");
+        end
+
+        wait_halt(2000);
+        check64_value(tile_csr_dispatch_count, 64'd4,
+                      "ACC/SHA writes and reads each dispatch once");
+        check64_value(tile_csr_write_count, 64'd2,
+                      "ACC/SHA writes complete once");
+        check64_value(tile_csr_read_count, 64'd2,
+                      "ACC/SHA reads complete once");
+        check64_value(tile_csr_hold_errors, 64'd0,
+                      "ACC request fields stay stable until done");
+        check64_value(tile_acc[2], 64'h5A,
+                      "ACC write updates shared accumulator");
+        check_reg(5, 64'h5A,
+                  "ACC read writes captured destination GPR");
+        check64_value(tile_sha_mode, 64'd2,
+                      "SHA metadata write updates shared state");
+        check_reg(7, 64'd2,
+                  "SHA metadata read writes captured destination GPR");
+        if (tile_csr_hold_cycles < 24)
+            $fatal(1, "delayed CSR responder observed only %0d held cycles",
+                   tile_csr_hold_cycles);
+        tile_csr_delay_cycles = 0;
 
         // ============================================================
         // Summary

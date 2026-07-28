@@ -1,7 +1,7 @@
 # Full TACC ISA and implementation handoff
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
-  scheduler; Phase 2 is next
+  scheduler; Phase 2 Landings 2.1 and 2.2 complete; Landing 2.3 is next
 - Date: 2026-07-28
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -13,6 +13,9 @@
   `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc`
 - Integration worktree:
   `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-phase5-full-tacc-integration`
+- Phase-2 branch: `feature/megapad-full-tacc-rtl`
+- Phase-2 worktree:
+  `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl`
 
 This document supersedes the condensed workspace-root
 `CHIP_MATH_UPDATE_HANDOFF.md`. The original correctly identified persistent
@@ -636,10 +639,12 @@ The feature must meet all of these gates:
 - no unbounded combinational path is added through product, FP addition, and
   ownership muxing.
 
-The topology-only checkpoint must fit and close timing before TACC RTL begins.
-If it lacks the required final headroom, optimize the baseline rather than
-silently deleting private engines. If TACC misses a gate, refactor or add
-bounded pipeline stages; do not add more arithmetic copies.
+The topology-only checkpoint and final TACC design must fit and close timing
+before Phase 2 closes. Approval-gated physical measurement does not block the
+functional RTL landings. If the topology lacks the required final headroom,
+optimize it rather than silently deleting private engines. If TACC misses a
+gate, refactor or add bounded pipeline stages; do not add more arithmetic
+copies.
 
 Vivado synthesis and implementation may be heavyweight. Per repository
 resource rules, obtain user approval before running a job that may spawn
@@ -1244,11 +1249,6 @@ Primary files:
 - `rtl/sim/tb_soc_tile_icache.v`
 - a new focused full-core private-tile bench
 - `rtl/sim/Makefile`
-- `fpga/synth_genesys2.tcl`
-- `fpga/synth_yosys_soc.tcl`
-- `fpga/synth_yosys_all.tcl`
-- new `fpga/run_tacc_impl.py`
-- FPGA source lists and a checked-in topology-only utilization summary
 
 Work:
 
@@ -1284,34 +1284,15 @@ Work:
   for a shared memory port;
 - add focused CSR/SHA/MEX legacy-ACC coexistence, simultaneous writer,
   caller-private SHA source, and per-caller `ACC_ZERO` tests;
-- add a checked implementation mode to the Vivado script that executes
-  `opt_design`, placement, physical optimization, and routing and emits
-  post-route reports; and
-- add a fail-closed implementation runner accepting exactly one of
-  `--source-tree` or `--source-ref`, plus `--label` and `--out`; it
-  materializes refs without modifying another checkout and records the source
-  commit, tool version, constraints, strategy, hierarchy counts, utilization,
-  timing, and unconstrained paths; and
 - add every new RTL module to each explicit FPGA synthesis source list.
 
-Before TACC RTL begins, obtain approval for the heavyweight run and synthesize
-and route both the locked Phase-0 main baseline and this topology-only landing
-with identical settings through the checked implementation mode. Record
-hierarchical utilization, post-route timing, unconstrained-path status, and
-the expected count of seven tile instances. If the corrected topology does
-not fit or close timing, optimize it here; do not mask the problem by
-returning to core-0-only or shared-full-core execution.
-
-After approval, the like-for-like commands are:
-
-```sh
-python fpga/run_tacc_impl.py \
-  --source-ref c8e8118e82a899ec3f101f63d277a1bf4ef5f84a \
-  --label current-main --out /tmp/megapad-tacc-reports/current-main
-python fpga/run_tacc_impl.py \
-  --source-tree /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc \
-  --label topology-only --out /tmp/megapad-tacc-reports/topology-only
-```
+Critical-path refinement (2026-07-28): the checked implementation runner,
+Vivado report mode, topology-only physical measurement, and fail-closed
+report comparison are consolidated in Landing 2.9. They are approval-gated
+physical acceptance infrastructure rather than prerequisites for building
+the functional RTL landings. Commit `364d44283ba5c2fad8187b63da6917af60344c26`
+is the immutable topology-only comparison point. This landing adds no new RTL
+module, so the existing explicit source lists require no new entry.
 
 Focused gates, run sequentially:
 
@@ -1332,8 +1313,8 @@ Replace the core-1–3 MEX tie-offs with private tile instances while retaining
 one shared engine in every microcluster.
 
 Route seven physical engines fairly to tile memory, isolate full-core state,
-give cluster callers private configuration shadows, and record the corrected
-topology synthesis baseline.
+give cluster callers private configuration shadows, and establish the
+immutable topology checkpoint used by final physical comparison.
 ```
 
 #### Landing 2.2 topology sublanding — 2026-07-28
@@ -1368,6 +1349,85 @@ One nonblocking cancellation detail is deferred with the already planned
 transfer/lifecycle work: disabling a cluster resets its engine but does not
 yet purge a request that the shared memory arbiter captured before disable.
 No heavyweight implementation run has been performed without approval.
+
+#### Landing 2.2 shared-state and admission sublanding — 2026-07-28
+
+Landing 2.2 now closes the architectural blockers left by the topology
+sublanding. Each of the seven tile modules is the sole owner of its physical
+engine's legacy ACC. A full CPU reaches that state through its paired private
+tile sideband, while cluster CSR, SHA, and MEX users reach the shared tile ACC
+through one acknowledged common domain. The cluster keeps `TMODE`, `TCTRL`,
+source, destination, shape, stride, and scalar configuration in per-caller
+shadows and captures the granted caller's values at admission.
+
+Cluster common admission is caller-first equal round-robin across ACC CSRs,
+SHA, and MEX. SHA `INIT` acquires the legacy engine lock, `FINAL` retains it,
+and `RELEASE` is the only ordinary unlock; the lock protects every
+ACC-dependent reduction, DOT, and DOTACC form, including raw SS=2 requests,
+while stateless MEX work remains available. Scalar MEX broadcasts now splat
+the low active EW8, EW16, EW32, FP16, or BF16 element rather than repeating a
+64-bit pattern. `ACC_ZERO` is captured and consumed only for the admitted
+caller's operation.
+
+Cancellation is aligned with architectural mutation. ACC CSR and SHA
+metadata writes commit only at their cancellation-aware terminal boundary.
+A canceled SHA compression resets the iterative child before fresh work can
+be admitted. A canceled, already-issued SHA read retains the external cluster
+port until its stale response is drained and discarded, so it cannot
+acknowledge a newly admitted microcore request. MEX admission snapshots legacy
+ACC and restores it if the caller is canceled after a leaf mutation but before
+retirement. External memory writes remain nonrollback side effects as
+specified by the fault/reset contract. The cluster's ordinary bus arbiter and
+SHA loader now feed a single output mux, eliminating their former multiple
+procedural drivers and preventing a SHA reservation from stealing an in-flight
+ordinary transfer.
+
+Sequential verification record for the completed landing:
+
+- `cluster`: 126 assertions passed, including mixed-kind equal round-robin,
+  authoritative ACC visibility, SHA ownership, raw-SS lock protection,
+  caller-private configuration and `ACC_ZERO`, terminal cancellation, MEX
+  rollback, stale external-response draining, and fresh compression after
+  cancellation;
+- `full_core_tile`: 14 assertions passed for four simultaneous private
+  engines and paired ACC visibility;
+- `tile`: 84 assertions and 34 write-ack assertions passed;
+- `cpu_micro`: 84 assertions passed;
+- `cpu_smoke`: 101 assertions passed;
+- `tile_port_arbiter`: 50 assertions passed;
+- reduced-parameter `soc_smoke`: 7 assertions passed;
+- `soc_tile_icache`: 11 assertions passed;
+- `soc_elaborate`: passed;
+- `string`: 39 assertions passed;
+- `dict`: 16 assertions passed; and
+- `multicore_smoke`: 37 assertions passed.
+
+`opcodes` remains at its pre-existing 104-pass/one MARK/SAV mismatch baseline.
+An Icarus `-Wall` cluster elaboration reported no implicit-net or
+multiple-driver warning. Yosys resolved both the full SoC and focused cluster
+hierarchies, including all seven tile instances. The checked-in all-module
+script cannot complete with the installed Yosys because that version rejects
+its `synth_xilinx -json` option. A focused `proc; check` run was bounded and
+stopped in `PROC_MUX` after hierarchy success because expanding the existing
+highly unrolled tile arithmetic dominated the run for roughly two minutes;
+the final `check` pass therefore did not run. These limitations are not
+presented as synthesis or physical acceptance evidence.
+
+Nonblocking findings intentionally remain documented rather than entering
+the feature's critical path:
+
+- cluster disable does not yet purge a tile-memory request already captured
+  by the SoC arbiter; Landing 2.3 owns that reset-scope requirement;
+- production microcore Field/GF inputs remain dangling because Field ALU SoC
+  integration is an explicit non-goal;
+- unused cursor and sideband signals, a default-topology-only parameter
+  assertion, established sized-hex warnings, and the MARK/SAV bench mismatch
+  are cleanup outside TACC correctness;
+- the existing SHA-384, SHA-512, and padding gaps are unrelated to shared
+  ACC ownership; and
+- no approval-gated Vivado placement or routing was run. Resource, timing,
+  unconstrained-path, and final seven-instance physical evidence remains
+  Landing 2.9 work.
 
 ### Landing 2.3 — TACC state and lifecycle
 
@@ -1725,13 +1785,15 @@ Primary files:
 
 Work:
 
-1. obtain approval for the heavyweight tool run;
-2. verify that every new module is present in every explicit FPGA source
+1. verify that every new module is present in every explicit FPGA source
    list;
-3. reproduce the current-main and seven-engine topology-only measurements if
-   tool or constraint settings changed after Landing 2.2;
-4. synthesize and route the final seven-engine TACC branch through the checked
-   implementation mode added in Landing 2.2;
+2. add the checked Vivado implementation/report mode, isolated source
+   materialization runner, and fail-closed report comparator described by the
+   physical contract;
+3. obtain approval for the heavyweight tool runs;
+4. measure the locked Phase-0 base, immutable topology-only commit
+   `364d44283ba5c2fad8187b63da6917af60344c26`, and final TACC branch with
+   identical tool and constraint settings;
 5. report current-main → topology-only and topology-only → TACC hierarchical
    LUT, FF, BRAM, DSP, WNS, TNS, and Fmax deltas separately;
 6. confirm exactly seven tile engines and seven TACC banks in the elaborated
@@ -1747,21 +1809,23 @@ Work:
 Do not commit a feature that only passes behavioral simulation but exceeds
 the device or timing budget.
 
-After approval, run the final implementation and the fail-closed comparison:
+After approval, run all three implementations and the fail-closed comparison:
 
 ```sh
 python fpga/run_tacc_impl.py \
-  --source-tree /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc \
+  --source-ref c8e8118e82a899ec3f101f63d277a1bf4ef5f84a \
+  --label current-main --out /tmp/megapad-tacc-reports/current-main
+python fpga/run_tacc_impl.py \
+  --source-ref 364d44283ba5c2fad8187b63da6917af60344c26 \
+  --label topology-only --out /tmp/megapad-tacc-reports/topology-only
+python fpga/run_tacc_impl.py \
+  --source-tree /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl \
   --label full-tacc --out /tmp/megapad-tacc-reports/full-tacc
 python fpga/check_tacc_reports.py \
   --current-main /tmp/megapad-tacc-reports/current-main \
   --topology-only /tmp/megapad-tacc-reports/topology-only \
   --full-tacc /tmp/megapad-tacc-reports/full-tacc
 ```
-
-If tool, constraint, or strategy settings changed after Landing 2.2, rerun
-the two baseline commands from that landing first against worktrees at the
-recorded source commits.
 
 Commit:
 
@@ -1798,10 +1862,10 @@ and RTL vectors or benches before Phase 2 closes.
 
 ## 15. Worktree and commit discipline
 
-All implementation work stays in:
+Phase-2 RTL implementation work stays in:
 
 ```text
-/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc
+/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl
 ```
 
 The primary `megapad/` checkout remains on `main` and must not receive
@@ -1869,8 +1933,8 @@ Phase 1:
 
 Phase 2:
 
-- [ ] RTL encodings and precise fault plumbing.
-- [ ] Seven-engine restoration, private/shadow state, and topology baseline.
+- [x] RTL encodings and precise fault plumbing.
+- [x] Seven-engine restoration, private/shadow state, and common admission.
 - [ ] Lifecycle state and privileged recovery.
 - [ ] Canonical four-beat image transfer.
 - [ ] Integer accumulation.

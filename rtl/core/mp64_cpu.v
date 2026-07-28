@@ -66,6 +66,12 @@ module mp64_cpu #(
     output reg  [63:0] csr_wdata,
     input  wire [63:0] csr_rdata,
 
+    // The private tile engine owns the architectural legacy ACC lanes.
+    // CPU-side SHA mutations return through a masked writeback channel.
+    input  wire [255:0] legacy_acc_state,
+    output reg  [3:0]   legacy_acc_wen,
+    output reg  [255:0] legacy_acc_wdata,
+
     output reg         mex_valid,
     output reg  [1:0]  mex_ss,
     output reg  [1:0]  mex_op,
@@ -305,9 +311,6 @@ module mp64_cpu #(
     reg  [63:0] sha_msglen_lo;   // total message length, bits (low 64)
     reg  [63:0] sha_msglen_hi;   // high 64
 
-    // Local ACC shadow registers (authoritative copy in CPU)
-    reg  [63:0] acc_reg [0:3];   // ACC0..ACC3
-
     // Local shadow of TSRC0 for SHA.ROUND bus reads
     reg  [63:0] sha_tsrc0;
 
@@ -328,14 +331,14 @@ module mp64_cpu #(
                 sha_w_buf[sha_pack_i];
         end
     endgenerate
-    assign sha_h_in_flat[0*32 +: 32] = acc_reg[0][63:32]; // a
-    assign sha_h_in_flat[1*32 +: 32] = acc_reg[0][31:0];  // b
-    assign sha_h_in_flat[2*32 +: 32] = acc_reg[1][63:32]; // c
-    assign sha_h_in_flat[3*32 +: 32] = acc_reg[1][31:0];  // d
-    assign sha_h_in_flat[4*32 +: 32] = acc_reg[2][63:32]; // e
-    assign sha_h_in_flat[5*32 +: 32] = acc_reg[2][31:0];  // f
-    assign sha_h_in_flat[6*32 +: 32] = acc_reg[3][63:32]; // g
-    assign sha_h_in_flat[7*32 +: 32] = acc_reg[3][31:0];  // h
+    assign sha_h_in_flat[0*32 +: 32] = legacy_acc_state[0*64 + 32 +: 32]; // a
+    assign sha_h_in_flat[1*32 +: 32] = legacy_acc_state[0*64 +  0 +: 32]; // b
+    assign sha_h_in_flat[2*32 +: 32] = legacy_acc_state[1*64 + 32 +: 32]; // c
+    assign sha_h_in_flat[3*32 +: 32] = legacy_acc_state[1*64 +  0 +: 32]; // d
+    assign sha_h_in_flat[4*32 +: 32] = legacy_acc_state[2*64 + 32 +: 32]; // e
+    assign sha_h_in_flat[5*32 +: 32] = legacy_acc_state[2*64 +  0 +: 32]; // f
+    assign sha_h_in_flat[6*32 +: 32] = legacy_acc_state[3*64 + 32 +: 32]; // g
+    assign sha_h_in_flat[7*32 +: 32] = legacy_acc_state[3*64 +  0 +: 32]; // h
 
     // SHA engine outputs
     wire        sha_h_we;
@@ -501,6 +504,8 @@ module mp64_cpu #(
             cpu_state      <= CPU_FETCH;
             bus_valid      <= 1'b0;
             csr_wen        <= 1'b0;
+            legacy_acc_wen <= 4'b0000;
+            legacy_acc_wdata <= 256'd0;
             mex_valid      <= 1'b0;
             mex_funct_byte <= 8'd0;
             tacc_ctl_valid <= 1'b0;
@@ -573,8 +578,6 @@ module mp64_cpu #(
             crc_acc        <= 64'hFFFF_FFFF;
             crc_mode       <= 2'd0;
 
-            acc_reg[0]     <= 64'd0; acc_reg[1] <= 64'd0;
-            acc_reg[2]     <= 64'd0; acc_reg[3] <= 64'd0;
             sha_mode       <= 2'd0;
             sha_msglen_lo  <= 64'd0;
             sha_msglen_hi  <= 64'd0;
@@ -635,6 +638,7 @@ module mp64_cpu #(
             bus_valid      <= 1'b0;
             bus_port_io    <= 1'b0;
             csr_wen        <= 1'b0;
+            legacy_acc_wen <= 4'b0000;
             mex_valid      <= 1'b0;
             icache_inv_all <= 1'b0;
             icache_inv_line<= 1'b0;
@@ -821,8 +825,10 @@ module mp64_cpu #(
                         // EXT.CRYPTO — 2 or 3-byte instruction
                         //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
                         //   ibuf[2] = DR or imm8 (3-byte ops only)
-                        if (ibuf[1][7:4] == 4'd0 &&
-                            ibuf[1][3:0] > ISA_CRC_SEED) begin
+                        if ((ibuf[1][7:4] == 4'd0 &&
+                             ibuf[1][3:0] > ISA_CRC_SEED) ||
+                            (ibuf[1][7:4] == 4'd1 &&
+                             ibuf[1][3:0] > ISA_SHA_RELEASE)) begin
                             // Reserved CRC sub-ops are fail-closed two-byte
                             // instructions, consistent with the emulators.
                             R[spsel] <= R[spsel] - 64'd8;
@@ -1417,10 +1423,6 @@ module mp64_cpu #(
                                 crc_mode <= (R[nib[2:0]] == 64'd1) ? 2'd1
                                           : (R[nib[2:0]] == 64'd2) ? 2'd2
                                           :                               2'd0;
-                            CSR_ACC0:     acc_reg[0] <= R[nib[2:0]];
-                            CSR_ACC1:     acc_reg[1] <= R[nib[2:0]];
-                            CSR_ACC2:     acc_reg[2] <= R[nib[2:0]];
-                            CSR_ACC3:     acc_reg[3] <= R[nib[2:0]];
                             CSR_TSRC0:    sha_tsrc0  <= R[nib[2:0]];
                             CSR_SHA_MODE: sha_mode   <= R[nib[2:0]][1:0];
                             CSR_SHA_MSGLEN:    sha_msglen_lo <= R[nib[2:0]];
@@ -1487,10 +1489,10 @@ module mp64_cpu #(
                             CSR_DMA_CTRL:    R[nib[2:0]] <= dma_ctrl;
                             CSR_CRC_ACC:     R[nib[2:0]] <= crc_acc;
                             CSR_CRC_MODE:    R[nib[2:0]] <= {62'd0, crc_mode};
-                            CSR_ACC0:        R[nib[2:0]] <= acc_reg[0];
-                            CSR_ACC1:        R[nib[2:0]] <= acc_reg[1];
-                            CSR_ACC2:        R[nib[2:0]] <= acc_reg[2];
-                            CSR_ACC3:        R[nib[2:0]] <= acc_reg[3];
+                            CSR_ACC0:        R[nib[2:0]] <= legacy_acc_state[0*64 +: 64];
+                            CSR_ACC1:        R[nib[2:0]] <= legacy_acc_state[1*64 +: 64];
+                            CSR_ACC2:        R[nib[2:0]] <= legacy_acc_state[2*64 +: 64];
+                            CSR_ACC3:        R[nib[2:0]] <= legacy_acc_state[3*64 +: 64];
                             CSR_SHA_MODE:    R[nib[2:0]] <= {62'd0, sha_mode};
                             CSR_SHA_MSGLEN:  R[nib[2:0]] <= sha_msglen_lo;
                             CSR_SHA_MSGLEN_HI: R[nib[2:0]] <= sha_msglen_hi;
@@ -1579,10 +1581,13 @@ module mp64_cpu #(
                                 // Load SHA-256 IV into ACC, set mode
                                 sha_mode <= crypto_imm_r[1:0];
                                 // SHA-256 IV (only mode supported in RTL)
-                                acc_reg[0] <= 64'h6a09e667_bb67ae85;
-                                acc_reg[1] <= 64'h3c6ef372_a54ff53a;
-                                acc_reg[2] <= 64'h510e527f_9b05688c;
-                                acc_reg[3] <= 64'h1f83d9ab_5be0cd19;
+                                legacy_acc_wen <= 4'b1111;
+                                legacy_acc_wdata <= {
+                                    64'h1f83d9ab_5be0cd19,
+                                    64'h510e527f_9b05688c,
+                                    64'h3c6ef372_a54ff53a,
+                                    64'h6a09e667_bb67ae85
+                                };
                                 sha_msglen_lo <= 64'd0;
                                 sha_msglen_hi <= 64'd0;
                                 crypto_active <= 1'b0;
@@ -1595,18 +1600,58 @@ module mp64_cpu #(
                             end
                             ISA_SHA_DIN: begin
                                 // ACC[Rd[1:0]] ← Rs
-                                acc_reg[crypto_rd_r[1:0]] <= R[crypto_rs_r];
+                                case (crypto_rd_r[1:0])
+                                    2'd0: begin
+                                        legacy_acc_wen <= 4'b0001;
+                                        legacy_acc_wdata <= {
+                                            legacy_acc_state[255:64],
+                                            R[crypto_rs_r]
+                                        };
+                                    end
+                                    2'd1: begin
+                                        legacy_acc_wen <= 4'b0010;
+                                        legacy_acc_wdata <= {
+                                            legacy_acc_state[255:128],
+                                            R[crypto_rs_r],
+                                            legacy_acc_state[63:0]
+                                        };
+                                    end
+                                    2'd2: begin
+                                        legacy_acc_wen <= 4'b0100;
+                                        legacy_acc_wdata <= {
+                                            legacy_acc_state[255:192],
+                                            R[crypto_rs_r],
+                                            legacy_acc_state[127:0]
+                                        };
+                                    end
+                                    default: begin
+                                        legacy_acc_wen <= 4'b1000;
+                                        legacy_acc_wdata <= {
+                                            R[crypto_rs_r],
+                                            legacy_acc_state[191:0]
+                                        };
+                                    end
+                                endcase
                                 crypto_active <= 1'b0;
                                 cpu_state <= CPU_FETCH;
                             end
                             ISA_SHA_DOUT: begin
                                 // Rd ← ACC[Rs[1:0]]
-                                R[crypto_rd_r] <= acc_reg[crypto_rs_r[1:0]];
+                                case (crypto_rs_r[1:0])
+                                    2'd0: R[crypto_rd_r] <= legacy_acc_state[0*64 +: 64];
+                                    2'd1: R[crypto_rd_r] <= legacy_acc_state[1*64 +: 64];
+                                    2'd2: R[crypto_rd_r] <= legacy_acc_state[2*64 +: 64];
+                                    default:
+                                        R[crypto_rd_r] <= legacy_acc_state[3*64 +: 64];
+                                endcase
                                 crypto_active <= 1'b0;
                                 cpu_state <= CPU_FETCH;
                             end
-                            ISA_SHA_PAD, ISA_SHA_FINAL: begin
-                                // PAD and FINAL: handled by BIOS in software
+                            ISA_SHA_PAD, ISA_SHA_FINAL,
+                            ISA_SHA_RELEASE: begin
+                                // PAD and FINAL are handled by BIOS in software;
+                                // RELEASE is an ownership-only no-op here
+                                // because a full core has a private engine.
                                 // (write padding manually, then SHA.ROUND)
                                 // RTL treats as NOP
                                 crypto_active <= 1'b0;
@@ -2164,18 +2209,17 @@ module mp64_cpu #(
             CPU_SHA_WAIT: begin
                 if (sha_done) begin
                     // Write back H' to ACC registers
-                    acc_reg[0] <= {
-                        sha_h_out_flat[0*32 +: 32],
-                        sha_h_out_flat[1*32 +: 32]};
-                    acc_reg[1] <= {
-                        sha_h_out_flat[2*32 +: 32],
-                        sha_h_out_flat[3*32 +: 32]};
-                    acc_reg[2] <= {
-                        sha_h_out_flat[4*32 +: 32],
-                        sha_h_out_flat[5*32 +: 32]};
-                    acc_reg[3] <= {
+                    legacy_acc_wen <= 4'b1111;
+                    legacy_acc_wdata <= {
                         sha_h_out_flat[6*32 +: 32],
-                        sha_h_out_flat[7*32 +: 32]};
+                        sha_h_out_flat[7*32 +: 32],
+                        sha_h_out_flat[4*32 +: 32],
+                        sha_h_out_flat[5*32 +: 32],
+                        sha_h_out_flat[2*32 +: 32],
+                        sha_h_out_flat[3*32 +: 32],
+                        sha_h_out_flat[0*32 +: 32],
+                        sha_h_out_flat[1*32 +: 32]
+                    };
                     // Update message length: +512 bits per block
                     sha_msglen_lo <= sha_msglen_lo + 64'd512;
                     if (sha_msglen_lo > (64'hFFFF_FFFF_FFFF_FFFF - 64'd512))

@@ -286,11 +286,25 @@ module tb_cluster;
     reg [N-1:0] tb_tile_allow_cluster_spad;
     reg [N-1:0] tb_tacc_ctl_valid;
     reg [N*64-1:0] tb_tacc_ctl_wdata;
+    reg [N-1:0] tb_sha_req;
+    reg [N*4-1:0] tb_sha_op;
+    reg [N*64-1:0] tb_sha_rs_val;
+    reg [N*8-1:0] tb_sha_imm8;
+    reg [N-1:0] tb_tile_csr_req;
+    reg [N-1:0] tb_tile_csr_wen;
+    reg [N*8-1:0] tb_tile_csr_addr;
+    reg [N*64-1:0] tb_tile_csr_wdata;
     integer tb_mex_valid_count;
     integer tb_mex_done_count;
     integer tb_ctl_valid_count;
     integer tb_ctl_done_count;
     integer tb_cancel_done_count;
+    integer tb_legacy_done_count;
+    integer tb_sha_done_count;
+    integer tb_csr_done_count;
+    integer tb_tred_done_count;
+    integer tb_wait_seen;
+    reg [1:0] tb_legacy_order [0:3];
 
     task drive_crc_op;
         input integer core_idx;
@@ -323,6 +337,52 @@ module tb_cluster;
             @(negedge clk);
             tb_crc_req[core_idx] = 1'b0;
             repeat (3) @(posedge clk);
+        end
+    endtask
+
+    task drive_private_tile_csr;
+        input integer core_idx;
+        input [7:0] csr_addr_value;
+        input [63:0] csr_data_value;
+        begin
+            @(negedge clk);
+            tb_tile_csr_req[core_idx] = 1'b0;
+            tb_tile_csr_wen[core_idx] = 1'b1;
+            tb_tile_csr_addr[core_idx*8 +: 8] = csr_addr_value;
+            tb_tile_csr_wdata[core_idx*64 +: 64] = csr_data_value;
+            @(negedge clk);
+            tb_tile_csr_wen[core_idx] = 1'b0;
+        end
+    endtask
+
+    task drive_sha_op;
+        input integer core_idx;
+        input [3:0] op_value;
+        input [63:0] rs_value;
+        input [7:0] imm_value;
+        integer cyc;
+        reg seen;
+        begin
+            @(negedge clk);
+            tb_sha_op[core_idx*4 +: 4] = op_value;
+            tb_sha_rs_val[core_idx*64 +: 64] = rs_value;
+            tb_sha_imm8[core_idx*8 +: 8] = imm_value;
+            tb_sha_req[core_idx] = 1'b1;
+            seen = 1'b0;
+            for (cyc = 0; cyc < 400; cyc = cyc + 1) begin
+                @(negedge clk);
+                if (uut.sha_done_reg && uut.sha_grant == core_idx) begin
+                    seen = 1'b1;
+                    cyc = 400;
+                end
+            end
+            if (!seen) begin
+                $display("FAIL [SHA common-domain timeout]: core=%0d op=%0d",
+                         core_idx, op_value);
+                fail_count = fail_count + 1;
+            end
+            tb_sha_req[core_idx] = 1'b0;
+            repeat (3) @(negedge clk);
         end
     endtask
 
@@ -833,6 +893,14 @@ module tb_cluster;
         tb_tile_allow_cluster_spad = {N{1'b1}};
         tb_tacc_ctl_valid = {N{1'b0}};
         tb_tacc_ctl_wdata = {(N*64){1'b0}};
+        tb_sha_req = {N{1'b0}};
+        tb_sha_op = {(N*4){1'b0}};
+        tb_sha_rs_val = {(N*64){1'b0}};
+        tb_sha_imm8 = {(N*8){1'b0}};
+        tb_tile_csr_req = {N{1'b0}};
+        tb_tile_csr_wen = {N{1'b0}};
+        tb_tile_csr_addr = {(N*8){1'b0}};
+        tb_tile_csr_wdata = {(N*64){1'b0}};
 
         force uut.mc_mex_req = tb_mex_req;
         force uut.mc_mex_ss = tb_mex_ss;
@@ -852,17 +920,25 @@ module tb_cluster;
             tb_tile_allow_cluster_spad;
         force uut.mc_tacc_ctl_valid = tb_tacc_ctl_valid;
         force uut.mc_tacc_ctl_wdata = tb_tacc_ctl_wdata;
+        force uut.mc_sha_req = tb_sha_req;
+        force uut.mc_sha_op = tb_sha_op;
+        force uut.mc_sha_rs_val = tb_sha_rs_val;
+        force uut.mc_sha_imm8 = tb_sha_imm8;
+        force uut.mc_tile_csr_req = tb_tile_csr_req;
+        force uut.mc_tile_csr_wen = tb_tile_csr_wen;
+        force uut.mc_tile_csr_addr = tb_tile_csr_addr;
+        force uut.mc_tile_csr_wdata = tb_tile_csr_wdata;
 
         // A held architectural request produces one dispatch and one routed
         // completion, then remains in WAIT_DROP until the caller withdraws.
         tb_mex_op[2*2 +: 2] = MEX_TMUL;
-        tb_mex_funct[2*3 +: 3] = TMUL_TAMAC;
-        tb_mex_funct_byte[2*8 +: 8] = 8'h06;
+        tb_mex_funct[2*3 +: 3] = 3'd7;
+        tb_mex_funct_byte[2*8 +: 8] = 8'h07;
         tb_mex_valid_count = 0;
         tb_mex_done_count = 0;
         @(negedge clk);
         tb_mex_req[2] = 1'b1;
-        repeat (16) begin
+        repeat (32) begin
             @(negedge clk);
             if (uut.te_mex_valid)
                 tb_mex_valid_count = tb_mex_valid_count + 1;
@@ -875,10 +951,12 @@ module tb_cluster;
                 tb_mex_done_count, 64'd1);
         check64("held MEX remains in WAIT_DROP",
                 uut.mex_state, uut.MEX_WAIT_DROP);
+        check64("held MEX holds common WAIT_DROP",
+                uut.legacy_state, uut.LEGACY_WAIT_DROP);
         check64("MEX fault routes from granted caller",
                 uut.mex_fault_reg, MEX_FAULT_ILLEGAL);
         check64("MEX raw function captured",
-                uut.te_mex_funct_byte, 64'h06);
+                uut.te_mex_funct_byte, 64'h07);
         check64("MEX absolute caller captured",
                 uut.te_mex_caller_id, CLUSTER_ID_BASE + 8'd2);
         @(negedge clk);
@@ -886,12 +964,14 @@ module tb_cluster;
         repeat (3) @(negedge clk);
         check64("MEX returns idle after request drops",
                 uut.mex_state, uut.MEX_IDLE);
+        check64("common domain idles after MEX drops",
+                uut.legacy_state, uut.LEGACY_IDLE);
 
         // A caller reset concurrent with first admission must mask both MEX
         // and control requests and advance exactly one caller epoch.
         tb_mex_op[1*2 +: 2] = MEX_TMUL;
-        tb_mex_funct[1*3 +: 3] = TMUL_TAMAC;
-        tb_mex_funct_byte[1*8 +: 8] = 8'h06;
+        tb_mex_funct[1*3 +: 3] = 3'd7;
+        tb_mex_funct_byte[1*8 +: 8] = 8'h07;
         tb_tacc_ctl_wdata[1*64 +: 64] = 64'd1;
         tb_mex_valid_count = 0;
         tb_ctl_valid_count = 0;
@@ -926,8 +1006,8 @@ module tb_cluster;
         // The control sideband must complete independently while another
         // caller owns the active MEX grant.
         tb_mex_op[0 +: 2] = MEX_TMUL;
-        tb_mex_funct[0 +: 3] = TMUL_TAMAC;
-        tb_mex_funct_byte[0 +: 8] = 8'h06;
+        tb_mex_funct[0 +: 3] = 3'd7;
+        tb_mex_funct_byte[0 +: 8] = 8'h07;
         force uut.te_mex_done = 1'b0;
         @(negedge clk);
         tb_mex_req[0] = 1'b1;
@@ -946,6 +1026,9 @@ module tb_cluster;
                 uut.mex_state, uut.MEX_ACTIVE);
         check64("control preserves active MEX owner",
                 uut.mex_grant, 64'd0);
+        check64("control preserves common MEX turn",
+                {60'd0, uut.legacy_kind, uut.legacy_grant},
+                {60'd0, uut.LEGACY_KIND_MEX, 2'd0});
         @(negedge clk);
         tb_tacc_ctl_valid[1] = 1'b0;
         repeat (3) @(negedge clk);
@@ -981,18 +1064,20 @@ module tb_cluster;
                 tb_cancel_done_count, 64'd0);
         check64("cancelled active MEX returns arbiter idle",
                 uut.mex_state, uut.MEX_IDLE);
+        check64("cancelled active MEX releases common domain",
+                uut.legacy_state, uut.LEGACY_IDLE);
         check64("active reset advances caller epoch once",
                 uut.tacc_caller_epoch[0], 64'd1);
         repeat (3) @(negedge clk);
 
         // A fresh caller can use the engine after cancellation.
         tb_mex_op[3*2 +: 2] = MEX_TMUL;
-        tb_mex_funct[3*3 +: 3] = TMUL_TAMAC;
-        tb_mex_funct_byte[3*8 +: 8] = 8'h06;
+        tb_mex_funct[3*3 +: 3] = 3'd7;
+        tb_mex_funct_byte[3*8 +: 8] = 8'h07;
         tb_mex_done_count = 0;
         @(negedge clk);
         tb_mex_req[3] = 1'b1;
-        repeat (12) begin
+        repeat (24) begin
             @(negedge clk);
             if (uut.mex_done_reg && uut.mex_grant == 3)
                 tb_mex_done_count = tb_mex_done_count + 1;
@@ -1026,6 +1111,672 @@ module tb_cluster;
                 (64'd5 << TACC_STATUS_OWNER_LSB));
         release uut.te_tacc_status_raw;
 
+        // -----------------------------------------------------------------
+        // Test 13: one caller-round-robin domain covers SHA, MEX, SHA
+        // metadata CSR, and legacy ACC CSR requests.  With last=0, four
+        // simultaneous callers must complete in order 1,2,3,0 regardless of
+        // producer kind.  Held requests still produce exactly one completion.
+        // -----------------------------------------------------------------
+        @(negedge clk);
+        tb_mex_req = {N{1'b0}};
+        tb_sha_req = {N{1'b0}};
+        tb_tile_csr_req = {N{1'b0}};
+        tb_tile_csr_wen = {N{1'b0}};
+        tile_engine_reset = 1'b1;
+        repeat (2) @(negedge clk);
+        tile_engine_reset = 1'b0;
+        repeat (2) @(negedge clk);
+
+        tb_sha_op[1*4 +: 4] = ISA_SHA_RELEASE;
+        tb_sha_imm8[1*8 +: 8] = 8'd0;
+
+        tb_mex_ss[2*2 +: 2] = 2'd0;
+        tb_mex_op[2*2 +: 2] = MEX_TMUL;
+        tb_mex_funct[2*3 +: 3] = 3'd7;
+        tb_mex_funct_byte[2*8 +: 8] = 8'h07;
+
+        tb_tile_csr_addr[3*8 +: 8] = CSR_SHA_MODE;
+        tb_tile_csr_wen[3] = 1'b0;
+        tb_tile_csr_addr[0*8 +: 8] = CSR_ACC0;
+        tb_tile_csr_wdata[0*64 +: 64] =
+            64'hCAFE_BABE_0123_4567;
+        tb_tile_csr_wen[0] = 1'b1;
+
+        tb_legacy_done_count = 0;
+        @(negedge clk);
+        tb_sha_req[1] = 1'b1;
+        tb_mex_req[2] = 1'b1;
+        tb_tile_csr_req[3] = 1'b1;
+        tb_tile_csr_req[0] = 1'b1;
+        for (i = 0; i < 400; i = i + 1) begin
+            @(negedge clk);
+            if (uut.sha_done_reg && uut.sha_grant == 1 &&
+                tb_sha_req[1]) begin
+                if (tb_legacy_done_count < 4)
+                    tb_legacy_order[tb_legacy_done_count] = 2'd1;
+                tb_legacy_done_count = tb_legacy_done_count + 1;
+                tb_sha_req[1] = 1'b0;
+            end
+            if (uut.mex_done_reg && uut.mex_grant == 2 &&
+                tb_mex_req[2]) begin
+                if (tb_legacy_done_count < 4)
+                    tb_legacy_order[tb_legacy_done_count] = 2'd2;
+                tb_legacy_done_count = tb_legacy_done_count + 1;
+                tb_mex_req[2] = 1'b0;
+            end
+            if (uut.mc_tile_csr_done[3] && tb_tile_csr_req[3]) begin
+                if (tb_legacy_done_count < 4)
+                    tb_legacy_order[tb_legacy_done_count] = 2'd3;
+                tb_legacy_done_count = tb_legacy_done_count + 1;
+                tb_tile_csr_req[3] = 1'b0;
+            end
+            if (uut.mc_tile_csr_done[0] && tb_tile_csr_req[0]) begin
+                if (tb_legacy_done_count < 4)
+                    tb_legacy_order[tb_legacy_done_count] = 2'd0;
+                tb_legacy_done_count = tb_legacy_done_count + 1;
+                tb_tile_csr_req[0] = 1'b0;
+            end
+            if (tb_legacy_done_count == 4)
+                i = 400;
+        end
+        check64("mixed common domain completes four",
+                tb_legacy_done_count, 64'd4);
+        check64("mixed common RR first caller",
+                tb_legacy_order[0], 64'd1);
+        check64("mixed common RR second caller",
+                tb_legacy_order[1], 64'd2);
+        check64("mixed common RR third caller",
+                tb_legacy_order[2], 64'd3);
+        check64("mixed common RR wraps to zero",
+                tb_legacy_order[3], 64'd0);
+        repeat (4) @(negedge clk);
+        check64("mixed common RR cursor",
+                uut.legacy_last, 64'd0);
+        check64("SHA metadata CSR shares common domain",
+                uut.mc_tile_csr_rdata[3*64 +: 64], 64'd0);
+        check64("ACC CSR write reaches tile-owned bank",
+                uut.te_legacy_acc_state[0*64 +: 64],
+                64'hCAFE_BABE_0123_4567);
+
+        // A different caller reads the same authoritative ACC bank through
+        // the acknowledged CSR path.
+        tb_tile_csr_addr[2*8 +: 8] = CSR_ACC0;
+        tb_tile_csr_wen[2] = 1'b0;
+        tb_wait_seen = 0;
+        @(negedge clk);
+        tb_tile_csr_req[2] = 1'b1;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.mc_tile_csr_done[2]) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [authoritative ACC CSR read timeout]");
+            fail_count = fail_count + 1;
+        end
+        tb_tile_csr_req[2] = 1'b0;
+        repeat (3) @(negedge clk);
+        check64("ACC CSR read observes shared bank",
+                uut.mc_tile_csr_rdata[2*64 +: 64],
+                64'hCAFE_BABE_0123_4567);
+
+        // -----------------------------------------------------------------
+        // Test 14: SHA owns the shared digest/legacy-ACC transaction, but does
+        // not monopolize stateless MEX service.  Private config is sampled
+        // from the granted MEX caller, FINAL retains the lock, RELEASE alone
+        // unlocks, and ACC_ZERO clears only the granted caller's TCTRL shadow.
+        // -----------------------------------------------------------------
+        tile_mem_model[0] = {64{8'h01}};
+        tile_mem_model[1] = {64{8'h02}};
+        tile_mem_model[2] = 512'd0;
+        tile_mem_model[3] = {64{8'h01}};
+
+        drive_private_tile_csr(2, CSR_TMODE, 64'd0);
+        drive_private_tile_csr(2, CSR_TSRC0, 64'h0000);
+        drive_private_tile_csr(2, CSR_TSRC1, 64'h0040);
+        drive_private_tile_csr(2, CSR_TDST, 64'h0080);
+        drive_private_tile_csr(3, CSR_TMODE, 64'd0);
+        drive_private_tile_csr(3, CSR_TSRC0, 64'h00C0);
+        drive_private_tile_csr(3, CSR_TCTRL, 64'h0002);
+        drive_private_tile_csr(1, CSR_TCTRL, 64'h0002);
+        check64("caller 2 keeps private TSRC0",
+                uut.cfg_tsrc0[2], 64'h0000);
+        check64("caller 3 keeps private TSRC0",
+                uut.cfg_tsrc0[3], 64'h00C0);
+
+        drive_sha_op(0, ISA_SHA_INIT, 64'd0, 8'd0);
+        check64("SHA INIT acquires lock",
+                {61'd0, uut.sha_locked, uut.sha_lock_owner},
+                {61'd0, 1'b1, 2'd0});
+        check64("SHA INIT writes authoritative ACC0",
+                uut.te_legacy_acc_state[0*64 +: 64],
+                64'h6a09e667_bb67ae85);
+
+        // Caller 1 requests a protected ACC write, caller 3 requests a
+        // protected reduction, and caller 2 requests stateless T.ADD.
+        // Only caller 2 may receive service while caller 0 owns SHA.
+        tb_tile_csr_addr[1*8 +: 8] = CSR_ACC0;
+        tb_tile_csr_wdata[1*64 +: 64] = 64'hDEAD_BEEF_CAFE_0001;
+        tb_tile_csr_wen[1] = 1'b1;
+
+        tb_mex_ss[2*2 +: 2] = 2'd0;
+        tb_mex_op[2*2 +: 2] = MEX_TALU;
+        tb_mex_funct[2*3 +: 3] = TALU_ADD;
+        tb_mex_funct_byte[2*8 +: 8] = {5'd0, TALU_ADD};
+        tb_mex_ss[3*2 +: 2] = 2'd0;
+        tb_mex_op[3*2 +: 2] = MEX_TRED;
+        tb_mex_funct[3*3 +: 3] = TRED_SUM;
+        tb_mex_funct_byte[3*8 +: 8] = {5'd0, TRED_SUM};
+
+        tb_mex_done_count = 0;
+        tb_csr_done_count = 0;
+        tb_tred_done_count = 0;
+        @(negedge clk);
+        tb_tile_csr_req[1] = 1'b1;
+        tb_mex_req[2] = 1'b1;
+        tb_mex_req[3] = 1'b1;
+        for (i = 0; i < 400; i = i + 1) begin
+            @(negedge clk);
+            if (uut.mc_tile_csr_done[1])
+                tb_csr_done_count = tb_csr_done_count + 1;
+            if (uut.mex_done_reg && uut.mex_grant == 3)
+                tb_tred_done_count = tb_tred_done_count + 1;
+            if (uut.mex_done_reg && uut.mex_grant == 2 &&
+                tb_mex_req[2]) begin
+                tb_mex_done_count = tb_mex_done_count + 1;
+                tb_mex_req[2] = 1'b0;
+                i = 400;
+            end
+        end
+        check64("stateless MEX completes under SHA lock",
+                tb_mex_done_count, 64'd1);
+        repeat (16) begin
+            @(negedge clk);
+            if (uut.mc_tile_csr_done[1])
+                tb_csr_done_count = tb_csr_done_count + 1;
+            if (uut.mex_done_reg && uut.mex_grant == 3)
+                tb_tred_done_count = tb_tred_done_count + 1;
+        end
+        check64("SHA lock blocks nonowner ACC CSR",
+                tb_csr_done_count, 64'd0);
+        check64("SHA lock blocks nonowner TRED",
+                tb_tred_done_count, 64'd0);
+        check64("SHA lock preserves authoritative ACC",
+                uut.te_legacy_acc_state[0*64 +: 64],
+                64'h6a09e667_bb67ae85);
+        check64("stateless MEX sampled caller 2 config",
+                uut.u_tile.tsrc0, 64'h0000);
+        if (tile_mem_model[2] === {64{8'h03}})
+            pass_count = pass_count + 1;
+        else begin
+            $display("FAIL [stateless MEX under SHA lock]: got=%h",
+                     tile_mem_model[2]);
+            fail_count = fail_count + 1;
+        end
+
+        // The immediate-source encoding still carries the raw TMUL function
+        // into the current leaf.  A low function value of DOT must therefore
+        // remain protected rather than bypassing the SHA transaction lock.
+        tb_mex_ss[2*2 +: 2] = 2'd2;
+        tb_mex_op[2*2 +: 2] = MEX_TMUL;
+        tb_mex_funct[2*3 +: 3] = TMUL_DOT;
+        tb_mex_funct_byte[2*8 +: 8] = {5'd0, TMUL_DOT};
+        tb_mex_done_count = 0;
+        @(negedge clk);
+        tb_mex_req[2] = 1'b1;
+        repeat (16) begin
+            @(negedge clk);
+            if (uut.mex_done_reg && uut.mex_grant == 2)
+                tb_mex_done_count = tb_mex_done_count + 1;
+        end
+        check64("SHA lock blocks SS2 DOT",
+                tb_mex_done_count, 64'd0);
+        check64("blocked SS2 DOT preserves ACC",
+                uut.te_legacy_acc_state[0*64 +: 64],
+                64'h6a09e667_bb67ae85);
+        tb_mex_req[2] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        drive_sha_op(0, ISA_SHA_FINAL, 64'd0, 8'd0);
+        check64("SHA FINAL retains transaction lock",
+                {61'd0, uut.sha_locked, uut.sha_lock_owner},
+                {61'd0, 1'b1, 2'd0});
+        check64("FINAL leaves blocked ACC pending",
+                tb_csr_done_count, 64'd0);
+        check64("FINAL leaves blocked TRED pending",
+                tb_tred_done_count, 64'd0);
+
+        // Release caller 0, then retain both previously blocked requests.
+        // RR last=0 after RELEASE, so caller 1's ACC write must precede caller
+        // 3's reduction.
+        tb_sha_op[0*4 +: 4] = ISA_SHA_RELEASE;
+        tb_sha_rs_val[0*64 +: 64] = 64'd0;
+        tb_sha_imm8[0*8 +: 8] = 8'd0;
+        tb_sha_done_count = 0;
+        tb_csr_done_count = 0;
+        tb_tred_done_count = 0;
+        tb_legacy_done_count = 0;
+        @(negedge clk);
+        tb_sha_req[0] = 1'b1;
+        for (i = 0; i < 600; i = i + 1) begin
+            @(negedge clk);
+            if (uut.sha_done_reg && uut.sha_grant == 0 &&
+                tb_sha_req[0]) begin
+                tb_sha_done_count = tb_sha_done_count + 1;
+                tb_sha_req[0] = 1'b0;
+            end
+            if (uut.mc_tile_csr_done[1] && tb_tile_csr_req[1]) begin
+                if (tb_legacy_done_count < 4)
+                    tb_legacy_order[tb_legacy_done_count] = 2'd1;
+                tb_legacy_done_count = tb_legacy_done_count + 1;
+                tb_csr_done_count = tb_csr_done_count + 1;
+                tb_tile_csr_req[1] = 1'b0;
+            end
+            if (uut.mex_done_reg && uut.mex_grant == 3 &&
+                tb_mex_req[3]) begin
+                if (tb_legacy_done_count < 4)
+                    tb_legacy_order[tb_legacy_done_count] = 2'd3;
+                tb_legacy_done_count = tb_legacy_done_count + 1;
+                tb_tred_done_count = tb_tred_done_count + 1;
+                tb_mex_req[3] = 1'b0;
+            end
+            if (tb_sha_done_count == 1 &&
+                tb_legacy_done_count == 2)
+                i = 600;
+        end
+        @(negedge clk);
+        tb_sha_req[0] = 1'b0;
+        tb_tile_csr_req[1] = 1'b0;
+        tb_mex_req[3] = 1'b0;
+        repeat (5) @(negedge clk);
+        check64("SHA RELEASE completes once",
+                tb_sha_done_count, 64'd1);
+        check64("SHA RELEASE is sole unlock",
+                uut.sha_locked, 64'd0);
+        check64("released ACC writer completes once",
+                tb_csr_done_count, 64'd1);
+        check64("released TRED completes once",
+                tb_tred_done_count, 64'd1);
+        check64("post-release first caller",
+                tb_legacy_order[0], 64'd1);
+        check64("post-release second caller",
+                tb_legacy_order[1], 64'd3);
+        check64("TRED updates authoritative ACC",
+                uut.te_legacy_acc_state[0*64 +: 64], 64'd64);
+        check64("ACC_ZERO clears granted caller only",
+                uut.cfg_tctrl[3], 64'd0);
+        check64("ACC_ZERO preserves sibling shadow",
+                uut.cfg_tctrl[1], 64'd2);
+        check64("TRED sampled caller 3 config",
+                uut.u_tile.tsrc0, 64'h00C0);
+
+        // -----------------------------------------------------------------
+        // Test 15: SHA.ROUND captures the granted caller's private TSRC0.
+        // Resetting that caller after the outer bus captures a read must drain
+        // and discard its response before a normal microcore bus request can
+        // take ownership.
+        // -----------------------------------------------------------------
+        drive_private_tile_csr(1, CSR_TSRC0, 64'h0100);
+        drive_private_tile_csr(2, CSR_TSRC0, 64'h0300);
+        mem[12'h380] = 8'h11; mem[12'h381] = 8'h22;
+        mem[12'h382] = 8'h33; mem[12'h383] = 8'h44;
+        mem[12'h384] = 8'h55; mem[12'h385] = 8'h66;
+        mem[12'h386] = 8'h77; mem[12'h387] = 8'h88;
+        force uut.bus_ready = 1'b0;
+        tb_sha_op[1*4 +: 4] = ISA_SHA_ROUND;
+        tb_sha_rs_val[1*64 +: 64] = 64'd0;
+        tb_sha_imm8[1*8 +: 8] = 8'd0;
+        tb_wait_seen = 0;
+        @(negedge clk);
+        tb_sha_req[1] = 1'b1;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(negedge clk);
+            if (uut.sha_state == uut.SHA_LOAD &&
+                uut.sha_bus_pending) begin
+                tb_wait_seen = 1;
+                i = 200;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [SHA captured-source load timeout]");
+            fail_count = fail_count + 1;
+        end
+        check64("SHA samples granted private TSRC0",
+                uut.sha_tsrc0_reg, 64'h0100);
+        check64("SHA load uses captured TSRC0",
+                bus_addr, 64'h0100);
+
+        // A sibling can change its own shadow while the load is held without
+        // perturbing the captured SHA source.
+        drive_private_tile_csr(2, CSR_TSRC0, 64'h0380);
+        check64("sibling TSRC0 write remains private",
+                uut.cfg_tsrc0[2], 64'h0380);
+        check64("active SHA source remains captured",
+                uut.sha_tsrc0_reg, 64'h0100);
+
+        tb_cancel_done_count = 0;
+        @(negedge clk);
+        micro_reset[1] = 1'b1;
+        repeat (2) begin
+            @(negedge clk);
+            if (uut.sha_done_reg)
+                tb_cancel_done_count = tb_cancel_done_count + 1;
+        end
+        tb_sha_req[1] = 1'b0;
+        micro_reset[1] = 1'b0;
+        repeat (2) begin
+            @(negedge clk);
+            if (uut.sha_done_reg)
+                tb_cancel_done_count = tb_cancel_done_count + 1;
+        end
+        check64("cancelled SHA enters response drain",
+                uut.sha_state, uut.SHA_DRAIN);
+        check64("cancelled SHA retains bus ownership",
+                {62'd0, uut.sha_bus_active, uut.sha_bus_pending}, 64'd3);
+        check64("SHA drain holds captured address",
+                bus_addr, 64'h0100);
+
+        // Hold a normal microcore request behind the canceled SHA response.
+        // If SHA released the port early, the stale response below would be
+        // routed to this request.
+        force uut.mc_bus_valid = 4'b0100;
+        force uut.mc_bus_addr =
+            {64'd0, 64'h0000_0000_0000_0380, 128'd0};
+        force uut.mc_bus_wdata = 256'd0;
+        force uut.mc_bus_wen = 4'b0000;
+        force uut.mc_bus_size = {2'd0, BUS_DWORD, 4'd0};
+        repeat (2) @(negedge clk);
+        check64("normal bus waits behind SHA drain",
+                {62'd0, uut.arb_busy, uut.mc_bus_ready[2]}, 64'd0);
+        check64("drain still presents canceled SHA request",
+                {63'd0, bus_valid}, 64'd1);
+
+        // Return the already-captured SHA response. It is consumed only as a
+        // drain event and cannot acknowledge the waiting normal request.
+        force uut.bus_rdata = 64'hDEAD_CAFE_55AA_1234;
+        force uut.bus_ready = 1'b1;
+        @(posedge clk);
+        #1;
+        check64("stale SHA response not delivered to microcore",
+                {63'd0, uut.mc_bus_ready[2]}, 64'd0);
+        @(negedge clk);
+        release uut.bus_ready;
+        release uut.bus_rdata;
+        repeat (2) @(negedge clk);
+        check64("cancelled SHA has no late completion",
+                tb_cancel_done_count, 64'd0);
+        check64("cancelled SHA returns leaf idle",
+                uut.sha_state, uut.SHA_IDLE);
+        check64("drained SHA releases bus ownership",
+                {62'd0, uut.sha_bus_active, uut.sha_bus_pending}, 64'd0);
+        check64("cancelled SHA releases common turn",
+                uut.legacy_state, uut.LEGACY_IDLE);
+        check64("cancelled SHA preserves ACC",
+                uut.te_legacy_acc_state[0*64 +: 64], 64'd64);
+
+        // The still-held normal request now acquires the cluster port and
+        // receives its own response rather than the discarded SHA data.
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(posedge clk);
+            #1;
+            if (uut.mc_bus_ready[2]) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [normal bus request after SHA drain timeout]");
+            fail_count = fail_count + 1;
+        end
+        check64("normal bus gets its own post-drain response",
+                uut.mc_bus_rdata[2*64 +: 64],
+                64'h1122_3344_5566_7788);
+        release uut.mc_bus_valid;
+        release uut.mc_bus_addr;
+        release uut.mc_bus_wdata;
+        release uut.mc_bus_wen;
+        release uut.mc_bus_size;
+        repeat (2) @(negedge clk);
+
+        // A fresh caller proves cancellation left the common domain usable.
+        tb_tile_csr_addr[2*8 +: 8] = CSR_ACC0;
+        tb_tile_csr_wen[2] = 1'b0;
+        tb_wait_seen = 0;
+        @(negedge clk);
+        tb_tile_csr_req[2] = 1'b1;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.mc_tile_csr_done[2]) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [fresh ACC read after SHA cancellation timeout]");
+            fail_count = fail_count + 1;
+        end
+        tb_tile_csr_req[2] = 1'b0;
+        repeat (3) @(negedge clk);
+        check64("fresh caller reads ACC after cancellation",
+                uut.mc_tile_csr_rdata[2*64 +: 64], 64'd64);
+
+        // -----------------------------------------------------------------
+        // Test 16: cancellation and mutation share one terminal boundary.
+        // Exercise the exact edge after a CSR/SHA write is prepared, restore
+        // a MEX accumulator mutation that has already reached the leaf, and
+        // prove a canceled compression job cannot complete as fresh work.
+        // -----------------------------------------------------------------
+        tb_mex_req = {N{1'b0}};
+        tb_sha_req = {N{1'b0}};
+        tb_tile_csr_req = {N{1'b0}};
+        tb_tile_csr_wen = {N{1'b0}};
+        tile_engine_reset = 1'b1;
+        repeat (2) @(negedge clk);
+        tile_engine_reset = 1'b0;
+        repeat (2) @(negedge clk);
+
+        // Cancel an ACC CSR while its ACTIVE terminal signals are present.
+        tb_tile_csr_addr[2*8 +: 8] = CSR_ACC0;
+        tb_tile_csr_wdata[2*64 +: 64] =
+            64'hC5C5_0000_DEAD_BEEF;
+        tb_tile_csr_wen[2] = 1'b1;
+        @(negedge clk);
+        tb_tile_csr_req[2] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.legacy_state == uut.LEGACY_ACTIVE &&
+                uut.legacy_kind == uut.LEGACY_KIND_CSR &&
+                uut.legacy_grant == 2) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [CSR terminal-cancel setup timeout]");
+            fail_count = fail_count + 1;
+        end
+        micro_reset[2] = 1'b1;
+        #1;
+        check64("reset suppresses terminal CSR done",
+                uut.mc_tile_csr_done[2], 64'd0);
+        @(posedge clk);
+        @(negedge clk);
+        tb_tile_csr_req[2] = 1'b0;
+        tb_tile_csr_wen[2] = 1'b0;
+        micro_reset[2] = 1'b0;
+        repeat (3) @(negedge clk);
+        check64("cancelled CSR preserves ACC",
+                uut.te_legacy_acc_state[0*64 +: 64], 64'd0);
+        check64("cancelled CSR does not advance RR",
+                uut.legacy_last, 64'd0);
+
+        // Cancel SHA.INIT during SHA_DONE, before the prepared IV write and
+        // ownership acquisition reach their common terminal edge.
+        tb_sha_op[1*4 +: 4] = ISA_SHA_INIT;
+        tb_sha_imm8[1*8 +: 8] = 8'd0;
+        @(negedge clk);
+        tb_sha_req[1] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.sha_state == uut.SHA_DONE &&
+                uut.sha_done_reg && uut.sha_grant == 1) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [SHA terminal-cancel setup timeout]");
+            fail_count = fail_count + 1;
+        end
+        micro_reset[1] = 1'b1;
+        #1;
+        check64("reset masks terminal SHA completion",
+                uut.mc[1].u_micro.sha_done, 64'd0);
+        @(posedge clk);
+        @(negedge clk);
+        tb_sha_req[1] = 1'b0;
+        micro_reset[1] = 1'b0;
+        repeat (3) @(negedge clk);
+        check64("cancelled SHA INIT preserves ACC",
+                uut.te_legacy_acc_state[0*64 +: 64], 64'd0);
+        check64("cancelled SHA INIT preserves lock",
+                uut.sha_locked, 64'd0);
+        check64("cancelled SHA INIT preserves mode",
+                uut.cl_sha_mode, 64'd0);
+        check64("cancelled SHA INIT does not advance RR",
+                uut.legacy_last, 64'd0);
+
+        // Seed ACC, then cancel a reduction only after the tile leaf has
+        // entered S_DONE with the mutated accumulator.  The common-domain
+        // admission snapshot must be restored on the cancellation edge.
+        tb_tile_csr_addr[0*8 +: 8] = CSR_ACC0;
+        tb_tile_csr_wdata[0*64 +: 64] =
+            64'h55AA_0000_0000_1234;
+        tb_tile_csr_wen[0] = 1'b1;
+        @(negedge clk);
+        tb_tile_csr_req[0] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(negedge clk);
+            if (uut.mc_tile_csr_done[0]) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [ACC seed timeout]");
+            fail_count = fail_count + 1;
+        end
+        tb_tile_csr_req[0] = 1'b0;
+        tb_tile_csr_wen[0] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        tile_mem_model[0] = {64{8'h01}};
+        drive_private_tile_csr(2, CSR_TMODE, 64'd0);
+        drive_private_tile_csr(2, CSR_TSRC0, 64'h0000);
+        drive_private_tile_csr(2, CSR_TCTRL, 64'd0);
+        tb_mex_ss[2*2 +: 2] = 2'd0;
+        tb_mex_op[2*2 +: 2] = MEX_TRED;
+        tb_mex_funct[2*3 +: 3] = TRED_SUM;
+        tb_mex_funct_byte[2*8 +: 8] = {5'd0, TRED_SUM};
+        @(negedge clk);
+        tb_mex_req[2] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(negedge clk);
+            if (uut.u_tile.state == uut.u_tile.S_DONE &&
+                uut.te_legacy_acc_state[0*64 +: 64] == 64'd64) begin
+                tb_wait_seen = 1;
+                i = 200;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [post-mutation MEX cancel setup timeout]");
+            fail_count = fail_count + 1;
+        end
+        micro_reset[2] = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        tb_mex_req[2] = 1'b0;
+        micro_reset[2] = 1'b0;
+        repeat (4) @(negedge clk);
+        check64("cancelled MEX restores ACC snapshot",
+                uut.te_legacy_acc_state[0*64 +: 64],
+                64'h55AA_0000_0000_1234);
+        check64("cancelled MEX returns common domain idle",
+                uut.legacy_state, uut.LEGACY_IDLE);
+        check64("cancelled MEX does not advance RR",
+                uut.legacy_last, 64'd0);
+
+        // Cancel a live compression child, then run a fresh ROUND.  The child
+        // must reset rather than publishing its stale digest as fresh work.
+        drive_private_tile_csr(1, CSR_TSRC0, 64'h0200);
+        drive_private_tile_csr(2, CSR_TSRC0, 64'h0300);
+        for (i = 0; i < 128; i = i + 1) begin
+            mem[12'h200 + i] = i[7:0];
+            mem[12'h300 + i] = (8'hFF - i[7:0]);
+        end
+        tb_sha_op[1*4 +: 4] = ISA_SHA_ROUND;
+        @(negedge clk);
+        tb_sha_req[1] = 1'b1;
+        tb_wait_seen = 0;
+        for (i = 0; i < 300; i = i + 1) begin
+            @(negedge clk);
+            if (uut.sha_state == uut.SHA_COMPRESS &&
+                uut.sha_eng_busy) begin
+                tb_wait_seen = 1;
+                i = 300;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [SHA compression-cancel setup timeout]");
+            fail_count = fail_count + 1;
+        end
+        micro_reset[1] = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        tb_sha_req[1] = 1'b0;
+        micro_reset[1] = 1'b0;
+        repeat (3) @(negedge clk);
+        check64("cancel resets SHA compression child",
+                uut.sha_eng_busy, 64'd0);
+        check64("cancelled compression releases common domain",
+                uut.legacy_state, uut.LEGACY_IDLE);
+
+        tb_sha_op[2*4 +: 4] = ISA_SHA_ROUND;
+        tb_sha_done_count = 0;
+        tb_wait_seen = 0;
+        @(negedge clk);
+        tb_sha_req[2] = 1'b1;
+        for (i = 0; i < 400; i = i + 1) begin
+            @(negedge clk);
+            if (uut.sha_state == uut.SHA_COMPRESS)
+                tb_wait_seen = tb_wait_seen + 1;
+            if (uut.sha_done_reg && uut.sha_grant == 2 &&
+                tb_sha_req[2]) begin
+                tb_sha_done_count = tb_sha_done_count + 1;
+                tb_sha_req[2] = 1'b0;
+                i = 400;
+            end
+        end
+        check64("fresh ROUND completes once",
+                tb_sha_done_count, 64'd1);
+        if (tb_wait_seen >= 60)
+            pass_count = pass_count + 1;
+        else begin
+            $display("FAIL [fresh ROUND completed too early]: cycles=%0d",
+                     tb_wait_seen);
+            fail_count = fail_count + 1;
+        end
+        repeat (5) @(negedge clk);
+        check64("fresh ROUND leaves child idle",
+                uut.sha_eng_busy, 64'd0);
+
         release uut.mc_mex_req;
         release uut.mc_mex_ss;
         release uut.mc_mex_op;
@@ -1043,6 +1794,14 @@ module tb_cluster;
         release uut.mc_tile_allow_cluster_spad;
         release uut.mc_tacc_ctl_valid;
         release uut.mc_tacc_ctl_wdata;
+        release uut.mc_sha_req;
+        release uut.mc_sha_op;
+        release uut.mc_sha_rs_val;
+        release uut.mc_sha_imm8;
+        release uut.mc_tile_csr_req;
+        release uut.mc_tile_csr_wen;
+        release uut.mc_tile_csr_addr;
+        release uut.mc_tile_csr_wdata;
 
         // =================================================================
         $display("===========================================");

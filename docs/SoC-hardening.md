@@ -2303,7 +2303,7 @@ to a core instruction.
 | Category | Current | Proposed | Rationale |
 |----------|---------|----------|-----------|
 | CRC (32/64-bit modes) | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA + cluster-shared (hw lock)** | ✅ DONE — MMIO removed, cluster arbiter for micro-cores |
-| SHA-256/384/512 | ~~Shared MMIO~~ **REMOVED** | **Full-core-local ISA + micro-cluster-shared ISA** | Native/emulator path complete; explicit-release RTL update deferred |
+| SHA-256/384/512 | ~~Shared MMIO~~ **REMOVED** | **Full-core-local ISA + micro-cluster-shared ISA** | ✅ Explicit-release decode and cluster ownership complete in RTL; SHA-384/512 datapath expansion remains separate |
 | Field ALU | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
 | AES-256-GCM | Shared MMIO | Shared MMIO | Large key schedule; AES-NI style would need 240-byte state per core |
 | SHA-3/SHAKE | Shared MMIO | Shared MMIO | 1600-bit Keccak state doesn't fit core registers |
@@ -2452,7 +2452,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] RTL: per-core `mp64_sha2_isa` datapath (SHA-256 mode, 64-round) (2026-03-10)
 - [x] RTL: integrate into `mp64_cpu.v` as tightly-coupled sub-module (2026-03-10)
 - [x] RTL: ISA decode for SHA.INIT / SHA.ROUND / SHA.FINAL (FB 10–15) (2026-03-10)
-- [ ] RTL: SHA.RELEASE decode and FINAL-retains cluster ownership (deferred)
+- [x] RTL: SHA.RELEASE decode and FINAL-retains cluster ownership (2026-07-28)
 - [x] RTL: testbench `tb_sha2_isa.v` — 7/7 NIST vectors passing (2026-03-10)
 - [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
 - [x] BIOS: crypto words updated to use ISA path (full cores) (2026-03-10)

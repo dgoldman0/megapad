@@ -150,6 +150,10 @@ module mp64_soc #(
     wire [7:0]  core_csr_addr  [0:NUM_CORES-1];
     wire [63:0] core_csr_wdata [0:NUM_CORES-1];
     wire [63:0] core_csr_rdata [0:NUM_CORES-1];
+    wire [255:0] core_legacy_acc_state[0:NUM_CORES-1];
+    wire [3:0]   core_legacy_acc_wen  [0:NUM_CORES-1];
+    wire [255:0] core_legacy_acc_wdata[0:NUM_CORES-1];
+    wire         core_acc_zero_consumed[0:NUM_CORES-1];
 
     wire        core_mex_valid     [0:NUM_CORES-1];
     wire [1:0]  core_mex_ss        [0:NUM_CORES-1];
@@ -270,6 +274,9 @@ module mp64_soc #(
                 .csr_addr        (core_csr_addr[ci]),
                 .csr_wdata       (core_csr_wdata[ci]),
                 .csr_rdata       (core_csr_rdata[ci]),
+                .legacy_acc_state(core_legacy_acc_state[ci]),
+                .legacy_acc_wen  (core_legacy_acc_wen[ci]),
+                .legacy_acc_wdata(core_legacy_acc_wdata[ci]),
                 .mex_valid       (core_mex_valid[ci]),
                 .mex_ss          (core_mex_ss[ci]),
                 .mex_op          (core_mex_op[ci]),
@@ -937,6 +944,26 @@ module mp64_soc #(
                     .tacc_ctl_wdata(core_tacc_ctl_wdata[fti]),
                     .tacc_ctl_done (core_tacc_ctl_done[fti]),
                     .tacc_ctl_fault(core_tacc_ctl_fault[fti]),
+
+                    .legacy_acc_state(core_legacy_acc_state[fti]),
+                    .legacy_acc_wen(core_legacy_acc_wen[fti]),
+                    .legacy_acc_wdata(core_legacy_acc_wdata[fti]),
+                    .cfg_load      (1'b0),
+                    .cfg_tmode     (64'd0),
+                    .cfg_tctrl     (64'd0),
+                    .cfg_tsrc0     (64'd0),
+                    .cfg_tsrc1     (64'd0),
+                    .cfg_tdst      (64'd0),
+                    .cfg_sb        (64'd0),
+                    .cfg_sr        (64'd0),
+                    .cfg_sc        (64'd0),
+                    .cfg_sw        (64'd0),
+                    .cfg_tstride_r (64'd0),
+                    .cfg_tstride_c (64'd0),
+                    .cfg_ttile_h   (64'd0),
+                    .cfg_ttile_w   (64'd0),
+                    .acc_zero_consumed(
+                        core_acc_zero_consumed[fti]),
 
                     .tile_req      (core_tile_req[fti]),
                     .tile_addr     (core_tile_addr[fti]),

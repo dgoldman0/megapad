@@ -66,7 +66,10 @@ function crypto_is_bare;
             8'h06, 8'h07, 8'h08, 8'h09,  // reserved CRC ops trap as
             8'h0A, 8'h0B, 8'h0C, 8'h0D,  // complete two-byte encodings
             8'h0E, 8'h0F,
-            8'h11, 8'h12, 8'h15,          // SHA.ROUND/PAD/FINAL
+            8'h11, 8'h12, 8'h15, 8'h16,  // SHA.ROUND/PAD/FINAL/RELEASE
+            8'h17, 8'h18, 8'h19, 8'h1A,  // reserved SHA ops trap as
+            8'h1B, 8'h1C, 8'h1D, 8'h1E,  // complete two-byte encodings
+            8'h1F,
             8'h20, 8'h21, 8'h22, 8'h23,  // GF.ADD/SUB/MUL/SQR
             8'h24, 8'h25, 8'h26,          // GF.INV/POW/MULR
             8'h27, 8'h28,                 // GF.MAC/MACR

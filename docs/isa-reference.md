@@ -901,9 +901,8 @@ transaction owner. SHA.DIN = 1 cycle (+ ~64 cycles when a full block triggers
 compression; ~80 in SHA-384/512 mode). SHA.FINAL = ~64–83 cycles.
 SHA.DOUT and SHA.RELEASE = 1 cycle.
 
-The assembler, Python execution model, and native C++ execution/scheduler
-implement this `SHA.RELEASE` contract. Matching RTL decode and cluster-lock
-changes are intentionally deferred.
+The assembler, Python execution model, native C++ execution/scheduler, and
+RTL decode and cluster-lock paths implement this `SHA.RELEASE` contract.
 
 #### Field ALU Sub-Operations (sub-op 0x20–0x2D)
 

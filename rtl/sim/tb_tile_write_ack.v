@@ -39,6 +39,8 @@ module tb_tile_write_ack;
     wire [511:0] ext_tile_wdata;
     reg [511:0]  ext_tile_rdata;
     reg          ext_tile_ack;
+    wire [255:0] legacy_acc_state;
+    wire         acc_zero_consumed;
 
     integer pass_count;
     integer fail_count;
@@ -92,6 +94,24 @@ module tb_tile_write_ack;
         .tacc_ctl_wdata (64'd0),
         .tacc_ctl_done  (),
         .tacc_ctl_fault (),
+        .legacy_acc_state(legacy_acc_state),
+        .legacy_acc_wen (4'd0),
+        .legacy_acc_wdata(256'd0),
+        .cfg_load       (1'b0),
+        .cfg_tmode      (64'd0),
+        .cfg_tctrl      (64'd0),
+        .cfg_tsrc0      (64'd0),
+        .cfg_tsrc1      (64'd0),
+        .cfg_tdst       (64'd0),
+        .cfg_sb         (64'd0),
+        .cfg_sr         (64'd0),
+        .cfg_sc         (64'd0),
+        .cfg_sw         (64'd0),
+        .cfg_tstride_r  (64'd0),
+        .cfg_tstride_c  (64'd0),
+        .cfg_ttile_h    (64'd0),
+        .cfg_ttile_w    (64'd0),
+        .acc_zero_consumed(acc_zero_consumed),
         .tile_req       (tile_req),
         .tile_addr      (tile_addr),
         .tile_wen       (tile_wen),

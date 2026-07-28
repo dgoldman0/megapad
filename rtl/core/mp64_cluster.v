@@ -35,11 +35,11 @@ module mp64_cluster #(
     input  wire [N-1:0] micro_reset,   // per-caller reset/cancel sideband
 
     // === Single external bus port ===
-    output reg         bus_valid,
-    output reg  [63:0] bus_addr,
-    output reg  [63:0] bus_wdata,
-    output reg         bus_wen,
-    output reg  [1:0]  bus_size,
+    output wire        bus_valid,
+    output wire [63:0] bus_addr,
+    output wire [63:0] bus_wdata,
+    output wire        bus_wen,
+    output wire [1:0]  bus_size,
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
 
@@ -80,6 +80,17 @@ module mp64_cluster #(
     localparam [1:0] MEX_IDLE      = 2'd0;
     localparam [1:0] MEX_ACTIVE    = 2'd1;
     localparam [1:0] MEX_WAIT_DROP = 2'd2;
+    localparam [1:0] MEX_PRELOAD   = 2'd3;
+    localparam [1:0] LEGACY_IDLE      = 2'd0;
+    localparam [1:0] LEGACY_ACTIVE    = 2'd1;
+    localparam [1:0] LEGACY_WAIT_DROP = 2'd2;
+    localparam [1:0] LEGACY_KIND_CSR  = 2'd0;
+    localparam [1:0] LEGACY_KIND_SHA  = 2'd1;
+    localparam [1:0] LEGACY_KIND_MEX  = 2'd2;
+
+    reg [1:0]          legacy_state;
+    reg [1:0]          legacy_kind;
+    reg [ARB_BITS-1:0] legacy_grant;
 
     // ====================================================================
     // Per-micro-core internal bus wires
@@ -129,6 +140,7 @@ module mp64_cluster #(
     wire [N-1:0]        mc_tacc_priv_fault;
     reg                 mex_done_reg;
     reg                 mex_busy_reg;
+    reg  [1:0]          mex_state;
     reg  [2:0]          mex_fault_reg;
     reg  [63:0]         mex_fault_addr_reg;
     reg                 tacc_ctl_done_reg;
@@ -136,10 +148,12 @@ module mp64_cluster #(
     wire                te_mex_stall_cycle;
 
     // Per-micro-core tile CSR wires
+    wire [N-1:0]        mc_tile_csr_req;
     wire [N-1:0]        mc_tile_csr_wen;
     wire [N*8-1:0]      mc_tile_csr_addr;
     wire [N*64-1:0]     mc_tile_csr_wdata;
     reg  [N*64-1:0]     mc_tile_csr_rdata;
+    reg  [N-1:0]        mc_tile_csr_done;
 
     // Per-micro-core CRC wires
     wire [N-1:0]        mc_crc_req;
@@ -176,12 +190,43 @@ module mp64_cluster #(
     reg [63:0]  cl_crc_acc;        // cluster-shared CRC accumulator
     reg [1:0]   cl_crc_mode;       // cluster-shared CRC mode (0/1/2)
 
-    // Cluster-shared SHA-2 state
-    reg [63:0]  cl_sha_acc  [0:3]; // SHA accumulator (4 × 64-bit = 256 bits)
+    // Cluster-shared SHA-2 metadata. The digest itself is the tile engine's
+    // authoritative legacy ACC bank.
     reg [1:0]   cl_sha_mode;       // 0=SHA-256
     reg [63:0]  cl_sha_msglen_lo;  // message length in bits (low 64)
     reg [63:0]  cl_sha_msglen_hi;  // high 64
-    reg [63:0]  cl_sha_tsrc0;      // shadow of TSRC0 for SHA W-loading
+
+    // Tile configuration is caller-private even though the execution leaf is
+    // shared.  The selected bank is loaded into the leaf before MEX dispatch.
+    reg [63:0] cfg_tmode     [0:N-1];
+    reg [63:0] cfg_tctrl     [0:N-1];
+    reg [63:0] cfg_tsrc0     [0:N-1];
+    reg [63:0] cfg_tsrc1     [0:N-1];
+    reg [63:0] cfg_tdst      [0:N-1];
+    reg [63:0] cfg_sb        [0:N-1];
+    reg [63:0] cfg_sr        [0:N-1];
+    reg [63:0] cfg_sc        [0:N-1];
+    reg [63:0] cfg_sw        [0:N-1];
+    reg [63:0] cfg_tstride_r [0:N-1];
+    reg [63:0] cfg_tstride_c [0:N-1];
+    reg [63:0] cfg_ttile_h   [0:N-1];
+    reg [63:0] cfg_ttile_w   [0:N-1];
+
+    wire [255:0] te_legacy_acc_state;
+    reg  [3:0]   te_legacy_acc_wen;
+    reg  [255:0] te_legacy_acc_wdata;
+    wire         te_acc_zero_consumed;
+    reg  [3:0]   sha_legacy_acc_wen;
+    reg  [255:0] sha_legacy_acc_wdata;
+    reg  [3:0]   csr_legacy_acc_wen;
+    reg  [255:0] csr_legacy_acc_wdata;
+    reg          shared_csr_commit;
+    reg          shared_csr_commit_wen;
+    reg  [7:0]   shared_csr_commit_addr;
+    reg  [63:0]  shared_csr_commit_wdata;
+    reg  [255:0] mex_acc_snapshot;
+    reg  [N-1:0] micro_reset_d;
+    wire [N-1:0] micro_cancel_pulse = micro_reset & ~micro_reset_d;
 
     // ====================================================================
     // Unpack per-micro-core address/wdata/size for indexing
@@ -244,8 +289,14 @@ module mp64_cluster #(
                 .sha_rs_val (mc_sha_rs_val[gi*64 +: 64]),
                 .sha_imm8   (mc_sha_imm8 [gi*8  +: 8]),
                 .sha_result (sha_result_reg),
-                .sha_done   (sha_done_reg && (sha_grant == gi[ARB_BITS-1:0])),
-                .sha_rd_we_in(sha_rd_we_reg && (sha_grant == gi[ARB_BITS-1:0])),
+                .sha_done   (
+                    sha_done_reg &&
+                    !micro_reset[sha_grant] &&
+                    (sha_grant == gi[ARB_BITS-1:0])),
+                .sha_rd_we_in(
+                    sha_rd_we_reg &&
+                    !micro_reset[sha_grant] &&
+                    (sha_grant == gi[ARB_BITS-1:0])),
 
                 .mex_req       (mc_mex_req[gi]),
                 .mex_ss        (mc_mex_ss       [gi*2  +: 2]),
@@ -288,10 +339,12 @@ module mp64_cluster #(
                 .tacc_ctl_fault(tacc_ctl_fault_reg),
                 .tacc_priv_fault(mc_tacc_priv_fault[gi]),
 
+                .tile_csr_req  (mc_tile_csr_req  [gi]),
                 .tile_csr_wen  (mc_tile_csr_wen  [gi]),
                 .tile_csr_addr (mc_tile_csr_addr [gi*8  +: 8]),
                 .tile_csr_wdata(mc_tile_csr_wdata[gi*64 +: 64]),
                 .tile_csr_rdata(mc_tile_csr_rdata[gi*64 +: 64]),
+                .tile_csr_done (mc_tile_csr_done [gi]),
 
                 .cl_csr_addr  (mc_cl_csr_addr [gi*8  +: 8]),
                 .cl_csr_wen   (mc_cl_csr_wen  [gi]),
@@ -306,6 +359,140 @@ module mp64_cluster #(
 
         end
     endgenerate
+
+    wire legacy_transaction_live =
+        legacy_state == LEGACY_ACTIVE &&
+        !micro_reset[legacy_grant];
+    wire legacy_mex_cancel =
+        legacy_state == LEGACY_ACTIVE &&
+        legacy_kind == LEGACY_KIND_MEX &&
+        micro_reset[legacy_grant];
+
+    // SHA and acknowledged CSR traffic share the one external write port into
+    // the tile-owned ACC.  A canceled MEX restores its admission snapshot so
+    // an ACC mutation cannot survive without the matching retirement.
+    always @(*) begin
+        te_legacy_acc_wen   = 4'b0000;
+        te_legacy_acc_wdata = 256'd0;
+        if (legacy_transaction_live &&
+            legacy_kind == LEGACY_KIND_SHA) begin
+            te_legacy_acc_wen   = sha_legacy_acc_wen;
+            te_legacy_acc_wdata = sha_legacy_acc_wdata;
+        end
+        if (legacy_transaction_live &&
+            legacy_kind == LEGACY_KIND_CSR) begin
+            te_legacy_acc_wen   = csr_legacy_acc_wen;
+            te_legacy_acc_wdata = csr_legacy_acc_wdata;
+        end
+        if (legacy_mex_cancel) begin
+            te_legacy_acc_wen   = 4'b1111;
+            te_legacy_acc_wdata = mex_acc_snapshot;
+        end
+    end
+
+`ifndef SYNTHESIS
+    always @(posedge clk) begin
+        if (!cl_rst && (|sha_legacy_acc_wen) &&
+            (|csr_legacy_acc_wen))
+            $error("mp64_cluster: concurrent SHA and CSR legacy ACC writers");
+    end
+`endif
+
+    // ====================================================================
+    // Caller-private tile configuration
+    // ====================================================================
+    integer cfg_i;
+    always @(posedge clk) begin
+        if (cl_rst || tile_engine_reset) begin
+            for (cfg_i = 0; cfg_i < N; cfg_i = cfg_i + 1) begin
+                cfg_tmode[cfg_i]     <= 64'd0;
+                cfg_tctrl[cfg_i]     <= 64'd0;
+                cfg_tsrc0[cfg_i]     <= 64'd0;
+                cfg_tsrc1[cfg_i]     <= 64'd0;
+                cfg_tdst[cfg_i]      <= 64'd0;
+                cfg_sb[cfg_i]        <= 64'd0;
+                cfg_sr[cfg_i]        <= 64'd0;
+                cfg_sc[cfg_i]        <= 64'd0;
+                cfg_sw[cfg_i]        <= 64'd0;
+                cfg_tstride_r[cfg_i] <= 64'd0;
+                cfg_tstride_c[cfg_i] <= 64'd0;
+                cfg_ttile_h[cfg_i]   <= 64'd8;
+                cfg_ttile_w[cfg_i]   <= 64'd8;
+            end
+        end else begin
+            for (cfg_i = 0; cfg_i < N; cfg_i = cfg_i + 1) begin
+                if (micro_reset[cfg_i]) begin
+                    cfg_tmode[cfg_i]     <= 64'd0;
+                    cfg_tctrl[cfg_i]     <= 64'd0;
+                    cfg_tsrc0[cfg_i]     <= 64'd0;
+                    cfg_tsrc1[cfg_i]     <= 64'd0;
+                    cfg_tdst[cfg_i]      <= 64'd0;
+                    cfg_sb[cfg_i]        <= 64'd0;
+                    cfg_sr[cfg_i]        <= 64'd0;
+                    cfg_sc[cfg_i]        <= 64'd0;
+                    cfg_sw[cfg_i]        <= 64'd0;
+                    cfg_tstride_r[cfg_i] <= 64'd0;
+                    cfg_tstride_c[cfg_i] <= 64'd0;
+                    cfg_ttile_h[cfg_i]   <= 64'd8;
+                    cfg_ttile_w[cfg_i]   <= 64'd8;
+                end else begin
+                    // Return ACC_ZERO consumption only to the caller whose
+                    // configuration was captured with the active operation.
+                    if (te_acc_zero_consumed &&
+                        mex_grant == cfg_i[ARB_BITS-1:0])
+                        cfg_tctrl[cfg_i][1] <= 1'b0;
+
+                    // Each caller writes its own bank independently.
+                    // Keep this after the auto-clear so an explicit same-cycle
+                    // TCTRL write defines the next operation and wins.
+                    if (mc_tile_csr_wen[cfg_i]) begin
+                        case (mc_tile_csr_addr[cfg_i*8 +: 8])
+                            CSR_TMODE:
+                                cfg_tmode[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TCTRL:
+                                cfg_tctrl[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TSRC0:
+                                cfg_tsrc0[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TSRC1:
+                                cfg_tsrc1[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TDST:
+                                cfg_tdst[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_SB:
+                                cfg_sb[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_SR:
+                                cfg_sr[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_SC:
+                                cfg_sc[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_SW:
+                                cfg_sw[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TSTRIDE_R:
+                                cfg_tstride_r[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TSTRIDE_C:
+                                cfg_tstride_c[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TTILE_H:
+                                cfg_ttile_h[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            CSR_TTILE_W:
+                                cfg_ttile_w[cfg_i] <=
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                            default: ;
+                        endcase
+                    end
+                end
+            end
+        end
+    end
 
     // ====================================================================
     // Cluster CSR Read Mux (per micro-core, combinational)
@@ -356,6 +543,29 @@ module mp64_cluster #(
     reg [ARB_BITS-1:0] arb_last;
     reg                arb_busy;
     reg                arb_spad;
+    reg                arb_bus_valid;
+    reg [63:0]         arb_bus_addr;
+    reg [63:0]         arb_bus_wdata;
+    reg                arb_bus_wen;
+    reg [1:0]          arb_bus_size;
+
+    // SHA may reserve the port while an already-issued microcore transfer is
+    // still draining.  The in-flight transfer retains ownership; once it
+    // completes, sha_bus_active prevents a new microcore grant and the SHA
+    // request becomes the sole external-port driver.
+    reg                sha_bus_valid;
+    reg [63:0]         sha_bus_addr;
+    reg                sha_bus_active;
+    wire [63:0]        sha_bus_wdata = 64'd0;
+    wire               sha_bus_wen = 1'b0;
+    wire [1:0]         sha_bus_size = BUS_DWORD;
+
+    assign bus_valid = arb_busy ? arb_bus_valid :
+                       (sha_bus_active ? sha_bus_valid : 1'b0);
+    assign bus_addr  = arb_busy ? arb_bus_addr  : sha_bus_addr;
+    assign bus_wdata = arb_busy ? arb_bus_wdata : sha_bus_wdata;
+    assign bus_wen   = arb_busy ? arb_bus_wen   : sha_bus_wen;
+    assign bus_size  = arb_busy ? arb_bus_size  : sha_bus_size;
 
     // Round-robin next selection (no modulo — uses wrap-around subtraction)
     reg [ARB_BITS-1:0] arb_next;
@@ -426,11 +636,11 @@ module mp64_cluster #(
             arb_last     <= {ARB_BITS{1'b0}};
             arb_busy     <= 1'b0;
             arb_spad     <= 1'b0;
-            bus_valid    <= 1'b0;
-            bus_addr     <= 64'd0;
-            bus_wdata    <= 64'd0;
-            bus_wen      <= 1'b0;
-            bus_size     <= 2'd0;
+            arb_bus_valid <= 1'b0;
+            arb_bus_addr  <= 64'd0;
+            arb_bus_wdata <= 64'd0;
+            arb_bus_wen   <= 1'b0;
+            arb_bus_size  <= 2'd0;
             mc_bus_ready <= {N{1'b0}};
             mc_bus_rdata <= {(N*64){1'b0}};
             mc_mpu_fault <= {N{1'b0}};
@@ -438,16 +648,10 @@ module mp64_cluster #(
             cl_mpu_base   <= 64'd0;
             cl_mpu_limit  <= 64'd0;
             cl_ivt_base   <= 64'd0;
-            cl_sha_acc[0] <= 64'd0; cl_sha_acc[1] <= 64'd0;
-            cl_sha_acc[2] <= 64'd0; cl_sha_acc[3] <= 64'd0;
-            cl_sha_mode      <= 2'd0;
-            cl_sha_msglen_lo <= 64'd0;
-            cl_sha_msglen_hi <= 64'd0;
-            cl_sha_tsrc0     <= 64'd0;
         end else begin
             mc_bus_ready <= {N{1'b0}};
             mc_mpu_fault <= {N{1'b0}};
-            bus_valid    <= 1'b0;
+            arb_bus_valid <= 1'b0;
 
             // ---------------------------------------------------------
             // Bus arbitration
@@ -461,13 +665,13 @@ module mp64_cluster #(
                     arb_busy <= 1'b0;
                 end else begin
                     // External: wait for main bus ready
-                    bus_valid <= 1'b1;
+                    arb_bus_valid <= 1'b1;
                     if (bus_ready) begin
                         mc_bus_rdata[arb_grant*64 +: 64] <= bus_rdata;
                         mc_bus_ready[arb_grant] <= 1'b1;
                         arb_last  <= arb_grant;
                         arb_busy  <= 1'b0;
-                        bus_valid <= 1'b0;
+                        arb_bus_valid <= 1'b0;
                     end
                 end
             end else if (arb_any && !bist_running && !sha_bus_active) begin
@@ -484,11 +688,11 @@ module mp64_cluster #(
                 end else begin
                     arb_busy  <= 1'b1;
                     arb_spad  <= 1'b0;
-                    bus_valid <= 1'b1;
-                    bus_addr  <= mc_addr[arb_next];
-                    bus_wdata <= mc_wdata_u[arb_next];
-                    bus_wen   <= mc_bus_wen[arb_next];
-                    bus_size  <= mc_sz[arb_next];
+                    arb_bus_valid <= 1'b1;
+                    arb_bus_addr  <= mc_addr[arb_next];
+                    arb_bus_wdata <= mc_wdata_u[arb_next];
+                    arb_bus_wen   <= mc_bus_wen[arb_next];
+                    arb_bus_size  <= mc_sz[arb_next];
                 end
             end
 
@@ -507,24 +711,9 @@ module mp64_cluster #(
                             cl_mpu_limit <= mc_cl_csr_wdata[mi*64 +: 64];
                         CSR_IVTBASE, CSR_CL_IVTBASE:
                             cl_ivt_base <= mc_cl_csr_wdata[mi*64 +: 64];
-                        CSR_SHA_MODE:
-                            cl_sha_mode <= mc_cl_csr_wdata[mi*64 +: 2];
-                        CSR_SHA_MSGLEN:
-                            cl_sha_msglen_lo <= mc_cl_csr_wdata[mi*64 +: 64];
-                        CSR_SHA_MSGLEN_HI:
-                            cl_sha_msglen_hi <= mc_cl_csr_wdata[mi*64 +: 64];
                         default: ;
                     endcase
                 end
-            end
-
-            // ---------------------------------------------------------
-            // Sniff tile CSR writes for TSRC0 → shadow into cl_sha_tsrc0
-            // ---------------------------------------------------------
-            for (mi = 0; mi < N; mi = mi + 1) begin
-                if (mc_tile_csr_wen[mi] &&
-                    mc_tile_csr_addr[mi*8 +: 8] == CSR_TSRC0)
-                    cl_sha_tsrc0 <= mc_tile_csr_wdata[mi*64 +: 64];
             end
 
             // A precise tile/control privilege fault enters the existing
@@ -874,9 +1063,10 @@ module mp64_cluster #(
     // One mp64_sha2_isa instance shared among N micro-cores.  Same
     // round-robin + hardware lock pattern as CRC.
     //
-    // SHA.INIT acquires lock, SHA.FINAL releases lock.
+    // SHA.INIT acquires the lock; SHA.FINAL retains it and SHA.RELEASE
+    // releases it.
     // SHA.ROUND is multi-cycle: loads 16×32-bit W from tile memory
-    //   (8 × 64-bit bus reads at cl_sha_tsrc0), then runs 64-round
+    //   (8 × 64-bit bus reads at the granted caller's TSRC0), then runs
     //   compression (via mp64_sha2_isa engine).
     //
     // Bus access: SHA arbiter takes over the cluster bus during W loading
@@ -887,12 +1077,85 @@ module mp64_cluster #(
     localparam SHA_LOAD    = 3'd2;   // loading W from tile memory (8 bus reads)
     localparam SHA_COMPRESS= 3'd3;   // waiting for 64-round compression engine
     localparam SHA_DONE    = 3'd4;   // signal result to micro-core
+    localparam SHA_DRAIN   = 3'd5;   // discard an issued read after cancellation
 
     reg [2:0]           sha_state;
     reg [ARB_BITS-1:0]  sha_last;
     reg                 sha_locked;
     reg [ARB_BITS-1:0]  sha_lock_owner;
-    reg                 sha_bus_active;   // blocks normal bus arbiter
+
+    // ACC CSRs, SHA instructions/metadata CSRs, and every MEX instruction
+    // consume one common physical-engine turn. Selection is equal
+    // round-robin by caller; producer kind is chosen only after the caller.
+    reg [ARB_BITS-1:0] legacy_last;
+    reg [ARB_BITS-1:0] legacy_next;
+    reg [1:0]          legacy_next_kind;
+    reg                legacy_any;
+    reg [ARB_BITS:0]   legacy_cand;
+    reg                legacy_mex_acc_protected;
+
+    always @(*) begin
+        legacy_next       = legacy_last;
+        legacy_next_kind  = LEGACY_KIND_CSR;
+        legacy_any        = 1'b0;
+        legacy_mex_acc_protected = 1'b0;
+        for (mi = 1; mi <= N; mi = mi + 1) begin : legacy_rr_scan
+            legacy_cand = {1'b0, legacy_last} + mi[ARB_BITS:0];
+            if (legacy_cand >= N_VAL)
+                legacy_cand = legacy_cand - N_VAL;
+
+            legacy_mex_acc_protected =
+                mc_mex_op[legacy_cand[ARB_BITS-1:0]*2 +: 2] ==
+                    MEX_TRED ||
+                (mc_mex_op[legacy_cand[ARB_BITS-1:0]*2 +: 2] ==
+                     MEX_TMUL &&
+                 (mc_mex_funct[
+                      legacy_cand[ARB_BITS-1:0]*3 +: 3] == TMUL_DOT ||
+                  mc_mex_funct[
+                      legacy_cand[ARB_BITS-1:0]*3 +: 3] ==
+                      TMUL_DOTACC));
+
+            if (!legacy_any &&
+                !micro_reset[legacy_cand[ARB_BITS-1:0]]) begin
+                if (mc_tile_csr_req[
+                        legacy_cand[ARB_BITS-1:0]] &&
+                    (!sha_locked ||
+                     sha_lock_owner ==
+                         legacy_cand[ARB_BITS-1:0])) begin
+                    legacy_next = legacy_cand[ARB_BITS-1:0];
+                    legacy_next_kind = LEGACY_KIND_CSR;
+                    legacy_any = 1'b1;
+                end else if (sha_state == SHA_IDLE &&
+                             mc_sha_req[
+                                 legacy_cand[ARB_BITS-1:0]] &&
+                             (!sha_locked ||
+                              sha_lock_owner ==
+                                  legacy_cand[ARB_BITS-1:0])) begin
+                    legacy_next = legacy_cand[ARB_BITS-1:0];
+                    legacy_next_kind = LEGACY_KIND_SHA;
+                    legacy_any = 1'b1;
+                end else if (mc_mex_req[
+                                 legacy_cand[ARB_BITS-1:0]] &&
+                             (!sha_locked ||
+                              sha_lock_owner ==
+                                  legacy_cand[ARB_BITS-1:0] ||
+                              !legacy_mex_acc_protected)) begin
+                    legacy_next = legacy_cand[ARB_BITS-1:0];
+                    legacy_next_kind = LEGACY_KIND_MEX;
+                    legacy_any = 1'b1;
+                end
+            end
+        end
+    end
+
+    wire legacy_start =
+        legacy_state == LEGACY_IDLE && legacy_any;
+    wire legacy_request_held =
+        legacy_kind == LEGACY_KIND_CSR
+            ? mc_tile_csr_req[legacy_grant]
+            : legacy_kind == LEGACY_KIND_SHA
+                ? mc_sha_req[legacy_grant]
+                : mc_mex_req[legacy_grant];
 
     // SHA W buffer (loaded from memory before compression)
     reg  [31:0] sha_w_buf [0:15];
@@ -901,6 +1164,7 @@ module mp64_cluster #(
 
     // SHA engine instance
     reg         sha_eng_start;
+    reg         sha_eng_reset;
     wire [511:0] sha_w_flat;
     wire [255:0] sha_h_in_flat;
     wire [255:0] sha_h_out_flat;
@@ -908,7 +1172,7 @@ module mp64_cluster #(
     wire        sha_eng_busy;
     wire        sha_eng_done;
 
-    // Unpack cluster SHA ACC → 8 × 32-bit H
+    // Unpack the tile-owned legacy ACC → 8 × 32-bit H.
     genvar sha_pack_i;
     generate
         for (sha_pack_i = 0; sha_pack_i < 16;
@@ -917,18 +1181,26 @@ module mp64_cluster #(
                 sha_w_buf[sha_pack_i];
         end
     endgenerate
-    assign sha_h_in_flat[0*32 +: 32] = cl_sha_acc[0][63:32]; // a
-    assign sha_h_in_flat[1*32 +: 32] = cl_sha_acc[0][31:0];  // b
-    assign sha_h_in_flat[2*32 +: 32] = cl_sha_acc[1][63:32]; // c
-    assign sha_h_in_flat[3*32 +: 32] = cl_sha_acc[1][31:0];  // d
-    assign sha_h_in_flat[4*32 +: 32] = cl_sha_acc[2][63:32]; // e
-    assign sha_h_in_flat[5*32 +: 32] = cl_sha_acc[2][31:0];  // f
-    assign sha_h_in_flat[6*32 +: 32] = cl_sha_acc[3][63:32]; // g
-    assign sha_h_in_flat[7*32 +: 32] = cl_sha_acc[3][31:0];  // h
+    assign sha_h_in_flat[0*32 +: 32] =
+        te_legacy_acc_state[0*64 + 32 +: 32]; // a
+    assign sha_h_in_flat[1*32 +: 32] =
+        te_legacy_acc_state[0*64 +  0 +: 32]; // b
+    assign sha_h_in_flat[2*32 +: 32] =
+        te_legacy_acc_state[1*64 + 32 +: 32]; // c
+    assign sha_h_in_flat[3*32 +: 32] =
+        te_legacy_acc_state[1*64 +  0 +: 32]; // d
+    assign sha_h_in_flat[4*32 +: 32] =
+        te_legacy_acc_state[2*64 + 32 +: 32]; // e
+    assign sha_h_in_flat[5*32 +: 32] =
+        te_legacy_acc_state[2*64 +  0 +: 32]; // f
+    assign sha_h_in_flat[6*32 +: 32] =
+        te_legacy_acc_state[3*64 + 32 +: 32]; // g
+    assign sha_h_in_flat[7*32 +: 32] =
+        te_legacy_acc_state[3*64 +  0 +: 32]; // h
 
     mp64_sha2_isa u_cl_sha2 (
         .clk     (clk),
-        .rst_n   (~cl_rst),
+        .rst_n   (~(cl_rst | tile_engine_reset | sha_eng_reset)),
         .start   (sha_eng_start),
         .w_in    (sha_w_flat),
         .h_in    (sha_h_in_flat),
@@ -938,40 +1210,15 @@ module mp64_cluster #(
         .done    (sha_eng_done)
     );
 
-    // SHA arbiter: round-robin with lock (same pattern as CRC)
-    reg [ARB_BITS-1:0] sha_next;
-    reg                sha_any;
-    reg [ARB_BITS:0]   sha_cand;
-
-    always @(*) begin
-        sha_next = sha_last;
-        sha_any  = 1'b0;
-        if (sha_locked) begin
-            if (mc_sha_req[sha_lock_owner]) begin
-                sha_next = sha_lock_owner;
-                sha_any  = 1'b1;
-            end
-        end else begin
-            for (mi = 1; mi <= N; mi = mi + 1) begin
-                sha_cand = {1'b0, sha_last} + mi[ARB_BITS:0];
-                if (sha_cand >= N_VAL)
-                    sha_cand = sha_cand - N_VAL;
-                if (!sha_any && mc_sha_req[sha_cand[ARB_BITS-1:0]]) begin
-                    sha_next = sha_cand[ARB_BITS-1:0];
-                    sha_any  = 1'b1;
-                end
-            end
-        end
-    end
-
     // Latched op/imm8 from the granted core
     reg  [3:0]  sha_op_r;
     reg  [7:0]  sha_imm8_r;
     reg  [63:0] sha_rs_val_r;
+    reg  [63:0] sha_tsrc0_reg;
 
     // SHA arbiter FSM
     always @(posedge clk) begin
-        if (cl_rst) begin
+        if (cl_rst || tile_engine_reset) begin
             sha_state      <= SHA_IDLE;
             sha_grant      <= {ARB_BITS{1'b0}};
             sha_last       <= {ARB_BITS{1'b0}};
@@ -982,23 +1229,78 @@ module mp64_cluster #(
             sha_lock_owner <= {ARB_BITS{1'b0}};
             sha_bus_active <= 1'b0;
             sha_bus_pending<= 1'b0;
+            sha_bus_valid  <= 1'b0;
+            sha_bus_addr   <= 64'd0;
             sha_load_cnt   <= 4'd0;
             sha_eng_start  <= 1'b0;
+            sha_eng_reset  <= 1'b0;
             sha_op_r       <= 4'd0;
             sha_imm8_r     <= 8'd0;
             sha_rs_val_r   <= 64'd0;
+            sha_tsrc0_reg  <= 64'd0;
+            cl_sha_mode      <= 2'd0;
+            cl_sha_msglen_lo <= 64'd0;
+            cl_sha_msglen_hi <= 64'd0;
+            sha_legacy_acc_wen   <= 4'b0000;
+            sha_legacy_acc_wdata <= 256'd0;
         end else begin
             sha_done_reg  <= 1'b0;
             sha_rd_we_reg <= 1'b0;
             sha_eng_start <= 1'b0;
+            sha_eng_reset <= 1'b0;
+            sha_legacy_acc_wen <= 4'b0000;
+            sha_bus_valid <= 1'b0;
 
-            case (sha_state)
+            // SHA metadata CSR instructions take the same common turn as
+            // SHA and MEX. They therefore cannot collide with an active SHA
+            // state transition in this block.
+            if (shared_csr_commit && shared_csr_commit_wen) begin
+                case (shared_csr_commit_addr)
+                    CSR_SHA_MODE:
+                        cl_sha_mode <= shared_csr_commit_wdata[1:0];
+                    CSR_SHA_MSGLEN:
+                        cl_sha_msglen_lo <= shared_csr_commit_wdata;
+                    CSR_SHA_MSGLEN_HI:
+                        cl_sha_msglen_hi <= shared_csr_commit_wdata;
+                    default: ;
+                endcase
+            end
+
+            if (sha_state != SHA_IDLE && sha_state != SHA_DRAIN &&
+                micro_cancel_pulse[sha_grant]) begin
+                // Cancel without architectural completion or ACC writeback.
+                sha_eng_start   <= 1'b0;
+                if (sha_state == SHA_COMPRESS)
+                    sha_eng_reset <= 1'b1;
+
+                // Once a SHA read has been presented, the outer SoC bus may
+                // already have captured this cluster as its response owner.
+                // Retain the port until that response arrives, then discard
+                // it. Releasing early could deliver stale ready/data to a
+                // freshly admitted microcore request.
+                if (sha_state == SHA_LOAD && sha_bus_pending &&
+                    !bus_ready) begin
+                    sha_state       <= SHA_DRAIN;
+                    sha_bus_active  <= 1'b1;
+                    sha_bus_pending <= 1'b1;
+                    sha_bus_valid   <= 1'b1;
+                end else begin
+                    sha_state       <= SHA_IDLE;
+                    sha_bus_active  <= 1'b0;
+                    sha_bus_pending <= 1'b0;
+                    sha_bus_valid   <= 1'b0;
+                end
+            end else begin
+                case (sha_state)
                 SHA_IDLE: begin
-                    if (sha_any) begin
-                        sha_grant    <= sha_next;
-                        sha_op_r     <= mc_sha_op    [sha_next*4  +: 4];
-                        sha_imm8_r   <= mc_sha_imm8  [sha_next*8  +: 8];
-                        sha_rs_val_r <= mc_sha_rs_val [sha_next*64 +: 64];
+                    if (legacy_start &&
+                        legacy_next_kind == LEGACY_KIND_SHA) begin
+                        sha_grant    <= legacy_next;
+                        sha_op_r     <= mc_sha_op    [legacy_next*4  +: 4];
+                        sha_imm8_r   <= mc_sha_imm8  [legacy_next*8  +: 8];
+                        sha_rs_val_r <= mc_sha_rs_val[
+                            legacy_next*64 +: 64];
+                        sha_tsrc0_reg<= cfg_tsrc0[legacy_next];
                         sha_state    <= SHA_SIMPLE;
                     end
                 end
@@ -1012,26 +1314,53 @@ module mp64_cluster #(
                     case (sha_op_r)
                         ISA_SHA_INIT: begin
                             // Load SHA-256 IV, set mode, reset msglen
-                            cl_sha_mode      <= sha_imm8_r[1:0];
-                            cl_sha_acc[0]    <= 64'h6a09e667_bb67ae85;
-                            cl_sha_acc[1]    <= 64'h3c6ef372_a54ff53a;
-                            cl_sha_acc[2]    <= 64'h510e527f_9b05688c;
-                            cl_sha_acc[3]    <= 64'h1f83d9ab_5be0cd19;
-                            cl_sha_msglen_lo <= 64'd0;
-                            cl_sha_msglen_hi <= 64'd0;
-                            // Acquire lock
-                            sha_locked     <= 1'b1;
-                            sha_lock_owner <= sha_grant;
+                            sha_legacy_acc_wen <= 4'b1111;
+                            sha_legacy_acc_wdata <= {
+                                64'h1f83d9ab_5be0cd19,
+                                64'h510e527f_9b05688c,
+                                64'h3c6ef372_a54ff53a,
+                                64'h6a09e667_bb67ae85
+                            };
                         end
 
                         ISA_SHA_DIN: begin
                             // ACC[imm8_hi[1:0]] ← rs_val
-                            cl_sha_acc[sha_imm8_r[5:4]] <= sha_rs_val_r;
+                            case (sha_imm8_r[5:4])
+                                2'd0: begin
+                                    sha_legacy_acc_wen <= 4'b0001;
+                                    sha_legacy_acc_wdata <=
+                                        {192'd0, sha_rs_val_r};
+                                end
+                                2'd1: begin
+                                    sha_legacy_acc_wen <= 4'b0010;
+                                    sha_legacy_acc_wdata <=
+                                        {128'd0, sha_rs_val_r, 64'd0};
+                                end
+                                2'd2: begin
+                                    sha_legacy_acc_wen <= 4'b0100;
+                                    sha_legacy_acc_wdata <=
+                                        {64'd0, sha_rs_val_r, 128'd0};
+                                end
+                                default: begin
+                                    sha_legacy_acc_wen <= 4'b1000;
+                                    sha_legacy_acc_wdata <=
+                                        {sha_rs_val_r, 192'd0};
+                                end
+                            endcase
                         end
 
                         ISA_SHA_DOUT: begin
                             // Rd ← ACC[imm8_lo[1:0]]
-                            sha_result_reg <= cl_sha_acc[sha_imm8_r[1:0]];
+                            case (sha_imm8_r[1:0])
+                                2'd0: sha_result_reg <=
+                                    te_legacy_acc_state[0*64 +: 64];
+                                2'd1: sha_result_reg <=
+                                    te_legacy_acc_state[1*64 +: 64];
+                                2'd2: sha_result_reg <=
+                                    te_legacy_acc_state[2*64 +: 64];
+                                default: sha_result_reg <=
+                                    te_legacy_acc_state[3*64 +: 64];
+                            endcase
                             sha_rd_we_reg  <= 1'b1;
                         end
 
@@ -1040,8 +1369,13 @@ module mp64_cluster #(
                         end
 
                         ISA_SHA_FINAL: begin
-                            // NOP + release lock
-                            sha_locked <= 1'b0;
+                            // Digest finalization is a data-path NOP here.
+                            // Ownership persists until explicit RELEASE.
+                        end
+
+                        ISA_SHA_RELEASE: begin
+                            // Lock mutation occurs at the terminal commit
+                            // boundary in SHA_DONE.
                         end
 
                         ISA_SHA_ROUND: begin
@@ -1058,24 +1392,22 @@ module mp64_cluster #(
 
                     // For non-ROUND ops, return to IDLE
                     if (sha_op_r != ISA_SHA_ROUND) begin
-                        sha_last  <= sha_grant;
-                        sha_state <= SHA_IDLE;
+                        sha_state <= SHA_DONE;
                     end
                 end
 
-                // W-loading: 8 × 64-bit bus reads from cl_sha_tsrc0
+                // W-loading: 8 × 64-bit bus reads from the captured source.
                 SHA_LOAD: begin
                     if (!sha_bus_pending && !arb_busy) begin
                         // Issue bus read
-                        bus_valid      <= 1'b1;
-                        bus_addr       <= cl_sha_tsrc0 + {sha_load_cnt[2:0], 3'b000};
-                        bus_wen        <= 1'b0;
-                        bus_size       <= BUS_DWORD;
+                        sha_bus_valid  <= 1'b1;
+                        sha_bus_addr   <= sha_tsrc0_reg +
+                                          {sha_load_cnt[2:0], 3'b000};
                         sha_bus_pending <= 1'b1;
                     end else if (sha_bus_pending) begin
-                        bus_valid <= 1'b1;   // keep valid asserted
+                        sha_bus_valid <= 1'b1; // keep valid asserted
                         if (bus_ready) begin
-                            bus_valid <= 1'b0;
+                            sha_bus_valid <= 1'b0;
                             sha_bus_pending <= 1'b0;
                             // Big-endian: high 32 = W[2i], low 32 = W[2i+1]
                             sha_w_buf[{sha_load_cnt[2:0], 1'b0}]        <= bus_rdata[63:32];
@@ -1095,33 +1427,76 @@ module mp64_cluster #(
                 // Wait for 64-round compression engine
                 SHA_COMPRESS: begin
                     if (sha_eng_done) begin
-                        // Write back H' to cluster SHA ACC
-                        cl_sha_acc[0] <= {
-                            sha_h_out_flat[0*32 +: 32],
-                            sha_h_out_flat[1*32 +: 32]};
-                        cl_sha_acc[1] <= {
-                            sha_h_out_flat[2*32 +: 32],
-                            sha_h_out_flat[3*32 +: 32]};
-                        cl_sha_acc[2] <= {
-                            sha_h_out_flat[4*32 +: 32],
-                            sha_h_out_flat[5*32 +: 32]};
-                        cl_sha_acc[3] <= {
+                        // Write back H' through the tile-owned ACC port.
+                        sha_legacy_acc_wen <= 4'b1111;
+                        sha_legacy_acc_wdata <= {
                             sha_h_out_flat[6*32 +: 32],
-                            sha_h_out_flat[7*32 +: 32]};
-                        // Update message length: +512 bits per block
-                        cl_sha_msglen_lo <= cl_sha_msglen_lo + 64'd512;
-                        if (cl_sha_msglen_lo > (64'hFFFF_FFFF_FFFF_FFFF - 64'd512))
-                            cl_sha_msglen_hi <= cl_sha_msglen_hi + 64'd1;
-                        // Signal done to micro-core
+                            sha_h_out_flat[7*32 +: 32],
+                            sha_h_out_flat[4*32 +: 32],
+                            sha_h_out_flat[5*32 +: 32],
+                            sha_h_out_flat[2*32 +: 32],
+                            sha_h_out_flat[3*32 +: 32],
+                            sha_h_out_flat[0*32 +: 32],
+                            sha_h_out_flat[1*32 +: 32]
+                        };
+                        // Present writeback and completion together during
+                        // SHA_DONE.  The following edge is the one
+                        // cancellation-aware architectural commit boundary.
                         sha_done_reg  <= 1'b1;
                         sha_rd_we_reg <= 1'b0;
-                        sha_last      <= sha_grant;
-                        sha_state     <= SHA_IDLE;
+                        sha_state     <= SHA_DONE;
+                    end
+                end
+
+                SHA_DONE: begin
+                    case (sha_op_r)
+                        ISA_SHA_INIT: begin
+                            cl_sha_mode      <= sha_imm8_r[1:0];
+                            cl_sha_msglen_lo <= 64'd0;
+                            cl_sha_msglen_hi <= 64'd0;
+                            sha_locked       <= 1'b1;
+                            sha_lock_owner   <= sha_grant;
+                        end
+                        ISA_SHA_RELEASE:
+                            sha_locked <= 1'b0;
+                        ISA_SHA_ROUND: begin
+                            cl_sha_msglen_lo <=
+                                cl_sha_msglen_lo + 64'd512;
+                            if (cl_sha_msglen_lo >
+                                (64'hFFFF_FFFF_FFFF_FFFF - 64'd512))
+                                cl_sha_msglen_hi <=
+                                    cl_sha_msglen_hi + 64'd1;
+                        end
+                        default: ;
+                    endcase
+                    sha_last  <= sha_grant;
+                    sha_state <= SHA_IDLE;
+                end
+
+                SHA_DRAIN: begin
+                    // The caller is gone, but the bus transaction still
+                    // belongs to this SHA request. Hold its captured address
+                    // and suppress normal grants until the response is
+                    // consumed without architectural delivery.
+                    sha_bus_active  <= 1'b1;
+                    sha_bus_pending <= 1'b1;
+                    sha_bus_valid   <= 1'b1;
+                    if (bus_ready) begin
+                        sha_bus_active  <= 1'b0;
+                        sha_bus_pending <= 1'b0;
+                        sha_bus_valid   <= 1'b0;
+                        sha_state       <= SHA_IDLE;
                     end
                 end
 
                 default: sha_state <= SHA_IDLE;
-            endcase
+                endcase
+            end
+
+            // Individual caller reset must not leave a permanent transaction
+            // lock owned by a reset microcore. Shared digest data remains.
+            if (sha_locked && micro_cancel_pulse[sha_lock_owner])
+                sha_locked <= 1'b0;
         end
     end
 
@@ -1257,29 +1632,20 @@ module mp64_cluster #(
     //
     // Flow:
     //   1. Micro-core asserts mex_req with MEX fields, enters CPU_MEX_WAIT
-    //   2. MEX arbiter grants one core, drives tile engine CSR/MEX signals
-    //   3. Tile engine processes op (4–8 cycles), asserts mex_done
-    //   4. Arbiter routes mex_done back to the granted core
-    //   5. Core returns to CPU_FETCH
-    //
-    // Tile CSR writes: any core can write tile CSRs at any time (each
-    // core has its own CSR namespace in the tile engine, muxed by grant).
-    // In practice the ISA serialises CSR writes before MEX dispatch, so
-    // the arbiter need only forward CSR writes from the MEX-granted core
-    // while an op is in flight.  When idle, writes are accepted from
-    // any core (last writer wins — software must coordinate).
+    //   2. MEX arbiter grants one core and preloads its private configuration
+    //   3. The captured instruction is dispatched on the following cycle
+    //   4. Tile engine processes the operation and asserts mex_done
+    //   5. Arbiter routes mex_done back to the granted core
 
-    reg [1:0]           mex_state;
     reg [ARB_BITS-1:0]  mex_last;
     reg [TACC_EPOCH_BITS-1:0] tacc_caller_epoch [0:N-1];
-    reg [N-1:0]         micro_reset_d;
-    wire [N-1:0]        micro_cancel_pulse = micro_reset & ~micro_reset_d;
 
     // Tile engine wires — from arbiter to tile engine instance
-    reg         te_csr_wen;
-    reg  [7:0]  te_csr_addr;
-    reg  [63:0] te_csr_wdata;
+    wire        te_csr_wen;
+    wire [7:0]  te_csr_addr;
+    wire [63:0] te_csr_wdata;
     wire [63:0] te_csr_rdata;
+    reg         te_cfg_load;
 
     reg         te_mex_valid;
     reg  [1:0]  te_mex_ss;
@@ -1305,6 +1671,20 @@ module mp64_cluster #(
     wire [63:0] te_mex_fault_addr;
     wire [TACC_EPOCH_BITS-1:0] te_engine_epoch;
     wire [63:0] te_tacc_status_raw;
+
+    wire [63:0] te_cfg_tmode     = cfg_tmode[mex_grant];
+    wire [63:0] te_cfg_tctrl     = cfg_tctrl[mex_grant];
+    wire [63:0] te_cfg_tsrc0     = cfg_tsrc0[mex_grant];
+    wire [63:0] te_cfg_tsrc1     = cfg_tsrc1[mex_grant];
+    wire [63:0] te_cfg_tdst      = cfg_tdst[mex_grant];
+    wire [63:0] te_cfg_sb        = cfg_sb[mex_grant];
+    wire [63:0] te_cfg_sr        = cfg_sr[mex_grant];
+    wire [63:0] te_cfg_sc        = cfg_sc[mex_grant];
+    wire [63:0] te_cfg_sw        = cfg_sw[mex_grant];
+    wire [63:0] te_cfg_tstride_r = cfg_tstride_r[mex_grant];
+    wire [63:0] te_cfg_tstride_c = cfg_tstride_c[mex_grant];
+    wire [63:0] te_cfg_ttile_h   = cfg_ttile_h[mex_grant];
+    wire [63:0] te_cfg_ttile_w   = cfg_ttile_w[mex_grant];
 
     // The fixed production cluster has four callers.  Keep the tile leaf's
     // cancellation transport fixed-width while allowing reduced-N benches.
@@ -1345,67 +1725,72 @@ module mp64_cluster #(
         end
     end
 
-    // MEX arbiter: round-robin next selection (same pattern as MUL)
-    reg [ARB_BITS-1:0] mex_next;
-    reg                mex_any;
-    reg [ARB_BITS:0]   mex_cand;
+    // Cluster callers never mutate the leaf's staging CSRs directly.
+    // Private configuration is banked above and preloaded with a grant;
+    // shared ACC accesses use the acknowledged legacy-domain path below.
+    assign te_csr_wen   = 1'b0;
+    assign te_csr_addr  = 8'd0;
+    assign te_csr_wdata = 64'd0;
 
-    always @(*) begin
-        mex_next = mex_last;
-        mex_any  = 1'b0;
-        for (mi = 1; mi <= N; mi = mi + 1) begin : mex_rr_scan
-            mex_cand = {1'b0, mex_last} + mi[ARB_BITS:0];
-            if (mex_cand >= N_VAL)
-                mex_cand = mex_cand - N_VAL;
-            if (!mex_any &&
-                !micro_reset[mex_cand[ARB_BITS-1:0]] &&
-                mc_mex_req[mex_cand[ARB_BITS-1:0]]) begin
-                mex_next = mex_cand[ARB_BITS-1:0];
-                mex_any  = 1'b1;
-            end
-        end
-    end
-
-    // CSR write forwarding: when idle, accept from any core (last wins);
-    // when active, only from the granted core.
-    // The addr is always forwarded from any core for combinational reads.
-    always @(*) begin
-        te_csr_wen   = 1'b0;
-        te_csr_addr  = 8'd0;
-        te_csr_wdata = 64'd0;
-        // Priority: granted core during active op, else any writer
-        if (mex_state == MEX_ACTIVE) begin
-            te_csr_wen   = mc_tile_csr_wen[mex_grant];
-            te_csr_addr  = mc_tile_csr_addr [mex_grant*8  +: 8];
-            te_csr_wdata = mc_tile_csr_wdata[mex_grant*64 +: 64];
-        end else begin
-            for (mi = 0; mi < N; mi = mi + 1) begin
-                if (mc_tile_csr_wen[mi]) begin
-                    te_csr_wen   = 1'b1;
-                    te_csr_addr  = mc_tile_csr_addr [mi*8  +: 8];
-                    te_csr_wdata = mc_tile_csr_wdata[mi*64 +: 64];
-                end
-            end
-            // When no core is writing, still forward addr for CSR reads.
-            // Any core presenting a non-zero addr wins (last-writer-wins);
-            // this is fine since simultaneous reads from different cores
-            // targeting different CSR addrs is a don't-care scenario.
-            if (!te_csr_wen) begin
-                for (mi = 0; mi < N; mi = mi + 1) begin
-                    if (mc_tile_csr_addr[mi*8 +: 8] != 8'd0)
-                        te_csr_addr = mc_tile_csr_addr[mi*8 +: 8];
-                end
-            end
-        end
-    end
-
-    // CSR read mux: each micro-core gets tile CSR rdata from the shared
-    // tile engine based on its own tile_csr_addr (combinational).
-    // Since there's only one tile engine, all cores see the same state.
+    // Private CSR reads are caller-local and can proceed simultaneously.
+    // ACC reads observe the single shared architectural bank; retirement is
+    // still controlled by mc_tile_csr_done.
     generate
         for (gi = 0; gi < N; gi = gi + 1) begin : tile_csr_rd
             always @(*) begin
-                mc_tile_csr_rdata[gi*64 +: 64] = te_csr_rdata;
+                case (mc_tile_csr_addr[gi*8 +: 8])
+                    CSR_TMODE:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_tmode[gi];
+                    CSR_TCTRL:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_tctrl[gi];
+                    CSR_TSRC0:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_tsrc0[gi];
+                    CSR_TSRC1:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_tsrc1[gi];
+                    CSR_TDST:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_tdst[gi];
+                    CSR_SB:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_sb[gi];
+                    CSR_SR:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_sr[gi];
+                    CSR_SC:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_sc[gi];
+                    CSR_SW:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_sw[gi];
+                    CSR_TSTRIDE_R:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            cfg_tstride_r[gi];
+                    CSR_TSTRIDE_C:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            cfg_tstride_c[gi];
+                    CSR_TTILE_H:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_ttile_h[gi];
+                    CSR_TTILE_W:
+                        mc_tile_csr_rdata[gi*64 +: 64] = cfg_ttile_w[gi];
+                    CSR_ACC0:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            te_legacy_acc_state[0*64 +: 64];
+                    CSR_ACC1:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            te_legacy_acc_state[1*64 +: 64];
+                    CSR_ACC2:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            te_legacy_acc_state[2*64 +: 64];
+                    CSR_ACC3:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            te_legacy_acc_state[3*64 +: 64];
+                    CSR_SHA_MODE:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            {62'd0, cl_sha_mode};
+                    CSR_SHA_MSGLEN:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            cl_sha_msglen_lo;
+                    CSR_SHA_MSGLEN_HI:
+                        mc_tile_csr_rdata[gi*64 +: 64] =
+                            cl_sha_msglen_hi;
+                    default:
+                        mc_tile_csr_rdata[gi*64 +: 64] = 64'd0;
+                endcase
             end
         end
     endgenerate
@@ -1429,6 +1814,124 @@ module mp64_cluster #(
         end
     endgenerate
 
+    // A shared CSR completes on the same edge that its architectural write
+    // reaches the tile/SHA state.  Keeping these terminal signals
+    // combinational from the captured ACTIVE transaction lets an individual
+    // reset suppress completion, mutation, and RR advancement together.
+    always @(*) begin
+        mc_tile_csr_done   = {N{1'b0}};
+        csr_legacy_acc_wen = 4'b0000;
+        csr_legacy_acc_wdata = 256'd0;
+        shared_csr_commit  = 1'b0;
+
+        if (legacy_state == LEGACY_ACTIVE &&
+            legacy_kind == LEGACY_KIND_CSR &&
+            !micro_reset[legacy_grant]) begin
+            mc_tile_csr_done[legacy_grant] = 1'b1;
+            shared_csr_commit = 1'b1;
+            if (shared_csr_commit_wen) begin
+                case (shared_csr_commit_addr)
+                    CSR_ACC0: begin
+                        csr_legacy_acc_wen = 4'b0001;
+                        csr_legacy_acc_wdata =
+                            {192'd0, shared_csr_commit_wdata};
+                    end
+                    CSR_ACC1: begin
+                        csr_legacy_acc_wen = 4'b0010;
+                        csr_legacy_acc_wdata =
+                            {128'd0, shared_csr_commit_wdata, 64'd0};
+                    end
+                    CSR_ACC2: begin
+                        csr_legacy_acc_wen = 4'b0100;
+                        csr_legacy_acc_wdata =
+                            {64'd0, shared_csr_commit_wdata, 128'd0};
+                    end
+                    CSR_ACC3: begin
+                        csr_legacy_acc_wen = 4'b1000;
+                        csr_legacy_acc_wdata =
+                            {shared_csr_commit_wdata, 192'd0};
+                    end
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    // Common shared-engine admission. A real completion/fault advances the
+    // caller RR cursor; cancellation does not consume service. WAIT_DROP
+    // de-duplicates the level-held requests emitted by the microcore FSMs.
+    always @(posedge clk) begin
+        if (cl_rst || tile_engine_reset) begin
+            legacy_state  <= LEGACY_IDLE;
+            legacy_kind   <= LEGACY_KIND_CSR;
+            legacy_grant  <= {ARB_BITS{1'b0}};
+            legacy_last   <= {ARB_BITS{1'b0}};
+            shared_csr_commit_wen   <= 1'b0;
+            shared_csr_commit_addr  <= 8'd0;
+            shared_csr_commit_wdata <= 64'd0;
+            mex_acc_snapshot        <= 256'd0;
+        end else begin
+            case (legacy_state)
+                LEGACY_IDLE: begin
+                    if (legacy_any) begin
+                        legacy_grant <= legacy_next;
+                        legacy_kind  <= legacy_next_kind;
+                        legacy_state <= LEGACY_ACTIVE;
+                        if (legacy_next_kind == LEGACY_KIND_CSR) begin
+                            shared_csr_commit_wen <=
+                                mc_tile_csr_wen[legacy_next];
+                            shared_csr_commit_addr <= mc_tile_csr_addr[
+                                legacy_next*8 +: 8];
+                            shared_csr_commit_wdata <= mc_tile_csr_wdata[
+                                legacy_next*64 +: 64];
+                        end else if (legacy_next_kind ==
+                                     LEGACY_KIND_MEX) begin
+                            mex_acc_snapshot <= te_legacy_acc_state;
+                        end
+                    end
+                end
+
+                LEGACY_ACTIVE: begin
+                    if (micro_cancel_pulse[legacy_grant]) begin
+                        legacy_state <= LEGACY_IDLE;
+                    end else begin
+                        case (legacy_kind)
+                            LEGACY_KIND_CSR: begin
+                                legacy_last  <= legacy_grant;
+                                legacy_state <= LEGACY_WAIT_DROP;
+                            end
+
+                            LEGACY_KIND_SHA: begin
+                                if (sha_done_reg) begin
+                                    legacy_last  <= legacy_grant;
+                                    legacy_state <= LEGACY_WAIT_DROP;
+                                end
+                            end
+
+                            LEGACY_KIND_MEX: begin
+                                if (mex_done_reg) begin
+                                    legacy_last  <= legacy_grant;
+                                    legacy_state <= LEGACY_WAIT_DROP;
+                                end
+                            end
+
+                            default:
+                                legacy_state <= LEGACY_IDLE;
+                        endcase
+                    end
+                end
+
+                LEGACY_WAIT_DROP: begin
+                    if (!legacy_request_held)
+                        legacy_state <= LEGACY_IDLE;
+                end
+
+                default:
+                    legacy_state <= LEGACY_IDLE;
+            endcase
+        end
+    end
+
     // MEX arbiter FSM
     always @(posedge clk) begin
         if (cl_rst || tile_engine_reset) begin
@@ -1440,6 +1943,7 @@ module mp64_cluster #(
             mex_fault_reg  <= MEX_FAULT_NONE;
             mex_fault_addr_reg <= 64'd0;
             te_mex_valid   <= 1'b0;
+            te_cfg_load    <= 1'b0;
         end else begin
             mex_done_reg <= 1'b0;
 
@@ -1447,41 +1951,62 @@ module mp64_cluster #(
                 MEX_IDLE: begin
                     mex_busy_reg <= 1'b0;
                     te_mex_valid <= 1'b0;
-                    if (mex_any) begin
-                        mex_grant       <= mex_next;
+                    te_cfg_load  <= 1'b0;
+                    if (legacy_start &&
+                        legacy_next_kind == LEGACY_KIND_MEX) begin
+                        mex_grant       <= legacy_next;
                         mex_busy_reg    <= 1'b1;
-                        te_mex_valid    <= 1'b1;
-                        te_mex_ss       <= mc_mex_ss       [mex_next*2  +: 2];
-                        te_mex_op       <= mc_mex_op       [mex_next*2  +: 2];
-                        te_mex_funct    <= mc_mex_funct    [mex_next*3  +: 3];
+                        te_cfg_load     <= 1'b1;
+                        te_mex_ss       <= mc_mex_ss       [legacy_next*2  +: 2];
+                        te_mex_op       <= mc_mex_op       [legacy_next*2  +: 2];
+                        te_mex_funct    <= mc_mex_funct    [legacy_next*3  +: 3];
                         te_mex_funct_byte<= mc_mex_funct_byte[
-                            mex_next*8 +: 8];
-                        te_mex_gpr_val  <= mc_mex_gpr_val  [mex_next*64 +: 64];
-                        te_mex_imm8     <= mc_mex_imm8     [mex_next*8  +: 8];
-                        te_mex_ext_mod  <= mc_mex_ext_mod  [mex_next*4  +: 4];
-                        te_mex_ext_active<= mc_mex_ext_active[mex_next];
+                            legacy_next*8 +: 8];
+                        te_mex_gpr_val  <= mc_mex_gpr_val  [
+                            legacy_next*64 +: 64];
+                        te_mex_imm8     <= mc_mex_imm8     [
+                            legacy_next*8  +: 8];
+                        te_mex_ext_mod  <= mc_mex_ext_mod  [
+                            legacy_next*4  +: 4];
+                        te_mex_ext_active<=
+                            mc_mex_ext_active[legacy_next];
                         te_mex_caller_id <= mc_tile_caller_id[
-                            mex_next*TACC_CALLER_BITS +:
+                            legacy_next*TACC_CALLER_BITS +:
                             TACC_CALLER_BITS];
-                        te_mex_priv <= mc_tile_priv[mex_next];
+                        te_mex_priv <= mc_tile_priv[legacy_next];
                         te_mex_mpu_base <= mc_tile_mpu_base[
-                            mex_next*64 +: 64];
+                            legacy_next*64 +: 64];
                         te_mex_mpu_limit <= mc_tile_mpu_limit[
-                            mex_next*64 +: 64];
+                            legacy_next*64 +: 64];
                         te_mex_mpu_enabled <=
-                            mc_tile_mpu_enabled[mex_next];
+                            mc_tile_mpu_enabled[legacy_next];
                         te_mex_allow_cluster_spad <=
-                            mc_tile_allow_cluster_spad[mex_next];
+                            mc_tile_allow_cluster_spad[legacy_next];
                         te_mex_engine_epoch <= te_engine_epoch;
                         te_mex_caller_epoch <=
-                            tacc_caller_epoch[mex_next];
-                        te_mex_caller_slot <= mex_next;
-                        mex_state       <= MEX_ACTIVE;
+                            tacc_caller_epoch[legacy_next];
+                        te_mex_caller_slot <= legacy_next;
+                        mex_state       <= MEX_PRELOAD;
+                    end
+                end
+
+                MEX_PRELOAD: begin
+                    // The leaf samples cfg_load on this edge.  Dispatch one
+                    // cycle later so its MEX admission observes the new bank.
+                    te_cfg_load <= 1'b0;
+                    if (micro_cancel_pulse[mex_grant]) begin
+                        te_mex_valid <= 1'b0;
+                        mex_busy_reg <= 1'b0;
+                        mex_state    <= MEX_IDLE;
+                    end else begin
+                        te_mex_valid <= 1'b1;
+                        mex_state    <= MEX_ACTIVE;
                     end
                 end
 
                 MEX_ACTIVE: begin
                     te_mex_valid <= 1'b0;  // only pulse for 1 cycle
+                    te_cfg_load  <= 1'b0;
                     if (micro_cancel_pulse[mex_grant]) begin
                         mex_busy_reg <= 1'b0;
                         mex_state    <= MEX_IDLE;
@@ -1497,6 +2022,7 @@ module mp64_cluster #(
 
                 MEX_WAIT_DROP: begin
                     te_mex_valid <= 1'b0;
+                    te_cfg_load  <= 1'b0;
                     mex_busy_reg <= 1'b0;
                     if (!mc_mex_req[mex_grant])
                         mex_state <= MEX_IDLE;
@@ -1649,6 +2175,27 @@ module mp64_cluster #(
         .tacc_ctl_wdata(te_tacc_ctl_wdata),
         .tacc_ctl_done (te_tacc_ctl_done),
         .tacc_ctl_fault(te_tacc_ctl_fault),
+
+        // The leaf owns the one physical legacy ACC. Caller-private
+        // configuration is copied in the cycle before admitted MEX dispatch.
+        .legacy_acc_state(te_legacy_acc_state),
+        .legacy_acc_wen(te_legacy_acc_wen),
+        .legacy_acc_wdata(te_legacy_acc_wdata),
+        .cfg_load      (te_cfg_load),
+        .cfg_tmode     (te_cfg_tmode),
+        .cfg_tctrl     (te_cfg_tctrl),
+        .cfg_tsrc0     (te_cfg_tsrc0),
+        .cfg_tsrc1     (te_cfg_tsrc1),
+        .cfg_tdst      (te_cfg_tdst),
+        .cfg_sb        (te_cfg_sb),
+        .cfg_sr        (te_cfg_sr),
+        .cfg_sc        (te_cfg_sc),
+        .cfg_sw        (te_cfg_sw),
+        .cfg_tstride_r (te_cfg_tstride_r),
+        .cfg_tstride_c (te_cfg_tstride_c),
+        .cfg_ttile_h   (te_cfg_ttile_h),
+        .cfg_ttile_w   (te_cfg_ttile_w),
+        .acc_zero_consumed(te_acc_zero_consumed),
 
         // Internal tile memory port (→ SoC memory subsystem)
         .tile_req      (tile_req),
