@@ -27,12 +27,38 @@ module mp64_tile (
     input  wire [1:0]  mex_ss,         // source selector
     input  wire [1:0]  mex_op,         // operation class
     input  wire [2:0]  mex_funct,      // sub-function
+    input  wire [7:0]  mex_funct_byte, // complete encoded function byte
     input  wire [63:0] mex_gpr_val,    // GPR value (for broadcast mode)
     input  wire [7:0]  mex_imm8,       // immediate (for splat mode)
     input  wire [3:0]  mex_ext_mod,    // EXT prefix modifier
     input  wire        mex_ext_active, // EXT prefix is active
+    input  wire [4:0]  mex_caller_id,  // absolute architectural caller ID
+    input  wire        mex_priv,       // 0 = supervisor, 1 = user
+    input  wire [63:0] mex_mpu_base,
+    input  wire [63:0] mex_mpu_limit,
+    input  wire        mex_mpu_enabled,
+    input  wire        mex_allow_cluster_spad,
+    input  wire [7:0]  mex_engine_epoch,
+    input  wire [7:0]  mex_caller_epoch,
+    input  wire [1:0]  mex_caller_slot,
+    input  wire        engine_reset,
+    input  wire [3:0]  caller_cancel,
+    input  wire [31:0] caller_epochs,
+    output reg  [7:0]  engine_epoch,
     output reg         mex_done,       // operation complete
     output reg         mex_busy,       // engine busy (stall CPU)
+    output reg  [2:0]  mex_fault,
+    output reg  [63:0] mex_fault_addr,
+    output reg         mex_stall_cycle,
+
+    // === TACC CSR sidebands (state arrives in Landing 2.3) ===
+    output wire [63:0] tacc_status_raw,
+    input  wire        tacc_ctl_valid,
+    input  wire [4:0]  tacc_ctl_caller_id,
+    input  wire        tacc_ctl_priv,
+    input  wire [63:0] tacc_ctl_wdata,
+    output reg         tacc_ctl_done,
+    output reg  [2:0]  tacc_ctl_fault,
 
     // === Tile memory port (512-bit, directly to BRAM Port A) ===
     output reg         tile_req,
@@ -51,6 +77,10 @@ module mp64_tile (
     input  wire        ext_tile_ack
 );
 
+    // Landing 2.1 exposes the physical-engine view but deliberately creates
+    // no TACC state.  OWNER_NONE occupies status bits [20:16].
+    assign tacc_status_raw = {43'd0, TACC_OWNER_NONE, 16'd0};
+
     // ========================================================================
     // CSR registers
     // ========================================================================
@@ -59,6 +89,9 @@ module mp64_tile (
     reg [63:0] tdst;
     reg [63:0] tmode;        // bits[2:0]=EW, bit[4]=signed, bit[5]=saturate
     reg [63:0] tctrl;        // bit[0]=accumulate, bit[1]=acc_zero
+    reg        tctrl_accumulate_reg;
+    reg        tctrl_acc_zero_reg;
+    reg        tctrl_acc_zero_clear;
     reg [63:0] acc [0:3];    // 256-bit accumulator (4 × 64-bit)
     reg [63:0] tile_bank;
     reg [63:0] tile_row;
@@ -68,6 +101,15 @@ module mp64_tile (
     reg [63:0] tstride_c;    // column stride in bytes (reserved)
     reg [63:0] ttile_h;      // tile height (rows, 1-8)
     reg [63:0] ttile_w;      // tile width (bytes per row, 1-64)
+
+    // The control transport is independent of MEX.  Landing 2.3 consumes the
+    // captured caller and data; for now a supervisor write is acknowledged
+    // without state mutation.  tacc_ctl_seen turns a held valid level into
+    // exactly one completion.
+    reg        tacc_ctl_seen;
+    reg [4:0]  tacc_ctl_caller_id_reg;
+    reg        tacc_ctl_priv_reg;
+    reg [63:0] tacc_ctl_wdata_reg;
 
     // CSR read mux
     always @(*) begin
@@ -114,27 +156,94 @@ module mp64_tile (
             tstride_c   <= 64'd0;
             ttile_h     <= 64'd8;   // default 8 rows
             ttile_w     <= 64'd8;   // default 8 bytes per row
-        end else if (csr_wen) begin
-            case (csr_addr)
-                CSR_TMODE: tmode       <= csr_wdata;
-                CSR_TCTRL: tctrl       <= csr_wdata;
-                CSR_TSRC0: tsrc0       <= csr_wdata;
-                CSR_TSRC1: tsrc1       <= csr_wdata;
-                CSR_TDST:  tdst        <= csr_wdata;
-                CSR_ACC0:  acc[0]      <= csr_wdata;
-                CSR_ACC1:  acc[1]      <= csr_wdata;
-                CSR_ACC2:  acc[2]      <= csr_wdata;
-                CSR_ACC3:  acc[3]      <= csr_wdata;
-                CSR_SB:    tile_bank   <= csr_wdata;
-                CSR_SR:    tile_row    <= csr_wdata;
-                CSR_SC:    tile_col    <= csr_wdata;
-                CSR_SW:    tile_stride <= csr_wdata;
-                CSR_TSTRIDE_R: tstride_r <= csr_wdata;
-                CSR_TSTRIDE_C: tstride_c <= csr_wdata;
-                CSR_TTILE_H:   ttile_h   <= csr_wdata;
-                CSR_TTILE_W:   ttile_w   <= csr_wdata;
-                default: ;  // no-op for unrecognized CSR
-            endcase
+        end else if (engine_reset) begin
+            tsrc0       <= 64'd0;
+            tsrc1       <= 64'd0;
+            tdst        <= 64'd0;
+            tmode       <= 64'd0;
+            tctrl       <= 64'd0;
+            acc[0]      <= 64'd0;
+            acc[1]      <= 64'd0;
+            acc[2]      <= 64'd0;
+            acc[3]      <= 64'd0;
+            tile_bank   <= 64'd0;
+            tile_row    <= 64'd0;
+            tile_col    <= 64'd0;
+            tile_stride <= 64'd0;
+            tstride_r   <= 64'd0;
+            tstride_c   <= 64'd0;
+            ttile_h     <= 64'd8;
+            ttile_w     <= 64'd8;
+        end else begin
+            if (csr_wen) begin
+                case (csr_addr)
+                    CSR_TMODE: tmode       <= csr_wdata;
+                    CSR_TCTRL: tctrl       <= csr_wdata;
+                    CSR_TSRC0: tsrc0       <= csr_wdata;
+                    CSR_TSRC1: tsrc1       <= csr_wdata;
+                    CSR_TDST:  tdst        <= csr_wdata;
+                    CSR_ACC0:  acc[0]      <= csr_wdata;
+                    CSR_ACC1:  acc[1]      <= csr_wdata;
+                    CSR_ACC2:  acc[2]      <= csr_wdata;
+                    CSR_ACC3:  acc[3]      <= csr_wdata;
+                    CSR_SB:    tile_bank   <= csr_wdata;
+                    CSR_SR:    tile_row    <= csr_wdata;
+                    CSR_SC:    tile_col    <= csr_wdata;
+                    CSR_SW:    tile_stride <= csr_wdata;
+                    CSR_TSTRIDE_R: tstride_r <= csr_wdata;
+                    CSR_TSTRIDE_C: tstride_c <= csr_wdata;
+                    CSR_TTILE_H:   ttile_h   <= csr_wdata;
+                    CSR_TTILE_W:   ttile_w   <= csr_wdata;
+                    default: ;  // no-op for unrecognized CSR
+                endcase
+            end
+
+            // A same-cycle explicit TCTRL write describes the next operation
+            // and therefore wins over clearing the one-shot consumed by the
+            // operation that just reached its terminal boundary.
+            if (tctrl_acc_zero_clear &&
+                !(csr_wen && csr_addr == CSR_TCTRL))
+                tctrl[1] <= 1'b0;
+        end
+    end
+
+    // Independent, level-valid-de-duplicated TACC control transport.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            tacc_ctl_seen          <= 1'b0;
+            tacc_ctl_done          <= 1'b0;
+            tacc_ctl_fault         <= MEX_FAULT_NONE;
+            tacc_ctl_caller_id_reg <= 5'd0;
+            tacc_ctl_priv_reg      <= 1'b0;
+            tacc_ctl_wdata_reg     <= 64'd0;
+        end else if (engine_reset) begin
+            // Mark a held request seen so reset cannot create a late
+            // completion after the engine returns to service.
+            tacc_ctl_seen  <= tacc_ctl_valid;
+            tacc_ctl_done  <= 1'b0;
+            tacc_ctl_fault <= MEX_FAULT_NONE;
+        end else begin
+            tacc_ctl_done <= 1'b0;
+            if (!tacc_ctl_valid) begin
+                tacc_ctl_seen <= 1'b0;
+            end else if (!tacc_ctl_seen) begin
+                tacc_ctl_seen          <= 1'b1;
+                tacc_ctl_done          <= 1'b1;
+                tacc_ctl_caller_id_reg <= tacc_ctl_caller_id;
+                tacc_ctl_priv_reg      <= tacc_ctl_priv;
+                tacc_ctl_wdata_reg     <= tacc_ctl_wdata;
+
+                // Only FORCE_RELEASE (bit 0) is privileged; reserved bits are
+                // ignored in either mode. Unknown control values fail closed.
+                case ({tacc_ctl_priv, tacc_ctl_wdata[0]})
+                    2'b00, 2'b01, 2'b10:
+                        tacc_ctl_fault <= MEX_FAULT_NONE;
+                    2'b11:
+                        tacc_ctl_fault <= MEX_FAULT_PRIV;
+                    default:
+                        tacc_ctl_fault <= MEX_FAULT_PRIV;
+                endcase
+            end
         end
     end
 
@@ -200,12 +309,78 @@ module mp64_tile (
     reg [511:0] result2;         // second result tile (WMUL high half)
     reg [1:0]   op_reg;
     reg [2:0]   funct_reg;
+    reg [7:0]   funct_byte_reg;
     reg [1:0]   ss_reg;
     reg [63:0]  gpr_val_reg;
     reg [7:0]   imm8_reg;
     reg [3:0]   ext_mod_reg;
     reg         ext_active_reg;
     reg         needs_load_c;
+
+    // Captured dispatch context.  Later TACC landings consume the protection
+    // and identity fields; the epoch fields are already live so cancellation
+    // cannot generate a late completion.
+    reg [4:0]   caller_id_reg;
+    reg         priv_reg;
+    reg [63:0]  mpu_base_reg;
+    reg [63:0]  mpu_limit_reg;
+    reg         mpu_enabled_reg;
+    reg         allow_cluster_spad_reg;
+    reg [7:0]   request_engine_epoch_reg;
+    reg [7:0]   caller_epoch_reg;
+    reg [1:0]   caller_slot_reg;
+    reg         engine_reset_seen;
+
+    wire [7:0] incoming_caller_epoch_now =
+        caller_epochs[mex_caller_slot*8 +: 8];
+    wire [7:0] active_caller_epoch_now =
+        caller_epochs[caller_slot_reg*8 +: 8];
+    wire incoming_cancelled =
+        (mex_engine_epoch != engine_epoch) ||
+        caller_cancel[mex_caller_slot] ||
+        (incoming_caller_epoch_now != mex_caller_epoch);
+    wire active_cancelled =
+        (state != S_IDLE) &&
+        ((request_engine_epoch_reg != engine_epoch) ||
+         caller_cancel[caller_slot_reg] ||
+         (active_caller_epoch_now != caller_epoch_reg));
+
+    // TACC arithmetic/lifecycle execution is deliberately not present in
+    // Landing 2.1.  Catch the complete assigned/reserved namespaces using
+    // both transports so no malformed variant can fall through to a legacy
+    // low-three-bit operation and touch memory or legacy ACC.
+    wire intercept_tacc_tmul =
+        (mex_op == MEX_TMUL) &&
+        ((mex_funct == 3'd6) || (mex_funct == 3'd7) ||
+         (mex_funct_byte[2:0] == 3'd6) ||
+         (mex_funct_byte[2:0] == 3'd7));
+    wire intercept_tacc_lifecycle =
+        (mex_op == MEX_TSYS) && mex_ext_active &&
+        (mex_ext_mod == 4'd8) &&
+        ((mex_funct >= 3'd2) || (mex_funct_byte[2:0] >= 3'd2));
+    wire intercept_unimplemented_tacc =
+        intercept_tacc_tmul || intercept_tacc_lifecycle;
+
+    // Count only cycles in which the leaf is genuinely blocked on a target
+    // acknowledgement.  Dispatch, compute, and fixed completion cycles are
+    // useful work and remain part of the architectural base latency.
+    always @(*) begin
+        mex_stall_cycle = 1'b0;
+        if (!engine_reset && !active_cancelled) begin
+            case (state)
+                S_LOAD_A, S_LOAD_B, S_LOAD_C,
+                S_STORE2, S_STORE_WAIT, S_STORE2_WAIT,
+                S_LOAD2D_WAIT, S_STORE2D_WAIT,
+                S_STORE2D_WRITE_WAIT:
+                    mex_stall_cycle = !tile_ack;
+                S_EXT_LOAD_A, S_EXT_LOAD_B, S_EXT_STORE,
+                S_EXT_STORE2_WAIT:
+                    mex_stall_cycle = !ext_tile_ack;
+                default:
+                    mex_stall_cycle = 1'b0;
+            endcase
+        end
+    end
 
     // LOAD2D / STORE2D FSM registers
     reg [63:0]  ld2d_base;       // starting memory address
@@ -1774,6 +1949,8 @@ module mp64_tile (
             state         <= S_IDLE;
             mex_done      <= 1'b0;
             mex_busy      <= 1'b0;
+            mex_fault     <= MEX_FAULT_NONE;
+            mex_fault_addr<= 64'd0;
             tile_req      <= 1'b0;
             tile_wen      <= 1'b0;
             tile_a        <= 512'd0;
@@ -1784,29 +1961,116 @@ module mp64_tile (
             ext_tile_req  <= 1'b0;
             ext_tile_wen  <= 1'b0;
             needs_load_c  <= 1'b0;
+            engine_epoch  <= 8'd0;
+            engine_reset_seen <= 1'b0;
+            tctrl_accumulate_reg <= 1'b0;
+            tctrl_acc_zero_reg   <= 1'b0;
+            tctrl_acc_zero_clear <= 1'b0;
+            op_reg        <= 2'd0;
+            funct_reg     <= 3'd0;
+            funct_byte_reg<= 8'd0;
+            ss_reg        <= 2'd0;
+            gpr_val_reg   <= 64'd0;
+            imm8_reg      <= 8'd0;
+            ext_mod_reg   <= 4'd0;
+            ext_active_reg<= 1'b0;
+            caller_id_reg <= 5'd0;
+            priv_reg      <= 1'b0;
+            mpu_base_reg  <= 64'd0;
+            mpu_limit_reg <= 64'd0;
+            mpu_enabled_reg <= 1'b0;
+            allow_cluster_spad_reg <= 1'b0;
+            request_engine_epoch_reg <= 8'd0;
+            caller_epoch_reg <= 8'd0;
+            caller_slot_reg  <= 2'd0;
+        end else if (engine_reset) begin
+            state         <= S_IDLE;
+            mex_done      <= 1'b0;
+            mex_busy      <= 1'b0;
+            mex_fault     <= MEX_FAULT_NONE;
+            mex_fault_addr<= 64'd0;
+            tile_req      <= 1'b0;
+            tile_wen      <= 1'b0;
+            ext_tile_req  <= 1'b0;
+            ext_tile_wen  <= 1'b0;
+            needs_load_c  <= 1'b0;
+            tctrl_accumulate_reg <= 1'b0;
+            tctrl_acc_zero_reg   <= 1'b0;
+            tctrl_acc_zero_clear <= 1'b0;
+            if (!engine_reset_seen)
+                engine_epoch <= engine_epoch + 8'd1;
+            engine_reset_seen <= 1'b1;
         end else begin
+            engine_reset_seen <= 1'b0;
             mex_done     <= 1'b0;
             tile_req     <= 1'b0;
             tile_wen     <= 1'b0;
             ext_tile_req <= 1'b0;
             ext_tile_wen <= 1'b0;
+            tctrl_acc_zero_clear <= 1'b0;
 
+            if (active_cancelled) begin
+                // Cancellation is terminal but non-retiring.  Requests already
+                // accepted by a memory target are not rolled back; their late
+                // acknowledgements are ignored in S_IDLE.
+                state         <= S_IDLE;
+                mex_done      <= 1'b0;
+                mex_busy      <= 1'b0;
+                mex_fault     <= MEX_FAULT_NONE;
+                mex_fault_addr<= 64'd0;
+                tile_req      <= 1'b0;
+                tile_wen      <= 1'b0;
+                ext_tile_req  <= 1'b0;
+                ext_tile_wen  <= 1'b0;
+                needs_load_c  <= 1'b0;
+            end else begin
             case (state)
             S_IDLE: begin
                 mex_busy <= 1'b0;
                 if (mex_valid) begin
-                    op_reg        <= mex_op;
-                    funct_reg     <= mex_funct;
-                    ss_reg        <= mex_ss;
-                    gpr_val_reg   <= mex_gpr_val;
-                    imm8_reg      <= mex_imm8;
-                    ext_mod_reg   <= mex_ext_mod;
-                    ext_active_reg<= mex_ext_active;
-                    mex_busy      <= 1'b1;
-                    needs_load_c  <= 1'b0;
+                    if (incoming_cancelled) begin
+                        // A stale request belongs to an execution context
+                        // that no longer waits for completion.  Drop it before
+                        // any memory, ACC, or completion side effect.
+                        state          <= S_IDLE;
+                        mex_busy       <= 1'b0;
+                        mex_fault      <= MEX_FAULT_NONE;
+                        mex_fault_addr <= 64'd0;
+                    end else begin
+                        op_reg        <= mex_op;
+                        funct_reg     <= mex_funct;
+                        funct_byte_reg<= mex_funct_byte;
+                        ss_reg        <= mex_ss;
+                        gpr_val_reg   <= mex_gpr_val;
+                        imm8_reg      <= mex_imm8;
+                        ext_mod_reg   <= mex_ext_mod;
+                        ext_active_reg<= mex_ext_active;
+                        caller_id_reg <= mex_caller_id;
+                        priv_reg      <= mex_priv;
+                        mpu_base_reg  <= mex_mpu_base;
+                        mpu_limit_reg <= mex_mpu_limit;
+                        mpu_enabled_reg <= mex_mpu_enabled;
+                        allow_cluster_spad_reg <= mex_allow_cluster_spad;
+                        request_engine_epoch_reg <= mex_engine_epoch;
+                        caller_epoch_reg <= mex_caller_epoch;
+                        caller_slot_reg  <= mex_caller_slot;
+                        tctrl_accumulate_reg <= tctrl[0];
+                        tctrl_acc_zero_reg   <= tctrl[1];
+                        mex_busy      <= 1'b1;
+                        mex_fault     <= MEX_FAULT_NONE;
+                        mex_fault_addr<= 64'd0;
+                        needs_load_c  <= 1'b0;
 
+                        // TACC encodings are reserved now, but execution does
+                        // not arrive until later landings.  Complete them as
+                        // precise illegal instructions without entering any
+                        // legacy memory or accumulator state.
+                        if (intercept_unimplemented_tacc) begin
+                            mex_fault <= MEX_FAULT_ILLEGAL;
+                            state     <= S_DONE;
+                        end
                     // TSYS.ZERO — write zeros
-                    if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
+                    else if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
                         !(mex_ext_active && mex_ext_mod == 4'd8)) begin
                         if (dst_internal) begin
                             tile_req   <= 1'b1;
@@ -1904,6 +2168,7 @@ module mp64_tile (
                             ext_tile_addr <= tsrc0;
                             state         <= S_EXT_LOAD_A;
                         end
+                    end
                     end
                 end
             end
@@ -2013,12 +2278,13 @@ module mp64_tile (
 
                 // DOT/DOTACC → accumulator, then done (no tile store)
                 if (op_reg == MEX_TMUL && funct_reg == TMUL_DOT) begin
+                    tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
                     if (mode_fp) begin
                         // FP DOT: result is FP32 in low 32 bits of acc[0]
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= {32'd0, fp_dot_result};
                             acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl[0]) begin
+                        end else if (tctrl_accumulate_reg) begin
                             // ACC_ACC: add new FP32 dot to existing FP32 acc
                             // Use an inline FP32 add (can't instantiate in sequential)
                             // Store raw — the emulator does acc[0] = fp32_to_bits(old + new)
@@ -2030,9 +2296,9 @@ module mp64_tile (
                             acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
                         end
                     end else begin
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= dot_result; acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl[0])
+                        end else if (tctrl_accumulate_reg)
                             acc[0] <= acc[0] + dot_result;
                         else begin
                             acc[0] <= dot_result; acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
@@ -2041,13 +2307,14 @@ module mp64_tile (
                     state <= S_DONE;
                 end
                 else if (op_reg == MEX_TMUL && funct_reg == TMUL_DOTACC) begin
+                    tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
                     if (mode_fp) begin
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= {32'd0, fp_dotacc_result[0]};
                             acc[1] <= {32'd0, fp_dotacc_result[1]};
                             acc[2] <= {32'd0, fp_dotacc_result[2]};
                             acc[3] <= {32'd0, fp_dotacc_result[3]};
-                        end else if (tctrl[0]) begin
+                        end else if (tctrl_accumulate_reg) begin
                             acc[0] <= {32'd0, fp_dotacc_acc_result[0]};
                             acc[1] <= {32'd0, fp_dotacc_acc_result[1]};
                             acc[2] <= {32'd0, fp_dotacc_acc_result[2]};
@@ -2059,9 +2326,9 @@ module mp64_tile (
                             acc[3] <= {32'd0, fp_dotacc_result[3]};
                         end
                     end else begin
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= dotacc[0]; acc[1] <= dotacc[1]; acc[2] <= dotacc[2]; acc[3] <= dotacc[3];
-                        end else if (tctrl[0]) begin
+                        end else if (tctrl_accumulate_reg) begin
                             acc[0] <= acc[0]+dotacc[0]; acc[1] <= acc[1]+dotacc[1];
                             acc[2] <= acc[2]+dotacc[2]; acc[3] <= acc[3]+dotacc[3];
                         end else begin
@@ -2123,14 +2390,15 @@ module mp64_tile (
             end
 
             S_REDUCE: begin
+                tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
                 if (mode_fp && (funct_reg != TRED_POPC) && (funct_reg != TRED_L1)) begin
                     // FP reductions: result is FP32 stored in acc[0][31:0]
                     if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX) begin
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= fp_red_idx;
                             acc[1] <= {32'd0, fp_red_val};
                             acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl[0]) begin
+                        end else if (tctrl_accumulate_reg) begin
                             // Compare new vs old best
                             if (funct_reg == TRED_MINIDX) begin
                                 // If new FP value < old acc[1] FP32 value
@@ -2162,10 +2430,10 @@ module mp64_tile (
                         end
                     end else begin
                         // SUM, MIN, MAX, SUMSQ → FP32 in acc[0]
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= {32'd0, fp_red_result};
                             acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl[0])
+                        end else if (tctrl_accumulate_reg)
                             acc[0] <= {32'd0, fp_red_acc_result};
                         else
                             acc[0] <= {32'd0, fp_red_result};
@@ -2173,9 +2441,9 @@ module mp64_tile (
                 end else begin
                     // Integer reductions (unchanged)
                     if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX) begin
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= red_idx; acc[1] <= red_val; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl[0]) begin
+                        end else if (tctrl_accumulate_reg) begin
                             if (funct_reg == TRED_MINIDX) begin
                                 if (mode_signed) begin
                                     if ($signed(red_val) < $signed(acc[1])) begin acc[0] <= red_idx; acc[1] <= red_val; end
@@ -2193,9 +2461,9 @@ module mp64_tile (
                             acc[0] <= red_idx; acc[1] <= red_val;
                         end
                     end else begin
-                        if (tctrl[1]) begin
+                        if (tctrl_acc_zero_reg) begin
                             acc[0] <= red_result; acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl[0])
+                        end else if (tctrl_accumulate_reg)
                             acc[0] <= acc[0] + red_result;
                         else
                             acc[0] <= red_result;
@@ -2367,6 +2635,7 @@ module mp64_tile (
             end
             default: state <= S_IDLE;
             endcase
+            end
         end
     end
 

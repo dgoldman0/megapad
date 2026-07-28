@@ -54,6 +54,10 @@ module tb_tile_write_ack;
     mp64_tile uut (
         .clk            (clk),
         .rst_n          (rst_n),
+        .engine_reset   (1'b0),
+        .caller_cancel  (4'd0),
+        .caller_epochs  (32'd0),
+        .engine_epoch   (),
         .csr_wen        (csr_wen),
         .csr_addr       (csr_addr),
         .csr_wdata      (csr_wdata),
@@ -62,12 +66,32 @@ module tb_tile_write_ack;
         .mex_ss         (mex_ss),
         .mex_op         (mex_op),
         .mex_funct      (mex_funct),
+        .mex_funct_byte ({5'd0, mex_funct}),
         .mex_gpr_val    (mex_gpr_val),
         .mex_imm8       (mex_imm8),
         .mex_ext_mod    (mex_ext_mod),
         .mex_ext_active (mex_ext_active),
+        .mex_caller_id  (5'd0),
+        .mex_priv       (1'b0),
+        .mex_mpu_base   (64'd0),
+        .mex_mpu_limit  (64'd0),
+        .mex_mpu_enabled(1'b0),
+        .mex_allow_cluster_spad(1'b0),
+        .mex_engine_epoch(8'd0),
+        .mex_caller_epoch(8'd0),
+        .mex_caller_slot(2'd0),
         .mex_done       (mex_done),
         .mex_busy       (mex_busy),
+        .mex_fault      (),
+        .mex_fault_addr (),
+        .mex_stall_cycle(),
+        .tacc_status_raw(),
+        .tacc_ctl_valid (1'b0),
+        .tacc_ctl_caller_id(5'd0),
+        .tacc_ctl_priv  (1'b0),
+        .tacc_ctl_wdata (64'd0),
+        .tacc_ctl_done  (),
+        .tacc_ctl_fault (),
         .tile_req       (tile_req),
         .tile_addr      (tile_addr),
         .tile_wen       (tile_wen),
@@ -150,7 +174,7 @@ module tb_tile_write_ack;
             if (guard > 40) begin
                 $display("  FAIL: timeout waiting for internal request");
                 fail_count = fail_count + 1;
-                $finish(1);
+                $fatal(1, "timed out waiting for internal tile request");
             end
         end
     end
@@ -168,7 +192,7 @@ module tb_tile_write_ack;
             if (guard > 40) begin
                 $display("  FAIL: timeout waiting for external request");
                 fail_count = fail_count + 1;
-                $finish(1);
+                $fatal(1, "timed out waiting for external tile request");
             end
         end
     end
@@ -232,7 +256,7 @@ module tb_tile_write_ack;
             if (guard > 20) begin
                 $display("  FAIL: %0s", label);
                 fail_count = fail_count + 1;
-                $finish(1);
+                $fatal(1, "timed out waiting for tile retirement");
             end
         end
         check(label, mex_done && !mex_busy);
@@ -429,14 +453,14 @@ module tb_tile_write_ack;
                      pass_count, fail_count);
 
         if (fail_count != 0)
-            $finish(1);
+            $fatal(1, "tb_tile_write_ack failed");
         $finish(0);
     end
 
     initial begin
         #300000;
         $display("tb_tile_write_ack: TIMEOUT");
-        $finish(1);
+        $fatal(1, "tb_tile_write_ack timeout");
     end
 
 endmodule

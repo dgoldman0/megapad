@@ -23,6 +23,8 @@ parameter MAX_REGS        = 16;            // 16 GPRs
 // ----------------------------------------------------------------------------
 parameter NUM_CORES       = 4;             // Major (full) cores
 parameter CORE_ID_BITS    = 4;             // 4-bit core IDs (0-15)
+parameter TACC_CALLER_BITS = 5;            // 5-bit owner ID; 31 means none
+parameter TACC_EPOCH_BITS  = 8;            // reset/cancellation generation
 
 // Micro-cluster parameters
 parameter NUM_CLUSTERS    = 3;             // Micro-core clusters
@@ -248,6 +250,13 @@ parameter [1:0] MEX_TMUL  = 2'b01;
 parameter [1:0] MEX_TRED  = 2'b10;
 parameter [1:0] MEX_TSYS  = 2'b11;
 
+// MEX completion fault codes
+parameter [2:0] MEX_FAULT_NONE    = 3'd0;
+parameter [2:0] MEX_FAULT_ILLEGAL = 3'd1;
+parameter [2:0] MEX_FAULT_ALIGN   = 3'd2;
+parameter [2:0] MEX_FAULT_BUS     = 3'd3;
+parameter [2:0] MEX_FAULT_PRIV    = 3'd4;
+
 // TALU functions
 parameter [2:0] TALU_ADD  = 3'd0;
 parameter [2:0] TALU_SUB  = 3'd1;
@@ -271,6 +280,7 @@ parameter [2:0] TMUL_WMUL   = 3'd2;
 parameter [2:0] TMUL_MAC    = 3'd3;
 parameter [2:0] TMUL_FMA    = 3'd4;
 parameter [2:0] TMUL_DOTACC = 3'd5;
+parameter [2:0] TMUL_TAMAC  = 3'd6;
 
 // EXT prefix modifier values
 parameter [3:0] EXT_IMM64  = 4'd0;   // 64-bit immediate
@@ -305,11 +315,31 @@ parameter [2:0] TSYS_RROT    = 3'd7;   // Row/column rotate or mirror
 // Extended TSYS functions (via EXT modifier 8)
 parameter [2:0] ETSYS_LOAD2D  = 3'd0;   // Strided 2D tile gather
 parameter [2:0] ETSYS_STORE2D = 3'd1;   // Strided 2D tile scatter
+parameter [2:0] ETSYS_TACC_TRY      = 3'd2;
+parameter [2:0] ETSYS_TACC_CLEAR    = 3'd3;
+parameter [2:0] ETSYS_TACC_LOAD     = 3'd4;
+parameter [2:0] ETSYS_TACC_STORE    = 3'd5;
+parameter [2:0] ETSYS_TACC_RELEASE  = 3'd6;
+parameter [2:0] ETSYS_TACC_RESERVED = 3'd7;
 
 // TMODE extended bits
 parameter TMODE_BIT_SIGNED   = 4;      // Bit 4: signed mode
 parameter TMODE_BIT_SATURATE = 5;      // Bit 5: saturating arithmetic
 parameter TMODE_BIT_ROUNDING = 6;      // Bit 6: rounding mode for shifts
+
+// TACC_STATUS CSR bit and field positions
+parameter TACC_STATUS_BIT_CLAIMED       = 0;
+parameter TACC_STATUS_BIT_MINE          = 1;
+parameter TACC_STATUS_BIT_VALID         = 2;
+parameter TACC_STATUS_BIT_DIRTY         = 3;
+parameter TACC_STATUS_BIT_BUSY          = 4;
+parameter TACC_STATUS_FORMAT_EW_LSB     = 5;
+parameter TACC_STATUS_FORMAT_EW_MSB     = 7;
+parameter TACC_STATUS_BIT_FORMAT_SIGNED = 8;
+parameter TACC_STATUS_BIT_FORCE_PENDING = 9;
+parameter TACC_STATUS_OWNER_LSB         = 16;
+parameter TACC_STATUS_OWNER_MSB         = 20;
+parameter [TACC_CALLER_BITS-1:0] TACC_OWNER_NONE = 5'd31;
 
 // Tile modes (TMODE CSR bits [2:0] — 3-bit EW encoding)
 parameter [2:0] TMODE_8    = 3'b000;   // 64 × 8-bit  lanes (u8/i8)
@@ -348,6 +378,8 @@ parameter [7:0] CSR_ACC0     = 8'h19;
 parameter [7:0] CSR_ACC1     = 8'h1A;
 parameter [7:0] CSR_ACC2     = 8'h1B;
 parameter [7:0] CSR_ACC3     = 8'h1C;
+parameter [7:0] CSR_TACC_STATUS = 8'h1D;
+parameter [7:0] CSR_TACC_CTL    = 8'h1E;
 
 // Multi-core CSR addresses
 parameter [7:0] CSR_COREID   = 8'h20;   // Read-only: core ID (0–3)
@@ -436,7 +468,9 @@ parameter [2:0] IRQ_TIMER  = 3'd7;
 
 // Software / internal interrupt vectors (IVT indices 0-7)
 parameter [7:0] IRQX_ILLEGAL_OP = 8'd2;  // Illegal opcode trap
+parameter [7:0] IRQX_ALIGN      = 8'd3;  // Alignment fault
 parameter [7:0] IRQX_DIV_ZERO   = 8'd4;  // Division-by-zero trap
+parameter [7:0] IRQX_BUS        = 8'd5;  // Bus-error timeout trap
 parameter [7:0] IRQX_SW_TRAP    = 8'd6;  // Software TRAP instruction
 
 // Extended interrupt sources (active on per-core irq_ext lines)
@@ -447,7 +481,7 @@ parameter [3:0] IRQX_DISK    = 4'd11;
 parameter [3:0] IRQX_AES     = 4'd12;
 parameter [3:0] IRQX_SHA     = 4'd13;
 parameter [3:0] IRQX_DMA     = 4'd14;
-parameter [3:0] IRQX_PRIV    = 4'd15;    // Privilege violation
+parameter [7:0] IRQX_PRIV    = 8'd15;    // Privilege violation
 parameter [4:0] IRQX_RTC     = 5'd16;    // RTC alarm
 
 // AES-256-GCM register offsets (from AES_BASE)

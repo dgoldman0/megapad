@@ -92,6 +92,9 @@ module tb_cluster;
     // Cluster instance
     // ====================================================================
     localparam N = 4;
+    localparam [7:0] CLUSTER_ID_BASE = 8'd4;
+    reg tile_engine_reset;
+    reg [N-1:0] micro_reset;
 
     // Tile memory port model (256 tiles × 512 bits = 16 KiB)
     wire        tile_req;
@@ -120,11 +123,13 @@ module tb_cluster;
 
     mp64_cluster #(
         .N              (N),
-        .CLUSTER_ID_BASE(8'd4)
+        .CLUSTER_ID_BASE(CLUSTER_ID_BASE)
     ) uut (
         .clk        (clk),
         .rst        (rst),
         .cluster_en (1'b1),
+        .tile_engine_reset(tile_engine_reset),
+        .micro_reset(micro_reset),
 
         .bus_valid  (bus_valid),
         .bus_addr   (bus_addr),
@@ -264,6 +269,28 @@ module tb_cluster;
     reg [N*64-1:0] tb_crc_csr_wdata;
     reg [63:0] tb_crc_result;
     integer tb_crc_seen;
+    reg [N-1:0] tb_mex_req;
+    reg [N*2-1:0] tb_mex_ss;
+    reg [N*2-1:0] tb_mex_op;
+    reg [N*3-1:0] tb_mex_funct;
+    reg [N*8-1:0] tb_mex_funct_byte;
+    reg [N*64-1:0] tb_mex_gpr_val;
+    reg [N*8-1:0] tb_mex_imm8;
+    reg [N*4-1:0] tb_mex_ext_mod;
+    reg [N-1:0] tb_mex_ext_active;
+    reg [N*TACC_CALLER_BITS-1:0] tb_tile_caller_id;
+    reg [N-1:0] tb_tile_priv;
+    reg [N*64-1:0] tb_tile_mpu_base;
+    reg [N*64-1:0] tb_tile_mpu_limit;
+    reg [N-1:0] tb_tile_mpu_enabled;
+    reg [N-1:0] tb_tile_allow_cluster_spad;
+    reg [N-1:0] tb_tacc_ctl_valid;
+    reg [N*64-1:0] tb_tacc_ctl_wdata;
+    integer tb_mex_valid_count;
+    integer tb_mex_done_count;
+    integer tb_ctl_valid_count;
+    integer tb_ctl_done_count;
+    integer tb_cancel_done_count;
 
     task drive_crc_op;
         input integer core_idx;
@@ -308,6 +335,8 @@ module tb_cluster;
 
         pass_count = 0;
         fail_count = 0;
+        tile_engine_reset = 1'b0;
+        micro_reset = {N{1'b0}};
 
         // Clear memory
         for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
@@ -774,6 +803,247 @@ module tb_cluster;
         release uut.mc_cl_csr_addr;
         release uut.mc_cl_csr_wdata;
 
+        // -----------------------------------------------------------------
+        // Test 12: TACC MEX/control arbitration and caller-relative status.
+        // Drive the shared-resource request boundary directly, matching the
+        // focused CRC arbiter tests above.
+        // -----------------------------------------------------------------
+        tb_mex_req = {N{1'b0}};
+        tb_mex_ss = {(N*2){1'b0}};
+        tb_mex_op = {(N*2){1'b0}};
+        tb_mex_funct = {(N*3){1'b0}};
+        tb_mex_funct_byte = {(N*8){1'b0}};
+        tb_mex_gpr_val = {(N*64){1'b0}};
+        tb_mex_imm8 = {(N*8){1'b0}};
+        tb_mex_ext_mod = {(N*4){1'b0}};
+        tb_mex_ext_active = {N{1'b0}};
+        tb_tile_caller_id = {(N*TACC_CALLER_BITS){1'b0}};
+        tb_tile_caller_id[0*TACC_CALLER_BITS +: TACC_CALLER_BITS] =
+            CLUSTER_ID_BASE + 8'd0;
+        tb_tile_caller_id[1*TACC_CALLER_BITS +: TACC_CALLER_BITS] =
+            CLUSTER_ID_BASE + 8'd1;
+        tb_tile_caller_id[2*TACC_CALLER_BITS +: TACC_CALLER_BITS] =
+            CLUSTER_ID_BASE + 8'd2;
+        tb_tile_caller_id[3*TACC_CALLER_BITS +: TACC_CALLER_BITS] =
+            CLUSTER_ID_BASE + 8'd3;
+        tb_tile_priv = {N{1'b0}};
+        tb_tile_mpu_base = {(N*64){1'b0}};
+        tb_tile_mpu_limit = {(N*64){1'b0}};
+        tb_tile_mpu_enabled = {N{1'b0}};
+        tb_tile_allow_cluster_spad = {N{1'b1}};
+        tb_tacc_ctl_valid = {N{1'b0}};
+        tb_tacc_ctl_wdata = {(N*64){1'b0}};
+
+        force uut.mc_mex_req = tb_mex_req;
+        force uut.mc_mex_ss = tb_mex_ss;
+        force uut.mc_mex_op = tb_mex_op;
+        force uut.mc_mex_funct = tb_mex_funct;
+        force uut.mc_mex_funct_byte = tb_mex_funct_byte;
+        force uut.mc_mex_gpr_val = tb_mex_gpr_val;
+        force uut.mc_mex_imm8 = tb_mex_imm8;
+        force uut.mc_mex_ext_mod = tb_mex_ext_mod;
+        force uut.mc_mex_ext_active = tb_mex_ext_active;
+        force uut.mc_tile_caller_id = tb_tile_caller_id;
+        force uut.mc_tile_priv = tb_tile_priv;
+        force uut.mc_tile_mpu_base = tb_tile_mpu_base;
+        force uut.mc_tile_mpu_limit = tb_tile_mpu_limit;
+        force uut.mc_tile_mpu_enabled = tb_tile_mpu_enabled;
+        force uut.mc_tile_allow_cluster_spad =
+            tb_tile_allow_cluster_spad;
+        force uut.mc_tacc_ctl_valid = tb_tacc_ctl_valid;
+        force uut.mc_tacc_ctl_wdata = tb_tacc_ctl_wdata;
+
+        // A held architectural request produces one dispatch and one routed
+        // completion, then remains in WAIT_DROP until the caller withdraws.
+        tb_mex_op[2*2 +: 2] = MEX_TMUL;
+        tb_mex_funct[2*3 +: 3] = TMUL_TAMAC;
+        tb_mex_funct_byte[2*8 +: 8] = 8'h06;
+        tb_mex_valid_count = 0;
+        tb_mex_done_count = 0;
+        @(negedge clk);
+        tb_mex_req[2] = 1'b1;
+        repeat (16) begin
+            @(negedge clk);
+            if (uut.te_mex_valid)
+                tb_mex_valid_count = tb_mex_valid_count + 1;
+            if (uut.mex_done_reg && uut.mex_grant == 2)
+                tb_mex_done_count = tb_mex_done_count + 1;
+        end
+        check64("held MEX dispatches once",
+                tb_mex_valid_count, 64'd1);
+        check64("held MEX completes once",
+                tb_mex_done_count, 64'd1);
+        check64("held MEX remains in WAIT_DROP",
+                uut.mex_state, uut.MEX_WAIT_DROP);
+        check64("MEX fault routes from granted caller",
+                uut.mex_fault_reg, MEX_FAULT_ILLEGAL);
+        check64("MEX raw function captured",
+                uut.te_mex_funct_byte, 64'h06);
+        check64("MEX absolute caller captured",
+                uut.te_mex_caller_id, CLUSTER_ID_BASE + 8'd2);
+        @(negedge clk);
+        tb_mex_req[2] = 1'b0;
+        repeat (3) @(negedge clk);
+        check64("MEX returns idle after request drops",
+                uut.mex_state, uut.MEX_IDLE);
+
+        // A caller reset concurrent with first admission must mask both MEX
+        // and control requests and advance exactly one caller epoch.
+        tb_mex_op[1*2 +: 2] = MEX_TMUL;
+        tb_mex_funct[1*3 +: 3] = TMUL_TAMAC;
+        tb_mex_funct_byte[1*8 +: 8] = 8'h06;
+        tb_tacc_ctl_wdata[1*64 +: 64] = 64'd1;
+        tb_mex_valid_count = 0;
+        tb_ctl_valid_count = 0;
+        tb_ctl_done_count = 0;
+        @(negedge clk);
+        tb_mex_req[1] = 1'b1;
+        tb_tacc_ctl_valid[1] = 1'b1;
+        micro_reset[1] = 1'b1;
+        repeat (3) begin
+            @(negedge clk);
+            if (uut.te_mex_valid)
+                tb_mex_valid_count = tb_mex_valid_count + 1;
+            if (uut.te_tacc_ctl_valid)
+                tb_ctl_valid_count = tb_ctl_valid_count + 1;
+            if (uut.tacc_ctl_done_reg)
+                tb_ctl_done_count = tb_ctl_done_count + 1;
+        end
+        check64("same-edge reset masks MEX admission",
+                tb_mex_valid_count, 64'd0);
+        check64("same-edge reset masks control admission",
+                tb_ctl_valid_count, 64'd0);
+        check64("same-edge reset prevents control completion",
+                tb_ctl_done_count, 64'd0);
+        check64("same-edge reset advances caller epoch once",
+                uut.tacc_caller_epoch[1], 64'd1);
+        @(negedge clk);
+        tb_mex_req[1] = 1'b0;
+        tb_tacc_ctl_valid[1] = 1'b0;
+        micro_reset[1] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        // The control sideband must complete independently while another
+        // caller owns the active MEX grant.
+        tb_mex_op[0 +: 2] = MEX_TMUL;
+        tb_mex_funct[0 +: 3] = TMUL_TAMAC;
+        tb_mex_funct_byte[0 +: 8] = 8'h06;
+        force uut.te_mex_done = 1'b0;
+        @(negedge clk);
+        tb_mex_req[0] = 1'b1;
+        while (uut.mex_state != uut.MEX_ACTIVE) @(negedge clk);
+        tb_tacc_ctl_wdata[1*64 +: 64] = 64'd1;
+        tb_tacc_ctl_valid[1] = 1'b1;
+        tb_ctl_done_count = 0;
+        repeat (12) begin
+            @(negedge clk);
+            if (uut.tacc_ctl_done_reg && uut.tacc_ctl_grant == 1)
+                tb_ctl_done_count = tb_ctl_done_count + 1;
+        end
+        check64("control completes once while MEX active",
+                tb_ctl_done_count, 64'd1);
+        check64("control does not disturb active MEX grant",
+                uut.mex_state, uut.MEX_ACTIVE);
+        check64("control preserves active MEX owner",
+                uut.mex_grant, 64'd0);
+        @(negedge clk);
+        tb_tacc_ctl_valid[1] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        // Reset the active caller.  The arbiter and leaf both cancel it and
+        // a late leaf completion cannot be routed.
+        tb_cancel_done_count = 0;
+        @(negedge clk);
+        micro_reset[0] = 1'b1;
+        repeat (3) begin
+            @(negedge clk);
+            if (uut.mex_done_reg)
+                tb_cancel_done_count = tb_cancel_done_count + 1;
+        end
+        @(negedge clk);
+        tb_mex_req[0] = 1'b0;
+        micro_reset[0] = 1'b0;
+
+        // Present a stale completion after the request and reset have both
+        // dropped.  Releasing a forced-low leaf would not itself inject one.
+        force uut.te_mex_done = 1'b1;
+        @(negedge clk);
+        if (uut.mex_done_reg)
+            tb_cancel_done_count = tb_cancel_done_count + 1;
+        force uut.te_mex_done = 1'b0;
+        release uut.te_mex_done;
+        repeat (2) begin
+            @(negedge clk);
+            if (uut.mex_done_reg)
+                tb_cancel_done_count = tb_cancel_done_count + 1;
+        end
+        check64("cancelled active MEX has no late completion",
+                tb_cancel_done_count, 64'd0);
+        check64("cancelled active MEX returns arbiter idle",
+                uut.mex_state, uut.MEX_IDLE);
+        check64("active reset advances caller epoch once",
+                uut.tacc_caller_epoch[0], 64'd1);
+        repeat (3) @(negedge clk);
+
+        // A fresh caller can use the engine after cancellation.
+        tb_mex_op[3*2 +: 2] = MEX_TMUL;
+        tb_mex_funct[3*3 +: 3] = TMUL_TAMAC;
+        tb_mex_funct_byte[3*8 +: 8] = 8'h06;
+        tb_mex_done_count = 0;
+        @(negedge clk);
+        tb_mex_req[3] = 1'b1;
+        repeat (12) begin
+            @(negedge clk);
+            if (uut.mex_done_reg && uut.mex_grant == 3)
+                tb_mex_done_count = tb_mex_done_count + 1;
+        end
+        check64("fresh caller completes after cancellation",
+                tb_mex_done_count, 64'd1);
+        @(negedge clk);
+        tb_mex_req[3] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        // Only MINE is caller-relative; every physical status field remains
+        // identical for all simultaneous readers.
+        force uut.te_tacc_status_raw =
+            (64'd1 << TACC_STATUS_BIT_CLAIMED) |
+            (64'd1 << TACC_STATUS_BIT_VALID) |
+            (64'd1 << TACC_STATUS_BIT_BUSY) |
+            (64'd5 << TACC_STATUS_OWNER_LSB);
+        #1;
+        check64("nonowner status clears MINE",
+                uut.mc_tacc_status[0*64 +: 64],
+                (64'd1 << TACC_STATUS_BIT_CLAIMED) |
+                (64'd1 << TACC_STATUS_BIT_VALID) |
+                (64'd1 << TACC_STATUS_BIT_BUSY) |
+                (64'd5 << TACC_STATUS_OWNER_LSB));
+        check64("matching absolute caller status sets MINE",
+                uut.mc_tacc_status[1*64 +: 64],
+                (64'd1 << TACC_STATUS_BIT_CLAIMED) |
+                (64'd1 << TACC_STATUS_BIT_MINE) |
+                (64'd1 << TACC_STATUS_BIT_VALID) |
+                (64'd1 << TACC_STATUS_BIT_BUSY) |
+                (64'd5 << TACC_STATUS_OWNER_LSB));
+        release uut.te_tacc_status_raw;
+
+        release uut.mc_mex_req;
+        release uut.mc_mex_ss;
+        release uut.mc_mex_op;
+        release uut.mc_mex_funct;
+        release uut.mc_mex_funct_byte;
+        release uut.mc_mex_gpr_val;
+        release uut.mc_mex_imm8;
+        release uut.mc_mex_ext_mod;
+        release uut.mc_mex_ext_active;
+        release uut.mc_tile_caller_id;
+        release uut.mc_tile_priv;
+        release uut.mc_tile_mpu_base;
+        release uut.mc_tile_mpu_limit;
+        release uut.mc_tile_mpu_enabled;
+        release uut.mc_tile_allow_cluster_spad;
+        release uut.mc_tacc_ctl_valid;
+        release uut.mc_tacc_ctl_wdata;
+
         // =================================================================
         $display("===========================================");
         if (fail_count == 0)
@@ -781,14 +1051,16 @@ module tb_cluster;
         else
             $display("tb_cluster: %0d PASSED, %0d FAILED", pass_count, fail_count);
         $display("===========================================");
-        $finish;
+        if (fail_count != 0)
+            $fatal(1, "tb_cluster failed");
+        $finish(0);
     end
 
     // Timeout watchdog
     initial begin
         #10000000;
         $display("TIMEOUT: tb_cluster");
-        $finish;
+        $fatal(1, "tb_cluster timeout");
     end
 
 endmodule

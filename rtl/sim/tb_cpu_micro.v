@@ -108,6 +108,53 @@ module tb_cpu_micro;
     wire [7:0]  cl_csr_addr;
     wire        cl_csr_wen;
     wire [63:0] cl_csr_wdata;
+    wire        mex_req;
+    wire [1:0]  mex_ss;
+    wire [1:0]  mex_op;
+    wire [2:0]  mex_funct;
+    wire [7:0]  mex_funct_byte;
+    wire [63:0] mex_gpr_val;
+    wire [7:0]  mex_imm8;
+    wire [3:0]  mex_ext_mod;
+    wire        mex_ext_active;
+    reg         mex_done;
+    reg         mex_busy;
+    reg  [2:0]  mex_fault;
+    reg  [63:0] mex_fault_addr;
+    reg         mex_stall_cycle;
+    reg  [2:0]  next_mex_fault;
+    reg  [63:0] next_mex_fault_addr;
+    reg         mex_ack_enable;
+    reg  [63:0] tacc_status;
+    wire        tacc_ctl_valid;
+    wire [63:0] tacc_ctl_wdata;
+    reg         tacc_ctl_done;
+    reg  [2:0]  tacc_ctl_fault;
+    reg  [2:0]  next_tacc_ctl_fault;
+    reg         tacc_ctl_ack_enable;
+    wire        tacc_priv_fault;
+    reg         cl_priv_level;
+    integer     mex_dispatch_count;
+    integer     tacc_ctl_dispatch_count;
+    integer     tacc_priv_fault_count;
+
+    always @(negedge clk) begin
+        mex_done <= 1'b0;
+        tacc_ctl_done <= 1'b0;
+        if (mex_req && mex_ack_enable) begin
+            mex_dispatch_count = mex_dispatch_count + 1;
+            mex_fault <= next_mex_fault;
+            mex_fault_addr <= next_mex_fault_addr;
+            mex_done <= 1'b1;
+        end
+        if (tacc_ctl_valid && tacc_ctl_ack_enable) begin
+            tacc_ctl_dispatch_count = tacc_ctl_dispatch_count + 1;
+            tacc_ctl_fault <= next_tacc_ctl_fault;
+            tacc_ctl_done <= 1'b1;
+        end
+        if (tacc_priv_fault)
+            tacc_priv_fault_count = tacc_priv_fault_count + 1;
+    end
 
     mp64_cpu_micro u_cpu (
         .clk       (clk),
@@ -137,12 +184,44 @@ module tb_cpu_micro;
         .crc_result(64'd0),
         .crc_done  (crc_req),
         .crc_rd_we_in(1'b0),
+        .mex_req   (mex_req),
+        .mex_ss    (mex_ss),
+        .mex_op    (mex_op),
+        .mex_funct (mex_funct),
+        .mex_funct_byte(mex_funct_byte),
+        .mex_gpr_val(mex_gpr_val),
+        .mex_imm8  (mex_imm8),
+        .mex_ext_mod(mex_ext_mod),
+        .mex_ext_active(mex_ext_active),
+        .mex_done  (mex_done),
+        .mex_busy  (mex_busy),
+        .mex_fault (mex_fault),
+        .mex_fault_addr(mex_fault_addr),
+        .mex_stall_cycle(mex_stall_cycle),
+        .tile_caller_id(),
+        .tile_priv (),
+        .tile_mpu_base(),
+        .tile_mpu_limit(),
+        .tile_mpu_enabled(),
+        .tile_allow_cluster_spad(),
+        .tacc_status(tacc_status),
+        .tacc_ctl_valid(tacc_ctl_valid),
+        .tacc_ctl_wdata(tacc_ctl_wdata),
+        .tacc_ctl_done(tacc_ctl_done),
+        .tacc_ctl_fault(tacc_ctl_fault),
+        .tacc_priv_fault(tacc_priv_fault),
+        .tile_csr_wen(),
+        .tile_csr_addr(),
+        .tile_csr_wdata(),
+        .tile_csr_rdata(64'd0),
         .cl_csr_addr  (cl_csr_addr),
         .cl_csr_wen   (cl_csr_wen),
         .cl_csr_wdata (cl_csr_wdata),
         .cl_csr_rdata (64'd0),
         .cl_ivt_base  (64'h100),
-        .cl_priv_level(1'b0)
+        .cl_priv_level(cl_priv_level),
+        .cl_mpu_base  (64'd0),
+        .cl_mpu_limit (64'd0)
     );
 
     // ========================================================================
@@ -184,6 +263,8 @@ module tb_cpu_micro;
             if (u_cpu.cpu_state != 4'd7) begin
                 $display("  TIMEOUT: CPU did not halt within %0d cycles", max_cycles);
                 timeout = 1;
+                $fatal(1, "micro-CPU did not halt within %0d cycles",
+                       max_cycles);
             end
         end
     endtask
@@ -199,6 +280,67 @@ module tb_cpu_micro;
             end else begin
                 pass = pass + 1;
             end
+    end
+    endtask
+
+    task check64_value;
+        input [63:0] got;
+        input [63:0] expected;
+        input [255:0] name;
+        begin
+            if (got !== expected) begin
+                $display("FAIL %0s: got=%h expected=%h",
+                         name, got, expected);
+                fail = fail + 1;
+            end else begin
+                pass = pass + 1;
+            end
+        end
+    endtask
+
+    task install_vector;
+        input [7:0] vector;
+        input [7:0] target;
+        integer vector_base;
+        integer vector_i;
+        begin
+            vector_base = 16'h100 + vector * 8;
+            for (vector_i = 0; vector_i < 8; vector_i = vector_i + 1)
+                mem[vector_base+vector_i] = 8'd0;
+            mem[vector_base] = target;
+        end
+    endtask
+
+    task run_mex_fault_case;
+        input [2:0] fault_code;
+        input [7:0] expected_vector;
+        input [63:0] faulting_addr;
+        input [63:0] expected_trap_addr;
+        begin
+            clear_mem;
+            mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+            mem[3] = 8'hE0; mem[4] = 8'h00;
+            mem[5] = 8'h02;
+            install_vector(expected_vector, 8'h40);
+            mem[8'h40] = 8'h02;
+            next_mex_fault = fault_code;
+            next_mex_fault_addr = faulting_addr;
+            mex_dispatch_count = 0;
+            cl_priv_level = 1'b0;
+            reset_cpu;
+            @(negedge clk);
+            u_cpu.trap_addr = 64'hCAFE_BABE_DEAD_BEEF;
+            wait_halt(2000);
+            check64_value(mex_dispatch_count, 64'd1,
+                          "MEX fault emits one request");
+            check64_value(u_cpu.ivec_id, expected_vector,
+                          "MEX fault vector");
+            check64_value(u_cpu.trap_addr, expected_trap_addr,
+                          "MEX fault TRAP_ADDR");
+            check_mem_qword_le(13'h070, 64'd5,
+                               "MEX fault saved end PC");
+            check64_value(u_cpu.perf_tileops, 64'd0,
+                          "faulting MEX does not retire");
         end
     endtask
 
@@ -243,6 +385,23 @@ module tb_cpu_micro;
         pass = 0;
         fail = 0;
         rst_n = 0;
+        mex_done = 1'b0;
+        mex_busy = 1'b0;
+        mex_fault = MEX_FAULT_NONE;
+        mex_fault_addr = 64'd0;
+        mex_stall_cycle = 1'b0;
+        next_mex_fault = MEX_FAULT_NONE;
+        next_mex_fault_addr = 64'd0;
+        mex_ack_enable = 1'b1;
+        tacc_status = {43'd0, TACC_OWNER_NONE, 16'd0};
+        tacc_ctl_done = 1'b0;
+        tacc_ctl_fault = MEX_FAULT_NONE;
+        next_tacc_ctl_fault = MEX_FAULT_NONE;
+        tacc_ctl_ack_enable = 1'b1;
+        cl_priv_level = 1'b0;
+        mex_dispatch_count = 0;
+        tacc_ctl_dispatch_count = 0;
+        tacc_priv_fault_count = 0;
 
         // ============================================================
         // TEST 1: NOP + HALT
@@ -544,6 +703,144 @@ module tb_cpu_micro;
         end
 
         // ============================================================
+        // TEST 14: malformed TACC encodings pretrap without MEX.
+        // ============================================================
+        $display("Test 14: TACC encoding pretraps");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'hE1; mem[4] = 8'h26;
+        mem[5] = 8'h02;
+        install_vector(IRQX_ILLEGAL_OP, 8'h40);
+        mem[8'h40] = 8'h02;
+        mex_dispatch_count = 0;
+        cl_priv_level = 1'b0;
+        reset_cpu;
+        @(negedge clk);
+        u_cpu.trap_addr = 64'h0123_4567_89AB_CDEF;
+        wait_halt(2000);
+        check64_value(mex_dispatch_count, 64'd0,
+                      "noncanonical TAMAC emits no MEX");
+        check64_value(u_cpu.ivec_id, IRQX_ILLEGAL_OP,
+                      "noncanonical TAMAC vector");
+        check_mem_qword_le(13'h070, 64'd5,
+                           "noncanonical TAMAC saved end PC");
+        check64_value(u_cpu.trap_addr, 64'h0123_4567_89AB_CDEF,
+                      "noncanonical TAMAC preserves TRAP_ADDR");
+
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'hF8; mem[4] = 8'hE3; mem[5] = 8'h22;
+        mem[6] = 8'h02;
+        install_vector(IRQX_ILLEGAL_OP, 8'h40);
+        mem[8'h40] = 8'h02;
+        mex_dispatch_count = 0;
+        reset_cpu;
+        wait_halt(2000);
+        check64_value(mex_dispatch_count, 64'd0,
+                      "noncanonical lifecycle emits no MEX");
+        check_mem_qword_le(13'h070, 64'd6,
+                           "noncanonical lifecycle saved end PC");
+
+        // ============================================================
+        // TEST 15: all precise MEX completion faults.
+        // ============================================================
+        $display("Test 15: precise MEX completion faults");
+        run_mex_fault_case(MEX_FAULT_ILLEGAL, IRQX_ILLEGAL_OP,
+                           64'h1111, 64'hCAFE_BABE_DEAD_BEEF);
+        run_mex_fault_case(MEX_FAULT_ALIGN, IRQX_ALIGN,
+                           64'h2222, 64'h2222);
+        run_mex_fault_case(MEX_FAULT_BUS, IRQX_BUS,
+                           64'h3333, 64'h3333);
+        run_mex_fault_case(MEX_FAULT_PRIV, IRQX_PRIV,
+                           64'h4444, 64'h4444);
+
+        // ============================================================
+        // TEST 16: dedicated TACC status/control paths.
+        // ============================================================
+        $display("Test 16: TACC status/control");
+        clear_mem;
+        tacc_status = 64'h0123_4567_89AB_CDEF;
+        mem[0] = 8'hD1; mem[1] = CSR_TACC_STATUS;
+        mem[2] = 8'hD2; mem[3] = CSR_TACC_CTL;
+        mem[4] = 8'h02;
+        cl_priv_level = 1'b0;
+        reset_cpu;
+        wait_halt(2000);
+        check_reg(1, 64'h0123_4567_89AB_CDEF,
+                  "TACC_STATUS dedicated read");
+        check_reg(2, 64'd0, "TACC_CTL reads zero");
+
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h01;
+        mem[3] = 8'hD9; mem[4] = CSR_TACC_CTL;
+        mem[5] = 8'h02;
+        tacc_ctl_ack_enable = 1'b0;
+        next_tacc_ctl_fault = MEX_FAULT_NONE;
+        tacc_ctl_dispatch_count = 0;
+        reset_cpu;
+        timeout = 1;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(posedge clk);
+            if (u_cpu.cpu_state == CPU_CSR_WAIT) begin
+                timeout = 0;
+                i = 200;
+            end
+        end
+        if (timeout) begin
+            $display("FAIL T16: control write did not enter CSR_WAIT");
+            fail = fail + 1;
+        end else begin
+            repeat (3) begin
+                @(negedge clk);
+                check64_value(tacc_ctl_valid, 64'd1,
+                              "TACC_CTL valid remains held");
+                check64_value(tacc_ctl_wdata, 64'd1,
+                              "TACC_CTL data remains held");
+            end
+        end
+        tacc_ctl_ack_enable = 1'b1;
+        wait_halt(2000);
+        check64_value(tacc_ctl_dispatch_count, 64'd1,
+                      "TACC_CTL publishes one transaction");
+
+        // User FORCE_RELEASE must pretrap, notify the cluster, and never
+        // reach the control sideband.
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'h60; mem[4] = 8'h10; mem[5] = 8'h01;
+        mem[6] = 8'hD9; mem[7] = CSR_TACC_CTL;
+        mem[8] = 8'h02;
+        install_vector(IRQX_PRIV, 8'h40);
+        mem[8'h40] = 8'h02;
+        cl_priv_level = 1'b1;
+        tacc_ctl_dispatch_count = 0;
+        tacc_priv_fault_count = 0;
+        reset_cpu;
+        wait_halt(2000);
+        check64_value(tacc_ctl_dispatch_count, 64'd0,
+                      "user FORCE_RELEASE emits no control request");
+        check64_value(tacc_priv_fault_count, 64'd1,
+                      "user FORCE_RELEASE notifies cluster privilege");
+        check64_value(u_cpu.ivec_id, IRQX_PRIV,
+                      "user FORCE_RELEASE vector");
+        check_mem_qword_le(13'h070, 64'd8,
+                           "user FORCE_RELEASE saved end PC");
+
+        // Reserved-only writes remain legal in user mode.
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h02;
+        mem[3] = 8'hD9; mem[4] = CSR_TACC_CTL;
+        mem[5] = 8'h02;
+        tacc_ctl_dispatch_count = 0;
+        tacc_priv_fault_count = 0;
+        reset_cpu;
+        wait_halt(2000);
+        check64_value(tacc_ctl_dispatch_count, 64'd1,
+                      "user reserved-only control is acknowledged");
+        check64_value(tacc_priv_fault_count, 64'd0,
+                      "reserved-only control does not fault privilege");
+
+        // ============================================================
         // Summary
         // ============================================================
         $display("--------------------------------------------");
@@ -551,7 +848,7 @@ module tb_cpu_micro;
         $display("--------------------------------------------");
         if (fail != 0) begin
             $display("FAIL");
-            $finish(1);
+            $fatal(1, "tb_cpu_micro failed");
         end else begin
             $display("ALL PASS");
         end

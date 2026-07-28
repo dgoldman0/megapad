@@ -30,12 +30,37 @@ module tb_tile;
     reg  [1:0]  mex_ss;
     reg  [1:0]  mex_op;
     reg  [2:0]  mex_funct;
+    reg  [7:0]  mex_funct_byte;
     reg  [63:0] mex_gpr_val;
     reg  [7:0]  mex_imm8;
     reg  [3:0]  mex_ext_mod;
     reg         mex_ext_active;
+    reg  [4:0]  mex_caller_id;
+    reg         mex_priv;
+    reg  [63:0] mex_mpu_base;
+    reg  [63:0] mex_mpu_limit;
+    reg         mex_mpu_enabled;
+    reg         mex_allow_cluster_spad;
+    reg  [7:0]  mex_engine_epoch;
+    reg  [7:0]  mex_caller_epoch;
+    reg  [1:0]  mex_caller_slot;
+    reg         engine_reset;
+    reg  [3:0]  caller_cancel;
+    reg  [31:0] caller_epochs;
+    wire [7:0]  engine_epoch;
     wire        mex_done;
     wire        mex_busy;
+    wire [2:0]  mex_fault;
+    wire [63:0] mex_fault_addr;
+    wire        mex_stall_cycle;
+
+    reg         tacc_ctl_valid;
+    reg  [4:0]  tacc_ctl_caller_id;
+    reg         tacc_ctl_priv;
+    reg  [63:0] tacc_ctl_wdata;
+    wire [63:0] tacc_status_raw;
+    wire        tacc_ctl_done;
+    wire [2:0]  tacc_ctl_fault;
 
     // === Tile memory port — simple 1-cycle BRAM model ===
     wire        tile_req;
@@ -44,6 +69,7 @@ module tb_tile;
     wire [511:0] tile_wdata;
     reg  [511:0] tile_rdata;
     reg          tile_ack;
+    reg          tile_ack_enable;
 
     // === External tile port (unused — stub) ===
     wire        ext_tile_req;
@@ -58,7 +84,7 @@ module tb_tile;
 
     always @(posedge clk) begin
         tile_ack <= 1'b0;
-        if (tile_req) begin
+        if (tile_req && tile_ack_enable) begin
             if (tile_wen)
                 tile_mem[tile_addr[13:6]] <= tile_wdata;
             tile_rdata <= tile_mem[tile_addr[13:6]];
@@ -70,6 +96,10 @@ module tb_tile;
     mp64_tile u_tile (
         .clk           (clk),
         .rst_n         (rst_n),
+        .engine_reset  (engine_reset),
+        .caller_cancel (caller_cancel),
+        .caller_epochs (caller_epochs),
+        .engine_epoch  (engine_epoch),
         .csr_wen       (csr_wen),
         .csr_addr      (csr_addr),
         .csr_wdata     (csr_wdata),
@@ -78,12 +108,32 @@ module tb_tile;
         .mex_ss        (mex_ss),
         .mex_op        (mex_op),
         .mex_funct     (mex_funct),
+        .mex_funct_byte(mex_funct_byte),
         .mex_gpr_val   (mex_gpr_val),
         .mex_imm8      (mex_imm8),
         .mex_ext_mod   (mex_ext_mod),
         .mex_ext_active(mex_ext_active),
+        .mex_caller_id (mex_caller_id),
+        .mex_priv      (mex_priv),
+        .mex_mpu_base  (mex_mpu_base),
+        .mex_mpu_limit (mex_mpu_limit),
+        .mex_mpu_enabled(mex_mpu_enabled),
+        .mex_allow_cluster_spad(mex_allow_cluster_spad),
+        .mex_engine_epoch(mex_engine_epoch),
+        .mex_caller_epoch(mex_caller_epoch),
+        .mex_caller_slot(mex_caller_slot),
         .mex_done      (mex_done),
         .mex_busy      (mex_busy),
+        .mex_fault     (mex_fault),
+        .mex_fault_addr(mex_fault_addr),
+        .mex_stall_cycle(mex_stall_cycle),
+        .tacc_status_raw(tacc_status_raw),
+        .tacc_ctl_valid(tacc_ctl_valid),
+        .tacc_ctl_caller_id(tacc_ctl_caller_id),
+        .tacc_ctl_priv (tacc_ctl_priv),
+        .tacc_ctl_wdata(tacc_ctl_wdata),
+        .tacc_ctl_done (tacc_ctl_done),
+        .tacc_ctl_fault(tacc_ctl_fault),
         .tile_req      (tile_req),
         .tile_addr     (tile_addr),
         .tile_wen      (tile_wen),
@@ -100,6 +150,13 @@ module tb_tile;
 
     integer pass_cnt, fail_cnt;
     integer i;
+    integer tacc_mem_req_count;
+    reg     tacc_monitor;
+
+    always @(posedge clk) begin
+        if (tacc_monitor && (tile_req || ext_tile_req))
+            tacc_mem_req_count = tacc_mem_req_count + 1;
+    end
 
     // === Helper tasks ===
 
@@ -140,6 +197,7 @@ module tb_tile;
         mex_ss         <= ss;
         mex_op         <= op;
         mex_funct      <= funct;
+        mex_funct_byte <= {5'd0, funct};
         mex_gpr_val    <= gpr;
         mex_imm8       <= imm;
         mex_ext_mod    <= 4'd0;
@@ -165,12 +223,39 @@ module tb_tile;
         mex_ss         <= ss;
         mex_op         <= op;
         mex_funct      <= funct;
+        mex_funct_byte <= {5'd0, funct};
         mex_gpr_val    <= gpr;
         mex_imm8       <= imm;
         mex_ext_mod    <= ext;
         mex_ext_active <= 1'b1;
         @(posedge clk);
         mex_valid <= 0;
+        while (!mex_done) @(posedge clk);
+    end
+    endtask
+
+    // Dispatch a raw function byte so malformed encodings cannot hide behind
+    // the legacy three-bit function port.
+    task mex_dispatch_raw;
+        input [1:0] ss;
+        input [1:0] op;
+        input [2:0] funct;
+        input [7:0] funct_byte;
+        input [3:0] ext;
+        input       ext_active;
+    begin
+        @(posedge clk);
+        mex_valid      <= 1'b1;
+        mex_ss         <= ss;
+        mex_op         <= op;
+        mex_funct      <= funct;
+        mex_funct_byte <= funct_byte;
+        mex_gpr_val    <= 64'd0;
+        mex_imm8       <= 8'd0;
+        mex_ext_mod    <= ext;
+        mex_ext_active <= ext_active;
+        @(posedge clk);
+        mex_valid <= 1'b0;
         while (!mex_done) @(posedge clk);
     end
     endtask
@@ -206,6 +291,47 @@ module tb_tile;
     end
     endtask
 
+    task check3;
+        input [2:0] got;
+        input [2:0] expected;
+        input [255:0] label;
+    begin
+        if (got === expected) begin
+            $display("  PASS: %0s = %0d", label, got);
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  FAIL: %0s = %0d (expected %0d)",
+                     label, got, expected);
+            fail_cnt = fail_cnt + 1;
+        end
+    end
+    endtask
+
+    task tacc_ctl_request;
+        input        priv;
+        input [63:0] data;
+        output integer done_count;
+        output [2:0] fault_seen;
+        integer ctl_cycle;
+    begin
+        done_count = 0;
+        fault_seen = MEX_FAULT_NONE;
+        @(negedge clk);
+        tacc_ctl_priv  = priv;
+        tacc_ctl_wdata = data;
+        tacc_ctl_valid = 1'b1;
+        for (ctl_cycle = 0; ctl_cycle < 4; ctl_cycle = ctl_cycle + 1) begin
+            @(negedge clk);
+            if (tacc_ctl_done) begin
+                done_count = done_count + 1;
+                fault_seen = tacc_ctl_fault;
+            end
+        end
+        tacc_ctl_valid = 1'b0;
+        @(negedge clk);
+    end
+    endtask
+
     // ========================================================================
     reg [63:0]  rd64;
     reg [511:0] expected_tile;
@@ -218,10 +344,30 @@ module tb_tile;
         fail_cnt  = 0;
         csr_wen   = 0;
         mex_valid = 0;
+        mex_funct_byte = 8'd0;
         mex_ext_mod    = 4'd0;
         mex_ext_active = 1'b0;
+        mex_caller_id  = 5'd0;
+        mex_priv       = 1'b0;
+        mex_mpu_base   = 64'd0;
+        mex_mpu_limit  = 64'd0;
+        mex_mpu_enabled = 1'b0;
+        mex_allow_cluster_spad = 1'b0;
+        mex_engine_epoch = 8'd0;
+        mex_caller_epoch = 8'd0;
+        mex_caller_slot = 2'd0;
+        engine_reset   = 1'b0;
+        caller_cancel  = 4'd0;
+        caller_epochs  = 32'd0;
+        tacc_ctl_valid = 1'b0;
+        tacc_ctl_caller_id = 5'd0;
+        tacc_ctl_priv  = 1'b0;
+        tacc_ctl_wdata = 64'd0;
+        tacc_monitor   = 1'b0;
+        tacc_mem_req_count = 0;
         ext_tile_ack   = 0;
         ext_tile_rdata = 512'd0;
+        tile_ack_enable = 1'b1;
         rst_n = 0;
         repeat (5) @(posedge clk);
         rst_n = 1;
@@ -272,12 +418,20 @@ module tb_tile;
         $display("\n=== TEST 3: TRED.SUM ===");
         csr_write(CSR_TSRC0, 64'hC0);  // tile 3
         csr_write(CSR_TMODE, 64'd0);
-        csr_write(CSR_TCTRL, 64'h02);  // ACC_ZERO = 1
+        csr_write(CSR_ACC0, 64'd999);  // prove ACC_ZERO ignores old state
+        csr_write(CSR_TCTRL, 64'h03);  // ACC_ACC + one-shot ACC_ZERO
 
         mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
 
         csr_read(CSR_ACC0, rd64);
         check64(rd64, 64'd16320, "TRED.SUM acc0");
+        csr_read(CSR_TCTRL, rd64);
+        check64(rd64, 64'd1,
+                "TCTRL.ACC_ZERO clears without clearing ACC_ACC");
+        mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
+        csr_read(CSR_ACC0, rd64);
+        check64(rd64, 64'd32640,
+                "cleared ACC_ZERO allows the next reduction to accumulate");
 
         // ====== TEST 4: TRED.MIN — tile with ascending bytes ======
         $display("\n=== TEST 4: TRED.MIN ===");
@@ -1016,12 +1170,156 @@ module tb_tile;
         expected_tile = {8{64'hDEAD_BEEF_CAFE_F00D}};
         check512(tile_mem[2], expected_tile, "VSEL 64-bit all-select");
 
+        // ====== TEST 54: Landing 2.1 TACC leaf plumbing ======
+        // Arithmetic/lifecycle execution lands later.  For now the leaf must
+        // fail closed, preserve the full function byte, avoid legacy memory
+        // effects, de-duplicate held control requests, and cancel stale work.
+        $display("\n=== TEST 54: TACC plumbing and cancellation ===");
+        begin : tacc_plumbing
+            integer ctl_done_count;
+            integer stale_done_count;
+            integer cancel_done_count;
+            integer reset_epoch_before;
+            reg [2:0] ctl_fault_seen;
+
+            check64(tacc_status_raw,
+                    {43'd0, TACC_OWNER_NONE, 16'd0},
+                    "TACC_STATUS raw owner-none placeholder");
+
+            tacc_mem_req_count = 0;
+            tacc_monitor = 1'b1;
+            mex_dispatch_raw(2'd0, MEX_TMUL, TMUL_TAMAC,
+                             8'h06, 4'd0, 1'b0);
+            check3(mex_fault, MEX_FAULT_ILLEGAL,
+                   "canonical TAMAC fails closed before implementation");
+            mex_dispatch_raw(2'd0, MEX_TMUL, TMUL_TAMAC,
+                             8'h26, 4'd0, 1'b0);
+            check3(mex_fault, MEX_FAULT_ILLEGAL,
+                   "noncanonical TAMAC cannot alias a legacy function");
+            mex_dispatch_raw(2'd0, MEX_TSYS, ETSYS_TACC_TRY,
+                             8'h02, 4'd8, 1'b1);
+            check3(mex_fault, MEX_FAULT_ILLEGAL,
+                   "canonical lifecycle fails closed before implementation");
+            mex_dispatch_raw(2'd0, MEX_TSYS, 3'd7,
+                             8'h07, 4'd8, 1'b1);
+            check3(mex_fault, MEX_FAULT_ILLEGAL,
+                   "reserved lifecycle function fails closed");
+            tacc_monitor = 1'b0;
+            if (tacc_mem_req_count !== 0) begin
+                $display("  FAIL: TACC placeholder issued %0d memory requests",
+                         tacc_mem_req_count);
+                fail_cnt = fail_cnt + 1;
+            end else begin
+                $display("  PASS: TACC placeholder issued no memory requests");
+                pass_cnt = pass_cnt + 1;
+            end
+
+            tacc_ctl_request(1'b0, 64'd1,
+                             ctl_done_count, ctl_fault_seen);
+            check64(ctl_done_count, 64'd1,
+                    "held supervisor control request completes once");
+            check3(ctl_fault_seen, MEX_FAULT_NONE,
+                   "supervisor FORCE_RELEASE control acknowledgement");
+
+            tacc_ctl_request(1'b1, 64'd1,
+                             ctl_done_count, ctl_fault_seen);
+            check64(ctl_done_count, 64'd1,
+                    "held user control request completes once");
+            check3(ctl_fault_seen, MEX_FAULT_PRIV,
+                   "user FORCE_RELEASE is rejected");
+
+            tacc_ctl_request(1'b1, 64'd2,
+                             ctl_done_count, ctl_fault_seen);
+            check64(ctl_done_count, 64'd1,
+                    "held reserved-only control request completes once");
+            check3(ctl_fault_seen, MEX_FAULT_NONE,
+                   "reserved control bits are ignored");
+
+            // A request carrying a stale caller epoch must disappear without
+            // completion or any memory effect.
+            caller_epochs[7:0] = 8'd1;
+            mex_caller_epoch = 8'd0;
+            stale_done_count = 0;
+            tacc_mem_req_count = 0;
+            tacc_monitor = 1'b1;
+            @(negedge clk);
+            mex_ss = 2'd0;
+            mex_op = MEX_TMUL;
+            mex_funct = TMUL_TAMAC;
+            mex_funct_byte = 8'h06;
+            mex_valid = 1'b1;
+            @(negedge clk);
+            mex_valid = 1'b0;
+            repeat (4) begin
+                @(negedge clk);
+                if (mex_done)
+                    stale_done_count = stale_done_count + 1;
+            end
+            tacc_monitor = 1'b0;
+            check64(stale_done_count, 64'd0,
+                    "stale caller epoch produces no completion");
+            check64(tacc_mem_req_count, 64'd0,
+                    "stale caller epoch produces no memory request");
+
+            // Cancel a legacy operation after admission but before its first
+            // acknowledgement, then present a late acknowledgement.
+            csr_write(CSR_ACC0, 64'hCA11_CE1D_0000_0001);
+            mex_caller_epoch = 8'd1;
+            tile_ack_enable = 1'b0;
+            cancel_done_count = 0;
+            @(negedge clk);
+            mex_ss = 2'd0;
+            mex_op = MEX_TRED;
+            mex_funct = TRED_SUM;
+            mex_funct_byte = {5'd0, TRED_SUM};
+            mex_valid = 1'b1;
+            @(negedge clk);
+            mex_valid = 1'b0;
+            while (!tile_req) @(negedge clk);
+            caller_epochs[7:0] = 8'd2;
+            caller_cancel[0] = 1'b1;
+            @(negedge clk);
+            caller_cancel[0] = 1'b0;
+
+            // Inject an acknowledgement independently of tile_req.  A
+            // request-qualified memory model cannot otherwise produce the
+            // late response that this boundary is required to discard.
+            force tile_ack = 1'b1;
+            @(negedge clk);
+            if (mex_done)
+                cancel_done_count = cancel_done_count + 1;
+            release tile_ack;
+            tile_ack = 1'b0;
+            tile_ack_enable = 1'b1;
+            repeat (5) begin
+                @(negedge clk);
+                if (mex_done)
+                    cancel_done_count = cancel_done_count + 1;
+            end
+            check64(cancel_done_count, 64'd0,
+                    "cancelled operation ignores late acknowledgement");
+            check64({63'd0, mex_busy}, 64'd0,
+                    "cancelled operation returns leaf to idle");
+            check64(u_tile.acc[0], 64'hCA11_CE1D_0000_0001,
+                    "late acknowledgement cannot mutate cancelled state");
+
+            // A held engine reset advances the generation exactly once.
+            reset_epoch_before = engine_epoch;
+            engine_reset = 1'b1;
+            repeat (3) @(negedge clk);
+            engine_reset = 1'b0;
+            repeat (2) @(negedge clk);
+            check64(engine_epoch, reset_epoch_before + 1,
+                    "held engine reset increments epoch once");
+        end
+
         // ====== SUMMARY ======
         $display("\n========================================");
         $display("  Tile Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);
         $display("========================================\n");
 
-        if (fail_cnt > 0) $finish(1);
+        if (fail_cnt > 0)
+            $fatal(1, "tb_tile failed");
         $finish(0);
     end
 
@@ -1029,7 +1327,7 @@ module tb_tile;
     initial begin
         #500000;
         $display("GLOBAL TIMEOUT");
-        $finish(1);
+        $fatal(1, "tb_tile timeout");
     end
 
 endmodule

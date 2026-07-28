@@ -44,6 +44,8 @@ localparam MP64_NUM_CORES_DEFAULT       = 4;
 localparam MP64_CORE_ID_BITS            = 8;        // 8-bit core IDs (0–255)
 localparam MP64_NUM_CLUSTERS_DEFAULT    = 3;
 localparam MP64_MICRO_PER_CLUSTER       = 4;
+localparam TACC_CALLER_BITS             = 5;        // 5-bit owner ID; 31 means none
+localparam TACC_EPOCH_BITS              = 8;        // reset/cancellation generation
 // Derived (at default counts):
 //   NUM_MICRO_CORES = NUM_CLUSTERS × MICRO_PER_CLUSTER = 12
 //   NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES = 16
@@ -125,6 +127,7 @@ localparam [4:0] CPU_CRYPTO     = 5'd17; // EXT.CRYPTO stall (multi-cycle ops)
 localparam [4:0] CPU_SHA_LOAD   = 5'd18; // SHA-2: loading W from tile memory
 localparam [4:0] CPU_SHA_WAIT   = 5'd19; // SHA-2: waiting for compression engine
 localparam [4:0] CPU_GF_WAIT    = 5'd20; // Field ALU: waiting for GF engine
+localparam [4:0] CPU_CSR_WAIT   = 5'd21; // acknowledged accelerator CSR access
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;
@@ -192,6 +195,13 @@ localparam [1:0] MEX_TMUL = 2'b01;
 localparam [1:0] MEX_TRED = 2'b10;
 localparam [1:0] MEX_TSYS = 2'b11;
 
+// MEX completion fault codes
+localparam [2:0] MEX_FAULT_NONE    = 3'd0;
+localparam [2:0] MEX_FAULT_ILLEGAL = 3'd1;
+localparam [2:0] MEX_FAULT_ALIGN   = 3'd2;
+localparam [2:0] MEX_FAULT_BUS     = 3'd3;
+localparam [2:0] MEX_FAULT_PRIV    = 3'd4;
+
 // TALU functions (bits [2:0])
 localparam [2:0] TALU_ADD = 3'd0;
 localparam [2:0] TALU_SUB = 3'd1;
@@ -215,6 +225,7 @@ localparam [2:0] TMUL_WMUL   = 3'd2;
 localparam [2:0] TMUL_MAC    = 3'd3;
 localparam [2:0] TMUL_FMA    = 3'd4;
 localparam [2:0] TMUL_DOTACC = 3'd5;
+localparam [2:0] TMUL_TAMAC  = 3'd6;
 
 // TRED functions
 localparam [2:0] TRED_SUM    = 3'd0;
@@ -239,11 +250,31 @@ localparam [2:0] TSYS_RROT    = 3'd7;  // Row/col rotate or mirror
 // Extended TSYS (via EXT_ETALU modifier)
 localparam [2:0] ETSYS_LOAD2D  = 3'd0;  // Strided 2D tile gather
 localparam [2:0] ETSYS_STORE2D = 3'd1;  // Strided 2D tile scatter
+localparam [2:0] ETSYS_TACC_TRY     = 3'd2;
+localparam [2:0] ETSYS_TACC_CLEAR   = 3'd3;
+localparam [2:0] ETSYS_TACC_LOAD    = 3'd4;
+localparam [2:0] ETSYS_TACC_STORE   = 3'd5;
+localparam [2:0] ETSYS_TACC_RELEASE = 3'd6;
+localparam [2:0] ETSYS_TACC_RESERVED = 3'd7;
 
 // TMODE CSR bit positions
 localparam TMODE_BIT_SIGNED   = 4;
 localparam TMODE_BIT_SATURATE = 5;
 localparam TMODE_BIT_ROUNDING = 6;
+
+// TACC_STATUS CSR bit and field positions
+localparam TACC_STATUS_BIT_CLAIMED       = 0;
+localparam TACC_STATUS_BIT_MINE          = 1;
+localparam TACC_STATUS_BIT_VALID         = 2;
+localparam TACC_STATUS_BIT_DIRTY         = 3;
+localparam TACC_STATUS_BIT_BUSY          = 4;
+localparam TACC_STATUS_FORMAT_EW_LSB     = 5;
+localparam TACC_STATUS_FORMAT_EW_MSB     = 7;
+localparam TACC_STATUS_BIT_FORMAT_SIGNED = 8;
+localparam TACC_STATUS_BIT_FORCE_PENDING = 9;
+localparam TACC_STATUS_OWNER_LSB         = 16;
+localparam TACC_STATUS_OWNER_MSB         = 20;
+localparam [TACC_CALLER_BITS-1:0] TACC_OWNER_NONE = 5'd31;
 
 // TMODE element width encoding (bits [2:0])
 localparam [2:0] TMODE_8    = 3'b000;  // 64 × 8-bit lanes
@@ -286,6 +317,8 @@ localparam [7:0] CSR_ACC0      = 8'h19;
 localparam [7:0] CSR_ACC1      = 8'h1A;
 localparam [7:0] CSR_ACC2      = 8'h1B;
 localparam [7:0] CSR_ACC3      = 8'h1C;
+localparam [7:0] CSR_TACC_STATUS = 8'h1D;
+localparam [7:0] CSR_TACC_CTL    = 8'h1E;
 
 // Multi-core CSRs
 localparam [7:0] CSR_COREID    = 8'h20;  // RO: core ID
@@ -526,10 +559,11 @@ localparam [2:0] IRQ_SWTRAP = 3'd6;
 localparam [2:0] IRQ_TIMER  = 3'd7;
 
 localparam [7:0] IRQX_ILLEGAL_OP = 8'd2;
+localparam [7:0] IRQX_ALIGN      = 8'd3;
 localparam [7:0] IRQX_DIV_ZERO   = 8'd4;
+localparam [7:0] IRQX_BUS        = 8'd5;    // bus-error timeout trap
 localparam [7:0] IRQX_SW_TRAP    = 8'd6;
 
-localparam [3:0] IRQX_BUS   = 4'd5;    // bus-error timeout trap
 localparam [3:0] IRQX_IPI   = 4'd8;
 localparam [3:0] IRQX_UART  = 4'd9;
 localparam [3:0] IRQX_NIC   = 4'd10;
@@ -537,7 +571,7 @@ localparam [3:0] IRQX_DISK  = 4'd11;
 localparam [3:0] IRQX_AES   = 4'd12;
 localparam [3:0] IRQX_SHA   = 4'd13;
 localparam [3:0] IRQX_DMA   = 4'd14;
-localparam [3:0] IRQX_PRIV  = 4'd15;
+localparam [7:0] IRQX_PRIV  = 8'd15;
 
 localparam [1:0] IRQ_ROUTE_DEFAULT = 2'd0;
 

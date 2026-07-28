@@ -155,12 +155,34 @@ module mp64_soc #(
     wire [1:0]  core_mex_ss        [0:NUM_CORES-1];
     wire [1:0]  core_mex_op        [0:NUM_CORES-1];
     wire [2:0]  core_mex_funct     [0:NUM_CORES-1];
+    wire [7:0]  core_mex_funct_byte[0:NUM_CORES-1];
     wire [63:0] core_mex_gpr_val   [0:NUM_CORES-1];
     wire [7:0]  core_mex_imm8      [0:NUM_CORES-1];
     wire [3:0]  core_mex_ext_mod   [0:NUM_CORES-1];
     wire        core_mex_ext_active[0:NUM_CORES-1];
     wire        core_mex_done      [0:NUM_CORES-1];
     wire        core_mex_busy      [0:NUM_CORES-1];
+    wire [2:0]  core_mex_fault     [0:NUM_CORES-1];
+    wire [63:0] core_mex_fault_addr[0:NUM_CORES-1];
+    wire        core_mex_stall_cycle[0:NUM_CORES-1];
+    wire [TACC_CALLER_BITS-1:0]
+                 core_tile_caller_id[0:NUM_CORES-1];
+    wire        core_tile_priv     [0:NUM_CORES-1];
+    wire [63:0] core_tile_mpu_base [0:NUM_CORES-1];
+    wire [63:0] core_tile_mpu_limit[0:NUM_CORES-1];
+    wire        core_tile_mpu_enabled[0:NUM_CORES-1];
+    wire        core_tile_allow_cluster_spad[0:NUM_CORES-1];
+    wire [63:0] core_tacc_status   [0:NUM_CORES-1];
+    wire        core_tacc_ctl_valid[0:NUM_CORES-1];
+    wire [63:0] core_tacc_ctl_wdata[0:NUM_CORES-1];
+    wire        core_tacc_ctl_done [0:NUM_CORES-1];
+    wire [2:0]  core_tacc_ctl_fault[0:NUM_CORES-1];
+
+    // Core 0 is the only full-core tile engine until the topology landing.
+    // Keep its TACC/reset metadata explicit so cores 1–3 can be replaced
+    // without another CPU-interface change.
+    wire [63:0] c0_tacc_status_raw;
+    wire [TACC_EPOCH_BITS-1:0] c0_tile_engine_epoch;
 
     // Interrupts
     wire        irq_uart_w;
@@ -254,12 +276,28 @@ module mp64_soc #(
                 .mex_ss          (core_mex_ss[ci]),
                 .mex_op          (core_mex_op[ci]),
                 .mex_funct       (core_mex_funct[ci]),
+                .mex_funct_byte  (core_mex_funct_byte[ci]),
                 .mex_gpr_val     (core_mex_gpr_val[ci]),
                 .mex_imm8        (core_mex_imm8[ci]),
                 .mex_ext_mod     (core_mex_ext_mod[ci]),
                 .mex_ext_active  (core_mex_ext_active[ci]),
                 .mex_done        (core_mex_done[ci]),
                 .mex_busy        (core_mex_busy[ci]),
+                .mex_fault       (core_mex_fault[ci]),
+                .mex_fault_addr  (core_mex_fault_addr[ci]),
+                .mex_stall_cycle (core_mex_stall_cycle[ci]),
+                .tile_caller_id  (core_tile_caller_id[ci]),
+                .tile_priv       (core_tile_priv[ci]),
+                .tile_mpu_base   (core_tile_mpu_base[ci]),
+                .tile_mpu_limit  (core_tile_mpu_limit[ci]),
+                .tile_mpu_enabled(core_tile_mpu_enabled[ci]),
+                .tile_allow_cluster_spad(
+                    core_tile_allow_cluster_spad[ci]),
+                .tacc_status     (core_tacc_status[ci]),
+                .tacc_ctl_valid  (core_tacc_ctl_valid[ci]),
+                .tacc_ctl_wdata  (core_tacc_ctl_wdata[ci]),
+                .tacc_ctl_done   (core_tacc_ctl_done[ci]),
+                .tacc_ctl_fault  (core_tacc_ctl_fault[ci]),
 
                 // Interrupts
                 .irq_timer       (irq_timer_w),
@@ -334,6 +372,13 @@ module mp64_soc #(
                 assign core_csr_rdata[ci] = 64'd0;
                 assign core_mex_done[ci]  = 1'b1;
                 assign core_mex_busy[ci]  = 1'b0;
+                assign core_mex_fault[ci] = MEX_FAULT_ILLEGAL;
+                assign core_mex_fault_addr[ci] = 64'd0;
+                assign core_mex_stall_cycle[ci] = 1'b0;
+                assign core_tacc_status[ci] =
+                    {43'd0, TACC_OWNER_NONE, 16'd0};
+                assign core_tacc_ctl_done[ci] = 1'b1;
+                assign core_tacc_ctl_fault[ci] = MEX_FAULT_ILLEGAL;
             end
 
         end // g_core
@@ -383,6 +428,8 @@ module mp64_soc #(
                 .clk         (sys_clk),
                 .rst         (rst_h),
                 .cluster_en  (1'b1),
+                .tile_engine_reset(1'b0),
+                .micro_reset ({CORES_PER_CLUSTER{1'b0}}),
 
                 .bus_valid   (cluster_bus_valid[ki]),
                 .bus_addr    (cluster_bus_addr[ki]),
@@ -849,9 +896,22 @@ module mp64_soc #(
     // ========================================================================
     // Tile Engine — Core 0 (connected to core 0 CSR/MEX, tile arb port 0)
     // ========================================================================
+    wire c0_tacc_mine =
+        c0_tacc_status_raw[TACC_STATUS_BIT_CLAIMED] &&
+        c0_tacc_status_raw[
+            TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] ==
+        core_tile_caller_id[0];
+    assign core_tacc_status[0] =
+        (c0_tacc_status_raw & ~(64'd1 << TACC_STATUS_BIT_MINE)) |
+        (c0_tacc_mine ? (64'd1 << TACC_STATUS_BIT_MINE) : 64'd0);
+
     mp64_tile u_tile (
         .clk       (sys_clk),
         .rst_n     (sys_rst_n),
+        .engine_reset(1'b0),
+        .caller_cancel(4'b0000),
+        .caller_epochs(32'd0),
+        .engine_epoch(c0_tile_engine_epoch),
 
         // CSR/MEX from core 0
         .csr_wen       (core_csr_wen[0]),
@@ -862,12 +922,33 @@ module mp64_soc #(
         .mex_ss        (core_mex_ss[0]),
         .mex_op        (core_mex_op[0]),
         .mex_funct     (core_mex_funct[0]),
+        .mex_funct_byte(core_mex_funct_byte[0]),
         .mex_gpr_val   (core_mex_gpr_val[0]),
         .mex_imm8      (core_mex_imm8[0]),
         .mex_ext_mod   (core_mex_ext_mod[0]),
         .mex_ext_active(core_mex_ext_active[0]),
+        .mex_caller_id (core_tile_caller_id[0]),
+        .mex_priv      (core_tile_priv[0]),
+        .mex_mpu_base  (core_tile_mpu_base[0]),
+        .mex_mpu_limit (core_tile_mpu_limit[0]),
+        .mex_mpu_enabled(core_tile_mpu_enabled[0]),
+        .mex_allow_cluster_spad(core_tile_allow_cluster_spad[0]),
+        .mex_engine_epoch(c0_tile_engine_epoch),
+        .mex_caller_epoch({TACC_EPOCH_BITS{1'b0}}),
+        .mex_caller_slot(2'd0),
         .mex_done      (core_mex_done[0]),
         .mex_busy      (core_mex_busy[0]),
+        .mex_fault     (core_mex_fault[0]),
+        .mex_fault_addr(core_mex_fault_addr[0]),
+        .mex_stall_cycle(core_mex_stall_cycle[0]),
+
+        .tacc_status_raw(c0_tacc_status_raw),
+        .tacc_ctl_valid(core_tacc_ctl_valid[0]),
+        .tacc_ctl_caller_id(core_tile_caller_id[0]),
+        .tacc_ctl_priv (core_tile_priv[0]),
+        .tacc_ctl_wdata(core_tacc_ctl_wdata[0]),
+        .tacc_ctl_done (core_tacc_ctl_done[0]),
+        .tacc_ctl_fault(core_tacc_ctl_fault[0]),
 
         // Internal tile memory port → tile arbiter port 0
         .tile_req      (c0_tile_req),

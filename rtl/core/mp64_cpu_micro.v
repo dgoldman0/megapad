@@ -22,7 +22,7 @@
 //   SHARED  — IVT base (cluster-level, input wire)
 //   SHARED  — Privilege level + MPU (cluster-level)
 //   KEPT    — SEP (0xA) and SEX (0xB) — zero-cost, avoids ISA fragmentation
-//   REDUCED — Performance counters: cycles only
+//   REDUCED — Performance counters: cycles, stalls, and tile operations
 //
 // Area budget (Kintex-7 estimates):
 //   ~1,200 FFs / ~800 LUTs / 0 DSP48
@@ -100,12 +100,33 @@ module mp64_cpu_micro (
     output reg  [1:0]  mex_ss,        // source selector
     output reg  [1:0]  mex_op,        // operation class
     output reg  [2:0]  mex_funct,     // sub-function
+    output reg  [7:0]  mex_funct_byte,// complete canonicality-preserving byte
     output reg  [63:0] mex_gpr_val,   // GPR value (broadcast mode)
     output reg  [7:0]  mex_imm8,      // immediate (splat mode)
     output reg  [3:0]  mex_ext_mod,   // EXT prefix modifier
     output reg         mex_ext_active,// EXT prefix active
     input  wire        mex_done,      // tile op complete (from arbiter)
     input  wire        mex_busy,      // tile engine busy (stall)
+    input  wire [2:0]  mex_fault,
+    input  wire [63:0] mex_fault_addr,
+    input  wire        mex_stall_cycle,
+
+    // Caller context sampled by the cluster arbiter with each request.
+    output wire [TACC_CALLER_BITS-1:0] tile_caller_id,
+    output wire        tile_priv,
+    output wire [63:0] tile_mpu_base,
+    output wire [63:0] tile_mpu_limit,
+    output wire        tile_mpu_enabled,
+    output wire        tile_allow_cluster_spad,
+
+    // TACC status/control bypass MEX admission so force can be acknowledged
+    // while another caller owns the shared tile engine.
+    input  wire [63:0] tacc_status,
+    output reg         tacc_ctl_valid,
+    output reg  [63:0] tacc_ctl_wdata,
+    input  wire        tacc_ctl_done,
+    input  wire [2:0]  tacc_ctl_fault,
+    output reg         tacc_priv_fault,
 
     // === Shared Tile CSR interface (to cluster tile engine) ===
     output reg         tile_csr_wen,
@@ -122,7 +143,9 @@ module mp64_cpu_micro (
 
     // === Cluster-shared state (inputs from cluster) ===
     input  wire [63:0] cl_ivt_base,
-    input  wire        cl_priv_level
+    input  wire        cl_priv_level,
+    input  wire [63:0] cl_mpu_base,
+    input  wire [63:0] cl_mpu_limit
 );
 
     `include "mp64_cpu_funcs.vh"
@@ -143,8 +166,16 @@ module mp64_cpu_micro (
     reg [63:0] trap_addr;
     reg [63:0] trap_return_pc;
 
-    // Performance counter (cycles only)
-    reg [63:0] perf_cycles;
+    assign tile_caller_id          = core_id;
+    assign tile_priv               = cl_priv_level;
+    assign tile_mpu_base           = cl_mpu_base;
+    assign tile_mpu_limit          = cl_mpu_limit;
+    assign tile_mpu_enabled        = cl_priv_level &&
+                                     (cl_mpu_limit > cl_mpu_base);
+    assign tile_allow_cluster_spad = 1'b1;
+
+    // Per-microcore performance counters.
+    reg [63:0] perf_cycles, perf_stalls, perf_tileops;
     reg        perf_enable;
 
     // EXT prefix
@@ -167,6 +198,19 @@ module mp64_cpu_micro (
     // CPU FSM
     // ====================================================================
     reg [4:0]  cpu_state;
+
+    function [7:0] mex_fault_vector;
+        input [2:0] fault;
+        begin
+            case (fault)
+                MEX_FAULT_ILLEGAL: mex_fault_vector = IRQX_ILLEGAL_OP;
+                MEX_FAULT_ALIGN:   mex_fault_vector = IRQX_ALIGN;
+                MEX_FAULT_BUS:     mex_fault_vector = IRQX_BUS;
+                MEX_FAULT_PRIV:    mex_fault_vector = IRQX_PRIV;
+                default:           mex_fault_vector = IRQX_ILLEGAL_OP;
+            endcase
+        end
+    endfunction
 
     // ====================================================================
     // ALU instance (one per micro-core — combinational, cheap)
@@ -294,10 +338,14 @@ module mp64_cpu_micro (
             mex_ss         <= 2'd0;
             mex_op         <= 2'd0;
             mex_funct      <= 3'd0;
+            mex_funct_byte <= 8'd0;
             mex_gpr_val    <= 64'd0;
             mex_imm8       <= 8'd0;
             mex_ext_mod    <= 4'd0;
             mex_ext_active <= 1'b0;
+            tacc_ctl_valid <= 1'b0;
+            tacc_ctl_wdata <= 64'd0;
+            tacc_priv_fault <= 1'b0;
             tile_csr_wen   <= 1'b0;
             tile_csr_addr  <= 8'd0;
             tile_csr_wdata <= 64'd0;
@@ -305,8 +353,10 @@ module mp64_cpu_micro (
             cl_csr_wen   <= 1'b0;
             cl_csr_wdata <= 64'd0;
 
-            perf_cycles <= 64'd0;
-            perf_enable <= 1'b1;
+            perf_cycles  <= 64'd0;
+            perf_stalls  <= 64'd0;
+            perf_tileops <= 64'd0;
+            perf_enable  <= 1'b1;
 
             R[0]  <= 64'd0; R[1]  <= 64'd0; R[2]  <= 64'd0; R[3]  <= 64'd0;
             R[4]  <= 64'd0; R[5]  <= 64'd0; R[6]  <= 64'd0; R[7]  <= 64'd0;
@@ -317,9 +367,26 @@ module mp64_cpu_micro (
             bus_valid    <= 1'b0;
             cl_csr_wen   <= 1'b0;
             tile_csr_wen <= 1'b0;
+            tacc_priv_fault <= 1'b0;
 
-            if (perf_enable)
+            if (perf_enable) begin
                 perf_cycles <= perf_cycles + 64'd1;
+                if ((cpu_state == CPU_FETCH_MORE && fetch_pending && !bus_ready) ||
+                    (cpu_state == CPU_MEM_READ   && !bus_ready) ||
+                    (cpu_state == CPU_MEM_WRITE  && !bus_ready) ||
+                    (cpu_state == CPU_MEM_READ2  && !bus_ready) ||
+                    (cpu_state == CPU_IRQ_PUSH   && !bus_ready) ||
+                    (cpu_state == CPU_IRQ_LOAD   && !bus_ready) ||
+                    (cpu_state == CPU_CRYPTO     && !crc_done) ||
+                    (cpu_state == CPU_SHA_WAIT   && !sha_done) ||
+                    (cpu_state == CPU_GF_WAIT    && !gf_done) ||
+                    (cpu_state == CPU_MEX_WAIT   && mex_stall_cycle) ||
+                    (cpu_state == CPU_CSR_WAIT   && !tacc_ctl_done))
+                    perf_stalls <= perf_stalls + 64'd1;
+                if (cpu_state == CPU_MEX_WAIT && mex_done &&
+                    mex_fault == MEX_FAULT_NONE)
+                    perf_tileops <= perf_tileops + 64'd1;
+            end
 
             case (cpu_state)
 
@@ -768,6 +835,32 @@ module mp64_cpu_micro (
                     if (nib[3]) begin
                         // CSRW
                         case (ibuf[1])
+                            CSR_TACC_STATUS: ;  // read-only
+                            CSR_TACC_CTL: begin
+                                if (cl_priv_level && R[nib[2:0]][0]) begin
+                                    // FORCE_RELEASE is the narrow enforced
+                                    // privilege check.  Trap before emitting
+                                    // a control request and notify the
+                                    // cluster so its shared privilege source
+                                    // transitions at the same trap boundary.
+                                    tacc_ctl_valid <= 1'b0;
+                                    tacc_priv_fault <= 1'b1;
+                                    R[spsel] <= R[spsel] - 64'd8;
+                                    effective_addr <= R[spsel] - 64'd8;
+                                    trap_return_pc <=
+                                        R[psel] + {60'd0, ibuf_need};
+                                    mem_data <= {56'd0, flags};
+                                    flags[6] <= 1'b0;
+                                    ivec_id <= IRQX_PRIV;
+                                    post_action <= POST_IRQ_VEC;
+                                    bus_size <= BUS_DWORD;
+                                    cpu_state <= CPU_MEM_WRITE;
+                                end else begin
+                                    tacc_ctl_valid <= 1'b1;
+                                    tacc_ctl_wdata <= R[nib[2:0]];
+                                    cpu_state <= CPU_CSR_WAIT;
+                                end
+                            end
                             CSR_FLAGS:    flags    <= R[nib[2:0]][7:0];
                             CSR_PSEL:     psel     <= R[nib[2:0]][3:0];
                             CSR_XSEL:     xsel     <= R[nib[2:0]][3:0];
@@ -776,8 +869,11 @@ module mp64_cpu_micro (
                             CSR_IVEC_ID:  ivec_id  <= R[nib[2:0]][7:0];
                             CSR_PERF_CTRL: begin
                                 perf_enable <= R[nib[2:0]][0];
-                                if (R[nib[2:0]][1])
+                                if (R[nib[2:0]][1]) begin
                                     perf_cycles <= 64'd0;
+                                    perf_stalls <= 64'd0;
+                                    perf_tileops <= 64'd0;
+                                end
                             end
                             // D/Q/T CSRs: silently ignored (stripped)
                             CSR_D, CSR_DF, CSR_QREG, CSR_TREG: ;
@@ -814,6 +910,8 @@ module mp64_cpu_micro (
                     end else begin
                         // CSRR
                         case (ibuf[1])
+                            CSR_TACC_STATUS: R[nib[2:0]] <= tacc_status;
+                            CSR_TACC_CTL:    R[nib[2:0]] <= 64'd0;
                             CSR_FLAGS:       R[nib[2:0]] <= {56'd0, flags};
                             CSR_PSEL:        R[nib[2:0]] <= {60'd0, psel};
                             CSR_XSEL:        R[nib[2:0]] <= {60'd0, xsel};
@@ -832,6 +930,8 @@ module mp64_cpu_micro (
                             CSR_MEGAPAD_SZ:  R[nib[2:0]] <= 64'd0;
                             CSR_CPUID:       R[nib[2:0]] <= 64'h4D50_3634_0001_4D43; // "MP64" v1 "MC"
                             CSR_PERF_CYCLES: R[nib[2:0]] <= perf_cycles;
+                            CSR_PERF_STALLS: R[nib[2:0]] <= perf_stalls;
+                            CSR_PERF_TILEOPS:R[nib[2:0]] <= perf_tileops;
                             CSR_PERF_CTRL:   R[nib[2:0]] <= {63'd0, perf_enable};
                             // Tile CSR reads: forwarded to cluster tile engine
                             CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
@@ -859,16 +959,44 @@ module mp64_cpu_micro (
                 // MEX (0xE) — dispatch to cluster-shared tile engine
                 // --------------------------------------------------------
                 else if (fam == FAM_MEX) begin
-                    mex_req        <= 1'b1;
-                    mex_ss         <= ibuf[0][3:2];
-                    mex_op         <= ibuf[0][1:0];
-                    mex_funct      <= ibuf[1][2:0];
-                    mex_gpr_val    <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
-                    mex_imm8       <= ibuf[2];
-                    mex_ext_mod    <= ext_mod;
-                    mex_ext_active <= ext_active;
+                    mex_funct_byte <= ibuf[1];
                     ext_active     <= 1'b0;
-                    cpu_state      <= CPU_MEX_WAIT;
+                    if (
+                        (ibuf[0][1:0] == MEX_TMUL &&
+                         ibuf[1][2:0] == TMUL_TAMAC &&
+                         (ibuf[0][3:2] == 2'd2 ||
+                          ibuf[1][7:3] != 5'd0)) ||
+                        (ibuf[0][1:0] == MEX_TMUL &&
+                         ibuf[1][2:0] == 3'd7) ||
+                        (ext_active && ext_mod == EXT_ETALU &&
+                         ibuf[0][1:0] == MEX_TSYS &&
+                         (((ibuf[1][2:0] >= 3'd2) &&
+                           (ibuf[1][2:0] <= 3'd6) &&
+                           (ibuf[0][3:2] != 2'd0 ||
+                            ibuf[1][7:3] != 5'd0)) ||
+                          ibuf[1][2:0] == 3'd7))
+                    ) begin
+                        mex_req <= 1'b0;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        trap_return_pc <= R[psel] + {60'd0, ibuf_len};
+                        mem_data <= {56'd0, flags};
+                        flags[6] <= 1'b0;
+                        ivec_id <= IRQX_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else begin
+                        mex_req        <= 1'b1;
+                        mex_ss         <= ibuf[0][3:2];
+                        mex_op         <= ibuf[0][1:0];
+                        mex_funct      <= ibuf[1][2:0];
+                        mex_gpr_val    <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
+                        mex_imm8       <= ibuf[2];
+                        mex_ext_mod    <= ext_mod;
+                        mex_ext_active <= ext_active;
+                        cpu_state      <= CPU_MEX_WAIT;
+                    end
                 end
 
                 // --------------------------------------------------------
@@ -1029,8 +1157,52 @@ module mp64_cpu_micro (
             // ============================================================
             CPU_MEX_WAIT: begin
                 if (mex_done) begin
-                    mex_req   <= 1'b0;
-                    cpu_state <= CPU_FETCH;
+                    mex_req <= 1'b0;
+                    if (mex_fault == MEX_FAULT_NONE) begin
+                        cpu_state <= CPU_FETCH;
+                    end else begin
+                        if (mex_fault == MEX_FAULT_ALIGN ||
+                            mex_fault == MEX_FAULT_BUS ||
+                            mex_fault == MEX_FAULT_PRIV)
+                            trap_addr <= mex_fault_addr;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        trap_return_pc <= R[psel];
+                        mem_data <= {56'd0, flags};
+                        flags[6] <= 1'b0;
+                        ivec_id <= mex_fault_vector(mex_fault);
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end
+                end else begin
+                    // Arbitration and service backpressure must not turn a
+                    // single architectural request into a pulse.
+                    mex_req <= 1'b1;
+                end
+            end
+
+            // ============================================================
+            // CSR_WAIT: acknowledged TACC control write
+            // ============================================================
+            CPU_CSR_WAIT: begin
+                if (tacc_ctl_done) begin
+                    tacc_ctl_valid <= 1'b0;
+                    if (tacc_ctl_fault == MEX_FAULT_NONE) begin
+                        cpu_state <= CPU_FETCH;
+                    end else begin
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        trap_return_pc <= R[psel];
+                        mem_data <= {56'd0, flags};
+                        flags[6] <= 1'b0;
+                        ivec_id <= mex_fault_vector(tacc_ctl_fault);
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end
+                end else begin
+                    tacc_ctl_valid <= 1'b1;
                 end
             end
 

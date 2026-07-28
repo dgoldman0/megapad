@@ -1169,6 +1169,68 @@ Define the TACC encodings in both RTL packages and repair the existing
 ACC_ZERO one-shot divergence.
 ```
 
+#### Landing 2.1 execution record — 2026-07-28
+
+Landing 2.1 was implemented on the isolated
+`feature/megapad-full-tacc-rtl` worktree. The full and microcore CPU paths now
+preserve the complete function byte, expose caller and protection context,
+pretrap malformed TACC encodings, map precise MEX completion faults, and use
+dedicated acknowledged `TACC_STATUS`/`TACC_CTL` paths. The cluster captures
+request context and epochs at grant, de-duplicates level-held MEX and control
+requests, masks same-edge caller resets, and shapes `MINE` independently for
+each absolute caller. The tile leaf implements reset/cancellation generation
+checks, fail-closed placeholders for the assigned TACC namespaces, and the
+correct `ACC_ZERO` one-shot boundary. Cores 1–3 deliberately return
+`ILLEGAL_OP` for MEX/TACC until Landing 2.2 installs their private engines;
+they cannot falsely retire accelerator work in this bridge state.
+
+The focused benches are fail-closed for this landing and cover complete
+encoding lengths, all four MEX fault mappings, saved end-of-instruction PCs,
+`TRAP_ADDR`, fault non-retirement, raw status, held control requests,
+privilege, arbiter replay, same-edge and active cancellation, late
+acknowledgements, caller epochs, status shaping, and `ACC_ZERO` reuse.
+
+Sequential verification record:
+
+- `cpu_smoke`: 101 passed;
+- `cpu_micro`: 64 passed;
+- `cluster`: 55 passed;
+- `tile`: 78 tile assertions and 34 write-ack assertions passed;
+- `soc_elaborate`: passed;
+- full-source Yosys frontend and `mp64_soc` hierarchy check: passed;
+- `string`: 39 passed;
+- `dict`: 16 passed;
+- `multicore_smoke`: 37 passed;
+- reduced-parameter `soc_smoke`: 5 passed; and
+- `soc_tile_icache`: 7 passed.
+
+`opcodes` remains at its exact pre-landing baseline of 104 passes and one
+MARK/SAV mismatch. That unrelated bench still exits successfully despite its
+reported failure, so the new TACC assertions live in fail-closed benches
+rather than treating `opcodes` as acceptance evidence.
+
+Nonblocking findings intentionally deferred from the critical path:
+
+- the long-standing MARK/SAV mismatch and the existing sized-hex compiler
+  warnings are unrelated to TACC and remain visible in the verification log;
+- the fixed leaf cancellation bundle assumes the production `N <= 4`
+  microcluster size; a future parameter-general cluster must widen that
+  bundle or reject larger `N` explicitly;
+- a bare `tile_engine_reset` is a paired-reset transport, not a standalone
+  microcore cancellation API. It is tied inactive in the Landing 2.1 SoC and
+  must be wired only with the corresponding core/cluster reset in later
+  topology work; individual microcore cancellation uses `micro_reset` and
+  caller epochs;
+- the pre-existing microcluster trap architecture does not expose a general
+  local-trap notification for every illegal/alignment/bus exception, so
+  cluster privilege transition outside the new TACC privilege paths remains
+  a broader RTL hardening item; and
+- heavyweight Genesys 2 implementation evidence remains approval-gated. The
+  checked-in four-bank memory estimate alone requests 1,024 RAMB36 blocks
+  against 445 on the target, so Landing 2.2 must establish a fit-capable
+  like-for-like configuration or a larger target before route results can
+  meaningfully measure the seven-engine delta.
+
 ### Landing 2.2 — restore the seven-engine topology
 
 Primary files:

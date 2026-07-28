@@ -31,6 +31,8 @@ module mp64_cluster #(
     input  wire        clk,
     input  wire        rst,
     input  wire        cluster_en,    // 0 = hold all micro-cores in reset
+    input  wire        tile_engine_reset,
+    input  wire [N-1:0] micro_reset,   // per-caller reset/cancel sideband
 
     // === Single external bus port ===
     output reg         bus_valid,
@@ -75,6 +77,9 @@ module mp64_cluster #(
     // ====================================================================
     localparam ARB_BITS = (N > 1) ? $clog2(N) : 1;
     localparam [ARB_BITS:0] N_VAL = N;   // wider copy for wrap-around math
+    localparam [1:0] MEX_IDLE      = 2'd0;
+    localparam [1:0] MEX_ACTIVE    = 2'd1;
+    localparam [1:0] MEX_WAIT_DROP = 2'd2;
 
     // ====================================================================
     // Per-micro-core internal bus wires
@@ -107,12 +112,28 @@ module mp64_cluster #(
     wire [N*2-1:0]      mc_mex_ss;
     wire [N*2-1:0]      mc_mex_op;
     wire [N*3-1:0]      mc_mex_funct;
+    wire [N*8-1:0]      mc_mex_funct_byte;
     wire [N*64-1:0]     mc_mex_gpr_val;
     wire [N*8-1:0]      mc_mex_imm8;
     wire [N*4-1:0]      mc_mex_ext_mod;
     wire [N-1:0]        mc_mex_ext_active;
+    wire [N*TACC_CALLER_BITS-1:0] mc_tile_caller_id;
+    wire [N-1:0]        mc_tile_priv;
+    wire [N*64-1:0]     mc_tile_mpu_base;
+    wire [N*64-1:0]     mc_tile_mpu_limit;
+    wire [N-1:0]        mc_tile_mpu_enabled;
+    wire [N-1:0]        mc_tile_allow_cluster_spad;
+    wire [N*64-1:0]     mc_tacc_status;
+    wire [N-1:0]        mc_tacc_ctl_valid;
+    wire [N*64-1:0]     mc_tacc_ctl_wdata;
+    wire [N-1:0]        mc_tacc_priv_fault;
     reg                 mex_done_reg;
     reg                 mex_busy_reg;
+    reg  [2:0]          mex_fault_reg;
+    reg  [63:0]         mex_fault_addr_reg;
+    reg                 tacc_ctl_done_reg;
+    reg  [2:0]          tacc_ctl_fault_reg;
+    wire                te_mex_stall_cycle;
 
     // Per-micro-core tile CSR wires
     wire [N-1:0]        mc_tile_csr_wen;
@@ -141,6 +162,7 @@ module mp64_cluster #(
     // Forward-declare MUL, MEX, CRC, and SHA grants (used in generate block)
     reg  [ARB_BITS-1:0] mul_grant;
     reg  [ARB_BITS-1:0] mex_grant;
+    reg  [ARB_BITS-1:0] tacc_ctl_grant;
     reg  [ARB_BITS-1:0] crc_grant;
     reg  [ARB_BITS-1:0] sha_grant;
 
@@ -185,7 +207,7 @@ module mp64_cluster #(
 
             mp64_cpu_micro u_micro (
                 .clk        (clk),
-                .rst        (cl_rst),
+                .rst        (cl_rst | micro_reset[gi]),
                 .core_id    (CLUSTER_ID_BASE + gi[MP64_CORE_ID_BITS-1:0]),
 
                 .bus_valid  (mc_bus_valid[gi]),
@@ -229,12 +251,42 @@ module mp64_cluster #(
                 .mex_ss        (mc_mex_ss       [gi*2  +: 2]),
                 .mex_op        (mc_mex_op       [gi*2  +: 2]),
                 .mex_funct     (mc_mex_funct    [gi*3  +: 3]),
+                .mex_funct_byte(mc_mex_funct_byte[gi*8 +: 8]),
                 .mex_gpr_val   (mc_mex_gpr_val  [gi*64 +: 64]),
                 .mex_imm8      (mc_mex_imm8     [gi*8  +: 8]),
                 .mex_ext_mod   (mc_mex_ext_mod  [gi*4  +: 4]),
                 .mex_ext_active(mc_mex_ext_active[gi]),
                 .mex_done      (mex_done_reg && (mex_grant == gi[ARB_BITS-1:0])),
                 .mex_busy      (mex_busy_reg && (mex_grant != gi[ARB_BITS-1:0])),
+                .mex_fault     (mex_fault_reg),
+                .mex_fault_addr(mex_fault_addr_reg),
+                .mex_stall_cycle(
+                    (mex_state == MEX_ACTIVE &&
+                     mex_grant == gi[ARB_BITS-1:0]) ? te_mex_stall_cycle :
+                    (mc_mex_req[gi] &&
+                     !(mex_done_reg &&
+                       mex_grant == gi[ARB_BITS-1:0]) &&
+                     !(mex_state == MEX_ACTIVE &&
+                       mex_grant == gi[ARB_BITS-1:0]))
+                ),
+
+                .tile_caller_id(mc_tile_caller_id[
+                    gi*TACC_CALLER_BITS +: TACC_CALLER_BITS]),
+                .tile_priv     (mc_tile_priv[gi]),
+                .tile_mpu_base (mc_tile_mpu_base[gi*64 +: 64]),
+                .tile_mpu_limit(mc_tile_mpu_limit[gi*64 +: 64]),
+                .tile_mpu_enabled(mc_tile_mpu_enabled[gi]),
+                .tile_allow_cluster_spad(
+                    mc_tile_allow_cluster_spad[gi]),
+
+                .tacc_status   (mc_tacc_status[gi*64 +: 64]),
+                .tacc_ctl_valid(mc_tacc_ctl_valid[gi]),
+                .tacc_ctl_wdata(mc_tacc_ctl_wdata[gi*64 +: 64]),
+                .tacc_ctl_done (
+                    tacc_ctl_done_reg &&
+                    tacc_ctl_grant == gi[ARB_BITS-1:0]),
+                .tacc_ctl_fault(tacc_ctl_fault_reg),
+                .tacc_priv_fault(mc_tacc_priv_fault[gi]),
 
                 .tile_csr_wen  (mc_tile_csr_wen  [gi]),
                 .tile_csr_addr (mc_tile_csr_addr [gi*8  +: 8]),
@@ -247,7 +299,9 @@ module mp64_cluster #(
                 .cl_csr_rdata (mc_cl_csr_rdata[gi*64 +: 64]),
 
                 .cl_ivt_base  (cl_ivt_base),
-                .cl_priv_level(cl_priv_level)
+                .cl_priv_level(cl_priv_level),
+                .cl_mpu_base  (cl_mpu_base),
+                .cl_mpu_limit (cl_mpu_limit)
             );
 
         end
@@ -472,6 +526,15 @@ module mp64_cluster #(
                     mc_tile_csr_addr[mi*8 +: 8] == CSR_TSRC0)
                     cl_sha_tsrc0 <= mc_tile_csr_wdata[mi*64 +: 64];
             end
+
+            // A precise tile/control privilege fault enters the existing
+            // cluster trap path in supervisor mode.  Keep this assignment
+            // after software CSR writes so the fault transition wins.
+            if ((|mc_tacc_priv_fault) ||
+                (mex_done_reg && mex_fault_reg == MEX_FAULT_PRIV) ||
+                (tacc_ctl_done_reg &&
+                 tacc_ctl_fault_reg == MEX_FAULT_PRIV))
+                cl_priv_level <= 1'b0;
         end
     end
 
@@ -1206,12 +1269,11 @@ module mp64_cluster #(
     // while an op is in flight.  When idle, writes are accepted from
     // any core (last writer wins — software must coordinate).
 
-    // MEX arbiter state
-    localparam MEX_IDLE    = 2'd0;
-    localparam MEX_ACTIVE  = 2'd1;
-
     reg [1:0]           mex_state;
     reg [ARB_BITS-1:0]  mex_last;
+    reg [TACC_EPOCH_BITS-1:0] tacc_caller_epoch [0:N-1];
+    reg [N-1:0]         micro_reset_d;
+    wire [N-1:0]        micro_cancel_pulse = micro_reset & ~micro_reset_d;
 
     // Tile engine wires — from arbiter to tile engine instance
     reg         te_csr_wen;
@@ -1223,16 +1285,70 @@ module mp64_cluster #(
     reg  [1:0]  te_mex_ss;
     reg  [1:0]  te_mex_op;
     reg  [2:0]  te_mex_funct;
+    reg  [7:0]  te_mex_funct_byte;
     reg  [63:0] te_mex_gpr_val;
     reg  [7:0]  te_mex_imm8;
     reg  [3:0]  te_mex_ext_mod;
     reg         te_mex_ext_active;
+    reg  [TACC_CALLER_BITS-1:0] te_mex_caller_id;
+    reg         te_mex_priv;
+    reg  [63:0] te_mex_mpu_base;
+    reg  [63:0] te_mex_mpu_limit;
+    reg         te_mex_mpu_enabled;
+    reg         te_mex_allow_cluster_spad;
+    reg  [TACC_EPOCH_BITS-1:0] te_mex_engine_epoch;
+    reg  [TACC_EPOCH_BITS-1:0] te_mex_caller_epoch;
+    reg  [1:0]  te_mex_caller_slot;
     wire        te_mex_done;
     wire        te_mex_busy;
+    wire [2:0]  te_mex_fault;
+    wire [63:0] te_mex_fault_addr;
+    wire [TACC_EPOCH_BITS-1:0] te_engine_epoch;
+    wire [63:0] te_tacc_status_raw;
+
+    // The fixed production cluster has four callers.  Keep the tile leaf's
+    // cancellation transport fixed-width while allowing reduced-N benches.
+    wire [3:0]  te_caller_cancel;
+    wire [4*TACC_EPOCH_BITS-1:0] te_caller_epochs;
+    genvar tci;
+    generate
+        for (tci = 0; tci < 4; tci = tci + 1) begin : tacc_epoch_pack
+            if (tci < N) begin : present
+                assign te_caller_cancel[tci] = micro_cancel_pulse[tci];
+                assign te_caller_epochs[
+                    tci*TACC_EPOCH_BITS +: TACC_EPOCH_BITS] =
+                    tacc_caller_epoch[tci];
+            end else begin : absent
+                assign te_caller_cancel[tci] = 1'b0;
+                assign te_caller_epochs[
+                    tci*TACC_EPOCH_BITS +: TACC_EPOCH_BITS] =
+                    {TACC_EPOCH_BITS{1'b0}};
+            end
+        end
+    endgenerate
+
+    integer epoch_i;
+    always @(posedge clk) begin
+        if (cl_rst) begin
+            micro_reset_d <= {N{1'b0}};
+            for (epoch_i = 0; epoch_i < N; epoch_i = epoch_i + 1)
+                tacc_caller_epoch[epoch_i] <=
+                    {TACC_EPOCH_BITS{1'b0}};
+        end else begin
+            micro_reset_d <= micro_reset;
+            for (epoch_i = 0; epoch_i < N; epoch_i = epoch_i + 1) begin
+                if (micro_cancel_pulse[epoch_i])
+                    tacc_caller_epoch[epoch_i] <=
+                        tacc_caller_epoch[epoch_i] +
+                        {{(TACC_EPOCH_BITS-1){1'b0}}, 1'b1};
+            end
+        end
+    end
 
     // MEX arbiter: round-robin next selection (same pattern as MUL)
     reg [ARB_BITS-1:0] mex_next;
     reg                mex_any;
+    reg [ARB_BITS:0]   mex_cand;
 
     always @(*) begin
         mex_next = mex_last;
@@ -1241,14 +1357,14 @@ module mp64_cluster #(
             mex_cand = {1'b0, mex_last} + mi[ARB_BITS:0];
             if (mex_cand >= N_VAL)
                 mex_cand = mex_cand - N_VAL;
-            if (!mex_any && mc_mex_req[mex_cand[ARB_BITS-1:0]]) begin
+            if (!mex_any &&
+                !micro_reset[mex_cand[ARB_BITS-1:0]] &&
+                mc_mex_req[mex_cand[ARB_BITS-1:0]]) begin
                 mex_next = mex_cand[ARB_BITS-1:0];
                 mex_any  = 1'b1;
             end
         end
     end
-
-    reg [ARB_BITS:0] mex_cand;   // temporary for round-robin scan
 
     // CSR write forwarding: when idle, accept from any core (last wins);
     // when active, only from the granted core.
@@ -1294,14 +1410,35 @@ module mp64_cluster #(
         end
     endgenerate
 
+    // TACC_STATUS is caller-relative only for MINE.  Keep the physical
+    // engine's raw status separate so simultaneous readers cannot corrupt
+    // one another through the legacy single-address CSR mux.
+    generate
+        for (gi = 0; gi < N; gi = gi + 1) begin : tacc_status_shape
+            wire status_mine =
+                te_tacc_status_raw[TACC_STATUS_BIT_CLAIMED] &&
+                te_tacc_status_raw[
+                    TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] ==
+                mc_tile_caller_id[
+                    gi*TACC_CALLER_BITS +: TACC_CALLER_BITS];
+            assign mc_tacc_status[gi*64 +: 64] =
+                (te_tacc_status_raw &
+                 ~(64'd1 << TACC_STATUS_BIT_MINE)) |
+                (status_mine ?
+                    (64'd1 << TACC_STATUS_BIT_MINE) : 64'd0);
+        end
+    endgenerate
+
     // MEX arbiter FSM
     always @(posedge clk) begin
-        if (cl_rst) begin
+        if (cl_rst || tile_engine_reset) begin
             mex_state      <= MEX_IDLE;
             mex_grant      <= {ARB_BITS{1'b0}};
             mex_last       <= {ARB_BITS{1'b0}};
             mex_done_reg   <= 1'b0;
             mex_busy_reg   <= 1'b0;
+            mex_fault_reg  <= MEX_FAULT_NONE;
+            mex_fault_addr_reg <= 64'd0;
             te_mex_valid   <= 1'b0;
         end else begin
             mex_done_reg <= 1'b0;
@@ -1317,25 +1454,146 @@ module mp64_cluster #(
                         te_mex_ss       <= mc_mex_ss       [mex_next*2  +: 2];
                         te_mex_op       <= mc_mex_op       [mex_next*2  +: 2];
                         te_mex_funct    <= mc_mex_funct    [mex_next*3  +: 3];
+                        te_mex_funct_byte<= mc_mex_funct_byte[
+                            mex_next*8 +: 8];
                         te_mex_gpr_val  <= mc_mex_gpr_val  [mex_next*64 +: 64];
                         te_mex_imm8     <= mc_mex_imm8     [mex_next*8  +: 8];
                         te_mex_ext_mod  <= mc_mex_ext_mod  [mex_next*4  +: 4];
                         te_mex_ext_active<= mc_mex_ext_active[mex_next];
+                        te_mex_caller_id <= mc_tile_caller_id[
+                            mex_next*TACC_CALLER_BITS +:
+                            TACC_CALLER_BITS];
+                        te_mex_priv <= mc_tile_priv[mex_next];
+                        te_mex_mpu_base <= mc_tile_mpu_base[
+                            mex_next*64 +: 64];
+                        te_mex_mpu_limit <= mc_tile_mpu_limit[
+                            mex_next*64 +: 64];
+                        te_mex_mpu_enabled <=
+                            mc_tile_mpu_enabled[mex_next];
+                        te_mex_allow_cluster_spad <=
+                            mc_tile_allow_cluster_spad[mex_next];
+                        te_mex_engine_epoch <= te_engine_epoch;
+                        te_mex_caller_epoch <=
+                            tacc_caller_epoch[mex_next];
+                        te_mex_caller_slot <= mex_next;
                         mex_state       <= MEX_ACTIVE;
                     end
                 end
 
                 MEX_ACTIVE: begin
                     te_mex_valid <= 1'b0;  // only pulse for 1 cycle
-                    if (te_mex_done) begin
+                    if (micro_cancel_pulse[mex_grant]) begin
+                        mex_busy_reg <= 1'b0;
+                        mex_state    <= MEX_IDLE;
+                    end else if (te_mex_done) begin
                         mex_done_reg <= 1'b1;
                         mex_busy_reg <= 1'b0;
+                        mex_fault_reg <= te_mex_fault;
+                        mex_fault_addr_reg <= te_mex_fault_addr;
                         mex_last     <= mex_grant;
-                        mex_state    <= MEX_IDLE;
+                        mex_state    <= MEX_WAIT_DROP;
                     end
                 end
 
+                MEX_WAIT_DROP: begin
+                    te_mex_valid <= 1'b0;
+                    mex_busy_reg <= 1'b0;
+                    if (!mc_mex_req[mex_grant])
+                        mex_state <= MEX_IDLE;
+                end
+
                 default: mex_state <= MEX_IDLE;
+            endcase
+        end
+    end
+
+    // ====================================================================
+    // Independent acknowledged TACC control sideband
+    // ====================================================================
+    localparam [1:0] TACC_CTL_IDLE      = 2'd0;
+    localparam [1:0] TACC_CTL_ACTIVE    = 2'd1;
+    localparam [1:0] TACC_CTL_WAIT_DROP = 2'd2;
+
+    reg [1:0]          tacc_ctl_state;
+    reg [ARB_BITS-1:0] tacc_ctl_last;
+    reg [ARB_BITS-1:0] tacc_ctl_next;
+    reg                tacc_ctl_any;
+    reg [ARB_BITS:0]   tacc_ctl_cand;
+    reg                te_tacc_ctl_valid;
+    reg [TACC_CALLER_BITS-1:0] te_tacc_ctl_caller_id;
+    reg                te_tacc_ctl_priv;
+    reg [63:0]         te_tacc_ctl_wdata;
+    wire               te_tacc_ctl_done;
+    wire [2:0]         te_tacc_ctl_fault;
+    wire               te_tacc_ctl_leaf_valid =
+        te_tacc_ctl_valid &&
+        !micro_cancel_pulse[tacc_ctl_grant] &&
+        !tile_engine_reset;
+
+    always @(*) begin
+        tacc_ctl_next = tacc_ctl_last;
+        tacc_ctl_any  = 1'b0;
+        for (mi = 1; mi <= N; mi = mi + 1) begin : tacc_ctl_rr_scan
+            tacc_ctl_cand = {1'b0, tacc_ctl_last} + mi[ARB_BITS:0];
+            if (tacc_ctl_cand >= N_VAL)
+                tacc_ctl_cand = tacc_ctl_cand - N_VAL;
+            if (!tacc_ctl_any &&
+                !micro_reset[tacc_ctl_cand[ARB_BITS-1:0]] &&
+                mc_tacc_ctl_valid[
+                    tacc_ctl_cand[ARB_BITS-1:0]]) begin
+                tacc_ctl_next = tacc_ctl_cand[ARB_BITS-1:0];
+                tacc_ctl_any  = 1'b1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (cl_rst || tile_engine_reset) begin
+            tacc_ctl_state     <= TACC_CTL_IDLE;
+            tacc_ctl_grant     <= {ARB_BITS{1'b0}};
+            tacc_ctl_last      <= {ARB_BITS{1'b0}};
+            tacc_ctl_done_reg  <= 1'b0;
+            tacc_ctl_fault_reg <= MEX_FAULT_NONE;
+            te_tacc_ctl_valid  <= 1'b0;
+        end else begin
+            tacc_ctl_done_reg <= 1'b0;
+            case (tacc_ctl_state)
+                TACC_CTL_IDLE: begin
+                    te_tacc_ctl_valid <= 1'b0;
+                    if (tacc_ctl_any) begin
+                        tacc_ctl_grant <= tacc_ctl_next;
+                        te_tacc_ctl_caller_id <= mc_tile_caller_id[
+                            tacc_ctl_next*TACC_CALLER_BITS +:
+                            TACC_CALLER_BITS];
+                        te_tacc_ctl_priv <=
+                            mc_tile_priv[tacc_ctl_next];
+                        te_tacc_ctl_wdata <= mc_tacc_ctl_wdata[
+                            tacc_ctl_next*64 +: 64];
+                        te_tacc_ctl_valid <= 1'b1;
+                        tacc_ctl_state <= TACC_CTL_ACTIVE;
+                    end
+                end
+
+                TACC_CTL_ACTIVE: begin
+                    if (micro_cancel_pulse[tacc_ctl_grant]) begin
+                        te_tacc_ctl_valid <= 1'b0;
+                        tacc_ctl_state <= TACC_CTL_IDLE;
+                    end else if (te_tacc_ctl_done) begin
+                        te_tacc_ctl_valid <= 1'b0;
+                        tacc_ctl_done_reg <= 1'b1;
+                        tacc_ctl_fault_reg <= te_tacc_ctl_fault;
+                        tacc_ctl_last <= tacc_ctl_grant;
+                        tacc_ctl_state <= TACC_CTL_WAIT_DROP;
+                    end
+                end
+
+                TACC_CTL_WAIT_DROP: begin
+                    te_tacc_ctl_valid <= 1'b0;
+                    if (!mc_tacc_ctl_valid[tacc_ctl_grant])
+                        tacc_ctl_state <= TACC_CTL_IDLE;
+                end
+
+                default: tacc_ctl_state <= TACC_CTL_IDLE;
             endcase
         end
     end
@@ -1346,6 +1604,10 @@ module mp64_cluster #(
     mp64_tile u_tile (
         .clk           (clk),
         .rst_n         (~cl_rst),
+        .engine_reset  (tile_engine_reset),
+        .caller_cancel (te_caller_cancel),
+        .caller_epochs (te_caller_epochs),
+        .engine_epoch  (te_engine_epoch),
 
         // CSR interface (from MEX arbiter)
         .csr_wen       (te_csr_wen),
@@ -1358,12 +1620,35 @@ module mp64_cluster #(
         .mex_ss        (te_mex_ss),
         .mex_op        (te_mex_op),
         .mex_funct     (te_mex_funct),
+        .mex_funct_byte(te_mex_funct_byte),
         .mex_gpr_val   (te_mex_gpr_val),
         .mex_imm8      (te_mex_imm8),
         .mex_ext_mod   (te_mex_ext_mod),
         .mex_ext_active(te_mex_ext_active),
+        .mex_caller_id (te_mex_caller_id),
+        .mex_priv      (te_mex_priv),
+        .mex_mpu_base  (te_mex_mpu_base),
+        .mex_mpu_limit (te_mex_mpu_limit),
+        .mex_mpu_enabled(te_mex_mpu_enabled),
+        .mex_allow_cluster_spad(te_mex_allow_cluster_spad),
+        .mex_engine_epoch(te_mex_engine_epoch),
+        .mex_caller_epoch(te_mex_caller_epoch),
+        .mex_caller_slot(te_mex_caller_slot),
         .mex_done      (te_mex_done),
         .mex_busy      (te_mex_busy),
+        .mex_fault     (te_mex_fault),
+        .mex_fault_addr(te_mex_fault_addr),
+        .mex_stall_cycle(te_mex_stall_cycle),
+
+        // Caller-relative status is shaped above; control remains independent
+        // of the ordinary MEX grant so force-pending can be accepted while busy.
+        .tacc_status_raw(te_tacc_status_raw),
+        .tacc_ctl_valid(te_tacc_ctl_leaf_valid),
+        .tacc_ctl_caller_id(te_tacc_ctl_caller_id),
+        .tacc_ctl_priv (te_tacc_ctl_priv),
+        .tacc_ctl_wdata(te_tacc_ctl_wdata),
+        .tacc_ctl_done (te_tacc_ctl_done),
+        .tacc_ctl_fault(te_tacc_ctl_fault),
 
         // Internal tile memory port (→ SoC memory subsystem)
         .tile_req      (tile_req),

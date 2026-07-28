@@ -222,9 +222,9 @@ tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
                 $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Micro-core standalone (2 expected failures without full cluster) ---
+# --- Micro-core standalone ---
 cpu_micro: tb_cpu_micro.vvp
-	-$(VVP) $<
+	$(VVP) $<
 
 tb_cpu_micro.vvp: tb_cpu_micro.v $(CORE)/mp64_cpu_micro.v $(CORE)/mp64_alu.v \
                   $(CORE)/mp64_bitfield.v
