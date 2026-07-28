@@ -1203,6 +1203,9 @@ def test_micro_tacc_reset_callback_cancels_without_retirement(
         owner.step()
 
     before = cluster._shared_engine_snapshot()
+    arbiter_before = dict(
+        system._native_system._cluster_arbiter_snapshot(0)
+    )
     caller_epoch_before = cluster._caller_tacc_epoch(owner.core_id)
     cycles_before = owner.cycle_count
     perf_cycles_before = owner.perf_cycles
@@ -1251,6 +1254,21 @@ def test_micro_tacc_reset_callback_cancels_without_retirement(
     assert owner.perf_tileops == tileops_before
     assert cluster._caller_tacc_epoch(owner.core_id) == caller_epoch_before + 1
     assert cluster._shared_engine_snapshot() == before
+    arbiter_after = dict(
+        system._native_system._cluster_arbiter_snapshot(0)
+    )
+    assert (
+        arbiter_after["grant_counts"]["tile_engine"]
+        == arbiter_before["grant_counts"]["tile_engine"]
+    )
+    assert (
+        arbiter_after["last_grants"]["tile_engine"]
+        == arbiter_before["last_grants"]["tile_engine"]
+    )
+    assert (
+        arbiter_after["grant_sequence"]
+        == arbiter_before["grant_sequence"]
+    )
     staged = dict(owner._cs.tacc_snapshot())
     assert staged["tacc"] == bytes(before["tacc"])
     for name in (

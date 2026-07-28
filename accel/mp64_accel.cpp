@@ -18812,6 +18812,7 @@ struct CoordinatorBoundarySettlement {
     uint64_t continuations = 0;
     bool closes_dispatch = false;
     bool terminal = false;
+    bool cancelled = false;
 };
 
 static CoordinatorBoundarySettlement
@@ -18820,19 +18821,34 @@ validated_coordinator_settlement(
         int64_t prefix_steps,
         int64_t prefix_cycles,
         int64_t max_steps,
-        const char* context) {
+        const char* context,
+        bool permit_cancellation = false) {
     py::tuple settled = settled_object.cast<py::tuple>();
-    if (settled.size() != 3) {
+    const bool has_cancellation_tag =
+        settled.size() == 4;
+    if (
+        settled.size() != 3 &&
+        !(permit_cancellation && has_cancellation_tag)
+    ) {
         throw std::runtime_error(
             std::string(context) +
-            " must return "
-            "(invocation_steps, invocation_cycles, terminal)");
+            " must return " +
+            (
+                permit_cancellation
+                    ? "(invocation_steps, invocation_cycles, "
+                      "terminal[, cancelled])"
+                    : "(invocation_steps, invocation_cycles, "
+                      "terminal)"
+            ));
     }
 
     CoordinatorBoundarySettlement result;
     result.total_steps = settled[0].cast<int64_t>();
     result.total_cycles = settled[1].cast<int64_t>();
     result.terminal = settled[2].cast<bool>();
+    result.cancelled =
+        has_cancellation_tag &&
+        settled[3].cast<bool>();
     if (
         result.total_steps < prefix_steps ||
         result.total_steps >
@@ -18847,6 +18863,18 @@ validated_coordinator_settlement(
         throw std::runtime_error(
             std::string(context) +
             " returned invalid progress");
+    }
+    if (
+        result.cancelled &&
+        (
+            result.total_steps != prefix_steps ||
+            result.total_cycles != prefix_cycles ||
+            !result.terminal
+        )
+    ) {
+        throw std::runtime_error(
+            std::string(context) +
+            " reported cancellation with architectural progress");
     }
     if (
         !result.terminal &&
@@ -19029,6 +19057,7 @@ finalize_coordinator_instruction(
         // by a later instruction from the same public batch budget.
         result.terminal = true;
         result.closes_dispatch = true;
+        result.cancelled = true;
         return result;
     }
 
@@ -19059,7 +19088,8 @@ finalize_coordinator_instruction(
                 combined_prefix_steps,
                 combined_prefix_cycles,
                 max_steps,
-                "coordinator continuation");
+                "coordinator continuation",
+                /*permit_cancellation=*/true);
         result.stop_reason = raw.stop_reason;
         result.continuations = 1;
         result.closes_dispatch = true;
@@ -20536,19 +20566,20 @@ static void run_parallel_core_subfrontier(
                     private_result.steps_executed,
                     1,
                     "cluster grant retirement accounting");
-            const bool cancelled_at_terminal =
+            const bool cancelled_tacc_at_terminal =
+                settlement.cancelled &&
+                granted.request.tacc_request &&
                 settlement.terminal &&
                 settlement.total_steps ==
                     private_result.steps_executed;
             if (
                 settlement.total_steps !=
                     expected_retirement &&
-                !cancelled_at_terminal
+                !cancelled_tacc_at_terminal
             ) {
                 throw std::runtime_error(
                     "granted cluster continuation must "
-                    "retire one instruction or close at a "
-                    "terminal cancellation boundary");
+                    "retire exactly one instruction");
             }
             if (
                 settlement.stop_reason !=
@@ -20565,11 +20596,13 @@ static void run_parallel_core_subfrontier(
             // checkpoint prevents a failed winner from orphaning that lock
             // or partially publishing shared-engine state.
             publish_settlement(winner, settlement);
-            granted_cluster.commit(
-                granted.request.resource,
-                granted.local_core,
-                granted.request.operation,
-                granted.request.sha_transaction);
+            if (!cancelled_tacc_at_terminal) {
+                granted_cluster.commit(
+                    granted.request.resource,
+                    granted.local_core,
+                    granted.request.operation,
+                    granted.request.sha_transaction);
+            }
         } catch (...) {
             granted_cluster = cluster_checkpoint;
             throw;

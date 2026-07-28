@@ -1129,6 +1129,11 @@ def test_reserved_crypto_ops_trap_without_cluster_grants(
     instruction,
     acquire,
 ) -> None:
+    lock_resource = (
+        "sha"
+        if resource == "tile_engine"
+        else resource
+    )
     signatures = {}
     for worker_count in (1, 2, 4):
         system = _system(worker_count=worker_count)
@@ -1154,8 +1159,8 @@ def test_reserved_crypto_ops_trap_without_cluster_grants(
             contender.pc,
             arbiter["grant_counts"][resource],
             arbiter["grant_sequence"],
-            arbiter[f"{resource}_locked"],
-            arbiter[f"{resource}_lock_owner"],
+            arbiter[f"{lock_resource}_locked"],
+            arbiter[f"{lock_resource}_lock_owner"],
         )
 
     assert signatures[2] == signatures[1]
@@ -1478,6 +1483,8 @@ def test_changed_bus_opcode_defers_the_selected_request() -> None:
 
 def _zero_retirement_grant_signature(
     worker_count: int,
+    *,
+    explicit_cancellation: bool,
 ) -> tuple:
     system = _system(worker_count=worker_count)
     cluster = system.clusters[0]
@@ -1503,6 +1510,8 @@ def _zero_retirement_grant_signature(
         assert cluster.crc_try_acquire(
             micro.core_id
         )
+        if explicit_cancellation:
+            return prefix_steps, prefix_cycles, True, True
         return prefix_steps, prefix_cycles, True
 
     system._settle_native_core_continuation = settle_zero
@@ -1529,11 +1538,18 @@ def _zero_retirement_grant_signature(
     )
 
 
-def test_zero_retirement_settlement_cannot_publish_a_cluster_grant() -> None:
+@pytest.mark.parametrize(
+    "explicit_cancellation",
+    (False, True),
+)
+def test_zero_retirement_settlement_cannot_publish_a_cluster_grant(
+    explicit_cancellation: bool,
+) -> None:
     signatures = {
         worker_count:
             _zero_retirement_grant_signature(
-                worker_count
+                worker_count,
+                explicit_cancellation=explicit_cancellation,
             )
         for worker_count in (1, 2, 4)
     }

@@ -2505,7 +2505,7 @@ class MegapadSystem:
         trap_id: int,
         prefix_steps: int,
         prefix_cycles: int,
-    ) -> tuple[int, int, bool]:
+    ) -> tuple[int, int, bool] | tuple[int, int, bool, bool]:
         """Settle a raw native boundary and return whole-invocation progress."""
         cpu = self.cores[core_index]
         try:
@@ -2533,7 +2533,7 @@ class MegapadSystem:
             if stop_reason in (3, 4):
                 cpu._last_python_fallback_cancelled = False
             if cancelled:
-                return prefix_steps, prefix_cycles, True
+                return prefix_steps, prefix_cycles, True, True
             return self._settle_native_batch_trap_error(
                 cpu,
                 error,
@@ -2557,7 +2557,7 @@ class MegapadSystem:
             # A reset won while a detached TACC instruction was executing.
             # Close this coordinator dispatch without counting or charging
             # the cancelled instruction.
-            return prefix_steps, prefix_cycles, True
+            return prefix_steps, prefix_cycles, True, True
         return (
             prefix_steps + 1,
             prefix_cycles + continuation_cycles,
