@@ -26,6 +26,7 @@ import _mp64_accel
 from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
 from megapad64 import (
+    CLUSTER_SPAD_ADDR,
     EW_BF16,
     EW_FP16,
     EW_U16,
@@ -1196,7 +1197,7 @@ def test_tacc_preflight_faults_before_any_memory_or_state_mutation(
                 cpu.tmode = EW_U16
             elif case != "second-tamac-source":
                 raise AssertionError(f"unknown preflight case: {case}")
-            cpu.tsrc1 = MEM_SIZE - 32
+            cpu.tsrc1 = MEM_SIZE
             original_read8 = cpu.mem_read8
 
             def counting_read8(address: int) -> int:
@@ -1216,6 +1217,62 @@ def test_tacc_preflight_faults_before_any_memory_or_state_mutation(
     assert result["ivec_id"] == expected_ivec
     assert after["interrupt"][2] == expected_trap_addr
     assert after["memory:callback-count"] == bytes(8)
+    assert after["tacc"] == before["tacc"]
+    assert after["memory:bank0"] == before["memory:bank0"]
+    _assert_tacc_fault_accounting(
+        before,
+        after,
+        instruction_bytes=len(result["encoded"]),
+        cycles=2,
+    )
+    _assert_tacc_legacy_isolation(
+        before,
+        after,
+        allow_trap_state=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_address", "expected_ivec"),
+    [
+        pytest.param(
+            SRC1 + 1,
+            IVEC_ALIGN_FAULT,
+            id="misaligned-second-source",
+        ),
+        pytest.param(
+            CLUSTER_SPAD_ADDR,
+            IVEC_BUS_FAULT,
+            id="cluster-scratchpad-source",
+        ),
+    ],
+)
+def test_native_tamac_source_preflight_delegates_without_access(
+    source_address: int,
+    expected_ivec: int,
+) -> None:
+    initial_image = bytes((index * 13 + 5) & 0xFF for index in range(256))
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=EW_U8,
+            src0=bytes([2]) * 64,
+            src1=bytes([3]) * 64,
+        )
+        _restore_tacc_state(cpu, image=initial_image, ew=EW_U8)
+        cpu.tsrc1 = source_address
+        return watchers
+
+    result = _assert_trapping_tacc_matches_oracle(
+        "t.amac",
+        setup,
+        expected_dispatch="fallback",
+    )
+    before = result["before"]
+    after = result["after"]
+    assert result["ivec_id"] == expected_ivec
+    assert after["interrupt"][2] == source_address
     assert after["tacc"] == before["tacc"]
     assert after["memory:bank0"] == before["memory:bank0"]
     _assert_tacc_fault_accounting(

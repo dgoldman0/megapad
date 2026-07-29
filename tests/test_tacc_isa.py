@@ -9,6 +9,7 @@ import pytest
 from asm import AsmError, assemble
 from cli import disasm_one
 from megapad64 import (
+    CLUSTER_SPAD_ADDR,
     CSR_TACC_CTL,
     CSR_TACC_STATUS,
     EW_BF16,
@@ -726,7 +727,7 @@ def test_ownership_format_and_source_faults_precede_reads_and_mutation() -> None
     assert _tacc_snapshot(cpu) == before
 
     cpu.tmode = EW_U8
-    cpu.tsrc1 = 4096 - 32
+    cpu.tsrc1 = 4096
     before = _tacc_snapshot(cpu)
     with pytest.raises(TrapError) as raised:
         _step(cpu, "t.amac")
@@ -734,6 +735,96 @@ def test_ownership_format_and_source_faults_precede_reads_and_mutation() -> None
     assert cpu.trap_addr == 4096
     assert reads == 0
     assert _tacc_snapshot(cpu) == before
+
+
+@pytest.mark.parametrize(
+    ("instruction", "misaligned_field", "misaligned_address"),
+    [
+        pytest.param(
+            "t.amac",
+            "tsrc1",
+            SOURCE_B + 1,
+            id="tile-second-source",
+        ),
+        pytest.param(
+            "t.amac r7",
+            "tsrc0",
+            SOURCE_A + 1,
+            id="broadcast-source",
+        ),
+        pytest.param(
+            "t.amac inplace",
+            "tdst",
+            IMAGE_A + 1,
+            id="inplace-first-source",
+        ),
+    ],
+)
+def test_tamac_preflights_all_source_alignment_before_routed_policy(
+    instruction: str,
+    misaligned_field: str,
+    misaligned_address: int,
+) -> None:
+    cpu = Megapad64(mem_size=4096)
+    _claim_and_clear(cpu, EW_U8)
+    cpu.tsrc0 = SOURCE_A
+    cpu.tsrc1 = SOURCE_B
+    cpu.tdst = IMAGE_A
+    setattr(cpu, misaligned_field, misaligned_address)
+    reads = 0
+    routed_checks = []
+    original_read8 = cpu.mem_read8
+
+    def counting_read8(addr: int) -> int:
+        nonlocal reads
+        reads += 1
+        return original_read8(addr)
+
+    def record_routed_span(start: int, size: int, write: bool):
+        routed_checks.append((start, size, write))
+        return None
+
+    cpu.mem_read8 = counting_read8
+    cpu._tacc_span_validator = record_routed_span
+    before = _tacc_snapshot(cpu)
+    cycles_before = cpu.cycle_count
+
+    with pytest.raises(TrapError) as raised:
+        _step(cpu, instruction)
+
+    assert raised.value.ivec_id == IVEC_ALIGN_FAULT
+    assert cpu.trap_addr == misaligned_address
+    assert reads == 0
+    assert routed_checks == []
+    assert _tacc_snapshot(cpu) == before
+    assert cpu.cycle_count - cycles_before == 2
+
+
+def test_tamac_rejects_cluster_scratchpad_before_source_traffic() -> None:
+    cpu = Megapad64(mem_size=4096)
+    _claim_and_clear(cpu, EW_U8)
+    cpu.tsrc0 = CLUSTER_SPAD_ADDR
+    cpu.tsrc1 = SOURCE_B
+    reads = 0
+    original_read8 = cpu.mem_read8
+
+    def counting_read8(addr: int) -> int:
+        nonlocal reads
+        reads += 1
+        return original_read8(addr)
+
+    cpu.mem_read8 = counting_read8
+    before = _tacc_snapshot(cpu)
+    cycles_before = cpu.cycle_count
+
+    with pytest.raises(TrapError) as raised:
+        _step(cpu, "t.amac")
+
+    assert raised.value.ivec_id == IVEC_BUS_FAULT
+    assert cpu.trap_addr == CLUSTER_SPAD_ADDR
+    assert reads == 0
+    assert _tacc_snapshot(cpu) == before
+    assert cpu.cycle_count - cycles_before == 2
 
 
 def test_trap_handler_saves_complete_instruction_return_pc() -> None:

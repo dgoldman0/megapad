@@ -1464,6 +1464,12 @@ class Megapad64:
                 "TACC span wraps the architectural address space",
                 0,
             )
+        if (start >> 32) == (CLUSTER_SPAD_ADDR >> 32):
+            self._tacc_trap(
+                IVEC_BUS_FAULT,
+                "cluster scratchpad is not routed to the TACC memory port",
+                start,
+            )
         if start < self.MMIO_END and end > self.MMIO_START:
             self._tacc_trap(
                 IVEC_BUS_FAULT,
@@ -4112,6 +4118,19 @@ class Megapad64:
             source_addresses = (u64(self.tsrc0),)
         else:
             source_addresses = (u64(self.tdst), u64(self.tsrc0))
+
+        # The physical source port consumes complete 64-byte rows.  Check
+        # every architecturally required base for row alignment before any
+        # routed-span policy so a later misaligned operand cannot be hidden by
+        # an earlier address fault.  The second pass still validates every
+        # complete span before _tacc_begin_atomic_operation permits a read.
+        for address in source_addresses:
+            if address & 0x3F:
+                self._tacc_trap(
+                    IVEC_ALIGN_FAULT,
+                    "TAMAC source must be 64-byte aligned",
+                    address,
+                )
         for address in source_addresses:
             self._tacc_preflight_span(address, 64)
 

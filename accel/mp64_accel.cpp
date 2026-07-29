@@ -7800,7 +7800,11 @@ static inline bool native_tacc_resolve_span(
         0xFFFF'FF00'0000'0000ULL;
     constexpr uint64_t TACC_MMIO_END =
         0xFFFF'FF80'0000'0000ULL;
+    constexpr uint64_t TACC_CLUSTER_SPAD_HI =
+        0xFFFF'FE00ULL;
     const uint64_t end = address + size;
+    if ((address >> 32) == TACC_CLUSTER_SPAD_HI)
+        return false;
     if (
         address < TACC_MMIO_END &&
         end > TACC_MMIO_START
@@ -8548,6 +8552,13 @@ static int exec_native_tacc_tamac(
     }
 
     NativeTaccSpan source_spans[2]{};
+    // Alignment is an architectural property of every complete source row.
+    // Check all required bases before resolving any span so ALIGN has
+    // deterministic priority and no native source access can precede it.
+    for (int index = 0; index < source_count; index++) {
+        if ((source_addresses[index] & 0x3F) != 0)
+            return -1;
+    }
     for (int index = 0; index < source_count; index++) {
         if (!native_tacc_resolve_span(
                 s,

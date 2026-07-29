@@ -24,6 +24,7 @@ module tb_tacc_cycles;
     reg [63:0]  mex_mpu_base;
     reg [63:0]  mex_mpu_limit;
     reg         mex_mpu_enabled;
+    reg         mex_allow_cluster_spad;
     reg [7:0]   mex_engine_epoch;
     reg [7:0]   mex_caller_epoch;
     reg [1:0]   mex_caller_slot;
@@ -171,7 +172,7 @@ module tb_tacc_cycles;
         .mex_mpu_base           (mex_mpu_base),
         .mex_mpu_limit          (mex_mpu_limit),
         .mex_mpu_enabled        (mex_mpu_enabled),
-        .mex_allow_cluster_spad (1'b0),
+        .mex_allow_cluster_spad (mex_allow_cluster_spad),
         .mex_engine_epoch       (mex_engine_epoch),
         .mex_caller_epoch       (mex_caller_epoch),
         .mex_caller_slot        (mex_caller_slot),
@@ -478,6 +479,7 @@ module tb_tacc_cycles;
         mex_mpu_base = 64'd0;
         mex_mpu_limit = 64'd0;
         mex_mpu_enabled = 1'b0;
+        mex_allow_cluster_spad = 1'b0;
         mex_engine_epoch = 8'd0;
         mex_caller_epoch = 8'd0;
         mex_caller_slot = 2'd0;
@@ -845,9 +847,8 @@ module tb_tacc_cycles;
         check("external TAMAC bypasses canonical image stage",
               !tacc_xfer_req);
 
-        // A bad second source must be discovered before source A is read.
-        // This is the hardware form of the emulator's all-span preflight
-        // callback test.
+        // A misaligned second source has deterministic ALIGN priority and
+        // must be discovered before source A is read.
         write_csr(CSR_TSRC0, {32'd0, TAMAC_ADDR_A});
         write_csr(CSR_TSRC1, 64'h0000_0000_000F_FFE0);
         mex_ss = 2'd0;
@@ -860,23 +861,51 @@ module tb_tacc_cycles;
         mex_valid = 1'b1;
         tick;
         mex_valid = 1'b0;
-        check("second-source span fault waits one transport interval",
+        check("second-source alignment fault waits one transport interval",
               !mex_done && mex_busy &&
               mex_fault == MEX_FAULT_NONE &&
               !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
-        check("second-source preflight prevents first source read",
+        check("source alignment preflight prevents first source read",
               tamac_mem_req_count == 0 &&
               !tile_req && !ext_tile_req);
         tick;
-        check("second-source span fault completes in second base cycle",
+        check("second-source alignment fault completes in second base cycle",
+              mex_done && !mex_busy &&
+              mex_fault == MEX_FAULT_ALIGN);
+        check("second-source alignment fault reports its base",
+              mex_fault_addr == 64'h0000_0000_000F_FFE0);
+        check("source alignment preflight prevents first source read",
+              tamac_mem_req_count == 0 &&
+              !tile_req && !ext_tile_req);
+        tick;
+
+        // Cluster callers may use the scratchpad for scalar memory, but the
+        // tile-memory source port has no scratchpad datapath.  Even a captured
+        // allow bit therefore terminates as BUS before source A traffic.
+        mex_allow_cluster_spad = 1'b1;
+        write_csr(CSR_TSRC1, 64'hFFFF_FE00_0000_0000);
+        tamac_mem_req_count = 0;
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("scratchpad source fault waits one transport interval",
+              !mex_done && mex_busy &&
+              mex_fault == MEX_FAULT_NONE &&
+              !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
+        check("scratchpad preflight prevents first source read",
+              tamac_mem_req_count == 0 &&
+              !tile_req && !ext_tile_req);
+        tick;
+        check("scratchpad source faults BUS in second base cycle",
               mex_done && !mex_busy &&
               mex_fault == MEX_FAULT_BUS);
-        check("second-source span fault reports first forbidden byte",
-              mex_fault_addr == 64'h0000_0000_0010_0000);
-        check("second-source preflight prevents first source read",
+        check("scratchpad source fault reports the source base",
+              mex_fault_addr == 64'hFFFF_FE00_0000_0000);
+        check("scratchpad preflight prevents first source read",
               tamac_mem_req_count == 0 &&
               !tile_req && !ext_tile_req);
         tick;
+        mex_allow_cluster_spad = 1'b0;
 
         // Dynamic target errors qualify the acknowledged source beat and
         // retire without exposing any partial arithmetic.

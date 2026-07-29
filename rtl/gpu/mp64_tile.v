@@ -533,6 +533,12 @@ module mp64_tile #(
             if (span_end[64]) begin
                 fault         = MEX_FAULT_BUS;
                 fault_address = 64'd0;
+            end else if (address[63:32] == MP64_SPAD_HI) begin
+                // The shared tile-memory port has no cluster-local scratchpad
+                // route.  Reject the sentinel aperture before any traffic
+                // even when the captured caller may use it for scalar loads.
+                fault         = MEX_FAULT_BUS;
+                fault_address = address;
             end else if ((address < TACC_MMIO_END) &&
                          (span_end[63:0] > MP64_MMIO_BASE)) begin
                 fault = MEX_FAULT_BUS;
@@ -623,34 +629,49 @@ module mp64_tile #(
         tamac_src_b_hbw                  = 1'b0;
 
         if (tacc_req_is_tamac) begin
-            tacc_preflight_span(
-                tacc_req_tamac_src_a, 9'd64, tacc_req_priv,
-                tacc_req_mpu_base, tacc_req_mpu_limit,
-                tacc_req_mpu_enabled,
-                tamac_src_a_preflight_fault,
-                tamac_src_a_preflight_fault_addr,
-                tamac_src_a_ext, tamac_src_a_hbw);
-            if (tacc_req_tamac_has_b)
+            // A source row is a physical 512-bit request, not a byte-addressed
+            // assembly operation.  Give ALIGN deterministic priority across
+            // every required operand, then validate every routed span before
+            // tacc_tamac_start can expose the first request.
+            if (tacc_req_tamac_src_a[5:0] != 6'd0) begin
+                tacc_req_preflight_fault = MEX_FAULT_ALIGN;
+                tacc_req_preflight_fault_addr =
+                    tacc_req_tamac_src_a;
+            end else if (tacc_req_tamac_has_b &&
+                         (tacc_req_tamac_src_b[5:0] != 6'd0)) begin
+                tacc_req_preflight_fault = MEX_FAULT_ALIGN;
+                tacc_req_preflight_fault_addr =
+                    tacc_req_tamac_src_b;
+            end else begin
                 tacc_preflight_span(
-                    tacc_req_tamac_src_b, 9'd64, tacc_req_priv,
+                    tacc_req_tamac_src_a, 9'd64, tacc_req_priv,
                     tacc_req_mpu_base, tacc_req_mpu_limit,
                     tacc_req_mpu_enabled,
-                    tamac_src_b_preflight_fault,
-                    tamac_src_b_preflight_fault_addr,
-                    tamac_src_b_ext, tamac_src_b_hbw);
+                    tamac_src_a_preflight_fault,
+                    tamac_src_a_preflight_fault_addr,
+                    tamac_src_a_ext, tamac_src_a_hbw);
+                if (tacc_req_tamac_has_b)
+                    tacc_preflight_span(
+                        tacc_req_tamac_src_b, 9'd64, tacc_req_priv,
+                        tacc_req_mpu_base, tacc_req_mpu_limit,
+                        tacc_req_mpu_enabled,
+                        tamac_src_b_preflight_fault,
+                        tamac_src_b_preflight_fault_addr,
+                        tamac_src_b_ext, tamac_src_b_hbw);
 
-            if (tamac_src_a_preflight_fault != MEX_FAULT_NONE) begin
-                tacc_req_preflight_fault =
-                    tamac_src_a_preflight_fault;
-                tacc_req_preflight_fault_addr =
-                    tamac_src_a_preflight_fault_addr;
-            end else if (tacc_req_tamac_has_b &&
-                         (tamac_src_b_preflight_fault !=
-                          MEX_FAULT_NONE)) begin
-                tacc_req_preflight_fault =
-                    tamac_src_b_preflight_fault;
-                tacc_req_preflight_fault_addr =
-                    tamac_src_b_preflight_fault_addr;
+                if (tamac_src_a_preflight_fault != MEX_FAULT_NONE) begin
+                    tacc_req_preflight_fault =
+                        tamac_src_a_preflight_fault;
+                    tacc_req_preflight_fault_addr =
+                        tamac_src_a_preflight_fault_addr;
+                end else if (tacc_req_tamac_has_b &&
+                             (tamac_src_b_preflight_fault !=
+                              MEX_FAULT_NONE)) begin
+                    tacc_req_preflight_fault =
+                        tamac_src_b_preflight_fault;
+                    tacc_req_preflight_fault_addr =
+                        tamac_src_b_preflight_fault_addr;
+                end
             end
         end
     end
