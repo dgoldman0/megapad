@@ -12,13 +12,11 @@
 - Phase-5 merge: `5f1e4e51a48a3394504b95d92cefb111b92fd616`
 - Combined TACC merge: `895fca8e2e26c7f91cc525e90e5edd3ab13cb0f4`
 - Phase-0 base commit: `c8e8118e82a899ec3f101f63d277a1bf4ef5f84a`
-- Phase-1 worktree:
-  `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc`
+- Phase-1 worktree: `.worktrees/megapad-full-tacc` (historical)
 - Integration worktree:
-  `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-phase5-full-tacc-integration`
+  `.worktrees/megapad-phase5-full-tacc-integration` (historical)
 - Phase-2 branch: `feature/megapad-full-tacc-rtl`
-- Phase-2 worktree:
-  `/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl`
+- Phase-2 worktree: `.worktrees/megapad-full-tacc-rtl` (historical)
 
 This document supersedes the condensed workspace-root
 `CHIP_MATH_UPDATE_HANDOFF.md`. The original correctly identified persistent
@@ -2351,7 +2349,7 @@ python fpga/run_tacc_impl.py \
   --label topology-only --campaign-id <campaign> \
   --out /tmp/megapad-tacc-reports/topology-only
 python fpga/run_tacc_impl.py \
-  --source-tree /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl \
+  --source-ref <full-tacc-commit> \
   --label full-tacc --campaign-id <campaign> \
   --out /tmp/megapad-tacc-reports/full-tacc
 ```
@@ -2432,15 +2430,18 @@ and RTL vectors or benches before Phase 2 closes.
 
 ## 15. Worktree and commit discipline
 
-Phase-2 RTL implementation work stays in:
+Phase-2 RTL implementation was developed in the isolated worktree:
 
 ```text
-/home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl
+.worktrees/megapad-full-tacc-rtl
 ```
 
+That relative path is a historical execution record, not a durable build
+interface. After integration, physical campaigns must materialize committed
+`--source-ref` values and must not depend on retaining the feature worktree.
 The primary `megapad/` checkout remains on `main` and must not receive
 generated extensions, test caches, BIOS artifacts, or intermediate edits from
-this feature.
+feature worktrees.
 
 Before each commit:
 
