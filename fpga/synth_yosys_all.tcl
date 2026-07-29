@@ -82,6 +82,7 @@ read_verilog -sv -Irtl/pkg \
     rtl/crypto/mp64_ntt.v      \
     rtl/crypto/mp64_kem.v      \
     rtl/gpu/mp64_tacc.v    \
+    rtl/soc/mp64_tacc_transfer.v \
     rtl/gpu/mp64_tile.v
 
 log ===================================================================

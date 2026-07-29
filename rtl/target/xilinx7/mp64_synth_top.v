@@ -86,6 +86,7 @@ module mp64_synth_top (
     wire [63:0] phy_rdata_tied  = 64'd0;
     wire        phy_rvalid_tied = 1'b0;
     wire        phy_ready_tied  = 1'b0;
+    wire        phy_error_tied  = 1'b0;
 
     // NIC PHY — not connected for synthesis test
     wire        nic_tx_ready_tied = 1'b0;
@@ -110,9 +111,13 @@ module mp64_synth_top (
         .phy_wen       (),
         .phy_wdata     (),
         .phy_burst_len (),
+        .phy_cancel    (),
         .phy_rdata     (phy_rdata_tied),
         .phy_rvalid    (phy_rvalid_tied),
         .phy_ready     (phy_ready_tied),
+        .phy_error     (phy_error_tied),
+        // No PHY is instantiated in this synthesis-only wrapper.
+        .phy_cancel_done(1'b1),
 
         // SD Card
         .sd_sck     (sd_sck),

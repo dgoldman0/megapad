@@ -43,6 +43,10 @@ CORE_SRC = $(CORE)/mp64_alu.v \
            $(CRYPTO)/mp64_sha2_isa.v \
            $(CRYPTO)/mp64_field_alu_isa.v
 
+# Shared full-SoC source set for integration elaboration and benches.
+SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
+                            $(PERIPH)/*.v $(CRYPTO)/*.v $(GPU)/*.v $(PRIM)/*.v)
+
 .PHONY: all clean phase1 phase2 phase3 phase4 phase5 \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
@@ -50,7 +54,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic \
         nic_lint nic_bus mailbox trng tile tacc tacc_cycles \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
-        full_core_tile soc_smoke soc_tile_icache soc_elaborate
+        tacc_transfer full_core_tile soc_smoke soc_tile_icache soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -106,8 +110,9 @@ platform_sim: tb_platform_sim.vvp
 	$(VVP) $<
 
 tb_platform_sim.vvp: tb_platform_sim.v $(PLAT)/mp64_platform_sim.v \
-                     $(SOC)/mp64_top.v $(PRIM)/mp64_rst_sync.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                     $(SOC_ELAB_SRC)
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_platform_sim -o $@ \
+		tb_platform_sim.v $(PLAT)/mp64_platform_sim.v $(SOC_ELAB_SRC)
 
 # --- 64-bit multiplier ---
 mul: tb_mul.vvp
@@ -402,7 +407,7 @@ tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
 # ==========================================================================
 
 phase5: qos multicore_smoke core_bus_mux tile_port_arbiter full_core_tile \
-        soc_smoke soc_tile_icache soc_elaborate
+        tacc_transfer soc_smoke soc_tile_icache soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
 
@@ -443,9 +448,13 @@ tb_tile_port_arbiter.vvp: tb_tile_port_arbiter.v \
                           $(SOC)/mp64_tile_port_arbiter.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# Shared full-SoC source set for integration elaboration and benches.
-SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
-                            $(PERIPH)/*.v $(CRYPTO)/*.v $(GPU)/*.v $(PRIM)/*.v)
+# --- One chip-wide canonical TACC image stage ---
+tacc_transfer: tb_tacc_transfer.vvp
+	$(VVP) $<
+
+tb_tacc_transfer.vvp: tb_tacc_transfer.v $(SOC)/mp64_tacc_transfer.v \
+                      ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Four private full-core tile engines on the shared memory port ---
 full_core_tile: tb_full_core_tile.vvp

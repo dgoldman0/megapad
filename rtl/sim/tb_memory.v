@@ -15,6 +15,7 @@
 //   8.  HBW bank 2 tile write + read
 //   9.  Held CPU requests execute once (internal RMW and external forward)
 //  10.  Concurrent tile + CPU on different banks
+//  11.  Invalid tile requests accept and return a precise terminal error
 //
 
 `timescale 1ns/1ps
@@ -48,8 +49,11 @@ module tb_memory;
     reg  [31:0]  tile_addr;
     reg          tile_wen;
     reg  [511:0] tile_wdata;
+    wire         tile_accept;
     wire [511:0] tile_rdata;
     wire         tile_ack;
+    wire         tile_error;
+    wire [63:0]  tile_fault_addr;
 
     wire         ext_req;
     wire [63:0]  ext_addr;
@@ -63,7 +67,8 @@ module tb_memory;
     // Assertions
     // ========================================================================
     integer pass_count, fail_count, test_num;
-    integer bank0_ce_count, ext_req_rise_count;
+    integer bank0_ce_count, tile_ce_count, tile_accept_count;
+    integer ext_req_rise_count;
     reg     ext_req_d;
 
     task check;
@@ -93,11 +98,17 @@ module tb_memory;
     always @(posedge clk) begin
         if (!rst_n) begin
             bank0_ce_count   = 0;
+            tile_ce_count    = 0;
+            tile_accept_count = 0;
             ext_req_rise_count = 0;
             ext_req_d        <= 1'b0;
         end else begin
             if (dut.bank_b_ce[0])
                 bank0_ce_count = bank0_ce_count + 1;
+            if (|dut.bank_a_ce)
+                tile_ce_count = tile_ce_count + 1;
+            if (tile_accept)
+                tile_accept_count = tile_accept_count + 1;
             if (ext_req && !ext_req_d)
                 ext_req_rise_count = ext_req_rise_count + 1;
             ext_req_d <= ext_req;
@@ -125,8 +136,11 @@ module tb_memory;
         .tile_addr (tile_addr),
         .tile_wen  (tile_wen),
         .tile_wdata(tile_wdata),
+        .tile_accept(tile_accept),
         .tile_rdata(tile_rdata),
         .tile_ack  (tile_ack),
+        .tile_error(tile_error),
+        .tile_fault_addr(tile_fault_addr),
         .ext_req   (ext_req),
         .ext_addr  (ext_addr),
         .ext_wdata (ext_wdata),
@@ -279,7 +293,9 @@ module tb_memory;
         reset;
         @(posedge clk); #1;
         check("cpu_ack clear after reset",  cpu_ack  == 1'b0);
+        check("tile_accept clear after reset", tile_accept == 1'b0);
         check("tile_ack clear after reset", tile_ack == 1'b0);
+        check("tile_error clear after reset", tile_error == 1'b0);
         check("ext_req clear after reset",  ext_req  == 1'b0);
 
         // ---- Test 2: CPU dword write + read (Bank 0) ----
@@ -374,6 +390,43 @@ module tb_memory;
         tile_write(32'hFFE0_0040, {8{64'hCAFE_0000_0000_0001}});
         tile_read(32'hFFE0_0040, rd512);
         check("HBW bank 2 tile readback", rd512 == {8{64'hCAFE_0000_0000_0001}});
+
+        // ---- Test 8b: Invalid tile address returns a terminal error ----
+        $display("--- Test 8b: Invalid tile target completion ---");
+        begin : blk_t8b
+            integer ce_before;
+            integer accepts_before;
+            ce_before      = tile_ce_count;
+            accepts_before = tile_accept_count;
+            @(negedge clk);
+            tile_req   <= 1'b1;
+            tile_addr  <= 32'h8000_003F;
+            tile_wdata <= {8{64'hBAD0_BAD0_BAD0_BAD0}};
+            tile_wen   <= 1'b1;
+            @(posedge clk); #1;
+            check("invalid tile request is explicitly accepted",
+                  tile_accept && !tile_ack);
+            @(posedge clk); #1;
+            check("invalid tile request receives registered ACK", tile_ack);
+            check("invalid tile request reports target error", tile_error);
+            check("invalid tile fault address is the 64-byte beat base",
+                  tile_fault_addr == 64'h0000_0000_8000_0000);
+            check("invalid tile write never enables SRAM",
+                  tile_ce_count == ce_before);
+
+            // Keeping REQ high across and beyond ACK must not re-accept it.
+            repeat (4) begin
+                @(posedge clk); #1;
+            end
+            check("held invalid tile request is accepted exactly once",
+                  tile_accept_count == accepts_before + 1);
+            check("invalid tile response is a one-cycle pulse",
+                  !tile_ack && !tile_error);
+            @(negedge clk);
+            tile_req <= 1'b0;
+            tile_wen <= 1'b0;
+            @(negedge clk);
+        end
 
         // ---- Test 9: External forward ----
         $display("--- Test 9: External forward ---");

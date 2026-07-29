@@ -20,10 +20,28 @@ module tb_tacc;
     reg [1:0]   req_caller_slot;
     reg [2:0]   req_format_ew;
     reg         req_format_signed;
+    reg [63:0]  req_image_addr;
+    reg [2:0]   req_preflight_fault;
+    reg [63:0]  req_preflight_fault_addr;
     reg         req_cancel;
     wire        req_done;
     wire        req_busy;
     wire [2:0]  req_fault;
+    wire [63:0] req_fault_addr;
+
+    wire         xfer_req;
+    wire         xfer_store;
+    wire [63:0]  xfer_base;
+    wire [2:0]   xfer_format_ew;
+    wire [7:0]   xfer_token;
+    wire [2047:0] xfer_store_image;
+    wire         xfer_cancel;
+    wire         xfer_finish;
+    reg          xfer_done;
+    reg [7:0]    xfer_response_token;
+    reg [2:0]    xfer_fault;
+    reg [63:0]   xfer_fault_addr;
+    reg [2047:0] xfer_load_image;
 
     reg         force_valid;
     wire        force_ready;
@@ -40,6 +58,7 @@ module tb_tacc;
     integer fail_count;
     reg [63:0] metadata_snapshot;
     reg [2047:0] bank_snapshot;
+    reg [7:0] prior_xfer_token;
 
     mp64_tacc #(
         .CALLER_BASE (5'd4),
@@ -57,11 +76,28 @@ module tb_tacc;
         .req_caller_slot         (req_caller_slot),
         .req_format_ew           (req_format_ew),
         .req_format_signed       (req_format_signed),
+        .req_image_addr          (req_image_addr),
+        .req_preflight_fault     (req_preflight_fault),
+        .req_preflight_fault_addr(req_preflight_fault_addr),
         .req_cancel              (req_cancel),
         .req_retire              (1'b1),
         .req_done                (req_done),
         .req_busy                (req_busy),
         .req_fault               (req_fault),
+        .req_fault_addr          (req_fault_addr),
+        .xfer_req                (xfer_req),
+        .xfer_store              (xfer_store),
+        .xfer_base               (xfer_base),
+        .xfer_format_ew          (xfer_format_ew),
+        .xfer_token              (xfer_token),
+        .xfer_store_image        (xfer_store_image),
+        .xfer_cancel             (xfer_cancel),
+        .xfer_finish             (xfer_finish),
+        .xfer_done               (xfer_done),
+        .xfer_response_token     (xfer_response_token),
+        .xfer_fault              (xfer_fault),
+        .xfer_fault_addr         (xfer_fault_addr),
+        .xfer_load_image         (xfer_load_image),
         .force_valid             (force_valid),
         .force_ready             (force_ready),
         .force_priv              (force_priv),
@@ -248,6 +284,7 @@ module tb_tacc;
     initial begin
         pass_count = 0;
         fail_count = 0;
+        prior_xfer_token = 8'd0;
 
         rst_n = 1'b0;
         engine_reset = 1'b0;
@@ -259,7 +296,15 @@ module tb_tacc;
         req_caller_slot = 2'd0;
         req_format_ew = TMODE_8;
         req_format_signed = 1'b0;
+        req_image_addr = 64'h0000_0000_0000_0400;
+        req_preflight_fault = MEX_FAULT_NONE;
+        req_preflight_fault_addr = 64'd0;
         req_cancel = 1'b0;
+        xfer_done = 1'b0;
+        xfer_response_token = 8'd0;
+        xfer_fault = MEX_FAULT_NONE;
+        xfer_fault_addr = 64'd0;
+        xfer_load_image = 2048'd0;
         force_valid = 1'b0;
         force_priv = 1'b0;
         force_wdata = 64'd0;
@@ -324,8 +369,91 @@ module tb_tacc;
         check("CLEAR zeroizes the whole persistent bank",
               bank_state == 2048'd0);
 
-        // Test-only deposit makes every bank bit observable without
-        // prematurely adding a production LOAD/TAMAC write interface.
+        // LOAD retains the old architectural bank until the shared stage's
+        // terminal response reaches the explicit retirement edge.
+        bank_snapshot = bank_state;
+        xfer_load_image = {256{8'h5A}};
+        set_request(1'b0, ETSYS_TACC_LOAD, 1'b1,
+                    5'd4, 2'd0, TMODE_16, 1'b1);
+        req_valid = 1'b1;
+        tick;
+        req_valid = 1'b0;
+        check("LOAD admission exposes one held stage request",
+              xfer_req && !xfer_store &&
+              xfer_base == req_image_addr &&
+              xfer_format_ew == TMODE_16);
+        prior_xfer_token = xfer_token;
+        check("LOAD admission leaves old bank private",
+              bank_state == bank_snapshot);
+        xfer_response_token = xfer_token;
+        xfer_done = 1'b1;
+        tick;
+        xfer_done = 1'b0;
+        check("LOAD stage completion publishes terminal response",
+              req_done && req_fault == MEX_FAULT_NONE && xfer_finish);
+        check("LOAD response is atomic before retirement",
+              bank_state == bank_snapshot);
+        tick;
+        check("LOAD retirement publishes the complete image",
+              bank_state == {256{8'h5A}});
+        check("LOAD retirement latches clean format metadata",
+              status_raw[TACC_STATUS_BIT_VALID] &&
+              !status_raw[TACC_STATUS_BIT_DIRTY] &&
+              status_raw[TACC_STATUS_FORMAT_EW_MSB:
+                         TACC_STATUS_FORMAT_EW_LSB] == TMODE_16 &&
+              status_raw[TACC_STATUS_BIT_FORMAT_SIGNED]);
+
+        // STORE snapshots the persistent bank but changes only DIRTY, and
+        // only on a successful terminal retirement.
+        uut.dirty_reg = 1'b1;
+        #1;
+        set_request(1'b0, ETSYS_TACC_STORE, 1'b1,
+                    5'd4, 2'd0, TMODE_64, 1'b0);
+        req_valid = 1'b1;
+        tick;
+        req_valid = 1'b0;
+        check("STORE uses the latched format rather than current TMODE",
+              xfer_req && xfer_store &&
+              xfer_format_ew == TMODE_16 &&
+              xfer_store_image == {256{8'h5A}});
+        check("back-to-back transfers use distinct operation tokens",
+              xfer_token != prior_xfer_token);
+        prior_xfer_token = xfer_token;
+        xfer_response_token = xfer_token;
+        xfer_fault = MEX_FAULT_BUS;
+        xfer_fault_addr = 64'h0000_0000_0000_0488;
+        xfer_done = 1'b1;
+        tick;
+        xfer_done = 1'b0;
+        check("STORE bus fault reports exact target address",
+              req_done && req_fault == MEX_FAULT_BUS &&
+              req_fault_addr == 64'h0000_0000_0000_0488);
+        tick;
+        check("failed STORE preserves bank and preinstruction DIRTY",
+              bank_state == {256{8'h5A}} &&
+              status_raw[TACC_STATUS_BIT_DIRTY]);
+
+        set_request(1'b0, ETSYS_TACC_STORE, 1'b1,
+                    5'd4, 2'd0, TMODE_8, 1'b0);
+        req_valid = 1'b1;
+        tick;
+        req_valid = 1'b0;
+        check("faulted transfer token cannot alias fresh STORE",
+              xfer_token != prior_xfer_token);
+        xfer_response_token = xfer_token;
+        xfer_fault = MEX_FAULT_NONE;
+        xfer_fault_addr = 64'd0;
+        xfer_done = 1'b1;
+        tick;
+        xfer_done = 1'b0;
+        check("successful STORE reaches terminal response", req_done);
+        tick;
+        check("successful STORE clears DIRTY without changing bank",
+              !status_raw[TACC_STATUS_BIT_DIRTY] &&
+              bank_state == {256{8'h5A}});
+
+        // Test-only deposit keeps every bank bit observable for destructive
+        // lifecycle checks below; TAMAC still has no production write path.
         uut.bank_reg = {256{8'hA5}};
         #1;
         check("focused bench seeds every persistent bank byte",
@@ -440,9 +568,17 @@ module tb_tacc;
                           TMODE_8, 1'b0);
         lifecycle_success(ETSYS_TACC_CLEAR, 5'd4, 2'd0,
                           TMODE_16, 1'b1);
-        start_lifecycle(ETSYS_TACC_CLEAR, 5'd4, 2'd0,
-                        TMODE_8, 1'b0);
+        set_request(1'b0, ETSYS_TACC_LOAD, 1'b1,
+                    5'd4, 2'd0, TMODE_8, 1'b0);
+        req_valid = 1'b1;
+        tick;
+        req_valid = 1'b0;
+        check("engine-reset target owns the transfer stage request",
+              xfer_req && req_busy);
         engine_reset = 1'b1;
+        #1;
+        check("engine reset cancels an owned transfer before leaf wipe",
+              xfer_cancel);
         tick;
         check("engine reset suppresses active completion",
               !req_done && !req_busy && req_fault == MEX_FAULT_NONE);

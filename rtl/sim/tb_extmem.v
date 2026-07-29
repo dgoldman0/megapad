@@ -1,31 +1,19 @@
 // ============================================================================
-// tb_extmem.v — Testbench for mp64_extmem
+// tb_extmem.v — Focused testbench for mp64_extmem
 // ============================================================================
 //
-// Negedge-driven methodology.
-//
-// Tests:
-//   1. Reset clears outputs
-//   2. CPU single-beat read
-//   3. CPU single-beat write
-//   4. Tile 8-beat burst read
-//   5. Tile 8-beat burst write
-//   6. Tile pre-empts CPU (tile priority)
+// Covers the held REQ/READY launch contract, independent terminal ACK/ERROR,
+// eight-word tile serialization, retained payloads, cancellation/draining,
+// stale-ACK quarantine, and both 255-cycle per-word timeout phases.
 //
 
 `timescale 1ns/1ps
 
 module tb_extmem;
-
-    // ========================================================================
-    // Parameters
-    // ========================================================================
     localparam CLK_HALF = 5;
 
-    // ========================================================================
-    // Signals
-    // ========================================================================
-    reg          clk, rst_n;
+    reg          clk;
+    reg          rst_n;
 
     reg          cpu_req;
     reg  [31:0]  cpu_addr;
@@ -39,28 +27,37 @@ module tb_extmem;
     reg  [31:0]  tile_addr;
     reg  [511:0] tile_wdata;
     reg          tile_wen;
+    reg          tile_cancel;
+    wire         tile_accept;
     wire [511:0] tile_rdata;
     wire         tile_ack;
+    wire         tile_error;
+    wire [63:0]  tile_fault_addr;
 
     wire         phy_req;
     wire [31:0]  phy_addr;
     wire [63:0]  phy_wdata;
     wire         phy_wen;
+    reg          phy_ready;
     reg  [63:0]  phy_rdata;
     reg          phy_ack;
+    reg          phy_error;
+    wire         phy_cancel;
+    reg          phy_cancel_done;
     wire [3:0]   phy_burst_len;
 
-    // ========================================================================
-    // Assertions
-    // ========================================================================
-    integer pass_count, fail_count, test_num;
+    integer pass_count;
+    integer fail_count;
+    integer test_num;
+    integer phy_launch_count;
+    integer tile_accept_count;
 
     task check;
-        input [511:0] label;
-        input         cond;
+        input [8*96-1:0] label;
+        input            condition;
         begin
             test_num = test_num + 1;
-            if (cond) begin
+            if (condition) begin
                 pass_count = pass_count + 1;
                 $display("  [PASS %0d] %0s", test_num, label);
             end else begin
@@ -70,87 +67,141 @@ module tb_extmem;
         end
     endtask
 
-    // ========================================================================
-    // Clock
-    // ========================================================================
-    initial clk = 0;
+    initial clk = 1'b0;
     always #CLK_HALF clk = ~clk;
 
-    // ========================================================================
-    // DUT
-    // ========================================================================
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            phy_launch_count = 0;
+            tile_accept_count = 0;
+        end else begin
+            if (phy_req && phy_ready)
+                phy_launch_count = phy_launch_count + 1;
+            if (tile_accept)
+                tile_accept_count = tile_accept_count + 1;
+        end
+    end
+
     mp64_extmem dut (
-        .clk           (clk),
-        .rst_n         (rst_n),
-        .cpu_req       (cpu_req),
-        .cpu_addr      (cpu_addr),
-        .cpu_wdata     (cpu_wdata),
-        .cpu_wen       (cpu_wen),
-        .cpu_size      (cpu_size),
-        .cpu_rdata     (cpu_rdata),
-        .cpu_ack       (cpu_ack),
-        .tile_req      (tile_req),
-        .tile_addr     (tile_addr),
-        .tile_wdata    (tile_wdata),
-        .tile_wen      (tile_wen),
-        .tile_rdata    (tile_rdata),
-        .tile_ack      (tile_ack),
-        .phy_req       (phy_req),
-        .phy_addr      (phy_addr),
-        .phy_wdata     (phy_wdata),
-        .phy_wen       (phy_wen),
-        .phy_rdata     (phy_rdata),
-        .phy_ack       (phy_ack),
-        .phy_burst_len (phy_burst_len)
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .cpu_req         (cpu_req),
+        .cpu_addr        (cpu_addr),
+        .cpu_wdata       (cpu_wdata),
+        .cpu_wen         (cpu_wen),
+        .cpu_size        (cpu_size),
+        .cpu_rdata       (cpu_rdata),
+        .cpu_ack         (cpu_ack),
+        .tile_req        (tile_req),
+        .tile_addr       (tile_addr),
+        .tile_wdata      (tile_wdata),
+        .tile_wen        (tile_wen),
+        .tile_cancel     (tile_cancel),
+        .tile_accept     (tile_accept),
+        .tile_rdata      (tile_rdata),
+        .tile_ack        (tile_ack),
+        .tile_error      (tile_error),
+        .tile_fault_addr (tile_fault_addr),
+        .phy_req         (phy_req),
+        .phy_addr        (phy_addr),
+        .phy_wdata       (phy_wdata),
+        .phy_wen         (phy_wen),
+        .phy_ready       (phy_ready),
+        .phy_rdata       (phy_rdata),
+        .phy_ack         (phy_ack),
+        .phy_error       (phy_error),
+        .phy_cancel      (phy_cancel),
+        .phy_cancel_done (phy_cancel_done),
+        .phy_burst_len   (phy_burst_len)
     );
 
-    // ========================================================================
-    // Helper tasks
-    // ========================================================================
-
-    task clear_all;
+    task clear_inputs;
         begin
-            cpu_req    <= 1'b0;
-            cpu_addr   <= 32'd0;
-            cpu_wdata  <= 64'd0;
-            cpu_wen    <= 1'b0;
-            cpu_size   <= 2'd3;
-            tile_req   <= 1'b0;
-            tile_addr  <= 32'd0;
-            tile_wdata <= 512'd0;
-            tile_wen   <= 1'b0;
-            phy_rdata  <= 64'd0;
-            phy_ack    <= 1'b0;
+            cpu_req     <= 1'b0;
+            cpu_addr    <= 32'd0;
+            cpu_wdata   <= 64'd0;
+            cpu_wen     <= 1'b0;
+            cpu_size    <= 2'd3;
+            tile_req    <= 1'b0;
+            tile_addr   <= 32'd0;
+            tile_wdata  <= 512'd0;
+            tile_wen    <= 1'b0;
+            tile_cancel <= 1'b0;
+            phy_ready   <= 1'b0;
+            phy_rdata   <= 64'd0;
+            phy_ack     <= 1'b0;
+            phy_error   <= 1'b0;
+            phy_cancel_done <= 1'b1;
         end
     endtask
 
     task reset;
         begin
             rst_n <= 1'b0;
-            clear_all;
-            @(negedge clk);
-            @(negedge clk);
-            @(negedge clk);
+            clear_inputs;
+            repeat (3) @(negedge clk);
             rst_n <= 1'b1;
+            // The first active edge consumes the reset flush handshake.
+            @(posedge clk); #1;
             @(negedge clk);
+            phy_cancel_done <= 1'b0;
         end
     endtask
 
-    // Wait for phy_req to go high
     task wait_phy_req;
-        integer wd;
+        integer watchdog;
         begin
-            wd = 0;
-            while (!phy_req && wd < 50) begin
+            watchdog = 0;
+            while (!phy_req && watchdog < 300) begin
                 @(posedge clk); #1;
-                wd = wd + 1;
+                watchdog = watchdog + 1;
             end
+            check("PHY request arrived before watchdog", phy_req);
         end
     endtask
 
-    // ========================================================================
-    // Main test sequence
-    // ========================================================================
+    task wait_tile_accept;
+        integer watchdog;
+        begin
+            watchdog = 0;
+            while (!tile_accept && watchdog < 20) begin
+                @(posedge clk); #1;
+                watchdog = watchdog + 1;
+            end
+            check("tile request received explicit accept", tile_accept);
+        end
+    endtask
+
+    task launch_current_word;
+        begin
+            @(negedge clk);
+            phy_ready <= 1'b1;
+            @(posedge clk); #1;
+            check("PHY request drops after ready launch", !phy_req);
+            @(negedge clk);
+            phy_ready <= 1'b0;
+        end
+    endtask
+
+    task respond_current_word;
+        input [63:0] data;
+        input        error;
+        begin
+            @(negedge clk);
+            phy_rdata <= data;
+            phy_error <= error;
+            phy_ack   <= 1'b1;
+            @(posedge clk); #1;
+            @(negedge clk);
+            phy_ack   <= 1'b0;
+            phy_error <= 1'b0;
+        end
+    endtask
+
+    reg [511:0] expected_image;
+    reg [511:0] write_image;
+    integer beat;
+
     initial begin
         $dumpfile("tb_extmem.vcd");
         $dumpvars(0, tb_extmem);
@@ -158,283 +209,479 @@ module tb_extmem;
         pass_count = 0;
         fail_count = 0;
         test_num   = 0;
+        rst_n      = 1'b0;
+        clear_inputs;
 
         $display("=== tb_extmem ===");
 
-        // ---- Test 1: Reset ----
-        $display("--- Test 1: Reset ---");
+        // --------------------------------------------------------------------
+        $display("--- Reset contract ---");
         reset;
         @(posedge clk); #1;
-        check("phy_req clear after reset", phy_req  == 1'b0);
-        check("cpu_ack clear after reset", cpu_ack  == 1'b0);
-        check("tile_ack clear after reset",tile_ack == 1'b0);
+        check("PHY request clear after reset", !phy_req);
+        check("reset flush completed before target reopened", !phy_cancel);
+        check("CPU ACK clear after reset", !cpu_ack);
+        check("tile accept/ACK/error clear after reset",
+              !tile_accept && !tile_ack && !tile_error);
 
-        // ---- Test 2: CPU single-beat read ----
-        $display("--- Test 2: CPU read ---");
+        // --------------------------------------------------------------------
+        $display("--- CPU read: held launch payload and terminal response ---");
         @(negedge clk);
         cpu_req   <= 1'b1;
         cpu_addr  <= 32'h8000_0103;
-        cpu_wdata <= 64'd0;
         cpu_wen   <= 1'b0;
         cpu_size  <= 2'd0;
-
         wait_phy_req;
-        check("phy_req for CPU read",      phy_req       == 1'b1);
-        check("phy_burst_len is 1",        phy_burst_len == 4'd1);
-        check("unaligned CPU read uses aligned PHY word",
+        check("CPU read aligns the physical word",
               phy_addr == 32'h8000_0100);
-        check("phy_wen is 0",              phy_wen       == 1'b0);
-
-        // PHY responds
+        check("CPU read is one physical word",
+              !phy_wen && phy_burst_len == 4'd1);
+        repeat (3) begin
+            @(posedge clk); #1;
+            check("PHY request and payload hold while ready is low",
+                  phy_req && phy_addr == 32'h8000_0100 && !phy_wen);
+        end
+        launch_current_word;
+        check("CPU does not ACK at launch", !cpu_ack);
+        respond_current_word(64'hDEAD_BEEF_1234_5678, 1'b0);
+        check("CPU read ACKs only on terminal PHY response", cpu_ack);
+        check("CPU read returns PHY data",
+              cpu_rdata == 64'hDEAD_BEEF_1234_5678);
+        repeat (3) begin
+            @(posedge clk); #1;
+        end
+        check("held CPU request is not relaunched", phy_launch_count == 1);
         @(negedge clk);
-        phy_rdata <= 64'hDEAD_BEEF_1234_5678;
-        phy_ack   <= 1'b1;
-        @(posedge clk); #1;  // FSM processes phy_ack → cpu_ack=1
-        check("cpu_ack asserted",  cpu_ack   == 1'b1);
-        check("cpu_rdata correct", cpu_rdata == 64'hDEAD_BEEF_1234_5678);
-        // Clear before next posedge to prevent re-entry
-        @(negedge clk);
-        clear_all;
-        @(negedge clk);
-
-        // ---- Test 3: CPU single-beat write ----
-        $display("--- Test 3: CPU write ---");
-        @(negedge clk);
-        cpu_req   <= 1'b1;
-        cpu_addr  <= 32'h8000_0200;
-        cpu_wdata <= 64'hCAFE_BABE_0000_0001;
-        cpu_wen   <= 1'b1;
-        cpu_size  <= 2'd3;
-
-        wait_phy_req;
-        check("phy_req for CPU write", phy_req   == 1'b1);
-        check("phy_wen is 1",         phy_wen   == 1'b1);
-        check("phy_wdata correct",    phy_wdata == 64'hCAFE_BABE_0000_0001);
-
-        @(negedge clk);
-        phy_ack <= 1'b1;
+        cpu_req <= 1'b0;
         @(posedge clk); #1;
-        check("cpu_ack for write", cpu_ack == 1'b1);
-        @(negedge clk);
-        clear_all;
-        @(negedge clk);
 
-        // ---- Test 3b: CPU byte write uses aligned PHY read-modify-write ----
-        $display("--- Test 3b: CPU byte RMW and held request ---");
+        // --------------------------------------------------------------------
+        $display("--- CPU subword RMW uses two independent PHY words ---");
         @(negedge clk);
         cpu_req   <= 1'b1;
         cpu_addr  <= 32'h8000_0203;
         cpu_wdata <= 64'h0000_0000_0000_00AA;
         cpu_wen   <= 1'b1;
         cpu_size  <= 2'd0;
-
         wait_phy_req;
-        check("byte write starts with PHY read", phy_req && !phy_wen);
-        check("byte RMW read address is 8-byte aligned",
-              phy_addr == 32'h8000_0200);
-
-        // Return the containing word.  Lane 3 (old 0x55) becomes 0xAA.
-        @(negedge clk);
-        phy_rdata <= 64'h1122_3344_5566_7788;
-        phy_ack   <= 1'b1;
-        @(posedge clk); #1;
-        check("RMW inserts a gap between PHY read and write", !phy_req);
-        check("byte RMW preserves all untouched neighbors",
+        check("subword write first launches a read",
+              !phy_wen && phy_addr == 32'h8000_0200);
+        launch_current_word;
+        respond_current_word(64'h1122_3344_5566_7788, 1'b0);
+        check("RMW read does not complete CPU request", !cpu_ack);
+        wait_phy_req;
+        check("RMW write is a new aligned launch",
+              phy_wen && phy_addr == 32'h8000_0200);
+        check("RMW write preserves untouched byte lanes",
               phy_wdata == 64'h1122_3344_AA66_7788);
-
+        launch_current_word;
+        respond_current_word(64'd0, 1'b0);
+        check("CPU ACK waits for RMW write response", cpu_ack);
+        check("RMW performed exactly two launches", phy_launch_count == 3);
         @(negedge clk);
-        phy_ack <= 1'b0;
+        cpu_req <= 1'b0;
+        cpu_wen <= 1'b0;
         @(posedge clk); #1;
-        check("byte RMW issues aligned full-word PHY write",
-              phy_req && phy_wen && phy_addr == 32'h8000_0200);
 
+        // --------------------------------------------------------------------
+        $display("--- Stale high PHY ACK is quarantined before launch ---");
         @(negedge clk);
-        phy_ack <= 1'b1;
-        @(posedge clk); #1;
-        check("CPU ACK waits for RMW write commit", cpu_ack && !phy_req);
-
-        // Keep cpu_req asserted beyond registered ACK, as mp64_memory does.
-        // The accepted transfer must not re-enter IDLE.
-        @(negedge clk);
-        phy_ack <= 1'b0;
-        begin : blk_held_cpu_req
-            integer held_cycle;
-            reg no_duplicate;
-            no_duplicate = 1'b1;
-            for (held_cycle = 0; held_cycle < 4; held_cycle = held_cycle + 1) begin
-                @(posedge clk); #1;
-                if (phy_req || cpu_ack)
-                    no_duplicate = 1'b0;
-            end
-            check("held CPU request is accepted exactly once", no_duplicate);
-        end
-        @(negedge clk);
-        clear_all;
-        @(negedge clk);
-
-        // ---- Test 3c: withdrawn request cancels and drains late PHY ACK ----
-        $display("--- Test 3c: CPU cancellation and recovery ---");
-        @(negedge clk);
+        phy_ack  <= 1'b1;
         cpu_req  <= 1'b1;
-        cpu_addr <= 32'h8000_0305;
+        cpu_addr <= 32'h8000_0300;
         cpu_wen  <= 1'b0;
-        cpu_size <= 2'd0;
+        repeat (4) begin
+            @(posedge clk); #1;
+        end
+        check("stale ACK cannot launch or complete the new request",
+              !phy_req && !cpu_ack && phy_launch_count == 3);
+        @(negedge clk);
+        phy_ack <= 1'b0;
         wait_phy_req;
-        check("unresponsive CPU read reaches PHY", phy_req && !phy_wen);
-
+        launch_current_word;
+        respond_current_word(64'hA55A_5AA5_0102_0304, 1'b0);
+        check("request recovers after stale ACK drains",
+              cpu_ack && cpu_rdata == 64'hA55A_5AA5_0102_0304);
         @(negedge clk);
         cpu_req <= 1'b0;
         @(posedge clk); #1;
-        check("withdrawn CPU request cancels PHY request", !phy_req && !cpu_ack);
 
-        // A tardy response must be drained, not completed or reused.
+        // --------------------------------------------------------------------
+        $display("--- CPU PHY error terminates through documented seam ---");
+        @(negedge clk);
+        cpu_req  <= 1'b1;
+        cpu_addr <= 32'h8000_0400;
+        wait_phy_req;
+        launch_current_word;
+        respond_current_word(64'hFFFF_FFFF_FFFF_FFFF, 1'b1);
+        check("CPU PHY error cannot deadlock the CPU bus", cpu_ack);
+        check("CPU PHY error returns deterministic zero data", cpu_rdata == 0);
+        @(negedge clk);
+        cpu_req <= 1'b0;
+        @(posedge clk); #1;
+
+        // --------------------------------------------------------------------
+        $display("--- Tile read: retained request and eight serialized words ---");
+        expected_image = 512'd0;
+        for (beat = 0; beat < 8; beat = beat + 1)
+            expected_image[beat*64 +: 64] =
+                64'hB100_0000_0000_0000 + beat;
+        @(negedge clk);
+        tile_req  <= 1'b1;
+        tile_addr <= 32'hA000_0040;
+        tile_wen  <= 1'b0;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req   <= 1'b0;
+        tile_addr  <= 32'hDEAD_DEAD;
+        tile_wdata <= {8{64'hBAD0_BAD0_BAD0_BAD0}};
+
+        for (beat = 0; beat < 8; beat = beat + 1) begin
+            wait_phy_req;
+            check("tile read word address advances by eight bytes",
+                  phy_addr == (32'hA000_0040 + beat*8));
+            check("tile read launches one-word PHY requests",
+                  !phy_wen && phy_burst_len == 4'd1);
+            launch_current_word;
+            respond_current_word(expected_image[beat*64 +: 64], 1'b0);
+            if (beat != 7)
+                check("tile ACK waits for all eight words", !tile_ack);
+        end
+        check("tile read returns one terminal success ACK",
+              tile_ack && !tile_error);
+        check("tile read assembles little-endian word order",
+              tile_rdata == expected_image);
+        check("tile request is accepted once", tile_accept_count == 1);
+        check("tile read launches exactly eight physical words",
+              phy_launch_count == 13);
+        @(posedge clk); #1;
+
+        // --------------------------------------------------------------------
+        $display("--- Tile write retains all 512 payload bits after accept ---");
+        write_image = 512'd0;
+        for (beat = 0; beat < 8; beat = beat + 1)
+            write_image[beat*64 +: 64] =
+                64'hC200_0000_0000_0000 + beat;
+        @(negedge clk);
+        tile_req   <= 1'b1;
+        tile_addr  <= 32'hB000_0080;
+        tile_wdata <= write_image;
+        tile_wen   <= 1'b1;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req   <= 1'b0;
+        tile_addr  <= 32'd0;
+        tile_wdata <= 512'd0;
+        tile_wen   <= 1'b0;
+
+        for (beat = 0; beat < 8; beat = beat + 1) begin
+            wait_phy_req;
+            check("tile write word address advances by eight bytes",
+                  phy_addr == (32'hB000_0080 + beat*8));
+            check("tile write uses retained word payload",
+                  phy_wen &&
+                  phy_wdata == write_image[beat*64 +: 64]);
+            launch_current_word;
+            respond_current_word(64'd0, 1'b0);
+        end
+        check("tile write returns terminal success", tile_ack && !tile_error);
+        check("second tile command receives one accept", tile_accept_count == 2);
+        @(posedge clk); #1;
+
+        // --------------------------------------------------------------------
+        $display("--- Tile PHY error stops at exact word and keeps prefix ---");
+        write_image = {8{64'hD300_D300_D300_D300}};
+        @(negedge clk);
+        tile_req   <= 1'b1;
+        tile_addr  <= 32'hC000_0100;
+        tile_wdata <= write_image;
+        tile_wen   <= 1'b1;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req <= 1'b0;
+
+        for (beat = 0; beat < 3; beat = beat + 1) begin
+            wait_phy_req;
+            check("faulting write exposes expected current word",
+                  phy_addr == (32'hC000_0100 + beat*8));
+            launch_current_word;
+            respond_current_word(64'd0, beat == 2);
+        end
+        check("PHY error becomes terminal tile error",
+              tile_ack && tile_error);
+        check("PHY error reports exact physical word address",
+              tile_fault_addr == 64'h0000_0000_C000_0110);
+        repeat (4) begin
+            @(posedge clk); #1;
+        end
+        check("no word after the fault is launched",
+              phy_launch_count == 24);
+
+        // --------------------------------------------------------------------
+        $display("--- Tile cancel before launch issues no physical word ---");
+        begin : cancel_before_launch
+            integer launches_before;
+            launches_before = phy_launch_count;
+            @(negedge clk);
+            tile_req    <= 1'b1;
+            tile_addr   <= 32'hD000_0000;
+            tile_wen    <= 1'b0;
+            tile_cancel <= 1'b0;
+            wait_tile_accept;
+            @(negedge clk);
+            tile_req    <= 1'b0;
+            tile_cancel <= 1'b1;
+            @(posedge clk); #1;
+            check("pre-launch cancel returns a terminal target ACK",
+                  tile_ack && !tile_error);
+            check("pre-launch cancel never reaches PHY",
+                  phy_launch_count == launches_before && !phy_req);
+            @(negedge clk);
+            tile_cancel <= 1'b0;
+            @(posedge clk); #1;
+        end
+
+        // --------------------------------------------------------------------
+        $display("--- Tile cancel after launch drains current response ---");
+        begin : cancel_after_launch
+            integer launches_before;
+            launches_before = phy_launch_count;
+            @(negedge clk);
+            tile_req    <= 1'b1;
+            tile_addr   <= 32'hD100_0000;
+            tile_wen    <= 1'b0;
+            tile_cancel <= 1'b0;
+            wait_tile_accept;
+            @(negedge clk);
+            tile_req <= 1'b0;
+            wait_phy_req;
+            launch_current_word;
+            @(negedge clk);
+            tile_cancel <= 1'b1;
+            @(posedge clk); #1;
+            check("post-launch cancel waits for terminal response", !tile_ack);
+            @(negedge clk);
+            tile_cancel <= 1'b0;
+            repeat (3) begin
+                @(posedge clk); #1;
+            end
+            check("canceled accepted word remains in drain state", !tile_ack);
+            respond_current_word(64'h1111_2222_3333_4444, 1'b0);
+            check("drained canceled word returns target-only ACK",
+                  tile_ack && !tile_error);
+            repeat (4) begin
+                @(posedge clk); #1;
+            end
+            check("post-launch cancel suppresses all later words",
+                  phy_launch_count == launches_before + 1);
+        end
+
+        // --------------------------------------------------------------------
+        $display("--- Launch timeout is bounded and reports word address ---");
+        reset;
+        @(negedge clk);
+        tile_req  <= 1'b1;
+        tile_addr <= 32'hE000_0200;
+        tile_wen  <= 1'b0;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req <= 1'b0;
+        begin : launch_timeout_window
+            integer cycle;
+            reg early_ack;
+            early_ack = 1'b0;
+            for (cycle = 0; cycle < 254; cycle = cycle + 1) begin
+                @(posedge clk); #1;
+                if (tile_ack)
+                    early_ack = 1'b1;
+            end
+            check("launch timeout does not fire before cycle 255", !early_ack);
+            @(posedge clk); #1;
+            check("unaccepted launch times out on cycle 255",
+                  tile_ack && tile_error);
+            check("launch timeout reports exact first word",
+                  tile_fault_addr == 64'h0000_0000_E000_0200);
+        end
+        @(posedge clk); #1;
+
+        // --------------------------------------------------------------------
+        $display("--- Response ACK on cycle 255 wins over timeout ---");
+        reset;
+        @(negedge clk);
+        tile_req  <= 1'b1;
+        tile_addr <= 32'hE100_0300;
+        tile_wen  <= 1'b0;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req <= 1'b0;
+        wait_phy_req;
+        launch_current_word;
+        begin : response_deadline_win
+            integer cycle;
+            reg early_ack;
+            early_ack = 1'b0;
+            for (cycle = 0; cycle < 254; cycle = cycle + 1) begin
+                @(posedge clk); #1;
+                if (tile_ack)
+                    early_ack = 1'b1;
+            end
+            check("response timeout waits through cycle 254", !early_ack);
+            @(negedge clk);
+            phy_rdata <= 64'hF00D_F00D_F00D_F00D;
+            phy_ack   <= 1'b1;
+            @(posedge clk); #1;
+            check("ACK on response cycle 255 beats timeout",
+                  !tile_ack && !tile_error &&
+                  tile_rdata[63:0] == 64'hF00D_F00D_F00D_F00D);
+            @(negedge clk);
+            phy_ack     <= 1'b0;
+            tile_cancel <= 1'b1;
+            @(posedge clk); #1;
+            check("deadline-win transfer can cancel before its next word",
+                  tile_ack && !tile_error);
+            @(negedge clk);
+            tile_cancel <= 1'b0;
+            @(posedge clk); #1;
+        end
+
+        // --------------------------------------------------------------------
+        $display("--- Accepted response timeout is exact and terminal ---");
+        reset;
+        @(negedge clk);
+        tile_req  <= 1'b1;
+        tile_addr <= 32'hE200_0400;
+        tile_wen  <= 1'b0;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req <= 1'b0;
+        wait_phy_req;
+        launch_current_word;
+        begin : response_timeout_window
+            integer cycle;
+            reg early_ack;
+            early_ack = 1'b0;
+            for (cycle = 0; cycle < 254; cycle = cycle + 1) begin
+                @(posedge clk); #1;
+                if (tile_ack)
+                    early_ack = 1'b1;
+            end
+            check("response timeout does not fire before cycle 255",
+                  !early_ack);
+            @(posedge clk); #1;
+            check("missing response times out on cycle 255",
+                  tile_ack && tile_error);
+            check("response timeout reports accepted word address",
+                  tile_fault_addr == 64'h0000_0000_E200_0400);
+            check("accepted-word timeout closes PHY epoch for flush",
+                  phy_cancel);
+        end
+
+        // --------------------------------------------------------------------
+        $display("--- Late timed-out ACK is suppressed before successful reuse ---");
+        @(negedge clk);
+        tile_req   <= 1'b1;
+        tile_addr  <= 32'hE300_0500;
+        tile_wen   <= 1'b0;
+        phy_rdata  <= 64'hDEAD_DEAD_DEAD_DEAD;
+        phy_ack    <= 1'b1;
+        repeat (3) begin
+            @(posedge clk); #1;
+            check("flush barrier ignores late ACK and blocks new accept",
+                  phy_cancel && !phy_req && !tile_accept && !tile_ack);
+        end
+
+        // DONE is asserted only after the PHY has discarded the timed-out
+        // epoch and driven ACK low.  The held replacement may then proceed.
+        @(negedge clk);
+        phy_ack         <= 1'b0;
+        phy_cancel_done <= 1'b1;
+        @(posedge clk); #1;
+        check("PHY cancel completion reopens the controller",
+              !phy_cancel && !tile_accept);
+        @(negedge clk);
+        phy_cancel_done <= 1'b0;
+        @(posedge clk); #1;
+        check("held replacement is accepted after flush", tile_accept);
+        @(negedge clk);
+        tile_req <= 1'b0;
+        wait_phy_req;
+        check("replacement keeps its own post-flush address",
+              phy_addr == 32'hE300_0500);
+        launch_current_word;
+        respond_current_word(64'hACCE_5510_ACCE_5510, 1'b0);
+        check("late ACK cannot contaminate replacement read data",
+              tile_rdata[63:0] == 64'hACCE_5510_ACCE_5510);
+        tile_cancel <= 1'b1;
+        @(posedge clk); #1;
+        check("replacement can retire normally after reuse",
+              tile_ack && !tile_error);
+        @(negedge clk);
+        tile_cancel <= 1'b0;
+        @(posedge clk); #1;
+
+        // --------------------------------------------------------------------
+        $display("--- Reset flushes an accepted PHY epoch before reuse ---");
+        @(negedge clk);
+        tile_req   <= 1'b1;
+        tile_addr  <= 32'hE400_0600;
+        tile_wen   <= 1'b0;
+        wait_tile_accept;
+        @(negedge clk);
+        tile_req <= 1'b0;
+        wait_phy_req;
+        launch_current_word;
+
+        // Reset while the accepted word is awaiting its response.
+        @(negedge clk);
+        rst_n           <= 1'b0;
+        phy_cancel_done <= 1'b0;
+        @(posedge clk); #1;
+        check("reset asserts PHY cancel and suppresses request",
+              phy_cancel && !phy_req);
+
+        // A reset-era tardy response is ignored.  A fresh request held across
+        // reset release remains blocked until the explicit flush completion.
         @(negedge clk);
         phy_ack   <= 1'b1;
         phy_rdata <= 64'hBAD0_BAD0_BAD0_BAD0;
-        @(posedge clk); #1;
-        check("late PHY ACK is ignored during cancellation", !phy_req && !cpu_ack);
-        @(negedge clk);
-        phy_ack <= 1'b0;
-        @(posedge clk); #1;
-
-        // A subsequent request must complete normally after the drain.
-        @(negedge clk);
-        cpu_req  <= 1'b1;
-        cpu_addr <= 32'h8000_0407;
-        wait_phy_req;
-        check("controller accepts request after cancellation",
-              phy_req && phy_addr == 32'h8000_0400);
-        @(negedge clk);
-        phy_rdata <= 64'h0123_4567_89AB_CDEF;
-        phy_ack   <= 1'b1;
-        @(posedge clk); #1;
-        check("post-cancel request returns its own response",
-              cpu_ack && cpu_rdata == 64'h0123_4567_89AB_CDEF);
-        @(negedge clk);
-        clear_all;
-        @(negedge clk);
-
-        // ---- Test 4: Tile 8-beat burst read ----
-        $display("--- Test 4: Tile burst read ---");
-        @(negedge clk);
         tile_req  <= 1'b1;
-        tile_addr <= 32'hA000_0000;
-        tile_wen  <= 1'b0;
-
-        wait_phy_req;
-        check("phy_req for tile burst", phy_req       == 1'b1);
-        check("phy_burst_len is 8",     phy_burst_len == 4'd8);
-
-        // Feed 8 beats
-        begin : blk_t4
-            integer beat;
-            for (beat = 0; beat < 8; beat = beat + 1) begin
-                @(negedge clk);
-                phy_rdata <= {32'hBEAD_0000, beat[15:0], 16'h0000};
-                phy_ack   <= 1'b1;
-                @(posedge clk); #1;
-                @(negedge clk);
-                phy_ack   <= 1'b0;
-                if (beat == 7) tile_req <= 1'b0;
-            end
-        end
-
-        // tile_ack was set at last beat's posedge, still valid now
-        check("tile_ack after burst", tile_ack == 1'b1);
-        check("tile_rdata beat 0", tile_rdata[0*64 +: 64] == {32'hBEAD_0000, 16'd0, 16'h0000});
-        check("tile_rdata beat 7", tile_rdata[7*64 +: 64] == {32'hBEAD_0000, 16'd7, 16'h0000});
-
-        @(negedge clk);
-        clear_all;
-        @(negedge clk);
-
-        // ---- Test 5: Tile 8-beat burst write ----
-        $display("--- Test 5: Tile burst write ---");
-        begin : blk_t5
-            reg [511:0] wpattern;
-            integer i;
-            wpattern = 512'd0;
-            for (i = 0; i < 8; i = i + 1)
-                wpattern[i*64 +: 64] = 64'hAA00_0000 + i;
-
-            @(negedge clk);
-            tile_req   <= 1'b1;
-            tile_addr  <= 32'hB000_0000;
-            tile_wdata <= wpattern;
-            tile_wen   <= 1'b1;
-
-            wait_phy_req;
-            check("tile write phy_req",   phy_req       == 1'b1);
-            check("tile write phy_wen",   phy_wen       == 1'b1);
-            check("tile write burst len", phy_burst_len == 4'd8);
-            check("tile write beat 0",    phy_wdata     == wpattern[0*64 +: 64]);
-
-            // Ack all 8 beats
-            begin : blk_t5b
-                integer beat;
-                for (beat = 0; beat < 8; beat = beat + 1) begin
-                    @(negedge clk);
-                    phy_ack <= 1'b1;
-                    @(posedge clk); #1;
-                    @(negedge clk);
-                    phy_ack <= 1'b0;
-                    if (beat == 7) tile_req <= 1'b0;
-                end
-            end
-
-            check("tile write ack", tile_ack == 1'b1);
-        end
-        @(negedge clk);
-        clear_all;
-        @(negedge clk);
-
-        // ---- Test 6: Tile pre-empts CPU ----
-        $display("--- Test 6: Tile priority ---");
-        @(negedge clk);
-        cpu_req   <= 1'b1;
-        cpu_addr  <= 32'h9000_0000;
-        cpu_wen   <= 1'b0;
-        tile_req  <= 1'b1;
-        tile_addr <= 32'hC000_0000;
-        tile_wen  <= 1'b0;
-
-        wait_phy_req;
-        check("tile gets priority", phy_burst_len == 4'd8);
-        check("tile addr on phy",   phy_addr == 32'hC000_0000);
-
-        // Ack the tile burst (8 beats)
-        begin : blk_t6b
-            integer beat;
-            for (beat = 0; beat < 8; beat = beat + 1) begin
-                @(negedge clk);
-                phy_rdata <= 64'h7000 + beat;
-                phy_ack   <= 1'b1;
-                @(posedge clk); #1;
-                @(negedge clk);
-                phy_ack   <= 1'b0;
-                if (beat == 7) tile_req <= 1'b0;
-            end
-        end
-
-        check("tile ack in priority test", tile_ack == 1'b1);
-
-        // Now CPU should get its turn
-        wait_phy_req;
-        check("CPU served after tile", phy_req == 1'b1 && phy_burst_len == 4'd1);
-
-        @(negedge clk);
-        phy_rdata <= 64'hC000_AF1E;
-        phy_ack   <= 1'b1;
+        tile_addr <= 32'hE500_0700;
         @(posedge clk); #1;
-        check("CPU ack after tile", cpu_ack == 1'b1);
+        check("reset ignores stale response while cancel remains asserted",
+              phy_cancel && !tile_accept);
+        @(negedge clk);
+        rst_n <= 1'b1;
+        @(posedge clk); #1;
+        check("reset release cannot bypass incomplete PHY flush",
+              phy_cancel && !tile_accept && !phy_req);
 
         @(negedge clk);
-        clear_all;
+        phy_ack         <= 1'b0;
+        phy_cancel_done <= 1'b1;
+        @(posedge clk); #1;
+        check("reset flush completion releases quarantine", !phy_cancel);
         @(negedge clk);
+        phy_cancel_done <= 1'b0;
+        @(posedge clk); #1;
+        check("fresh request is accepted only after reset flush",
+              tile_accept);
+        @(negedge clk);
+        tile_req <= 1'b0;
+        wait_phy_req;
+        check("post-reset request retains its own address",
+              phy_addr == 32'hE500_0700);
+        launch_current_word;
+        respond_current_word(64'h5151_5252_5353_5454, 1'b0);
+        check("post-reset response is not stale reset-era data",
+              tile_rdata[63:0] == 64'h5151_5252_5353_5454);
+        tile_cancel <= 1'b1;
+        @(posedge clk); #1;
+        check("post-reset transfer remains usable", tile_ack && !tile_error);
+        @(negedge clk);
+        tile_cancel <= 1'b0;
+        @(posedge clk); #1;
 
-        // ================================================================
-        // Summary
-        // ================================================================
+        // --------------------------------------------------------------------
         $display("");
         $display("=== tb_extmem: %0d passed, %0d failed ===",
                  pass_count, fail_count);
@@ -445,11 +692,8 @@ module tb_extmem;
         $finish;
     end
 
-    // Timeout
     initial begin
-        #500000;
-        $display("TIMEOUT");
-        $finish;
+        #2000000;
+        $fatal(1, "tb_extmem timeout");
     end
-
 endmodule

@@ -32,6 +32,9 @@ module tb_full_core_tile;
     integer done_count1;
     integer done_count2;
     integer done_count3;
+    integer tacc_write_commit_count;
+    reg     track_rr_commits;
+    reg     track_tacc_commits;
 
     mp64_soc #(
         .MEM_DEPTH(16)
@@ -45,9 +48,12 @@ module tb_full_core_tile;
         .phy_wen            (phy_wen),
         .phy_wdata          (phy_wdata),
         .phy_burst_len      (phy_burst_len),
+        .phy_cancel         (),
         .phy_rdata          (64'd0),
         .phy_rvalid         (1'b0),
         .phy_ready          (1'b1),
+        .phy_error          (1'b0),
+        .phy_cancel_done    (1'b1),
         .sd_sck             (sd_sck),
         .sd_mosi            (sd_mosi),
         .sd_miso            (1'b1),
@@ -95,6 +101,9 @@ module tb_full_core_tile;
             done_count1 = 0;
             done_count2 = 0;
             done_count3 = 0;
+            tacc_write_commit_count = 0;
+            track_rr_commits = 1'b0;
+            track_tacc_commits = 1'b0;
         end else begin
             if (u_soc.core_mex_done[0])
                 done_count0 = done_count0 + 1;
@@ -105,14 +114,35 @@ module tb_full_core_tile;
             if (u_soc.core_mex_done[3])
                 done_count3 = done_count3 + 1;
 
-            if (u_soc.tile_write_commit) begin
-                if (u_soc.tile_write_owner !== write_commit_count[2:0]) begin
-                    $display("  FAIL: commit %0d owned by %0d",
+            if (u_soc.tile_write_commit && track_rr_commits) begin
+                // Core zero's preceding TACC STORE consumed the prior turn,
+                // so equal RR fairness resumes at core one and wraps to zero.
+                if (u_soc.tile_write_owner !==
+                    ((write_commit_count + 1) % 4)) begin
+                    $display("  FAIL: commit %0d owned by %0d, expected %0d",
                              write_commit_count,
-                             u_soc.tile_write_owner);
+                             u_soc.tile_write_owner,
+                             (write_commit_count + 1) % 4);
                     fail_count = fail_count + 1;
                 end
                 write_commit_count = write_commit_count + 1;
+            end
+
+            if (u_soc.tile_write_commit && track_tacc_commits) begin
+                if (u_soc.tile_write_owner !== 3'd0 ||
+                    u_soc.tile_write_ext !== 1'b0 ||
+                    u_soc.tile_write_addr !==
+                        (64'h0000_0000_0000_0100 +
+                         tacc_write_commit_count * 64)) begin
+                    $display("  FAIL: TACC beat %0d owner=%0d ext=%0d addr=%h",
+                             tacc_write_commit_count,
+                             u_soc.tile_write_owner,
+                             u_soc.tile_write_ext,
+                             u_soc.tile_write_addr);
+                    fail_count = fail_count + 1;
+                end
+                tacc_write_commit_count =
+                    tacc_write_commit_count + 1;
             end
         end
     end
@@ -125,6 +155,9 @@ module tb_full_core_tile;
         done_count1 = 0;
         done_count2 = 0;
         done_count3 = 0;
+        tacc_write_commit_count = 0;
+        track_rr_commits = 1'b0;
+        track_tacc_commits = 1'b0;
         sys_rst_n = 1'b0;
 
         // Hold CPU fetch and cluster tile producers quiescent.  The focused
@@ -379,6 +412,108 @@ module tb_full_core_tile;
               && u_soc.core_tacc_status[2][TACC_STATUS_BIT_MINE]
               && u_soc.core_tacc_status[3][TACC_STATUS_BIT_MINE]);
 
+        // Exercise the complete SoC image path while all four full-core
+        // domains remain claimed.  Four distinct SRAM rows make beat order
+        // and atomic publication observable without bypassing the shared
+        // transfer stage or the seven-source tile-port arbiter.
+        u_soc.u_memory.g_bank[0].u_sram.mem[0] = {64{8'h11}};
+        u_soc.u_memory.g_bank[0].u_sram.mem[1] = {64{8'h22}};
+        u_soc.u_memory.g_bank[0].u_sram.mem[2] = {64{8'h33}};
+        u_soc.u_memory.g_bank[0].u_sram.mem[3] = {64{8'h44}};
+
+        force u_soc.core_csr_addr[0] = CSR_TSRC0;
+        force u_soc.core_csr_wdata[0] = 64'h0000_0000_0000_0000;
+        force u_soc.core_csr_wen[0] = 1'b1;
+        clock;
+        force u_soc.core_csr_wen[0] = 1'b0;
+        force u_soc.core_csr_addr[0] = CSR_TMODE;
+        force u_soc.core_csr_wdata[0] = {61'd0, TMODE_8};
+        force u_soc.core_csr_wen[0] = 1'b1;
+        clock;
+        force u_soc.core_csr_wen[0] = 1'b0;
+
+        force u_soc.core_mex_funct[0] = ETSYS_TACC_LOAD;
+        force u_soc.core_mex_funct_byte[0] =
+            {5'd0, ETSYS_TACC_LOAD};
+        force u_soc.core_mex_valid[0] = 1'b1;
+        clock;
+        force u_soc.core_mex_valid[0] = 1'b0;
+        check("full-core TACC LOAD enters the shared transfer path",
+              u_soc.core_mex_busy[0]);
+
+        guard = 0;
+        while (!u_soc.core_mex_done[0]) begin
+            clock;
+            guard = guard + 1;
+            if (guard > 100) begin
+                $display("  FAIL: timeout waiting for TACC LOAD");
+                fail_count = fail_count + 1;
+                $fatal(1, "full-core TACC LOAD timeout");
+            end
+        end
+        check("four-beat TACC LOAD completes without a fault",
+              u_soc.core_mex_fault[0] == MEX_FAULT_NONE);
+        clock;
+        check("TACC LOAD publishes the complete image atomically",
+              u_soc.g_full_tile[0].u_tile.tacc_bank_state ==
+                  {{64{8'h44}}, {64{8'h33}},
+                   {64{8'h22}}, {64{8'h11}}});
+        check("successful TACC LOAD leaves valid clean private state",
+              u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_VALID]
+              && !u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_DIRTY]
+              && !u_soc.core_tacc_status_raw[1][TACC_STATUS_BIT_VALID]
+              && !u_soc.core_tacc_status_raw[2][TACC_STATUS_BIT_VALID]
+              && !u_soc.core_tacc_status_raw[3][TACC_STATUS_BIT_VALID]);
+
+        u_soc.u_memory.g_bank[0].u_sram.mem[4] = 512'd0;
+        u_soc.u_memory.g_bank[0].u_sram.mem[5] = 512'd0;
+        u_soc.u_memory.g_bank[0].u_sram.mem[6] = 512'd0;
+        u_soc.u_memory.g_bank[0].u_sram.mem[7] = 512'd0;
+        force u_soc.core_csr_addr[0] = CSR_TDST;
+        force u_soc.core_csr_wdata[0] = 64'h0000_0000_0000_0100;
+        force u_soc.core_csr_wen[0] = 1'b1;
+        clock;
+        force u_soc.core_csr_wen[0] = 1'b0;
+
+        tacc_write_commit_count = 0;
+        track_tacc_commits = 1'b1;
+        force u_soc.core_mex_funct[0] = ETSYS_TACC_STORE;
+        force u_soc.core_mex_funct_byte[0] =
+            {5'd0, ETSYS_TACC_STORE};
+        force u_soc.core_mex_valid[0] = 1'b1;
+        clock;
+        force u_soc.core_mex_valid[0] = 1'b0;
+        check("full-core TACC STORE enters the shared transfer path",
+              u_soc.core_mex_busy[0]);
+
+        guard = 0;
+        while (!u_soc.core_mex_done[0]) begin
+            clock;
+            guard = guard + 1;
+            if (guard > 100) begin
+                $display("  FAIL: timeout waiting for TACC STORE");
+                fail_count = fail_count + 1;
+                $fatal(1, "full-core TACC STORE timeout");
+            end
+        end
+        check("four-beat TACC STORE completes without a fault",
+              u_soc.core_mex_fault[0] == MEX_FAULT_NONE);
+        clock;
+        track_tacc_commits = 1'b0;
+        check("TACC STORE commits exactly four ordered SRAM beats",
+              tacc_write_commit_count == 4);
+        check("TACC STORE writes the canonical image end to end",
+              u_soc.u_memory.g_bank[0].u_sram.mem[4] == {64{8'h11}}
+              && u_soc.u_memory.g_bank[0].u_sram.mem[5] == {64{8'h22}}
+              && u_soc.u_memory.g_bank[0].u_sram.mem[6] == {64{8'h33}}
+              && u_soc.u_memory.g_bank[0].u_sram.mem[7] == {64{8'h44}});
+        check("successful TACC STORE preserves ownership and clean state",
+              u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_CLAIMED]
+              && u_soc.core_tacc_status_raw[0][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd0
+              && u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_VALID]
+              && !u_soc.core_tacc_status_raw[0][TACC_STATUS_BIT_DIRTY]);
+
         // The three shared microcluster engines are distinct TACC domains.
         // Drive their post-arbiter leaf boundaries together, then make a
         // sibling lose TRY without trapping or stealing cluster 0's bank.
@@ -555,6 +690,7 @@ module tb_full_core_tile;
 
         // All four engines admit work together; only their physical memory
         // writes serialize through the seven-source arbiter.
+        track_rr_commits = 1'b1;
         force u_soc.core_mex_valid[0] = 1'b1;
         force u_soc.core_mex_valid[1] = 1'b1;
         force u_soc.core_mex_valid[2] = 1'b1;
@@ -583,8 +719,9 @@ module tb_full_core_tile;
         check("each full-core operation completes exactly once",
               done_count0 == 1 && done_count1 == 1
               && done_count2 == 1 && done_count3 == 1);
-        check("four physical writes complete in 0-1-2-3 RR order",
+        check("four physical writes continue in 1-2-3-0 RR order",
               write_commit_count == 4);
+        track_rr_commits = 1'b0;
         check("all full-core engines return idle",
               !u_soc.core_mex_busy[0] && !u_soc.core_mex_busy[1]
               && !u_soc.core_mex_busy[2] && !u_soc.core_mex_busy[3]);

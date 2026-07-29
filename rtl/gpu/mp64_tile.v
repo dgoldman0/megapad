@@ -16,7 +16,12 @@
 module mp64_tile #(
     parameter [TACC_CALLER_BITS-1:0] TACC_CALLER_BASE =
         {TACC_CALLER_BITS{1'b0}},
-    parameter integer TACC_CALLER_COUNT = 1
+    parameter integer TACC_CALLER_COUNT = 1,
+    parameter [63:0] TACC_BANK0_LIMIT = 64'h0000_0000_0010_0000,
+    parameter [63:0] TACC_EXT_LIMIT   = 64'h0000_0000_FF00_0000,
+    parameter [63:0] TACC_VRAM_BASE   = 64'h0000_0000_FF00_0000,
+    parameter [63:0] TACC_VRAM_LIMIT  = 64'h0000_0000_FF40_0000,
+    parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -53,7 +58,7 @@ module mp64_tile #(
     output wire        mex_done,       // operation complete
     output wire        mex_busy,       // engine busy (stall CPU)
     output wire [2:0]  mex_fault,
-    output reg  [63:0] mex_fault_addr,
+    output wire [63:0] mex_fault_addr,
     output reg         mex_stall_cycle,
 
     // === TACC CSR sidebands ===
@@ -64,6 +69,22 @@ module mp64_tile #(
     input  wire [63:0] tacc_ctl_wdata,
     output wire        tacc_ctl_done,
     output wire [2:0]  tacc_ctl_fault,
+
+    // === Chip-wide canonical-image transfer stage ===
+    output wire         tacc_xfer_req,
+    output wire         tacc_xfer_store,
+    output wire         tacc_xfer_ext,
+    output wire [63:0]  tacc_xfer_base,
+    output wire [2:0]   tacc_xfer_format_ew,
+    output wire [7:0]   tacc_xfer_token,
+    output wire [2047:0] tacc_xfer_store_image,
+    output wire         tacc_xfer_cancel,
+    output wire         tacc_xfer_finish,
+    input  wire         tacc_xfer_done,
+    input  wire [7:0]   tacc_xfer_response_token,
+    input  wire [2:0]   tacc_xfer_fault,
+    input  wire [63:0]  tacc_xfer_fault_addr,
+    input  wire [2047:0] tacc_xfer_load_image,
 
     // === Legacy ACC and caller-private configuration preload ===
     output wire [255:0] legacy_acc_state,
@@ -283,6 +304,7 @@ module mp64_tile #(
     reg         mex_done_reg;
     reg         mex_busy_reg;
     reg [2:0]   mex_fault_reg;
+    reg [63:0]  mex_fault_addr_reg;
     wire        mex_done_internal;
     wire [2:0]  mex_fault_internal;
     reg [511:0] tile_a;
@@ -418,12 +440,116 @@ module mp64_tile #(
              (tacc_req_funct_byte == {5'd0, tacc_req_funct}) &&
              (tacc_req_funct >= ETSYS_TACC_TRY) &&
              (tacc_req_funct <= ETSYS_TACC_RESERVED));
+    wire [63:0] tacc_req_image_addr =
+        (tacc_req_funct == ETSYS_TACC_STORE) ? tdst : tsrc0;
+    wire tacc_req_priv =
+        tacc_req_from_input ? mex_priv : priv_reg;
+    wire [63:0] tacc_req_mpu_base =
+        tacc_req_from_input ? mex_mpu_base : mpu_base_reg;
+    wire [63:0] tacc_req_mpu_limit =
+        tacc_req_from_input ? mex_mpu_limit : mpu_limit_reg;
+    wire tacc_req_mpu_enabled =
+        tacc_req_from_input ? mex_mpu_enabled : mpu_enabled_reg;
+    wire tacc_req_image_operation =
+        (tacc_req_funct == ETSYS_TACC_LOAD) ||
+        (tacc_req_funct == ETSYS_TACC_STORE);
+    wire [64:0] tacc_req_span_end =
+        {1'b0, tacc_req_image_addr} + 65'd256;
+    localparam [63:0] TACC_MMIO_END =
+        64'hFFFF_FF80_0000_0000;
+    reg [2:0]  tacc_req_preflight_fault;
+    reg [63:0] tacc_req_preflight_fault_addr;
+    reg        tacc_req_image_ext;
+    reg        tacc_req_image_hbw;
+
+    // Image preflight is deliberately combinational and complete: no BUSY,
+    // shared-stage ownership, or memory side effect is visible until all 256
+    // bytes have one legal route under the captured caller's policy.
+    always @(*) begin
+        tacc_req_preflight_fault      = MEX_FAULT_NONE;
+        tacc_req_preflight_fault_addr = 64'd0;
+        tacc_req_image_ext            = 1'b0;
+        tacc_req_image_hbw            = 1'b0;
+
+        if (tacc_req_image_operation) begin
+            if (tacc_req_image_addr[5:0] != 6'd0) begin
+                tacc_req_preflight_fault = MEX_FAULT_ALIGN;
+                tacc_req_preflight_fault_addr = tacc_req_image_addr;
+            end else if (tacc_req_image_addr >
+                         64'hFFFF_FFFF_FFFF_FF00) begin
+                tacc_req_preflight_fault = MEX_FAULT_BUS;
+                tacc_req_preflight_fault_addr = 64'd0;
+            end else if ((tacc_req_image_addr < TACC_MMIO_END) &&
+                         (tacc_req_span_end[63:0] > MP64_MMIO_BASE)) begin
+                tacc_req_preflight_fault = MEX_FAULT_BUS;
+                tacc_req_preflight_fault_addr =
+                    (tacc_req_image_addr < MP64_MMIO_BASE) ?
+                    MP64_MMIO_BASE : tacc_req_image_addr;
+            end else if (tacc_req_image_addr < TACC_BANK0_LIMIT) begin
+                if (tacc_req_span_end > {1'b0, TACC_BANK0_LIMIT}) begin
+                    tacc_req_preflight_fault = MEX_FAULT_BUS;
+                    tacc_req_preflight_fault_addr =
+                        TACC_BANK0_LIMIT;
+                end
+            end else if ((tacc_req_image_addr >=
+                          {32'd0, MP64_EXT_MEM_BASE}) &&
+                         (tacc_req_image_addr < TACC_EXT_LIMIT)) begin
+                tacc_req_image_ext = 1'b1;
+                if (tacc_req_span_end > {1'b0, TACC_EXT_LIMIT}) begin
+                    tacc_req_preflight_fault = MEX_FAULT_BUS;
+                    tacc_req_preflight_fault_addr =
+                        TACC_EXT_LIMIT;
+                end
+            end else if ((tacc_req_image_addr >= TACC_VRAM_BASE) &&
+                         (tacc_req_image_addr < TACC_VRAM_LIMIT)) begin
+                tacc_req_image_ext = 1'b1;
+                if (tacc_req_span_end > {1'b0, TACC_VRAM_LIMIT}) begin
+                    tacc_req_preflight_fault = MEX_FAULT_BUS;
+                    tacc_req_preflight_fault_addr =
+                        TACC_VRAM_LIMIT;
+                end
+            end else if ((tacc_req_image_addr >=
+                          {32'd0, MP64_HBW_BASE_ADDR}) &&
+                         (tacc_req_image_addr < TACC_HBW_LIMIT)) begin
+                tacc_req_image_hbw = 1'b1;
+                if (tacc_req_span_end > {1'b0, TACC_HBW_LIMIT}) begin
+                    tacc_req_preflight_fault = MEX_FAULT_BUS;
+                    tacc_req_preflight_fault_addr =
+                        TACC_HBW_LIMIT;
+                end
+            end else begin
+                tacc_req_preflight_fault = MEX_FAULT_BUS;
+                tacc_req_preflight_fault_addr = tacc_req_image_addr;
+            end
+
+            if ((tacc_req_preflight_fault == MEX_FAULT_NONE) &&
+                tacc_req_priv && tacc_req_image_hbw) begin
+                tacc_req_preflight_fault = MEX_FAULT_PRIV;
+                tacc_req_preflight_fault_addr = tacc_req_image_addr;
+            end else if ((tacc_req_preflight_fault == MEX_FAULT_NONE) &&
+                         tacc_req_priv && tacc_req_mpu_enabled) begin
+                if ((tacc_req_image_addr < tacc_req_mpu_base) ||
+                    (tacc_req_image_addr >= tacc_req_mpu_limit)) begin
+                    tacc_req_preflight_fault = MEX_FAULT_PRIV;
+                    tacc_req_preflight_fault_addr =
+                        tacc_req_image_addr;
+                end else if (tacc_req_span_end >
+                             {1'b0, tacc_req_mpu_limit}) begin
+                    tacc_req_preflight_fault = MEX_FAULT_PRIV;
+                    tacc_req_preflight_fault_addr =
+                        tacc_req_mpu_limit;
+                end
+            end
+        end
+    end
+
     wire tacc_req_cancel =
         tacc_req_from_input ? incoming_cancelled : active_cancelled;
     wire tacc_req_ready;
     wire tacc_req_done;
     wire tacc_req_busy;
     wire [2:0] tacc_req_fault;
+    wire [63:0] tacc_req_fault_addr;
     wire [2047:0] tacc_bank_state;
     mp64_tacc #(
         .CALLER_BASE (TACC_CALLER_BASE),
@@ -441,11 +567,28 @@ module mp64_tile #(
         .req_caller_slot       (tacc_req_caller_slot),
         .req_format_ew         (mode_ew),
         .req_format_signed     (mode_signed),
+        .req_image_addr        (tacc_req_image_addr),
+        .req_preflight_fault   (tacc_req_preflight_fault),
+        .req_preflight_fault_addr(tacc_req_preflight_fault_addr),
         .req_cancel            (tacc_req_cancel),
         .req_retire            (mex_retire),
         .req_done              (tacc_req_done),
         .req_busy              (tacc_req_busy),
         .req_fault             (tacc_req_fault),
+        .req_fault_addr        (tacc_req_fault_addr),
+        .xfer_req              (tacc_xfer_req),
+        .xfer_store            (tacc_xfer_store),
+        .xfer_base             (tacc_xfer_base),
+        .xfer_format_ew        (tacc_xfer_format_ew),
+        .xfer_token            (tacc_xfer_token),
+        .xfer_store_image      (tacc_xfer_store_image),
+        .xfer_cancel           (tacc_xfer_cancel),
+        .xfer_finish           (tacc_xfer_finish),
+        .xfer_done             (tacc_xfer_done),
+        .xfer_response_token   (tacc_xfer_response_token),
+        .xfer_fault            (tacc_xfer_fault),
+        .xfer_fault_addr       (tacc_xfer_fault_addr),
+        .xfer_load_image       (tacc_xfer_load_image),
         .force_valid           (tacc_ctl_valid),
         .force_ready           (),
         .force_priv            (tacc_ctl_priv),
@@ -457,6 +600,8 @@ module mp64_tile #(
         .bank_state            (tacc_bank_state)
     );
 
+    assign tacc_xfer_ext = tacc_req_image_ext;
+
     assign mex_done_internal = mex_done_reg | tacc_req_done;
     assign mex_fault_internal =
         tacc_req_done ? tacc_req_fault :
@@ -465,6 +610,8 @@ module mp64_tile #(
     assign mex_done = mex_done_internal;
     assign mex_busy = mex_busy_reg && !tacc_req_done;
     assign mex_fault = mex_fault_internal;
+    assign mex_fault_addr =
+        tacc_req_done ? tacc_req_fault_addr : mex_fault_addr_reg;
 
     // Count only cycles in which the leaf is genuinely blocked on a target
     // acknowledgement.  Dispatch, compute, and fixed completion cycles are
@@ -2071,7 +2218,7 @@ module mp64_tile #(
             mex_done_reg  <= 1'b0;
             mex_busy_reg  <= 1'b0;
             mex_fault_reg <= MEX_FAULT_NONE;
-            mex_fault_addr<= 64'd0;
+            mex_fault_addr_reg <= 64'd0;
             tile_req      <= 1'b0;
             tile_wen      <= 1'b0;
             tile_a        <= 512'd0;
@@ -2113,7 +2260,7 @@ module mp64_tile #(
             mex_done_reg  <= 1'b0;
             mex_busy_reg  <= 1'b0;
             mex_fault_reg <= MEX_FAULT_NONE;
-            mex_fault_addr<= 64'd0;
+            mex_fault_addr_reg <= 64'd0;
             tile_req      <= 1'b0;
             tile_wen      <= 1'b0;
             ext_tile_req  <= 1'b0;
@@ -2167,7 +2314,7 @@ module mp64_tile #(
                 mex_done_reg  <= 1'b0;
                 mex_busy_reg  <= 1'b0;
                 mex_fault_reg <= MEX_FAULT_NONE;
-                mex_fault_addr<= 64'd0;
+                mex_fault_addr_reg <= 64'd0;
                 tile_req      <= 1'b0;
                 tile_wen      <= 1'b0;
                 ext_tile_req  <= 1'b0;
@@ -2179,7 +2326,7 @@ module mp64_tile #(
                 mex_busy_reg <= 1'b0;
                 if (!mex_valid) begin
                     mex_fault_reg  <= MEX_FAULT_NONE;
-                    mex_fault_addr <= 64'd0;
+                    mex_fault_addr_reg <= 64'd0;
                 end
                 if (mex_valid) begin
                     if (incoming_cancelled) begin
@@ -2189,7 +2336,7 @@ module mp64_tile #(
                         state          <= S_IDLE;
                         mex_busy_reg   <= 1'b0;
                         mex_fault_reg  <= MEX_FAULT_NONE;
-                        mex_fault_addr <= 64'd0;
+                        mex_fault_addr_reg <= 64'd0;
                     end else begin
                         op_reg        <= mex_op;
                         funct_reg     <= mex_funct;
@@ -2212,7 +2359,7 @@ module mp64_tile #(
                         tctrl_acc_zero_reg   <= tctrl[1];
                         mex_busy_reg  <= 1'b1;
                         mex_fault_reg <= MEX_FAULT_NONE;
-                        mex_fault_addr<= 64'd0;
+                        mex_fault_addr_reg <= 64'd0;
                         needs_load_c  <= 1'b0;
 
                         // The dedicated state leaf admits lifecycle operations

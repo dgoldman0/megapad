@@ -48,8 +48,11 @@ module mp64_memory #(
     input  wire [31:0]  tile_addr,
     input  wire         tile_wen,
     input  wire [511:0] tile_wdata,
+    output reg          tile_accept,
     output reg  [511:0] tile_rdata,
     output reg          tile_ack,
+    output reg          tile_error,
+    output reg  [63:0]  tile_fault_addr,
 
     // === External memory forward ===
     output reg          ext_req,
@@ -148,41 +151,73 @@ module mp64_memory #(
     // ========================================================================
     // Accept new request only when not already processing one.
 
-    wire tile_start = tile_req && tile_is_valid && !tile_active;
+    // The target accepts both valid and invalid requests.  Invalid addresses
+    // complete through the same registered response path so no requester can
+    // hang waiting for an address decode that silently dropped its pulse.
+    wire tile_start = tile_req && !tile_req_seen && !tile_active;
 
     reg        tile_active;
+    reg        tile_req_seen;
+    reg        tile_valid_r;
     reg [1:0]  tile_bank_sel_r;
+    reg [63:0] tile_fault_addr_r;
 
     always @(posedge clk) begin
         if (!rst_n) begin
             tile_active     <= 1'b0;
+            tile_req_seen   <= 1'b0;
+            tile_valid_r    <= 1'b0;
             tile_bank_sel_r <= 2'd0;
+            tile_fault_addr_r <= 64'd0;
+            tile_accept     <= 1'b0;
             tile_ack        <= 1'b0;
+            tile_error      <= 1'b0;
+            tile_fault_addr <= 64'd0;
             tile_rdata      <= 512'd0;
         end else begin
             tile_active <= tile_start;
+            tile_accept <= tile_start;
             tile_ack    <= 1'b0;
+            tile_error  <= 1'b0;
+            tile_fault_addr <= 64'd0;
 
-            if (tile_start)
+            if (!tile_req)
+                tile_req_seen <= 1'b0;
+
+            if (tile_start) begin
+                tile_req_seen     <= 1'b1;
+                tile_valid_r      <= tile_is_valid;
                 tile_bank_sel_r <= tile_bank_sel;
+                tile_fault_addr_r <=
+                    {32'd0, tile_addr[31:6], 6'b000000};
+            end
 
             if (tile_active) begin
-                tile_ack <= 1'b1;
-                case (tile_bank_sel_r)
-                    2'd0: tile_rdata <= bank_a_rdata[0];
-                    2'd1: tile_rdata <= bank_a_rdata[1];
-                    2'd2: tile_rdata <= bank_a_rdata[2];
-                    2'd3: tile_rdata <= bank_a_rdata[3];
-                endcase
+                tile_ack        <= 1'b1;
+                tile_error      <= !tile_valid_r;
+                tile_fault_addr <= tile_valid_r ? 64'd0
+                                                : tile_fault_addr_r;
+                if (tile_valid_r) begin
+                    case (tile_bank_sel_r)
+                        2'd0: tile_rdata <= bank_a_rdata[0];
+                        2'd1: tile_rdata <= bank_a_rdata[1];
+                        2'd2: tile_rdata <= bank_a_rdata[2];
+                        2'd3: tile_rdata <= bank_a_rdata[3];
+                    endcase
+                end
             end
         end
     end
 
     // Tile SRAM enables (active during start cycle only)
-    assign bank_a_ce[0] = tile_start && (tile_bank_sel == 2'd0);
-    assign bank_a_ce[1] = tile_start && (tile_bank_sel == 2'd1);
-    assign bank_a_ce[2] = tile_start && (tile_bank_sel == 2'd2);
-    assign bank_a_ce[3] = tile_start && (tile_bank_sel == 2'd3);
+    assign bank_a_ce[0] = tile_start && tile_is_valid &&
+                          (tile_bank_sel == 2'd0);
+    assign bank_a_ce[1] = tile_start && tile_is_valid &&
+                          (tile_bank_sel == 2'd1);
+    assign bank_a_ce[2] = tile_start && tile_is_valid &&
+                          (tile_bank_sel == 2'd2);
+    assign bank_a_ce[3] = tile_start && tile_is_valid &&
+                          (tile_bank_sel == 2'd3);
 
     assign bank_a_we[0] = bank_a_ce[0] && tile_wen;
     assign bank_a_we[1] = bank_a_ce[1] && tile_wen;

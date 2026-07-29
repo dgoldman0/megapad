@@ -26,7 +26,12 @@
 
 module mp64_cluster #(
     parameter N               = MP64_MICRO_PER_CLUSTER,
-    parameter [MP64_CORE_ID_BITS-1:0] CLUSTER_ID_BASE = 8'd4
+    parameter [MP64_CORE_ID_BITS-1:0] CLUSTER_ID_BASE = 8'd4,
+    parameter [63:0] TACC_BANK0_LIMIT = 64'h0000_0000_0010_0000,
+    parameter [63:0] TACC_EXT_LIMIT   = 64'h0000_0000_FF00_0000,
+    parameter [63:0] TACC_VRAM_BASE   = 64'h0000_0000_FF00_0000,
+    parameter [63:0] TACC_VRAM_LIMIT  = 64'h0000_0000_FF40_0000,
+    parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -64,7 +69,23 @@ module mp64_cluster #(
     output wire        ext_tile_wen,
     output wire [511:0]ext_tile_wdata,
     input  wire [511:0]ext_tile_rdata,
-    input  wire        ext_tile_ack
+    input  wire        ext_tile_ack,
+
+    // === Shared chip-wide TACC image-transfer stage ===
+    output wire         tacc_xfer_req,
+    output wire         tacc_xfer_store,
+    output wire         tacc_xfer_ext,
+    output wire [63:0]  tacc_xfer_base,
+    output wire [2:0]   tacc_xfer_format_ew,
+    output wire [7:0]   tacc_xfer_token,
+    output wire [2047:0] tacc_xfer_store_image,
+    output wire         tacc_xfer_cancel,
+    output wire         tacc_xfer_finish,
+    input  wire         tacc_xfer_done,
+    input  wire [7:0]   tacc_xfer_response_token,
+    input  wire [2:0]   tacc_xfer_fault,
+    input  wire [63:0]  tacc_xfer_fault_addr,
+    input  wire [2047:0] tacc_xfer_load_image
 );
 
     // ====================================================================
@@ -2140,7 +2161,12 @@ module mp64_cluster #(
     // ====================================================================
     mp64_tile #(
         .TACC_CALLER_BASE (CLUSTER_ID_BASE[TACC_CALLER_BITS-1:0]),
-        .TACC_CALLER_COUNT(N)
+        .TACC_CALLER_COUNT(N),
+        .TACC_BANK0_LIMIT (TACC_BANK0_LIMIT),
+        .TACC_EXT_LIMIT   (TACC_EXT_LIMIT),
+        .TACC_VRAM_BASE   (TACC_VRAM_BASE),
+        .TACC_VRAM_LIMIT  (TACC_VRAM_LIMIT),
+        .TACC_HBW_LIMIT   (TACC_HBW_LIMIT)
     ) u_tile (
         .clk           (clk),
         .rst_n         (~cl_rst),
@@ -2190,6 +2216,21 @@ module mp64_cluster #(
         .tacc_ctl_wdata(te_tacc_ctl_wdata),
         .tacc_ctl_done (te_tacc_ctl_done),
         .tacc_ctl_fault(te_tacc_ctl_fault),
+
+        .tacc_xfer_req (tacc_xfer_req),
+        .tacc_xfer_store(tacc_xfer_store),
+        .tacc_xfer_ext (tacc_xfer_ext),
+        .tacc_xfer_base(tacc_xfer_base),
+        .tacc_xfer_format_ew(tacc_xfer_format_ew),
+        .tacc_xfer_token(tacc_xfer_token),
+        .tacc_xfer_store_image(tacc_xfer_store_image),
+        .tacc_xfer_cancel(tacc_xfer_cancel),
+        .tacc_xfer_finish(tacc_xfer_finish),
+        .tacc_xfer_done(tacc_xfer_done),
+        .tacc_xfer_response_token(tacc_xfer_response_token),
+        .tacc_xfer_fault(tacc_xfer_fault),
+        .tacc_xfer_fault_addr(tacc_xfer_fault_addr),
+        .tacc_xfer_load_image(tacc_xfer_load_image),
 
         // The leaf owns the one physical legacy ACC. Caller-private
         // configuration is copied in the cycle before admitted MEX dispatch.

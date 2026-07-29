@@ -49,9 +49,12 @@ module mp64_soc #(
     output wire        phy_wen,
     output wire [63:0] phy_wdata,
     output wire [7:0]  phy_burst_len,
+    output wire        phy_cancel,
     input  wire [63:0] phy_rdata,
     input  wire        phy_rvalid,
     input  wire        phy_ready,
+    input  wire        phy_error,
+    input  wire        phy_cancel_done,
 
     // === SD Card (SPI) ===
     output wire        sd_sck,
@@ -404,12 +407,33 @@ module mp64_soc #(
     wire [511:0]cluster_ext_tile_rdata [0:NUM_CLUSTERS-1];
     wire        cluster_ext_tile_ack   [0:NUM_CLUSTERS-1];
 
+    wire         cluster_tacc_xfer_req [0:NUM_CLUSTERS-1];
+    wire         cluster_tacc_xfer_store[0:NUM_CLUSTERS-1];
+    wire         cluster_tacc_xfer_ext [0:NUM_CLUSTERS-1];
+    wire [63:0]  cluster_tacc_xfer_base[0:NUM_CLUSTERS-1];
+    wire [2:0]   cluster_tacc_xfer_format_ew[0:NUM_CLUSTERS-1];
+    wire [7:0]   cluster_tacc_xfer_token[0:NUM_CLUSTERS-1];
+    wire [2047:0] cluster_tacc_xfer_store_image[0:NUM_CLUSTERS-1];
+    wire         cluster_tacc_xfer_cancel[0:NUM_CLUSTERS-1];
+    wire         cluster_tacc_xfer_finish[0:NUM_CLUSTERS-1];
+    wire         cluster_tacc_xfer_done[0:NUM_CLUSTERS-1];
+    wire [7:0]   cluster_tacc_xfer_response_token[0:NUM_CLUSTERS-1];
+    wire [2:0]   cluster_tacc_xfer_fault[0:NUM_CLUSTERS-1];
+    wire [63:0]  cluster_tacc_xfer_fault_addr[0:NUM_CLUSTERS-1];
+    wire [2047:0] cluster_tacc_xfer_load_image[0:NUM_CLUSTERS-1];
+
     genvar ki;
     generate
         for (ki = 0; ki < NUM_CLUSTERS; ki = ki + 1) begin : g_cluster
             mp64_cluster #(
                 .N             (CORES_PER_CLUSTER),
-                .CLUSTER_ID_BASE(NUM_CORES[7:0] + ki[7:0] * CORES_PER_CLUSTER[7:0])
+                .CLUSTER_ID_BASE(NUM_CORES[7:0] +
+                                 ki[7:0] * CORES_PER_CLUSTER[7:0]),
+                .TACC_BANK0_LIMIT(BANK0_SIZE),
+                .TACC_EXT_LIMIT  (EXT_MEM_LIMIT),
+                .TACC_VRAM_BASE  ({32'd0, MP64_VRAM_BASE_ADDR}),
+                .TACC_VRAM_LIMIT (VRAM_LIMIT),
+                .TACC_HBW_LIMIT  (HBW_LIMIT)
             ) u_cluster (
                 .clk         (sys_clk),
                 .rst         (rst_h),
@@ -442,7 +466,27 @@ module mp64_soc #(
                 .ext_tile_wen  (cluster_ext_tile_wen[ki]),
                 .ext_tile_wdata(cluster_ext_tile_wdata[ki]),
                 .ext_tile_rdata(cluster_ext_tile_rdata[ki]),
-                .ext_tile_ack  (cluster_ext_tile_ack[ki])
+                .ext_tile_ack  (cluster_ext_tile_ack[ki]),
+
+                .tacc_xfer_req (cluster_tacc_xfer_req[ki]),
+                .tacc_xfer_store(cluster_tacc_xfer_store[ki]),
+                .tacc_xfer_ext (cluster_tacc_xfer_ext[ki]),
+                .tacc_xfer_base(cluster_tacc_xfer_base[ki]),
+                .tacc_xfer_format_ew(
+                    cluster_tacc_xfer_format_ew[ki]),
+                .tacc_xfer_token(cluster_tacc_xfer_token[ki]),
+                .tacc_xfer_store_image(
+                    cluster_tacc_xfer_store_image[ki]),
+                .tacc_xfer_cancel(cluster_tacc_xfer_cancel[ki]),
+                .tacc_xfer_finish(cluster_tacc_xfer_finish[ki]),
+                .tacc_xfer_done(cluster_tacc_xfer_done[ki]),
+                .tacc_xfer_response_token(
+                    cluster_tacc_xfer_response_token[ki]),
+                .tacc_xfer_fault(cluster_tacc_xfer_fault[ki]),
+                .tacc_xfer_fault_addr(
+                    cluster_tacc_xfer_fault_addr[ki]),
+                .tacc_xfer_load_image(
+                    cluster_tacc_xfer_load_image[ki])
             );
         end
     endgenerate
@@ -658,6 +702,10 @@ module mp64_soc #(
     wire [511:0]tile_mem_wdata;
     wire [511:0]tile_mem_rdata;
     wire        tile_mem_ack;
+    wire        tile_mem_accept;
+    wire        tile_mem_cancel;
+    wire        tile_mem_error;
+    wire [63:0] tile_mem_fault_addr;
 
     wire        mem_ext_req;
     wire [63:0] mem_ext_addr;
@@ -687,8 +735,11 @@ module mp64_soc #(
         .tile_addr (tile_mem_addr),
         .tile_wen  (tile_mem_wen),
         .tile_wdata(tile_mem_wdata),
+        .tile_accept(tile_mem_accept),
         .tile_rdata(tile_mem_rdata),
         .tile_ack  (tile_mem_ack),
+        .tile_error(tile_mem_error),
+        .tile_fault_addr(tile_mem_fault_addr),
 
         // External forward
         .ext_req   (mem_ext_req),
@@ -710,6 +761,10 @@ module mp64_soc #(
     wire [511:0]ext_tile_wdata;
     wire [511:0]ext_tile_rdata;
     wire        ext_tile_ack;
+    wire        ext_tile_accept;
+    wire        ext_tile_cancel;
+    wire        ext_tile_error;
+    wire [63:0] ext_tile_fault_addr;
 
     // PHY interface (internal 32-bit addr + phy_ack)
     wire        extmem_phy_req;
@@ -718,6 +773,7 @@ module mp64_soc #(
     wire        extmem_phy_wen;
     wire [63:0] extmem_phy_rdata;
     wire        extmem_phy_ack;
+    wire        extmem_phy_cancel;
     wire [3:0]  extmem_phy_burst_len;
 
     mp64_extmem u_extmem (
@@ -738,25 +794,34 @@ module mp64_soc #(
         .tile_addr (ext_tile_addr[31:0]),
         .tile_wdata(ext_tile_wdata),
         .tile_wen  (ext_tile_wen),
+        .tile_cancel(ext_tile_cancel),
+        .tile_accept(ext_tile_accept),
         .tile_rdata(ext_tile_rdata),
         .tile_ack  (ext_tile_ack),
+        .tile_error(ext_tile_error),
+        .tile_fault_addr(ext_tile_fault_addr),
 
         // PHY
         .phy_req       (extmem_phy_req),
         .phy_addr      (extmem_phy_addr),
         .phy_wdata     (extmem_phy_wdata),
         .phy_wen       (extmem_phy_wen),
+        .phy_ready     (phy_ready),
         .phy_rdata     (extmem_phy_rdata),
         .phy_ack       (extmem_phy_ack),
+        .phy_error     (phy_error),
+        .phy_cancel    (extmem_phy_cancel),
+        .phy_cancel_done(phy_cancel_done),
         .phy_burst_len (extmem_phy_burst_len)
     );
 
     // Adapt internal 32-bit PHY to external 64-bit / rvalid/ready interface
-    assign phy_req       = extmem_phy_req & phy_ready;  // gate on PHY readiness
+    assign phy_req       = extmem_phy_req;
     assign phy_addr      = {32'd0, extmem_phy_addr};
     assign phy_wen       = extmem_phy_wen;
     assign phy_wdata     = extmem_phy_wdata;
     assign phy_burst_len = {4'd0, extmem_phy_burst_len};
+    assign phy_cancel    = extmem_phy_cancel;
     assign extmem_phy_rdata = phy_rdata;
     assign extmem_phy_ack   = phy_rvalid;
 
@@ -780,6 +845,20 @@ module mp64_soc #(
     wire [63:0] core_ext_tile_addr [0:NUM_CORES-1];
     wire        core_ext_tile_wen  [0:NUM_CORES-1];
     wire [511:0]core_ext_tile_wdata[0:NUM_CORES-1];
+    wire        core_tacc_xfer_req [0:NUM_CORES-1];
+    wire        core_tacc_xfer_store[0:NUM_CORES-1];
+    wire        core_tacc_xfer_ext [0:NUM_CORES-1];
+    wire [63:0] core_tacc_xfer_base[0:NUM_CORES-1];
+    wire [2:0]  core_tacc_xfer_format_ew[0:NUM_CORES-1];
+    wire [7:0]  core_tacc_xfer_token[0:NUM_CORES-1];
+    wire [2047:0] core_tacc_xfer_store_image[0:NUM_CORES-1];
+    wire        core_tacc_xfer_cancel[0:NUM_CORES-1];
+    wire        core_tacc_xfer_finish[0:NUM_CORES-1];
+    wire        core_tacc_xfer_done[0:NUM_CORES-1];
+    wire [7:0]  core_tacc_xfer_response_token[0:NUM_CORES-1];
+    wire [2:0]  core_tacc_xfer_fault[0:NUM_CORES-1];
+    wire [63:0] core_tacc_xfer_fault_addr[0:NUM_CORES-1];
+    wire [2047:0] core_tacc_xfer_load_image[0:NUM_CORES-1];
 
     wire [TILE_SOURCE_COUNT-1:0]     tile_src_req_bus;
     wire [TILE_SOURCE_COUNT*32-1:0]  tile_src_addr_bus;
@@ -791,6 +870,39 @@ module mp64_soc #(
     wire [TILE_SOURCE_COUNT*512-1:0] ext_tile_src_wdata_bus;
     wire [TILE_SOURCE_COUNT-1:0] tile_src_ack;
     wire [TILE_SOURCE_COUNT-1:0] ext_tile_src_ack;
+    wire [TILE_SOURCE_COUNT-1:0] tile_src_error;
+    wire [TILE_SOURCE_COUNT-1:0] ext_tile_src_error;
+    wire [TILE_SOURCE_COUNT*64-1:0] tile_src_fault_addr;
+    wire [TILE_SOURCE_COUNT*64-1:0] ext_tile_src_fault_addr;
+    wire [TILE_SOURCE_COUNT-1:0] tile_src_cancel;
+    wire [TILE_SOURCE_COUNT-1:0] tile_src_cancel_done;
+    wire [TILE_SOURCE_COUNT-1:0] tile_src_accept;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_req;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_store;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_ext;
+    wire [TILE_SOURCE_COUNT*64-1:0] tacc_stage_base;
+    wire [TILE_SOURCE_COUNT*3-1:0] tacc_stage_format_ew;
+    wire [TILE_SOURCE_COUNT*8-1:0] tacc_stage_token;
+    wire [TILE_SOURCE_COUNT*2048-1:0] tacc_stage_store_image;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_cancel;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_finish;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_stage_done;
+    wire [TILE_SOURCE_COUNT*8-1:0] tacc_stage_response_token;
+    wire [TILE_SOURCE_COUNT*3-1:0] tacc_stage_fault;
+    wire [TILE_SOURCE_COUNT*64-1:0] tacc_stage_fault_addr;
+    wire [2047:0] tacc_stage_result_image;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_beat_req;
+    wire        tacc_beat_ext;
+    wire [63:0] tacc_beat_addr;
+    wire        tacc_beat_wen;
+    wire [511:0] tacc_beat_wdata;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_port_cancel;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_port_ack =
+        tile_src_ack | ext_tile_src_ack;
+    wire [TILE_SOURCE_COUNT-1:0] tacc_port_error =
+        tile_src_error | ext_tile_src_error;
+    wire [TILE_SOURCE_COUNT*64-1:0] tacc_port_fault_addr;
+    wire [TILE_SOURCE_COUNT-1:0] cluster_disable_cancel;
     wire       tile_write_commit;
     wire [TILE_OWNER_BITS-1:0] tile_write_owner;
     wire       tile_write_ext;
@@ -800,48 +912,172 @@ module mp64_soc #(
     generate
         for (tai = 0; tai < NUM_CORES;
              tai = tai + 1) begin : g_full_tile_arb_lane
-            assign tile_src_req_bus[tai] = core_tile_req[tai];
+            assign tile_src_req_bus[tai] =
+                tacc_beat_req[tai] ? !tacc_beat_ext :
+                core_tile_req[tai];
             assign tile_src_addr_bus[tai*32 +: 32] =
+                tacc_beat_req[tai] ? tacc_beat_addr[31:0] :
                 core_tile_addr[tai];
-            assign tile_src_wen_bus[tai] = core_tile_wen[tai];
+            assign tile_src_wen_bus[tai] =
+                tacc_beat_req[tai] ? tacc_beat_wen :
+                core_tile_wen[tai];
             assign tile_src_wdata_bus[tai*512 +: 512] =
+                tacc_beat_req[tai] ? tacc_beat_wdata :
                 core_tile_wdata[tai];
             assign ext_tile_src_req_bus[tai] =
+                tacc_beat_req[tai] ? tacc_beat_ext :
                 core_ext_tile_req[tai];
             assign ext_tile_src_addr_bus[tai*64 +: 64] =
+                tacc_beat_req[tai] ? tacc_beat_addr :
                 core_ext_tile_addr[tai];
             assign ext_tile_src_wen_bus[tai] =
+                tacc_beat_req[tai] ? tacc_beat_wen :
                 core_ext_tile_wen[tai];
             assign ext_tile_src_wdata_bus[tai*512 +: 512] =
+                tacc_beat_req[tai] ? tacc_beat_wdata :
                 core_ext_tile_wdata[tai];
+
+            assign tacc_stage_req[tai] = core_tacc_xfer_req[tai];
+            assign tacc_stage_store[tai] = core_tacc_xfer_store[tai];
+            assign tacc_stage_ext[tai] = core_tacc_xfer_ext[tai];
+            assign tacc_stage_base[tai*64 +: 64] =
+                core_tacc_xfer_base[tai];
+            assign tacc_stage_format_ew[tai*3 +: 3] =
+                core_tacc_xfer_format_ew[tai];
+            assign tacc_stage_token[tai*8 +: 8] =
+                core_tacc_xfer_token[tai];
+            assign tacc_stage_store_image[tai*2048 +: 2048] =
+                core_tacc_xfer_store_image[tai];
+            assign tacc_stage_cancel[tai] =
+                core_tacc_xfer_cancel[tai];
+            assign tacc_stage_finish[tai] =
+                core_tacc_xfer_finish[tai];
+            assign core_tacc_xfer_done[tai] =
+                tacc_stage_done[tai];
+            assign core_tacc_xfer_response_token[tai] =
+                tacc_stage_response_token[tai*8 +: 8];
+            assign core_tacc_xfer_fault[tai] =
+                tacc_stage_fault[tai*3 +: 3];
+            assign core_tacc_xfer_fault_addr[tai] =
+                tacc_stage_fault_addr[tai*64 +: 64];
+            assign core_tacc_xfer_load_image[tai] =
+                tacc_stage_result_image;
+            assign cluster_disable_cancel[tai] = 1'b0;
         end
 
         for (tai = 0; tai < NUM_CLUSTERS;
              tai = tai + 1) begin : g_cluster_tile_arb_lane
             localparam integer TILE_LANE = CLUSTER_TILE_SOURCE_BASE + tai;
             assign tile_src_req_bus[TILE_LANE] =
+                tacc_beat_req[TILE_LANE] ? !tacc_beat_ext :
                 cluster_tile_req[tai];
             assign tile_src_addr_bus[TILE_LANE*32 +: 32] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_addr[31:0] :
                 cluster_tile_addr[tai];
             assign tile_src_wen_bus[TILE_LANE] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_wen :
                 cluster_tile_wen[tai];
             assign tile_src_wdata_bus[TILE_LANE*512 +: 512] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_wdata :
                 cluster_tile_wdata[tai];
             assign ext_tile_src_req_bus[TILE_LANE] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_ext :
                 cluster_ext_tile_req[tai];
             assign ext_tile_src_addr_bus[TILE_LANE*64 +: 64] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_addr :
                 cluster_ext_tile_addr[tai];
             assign ext_tile_src_wen_bus[TILE_LANE] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_wen :
                 cluster_ext_tile_wen[tai];
             assign ext_tile_src_wdata_bus[TILE_LANE*512 +: 512] =
+                tacc_beat_req[TILE_LANE] ? tacc_beat_wdata :
                 cluster_ext_tile_wdata[tai];
             assign cluster_tile_rdata[tai] = tile_mem_rdata;
             assign cluster_tile_ack[tai] = tile_src_ack[TILE_LANE];
             assign cluster_ext_tile_rdata[tai] = ext_tile_rdata;
             assign cluster_ext_tile_ack[tai] =
                 ext_tile_src_ack[TILE_LANE];
+
+            assign tacc_stage_req[TILE_LANE] =
+                cluster_tacc_xfer_req[tai];
+            assign tacc_stage_store[TILE_LANE] =
+                cluster_tacc_xfer_store[tai];
+            assign tacc_stage_ext[TILE_LANE] =
+                cluster_tacc_xfer_ext[tai];
+            assign tacc_stage_base[TILE_LANE*64 +: 64] =
+                cluster_tacc_xfer_base[tai];
+            assign tacc_stage_format_ew[TILE_LANE*3 +: 3] =
+                cluster_tacc_xfer_format_ew[tai];
+            assign tacc_stage_token[TILE_LANE*8 +: 8] =
+                cluster_tacc_xfer_token[tai];
+            assign tacc_stage_store_image[
+                TILE_LANE*2048 +: 2048] =
+                cluster_tacc_xfer_store_image[tai];
+            assign tacc_stage_cancel[TILE_LANE] =
+                cluster_tacc_xfer_cancel[tai] ||
+                !sysinfo_cluster_en[tai];
+            assign tacc_stage_finish[TILE_LANE] =
+                cluster_tacc_xfer_finish[tai];
+            assign cluster_tacc_xfer_done[tai] =
+                tacc_stage_done[TILE_LANE];
+            assign cluster_tacc_xfer_response_token[tai] =
+                tacc_stage_response_token[TILE_LANE*8 +: 8];
+            assign cluster_tacc_xfer_fault[tai] =
+                tacc_stage_fault[TILE_LANE*3 +: 3];
+            assign cluster_tacc_xfer_fault_addr[tai] =
+                tacc_stage_fault_addr[TILE_LANE*64 +: 64];
+            assign cluster_tacc_xfer_load_image[tai] =
+                tacc_stage_result_image;
+            assign cluster_disable_cancel[TILE_LANE] =
+                !sysinfo_cluster_en[tai];
+        end
+
+        for (tai = 0; tai < TILE_SOURCE_COUNT;
+             tai = tai + 1) begin : g_tacc_fault_mux
+            assign tacc_port_fault_addr[tai*64 +: 64] =
+                ext_tile_src_ack[tai] ?
+                ext_tile_src_fault_addr[tai*64 +: 64] :
+                tile_src_fault_addr[tai*64 +: 64];
         end
     endgenerate
+
+    assign tile_src_cancel =
+        tacc_port_cancel | cluster_disable_cancel;
+
+    mp64_tacc_transfer #(
+        .SOURCE_COUNT(TILE_SOURCE_COUNT),
+        .OWNER_BITS  (TILE_OWNER_BITS),
+        .TOKEN_BITS  (TACC_EPOCH_BITS)
+    ) u_tacc_transfer (
+        .clk                (sys_clk),
+        .rst                (rst_h),
+        .req                (tacc_stage_req),
+        .req_store          (tacc_stage_store),
+        .req_ext            (tacc_stage_ext),
+        .req_base           (tacc_stage_base),
+        .req_format_ew      (tacc_stage_format_ew),
+        .req_token          (tacc_stage_token),
+        .req_store_image    (tacc_stage_store_image),
+        .req_cancel         (tacc_stage_cancel),
+        .finish             (tacc_stage_finish),
+        .port_ack           (tacc_port_ack),
+        .port_error         (tacc_port_error),
+        .port_fault_addr    (tacc_port_fault_addr),
+        .tile_rdata         (tile_mem_rdata),
+        .ext_rdata          (ext_tile_rdata),
+        .port_cancel_done   (tile_src_cancel_done),
+        .beat_req           (tacc_beat_req),
+        .beat_ext           (tacc_beat_ext),
+        .beat_addr          (tacc_beat_addr),
+        .beat_wen           (tacc_beat_wen),
+        .beat_wdata         (tacc_beat_wdata),
+        .port_cancel        (tacc_port_cancel),
+        .done               (tacc_stage_done),
+        .response_token     (tacc_stage_response_token),
+        .response_fault     (tacc_stage_fault),
+        .response_fault_addr(tacc_stage_fault_addr),
+        .result_image       (tacc_stage_result_image)
+    );
 
     mp64_tile_port_arbiter #(
         .SOURCE_COUNT(TILE_SOURCE_COUNT),
@@ -854,26 +1090,52 @@ module mp64_soc #(
         .src_tile_wen   (tile_src_wen_bus),
         .src_tile_wdata (tile_src_wdata_bus),
         .src_tile_ack   (tile_src_ack),
+        .src_tile_error (tile_src_error),
+        .src_tile_fault_addr(tile_src_fault_addr),
         .src_ext_req    (ext_tile_src_req_bus),
         .src_ext_addr   (ext_tile_src_addr_bus),
         .src_ext_wen    (ext_tile_src_wen_bus),
         .src_ext_wdata  (ext_tile_src_wdata_bus),
         .src_ext_ack    (ext_tile_src_ack),
+        .src_ext_error  (ext_tile_src_error),
+        .src_ext_fault_addr(ext_tile_src_fault_addr),
+        .src_cancel     (tile_src_cancel),
+        .src_accept     (tile_src_accept),
+        .src_cancel_done(tile_src_cancel_done),
         .tile_req       (tile_mem_req),
         .tile_addr      (tile_mem_addr),
         .tile_wen       (tile_mem_wen),
         .tile_wdata     (tile_mem_wdata),
+        .tile_accept    (tile_mem_accept),
         .tile_ack       (tile_mem_ack),
+        .tile_error     (tile_mem_error),
+        .tile_fault_addr(tile_mem_fault_addr),
+        .tile_cancel    (tile_mem_cancel),
         .ext_req        (ext_tile_req),
         .ext_addr       (ext_tile_addr),
         .ext_wen        (ext_tile_wen),
         .ext_wdata      (ext_tile_wdata),
+        .ext_accept     (ext_tile_accept),
         .ext_ack        (ext_tile_ack),
+        .ext_error      (ext_tile_error),
+        .ext_fault_addr (ext_tile_fault_addr),
+        .ext_cancel     (ext_tile_cancel),
         .write_commit   (tile_write_commit),
         .write_owner    (tile_write_owner),
         .write_ext      (tile_write_ext),
         .write_addr     (tile_write_addr)
     );
+
+`ifndef SYNTHESIS
+    // A tile engine cannot issue ordinary lane traffic while its TACC
+    // instruction owns that engine.  This makes every one-cycle stage beat
+    // unconditionally capturable in the lane's sole arbiter slot; fail
+    // closed if later integration ever breaks that invariant.
+    always @(posedge sys_clk) begin
+        if (!rst_h && |(tacc_beat_req & ~tile_src_accept))
+            $fatal(1, "TACC beat was not captured by its source lane");
+    end
+`endif
 
     // Read data is shared physically, but ACK is returned only to the captured
     // owner.  Each full-core write invalidates only its paired private
@@ -903,7 +1165,13 @@ module mp64_soc #(
 
             mp64_tile #(
                     .TACC_CALLER_BASE (TACC_CALLER),
-                    .TACC_CALLER_COUNT(1)
+                    .TACC_CALLER_COUNT(1),
+                    .TACC_BANK0_LIMIT (BANK0_SIZE),
+                    .TACC_EXT_LIMIT   (EXT_MEM_LIMIT),
+                    .TACC_VRAM_BASE   (
+                        {32'd0, MP64_VRAM_BASE_ADDR}),
+                    .TACC_VRAM_LIMIT  (VRAM_LIMIT),
+                    .TACC_HBW_LIMIT   (HBW_LIMIT)
                 ) u_tile (
                     .clk       (sys_clk),
                     .rst_n     (sys_rst_n),
@@ -949,6 +1217,26 @@ module mp64_soc #(
                     .tacc_ctl_wdata(core_tacc_ctl_wdata[fti]),
                     .tacc_ctl_done (core_tacc_ctl_done[fti]),
                     .tacc_ctl_fault(core_tacc_ctl_fault[fti]),
+
+                    .tacc_xfer_req (core_tacc_xfer_req[fti]),
+                    .tacc_xfer_store(core_tacc_xfer_store[fti]),
+                    .tacc_xfer_ext (core_tacc_xfer_ext[fti]),
+                    .tacc_xfer_base(core_tacc_xfer_base[fti]),
+                    .tacc_xfer_format_ew(
+                        core_tacc_xfer_format_ew[fti]),
+                    .tacc_xfer_token(core_tacc_xfer_token[fti]),
+                    .tacc_xfer_store_image(
+                        core_tacc_xfer_store_image[fti]),
+                    .tacc_xfer_cancel(core_tacc_xfer_cancel[fti]),
+                    .tacc_xfer_finish(core_tacc_xfer_finish[fti]),
+                    .tacc_xfer_done(core_tacc_xfer_done[fti]),
+                    .tacc_xfer_response_token(
+                        core_tacc_xfer_response_token[fti]),
+                    .tacc_xfer_fault(core_tacc_xfer_fault[fti]),
+                    .tacc_xfer_fault_addr(
+                        core_tacc_xfer_fault_addr[fti]),
+                    .tacc_xfer_load_image(
+                        core_tacc_xfer_load_image[fti]),
 
                     .legacy_acc_state(core_legacy_acc_state[fti]),
                     .legacy_acc_wen(core_legacy_acc_wen[fti]),

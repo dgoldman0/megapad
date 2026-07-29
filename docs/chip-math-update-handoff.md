@@ -1,7 +1,7 @@
 # Full TACC ISA and implementation handoff
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
-  scheduler; Phase 2 Landings 2.1 through 2.3 complete; Landing 2.4 is next
+  scheduler; Phase 2 Landings 2.1 through 2.4 complete; Landing 2.5 is next
 - Date: 2026-07-28
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -537,7 +537,11 @@ word-relative cycle 255 wins; no response or a later response faults at cycle
 255 and reports that word's exact address. The measured model also confirms
 atomic external LOAD, acknowledged-prefix STORE behavior, reset cancellation
 without late callbacks or effects, and successful reuse after a timeout or
-explicit error.
+explicit error. Because the PHY response has no transaction tag, an accepted
+word timeout or reset closes the current response epoch with
+`PHY_CANCEL`; the controller may not reuse the interface until
+`PHY_CANCEL_DONE` guarantees `PHY_ACK` is low and the canceled epoch can
+produce no later response.
 
 Reset scope is also explicit:
 
@@ -1674,6 +1678,104 @@ tile-memory port without premature retirement.
 Preserve ownership and architectural TACC state across transfer faults while
 normalizing every inactive byte of the 256-byte image.
 ```
+
+#### Landing 2.4 completion — 2026-07-28
+
+Landing 2.4 is implemented in the isolated Phase-2 worktree. One chip-wide
+2,048-bit stage now admits image requests from the four private full-core and
+three cluster-shared engines with equal round-robin selection. It snapshots a
+STORE image or assembles a LOAD image, owns that state across four serialized
+512-bit beats, returns a token-qualified held response, and does not expose a
+partial LOAD. U32/S32, FP16, and BF16 transfers normalize bytes 128–255 to
+zero. The stage enters the focused simulation target and every explicit FPGA
+source manifest.
+
+The tile leaf preflights the complete aligned 256-byte span before BUSY or
+traffic. It rejects wrapping, MMIO, holes, cross-region spans, user HBW, and
+MPU violations with the first forbidden address. LOAD atomically publishes
+the complete image only at retirement. STORE uses the latched TACC format,
+retains a stable bank snapshot for all four beats, preserves the bank and
+preinstruction DIRTY value on a transport fault, and clears DIRTY only after
+the fourth successful acknowledgement and retirement.
+
+The internal and external 512-bit targets now explicitly acknowledge request
+capture and return terminal error plus a 64-bit fault address. External tile
+accesses retain their complete payload, serialize eight one-word PHY
+transactions per tile beat, hold each request through `PHY_READY`, and bound
+both launch and response waits to 255 cycles. An accepted-word timeout or
+controller reset closes the external response epoch: `PHY_CANCEL` remains
+asserted, new requests remain blocked, and late acknowledgements are ignored
+until `PHY_CANCEL_DONE` guarantees that `PHY_ACK` is low and no response from
+the canceled epoch can recur. Tied-off wrappers acknowledge immediately only
+because they contain no PHY response state. The seven-source tile arbiter
+holds target requests through acceptance, including coincident acceptance and
+cancel, routes error metadata only to the captured owner, and cancels pending
+work or drains accepted stale work without delivering its completion. Cluster
+disable drives that cancellation directly, so a disabled engine cannot leave
+a captured image beat behind for a re-enabled caller.
+
+The production SoC routes each TACC beat through its owning engine's existing
+source lane rather than creating an eighth memory source. The full-core
+integration bench seeds four SRAM rows, loads them through the shared stage
+into core 0's private TACC, stores the same canonical image into four new
+rows, checks exact owner/address order, and proves that the other three
+private banks remain unchanged. The prior transfer advances the ordinary
+memory arbiter cursor, and the existing four-core test correctly continues
+equal round-robin service in 1–2–3–0 order.
+
+Sequential verification record:
+
+- `memory`: 30 checks passed;
+- `extmem`: 175 checks passed, including timeout/reset quarantine, late-response
+  suppression, and post-flush reuse;
+- `platform_sim`: 5 checks passed after making its source manifest elaborate
+  the real SoC hierarchy;
+- `tile_port_arbiter`: 114 checks passed;
+- `tacc_transfer`: 395 checks passed, plus focused Yosys `hierarchy`, `proc`,
+  and `check`;
+- `tacc`: 179 lifecycle and transfer-terminal checks passed;
+- `tacc_cycles`: 56 timing, preflight, and fault checks passed;
+- `tile`: 85 datapath/lifecycle checks and 34 write-ack checks passed;
+- `cluster`: 136 checks passed;
+- `full_core_tile`: 31 private-engine and end-to-end image checks passed;
+- `disk_bus_dma`: 15 checks passed;
+- `nic_bus`: 11 checks passed;
+- reduced-parameter `soc_smoke`: 7 checks passed;
+- `soc_tile_icache`: 11 checks passed; and
+- full `mp64_soc` elaboration passed with only the established sized-hex
+  warnings.
+
+Nonblocking findings intentionally remain visible for closure rather than
+expanding this functional landing:
+
+- `PERF_STALLS` does not yet distinguish the four TACC transfer service
+  acknowledgements from stage-acquisition, arbiter, and target wait cycles.
+  Exact emulator/RTL cycle and counter parity remains an explicit Landing 2.8
+  closure gate alongside `PERF_TILE_OPS`. The locked successful external-image
+  increment of 32 serialized PHY words is also not yet connected to
+  `PERF_EXTMEM` and remains part of that counter closure;
+- a microcore's `mex_allow_cluster_spad` policy bit is captured with the
+  operation, but TACC image preflight and the four-beat transport do not yet
+  recognize or route the cluster-local scratchpad aperture. Landing 2.8 must
+  either implement that explicit private route or close the policy contract
+  before differential sign-off;
+- the focused stage, target, and arbiter benches cover faults, timeouts,
+  cancellation, stale responses, canonical padding, and all-seven admission,
+  but the exhaustive reset-at-every-state and seven-engine contended SoC
+  matrix remains in the planned `tacc_soc` closure bench in Landing 2.8;
+- the pre-existing CPU/DMA memory transports have no error qualifier. External
+  PHY error or timeout therefore completes those non-TACC requests with
+  deterministic zero data instead of a precise trap, while TACC receives the
+  new error and fault-address path. Ordinary non-TACC tile operations also do
+  not yet consume the target error qualifier;
+- the standalone legacy `tb_mp64_soc` harness is not an active Make target and
+  still names hierarchy that predates the private full-core tile engines. A
+  direct elaboration therefore fails before simulation; Landing 2.8 should
+  rebase that harness onto supported observability points or remove it, while
+  the active full-SoC elaboration, platform, smoke, private-engine, and
+  coherence gates all pass; and
+- heavyweight implementation, physical resource deltas, timing, and exact
+  seven-bank post-synthesis evidence remain approval-gated Landing 2.9 work.
 
 ### Landing 2.5 — integer accumulation slice
 

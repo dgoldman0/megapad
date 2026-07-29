@@ -69,6 +69,7 @@ set rtl_files [list \
     ${RTL_DIR}/crypto/mp64_wots.v                  \
     ${RTL_DIR}/soc/mp64_core_bus_mux.v             \
     ${RTL_DIR}/soc/mp64_tile_port_arbiter.v        \
+    ${RTL_DIR}/soc/mp64_tacc_transfer.v            \
     ${RTL_DIR}/soc/mp64_soc.v                      \
     ${RTL_DIR}/target/xilinx7/mp64_synth_top.v     \
 ]

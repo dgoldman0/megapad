@@ -39,10 +39,11 @@ module tb_mp64_soc;
     reg [63:0] ext_mem [0:32767];  // 256 KiB external
 
     wire        phy_req;
-    wire [31:0] phy_addr;
+    wire [63:0] phy_addr;
     wire        phy_wen;
     wire [63:0] phy_wdata;
-    wire [3:0]  phy_burst_len;
+    wire [7:0]  phy_burst_len;
+    wire        phy_cancel;
     reg  [63:0] phy_rdata;
     reg         phy_rvalid;
     reg         phy_ready;
@@ -50,13 +51,16 @@ module tb_mp64_soc;
     // Simple 2-cycle latency PHY model
     reg [3:0]  phy_state;
     reg [3:0]  phy_cnt;
-    reg [31:0] phy_cur_addr;
-    reg [3:0]  phy_burst_rem;
+    reg [63:0] phy_cur_addr;
 
     localparam PHY_IDLE   = 4'd0;
     localparam PHY_READ   = 4'd1;
     localparam PHY_WRITE  = 4'd2;
-    localparam PHY_BURST  = 4'd3;
+
+    // This model clears every pending response synchronously when cancel is
+    // observed.  DONE goes high only once no stale ACK can still be emitted.
+    wire phy_cancel_done =
+        phy_cancel && phy_state == PHY_IDLE && !phy_rvalid;
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
@@ -64,6 +68,13 @@ module tb_mp64_soc;
             phy_ready  <= 1'b1;
             phy_state  <= PHY_IDLE;
             phy_rdata  <= 64'd0;
+            phy_cnt    <= 4'd0;
+            phy_cur_addr <= 64'd0;
+        end else if (phy_cancel) begin
+            phy_rvalid <= 1'b0;
+            phy_ready  <= 1'b1;
+            phy_state  <= PHY_IDLE;
+            phy_cnt    <= 4'd0;
         end else begin
             phy_rvalid <= 1'b0;
 
@@ -73,7 +84,6 @@ module tb_mp64_soc;
                     if (phy_req) begin
                         phy_ready     <= 1'b0;
                         phy_cur_addr  <= phy_addr;
-                        phy_burst_rem <= phy_burst_len;
                         phy_cnt       <= 4'd1;  // 1-cycle latency
                         if (phy_wen)
                             phy_state <= PHY_WRITE;
@@ -88,13 +98,8 @@ module tb_mp64_soc;
                     end else begin
                         phy_rdata  <= ext_mem[phy_cur_addr[17:3]];
                         phy_rvalid <= 1'b1;
-                        if (phy_burst_rem > 0) begin
-                            phy_cur_addr  <= phy_cur_addr + 32'd8;
-                            phy_burst_rem <= phy_burst_rem - 1;
-                        end else begin
-                            phy_ready <= 1'b1;
-                            phy_state <= PHY_IDLE;
-                        end
+                        phy_ready  <= 1'b1;
+                        phy_state  <= PHY_IDLE;
                     end
                 end
 
@@ -103,13 +108,9 @@ module tb_mp64_soc;
                         phy_cnt <= phy_cnt - 1;
                     end else begin
                         ext_mem[phy_cur_addr[17:3]] <= phy_wdata;
-                        if (phy_burst_rem > 0) begin
-                            phy_cur_addr  <= phy_cur_addr + 32'd8;
-                            phy_burst_rem <= phy_burst_rem - 1;
-                        end else begin
-                            phy_ready <= 1'b1;
-                            phy_state <= PHY_IDLE;
-                        end
+                        phy_rvalid <= 1'b1;
+                        phy_ready  <= 1'b1;
+                        phy_state  <= PHY_IDLE;
                     end
                 end
             endcase
@@ -205,9 +206,12 @@ module tb_mp64_soc;
         .phy_wen      (phy_wen),
         .phy_wdata    (phy_wdata),
         .phy_burst_len(phy_burst_len),
+        .phy_cancel   (phy_cancel),
         .phy_rdata    (phy_rdata),
         .phy_rvalid   (phy_rvalid),
         .phy_ready    (phy_ready),
+        .phy_error    (1'b0),
+        .phy_cancel_done(phy_cancel_done),
         .sd_sck       (sd_sck),
         .sd_mosi      (sd_mosi),
         .sd_miso      (sd_miso),

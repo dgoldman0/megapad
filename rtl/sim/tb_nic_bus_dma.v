@@ -98,7 +98,8 @@ module tb_nic_bus_dma;
         .cpu_wen(mem_wen), .cpu_size(mem_size),
         .cpu_rdata(mem_rdata), .cpu_ack(mem_ack),
         .tile_req(1'b0), .tile_addr(32'd0), .tile_wen(1'b0),
-        .tile_wdata(512'd0), .tile_rdata(), .tile_ack(),
+        .tile_wdata(512'd0), .tile_accept(), .tile_rdata(), .tile_ack(),
+        .tile_error(), .tile_fault_addr(),
         .ext_req(), .ext_addr(), .ext_wdata(), .ext_wen(), .ext_size(),
         .ext_rdata(64'd0), .ext_ack(1'b0)
     );

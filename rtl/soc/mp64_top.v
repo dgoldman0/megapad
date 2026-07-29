@@ -56,9 +56,12 @@ module mp64_top #(
     output wire        phy_wen,
     output wire [63:0] phy_wdata,
     output wire [7:0]  phy_burst_len,
+    output wire        phy_cancel,
     input  wire [63:0] phy_rdata,
     input  wire        phy_rvalid,
     input  wire        phy_ready,
+    input  wire        phy_error,
+    input  wire        phy_cancel_done,
 
     // === NIC PHY ===
     output wire        nic_tx_valid,
@@ -100,9 +103,12 @@ module mp64_top #(
         .phy_wen       (phy_wen),
         .phy_wdata     (phy_wdata),
         .phy_burst_len (phy_burst_len),
+        .phy_cancel    (phy_cancel),
         .phy_rdata     (phy_rdata),
         .phy_rvalid    (phy_rvalid),
         .phy_ready     (phy_ready),
+        .phy_error     (phy_error),
+        .phy_cancel_done(phy_cancel_done),
 
         // SD Card
         .sd_sck        (sd_sck),

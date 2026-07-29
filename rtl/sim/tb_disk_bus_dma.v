@@ -147,7 +147,8 @@ module tb_disk_bus_dma;
         .cpu_wdata(mem_wdata), .cpu_wen(mem_wen), .cpu_size(mem_size),
         .cpu_rdata(mem_rdata), .cpu_ack(mem_ack),
         .tile_req(1'b0), .tile_addr(32'd0), .tile_wen(1'b0),
-        .tile_wdata(512'd0), .tile_rdata(), .tile_ack(),
+        .tile_wdata(512'd0), .tile_accept(), .tile_rdata(), .tile_ack(),
+        .tile_error(), .tile_fault_addr(),
         .ext_req(ext_req), .ext_addr(ext_addr), .ext_wdata(ext_wdata),
         .ext_wen(ext_wen), .ext_size(ext_size),
         .ext_rdata(ext_rdata), .ext_ack(ext_ack)
@@ -159,7 +160,10 @@ module tb_disk_bus_dma;
     wire        ext_phy_wen;
     wire [63:0] ext_phy_rdata;
     wire        ext_phy_ack;
+    wire        ext_phy_ready;
+    wire        ext_phy_cancel;
     wire [3:0]  ext_phy_burst_len;
+    reg         ext_phy_pending;
     reg         phy_stall;
     reg [63:0]  phy_words [0:511];
     wire        ext_phy_in_range = (ext_phy_addr >= EXT_BASE[31:0]) &&
@@ -169,11 +173,23 @@ module tb_disk_bus_dma;
 
     assign ext_phy_rdata = ext_phy_in_range ?
                            phy_words[ext_phy_word_index] : 64'd0;
-    assign ext_phy_ack = ext_phy_req && ext_phy_in_range && !phy_stall;
+    assign ext_phy_ready = ext_phy_in_range && !phy_stall &&
+                           !ext_phy_cancel;
+    assign ext_phy_ack = ext_phy_pending;
 
     always @(posedge clk) begin
-        if (ext_phy_req && ext_phy_ack && ext_phy_wen)
-            phy_words[ext_phy_word_index] <= ext_phy_wdata;
+        if (!rst_n) begin
+            ext_phy_pending <= 1'b0;
+        end else begin
+            ext_phy_pending <= 1'b0;
+            if (ext_phy_cancel) begin
+                ext_phy_pending <= 1'b0;
+            end else if (ext_phy_req && ext_phy_ready) begin
+                ext_phy_pending <= 1'b1;
+                if (ext_phy_wen)
+                    phy_words[ext_phy_word_index] <= ext_phy_wdata;
+            end
+        end
     end
 
     mp64_extmem u_extmem (
@@ -182,10 +198,13 @@ module tb_disk_bus_dma;
         .cpu_wdata(ext_wdata), .cpu_wen(ext_wen), .cpu_size(ext_size),
         .cpu_rdata(ext_rdata), .cpu_ack(ext_ack),
         .tile_req(1'b0), .tile_addr(32'd0), .tile_wdata(512'd0),
-        .tile_wen(1'b0), .tile_rdata(), .tile_ack(),
+        .tile_wen(1'b0), .tile_cancel(1'b0), .tile_accept(),
+        .tile_rdata(), .tile_ack(), .tile_error(), .tile_fault_addr(),
         .phy_req(ext_phy_req), .phy_addr(ext_phy_addr),
         .phy_wdata(ext_phy_wdata), .phy_wen(ext_phy_wen),
-        .phy_rdata(ext_phy_rdata), .phy_ack(ext_phy_ack),
+        .phy_ready(ext_phy_ready), .phy_rdata(ext_phy_rdata),
+        .phy_ack(ext_phy_ack), .phy_error(1'b0),
+        .phy_cancel(ext_phy_cancel), .phy_cancel_done(1'b1),
         .phy_burst_len(ext_phy_burst_len)
     );
 

@@ -21,8 +21,8 @@
 // leaf response.  req_valid may be a pulse, so integration must retain a
 // request for which req_ready is low.
 //
-// LOAD, STORE, and TAMAC fail closed until their dedicated data-movement and
-// arithmetic landings add tokened staging and terminal interfaces.
+// LOAD and STORE use a tokened chip-wide staging interface below. TAMAC
+// remains fail-closed until its dedicated arithmetic landing.
 //
 // FORCE is an independent, level-valid, de-duplicated control transport.
 // An accepted supervisor FORCE defeats idle admission in the same cycle.  If
@@ -51,11 +51,32 @@ module mp64_tacc #(
     input  wire [1:0]   req_caller_slot,
     input  wire [2:0]   req_format_ew,
     input  wire         req_format_signed,
+    input  wire [63:0]  req_image_addr,
+    input  wire [2:0]   req_preflight_fault,
+    input  wire [63:0]  req_preflight_fault_addr,
     input  wire         req_cancel,
     input  wire         req_retire,
     output reg          req_done,
     output wire         req_busy,
     output reg  [2:0]   req_fault,
+    output reg  [63:0]  req_fault_addr,
+
+    // One chip-wide image stage arbitrates these level-held requests across
+    // the seven physical engines.  The response remains held by that stage
+    // until xfer_finish reaches the architectural retirement edge.
+    output wire         xfer_req,
+    output wire         xfer_store,
+    output wire [63:0]  xfer_base,
+    output wire [2:0]   xfer_format_ew,
+    output wire [7:0]   xfer_token,
+    output wire [2047:0] xfer_store_image,
+    output wire         xfer_cancel,
+    output wire         xfer_finish,
+    input  wire         xfer_done,
+    input  wire [7:0]   xfer_response_token,
+    input  wire [2:0]   xfer_fault,
+    input  wire [63:0]  xfer_fault_addr,
+    input  wire [2047:0] xfer_load_image,
 
     // Independent TACC_CTL transport.  force_priv is 0 for supervisor and
     // 1 for user, matching the CPU privilege encoding.
@@ -88,6 +109,9 @@ module mp64_tacc #(
     reg [4:0]    active_caller_id_reg;
     reg [2:0]    active_format_ew_reg;
     reg          active_format_signed_reg;
+    reg [63:0]   active_image_addr_reg;
+    reg [7:0]    active_token_reg;
+    reg [7:0]    operation_generation_reg;
 
     // Held-valid de-duplication prevents a just-completed request from being
     // admitted again before its producer observes completion and drops valid.
@@ -173,8 +197,10 @@ module mp64_tacc #(
         format_is_legal(req_format_ew) &&
         format_signed_is_known(req_format_ew, req_format_signed);
     reg [2:0] incoming_fault;
+    reg [63:0] incoming_fault_addr;
     always @(*) begin
         incoming_fault = MEX_FAULT_ILLEGAL;
+        incoming_fault_addr = 64'd0;
 
         if (incoming_caller_allowed) begin
             // case/default makes an unknown canonicality or operation tag
@@ -190,10 +216,41 @@ module mp64_tacc #(
                                 incoming_fault = MEX_FAULT_NONE;
 
                         ETSYS_TACC_LOAD:
-                            incoming_fault = MEX_FAULT_ILLEGAL;
+                            if (incoming_mine && incoming_format_legal) begin
+                                case (req_preflight_fault)
+                                    MEX_FAULT_NONE:
+                                        incoming_fault = MEX_FAULT_NONE;
+                                    MEX_FAULT_ALIGN,
+                                    MEX_FAULT_BUS,
+                                    MEX_FAULT_PRIV: begin
+                                        incoming_fault =
+                                            req_preflight_fault;
+                                        incoming_fault_addr =
+                                            req_preflight_fault_addr;
+                                    end
+                                    default:
+                                        incoming_fault = MEX_FAULT_ILLEGAL;
+                                endcase
+                            end
 
                         ETSYS_TACC_STORE:
-                            incoming_fault = MEX_FAULT_ILLEGAL;
+                            if (incoming_mine && valid_reg &&
+                                format_is_legal(format_ew_reg)) begin
+                                case (req_preflight_fault)
+                                    MEX_FAULT_NONE:
+                                        incoming_fault = MEX_FAULT_NONE;
+                                    MEX_FAULT_ALIGN,
+                                    MEX_FAULT_BUS,
+                                    MEX_FAULT_PRIV: begin
+                                        incoming_fault =
+                                            req_preflight_fault;
+                                        incoming_fault_addr =
+                                            req_preflight_fault_addr;
+                                    end
+                                    default:
+                                        incoming_fault = MEX_FAULT_ILLEGAL;
+                                endcase
+                            end
 
                         ETSYS_TACC_RELEASE:
                             if (incoming_mine)
@@ -270,6 +327,25 @@ module mp64_tacc #(
         !active_reg && !req_done && !force_pending_reg && !req_seen &&
         !force_authorized_new;
 
+    wire active_is_transfer =
+        (active_funct_reg == ETSYS_TACC_LOAD) ||
+        (active_funct_reg == ETSYS_TACC_STORE);
+    assign xfer_req =
+        active_reg && active_is_transfer && !req_done &&
+        request_not_cancelled;
+    assign xfer_store =
+        active_funct_reg == ETSYS_TACC_STORE;
+    assign xfer_base = active_image_addr_reg;
+    assign xfer_format_ew = active_format_ew_reg;
+    assign xfer_token = active_token_reg;
+    assign xfer_store_image = bank_reg;
+    assign xfer_cancel =
+        active_reg && active_is_transfer &&
+        (!request_not_cancelled || engine_reset);
+    assign xfer_finish =
+        active_reg && active_is_transfer && req_done &&
+        request_not_cancelled && response_retired;
+
     assign bank_state = bank_reg;
     assign status_raw = {
         43'd0,
@@ -299,10 +375,14 @@ module mp64_tacc #(
             active_caller_id_reg        <= TACC_OWNER_NONE;
             active_format_ew_reg        <= 3'd0;
             active_format_signed_reg    <= 1'b0;
+            active_image_addr_reg       <= 64'd0;
+            active_token_reg            <= 8'd0;
+            operation_generation_reg    <= 8'd0;
             req_seen                    <= 1'b0;
             force_seen                  <= 1'b0;
             req_done                    <= 1'b0;
             req_fault                   <= MEX_FAULT_NONE;
+            req_fault_addr              <= 64'd0;
             force_done                  <= 1'b0;
             force_fault                 <= MEX_FAULT_NONE;
         end else if (engine_reset) begin
@@ -318,12 +398,16 @@ module mp64_tacc #(
             active_caller_id_reg        <= TACC_OWNER_NONE;
             active_format_ew_reg        <= 3'd0;
             active_format_signed_reg    <= 1'b0;
+            active_image_addr_reg       <= 64'd0;
+            active_token_reg            <= 8'd0;
+            operation_generation_reg    <= operation_generation_reg + 8'd1;
             // A request held across reset belongs to the canceled execution
             // context.  Mark it seen until its source drops valid.
             req_seen                    <= req_valid;
             force_seen                  <= force_valid;
             req_done                    <= 1'b0;
             req_fault                   <= MEX_FAULT_NONE;
+            req_fault_addr              <= 64'd0;
             force_done                  <= 1'b0;
             force_fault                 <= MEX_FAULT_NONE;
         end else begin
@@ -354,6 +438,8 @@ module mp64_tacc #(
                         format_ew_reg     <= 3'd0;
                         format_signed_reg <= 1'b0;
                         force_pending_reg <= 1'b0;
+                        operation_generation_reg <=
+                            operation_generation_reg + 8'd1;
                     end
                 end
             end
@@ -365,6 +451,7 @@ module mp64_tacc #(
                 if (!request_not_cancelled) begin
                     req_done  <= 1'b0;
                     req_fault <= MEX_FAULT_NONE;
+                    req_fault_addr <= 64'd0;
                     if (active_reg) begin
                         active_reg <= 1'b0;
                         if (force_pending_reg || force_authorized_new) begin
@@ -375,11 +462,14 @@ module mp64_tacc #(
                             format_ew_reg     <= 3'd0;
                             format_signed_reg <= 1'b0;
                             force_pending_reg <= 1'b0;
+                            operation_generation_reg <=
+                                operation_generation_reg + 8'd1;
                         end
                     end
                 end else if (response_retired) begin
                     req_done  <= 1'b0;
                     req_fault <= MEX_FAULT_NONE;
+                    req_fault_addr <= 64'd0;
                     if (active_reg) begin
                         active_reg <= 1'b0;
 
@@ -393,6 +483,8 @@ module mp64_tacc #(
                             format_ew_reg     <= 3'd0;
                             format_signed_reg <= 1'b0;
                             force_pending_reg <= 1'b0;
+                            operation_generation_reg <=
+                                operation_generation_reg + 8'd1;
                         end else if (req_fault == MEX_FAULT_NONE) begin
                             case (active_funct_reg)
                                 ETSYS_TACC_TRY: begin
@@ -411,6 +503,22 @@ module mp64_tacc #(
                                         active_format_signed_reg;
                                 end
 
+                                ETSYS_TACC_LOAD: begin
+                                    bank_reg          <= xfer_load_image;
+                                    valid_reg         <= 1'b1;
+                                    dirty_reg         <= 1'b0;
+                                    format_ew_reg     <= active_format_ew_reg;
+                                    format_signed_reg <=
+                                        active_format_signed_reg;
+                                end
+
+                                ETSYS_TACC_STORE: begin
+                                    // The canonical image is already visible
+                                    // in memory. Architectural state changes
+                                    // only by clearing DIRTY at retirement.
+                                    dirty_reg <= 1'b0;
+                                end
+
                                 ETSYS_TACC_RELEASE: begin
                                     bank_reg          <= 2048'd0;
                                     owner_reg         <= TACC_OWNER_NONE;
@@ -418,6 +526,8 @@ module mp64_tacc #(
                                     dirty_reg         <= 1'b0;
                                     format_ew_reg     <= 3'd0;
                                     format_signed_reg <= 1'b0;
+                                    operation_generation_reg <=
+                                        operation_generation_reg + 8'd1;
                                 end
 
                                 default: begin
@@ -443,6 +553,8 @@ module mp64_tacc #(
                         format_ew_reg     <= 3'd0;
                         format_signed_reg <= 1'b0;
                         force_pending_reg <= 1'b0;
+                        operation_generation_reg <=
+                            operation_generation_reg + 8'd1;
                     end
                 end else begin
                     // Publish the response one interval before its sampling
@@ -451,11 +563,22 @@ module mp64_tacc #(
                     // rollback snapshot.
                     req_done  <= 1'b1;
                     req_fault <= MEX_FAULT_NONE;
+                    req_fault_addr <= 64'd0;
 
                     case (active_funct_reg)
                         ETSYS_TACC_TRY,
                         ETSYS_TACC_CLEAR,
                         ETSYS_TACC_RELEASE: begin
+                        end
+                        ETSYS_TACC_LOAD,
+                        ETSYS_TACC_STORE: begin
+                            if (xfer_done &&
+                                xfer_response_token == active_token_reg) begin
+                                req_fault      <= xfer_fault;
+                                req_fault_addr <= xfer_fault_addr;
+                            end else begin
+                                req_done <= 1'b0;
+                            end
                         end
                         default:
                             req_fault <= MEX_FAULT_ILLEGAL;
@@ -470,14 +593,31 @@ module mp64_tacc #(
                     // They do not enter BUSY and cannot mutate state.
                     req_done  <= 1'b1;
                     req_fault <= incoming_fault;
+                    req_fault_addr <= incoming_fault_addr;
                 end else begin
                     active_reg               <= 1'b1;
                     active_funct_reg         <= req_funct;
                     active_caller_id_reg     <= req_caller_id;
-                    active_format_ew_reg     <= req_format_ew;
-                    active_format_signed_reg <=
-                        normalized_signed(req_format_ew,
-                                          req_format_signed);
+                    if (req_funct == ETSYS_TACC_STORE) begin
+                        active_format_ew_reg     <= format_ew_reg;
+                        active_format_signed_reg <= format_signed_reg;
+                    end else begin
+                        active_format_ew_reg     <= req_format_ew;
+                        active_format_signed_reg <=
+                            normalized_signed(req_format_ew,
+                                              req_format_signed);
+                    end
+                    active_image_addr_reg <= req_image_addr;
+                    active_token_reg      <= operation_generation_reg;
+                    // Every admitted transfer consumes a generation even
+                    // when ownership and format remain unchanged.  The
+                    // shared stage drains or retires one tenure completely
+                    // before another can be admitted, so an eight-bit wrap
+                    // cannot alias a still-live response.
+                    if ((req_funct == ETSYS_TACC_LOAD) ||
+                        (req_funct == ETSYS_TACC_STORE))
+                        operation_generation_reg <=
+                            operation_generation_reg + 8'd1;
                 end
             end
         end
@@ -509,6 +649,20 @@ module mp64_tacc #(
                             $error("mp64_tacc: nonowner CLEAR became active");
                         if (!format_is_legal(active_format_ew_reg))
                             $error("mp64_tacc: illegal CLEAR format active");
+                    end
+                    ETSYS_TACC_LOAD: begin
+                        if (owner_reg != active_caller_id_reg)
+                            $error("mp64_tacc: nonowner LOAD became active");
+                        if (!format_is_legal(active_format_ew_reg))
+                            $error("mp64_tacc: illegal LOAD format active");
+                    end
+                    ETSYS_TACC_STORE: begin
+                        if (owner_reg != active_caller_id_reg)
+                            $error("mp64_tacc: nonowner STORE became active");
+                        if (!valid_reg)
+                            $error("mp64_tacc: STORE active without valid state");
+                        if (!format_is_legal(active_format_ew_reg))
+                            $error("mp64_tacc: illegal STORE format active");
                     end
                     ETSYS_TACC_RELEASE:
                         if (owner_reg != active_caller_id_reg)

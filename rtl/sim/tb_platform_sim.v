@@ -10,10 +10,9 @@
 //
 
 `timescale 1ns / 1ps
+`include "mp64_pkg.vh"
 
 module tb_platform_sim;
-
-    `include "mp64_pkg.vh"
 
     wire       sim_clk;
     wire       sim_rst_n;

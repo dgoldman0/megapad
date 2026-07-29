@@ -74,6 +74,7 @@ read_verilog -sv -Irtl/pkg \
 read_verilog -sv -Irtl/pkg \
     rtl/soc/mp64_core_bus_mux.v \
     rtl/soc/mp64_tile_port_arbiter.v \
+    rtl/soc/mp64_tacc_transfer.v \
     rtl/soc/mp64_soc.v
 
 # ---- Synthesise for Xilinx 7-series ----------------------------------------

@@ -67,9 +67,12 @@ module tb_soc_smoke;
         .phy_wen       (phy_wen),
         .phy_wdata     (phy_wdata),
         .phy_burst_len (phy_burst_len),
+        .phy_cancel    (),
         .phy_rdata     (64'd0),
         .phy_rvalid    (1'b0),
         .phy_ready     (1'b1),
+        .phy_error     (1'b0),
+        .phy_cancel_done(1'b1),
 
         // SD — tied off
         .sd_sck        (sd_sck),

@@ -19,6 +19,10 @@ module tb_tacc_cycles;
     reg [3:0]   mex_ext_mod;
     reg         mex_ext_active;
     reg [4:0]   mex_caller_id;
+    reg         mex_priv;
+    reg [63:0]  mex_mpu_base;
+    reg [63:0]  mex_mpu_limit;
+    reg         mex_mpu_enabled;
     reg [7:0]   mex_engine_epoch;
     reg [7:0]   mex_caller_epoch;
     reg [1:0]   mex_caller_slot;
@@ -39,6 +43,20 @@ module tb_tacc_cycles;
     wire        tacc_ctl_done;
     wire [2:0]  tacc_ctl_fault;
     wire [63:0] tacc_status_raw;
+    wire        tacc_xfer_req;
+    wire        tacc_xfer_store;
+    wire        tacc_xfer_ext;
+    wire [63:0] tacc_xfer_base;
+    wire [2:0]  tacc_xfer_format_ew;
+    wire [7:0]  tacc_xfer_token;
+    wire [2047:0] tacc_xfer_store_image;
+    wire        tacc_xfer_cancel;
+    wire        tacc_xfer_finish;
+    reg         tacc_xfer_done;
+    reg [7:0]   tacc_xfer_response_token;
+    reg [2:0]   tacc_xfer_fault;
+    reg [63:0]  tacc_xfer_fault_addr;
+    reg [2047:0] tacc_xfer_load_image;
 
     reg         csr_wen;
     reg [7:0]   csr_addr;
@@ -75,10 +93,10 @@ module tb_tacc_cycles;
         .mex_ext_mod            (mex_ext_mod),
         .mex_ext_active         (mex_ext_active),
         .mex_caller_id          (mex_caller_id),
-        .mex_priv               (1'b0),
-        .mex_mpu_base           (64'd0),
-        .mex_mpu_limit          (64'd0),
-        .mex_mpu_enabled        (1'b0),
+        .mex_priv               (mex_priv),
+        .mex_mpu_base           (mex_mpu_base),
+        .mex_mpu_limit          (mex_mpu_limit),
+        .mex_mpu_enabled        (mex_mpu_enabled),
         .mex_allow_cluster_spad (1'b0),
         .mex_engine_epoch       (mex_engine_epoch),
         .mex_caller_epoch       (mex_caller_epoch),
@@ -100,6 +118,20 @@ module tb_tacc_cycles;
         .tacc_ctl_wdata         (tacc_ctl_wdata),
         .tacc_ctl_done          (tacc_ctl_done),
         .tacc_ctl_fault         (tacc_ctl_fault),
+        .tacc_xfer_req          (tacc_xfer_req),
+        .tacc_xfer_store        (tacc_xfer_store),
+        .tacc_xfer_ext          (tacc_xfer_ext),
+        .tacc_xfer_base         (tacc_xfer_base),
+        .tacc_xfer_format_ew    (tacc_xfer_format_ew),
+        .tacc_xfer_token        (tacc_xfer_token),
+        .tacc_xfer_store_image  (tacc_xfer_store_image),
+        .tacc_xfer_cancel       (tacc_xfer_cancel),
+        .tacc_xfer_finish       (tacc_xfer_finish),
+        .tacc_xfer_done         (tacc_xfer_done),
+        .tacc_xfer_response_token(tacc_xfer_response_token),
+        .tacc_xfer_fault        (tacc_xfer_fault),
+        .tacc_xfer_fault_addr   (tacc_xfer_fault_addr),
+        .tacc_xfer_load_image   (tacc_xfer_load_image),
         .legacy_acc_state       (legacy_acc_state),
         .legacy_acc_wen         (4'd0),
         .legacy_acc_wdata       (256'd0),
@@ -208,6 +240,38 @@ module tb_tacc_cycles;
     end
     endtask
 
+    task write_csr;
+        input [7:0]  address;
+        input [63:0] value;
+    begin
+        csr_addr  = address;
+        csr_wdata = value;
+        csr_wen   = 1'b1;
+        tick;
+        csr_wen   = 1'b0;
+    end
+    endtask
+
+    task dispatch_address_fault;
+        input [2:0]  expected_fault;
+        input [63:0] expected_addr;
+    begin
+        set_lifecycle(ETSYS_TACC_LOAD,
+                      {5'd0, ETSYS_TACC_LOAD});
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("address preflight fault is immediate and nonbusy",
+              mex_done && !mex_busy &&
+              mex_fault == expected_fault);
+        check("address preflight reports the first forbidden byte",
+              mex_fault_addr == expected_addr);
+        check("address preflight emits no stage or memory request",
+              !tacc_xfer_req && !tile_req && !ext_tile_req);
+        tick;
+    end
+    endtask
+
     initial begin
         pass_count = 0;
         fail_count = 0;
@@ -222,6 +286,10 @@ module tb_tacc_cycles;
         mex_ext_mod = 4'd8;
         mex_ext_active = 1'b1;
         mex_caller_id = 5'd4;
+        mex_priv = 1'b0;
+        mex_mpu_base = 64'd0;
+        mex_mpu_limit = 64'd0;
+        mex_mpu_enabled = 1'b0;
         mex_engine_epoch = 8'd0;
         mex_caller_epoch = 8'd0;
         mex_caller_slot = 2'd0;
@@ -231,6 +299,11 @@ module tb_tacc_cycles;
         tacc_ctl_caller_id = 5'd4;
         tacc_ctl_priv = 1'b0;
         tacc_ctl_wdata = 64'd0;
+        tacc_xfer_done = 1'b0;
+        tacc_xfer_response_token = 8'd0;
+        tacc_xfer_fault = MEX_FAULT_NONE;
+        tacc_xfer_fault_addr = 64'd0;
+        tacc_xfer_load_image = {256{8'h96}};
         csr_wen = 1'b0;
         csr_addr = 8'd0;
         csr_wdata = 64'd0;
@@ -251,13 +324,56 @@ module tb_tacc_cycles;
               tacc_status_raw[TACC_STATUS_OWNER_MSB:
                               TACC_STATUS_OWNER_LSB] == 5'd4);
 
-        // Noncanonical and not-yet-implemented lifecycle operations fail in
-        // one cycle and cannot enter legacy memory handling.
+        // Noncanonical lifecycle and STORE-without-valid-state fail in one
+        // cycle and cannot enter legacy memory handling.
         dispatch_fault(ETSYS_TACC_CLEAR, 8'h23);
-        dispatch_fault(ETSYS_TACC_LOAD,
-                       {5'd0, ETSYS_TACC_LOAD});
         dispatch_fault(ETSYS_TACC_STORE,
                        {5'd0, ETSYS_TACC_STORE});
+
+        // A canonical LOAD waits on the chip-wide stage and publishes its
+        // complete image only on the following retirement edge.
+        set_lifecycle(ETSYS_TACC_LOAD,
+                      {5'd0, ETSYS_TACC_LOAD});
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("LOAD capture raises BUSY without ordinary tile traffic",
+              mex_busy && !mex_done && tacc_xfer_req &&
+              !tile_req && !ext_tile_req);
+        check("LOAD stage request carries canonical internal base",
+              !tacc_xfer_store && !tacc_xfer_ext &&
+              tacc_xfer_base == 64'd0);
+        tacc_xfer_response_token = tacc_xfer_token;
+        tacc_xfer_done = 1'b1;
+        tick;
+        tacc_xfer_done = 1'b0;
+        check("LOAD stage response reaches MEX terminal",
+              mex_done && mex_fault == MEX_FAULT_NONE &&
+              tacc_xfer_finish);
+        tick;
+        check("LOAD retirement publishes VALID clean state",
+              tacc_status_raw[TACC_STATUS_BIT_VALID] &&
+              !tacc_status_raw[TACC_STATUS_BIT_DIRTY]);
+
+        write_csr(CSR_TSRC0, 64'h0000_0000_0000_0041);
+        dispatch_address_fault(MEX_FAULT_ALIGN,
+                               64'h0000_0000_0000_0041);
+        write_csr(CSR_TSRC0, 64'h0000_0000_FF40_0000);
+        dispatch_address_fault(MEX_FAULT_BUS,
+                               64'h0000_0000_FF40_0000);
+        write_csr(CSR_TSRC0, 64'h0000_0000_FFD0_0000);
+        mex_priv = 1'b1;
+        dispatch_address_fault(MEX_FAULT_PRIV,
+                               64'h0000_0000_FFD0_0000);
+        write_csr(CSR_TSRC0, 64'h0000_0000_0010_0000);
+        mex_mpu_base = 64'h0000_0000_0010_0000;
+        mex_mpu_limit = 64'h0000_0000_0010_0080;
+        mex_mpu_enabled = 1'b1;
+        dispatch_address_fault(MEX_FAULT_PRIV,
+                               64'h0000_0000_0010_0080);
+        mex_priv = 1'b0;
+        mex_mpu_enabled = 1'b0;
+        write_csr(CSR_TSRC0, 64'd0);
 
         // A canonical TAMAC is intercepted by the state leaf and remains a
         // precise one-cycle illegal operation until its arithmetic landing.
