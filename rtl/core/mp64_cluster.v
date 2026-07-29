@@ -90,7 +90,8 @@ module mp64_cluster #(
     input  wire [7:0]   tacc_xfer_response_token,
     input  wire [2:0]   tacc_xfer_fault,
     input  wire [63:0]  tacc_xfer_fault_addr,
-    input  wire [2047:0] tacc_xfer_load_image
+    input  wire [2047:0] tacc_xfer_load_image,
+    input  wire         tacc_xfer_stall_cycle
 );
 
     // ====================================================================
@@ -339,7 +340,9 @@ module mp64_cluster #(
                 .mex_fault_addr(mex_fault_addr_reg),
                 .mex_stall_cycle(
                     (mex_state == MEX_ACTIVE &&
-                     mex_grant == gi[ARB_BITS-1:0]) ? te_mex_stall_cycle :
+                     mex_grant == gi[ARB_BITS-1:0]) ?
+                        (te_mex_stall_cycle ||
+                         tacc_xfer_stall_cycle) :
                     (mc_mex_req[gi] &&
                      !(mex_done_reg &&
                        mex_grant == gi[ARB_BITS-1:0]) &&

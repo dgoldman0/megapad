@@ -44,6 +44,10 @@ module mp64_extmem (
     output reg          tile_ack,
     output reg          tile_error,
     output reg  [63:0]  tile_fault_addr,
+    // One pulse per successfully acknowledged physical word in the active
+    // tile transaction. This sits below the 512-bit terminal boundary so a
+    // faulted transfer's acknowledged prefix remains exactly accountable.
+    output reg          tile_word_done,
 
     // === Generic PHY interface ===
     output wire         phy_req,
@@ -156,6 +160,7 @@ module mp64_extmem (
             tile_ack         <= 1'b0;
             tile_error       <= 1'b0;
             tile_fault_addr  <= 64'd0;
+            tile_word_done   <= 1'b0;
             phy_addr         <= 32'd0;
             phy_wdata        <= 64'd0;
             phy_wen          <= 1'b0;
@@ -167,6 +172,7 @@ module mp64_extmem (
             tile_ack        <= 1'b0;
             tile_error      <= 1'b0;
             tile_fault_addr <= 64'd0;
+            tile_word_done  <= 1'b0;
 
             // A held upstream request is accepted only once.  Tile payloads
             // may be released immediately after the explicit accept pulse.
@@ -348,6 +354,7 @@ module mp64_extmem (
                             tile_fault_addr <= {32'd0, phy_addr};
                             state           <= EXT_IDLE;
                         end else begin
+                            tile_word_done <= 1'b1;
                             if (!tile_wen_r)
                                 tile_rdata[tile_word_index*64 +: 64] <=
                                     phy_rdata;

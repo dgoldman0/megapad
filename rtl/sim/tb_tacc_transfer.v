@@ -36,6 +36,7 @@ module tb_tacc_transfer;
     wire beat_wen;
     wire [511:0] beat_wdata;
     wire [SOURCE_COUNT-1:0] port_cancel;
+    wire [SOURCE_COUNT-1:0] stall_cycle;
 
     wire [SOURCE_COUNT-1:0] done;
     wire [SOURCE_COUNT*TOKEN_BITS-1:0] response_token;
@@ -77,6 +78,7 @@ module tb_tacc_transfer;
         .beat_wen            (beat_wen),
         .beat_wdata          (beat_wdata),
         .port_cancel         (port_cancel),
+        .stall_cycle         (stall_cycle),
         .done                (done),
         .response_token      (response_token),
         .response_fault      (response_fault),
@@ -260,9 +262,89 @@ module tb_tacc_transfer;
         tick;
 
         check("reset clears all request and response outputs",
-              beat_req == 0 && port_cancel == 0 && done == 0);
+              beat_req == 0 && port_cancel == 0 && stall_cycle == 0
+              && done == 0);
         check("reset hides and zeroizes the shared image",
               result_image == 2048'd0);
+
+        // ------------------------------------------------------------------
+        // Stall accounting is request-local and progress based. A held
+        // request stalls while acquiring or waiting on the shared stage.
+        // Only its acknowledged-beat cycle is progress; cancellation and the
+        // held terminal response are excluded.
+        // ------------------------------------------------------------------
+        set_request(
+            2, 1'b1, 1'b0, 64'h0000_0000_0000_0200,
+            TMODE_8, 8'h22, source_image[2]
+        );
+        #1;
+        check("held request stalls while acquiring the shared stage",
+              stall_cycle == 7'b0000100);
+        tick;
+        check("admitted owner stalls while its beat awaits capture",
+              beat_req == 7'b0000100 &&
+              stall_cycle == 7'b0000100);
+
+        set_request(
+            5, 1'b1, 1'b1, 64'h0000_0001_0000_0500,
+            TMODE_8, 8'h55, source_image[5]
+        );
+        #1;
+        check("owner and waiting peer each report their own stall",
+              stall_cycle == 7'b0100100);
+        tick;
+        repeat (2) begin
+            tick;
+            check("target wait remains a stall for owner and peer",
+                  beat_req == 0 && stall_cycle == 7'b0100100);
+        end
+
+        // Complete all four owner beats while retaining both request levels.
+        // Each ACK suppresses only the progressing owner's stall for that
+        // cycle; the peer remains blocked by stage ownership.
+        for (beat_number = 0;
+             beat_number < 4;
+             beat_number = beat_number + 1) begin
+            port_ack[2] = 1'b1;
+            #1;
+            check("ACK progress clears only the owner's stall bit",
+                  stall_cycle == 7'b0100000);
+            tick;
+            port_ack[2] = 1'b0;
+            #1;
+            if (beat_number != 3) begin
+                check("held owner stalls again after ACK progress ends",
+                      stall_cycle == 7'b0100100);
+                check("next owner beat is emitted after successful ACK",
+                      beat_req == 7'b0000100);
+                tick;
+            end
+        end
+        check("terminal done excludes held owner request from stalls",
+              done == 7'b0000100 && stall_cycle == 7'b0100000);
+
+        req[2] = 1'b0;
+        finish[2] = 1'b1;
+        tick;
+        finish[2] = 1'b0;
+        check("waiting peer remains stalled when prior response retires",
+              done == 0 && stall_cycle == 7'b0100000);
+        req_cancel[5] = 1'b1;
+        #1;
+        check("canceled held request does not report a stall",
+              stall_cycle == 0);
+        tick;
+        req[5] = 1'b0;
+        req_cancel[5] = 1'b0;
+        tick;
+
+        // Restore reset-era arbitration state for the ordering tests below.
+        rst = 1'b1;
+        repeat (2) tick;
+        rst = 1'b0;
+        tick;
+        check("stall accounting clears across reset",
+              stall_cycle == 0 && done == 0 && beat_req == 0);
 
         // ------------------------------------------------------------------
         // Seven simultaneous stores prove candidate-set RR order, reset

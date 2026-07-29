@@ -86,6 +86,9 @@ module mp64_cpu #(
     input  wire [2:0]  mex_fault,
     input  wire [63:0] mex_fault_addr,
     input  wire        mex_stall_cycle,
+    // Successful 64-bit external-PHY word attributed to this core's private
+    // tile engine. The pulse may precede the 512-bit tile terminal response.
+    input  wire        perf_extmem_word,
 
     // Caller context sampled with every tile request.
     output wire [TACC_CALLER_BITS-1:0] tile_caller_id,
@@ -662,6 +665,8 @@ module mp64_cpu #(
                 if (cpu_state == CPU_MEX_WAIT && mex_done &&
                     mex_fault == MEX_FAULT_NONE)
                     perf_tileops <= perf_tileops + 64'd1;
+                if (perf_extmem_word)
+                    perf_extmem <= perf_extmem + 64'd1;
             end
 
             // Tile self-test countdown

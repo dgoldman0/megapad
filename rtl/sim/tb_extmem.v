@@ -33,6 +33,7 @@ module tb_extmem;
     wire         tile_ack;
     wire         tile_error;
     wire [63:0]  tile_fault_addr;
+    wire         tile_word_done;
 
     wire         phy_req;
     wire [31:0]  phy_addr;
@@ -51,6 +52,8 @@ module tb_extmem;
     integer test_num;
     integer phy_launch_count;
     integer tile_accept_count;
+    integer tile_word_done_count;
+    integer tile_words_before;
 
     task check;
         input [8*96-1:0] label;
@@ -82,6 +85,11 @@ module tb_extmem;
         end
     end
 
+    // Count the actual completion pulses rather than inferring physical-word
+    // progress from the terminal 512-bit transaction response.
+    always @(posedge tile_word_done)
+        tile_word_done_count = tile_word_done_count + 1;
+
     mp64_extmem dut (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -102,6 +110,7 @@ module tb_extmem;
         .tile_ack        (tile_ack),
         .tile_error      (tile_error),
         .tile_fault_addr (tile_fault_addr),
+        .tile_word_done  (tile_word_done),
         .phy_req         (phy_req),
         .phy_addr        (phy_addr),
         .phy_wdata       (phy_wdata),
@@ -209,6 +218,8 @@ module tb_extmem;
         pass_count = 0;
         fail_count = 0;
         test_num   = 0;
+        tile_word_done_count = 0;
+        tile_words_before = 0;
         rst_n      = 1'b0;
         clear_inputs;
 
@@ -223,6 +234,8 @@ module tb_extmem;
         check("CPU ACK clear after reset", !cpu_ack);
         check("tile accept/ACK/error clear after reset",
               !tile_accept && !tile_ack && !tile_error);
+        check("physical tile-word completion is clear after reset",
+              !tile_word_done && tile_word_done_count == 0);
 
         // --------------------------------------------------------------------
         $display("--- CPU read: held launch payload and terminal response ---");
@@ -316,12 +329,15 @@ module tb_extmem;
         respond_current_word(64'hFFFF_FFFF_FFFF_FFFF, 1'b1);
         check("CPU PHY error cannot deadlock the CPU bus", cpu_ack);
         check("CPU PHY error returns deterministic zero data", cpu_rdata == 0);
+        check("CPU traffic never reports a tile-word completion",
+              !tile_word_done && tile_word_done_count == 0);
         @(negedge clk);
         cpu_req <= 1'b0;
         @(posedge clk); #1;
 
         // --------------------------------------------------------------------
         $display("--- Tile read: retained request and eight serialized words ---");
+        tile_words_before = tile_word_done_count;
         expected_image = 512'd0;
         for (beat = 0; beat < 8; beat = beat + 1)
             expected_image[beat*64 +: 64] =
@@ -344,6 +360,8 @@ module tb_extmem;
                   !phy_wen && phy_burst_len == 4'd1);
             launch_current_word;
             respond_current_word(expected_image[beat*64 +: 64], 1'b0);
+            check("successful tile read word emits one completion pulse",
+                  tile_word_done);
             if (beat != 7)
                 check("tile ACK waits for all eight words", !tile_ack);
         end
@@ -354,10 +372,15 @@ module tb_extmem;
         check("tile request is accepted once", tile_accept_count == 1);
         check("tile read launches exactly eight physical words",
               phy_launch_count == 13);
+        check("tile read accounts exactly eight successful physical words",
+              tile_word_done_count == tile_words_before + 8);
         @(posedge clk); #1;
+        check("tile-word completion pulse clears after its ACK cycle",
+              !tile_word_done);
 
         // --------------------------------------------------------------------
         $display("--- Tile write retains all 512 payload bits after accept ---");
+        tile_words_before = tile_word_done_count;
         write_image = 512'd0;
         for (beat = 0; beat < 8; beat = beat + 1)
             write_image[beat*64 +: 64] =
@@ -383,13 +406,18 @@ module tb_extmem;
                   phy_wdata == write_image[beat*64 +: 64]);
             launch_current_word;
             respond_current_word(64'd0, 1'b0);
+            check("successful tile write word emits one completion pulse",
+                  tile_word_done);
         end
         check("tile write returns terminal success", tile_ack && !tile_error);
         check("second tile command receives one accept", tile_accept_count == 2);
+        check("tile write accounts exactly eight successful physical words",
+              tile_word_done_count == tile_words_before + 8);
         @(posedge clk); #1;
 
         // --------------------------------------------------------------------
         $display("--- Tile PHY error stops at exact word and keeps prefix ---");
+        tile_words_before = tile_word_done_count;
         write_image = {8{64'hD300_D300_D300_D300}};
         @(negedge clk);
         tile_req   <= 1'b1;
@@ -406,11 +434,15 @@ module tb_extmem;
                   phy_addr == (32'hC000_0100 + beat*8));
             launch_current_word;
             respond_current_word(64'd0, beat == 2);
+            check("faulting tile transfer counts only successful prefix words",
+                  tile_word_done == (beat != 2));
         end
         check("PHY error becomes terminal tile error",
               tile_ack && tile_error);
         check("PHY error reports exact physical word address",
               tile_fault_addr == 64'h0000_0000_C000_0110);
+        check("faulting tile transfer accounts exact acknowledged prefix",
+              tile_word_done_count == tile_words_before + 2);
         repeat (4) begin
             @(posedge clk); #1;
         end
@@ -422,6 +454,7 @@ module tb_extmem;
         begin : cancel_before_launch
             integer launches_before;
             launches_before = phy_launch_count;
+            tile_words_before = tile_word_done_count;
             @(negedge clk);
             tile_req    <= 1'b1;
             tile_addr   <= 32'hD000_0000;
@@ -436,6 +469,9 @@ module tb_extmem;
                   tile_ack && !tile_error);
             check("pre-launch cancel never reaches PHY",
                   phy_launch_count == launches_before && !phy_req);
+            check("pre-launch cancel reports no completed physical word",
+                  !tile_word_done &&
+                  tile_word_done_count == tile_words_before);
             @(negedge clk);
             tile_cancel <= 1'b0;
             @(posedge clk); #1;
@@ -446,6 +482,7 @@ module tb_extmem;
         begin : cancel_after_launch
             integer launches_before;
             launches_before = phy_launch_count;
+            tile_words_before = tile_word_done_count;
             @(negedge clk);
             tile_req    <= 1'b1;
             tile_addr   <= 32'hD100_0000;
@@ -469,6 +506,9 @@ module tb_extmem;
             respond_current_word(64'h1111_2222_3333_4444, 1'b0);
             check("drained canceled word returns target-only ACK",
                   tile_ack && !tile_error);
+            check("drained canceled word is not architecturally completed",
+                  !tile_word_done &&
+                  tile_word_done_count == tile_words_before);
             repeat (4) begin
                 @(posedge clk); #1;
             end

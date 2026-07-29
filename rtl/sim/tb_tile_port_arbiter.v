@@ -55,6 +55,8 @@ module tb_tile_port_arbiter;
     wire [2:0]   write_owner;
     wire         write_ext;
     wire [63:0]  write_addr;
+    wire         ext_word_owner_valid;
+    wire [2:0]   ext_word_owner;
 
     integer pass_count;
     integer fail_count;
@@ -100,7 +102,9 @@ module tb_tile_port_arbiter;
         .write_commit   (write_commit),
         .write_owner    (write_owner),
         .write_ext      (write_ext),
-        .write_addr     (write_addr)
+        .write_addr     (write_addr),
+        .ext_word_owner_valid(ext_word_owner_valid),
+        .ext_word_owner (ext_word_owner)
     );
 
     initial clk = 1'b0;
@@ -129,6 +133,8 @@ module tb_tile_port_arbiter;
 
     task accept_internal;
     begin
+        check("internal transaction has no external word owner",
+              !ext_word_owner_valid);
         tile_accept = 1'b1;
         #1;
         check("internal request remains asserted through ACCEPT", tile_req);
@@ -156,14 +162,21 @@ module tb_tile_port_arbiter;
     endtask
 
     task accept_external;
+        input [2:0] owner;
     begin
+        check("external word owner is invalid before target ACCEPT",
+              !ext_word_owner_valid);
         ext_accept = 1'b1;
         #1;
         check("external request remains asserted through ACCEPT", ext_req);
+        check("target ACCEPT makes the captured external owner visible",
+              ext_word_owner_valid && ext_word_owner == owner);
         clock;
         ext_accept = 1'b0;
         #1;
         check("external request drops after ACCEPT", !ext_req);
+        check("accepted external transaction retains its word owner",
+              ext_word_owner_valid && ext_word_owner == owner);
     end
     endtask
 
@@ -171,6 +184,8 @@ module tb_tile_port_arbiter;
         input [2:0] owner;
         input       expected_write;
     begin
+        check("external word owner remains stable before terminal ACK",
+              ext_word_owner_valid && ext_word_owner == owner);
         ext_ack = 1'b1;
         #1;
         check("external request suppressed during ACK", !ext_req);
@@ -180,7 +195,11 @@ module tb_tile_port_arbiter;
               && src_tile_ack == {SOURCE_COUNT{1'b0}});
         check("external completion write classification",
               write_commit == expected_write);
+        check("external word owner remains valid for the ACK cycle",
+              ext_word_owner_valid && ext_word_owner == owner);
         clock;
+        check("terminal ACK retires external word ownership",
+              !ext_word_owner_valid);
         ext_ack = 1'b0;
         clock;
     end
@@ -348,7 +367,7 @@ module tb_tile_port_arbiter;
         check("busy-time external pulse is retained",
               ext_req && ext_addr == 64'h1234_5678_9ABC_DEF0
               && !ext_wen && ext_wdata == {64{8'h55}});
-        accept_external();
+        accept_external(3'd5);
         complete_external(3'd5, 1'b0);
         check("busy-time internal pulse follows in RR order",
               tile_req && tile_addr == 32'h0000_3600
@@ -377,7 +396,12 @@ module tb_tile_port_arbiter;
               ext_req && ext_wen
               && ext_addr == 64'hFEDC_BA98_7654_3210
               && ext_wdata == {64{8'h44}});
-        accept_external();
+        accept_external(3'd4);
+        repeat (3) begin
+            clock;
+            check("external owner remains stable through target wait",
+                  ext_word_owner_valid && ext_word_owner == 3'd4);
+        end
         ext_ack = 1'b1;
         #1;
         check("external write emits full commit metadata",
@@ -449,18 +473,26 @@ module tb_tile_port_arbiter;
         #1;
         check("coincident ACCEPT and cancel starts target drain",
               ext_cancel && !ext_req && src_cancel_done == 0);
+        check("coincident ACCEPT and cancel retains external owner",
+              ext_word_owner_valid && ext_word_owner == 3'd4);
         clock;
         ext_accept = 1'b0;
         #1;
         check("accepted cancellation retains ownership before ACK",
               ext_cancel && src_cancel_done == 0);
+        check("cancel drain keeps the accepted external owner stable",
+              ext_word_owner_valid && ext_word_owner == 3'd4);
         ext_ack = 1'b1;
         #1;
         check("race-drain terminal ACK is suppressed from source",
               src_ext_ack == 0 && src_ext_error == 0);
+        check("race-drain ACK cycle still identifies external owner",
+              ext_word_owner_valid && ext_word_owner == 3'd4);
         clock;
         check("accept-cancel race completes only on terminal ACK",
               src_cancel_done == 7'b0010000);
+        check("race-drain ACK retires external word ownership",
+              !ext_word_owner_valid);
         ext_ack = 1'b0;
         src_cancel[4] = 1'b0;
         clock;
@@ -477,7 +509,7 @@ module tb_tile_port_arbiter;
         clock;
         src_ext_req[5] = 1'b0;
         clock;
-        accept_external();
+        accept_external(3'd5);
         src_cancel[5] = 1'b1;
         #1;
         check("post-accept cancel reaches selected target",
@@ -485,6 +517,8 @@ module tb_tile_port_arbiter;
         clock;
         check("cancel remains asserted while accepted work drains",
               ext_cancel && src_cancel_done == 0);
+        check("post-accept cancel preserves external owner identity",
+              ext_word_owner_valid && ext_word_owner == 3'd5);
 
         src_ext_req[5] = 1'b1;
         src_ext_addr[5*64 +: 64] = 64'h0000_0002_0000_0300;
@@ -502,12 +536,16 @@ module tb_tile_port_arbiter;
         check("stale canceled ACK and error are suppressed",
               src_ext_ack == 0 && src_ext_error == 0
               && src_ext_fault_addr == 0);
+        check("canceled ACK cycle retains external owner identity",
+              ext_word_owner_valid && ext_word_owner == 3'd5);
         check("canceled issued write still emits conservative commit",
               write_commit && write_owner == 3'd5 && write_ext
               && write_addr == 64'h0000_0002_0000_0200);
         clock;
         check("issued cancellation completes only after drain ACK",
               src_cancel_done == 7'b0100000);
+        check("canceled terminal ACK retires external word ownership",
+              !ext_word_owner_valid);
         ext_ack = 1'b0;
         ext_error = 1'b0;
         ext_fault_addr = 64'd0;
@@ -515,7 +553,7 @@ module tb_tile_port_arbiter;
         check("fresh pulse survives stale completion",
               ext_req && ext_addr == 64'h0000_0002_0000_0300
               && !ext_wen);
-        accept_external();
+        accept_external(3'd5);
         complete_external(3'd5, 1'b0);
 
         // A normal target error is routed only to the captured source and
@@ -566,7 +604,11 @@ module tb_tile_port_arbiter;
               && src_ext_error == 7'b0000001
               && src_ext_fault_addr[0 +: 64]
                   == 64'hFFFF_FFFF_FFFF_FFC0);
+        check("same-cycle external terminal identifies captured owner",
+              ext_word_owner_valid && ext_word_owner == 3'd0);
         clock;
+        check("same-cycle terminal retires external word ownership",
+              !ext_word_owner_valid);
         ext_accept = 1'b0;
         ext_ack = 1'b0;
         ext_error = 1'b0;

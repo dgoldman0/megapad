@@ -167,6 +167,7 @@ module tb_dict;
         .mex_fault (MEX_FAULT_NONE),
         .mex_fault_addr(64'd0),
         .mex_stall_cycle(1'b0),
+        .perf_extmem_word(1'b0),
         .tile_caller_id(),
         .tile_priv (),
         .tile_mpu_base(),

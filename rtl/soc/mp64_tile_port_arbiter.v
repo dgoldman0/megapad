@@ -81,7 +81,13 @@ module mp64_tile_port_arbiter #(
     output wire          write_commit,
     output wire [OWNER_BITS-1:0] write_owner,
     output wire          write_ext,
-    output wire [63:0]   write_addr
+    output wire [63:0]   write_addr,
+
+    // The external controller reports individual 64-bit word completions
+    // before the arbiter's 512-bit terminal ACK. Keep the captured source
+    // identity visible for exact per-core PERF_EXTMEM attribution.
+    output wire          ext_word_owner_valid,
+    output wire [OWNER_BITS-1:0] ext_word_owner
 );
 
     reg [SOURCE_COUNT-1:0] pending;
@@ -224,6 +230,9 @@ module mp64_tile_port_arbiter #(
     assign write_owner  = active_owner;
     assign write_ext    = active_ext;
     assign write_addr   = active_addr;
+    assign ext_word_owner_valid =
+        active && active_ext && active_target_accepted;
+    assign ext_word_owner = active_owner;
 
     always @(*) begin
         src_tile_fault_addr = {(SOURCE_COUNT*64){1'b0}};

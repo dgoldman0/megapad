@@ -161,7 +161,8 @@ module tb_cluster;
         .ext_tile_ack  (1'b0),
         .ext_tile_error(1'b0),
         .ext_tile_fault_addr(64'd0),
-        .tile_source_cancel()
+        .tile_source_cancel(),
+        .tacc_xfer_stall_cycle(1'b0)
     );
 
     // ====================================================================

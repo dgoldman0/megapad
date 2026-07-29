@@ -133,6 +133,7 @@ module tb_cpu_smoke;
     reg  [2:0]  mex_fault_r;
     reg  [63:0] mex_fault_addr_r;
     reg         mex_stall_cycle_r;
+    reg         perf_extmem_word_r;
     reg  [2:0]  next_mex_fault;
     reg  [63:0] next_mex_fault_addr;
     reg         mex_ack_enable;
@@ -239,6 +240,7 @@ module tb_cpu_smoke;
         .mex_fault (mex_fault_r),
         .mex_fault_addr(mex_fault_addr_r),
         .mex_stall_cycle(mex_stall_cycle_r),
+        .perf_extmem_word(perf_extmem_word_r),
         .tile_caller_id(tile_caller_id_w),
         .tile_priv (tile_priv_w),
         .tile_mpu_base(tile_mpu_base_w),
@@ -506,6 +508,7 @@ module tb_cpu_smoke;
         mex_fault_r = MEX_FAULT_NONE;
         mex_fault_addr_r = 64'd0;
         mex_stall_cycle_r = 1'b0;
+        perf_extmem_word_r = 1'b0;
         next_mex_fault = MEX_FAULT_NONE;
         next_mex_fault_addr = 64'd0;
         mex_ack_enable = 1'b1;
@@ -541,6 +544,13 @@ module tb_cpu_smoke;
 
         run_to_halt;
         check_reg("NOP+HALT: PC", 3, 64'd2);
+        @(negedge clk);
+        perf_extmem_word_r = 1'b1;
+        repeat (2) @(posedge clk);
+        @(negedge clk);
+        perf_extmem_word_r = 1'b0;
+        check64("PERF_EXTMEM counts acknowledged physical words",
+                uut.perf_extmem, 64'd2);
 
         // -----------------------------------------------------------------
         // Test 2: INC / DEC

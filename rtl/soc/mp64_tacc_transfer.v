@@ -64,6 +64,10 @@ module mp64_tacc_transfer #(
     output wire                         beat_wen,
     output wire [511:0]                 beat_wdata,
     output wire [SOURCE_COUNT-1:0]      port_cancel,
+    // One bit per requesting engine. A cycle is stalled when its held image
+    // request makes no terminal or acknowledged-beat progress, including
+    // stage acquisition, peer ownership, arbiter capture, and target wait.
+    output wire [SOURCE_COUNT-1:0]      stall_cycle,
 
     // Held, one-hot terminal response.  Packed lane N belongs to source N.
     output reg  [SOURCE_COUNT-1:0]      done,
@@ -130,6 +134,11 @@ module mp64_tacc_transfer #(
     wire owner_ack = |(port_ack & owner_mask);
     wire owner_error = |(port_error & owner_mask);
     wire owner_cancel_done = |(port_cancel_done & owner_mask);
+    wire [SOURCE_COUNT-1:0] owner_progress =
+        (active && owner_ack) ? owner_mask : {SOURCE_COUNT{1'b0}};
+
+    assign stall_cycle =
+        req & ~req_cancel & ~done & ~owner_progress;
 
     // The request pulse is emitted only while there is no outstanding beat.
     // Masking the live cancel in this combinational boundary prevents a beat

@@ -200,6 +200,7 @@ module tb_disk_bus_dma;
         .tile_req(1'b0), .tile_addr(32'd0), .tile_wdata(512'd0),
         .tile_wen(1'b0), .tile_cancel(1'b0), .tile_accept(),
         .tile_rdata(), .tile_ack(), .tile_error(), .tile_fault_addr(),
+        .tile_word_done(),
         .phy_req(ext_phy_req), .phy_addr(ext_phy_addr),
         .phy_wdata(ext_phy_wdata), .phy_wen(ext_phy_wen),
         .phy_ready(ext_phy_ready), .phy_rdata(ext_phy_rdata),
