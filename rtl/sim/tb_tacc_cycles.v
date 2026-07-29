@@ -16,6 +16,7 @@ module tb_tacc_cycles;
     reg [1:0]   mex_op;
     reg [2:0]   mex_funct;
     reg [7:0]   mex_funct_byte;
+    reg [63:0]  mex_gpr_val;
     reg [3:0]   mex_ext_mod;
     reg         mex_ext_active;
     reg [4:0]   mex_caller_id;
@@ -66,12 +67,85 @@ module tb_tacc_cycles;
     wire [255:0] legacy_acc_state;
     wire         acc_zero_consumed;
     wire         tile_req;
+    wire [31:0]  tile_addr;
     wire         tile_wen;
+    wire [511:0] tile_rdata;
+    wire         tile_ack;
+    wire         tile_error;
+    wire [63:0]  tile_fault_addr;
     wire         ext_tile_req;
+    wire [63:0]  ext_tile_addr;
     wire         ext_tile_wen;
+    wire [511:0] ext_tile_rdata;
+    wire         ext_tile_ack;
+    wire         ext_tile_error;
+    wire [63:0]  ext_tile_fault_addr;
+    wire         tile_source_cancel;
+
+    reg [511:0] tamac_mem_a;
+    reg [511:0] tamac_mem_b;
+    reg         tamac_mem_respond;
+    reg         tamac_mem_error;
+    reg [31:0]  tamac_mem_error_addr;
+    reg [63:0]  tamac_mem_fault_addr;
+    integer     tamac_mem_req_count;
+
+    localparam [31:0] TAMAC_ADDR_A = 32'h0000_0100;
+    localparam [31:0] TAMAC_ADDR_B = 32'h0000_0200;
+    localparam [63:0] TAMAC_EXT_ADDR_A =
+        64'h0000_0000_0010_0100;
+    localparam [63:0] TAMAC_EXT_ADDR_B =
+        64'h0000_0000_0010_0200;
+
+    assign tile_rdata =
+        (tile_addr == TAMAC_ADDR_A) ? tamac_mem_a :
+        (tile_addr == TAMAC_ADDR_B) ? tamac_mem_b :
+        512'd0;
+    assign tile_ack = tile_req && tamac_mem_respond;
+    assign tile_error =
+        tile_ack && tamac_mem_error &&
+        (tile_addr == tamac_mem_error_addr);
+    assign tile_fault_addr =
+        tile_error ? tamac_mem_fault_addr : 64'd0;
+    assign ext_tile_rdata =
+        (ext_tile_addr == TAMAC_EXT_ADDR_A) ?
+        tamac_mem_a :
+        (ext_tile_addr == TAMAC_EXT_ADDR_B) ?
+        tamac_mem_b : 512'd0;
+    assign ext_tile_ack = ext_tile_req && tamac_mem_respond;
+    assign ext_tile_error = ext_tile_ack && tamac_mem_error;
+    assign ext_tile_fault_addr =
+        ext_tile_error ? tamac_mem_fault_addr : 64'd0;
+
+    always @(posedge clk) begin
+        if (!rst_n)
+            tamac_mem_req_count <= 0;
+        else if (tile_req || ext_tile_req)
+            tamac_mem_req_count <= tamac_mem_req_count + 1;
+    end
 
     integer pass_count;
     integer fail_count;
+    integer vector_fd;
+    integer vector_scan;
+    integer vector_case_count;
+    integer vector_repeat_index;
+    integer vector_observed_cycles;
+    integer vector_total_observed_cycles;
+    integer vector_ew;
+    integer vector_signed;
+    integer vector_ss;
+    integer vector_repeats;
+    integer vector_cycles;
+    integer vector_total_cycles;
+    reg [511:0] vector_name;
+    reg [16383:0] vector_line;
+    reg [63:0] vector_scalar;
+    reg [511:0] vector_source_a;
+    reg [511:0] vector_source_b;
+    reg [2047:0] vector_initial_tacc;
+    reg [2047:0] vector_final_tacc;
+    reg [2047:0] cycle_bank_snapshot;
 
     mp64_tile #(
         .TACC_CALLER_BASE (5'd4),
@@ -88,7 +162,7 @@ module tb_tacc_cycles;
         .mex_op                 (mex_op),
         .mex_funct              (mex_funct),
         .mex_funct_byte         (mex_funct_byte),
-        .mex_gpr_val            (64'd0),
+        .mex_gpr_val            (mex_gpr_val),
         .mex_imm8               (8'd0),
         .mex_ext_mod            (mex_ext_mod),
         .mex_ext_active         (mex_ext_active),
@@ -151,17 +225,22 @@ module tb_tacc_cycles;
         .cfg_ttile_w            (64'd8),
         .acc_zero_consumed      (acc_zero_consumed),
         .tile_req               (tile_req),
-        .tile_addr              (),
+        .tile_addr              (tile_addr),
         .tile_wen               (tile_wen),
         .tile_wdata             (),
-        .tile_rdata             (512'd0),
-        .tile_ack               (1'b0),
+        .tile_rdata             (tile_rdata),
+        .tile_ack               (tile_ack),
+        .tile_error             (tile_error),
+        .tile_fault_addr        (tile_fault_addr),
         .ext_tile_req           (ext_tile_req),
-        .ext_tile_addr          (),
+        .ext_tile_addr          (ext_tile_addr),
         .ext_tile_wen           (ext_tile_wen),
         .ext_tile_wdata         (),
-        .ext_tile_rdata         (512'd0),
-        .ext_tile_ack           (1'b0)
+        .ext_tile_rdata         (ext_tile_rdata),
+        .ext_tile_ack           (ext_tile_ack),
+        .ext_tile_error         (ext_tile_error),
+        .ext_tile_fault_addr    (ext_tile_fault_addr),
+        .tile_source_cancel     (tile_source_cancel)
     );
 
     initial clk = 1'b0;
@@ -224,13 +303,29 @@ module tb_tacc_cycles;
     task dispatch_fault;
         input [2:0] funct;
         input [7:0] funct_byte;
+        reg         deferred_class;
     begin
+        deferred_class =
+            (funct == ETSYS_TACC_LOAD) ||
+            (funct == ETSYS_TACC_STORE);
         set_lifecycle(funct, funct_byte);
         mex_valid = 1'b1;
         tick;
         mex_valid = 1'b0;
-        check("validation fault completes in first base cycle",
-              mex_done && !mex_busy && mex_fault == MEX_FAULT_ILLEGAL);
+        if (deferred_class) begin
+            check("image validation waits one transport interval",
+                  !mex_done && mex_busy &&
+                  mex_fault == MEX_FAULT_NONE &&
+                  !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
+            tick;
+            check("image validation fault completes in second base cycle",
+                  mex_done && !mex_busy &&
+                  mex_fault == MEX_FAULT_ILLEGAL);
+        end else begin
+            check("validation fault completes in first base cycle",
+                  mex_done && !mex_busy &&
+                  mex_fault == MEX_FAULT_ILLEGAL);
+        end
         check("validation fault never publishes TACC BUSY",
               !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
         check("validation fault issues no tile-memory request",
@@ -261,13 +356,105 @@ module tb_tacc_cycles;
         mex_valid = 1'b1;
         tick;
         mex_valid = 1'b0;
-        check("address preflight fault is immediate and nonbusy",
+        check("address preflight waits one transport interval",
+              !mex_done && mex_busy &&
+              mex_fault == MEX_FAULT_NONE &&
+              !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
+        check("address preflight emits no stage or memory request",
+              !tacc_xfer_req && !tile_req && !ext_tile_req);
+        tick;
+        check("address preflight completes in second base cycle",
               mex_done && !mex_busy &&
               mex_fault == expected_fault);
         check("address preflight reports the first forbidden byte",
               mex_fault_addr == expected_addr);
         check("address preflight emits no stage or memory request",
               !tacc_xfer_req && !tile_req && !ext_tile_req);
+        tick;
+    end
+    endtask
+
+    task load_tacc_image;
+        input [2:0]    format_ew;
+        input          format_signed;
+        input [2047:0] image;
+    begin
+        write_csr(
+            CSR_TMODE,
+            {59'd0, format_signed, 1'b0, format_ew});
+        write_csr(CSR_TSRC0, 64'd0);
+        tacc_xfer_load_image = image;
+        set_lifecycle(ETSYS_TACC_LOAD,
+                      {5'd0, ETSYS_TACC_LOAD});
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("vector LOAD owns image stage",
+              tacc_xfer_req && !tacc_xfer_store);
+        tacc_xfer_response_token = tacc_xfer_token;
+        tacc_xfer_done = 1'b1;
+        tick;
+        tacc_xfer_done = 1'b0;
+        check("vector LOAD reaches terminal response",
+              mex_done && mex_fault == MEX_FAULT_NONE);
+        tick;
+        check("vector LOAD publishes exact initial image",
+              uut.tacc_bank_state == image);
+    end
+    endtask
+
+    task dispatch_tamac_once;
+        input [1:0] source_form;
+        input integer expected_cycles;
+        input integer expected_source_reads;
+        output integer observed_cycles;
+        reg [2047:0] bank_before;
+        reg [255:0] legacy_acc_before;
+        integer observed_stalls;
+    begin
+        mex_ss          = source_form;
+        mex_op          = MEX_TMUL;
+        mex_funct       = TMUL_TAMAC;
+        mex_funct_byte  = {5'd0, TMUL_TAMAC};
+        mex_ext_mod     = 4'd0;
+        mex_ext_active  = 1'b0;
+        mex_caller_id   = 5'd4;
+        mex_caller_slot = 2'd0;
+        bank_before = uut.tacc_bank_state;
+        legacy_acc_before = legacy_acc_state;
+        tamac_mem_req_count = 0;
+        observed_cycles = 0;
+        observed_stalls = 0;
+
+        mex_valid = 1'b1;
+        tick;
+        observed_cycles = observed_cycles + 1;
+        observed_stalls = observed_stalls + mex_stall_cycle;
+        mex_valid = 1'b0;
+        check("TAMAC admission keeps old bank private",
+              uut.tacc_bank_state == bank_before);
+
+        while (!mex_done && observed_cycles < 16) begin
+            tick;
+            observed_cycles = observed_cycles + 1;
+            observed_stalls = observed_stalls + mex_stall_cycle;
+            if (!mex_done)
+                check("TAMAC partial beat is not architecturally visible",
+                      uut.tacc_bank_state == bank_before);
+        end
+
+        check("TAMAC terminates without fault",
+              mex_done && mex_fault == MEX_FAULT_NONE);
+        check("TAMAC exact engine-local cycle count",
+              observed_cycles == expected_cycles);
+        check("TAMAC serialized source-beat count",
+              tamac_mem_req_count == expected_source_reads);
+        check("uncontended TAMAC records no transport stall",
+              observed_stalls == 0);
+        check("TAMAC terminal still preserves pre-retirement bank",
+              uut.tacc_bank_state == bank_before);
+        check("TAMAC leaves legacy ACC byte-exact",
+              legacy_acc_state == legacy_acc_before);
         tick;
     end
     endtask
@@ -283,6 +470,7 @@ module tb_tacc_cycles;
         mex_op = MEX_TSYS;
         mex_funct = ETSYS_TACC_TRY;
         mex_funct_byte = {5'd0, ETSYS_TACC_TRY};
+        mex_gpr_val = 64'd0;
         mex_ext_mod = 4'd8;
         mex_ext_active = 1'b1;
         mex_caller_id = 5'd4;
@@ -307,6 +495,13 @@ module tb_tacc_cycles;
         csr_wen = 1'b0;
         csr_addr = 8'd0;
         csr_wdata = 64'd0;
+        tamac_mem_a = 512'd0;
+        tamac_mem_b = 512'd0;
+        tamac_mem_respond = 1'b1;
+        tamac_mem_error = 1'b0;
+        tamac_mem_error_addr = 32'd0;
+        tamac_mem_fault_addr = 64'd0;
+        tamac_mem_req_count = 0;
 
         repeat (3) tick;
         rst_n = 1'b1;
@@ -324,8 +519,8 @@ module tb_tacc_cycles;
               tacc_status_raw[TACC_STATUS_OWNER_MSB:
                               TACC_STATUS_OWNER_LSB] == 5'd4);
 
-        // Noncanonical lifecycle and STORE-without-valid-state fail in one
-        // cycle and cannot enter legacy memory handling.
+        // Noncanonical lifecycle fails in one cycle. STORE-without-valid-state
+        // retains the locked two-cycle image-operation validation latency.
         dispatch_fault(ETSYS_TACC_CLEAR, 8'h23);
         dispatch_fault(ETSYS_TACC_STORE,
                        {5'd0, ETSYS_TACC_STORE});
@@ -375,21 +570,220 @@ module tb_tacc_cycles;
         mex_mpu_enabled = 1'b0;
         write_csr(CSR_TSRC0, 64'd0);
 
-        // A canonical TAMAC is intercepted by the state leaf and remains a
-        // precise one-cycle illegal operation until its arithmetic landing.
+        // Execute the checked-in Phase-1 emulator oracle vectors.  The file
+        // carries complete 2,048-bit initial/final images, not a duplicate RTL
+        // arithmetic oracle.
+        vector_case_count = 0;
+        vector_fd = $fopen("tamac_integer_vectors.vec", "r");
+        if (vector_fd == 0)
+            $fatal(1, "cannot open tamac_integer_vectors.vec");
+        while (!$feof(vector_fd)) begin
+            vector_line = {16384{1'b0}};
+            vector_scan = $fgets(vector_line, vector_fd);
+            vector_scan = $sscanf(
+                vector_line,
+                "%s %d %d %d %d %d %d %h %h %h %h %h",
+                vector_name,
+                vector_ew,
+                vector_signed,
+                vector_ss,
+                vector_repeats,
+                vector_cycles,
+                vector_total_cycles,
+                vector_scalar,
+                vector_source_a,
+                vector_source_b,
+                vector_initial_tacc,
+                vector_final_tacc);
+            if (vector_scan == 12) begin
+                vector_case_count = vector_case_count + 1;
+                $display("  TAMAC vector: %0s", vector_name);
+                load_tacc_image(
+                    vector_ew[2:0],
+                    vector_signed[0],
+                    vector_initial_tacc);
+                tamac_mem_a = vector_source_a;
+                tamac_mem_b = vector_source_b;
+                mex_gpr_val = vector_scalar;
+
+                case (vector_ss)
+                    0: begin
+                        write_csr(CSR_TSRC0,
+                                  {32'd0, TAMAC_ADDR_A});
+                        write_csr(CSR_TSRC1,
+                                  {32'd0, TAMAC_ADDR_B});
+                    end
+                    1: begin
+                        write_csr(CSR_TSRC0,
+                                  {32'd0, TAMAC_ADDR_A});
+                    end
+                    3: begin
+                        write_csr(CSR_TDST,
+                                  {32'd0, TAMAC_ADDR_A});
+                        write_csr(CSR_TSRC0,
+                                  {32'd0, TAMAC_ADDR_B});
+                    end
+                    default:
+                        $fatal(1, "fixture has illegal TAMAC SS");
+                endcase
+
+                vector_total_observed_cycles = 0;
+                for (vector_repeat_index = 0;
+                     vector_repeat_index < vector_repeats;
+                     vector_repeat_index = vector_repeat_index + 1) begin
+                    dispatch_tamac_once(
+                        vector_ss[1:0],
+                        vector_cycles,
+                        (vector_ss == 1) ? 1 : 2,
+                        vector_observed_cycles);
+                    vector_total_observed_cycles =
+                        vector_total_observed_cycles +
+                        vector_observed_cycles;
+                end
+                check("fixture repeat-total cycle count",
+                      vector_total_observed_cycles ==
+                      vector_total_cycles);
+                check("fixture final TACC image matches emulator",
+                      uut.tacc_bank_state == vector_final_tacc);
+                check("successful fixture leaves TACC dirty",
+                      tacc_status_raw[TACC_STATUS_BIT_DIRTY]);
+            end
+        end
+        $fclose(vector_fd);
+        check("all six integer TAMAC fixtures executed",
+              vector_case_count == 6);
+
+        // TAMAC source reads use the ordinary internal/external 512-bit lane,
+        // never the four-beat canonical-image stage.
+        load_tacc_image(TMODE_32, 1'b0, 2048'd0);
+        tamac_mem_a = {16{32'd7}};
+        mex_gpr_val = 64'hA5A5_5A5A_0000_0005;
+        write_csr(CSR_TSRC0, TAMAC_EXT_ADDR_A);
+        dispatch_tamac_once(2'd1, 3, 1,
+                            vector_observed_cycles);
+        check("external-source broadcast computes exact result",
+              uut.tacc_bank_state[63:0] ==
+              64'h0000_0000_0000_0023);
+        check("external-source TAMAC keeps U32 inactive bytes zero",
+              uut.tacc_bank_state[2047:1024] == 1024'd0);
+        check("external TAMAC bypasses canonical image stage",
+              !tacc_xfer_req);
+
+        // A bad second source must be discovered before source A is read.
+        // This is the hardware form of the emulator's all-span preflight
+        // callback test.
+        write_csr(CSR_TSRC0, {32'd0, TAMAC_ADDR_A});
+        write_csr(CSR_TSRC1, 64'h0000_0000_000F_FFE0);
         mex_ss = 2'd0;
         mex_op = MEX_TMUL;
         mex_funct = TMUL_TAMAC;
         mex_funct_byte = {5'd0, TMUL_TAMAC};
         mex_ext_mod = 4'd0;
         mex_ext_active = 1'b0;
+        tamac_mem_req_count = 0;
         mex_valid = 1'b1;
         tick;
         mex_valid = 1'b0;
-        check("pre-arithmetic TAMAC fails closed in one cycle",
-              mex_done && !mex_busy && mex_fault == MEX_FAULT_ILLEGAL);
-        check("pre-arithmetic TAMAC issues no memory request",
+        check("second-source span fault waits one transport interval",
+              !mex_done && mex_busy &&
+              mex_fault == MEX_FAULT_NONE &&
+              !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
+        check("second-source preflight prevents first source read",
+              tamac_mem_req_count == 0 &&
               !tile_req && !ext_tile_req);
+        tick;
+        check("second-source span fault completes in second base cycle",
+              mex_done && !mex_busy &&
+              mex_fault == MEX_FAULT_BUS);
+        check("second-source span fault reports first forbidden byte",
+              mex_fault_addr == 64'h0000_0000_0010_0000);
+        check("second-source preflight prevents first source read",
+              tamac_mem_req_count == 0 &&
+              !tile_req && !ext_tile_req);
+        tick;
+
+        // Dynamic target errors qualify the acknowledged source beat and
+        // retire without exposing any partial arithmetic.
+        write_csr(CSR_TSRC1, {32'd0, TAMAC_ADDR_B});
+        cycle_bank_snapshot = uut.tacc_bank_state;
+        tamac_mem_error = 1'b1;
+        tamac_mem_error_addr = TAMAC_ADDR_B;
+        tamac_mem_fault_addr = 64'h0000_0000_0000_0220;
+        tamac_mem_req_count = 0;
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        tick;
+        tick;
+        tamac_mem_error = 1'b0;
+        check("second source target error reaches TAMAC terminal",
+              mex_done && mex_fault == MEX_FAULT_BUS);
+        check("dynamic TAMAC error reports target fault address",
+              mex_fault_addr == 64'h0000_0000_0000_0220);
+        check("dynamic source fault preserves persistent bank",
+              uut.tacc_bank_state == cycle_bank_snapshot);
+        check("dynamic second-source error issues exactly two reads",
+              tamac_mem_req_count == 2);
+        tick;
+        check("fault retirement cannot publish staged arithmetic",
+              uut.tacc_bank_state == cycle_bank_snapshot);
+
+        // Cancellation while a source response is stalled suppresses the MEX
+        // completion and raises the private source-lane drain request.
+        tamac_mem_respond = 1'b0;
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        caller_cancel[0] = 1'b1;
+        tick;
+        caller_cancel[0] = 1'b0;
+        check("source-wait cancel suppresses TAMAC response",
+              !mex_done && !mex_busy &&
+              mex_fault == MEX_FAULT_NONE);
+        check("source-wait cancel preserves persistent bank",
+              uut.tacc_bank_state == cycle_bank_snapshot);
+        check("source-wait cancel requests arbiter drain",
+              tile_source_cancel);
+        tamac_mem_respond = 1'b1;
+        tick;
+        check("source cancellation pulse is edge-bounded",
+              !tile_source_cancel);
+
+        // Reserved function bits and unsupported immediate form remain
+        // fail-closed before memory traffic.
+        mex_ss = 2'd0;
+        mex_funct_byte = 8'h26;
+        tamac_mem_req_count = 0;
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("noncanonical TAMAC waits one transport interval",
+              !mex_done && mex_busy &&
+              mex_fault == MEX_FAULT_NONE &&
+              !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
+        check("noncanonical TAMAC emits no source request",
+              tamac_mem_req_count == 0);
+        tick;
+        check("noncanonical TAMAC faults in second base cycle",
+              mex_done && !mex_busy &&
+              mex_fault == MEX_FAULT_ILLEGAL);
+        check("noncanonical TAMAC emits no source request",
+              tamac_mem_req_count == 0);
+        tick;
+
+        mex_ss = 2'd2;
+        mex_funct_byte = {5'd0, TMUL_TAMAC};
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        check("immediate TAMAC form waits one transport interval",
+              !mex_done && mex_busy &&
+              mex_fault == MEX_FAULT_NONE &&
+              !tacc_status_raw[TACC_STATUS_BIT_BUSY]);
+        tick;
+        check("immediate TAMAC source form faults in second base cycle",
+              mex_done && !mex_busy &&
+              mex_fault == MEX_FAULT_ILLEGAL);
         tick;
 
         // Restore lifecycle fields for control/admission collision checks.
@@ -534,7 +928,7 @@ module tb_tacc_cycles;
         tick;
         check("engine reset produces no late completion", !mex_done);
 
-        check("lifecycle-only bench observed no memory write request",
+        check("TACC timing bench observed no memory write request",
               !tile_wen && !ext_tile_wen);
         check("lifecycle faults leave fault address neutral",
               mex_fault_addr == 64'd0);

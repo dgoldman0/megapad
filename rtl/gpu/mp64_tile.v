@@ -113,6 +113,8 @@ module mp64_tile #(
     output reg  [511:0]tile_wdata,
     input  wire [511:0]tile_rdata,
     input  wire        tile_ack,
+    input  wire        tile_error,
+    input  wire [63:0] tile_fault_addr,
 
     // === External memory tile access (for tiles in external RAM) ===
     output reg         ext_tile_req,
@@ -120,7 +122,14 @@ module mp64_tile #(
     output reg         ext_tile_wen,
     output reg  [511:0]ext_tile_wdata,
     input  wire [511:0]ext_tile_rdata,
-    input  wire        ext_tile_ack
+    input  wire        ext_tile_ack,
+    input  wire        ext_tile_error,
+    input  wire [63:0] ext_tile_fault_addr,
+
+    // Cancel an ordinary source-lane transaction after a TAMAC caller or
+    // engine cancellation.  The SoC arbiter drains an accepted target request
+    // and may retain one replacement request for the same private engine.
+    output reg         tile_source_cancel
 );
 
     // ========================================================================
@@ -299,6 +308,9 @@ module mp64_tile #(
     localparam S_EXT_STORE2_WAIT = 5'd18; // wait final external WMUL store
     localparam S_STORE2D_WRITE_WAIT = 5'd19; // wait row write acknowledgement
     localparam S_TACC_WAIT   = 5'd20;  // held lifecycle request / terminal
+    localparam S_TAMAC_LOAD_A= 5'd21;  // wait first integer TAMAC source
+    localparam S_TAMAC_LOAD_B= 5'd22;  // wait second integer TAMAC source
+    localparam S_TACC_INT    = 5'd23;  // one 16-lane feedback slice
 
     reg [4:0]   state;
     reg         mex_done_reg;
@@ -335,6 +347,19 @@ module mp64_tile #(
     reg [7:0]   caller_epoch_reg;
     reg [1:0]   caller_slot_reg;
     reg         engine_reset_seen;
+
+    // Integer TAMAC captures every control that affects routing or arithmetic
+    // before source traffic begins.  Existing tile_a/tile_b and result scratch
+    // registers retain operands and completed slices; no second TACC bank is
+    // instantiated.
+    reg [2:0]   tamac_ew_reg;
+    reg         tamac_signed_reg;
+    reg [1:0]   tamac_beat_reg;
+    reg [63:0]  tamac_src_a_addr_reg;
+    reg [63:0]  tamac_src_b_addr_reg;
+    reg [63:0]  tacc_image_addr_reg;
+    reg         tamac_src_b_ext_reg;
+    reg         tamac_read_ext_reg;
 
     wire [7:0] incoming_caller_epoch_now =
         caller_epochs[mex_caller_slot*8 +: 8];
@@ -440,8 +465,23 @@ module mp64_tile #(
              (tacc_req_funct_byte == {5'd0, tacc_req_funct}) &&
              (tacc_req_funct >= ETSYS_TACC_TRY) &&
              (tacc_req_funct <= ETSYS_TACC_RESERVED));
+    wire [2:0] tacc_req_format_ew =
+        tacc_req_from_input ? mode_ew : tamac_ew_reg;
+    wire tacc_req_format_signed =
+        tacc_req_from_input ? mode_signed : tamac_signed_reg;
     wire [63:0] tacc_req_image_addr =
-        (tacc_req_funct == ETSYS_TACC_STORE) ? tdst : tsrc0;
+        tacc_req_from_input ?
+            ((tacc_req_funct == ETSYS_TACC_STORE) ? tdst : tsrc0) :
+            tacc_image_addr_reg;
+    wire [63:0] tacc_req_tamac_src_a =
+        tacc_req_from_input ?
+            ((tacc_req_ss == 2'd3) ? tdst : tsrc0) :
+            tamac_src_a_addr_reg;
+    wire [63:0] tacc_req_tamac_src_b =
+        tacc_req_from_input ?
+            ((tacc_req_ss == 2'd0) ? tsrc1 : tsrc0) :
+            tamac_src_b_addr_reg;
+    wire tacc_req_tamac_has_b = tacc_req_ss != 2'd1;
     wire tacc_req_priv =
         tacc_req_from_input ? mex_priv : priv_reg;
     wire [63:0] tacc_req_mpu_base =
@@ -453,18 +493,105 @@ module mp64_tile #(
     wire tacc_req_image_operation =
         (tacc_req_funct == ETSYS_TACC_LOAD) ||
         (tacc_req_funct == ETSYS_TACC_STORE);
-    wire [64:0] tacc_req_span_end =
-        {1'b0, tacc_req_image_addr} + 65'd256;
     localparam [63:0] TACC_MMIO_END =
         64'hFFFF_FF80_0000_0000;
     reg [2:0]  tacc_req_preflight_fault;
     reg [63:0] tacc_req_preflight_fault_addr;
     reg        tacc_req_image_ext;
     reg        tacc_req_image_hbw;
+    reg [2:0]  tamac_src_a_preflight_fault;
+    reg [63:0] tamac_src_a_preflight_fault_addr;
+    reg        tamac_src_a_ext;
+    reg        tamac_src_a_hbw;
+    reg [2:0]  tamac_src_b_preflight_fault;
+    reg [63:0] tamac_src_b_preflight_fault_addr;
+    reg        tamac_src_b_ext;
+    reg        tamac_src_b_hbw;
 
-    // Image preflight is deliberately combinational and complete: no BUSY,
-    // shared-stage ownership, or memory side effect is visible until all 256
-    // bytes have one legal route under the captured caller's policy.
+    // The task is pure combinational routing policy.  It deliberately does
+    // not issue a memory request, so both TAMAC source spans can be checked
+    // before the first source beat becomes visible.
+    task tacc_preflight_span;
+        input  [63:0] address;
+        input  [8:0]  span_bytes;
+        input         caller_priv;
+        input  [63:0] caller_mpu_base;
+        input  [63:0] caller_mpu_limit;
+        input         caller_mpu_enabled;
+        output [2:0]  fault;
+        output [63:0] fault_address;
+        output        routed_ext;
+        output        routed_hbw;
+        reg [64:0] span_end;
+        begin
+            fault         = MEX_FAULT_NONE;
+            fault_address = 64'd0;
+            routed_ext    = 1'b0;
+            routed_hbw    = 1'b0;
+            span_end      = {1'b0, address} + span_bytes;
+
+            if (span_end[64]) begin
+                fault         = MEX_FAULT_BUS;
+                fault_address = 64'd0;
+            end else if ((address < TACC_MMIO_END) &&
+                         (span_end[63:0] > MP64_MMIO_BASE)) begin
+                fault = MEX_FAULT_BUS;
+                fault_address =
+                    (address < MP64_MMIO_BASE) ?
+                    MP64_MMIO_BASE : address;
+            end else if (address < TACC_BANK0_LIMIT) begin
+                if (span_end > {1'b0, TACC_BANK0_LIMIT}) begin
+                    fault         = MEX_FAULT_BUS;
+                    fault_address = TACC_BANK0_LIMIT;
+                end
+            end else if ((address >= {32'd0, MP64_EXT_MEM_BASE}) &&
+                         (address < TACC_EXT_LIMIT)) begin
+                routed_ext = 1'b1;
+                if (span_end > {1'b0, TACC_EXT_LIMIT}) begin
+                    fault         = MEX_FAULT_BUS;
+                    fault_address = TACC_EXT_LIMIT;
+                end
+            end else if ((address >= TACC_VRAM_BASE) &&
+                         (address < TACC_VRAM_LIMIT)) begin
+                routed_ext = 1'b1;
+                if (span_end > {1'b0, TACC_VRAM_LIMIT}) begin
+                    fault         = MEX_FAULT_BUS;
+                    fault_address = TACC_VRAM_LIMIT;
+                end
+            end else if ((address >= {32'd0, MP64_HBW_BASE_ADDR}) &&
+                         (address < TACC_HBW_LIMIT)) begin
+                routed_hbw = 1'b1;
+                if (span_end > {1'b0, TACC_HBW_LIMIT}) begin
+                    fault         = MEX_FAULT_BUS;
+                    fault_address = TACC_HBW_LIMIT;
+                end
+            end else begin
+                fault         = MEX_FAULT_BUS;
+                fault_address = address;
+            end
+
+            if ((fault == MEX_FAULT_NONE) &&
+                caller_priv && routed_hbw) begin
+                fault         = MEX_FAULT_PRIV;
+                fault_address = address;
+            end else if ((fault == MEX_FAULT_NONE) &&
+                         caller_priv && caller_mpu_enabled) begin
+                if ((address < caller_mpu_base) ||
+                    (address >= caller_mpu_limit)) begin
+                    fault         = MEX_FAULT_PRIV;
+                    fault_address = address;
+                end else if (span_end >
+                             {1'b0, caller_mpu_limit}) begin
+                    fault         = MEX_FAULT_PRIV;
+                    fault_address = caller_mpu_limit;
+                end
+            end
+        end
+    endtask
+
+    // Image and source preflight are deliberately combinational and complete:
+    // no BUSY, stage ownership, or source read is visible until every required
+    // byte has one legal route under the captured caller's policy.
     always @(*) begin
         tacc_req_preflight_fault      = MEX_FAULT_NONE;
         tacc_req_preflight_fault_addr = 64'd0;
@@ -475,70 +602,55 @@ module mp64_tile #(
             if (tacc_req_image_addr[5:0] != 6'd0) begin
                 tacc_req_preflight_fault = MEX_FAULT_ALIGN;
                 tacc_req_preflight_fault_addr = tacc_req_image_addr;
-            end else if (tacc_req_image_addr >
-                         64'hFFFF_FFFF_FFFF_FF00) begin
-                tacc_req_preflight_fault = MEX_FAULT_BUS;
-                tacc_req_preflight_fault_addr = 64'd0;
-            end else if ((tacc_req_image_addr < TACC_MMIO_END) &&
-                         (tacc_req_span_end[63:0] > MP64_MMIO_BASE)) begin
-                tacc_req_preflight_fault = MEX_FAULT_BUS;
-                tacc_req_preflight_fault_addr =
-                    (tacc_req_image_addr < MP64_MMIO_BASE) ?
-                    MP64_MMIO_BASE : tacc_req_image_addr;
-            end else if (tacc_req_image_addr < TACC_BANK0_LIMIT) begin
-                if (tacc_req_span_end > {1'b0, TACC_BANK0_LIMIT}) begin
-                    tacc_req_preflight_fault = MEX_FAULT_BUS;
-                    tacc_req_preflight_fault_addr =
-                        TACC_BANK0_LIMIT;
-                end
-            end else if ((tacc_req_image_addr >=
-                          {32'd0, MP64_EXT_MEM_BASE}) &&
-                         (tacc_req_image_addr < TACC_EXT_LIMIT)) begin
-                tacc_req_image_ext = 1'b1;
-                if (tacc_req_span_end > {1'b0, TACC_EXT_LIMIT}) begin
-                    tacc_req_preflight_fault = MEX_FAULT_BUS;
-                    tacc_req_preflight_fault_addr =
-                        TACC_EXT_LIMIT;
-                end
-            end else if ((tacc_req_image_addr >= TACC_VRAM_BASE) &&
-                         (tacc_req_image_addr < TACC_VRAM_LIMIT)) begin
-                tacc_req_image_ext = 1'b1;
-                if (tacc_req_span_end > {1'b0, TACC_VRAM_LIMIT}) begin
-                    tacc_req_preflight_fault = MEX_FAULT_BUS;
-                    tacc_req_preflight_fault_addr =
-                        TACC_VRAM_LIMIT;
-                end
-            end else if ((tacc_req_image_addr >=
-                          {32'd0, MP64_HBW_BASE_ADDR}) &&
-                         (tacc_req_image_addr < TACC_HBW_LIMIT)) begin
-                tacc_req_image_hbw = 1'b1;
-                if (tacc_req_span_end > {1'b0, TACC_HBW_LIMIT}) begin
-                    tacc_req_preflight_fault = MEX_FAULT_BUS;
-                    tacc_req_preflight_fault_addr =
-                        TACC_HBW_LIMIT;
-                end
             end else begin
-                tacc_req_preflight_fault = MEX_FAULT_BUS;
-                tacc_req_preflight_fault_addr = tacc_req_image_addr;
+                tacc_preflight_span(
+                    tacc_req_image_addr, 9'd256, tacc_req_priv,
+                    tacc_req_mpu_base, tacc_req_mpu_limit,
+                    tacc_req_mpu_enabled,
+                    tacc_req_preflight_fault,
+                    tacc_req_preflight_fault_addr,
+                    tacc_req_image_ext, tacc_req_image_hbw);
             end
+        end
 
-            if ((tacc_req_preflight_fault == MEX_FAULT_NONE) &&
-                tacc_req_priv && tacc_req_image_hbw) begin
-                tacc_req_preflight_fault = MEX_FAULT_PRIV;
-                tacc_req_preflight_fault_addr = tacc_req_image_addr;
-            end else if ((tacc_req_preflight_fault == MEX_FAULT_NONE) &&
-                         tacc_req_priv && tacc_req_mpu_enabled) begin
-                if ((tacc_req_image_addr < tacc_req_mpu_base) ||
-                    (tacc_req_image_addr >= tacc_req_mpu_limit)) begin
-                    tacc_req_preflight_fault = MEX_FAULT_PRIV;
-                    tacc_req_preflight_fault_addr =
-                        tacc_req_image_addr;
-                end else if (tacc_req_span_end >
-                             {1'b0, tacc_req_mpu_limit}) begin
-                    tacc_req_preflight_fault = MEX_FAULT_PRIV;
-                    tacc_req_preflight_fault_addr =
-                        tacc_req_mpu_limit;
-                end
+        tamac_src_a_preflight_fault      = MEX_FAULT_NONE;
+        tamac_src_a_preflight_fault_addr = 64'd0;
+        tamac_src_a_ext                  = 1'b0;
+        tamac_src_a_hbw                  = 1'b0;
+        tamac_src_b_preflight_fault      = MEX_FAULT_NONE;
+        tamac_src_b_preflight_fault_addr = 64'd0;
+        tamac_src_b_ext                  = 1'b0;
+        tamac_src_b_hbw                  = 1'b0;
+
+        if (tacc_req_is_tamac) begin
+            tacc_preflight_span(
+                tacc_req_tamac_src_a, 9'd64, tacc_req_priv,
+                tacc_req_mpu_base, tacc_req_mpu_limit,
+                tacc_req_mpu_enabled,
+                tamac_src_a_preflight_fault,
+                tamac_src_a_preflight_fault_addr,
+                tamac_src_a_ext, tamac_src_a_hbw);
+            if (tacc_req_tamac_has_b)
+                tacc_preflight_span(
+                    tacc_req_tamac_src_b, 9'd64, tacc_req_priv,
+                    tacc_req_mpu_base, tacc_req_mpu_limit,
+                    tacc_req_mpu_enabled,
+                    tamac_src_b_preflight_fault,
+                    tamac_src_b_preflight_fault_addr,
+                    tamac_src_b_ext, tamac_src_b_hbw);
+
+            if (tamac_src_a_preflight_fault != MEX_FAULT_NONE) begin
+                tacc_req_preflight_fault =
+                    tamac_src_a_preflight_fault;
+                tacc_req_preflight_fault_addr =
+                    tamac_src_a_preflight_fault_addr;
+            end else if (tacc_req_tamac_has_b &&
+                         (tamac_src_b_preflight_fault !=
+                          MEX_FAULT_NONE)) begin
+                tacc_req_preflight_fault =
+                    tamac_src_b_preflight_fault;
+                tacc_req_preflight_fault_addr =
+                    tamac_src_b_preflight_fault_addr;
             end
         end
     end
@@ -551,6 +663,11 @@ module mp64_tile #(
     wire [2:0] tacc_req_fault;
     wire [63:0] tacc_req_fault_addr;
     wire [2047:0] tacc_bank_state;
+    wire tacc_tamac_start;
+    wire tamac_terminal;
+    wire [2:0] tamac_terminal_fault;
+    wire [63:0] tamac_terminal_fault_addr;
+    wire [2047:0] tamac_result_image;
     mp64_tacc #(
         .CALLER_BASE (TACC_CALLER_BASE),
         .CALLER_COUNT(TACC_CALLER_COUNT)
@@ -565,8 +682,8 @@ module mp64_tile #(
         .req_canonical         (tacc_req_canonical),
         .req_caller_id         (tacc_req_caller_id),
         .req_caller_slot       (tacc_req_caller_slot),
-        .req_format_ew         (mode_ew),
-        .req_format_signed     (mode_signed),
+        .req_format_ew         (tacc_req_format_ew),
+        .req_format_signed     (tacc_req_format_signed),
         .req_image_addr        (tacc_req_image_addr),
         .req_preflight_fault   (tacc_req_preflight_fault),
         .req_preflight_fault_addr(tacc_req_preflight_fault_addr),
@@ -576,6 +693,11 @@ module mp64_tile #(
         .req_busy              (tacc_req_busy),
         .req_fault             (tacc_req_fault),
         .req_fault_addr        (tacc_req_fault_addr),
+        .tamac_start           (tacc_tamac_start),
+        .tamac_done            (tamac_terminal),
+        .tamac_fault           (tamac_terminal_fault),
+        .tamac_fault_addr      (tamac_terminal_fault_addr),
+        .tamac_result_image    (tamac_result_image),
         .xfer_req              (tacc_xfer_req),
         .xfer_store            (tacc_xfer_store),
         .xfer_base             (tacc_xfer_base),
@@ -628,6 +750,10 @@ module mp64_tile #(
                 S_EXT_LOAD_A, S_EXT_LOAD_B, S_EXT_STORE,
                 S_EXT_STORE2_WAIT:
                     mex_stall_cycle = !ext_tile_ack;
+                S_TAMAC_LOAD_A, S_TAMAC_LOAD_B:
+                    mex_stall_cycle =
+                        tamac_read_ext_reg ?
+                        !ext_tile_ack : !tile_ack;
                 S_TACC_WAIT:
                     mex_stall_cycle = !tacc_req_busy && !tacc_req_done;
                 default:
@@ -648,8 +774,11 @@ module mp64_tile #(
     // Source B selection
     reg [511:0] src_b_selected;
     reg [511:0] gpr_broadcast;
+    wire tamac_datapath_active = state == S_TACC_INT;
+    wire [2:0] broadcast_mode_ew =
+        tamac_datapath_active ? tamac_ew_reg : mode_ew;
     always @(*) begin
-        case (mode_ew)
+        case (broadcast_mode_ew)
             TMODE_8:
                 gpr_broadcast = {64{gpr_val_reg[7:0]}};
             TMODE_16, TMODE_FP16, TMODE_BF16:
@@ -662,13 +791,20 @@ module mp64_tile #(
                 gpr_broadcast = 512'd0;
         endcase
 
-        case (ss_reg)
-            2'd0: src_b_selected = tile_b;
-            2'd1: src_b_selected = gpr_broadcast;
-            2'd2: src_b_selected = {64{imm8_reg}};
-            2'd3: src_b_selected = tile_a;      // in-place
-            default: src_b_selected = 512'd0;
-        endcase
+        if (tamac_datapath_active && ss_reg == 2'd3)
+            // TAMAC in-place is [TDST] x [TSRC0]; tile_a is source A,
+            // while the ordinary SS3 convention would incorrectly reuse it
+            // as source B.
+            src_b_selected = tile_b;
+        else begin
+            case (ss_reg)
+                2'd0: src_b_selected = tile_b;
+                2'd1: src_b_selected = gpr_broadcast;
+                2'd2: src_b_selected = {64{imm8_reg}};
+                2'd3: src_b_selected = tile_a;      // ordinary in-place
+                default: src_b_selected = 512'd0;
+            endcase
+        end
     end
 
     // ========================================================================
@@ -1506,13 +1642,17 @@ module mp64_tile #(
     // ========================================================================
     reg [511:0] wmul_lo, wmul_hi;
     integer wl;
+    wire [2:0] wmul_mode_ew =
+        tamac_datapath_active ? tamac_ew_reg : mode_ew;
+    wire wmul_mode_signed =
+        tamac_datapath_active ? tamac_signed_reg : mode_signed;
     always @(*) begin
         wmul_lo = 512'd0;
         wmul_hi = 512'd0;
-        case (mode_ew[1:0])
+        case (wmul_mode_ew[1:0])
             2'd0: for (wl = 0; wl < 64; wl = wl + 1) begin : w8
                 reg [15:0] wp8;
-                if (mode_signed) wp8 = $signed({{8{tile_a[wl*8+7]}}, tile_a[wl*8 +: 8]})
+                if (wmul_mode_signed) wp8 = $signed({{8{tile_a[wl*8+7]}}, tile_a[wl*8 +: 8]})
                                      * $signed({{8{src_b_selected[wl*8+7]}}, src_b_selected[wl*8 +: 8]});
                 else             wp8 = {8'd0, tile_a[wl*8 +: 8]} * {8'd0, src_b_selected[wl*8 +: 8]};
                 if (wl < 32) wmul_lo[wl*16 +: 16] = wp8;
@@ -1520,7 +1660,7 @@ module mp64_tile #(
             end
             2'd1: for (wl = 0; wl < 32; wl = wl + 1) begin : w16
                 reg [31:0] wp16;
-                if (mode_signed) wp16 = $signed({{16{tile_a[wl*16+15]}}, tile_a[wl*16 +: 16]})
+                if (wmul_mode_signed) wp16 = $signed({{16{tile_a[wl*16+15]}}, tile_a[wl*16 +: 16]})
                                       * $signed({{16{src_b_selected[wl*16+15]}}, src_b_selected[wl*16 +: 16]});
                 else             wp16 = {16'd0, tile_a[wl*16 +: 16]} * {16'd0, src_b_selected[wl*16 +: 16]};
                 if (wl < 16) wmul_lo[wl*32 +: 32] = wp16;
@@ -1528,7 +1668,7 @@ module mp64_tile #(
             end
             2'd2: for (wl = 0; wl < 16; wl = wl + 1) begin : w32
                 reg [63:0] wp32;
-                if (mode_signed) wp32 = $signed({{32{tile_a[wl*32+31]}}, tile_a[wl*32 +: 32]})
+                if (wmul_mode_signed) wp32 = $signed({{32{tile_a[wl*32+31]}}, tile_a[wl*32 +: 32]})
                                       * $signed({{32{src_b_selected[wl*32+31]}}, src_b_selected[wl*32 +: 32]});
                 else             wp32 = {32'd0, tile_a[wl*32 +: 32]} * {32'd0, src_b_selected[wl*32 +: 32]};
                 if (wl < 8) wmul_lo[wl*64 +: 64] = wp32;
@@ -1537,6 +1677,166 @@ module mp64_tile #(
             2'd3: wmul_lo = mul_result;  // can't widen 64→128
         endcase
     end
+
+    // ========================================================================
+    // Integer TAMAC — one structurally explicit 16x64-bit feedback bank
+    // ========================================================================
+    // WMUL already produces exact 8x8, 16x16, and 32x32 products.  Operand
+    // muxes below select one group of sixteen accumulator/product lanes for
+    // every beat.  The sole arithmetic operators are the sixteen generated
+    // 64-bit additions, so synthesis cannot elaborate a separate adder bank
+    // for each element width.  U8 consumes only each sum's low 32 bits.
+    reg  [63:0] tamac_feedback_lhs [0:15];
+    reg  [63:0] tamac_feedback_rhs [0:15];
+    wire [63:0] tamac_feedback_sum [0:15];
+    reg [1023:0] tamac_slice_result;
+    integer tfo;
+    integer tfr;
+    integer tamac_lane_index;
+
+    always @(*) begin
+        tamac_lane_index = 0;
+        for (tfo = 0; tfo < 16; tfo = tfo + 1) begin
+            tamac_feedback_lhs[tfo] = 64'd0;
+            tamac_feedback_rhs[tfo] = 64'd0;
+
+            case (tamac_ew_reg)
+                TMODE_8: begin
+                    tamac_lane_index = tamac_beat_reg * 16 + tfo;
+                    tamac_feedback_lhs[tfo] =
+                        {32'd0,
+                         tacc_bank_state[
+                             tamac_lane_index*32 +: 32]};
+                    if (tamac_lane_index < 32) begin
+                        tamac_feedback_rhs[tfo] =
+                            tamac_signed_reg ?
+                            {{48{wmul_lo[
+                                tamac_lane_index*16 + 15]}},
+                             wmul_lo[
+                                tamac_lane_index*16 +: 16]} :
+                            {48'd0,
+                             wmul_lo[
+                                tamac_lane_index*16 +: 16]};
+                    end else begin
+                        tamac_feedback_rhs[tfo] =
+                            tamac_signed_reg ?
+                            {{48{wmul_hi[
+                                (tamac_lane_index-32)*16 + 15]}},
+                             wmul_hi[
+                                (tamac_lane_index-32)*16 +: 16]} :
+                            {48'd0,
+                             wmul_hi[
+                                (tamac_lane_index-32)*16 +: 16]};
+                    end
+                end
+
+                TMODE_16: begin
+                    tamac_lane_index = tamac_beat_reg * 16 + tfo;
+                    tamac_feedback_lhs[tfo] =
+                        tacc_bank_state[
+                            tamac_lane_index*64 +: 64];
+                    if (tamac_lane_index < 16) begin
+                        tamac_feedback_rhs[tfo] =
+                            tamac_signed_reg ?
+                            {{32{wmul_lo[
+                                tamac_lane_index*32 + 31]}},
+                             wmul_lo[
+                                tamac_lane_index*32 +: 32]} :
+                            {32'd0,
+                             wmul_lo[
+                                tamac_lane_index*32 +: 32]};
+                    end else begin
+                        tamac_feedback_rhs[tfo] =
+                            tamac_signed_reg ?
+                            {{32{wmul_hi[
+                                (tamac_lane_index-16)*32 + 31]}},
+                             wmul_hi[
+                                (tamac_lane_index-16)*32 +: 32]} :
+                            {32'd0,
+                             wmul_hi[
+                                (tamac_lane_index-16)*32 +: 32]};
+                    end
+                end
+
+                TMODE_32: begin
+                    tamac_feedback_lhs[tfo] =
+                        tacc_bank_state[tfo*64 +: 64];
+                    if (tfo < 8)
+                        tamac_feedback_rhs[tfo] =
+                            wmul_lo[tfo*64 +: 64];
+                    else
+                        tamac_feedback_rhs[tfo] =
+                            wmul_hi[(tfo-8)*64 +: 64];
+                end
+
+                default: begin
+                end
+            endcase
+        end
+    end
+
+    genvar tamac_feedback_lane;
+    generate
+        for (tamac_feedback_lane = 0;
+             tamac_feedback_lane < 16;
+             tamac_feedback_lane = tamac_feedback_lane + 1) begin
+            assign tamac_feedback_sum[tamac_feedback_lane] =
+                tamac_feedback_lhs[tamac_feedback_lane] +
+                tamac_feedback_rhs[tamac_feedback_lane];
+        end
+    endgenerate
+
+    always @(*) begin
+        tamac_slice_result = 1024'd0;
+        for (tfr = 0; tfr < 16; tfr = tfr + 1) begin
+            if (tamac_ew_reg == TMODE_8)
+                tamac_slice_result[tfr*32 +: 32] =
+                    tamac_feedback_sum[tfr][31:0];
+            else if ((tamac_ew_reg == TMODE_16) ||
+                     (tamac_ew_reg == TMODE_32))
+                tamac_slice_result[tfr*64 +: 64] =
+                    tamac_feedback_sum[tfr];
+        end
+    end
+
+    wire tamac_last_beat =
+        ((tamac_ew_reg == TMODE_8)  &&
+         (tamac_beat_reg == 2'd3)) ||
+        ((tamac_ew_reg == TMODE_16) &&
+         (tamac_beat_reg == 2'd1)) ||
+        ((tamac_ew_reg == TMODE_32) &&
+         (tamac_beat_reg == 2'd0));
+    wire tamac_source_ack =
+        tamac_read_ext_reg ? ext_tile_ack : tile_ack;
+    wire tamac_source_error =
+        tamac_read_ext_reg ? ext_tile_error : tile_error;
+    wire [63:0] tamac_source_fault_addr =
+        tamac_read_ext_reg ?
+        ext_tile_fault_addr : tile_fault_addr;
+    wire tamac_source_wait =
+        (state == S_TAMAC_LOAD_A) ||
+        (state == S_TAMAC_LOAD_B);
+
+    assign tamac_terminal =
+        (tamac_source_wait &&
+         tamac_source_ack && tamac_source_error) ||
+        ((state == S_TACC_INT) && tamac_last_beat);
+    assign tamac_terminal_fault =
+        (tamac_source_wait &&
+         tamac_source_ack && tamac_source_error) ?
+        MEX_FAULT_BUS : MEX_FAULT_NONE;
+    assign tamac_terminal_fault_addr =
+        (tamac_source_wait &&
+         tamac_source_ack && tamac_source_error) ?
+        tamac_source_fault_addr : 64'd0;
+    assign tamac_result_image =
+        (tamac_ew_reg == TMODE_8) ?
+            {tile_a, result2, result, tile_c} :
+        (tamac_ew_reg == TMODE_16) ?
+            {tile_b, tile_a, result2, result} :
+        (tamac_ew_reg == TMODE_32) ?
+            {1024'd0, result2, result} :
+            2048'd0;
 
     // ========================================================================
     // TMUL.MAC / TMUL.FMA — multiply-accumulate in-place (dst += a*b)
@@ -2228,6 +2528,7 @@ module mp64_tile #(
             result2       <= 512'd0;
             ext_tile_req  <= 1'b0;
             ext_tile_wen  <= 1'b0;
+            tile_source_cancel <= 1'b0;
             needs_load_c  <= 1'b0;
             engine_epoch  <= 8'd0;
             engine_reset_seen <= 1'b0;
@@ -2251,6 +2552,14 @@ module mp64_tile #(
             request_engine_epoch_reg <= 8'd0;
             caller_epoch_reg <= 8'd0;
             caller_slot_reg  <= 2'd0;
+            tamac_ew_reg      <= TMODE_8;
+            tamac_signed_reg  <= 1'b0;
+            tamac_beat_reg    <= 2'd0;
+            tamac_src_a_addr_reg <= 64'd0;
+            tamac_src_b_addr_reg <= 64'd0;
+            tacc_image_addr_reg  <= 64'd0;
+            tamac_src_b_ext_reg  <= 1'b0;
+            tamac_read_ext_reg   <= 1'b0;
             acc[0]        <= 64'd0;
             acc[1]        <= 64'd0;
             acc[2]        <= 64'd0;
@@ -2265,6 +2574,7 @@ module mp64_tile #(
             tile_wen      <= 1'b0;
             ext_tile_req  <= 1'b0;
             ext_tile_wen  <= 1'b0;
+            tile_source_cancel <= tamac_source_wait;
             needs_load_c  <= 1'b0;
             tctrl_accumulate_reg <= 1'b0;
             tctrl_acc_zero_reg   <= 1'b0;
@@ -2283,6 +2593,7 @@ module mp64_tile #(
             tile_wen     <= 1'b0;
             ext_tile_req <= 1'b0;
             ext_tile_wen <= 1'b0;
+            tile_source_cancel <= 1'b0;
             tctrl_acc_zero_clear <= 1'b0;
 
             // ACC has one procedural owner. Cluster context restores and
@@ -2307,9 +2618,10 @@ module mp64_tile #(
             end
 
             if (active_cancelled) begin
-                // Cancellation is terminal but non-retiring.  Requests already
-                // accepted by a memory target are not rolled back; their late
-                // acknowledgements are ignored in S_IDLE.
+                // Cancellation is terminal but non-retiring.  A TAMAC source
+                // request is canceled one interval later, after its dispatch
+                // pulse has been captured by the source arbiter.  The arbiter
+                // drains any accepted target response and suppresses its ACK.
                 state         <= S_IDLE;
                 mex_done_reg  <= 1'b0;
                 mex_busy_reg  <= 1'b0;
@@ -2319,6 +2631,7 @@ module mp64_tile #(
                 tile_wen      <= 1'b0;
                 ext_tile_req  <= 1'b0;
                 ext_tile_wen  <= 1'b0;
+                tile_source_cancel <= tamac_source_wait;
                 needs_load_c  <= 1'b0;
             end else begin
             case (state)
@@ -2355,6 +2668,16 @@ module mp64_tile #(
                         request_engine_epoch_reg <= mex_engine_epoch;
                         caller_epoch_reg <= mex_caller_epoch;
                         caller_slot_reg  <= mex_caller_slot;
+                        tamac_ew_reg      <= mode_ew;
+                        tamac_signed_reg  <= mode_signed;
+                        tamac_beat_reg    <= 2'd0;
+                        tamac_src_a_addr_reg <=
+                            (mex_ss == 2'd3) ? tdst : tsrc0;
+                        tamac_src_b_addr_reg <=
+                            (mex_ss == 2'd0) ? tsrc1 : tsrc0;
+                        tacc_image_addr_reg <=
+                            (mex_funct == ETSYS_TACC_STORE) ?
+                            tdst : tsrc0;
                         tctrl_accumulate_reg <= tctrl[0];
                         tctrl_acc_zero_reg   <= tctrl[1];
                         mex_busy_reg  <= 1'b1;
@@ -2362,12 +2685,29 @@ module mp64_tile #(
                         mex_fault_addr_reg <= 64'd0;
                         needs_load_c  <= 1'b0;
 
-                        // The dedicated state leaf admits lifecycle operations
-                        // and fails future image/arithmetic requests closed.
-                        // Keep the captured copy live because a simultaneous
-                        // privileged FORCE may deliberately defer admission.
                         if (intercept_tacc_namespace) begin
-                            state <= S_TACC_WAIT;
+                            if (tacc_req_is_tamac &&
+                                tacc_tamac_start) begin
+                                tamac_src_b_ext_reg <=
+                                    tamac_src_b_ext;
+                                tamac_read_ext_reg <=
+                                    tamac_src_a_ext;
+                                if (tamac_src_a_ext) begin
+                                    ext_tile_req <= 1'b1;
+                                    ext_tile_addr <=
+                                        tacc_req_tamac_src_a;
+                                end else begin
+                                    tile_req <= 1'b1;
+                                    tile_addr <=
+                                        tacc_req_tamac_src_a[31:0];
+                                end
+                                state <= S_TAMAC_LOAD_A;
+                            end else begin
+                                // Keep the captured copy live because a
+                                // simultaneous FORCE may defer admission or
+                                // validation may publish a terminal fault.
+                                state <= S_TACC_WAIT;
+                            end
                         end
                     // TSYS.ZERO — write zeros
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
@@ -2842,6 +3182,92 @@ module mp64_tile #(
                     state <= S_DONE;
             end
 
+            // Integer TAMAC reads use the engine's private ordinary source
+            // lane.  All required spans were validated before tamac_start, so
+            // only acknowledged target errors can terminate these states.
+            S_TAMAC_LOAD_A: begin
+                if (tamac_source_ack) begin
+                    if (tamac_source_error) begin
+                        state <= S_TACC_WAIT;
+                    end else begin
+                        tile_a <= tamac_read_ext_reg ?
+                                  ext_tile_rdata : tile_rdata;
+                        tamac_beat_reg <= 2'd0;
+                        if (ss_reg == 2'd1) begin
+                            state <= S_TACC_INT;
+                        end else begin
+                            tamac_read_ext_reg <=
+                                tamac_src_b_ext_reg;
+                            if (tamac_src_b_ext_reg) begin
+                                ext_tile_req  <= 1'b1;
+                                ext_tile_addr <=
+                                    tamac_src_b_addr_reg;
+                            end else begin
+                                tile_req  <= 1'b1;
+                                tile_addr <=
+                                    tamac_src_b_addr_reg[31:0];
+                            end
+                            state <= S_TAMAC_LOAD_B;
+                        end
+                    end
+                end
+            end
+
+            S_TAMAC_LOAD_B: begin
+                if (tamac_source_ack) begin
+                    if (tamac_source_error) begin
+                        state <= S_TACC_WAIT;
+                    end else begin
+                        tile_b <= tamac_read_ext_reg ?
+                                  ext_tile_rdata : tile_rdata;
+                        tamac_beat_reg <= 2'd0;
+                        state <= S_TACC_INT;
+                    end
+                end
+            end
+
+            S_TACC_INT: begin
+                case (tamac_ew_reg)
+                    TMODE_8: begin
+                        case (tamac_beat_reg)
+                            2'd0: tile_c  <=
+                                tamac_slice_result[511:0];
+                            2'd1: result  <=
+                                tamac_slice_result[511:0];
+                            2'd2: result2 <=
+                                tamac_slice_result[511:0];
+                            2'd3: tile_a  <=
+                                tamac_slice_result[511:0];
+                            default: begin
+                            end
+                        endcase
+                    end
+
+                    TMODE_16: begin
+                        if (tamac_beat_reg == 2'd0) begin
+                            result  <= tamac_slice_result[511:0];
+                            result2 <= tamac_slice_result[1023:512];
+                        end else begin
+                            tile_a <= tamac_slice_result[511:0];
+                            tile_b <= tamac_slice_result[1023:512];
+                        end
+                    end
+
+                    TMODE_32: begin
+                        result  <= tamac_slice_result[511:0];
+                        result2 <= tamac_slice_result[1023:512];
+                    end
+
+                    default: begin
+                    end
+                endcase
+
+                if (tamac_last_beat)
+                    state <= S_TACC_WAIT;
+                else
+                    tamac_beat_reg <= tamac_beat_reg + 2'd1;
+            end
+
             // ================================================================
             // LOAD2D: multi-cycle strided gather from tile BRAM → result
             // ================================================================
@@ -2929,7 +3355,23 @@ module mp64_tile #(
             end
 
             S_TACC_WAIT: begin
-                if (tacc_req_done && mex_retire) begin
+                if (tacc_tamac_start) begin
+                    // A FORCE accepted beside the original dispatch may have
+                    // delayed admission.  Reuse the captured request context;
+                    // live CPU buses are intentionally ignored here.
+                    tamac_src_b_ext_reg <= tamac_src_b_ext;
+                    tamac_read_ext_reg  <= tamac_src_a_ext;
+                    tamac_beat_reg      <= 2'd0;
+                    if (tamac_src_a_ext) begin
+                        ext_tile_req  <= 1'b1;
+                        ext_tile_addr <= tamac_src_a_addr_reg;
+                    end else begin
+                        tile_req  <= 1'b1;
+                        tile_addr <= tamac_src_a_addr_reg[31:0];
+                    end
+                    mex_busy_reg <= 1'b1;
+                    state <= S_TAMAC_LOAD_A;
+                end else if (tacc_req_done && mex_retire) begin
                     mex_busy_reg <= 1'b0;
                     state        <= S_IDLE;
                 end else begin

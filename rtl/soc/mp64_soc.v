@@ -398,6 +398,8 @@ module mp64_soc #(
     wire [511:0]cluster_tile_wdata  [0:NUM_CLUSTERS-1];
     wire [511:0]cluster_tile_rdata  [0:NUM_CLUSTERS-1];
     wire        cluster_tile_ack    [0:NUM_CLUSTERS-1];
+    wire        cluster_tile_error  [0:NUM_CLUSTERS-1];
+    wire [63:0] cluster_tile_fault_addr[0:NUM_CLUSTERS-1];
 
     // Per-cluster ext tile memory ports
     wire        cluster_ext_tile_req   [0:NUM_CLUSTERS-1];
@@ -406,6 +408,9 @@ module mp64_soc #(
     wire [511:0]cluster_ext_tile_wdata [0:NUM_CLUSTERS-1];
     wire [511:0]cluster_ext_tile_rdata [0:NUM_CLUSTERS-1];
     wire        cluster_ext_tile_ack   [0:NUM_CLUSTERS-1];
+    wire        cluster_ext_tile_error [0:NUM_CLUSTERS-1];
+    wire [63:0] cluster_ext_tile_fault_addr[0:NUM_CLUSTERS-1];
+    wire        cluster_tile_source_cancel[0:NUM_CLUSTERS-1];
 
     wire         cluster_tacc_xfer_req [0:NUM_CLUSTERS-1];
     wire         cluster_tacc_xfer_store[0:NUM_CLUSTERS-1];
@@ -460,6 +465,8 @@ module mp64_soc #(
                 .tile_wdata  (cluster_tile_wdata[ki]),
                 .tile_rdata  (cluster_tile_rdata[ki]),
                 .tile_ack    (cluster_tile_ack[ki]),
+                .tile_error  (cluster_tile_error[ki]),
+                .tile_fault_addr(cluster_tile_fault_addr[ki]),
 
                 .ext_tile_req  (cluster_ext_tile_req[ki]),
                 .ext_tile_addr (cluster_ext_tile_addr[ki]),
@@ -467,6 +474,11 @@ module mp64_soc #(
                 .ext_tile_wdata(cluster_ext_tile_wdata[ki]),
                 .ext_tile_rdata(cluster_ext_tile_rdata[ki]),
                 .ext_tile_ack  (cluster_ext_tile_ack[ki]),
+                .ext_tile_error(cluster_ext_tile_error[ki]),
+                .ext_tile_fault_addr(
+                    cluster_ext_tile_fault_addr[ki]),
+                .tile_source_cancel(
+                    cluster_tile_source_cancel[ki]),
 
                 .tacc_xfer_req (cluster_tacc_xfer_req[ki]),
                 .tacc_xfer_store(cluster_tacc_xfer_store[ki]),
@@ -845,6 +857,7 @@ module mp64_soc #(
     wire [63:0] core_ext_tile_addr [0:NUM_CORES-1];
     wire        core_ext_tile_wen  [0:NUM_CORES-1];
     wire [511:0]core_ext_tile_wdata[0:NUM_CORES-1];
+    wire        core_tile_source_cancel[0:NUM_CORES-1];
     wire        core_tacc_xfer_req [0:NUM_CORES-1];
     wire        core_tacc_xfer_store[0:NUM_CORES-1];
     wire        core_tacc_xfer_ext [0:NUM_CORES-1];
@@ -877,6 +890,7 @@ module mp64_soc #(
     wire [TILE_SOURCE_COUNT-1:0] tile_src_cancel;
     wire [TILE_SOURCE_COUNT-1:0] tile_src_cancel_done;
     wire [TILE_SOURCE_COUNT-1:0] tile_src_accept;
+    wire [TILE_SOURCE_COUNT-1:0] tile_engine_source_cancel;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_req;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_store;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_ext;
@@ -963,6 +977,8 @@ module mp64_soc #(
             assign core_tacc_xfer_load_image[tai] =
                 tacc_stage_result_image;
             assign cluster_disable_cancel[tai] = 1'b0;
+            assign tile_engine_source_cancel[tai] =
+                core_tile_source_cancel[tai];
         end
 
         for (tai = 0; tai < NUM_CLUSTERS;
@@ -994,9 +1010,17 @@ module mp64_soc #(
                 cluster_ext_tile_wdata[tai];
             assign cluster_tile_rdata[tai] = tile_mem_rdata;
             assign cluster_tile_ack[tai] = tile_src_ack[TILE_LANE];
+            assign cluster_tile_error[tai] =
+                tile_src_error[TILE_LANE];
+            assign cluster_tile_fault_addr[tai] =
+                tile_src_fault_addr[TILE_LANE*64 +: 64];
             assign cluster_ext_tile_rdata[tai] = ext_tile_rdata;
             assign cluster_ext_tile_ack[tai] =
                 ext_tile_src_ack[TILE_LANE];
+            assign cluster_ext_tile_error[tai] =
+                ext_tile_src_error[TILE_LANE];
+            assign cluster_ext_tile_fault_addr[tai] =
+                ext_tile_src_fault_addr[TILE_LANE*64 +: 64];
 
             assign tacc_stage_req[TILE_LANE] =
                 cluster_tacc_xfer_req[tai];
@@ -1030,6 +1054,8 @@ module mp64_soc #(
                 tacc_stage_result_image;
             assign cluster_disable_cancel[TILE_LANE] =
                 !sysinfo_cluster_en[tai];
+            assign tile_engine_source_cancel[TILE_LANE] =
+                cluster_tile_source_cancel[tai];
         end
 
         for (tai = 0; tai < TILE_SOURCE_COUNT;
@@ -1042,7 +1068,8 @@ module mp64_soc #(
     endgenerate
 
     assign tile_src_cancel =
-        tacc_port_cancel | cluster_disable_cancel;
+        tacc_port_cancel | cluster_disable_cancel |
+        tile_engine_source_cancel;
 
     mp64_tacc_transfer #(
         .SOURCE_COUNT(TILE_SOURCE_COUNT),
@@ -1264,13 +1291,21 @@ module mp64_soc #(
                     .tile_wdata    (core_tile_wdata[fti]),
                     .tile_rdata    (tile_mem_rdata),
                     .tile_ack      (tile_src_ack[fti]),
+                    .tile_error    (tile_src_error[fti]),
+                    .tile_fault_addr(
+                        tile_src_fault_addr[fti*64 +: 64]),
 
                     .ext_tile_req  (core_ext_tile_req[fti]),
                     .ext_tile_addr (core_ext_tile_addr[fti]),
                     .ext_tile_wen  (core_ext_tile_wen[fti]),
                     .ext_tile_wdata(core_ext_tile_wdata[fti]),
                     .ext_tile_rdata(ext_tile_rdata),
-                    .ext_tile_ack  (ext_tile_src_ack[fti])
+                    .ext_tile_ack  (ext_tile_src_ack[fti]),
+                    .ext_tile_error(ext_tile_src_error[fti]),
+                    .ext_tile_fault_addr(
+                        ext_tile_src_fault_addr[fti*64 +: 64]),
+                    .tile_source_cancel(
+                        core_tile_source_cancel[fti])
             );
         end
     endgenerate

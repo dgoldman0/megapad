@@ -161,12 +161,17 @@ module tb_tile;
         .tile_wdata    (tile_wdata),
         .tile_rdata    (tile_rdata),
         .tile_ack      (tile_ack),
+        .tile_error    (1'b0),
+        .tile_fault_addr(64'd0),
         .ext_tile_req  (ext_tile_req),
         .ext_tile_addr (ext_tile_addr),
         .ext_tile_wen  (ext_tile_wen),
         .ext_tile_wdata(ext_tile_wdata),
         .ext_tile_rdata(ext_tile_rdata),
-        .ext_tile_ack  (ext_tile_ack)
+        .ext_tile_ack  (ext_tile_ack),
+        .ext_tile_error(1'b0),
+        .ext_tile_fault_addr(64'd0),
+        .tile_source_cancel()
     );
 
     integer pass_cnt, fail_cnt;
@@ -1235,9 +1240,9 @@ module tb_tile;
         check512(tile_mem[2], {32{16'h4000}}, "broadcast low BF16 element");
 
         // ====== TEST 55: TACC lifecycle plumbing ======
-        // Lifecycle execution is live while future arithmetic remains
-        // fail-closed. Preserve the full function byte, avoid legacy memory
-        // effects, de-duplicate held control requests, and cancel stale work.
+        // Preserve the full function byte, reject TAMAC before ownership and
+        // validity, avoid legacy memory effects, de-duplicate held control
+        // requests, and cancel stale work.
         $display("\n=== TEST 55: TACC lifecycle and cancellation ===");
         begin : tacc_plumbing
             integer ctl_done_count;
@@ -1255,7 +1260,7 @@ module tb_tile;
             mex_dispatch_raw(2'd0, MEX_TMUL, TMUL_TAMAC,
                              8'h06, 4'd0, 1'b0);
             check3(mex_fault, MEX_FAULT_ILLEGAL,
-                   "canonical TAMAC fails closed before implementation");
+                   "canonical TAMAC rejects FREE invalid state");
             mex_dispatch_raw(2'd0, MEX_TMUL, TMUL_TAMAC,
                              8'h26, 4'd0, 1'b0);
             check3(mex_fault, MEX_FAULT_ILLEGAL,

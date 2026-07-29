@@ -13,16 +13,19 @@
 // functions.  req_canonical is the tile decoder's combined check of the EXT
 // namespace, source selector, and complete function byte.
 //
-// A validation fault completes in its acceptance cycle and never raises BUSY.
-// A valid TRY, CLEAR, or RELEASE is admitted and exposes BUSY.  req_done is
-// published during the following service interval; state commits on the edge
-// where the receiver samples that response.  This keeps cancellation and
-// architectural retirement on one boundary even when a cluster registers the
-// leaf response.  req_valid may be a pulse, so integration must retain a
-// request for which req_ready is low.
+// Ordinary lifecycle validation faults complete in their acceptance cycle.
+// TAMAC and image-operation validation faults publish one interval later;
+// neither path raises physical BUSY.  A valid TRY, CLEAR, or RELEASE is
+// admitted and exposes BUSY.  req_done is published during the following
+// service interval; state commits on the edge where the receiver samples that
+// response.  This keeps cancellation and architectural retirement on one
+// boundary even when a cluster registers the leaf response.  req_valid may be
+// a pulse, so integration must retain a request for which req_ready is low.
 //
-// LOAD and STORE use a tokened chip-wide staging interface below. TAMAC
-// remains fail-closed until its dedicated arithmetic landing.
+// LOAD and STORE use a tokened chip-wide staging interface below.  TAMAC
+// arithmetic is performed by the parent tile datapath: tamac_start authorizes
+// its first source request, and the complete result remains private there until
+// this leaf reaches the architectural retirement edge.
 //
 // FORCE is an independent, level-valid, de-duplicated control transport.
 // An accepted supervisor FORCE defeats idle admission in the same cycle.  If
@@ -60,6 +63,16 @@ module mp64_tacc #(
     output wire         req_busy,
     output reg  [2:0]   req_fault,
     output reg  [63:0]  req_fault_addr,
+
+    // Integer TAMAC datapath handshake.  tamac_start is a combinational
+    // admission pulse; tamac_done terminates the admitted operation after all
+    // source reads and arithmetic slices.  The result image must remain stable
+    // while req_done is held, through the req_retire sampling edge.
+    output wire          tamac_start,
+    input  wire          tamac_done,
+    input  wire [2:0]    tamac_fault,
+    input  wire [63:0]   tamac_fault_addr,
+    input  wire [2047:0] tamac_result_image,
 
     // One chip-wide image stage arbitrates these level-held requests across
     // the seven physical engines.  The response remains held by that stage
@@ -105,6 +118,7 @@ module mp64_tacc #(
     reg          force_pending_reg;
 
     reg          active_reg;
+    reg          active_is_tamac_reg;
     reg [2:0]    active_funct_reg;
     reg [4:0]    active_caller_id_reg;
     reg [2:0]    active_format_ew_reg;
@@ -112,6 +126,13 @@ module mp64_tacc #(
     reg [63:0]   active_image_addr_reg;
     reg [7:0]    active_token_reg;
     reg [7:0]    operation_generation_reg;
+
+    // TAMAC and image-operation validation faults have a locked two-cycle
+    // base latency.  Keep their one deferred interval outside active_reg so
+    // they never publish BUSY or acquire a datapath/transfer resource.
+    reg          deferred_fault_reg;
+    reg [2:0]    deferred_fault_code_reg;
+    reg [63:0]   deferred_fault_addr_reg;
 
     // Held-valid de-duplication prevents a just-completed request from being
     // admitted again before its producer observes completion and drops valid.
@@ -161,6 +182,18 @@ module mp64_tacc #(
                     normalized_signed = 1'b0;
                 default:
                     normalized_signed = signed_mode;
+            endcase
+        end
+    endfunction
+
+    function integer_tamac_format;
+        input [2:0] ew;
+        begin
+            case (ew)
+                TMODE_8, TMODE_16, TMODE_32:
+                    integer_tamac_format = 1'b1;
+                default:
+                    integer_tamac_format = 1'b0;
             endcase
         end
     endfunction
@@ -261,8 +294,31 @@ module mp64_tacc #(
                     endcase
                 end
 
-                2'b11:
-                    incoming_fault = MEX_FAULT_ILLEGAL;
+                2'b11: begin
+                    if ((req_funct == TMUL_TAMAC) &&
+                        incoming_mine && valid_reg &&
+                        incoming_format_legal &&
+                        integer_tamac_format(req_format_ew) &&
+                        (format_ew_reg == req_format_ew) &&
+                        (format_signed_reg ==
+                         normalized_signed(req_format_ew,
+                                           req_format_signed))) begin
+                        case (req_preflight_fault)
+                            MEX_FAULT_NONE:
+                                incoming_fault = MEX_FAULT_NONE;
+                            MEX_FAULT_ALIGN,
+                            MEX_FAULT_BUS,
+                            MEX_FAULT_PRIV: begin
+                                incoming_fault =
+                                    req_preflight_fault;
+                                incoming_fault_addr =
+                                    req_preflight_fault_addr;
+                            end
+                            default:
+                                incoming_fault = MEX_FAULT_ILLEGAL;
+                        endcase
+                    end
+                end
 
                 default:
                     incoming_fault = MEX_FAULT_ILLEGAL;
@@ -316,6 +372,11 @@ module mp64_tacc #(
     wire force_authorized_new = force_new && force_action;
     wire request_not_cancelled = bit_is_zero(req_cancel);
     wire response_retired = bit_is_one(req_retire);
+    wire incoming_fault_is_deferred =
+        req_is_tamac ||
+        (!req_is_tamac &&
+         ((req_funct == ETSYS_TACC_LOAD) ||
+          (req_funct == ETSYS_TACC_STORE)));
     // The requester may treat a published response as no longer busy, while
     // physical BUSY remains asserted through the response-sampling edge.
     // That prevents sibling status readers from observing an idle gap before
@@ -324,12 +385,18 @@ module mp64_tacc #(
     assign force_ready = rst_n && !engine_reset && !force_seen;
     assign req_ready =
         rst_n && !engine_reset &&
-        !active_reg && !req_done && !force_pending_reg && !req_seen &&
+        !active_reg && !deferred_fault_reg &&
+        !req_done && !force_pending_reg && !req_seen &&
         !force_authorized_new;
+    assign tamac_start =
+        req_valid && req_ready && req_is_tamac &&
+        request_not_cancelled &&
+        (incoming_fault == MEX_FAULT_NONE);
 
     wire active_is_transfer =
-        (active_funct_reg == ETSYS_TACC_LOAD) ||
-        (active_funct_reg == ETSYS_TACC_STORE);
+        !active_is_tamac_reg &&
+        ((active_funct_reg == ETSYS_TACC_LOAD) ||
+         (active_funct_reg == ETSYS_TACC_STORE));
     assign xfer_req =
         active_reg && active_is_transfer && !req_done &&
         request_not_cancelled;
@@ -371,6 +438,7 @@ module mp64_tacc #(
             format_signed_reg           <= 1'b0;
             force_pending_reg           <= 1'b0;
             active_reg                  <= 1'b0;
+            active_is_tamac_reg         <= 1'b0;
             active_funct_reg            <= 3'd0;
             active_caller_id_reg        <= TACC_OWNER_NONE;
             active_format_ew_reg        <= 3'd0;
@@ -378,6 +446,9 @@ module mp64_tacc #(
             active_image_addr_reg       <= 64'd0;
             active_token_reg            <= 8'd0;
             operation_generation_reg    <= 8'd0;
+            deferred_fault_reg          <= 1'b0;
+            deferred_fault_code_reg     <= MEX_FAULT_NONE;
+            deferred_fault_addr_reg     <= 64'd0;
             req_seen                    <= 1'b0;
             force_seen                  <= 1'b0;
             req_done                    <= 1'b0;
@@ -394,6 +465,7 @@ module mp64_tacc #(
             format_signed_reg           <= 1'b0;
             force_pending_reg           <= 1'b0;
             active_reg                  <= 1'b0;
+            active_is_tamac_reg         <= 1'b0;
             active_funct_reg            <= 3'd0;
             active_caller_id_reg        <= TACC_OWNER_NONE;
             active_format_ew_reg        <= 3'd0;
@@ -401,6 +473,9 @@ module mp64_tacc #(
             active_image_addr_reg       <= 64'd0;
             active_token_reg            <= 8'd0;
             operation_generation_reg    <= operation_generation_reg + 8'd1;
+            deferred_fault_reg          <= 1'b0;
+            deferred_fault_code_reg     <= MEX_FAULT_NONE;
+            deferred_fault_addr_reg     <= 64'd0;
             // A request held across reset belongs to the canceled execution
             // context.  Mark it seen until its source drops valid.
             req_seen                    <= req_valid;
@@ -454,6 +529,7 @@ module mp64_tacc #(
                     req_fault_addr <= 64'd0;
                     if (active_reg) begin
                         active_reg <= 1'b0;
+                        active_is_tamac_reg <= 1'b0;
                         if (force_pending_reg || force_authorized_new) begin
                             bank_reg          <= 2048'd0;
                             owner_reg         <= TACC_OWNER_NONE;
@@ -472,6 +548,7 @@ module mp64_tacc #(
                     req_fault_addr <= 64'd0;
                     if (active_reg) begin
                         active_reg <= 1'b0;
+                        active_is_tamac_reg <= 1'b0;
 
                         if (force_pending_reg || force_authorized_new) begin
                             // FORCE is independently acknowledged and survives
@@ -485,6 +562,10 @@ module mp64_tacc #(
                             force_pending_reg <= 1'b0;
                             operation_generation_reg <=
                                 operation_generation_reg + 8'd1;
+                        end else if (req_fault == MEX_FAULT_NONE &&
+                                     active_is_tamac_reg) begin
+                            bank_reg  <= tamac_result_image;
+                            dirty_reg <= 1'b1;
                         end else if (req_fault == MEX_FAULT_NONE) begin
                             case (active_funct_reg)
                                 ETSYS_TACC_TRY: begin
@@ -538,6 +619,22 @@ module mp64_tacc #(
                         end
                     end
                 end
+            end else if (deferred_fault_reg) begin
+                // A canceled execution context receives no late fault.  Normal
+                // completion appears after exactly one non-BUSY defer interval
+                // and then follows the ordinary retirement handshake.
+                deferred_fault_reg      <= 1'b0;
+                deferred_fault_code_reg <= MEX_FAULT_NONE;
+                deferred_fault_addr_reg <= 64'd0;
+                if (!request_not_cancelled) begin
+                    req_done       <= 1'b0;
+                    req_fault      <= MEX_FAULT_NONE;
+                    req_fault_addr <= 64'd0;
+                end else begin
+                    req_done       <= 1'b1;
+                    req_fault      <= deferred_fault_code_reg;
+                    req_fault_addr <= deferred_fault_addr_reg;
+                end
             end else if (active_reg) begin
                 if (!request_not_cancelled) begin
                     // Individual caller cancellation is non-retiring and
@@ -545,6 +642,7 @@ module mp64_tacc #(
                     // same-cycle accepted) FORCE still owns the terminal
                     // boundary and therefore wipes after the cancellation.
                     active_reg <= 1'b0;
+                    active_is_tamac_reg <= 1'b0;
                     if (force_pending_reg || force_authorized_new) begin
                         bank_reg          <= 2048'd0;
                         owner_reg         <= TACC_OWNER_NONE;
@@ -557,48 +655,71 @@ module mp64_tacc #(
                             operation_generation_reg + 8'd1;
                     end
                 end else begin
-                    // Publish the response one interval before its sampling
-                    // edge so the outer cluster can suppress a coincident
-                    // caller cancellation without needing a 2,048-bit
-                    // rollback snapshot.
-                    req_done  <= 1'b1;
-                    req_fault <= MEX_FAULT_NONE;
-                    req_fault_addr <= 64'd0;
+                    if (active_is_tamac_reg) begin
+                        if (tamac_done) begin
+                            // The parent holds its completed scratch image
+                            // stable until retirement; no second 2,048-bit
+                            // accumulator bank is needed here.
+                            req_done       <= 1'b1;
+                            req_fault      <= tamac_fault;
+                            req_fault_addr <= tamac_fault_addr;
+                        end
+                    end else begin
+                        // Publish the response one interval before its
+                        // sampling edge so the outer cluster can suppress a
+                        // coincident caller cancellation without rollback.
+                        req_done  <= 1'b1;
+                        req_fault <= MEX_FAULT_NONE;
+                        req_fault_addr <= 64'd0;
 
-                    case (active_funct_reg)
-                        ETSYS_TACC_TRY,
-                        ETSYS_TACC_CLEAR,
-                        ETSYS_TACC_RELEASE: begin
-                        end
-                        ETSYS_TACC_LOAD,
-                        ETSYS_TACC_STORE: begin
-                            if (xfer_done &&
-                                xfer_response_token == active_token_reg) begin
-                                req_fault      <= xfer_fault;
-                                req_fault_addr <= xfer_fault_addr;
-                            end else begin
-                                req_done <= 1'b0;
+                        case (active_funct_reg)
+                            ETSYS_TACC_TRY,
+                            ETSYS_TACC_CLEAR,
+                            ETSYS_TACC_RELEASE: begin
                             end
-                        end
-                        default:
-                            req_fault <= MEX_FAULT_ILLEGAL;
-                    endcase
+                            ETSYS_TACC_LOAD,
+                            ETSYS_TACC_STORE: begin
+                                if (xfer_done &&
+                                    xfer_response_token ==
+                                        active_token_reg) begin
+                                    req_fault      <= xfer_fault;
+                                    req_fault_addr <= xfer_fault_addr;
+                                end else begin
+                                    req_done <= 1'b0;
+                                end
+                            end
+                            default:
+                                req_fault <= MEX_FAULT_ILLEGAL;
+                        endcase
+                    end
                 end
             end else if (req_valid && req_ready &&
                          request_not_cancelled) begin
                 req_seen <= 1'b1;
 
                 if (incoming_fault != MEX_FAULT_NONE) begin
-                    // Validation failures are one-cycle terminal responses.
-                    // They do not enter BUSY and cannot mutate state.
-                    req_done  <= 1'b1;
-                    req_fault <= incoming_fault;
-                    req_fault_addr <= incoming_fault_addr;
+                    // TAMAC and image operations retain their locked second
+                    // validation cycle without entering BUSY. Other lifecycle
+                    // validation faults complete on this acceptance edge.
+                    if (incoming_fault_is_deferred) begin
+                        deferred_fault_reg      <= 1'b1;
+                        deferred_fault_code_reg <= incoming_fault;
+                        deferred_fault_addr_reg <= incoming_fault_addr;
+                        req_done                <= 1'b0;
+                        req_fault               <= MEX_FAULT_NONE;
+                        req_fault_addr          <= 64'd0;
+                    end else begin
+                        req_done       <= 1'b1;
+                        req_fault      <= incoming_fault;
+                        req_fault_addr <= incoming_fault_addr;
+                    end
                 end else begin
                     active_reg               <= 1'b1;
+                    active_is_tamac_reg      <= req_is_tamac;
                     active_funct_reg         <= req_funct;
                     active_caller_id_reg     <= req_caller_id;
-                    if (req_funct == ETSYS_TACC_STORE) begin
+                    if (!req_is_tamac &&
+                        req_funct == ETSYS_TACC_STORE) begin
                         active_format_ew_reg     <= format_ew_reg;
                         active_format_signed_reg <= format_signed_reg;
                     end else begin
@@ -614,8 +735,9 @@ module mp64_tacc #(
                     // shared stage drains or retires one tenure completely
                     // before another can be admitted, so an eight-bit wrap
                     // cannot alias a still-live response.
-                    if ((req_funct == ETSYS_TACC_LOAD) ||
-                        (req_funct == ETSYS_TACC_STORE))
+                    if (!req_is_tamac &&
+                        ((req_funct == ETSYS_TACC_LOAD) ||
+                         (req_funct == ETSYS_TACC_STORE)))
                         operation_generation_reg <=
                             operation_generation_reg + 8'd1;
                 end
@@ -636,7 +758,17 @@ module mp64_tacc #(
     always @(posedge clk) begin
         if (rst_n && !engine_reset) begin
             if (active_reg) begin
-                case (active_funct_reg)
+                if (active_is_tamac_reg) begin
+                    if (active_funct_reg != TMUL_TAMAC)
+                        $error("mp64_tacc: corrupt TAMAC function tag");
+                    if (owner_reg != active_caller_id_reg || !valid_reg)
+                        $error("mp64_tacc: unowned or invalid TAMAC active");
+                    if (!integer_tamac_format(active_format_ew_reg))
+                        $error("mp64_tacc: noninteger TAMAC became active");
+                    if (format_ew_reg != active_format_ew_reg ||
+                        format_signed_reg != active_format_signed_reg)
+                        $error("mp64_tacc: mismatched TAMAC format active");
+                end else case (active_funct_reg)
                     ETSYS_TACC_TRY: begin
                         if (active_caller_id_reg == TACC_OWNER_NONE ||
                             {1'b0, active_caller_id_reg} <
@@ -670,9 +802,16 @@ module mp64_tacc #(
                     default:
                         $error("mp64_tacc: illegal lifecycle tag active");
                 endcase
+                if (tamac_done && !active_is_tamac_reg)
+                    $error("mp64_tacc: TAMAC terminal without TAMAC active");
             end
             if (dirty_reg && !valid_reg)
                 $error("mp64_tacc: DIRTY set while state is invalid");
+            if (deferred_fault_reg && active_reg)
+                $error("mp64_tacc: deferred fault overlaps active operation");
+            if (deferred_fault_reg &&
+                deferred_fault_code_reg == MEX_FAULT_NONE)
+                $error("mp64_tacc: deferred terminal has no fault");
             if (valid_reg && owner_reg == TACC_OWNER_NONE)
                 $error("mp64_tacc: valid state has no owner");
             if (!valid_reg &&

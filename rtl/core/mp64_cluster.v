@@ -62,6 +62,8 @@ module mp64_cluster #(
     output wire [511:0]tile_wdata,
     input  wire [511:0]tile_rdata,
     input  wire        tile_ack,
+    input  wire        tile_error,
+    input  wire [63:0] tile_fault_addr,
 
     // === External tile memory port (for tiles in external RAM) ===
     output wire        ext_tile_req,
@@ -70,6 +72,9 @@ module mp64_cluster #(
     output wire [511:0]ext_tile_wdata,
     input  wire [511:0]ext_tile_rdata,
     input  wire        ext_tile_ack,
+    input  wire        ext_tile_error,
+    input  wire [63:0] ext_tile_fault_addr,
+    output wire        tile_source_cancel,
 
     // === Shared chip-wide TACC image-transfer stage ===
     output wire         tacc_xfer_req,
@@ -2260,6 +2265,8 @@ module mp64_cluster #(
         .tile_wdata    (tile_wdata),
         .tile_rdata    (tile_rdata),
         .tile_ack      (tile_ack),
+        .tile_error    (tile_error),
+        .tile_fault_addr(tile_fault_addr),
 
         // External tile memory port (→ SoC ext-mem)
         .ext_tile_req  (ext_tile_req),
@@ -2267,7 +2274,10 @@ module mp64_cluster #(
         .ext_tile_wen  (ext_tile_wen),
         .ext_tile_wdata(ext_tile_wdata),
         .ext_tile_rdata(ext_tile_rdata),
-        .ext_tile_ack  (ext_tile_ack)
+        .ext_tile_ack  (ext_tile_ack),
+        .ext_tile_error(ext_tile_error),
+        .ext_tile_fault_addr(ext_tile_fault_addr),
+        .tile_source_cancel(tile_source_cancel)
     );
 
 endmodule

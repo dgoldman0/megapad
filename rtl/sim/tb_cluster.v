@@ -150,13 +150,18 @@ module tb_cluster;
         .tile_wdata (tile_wdata),
         .tile_rdata (tile_rdata),
         .tile_ack   (tile_ack),
+        .tile_error (1'b0),
+        .tile_fault_addr(64'd0),
 
         .ext_tile_req  (ext_tile_req),
         .ext_tile_addr (ext_tile_addr),
         .ext_tile_wen  (ext_tile_wen),
         .ext_tile_wdata(ext_tile_wdata),
         .ext_tile_rdata(512'd0),
-        .ext_tile_ack  (1'b0)
+        .ext_tile_ack  (1'b0),
+        .ext_tile_error(1'b0),
+        .ext_tile_fault_addr(64'd0),
+        .tile_source_cancel()
     );
 
     // ====================================================================
@@ -304,6 +309,7 @@ module tb_cluster;
     integer tb_csr_done_count;
     integer tb_tred_done_count;
     integer tb_wait_seen;
+    reg [2:0] tb_private_mex_fault;
     reg [1:0] tb_legacy_order [0:3];
 
     task drive_crc_op;
@@ -352,6 +358,47 @@ module tb_cluster;
             tb_tile_csr_wdata[core_idx*64 +: 64] = csr_data_value;
             @(negedge clk);
             tb_tile_csr_wen[core_idx] = 1'b0;
+    end
+    endtask
+
+    task drive_private_mex;
+        input integer core_idx;
+        input [1:0] source_form;
+        input [1:0] operation;
+        input [2:0] function_code;
+        input [7:0] function_byte;
+        input [3:0] ext_modifier;
+        input       ext_is_active;
+        output [2:0] operation_fault;
+        integer cyc;
+        reg seen;
+        begin
+            @(negedge clk);
+            tb_mex_ss[core_idx*2 +: 2] = source_form;
+            tb_mex_op[core_idx*2 +: 2] = operation;
+            tb_mex_funct[core_idx*3 +: 3] = function_code;
+            tb_mex_funct_byte[core_idx*8 +: 8] = function_byte;
+            tb_mex_ext_mod[core_idx*4 +: 4] = ext_modifier;
+            tb_mex_ext_active[core_idx] = ext_is_active;
+            tb_mex_req[core_idx] = 1'b1;
+            seen = 1'b0;
+            operation_fault = MEX_FAULT_NONE;
+            for (cyc = 0; cyc < 200; cyc = cyc + 1) begin
+                @(negedge clk);
+                if (uut.mex_done_reg &&
+                    uut.mex_grant == core_idx) begin
+                    operation_fault = uut.mex_fault_reg;
+                    seen = 1'b1;
+                    cyc = 200;
+                end
+            end
+            if (!seen) begin
+                $display("FAIL [private MEX timeout]: core=%0d op=%0d funct=%0d",
+                         core_idx, operation, function_code);
+                fail_count = fail_count + 1;
+            end
+            tb_mex_req[core_idx] = 1'b0;
+            repeat (3) @(negedge clk);
         end
     endtask
 
@@ -1577,6 +1624,53 @@ module tb_cluster;
         repeat (2) @(negedge clk);
         tile_engine_reset = 1'b0;
         repeat (2) @(negedge clk);
+
+        // The cluster-shared physical engine executes TAMAC for its owning
+        // microcore through the registered dispatch/retirement path.  Use a
+        // simple all-lane product here; adversarial arithmetic remains covered
+        // by the emulator-generated direct-engine vectors.
+        drive_private_tile_csr(0, CSR_TMODE, TMODE_8);
+        drive_private_tile_csr(0, CSR_TSRC0, 64'h0000_0000_0000_0100);
+        drive_private_tile_csr(0, CSR_TSRC1, 64'h0000_0000_0000_0140);
+        tile_mem_model[4] = {64{8'h03}};
+        tile_mem_model[5] = {64{8'h05}};
+
+        drive_private_mex(
+            0, 2'd0, MEX_TSYS, ETSYS_TACC_TRY,
+            {5'd0, ETSYS_TACC_TRY}, 4'd8, 1'b1,
+            tb_private_mex_fault);
+        check64("cluster owner TRY succeeds",
+                tb_private_mex_fault, MEX_FAULT_NONE);
+        drive_private_mex(
+            0, 2'd0, MEX_TSYS, ETSYS_TACC_CLEAR,
+            {5'd0, ETSYS_TACC_CLEAR}, 4'd8, 1'b1,
+            tb_private_mex_fault);
+        check64("cluster owner CLEAR succeeds",
+                tb_private_mex_fault, MEX_FAULT_NONE);
+        drive_private_mex(
+            0, 2'd0, MEX_TMUL, TMUL_TAMAC,
+            {5'd0, TMUL_TAMAC}, 4'd0, 1'b0,
+            tb_private_mex_fault);
+        check64("cluster owner integer TAMAC succeeds",
+                tb_private_mex_fault, MEX_FAULT_NONE);
+        check64("cluster TAMAC updates low U8 accumulator lanes",
+                uut.u_tile.tacc_bank_state[63:0],
+                64'h0000_000F_0000_000F);
+        check64("cluster TAMAC updates high U8 accumulator lanes",
+                uut.u_tile.tacc_bank_state[2047:1984],
+                64'h0000_000F_0000_000F);
+        check64("cluster TAMAC leaves shared bank valid and dirty",
+                {62'd0,
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_DIRTY],
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_VALID]},
+                64'd3);
+        drive_private_mex(
+            0, 2'd0, MEX_TSYS, ETSYS_TACC_RELEASE,
+            {5'd0, ETSYS_TACC_RELEASE}, 4'd8, 1'b1,
+            tb_private_mex_fault);
+        check64("cluster owner RELEASE restores FREE TACC",
+                uut.te_tacc_status_raw,
+                {43'd0, TACC_OWNER_NONE, 16'd0});
 
         // Cancel an ACC CSR while its ACTIVE terminal signals are present.
         tb_tile_csr_addr[2*8 +: 8] = CSR_ACC0;

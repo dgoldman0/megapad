@@ -28,6 +28,11 @@ module tb_tacc;
     wire        req_busy;
     wire [2:0]  req_fault;
     wire [63:0] req_fault_addr;
+    wire         tamac_start;
+    reg          tamac_done;
+    reg [2:0]    tamac_fault;
+    reg [63:0]   tamac_fault_addr;
+    reg [2047:0] tamac_result_image;
 
     wire         xfer_req;
     wire         xfer_store;
@@ -85,6 +90,11 @@ module tb_tacc;
         .req_busy                (req_busy),
         .req_fault               (req_fault),
         .req_fault_addr          (req_fault_addr),
+        .tamac_start             (tamac_start),
+        .tamac_done              (tamac_done),
+        .tamac_fault             (tamac_fault),
+        .tamac_fault_addr        (tamac_fault_addr),
+        .tamac_result_image      (tamac_result_image),
         .xfer_req                (xfer_req),
         .xfer_store              (xfer_store),
         .xfer_base               (xfer_base),
@@ -180,8 +190,9 @@ module tb_tacc;
     end
     endtask
 
-    // Validation failures are one-base-cycle responses: completion and fault
-    // appear on the acceptance edge, with no BUSY interval or mutation.
+    // Ordinary lifecycle validation fails on the acceptance edge. TAMAC and
+    // image operations retain their locked second base cycle without ever
+    // publishing BUSY or mutating state.
     task lifecycle_fault;
         input       is_tamac;
         input [2:0] funct;
@@ -191,7 +202,13 @@ module tb_tacc;
         input [2:0] format_ew;
         input       format_signed;
         input [2:0] expected_fault;
+        reg         deferred_class;
     begin
+        deferred_class =
+            is_tamac ||
+            (!is_tamac &&
+             ((funct == ETSYS_TACC_LOAD) ||
+              (funct == ETSYS_TACC_STORE)));
         metadata_snapshot = status_raw &
             ~(64'd1 << TACC_STATUS_BIT_BUSY);
         bank_snapshot = bank_state;
@@ -201,8 +218,17 @@ module tb_tacc;
         req_valid = 1'b1;
         tick;
         req_valid = 1'b0;
-        check("validation fault completes in acceptance cycle",
-              req_done && req_fault == expected_fault);
+        if (deferred_class) begin
+            check("deferred validation fault waits one nonbusy interval",
+                  !req_done && !req_busy &&
+                  req_fault == MEX_FAULT_NONE);
+            tick;
+            check("deferred validation fault completes in second base cycle",
+                  req_done && req_fault == expected_fault);
+        end else begin
+            check("validation fault completes in acceptance cycle",
+                  req_done && req_fault == expected_fault);
+        end
         check("validation fault never raises BUSY", !req_busy);
         check("validation fault preserves physical metadata",
               (status_raw & ~(64'd1 << TACC_STATUS_BIT_BUSY))
@@ -300,6 +326,10 @@ module tb_tacc;
         req_preflight_fault = MEX_FAULT_NONE;
         req_preflight_fault_addr = 64'd0;
         req_cancel = 1'b0;
+        tamac_done = 1'b0;
+        tamac_fault = MEX_FAULT_NONE;
+        tamac_fault_addr = 64'd0;
+        tamac_result_image = 2048'd0;
         xfer_done = 1'b0;
         xfer_response_token = 8'd0;
         xfer_fault = MEX_FAULT_NONE;
@@ -452,8 +482,89 @@ module tb_tacc;
               !status_raw[TACC_STATUS_BIT_DIRTY] &&
               bank_state == {256{8'h5A}});
 
+        // TAMAC admission and completion are separate boundaries.  The parent
+        // datapath may finish early, but its complete image remains private
+        // until this leaf samples architectural retirement.
+        set_request(1'b1, TMUL_TAMAC, 1'b1,
+                    5'd4, 2'd0, TMODE_16, 1'b1);
+        tamac_result_image = {256{8'h3C}};
+        req_valid = 1'b1;
+        #1;
+        check("matching integer TAMAC raises combinational start",
+              tamac_start);
+        tick;
+        req_valid = 1'b0;
+        check("admitted TAMAC is busy without early completion",
+              req_busy && !req_done);
+        bank_snapshot = bank_state;
+        tamac_done = 1'b1;
+        tick;
+        tamac_done = 1'b0;
+        check("TAMAC terminal response precedes architectural commit",
+              req_done && !req_busy &&
+              req_fault == MEX_FAULT_NONE &&
+              bank_state == bank_snapshot);
+        tick;
+        check("retired TAMAC publishes complete dirty image",
+              bank_state == {256{8'h3C}} &&
+              status_raw[TACC_STATUS_BIT_DIRTY]);
+
+        bank_snapshot = bank_state;
+        tamac_result_image = {256{8'hC3}};
+        req_valid = 1'b1;
+        tick;
+        req_valid = 1'b0;
+        req_cancel = 1'b1;
+        tick;
+        req_cancel = 1'b0;
+        check("active TAMAC cancellation suppresses response and commit",
+              !req_done && !req_busy &&
+              bank_state == bank_snapshot);
+
+        tamac_result_image = {256{8'h69}};
+        req_valid = 1'b1;
+        tick;
+        req_valid = 1'b0;
+        tamac_fault = MEX_FAULT_BUS;
+        tamac_fault_addr = 64'h0000_0000_0010_0040;
+        tamac_done = 1'b1;
+        tick;
+        tamac_done = 1'b0;
+        tamac_fault = MEX_FAULT_NONE;
+        tamac_fault_addr = 64'd0;
+        check("TAMAC source fault reaches terminal with exact address",
+              req_done && req_fault == MEX_FAULT_BUS &&
+              req_fault_addr == 64'h0000_0000_0010_0040);
+        tick;
+        check("faulted TAMAC preserves the complete prior image",
+              bank_state == bank_snapshot);
+
+        req_preflight_fault = MEX_FAULT_BUS;
+        req_preflight_fault_addr = 64'h0000_0000_0010_0080;
+        req_valid = 1'b1;
+        #1;
+        check("preflight-fault TAMAC never starts its datapath",
+              !tamac_start);
+        tick;
+        req_valid = 1'b0;
+        check("preflight-fault TAMAC defers without BUSY",
+              !req_done && !req_busy &&
+              req_fault == MEX_FAULT_NONE);
+        tick;
+        check("preflight-fault TAMAC completes in second base cycle",
+              req_done && !req_busy &&
+              req_fault == MEX_FAULT_BUS &&
+              req_fault_addr == 64'h0000_0000_0010_0080);
+        req_preflight_fault = MEX_FAULT_NONE;
+        req_preflight_fault_addr = 64'd0;
+        tick;
+
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_8, 1'b1,
+                        MEX_FAULT_ILLEGAL);
+
         // Test-only deposit keeps every bank bit observable for destructive
-        // lifecycle checks below; TAMAC still has no production write path.
+        // lifecycle checks below.
         uut.bank_reg = {256{8'hA5}};
         #1;
         check("focused bench seeds every persistent bank byte",

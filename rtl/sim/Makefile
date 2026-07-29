@@ -384,8 +384,10 @@ tacc_cycles: tb_tacc_cycles.vvp
 
 tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
                     $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
-                    ../pkg/mp64_pkg.vh
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                    ../pkg/mp64_pkg.vh tamac_integer_vectors.vec
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+	    tb_tacc_cycles.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+	    $(CORE)/mp64_fp16_alu.v ../pkg/mp64_pkg.vh
 
 # --- Tile engine ---
 tile: tb_tile.vvp tb_tile_write_ack.vvp
