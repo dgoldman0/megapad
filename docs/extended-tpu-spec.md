@@ -1,15 +1,21 @@
 # Extended TPU Specification
 
-**Branch:** `features/extended-tpu-impl`  
-**Status:** Original extended TPU implemented; full TACC is emulator Phase 1,
-RTL Phase 2
-**Author:** auto-generated from design discussion  
-**Depends on:** Base tile engine (mp64_tile.v), ISA v2.1, quad-core SoC
+**Branch:** historical origin `features/extended-tpu-impl`; current contract is
+integrated in the main design
+
+**Status:** Original extended TPU and functional full-TACC RTL implemented;
+routed FPGA acceptance pending
+
+**Author:** auto-generated from design discussion
+
+**Depends on:** Base tile engine (`mp64_tile.v`), ISA v2.1, 4-full-core plus
+3-microcluster SoC
 
 > The original extended-TPU features retain their implementation status below.
 > The later full-width TACC extension is implemented in the Python/native
-> emulator and strict-cycle model in Phase 1.  Its portable RTL is deliberately
-> deferred to Phase 2 and must conform to the emulator oracle.
+> emulator, strict-cycle model, and portable RTL.  Its emulator-generated
+> arithmetic vectors are an executable RTL oracle.  Routed FPGA resource and
+> timing acceptance remains pending.
 
 ---
 
@@ -23,7 +29,7 @@ existing tile engine and SoC infrastructure:
 |--------|---------|---------------|--------|
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
 | **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium | ✅ FP16/BF16 done; ☐ scalar FP32 |
-| **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator Phase 1; ☐ RTL Phase 2 |
+| **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator and functional RTL; ☐ routed FPGA acceptance |
 | **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, 32/64-bit CRC tuples | Large | ✅ Implemented (emulator + BIOS + KDOS) |
 | **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | ✅ CSRs + QoS done; DMA design only |
 | **Reliability / BIST** | Memory self-test, tile datapath check, perf counters | Small | ✅ Implemented |
@@ -221,7 +227,9 @@ FP16, and BF16 occupy the low 128 bytes and normalize the high half to zero.
 External images further serialize into 32 64-bit PHY words.  A response at
 cycle 255 wins; no response or a later response faults at the exact word
 address.  LOAD publishes atomically, while a faulting external STORE may leave
-only its acknowledged prefix visible.
+only its acknowledged prefix visible.  The microcluster scratchpad aperture
+is not a TACC image or operand route and faults before traffic even when
+ordinary scalar scratchpad access is enabled.
 
 Uncontended emulator Phase-1 image timing is:
 
@@ -236,10 +244,13 @@ words.  Contention and longer responses add elapsed stall cycles; microcore
 MEX also pays the existing fixed three-cycle post-grant cluster cost.
 
 Interrupts and traps preserve ownership.  Migration requires saving dirty
-state and its format as needed, then releasing.  Reset wipes only its defined
-engine domain; individual microcore reset cancels that caller without wiping
-shared cluster TACC.  The complete normative contract is in
-`docs/isa-reference.md` and the programming guide in `docs/tile-engine.md`.
+state and its format as needed, then releasing.  The architectural reset
+contract wipes only the defined engine domain; individual microcore reset
+cancels that caller without wiping shared cluster TACC.  RTL verifies the
+independent scopes through named seams that remain tied inactive until a
+production reset controller is specified.  The complete normative contract
+is in `docs/isa-reference.md` and the programming guide in
+`docs/tile-engine.md`.
 
 ---
 
@@ -632,7 +643,11 @@ F8 E3 06  TACC.RELEASE
 
 ---
 
-## 9. Implementation Priority
+## 9. Historical Implementation Priority
+
+The table below is the original extended-TPU planning record, not the current
+implementation status or an active delivery plan.  The status table in
+Section 1 and the full-TACC handoff are authoritative.
 
 Recommended build order based on dependencies and complexity:
 

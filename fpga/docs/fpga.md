@@ -1,495 +1,188 @@
-# Megapad-64 FPGA Design Document
+# Megapad-64 FPGA Design and Status
 
-## 1  Overview
+This document describes the current portable RTL, its FPGA-facing integration,
+and the evidence still required before claiming a physical implementation.
+The functional TACC RTL is present; routed resource, timing, and board
+acceptance are not.
 
-This document describes the FPGA implementation of the Megapad-64
-system-on-chip.  The design targets the **Digilent Genesys 2**
-(Xilinx Kintex-7 `xc7k325tffg900-2`) as the primary prototype board.
+## 1. Current SoC topology
 
-### 1.1  Design Goals
+The production topology contains sixteen instruction-executing cores and seven
+physical tile engines:
 
-| Goal | Target |
-|------|--------|
-| **CPU cores** | 4 × Megapad-64 CPU, single-issue multi-cycle |
-| **Tile engines** | 4 × 64-lane SIMD (one per core, private state) |
-| **Internal RAM** | 1 MiB shared BRAM (dual-port, arbitrated) |
-| **Tile fast path** | 512-bit single-cycle read/write to BRAM (arbitrated) |
-| **External memory** | HyperRAM / SDRAM via PMOD, ≥ 64 MiB for standard KDOS userland |
-| **Clock** | 100 MHz system clock |
-| **UART** | 115 200 baud, USB bridge on-board |
-| **Storage** | SPI-SD on-board micro-SD slot |
-| **NIC** | Ethernet PMOD (optional) |
-| **IPC** | Hardware mailbox (4 × 64-bit) + 8 hardware spinlocks |
+| Compute domain | Instances | Tile, ACC, and TACC state |
+|---|---:|---|
+| Full core | 4 | One private engine per core |
+| Microcore cluster | 3 × 4 microcores | One engine shared by the four callers in each cluster |
 
----
+Each full core has its own I-cache, scalar execution state, tile configuration,
+legacy 256-bit ACC, and 2,048-bit TACC. Within a microcluster, each caller keeps
+private tile cursor, mode, control, source, destination, and stride shadows.
+The cluster's legacy ACC, TACC, and TACC ownership metadata belong to its one
+shared physical engine.
 
-## 2  Block Diagram
+The four private full-core engines and three cluster-shared engines form seven
+requestors at the common tile-memory port. The production arbiter uses equal
+round-robin service. TACC image operations use the same seven source lanes and
+a chip-wide four-beat transfer stage; they do not add an eighth memory source.
 
-```
-               ┌────────────────────────────────────────────────────────────────┐
-               │              mp64_soc (quad-core)                    │
-               │                                                      │
-               │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-               │  │ CPU 0    │  │ CPU 1    │  │ CPU 2    │  │ CPU 3    │  │
-               │  │ + Tile 0 │  │ + Tile 1 │  │ + Tile 2 │  │ + Tile 3 │  │
-               │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  │
-UART_RXD ──►│       └───┬─────┴────┬─────┴────┬─────┴────┘            │
-UART_TXD ◄──│       bus  │         │         │  tile              │
-               │       ┌───┴─────────┴───┐     ┌──┴───────────┐   │
-               │       │ mp64_bus         │     │ Tile Port A  │   │
-               │       │ 4→1 RR arbiter │     │ arbiter (RR)  │   │
-               │       └──┬───────┬─────┘     └──────┬──────┘   │
-               │         │       │               │             │
-               │    ┌────┴───┐ ┌─┴────────────┴───────┐  │
-               │    │ MMIO    │ │ mp64_memory  Port B  Port A│  │
-               │    │ mux     │ │ 1 MiB BRAM  (64-bit)(512b) │  │
-               │    │┌───────┐│ └───────────┬───────────┘  │
-               │    ││ UART  ││             │               │
-               │    ││ Timer ││       ┌─────┴──────┐        │
-               │    ││ Disk  ││       │ mp64_extmem  │        │
-               │    ││ NIC   ││       │ controller   │        │
-               │    ││ Mbox  ││       └──────┬──────┘        │
-               │    ││ Slock ││              │ PHY           │
-               │    │└───────┘│              │               │
-               │    └─────────┘              │               │
-               └────────────────────────────────────────────────────────────────┘
-```
+The scalar memory bus separately admits the four full-core ports, three
+cluster ports, NIC DMA, and disk DMA. I-cache refill and data traffic are
+time-multiplexed at each full-core bus port.
 
----
+## 2. Internal and external memory
 
-## 3  Module Inventory
+`mp64_soc` currently defaults `MEM_DEPTH` to 16,384 512-bit rows per bank.
+`mp64_memory` instantiates four such asymmetric dual-port banks:
 
-| Module | File | Lines | Description |
-|--------|------|------:|-------------|
-| `mp64_defs` | `rtl/mp64_defs.vh` | ~433 | Shared constants, ISA encoding, CSR map |
-| `mp64_cpu` | `rtl/mp64_cpu.v` | ~1,951 | CPU core: fetch/decode/execute, 16 GPRs, flags |
-| `mp64_cpu_fsm` | `rtl/mp64_cpu_fsm.v` | ~1,614 | CPU FSM controller |
-| `mp64_bus` | `rtl/mp64_bus.v` | ~300 | Bus arbiter & MMIO/memory address decoder |
-| `mp64_memory` | `rtl/mp64_memory.v` | ~186 | Dual-port 1 MiB BRAM (512-bit tile + 64-bit CPU) |
-| `mp64_tile` | `rtl/mp64_tile.v` | ~2,283 | Tile engine (MEX), 64×8-bit SIMD lanes |
-| `mp64_fp16_alu` | `rtl/mp64_fp16_alu.v` | ~724 | FP16/BF16 ALU |
-| `mp64_icache` | `rtl/mp64_icache.v` | ~217 | Instruction cache |
-| `mp64_extmem` | `rtl/mp64_extmem.v` | ~165 | External memory controller (HyperRAM/SDRAM) |
-| `mp64_uart` | `rtl/mp64_uart.v` | ~238 | UART 8N1, 16-byte FIFOs |
-| `mp64_timer` | `rtl/mp64_timer.v` | ~120 | 32-bit timer, compare-match, auto-reload |
-| `mp64_disk` | `rtl/mp64_disk.v` | ~270 | SPI-SD controller with DMA |
-| `mp64_nic` | `rtl/mp64_nic.v` | ~309 | NIC with 1514-byte no-FCS frame buffers and DMA |
-| `mp64_mailbox` | `rtl/mp64_mailbox.v` | ~216 | Multicore mailbox + IPI |
-| `mp64_aes` | `rtl/mp64_aes.v` | ~735 | AES-256-GCM engine |
-| `mp64_sha3` | `rtl/mp64_sha3.v` | ~395 | SHA3/Keccak engine |
-| `mp64_crc` | `rtl/mp64_crc.v` | ~174 | CRC-32 engine |
-| `mp64_trng` | `rtl/mp64_trng.v` | ~192 | True RNG (ring-osc + LFSR conditioner) |
-| `mp64_ntt` | `rtl/mp64_ntt.v` | ~443 | 256-point NTT engine (Cooley-Tukey butterfly) |
-| `mp64_kem` | `rtl/mp64_kem.v` | ~337 | ML-KEM-512 key encapsulation accelerator |
-| `mp64_synth_top` | `rtl/mp64_synth_top.v` | ~136 | Synthesis top-level wrapper |
-| `mp64_soc` | `rtl/mp64_soc.v` | ~950 | Top-level SoC wiring |
+| Region | Address range | Current default |
+|---|---|---:|
+| Bank 0, system RAM | `0x0000_0000`–`0x000F_FFFF` | 1 MiB |
+| External allocation window | `0x0010_0000` up to the VRAM aperture | Board-dependent |
+| VRAM aperture | `0xFF00_0000`–`0xFF3F_FFFF` | 4 MiB external window |
+| Bank 1, HBW RAM | `0xFFD0_0000`–`0xFFDFFFFF` | 1 MiB |
+| Bank 2, HBW RAM | `0xFFE0_0000`–`0xFFEFFFFF` | 1 MiB |
+| Bank 3, HBW RAM | `0xFFF0_0000`–`0xFFFFFFFF` | 1 MiB |
 
-**Total:** ~13,367 lines RTL, ~8,677 lines testbench code (18 testbenches).
+The four internal banks therefore expose 4 MiB of architectural payload.
+Their tile port is 512 bits wide and their CPU port is 64 bits wide. Requests
+outside an internal bank are forwarded to the external-memory controller.
 
----
+The portable RTL defines the controller-side external-memory handshake,
+including cancellation, bounded response handling, and tile serialization.
+It does not by itself provide a production DDR3, HyperRAM, or Ethernet PHY.
 
-## 4  Memory Architecture
+## 3. Known K325T memory mismatch
 
-### 4.1  Internal BRAM (1 MiB)
+The current comparison target is the Genesys 2
+`xc7k325tffg900-2`. It contains 445 RAMB36 blocks, totaling 2,002.5 KiB.
+The RTL's four 1 MiB banks exceed that raw capacity before accounting for any
+cache, FIFO, or peripheral storage.
 
-Address range: `0x0000_0000` – `0x000F_FFFF`
+The asymmetric 512-bit geometry makes the mismatch larger in practice. The
+physical-preflight lower bound is eight RAMB36 blocks across each 512-bit row,
+32 blocks deep for 16,384 rows, across four banks: at least 1,024 RAMB36 blocks
+for the default memory alone. The implementation runner must reject this
+configuration before launching a heavyweight tool.
 
-Organisation: 16 384 rows × 512 bits (= 1 048 576 bytes)
+Routed acceptance therefore requires one explicit production decision:
 
-**Port A** — Tile engine (512-bit wide):
-- Single-cycle read/write of a full 64-byte tile
-- Address in tile-row units (row = addr >> 6)
-- Priority over Port B on collision
+- select a device large enough for the four-bank memory contract; or
+- first derive the memory address widths and apertures from the selected
+  depth, then reduce on-chip capacity and define what moves to external RAM.
 
-**Port B** — CPU (64-bit wide):
-- Standard load/store (byte, half, word, dword)
-- 131 072 × 64-bit view of the same physical RAM
-- Stalls 1 cycle on collision with Port A
+The current memory module retains 14/17-bit addresses and fixed 1 MiB
+apertures when only `MEM_DEPTH` changes.  The runner therefore rejects a
+reduced-depth build as production evidence until that RTL contract is
+corrected.  The selected target and `MEM_DEPTH` must then remain identical
+across every comparison build. Until that decision is made, the K325T is a
+measurement target, not an accepted production fit.
 
-### 4.2  External Memory
+## 4. Board wrapper versus comparison harness
 
-Address range: `0x0010_0000` and above.
+The Xilinx board wrapper,
+`rtl/target/xilinx7/mp64_synth_top.v`, serves board-facing integration. It
+contains the Genesys 2 clock path from the 200 MHz differential oscillator to
+a 100 MHz system clock, synchronizes reset, exposes UART, SD, and debug LEDs,
+and instantiates `mp64_soc`.
 
-Two access modes:
-1. **CPU single-beat**: 6–10 cycles latency per access
-2. **Tile burst**: 8 beats × 64 bits = 512 bits in 14–18 cycles
+That wrapper is not a complete board design. Its external-memory and NIC inputs
+are tied inactive, no production memory or network PHY is instantiated, and
+its existing Genesys 2 Tcl is a synthesis-oriented helper rather than routed
+acceptance evidence.
 
-Tile requests pre-empt CPU external accesses.
+Landing 2.9 uses a separate common comparison harness. It measures `mp64_soc`
+directly under one internal 100 MHz constraint and an explicit memory depth.
+This avoids treating board-wrapper clock, pin, or historical source-list
+differences as TACC resource deltas. The comparison harness is for
+like-for-like implementation analysis; it is not a deployable bitstream top.
 
----
+## 5. Functional RTL verification
 
-## 5  Tile Engine Detail
+The supported RTL gate graph is in `rtl/sim/Makefile`. Relevant focused gates
+must be run sequentially, including:
 
-The tile engine implements the MEX instruction family with 64 parallel
-8-bit ALU lanes (also configurable for 32×16, 16×32, 8×64 — 8-bit
-is default).
-
-### 5.1  Pipeline
-
-| Cycle | Operation |
-|------:|-----------|
-| 1 | Load source A from BRAM (512-bit) |
-| 2 | Load source B (BRAM, GPR broadcast, imm8 splat, or in-place) |
-| 3 | Compute + Store result |
-
-For **external** tile addresses, each load/store phase takes ~8–10
-additional cycles for the burst transfer.
-
-### 5.2  Operations
-
-| Family | Functions |
-|--------|-----------|
-| **TALU** | ADD, SUB, AND, OR, XOR, MIN, MAX, ABS |
-| **TMUL** | MUL, DOT |
-| **TRED** | SUM, MIN, MAX, POPCNT, L1 |
-| **TSYS** | TRANS, MOVBANK, LOADC, ZERO |
-
-### 5.3  Reduction
-
-Reduction operations (TRED) sum / min / max across all 64 lanes and
-store the scalar result in the 256-bit accumulator (ACC0–ACC3 CSRs).
-
----
-
-## 6  CPU Core
-
-### 6.1  Architecture
-
-- 16 × 64-bit general-purpose registers (R0–R15)
-- Selectable PC (PSEL, default R3), data pointer (XSEL, R2), SP (SPSEL, R15)
-- 8-bit flags: Z, C, N, V, P, G, I (interrupt enable), S (saturation)
-- Vectored interrupts: 8 vectors, IVT base in CSR
-
-### 6.2  Instruction Encoding
-
-Variable-length, 1–11 bytes:
-
-| Family (hi nibble) | Typical length | Example |
-|---------------------|---------------:|---------|
-| `0x0_` SYS | 1–2 | `NOP`, `CALL.L R6` |
-| `0x1_` INC | 1 | `INC R5` |
-| `0x2_` DEC | 1 | `DEC R5` |
-| `0x3_` BR | 2 | `BR.EQ +12` |
-| `0x4_` LBR | 3 | `LBR.AL -4096` |
-| `0x5_` MEM | 3 | `LD R1, [R2+8]` |
-| `0x6_` IMM | 3–10 | `LDI R1, 42` / EXT + 64-bit |
-| `0x7_` ALU | 2 | `ADD R1, R2` |
-| `0x8_` MEMALU | 1 | Legacy 1802 ops |
-| `0x9_` IO | 1 | `OUT 4` / `INP 5` |
-| `0xA_` SEP | 1 | `SEP R3` |
-| `0xB_` SEX | 1 | `SEX R2` |
-| `0xC_` MULDIV | 2 | `MUL R3, R4` |
-| `0xD_` CSR | 3 | `CSRW TSRC0, R5` |
-| `0xE_` MEX | 2–3 | `TALU.ADD.8` |
-| `0xF_` EXT | 1 | Prefix modifier |
-
-### 6.3  Execution Model
-
-**Current (FSM-based prototype)**: Backup preserved as `mp64_cpu_fsm.v`.
-
-**Production (pipelined, implemented)**: 2-stage decoupled fetch
-pipeline (IF + DEX).  The IF stage reads 8 bytes/cycle from a per-core
-4 KiB direct-mapped instruction cache into a 16-byte alignment buffer.
-The DEX stage decodes and executes from the buffer.
-
-- No out-of-order execution, no speculation, no branch prediction
-  (preserving the deterministic 1802 design ethos).
-- On a cache hit, simple instructions (INC, ALU, SEP) retire in **2
-  cycles**.  Cache misses incur a ~5 cycle refill penalty (2-beat ×
-  64-bit bus).
-- The I-cache uses `refill_pending` handshake to prevent stale
-  bus-data consumption between refill beats.
-- Store-to-code coherence: any MEM_WRITE triggers a single-line
-  I-cache invalidation for the written address.
-- CSRs: ICACHE_CTRL (0x70, enable/invalidate), ICACHE_HITS (0x71),
-  ICACHE_MISSES (0x72).
-
----
-
-## 7  Resource Estimates (Artix-7 200T)
-
-No post-synthesis numbers yet.  The estimates below are from the
-base-ISA quad-core design **before** the extended tile engine
-(FP16 ALU, LOAD2D/STORE2D FSM, RROT, saturating/rounding, CRC engine,
-BIST, perf counters) was implemented.  Actual utilization will be
-significantly higher.
-
-**Stale base-ISA estimate (for reference only):**
-
-| Resource | Est. (quad-core, base ISA) | Available | % |
-|----------|------------------:|----------:|---:|
-| Block RAM (36 Kb) | ~290 | 365 | 79% |
-| Slice LUTs | ~24 000 | 134 600 | 18% |
-| Slice Registers | ~12 000 | 269 200 | 4.5% |
-
-BRAM dominates — 1 MiB = 8 Mb = 228 × 36 Kb blocks (228 of 365,
-≈ 62%).  The remaining 137 blocks provide tile FIFO, UART FIFOs,
-NIC RX buffer, etc.
-
-The extended tile engine (FP16 multipliers, wider muxes, 2D FSM,
-CRC barrel shifters, BIST state machines) likely pushes total LUT
-usage well beyond the base estimate.  A real synthesis run is needed
-to determine whether the full design fits the 200T or requires a
-larger target.
-
----
-
-## 8  Timing Budget
-
-| Path | Target | Margin |
-|------|--------|--------|
-| CPU ALU (64-bit add) | 10 ns | ~4 ns |
-| BRAM access (Port B, 64-bit) | 10 ns | ~3 ns |
-| Tile 512-bit read | 10 ns | ~2 ns |
-| MMIO register read | 10 ns | ~6 ns |
-| External PHY I/O | 10 ns | ~1 ns (critical) |
-
-The external memory PHY interface is the tightest path.  If timing
-closure is difficult, the PHY can operate at sys_clk/2 (50 MHz).
-
----
-
-## 9  Testing & Verification
-
-### 9.1  Lint (Verilator 5.020)
-
-```bash
-verilator --lint-only -Wall -Irtl/pkg rtl/soc/mp64_top.v
+```sh
+make -C rtl/sim -j1 memory
+make -C rtl/sim -j1 extmem
+make -C rtl/sim -j1 tile_port_arbiter
+make -C rtl/sim -j1 tacc_transfer
+make -C rtl/sim -j1 tacc
+make -C rtl/sim -j1 tacc_cycles
+make -C rtl/sim -j1 cluster
+make -C rtl/sim -j1 cpu_smoke
+make -C rtl/sim -j1 cpu_micro
+make -C rtl/sim -j1 tacc_soc
+make -C rtl/sim -j1 soc_elaborate
 ```
 
-**Status:** ✅ 0 errors, 120 benign warnings (unused params from shared defs, incomplete case defaults, dual-port multi-driven pattern).
+`tacc_cycles` consumes the emulator-generated integer and floating-point TAMAC
+fixtures; `tacc_vectors` intentionally aliases that authoritative gate.
+`tacc_soc` is the supported seven-domain topology, image, isolation, and reset
+integration bench. `soc_elaborate` is the supported complete-SoC elaboration
+gate.
 
-### 9.2  Unit Tests (Icarus Verilog 12.0)
+The old BIOS-heavy `tb_mp64_soc.v` is retired and intentionally absent from the
+Make graph because its hierarchy predates private full-core tile engines. This
+document identifies supported gates but does not claim that they were freshly
+run as part of this documentation rewrite.
 
-| Testbench | Tests | Coverage |
-|-----------|------:|----------|
-| `tb_cpu_smoke.v` | 19 | NOP/HALT, INC/DEC, LDI (multi-byte), ADD/SUB/CMP, AND/OR/XOR, SHL/SHR, SEP, flags (Z/C/G) |
-| `tb_opcodes.v` | 40 | Full ISA coverage (via I-cache) |
-| `tb_memory.v` | 9 | dword/word/half/byte R/W, tile 512-bit R/W, dual-port, CPU↔tile cross-check, ext fwd |
-| `tb_tile.v` | 10 | CSR read/write, TALU.ADD, TRED.SUM/MIN/MAX, imm8 splat, accumulate mode |
-| `tb_icache.v` | 22 | Hit/miss, refill, invalidation (all/single-line), stats, multi-line |
-| `tb_multicore_smoke.v` | 37 | Quad-core, IPI, mailbox, per-core I-cache |
-| `tb_bus_arbiter.v` | — | Priority arbitration, round-robin |
-| `tb_crypto.v` | — | AES, SHA3, CRC engine tests |
-| `tb_mailbox.v` | — | Mailbox/IPI slots, spinlocks |
-| `tb_nic.v` | — | NIC TX/RX, DMA |
-| `tb_peripherals.v` | — | UART, Timer, Disk |
-| `tb_qos.v` | — | QoS weight-based scheduling |
-| `tb_trng.v` | 9 | TRNG readback, entropy, pool, health monitoring |
-| `tb_x25519.v` | — | Legacy X25519 scalar multiply |
-| `tb_field_alu.v` | 11 | FADD, FSUB, FMUL, FSQR, FINV, MUL_RAW (LO+HI), STATUS, FPOW |
-| `tb_ntt.v` | 8 | Q readback, PADD, PMUL, NTT_FWD, STATUS |
-| `tb_kem.v` | 15 | Buffer sizes, DIN/DOUT roundtrip, keygen, encaps, decaps, IDX_SET |
-| `tb_mp64_soc.v` | — | Full SoC integration |
+Generic frontend or hierarchy checks can support source-list and elaboration
+confidence. They do not establish FPGA resource fit, arithmetic sharing,
+routed timing, or unconstrained-path closure.
 
-**Status:** ✅ **~180 tests passing**
+## 6. Attested physical workflow
 
-```bash
-cd rtl/sim
-# CPU smoke tests
-iverilog -g2012 -DSIMULATION -I../pkg -o tb_cpu_smoke.vvp \
-    ../core/mp64_cpu.v tb_cpu_smoke.v
-vvp tb_cpu_smoke.vvp
+Physical comparison is a three-build campaign:
 
-# Memory tests
-iverilog -g2012 -DSIMULATION -I../pkg -o tb_memory.vvp \
-    ../mem/mp64_memory.v tb_memory.v
-vvp tb_memory.vvp
+1. materialize the locked pre-topology baseline;
+2. materialize the immutable seven-engine topology checkpoint;
+3. materialize the final full-TACC RTL;
+4. bind all three to the same audited harness, constraints, part, memory
+   depth, tool version, and implementation directives;
+5. run implementation only after explicit approval; and
+6. compare attested post-route reports.
 
-# Tile engine tests
-iverilog -g2012 -DSIMULATION -I../pkg -o tb_tile.vvp \
-    ../gpu/mp64_tile.v tb_tile.v
-vvp tb_tile.vvp
-```
+The report gate must verify source commits and manifests, campaign and harness
+identity, LUT/FF/BRAM/DSP deltas and remaining headroom, WNS/TNS and derived
+Fmax, zero unconstrained paths, exactly seven tile engines and seven TACC
+banks, and the locked multiplier and FP-feedback sharing limits.
 
-### 9.3  Known Bugs Fixed
+No post-route utilization or timing result is accepted yet. Behavioral
+simulation, manual estimates, and generic synthesis must not be promoted into
+physical acceptance numbers. Exact preparation and comparison commands belong
+in `fpga/README.md` and the chip-math handoff after the runner interface is
+settled.
 
-**CPU multi-byte fetch bug** (fixed in commit `93e327e`):
-- **Issue:** `ibuf_need` comparison used stale reset value (1) for the first byte, causing all multi-byte instructions (LDI, ALU, BR, MEM, CSR, etc.) to decode after only 1 byte instead of waiting for full instruction fetch.
-- **Impact:** Every instruction except single-byte ops (NOP, INC, DEC, SEP, SEX, IO) was broken.
-- **Fix:** Use `instr_len()` directly for first-byte comparison instead of relying on registered `ibuf_need`.
+## 7. Documented nonblocking limitations
 
-**Fetch address staleness** (fixed in commit `93e327e`):
-- **Issue:** `bus_addr` used pre-increment `ibuf_len`, causing memory to receive stale address for one cycle after byte consumption.
-- **Fix:** Added `fetch_pending` gating flag to suppress `bus_valid` until `ibuf_len` update completes.
+The following do not block the functional RTL landing, but remain explicit
+physical or integration work:
 
-### 9.4  Full SoC Simulation
+- the production target and on-chip memory depth are undecided;
+- no accepted routed implementation, bitstream, or board validation exists;
+- the Genesys 2 wrapper has no production external-memory or NIC PHY;
+- paired full-core and individual microcore reset seams exist and are covered
+  by focused verification, but remain tied inactive until a production reset
+  controller supplies them;
+- the composed SoC bench does not repeat every leaf-level in-flight reset,
+  cancellation, or stale-acknowledgement window;
+- owner preservation through a CPU interrupt and the complete migration
+  `STORE`/`RELEASE`/`LOAD` sequence remain composition tests;
+- the topology bench does not repeat an actual CPU-fetched full-core TAMAC,
+  although arithmetic and full-core dispatch are covered independently;
+- the composed image route has additional registered no-progress cycles beyond
+  the locked strict-system baseline; and
+- microcluster scratchpad is not a legal TAMAC or TACC image route and faults
+  before traffic even when scalar scratchpad policy is enabled.
 
-```bash
-cd rtl/sim
-# Generate hex files for simulation
-python gen_hex.py
+These gaps must remain visible in documentation rather than being mistaken for
+routed or board-ready closure.
 
-# Run SoC testbench (with BIOS loaded)
-iverilog -g2012 -DSIMULATION -I../pkg -o tb_soc.vvp \
-    ../core/*.v ../mem/*.v ../bus/*.v ../soc/*.v ../periph/*.v ../crypto/*.v ../gpu/*.v ../prim/*.v tb_mp64_soc.v
-vvp tb_soc.vvp
-gtkwave tb_mp64_soc.vcd
-```
+## 8. References
 
-**Note:** Full BIOS simulation benefits significantly from the per-core I-cache (4 KiB, direct-mapped) which reduces fetch latency from ~4 cycles/byte to 1 cycle/8 bytes on cache hits.
-
-### 9.5  Synthesis (Vivado)
-
-```tcl
-create_project mp64 -part xc7a200tsbg484-1
-add_files [glob rtl/*.v rtl/*.vh]
-add_files -fileset constrs_1 constraints/nexys_a7.xdc
-set_property top mp64_soc [current_fileset]
-launch_runs synth_1 -jobs 8
-launch_runs impl_1 -to_step write_bitstream
-```
-
-**Note:** Target synthesis and implementation have not been attempted (Vivado
-and FPGA hardware are not available). The NIC alone elaborates under generic
-Yosys, but its frame buffers are currently lowered to registers rather than
-inferred BRAM; this is a functional synthesis check, not resource or timing
-closure.
-
-### 9.6  Programming (Requires Hardware)
-
-```bash
-vivado -mode batch -source program.tcl
-# or via hardware manager GUI
-```
-
----
-
-## 10  Current Status
-
-| Phase | Status | Notes |
-|-------|--------|-------|
-| RTL design | ✅ Complete | 23 modules, ~13,367 lines |
-| Lint verification | ✅ Pass | 0 errors (Verilator) |
-| Unit tests | ✅ Pass | ~180 tests (Icarus) |
-| CPU bugs | ✅ Fixed | Multi-byte fetch + address staleness |
-| Target synthesis | ⏸️ Pending | Requires Vivado; no resource or timing closure yet |
-| Timing closure | ⏸️ Pending | Requires synthesis |
-| FPGA programming | ❌ Blocked | No hardware available |
-| Hardware validation | ❌ Blocked | No hardware available |
-
-The portable RTL has unit-level verification, but target synthesis, resource
-closure, timing closure, and board validation remain hardware-bring-up work.
-
----
-
-## 11  Limitations & Known Issues
-
-### 11.1  Performance
-
-- ~~No instruction cache~~ — **Implemented.** Per-core 4 KiB direct-mapped I-cache (256 entries × 16-byte lines).  2-beat refill from 64-bit bus.  Hit latency: 0 extra cycles; miss penalty: ~5 cycles.
-
-- ~~No pipeline~~ — **Implemented.** 2-stage decoupled fetch pipeline (IF reads I-cache into 16-byte ibuf, DEX decodes/executes).  ~2× throughput over original FSM for cache-hot code.
-
-- **Tile engine serialization**: TALU operations complete in 3 cycles (load A, load B, compute+store) for internal memory, but external tile ops take ~24+ cycles. Double-buffering (load next tile while computing current) would hide latency.
-
-### 11.2  Missing Features
-
-- **Disk DMA is not integrated**: The disk controller's DMA request is not yet
-  connected to the shared memory bus. The NIC's byte-DMA master is connected
-  and its acknowledge/completion behavior is covered by an integration
-  testbench using the real bus arbiter and internal memory.
-  
-- **No boot ROM**: BIOS must be preloaded into BRAM via synthesis or JTAG memory write. A small boot ROM (256 bytes) could load BIOS from SD card.
-
-- **UART FIFO depth**: 16 bytes TX/RX. At 115 200 baud, 16 bytes = 1.4 ms buffering. May drop chars if CPU interrupt latency exceeds this. Consider 256-byte FIFOs.
-
-- **No interrupt priority**: All IRQs have equal priority. Timer should be highest priority for real-time guarantees.
-
-### 11.3  Validation Status
-
-- ✅ **CPU core**: All ISA families tested except EXT (prefix), MEMALU (legacy), and complex MEX modes.
-- ✅ **Memory**: Dual-port BRAM verified. External memory forwarding logic tested (stub only, no real PHY).
-- ✅ **Tile engine**: TALU and TRED basic ops verified. TMUL (multiply, DOT product) not yet tested.
-- ⚠️ **Peripherals**: The NIC has unit simulation plus a shared-bus DMA
-  integration test. UART, timer, and disk remain structural-only here, and no
-  peripheral has board-level validation.
-- ⚠️ **SoC integration**: Module wiring verified by lint, but no full-system simulation with all peripherals active.
-
-**Recommendation:** Prioritize UART testbench next (critical for debugging on hardware). Then timer (interrupt delivery test).
-
----
-
-## 12  Future Work
-
-### 12.1  Hardware Acquisition
-
-Target: **Digilent Genesys 2** (Kintex-7 325T, primary) or **Nexys A7-200T** (legacy, tight fit)
-- Genesys 2 has 445 BRAMs, 840 DSP48E1, 203K LUTs — comfortable headroom
-- Nexys A7-200T has 365 BRAMs but insufficient DSPs for 4× tile engines
-- Both include USB-UART, micro-SD slot; Genesys 2 adds DDR3, GbE PHY
-
-### 12.2  RTL Optimizations (Post-Hardware)
-
-1. ~~Pipelined CPU~~ — **Done.** 2-stage IF+DEX with 16-byte prefetch buffer
-2. ~~Instruction cache~~ — **Done.** 4 KiB per-core, direct-mapped, 16-byte lines
-3. **Tile double-buffering** — overlap load + compute for throughput
-4. **Disk DMA completion handshake** — connect the disk controller to the shared bus
-5. **Interrupt priority encoder** — timer highest, NIC/UART mid, disk low
-
-### 12.3  New Peripherals
-
-6. **HDMI/VGA output** — framebuffer in external memory, scan-out engine
-7. **PS/2 keyboard** — direct input for standalone operation
-8. **Boot ROM** — small ROM with SPI bootstrap to load BIOS from SD
-9. **Audio** — I²S DAC output for beeps/music
-
-### 12.4  Multi-Core Architecture (Implemented)
-
-The SoC is now quad-core.  Architecture details:
-
-**Hardware:**
-- 4 × CPU cores with `core_id` CSR (read-only, 0–3)
-- 4 × private tile engines (no sharing/contention on MEX)
-- Round-robin bus arbiter (4 CPU masters → 1 memory port)
-- Round-robin tile arbiter (4 tile engines → 1 BRAM Port A)
-- Hardware mailbox: 4 × 64-bit message slots + IPI doorbell interrupts
-- 8 hardware spinlocks (atomic test-and-set via MMIO read)
-- IRQ routing: timer → all cores, UART/NIC → core 0, IPI → per-core
-
-**Boot protocol:**
-1. All 4 cores start executing from address 0x0000 on reset
-2. Each core reads `CSR_COREID` early in boot
-3. Core 0 (`COREID == 0`): runs BIOS, loads KDOS, initialises hardware
-4. Cores 1–3 (`COREID != 0`): enter HALT (WFI), wait for IPI
-5. Core 0 writes per-core entry point + stack top to mailbox, sends IPI
-6. Secondary cores wake, read mailbox, set up stacks, jump to entry point
-
-**Memory layout (per-core stacks):**
-
-| Region | Address range | Owner |
-|--------|---------------|-------|
-| Code + dictionary | 0x00000–0xBFFFF | Shared (768 KiB) |
-| Core 3 stack | 0xC0000–0xCFFFF | Core 3 (64 KiB) |
-| Core 2 stack | 0xD0000–0xDFFFF | Core 2 (64 KiB) |
-| Core 1 stack | 0xE0000–0xEFFFF | Core 1 (64 KiB) |
-| Core 0 stack | 0xF0000–0xFFFFF | Core 0 (64 KiB) |
-
-### 12.5  Software Changes Required
-
-The following software components need updates (not yet implemented):
-
-**BIOS (`bios.asm`):**
-- Add `CSR_COREID` read at boot entry point
-- Core 0: proceed with normal BIOS boot
-- Cores 1–3: set per-core SP from stack-top table, enter `HALT` (WFI)
-- Add `WAKE-CORE` routine: write entry addr to mailbox, send IPI
-- Partition stack memory: R14/R15 per-core from stack-top constants
-
-**KDOS (`kdos.f`):**
-- New words: `COREID` (read CSR_COREID), `NCORES` (read CSR_NCORES)
-- `LOCK` / `UNLOCK` (hardware spinlock acquire/release via MMIO)
-- `SEND-IPI` (write to mailbox SEND register)
-- `RECV-IPI` (poll/wait for IPI, read mailbox data)
-- `SPAWN` ( addr core -- ) wake secondary core with Forth entry point
-- Mutex-protect shared resources: dictionary (`HERE`, `ALLOT`), UART
-- Per-core `STATE`, `BASE`, data/return stack pointers
-
-**Emulator (`cpu.py` / `system.py`):**
-- `MegapadSystem.__init__`: create `NUM_CORES` CPU instances, shared memory
-- Round-robin or interleaved stepping: `step()` calls each CPU in turn
-- Per-CPU `core_id` field, `CSR_COREID` returns it
-- IPI mechanism: write to mailbox MMIO → set pending flag on target CPU
-- Shared memory (single `bytearray`) accessed by all CPU instances
-- `SysInfo` MMIO: return core count at offset 0x10
-- Timer IRQ: delivered to all CPUs (or configurable routing)
+- [`fpga/README.md`](../README.md) — current FPGA entry point and workflow
+- [`docs/chip-math-update-handoff.md`](../../docs/chip-math-update-handoff.md) —
+  locked TACC contracts, landings, and physical acceptance gates
+- [`docs/isa-reference.md`](../../docs/isa-reference.md) — normative TACC ISA
+- [`docs/architecture.md`](../../docs/architecture.md) — complete system map

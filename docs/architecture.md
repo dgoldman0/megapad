@@ -403,11 +403,14 @@ The tile engine extends beyond the base TALU/TMUL/TRED/TSYS with:
 - **Full-width TACC** — one explicit 2,048-bit persistent lane accumulator per
   physical engine, with widened integer and binary32 feedback accumulation
 
-The pre-TACC extended tile operations are implemented in both the emulator and
-RTL.  TACC is implemented by the Python oracle, native accelerator, and
-strict-cycle model in emulator Phase 1.  Restoring all private full-core
-engines and implementing TACC in portable RTL are Phase 2 work; current RTL
-must not be treated as TACC-capable.
+The extended tile operations and TACC contract are implemented in the Python
+oracle, native accelerator, strict-cycle model, and portable RTL.  The RTL
+contains all four private full-core engines and all three cluster-shared
+engines, with one TACC bank per engine.  Focused and composed simulation
+cover the locked arithmetic, ownership, image, fault, reset, and counter
+behavior.  Routed FPGA resource and timing acceptance is a separate,
+unfinished physical-validation step and must not be inferred from functional
+RTL simulation.
 
 ### Tile Engine Domains and Explicit TACC Control
 
@@ -448,11 +451,13 @@ images measure 6 and 9 respectively.
 
 Interrupts and traps preserve TACC.  Software saves dirty state and its format
 before migrating an owner, then releases; same-core resumption may retain it.
-Whole-SoC reset wipes all seven domains, a full-core reset wipes only its
-paired engine, and cluster disable/reset wipes only that cluster engine.
-Individual microcore reset cancels only that caller's work.  Supervisor
-`FORCE_RELEASE` is the explicit dead-owner recovery mechanism and zeroizes the
-bank before another TACC operation is admitted.
+The architectural reset contract wipes all seven domains on whole-SoC reset,
+only the paired engine on full-core reset, and only the shared engine on
+cluster disable/reset.  Individual microcore reset cancels only that caller's
+work.  RTL verifies these scopes through named reset seams; the independent
+seams remain tied inactive until a production reset controller is specified.
+Supervisor `FORCE_RELEASE` is the explicit dead-owner recovery mechanism and
+zeroizes the bank before another TACC operation is admitted.
 
 ### Crypto Accelerators
 

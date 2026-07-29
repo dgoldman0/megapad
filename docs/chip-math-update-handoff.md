@@ -2,8 +2,9 @@
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
   scheduler; Phase 2 functional Landings 2.1 through 2.8 complete; Landing
-  2.9 preparation is in progress, while routed physical acceptance remains
-  blocked on the production target/memory decision and Vivado availability
+  2.9 lightweight preparation complete, while routed physical acceptance is
+  deferred to a hardware-development workstation after the production
+  target/memory contract is resolved
 - Date: 2026-07-29
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -2263,25 +2264,32 @@ Make graph because its hierarchy predates private full-core engines.
 
 Primary files:
 
-- `fpga/synth_genesys2.tcl`
-- `fpga/synth_yosys_soc.tcl`
-- `fpga/synth_yosys_all.tcl`
 - `fpga/run_tacc_impl.py`
-- new `fpga/check_tacc_reports.py`
-- any additional explicit production source list discovered during
-  implementation
-- checked-in resource/timing summary
+- `fpga/check_tacc_reports.py`
+- `fpga/tacc_impl_harness.tcl`
+- `fpga/constraints/tacc_measurement.xdc`
+- `tests/test_tacc_report_checker.py`
+- existing FPGA source manifests and board-helper flows
 - this handoff and public architecture documents
 
 #### Landing 2.9 execution constraint — 2026-07-29
 
-Final routed acceptance is presently blocked on two external prerequisites:
-the production FPGA target and memory configuration must be fixed, and a
-working Vivado installation must be available for like-for-like
-implementation runs. Until both are present, no routed LUT, FF, BRAM, DSP,
-WNS, TNS, or Fmax result may be inferred from behavioral simulation or a
-lightweight frontend check, and Phase 2 must not be marked physically
+There is no hardware-development workstation or Vivado installation in the
+current environment. Final routed acceptance is therefore future workstation
+work, not a gate to keep reattempting here. No routed LUT, FF, BRAM, DSP, WNS,
+TNS, or Fmax result may be inferred from behavioral simulation, preparation,
+or a lightweight frontend check, and Phase 2 must not be marked physically
 complete.
+
+The target decision is also substantive. The K325T comparison target has 445
+RAMB36 blocks, while the default four-bank 16,384-row memory geometry requires
+at least 1,024 before other storage. Merely lowering `MEM_DEPTH` is not a valid
+production workaround: the present memory RTL retains fixed 14/17-bit
+addresses and 1 MiB apertures. The runner therefore refuses both an
+over-capacity full-depth K325T run and a reduced-depth run without a
+depth-derived address contract. With the current RTL, physical acceptance
+requires selecting a larger target and updating the common harness/checker;
+reducing memory requires an RTL contract landing first.
 
 This does not block lightweight preparation. Source-manifest auditing,
 fail-closed runner and report-checker implementation, configuration
@@ -2290,60 +2298,115 @@ documentation remain in scope. Those artifacts should clearly report the
 missing routed prerequisites rather than fabricate or silently skip
 acceptance data.
 
-Work:
+Preparation completed here:
 
-1. verify that every new module is present in every explicit FPGA source
-   list;
-2. add the checked Vivado implementation/report mode, isolated source
-   materialization runner, and fail-closed report comparator described by the
-   physical contract;
-3. obtain approval for the heavyweight tool runs;
-4. measure the locked Phase-0 base, immutable topology-only commit
+1. every new module is present in the existing explicit FPGA source lists;
+2. the common direct-`mp64_soc` harness carries the only three
+   version-conditional sources (`mp64_fp_exact.v`, `mp64_tacc.v`, and
+   `mp64_tacc_transfer.v`);
+3. source and measurement-harness trees are copied independently and checked
+   against exact manifests before and after any tool run;
+4. build products stay outside both attested trees;
+5. prepare-only is the default, while `--run-vivado` is the sole heavyweight
+   opt-in and requires an explicit memory depth;
+6. the comparator locks both historical commits and manifests, requires the
+   expected final commit and manifest, requires one harness/campaign/tool
+   identity, and rejects output anywhere inside an input package;
+7. native Vivado timing and hierarchy rows must support helper markers;
+   applied clock period, complete route status, exact source counts,
+   structural sharing, and the full Vivado SW/IP build identity are
+   fail-closed inputs; and
+8. public FPGA and ISA documentation distinguishes functional RTL completion
+   from physical acceptance.
+
+Future workstation work:
+
+1. fix the target/memory contract and update the attested harness/checker;
+2. obtain approval for each heavyweight tool run;
+3. measure the locked Phase-0 base, immutable topology-only commit
    `364d44283ba5c2fad8187b63da6917af60344c26`, and final TACC branch with
    identical tool and constraint settings;
-5. report current-main → topology-only and topology-only → TACC hierarchical
+4. report current-main → topology-only and topology-only → TACC hierarchical
    LUT, FF, BRAM, DSP, WNS, TNS, and Fmax deltas separately;
-6. confirm exactly seven tile engines and seven TACC banks in the elaborated
+5. confirm exactly seven tile engines and seven TACC banks in the elaborated
    hierarchy;
-7. inspect multiplier and FP-adder sharing rather than trusting totals alone;
-8. confirm no unconstrained paths and nonnegative WNS/TNS at 100 MHz;
-9. make the report checker fail on any resource percentage, remaining
-   headroom, timing, unconstrained-path, or seven-instance-count violation;
-10. refactor and repeat if a gate fails; and
-11. record final measured latency, utilization, timing, and remaining
+6. inspect multiplier and FP-adder sharing rather than trusting totals alone;
+7. confirm no unconstrained paths and nonnegative WNS/TNS at 100 MHz;
+8. refactor and repeat if a gate fails; and
+9. record final measured latency, utilization, timing, and remaining
     headroom.
 
 Do not commit a feature that only passes behavioral simulation but exceeds
 the device or timing budget.
 
-After approval, run all three implementations and the fail-closed comparison:
+Prepare-only materialization is safe on an ordinary development machine:
 
 ```sh
 python fpga/run_tacc_impl.py \
   --source-ref c8e8118e82a899ec3f101f63d277a1bf4ef5f84a \
-  --label current-main --out /tmp/megapad-tacc-reports/current-main
+  --label current-main --campaign-id <campaign> \
+  --out /tmp/megapad-tacc-reports/current-main
 python fpga/run_tacc_impl.py \
   --source-ref 364d44283ba5c2fad8187b63da6917af60344c26 \
-  --label topology-only --out /tmp/megapad-tacc-reports/topology-only
+  --label topology-only --campaign-id <campaign> \
+  --out /tmp/megapad-tacc-reports/topology-only
 python fpga/run_tacc_impl.py \
   --source-tree /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-full-tacc-rtl \
-  --label full-tacc --out /tmp/megapad-tacc-reports/full-tacc
+  --label full-tacc --campaign-id <campaign> \
+  --out /tmp/megapad-tacc-reports/full-tacc
+```
+
+On a future workstation, recreate all three outputs with the same approved
+`--mem-depth <rows>` and `--run-vivado`, then compare them:
+
+```sh
 python fpga/check_tacc_reports.py \
   --current-main /tmp/megapad-tacc-reports/current-main \
   --topology-only /tmp/megapad-tacc-reports/topology-only \
-  --full-tacc /tmp/megapad-tacc-reports/full-tacc
+  --full-tacc /tmp/megapad-tacc-reports/full-tacc \
+  --expected-full-commit <40-digit-commit> \
+  --expected-full-manifest-sha256 <64-digit-manifest>
 ```
 
-Commit:
+#### Landing 2.9 preparation completion — 2026-07-29
+
+The 49-case lightweight report/runner gate passes sequentially. It covers
+every locked resource and timing threshold, strict JSON, immutable baseline
+commits and manifest digests, explicit final-source binding, exact source and
+harness trees, raw-report hashes, native timing/hierarchy evidence, applied
+clock agreement, output collision, prepare-only isolation, and both known
+memory-preflight failures.
+
+One prepare-only campaign successfully materialized all three sources. The
+locked Phase-0 source manifest is
+`064cdb7f06c88afa9107887b084ad19796cb9d65459410790e89e0c4706c95eb`;
+the immutable topology manifest is
+`87601b49375ce86be7218d8f10cf75611e97df902cb45f18a4232516f3e54e09`.
+All three used measurement-harness manifest
+`479be7c5c53776fbce98a53b27e33b93662c7acdcd626b010ec1e23b00245bc5`
+and explicitly recorded the memory choice as unresolved with the current
+fixed-depth address contract. The final source was a dirty preparation
+snapshot at functional commit `37596044de6b2962e8ca9ee77ad6b129d3c3d79d`;
+the runner prints its stable clean commit and manifest when this landing is
+materialized. Those values are supplied externally to the checker rather than
+embedded self-referentially in the source tree they identify.
+
+No Vivado, Yosys synthesis, placement, routing, bitstream generation, or board
+test was run. The Tcl flow and its native query spellings still require their
+first fail-closed dry run on the eventual Vivado workstation; failure there is
+a tooling item to repair, not permission to weaken or bypass the checker.
+
+Preparation commit:
 
 ```text
-Close full TACC resource and timing acceptance
+Prepare attested TACC physical comparison
 
-Record like-for-like baseline and TACC synthesis results, hierarchical
-sharing, routed timing, and remaining device headroom.
+Bind the two immutable baselines and final RTL to one isolated implementation
+harness, exact manifests, native report evidence, and fail-closed resource and
+timing gates.
 
-Confirm every locked functional and physical gate and mark the handoff
-complete only after the routed design passes.
+Keep routed acceptance explicitly pending until a production target, valid
+memory contract, Vivado workstation, and measured reports exist.
 ```
 
 ## 14. Verification matrix
@@ -2449,6 +2512,8 @@ Phase 2:
 - [x] FP16/BF16 TACC accumulation.
 - [x] Differential SoC closure, with nonblocking composition gaps recorded
   in the Landing 2.8 completion notes.
+- [x] Attested prepare-only physical runner, common harness, comparator, and
+  current platform-fit limitations documented.
 - [ ] Approved synthesis, routed timing, and resource acceptance.
 
 ## 18. Phase 1 integration closure

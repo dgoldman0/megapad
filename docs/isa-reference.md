@@ -576,9 +576,11 @@ the upper five function bits must be zero.
 
 ### Full-width TACC contract
 
-> **Implementation status:** emulator Phase 1 implements this ISA in the
-> Python oracle, native accelerator, and strict-cycle system model.  Portable
-> RTL implementation follows in Phase 2 and must conform to this contract.
+> **Implementation status:** the Python oracle, native accelerator,
+> strict-cycle system model, and portable RTL implement this contract.
+> Emulator-generated integer and floating-point vectors are consumed by the
+> RTL gate.  Routed FPGA resource and timing acceptance remains pending and
+> is not implied by functional conformance.
 
 There is one 2,048-bit TACC per physical tile engine: four private full-core
 domains and three cluster-shared microcore domains.  Full-core tile state is
@@ -657,7 +659,10 @@ consecutive 64-byte beats.  Lanes and lane bytes are little-endian.  For
 U32/S32, FP16, and BF16, bytes 128–255 store as zero and load as ignored input
 that commits as zero.  Image transfers do not change address or cursor CSRs;
 software must save the format alongside the image.  Internal memory, attached
-RAM, and external RAM use the same image; MMIO is illegal.
+RAM, and external RAM use the same image; MMIO is illegal.  The microcluster
+scratchpad aperture is not a TACC image route: `TAMAC`, `TACC.LOAD`, and
+`TACC.STORE` targeting it raise `IVEC_BUS_FAULT` before traffic, even when
+ordinary scalar cluster-scratchpad access is enabled.
 
 Before a transfer, the complete span is checked under the caller's routed
 memory, privilege, HBW, and active-MPU policy.  Misalignment raises
@@ -678,13 +683,16 @@ complete decoded instruction.  Faulting operations do not retire or increment
 
 Interrupts and ordinary traps preserve ownership.  Before task migration,
 software saves dirty state and its format as required, then releases; same-core
-resumption may retain ownership deliberately.  Whole-SoC reset wipes all
-seven domains.  A full-core reset wipes only its paired engine, cluster
-disable/reset wipes only that cluster engine, and individual microcore reset
-cancels only that caller's request.  Supervisor `TACC_CTL.FORCE_RELEASE` is
-dead-owner recovery, not an ordinary lifecycle operation.
+resumption may retain ownership deliberately.  The architectural reset
+contract wipes all seven domains on whole-SoC reset, only the paired engine on
+full-core reset, and only the shared engine on cluster disable/reset;
+individual microcore reset cancels only that caller's request.  RTL verifies
+those independent scopes through named reset seams, but the seams remain tied
+inactive until a production reset controller is specified.  Supervisor
+`TACC_CTL.FORCE_RELEASE` is dead-owner recovery, not an ordinary lifecycle
+operation.
 
-Uncontended full-core cycle totals are:
+The locked uncontended engine/strict-model cycle baselines are:
 
 | Operation/path | Instruction-step cycles | Strict-system cycles |
 |---|---:|---:|
@@ -702,7 +710,9 @@ The default external paths serialize all 32 PHY words and record 28
 instruction-step stalls or 31 strict-system stalls; successful completion
 increments `PERF_EXTMEM` by 32.  Microcore MEX adds the existing fixed
 three-cycle cluster-dispatch cost after winning admission.  Contention and PHY
-latency add elapsed stall cycles.
+latency add elapsed stall cycles.  The current composed RTL SoC image route
+has additional registered no-progress cycles; its counters report them, but
+strict composed-cycle parity is not yet claimed.
 
 ---
 

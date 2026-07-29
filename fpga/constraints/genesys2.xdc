@@ -9,7 +9,7 @@
 ##
 ## Resources:
 ##   - 203,800 LUTs / 407,600 FFs
-##   - 890 × 36Kb BRAM  = 4,005 KB
+##   - 445 × 36Kb BRAM  = 2,002.5 KiB
 ##   - 840 × DSP48E1
 ##   - DDR3 SODIMM (up to 1GB)
 ##   - Gigabit Ethernet PHY (Marvell 88E1111)
@@ -97,6 +97,9 @@ set_property BITSTREAM.CONFIG.CONFIGRATE 33 [current_design]
 ## ============================================================================
 ## BRAM Utilisation Note
 ## ============================================================================
-## Kintex-7 325T has 4,005 KB of BRAM (890 × 36Kb blocks).
-## 1 MiB internal RAM = 1024 KB ≈ 25% of available BRAM.
-## Remaining ~2,981 KB available for I-cache, FIFOs, tile scratch, NIC buffers.
+## Kintex-7 325T has 2,002.5 KiB of BRAM (445 × 36Kb blocks).
+## The production RTL currently declares four 1 MiB internal banks, so its
+## 4 MiB default memory configuration cannot fit this device even before
+## I-cache, FIFO, and peripheral storage.  Physical implementation therefore
+## requires an explicit production memory/target decision; this constraint
+## file does not establish fit.
