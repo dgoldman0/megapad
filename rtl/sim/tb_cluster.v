@@ -1664,6 +1664,36 @@ module tb_cluster;
                  uut.te_tacc_status_raw[TACC_STATUS_BIT_DIRTY],
                  uut.te_tacc_status_raw[TACC_STATUS_BIT_VALID]},
                 64'd3);
+
+        // Reformat the same owned physical bank and execute floating TAMAC
+        // through the production cluster dispatch path.  Direct-engine
+        // fixtures cover adversarial arithmetic; this case proves captured
+        // FP mode, four arithmetic intervals, and registered retirement.
+        drive_private_tile_csr(0, CSR_TMODE, TMODE_FP16);
+        tile_mem_model[4] = {32{16'h3C00}}; // 1.0
+        tile_mem_model[5] = {32{16'h4000}}; // 2.0
+        drive_private_mex(
+            0, 2'd0, MEX_TSYS, ETSYS_TACC_CLEAR,
+            {5'd0, ETSYS_TACC_CLEAR}, 4'd8, 1'b1,
+            tb_private_mex_fault);
+        check64("cluster owner FP16 CLEAR succeeds",
+                tb_private_mex_fault, MEX_FAULT_NONE);
+        drive_private_mex(
+            0, 2'd0, MEX_TMUL, TMUL_TAMAC,
+            {5'd0, TMUL_TAMAC}, 4'd0, 1'b0,
+            tb_private_mex_fault);
+        check64("cluster owner FP16 TAMAC succeeds",
+                tb_private_mex_fault, MEX_FAULT_NONE);
+        check64("cluster FP16 TAMAC updates lane zero",
+                uut.u_tile.tacc_bank_state[31:0],
+                32'h4000_0000);
+        check64("cluster FP16 TAMAC updates lane thirty-one",
+                uut.u_tile.tacc_bank_state[31*32 +: 32],
+                32'h4000_0000);
+        check64("cluster FP16 TAMAC keeps inactive image half zero",
+                uut.u_tile.tacc_bank_state[2047:1984],
+                64'd0);
+
         drive_private_mex(
             0, 2'd0, MEX_TSYS, ETSYS_TACC_RELEASE,
             {5'd0, ETSYS_TACC_RELEASE}, 4'd8, 1'b1,

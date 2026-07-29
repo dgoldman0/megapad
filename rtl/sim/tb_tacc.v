@@ -216,6 +216,11 @@ module tb_tacc;
                     format_ew, format_signed);
         check("validation-fault request is ready", req_ready);
         req_valid = 1'b1;
+        if (is_tamac) begin
+            #1;
+            check("validation-fault TAMAC never starts its datapath",
+                  !tamac_start);
+        end
         tick;
         req_valid = 1'b0;
         if (deferred_class) begin
@@ -562,6 +567,12 @@ module tb_tacc;
         lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
                         5'd4, 2'd0, TMODE_8, 1'b1,
                         MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_FP16, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_BF16, 1'b1,
+                        MEX_FAULT_ILLEGAL);
 
         // Test-only deposit keeps every bank bit observable for destructive
         // lifecycle checks below.
@@ -577,6 +588,158 @@ module tb_tacc;
               !status_raw[TACC_STATUS_BIT_FORMAT_SIGNED]);
         check("floating CLEAR zeroizes the seeded whole bank",
               bank_state == 2048'd0);
+        uut.dirty_reg = 1'b0;
+        #1;
+        check("FP16 TAMAC fixture begins from clean valid state",
+              !status_raw[TACC_STATUS_BIT_DIRTY]);
+
+        // Floating TAMAC ignores TMODE.SIGNED.  Keep the inactive upper half
+        // explicit in these supplied leaf images: the parent datapath
+        // canonicalizes it, while this leaf commits the complete image only
+        // at architectural retirement.
+        set_request(1'b1, TMUL_TAMAC, 1'b1,
+                    5'd4, 2'd0, TMODE_FP16, 1'b1);
+        tamac_result_image =
+            {1024'd0, {16{64'h7FC0_0000_3F80_0000}}};
+        req_valid = 1'b1;
+        #1;
+        check("matching FP16 TAMAC starts with SIGNED set",
+              tamac_start);
+        tick;
+        req_valid = 1'b0;
+        check("admitted FP16 TAMAC is busy before completion",
+              req_busy && !req_done);
+        bank_snapshot = bank_state;
+        tamac_done = 1'b1;
+        tick;
+        tamac_done = 1'b0;
+        check("FP16 TAMAC response precedes atomic image commit",
+              req_done && !req_busy &&
+              req_fault == MEX_FAULT_NONE &&
+              bank_state == bank_snapshot &&
+              !status_raw[TACC_STATUS_BIT_DIRTY]);
+        tick;
+        check("retired FP16 TAMAC commits exact canonical dirty image",
+              bank_state ==
+                  {1024'd0, {16{64'h7FC0_0000_3F80_0000}}} &&
+              status_raw[TACC_STATUS_BIT_DIRTY] &&
+              status_raw[TACC_STATUS_FORMAT_EW_MSB:
+                         TACC_STATUS_FORMAT_EW_LSB] == TMODE_FP16 &&
+              !status_raw[TACC_STATUS_BIT_FORMAT_SIGNED]);
+
+        // The opposite SIGNED value is admitted too.  Poison every supplied
+        // result byte so any partial or premature publication is observable.
+        bank_snapshot = bank_state;
+        set_request(1'b1, TMUL_TAMAC, 1'b1,
+                    5'd4, 2'd0, TMODE_FP16, 1'b0);
+        tamac_result_image = {128{16'hDEAD}};
+        req_valid = 1'b1;
+        #1;
+        check("matching FP16 TAMAC starts with SIGNED clear",
+              tamac_start);
+        tick;
+        req_valid = 1'b0;
+        check("cancel-target FP16 TAMAC became busy",
+              req_busy && !req_done);
+        req_cancel = 1'b1;
+        tick;
+        req_cancel = 1'b0;
+        check("canceled FP16 TAMAC preserves complete canonical bank",
+              !req_done && !req_busy &&
+              req_fault == MEX_FAULT_NONE &&
+              bank_state == bank_snapshot &&
+              bank_state[2047:1024] == 1024'd0);
+
+        // Neither an integer request against FP state nor another FP encoding
+        // may enter the datapath before a deliberate CLEAR or LOAD transition.
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_16, 1'b1,
+                        MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_BF16, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+
+        lifecycle_success(ETSYS_TACC_CLEAR, 5'd4, 2'd0,
+                          TMODE_BF16, 1'b1);
+        check("BF16 CLEAR ignores and clears signed format bit",
+              status_raw[TACC_STATUS_FORMAT_EW_MSB:
+                         TACC_STATUS_FORMAT_EW_LSB] == TMODE_BF16 &&
+              !status_raw[TACC_STATUS_BIT_FORMAT_SIGNED]);
+        check("BF16 CLEAR zeroizes the whole persistent bank",
+              bank_state == 2048'd0);
+        uut.dirty_reg = 1'b0;
+        #1;
+        check("BF16 TAMAC fixture begins from clean valid state",
+              !status_raw[TACC_STATUS_BIT_DIRTY]);
+
+        set_request(1'b1, TMUL_TAMAC, 1'b1,
+                    5'd4, 2'd0, TMODE_BF16, 1'b0);
+        tamac_result_image =
+            {1024'd0, {16{64'h8000_0000_0000_0001}}};
+        req_valid = 1'b1;
+        #1;
+        check("matching BF16 TAMAC starts with SIGNED clear",
+              tamac_start);
+        tick;
+        req_valid = 1'b0;
+        check("admitted BF16 TAMAC is busy before completion",
+              req_busy && !req_done);
+        bank_snapshot = bank_state;
+        tamac_done = 1'b1;
+        tick;
+        tamac_done = 1'b0;
+        check("BF16 TAMAC response precedes atomic image commit",
+              req_done && !req_busy &&
+              req_fault == MEX_FAULT_NONE &&
+              bank_state == bank_snapshot &&
+              !status_raw[TACC_STATUS_BIT_DIRTY]);
+        tick;
+        check("retired BF16 TAMAC commits exact canonical dirty image",
+              bank_state ==
+                  {1024'd0, {16{64'h8000_0000_0000_0001}}} &&
+              status_raw[TACC_STATUS_BIT_DIRTY] &&
+              status_raw[TACC_STATUS_FORMAT_EW_MSB:
+                         TACC_STATUS_FORMAT_EW_LSB] == TMODE_BF16 &&
+              !status_raw[TACC_STATUS_BIT_FORMAT_SIGNED]);
+
+        // SIGNED set remains a matching BF16 request.  A terminal source
+        // fault must discard even a fully supplied noncanonical poison image.
+        bank_snapshot = bank_state;
+        set_request(1'b1, TMUL_TAMAC, 1'b1,
+                    5'd4, 2'd0, TMODE_BF16, 1'b1);
+        tamac_result_image = {128{16'hBEEF}};
+        req_valid = 1'b1;
+        #1;
+        check("matching BF16 TAMAC starts with SIGNED set",
+              tamac_start);
+        tick;
+        req_valid = 1'b0;
+        check("fault-target BF16 TAMAC became busy",
+              req_busy && !req_done);
+        tamac_fault = MEX_FAULT_BUS;
+        tamac_fault_addr = 64'h0000_0000_0010_00C0;
+        tamac_done = 1'b1;
+        tick;
+        tamac_done = 1'b0;
+        tamac_fault = MEX_FAULT_NONE;
+        tamac_fault_addr = 64'd0;
+        check("BF16 TAMAC source fault reports exact address before commit",
+              req_done && !req_busy &&
+              req_fault == MEX_FAULT_BUS &&
+              req_fault_addr == 64'h0000_0000_0010_00C0 &&
+              bank_state == bank_snapshot);
+        tick;
+        check("faulted BF16 TAMAC preserves complete canonical bank",
+              bank_state == bank_snapshot &&
+              bank_state[2047:1024] == 1024'd0 &&
+              status_raw[TACC_STATUS_BIT_DIRTY]);
+
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_32, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b1, TMUL_TAMAC, 1'b1,
+                        5'd4, 2'd0, TMODE_FP16, 1'b1,
+                        MEX_FAULT_ILLEGAL);
 
         // Caller cancellation is terminal but non-retiring and preserves the
         // complete shared physical state when no FORCE is pending.

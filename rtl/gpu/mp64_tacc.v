@@ -64,7 +64,7 @@ module mp64_tacc #(
     output reg  [2:0]   req_fault,
     output reg  [63:0]  req_fault_addr,
 
-    // Integer TAMAC datapath handshake.  tamac_start is a combinational
+    // TAMAC datapath handshake.  tamac_start is a combinational
     // admission pulse; tamac_done terminates the admitted operation after all
     // source reads and arithmetic slices.  The result image must remain stable
     // while req_done is held, through the req_retire sampling edge.
@@ -186,14 +186,15 @@ module mp64_tacc #(
         end
     endfunction
 
-    function integer_tamac_format;
+    function tamac_format_is_legal;
         input [2:0] ew;
         begin
             case (ew)
-                TMODE_8, TMODE_16, TMODE_32:
-                    integer_tamac_format = 1'b1;
+                TMODE_8, TMODE_16, TMODE_32,
+                TMODE_FP16, TMODE_BF16:
+                    tamac_format_is_legal = 1'b1;
                 default:
-                    integer_tamac_format = 1'b0;
+                    tamac_format_is_legal = 1'b0;
             endcase
         end
     endfunction
@@ -298,7 +299,7 @@ module mp64_tacc #(
                     if ((req_funct == TMUL_TAMAC) &&
                         incoming_mine && valid_reg &&
                         incoming_format_legal &&
-                        integer_tamac_format(req_format_ew) &&
+                        tamac_format_is_legal(req_format_ew) &&
                         (format_ew_reg == req_format_ew) &&
                         (format_signed_reg ==
                          normalized_signed(req_format_ew,
@@ -763,8 +764,8 @@ module mp64_tacc #(
                         $error("mp64_tacc: corrupt TAMAC function tag");
                     if (owner_reg != active_caller_id_reg || !valid_reg)
                         $error("mp64_tacc: unowned or invalid TAMAC active");
-                    if (!integer_tamac_format(active_format_ew_reg))
-                        $error("mp64_tacc: noninteger TAMAC became active");
+                    if (!tamac_format_is_legal(active_format_ew_reg))
+                        $error("mp64_tacc: illegal TAMAC format became active");
                     if (format_ew_reg != active_format_ew_reg ||
                         format_signed_reg != active_format_signed_reg)
                         $error("mp64_tacc: mismatched TAMAC format active");

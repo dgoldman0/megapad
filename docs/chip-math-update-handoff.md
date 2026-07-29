@@ -1,7 +1,7 @@
 # Full TACC ISA and implementation handoff
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
-  scheduler; Phase 2 Landings 2.1 through 2.6 complete; Landing 2.7 is next
+  scheduler; Phase 2 Landings 2.1 through 2.7 complete; Landing 2.8 is next
 - Date: 2026-07-29
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -2067,6 +2067,48 @@ Match the emulator across persistent mixed-precision accumulation, source
 forms, canonical images, and IEEE edge cases.
 ```
 
+#### Landing 2.7 completion — 2026-07-29
+
+FP16 and BF16 are now legal TAMAC formats after the same owner, valid-state,
+canonical-encoding, and latched-format checks as integer TAMAC. Floating
+signedness is normalized away, so either incoming `TMODE.SIGNED` setting
+matches the one canonical floating format rather than creating a hidden
+second format.
+
+Each engine executes floating TAMAC as two registered groups of sixteen
+lanes. An even arithmetic beat captures exact product descriptors from the
+Landing-2.6 multiplier array; the following odd beat performs the sole
+binary32 round-to-nearest-even feedback addition through the shared bank.
+The second odd beat captures lanes 16–31 and terminates. Tile and in-place
+forms therefore retain the locked seven-cycle total, while broadcast retains
+six cycles because it reads one source tile. Only the low 1,024 result bits
+are published; the inactive image half is always zero.
+
+`gen_tamac_fp_vectors.py` executes the Phase-1 emulator to produce six
+checked-in full-image fixtures covering FP16 and BF16 tile, poisoned
+broadcast, and in-place forms. The fixture crosses lanes 15/16, repeats
+feedback, and covers exact fused rounding, subnormals, signed zero,
+cancellation, overflow, infinity, invalid products, and canonical NaN. The
+RTL gate regenerates and compares the fixture byte-for-byte before running
+it. A separate timing case cancels after the first registered product group
+and proves that no partial or late image is published.
+
+Sequential verification passed:
+
+- `tacc`: 270 lifecycle, admission, atomicity, mismatch, cancellation, and
+  fault checks;
+- `tacc_cycles`: 399 timing, source-traffic, emulator-vector, persistence,
+  and cancellation checks;
+- `fp_exact`: 640 exact product/feedback checks;
+- `tile`: 89 datapath checks;
+- `tile_write_ack`: 34 write-retirement checks; and
+- `cluster`: 148 checks, including production-dispatch FP16 TAMAC on a
+  cluster-shared engine.
+
+Focused Yosys SystemVerilog frontend and `mp64_tile` hierarchy validation
+also passed. Its only diagnostics were the established unpacked-array
+memory-to-register lowering warnings.
+
 ### Landing 2.8 — arbitration, SoC, and differential closure
 
 Primary files:
@@ -2312,8 +2354,8 @@ Phase 2:
 - [x] Lifecycle state and privileged recovery.
 - [x] Canonical four-beat image transfer.
 - [x] Integer accumulation.
-- [ ] Shared exact FP32 arithmetic.
-- [ ] FP16/BF16 TACC accumulation.
+- [x] Shared exact FP32 arithmetic.
+- [x] FP16/BF16 TACC accumulation.
 - [ ] Differential SoC closure.
 - [ ] Approved synthesis, routed timing, and resource acceptance.
 

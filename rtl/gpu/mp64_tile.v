@@ -308,8 +308,8 @@ module mp64_tile #(
     localparam S_EXT_STORE2_WAIT = 5'd18; // wait final external WMUL store
     localparam S_STORE2D_WRITE_WAIT = 5'd19; // wait row write acknowledgement
     localparam S_TACC_WAIT   = 5'd20;  // held lifecycle request / terminal
-    localparam S_TAMAC_LOAD_A= 5'd21;  // wait first integer TAMAC source
-    localparam S_TAMAC_LOAD_B= 5'd22;  // wait second integer TAMAC source
+    localparam S_TAMAC_LOAD_A= 5'd21;  // wait first TAMAC source
+    localparam S_TAMAC_LOAD_B= 5'd22;  // wait second TAMAC source
     localparam S_TACC_INT    = 5'd23;  // one 16-lane feedback slice
 
     reg [4:0]   state;
@@ -348,7 +348,7 @@ module mp64_tile #(
     reg [1:0]   caller_slot_reg;
     reg         engine_reset_seen;
 
-    // Integer TAMAC captures every control that affects routing or arithmetic
+    // TAMAC captures every control that affects routing or arithmetic
     // before source traffic begins.  Existing tile_a/tile_b and result scratch
     // registers retain operands and completed slices; no second TACC bank is
     // instantiated.
@@ -1267,6 +1267,7 @@ module mp64_tile #(
     reg [21:0]   fp_tamac_product_significand_stage [0:15];
     reg signed [10:0] fp_tamac_product_exponent_stage [0:15];
     integer fp_tamac_stage_lane;
+    integer fp_tamac_result_lane;
     wire fp_tamac_feedback_active =
         tamac_datapath_active &&
         ((tamac_ew_reg == TMODE_FP16) ||
@@ -1834,7 +1835,10 @@ module mp64_tile #(
         ((tamac_ew_reg == TMODE_16) &&
          (tamac_beat_reg == 2'd1)) ||
         ((tamac_ew_reg == TMODE_32) &&
-         (tamac_beat_reg == 2'd0));
+         (tamac_beat_reg == 2'd0)) ||
+        (((tamac_ew_reg == TMODE_FP16) ||
+          (tamac_ew_reg == TMODE_BF16)) &&
+         (tamac_beat_reg == 2'd3));
     wire tamac_source_ack =
         tamac_read_ext_reg ? ext_tile_ack : tile_ack;
     wire tamac_source_error =
@@ -1864,6 +1868,9 @@ module mp64_tile #(
         (tamac_ew_reg == TMODE_16) ?
             {tile_b, tile_a, result2, result} :
         (tamac_ew_reg == TMODE_32) ?
+            {1024'd0, result2, result} :
+        ((tamac_ew_reg == TMODE_FP16) ||
+         (tamac_ew_reg == TMODE_BF16)) ?
             {1024'd0, result2, result} :
             2048'd0;
 
@@ -3211,7 +3218,7 @@ module mp64_tile #(
                     state <= S_DONE;
             end
 
-            // Integer TAMAC reads use the engine's private ordinary source
+            // TAMAC reads use the engine's private ordinary source
             // lane.  All required spans were validated before tamac_start, so
             // only acknowledged target errors can terminate these states.
             S_TAMAC_LOAD_A: begin
@@ -3285,6 +3292,30 @@ module mp64_tile #(
                     TMODE_32: begin
                         result  <= tamac_slice_result[511:0];
                         result2 <= tamac_slice_result[1023:512];
+                    end
+
+                    TMODE_FP16, TMODE_BF16: begin
+                        // Even beats registered the selected exact product
+                        // group. Odd beats consume the shared feedback bank.
+                        if (tamac_beat_reg == 2'd1) begin
+                            for (fp_tamac_result_lane = 0;
+                                 fp_tamac_result_lane < 16;
+                                 fp_tamac_result_lane =
+                                     fp_tamac_result_lane + 1)
+                                result[
+                                    fp_tamac_result_lane*32 +: 32] <=
+                                    fp_shared_l1[
+                                        fp_tamac_result_lane];
+                        end else if (tamac_beat_reg == 2'd3) begin
+                            for (fp_tamac_result_lane = 0;
+                                 fp_tamac_result_lane < 16;
+                                 fp_tamac_result_lane =
+                                     fp_tamac_result_lane + 1)
+                                result2[
+                                    fp_tamac_result_lane*32 +: 32] <=
+                                    fp_shared_l1[
+                                        fp_tamac_result_lane];
+                        end
                     end
 
                     default: begin

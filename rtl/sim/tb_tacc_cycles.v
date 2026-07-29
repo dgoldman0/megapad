@@ -653,6 +653,182 @@ module tb_tacc_cycles;
         check("all six integer TAMAC fixtures executed",
               vector_case_count == 6);
 
+        // Floating feedback is split into registered product and add phases
+        // for each 16-lane group.  Exercise both groups and a fused case where
+        // rounding the product before the addition would produce the wrong
+        // answer.
+        load_tacc_image(TMODE_FP16, 1'b1, 2048'd0);
+        tamac_mem_a = {32{16'h3C01}};
+        tamac_mem_b = {32{16'h3C01}};
+        write_csr(CSR_TSRC0, {32'd0, TAMAC_ADDR_A});
+        write_csr(CSR_TSRC1, {32'd0, TAMAC_ADDR_B});
+        dispatch_tamac_once(2'd0, 7, 2,
+                            vector_observed_cycles);
+        check("FP16 TAMAC keeps exact product bits in both groups",
+              uut.tacc_bank_state ==
+              {1024'd0, {32{32'h3F80_4008}}});
+        check("floating TAMAC normalizes ignored signedness",
+              !tacc_status_raw[TACC_STATUS_BIT_FORMAT_SIGNED]);
+
+        load_tacc_image(
+            TMODE_BF16,
+            1'b0,
+            {1024'd0, {32{32'h0000_0001}}});
+        tamac_mem_a = {32{16'h0001}};
+        tamac_mem_b = {32{16'h3700}};
+        write_csr(CSR_TSRC0, {32'd0, TAMAC_ADDR_A});
+        write_csr(CSR_TSRC1, {32'd0, TAMAC_ADDR_B});
+        dispatch_tamac_once(2'd0, 7, 2,
+                            vector_observed_cycles);
+        if (uut.tacc_bank_state !=
+            {1024'd0, {32{32'h0000_0002}}})
+            $display(
+                "  BF16 fused mismatch: lane0=%08x lane15=%08x lane16=%08x lane31=%08x",
+                uut.tacc_bank_state[0*32 +: 32],
+                uut.tacc_bank_state[15*32 +: 32],
+                uut.tacc_bank_state[16*32 +: 32],
+                uut.tacc_bank_state[31*32 +: 32]);
+        if (uut.tacc_bank_state !=
+            {1024'd0, {32{32'h0000_0002}}})
+            $display(
+                "  BF16 staged descriptor: finite=%b zero=%b sig=%h exp=%0d",
+                uut.fp_tamac_product_finite_stage[0],
+                uut.fp_tamac_product_zero_stage[0],
+                uut.fp_tamac_product_significand_stage[0],
+                uut.fp_tamac_product_exponent_stage[0]);
+        check("BF16 TAMAC performs one final RNE after exact addition",
+              uut.tacc_bank_state ==
+              {1024'd0, {32{32'h0000_0002}}});
+        check("floating TAMAC canonical image keeps high half zero",
+              uut.tacc_bank_state[2047:1024] == 1024'd0);
+
+        // Execute the complete emulator-derived floating fixture.  It covers
+        // both formats and all three legal source forms, repeated feedback,
+        // the 15/16 group boundary, fused rounding, subnormals, signed zero,
+        // cancellation, overflow, infinity, and canonical NaN.
+        vector_case_count = 0;
+        vector_fd = $fopen("tamac_fp_vectors.vec", "r");
+        if (vector_fd == 0)
+            $fatal(1, "cannot open tamac_fp_vectors.vec");
+        while (!$feof(vector_fd)) begin
+            vector_line = {16384{1'b0}};
+            vector_scan = $fgets(vector_line, vector_fd);
+            vector_scan = $sscanf(
+                vector_line,
+                "%s %d %d %d %d %d %d %h %h %h %h %h",
+                vector_name,
+                vector_ew,
+                vector_signed,
+                vector_ss,
+                vector_repeats,
+                vector_cycles,
+                vector_total_cycles,
+                vector_scalar,
+                vector_source_a,
+                vector_source_b,
+                vector_initial_tacc,
+                vector_final_tacc);
+            if (vector_scan == 12) begin
+                vector_case_count = vector_case_count + 1;
+                $display("  FP TAMAC vector: %0s", vector_name);
+                load_tacc_image(
+                    vector_ew[2:0],
+                    vector_signed[0],
+                    vector_initial_tacc);
+                tamac_mem_a = vector_source_a;
+                tamac_mem_b = vector_source_b;
+                mex_gpr_val = vector_scalar;
+
+                case (vector_ss)
+                    0: begin
+                        write_csr(CSR_TSRC0,
+                                  {32'd0, TAMAC_ADDR_A});
+                        write_csr(CSR_TSRC1,
+                                  {32'd0, TAMAC_ADDR_B});
+                    end
+                    1: begin
+                        write_csr(CSR_TSRC0,
+                                  {32'd0, TAMAC_ADDR_A});
+                    end
+                    3: begin
+                        write_csr(CSR_TDST,
+                                  {32'd0, TAMAC_ADDR_A});
+                        write_csr(CSR_TSRC0,
+                                  {32'd0, TAMAC_ADDR_B});
+                    end
+                    default:
+                        $fatal(1, "FP fixture has illegal TAMAC SS");
+                endcase
+
+                vector_total_observed_cycles = 0;
+                for (vector_repeat_index = 0;
+                     vector_repeat_index < vector_repeats;
+                     vector_repeat_index = vector_repeat_index + 1) begin
+                    dispatch_tamac_once(
+                        vector_ss[1:0],
+                        vector_cycles,
+                        (vector_ss == 1) ? 1 : 2,
+                        vector_observed_cycles);
+                    vector_total_observed_cycles =
+                        vector_total_observed_cycles +
+                        vector_observed_cycles;
+                end
+                check("FP fixture repeat-total cycle count",
+                      vector_total_observed_cycles ==
+                      vector_total_cycles);
+                check("FP fixture final TACC image matches emulator",
+                      uut.tacc_bank_state == vector_final_tacc);
+                check("FP fixture canonical image keeps high half zero",
+                      uut.tacc_bank_state[2047:1024] == 1024'd0);
+                check("FP fixture leaves normalized dirty status",
+                      tacc_status_raw[TACC_STATUS_BIT_DIRTY] &&
+                      !tacc_status_raw[
+                          TACC_STATUS_BIT_FORMAT_SIGNED]);
+            end
+        end
+        $fclose(vector_fd);
+        check("all six floating TAMAC fixtures executed",
+              vector_case_count == 6);
+
+        // Cancel after the first exact-product group has crossed its timing
+        // register.  Neither that group nor a later group may become visible,
+        // and the abandoned stage must not generate a late response.
+        cycle_bank_snapshot = uut.tacc_bank_state;
+        mex_ss          = 2'd3;
+        mex_op          = MEX_TMUL;
+        mex_funct       = TMUL_TAMAC;
+        mex_funct_byte  = {5'd0, TMUL_TAMAC};
+        mex_ext_mod     = 4'd0;
+        mex_ext_active  = 1'b0;
+        mex_caller_id   = 5'd4;
+        mex_caller_slot = 2'd0;
+        vector_observed_cycles = 0;
+        mex_valid = 1'b1;
+        tick;
+        mex_valid = 1'b0;
+        vector_observed_cycles = vector_observed_cycles + 1;
+        while (!((uut.state == 5'd23) &&
+                 (uut.tamac_beat_reg == 2'd1)) &&
+               (vector_observed_cycles < 8)) begin
+            tick;
+            vector_observed_cycles = vector_observed_cycles + 1;
+        end
+        check("FP cancellation reaches registered-product boundary",
+              (uut.state == 5'd23) &&
+              (uut.tamac_beat_reg == 2'd1));
+        caller_cancel[0] = 1'b1;
+        tick;
+        caller_cancel[0] = 1'b0;
+        check("FP compute cancellation suppresses completion",
+              !mex_done && !mex_busy &&
+              mex_fault == MEX_FAULT_NONE);
+        check("FP compute cancellation preserves the complete bank",
+              uut.tacc_bank_state == cycle_bank_snapshot);
+        tick;
+        check("FP compute cancellation produces no late publication",
+              !mex_done &&
+              uut.tacc_bank_state == cycle_bank_snapshot);
+
         // TAMAC source reads use the ordinary internal/external 512-bit lane,
         // never the four-beat canonical-image stage.
         load_tacc_image(TMODE_32, 1'b0, 2048'd0);

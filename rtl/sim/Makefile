@@ -53,6 +53,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic \
         nic_lint nic_bus mailbox trng tile fp_exact tacc tacc_cycles \
+        tamac_fp_vectors_check \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
         tacc_transfer full_core_tile soc_smoke soc_tile_icache soc_elaborate
 
@@ -390,13 +391,17 @@ tb_fp_exact.vvp: tb_fp_exact.v $(CORE)/mp64_fp_exact.v fp_exact_vectors.vec
 	    tb_fp_exact.v $(CORE)/mp64_fp_exact.v
 
 # --- Tile-engine TACC timing ---
-tacc_cycles: tb_tacc_cycles.vvp
-	$(VVP) $<
+tamac_fp_vectors_check: gen_tamac_fp_vectors.py tamac_fp_vectors.vec
+	python3 gen_tamac_fp_vectors.py | cmp - tamac_fp_vectors.vec
+
+tacc_cycles: tamac_fp_vectors_check tb_tacc_cycles.vvp
+	$(VVP) tb_tacc_cycles.vvp
 
 tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
                     $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
                     $(CORE)/mp64_fp_exact.v \
-                    ../pkg/mp64_pkg.vh tamac_integer_vectors.vec
+                    ../pkg/mp64_pkg.vh tamac_integer_vectors.vec \
+                    tamac_fp_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_tacc_cycles.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
 	    $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
