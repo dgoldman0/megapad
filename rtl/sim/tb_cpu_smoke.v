@@ -552,6 +552,36 @@ module tb_cpu_smoke;
         check64("PERF_EXTMEM counts acknowledged physical words",
                 uut.perf_extmem, 64'd2);
 
+        // A normal MEX terminal increments PERF_TILEOPS once.  Only explicit
+        // no-progress cycles from the tile/transfer path increment
+        // PERF_STALLS; the successful terminal cycle remains useful work.
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+        mem[0] = 8'hE0; mem[1] = 8'h00;  // legal T.ADD
+        mem[2] = 8'h02;                   // HALT
+        mex_ack_enable = 1'b0;
+        mex_dispatch_count = 0;
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+        wait_state(CPU_MEX_WAIT, 200);
+        @(negedge clk);
+        mex_stall_cycle_r = 1'b1;
+        repeat (3) @(posedge clk);
+        @(negedge clk);
+        mex_stall_cycle_r = 1'b0;
+        force mex_done_r = 1'b1;
+        @(posedge clk);
+        #1;
+        release mex_done_r;
+        mex_ack_enable = 1'b1;
+        run_to_halt;
+        check64("successful MEX retires one PERF_TILEOPS event",
+                uut.perf_tileops, 64'd1);
+        check64("MEX progress accounting records exact explicit stalls",
+                uut.perf_stalls, 64'd3);
+        check64("held MEX dispatches only once while completion waits",
+                mex_dispatch_count, 64'd1);
+
         // -----------------------------------------------------------------
         // Test 2: INC / DEC
         // INC R5, INC R5, INC R5, DEC R5, HALT
@@ -947,6 +977,8 @@ module tb_cpu_smoke;
         check_reg("TACC_STATUS returns dedicated status", 1,
                   64'h0123_4567_89AB_CDEF);
         check_reg("TACC_CTL reads zero", 2, 64'd0);
+        check64("TACC status/control reads are not tile operations",
+                uut.perf_tileops, 64'd0);
 
         clear_mem;
         mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hAA;
@@ -984,6 +1016,8 @@ module tb_cpu_smoke;
         run_to_halt;
         check64("TACC_CTL publishes one acknowledged transaction",
                 tacc_ctl_dispatch_count, 64'd1);
+        check64("TACC_CTL write is not a tile operation",
+                uut.perf_tileops, 64'd0);
 
         // User FORCE_RELEASE traps locally with no sideband transaction.
         clear_mem;

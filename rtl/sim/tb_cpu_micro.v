@@ -802,6 +802,42 @@ module tb_cpu_micro;
         end
 
         // ============================================================
+        // Counter closure: one normally retired MEX and three explicit
+        // transfer/target wait cycles remain caller-private.
+        // ============================================================
+        $display("Counter closure: MEX retirement and stalls");
+        clear_mem;
+        mem[0] = 8'hE0; mem[1] = 8'h00;  // legal T.ADD
+        mem[2] = 8'h02;                   // HALT
+        mex_ack_enable = 1'b0;
+        mex_dispatch_count = 0;
+        reset_cpu;
+        timeout = 1;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(negedge clk);
+            if (u_cpu.cpu_state == CPU_MEX_WAIT) begin
+                timeout = 0;
+                i = 200;
+            end
+        end
+        if (timeout)
+            $fatal(1, "microcore did not enter MEX wait for counter test");
+        mex_stall_cycle = 1'b1;
+        repeat (3) @(posedge clk);
+        @(negedge clk);
+        mex_stall_cycle = 1'b0;
+        force mex_done = 1'b1;
+        @(posedge clk);
+        #1;
+        release mex_done;
+        mex_ack_enable = 1'b1;
+        wait_halt(200);
+        check64_value(u_cpu.perf_tileops, 64'd1,
+                      "successful microcore MEX increments PERF_TILEOPS");
+        check64_value(u_cpu.perf_stalls, 64'd3,
+                      "microcore records exact explicit MEX stalls");
+
+        // ============================================================
         // TEST 14: malformed TACC encodings pretrap without MEX.
         // ============================================================
         $display("Test 14: TACC encoding pretraps");
@@ -868,6 +904,8 @@ module tb_cpu_micro;
         check_reg(1, 64'h0123_4567_89AB_CDEF,
                   "TACC_STATUS dedicated read");
         check_reg(2, 64'd0, "TACC_CTL reads zero");
+        check64_value(u_cpu.perf_tileops, 64'd0,
+                      "TACC status/control reads are not tile operations");
 
         clear_mem;
         mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h01;
@@ -901,6 +939,8 @@ module tb_cpu_micro;
         wait_halt(2000);
         check64_value(tacc_ctl_dispatch_count, 64'd1,
                       "TACC_CTL publishes one transaction");
+        check64_value(u_cpu.perf_tileops, 64'd0,
+                      "TACC_CTL write is not a tile operation");
 
         // User FORCE_RELEASE must pretrap, notify the cluster, and never
         // reach the control sideband.

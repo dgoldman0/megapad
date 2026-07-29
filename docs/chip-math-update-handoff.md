@@ -1,7 +1,9 @@
 # Full TACC ISA and implementation handoff
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
-  scheduler; Phase 2 Landings 2.1 through 2.7 complete; Landing 2.8 is next
+  scheduler; Phase 2 functional Landings 2.1 through 2.8 complete; Landing
+  2.9 preparation is in progress, while routed physical acceptance remains
+  blocked on the production target/memory decision and Vivado availability
 - Date: 2026-07-29
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -407,6 +409,15 @@ unchanged.
 
 Internal memory, attached RAM, and external RAM must use the same
 architectural image. MMIO is not a legal TACC image target.
+
+The microcluster-local scratchpad aperture is not a legal source or image
+route for `TAMAC`, `TACC.LOAD`, or `TACC.STORE`. The 64-byte source and
+256-byte image preflights reject that aperture with `IVEC_BUS_FAULT` before
+issuing traffic, even when the caller's scalar
+`mex_allow_cluster_spad` policy is enabled. Supporting wide scratchpad tile
+traffic later requires an explicit physical route and a new contract update;
+the policy bit alone must never turn an unconnected aperture into a hanging
+request.
 
 Image preflight applies the issuing caller's ordinary scalar memory-access
 policy to the complete 256-byte span, including its active MPU window or
@@ -2119,7 +2130,8 @@ Primary files:
 - `rtl/sim/tb_cluster.v`
 - `rtl/sim/tb_tacc.v`
 - `rtl/sim/tb_tacc_cycles.v`
-- new focused `rtl/sim/tb_tacc_vectors.v`
+- fail-closed `tacc_vectors` target backed by the authoritative exact-cycle
+  vector consumer
 - new focused `rtl/sim/tb_tacc_soc.v`
 - `rtl/sim/Makefile`
 - vector generator and fixtures
@@ -2167,6 +2179,85 @@ contract on private full-core and cluster-shared tile engines.
 Consume emulator-generated arithmetic vectors so RTL and Phase 1 agree
 bit-for-bit at every architectural boundary.
 ```
+
+#### Landing 2.8 completion — 2026-07-29
+
+Landing 2.8 was split into three reviewable commits. The source-preflight
+landing made operand ordering identical in Python, native execution, and RTL:
+every required source is aligned and routed before the first read, and the
+unsupported cluster-scratchpad aperture now fails BUS before traffic. The
+counter landing defined a stall as a held request cycle with no cancellation,
+completion, or acknowledged progress, routed cluster stalls only to the
+granted microcore, counted every successfully completed external PHY word,
+and attributed those words only to the owning full core. The final SoC
+landing closes composition, reset scope, and fail-closed vector execution.
+
+The former `tb_full_core_tile` harness is now `tb_tacc_soc`. It proves four
+private full-core and three cluster-shared ownership domains, private legacy
+ACC/CSR state, canonical full-core LOAD/STORE through the shared image stage
+and seven-source port, cluster sibling claim behavior, and four simultaneous
+private ordinary tile operations. Seven distinct valid dirty TACC images are
+then used to prove that individual microcore reset preserves shared state,
+paired full-core reset wipes only its private domain, cluster disable wipes
+only that shared domain, supervisor FORCE wipes only the selected domain, all
+three wiped domains can be reclaimed, and whole-SoC reset zeroizes all seven.
+Named `core_domain_reset` and `cluster_micro_reset` seams make the intended
+scope explicit, but remain tied inactive until a production reset controller
+is specified.
+
+The production cluster arbiter now has direct coverage for simultaneous
+losing sibling `TACC.TRY` and stateless work, owner-microcore reset, rejected
+user FORCE, successful supervisor FORCE, and reclaim/release. Full-core and
+microcore CPU benches check exact `PERF_TILE_OPS` and controlled
+`PERF_STALLS` deltas, fault non-retirement, and that TACC status/control CSR
+traffic is not counted as a tile operation.
+
+`tacc_vectors` intentionally does not introduce a second fixture parser. It
+depends on `tb_tacc_cycles`, which already executes all six integer and all
+six floating emulator-generated fixtures with exact images, cycles, source
+counts, faults, cancellation, and retirement checks. Both generators are
+run into isolated temporary files and must exit successfully before
+byte-for-byte comparison. The fixture parser rejects every malformed
+non-comment record and any extra field, then requires exactly six records per
+file. This keeps one authoritative RTL consumer while remaining fail closed.
+
+Sequential focused verification passed:
+
+- `cpu_smoke`: 107 checks;
+- `cpu_micro`: 88 checks;
+- `cluster`: 167 checks;
+- `tacc_vectors` / `tacc_cycles`: 404 checks across all twelve generated
+  arithmetic fixtures;
+- `tacc_soc`: 43 seven-domain topology, image, isolation, and reset checks;
+  and
+- full `mp64_soc` elaboration, with only the established sized-hex warnings.
+
+The following are intentionally documented rather than added to the
+build-critical path:
+
+- the independent reset seams have no production controller inputs yet and
+  are exercised by focused hierarchical force;
+- the composed SoC bench does not repeat leaf/stage/port coverage for reset in
+  every in-flight window or stale accepted ACK, nor launch seven simultaneous
+  memory-producing engines;
+- full-core owner preservation across an actual CPU interrupt/trap and the
+  task-migration STORE/RELEASE/LOAD sequence remain composition tests; the
+  underlying lifecycle, image, cancellation, FORCE, and CPU trap primitives
+  are covered independently;
+- an actual CPU-fetched full-core TAMAC is not repeated in the topology
+  harness; exact arithmetic runs through the tile leaf and cluster production
+  dispatch, while full-core CPU MEX dispatch is covered with controlled
+  normal completion; and
+- the portable full-SoC image route currently adds registered no-progress
+  cycles beyond the locked strict-system internal-image total. Stall
+  accounting is now truthful, but strict composed-cycle parity remains a
+  nonblocking optimization/measurement item rather than a functional
+  correctness claim.
+
+The BIOS-heavy `tb_mp64_soc.v` remains explicitly retired and outside the
+Make graph because its hierarchy predates private full-core engines.
+`tb_tacc_soc`, reduced SoC smoke/coherence gates, and standalone
+`soc_elaborate` are the supported integration checks.
 
 ### Landing 2.9 — synthesis, timing, and Phase-2 capstone
 
@@ -2356,7 +2447,8 @@ Phase 2:
 - [x] Integer accumulation.
 - [x] Shared exact FP32 arithmetic.
 - [x] FP16/BF16 TACC accumulation.
-- [ ] Differential SoC closure.
+- [x] Differential SoC closure, with nonblocking composition gaps recorded
+  in the Landing 2.8 completion notes.
 - [ ] Approved synthesis, routed timing, and resource acceptance.
 
 ## 18. Phase 1 integration closure

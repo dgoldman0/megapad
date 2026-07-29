@@ -1,11 +1,11 @@
 // ============================================================================
-// tb_full_core_tile.v — Four private full-core tile-engine integration
+// tb_tacc_soc.v — Seven-engine TACC and shared-port SoC integration
 // ============================================================================
 
 `timescale 1ns / 1ps
 `include "mp64_pkg.vh"
 
-module tb_full_core_tile;
+module tb_tacc_soc;
 
     reg sys_clk;
     reg sys_rst_n;
@@ -35,6 +35,9 @@ module tb_full_core_tile;
     integer tacc_write_commit_count;
     reg     track_rr_commits;
     reg     track_tacc_commits;
+    reg [2047:0] tacc_bank_snapshot [0:6];
+    reg [63:0]   tacc_status_snapshot[0:6];
+    integer snapshot_index;
 
     mp64_soc #(
         .MEM_DEPTH(16)
@@ -70,6 +73,33 @@ module tb_full_core_tile;
         .debug_leds         (debug_leds)
     );
 
+    wire [2047:0] tacc_bank_view [0:6];
+    wire [63:0]   tacc_status_view[0:6];
+    assign tacc_bank_view[0] =
+        u_soc.g_full_tile[0].u_tile.tacc_bank_state;
+    assign tacc_bank_view[1] =
+        u_soc.g_full_tile[1].u_tile.tacc_bank_state;
+    assign tacc_bank_view[2] =
+        u_soc.g_full_tile[2].u_tile.tacc_bank_state;
+    assign tacc_bank_view[3] =
+        u_soc.g_full_tile[3].u_tile.tacc_bank_state;
+    assign tacc_bank_view[4] =
+        u_soc.g_cluster[0].u_cluster.u_tile.tacc_bank_state;
+    assign tacc_bank_view[5] =
+        u_soc.g_cluster[1].u_cluster.u_tile.tacc_bank_state;
+    assign tacc_bank_view[6] =
+        u_soc.g_cluster[2].u_cluster.u_tile.tacc_bank_state;
+    assign tacc_status_view[0] = u_soc.core_tacc_status_raw[0];
+    assign tacc_status_view[1] = u_soc.core_tacc_status_raw[1];
+    assign tacc_status_view[2] = u_soc.core_tacc_status_raw[2];
+    assign tacc_status_view[3] = u_soc.core_tacc_status_raw[3];
+    assign tacc_status_view[4] =
+        u_soc.g_cluster[0].u_cluster.te_tacc_status_raw;
+    assign tacc_status_view[5] =
+        u_soc.g_cluster[1].u_cluster.te_tacc_status_raw;
+    assign tacc_status_view[6] =
+        u_soc.g_cluster[2].u_cluster.te_tacc_status_raw;
+
     initial sys_clk = 1'b0;
     always #5 sys_clk = ~sys_clk;
 
@@ -77,6 +107,34 @@ module tb_full_core_tile;
     begin
         @(posedge sys_clk);
         #1;
+    end
+    endtask
+
+    task check_tacc_domain_cleared;
+        input [511:0] label;
+        input integer domain;
+    begin
+        check(label,
+              tacc_bank_view[domain] === 2048'd0 &&
+              tacc_status_view[domain] ===
+                  {43'd0, TACC_OWNER_NONE, 16'd0});
+    end
+    endtask
+
+    task check_all_tacc_domains_cleared;
+        input [511:0] label;
+        reg cleared;
+    begin
+        cleared = 1'b1;
+        for (snapshot_index = 0;
+             snapshot_index < 7;
+             snapshot_index = snapshot_index + 1) begin
+            if (tacc_bank_view[snapshot_index] !== 2048'd0 ||
+                tacc_status_view[snapshot_index] !==
+                    {43'd0, TACC_OWNER_NONE, 16'd0})
+                cleared = 1'b0;
+        end
+        check(label, cleared);
     end
     endtask
 
@@ -91,6 +149,105 @@ module tb_full_core_tile;
             fail_count = fail_count + 1;
             $display("  FAIL: %0s", label);
         end
+    end
+    endtask
+
+    task capture_tacc_snapshot;
+    begin
+        for (snapshot_index = 0;
+             snapshot_index < 7;
+             snapshot_index = snapshot_index + 1) begin
+            tacc_bank_snapshot[snapshot_index] =
+                tacc_bank_view[snapshot_index];
+            tacc_status_snapshot[snapshot_index] =
+                tacc_status_view[snapshot_index];
+        end
+    end
+    endtask
+
+    task check_tacc_peers_unchanged;
+        input [511:0] label;
+        input integer changed_domain;
+        reg peers_match;
+    begin
+        peers_match = 1'b1;
+        for (snapshot_index = 0;
+             snapshot_index < 7;
+             snapshot_index = snapshot_index + 1) begin
+            if (snapshot_index != changed_domain &&
+                (tacc_bank_view[snapshot_index] !==
+                     tacc_bank_snapshot[snapshot_index] ||
+                 tacc_status_view[snapshot_index] !==
+                     tacc_status_snapshot[snapshot_index]))
+                peers_match = 1'b0;
+        end
+        check(label, peers_match);
+    end
+    endtask
+
+    task seed_all_tacc_domains;
+    begin
+        // Backdoor setup is deliberate here: the transfer and arithmetic
+        // paths have their own exact-image benches.  This topology test needs
+        // seven distinct, architecturally self-consistent persistent states
+        // so that any reset-scope leak is immediately observable.
+        u_soc.g_full_tile[0].u_tile.u_tacc.bank_reg = {256{8'h10}};
+        u_soc.g_full_tile[0].u_tile.u_tacc.owner_reg = 5'd0;
+        u_soc.g_full_tile[0].u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_full_tile[0].u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_full_tile[0].u_tile.u_tacc.format_ew_reg = TMODE_8;
+        u_soc.g_full_tile[0].u_tile.u_tacc.format_signed_reg = 1'b0;
+
+        u_soc.g_full_tile[1].u_tile.u_tacc.bank_reg = {256{8'h11}};
+        u_soc.g_full_tile[1].u_tile.u_tacc.owner_reg = 5'd1;
+        u_soc.g_full_tile[1].u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_full_tile[1].u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_full_tile[1].u_tile.u_tacc.format_ew_reg = TMODE_8;
+        u_soc.g_full_tile[1].u_tile.u_tacc.format_signed_reg = 1'b0;
+
+        u_soc.g_full_tile[2].u_tile.u_tacc.bank_reg = {256{8'h12}};
+        u_soc.g_full_tile[2].u_tile.u_tacc.owner_reg = 5'd2;
+        u_soc.g_full_tile[2].u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_full_tile[2].u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_full_tile[2].u_tile.u_tacc.format_ew_reg = TMODE_8;
+        u_soc.g_full_tile[2].u_tile.u_tacc.format_signed_reg = 1'b0;
+
+        u_soc.g_full_tile[3].u_tile.u_tacc.bank_reg = {256{8'h13}};
+        u_soc.g_full_tile[3].u_tile.u_tacc.owner_reg = 5'd3;
+        u_soc.g_full_tile[3].u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_full_tile[3].u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_full_tile[3].u_tile.u_tacc.format_ew_reg = TMODE_8;
+        u_soc.g_full_tile[3].u_tile.u_tacc.format_signed_reg = 1'b0;
+
+        u_soc.g_cluster[0].u_cluster.u_tile.u_tacc.bank_reg =
+            {256{8'h14}};
+        u_soc.g_cluster[0].u_cluster.u_tile.u_tacc.owner_reg = 5'd4;
+        u_soc.g_cluster[0].u_cluster.u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_cluster[0].u_cluster.u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_cluster[0].u_cluster.u_tile.u_tacc.format_ew_reg =
+            TMODE_8;
+        u_soc.g_cluster[0].u_cluster.u_tile.u_tacc.format_signed_reg =
+            1'b0;
+
+        u_soc.g_cluster[1].u_cluster.u_tile.u_tacc.bank_reg =
+            {256{8'h15}};
+        u_soc.g_cluster[1].u_cluster.u_tile.u_tacc.owner_reg = 5'd8;
+        u_soc.g_cluster[1].u_cluster.u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_cluster[1].u_cluster.u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_cluster[1].u_cluster.u_tile.u_tacc.format_ew_reg =
+            TMODE_8;
+        u_soc.g_cluster[1].u_cluster.u_tile.u_tacc.format_signed_reg =
+            1'b0;
+
+        u_soc.g_cluster[2].u_cluster.u_tile.u_tacc.bank_reg =
+            {256{8'h16}};
+        u_soc.g_cluster[2].u_cluster.u_tile.u_tacc.owner_reg = 5'd12;
+        u_soc.g_cluster[2].u_cluster.u_tile.u_tacc.valid_reg = 1'b1;
+        u_soc.g_cluster[2].u_cluster.u_tile.u_tacc.dirty_reg = 1'b1;
+        u_soc.g_cluster[2].u_cluster.u_tile.u_tacc.format_ew_reg =
+            TMODE_8;
+        u_soc.g_cluster[2].u_cluster.u_tile.u_tacc.format_signed_reg =
+            1'b0;
     end
     endtask
 
@@ -239,6 +396,7 @@ module tb_full_core_tile;
         clock;
         check("re-enabled cluster leaves reset",
               !u_soc.g_cluster[1].u_cluster.cl_rst);
+        release u_soc.sysinfo_cluster_en;
 
         // Simultaneous CSR writes must remain private to each full-core
         // engine.  Readback occurs through the same per-core CSR wires.
@@ -583,6 +741,10 @@ module tb_full_core_tile;
                   TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd12
               && u_soc.core_tacc_status_raw[0][
                   TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd0
+              && u_soc.core_tacc_status_raw[1][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd1
+              && u_soc.core_tacc_status_raw[2][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd2
               && u_soc.core_tacc_status_raw[3][
                   TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd3);
         check("cluster status inserts MINE only for the owning sibling",
@@ -599,8 +761,110 @@ module tb_full_core_tile;
               && !u_soc.g_cluster[2].u_cluster.mc_tacc_status[
                   1*64 + TACC_STATUS_BIT_MINE]);
 
+        // Give every physical domain a unique, valid, dirty image before
+        // exercising reset scope.  A microcore reset is caller-local and
+        // therefore must preserve its cluster's shared TACC.  A paired
+        // full-core reset, cluster disable, or supervisor FORCE owns exactly
+        // one physical engine and must leave the other six bit-identical.
+        seed_all_tacc_domains;
+        #1;
+        capture_tacc_snapshot;
+
+        force u_soc.cluster_micro_reset = 12'h001;
+        clock;
+        force u_soc.cluster_micro_reset = 12'h000;
+        clock;
+        release u_soc.cluster_micro_reset;
+        check_tacc_peers_unchanged(
+            "individual microcore reset preserves all seven TACC domains",
+            -1);
+
+        capture_tacc_snapshot;
+        force u_soc.core_domain_reset = 4'b0100;
+        clock;
+        force u_soc.core_domain_reset = 4'b0000;
+        clock;
+        release u_soc.core_domain_reset;
+        check_tacc_domain_cleared(
+            "paired full-core reset wipes only its private TACC", 2);
+        check_tacc_peers_unchanged(
+            "paired full-core reset preserves the other six TACCs", 2);
+
+        force u_soc.core_mex_valid[2] = 1'b1;
+        clock;
+        force u_soc.core_mex_valid[2] = 1'b0;
+        clock;
+        clock;
+        check("reset full core can reclaim its private TACC",
+              u_soc.core_tacc_status_raw[2][TACC_STATUS_BIT_CLAIMED]
+              && u_soc.core_tacc_status_raw[2][
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd2);
+        seed_all_tacc_domains;
+        #1;
+
+        capture_tacc_snapshot;
+        force u_soc.sysinfo_cluster_en = 64'hFFFF_FFFF_FFFF_FFFD;
+        clock;
+        force u_soc.sysinfo_cluster_en = 64'hFFFF_FFFF_FFFF_FFFF;
+        clock;
+        release u_soc.sysinfo_cluster_en;
+        check_tacc_domain_cleared(
+            "cluster disable wipes only that cluster shared TACC", 5);
+        check_tacc_peers_unchanged(
+            "cluster disable preserves the other six TACCs", 5);
+
+        force u_soc.g_cluster[1].u_cluster.te_mex_valid = 1'b1;
+        clock;
+        force u_soc.g_cluster[1].u_cluster.te_mex_valid = 1'b0;
+        clock;
+        clock;
+        check("re-enabled cluster can reclaim its shared TACC",
+              u_soc.g_cluster[1].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_CLAIMED]
+              && u_soc.g_cluster[1].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd8);
+        seed_all_tacc_domains;
+        #1;
+
+        capture_tacc_snapshot;
+        force u_soc.g_cluster[0].u_cluster.te_tacc_ctl_caller_id = 5'd5;
+        force u_soc.g_cluster[0].u_cluster.te_tacc_ctl_priv = 1'b0;
+        force u_soc.g_cluster[0].u_cluster.te_tacc_ctl_wdata = 64'd1;
+        force u_soc.g_cluster[0].u_cluster.te_tacc_ctl_valid = 1'b1;
+        clock;
+        force u_soc.g_cluster[0].u_cluster.te_tacc_ctl_valid = 1'b0;
+        clock;
+        release u_soc.g_cluster[0].u_cluster.te_tacc_ctl_valid;
+        release u_soc.g_cluster[0].u_cluster.te_tacc_ctl_caller_id;
+        release u_soc.g_cluster[0].u_cluster.te_tacc_ctl_priv;
+        release u_soc.g_cluster[0].u_cluster.te_tacc_ctl_wdata;
+        check_tacc_domain_cleared(
+            "supervisor FORCE wipes only its selected shared TACC", 4);
+        check_tacc_peers_unchanged(
+            "supervisor FORCE preserves the other six TACCs", 4);
+
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_id = 5'd4;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_slot = 2'd0;
+        // The earlier individual reset advanced caller 4's epoch exactly
+        // once.  Reclaim must use that current tenure, while the later
+        // sibling-5 TRY remains at its untouched epoch zero.
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_epoch = 8'd1;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b1;
+        clock;
+        force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b0;
+        clock;
+        clock;
+        check("FORCE-cleared cluster can reclaim its shared TACC",
+              u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_BIT_CLAIMED]
+              && u_soc.g_cluster[0].u_cluster.te_tacc_status_raw[
+                  TACC_STATUS_OWNER_MSB:TACC_STATUS_OWNER_LSB] == 5'd4);
+        seed_all_tacc_domains;
+        #1;
+
         force u_soc.g_cluster[0].u_cluster.te_mex_caller_id = 5'd5;
         force u_soc.g_cluster[0].u_cluster.te_mex_caller_slot = 2'd1;
+        force u_soc.g_cluster[0].u_cluster.te_mex_caller_epoch = 8'd0;
         force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b1;
         clock;
         force u_soc.g_cluster[0].u_cluster.te_mex_valid = 1'b0;
@@ -726,22 +990,49 @@ module tb_full_core_tile;
               !u_soc.core_mex_busy[0] && !u_soc.core_mex_busy[1]
               && !u_soc.core_mex_busy[2] && !u_soc.core_mex_busy[3]);
 
+        // Re-establish nonzero claimed state in every physical engine so the
+        // whole-SoC reset assertion proves a seven-domain wipe rather than
+        // merely rechecking domains already made FREE by earlier RELEASEs.
+        seed_all_tacc_domains;
+        #1;
+        check("global reset test begins with seven nonzero claimed TACCs",
+              tacc_bank_view[0] !== 2048'd0
+              && tacc_bank_view[1] !== 2048'd0
+              && tacc_bank_view[2] !== 2048'd0
+              && tacc_bank_view[3] !== 2048'd0
+              && tacc_bank_view[4] !== 2048'd0
+              && tacc_bank_view[5] !== 2048'd0
+              && tacc_bank_view[6] !== 2048'd0
+              && tacc_status_view[0][TACC_STATUS_BIT_CLAIMED]
+              && tacc_status_view[1][TACC_STATUS_BIT_CLAIMED]
+              && tacc_status_view[2][TACC_STATUS_BIT_CLAIMED]
+              && tacc_status_view[3][TACC_STATUS_BIT_CLAIMED]
+              && tacc_status_view[4][TACC_STATUS_BIT_CLAIMED]
+              && tacc_status_view[5][TACC_STATUS_BIT_CLAIMED]
+              && tacc_status_view[6][TACC_STATUS_BIT_CLAIMED]);
+        sys_rst_n = 1'b0;
+        repeat (2) clock;
+        sys_rst_n = 1'b1;
+        repeat (3) clock;
+        check_all_tacc_domains_cleared(
+            "global reset zeroizes all seven physical TACC domains");
+
         $display("");
         if (fail_count == 0)
-            $display("tb_full_core_tile: ALL %0d assertions PASSED",
+            $display("tb_tacc_soc: ALL %0d assertions PASSED",
                      pass_count);
         else
-            $display("tb_full_core_tile: %0d PASSED, %0d FAILED",
+            $display("tb_tacc_soc: %0d PASSED, %0d FAILED",
                      pass_count, fail_count);
 
         if (fail_count != 0)
-            $fatal(1, "tb_full_core_tile failed");
+            $fatal(1, "tb_tacc_soc failed");
         $finish(0);
     end
 
     initial begin
         #500000;
-        $fatal(1, "tb_full_core_tile timeout");
+        $fatal(1, "tb_tacc_soc timeout");
     end
 
 endmodule

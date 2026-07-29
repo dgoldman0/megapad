@@ -95,6 +95,7 @@ module tb_cluster;
     localparam [7:0] CLUSTER_ID_BASE = 8'd4;
     reg tile_engine_reset;
     reg [N-1:0] micro_reset;
+    reg tacc_xfer_stall_cycle;
 
     // Tile memory port model (256 tiles × 512 bits = 16 KiB)
     wire        tile_req;
@@ -162,7 +163,7 @@ module tb_cluster;
         .ext_tile_error(1'b0),
         .ext_tile_fault_addr(64'd0),
         .tile_source_cancel(),
-        .tacc_xfer_stall_cycle(1'b0)
+        .tacc_xfer_stall_cycle(tacc_xfer_stall_cycle)
     );
 
     // ====================================================================
@@ -309,8 +310,14 @@ module tb_cluster;
     integer tb_sha_done_count;
     integer tb_csr_done_count;
     integer tb_tred_done_count;
+    integer tb_try_done_count;
+    integer tb_stateless_done_count;
     integer tb_wait_seen;
     reg [2:0] tb_private_mex_fault;
+    reg [2:0] tb_private_ctl_fault;
+    reg [2:0] tb_try_fault;
+    reg [2:0] tb_stateless_fault;
+    reg [2047:0] tb_tacc_snapshot;
     reg [1:0] tb_legacy_order [0:3];
 
     task drive_crc_op;
@@ -403,6 +410,39 @@ module tb_cluster;
         end
     endtask
 
+    task drive_private_tacc_ctl;
+        input integer core_idx;
+        input         caller_priv;
+        input [63:0]  control_value;
+        output [2:0]  control_fault;
+        integer cyc;
+        reg seen;
+        begin
+            @(negedge clk);
+            tb_tile_priv[core_idx] = caller_priv;
+            tb_tacc_ctl_wdata[core_idx*64 +: 64] = control_value;
+            tb_tacc_ctl_valid[core_idx] = 1'b1;
+            seen = 1'b0;
+            control_fault = MEX_FAULT_NONE;
+            for (cyc = 0; cyc < 100; cyc = cyc + 1) begin
+                @(negedge clk);
+                if (uut.tacc_ctl_done_reg &&
+                    uut.tacc_ctl_grant == core_idx) begin
+                    control_fault = uut.tacc_ctl_fault_reg;
+                    seen = 1'b1;
+                    cyc = 100;
+                end
+            end
+            if (!seen) begin
+                $display("FAIL [private TACC control timeout]: core=%0d",
+                         core_idx);
+                fail_count = fail_count + 1;
+            end
+            tb_tacc_ctl_valid[core_idx] = 1'b0;
+            repeat (3) @(negedge clk);
+        end
+    endtask
+
     task drive_sha_op;
         input integer core_idx;
         input [3:0] op_value;
@@ -445,6 +485,7 @@ module tb_cluster;
         fail_count = 0;
         tile_engine_reset = 1'b0;
         micro_reset = {N{1'b0}};
+        tacc_xfer_stall_cycle = 1'b0;
 
         // Clear memory
         for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
@@ -464,6 +505,24 @@ module tb_cluster;
         check_mc1_state("all-halt: mc1", CPU_HALT);
         check_mc2_state("all-halt: mc2", CPU_HALT);
         check_mc3_state("all-halt: mc3", CPU_HALT);
+
+        // The shared image stage reports one stall event for its owning
+        // cluster. Route it only into the microcore holding the active MEX
+        // grant; siblings retain caller-private counters.
+        force uut.mex_state = uut.MEX_ACTIVE;
+        force uut.mex_grant = 2'd2;
+        tacc_xfer_stall_cycle = 1'b1;
+        #1;
+        check64("TACC stage stall routes only to granted microcore",
+                {60'd0,
+                 uut.mc[3].u_micro.mex_stall_cycle,
+                 uut.mc[2].u_micro.mex_stall_cycle,
+                 uut.mc[1].u_micro.mex_stall_cycle,
+                 uut.mc[0].u_micro.mex_stall_cycle},
+                64'h4);
+        tacc_xfer_stall_cycle = 1'b0;
+        release uut.mex_grant;
+        release uut.mex_state;
 
         // -----------------------------------------------------------------
         // Test 2: INC on micro-core 0
@@ -1050,6 +1109,17 @@ module tb_cluster;
         tb_tacc_ctl_valid[1] = 1'b0;
         micro_reset[1] = 1'b0;
         repeat (3) @(negedge clk);
+
+        // Exercise privilege through the production cluster control arbiter,
+        // not only at the CPU source and TACC leaf in isolation.
+        drive_private_tacc_ctl(
+            1, 1'b1, 64'd1, tb_private_ctl_fault);
+        check64("cluster user FORCE reports precise privilege fault",
+                tb_private_ctl_fault, MEX_FAULT_PRIV);
+        check64("rejected cluster user FORCE preserves FREE TACC",
+                uut.te_tacc_status_raw,
+                {43'd0, TACC_OWNER_NONE, 16'd0});
+        tb_tile_priv[1] = 1'b0;
 
         // The control sideband must complete independently while another
         // caller owns the active MEX grant.
@@ -1666,6 +1736,85 @@ module tb_cluster;
                  uut.te_tacc_status_raw[TACC_STATUS_BIT_VALID]},
                 64'd3);
 
+        // Hold a losing sibling TRY and a stateless tile operation together
+        // at the real cluster request boundary. The common arbiter must
+        // retire each exactly once without letting TACC ownership monopolize
+        // unrelated engine work.
+        drive_private_tile_csr(
+            2, CSR_TDST, 64'h0000_0000_0000_0180);
+        tile_mem_model[6] = {64{8'hA5}};
+        tb_tacc_snapshot = uut.u_tile.tacc_bank_state;
+        tb_mex_ss[1*2 +: 2] = 2'd0;
+        tb_mex_op[1*2 +: 2] = MEX_TSYS;
+        tb_mex_funct[1*3 +: 3] = ETSYS_TACC_TRY;
+        tb_mex_funct_byte[1*8 +: 8] =
+            {5'd0, ETSYS_TACC_TRY};
+        tb_mex_ext_mod[1*4 +: 4] = 4'd8;
+        tb_mex_ext_active[1] = 1'b1;
+        tb_mex_ss[2*2 +: 2] = 2'd0;
+        tb_mex_op[2*2 +: 2] = MEX_TSYS;
+        tb_mex_funct[2*3 +: 3] = TSYS_ZERO;
+        tb_mex_funct_byte[2*8 +: 8] = {5'd0, TSYS_ZERO};
+        tb_mex_ext_mod[2*4 +: 4] = 4'd0;
+        tb_mex_ext_active[2] = 1'b0;
+        tb_try_done_count = 0;
+        tb_stateless_done_count = 0;
+        tb_try_fault = MEX_FAULT_NONE;
+        tb_stateless_fault = MEX_FAULT_NONE;
+        @(negedge clk);
+        tb_mex_req[1] = 1'b1;
+        tb_mex_req[2] = 1'b1;
+        for (i = 0; i < 300; i = i + 1) begin
+            @(negedge clk);
+            if (uut.mex_done_reg && uut.mex_grant == 1 &&
+                tb_mex_req[1]) begin
+                tb_try_done_count = tb_try_done_count + 1;
+                tb_try_fault = uut.mex_fault_reg;
+                tb_mex_req[1] = 1'b0;
+            end
+            if (uut.mex_done_reg && uut.mex_grant == 2 &&
+                tb_mex_req[2]) begin
+                tb_stateless_done_count =
+                    tb_stateless_done_count + 1;
+                tb_stateless_fault = uut.mex_fault_reg;
+                tb_mex_req[2] = 1'b0;
+            end
+            if (tb_try_done_count == 1 &&
+                tb_stateless_done_count == 1)
+                i = 300;
+        end
+        repeat (3) @(negedge clk);
+        check64("losing sibling TRY retires exactly once",
+                tb_try_done_count, 64'd1);
+        check64("stateless sibling work retires exactly once",
+                tb_stateless_done_count, 64'd1);
+        check64("losing TRY and stateless sibling report no fault",
+                {58'd0, tb_try_fault, tb_stateless_fault},
+                {58'd0, MEX_FAULT_NONE, MEX_FAULT_NONE});
+        check64("losing sibling TRY does not report MINE",
+                {63'd0,
+                 uut.mc_tacc_status[
+                     1*64 + TACC_STATUS_BIT_MINE]},
+                64'd0);
+        if (tile_mem_model[6] !== 512'd0) begin
+            $display("FAIL [stateless sibling did not zero its tile]");
+            fail_count = fail_count + 1;
+        end else
+            pass_count = pass_count + 1;
+        check64("sibling traffic preserves owner and exact TACC bank",
+                {58'd0,
+                 uut.te_tacc_status_raw[
+                     TACC_STATUS_OWNER_MSB:
+                     TACC_STATUS_OWNER_LSB],
+                 uut.te_tacc_status_raw[
+                     TACC_STATUS_BIT_CLAIMED]},
+                {58'd0, 5'd4, 1'b1});
+        if (uut.u_tile.tacc_bank_state !== tb_tacc_snapshot) begin
+            $display("FAIL [sibling traffic changed shared TACC bank]");
+            fail_count = fail_count + 1;
+        end else
+            pass_count = pass_count + 1;
+
         // Reformat the same owned physical bank and execute floating TAMAC
         // through the production cluster dispatch path.  Direct-engine
         // fixtures cover adversarial arithmetic; this case proves captured
@@ -1695,6 +1844,70 @@ module tb_cluster;
                 uut.u_tile.tacc_bank_state[2047:1984],
                 64'd0);
 
+        // An individual microcore reset is caller cancellation, not an
+        // engine reset. Even resetting the owner while idle must preserve
+        // the complete shared bank and ownership metadata.
+        tb_tacc_snapshot = uut.u_tile.tacc_bank_state;
+        @(negedge clk);
+        micro_reset[0] = 1'b1;
+        @(posedge clk);
+        #1;
+        @(negedge clk);
+        micro_reset[0] = 1'b0;
+        repeat (2) @(negedge clk);
+        check64("owner microcore reset preserves TACC metadata",
+                {56'd0,
+                 uut.te_tacc_status_raw[
+                     TACC_STATUS_OWNER_MSB:
+                     TACC_STATUS_OWNER_LSB],
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_DIRTY],
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_VALID],
+                 uut.te_tacc_status_raw[TACC_STATUS_BIT_CLAIMED]},
+                {56'd0, 5'd4, 3'b111});
+        if (uut.u_tile.tacc_bank_state !== tb_tacc_snapshot) begin
+            $display("FAIL [owner microcore reset changed shared TACC bank]");
+            fail_count = fail_count + 1;
+        end else
+            pass_count = pass_count + 1;
+
+        // Drive both rejected and authorized recovery through the production
+        // cluster control arbiter against a claimed, nonzero bank.
+        drive_private_tacc_ctl(
+            1, 1'b1, 64'd1, tb_private_ctl_fault);
+        check64("user cluster FORCE is rejected through control arbiter",
+                tb_private_ctl_fault, MEX_FAULT_PRIV);
+        if (uut.u_tile.tacc_bank_state !== tb_tacc_snapshot) begin
+            $display("FAIL [rejected user FORCE changed shared TACC bank]");
+            fail_count = fail_count + 1;
+        end else
+            pass_count = pass_count + 1;
+        check64("rejected user FORCE preserves cluster owner",
+                uut.te_tacc_status_raw[
+                    TACC_STATUS_OWNER_MSB:
+                    TACC_STATUS_OWNER_LSB],
+                64'd4);
+
+        drive_private_tacc_ctl(
+            1, 1'b0, 64'd1, tb_private_ctl_fault);
+        check64("supervisor cluster FORCE succeeds through control arbiter",
+                tb_private_ctl_fault, MEX_FAULT_NONE);
+        check64("supervisor cluster FORCE restores exact FREE metadata",
+                uut.te_tacc_status_raw,
+                {43'd0, TACC_OWNER_NONE, 16'd0});
+        if (uut.u_tile.tacc_bank_state !== 2048'd0) begin
+            $display("FAIL [supervisor FORCE did not zero shared TACC bank]");
+            fail_count = fail_count + 1;
+        end else
+            pass_count = pass_count + 1;
+
+        // Reclaim once so ordinary owner RELEASE remains covered after the
+        // dead-owner recovery path.
+        drive_private_mex(
+            0, 2'd0, MEX_TSYS, ETSYS_TACC_TRY,
+            {5'd0, ETSYS_TACC_TRY}, 4'd8, 1'b1,
+            tb_private_mex_fault);
+        check64("cluster owner reclaims after supervisor FORCE",
+                tb_private_mex_fault, MEX_FAULT_NONE);
         drive_private_mex(
             0, 2'd0, MEX_TSYS, ETSYS_TACC_RELEASE,
             {5'd0, ETSYS_TACC_RELEASE}, 4'd8, 1'b1,

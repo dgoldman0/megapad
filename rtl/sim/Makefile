@@ -53,9 +53,9 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic \
         nic_lint nic_bus mailbox trng tile fp_exact tacc tacc_cycles \
-        tamac_fp_vectors_check \
+        tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
-        tacc_transfer full_core_tile soc_smoke soc_tile_icache soc_elaborate
+        tacc_transfer tacc_soc soc_smoke soc_tile_icache soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -282,7 +282,7 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
 # ==========================================================================
 
 phase4: peripherals disk_controller disk_bus_dma crypto ntt kem nic mailbox \
-        trng tile tacc tacc_cycles
+        trng tile tacc tacc_vectors
 	@echo ""
 	@echo "--- Phase 4 complete ---"
 
@@ -384,18 +384,34 @@ fp_exact: fp_exact_vectors_check tb_fp_exact.vvp
 	$(VVP) tb_fp_exact.vvp
 
 fp_exact_vectors_check: gen_fp_exact_vectors.py fp_exact_vectors.vec
-	python3 gen_fp_exact_vectors.py | cmp - fp_exact_vectors.vec
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	    python3 gen_fp_exact_vectors.py > "$$tmp" && \
+	    cmp "$$tmp" fp_exact_vectors.vec
 
 tb_fp_exact.vvp: tb_fp_exact.v $(CORE)/mp64_fp_exact.v fp_exact_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_fp_exact.v $(CORE)/mp64_fp_exact.v
 
 # --- Tile-engine TACC timing ---
-tamac_fp_vectors_check: gen_tamac_fp_vectors.py tamac_fp_vectors.vec
-	python3 gen_tamac_fp_vectors.py | cmp - tamac_fp_vectors.vec
+tamac_integer_vectors_check: gen_tamac_integer_vectors.py \
+                             tamac_integer_vectors.vec
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	    python3 gen_tamac_integer_vectors.py > "$$tmp" && \
+	    cmp "$$tmp" tamac_integer_vectors.vec
 
-tacc_cycles: tamac_fp_vectors_check tb_tacc_cycles.vvp
+tamac_fp_vectors_check: gen_tamac_fp_vectors.py tamac_fp_vectors.vec
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	    python3 gen_tamac_fp_vectors.py > "$$tmp" && \
+	    cmp "$$tmp" tamac_fp_vectors.vec
+
+tacc_cycles: tamac_integer_vectors_check tamac_fp_vectors_check \
+             tb_tacc_cycles.vvp
 	$(VVP) tb_tacc_cycles.vvp
+
+# The exact-cycle bench executes every checked-in emulator-generated integer
+# and floating TAMAC image.  Keep one authoritative consumer rather than a
+# second vector-only bench that could drift from timing and fault coverage.
+tacc_vectors: tacc_cycles
 
 tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
                     $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
@@ -427,7 +443,7 @@ tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
 # Phase 5: Integration (QoS, multicore, SoC)
 # ==========================================================================
 
-phase5: qos multicore_smoke core_bus_mux tile_port_arbiter full_core_tile \
+phase5: qos multicore_smoke core_bus_mux tile_port_arbiter tacc_soc \
         tacc_transfer soc_smoke soc_tile_icache soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
@@ -477,14 +493,13 @@ tb_tacc_transfer.vvp: tb_tacc_transfer.v $(SOC)/mp64_tacc_transfer.v \
                       ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Four private full-core tile engines on the shared memory port ---
-full_core_tile: tb_full_core_tile.vvp
+# --- Seven private/shared TACC domains on the production SoC topology ---
+tacc_soc: tb_tacc_soc.vvp
 	$(VVP) $<
 
-tb_full_core_tile.vvp: tb_full_core_tile.v $(SOC_ELAB_SRC) \
-                       ../pkg/mp64_pkg.vh
-	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_full_core_tile -o $@ \
-		tb_full_core_tile.v $(SOC_ELAB_SRC)
+tb_tacc_soc.vvp: tb_tacc_soc.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_tacc_soc -o $@ \
+		tb_tacc_soc.v $(SOC_ELAB_SRC)
 
 # --- Standalone full-SoC elaboration (catches integration/port drift) ---
 soc_smoke: tb_soc_smoke.vvp

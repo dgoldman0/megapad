@@ -128,7 +128,10 @@ module tb_tacc_cycles;
     integer pass_count;
     integer fail_count;
     integer vector_fd;
+    integer vector_read;
     integer vector_scan;
+    integer vector_first_scan;
+    integer vector_line_number;
     integer vector_case_count;
     integer vector_repeat_index;
     integer vector_observed_cycles;
@@ -139,7 +142,9 @@ module tb_tacc_cycles;
     integer vector_repeats;
     integer vector_cycles;
     integer vector_total_cycles;
+    reg [7:0] vector_first_char;
     reg [511:0] vector_name;
+    reg [511:0] vector_extra;
     reg [16383:0] vector_line;
     reg [63:0] vector_scalar;
     reg [511:0] vector_source_a;
@@ -579,12 +584,19 @@ module tb_tacc_cycles;
         vector_fd = $fopen("tamac_integer_vectors.vec", "r");
         if (vector_fd == 0)
             $fatal(1, "cannot open tamac_integer_vectors.vec");
+        vector_line_number = 0;
         while (!$feof(vector_fd)) begin
             vector_line = {16384{1'b0}};
-            vector_scan = $fgets(vector_line, vector_fd);
+            vector_read = $fgets(vector_line, vector_fd);
+            if (vector_read != 0)
+                vector_line_number = vector_line_number + 1;
+            vector_first_char = 8'd0;
+            vector_first_scan = $sscanf(
+                vector_line, " %c", vector_first_char);
+            vector_extra = 512'd0;
             vector_scan = $sscanf(
                 vector_line,
-                "%s %d %d %d %d %d %d %h %h %h %h %h",
+                "%s %d %d %d %d %d %d %h %h %h %h %h %s",
                 vector_name,
                 vector_ew,
                 vector_signed,
@@ -596,8 +608,16 @@ module tb_tacc_cycles;
                 vector_source_a,
                 vector_source_b,
                 vector_initial_tacc,
-                vector_final_tacc);
-            if (vector_scan == 12) begin
+                vector_final_tacc,
+                vector_extra);
+            if (vector_first_scan == 1 &&
+                vector_first_char != 8'h23) begin
+                if (vector_scan != 12)
+                    $fatal(
+                        1,
+                        "malformed integer TAMAC fixture line %0d (%0d fields)",
+                        vector_line_number,
+                        vector_scan);
                 vector_case_count = vector_case_count + 1;
                 $display("  TAMAC vector: %0s", vector_name);
                 load_tacc_image(
@@ -712,12 +732,19 @@ module tb_tacc_cycles;
         vector_fd = $fopen("tamac_fp_vectors.vec", "r");
         if (vector_fd == 0)
             $fatal(1, "cannot open tamac_fp_vectors.vec");
+        vector_line_number = 0;
         while (!$feof(vector_fd)) begin
             vector_line = {16384{1'b0}};
-            vector_scan = $fgets(vector_line, vector_fd);
+            vector_read = $fgets(vector_line, vector_fd);
+            if (vector_read != 0)
+                vector_line_number = vector_line_number + 1;
+            vector_first_char = 8'd0;
+            vector_first_scan = $sscanf(
+                vector_line, " %c", vector_first_char);
+            vector_extra = 512'd0;
             vector_scan = $sscanf(
                 vector_line,
-                "%s %d %d %d %d %d %d %h %h %h %h %h",
+                "%s %d %d %d %d %d %d %h %h %h %h %h %s",
                 vector_name,
                 vector_ew,
                 vector_signed,
@@ -729,8 +756,16 @@ module tb_tacc_cycles;
                 vector_source_a,
                 vector_source_b,
                 vector_initial_tacc,
-                vector_final_tacc);
-            if (vector_scan == 12) begin
+                vector_final_tacc,
+                vector_extra);
+            if (vector_first_scan == 1 &&
+                vector_first_char != 8'h23) begin
+                if (vector_scan != 12)
+                    $fatal(
+                        1,
+                        "malformed FP TAMAC fixture line %0d (%0d fields)",
+                        vector_line_number,
+                        vector_scan);
                 vector_case_count = vector_case_count + 1;
                 $display("  FP TAMAC vector: %0s", vector_name);
                 load_tacc_image(

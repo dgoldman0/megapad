@@ -88,6 +88,17 @@ module mp64_soc #(
     // System-wide reset (active-high for cores, active-low for peripherals)
     wire rst_h = ~sys_rst_n;
 
+    // Named reset seams keep cancellation scope explicit even though the
+    // current production top has no independent reset-controller inputs.
+    // They synthesize inactive today and give focused verification (or a
+    // future controller) one unambiguous place to drive paired full-core and
+    // individual microcore reset domains.
+    wire [NUM_CORES-1:0] core_domain_reset;
+    wire [NUM_CLUSTERS*CORES_PER_CLUSTER-1:0] cluster_micro_reset;
+    assign core_domain_reset = {NUM_CORES{1'b0}};
+    assign cluster_micro_reset =
+        {(NUM_CLUSTERS*CORES_PER_CLUSTER){1'b0}};
+
     // ========================================================================
     // BIOS ROM  (64-bit × 4096 words = 32 KiB, mapped at addr 0)
     // ========================================================================
@@ -247,7 +258,7 @@ module mp64_soc #(
                 .CORE_ID_W (MP64_CORE_ID_BITS)
             ) u_cpu (
                 .clk             (sys_clk),
-                .rst             (rst_h),
+                .rst             (rst_h | core_domain_reset[ci]),
                 .core_id         (ci[MP64_CORE_ID_BITS-1:0]),
 
                 // I-cache interface
@@ -344,7 +355,7 @@ module mp64_soc #(
 
             mp64_icache u_icache (
                 .clk         (sys_clk),
-                .rst         (rst_h),
+                .rst         (rst_h | core_domain_reset[ci]),
 
                 // CPU fetch side
                 .enabled     (cpu_icache_enabled[ci]),
@@ -450,7 +461,8 @@ module mp64_soc #(
                 .rst         (rst_h),
                 .cluster_en  (sysinfo_cluster_en[ki]),
                 .tile_engine_reset(1'b0),
-                .micro_reset ({CORES_PER_CLUSTER{1'b0}}),
+                .micro_reset (cluster_micro_reset[
+                    ki*CORES_PER_CLUSTER +: CORES_PER_CLUSTER]),
 
                 .bus_valid   (cluster_bus_valid[ki]),
                 .bus_addr    (cluster_bus_addr[ki]),
@@ -1228,7 +1240,7 @@ module mp64_soc #(
                 ) u_tile (
                     .clk       (sys_clk),
                     .rst_n     (sys_rst_n),
-                    .engine_reset(1'b0),
+                    .engine_reset(core_domain_reset[fti]),
                     .caller_cancel(4'b0000),
                     .caller_epochs({(4*TACC_EPOCH_BITS){1'b0}}),
                     .engine_epoch(core_tile_engine_epoch[fti]),
