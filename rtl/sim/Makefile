@@ -52,7 +52,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic \
-        nic_lint nic_bus mailbox trng tile tacc tacc_cycles \
+        nic_lint nic_bus mailbox trng tile fp_exact tacc tacc_cycles \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
         tacc_transfer full_core_tile soc_smoke soc_tile_icache soc_elaborate
 
@@ -225,7 +225,7 @@ cluster: tb_cluster.vvp
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
                 $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v $(PRIM)/mp64_mul.v \
                 $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-                $(CORE)/mp64_fp16_alu.v \
+                $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
                 $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
@@ -378,30 +378,44 @@ tacc: tb_tacc.vvp
 tb_tacc.vvp: tb_tacc.v $(GPU)/mp64_tacc.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
+# --- Exact mixed-precision FP product and feedback ---
+fp_exact: fp_exact_vectors_check tb_fp_exact.vvp
+	$(VVP) tb_fp_exact.vvp
+
+fp_exact_vectors_check: gen_fp_exact_vectors.py fp_exact_vectors.vec
+	python3 gen_fp_exact_vectors.py | cmp - fp_exact_vectors.vec
+
+tb_fp_exact.vvp: tb_fp_exact.v $(CORE)/mp64_fp_exact.v fp_exact_vectors.vec
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+	    tb_fp_exact.v $(CORE)/mp64_fp_exact.v
+
 # --- Tile-engine TACC timing ---
 tacc_cycles: tb_tacc_cycles.vvp
 	$(VVP) $<
 
 tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
                     $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
+                    $(CORE)/mp64_fp_exact.v \
                     ../pkg/mp64_pkg.vh tamac_integer_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_tacc_cycles.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-	    $(CORE)/mp64_fp16_alu.v ../pkg/mp64_pkg.vh
+	    $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
+	    ../pkg/mp64_pkg.vh
 
 # --- Tile engine ---
-tile: tb_tile.vvp tb_tile_write_ack.vvp
+tile: fp_exact tb_tile.vvp tb_tile_write_ack.vvp
 	$(VVP) tb_tile.vvp
 	$(VVP) tb_tile_write_ack.vvp
 
 tb_tile.vvp: tb_tile.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-             $(CORE)/mp64_fp16_alu.v \
+             $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
              ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
                        $(GPU)/mp64_tile.v \
-                       $(CORE)/mp64_fp16_alu.v ../pkg/mp64_pkg.vh
+                       $(CORE)/mp64_fp16_alu.v \
+                       $(CORE)/mp64_fp_exact.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # ==========================================================================

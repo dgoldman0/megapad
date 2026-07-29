@@ -1174,43 +1174,47 @@ module mp64_tile #(
     end
 
     // ========================================================================
-    // FP16/BF16 TMUL.WMUL — widening multiply: FP16 × FP16 → FP32
+    // Exact FP16/BF16 product array
     // ========================================================================
+    //
+    // WMUL, DOT/DOTACC, SUMSQ, and floating TAMAC all consume this one
+    // 32-lane 11x11-or-8x8 multiplier array.  The exact descriptor remains
+    // available beside the independently rounded binary32 WMUL view, so TACC
+    // never inserts an intermediate half- or binary32-rounding point.
     reg  [511:0] fp_wmul_lo, fp_wmul_hi;
     wire [31:0]  fp_wmul_fp32 [0:31];
+    wire         fp_product_nan [0:31];
+    wire         fp_product_inf [0:31];
+    wire         fp_product_zero [0:31];
+    wire         fp_product_finite [0:31];
+    wire         fp_product_sign [0:31];
+    wire [21:0]  fp_product_significand [0:31];
+    wire signed [10:0] fp_product_exponent [0:31];
+    wire fp_product_square_mode =
+        (state == S_REDUCE) && (op_reg == MEX_TRED) &&
+        (funct_reg == TRED_SUMSQ);
+    wire fp_product_is_bf16 =
+        tamac_datapath_active ?
+        (tamac_ew_reg == TMODE_BF16) : mode_bf16;
 
     generate
         for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_wmul_lanes
-            // Convert inputs to FP32
-            wire [31:0] a_fp32, b_fp32;
-            mp64_fp16_to_fp32 u_cvt_a (
-                .is_bf16(mode_bf16), .fp16_in(tile_a[fpl*16 +: 16]), .fp32_out(a_fp32)
-            );
-            mp64_fp16_to_fp32 u_cvt_b (
-                .is_bf16(mode_bf16), .fp16_in(src_b_selected[fpl*16 +: 16]), .fp32_out(b_fp32)
-            );
-            // Multiply as FP32 (using product of widened values)
-            // Simplified: use FP16 mul then widen result
-            // Actually: widen first, then multiply. We need FP32 mul which we
-            // don't have, so we do: fp16_mul → fp16 result, then widen to fp32.
-            // This matches emulator: _fp_decode(a) * _fp_decode(b) → fp32_to_bits
-            // The emulator does the full-precision multiply in float, so we widen
-            // inputs then use software mul. For RTL, we widen then just store.
-            // Actually the emulator widening is: fa * fb computed at f64, stored as fp32.
-            // For RTL correctness, let's compute the FP16 product then widen to FP32.
-            wire [15:0] fp_prod_w;
-            mp64_fp16_alu u_fp_wmul (
-                .is_bf16  (mode_bf16),
-                .a        (tile_a[fpl*16 +: 16]),
-                .b        (src_b_selected[fpl*16 +: 16]),
-                .op_add(1'b0), .op_sub(1'b0), .op_mul(1'b1),
-                .op_min(1'b0), .op_max(1'b0), .op_abs(1'b0),
-                .op_cmp_lt(1'b0), .op_cmp_gt(1'b0),
-                .result(fp_prod_w),
-                .is_nan_a(), .is_nan_b()
-            );
-            mp64_fp16_to_fp32 u_widen_prod (
-                .is_bf16(mode_bf16), .fp16_in(fp_prod_w), .fp32_out(fp_wmul_fp32[fpl])
+            wire [15:0] product_b =
+                fp_product_square_mode ?
+                tile_a[fpl*16 +: 16] :
+                src_b_selected[fpl*16 +: 16];
+            mp64_fp16_bf16_exact_product u_exact_product (
+                .is_bf16           (fp_product_is_bf16),
+                .a                  (tile_a[fpl*16 +: 16]),
+                .b                  (product_b),
+                .product_nan        (fp_product_nan[fpl]),
+                .product_inf        (fp_product_inf[fpl]),
+                .product_zero       (fp_product_zero[fpl]),
+                .product_finite     (fp_product_finite[fpl]),
+                .product_sign       (fp_product_sign[fpl]),
+                .product_significand(fp_product_significand[fpl]),
+                .product_exponent   (fp_product_exponent[fpl]),
+                .rounded_fp32       (fp_wmul_fp32[fpl])
             );
         end
     endgenerate
@@ -1228,113 +1232,14 @@ module mp64_tile #(
     end
 
     // ========================================================================
-    // FP16/BF16 TMUL.DOT — dot product → FP32 accumulator
+    // Shared FP32 reduction/TACC feedback bank
     // ========================================================================
-    // 32 FP16 multiplies → widen to FP32 → adder tree → FP32 result
-    reg [31:0] fp_dot_result;
-
-    // Use FP32 products from wmul path (already computed above)
-    // Adder tree: 32 → 16 → 8 → 4 → 2 → 1
-    wire [31:0] fp_dot_l1 [0:15];
-    wire [31:0] fp_dot_l2 [0:7];
-    wire [31:0] fp_dot_l3 [0:3];
-    wire [31:0] fp_dot_l4 [0:1];
-    wire [31:0] fp_dot_l5;
-
-    generate
-        // Level 1: 32→16
-        for (fpl = 0; fpl < 16; fpl = fpl + 1) begin : dot_l1
-            mp64_fp32_adder u_add_l1 (
-                .a(fp_wmul_fp32[fpl*2]), .b(fp_wmul_fp32[fpl*2+1]),
-                .result(fp_dot_l1[fpl])
-            );
-        end
-        // Level 2: 16→8
-        for (fpl = 0; fpl < 8; fpl = fpl + 1) begin : dot_l2
-            mp64_fp32_adder u_add_l2 (
-                .a(fp_dot_l1[fpl*2]), .b(fp_dot_l1[fpl*2+1]),
-                .result(fp_dot_l2[fpl])
-            );
-        end
-        // Level 3: 8→4
-        for (fpl = 0; fpl < 4; fpl = fpl + 1) begin : dot_l3
-            mp64_fp32_adder u_add_l3 (
-                .a(fp_dot_l2[fpl*2]), .b(fp_dot_l2[fpl*2+1]),
-                .result(fp_dot_l3[fpl])
-            );
-        end
-        // Level 4: 4→2
-        for (fpl = 0; fpl < 2; fpl = fpl + 1) begin : dot_l4
-            mp64_fp32_adder u_add_l4 (
-                .a(fp_dot_l3[fpl*2]), .b(fp_dot_l3[fpl*2+1]),
-                .result(fp_dot_l4[fpl])
-            );
-        end
-        // Level 5: 2→1
-        mp64_fp32_adder u_add_l5 (
-            .a(fp_dot_l4[0]), .b(fp_dot_l4[1]),
-            .result(fp_dot_l5)
-        );
-    endgenerate
-
-    always @(*) fp_dot_result = fp_dot_l5;
-
-    // ========================================================================
-    // FP16/BF16 TMUL.DOTACC — 4-way chunked dot product → FP32 accumulators
-    // ========================================================================
-    // 32 lanes / 4 chunks = 8 lanes per chunk
-    // Each chunk: 8 FP16 muls → FP32 → adder tree(8→1) → acc[k]
-    reg [31:0] fp_dotacc_result [0:3];
-
-    generate
-        genvar chunk;
-        for (chunk = 0; chunk < 4; chunk = chunk + 1) begin : fp_dotacc_chunks
-            wire [31:0] chunk_l1 [0:3];
-            wire [31:0] chunk_l2 [0:1];
-            wire [31:0] chunk_l3;
-
-            // Level 1: 8→4
-            for (fpl = 0; fpl < 4; fpl = fpl + 1) begin : dac_l1
-                mp64_fp32_adder u_dac_l1 (
-                    .a(fp_wmul_fp32[chunk*8 + fpl*2]),
-                    .b(fp_wmul_fp32[chunk*8 + fpl*2 + 1]),
-                    .result(chunk_l1[fpl])
-                );
-            end
-            // Level 2: 4→2
-            for (fpl = 0; fpl < 2; fpl = fpl + 1) begin : dac_l2
-                mp64_fp32_adder u_dac_l2 (
-                    .a(chunk_l1[fpl*2]), .b(chunk_l1[fpl*2+1]),
-                    .result(chunk_l2[fpl])
-                );
-            end
-            // Level 3: 2→1
-            mp64_fp32_adder u_dac_l3 (
-                .a(chunk_l2[0]), .b(chunk_l2[1]),
-                .result(chunk_l3)
-            );
-        end
-    endgenerate
-
-    always @(*) begin
-        fp_dotacc_result[0] = fp_dotacc_chunks[0].chunk_l3;
-        fp_dotacc_result[1] = fp_dotacc_chunks[1].chunk_l3;
-        fp_dotacc_result[2] = fp_dotacc_chunks[2].chunk_l3;
-        fp_dotacc_result[3] = fp_dotacc_chunks[3].chunk_l3;
-    end
-
-    // ========================================================================
-    // FP16/BF16 TRED — reductions (SUM, MIN, MAX, SUMSQ, MINIDX, MAXIDX)
-    // ========================================================================
-    // POPC/L1 fall through to integer path (operate on raw bits)
-    reg [31:0] fp_red_result;      // FP32 for SUM/SUMSQ, raw for MIN/MAX
-    reg [63:0] fp_red_idx;
-    reg [31:0] fp_red_val;         // FP32 for MINIDX/MAXIDX value
-
-    // FP SUM: reuse DOT adder tree with b=1.0 — actually simpler:
-    //   widen each FP16 lane to FP32, then sum via adder tree
-    // We already have fp_wmul_fp32 which is a*b products.
-    // For SUM we need just the FP32-widened tile_a values.
+    //
+    // The sixteen first-level lanes are the only FP32 feedback bank in an
+    // engine.  Legacy reductions select ordinary binary32+binary32 mode.
+    // Floating TAMAC selects one exact-product group on arithmetic beats one
+    // and three.  Beats zero and two are fixed product/staging intervals,
+    // preserving the locked four-interval floating schedule.
     wire [31:0] fp_tile_a_fp32 [0:31];
     generate
         for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_widen_a
@@ -1346,67 +1251,191 @@ module mp64_tile #(
         end
     endgenerate
 
-    // FP SUM adder tree (32 FP32 values → 1)
-    wire [31:0] fp_sum_l1 [0:15];
-    wire [31:0] fp_sum_l2 [0:7];
-    wire [31:0] fp_sum_l3 [0:3];
-    wire [31:0] fp_sum_l4 [0:1];
-    wire [31:0] fp_sum_l5;
+    wire fp_reduction_sum_mode =
+        (op_reg == MEX_TRED) && (funct_reg == TRED_SUM);
+    wire [31:0] fp_reduction_leaf [0:31];
+    wire [31:0] fp_shared_l1 [0:15];
+    wire [31:0] fp_shared_l2 [0:7];
+    wire [31:0] fp_shared_l3 [0:3];
+    wire [31:0] fp_shared_l4 [0:1];
+    wire [31:0] fp_shared_l5;
+    reg          fp_tamac_product_nan_stage [0:15];
+    reg          fp_tamac_product_inf_stage [0:15];
+    reg          fp_tamac_product_zero_stage [0:15];
+    reg          fp_tamac_product_finite_stage [0:15];
+    reg          fp_tamac_product_sign_stage [0:15];
+    reg [21:0]   fp_tamac_product_significand_stage [0:15];
+    reg signed [10:0] fp_tamac_product_exponent_stage [0:15];
+    integer fp_tamac_stage_lane;
+    wire fp_tamac_feedback_active =
+        tamac_datapath_active &&
+        ((tamac_ew_reg == TMODE_FP16) ||
+         (tamac_ew_reg == TMODE_BF16)) &&
+        tamac_beat_reg[0];
+
+    // Even floating beats register one group of exact descriptors; the
+    // following odd beat feeds that stable group into the shared RNE bank.
+    // This is a real multiplier/feedback timing boundary, not an idle cycle.
+    always @(posedge clk) begin
+        if (!rst_n || engine_reset) begin
+            for (fp_tamac_stage_lane = 0;
+                 fp_tamac_stage_lane < 16;
+                 fp_tamac_stage_lane = fp_tamac_stage_lane + 1) begin
+                fp_tamac_product_nan_stage[
+                    fp_tamac_stage_lane] <= 1'b0;
+                fp_tamac_product_inf_stage[
+                    fp_tamac_stage_lane] <= 1'b0;
+                fp_tamac_product_zero_stage[
+                    fp_tamac_stage_lane] <= 1'b1;
+                fp_tamac_product_finite_stage[
+                    fp_tamac_stage_lane] <= 1'b0;
+                fp_tamac_product_sign_stage[
+                    fp_tamac_stage_lane] <= 1'b0;
+                fp_tamac_product_significand_stage[
+                    fp_tamac_stage_lane] <= 22'd0;
+                fp_tamac_product_exponent_stage[
+                    fp_tamac_stage_lane] <= 11'sd0;
+            end
+        end else if (!active_cancelled &&
+                     tamac_datapath_active &&
+                     ((tamac_ew_reg == TMODE_FP16) ||
+                      (tamac_ew_reg == TMODE_BF16)) &&
+                     !tamac_beat_reg[0]) begin
+            for (fp_tamac_stage_lane = 0;
+                 fp_tamac_stage_lane < 16;
+                 fp_tamac_stage_lane = fp_tamac_stage_lane + 1) begin
+                if (tamac_beat_reg[1]) begin
+                    fp_tamac_product_nan_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_nan[fp_tamac_stage_lane+16];
+                    fp_tamac_product_inf_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_inf[fp_tamac_stage_lane+16];
+                    fp_tamac_product_zero_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_zero[fp_tamac_stage_lane+16];
+                    fp_tamac_product_finite_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_finite[fp_tamac_stage_lane+16];
+                    fp_tamac_product_sign_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_sign[fp_tamac_stage_lane+16];
+                    fp_tamac_product_significand_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_significand[
+                            fp_tamac_stage_lane+16];
+                    fp_tamac_product_exponent_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_exponent[
+                            fp_tamac_stage_lane+16];
+                end else begin
+                    fp_tamac_product_nan_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_nan[fp_tamac_stage_lane];
+                    fp_tamac_product_inf_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_inf[fp_tamac_stage_lane];
+                    fp_tamac_product_zero_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_zero[fp_tamac_stage_lane];
+                    fp_tamac_product_finite_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_finite[fp_tamac_stage_lane];
+                    fp_tamac_product_sign_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_sign[fp_tamac_stage_lane];
+                    fp_tamac_product_significand_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_significand[fp_tamac_stage_lane];
+                    fp_tamac_product_exponent_stage[
+                        fp_tamac_stage_lane] <=
+                        fp_product_exponent[fp_tamac_stage_lane];
+                end
+            end
+        end
+    end
+
     generate
-        for (fpl = 0; fpl < 16; fpl = fpl + 1) begin : sum_l1
-            mp64_fp32_adder u_sum_l1 (.a(fp_tile_a_fp32[fpl*2]), .b(fp_tile_a_fp32[fpl*2+1]), .result(fp_sum_l1[fpl]));
+        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_reduce_leaf_mux
+            assign fp_reduction_leaf[fpl] =
+                fp_reduction_sum_mode ?
+                fp_tile_a_fp32[fpl] : fp_wmul_fp32[fpl];
         end
-        for (fpl = 0; fpl < 8; fpl = fpl + 1) begin : sum_l2
-            mp64_fp32_adder u_sum_l2 (.a(fp_sum_l1[fpl*2]), .b(fp_sum_l1[fpl*2+1]), .result(fp_sum_l2[fpl]));
+
+        for (fpl = 0; fpl < 16; fpl = fpl + 1) begin : fp_feedback_bank
+            wire [31:0] tamac_accumulator =
+                tamac_beat_reg[1] ?
+                tacc_bank_state[(fpl+16)*32 +: 32] :
+                tacc_bank_state[fpl*32 +: 32];
+            mp64_fp32_feedback_rne u_feedback (
+                .use_exact_product  (fp_tamac_feedback_active),
+                .a                  (
+                    fp_tamac_feedback_active ?
+                    tamac_accumulator :
+                    fp_reduction_leaf[fpl*2]),
+                .b                  (fp_reduction_leaf[fpl*2+1]),
+                .product_nan        (
+                    fp_tamac_product_nan_stage[fpl]),
+                .product_inf        (
+                    fp_tamac_product_inf_stage[fpl]),
+                .product_zero       (
+                    fp_tamac_product_zero_stage[fpl]),
+                .product_finite     (
+                    fp_tamac_product_finite_stage[fpl]),
+                .product_sign       (
+                    fp_tamac_product_sign_stage[fpl]),
+                .product_significand(
+                    fp_tamac_product_significand_stage[fpl]),
+                .product_exponent   (
+                    fp_tamac_product_exponent_stage[fpl]),
+                .result             (fp_shared_l1[fpl])
+            );
         end
-        for (fpl = 0; fpl < 4; fpl = fpl + 1) begin : sum_l3
-            mp64_fp32_adder u_sum_l3 (.a(fp_sum_l2[fpl*2]), .b(fp_sum_l2[fpl*2+1]), .result(fp_sum_l3[fpl]));
+
+        for (fpl = 0; fpl < 8; fpl = fpl + 1) begin : fp_shared_l2_add
+            mp64_fp32_add_rne u_add (
+                .a(fp_shared_l1[fpl*2]),
+                .b(fp_shared_l1[fpl*2+1]),
+                .result(fp_shared_l2[fpl])
+            );
         end
-        for (fpl = 0; fpl < 2; fpl = fpl + 1) begin : sum_l4
-            mp64_fp32_adder u_sum_l4 (.a(fp_sum_l3[fpl*2]), .b(fp_sum_l3[fpl*2+1]), .result(fp_sum_l4[fpl]));
+        for (fpl = 0; fpl < 4; fpl = fpl + 1) begin : fp_shared_l3_add
+            mp64_fp32_add_rne u_add (
+                .a(fp_shared_l2[fpl*2]),
+                .b(fp_shared_l2[fpl*2+1]),
+                .result(fp_shared_l3[fpl])
+            );
         end
-        mp64_fp32_adder u_sum_l5 (.a(fp_sum_l4[0]), .b(fp_sum_l4[1]), .result(fp_sum_l5));
+        for (fpl = 0; fpl < 2; fpl = fpl + 1) begin : fp_shared_l4_add
+            mp64_fp32_add_rne u_add (
+                .a(fp_shared_l3[fpl*2]),
+                .b(fp_shared_l3[fpl*2+1]),
+                .result(fp_shared_l4[fpl])
+            );
+        end
+        mp64_fp32_add_rne u_fp_shared_l5_add (
+            .a(fp_shared_l4[0]),
+            .b(fp_shared_l4[1]),
+            .result(fp_shared_l5)
+        );
     endgenerate
 
-    // FP SUMSQ: square each lane (a*a), widen, sum
-    wire [31:0] fp_sq_fp32 [0:31];
-    generate
-        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_sq_lanes
-            wire [15:0] fp_sq_prod;
-            mp64_fp16_alu u_fp_sq (
-                .is_bf16(mode_bf16),
-                .a(tile_a[fpl*16 +: 16]), .b(tile_a[fpl*16 +: 16]),
-                .op_add(1'b0), .op_sub(1'b0), .op_mul(1'b1),
-                .op_min(1'b0), .op_max(1'b0), .op_abs(1'b0),
-                .op_cmp_lt(1'b0), .op_cmp_gt(1'b0),
-                .result(fp_sq_prod), .is_nan_a(), .is_nan_b()
-            );
-            mp64_fp16_to_fp32 u_sq_widen (
-                .is_bf16(mode_bf16), .fp16_in(fp_sq_prod), .fp32_out(fp_sq_fp32[fpl])
-            );
-        end
-    endgenerate
+    wire [31:0] fp_dot_result = fp_shared_l5;
+    wire [31:0] fp_dotacc_result [0:3];
+    assign fp_dotacc_result[0] = fp_shared_l3[0];
+    assign fp_dotacc_result[1] = fp_shared_l3[1];
+    assign fp_dotacc_result[2] = fp_shared_l3[2];
+    assign fp_dotacc_result[3] = fp_shared_l3[3];
+    wire [31:0] fp_sum_l5 = fp_shared_l5;
+    wire [31:0] fp_sumsq_l5 = fp_shared_l5;
 
-    wire [31:0] fp_sumsq_l1 [0:15];
-    wire [31:0] fp_sumsq_l2 [0:7];
-    wire [31:0] fp_sumsq_l3 [0:3];
-    wire [31:0] fp_sumsq_l4 [0:1];
-    wire [31:0] fp_sumsq_l5;
-    generate
-        for (fpl = 0; fpl < 16; fpl = fpl + 1) begin : ssq_l1
-            mp64_fp32_adder u_ssq_l1 (.a(fp_sq_fp32[fpl*2]), .b(fp_sq_fp32[fpl*2+1]), .result(fp_sumsq_l1[fpl]));
-        end
-        for (fpl = 0; fpl < 8; fpl = fpl + 1) begin : ssq_l2
-            mp64_fp32_adder u_ssq_l2 (.a(fp_sumsq_l1[fpl*2]), .b(fp_sumsq_l1[fpl*2+1]), .result(fp_sumsq_l2[fpl]));
-        end
-        for (fpl = 0; fpl < 4; fpl = fpl + 1) begin : ssq_l3
-            mp64_fp32_adder u_ssq_l3 (.a(fp_sumsq_l2[fpl*2]), .b(fp_sumsq_l2[fpl*2+1]), .result(fp_sumsq_l3[fpl]));
-        end
-        for (fpl = 0; fpl < 2; fpl = fpl + 1) begin : ssq_l4
-            mp64_fp32_adder u_ssq_l4 (.a(fp_sumsq_l3[fpl*2]), .b(fp_sumsq_l3[fpl*2+1]), .result(fp_sumsq_l4[fpl]));
-        end
-        mp64_fp32_adder u_ssq_l5 (.a(fp_sumsq_l4[0]), .b(fp_sumsq_l4[1]), .result(fp_sumsq_l5));
-    endgenerate
+    // ========================================================================
+    // FP16/BF16 TRED — reductions (SUM, MIN, MAX, SUMSQ, MINIDX, MAXIDX)
+    // ========================================================================
+    // POPC/L1 fall through to integer path (operate on raw bits)
+    reg [31:0] fp_red_result;      // FP32 for SUM/SUMSQ, raw for MIN/MAX
+    reg [63:0] fp_red_idx;
+    reg [31:0] fp_red_val;         // FP32 for MINIDX/MAXIDX value
 
     // FP MIN / MAX / MINIDX / MAXIDX — sequential scan with comparators
     wire fp_cmp_lt [0:31];
@@ -2488,7 +2517,7 @@ module mp64_tile #(
     // ========================================================================
     // DOT ACC_ACC: acc[0] + fp_dot_result
     wire [31:0] fp_dot_acc_result;
-    mp64_fp32_adder u_dot_acc_add (
+    mp64_fp32_add_rne u_dot_acc_add (
         .a(acc[0][31:0]), .b(fp_dot_result), .result(fp_dot_acc_result)
     );
 
@@ -2496,7 +2525,7 @@ module mp64_tile #(
     wire [31:0] fp_dotacc_acc_result [0:3];
     generate
         for (fpl = 0; fpl < 4; fpl = fpl + 1) begin : dotacc_acc_add
-            mp64_fp32_adder u_dac_acc (
+            mp64_fp32_add_rne u_dac_acc (
                 .a(acc[fpl][31:0]), .b(fp_dotacc_result[fpl]),
                 .result(fp_dotacc_acc_result[fpl])
             );
@@ -2505,7 +2534,7 @@ module mp64_tile #(
 
     // TRED SUM/SUMSQ ACC_ACC: acc[0] + fp_red_result
     wire [31:0] fp_red_acc_result;
-    mp64_fp32_adder u_red_acc_add (
+    mp64_fp32_add_rne u_red_acc_add (
         .a(acc[0][31:0]), .b(fp_red_result), .result(fp_red_acc_result)
     );
 

@@ -29,6 +29,7 @@ read_verilog -sv -Irtl/pkg \
     rtl/core/mp64_bitfield.v   \
     rtl/core/mp64_dict.v       \
     rtl/core/mp64_fp16_alu.v   \
+    rtl/core/mp64_fp_exact.v   \
     rtl/core/mp64_string.v     \
     rtl/core/mp64_cpu.v        \
     rtl/core/mp64_cpu_micro.v  \

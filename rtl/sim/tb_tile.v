@@ -831,6 +831,38 @@ module tb_tile;
         expected_tile = {32{16'h40C0}};  // 6.0
         check512(tile_mem[2], expected_tile, "BF16 TMUL.MUL 2*3=6");
 
+        // ====== TEST 35B: exact FP WMUL across both destination tiles ======
+        // 0x3C01² contains product bits that are lost by half-round-then-
+        // widen.  Both halves also prove that all 32 product descriptors feed
+        // the architectural 2-tile result in lane order.
+        $display("\n=== TEST 35B: exact FP16/BF16 TMUL.WMUL ===");
+        tile_mem[0] = {32{16'h3C01}};
+        tile_mem[1] = {32{16'h3C01}};
+        tile_mem[2] = 512'd0;
+        tile_mem[3] = 512'd0;
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, TMODE_FP16);
+        mex_dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 64'd0, 8'd0);
+        check512(tile_mem[2], {16{32'h3F80_4008}},
+                 "FP16 WMUL lower half keeps exact product bits");
+        check512(tile_mem[3], {16{32'h3F80_4008}},
+                 "FP16 WMUL upper half keeps exact product bits");
+
+        // BF16 minimum subnormal widened by 1.0 remains a binary32
+        // subnormal.  This catches flush-to-zero and format-mux errors.
+        tile_mem[0] = {32{16'h0001}};
+        tile_mem[1] = {32{16'h3F80}};
+        tile_mem[2] = 512'd0;
+        tile_mem[3] = 512'd0;
+        csr_write(CSR_TMODE, TMODE_BF16);
+        mex_dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 64'd0, 8'd0);
+        check512(tile_mem[2], {16{32'h0001_0000}},
+                 "BF16 WMUL lower half preserves subnormal product");
+        check512(tile_mem[3], {16{32'h0001_0000}},
+                 "BF16 WMUL upper half preserves subnormal product");
+
         // ====== TEST 36: FP16 TRED.MIN — min across lanes ======
         $display("\n=== TEST 36: FP16 TRED.MIN ===");
         tile_mem[0] = {32{16'h4200}};  // fill with 3.0

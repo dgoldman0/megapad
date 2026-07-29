@@ -1,7 +1,7 @@
 # Full TACC ISA and implementation handoff
 
 - Status: Phase 1 complete and integrated with the Phase 5 production
-  scheduler; Phase 2 Landings 2.1 through 2.5 complete; Landing 2.6 is next
+  scheduler; Phase 2 Landings 2.1 through 2.6 complete; Landing 2.7 is next
 - Date: 2026-07-29
 - Phase-1 feature branch: `feature/megapad-full-tacc`
 - Phase-1 feature tip: `967dfc0d5792f9feaec9820b0a73d7b2212304c8`
@@ -1907,16 +1907,55 @@ Primary files:
 
 Work:
 
-- expose or implement an unrounded FP16/BF16 product-to-binary32 path;
-- provide a reusable bit-exact binary32 RNE feedback adder/sequencer;
+- expose or implement an exact, unrounded FP16/BF16 product descriptor plus
+  the product-only binary32 RNE path needed by `WMUL`;
+- provide a reusable bit-exact binary32 RNE add-product feedback
+  adder/sequencer;
 - support canonical NaN, infinities, signed zero, and subnormals;
-- refactor the existing applicable DOT, DOTACC, SUM, SUMSQ, and WMUL paths to
-  share the bounded arithmetic without changing architectural results;
+- correct `WMUL` so its binary32 result is produced directly from the exact
+  half-precision product, without first rounding the product back to FP16 or
+  BF16;
+- mux the reusable feedback lanes with an applicable existing FP reduction
+  stage so the physical bank is shared rather than dedicated to TACC, without
+  requiring a wholesale rewrite of the legacy reduction trees in this
+  landing;
 - cap the reusable bank at 16 feedback lanes per engine;
-- preserve the locked completion-cycle interface while refactoring internal
-  pipeline stages; and
+- preserve the existing legacy-operation completion interfaces; and
 - pass existing regressions plus adversarial FP fixtures before TACC is
   connected.
+
+#### Landing 2.6 scope clarification — 2026-07-29
+
+A pre-implementation audit found that the Phase-1 executable behavior of the
+legacy FP reductions is not a binary32 feedback-tree contract. `DOT` and
+`DOTACC` accumulate lane-ordered products in host binary64 and round once
+when publishing binary32 ACC state. `SUM` and `SUMSQ` currently use the
+running CPython `sum()` implementation before that final binary32
+conversion. Phase-1 native differential tests deliberately lock adversarial
+cancellation and rounding results that an iterated or balanced binary32
+adder tree does not reproduce.
+
+Moving all four legacy reductions onto the new sixteen-lane binary32 bank
+would therefore either change Phase-1 architectural results or require a
+separate wider arithmetic and sequencing contract. The latter is not the
+same resource described by this landing, and reproducing an implementation
+detail of CPython is not an acceptable production ISA definition.
+
+The critical path consequently proceeds with the exact product descriptor,
+direct binary32 `WMUL` result, bit-exact add-product feedback operation, and
+one physically shared/muxed sixteen-lane bank needed by floating TACC. It
+does not claim that DOT, DOTACC, SUM, or SUMSQ have been made bit-for-bit
+equivalent to their CPython-dependent Phase-1 behavior by that bank, and it
+does not disturb their current RTL completion interface merely to force the
+refactor.
+
+Legacy FP reduction reconciliation is an explicit nonblocking production
+item: choose and document a deterministic reduction order and intermediate
+precision as an ISA contract, then either amend the Phase-1 oracle and its
+tests or implement the corresponding wider RTL. This choice is not required
+to build and verify the TACC datapath, but legacy FP differential parity must
+remain open and must not be claimed at production sign-off until the choice
+is implemented.
 
 Focused gates, run sequentially:
 
@@ -1933,9 +1972,55 @@ Share exact FP32 arithmetic across tile operations
 Convert FP16 and BF16 products directly into binary32 feedback addition
 without intermediate half rounding.
 
-Replace duplicated reduction adders with a bounded reusable datapath while
-preserving existing tile results and IEEE edge behavior.
+Correct widening multiply and time-multiplex a bounded feedback bank with an
+applicable existing reduction stage while preserving legacy cycle interfaces.
 ```
+
+#### Landing 2.6 completion — 2026-07-29
+
+`mp64_fp_exact.v` now provides a bounded exact FP16/BF16 product descriptor,
+a product-only binary32 RNE packer, canonical binary32 addition, and
+binary32-plus-exact-product feedback with one final RNE point. The common
+finite adder uses a 27-bit normalized guard/round/sticky path with bounded
+right-shift-with-jam; it covers subnormals, signed zero, finite cancellation,
+overflow, infinities, invalid `0 × infinity`, and canonical NaN without
+`real`, `shortreal`, or exponent-sized arithmetic.
+
+Each tile engine has one 32-lane exact half-product array. Its independently
+rounded outputs directly feed WMUL and the applicable legacy reductions, so
+WMUL no longer rounds through FP16/BF16. Product-only rounding uses a
+dedicated packer with no add/subtract cone. One generated bank of sixteen
+`mp64_fp32_feedback_rne` lanes is muxed between the first reduction level and
+floating TACC. Later reduction levels remain ordinary FP32 adders rather than
+additional exact-product feedback lanes. Yosys hierarchy inspection reports
+exactly 32 exact-product cells and 16 feedback-bank cells per physical tile
+engine.
+
+Floating arithmetic has a real timing boundary ready for Landing 2.7: even
+TAMAC beats register one selected group of sixteen exact descriptors, and
+the following odd beat presents only that stable group to the feedback bank.
+Floating TAMAC admission remains deliberately disabled until Landing 2.7
+adds result capture, the beat-three terminal condition, and canonical image
+publication atomically.
+
+The checked-in fixture is reproduced byte-for-byte by
+`gen_fp_exact_vectors.py`. It covers both formats, exact product bits,
+tie-to-even in both directions, subnormal boundaries, overflow, signed zero,
+cancellation, NaN/infinity cases, the fused BF16 half-subnormal-ULP case, and
+deterministic randomized alignment cases. Sequential verification passed:
+
+- `fp_exact`: 640 checks;
+- `tile`: 89 datapath checks, including exact WMUL in both destination tiles;
+- `tile_write_ack`: 34 checks;
+- `tacc`: 196 lifecycle checks; and
+- Icarus warning elaboration plus Yosys frontend/hierarchy validation, with
+  only the established array-sensitivity and memory-to-register warnings.
+
+The legacy reduction semantic conflict described above remains explicitly
+nonblocking. This landing removes the duplicated DOTACC, SUM, and SUMSQ RTL
+trees and shares their physical arithmetic, but it does not claim bit parity
+with the Phase-1 host-binary64/CPython oracle for adversarial legacy
+reductions.
 
 ### Landing 2.7 — FP16 and BF16 TACC accumulation
 
@@ -2054,6 +2139,23 @@ Primary files:
   implementation
 - checked-in resource/timing summary
 - this handoff and public architecture documents
+
+#### Landing 2.9 execution constraint — 2026-07-29
+
+Final routed acceptance is presently blocked on two external prerequisites:
+the production FPGA target and memory configuration must be fixed, and a
+working Vivado installation must be available for like-for-like
+implementation runs. Until both are present, no routed LUT, FF, BRAM, DSP,
+WNS, TNS, or Fmax result may be inferred from behavioral simulation or a
+lightweight frontend check, and Phase 2 must not be marked physically
+complete.
+
+This does not block lightweight preparation. Source-manifest auditing,
+fail-closed runner and report-checker implementation, configuration
+validation, Yosys frontend/hierarchy checks, simulation elaboration, and
+documentation remain in scope. Those artifacts should clearly report the
+missing routed prerequisites rather than fabricate or silently skip
+acceptance data.
 
 Work:
 
