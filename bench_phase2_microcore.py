@@ -19,6 +19,10 @@ timed samples from cyclic-GC and persistent-pool teardown.
 Version 6 adds host-only private decode/admission-cache counters and the
 single-use micro-oracle proof-reuse count. Architectural state schema 3 and
 the timed-workload semantics remain unchanged.
+
+Version 7 carries native host-profile schema 4. The new exact-singleton
+full-core counters remain zero for this microcore topology; timed-workload and
+architectural-state semantics remain unchanged.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 6
+REPORT_SCHEMA_VERSION = 7
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -336,8 +340,8 @@ def _profile_probe(
         counts["coordinator_boundary_origins"].values()
     )
     validation = {
-        "schema_is_version_3":
-            normalized["schema_version"] == 3,
+        "schema_is_version_4":
+            normalized["schema_version"] == 4,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -359,6 +363,21 @@ def _profile_probe(
         "rounds_match_public_accounting":
             counts["scheduler_rounds"]
             == int(stats.native_rounds),
+        "uncontended_path_is_ineligible_for_micro_topology": (
+            all(
+                counts[name] == 0
+                for name in (
+                    "uncontended_rounds",
+                    "uncontended_dispatches",
+                    "uncontended_steps",
+                    "uncontended_continuations",
+                    "uncontended_callback_errors",
+                    "uncontended_interrupt_boundaries",
+                )
+            )
+            and normalized["wall_ns"]["uncontended_round"] == 0
+            and normalized["wall_ns"]["uncontended_dispatch"] == 0
+        ),
         "absorptions_match_subfrontiers":
             counts["round_absorptions"]
             == counts["logical_subfrontiers"],
@@ -437,7 +456,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 3,
+        "schema_version": 4,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

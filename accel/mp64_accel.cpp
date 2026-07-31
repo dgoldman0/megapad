@@ -3817,6 +3817,12 @@ struct ConcurrencyProfileCounters {
     uint64_t batches = 0;
     uint64_t prepare_batch_calls = 0;
     uint64_t scheduler_rounds = 0;
+    uint64_t uncontended_rounds = 0;
+    uint64_t uncontended_dispatches = 0;
+    uint64_t uncontended_steps = 0;
+    uint64_t uncontended_continuations = 0;
+    uint64_t uncontended_callback_errors = 0;
+    uint64_t uncontended_interrupt_boundaries = 0;
     uint64_t logical_subfrontiers = 0;
     uint64_t round_absorptions = 0;
     uint64_t worker_waves = 0;
@@ -3864,6 +3870,8 @@ struct ConcurrencyProfileCounters {
     uint64_t batch_total_ns = 0;
     uint64_t prepare_batch_ns = 0;
     uint64_t scheduler_round_ns = 0;
+    uint64_t uncontended_round_ns = 0;
+    uint64_t uncontended_dispatch_ns = 0;
     uint64_t logical_subfrontier_ns = 0;
     uint64_t round_absorption_ns = 0;
     uint64_t worker_wave_ns = 0;
@@ -4942,6 +4950,10 @@ struct SystemState {
     // while the coordinator owns scheduler_mutex.
     ConcurrencyProfileCounters concurrency_profile{};
     bool concurrency_profile_batch_active = false;
+    // Test-only host fault seam for the exact-singleton coordinator. A
+    // positive value fails after that many successful native step_one calls
+    // and resets itself before throwing.
+    int64_t uncontended_failure_after_native_steps = -1;
     std::atomic<bool> native_batch_active{false};
     std::atomic<bool> cycle_execution_pending{false};
     int advertised_core_count = 0;
@@ -14098,6 +14110,15 @@ static void run_parallel_core_round(
     SystemBatchResult& result,
     CoreFrontierOutcome& outcome);
 
+static void run_uncontended_single_core_round(
+    SystemState& system,
+    const CoreFrontierReservation& reservation,
+    const std::vector<StepCallbacks>& callbacks,
+    const py::function& settle_continuation,
+    const py::function& settle_dispatch_error,
+    SystemBatchResult& result,
+    CoreFrontierOutcome& outcome);
+
 static int pending_enabled_core_interrupt(
         const SystemState& system,
         const CPUState& core) {
@@ -14634,6 +14655,18 @@ static SystemBatchResult run_native_system_batch(
         return result;
     }
 
+    // With exactly one advertised full core there is no peer that can
+    // observe the private/shared classification boundaries inside a round.
+    // Keep the native coordinator, callbacks, interrupt checks, and the
+    // established round cadence, but avoid routing ordinary RAM-heavy code
+    // through the worker frontier for every load and store.
+    const bool uncontended_single_full_core =
+        core_count == 1 &&
+        system.cores.size() == 1 &&
+        system.cluster_states.empty() &&
+        system.execution_cores[0] == system.cores[0].get() &&
+        system.execution_cores[0]->profile == CoreProfile::FULL;
+
     int64_t remaining = max_steps;
     while (remaining > 0 && !system_all_halted(system)) {
         if (system_all_idle_or_halted(system))
@@ -14701,14 +14734,25 @@ static SystemBatchResult run_native_system_batch(
 
         CoreFrontierOutcome outcome;
         try {
-            run_parallel_core_round(
-                system,
-                reservations,
-                callbacks,
-                settle_continuation,
-                settle_dispatch_error,
-                result,
-                outcome);
+            if (uncontended_single_full_core) {
+                run_uncontended_single_core_round(
+                    system,
+                    reservations.front(),
+                    callbacks,
+                    settle_continuation,
+                    settle_dispatch_error,
+                    result,
+                    outcome);
+            } else {
+                run_parallel_core_round(
+                    system,
+                    reservations,
+                    callbacks,
+                    settle_continuation,
+                    settle_dispatch_error,
+                    result,
+                    outcome);
+            }
         } catch (...) {
             // Every physical cohort in the failing sub-frontier reached
             // the same private boundary before ordered settlement began.
@@ -19225,6 +19269,384 @@ settle_private_core_coordinator_instruction(
         raw);
 }
 
+struct UncontendedSingleCoreSegment {
+    RunResult run{0, 0, RUN_LIMIT, -1};
+    bool interrupt_boundary = false;
+};
+
+template <bool INJECT_FAILURE>
+static void run_uncontended_single_core_segment_impl(
+        SystemState& system,
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        int max_steps,
+        UncontendedSingleCoreSegment& segment) {
+    for (int step_index = 0;
+         step_index < max_steps;
+         step_index++) {
+        const int interrupt_vector =
+            pending_enabled_core_interrupt(
+                system, core);
+        if (interrupt_vector >= 0) {
+            segment.interrupt_boundary = true;
+            break;
+        }
+        if (core.halted) {
+            segment.run.stop_reason = RUN_HALT;
+            break;
+        }
+        if (core.idle) {
+            segment.run.stop_reason = RUN_IDLE;
+            break;
+        }
+
+        try {
+            const int cycles =
+                step_one(core, callbacks);
+            if (cycles == 0) {
+                segment.run.tacc_cancelled = true;
+                break;
+            }
+            segment.run.total_cycles += cycles;
+            segment.run.steps_executed++;
+            if constexpr (INJECT_FAILURE) {
+                if (
+                    --system.uncontended_failure_after_native_steps == 0
+                ) {
+                    system.uncontended_failure_after_native_steps = -1;
+                    throw std::runtime_error(
+                        "injected uncontended single-core "
+                        "scheduler failure");
+                }
+            }
+        } catch (const std::runtime_error& error) {
+            const std::string what = error.what();
+            if (what == "HALT") {
+                segment.run.stop_reason = RUN_HALT;
+                break;
+            }
+            if (what.rfind("TRAP:", 0) == 0) {
+                segment.run.stop_reason =
+                    what == "TRAP:RESET"
+                    ? RUN_RESET
+                    : RUN_TRAP;
+                if (segment.run.stop_reason == RUN_TRAP) {
+                    segment.run.trap_id =
+                        trap_id_from_runtime_error(what);
+                }
+                break;
+            }
+            if (what == "MEX_FALLBACK") {
+                segment.run.stop_reason =
+                    RUN_MEX_FALLBACK;
+                break;
+            }
+            if (what == "EXT_ISA_FALLBACK") {
+                segment.run.stop_reason =
+                    RUN_EXT_FALLBACK;
+                break;
+            }
+            throw;
+        }
+    }
+}
+
+static void run_uncontended_single_core_segment(
+        SystemState& system,
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        int max_steps,
+        UncontendedSingleCoreSegment& segment) {
+    if (system.uncontended_failure_after_native_steps > 0) {
+        run_uncontended_single_core_segment_impl<true>(
+            system, core, callbacks, max_steps, segment);
+        return;
+    }
+    run_uncontended_single_core_segment_impl<false>(
+        system, core, callbacks, max_steps, segment);
+}
+
+static void run_uncontended_single_core_round(
+        SystemState& system,
+        const CoreFrontierReservation& reservation,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error,
+        SystemBatchResult& result,
+        CoreFrontierOutcome& outcome) {
+    // This remains one native scheduler round. Device clocks and interrupt
+    // delivery are settled by run_native_system_batch after this function
+    // returns, exactly as they are for a parallel-core round.
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.scheduler_rounds);
+        host_saturating_increment(
+            profile.uncontended_rounds);
+    }
+    HostProfileWallTimer round_timer(
+        host_profile_enabled,
+        &profile.scheduler_round_ns);
+    HostProfileWallTimer uncontended_round_timer(
+        host_profile_enabled,
+        &profile.uncontended_round_ns);
+
+    if (
+        system.execution_cores.size() != 1 ||
+        system.cores.size() != 1 ||
+        !system.cluster_states.empty() ||
+        system.execution_cores[0] != system.cores[0].get() ||
+        system.execution_cores[0]->profile !=
+            CoreProfile::FULL ||
+        reservation.core_index != 0 ||
+        reservation.max_steps < 0 ||
+        reservation.max_steps >
+            std::numeric_limits<int>::max() ||
+        callbacks.size() != 1
+    ) {
+        throw std::logic_error(
+            "uncontended single-core round has an invalid topology");
+    }
+
+    CPUState& core = *system.execution_cores[0];
+    int64_t remaining = reservation.max_steps;
+    system.mappings_sealed = true;
+
+    auto publish_fragment = [&](
+            int64_t steps,
+            int64_t cycles,
+            bool closes_dispatch,
+            int stop_reason,
+            uint64_t continuations = 0) {
+        if (
+            steps < 0 ||
+            steps > remaining ||
+            cycles < 0
+        ) {
+            throw std::logic_error(
+                "uncontended single-core round produced invalid progress");
+        }
+        if (host_profile_enabled) {
+            host_saturating_add(
+                profile.uncontended_steps,
+                static_cast<uint64_t>(steps));
+        }
+        CoreDispatchResult fragment;
+        fragment.steps = steps;
+        fragment.cycles = cycles;
+        fragment.dispatches =
+            closes_dispatch ? 1 : 0;
+        fragment.continuations = continuations;
+        if (
+            closes_dispatch &&
+            stop_reason >= RUN_LIMIT &&
+            stop_reason <= RUN_RESET
+        ) {
+            fragment.stop_reasons[
+                static_cast<std::size_t>(
+                    stop_reason)] = 1;
+        }
+        merge_core_dispatch(
+            result, 0, fragment);
+        outcome.steps = checked_scheduler_add(
+            outcome.steps,
+            steps,
+            "single-core round instruction accounting");
+        outcome.cycles = checked_scheduler_add(
+            outcome.cycles,
+            cycles,
+            "single-core round cycle accounting");
+        remaining -= steps;
+        if (steps > 0)
+            system.scheduler_cursor = 0;
+    };
+
+    while (remaining > 0) {
+        if (core.halted || core.idle) {
+            outcome.terminal_cores.push_back(0);
+            break;
+        }
+        const int pending_interrupt =
+            pending_enabled_core_interrupt(
+                system, core);
+        if (pending_interrupt >= 0) {
+            if (host_profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_interrupt_boundaries);
+            }
+            outcome.interrupt_boundary = true;
+            outcome.interrupt_cores.push_back(0);
+            break;
+        }
+
+        checked_scheduler_increment(
+            system.native_dispatches,
+            "dispatch counter");
+        if (host_profile_enabled) {
+            host_saturating_increment(
+                profile.uncontended_dispatches);
+        }
+        HostProfileWallTimer uncontended_dispatch_timer(
+            host_profile_enabled,
+            &profile.uncontended_dispatch_ns);
+        const int64_t dispatch_budget = remaining;
+        UncontendedSingleCoreSegment segment;
+        bool callback_settled = false;
+        bool callback_terminal = false;
+
+        auto logical_guard =
+            acquire_shared_memory_use(
+                core,
+                /*permit_native_execution=*/true);
+        try {
+            py::gil_scoped_release release;
+            SystemBatchExecutionPermissionGuard
+                execution_permission(
+                    system.native_batch_active);
+            CPUExecutionGuard execution_guard(core);
+            run_uncontended_single_core_segment(
+                system,
+                core,
+                callbacks[0],
+                static_cast<int>(dispatch_budget),
+                segment);
+        } catch (py::error_already_set& error) {
+            if (host_profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_callback_errors);
+            }
+            publish_fragment(
+                segment.run.steps_executed,
+                segment.run.total_cycles,
+                false,
+                -1);
+            PrivateCoreResult prefix;
+            prefix.core_index = 0;
+            prefix.steps_executed =
+                segment.run.steps_executed;
+            prefix.total_cycles =
+                segment.run.total_cycles;
+            CoordinatorBoundarySettlement settlement =
+                settle_coordinator_dispatch_error(
+                    0,
+                    prefix,
+                    dispatch_budget,
+                    settle_dispatch_error,
+                    error);
+            publish_fragment(
+                settlement.total_steps -
+                    prefix.steps_executed,
+                settlement.total_cycles -
+                    prefix.total_cycles,
+                true,
+                settlement.stop_reason,
+                settlement.continuations);
+            callback_settled = true;
+            callback_terminal = settlement.terminal;
+        } catch (...) {
+            publish_fragment(
+                segment.run.steps_executed,
+                segment.run.total_cycles,
+                false,
+                -1);
+            throw;
+        }
+
+        if (callback_settled) {
+            if (callback_terminal) {
+                outcome.terminal_cores.push_back(0);
+                break;
+            }
+            continue;
+        }
+
+        publish_fragment(
+            segment.run.steps_executed,
+            segment.run.total_cycles,
+            false,
+            -1);
+
+        if (segment.interrupt_boundary) {
+            if (host_profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_interrupt_boundaries);
+            }
+            publish_fragment(
+                0, 0, true, RUN_LIMIT);
+            outcome.interrupt_boundary = true;
+            outcome.interrupt_cores.push_back(0);
+            break;
+        }
+
+        if (segment.run.tacc_cancelled) {
+            publish_fragment(
+                0, 0, true, RUN_LIMIT);
+            outcome.terminal_cores.push_back(0);
+            break;
+        }
+
+        if (
+            segment.run.stop_reason == RUN_HALT ||
+            segment.run.stop_reason == RUN_IDLE
+        ) {
+            publish_fragment(
+                0,
+                0,
+                true,
+                segment.run.stop_reason);
+            outcome.terminal_cores.push_back(0);
+            break;
+        }
+
+        if (
+            segment.run.stop_reason >=
+                RUN_MEX_FALLBACK &&
+            segment.run.stop_reason <= RUN_RESET
+        ) {
+            if (host_profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_continuations);
+            }
+            CoordinatorBoundarySettlement settlement =
+                validated_coordinator_settlement(
+                    settle_continuation(
+                        0,
+                        segment.run.stop_reason,
+                        segment.run.trap_id,
+                        segment.run.steps_executed,
+                        segment.run.total_cycles),
+                    segment.run.steps_executed,
+                    segment.run.total_cycles,
+                    dispatch_budget,
+                    "single-core coordinator continuation",
+                    /*permit_cancellation=*/true);
+            publish_fragment(
+                settlement.total_steps -
+                    segment.run.steps_executed,
+                settlement.total_cycles -
+                    segment.run.total_cycles,
+                true,
+                segment.run.stop_reason,
+                1);
+            if (settlement.terminal) {
+                outcome.terminal_cores.push_back(0);
+                break;
+            }
+            continue;
+        }
+
+        if (segment.run.stop_reason != RUN_LIMIT) {
+            throw std::logic_error(
+                "uncontended single-core round stopped unexpectedly");
+        }
+        publish_fragment(
+            0, 0, true, RUN_LIMIT);
+    }
+}
+
 static void run_parallel_core_subfrontier(
         SystemState& system,
         const std::vector<
@@ -21620,6 +22042,18 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.prepare_batch_calls;
     counts["scheduler_rounds"] =
         profile.scheduler_rounds;
+    counts["uncontended_rounds"] =
+        profile.uncontended_rounds;
+    counts["uncontended_dispatches"] =
+        profile.uncontended_dispatches;
+    counts["uncontended_steps"] =
+        profile.uncontended_steps;
+    counts["uncontended_continuations"] =
+        profile.uncontended_continuations;
+    counts["uncontended_callback_errors"] =
+        profile.uncontended_callback_errors;
+    counts["uncontended_interrupt_boundaries"] =
+        profile.uncontended_interrupt_boundaries;
     counts["logical_subfrontiers"] =
         profile.logical_subfrontiers;
     counts["round_absorptions"] =
@@ -21686,6 +22120,10 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.prepare_batch_ns;
     wall_ns["scheduler_round"] =
         profile.scheduler_round_ns;
+    wall_ns["uncontended_round"] =
+        profile.uncontended_round_ns;
+    wall_ns["uncontended_dispatch"] =
+        profile.uncontended_dispatch_ns;
     wall_ns["logical_subfrontier"] =
         profile.logical_subfrontier_ns;
     wall_ns["round_absorption"] =
@@ -21719,7 +22157,7 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict result;
-    result["schema_version"] = 3;
+    result["schema_version"] = 4;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -26370,6 +26808,34 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     concurrency_profile_snapshot_dict(
                         system);
             })
+        .def(
+            "_inject_uncontended_failure_after_native_steps",
+            [](SystemState& system, int64_t steps) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(
+                        system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "uncontended failure injection cannot change "
+                        "during an active native batch");
+                }
+                if (steps <= 0) {
+                    throw std::invalid_argument(
+                        "uncontended failure step count must be positive");
+                }
+                if (
+                    system.execution_cores.size() != 1 ||
+                    system.cores.size() != 1 ||
+                    !system.cluster_states.empty()
+                ) {
+                    throw std::runtime_error(
+                        "uncontended failure injection requires an "
+                        "exactly single-core system");
+                }
+                system.uncontended_failure_after_native_steps = steps;
+            },
+            py::arg("steps"))
         .def(
             "_run_private_full_core_commands",
             [](SystemState& system,

@@ -20,7 +20,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
     )
 
     assert report["schema"] == phase0.SCHEMA
-    assert report["schema_version"] == 11
+    assert report["schema_version"] == 12
     assert report["configuration"]["full_core_counts"] == [4]
     assert report["configuration"]["worker_counts"] == [1, 2, 4]
     assert not report["configuration"]["host_profile"]
@@ -102,3 +102,27 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
         ]
     )
     assert not strict_without_reference["validation"]["equivalent"]
+
+
+def test_single_core_fast_path_does_not_require_worker_participation():
+    report = phase0.run_report(
+        core_counts=[1],
+        worker_counts=[1, 2, 4],
+        scenario_names=["private_compute"],
+        instructions=1_024,
+        repeats=1,
+        warmups=0,
+        warmup_instructions=1,
+        strict_dma_bytes=SECTOR_SIZE,
+    )
+
+    assert [
+        result["worker_count"] for result in report["results"]
+    ] == [1, 2, 4]
+    for result in report["results"]:
+        assert result["lane_participation"] == {
+            "required": False,
+            "observed": False,
+            "requirement_satisfied": True,
+        }
+    assert all(report["validation"].values())

@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 9
 
@@ -2553,6 +2553,12 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "batches",
     "prepare_batch_calls",
     "scheduler_rounds",
+    "uncontended_rounds",
+    "uncontended_dispatches",
+    "uncontended_steps",
+    "uncontended_continuations",
+    "uncontended_callback_errors",
+    "uncontended_interrupt_boundaries",
     "logical_subfrontiers",
     "round_absorptions",
     "worker_waves",
@@ -2593,6 +2599,8 @@ _CONCURRENCY_PROFILE_WALL_FIELDS = (
     "batch_total",
     "prepare_batch",
     "scheduler_round",
+    "uncontended_round",
+    "uncontended_dispatch",
     "logical_subfrontier",
     "round_absorption",
     "worker_wave",
@@ -2742,7 +2750,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 3,
+            native_snapshot["schema_version"] == 4,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2766,6 +2774,41 @@ def _host_profile_probe(
         "scheduler_rounds_match_accounting":
             native_counts["scheduler_rounds"]
             == scheduler["native_rounds"],
+        "uncontended_rounds_within_scheduler_rounds": (
+            0 <= native_counts["uncontended_rounds"]
+            <= native_counts["scheduler_rounds"]
+        ),
+        "uncontended_path_covers_singleton_accounting": (
+            (
+                native_counts["uncontended_rounds"]
+                == native_counts["scheduler_rounds"]
+                and native_counts["uncontended_steps"]
+                == returned_instructions
+                and native_counts["uncontended_dispatches"]
+                == scheduler["reported_native_dispatches"]
+                and native_counts["uncontended_continuations"]
+                == scheduler["native_continuations"]
+            )
+            if native_counts["uncontended_rounds"] > 0
+            else all(
+                native_counts[name] == 0
+                for name in (
+                    "uncontended_dispatches",
+                    "uncontended_steps",
+                    "uncontended_continuations",
+                    "uncontended_callback_errors",
+                    "uncontended_interrupt_boundaries",
+                )
+            )
+        ),
+        "uncontended_callback_errors_within_dispatches": (
+            0 <= native_counts["uncontended_callback_errors"]
+            <= native_counts["uncontended_dispatches"]
+        ),
+        "uncontended_interrupts_within_rounds": (
+            0 <= native_counts["uncontended_interrupt_boundaries"]
+            <= native_counts["uncontended_rounds"]
+        ),
         "round_absorptions_match_logical_subfrontiers":
             native_counts["round_absorptions"]
             == native_counts["logical_subfrontiers"],
@@ -2899,12 +2942,21 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 3,
+        "schema_version": 4,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
         "python_callbacks": python_callbacks,
         "structural_ratios": {
+            "uncontended_steps_per_dispatch": _optional_ratio(
+                native_counts["uncontended_steps"],
+                native_counts["uncontended_dispatches"],
+            ),
+            "uncontended_step_fraction_of_returned_instructions":
+                _optional_ratio(
+                    native_counts["uncontended_steps"],
+                    returned_instructions,
+                ),
             "worker_commands_per_wave": _optional_ratio(
                 native_counts["worker_commands"],
                 native_counts["worker_waves"],
@@ -3681,6 +3733,11 @@ def run_report(
                 )
                 lane_participation_required = (
                     scenario.name == "private_compute"
+                    # An exactly single-core system uses the native
+                    # coordinator's uncontended loop and intentionally does
+                    # not submit worker commands. Multi-core runs remain the
+                    # worker-lane participation evidence.
+                    and num_cores > 1
                     and num_cores >= worker_count
                 )
                 lane_participation_observed = all(

@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 11
+    assert report["schema_version"] == 12
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -32,7 +32,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 3
+        assert probe["schema_version"] == 4
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -43,6 +43,12 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert native["generation"] > 0
         assert counts["batches"] == accounting["execution"]["run_batch_calls"]
         assert counts["scheduler_rounds"] > 0
+        assert counts["uncontended_rounds"] == 0
+        assert counts["uncontended_dispatches"] == 0
+        assert counts["uncontended_steps"] == 0
+        assert counts["uncontended_continuations"] == 0
+        assert counts["uncontended_callback_errors"] == 0
+        assert counts["uncontended_interrupt_boundaries"] == 0
         assert counts["logical_subfrontiers"] > 0
         assert counts["worker_waves"] > 0
         assert counts["worker_commands"] > 0
@@ -91,6 +97,8 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert len(counts["lane_steps"]) == result["worker_count"]
         assert len(native["lane_active_ns"]) == result["worker_count"]
         assert native["wall_ns"]["frontier_fast_path"] > 0
+        assert native["wall_ns"]["uncontended_round"] == 0
+        assert native["wall_ns"]["uncontended_dispatch"] == 0
 
         callbacks = probe["python_callbacks"]
         assert callbacks["mmio_read_calls"] > 0
@@ -106,6 +114,11 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         )
 
         ratios = probe["structural_ratios"]
+        assert ratios["uncontended_steps_per_dispatch"] is None
+        assert (
+            ratios["uncontended_step_fraction_of_returned_instructions"]
+            == 0
+        )
         assert ratios["worker_commands_per_wave"] is not None
         assert ratios["worker_wave_bypass_fraction"] > 0
         assert ratios["private_steps_per_worker_command"] is not None
@@ -114,6 +127,51 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert (
             ratios["returned_instructions_per_logical_subfrontier"]
             is not None
+        )
+
+
+def test_single_core_profile_attributes_work_across_worker_counts():
+    report = phase0.run_report(
+        core_counts=[1],
+        worker_counts=[1, 2, 4],
+        scenario_names=["shared_memory"],
+        instructions=2_503,
+        repeats=1,
+        warmups=0,
+        warmup_instructions=1,
+        strict_dma_bytes=SECTOR_SIZE,
+        host_profile=True,
+    )
+
+    assert report["schema_version"] == 12
+    assert all(report["validation"].values())
+    for result in report["results"]:
+        probe = result["host_profile_probe"]
+        assert probe["schema_version"] == 4
+        assert all(probe["validation"].values())
+        native = probe["native_snapshot"]
+        counts = native["counts"]
+        accounting = result["accounting_probe"]
+        returned = accounting[
+            "aggregate_instructions_from_per_core"
+        ]
+
+        assert counts["uncontended_rounds"] == counts["scheduler_rounds"]
+        assert counts["uncontended_dispatches"] == accounting[
+            "scheduler_provenance"
+        ]["reported_native_dispatches"]
+        assert counts["uncontended_steps"] == returned
+        assert counts["logical_subfrontiers"] == 0
+        assert counts["worker_commands"] == 0
+        assert counts["private_steps"] == 0
+        assert native["wall_ns"]["uncontended_round"] > 0
+        assert native["wall_ns"]["uncontended_dispatch"] > 0
+
+        ratios = probe["structural_ratios"]
+        assert ratios["uncontended_steps_per_dispatch"] > 0
+        assert (
+            ratios["uncontended_step_fraction_of_returned_instructions"]
+            == 1
         )
 
 

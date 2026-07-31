@@ -2914,7 +2914,7 @@ class MegapadSystem:
         return self.run_batch_stats(n).instructions_executed
 
     def run_batch_stats(self, n: int = 100_000) -> SystemRunStats:
-        """Execute one deterministic worker-backed batch."""
+        """Execute one deterministic native-scheduler batch."""
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
             if n <= 0:
