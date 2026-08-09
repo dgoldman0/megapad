@@ -1,13 +1,17 @@
 # Crypto interface contract
 
-Status: selected implementation contract; capability bits remain clear until
-the corresponding implementation and qualification gates pass.
+Status: selected implementation contract. The checkpoint-2 implementation
+advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC, checked SHA3/SHAKE
+streaming, and raw Keccak-f[1600]. Focused native, RTL, integrated-SoC, and
+BIOS qualification is green; final checkpoint qualification awaits the
+approval-gated KDOS and TLS/network source-load tests. Production WOTS remains
+unadvertised.
 
 This document is the numeric source of truth for MegaPad's reflected CRC,
-SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain work. It describes the
-interface being implemented. Where the present RTL, emulators, BIOS, or KDOS
-differ, the divergence ledger near the end of this document records that fact;
-it is not permission to advertise the selected behavior early.
+SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain work. It defines both the
+landed checkpoint-2 interface and the selected production WOTS interface.
+The implementation ledger near the end records completed cutovers and the
+remaining WOTS divergence; it is not an alternate contract.
 
 The keywords **must**, **must not**, **shall**, **shall not**, and **may** are
 normative. Numeric values are hexadecimal unless a table says otherwise.
@@ -38,10 +42,13 @@ implemented.
 
 ### Checked BIOS status values
 
-Every status-bearing checked word in this document uses the following status
-namespace. `CRC-FINAL@` is the sole result-only operation among the checked
-transaction words. `CRYPTO-CAPS@` is a raw discovery query, not a checked
-operation:
+Every status-bearing checked CRC, SHA3/SHAKE, raw-Keccak, and WOTS word in this
+document uses the following status namespace. The adjacent SHA-256 HMAC/HKDF
+wrappers retain the checked SHA-2 namespace documented in the KDOS reference
+(`0=OK`, `1=STATE`, `2=RANGE`, `3=CONTEXT-ALIAS`, and
+`4=LENGTH-OVERFLOW`). `CRC-FINAL@` is the sole result-only operation among the
+checked transaction words. `CRYPTO-CAPS@` is a raw discovery query, not a
+checked operation:
 
 | Value | Name | Meaning |
 |---:|---|---|
@@ -53,14 +60,17 @@ operation:
 | 5 | `TIMEOUT` | Bounded hardware progress did not complete. |
 | 6 | `HARDWARE/PROTOCOL` | The device reported an internal, bus, DMA, or protocol failure not represented above. |
 
-Capability and complete argument-span checks occur before engine state or a
-caller destination is mutated. The explicit exception is an unsupported
+For each checked BIOS transaction word, capability and complete argument-span
+checks occur before engine state or that word's caller destination is mutated.
+The explicit exception is an unsupported
 `CRC-RAW-FINAL@` issued by the owner of a non-reflected transaction: it uses
 ordinary finalization only to release that already-owned engine, as specified
-below. A destination-returning word stages its whole result in BIOS-owned
+below. A destination-returning BIOS word stages its whole result in BIOS-owned
 scratch, quiesces or clears the hardware as required, then publishes the
 caller destination while it still owns the crypto guard. On every nonzero
-return, caller destinations remain unchanged.
+return from that word, its destination remains unchanged. KDOS composites that
+request several such chunks have the explicitly streaming publication rule
+defined under the guard allocation below.
 
 ### Capability discovery
 
@@ -99,25 +109,28 @@ architectural access; it must not alias an earlier register. Writes to
 `CRYPTO_CAPS` or `NUM_BUS_PORTS` are acknowledged and ignored.
 
 The exact System Info extension is implemented in the execution models and
-integrated RTL. Capability bit 0 is set with the qualified reflected/raw CRC
-path; bits 1 through 3 remain zero. Source presence alone never sets a
-capability.
+integrated RTL. Checkpoint 2 advertises bits 0 through 2 (`0x7`) for the
+qualified reflected/raw CRC, SHA3/SHAKE, and raw Keccak paths. Bit 3 remains
+zero until the production WOTS path qualifies. Source presence alone never
+sets a capability.
 
 ## Portable crypto guard
 
 ### Allocation
 
-The portable guard is hardware spinlock 8:
+The portable BIOS guard is hardware spinlock 8.  KDOS reserves the adjacent
+hardware spinlock 9 for HMAC/HKDF wrapper scratch:
 
-| Operation | MMIO address |
-|---|---:|
-| Acquire | `SPINLOCK_BASE + 0x20`, absolute offset `+0x620` |
-| Release | `SPINLOCK_BASE + 0x21`, absolute offset `+0x621` |
+| Lock | Purpose | Acquire | Release |
+|---:|---|---:|---:|
+| 8 | Checked BIOS crypto/device ownership | `SPINLOCK_BASE + 0x20`, absolute offset `+0x620` | `SPINLOCK_BASE + 0x21`, absolute offset `+0x621` |
+| 9 | KDOS HMAC/HKDF shared scratch | `SPINLOCK_BASE + 0x24`, absolute offset `+0x624` | `SPINLOCK_BASE + 0x25`, absolute offset `+0x625` |
 
 The spinlock bank is 16 locks in the documented 64-byte aperture. Locks 0
 through 7 are already assigned by KDOS; lock 8 is named `CRYPTO-LOCK` and is
-reserved for this contract. A caller performs one atomic, nonblocking acquire
-attempt. Busy maps to checked status `STATE/OWNER`; callers may yield and
+reserved for the BIOS contract, while lock 9 is named `HMAC-HKDF-LOCK` and is
+reserved by KDOS. Both acquisition paths perform one atomic, nonblocking
+attempt. Busy maps to the family's checked state status; callers may yield and
 retry outside the checked word.
 
 The guard is held for these complete lifetimes:
@@ -139,7 +152,49 @@ normally release it within the call; the explicitly defined failed-quiescence
 paths retain it fail-closed. Callers must not wrap these words in generic
 `LOCK`/`UNLOCK` words.
 
-### Requester identity prerequisite
+KDOS holds lock 9 across each complete public SHA3-HMAC, SHA256-HMAC, or HKDF
+call, including every internal hash transaction and the final wipe of pads,
+intermediate digests, normalized keys, pointer/length metadata, and HKDF
+counters. SHA3-family entry points test the SHA3 capability before attempting
+lock 9, so `UNSUPPORTED` has priority over wrapper contention. Inside these
+wrappers, lock ordering is strictly lock 9 followed by the BIOS-managed lock 8.
+HKDF invokes private no-lock HMAC cores and therefore never recursively
+acquires lock 9.
+
+Lock 9 uses the same architectural requester identity as the rest of the
+spinlock bank and serializes scratch access across every advertised full and
+microcore. The current KDOS wrappers contain no scheduler or yielding point;
+that property, together with the no-lock internal cores, also prevents a
+same-core reacquire (which the hardware lock itself treats as successful).
+Adding a yield or preemptible callback inside this lifetime requires full-width
+core/task owner bookkeeping equivalent to the BIOS lock-8 guard. Callers must
+not acquire lock 9 themselves or call a public HMAC/HKDF wrapper while already
+holding it. They also must not enter those wrappers while retaining lock 8 via
+an active `SHA3-BEGIN`/SHAKE transaction; such a call is an API-order error even
+though both guards are nonblocking and therefore cannot deadlock.
+
+The KDOS multi-window SHAKE wrappers and multi-block HKDF expansion preflight
+their complete caller output spans, then publish successful checked chunks in
+order. A later hardware/hash failure returns the first nonzero status but does
+not roll back a prefix already published by an earlier successful chunk. Each
+individual BIOS `SHAKE-READ` (0 through 32 bytes), fixed digest, raw state, and
+HMAC output remains all-or-nothing. This streaming rule avoids an unrelated
+global output staging capacity; HKDF's only output limit remains the RFC 5869
+limit of 255 hash blocks.
+
+The named HMAC/HKDF pads, intermediate hashes, normalized-key buffers,
+counters, and metadata in the KDOS dictionary are reserved implementation
+storage. Caller key, message, info, PRK, and output spans must not alias that
+storage. The present cooperative MMIO boundary does not enforce this ABI rule
+as a protection domain.
+
+HKDF expansion additionally rejects an output span that overlaps its caller
+PRK or nonempty info span. Expansion rereads both inputs for every block, so
+permitting such an alias would make earlier output publication mutate the input
+to a later block. The SHA3 family reports `RANGE`; the SHA-256 family reports
+its own `SHA256-RANGE` value.
+
+### Requester identity
 
 Lock correctness requires the architectural global core ID of the CPU that
 issued the MMIO transaction. The RTL bus must capture requester-valid and
@@ -162,10 +217,11 @@ and microcores. A requester is in range exactly when
 `requester_id < NUM_CORES`.
 
 A main-bus port number is insufficient because every microcore in a cluster
-shares one port. The current RTL core-zero tie-off must be removed before any
-checked crypto path uses lock 8. TACC is not an alternative: its ownership
-domain is per full core or per cluster rather than machine-wide, and MegaPad
-has no qualified general CAS or load-linked/store-conditional primitive.
+shares one port. The integrated RTL now carries the latched global requester
+identity through the main bus and into the spinlock block; the former
+core-zero tie-off is gone. TACC is not an alternative: its ownership domain
+is per full core or per cluster rather than machine-wide, and MegaPad has no
+qualified general CAS or load-linked/store-conditional primitive.
 
 ### Same-core task ownership
 
@@ -657,7 +713,9 @@ The continuation check order is capability, exact owner, logical mode/phase,
 scalar values, complete spans, then device access. An earlier failure does not
 inspect a later pointer. Once an active exact-owner continuation reaches a
 mode, phase, scalar, or span failure, it performs the cleanup rule below
-before returning the first status selected by that order.
+before returning the first status selected by that order when cleanup succeeds.
+If cleanup itself cannot prove quiescence, its status takes precedence and the
+guard remains held fail-closed.
 
 The checked mode/phase rejections are exact:
 
@@ -670,8 +728,8 @@ The checked mode/phase rejections are exact:
 | `SHA3-UPDATE` after successful fixed `SHA3-FINAL` | 2; the prior final already released, so do not access the device. |
 
 Repeated finalization and any other continuation in the wrong logical phase
-use status 2. A scalar or span failure retains statuses 3 or 4 even though an
-already-active transaction is then cleared as part of failure cleanup.
+use status 2. A scalar or span failure retains statuses 3 or 4 when the
+already-active transaction is successfully cleared as part of failure cleanup.
 
 `SHA3-UPDATE` requires a nonnegative length. A zero-length update still
 verifies the exact owner and absorb phase but ignores `src`, performs no
@@ -682,9 +740,10 @@ arithmetic, mapping, and protection failures return 3 or 4 as defined above.
 Any failure after an engine has been claimed issues and awaits `CLEAR` and
 wipes BIOS scratch. The owner fields and lock are released only after status
 `0x00` proves the device quiescent and scrubbed. If the clear wait reaches
-`SHA_CLEAR_POLLS`, the word returns status 5 with caller output unchanged but
-retains the full owner fields and lock 8; releasing them while late hardware
-work can still publish is forbidden. The exact owner may retry
+`SHA_CLEAR_POLLS`, the word returns status 5; a checked MMIO/protocol failure
+during clear returns status 6. Either cleanup failure leaves caller output
+unchanged and retains the full owner fields and lock 8; releasing them while
+late hardware work can still publish is forbidden. The exact owner may retry
 `SHA3-CLEAR`; machine reset is the recovery if quiescence cannot be
 established. `SHA3-CLEAR` returns 0 when repeated after successful cleanup
 while the hardware and guard are both unowned. A different context cannot
@@ -706,9 +765,12 @@ then copies the staged state to the caller and releases. The caller pointer is
 never retained by hardware. Every failure leaves all 200 caller bytes
 unchanged.
 
-After MegaPad callers migrate, the public transaction words `SHA3-MODE!`,
-`SHA3-INIT`, `SHA3-SQUEEZE`, `SHA3-SQUEEZE-NEXT`, and `SHA3-DOUT@` are removed.
-They are not kept as aliases in the unreleased interface.
+Checkpoint-2 caller source migration is implemented. Its focused source-slice
+checks are green; complete KDOS and TLS/network source-load qualification is
+still approval-gated. The public transaction words
+`SHA3-MODE!`, `SHA3-INIT`, `SHA3-SQUEEZE`, `SHA3-SQUEEZE-NEXT`, and
+`SHA3-DOUT@` are removed and are not kept as aliases in the unreleased
+interface.
 
 ## WOTS chain contract
 
@@ -1043,7 +1105,7 @@ exact externally observable states before a new request can be accepted:
 
 | Surface | Reset state |
 |---|---|
-| Portable guard | Spinlock 8 is free; `CRYPTO-OWNER-CORE = UINT64_MAX`; `CRYPTO-OWNER-TASK = 0`; every per-core checked CRC owner record is unowned. |
+| Portable guards | Spinlocks 8 and 9 are free; `CRYPTO-OWNER-CORE = UINT64_MAX`; `CRYPTO-OWNER-TASK = 0`; every per-core checked CRC owner record is unowned. |
 | CRC engine | Mode 0; `CRC_ACC = 0x00000000FFFFFFFF`; every microcluster CRC hardware owner is none; no CRC operation is pending. |
 | SHA/Keccak front end | `CTRL = 0`; `STATUS = 0x00`; `ERROR = 0`; `STATE_INDEX = 0`; all 25 lanes, `DOUT`, rate/input storage, staging, and cursors are zero; no completion is pending and no round-service owner exists. |
 | WOTS | `STATUS = IDLE`; `ERROR = 0`; `CYCLES = 0`; all programming bytes, `DOUT`, private context, constructed state, counters, and transients are zero; no DMA beat is outstanding and no Keccak claim exists. |
@@ -1063,7 +1125,8 @@ implement.
   and shared by RTL, Python, and native execution.
 - A rejected request cannot partially overwrite an active transaction.
 - Secret or potentially secret transient state is wiped before ownership is
-  released. Caller destinations are not partially published.
+  released. Each destination-returning checked BIOS word is all-or-nothing;
+  KDOS multi-chunk composites use the documented streaming-prefix rule.
 - Caller buffers are exact spans. The fixed sizes 16, 32, 64, and 200 in this
   document come from algorithms or interfaces, not arbitrary caller-count or
   storage caps.
@@ -1073,11 +1136,10 @@ implement.
 - Capability bits describe complete landed behavior in the executing backend,
   not source presence, a standalone RTL module, or emulator convenience.
 
-## Current divergence and migration ledger
+## Implementation status and remaining divergence ledger
 
-This section records the implementation cutovers and the assumptions that
-remain for later checkpoints. It is status evidence, not an alternate
-contract.
+This section records completed implementation cutovers and the production
+WOTS work that remains. It is status evidence, not an alternate contract.
 
 ### CRC implementation and consumers
 
@@ -1114,49 +1176,49 @@ later MegaPad adoption checkpoint.
 after CRC moved to the ISA. Checkpoint 0 removes those phantom rows rather
 than carrying them into the checked surface.
 
-### SHA3/SHAKE implementation and consumers
+### SHA3/SHAKE and raw Keccak checkpoint 2
 
-Current native, RTL, and BIOS behavior differs materially:
+The native singleton, integrated RTL, BIOS, KDOS, and TLS callers now use the
+selected checkpoint-2 interface:
 
-| Surface | Current native behavior | Current integrated RTL behavior | Selected behavior |
-|---|---|---|---|
-| Window | Handles only `+0x00..+0x4F` | Decodes 96 bytes | Exact 96-byte window with indexed raw state |
-| Commands | 1/3/4 plus command 5 as a 32-byte sliding cursor; others ignored | Decodes low three bits; command 2 and 4 permute, others mostly no-op | Complete-byte 1/3/4/6/7; 2 and 5 rejected |
-| Status | Persistent idle/done, with an advisory WOTS bit | Busy/done bits with a short done pulse | Packed phase/owner table above |
-| Full-rate input | Automatically permutes synchronously | Acknowledges and drops input after the rate fills | Bounded backpressure and automatic permutation |
-| Wide MMIO | Decomposes into byte callbacks | Ignores access size | Whole-access preflight and defined byte/qword windows |
-| WOTS collision | Advisory status; writes still reach SHA | Entire SHA block loses ACK while WOTS is busy | Always-responsive status/error front end with owned round service |
-| Cleanup | Reset does not wipe all host storage | INIT can leave active FSM/output state | Command 7 aborts, wipes, and releases |
+- native `CryptoSHA3` owns the exact 96-byte aperture, visible tick-driven
+  `BUSY` intervals, complete command decoding, automatic rate absorption,
+  sequential 64-byte SHAKE windows, indexed raw lanes, atomic wide accesses,
+  and abort/zeroization behavior;
+- integrated RTL uses `mp64_sha3` with one `mp64_keccak_core`, whole-access
+  width checks, held-`DIN` backpressure, packed phase/owner status, command 6
+  raw permutations, and command 7 cleanup. The obsolete WOTS gate no longer
+  removes SHA status/error responsiveness;
+- BIOS exposes `SHA3-BEGIN`, `SHA3-UPDATE`, `SHA3-FINAL`, `SHAKE-FINAL`,
+  `SHAKE-READ`, `SHA3-CLEAR`, and `KECCAK-F1600` with the common checked
+  statuses. `SHA3-STATUS@` and `SHA3-MODE@` remain diagnostic reads; the old
+  transaction and prototype WOTS words were removed without aliases;
+- KDOS `SHA3`, `SHA3-512`, SHAKE, HMAC, HKDF, and `HASH` callers propagate
+  checked failures; its SHAKE callers request at most 32 bytes per
+  `SHAKE-READ` over the 64-byte hardware window; and
+- TLS hash/HMAC/HKDF dispatch returns the selected backend's real status, and
+  the private-suite empty hash is constructed through the checked SHA3
+  wrapper.
 
-The current BIOS `SHA3-FINAL` reads output immediately without waiting, and
-`SHA3-SQUEEZE` walks as if `DOUT` were 136 bytes although the mapped output is
-64 bytes. Its WOTS guard tests SHA `DONE` rather than `BUSY`. These paths rely
-on native synchrony and cannot qualify RTL.
-
-MegaPad callers to migrate with the checked BIOS surface include SHA3,
-SHA3-512, SHAKE128/256, `SHAKE-STREAM`, HMAC, HKDF, and `HASH` in `kdos.f`,
-plus the TLS hash/HMAC/HKDF adapters and load-time empty-hash construction in
-`networking.f`. Fixed-output callers must select their mode explicitly; SHAKE
-success and failure paths end in `SHA3-CLEAR`.
-
-Tests with old command, persistent-done, immediate-completion, advisory-lock,
-or 32-byte command-5 assumptions include the SHA3, SHAKE, streaming, WOTS,
-and lock classes in `tests/test_system.py`, singleton cases in
-`tests/test_native_system_state.py`, shared-mode coverage in
-`tests/test_concurrency_handoff.py`, and crypto snapshots in
-`bench_phase0_concurrency.py`. `rtl/sim/tb_crypto.v` uses stale offsets and
-nonzero-only checks; it must be replaced by known-answer and transition
-coverage rather than patched around those assumptions.
+System Info advertises bits 0 through 2 (`0x7`) in the execution model and
+integrated RTL, while WOTS bit 3 remains clear. The stale 32-byte command-5,
+immediate-completion, advisory-lock, and non-waiting BIOS assumptions were
+removed. Focused checkpoint-2 sources include
+`tests/test_native_sha3_model.py`, the SHA/guard coverage in
+`tests/test_concurrency_handoff.py`, and `rtl/sim/tb_sha3_keccak.v`; the stale
+mixed `rtl/sim/tb_crypto.v` was split into SHA/Keccak and AES benches.
 
 ### WOTS implementation and bus topology
 
-Current Python/native WOTS uses three 32-bit pointers, masks step bytes,
-executes synchronously, wraps each source modulo Bank 0, and has no checked
-error, clear, abort, or scrub state. Current integrated RTL acknowledges a
-private 32-bit DMA stub with zero data and leaves the SHA control outputs
-disconnected, so its result is not functional hardware. Zero-step, immediate
-done, masked `0xFF` steps, and retained post-done SHA-lock expectations must
-be replaced with this contract.
+Checkpoint 2 reserves the complete `+0x8A0..+0x8BF` aperture without exposing
+a functional prototype in any backend. Python `WotsChainAccel` and native
+`WotsChain` may retain the old programming bytes only as inert private
+latches; obsolete `GO` remains idle with zero cycles/output and performs no
+memory access, DMA, or Keccak claim. Integrated RTL acknowledges the reserved
+aperture as a zero responder with ignored writes, no IRQ or DMA, and inactive
+shared-service hooks. Production WOTS lands atomically in checkpoint 3 with
+the selected 64-bit context, DMA, checked state machine, and Keccak ownership
+contract; capability bit 3 remains clear until then.
 
 There is no WOTS RTL test target. A dedicated unit bench and integrated
 DMA/bus/Keccak tests are required before `WOTS_CHAIN` can be set.
@@ -1174,29 +1236,34 @@ Before BIOS uses `CSR_PERF_CYCLES` for the checked deadline, native writes
 must adopt exact bit-0 enable semantics and independent bit-1 reset semantics;
 save/enable/restore parity needs a differential test.
 
-No baseline test explicitly requires modulo-wrapped WOTS DMA. That behavior
-is still a defect and must be removed.
+The removed modulo-wrapped, three-pointer behavior is not a compatibility
+surface and must not return in checkpoint 3.
 
-### Guard and System Info prerequisites
+### Guard and System Info checkpoint 2
 
-Python and RTL currently implement eight spinlocks. KDOS assigns all eight:
-dictionary, UART, filesystem, heap, ring, hash table, application/event, and
-messaging. RTL also hardwires mailbox/spinlock requester identity to core 0.
-Lock-bank expansion, true global requester propagation, invalid-requester
-behavior, and same-core full-width owner-field tests remain prerequisites for
-the checked MMIO crypto guard in later checkpoints. Checked CRC does not use
-that guard: it uses topology-sized BIOS owner records and the cluster's CRC
-transaction lock.
+The execution model and RTL implement the exact 64-byte, 16-lock spinlock
+aperture. Lock 8 is reserved for checked MMIO crypto and KDOS reserves lock 9
+for its HMAC/HKDF scratch. Main-bus arbitration
+preserves requester-valid and the winning architectural global core ID
+through the response; cluster requests use the latched winning microcore
+identity, while DMA and cluster-internal SHA traffic are requester-invalid.
+Invalid and out-of-range requesters receive acknowledged non-mutating lock
+responses.
 
-Python/native and RTL implement the exact System Info range
+BIOS publishes full-width core/task owner fields in an interrupt-state-
+preserving critical section and verifies both fields on every continuation.
+This supplies the same-core task exclusion that the reentrant hardware lock
+alone cannot provide. Checked CRC remains separate: it uses topology-sized
+BIOS owner records and the cluster's CRC transaction lock.
+
+The execution model and RTL implement the exact System Info range
 `[+0x00,+0x70)`, reject misaligned, crossing, and `+0x70` accesses, expose the
 main-bus requester count at `+0x68`, and independently gate capabilities at
 `+0x60`.
 
 ## Qualification anchors
 
-Later checkpoints must use shared independent known-answer data and cover at
-least:
+Qualification uses shared independent known-answer data and covers at least:
 
 - all six CRC checks for `123456789`, arbitrary seeds, byte/qword/mixed feeds,
   tails 1 through 7, raw finalization, zero-extension, cluster contention, and

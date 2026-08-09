@@ -147,9 +147,9 @@ module tb_soc_smoke;
         force u_soc.bus_mmio_addr = 12'h360;
         force u_soc.bus_mmio_size = BUS_DWORD;
         #1;
-        check("SysInfo CRC capability is advertised",
+        check("SysInfo checkpoint-2 crypto capabilities are advertised",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'h1);
+              && u_soc.bus_mmio_rdata == 64'h7);
 
         force u_soc.bus_mmio_addr = 12'h368;
         #1;
@@ -183,7 +183,7 @@ module tb_soc_smoke;
         #1;
         check("SysInfo byte reads use little-endian lanes",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'h1);
+              && u_soc.bus_mmio_rdata == 64'h7);
 
         force u_soc.bus_mmio_addr = 12'h361;
         force u_soc.bus_mmio_size = BUS_HALF;
@@ -212,7 +212,84 @@ module tb_soc_smoke;
         #1;
         check("SysInfo capability writes are acknowledged and ignored",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'h1);
+              && u_soc.bus_mmio_rdata == 64'h7);
+
+        // Exercise raw Keccak through the integrated SoC decode/mux rather
+        // than only through the standalone SHA front-end bench.
+        force u_soc.bus_mmio_addr = 12'h780;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        force u_soc.bus_mmio_wen = 1'b1;
+        force u_soc.bus_mmio_wdata = 64'h6;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b0;
+        repeat (2) @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_wen = 1'b0;
+        force u_soc.bus_mmio_addr = 12'h781;
+        @(posedge clk);
+        #1;
+        check("Integrated raw Keccak command enters raw BUSY",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7:0] == 8'h09);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        repeat (32) @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        @(posedge clk);
+        #1;
+        check("Integrated raw Keccak command reaches raw DONE",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7:0] == 8'h0A);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_addr = 12'h7D8;
+        force u_soc.bus_mmio_size = BUS_DWORD;
+        @(posedge clk);
+        #1;
+        check("Integrated zero-state Keccak lane 0 is mapped little-endian",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'hF125_8F79_40E1_DDE7);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_addr = 12'h780;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        force u_soc.bus_mmio_wen = 1'b1;
+        force u_soc.bus_mmio_wdata = 64'h7;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b0;
+        repeat (2) @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_wen = 1'b0;
+        force u_soc.bus_mmio_addr = 12'h781;
+        @(posedge clk);
+        #1;
+        check("Integrated raw Keccak CLEAR returns scrubbed idle",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata[7:0] == 8'h00);
+
+        // The checkpoint-3 WOTS address is decoded now but remains inert.
+        force u_soc.bus_mmio_addr = 12'h8AE;
+        force u_soc.bus_mmio_wen = 1'b1;
+        force u_soc.bus_mmio_wdata = 64'h1;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_wen = 1'b0;
+        #1;
+        check("Integrated WOTS reservation acknowledges inert zero status",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h0
+              && u_soc.wots_active === 1'b0);
 
         release u_soc.bus_mmio_req;
         release u_soc.bus_mmio_addr;

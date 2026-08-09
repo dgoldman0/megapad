@@ -86,7 +86,7 @@ from devices import (
     STORAGE_CAP_GEN_GUARD, STORAGE_CAPS,
     PORT_BRIDGE_BASE, TRNG_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     FB_BASE,
-    WOTS_BASE, WotsChainAccel,
+    WOTS_BASE,
 )
 from data_sources import (
     encode_frame, decode_header, DTYPE_RAW, DTYPE_U8, DTYPE_TEXT,
@@ -12967,159 +12967,489 @@ class TestKDOSAES(_KDOSTestBase):
         self.assertIn("BLK1=193 ", text)
 
 
-class TestKDOSSHA3(_KDOSTestBase):
-    """Tests for §1.6 SHA-3 (Keccak-256) hashing."""
+class TestBIOSSHA3Checkpoint2(unittest.TestCase):
+    """Checked BIOS SHA-3/SHAKE/raw-Keccak checkpoint-2 contract."""
 
-    # Reference vectors (hashlib.sha3_256):
-    # SHA3-256("")     = a7ffc6f8bf1ed76651c14756a061d662...
-    # SHA3-256("abc")  = 3a985da74fe225b2045c172d6bd390bd...
-    # SHA3-256("A"*16) = 24163aabfd8d149f6e1ad9e7472ff2ac...
-    # SHA3-256(0..199) = 5f728f63bf5ee48c77f453c0490398fa...
+    _ABC_ADDR = 0x1B000
+    _SEQUENCE_ADDR = 0x1B100
+    _OUTPUT_ADDR = 0x1C000
+    _STATE_ADDR = 0x1D003  # Deliberately unaligned.
+    _MASK64 = (1 << 64) - 1
 
-    def test_sha3_status_idle(self):
-        """SHA3-STATUS@ returns 0 (idle) before any operation."""
-        text = self._run_kdos(['."  S3IDLE=" SHA3-STATUS@ .'])
-        self.assertIn("S3IDLE=0 ", text)
+    # Keccak-f[1600](all-zero state), lanes x+5*y in architectural order.
+    _ZERO_STATE_LANES = (
+        0xF1258F7940E1DDE7, 0x84D5CCF933C0478A,
+        0xD598261EA65AA9EE, 0xBD1547306F80494D,
+        0x8B284E056253D057, 0xFF97A42D7F8E6FD4,
+        0x90FEE5A0A44647C4, 0x8C5BDA0CD6192E76,
+        0xAD30A6F71B19059C, 0x30935AB7D08FFC64,
+        0xEB5AA93F2317D635, 0xA9A6E6260D712103,
+        0x81A57C16DBCF555F, 0x43B831CD0347C826,
+        0x01F22F1A11A5569F, 0x05E5635A21D9AE61,
+        0x64BEFEF28CC970F2, 0x613670957BC46611,
+        0xB87C5A554FD00ECB, 0x8C3EE88A1CCF32C8,
+        0x940C7922AE3A2614, 0x1841F924A2C509E4,
+        0x16F53526E70465C2, 0x75F644E97F30A13B,
+        0xEAF1FF7B5CECA249,
+    )
 
-    def test_sha3_empty(self):
-        """SHA3-256 of empty string matches reference (a7ffc6f8...)."""
-        text = self._run_kdos([
-            "CREATE h-buf 32 ALLOT",
-            "SHA3-INIT",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',            # 0xa7 = 167
-            '."  H1=" h-buf 1 + C@ .',        # 0xff = 255
-            '."  H2=" h-buf 2 + C@ .',        # 0xc6 = 198
-            '."  H3=" h-buf 3 + C@ .',        # 0xf8 = 248
-            '."  ST=" SHA3-STATUS@ .',         # 2 = done
+    _ROTATION = (
+         0,  1, 62, 28, 27,
+        36, 44,  6, 55, 20,
+         3, 10, 43, 25, 39,
+        41, 45, 15, 21,  8,
+        18,  2, 61, 56, 14,
+    )
+    _ROUND_CONSTANTS = (
+        0x0000000000000001, 0x0000000000008082,
+        0x800000000000808A, 0x8000000080008000,
+        0x000000000000808B, 0x0000000080000001,
+        0x8000000080008081, 0x8000000000008009,
+        0x000000000000008A, 0x0000000000000088,
+        0x0000000080008009, 0x000000008000000A,
+        0x000000008000808B, 0x800000000000008B,
+        0x8000000000008089, 0x8000000000008003,
+        0x8000000000008002, 0x8000000000000080,
+        0x000000000000800A, 0x800000008000000A,
+        0x8000000080008081, 0x8000000000008080,
+        0x0000000080000001, 0x8000000080008008,
+    )
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+        self._bios_labels = self._bios_harness._bios_labels
+
+    @classmethod
+    def _rol64(cls, value, shift):
+        if not shift:
+            return value & cls._MASK64
+        return (
+            (value << shift) | (value >> (64 - shift))
+        ) & cls._MASK64
+
+    @classmethod
+    def _keccak_reference(cls, state):
+        """Small independent Keccak oracle for nonzero lane mapping."""
+        lanes = list(struct.unpack("<25Q", state))
+        for round_constant in cls._ROUND_CONSTANTS:
+            columns = [
+                lanes[x] ^ lanes[x + 5] ^ lanes[x + 10]
+                ^ lanes[x + 15] ^ lanes[x + 20]
+                for x in range(5)
+            ]
+            deltas = [
+                columns[(x - 1) % 5]
+                ^ cls._rol64(columns[(x + 1) % 5], 1)
+                for x in range(5)
+            ]
+            for y in range(5):
+                for x in range(5):
+                    lanes[x + 5 * y] ^= deltas[x]
+
+            rotated = [0] * 25
+            for y in range(5):
+                for x in range(5):
+                    rotated[y + 5 * ((2 * x + 3 * y) % 5)] = cls._rol64(
+                        lanes[x + 5 * y], cls._ROTATION[x + 5 * y]
+                    )
+            for y in range(5):
+                for x in range(5):
+                    here = x + 5 * y
+                    lanes[here] = rotated[here] ^ (
+                        (~rotated[(x + 1) % 5 + 5 * y] & cls._MASK64)
+                        & rotated[(x + 2) % 5 + 5 * y]
+                    )
+            lanes[0] ^= round_constant
+        return struct.pack("<25Q", *lanes)
+
+    def _boot_bios(self):
+        return self._bios_harness._boot_bios()
+
+    def _run_forth(self, sys_obj, buf, lines):
+        return self._bios_harness._run_forth(sys_obj, buf, lines)
+
+    @staticmethod
+    def _load_u64(sys_obj, address):
+        return int.from_bytes(sys_obj.cpu.mem[address:address + 8], "little")
+
+    def _assert_crypto_clean(self, sys_obj):
+        labels = self._bios_labels
+        self.assertEqual(
+            self._load_u64(sys_obj, labels["var_crypto_owner_core"]),
+            self._MASK64,
+        )
+        for name in (
+            "var_crypto_owner_task", "var_crypto_owner_kind",
+            "var_crypto_mode", "var_crypto_phase",
+            "var_crypto_window_offset",
+        ):
+            self.assertEqual(self._load_u64(sys_obj, labels[name]), 0)
+        scratch = labels["crypto_scratch"]
+        self.assertEqual(bytes(sys_obj.cpu.mem[scratch:scratch + 200]), bytes(200))
+        self.assertEqual(sys_obj.cpu._cs.crypto_read8(0x0781), 0)
+        self.assertFalse(sys_obj.spinlock.locked[8])
+        self.assertEqual(sys_obj.spinlock.owner[8], -1)
+
+    def test_dictionary_surface_and_capabilities_are_exact(self):
+        """Only the checked transaction surface is advertised by BIOS."""
+        sys_obj, buf = self._boot_bios()
+        text = self._run_forth(sys_obj, buf, [
+            "WORDS",
+            '."  CAPS=" CRYPTO-CAPS@ .',
+            '."  WOTS-CAP=" CRYPTO-CAPS@ 8 AND .',
         ])
-        self.assertIn("H0=167 ", text)
-        self.assertIn("H1=255 ", text)
-        self.assertIn("H2=198 ", text)
-        self.assertIn("H3=248 ", text)
-        self.assertIn("ST=2 ", text)
+        for word in (
+            "CRYPTO-CAPS@", "SHA3-BEGIN", "SHA3-UPDATE", "SHA3-FINAL",
+            "SHA3-STATUS@", "SHAKE-FINAL", "SHA3-MODE@", "SHAKE-READ",
+            "SHA3-CLEAR", "KECCAK-F1600",
+        ):
+            self.assertRegex(text, rf"(?<!\S){re.escape(word)}(?!\S)")
+        for removed in (
+            "SHA3-INIT", "SHA3-MODE!", "SHA3-SQUEEZE",
+            "SHA3-SQUEEZE-NEXT", "SHA3-DOUT@", "WOTS-CHAIN-HW",
+            "SHA3-LOCKED?", "WOTS-STATUS@",
+        ):
+            self.assertNotRegex(text, rf"(?<!\S){re.escape(removed)}(?!\S)")
+        self.assertIn("CAPS=7 ", text)
+        self.assertIn("WOTS-CAP=0 ", text)
 
-    def test_sha3_abc(self):
-        """SHA3-256('abc') = 3a985da7..."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!",            # 'a'
-            "98 msg 1 + C!",        # 'b'
-            "99 msg 2 + C!",        # 'c'
-            "CREATE h-buf 32 ALLOT",
-            "SHA3-INIT",
-            "msg 3 SHA3-UPDATE",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',            # 0x3a = 58
-            '."  H1=" h-buf 1 + C@ .',        # 0x98 = 152
-            '."  H2=" h-buf 2 + C@ .',        # 0x5d = 93
-            '."  H3=" h-buf 3 + C@ .',        # 0xa7 = 167
+    def test_faulting_checked_status_access_returns_six_after_cleanup(self):
+        """A checked SHA bus fault is consumed once and follows cleanup."""
+        sys_obj, buf = self._boot_bios()
+        labels = self._bios_labels
+        address_load = labels["_sha3_begin_status_address"]
+        status_address = MMIO_START + 0x0781
+        reserved_address = MMIO_START + 0x0784
+        status_load = assemble(f"ldi64 r7, {status_address}")
+        faulting_load = assemble(f"ldi64 r7, {reserved_address}")
+        self.assertEqual(len(faulting_load), len(status_load))
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    address_load:address_load + len(status_load)
+                ]
+            ),
+            status_load,
+        )
+
+        # Redirect only BEGIN's first checked STATUS byte read to a reserved
+        # byte in the exact SHA aperture.  This deterministically injects an
+        # architectural bus fault while preserving the helper's saved end PC;
+        # cleanup then uses the unmodified CMD and STATUS paths.
+        for offset, value in enumerate(faulting_load):
+            sys_obj.cpu.mem_write8(address_load + offset, value)
+
+        initial_ie = sys_obj.cpu.flag_i
+        text = self._run_forth(sys_obj, buf, [
+            '."  FAULT=" 0 SHA3-BEGIN .',
         ])
-        self.assertIn("H0=58 ", text)
-        self.assertIn("H1=152 ", text)
-        self.assertIn("H2=93 ", text)
-        self.assertIn("H3=167 ", text)
+        self.assertIn("FAULT=6 ", text)
+        self.assertNotIn("BUS FAULT", text.upper())
+        self.assertEqual(sys_obj.cpu.flag_i, initial_ie)
+        self._assert_crypto_clean(sys_obj)
 
-    def test_sha3_sixteen_bytes(self):
-        """SHA3-256 of 16 x 0x41 ('A') = 24163aab..."""
-        text = self._run_kdos([
-            "CREATE msg 16 ALLOT",
-            "msg 16 65 FILL",        # 16 bytes of 'A'
-            "CREATE h-buf 32 ALLOT",
-            "SHA3-INIT",
-            "msg 16 SHA3-UPDATE",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',            # 0x24 = 36
-            '."  H1=" h-buf 1 + C@ .',        # 0x16 = 22
-            '."  H2=" h-buf 2 + C@ .',        # 0x3a = 58
-            '."  H3=" h-buf 3 + C@ .',        # 0xab = 171
+    def test_faulting_cleanup_access_returns_six_and_retains_guard(self):
+        """A cleanup bus fault wipes scratch but leaves the service closed."""
+        sys_obj, buf = self._boot_bios()
+        labels = self._bios_labels
+        address_load = labels["_sha3_clear_hardware"]
+        command_address = MMIO_START + 0x0780
+        reserved_address = MMIO_START + 0x0784
+        command_load = assemble(f"ldi64 r7, {command_address}")
+        faulting_load = assemble(f"ldi64 r7, {reserved_address}")
+        self.assertEqual(len(faulting_load), len(command_load))
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    address_load:address_load + len(command_load)
+                ]
+            ),
+            command_load,
+        )
+
+        # Redirect command 7 itself to a reserved SHA byte.  Since the engine
+        # cannot prove quiescence, CLEAR must return HARDWARE/PROTOCOL, wipe
+        # private staging, and deliberately retain both ownership records.
+        for offset, value in enumerate(faulting_load):
+            sys_obj.cpu.mem_write8(address_load + offset, value)
+
+        initial_ie = sys_obj.cpu.flag_i
+        text = self._run_forth(sys_obj, buf, [
+            '."  BEGIN=" 0 SHA3-BEGIN .',
+            '."  CLEAR=" SHA3-CLEAR .',
+            '."  RETRY=" 0 SHA3-BEGIN .',
         ])
-        self.assertIn("H0=36 ", text)
-        self.assertIn("H1=22 ", text)
-        self.assertIn("H2=58 ", text)
-        self.assertIn("H3=171 ", text)
+        self.assertIn("BEGIN=0 ", text)
+        self.assertIn("CLEAR=6 ", text)
+        self.assertIn("RETRY=2 ", text)
+        self.assertNotIn("BUS FAULT", text.upper())
+        self.assertEqual(sys_obj.cpu.flag_i, initial_ie)
+        self.assertEqual(
+            self._load_u64(sys_obj, labels["var_crypto_owner_core"]), 0
+        )
+        self.assertTrue(sys_obj.spinlock.locked[8])
+        self.assertEqual(sys_obj.spinlock.owner[8], 0)
+        scratch = labels["crypto_scratch"]
+        self.assertEqual(bytes(sys_obj.cpu.mem[scratch:scratch + 200]), bytes(200))
+        self.assertEqual(sys_obj.cpu._cs.crypto_read8(0x0781), 0x04)
 
-    def test_sha3_multi_rate_block(self):
-        """SHA3-256 of 200 bytes (>rate=136) = 5f728f63..."""
-        text = self._run_kdos([
-            "CREATE msg 200 ALLOT",
-            ": fill-seq 200 0 DO I msg I + C! LOOP ;",
-            "fill-seq",
-            "CREATE h-buf 32 ALLOT",
-            "SHA3-INIT",
-            "msg 200 SHA3-UPDATE",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',            # 0x5f = 95
-            '."  H1=" h-buf 1 + C@ .',        # 0x72 = 114
-            '."  H2=" h-buf 2 + C@ .',        # 0x8f = 143
-            '."  H3=" h-buf 3 + C@ .',        # 0x63 = 99
+    def test_unrelated_diagnostic_fault_still_reaches_diagnostic_handler(self):
+        """Only the two checked helper PCs consume a SHA aperture bus fault."""
+        sys_obj, buf = self._boot_bios()
+        labels = self._bios_labels
+        address_load = labels["w_sha3_status_fetch"]
+        status_address = MMIO_START + 0x0781
+        reserved_address = MMIO_START + 0x0784
+        status_load = assemble(f"ldi64 r11, {status_address}")
+        faulting_load = assemble(f"ldi64 r11, {reserved_address}")
+        self.assertEqual(len(faulting_load), len(status_load))
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    address_load:address_load + len(status_load)
+                ]
+            ),
+            status_load,
+        )
+        for offset, value in enumerate(faulting_load):
+            sys_obj.cpu.mem_write8(address_load + offset, value)
+
+        text = self._run_forth(sys_obj, buf, [
+            "SHA3-STATUS@",
+            '."  RECOVERED"',
         ])
-        self.assertIn("H0=95 ", text)
-        self.assertIn("H1=114 ", text)
-        self.assertIn("H2=143 ", text)
-        self.assertIn("H3=99 ", text)
+        self.assertIn("BUS FAULT", text.upper())
+        self.assertIn("RECOVERED", text)
+        self._assert_crypto_clean(sys_obj)
 
-    def test_sha3_convenience_word(self):
-        """KDOS SHA3 ( addr len hash-addr -- ) convenience word."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf SHA3",
-            '."  H0=" h-buf C@ .',            # same as test_sha3_abc
-            '."  H1=" h-buf 1 + C@ .',
+    def test_fixed_hash_known_answers_and_rate_boundaries(self):
+        """SHA3-256/512 match hashlib at rate, rate+1, and multi-rate."""
+        sys_obj, buf = self._boot_bios()
+        abc = b"abc"
+        sequence = bytes(index & 0xFF for index in range(337))
+        sys_obj.cpu.mem[self._ABC_ADDR:self._ABC_ADDR + len(abc)] = abc
+        sys_obj.cpu.mem[
+            self._SEQUENCE_ADDR:self._SEQUENCE_ADDR + len(sequence)
+        ] = sequence
+
+        cases = [
+            (0, self._ABC_ADDR, abc, hashlib.sha3_256),
+            (1, self._ABC_ADDR, abc, hashlib.sha3_512),
+        ]
+        cases += [
+            (0, self._SEQUENCE_ADDR, sequence[:length], hashlib.sha3_256)
+            for length in (136, 137, 273)
+        ]
+        cases += [
+            (1, self._SEQUENCE_ADDR, sequence[:length], hashlib.sha3_512)
+            for length in (72, 73, 145)
+        ]
+
+        lines = []
+        for index, (mode, address, message, _) in enumerate(cases):
+            output = self._OUTPUT_ADDR + index * 0x80
+            lines.extend([
+                f'."  B{index}=" {mode} SHA3-BEGIN .',
+                f'."  U{index}=" {address} {len(message)} SHA3-UPDATE .',
+                f'."  F{index}=" {output} SHA3-FINAL .',
+            ])
+        text = self._run_forth(sys_obj, buf, lines)
+        self.assertNotIn("???", text)
+
+        for index, (_, _, message, constructor) in enumerate(cases):
+            self.assertIn(f"B{index}=0 ", text)
+            self.assertIn(f"U{index}=0 ", text)
+            self.assertIn(f"F{index}=0 ", text)
+            expected = constructor(message).digest()
+            output = self._OUTPUT_ADDR + index * 0x80
+            self.assertEqual(
+                bytes(sys_obj.cpu.mem[output:output + len(expected)]),
+                expected,
+            )
+        self._assert_crypto_clean(sys_obj)
+
+    def test_shake_known_answers_rates_and_sequential_windows(self):
+        """Both SHAKE modes read exact 32-byte chunks across window 0/1."""
+        sys_obj, buf = self._boot_bios()
+        abc = b"abc"
+        sequence = bytes(index & 0xFF for index in range(337))
+        sys_obj.cpu.mem[self._ABC_ADDR:self._ABC_ADDR + len(abc)] = abc
+        sys_obj.cpu.mem[
+            self._SEQUENCE_ADDR:self._SEQUENCE_ADDR + len(sequence)
+        ] = sequence
+
+        cases = [
+            (2, self._ABC_ADDR, abc, 96, hashlib.shake_128),
+            (3, self._ABC_ADDR, abc, 96, hashlib.shake_256),
+        ]
+        cases += [
+            (2, self._SEQUENCE_ADDR, sequence[:length], 64, hashlib.shake_128)
+            for length in (168, 169, 337)
+        ]
+        cases += [
+            (3, self._SEQUENCE_ADDR, sequence[:length], 64, hashlib.shake_256)
+            for length in (136, 137, 273)
+        ]
+
+        lines = []
+        for index, (mode, address, message, outlen, _) in enumerate(cases):
+            output = self._OUTPUT_ADDR + index * 0x100
+            lines.extend([
+                f'."  B{index}=" {mode} SHA3-BEGIN .',
+                f'."  U{index}=" {address} {len(message)} SHA3-UPDATE .',
+                f'."  F{index}=" SHAKE-FINAL .',
+            ])
+            for offset in range(0, outlen, 32):
+                lines.append(
+                    f'."  R{index}-{offset}=" {output + offset} 32 SHAKE-READ .'
+                )
+            lines.append(f'."  C{index}=" SHA3-CLEAR .')
+
+        text = self._run_forth(sys_obj, buf, lines)
+        self.assertNotIn("???", text)
+        for index, (_, _, message, outlen, constructor) in enumerate(cases):
+            self.assertIn(f"B{index}=0 ", text)
+            self.assertIn(f"U{index}=0 ", text)
+            self.assertIn(f"F{index}=0 ", text)
+            for offset in range(0, outlen, 32):
+                self.assertIn(f"R{index}-{offset}=0 ", text)
+            self.assertIn(f"C{index}=0 ", text)
+            output = self._OUTPUT_ADDR + index * 0x100
+            self.assertEqual(
+                bytes(sys_obj.cpu.mem[output:output + outlen]),
+                constructor(message).digest(outlen),
+            )
+        self._assert_crypto_clean(sys_obj)
+
+    def test_zero_lengths_rejections_cleanup_and_nonmutation(self):
+        """Owner/phase/range/protected failures obey cleanup and publication."""
+        sys_obj, buf = self._boot_bios()
+        labels = self._bios_labels
+        protected = labels["sha256_contexts"]
+        task_active = labels["var_task_active"]
+        original_task = self._load_u64(sys_obj, task_active)
+        wrong_task = (original_task + 1) & self._MASK64
+        bad_inactive = self._OUTPUT_ADDR
+        bad_fixed = self._OUTPUT_ADDR + 0x80
+        bad_read = self._OUTPUT_ADDR + 0x100
+        zero_fixed = self._OUTPUT_ADDR + 0x180
+        zero_shake = self._OUTPUT_ADDR + 0x200
+        for address, length in (
+            (protected, 64), (bad_inactive, 32),
+            (bad_fixed, 32), (bad_read, 64),
+        ):
+            sys_obj.cpu.mem[address:address + length] = bytes((0xA5,)) * length
+
+        text = self._run_forth(sys_obj, buf, [
+            '."  IU=" -1 0 SHA3-UPDATE .',
+            f'."  IF=" {bad_inactive} SHA3-FINAL .',
+            '."  ML=" -1 SHA3-BEGIN .',
+            '."  MH=" 4 SHA3-BEGIN .',
+            '."  OB=" 0 SHA3-BEGIN .',
+            f"{wrong_task} {task_active} ! .\"  OU=\" -1 0 SHA3-UPDATE . "
+            f'."  OX=" SHA3-CLEAR . {original_task} {task_active} ! '
+            '."  OC=" SHA3-CLEAR .',
+            '."  FB=" 0 SHA3-BEGIN .',
+            '."  XF=" SHAKE-FINAL .',
+            '."  XB=" 2 SHA3-BEGIN .',
+            '."  XS=" SHAKE-FINAL .',
+            f'."  XH=" {bad_fixed} SHA3-FINAL .',
+            '."  NB=" 0 SHA3-BEGIN .',
+            '."  NR=" -1 -1 SHA3-UPDATE .',
+            '."  PB=" 0 SHA3-BEGIN .',
+            f'."  PU=" {protected} 1 SHA3-UPDATE .',
+            '."  QB=" 0 SHA3-BEGIN .',
+            f'."  QF=" {protected} SHA3-FINAL .',
+            '."  KR=" -1 KECCAK-F1600 .',
+            f'."  KP=" {protected} KECCAK-F1600 .',
+            '."  RB=" 3 SHA3-BEGIN .',
+            '."  RF=" SHAKE-FINAL .',
+            f'."  RR=" {bad_read} 33 SHAKE-READ .',
+            '."  ZB=" 0 SHA3-BEGIN .',
+            '."  ZU=" -1 0 SHA3-UPDATE .',
+            f'."  ZF=" {zero_fixed} SHA3-FINAL .',
+            '."  SB=" 2 SHA3-BEGIN .',
+            '."  SU=" -1 0 SHA3-UPDATE .',
+            '."  SF=" SHAKE-FINAL .',
+            '."  S0=" -1 0 SHAKE-READ .',
+            f'."  S32=" {zero_shake} 32 SHAKE-READ .',
+            '."  SC=" SHA3-CLEAR .',
+            '."  MB=" 3 SHA3-BEGIN .',
+            '."  MODE=" SHA3-MODE@ .',
+            '."  MC=" SHA3-CLEAR .',
+            '."  C0=" SHA3-CLEAR .',
+            '."  C1=" SHA3-CLEAR .',
+            '."  RAW-ST=" SHA3-STATUS@ .',
         ])
-        self.assertIn("H0=58 ", text)
-        self.assertIn("H1=152 ", text)
+        for marker in ("IU", "IF", "OU", "OX", "XF", "XH"):
+            self.assertIn(f"{marker}=2 ", text)
+        for marker in ("ML", "MH", "NR", "KR", "RR"):
+            self.assertIn(f"{marker}=3 ", text)
+        for marker in ("PU", "QF", "KP"):
+            self.assertIn(f"{marker}=4 ", text)
+        for marker in (
+            "OB", "OC", "FB", "XB", "XS", "NB", "PB", "QB",
+            "RB", "RF", "ZB", "ZU", "ZF", "SB", "SU", "SF",
+            "S0", "S32", "SC", "MB", "MC", "C0", "C1", "RAW-ST",
+        ):
+            self.assertIn(f"{marker}=0 ", text)
+        self.assertIn("MODE=3 ", text)
 
-    def test_sha3_reinit(self):
-        """SHA3 can be reused: init-update-final twice gives same result."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE h1 32 ALLOT",
-            "CREATE h2 32 ALLOT",
-            "msg 3 h1 SHA3",
-            "msg 3 h2 SHA3",
-            '."  R1=" h1 C@ .',
-            '."  R2=" h2 C@ .',
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[protected:protected + 64]),
+            bytes((0xA5,)) * 64,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[bad_inactive:bad_inactive + 32]),
+            bytes((0xA5,)) * 32,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[bad_fixed:bad_fixed + 32]),
+            bytes((0xA5,)) * 32,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[bad_read:bad_read + 64]),
+            bytes((0xA5,)) * 64,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[zero_fixed:zero_fixed + 32]),
+            hashlib.sha3_256(b"").digest(),
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[zero_shake:zero_shake + 32]),
+            hashlib.shake_128(b"").digest(32),
+        )
+        self._assert_crypto_clean(sys_obj)
+
+    def test_raw_keccak_vector_and_lane_mapping(self):
+        """Raw permutation is in-place x+5*y with little-endian lanes."""
+        zero_expected = b"".join(
+            lane.to_bytes(8, "little") for lane in self._ZERO_STATE_LANES
+        )
+        self.assertEqual(self._keccak_reference(bytes(200)), zero_expected)
+        patterned = bytes(range(200))
+        pattern_expected = self._keccak_reference(patterned)
+
+        sys_obj, buf = self._boot_bios()
+        second_state = self._STATE_ADDR + 0x200
+        sys_obj.cpu.mem[self._STATE_ADDR:self._STATE_ADDR + 200] = bytes(200)
+        sys_obj.cpu.mem[second_state:second_state + 200] = patterned
+        text = self._run_forth(sys_obj, buf, [
+            f'."  K0=" {self._STATE_ADDR} KECCAK-F1600 .',
+            f'."  K1=" {second_state} KECCAK-F1600 .',
         ])
-        self.assertIn("R1=58 ", text)
-        self.assertIn("R2=58 ", text)
-
-    def test_sha3_status_display(self):
-        """.SHA3-STATUS prints human-readable status."""
-        text = self._run_kdos([".SHA3-STATUS"])
-        self.assertIn("SHA3: idle", text)
-
-    def test_sha3_status_after_final(self):
-        """.SHA3-STATUS after finalize shows done."""
-        text = self._run_kdos([
-            "CREATE h-buf 32 ALLOT",
-            "SHA3-INIT",
-            "h-buf SHA3-FINAL",
-            ".SHA3-STATUS",
-        ])
-        self.assertIn("SHA3: done", text)
-
-    def test_sha3_single_byte(self):
-        """SHA3-256 of single byte 0x00 = 5d53469f..."""
-        text = self._run_kdos([
-            "CREATE msg 1 ALLOT",
-            "0 msg C!",
-            "CREATE h-buf 32 ALLOT",
-            "SHA3-INIT",
-            "msg 1 SHA3-UPDATE",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',            # 0x5d = 93
-            '."  H1=" h-buf 1 + C@ .',        # 0x53 = 83
-            '."  H2=" h-buf 2 + C@ .',        # 0x46 = 70
-            '."  H3=" h-buf 3 + C@ .',        # 0x9f = 159
-        ])
-        self.assertIn("H0=93 ", text)
-        self.assertIn("H1=83 ", text)
-        self.assertIn("H2=70 ", text)
-        self.assertIn("H3=159 ", text)
+        self.assertIn("K0=0 ", text)
+        self.assertIn("K1=0 ", text)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[self._STATE_ADDR:self._STATE_ADDR + 200]),
+            zero_expected,
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[second_state:second_state + 200]),
+            pattern_expected,
+        )
+        self._assert_crypto_clean(sys_obj)
 
 
 class TestBIOSSHA2(unittest.TestCase):
@@ -13405,8 +13735,12 @@ class TestBIOSSHA2(unittest.TestCase):
             "0 CONSTANT SHA512-OK",
         )
         definitions += source_slice(
+            "9 CONSTANT HMAC-HKDF-LOCK",
+            "136 CONSTANT HMAC-BLKSZ",
+        )
+        definitions += source_slice(
             "64 CONSTANT HMAC256-BLKSZ",
-            "\\ PQ-DERIVE ( out -- )",
+            "\\ PQ-DERIVE ( out -- status )",
         )
         text = self._run_sha2(definitions + [
             "CREATE abc 3 ALLOT",
@@ -13450,6 +13784,123 @@ class TestBIOSSHA2(unittest.TestCase):
         self.assertIn("H0=186 ", text)
         self.assertIn("M0=91 ", text)
         self.assertIn("P0=7 ", text)
+
+    def test_kdos_pq_responder_preserves_decapsulation_argument_order(self):
+        """The exact responder word passes ciphertext before the secret key."""
+        with open(KDOS_PATH) as source_file:
+            source_lines = source_file.read().splitlines()
+
+        start = source_lines.index(
+            ": PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- status )"
+        )
+        end = source_lines.index(
+            "\\ =====================================================================",
+            start,
+        )
+        definition = [
+            line
+            for line in source_lines[start:end]
+            if line.strip() and not line.lstrip().startswith("\\")
+        ]
+
+        text = self._run_sha2([
+            "CREATE X25519-PRIV 32 ALLOT",
+            "CREATE _PQ-SS-X 32 ALLOT",
+            "CREATE _PQ-SS-K 32 ALLOT",
+            "CREATE _PQ-CAT 64 ALLOT",
+            "CREATE pq-out 32 ALLOT",
+            "VARIABLE got-ct VARIABLE got-sk VARIABLE got-ss",
+            ": X25519 2DROP DROP ;",
+            ": KYBER-DECAPS got-ss ! got-sk ! got-ct ! ;",
+            ": PQ-DERIVE DROP 0 ;",
+        ] + definition + [
+            "VARIABLE d0 DEPTH d0 !",
+            '."  ST=" 111 222 333 pq-out PQ-EXCHANGE-RESP .',
+            '."  CT=" got-ct @ .',
+            '."  SK=" got-sk @ .',
+            '."  SS=" got-ss @ _PQ-SS-K = .',
+            '."  DEPTH-OK=" DEPTH d0 @ = .',
+        ])
+        self.assertIn("ST=0 ", text)
+        self.assertIn("CT=222 ", text)
+        self.assertIn("SK=333 ", text)
+        self.assertIn("SS=-1 ", text)
+        self.assertIn("DEPTH-OK=-1 ", text)
+
+    def test_networking_crypto_dispatch_source_slices_propagate_status(self):
+        """TLS dispatch and empty-hash gating return the real backend status."""
+        with open(NETWORKING_PATH) as source_file:
+            source_lines = source_file.read().splitlines()
+
+        dispatch_start = source_lines.index(
+            ": TLS-HASH ( addr len out -- status )"
+        )
+        dispatch_end = source_lines.index(
+            "\\ --- Scratch Buffers for Handshake ---",
+            dispatch_start,
+        )
+        derive_start = source_lines.index(
+            ": TLS-DERIVE-DERIVED ( secret out -- status )"
+        )
+        derive_end = source_lines.index(
+            "\\ --- TLS-DERIVE-SECRET ---",
+            derive_start,
+        )
+
+        def executable_slice(start, end):
+            return [
+                line
+                for line in source_lines[start:end]
+                if line.strip() and not line.lstrip().startswith("\\")
+            ]
+
+        definitions = [
+            "VARIABLE TLS-USE-SHA256",
+            ": SHA256 2DROP DROP 21 ;",
+            ": SHA3 2DROP DROP 31 ;",
+            ": HMAC-SHA256 2DROP 2DROP DROP 22 ;",
+            ": HMAC 2DROP 2DROP DROP 32 ;",
+            ": HKDF-SHA256-EXTRACT 2DROP 2DROP DROP 23 ;",
+            ": HKDF-EXTRACT 2DROP 2DROP DROP 33 ;",
+            ": HKDF-SHA256-EXPAND 2DROP 2DROP DROP 24 ;",
+            ": HKDF-EXPAND 2DROP 2DROP DROP 34 ;",
+            ": AES-KEY-MODE! DROP ;",
+        ]
+        definitions += executable_slice(dispatch_start, dispatch_end)
+        definitions += [
+            "CREATE TLS-EMPTY-HASH-SHA3 32 ALLOT",
+            "CREATE TLS-EMPTY-HASH-SHA256 32 ALLOT",
+            "VARIABLE TLS-EMPTY-HASH-SHA3-STATUS",
+            ": TLS-EMPTY-HASH TLS-USE-SHA256 @ IF"
+            " TLS-EMPTY-HASH-SHA256 ELSE TLS-EMPTY-HASH-SHA3 THEN ;",
+            "CREATE TLS-L-DERIVED 7 ALLOT",
+            "7 CONSTANT /TLS-L-DERIVED",
+            ": TLS-EXPAND-LABEL 2DROP 2DROP 2DROP DROP 77 ;",
+        ]
+        definitions += executable_slice(derive_start, derive_end)
+
+        text = self._run_sha2(definitions + [
+            "VARIABLE d0 DEPTH d0 !",
+            '0 TLS-USE-SHA256 ! ."  H3=" 1 2 3 TLS-HASH .',
+            '."  M3=" 1 2 3 4 5 TLS-HMAC .',
+            '."  E3=" 1 2 3 4 5 TLS-HKDF-EXTRACT .',
+            '."  X3=" 1 2 3 4 5 TLS-HKDF-EXPAND .',
+            '1 TLS-USE-SHA256 ! ."  H2=" 1 2 3 TLS-HASH .',
+            '."  M2=" 1 2 3 4 5 TLS-HMAC .',
+            '."  E2=" 1 2 3 4 5 TLS-HKDF-EXTRACT .',
+            '."  X2=" 1 2 3 4 5 TLS-HKDF-EXPAND .',
+            "6 TLS-EMPTY-HASH-SHA3-STATUS !",
+            '0 TLS-USE-SHA256 ! ."  D3=" 1 2 TLS-DERIVE-DERIVED .',
+            '1 TLS-USE-SHA256 ! ."  D2=" 1 2 TLS-DERIVE-DERIVED .',
+            '."  DEPTH-OK=" DEPTH d0 @ = .',
+        ])
+        for marker, status in (
+            ("H3", 31), ("M3", 32), ("E3", 33), ("X3", 34),
+            ("H2", 21), ("M2", 22), ("E2", 23), ("X2", 24),
+            ("D3", 6), ("D2", 77),
+        ):
+            self.assertIn(f"{marker}={status} ", text)
+        self.assertIn("DEPTH-OK=-1 ", text)
 
     def test_sha512_abc(self):
         """Streaming SHA-512('abc') returns success and starts ddaf35a1."""
@@ -13936,286 +14387,442 @@ class TestKDOSSHA256(_KDOSTestBase):
         self.assertIn("SET256", text)
 
 
-class TestKDOSSHAKE(_KDOSTestBase):
-    """Tests for SHAKE128/256 extendable-output functions."""
+class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
+    """Status-bearing KDOS wrappers over the checked BIOS service."""
 
-    # Reference vectors (hashlib):
-    # SHAKE128("abc", 32) → first 4 bytes: 88, 129, 9, 45
-    # SHAKE256("abc", 32) → first 4 bytes: 72, 51, 102, 96
-    # SHA3-512("abc")     → first 4 bytes: 183, 81, 133, 11
+    def _assert_byte(self, text, marker, expected):
+        self.assertIn(f"{marker}={expected} ", text)
 
-    def test_sha3_mode_roundtrip(self):
-        """SHA3-MODE! / SHA3-MODE@ round-trip the mode value."""
-        text = self._run_kdos([
-            '."  M0=" SHA3-MODE@ .',     # default mode = 0 (SHA3-256)
-            '3 SHA3-MODE!',
-            '."  M3=" SHA3-MODE@ .',     # now SHAKE256 mode = 3
-            '0 SHA3-MODE!',             # restore default
-        ])
-        self.assertIn("M0=0 ", text)
-        self.assertIn("M3=3 ", text)
+    def _run_kdos_inspected(self, extra_lines, *, mutate_system=None):
+        """Run the shared snapshot while retaining the device state.
 
-    def test_sha3_512_abc(self):
-        """SHA3-512('abc') first 4 bytes = 183, 81, 133, 11."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE h-buf 64 ALLOT",
-            "1 SHA3-MODE!",             # SHA3-512
-            "SHA3-INIT",
-            "msg 3 SHA3-UPDATE",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',
-            '."  H1=" h-buf 1 + C@ .',
-            '."  H2=" h-buf 2 + C@ .',
-            '."  H3=" h-buf 3 + C@ .',
-            "0 SHA3-MODE!",             # restore SHA3-256
-        ])
-        self.assertIn("H0=183 ", text)
-        self.assertIn("H1=81 ", text)
-        self.assertIn("H2=133 ", text)
-        self.assertIn("H3=11 ", text)
+        The ordinary fixture deliberately returns only UART text.  Lock
+        release and capability-priority tests also need to seed and inspect
+        device state, so keep this focused variant local to checkpoint 2.
+        Its step ceiling is the existing fast-fixture default, not the much
+        larger source-load ceiling.
+        """
+        mem_bytes, ext_mem_bytes, cpu_state = self._snapshot_data()
+        sys_obj = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        buf = capture_uart(sys_obj)
+        sys_obj.cpu.mem[:len(mem_bytes)] = mem_bytes
+        sys_obj._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
+        self._restore_cpu_state(sys_obj.cpu, cpu_state)
+        r19 = sys_obj.cpu.regs[19]
+        if r19 and r19 < len(mem_bytes):
+            sys_obj.uart._tx_ring_base = r19
 
-    def test_sha3_512_empty(self):
-        """SHA3-512('') first 4 bytes = 166, 159, 115, 204."""
-        text = self._run_kdos([
-            "CREATE h-buf 64 ALLOT",
-            "1 SHA3-MODE!",
-            "SHA3-INIT",
-            "h-buf SHA3-FINAL",
-            '."  H0=" h-buf C@ .',
-            '."  H1=" h-buf 1 + C@ .',
-            '."  H2=" h-buf 2 + C@ .',
-            '."  H3=" h-buf 3 + C@ .',
-            "0 SHA3-MODE!",
-        ])
-        self.assertIn("H0=166 ", text)
-        self.assertIn("H1=159 ", text)
-        self.assertIn("H2=115 ", text)
-        self.assertIn("H3=204 ", text)
+        if mutate_system is not None:
+            mutate_system(sys_obj)
 
-    def test_sha3_512_full_64_bytes(self):
-        """SHA3-512('abc') — verify bytes 32-35 and 60-63 of the 64-byte digest."""
-        # Full SHA3-512("abc") = b751850b...10e116e9...4eec53f0
-        # Bytes 32-35: 0x10=16, 0xe1=225, 0x16=22, 0xe9=233
-        # Bytes 60-63: 0x4e=78, 0xec=236, 0x53=83, 0xf0=240
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE h-buf 64 ALLOT",
-            "1 SHA3-MODE!",
-            "SHA3-INIT",
-            "msg 3 SHA3-UPDATE",
-            "h-buf SHA3-FINAL",
-            '."  B32=" h-buf 32 + C@ .',
-            '."  B33=" h-buf 33 + C@ .',
-            '."  B34=" h-buf 34 + C@ .',
-            '."  B35=" h-buf 35 + C@ .',
-            '."  B60=" h-buf 60 + C@ .',
-            '."  B61=" h-buf 61 + C@ .',
-            '."  B62=" h-buf 62 + C@ .',
-            '."  B63=" h-buf 63 + C@ .',
-            "0 SHA3-MODE!",
-        ])
-        self.assertIn("B32=16 ", text)
-        self.assertIn("B33=225 ", text)
-        self.assertIn("B34=22 ", text)
-        self.assertIn("B35=233 ", text)
-        self.assertIn("B60=78 ", text)
-        self.assertIn("B61=236 ", text)
-        self.assertIn("B62=83 ", text)
-        self.assertIn("B63=240 ", text)
+        payload = "\n".join(extra_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        steps = 0
+        max_steps = 50_000_000
+        while steps < max_steps:
+            if sys_obj.cpu.halted:
+                break
+            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys_obj.run_batch(min(100_000, max_steps - steps))
+            steps += max(batch, 1)
 
-    def test_sha3_512_convenience_word(self):
-        """SHA3-512 convenience word produces correct digest for 'abc'."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE h-buf 64 ALLOT",
-            "msg 3 h-buf SHA3-512",
-            '."  H0=" h-buf C@ .',
-            '."  H1=" h-buf 1 + C@ .',
-            '."  H2=" h-buf 2 + C@ .',
-            '."  H3=" h-buf 3 + C@ .',
-            '."  B32=" h-buf 32 + C@ .',
-            '."  B63=" h-buf 63 + C@ .',
-        ])
-        # First 4 bytes of SHA3-512("abc")
-        self.assertIn("H0=183 ", text)
-        self.assertIn("H1=81 ", text)
-        self.assertIn("H2=133 ", text)
-        self.assertIn("H3=11 ", text)
-        # Byte 32 and byte 63
-        self.assertIn("B32=16 ", text)
-        self.assertIn("B63=240 ", text)
+        return uart_text(buf), sys_obj
 
-    def test_shake128_abc(self):
-        """SHAKE128('abc', 32) first 4 bytes = 88, 129, 9, 45."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE out 32 ALLOT",
-            "msg 3 out 32 SHAKE128",
-            '."  H0=" out C@ .',
-            '."  H1=" out 1 + C@ .',
-            '."  H2=" out 2 + C@ .',
-            '."  H3=" out 3 + C@ .',
-        ])
-        self.assertIn("H0=88 ", text)
-        self.assertIn("H1=129 ", text)
-        self.assertIn("H2=9 ", text)
-        self.assertIn("H3=45 ", text)
+    @staticmethod
+    def _scratch_probe_lines(family):
+        """Build Forth helpers that poison and fully compare one family."""
+        if family == "sha3":
+            spans = (
+                ("HMAC-IPAD", 136), ("HMAC-OPAD", 136),
+                ("HMAC-INNER", 32), ("HMAC-KEY", 32),
+                ("_HKDF-ZERO-SALT", 32), ("_HKDF-T", 32),
+            )
+            variables = (
+                "_HMAC-PAD-PTR", "_HMAC-XBYTE", "_HMAC-OUT",
+                "_HMAC-KEY-PTR", "_HMAC-KEY-LEN",
+                "_HMAC-MSG-PTR", "_HMAC-MSG-LEN",
+                "_HKDF-PRK-PTR", "_HKDF-INFO-PTR", "_HKDF-INFO-LEN",
+                "_HKDF-OUT-PTR", "_HKDF-REMAIN", "_HKDF-TPREV-LEN",
+                "_HKDF-COUNTER",
+            )
+            probe_name = "H3-SCRATCH-DIRTY?"
+            poison_name = "POISON-H3-SCRATCH"
+        elif family == "sha256":
+            spans = (
+                ("HMAC256-IPAD", 64), ("HMAC256-OPAD", 64),
+                ("HMAC256-INNER", 32), ("HMAC256-KEY", 32),
+                ("_HKDF256-ZERO-SALT", 32), ("_HKDF256-T", 32),
+            )
+            variables = (
+                "_HMAC256-PAD-PTR", "_HMAC256-XBYTE", "_HMAC256-OUT",
+                "_HMAC256-KEY-PTR", "_HMAC256-KEY-LEN",
+                "_HMAC256-MSG-PTR", "_HMAC256-MSG-LEN",
+                "_HKDF256-PRK-PTR", "_HKDF256-INFO-PTR",
+                "_HKDF256-INFO-LEN", "_HKDF256-OUT-PTR",
+                "_HKDF256-REMAIN", "_HKDF256-TPREV-LEN",
+                "_HKDF256-COUNTER",
+            )
+            probe_name = "H256-SCRATCH-DIRTY?"
+            poison_name = "POISON-H256-SCRATCH"
+        else:
+            raise ValueError(f"unknown HMAC/HKDF family: {family}")
 
-    def test_shake256_abc(self):
-        """SHAKE256('abc', 32) first 4 bytes = 72, 51, 102, 96."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE out 32 ALLOT",
-            "msg 3 out 32 SHAKE256",
-            '."  H0=" out C@ .',
-            '."  H1=" out 1 + C@ .',
-            '."  H2=" out 2 + C@ .',
-            '."  H3=" out 3 + C@ .',
-        ])
-        self.assertIn("H0=72 ", text)
-        self.assertIn("H1=51 ", text)
-        self.assertIn("H2=102 ", text)
-        self.assertIn("H3=96 ", text)
-
-    def test_shake256_restores_mode(self):
-        """SHAKE256 restores SHA3-256 mode after use."""
-        text = self._run_kdos([
-            "CREATE msg 3 ALLOT",
-            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
-            "CREATE out 32 ALLOT",
-            "msg 3 out 32 SHAKE256",
-            '."  MODE=" SHA3-MODE@ .',     # should be 0 again
-        ])
-        self.assertIn("MODE=0 ", text)
-
-
-class TestSHA3Streaming(_KDOSTestBase):
-    """Tests for SHAKE-STREAM and SHA3-SQUEEZE-NEXT (§36 roadmap)."""
-
-    # Reference: hashlib.shake_256(b"abc").digest(96)
-    # Block 0 (bytes 0-31):   [0]=72, [1]=51, [31]=57
-    # Block 1 (bytes 32-63):  [32]=213, [33]=161, [63]=228
-    # Block 2 (bytes 64-95):  [64]=19, [65]=133, [95]=120
-
-    def _setup_shake256_abc(self):
-        """Set up SHAKE256 state absorbing b'abc', finalize."""
-        return [
-            'CREATE msg 3 ALLOT',
-            '97 msg C!  98 msg 1 + C!  99 msg 2 + C!',   # 'a', 'b', 'c'
-            'SHAKE256-MODE SHA3-MODE!',
-            'SHA3-INIT',
-            'msg 3 SHA3-UPDATE',
-            'CREATE _final-tmp 32 ALLOT',
-            '_final-tmp SHA3-FINAL',     # triggers FINAL + reads first 32 bytes
+        lines = [
+            "CREATE WIPE-ZERO 136 ALLOT  WIPE-ZERO 136 0 FILL",
+            ": WIPE-SPAN-DIRTY? ( addr len -- flag )"
+            " WIPE-ZERO SWAP VERIFY ;",
+            f": {probe_name} ( -- flag )",
         ]
+        first = True
+        for name, length in spans:
+            suffix = "" if first else " OR"
+            lines.append(f"  {name} {length} WIPE-SPAN-DIRTY?{suffix}")
+            first = False
+        for name in variables:
+            lines.append(f"  {name} @{'' if first else ' OR'}")
+            first = False
+        lines.append(";")
+        lines.append(f": {poison_name} ( -- )")
+        for name, length in spans:
+            lines.append(f"  {name} {length} 90 FILL")
+        for name in variables:
+            lines.append(f"  90 {name} !")
+        lines.append(";")
+        return lines
 
-    def test_squeeze_next_basic(self):
-        """SHA3-SQUEEZE-NEXT permutes and gives new DOUT content."""
-        setup = self._setup_shake256_abc()
-        setup.extend([
-            # Read first byte from DOUT (should be byte 0 of SHAKE256("abc"))
-            '."  B0=" _final-tmp C@ .',
-            # Now SQUEEZE-NEXT: permutes, refills DOUT
-            'SHA3-SQUEEZE-NEXT',
-            # Read first byte of next block
-            'CREATE _blk1 32 ALLOT',
-            '_blk1 SHA3-DOUT@',
-            '."  B32=" _blk1 C@ .',
-        ])
-        text = self._run_kdos(setup)
-        self.assertIn("B0=72 ", text)     # byte 0 of SHAKE256("abc")
-        self.assertIn("B32=213 ", text)   # byte 32
+    @staticmethod
+    def _hkdf_expand_reference(prk, info, length, digestmod):
+        import hmac
 
-    def test_shake_stream_3_blocks(self):
-        """SHAKE-STREAM reads 3 blocks (96 bytes) of XOF output."""
-        setup = self._setup_shake256_abc()
-        setup.extend([
-            'CREATE sbuf 96 ALLOT',
-            'sbuf 96 0 FILL',
-            'sbuf 3 SHAKE-STREAM',
-            # Verify block 0
-            '."  S0=" sbuf C@ .',           # byte 0 = 72
-            '."  S1=" sbuf 1 + C@ .',       # byte 1 = 51
-            '."  S31=" sbuf 31 + C@ .',     # byte 31 = 57
-            # Verify block 1
-            '."  S32=" sbuf 32 + C@ .',     # byte 32 = 213
-            '."  S33=" sbuf 33 + C@ .',     # byte 33 = 161
-            '."  S63=" sbuf 63 + C@ .',     # byte 63 = 228
-            # Verify block 2
-            '."  S64=" sbuf 64 + C@ .',     # byte 64 = 19
-            '."  S65=" sbuf 65 + C@ .',     # byte 65 = 133
-            '."  S95=" sbuf 95 + C@ .',     # byte 95 = 120
-        ])
-        text = self._run_kdos(setup)
-        self.assertIn("S0=72 ", text)
-        self.assertIn("S1=51 ", text)
-        self.assertIn("S31=57 ", text)
-        self.assertIn("S32=213 ", text)
-        self.assertIn("S33=161 ", text)
-        self.assertIn("S63=228 ", text)
-        self.assertIn("S64=19 ", text)
-        self.assertIn("S65=133 ", text)
-        self.assertIn("S95=120 ", text)
+        result = bytearray()
+        previous = b""
+        counter = 1
+        while len(result) < length:
+            previous = hmac.new(
+                prk, previous + info + bytes((counter,)), digestmod
+            ).digest()
+            result.extend(previous)
+            counter += 1
+        return bytes(result[:length])
 
-    def test_shake_stream_1_block(self):
-        """SHAKE-STREAM with 1 block matches FINAL output."""
-        setup = self._setup_shake256_abc()
-        setup.extend([
-            'CREATE sbuf 32 ALLOT',
-            'sbuf 1 SHAKE-STREAM',
-            # Should match first 32 bytes (same as FINAL output)
-            '."  F0=" _final-tmp C@ .',
-            '."  S0=" sbuf C@ .',
-            '."  F31=" _final-tmp 31 + C@ .',
-            '."  S31=" sbuf 31 + C@ .',
+    def test_one_shot_wrappers_and_shake_stream(self):
+        """All wrappers return status and SHAKE-STREAM crosses two windows."""
+        text = self._run_kdos([
+            "CREATE abc 3 ALLOT",
+            "97 abc C! 98 abc 1 + C! 99 abc 2 + C!",
+            "CREATE h256 32 ALLOT",
+            "CREATE h512 64 ALLOT",
+            "CREATE x128 96 ALLOT",
+            "CREATE x256 96 ALLOT",
+            "CREATE stream 96 ALLOT",
+            '."  H256-ST=" abc 3 h256 SHA3 .',
+            '."  H512-ST=" abc 3 h512 SHA3-512 .',
+            '."  X128-ST=" abc 3 x128 96 SHAKE128 .',
+            '."  X256-ST=" abc 3 x256 96 SHAKE256 .',
+            '."  STREAM-B=" SHAKE256-MODE SHA3-BEGIN .',
+            '."  STREAM-U=" abc 3 SHA3-UPDATE .',
+            '."  STREAM-F=" SHAKE-FINAL .',
+            '."  STREAM-ST=" stream 3 SHAKE-STREAM .',
+            '."  H256-0=" h256 C@ .',
+            '."  H256-31=" h256 31 + C@ .',
+            '."  H512-0=" h512 C@ .',
+            '."  H512-63=" h512 63 + C@ .',
+            '."  X128-0=" x128 C@ .',
+            '."  X128-31=" x128 31 + C@ .',
+            '."  X128-32=" x128 32 + C@ .',
+            '."  X128-63=" x128 63 + C@ .',
+            '."  X128-64=" x128 64 + C@ .',
+            '."  X128-95=" x128 95 + C@ .',
+            '."  X256-0=" x256 C@ .',
+            '."  X256-31=" x256 31 + C@ .',
+            '."  X256-32=" x256 32 + C@ .',
+            '."  X256-63=" x256 63 + C@ .',
+            '."  X256-64=" x256 64 + C@ .',
+            '."  X256-95=" x256 95 + C@ .',
+            '."  STREAM-0=" stream C@ .',
+            '."  STREAM-31=" stream 31 + C@ .',
+            '."  STREAM-32=" stream 32 + C@ .',
+            '."  STREAM-63=" stream 63 + C@ .',
+            '."  STREAM-64=" stream 64 + C@ .',
+            '."  STREAM-95=" stream 95 + C@ .',
+            ".SHA3-STATUS",
         ])
-        text = self._run_kdos(setup)
-        # Both should have byte 0 = 72
-        self.assertIn("F0=72 ", text)
-        self.assertIn("S0=72 ", text)
-        self.assertIn("F31=57 ", text)
-        self.assertIn("S31=57 ", text)
+        for marker in (
+            "H256-ST", "H512-ST", "X128-ST", "X256-ST",
+            "STREAM-B", "STREAM-U", "STREAM-F", "STREAM-ST",
+        ):
+            self.assertIn(f"{marker}=0 ", text)
 
-    def test_squeeze_next_multiple(self):
-        """Multiple SHA3-SQUEEZE-NEXT calls produce distinct blocks."""
-        setup = self._setup_shake256_abc()
-        setup.extend([
-            'CREATE b1 32 ALLOT',
-            'CREATE b2 32 ALLOT',
-            # Block 1 (bytes 32-63): squeeze first
-            'SHA3-SQUEEZE-NEXT',
-            'b1 SHA3-DOUT@',
-            # Block 2 (bytes 64-95): squeeze again
-            'SHA3-SQUEEZE-NEXT',
-            'b2 SHA3-DOUT@',
-            '."  B1-0=" b1 C@ .',     # byte 32 = 213
-            '."  B2-0=" b2 C@ .',     # byte 64 = 19
-        ])
-        text = self._run_kdos(setup)
-        self.assertIn("B1-0=213 ", text)
-        self.assertIn("B2-0=19 ", text)
+        vectors = {
+            "H256": hashlib.sha3_256(b"abc").digest(),
+            "H512": hashlib.sha3_512(b"abc").digest(),
+            "X128": hashlib.shake_128(b"abc").digest(96),
+            "X256": hashlib.shake_256(b"abc").digest(96),
+            "STREAM": hashlib.shake_256(b"abc").digest(96),
+        }
+        for name, offsets in (
+            ("H256", (0, 31)),
+            ("H512", (0, 63)),
+            ("X128", (0, 31, 32, 63, 64, 95)),
+            ("X256", (0, 31, 32, 63, 64, 95)),
+            ("STREAM", (0, 31, 32, 63, 64, 95)),
+        ):
+            for offset in offsets:
+                self._assert_byte(
+                    text, f"{name}-{offset}", vectors[name][offset]
+                )
+        self.assertIn("SHA3: idle", text)
 
-    def test_dout_read_idempotent(self):
-        """SHA3-DOUT@ can read DOUT multiple times without changing state."""
-        setup = self._setup_shake256_abc()
-        setup.extend([
-            'CREATE r1 32 ALLOT',
-            'CREATE r2 32 ALLOT',
-            'r1 SHA3-DOUT@',
-            'r2 SHA3-DOUT@',
-            '."  R1=" r1 C@ .',
-            '."  R2=" r2 C@ .',
+    def test_zero_lengths_and_first_failure_are_status_bearing(self):
+        """Zero spans ignore pointers; failures preserve output and clear."""
+        text = self._run_kdos([
+            "CREATE empty-hash 32 ALLOT",
+            "CREATE bad-fixed 32 ALLOT bad-fixed 32 165 FILL",
+            "CREATE bad-shake 64 ALLOT bad-shake 64 165 FILL",
+            "CREATE abc 3 ALLOT",
+            "97 abc C! 98 abc 1 + C! 99 abc 2 + C!",
+            '."  ZE=" -1 0 empty-hash SHA3 .',
+            '."  ZX=" -1 0 -1 0 SHAKE128 .',
+            '."  BAD-SRC=" -1 1 bad-fixed SHA3 .',
+            '."  BAD-OUTLEN=" abc 3 bad-shake -1 SHAKE256 .',
+            '."  SB=" SHAKE256-MODE SHA3-BEGIN .',
+            '."  SU=" abc 3 SHA3-UPDATE .',
+            '."  SF=" SHAKE-FINAL .',
+            '."  BAD-BLOCKS=" bad-shake -1 SHAKE-STREAM .',
+            '."  EMPTY-0=" empty-hash C@ .',
+            '."  BF0=" bad-fixed C@ .',
+            '."  BX0=" bad-shake C@ .',
+            '."  STATUSES=" CRYPTO-OK . CRYPTO-UNSUPPORTED .'
+            " CRYPTO-STATE . CRYPTO-RANGE . CRYPTO-PROTECTED ."
+            " CRYPTO-TIMEOUT . CRYPTO-HARDWARE .",
+            '."  CLEAR=" SHA3-CLEAR .',
+            ".SHA3-STATUS",
         ])
-        text = self._run_kdos(setup)
-        # Both reads should produce the same byte
-        self.assertIn("R1=72 ", text)
-        self.assertIn("R2=72 ", text)
+        self.assertIn("ZE=0 ", text)
+        self.assertIn("ZX=0 ", text)
+        self.assertIn("BAD-SRC=3 ", text)
+        self.assertIn("BAD-OUTLEN=3 ", text)
+        self.assertIn("BAD-BLOCKS=3 ", text)
+        for marker in ("SB", "SU", "SF", "CLEAR"):
+            self.assertIn(f"{marker}=0 ", text)
+        self.assertIn(f"EMPTY-0={hashlib.sha3_256(b'').digest()[0]} ", text)
+        self.assertIn("BF0=165 ", text)
+        self.assertIn("BX0=165 ", text)
+        self.assertIn("STATUSES=0 1 2 3 4 5 6 ", text)
+        self.assertIn("SHA3: idle", text)
+
+    def test_hmac_hkdf_lock9_contention_preserves_status_precedence(self):
+        """SHA3 capability wins; the SHA-256 family reports lock busy."""
+        def remove_sha3_and_contend_lock9(sys_obj):
+            sys_obj.sysinfo.crypto_caps = 0
+            sys_obj.sysinfo._regs[0x60] = 0
+            # The fixture executes only requester 0.  Seed a distinct owner
+            # directly so its nonblocking attempts observe genuine contention
+            # without waking a worker core.
+            sys_obj.spinlock.locked[9] = True
+            sys_obj.spinlock.owner[9] = 1
+
+        text, sys_obj = self._run_kdos_inspected([
+            "VARIABLE D0  DEPTH D0 !",
+            '."  CAPS=" CRYPTO-CAPS@ .',
+            '."  H3=" -1 1 -1 1 -1 HMAC .',
+            '."  K3E=" -1 1 -1 1 -1 HKDF-EXTRACT .',
+            '."  K3X=" -1 -1 1 1 -1 HKDF-EXPAND .',
+            '."  H256=" -1 1 -1 1 -1 HMAC-SHA256 .',
+            '."  K256E=" -1 1 -1 1 -1 HKDF-SHA256-EXTRACT .',
+            '."  K256X=" -1 -1 1 1 -1 HKDF-SHA256-EXPAND .',
+            '."  DEPTH-OK=" DEPTH D0 @ = .',
+        ], mutate_system=remove_sha3_and_contend_lock9)
+
+        self.assertIn("CAPS=0 ", text)
+        for marker in ("H3", "K3E", "K3X"):
+            self.assertIn(f"{marker}=1 ", text)  # CRYPTO-UNSUPPORTED
+        for marker in ("H256", "K256E", "K256X"):
+            self.assertIn(f"{marker}=1 ", text)  # SHA256-STATE
+        self.assertIn("DEPTH-OK=-1 ", text)
+        self.assertTrue(sys_obj.spinlock.locked[9])
+        self.assertEqual(sys_obj.spinlock.owner[9], 1)
+
+    def test_hmac_hkdf_release_and_wipe_on_success_and_early_failure(self):
+        """Public wrappers erase every scratch byte/cell before unlock."""
+        success_lines = self._scratch_probe_lines("sha3") + [
+            "CREATE WIPE-PRK 32 ALLOT",
+            ": INIT-WIPE-PRK 32 0 DO I WIPE-PRK I + C! LOOP ;",
+            "INIT-WIPE-PRK",
+            "CREATE WIPE-INFO 3 ALLOT",
+            "1 WIPE-INFO C! 2 WIPE-INFO 1 + C! 3 WIPE-INFO 2 + C!",
+            "CREATE WIPE-OUT 33 ALLOT",
+            "POISON-H3-SCRATCH",
+            '."  SUCCESS=" WIPE-PRK WIPE-INFO 3 33 WIPE-OUT'
+            " HKDF-EXPAND .",
+            '."  SUCCESS-DIRTY=" H3-SCRATCH-DIRTY? .',
+        ]
+        success_text, success_sys = self._run_kdos_inspected(success_lines)
+        self.assertIn("SUCCESS=0 ", success_text)
+        self.assertIn("SUCCESS-DIRTY=0 ", success_text)
+        self.assertFalse(success_sys.spinlock.locked[9])
+        self.assertEqual(success_sys.spinlock.owner[9], -1)
+
+        failure_lines = self._scratch_probe_lines("sha256") + [
+            "CREATE FAIL-PRK 32 ALLOT  FAIL-PRK 32 17 FILL",
+            "CREATE FAIL-OUT 1 ALLOT  165 FAIL-OUT C!",
+            "POISON-H256-SCRATCH",
+            # Length is rejected before inspecting or publishing the
+            # deliberately undersized destination.
+            '."  FAILURE=" FAIL-PRK 0 0 8161 FAIL-OUT'
+            " HKDF-SHA256-EXPAND .",
+            '."  FAILURE-DIRTY=" H256-SCRATCH-DIRTY? .',
+            '."  FAILURE-OUT=" FAIL-OUT C@ .',
+        ]
+        failure_text, failure_sys = self._run_kdos_inspected(failure_lines)
+        self.assertIn("FAILURE=2 ", failure_text)
+        self.assertIn("FAILURE-DIRTY=0 ", failure_text)
+        self.assertIn("FAILURE-OUT=165 ", failure_text)
+        self.assertFalse(failure_sys.spinlock.locked[9])
+        self.assertEqual(failure_sys.spinlock.owner[9], -1)
+
+    def test_long_hmac_keys_match_sha3_and_sha256_known_answers(self):
+        """Keys beyond each hash block size are normalized per HMAC."""
+        import hmac
+
+        message = b"checkpoint-2"
+        sha3_expected = hmac.new(
+            bytes(range(137)), message, hashlib.sha3_256
+        ).hexdigest().upper()
+        sha256_expected = hmac.new(
+            bytes(range(65)), message, hashlib.sha256
+        ).hexdigest().upper()
+        text = self._run_kdos([
+            "CREATE LONG-H3 137 ALLOT",
+            ": INIT-LONG-H3 137 0 DO I LONG-H3 I + C! LOOP ;",
+            "INIT-LONG-H3",
+            "CREATE LONG-H256 65 ALLOT",
+            ": INIT-LONG-H256 65 0 DO I LONG-H256 I + C! LOOP ;",
+            "INIT-LONG-H256",
+            "CREATE LONG-OUT-H3 32 ALLOT",
+            "CREATE LONG-OUT-H256 32 ALLOT",
+            '."  LONG-H3-ST=" LONG-H3 137 S" checkpoint-2"'
+            " LONG-OUT-H3 HMAC .",
+            '."  LONG-H256-ST=" LONG-H256 65 S" checkpoint-2"'
+            " LONG-OUT-H256 HMAC-SHA256 .",
+            '."  LONG-H3-DIGEST=" LONG-OUT-H3 32 .SHA3',
+            '."  LONG-H256-DIGEST=" LONG-OUT-H256 32 .SHA3',
+        ])
+        self.assertIn("LONG-H3-ST=0 ", text)
+        self.assertIn("LONG-H256-ST=0 ", text)
+        self.assertIn(f"LONG-H3-DIGEST={sha3_expected}", text)
+        self.assertIn(f"LONG-H256-DIGEST={sha256_expected}", text)
+
+    def test_hkdf_expand_bounds_aliases_and_multiblock_known_answers(self):
+        """Expand rejects bounds/aliases atomically and streams three blocks."""
+        prk = bytes(range(32))
+        info = b"checkpoint-2-info"
+        sha3_expected = self._hkdf_expand_reference(
+            prk, info, 65, hashlib.sha3_256
+        ).hex().upper()
+        sha256_expected = self._hkdf_expand_reference(
+            prk, info, 65, hashlib.sha256
+        ).hex().upper()
+        text = self._run_kdos([
+            "CREATE EXPAND-PRK 32 ALLOT",
+            "CREATE EXPAND-PRK-REF 32 ALLOT",
+            ": INIT-EXPAND-PRK 32 0 DO"
+            " I EXPAND-PRK I + C! I EXPAND-PRK-REF I + C! LOOP ;",
+            "INIT-EXPAND-PRK",
+            "CREATE ALIAS-INFO 17 ALLOT",
+            "CREATE ALIAS-INFO-REF 17 ALLOT",
+            ": INIT-ALIAS-INFO 17 0 DO"
+            " I 160 + ALIAS-INFO I + C!"
+            " I 160 + ALIAS-INFO-REF I + C! LOOP ;",
+            "INIT-ALIAS-INFO",
+            "CREATE REJECT-H3 32 ALLOT  REJECT-H3 32 165 FILL",
+            "CREATE REJECT-H256 32 ALLOT  REJECT-H256 32 165 FILL",
+            "CREATE REJECT-REF 32 ALLOT  REJECT-REF 32 165 FILL",
+            # No 8160-byte output is allocated: the scalar limit must win
+            # before either undersized sentinel destination is inspected.
+            '."  LIMIT-H3=" EXPAND-PRK 0 0 8161 REJECT-H3 HKDF-EXPAND .',
+            '."  LIMIT-H256=" EXPAND-PRK 0 0 8161 REJECT-H256'
+            " HKDF-SHA256-EXPAND .",
+            '."  LIMIT-H3-UNCHANGED=" REJECT-H3 REJECT-REF 32 VERIFY .',
+            '."  LIMIT-H256-UNCHANGED="'
+            " REJECT-H256 REJECT-REF 32 VERIFY .",
+            '."  ALIAS-H3-PRK=" EXPAND-PRK ALIAS-INFO 17 16'
+            " EXPAND-PRK HKDF-EXPAND .",
+            '."  ALIAS-H3-INFO=" EXPAND-PRK ALIAS-INFO 17 8'
+            " ALIAS-INFO 4 + HKDF-EXPAND .",
+            '."  ALIAS-H256-PRK=" EXPAND-PRK ALIAS-INFO 17 16'
+            " EXPAND-PRK HKDF-SHA256-EXPAND .",
+            '."  ALIAS-H256-INFO=" EXPAND-PRK ALIAS-INFO 17 8'
+            " ALIAS-INFO 4 + HKDF-SHA256-EXPAND .",
+            '."  PRK-UNCHANGED=" EXPAND-PRK EXPAND-PRK-REF 32 VERIFY .',
+            '."  INFO-UNCHANGED=" ALIAS-INFO ALIAS-INFO-REF 17 VERIFY .',
+            "CREATE EXPAND-H3 65 ALLOT",
+            "CREATE EXPAND-H256 65 ALLOT",
+            '."  EXPAND-H3-ST=" EXPAND-PRK S" checkpoint-2-info"'
+            " 65 EXPAND-H3 HKDF-EXPAND .",
+            '."  EXPAND-H256-ST=" EXPAND-PRK S" checkpoint-2-info"'
+            " 65 EXPAND-H256 HKDF-SHA256-EXPAND .",
+            '."  EXPAND-H3-DIGEST=" EXPAND-H3 65 .SHA3',
+            '."  EXPAND-H256-DIGEST=" EXPAND-H256 65 .SHA3',
+        ])
+        self.assertIn("LIMIT-H3=3 ", text)
+        self.assertIn("LIMIT-H256=2 ", text)
+        self.assertIn("LIMIT-H3-UNCHANGED=0 ", text)
+        self.assertIn("LIMIT-H256-UNCHANGED=0 ", text)
+        for marker in ("ALIAS-H3-PRK", "ALIAS-H3-INFO"):
+            self.assertIn(f"{marker}=3 ", text)
+        for marker in ("ALIAS-H256-PRK", "ALIAS-H256-INFO"):
+            self.assertIn(f"{marker}=2 ", text)
+        self.assertIn("PRK-UNCHANGED=0 ", text)
+        self.assertIn("INFO-UNCHANGED=0 ", text)
+        self.assertIn("EXPAND-H3-ST=0 ", text)
+        self.assertIn("EXPAND-H256-ST=0 ", text)
+        self.assertIn(f"EXPAND-H3-DIGEST={sha3_expected}", text)
+        self.assertIn(f"EXPAND-H256-DIGEST={sha256_expected}", text)
+
+    def test_shake_stream_preflights_overflow_and_cross_end_atomically(self):
+        """Whole-stream preflight preserves a valid prefix and clears state."""
+        text = self._run_kdos([
+            '."  OVERFLOW-BEGIN=" SHAKE256-MODE SHA3-BEGIN .',
+            '."  OVERFLOW-FINAL=" SHAKE-FINAL .',
+            # Bit 59 would be lost by blocks*32 in one machine cell.
+            '."  OVERFLOW-ST=" -1 576460752303423488 SHAKE-STREAM .',
+            '."  OVERFLOW-IDLE=" SHA3-STATUS@ 3 AND .',
+            "VARIABLE CROSS-END",
+            "EXT-MEM-BASE EXT-MEM-SIZE + 16 - CROSS-END !",
+            "CROSS-END @ 16 165 FILL",
+            "CREATE CROSS-REF 16 ALLOT  CROSS-REF 16 165 FILL",
+            '."  CROSS-BEGIN=" SHAKE128-MODE SHA3-BEGIN .',
+            '."  CROSS-FINAL=" SHAKE-FINAL .',
+            # Two blocks cross the advertised external-memory end.  The
+            # first 16 bytes are valid and must remain untouched.
+            '."  CROSS-ST=" CROSS-END @ 2 SHAKE-STREAM .',
+            '."  CROSS-UNCHANGED=" CROSS-END @ CROSS-REF 16 VERIFY .',
+            '."  CROSS-IDLE=" SHA3-STATUS@ 3 AND .',
+            '."  REUSE-BEGIN=" SHAKE256-MODE SHA3-BEGIN .',
+            '."  REUSE-CLEAR=" SHA3-CLEAR .',
+        ])
+        for marker in (
+            "OVERFLOW-BEGIN", "OVERFLOW-FINAL",
+            "CROSS-BEGIN", "CROSS-FINAL", "REUSE-BEGIN", "REUSE-CLEAR",
+        ):
+            self.assertIn(f"{marker}=0 ", text)
+        self.assertIn("OVERFLOW-ST=3 ", text)
+        self.assertIn("OVERFLOW-IDLE=0 ", text)
+        self.assertIn("CROSS-ST=3 ", text)
+        self.assertIn("CROSS-UNCHANGED=0 ", text)
+        self.assertIn("CROSS-IDLE=0 ", text)
 
 
 class TestBIOSEntropyFill(unittest.TestCase):
@@ -16108,14 +16715,16 @@ class TestPQExchange(_KDOSTestBase):
         setup.extend([
             'CREATE ct 768 ALLOT',
             'CREATE ss1 32 ALLOT',
-            'X25519-PUB kpk ct ss1 PQ-EXCHANGE-INIT',
+            '."  INIT-ST=" X25519-PUB kpk ct ss1 PQ-EXCHANGE-INIT .',
             'CREATE ss2 32 ALLOT',
-            'X25519-PUB ct ksk ss2 PQ-EXCHANGE-RESP',
+            '."  RESP-ST=" X25519-PUB ct ksk ss2 PQ-EXCHANGE-RESP .',
             ': CMP32 32 0 DO OVER I + C@ OVER I + C@ <>'
             ' IF 2DROP 0 UNLOOP EXIT THEN LOOP 2DROP 1 ;',
             'ss1 ss2 CMP32 IF ."  PQ-MATCH" THEN',
         ])
         text = self._run_kdos(setup)
+        self.assertIn("INIT-ST=0 ", text)
+        self.assertIn("RESP-ST=0 ", text)
         self.assertIn("PQ-MATCH", text)
 
     def test_hybrid_nonzero_secret(self):
@@ -16124,11 +16733,12 @@ class TestPQExchange(_KDOSTestBase):
         setup.extend([
             'CREATE ct 768 ALLOT',
             'CREATE ss 32 ALLOT  ss 32 0 FILL',
-            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '."  INIT-ST=" X25519-PUB kpk ct ss PQ-EXCHANGE-INIT .',
             ': any-nz? 0 32 0 DO OVER I + C@ OR LOOP NIP ;',
             'ss any-nz? IF ."  SS-NONZERO" THEN',
         ])
         text = self._run_kdos(setup)
+        self.assertIn("INIT-ST=0 ", text)
         self.assertIn("SS-NONZERO", text)
 
     def test_hybrid_ct_nonzero(self):
@@ -16137,11 +16747,12 @@ class TestPQExchange(_KDOSTestBase):
         setup.extend([
             'CREATE ct 768 ALLOT  ct 768 0 FILL',
             'CREATE ss 32 ALLOT',
-            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '."  INIT-ST=" X25519-PUB kpk ct ss PQ-EXCHANGE-INIT .',
             ': ct-nz? 0 32 0 DO OVER I + C@ OR LOOP NIP ;',
             'ct ct-nz? IF ."  CT-NONZERO" THEN',
         ])
         text = self._run_kdos(setup)
+        self.assertIn("INIT-ST=0 ", text)
         self.assertIn("CT-NONZERO", text)
 
     def test_kem_status_after_exchange(self):
@@ -16150,10 +16761,11 @@ class TestPQExchange(_KDOSTestBase):
         setup.extend([
             'CREATE ct 768 ALLOT',
             'CREATE ss 32 ALLOT',
-            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '."  INIT-ST=" X25519-PUB kpk ct ss PQ-EXCHANGE-INIT .',
             'KEM-STATUS@ ."  ST=" .',
         ])
         text = self._run_kdos(setup, max_steps=2_000_000_000)
+        self.assertIn("INIT-ST=0 ", text)
         self.assertIn("ST=2 ", text)
 
 
@@ -16195,9 +16807,10 @@ class TestSQuote(_KDOSTestBase):
         text = self._run_kdos([
             '_PQ-CAT 64 0 FILL',
             'CREATE dout 32 ALLOT',
-            'dout PQ-DERIVE',
+            '."  DERIVE-ST=" dout PQ-DERIVE .',
             'dout C@ ."  B0=" .',
         ])
+        self.assertIn("DERIVE-ST=0 ", text)
         self.assertIn("B0=", text)
 
 
@@ -16245,7 +16858,7 @@ class TestKDOSHKDF(_KDOSTestBase):
     def test_hkdf_extract_basic(self):
         """HKDF-EXTRACT produces correct PRK from salt + IKM."""
         lines = self._HKDF_SETUP + [
-            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT DROP",
             '." P0=" hkdf-prk C@ .',
             '." P1=" hkdf-prk 1 + C@ .',
             '." P2=" hkdf-prk 2 + C@ .',
@@ -16260,7 +16873,7 @@ class TestKDOSHKDF(_KDOSTestBase):
     def test_hkdf_extract_null_salt(self):
         """HKDF-EXTRACT with null salt uses 32 zero bytes."""
         lines = self._HKDF_SETUP + [
-            "0 0 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "0 0 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT DROP",
             '." N0=" hkdf-prk C@ .',
             '." N1=" hkdf-prk 1 + C@ .',
         ]
@@ -16271,7 +16884,7 @@ class TestKDOSHKDF(_KDOSTestBase):
     def test_hkdf_expand_32(self):
         """HKDF-EXPAND produces correct 32-byte OKM."""
         lines = self._HKDF_SETUP + [
-            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT DROP",
             "CREATE hkdf-info 13 ALLOT",
             ": fill-info",
             "  116 hkdf-info 0 + C!",      # t
@@ -16289,7 +16902,7 @@ class TestKDOSHKDF(_KDOSTestBase):
             "  100 hkdf-info 12 + C!",     # d
             ";",
             "fill-info",
-            "hkdf-prk hkdf-info 13 32 hkdf-okm HKDF-EXPAND",
+            "hkdf-prk hkdf-info 13 32 hkdf-okm HKDF-EXPAND DROP",
             '." E0=" hkdf-okm C@ .',
             '." E1=" hkdf-okm 1 + C@ .',
             '." E2=" hkdf-okm 2 + C@ .',
@@ -16304,7 +16917,7 @@ class TestKDOSHKDF(_KDOSTestBase):
     def test_hkdf_expand_48_multiblock(self):
         """HKDF-EXPAND to 48 bytes spans two HMAC blocks."""
         lines = self._HKDF_SETUP + [
-            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT DROP",
             "CREATE hkdf-info 13 ALLOT",
             ": fill-info",
             "  116 hkdf-info 0 + C!",
@@ -16322,7 +16935,7 @@ class TestKDOSHKDF(_KDOSTestBase):
             "  100 hkdf-info 12 + C!",
             ";",
             "fill-info",
-            "hkdf-prk hkdf-info 13 48 hkdf-okm HKDF-EXPAND",
+            "hkdf-prk hkdf-info 13 48 hkdf-okm HKDF-EXPAND DROP",
             '." M0=" hkdf-okm C@ .',
             '." M1=" hkdf-okm 1 + C@ .',
             '." M32=" hkdf-okm 32 + C@ .',
@@ -16340,7 +16953,7 @@ class TestKDOSHKDF(_KDOSTestBase):
             "CREATE zero-salt 32 ALLOT",
             "zero-salt 32 0 FILL",
             'CREATE empty-ikm 1 ALLOT',
-            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT",
+            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT DROP",
             '." Z0=" hkdf-prk C@ .',
             '." Z1=" hkdf-prk 1 + C@ .',
         ]
@@ -16354,9 +16967,9 @@ class TestKDOSHKDF(_KDOSTestBase):
             "CREATE zero-salt 32 ALLOT",
             "zero-salt 32 0 FILL",
             'CREATE empty-ikm 1 ALLOT',
-            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT",
+            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT DROP",
             'CREATE empty-info 1 ALLOT',
-            "hkdf-prk empty-info 0 16 hkdf-okm HKDF-EXPAND",
+            "hkdf-prk empty-info 0 16 hkdf-okm HKDF-EXPAND DROP",
             '." I0=" hkdf-okm C@ .',
             '." I1=" hkdf-okm 1 + C@ .',
             '." I2=" hkdf-okm 2 + C@ .',
@@ -16390,7 +17003,7 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf HASH",
+            "msg 3 h-buf HASH DROP",
             '."  H0=" h-buf C@ .',           # 0x3a = 58  (same as SHA3 "abc")
             '."  H1=" h-buf 1 + C@ .',       # 0x98 = 152
         ])
@@ -16465,7 +17078,7 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "test-key 32 msg 3 h-buf HMAC",
+            "test-key 32 msg 3 h-buf HMAC DROP",
             '."  M0=" h-buf C@ .',            # 99
             '."  M1=" h-buf 1 + C@ .',        # 47
             '."  M2=" h-buf 2 + C@ .',        # 97
@@ -16481,7 +17094,7 @@ class TestKDOSCrypto(_KDOSTestBase):
         text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
             "CREATE msg 1 ALLOT",    # dummy addr for 0-length
             "CREATE h-buf 32 ALLOT",
-            "test-key 32 msg 0 h-buf HMAC",
+            "test-key 32 msg 0 h-buf HMAC DROP",
             '."  M0=" h-buf C@ .',            # 80
             '."  M1=" h-buf 1 + C@ .',        # 171
             '."  M2=" h-buf 2 + C@ .',        # 22
@@ -16499,8 +17112,8 @@ class TestKDOSCrypto(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h1 32 ALLOT",
             "CREATE h2 32 ALLOT",
-            "test-key 32 msg 3 h1 HMAC",
-            "test-key 32 msg 3 h2 HMAC",
+            "test-key 32 msg 3 h1 HMAC DROP",
+            "test-key 32 msg 3 h2 HMAC DROP",
             '."  VH=" h1 h2 32 VERIFY .',     # 0 = equal
         ])
         self.assertIn("VH=0 ", text)
@@ -16513,8 +17126,8 @@ class TestKDOSCrypto(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h1 32 ALLOT",
             "CREATE h2 32 ALLOT",
-            "test-key 32 msg 3 h1 HMAC",
-            "key2 32 msg 3 h2 HMAC",
+            "test-key 32 msg 3 h1 HMAC DROP",
+            "key2 32 msg 3 h2 HMAC DROP",
             '."  VD=" h1 h2 32 VERIFY .',     # -1 = different
         ])
         self.assertIn("VD=-1 ", text)
@@ -32051,218 +32664,54 @@ class TestKDOSWInput(_KDOSTestBase):
 
 
 # ===========================================================================
-#  WOTS+ Chain Accelerator Tests
+#  Checkpoint-2 retired WOTS reservation
 # ===========================================================================
 
-class TestWotsChainAccel(unittest.TestCase):
-    """Tests for the WOTS+ chain accelerator (MMIO 0x8A0–0x8BF)."""
+class TestCheckpoint2WotsReservation(unittest.TestCase):
+    """The old direct WOTS prototype is decoded but unadvertised and inert."""
 
-    @staticmethod
-    def _reference_chain(seed: bytes, adrs: bytearray, buf: bytearray,
-                         steps: int, start: int) -> bytes:
-        """Compute reference WOTS+ chain using hashlib SHAKE-256."""
-        import hashlib
-        for s in range(steps):
-            step_idx = start + s
-            adrs[28] = 0
-            adrs[29] = 0
-            adrs[30] = (step_idx >> 8) & 0xFF
-            adrs[31] = step_idx & 0xFF
-            h = hashlib.shake_256(seed + bytes(adrs) + bytes(buf))
-            buf = bytearray(h.digest(16))
-        return bytes(buf)
-
-    def _make_wots(self, mem_size: int = 4096) -> tuple:
-        """Create a WotsChainAccel with attached memory."""
-        mem = bytearray(mem_size)
-        dev = WotsChainAccel()
-        dev.attach_mem(mem)
-        return dev, mem
-
-    def _write_addr32(self, dev, offset: int, addr: int):
-        """Write a 32-bit address LE across 4 consecutive byte registers."""
-        dev.write8(offset + 0, addr & 0xFF)
-        dev.write8(offset + 1, (addr >> 8) & 0xFF)
-        dev.write8(offset + 2, (addr >> 16) & 0xFF)
-        dev.write8(offset + 3, (addr >> 24) & 0xFF)
-
-    def _run_chain(self, dev, mem, seed_addr, adrs_addr, input_addr,
-                   steps, start):
-        """Program registers, trigger GO, return status."""
-        self._write_addr32(dev, 0x00, seed_addr)
-        self._write_addr32(dev, 0x04, adrs_addr)
-        self._write_addr32(dev, 0x08, input_addr)
-        dev.write8(0x0C, steps)
-        dev.write8(0x0D, start)
-        dev.write8(0x0E, 1)  # GO
-        return dev.read8(0x0E)
-
-    # -- Basic status lifecycle --------------------------------------------
-
-    def test_idle_status(self):
-        """Fresh device reads status=0 (idle)."""
-        dev, _ = self._make_wots()
-        self.assertEqual(dev.read8(0x0E), 0)
-
-    def test_done_status(self):
-        """After execution, status reads 2 (done)."""
-        dev, mem = self._make_wots()
-        # Plant minimal data
-        seed = bytes(range(16))
-        adrs = bytes(range(32))
-        inp = bytes(range(16))
-        mem[0:16] = seed
-        mem[100:132] = adrs
-        mem[200:216] = inp
-        status = self._run_chain(dev, mem, 0, 100, 200, 1, 0)
-        self.assertEqual(status, 2, "status should be 2 (done)")
-
-    # -- Single-step chain -------------------------------------------------
-
-    def test_single_step_matches_reference(self):
-        """1-step chain matches reference SHAKE-256 computation."""
-        dev, mem = self._make_wots()
-
-        seed = bytes(range(16))
-        adrs = bytearray(range(32))
-        inp = bytearray(b'\xAA' * 16)
-        seed_addr, adrs_addr, inp_addr = 0, 64, 128
-
-        mem[seed_addr:seed_addr+16] = seed
-        mem[adrs_addr:adrs_addr+32] = adrs
-        mem[inp_addr:inp_addr+16] = inp
-
-        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
-                                    steps=1, start=0)
-
-        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 1, 0)
-
-        # Read DOUT
-        dout = bytes(dev.read8(0x10 + i) for i in range(16))
-        self.assertEqual(dout, ref, "DOUT should match reference")
-
-    # -- Multi-step chain --------------------------------------------------
-
-    def test_multi_step_chain(self):
-        """5-step chain matches reference."""
-        dev, mem = self._make_wots()
-
-        seed = b'\xDE\xAD' * 8
-        adrs = bytearray(b'\x00' * 32)
-        inp = bytearray(b'\x42' * 16)
-        seed_addr, adrs_addr, inp_addr = 0, 32, 80
-
-        mem[seed_addr:seed_addr+16] = seed
-        mem[adrs_addr:adrs_addr+32] = adrs
-        mem[inp_addr:inp_addr+16] = inp
-
-        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
-                                    steps=5, start=0)
-
-        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 5, 0)
-
-        dout = bytes(dev.read8(0x10 + i) for i in range(16))
-        self.assertEqual(dout, ref)
-
-    def test_chain_with_nonzero_start(self):
-        """Chain with start=3 matches reference (ADRS mutation check)."""
-        dev, mem = self._make_wots()
-
-        seed = b'\xFF' * 16
-        adrs = bytearray(b'\x11' * 32)
-        inp = bytearray(b'\x00' * 16)
-        seed_addr, adrs_addr, inp_addr = 0, 32, 80
-
-        mem[seed_addr:seed_addr+16] = seed
-        mem[adrs_addr:adrs_addr+32] = adrs
-        mem[inp_addr:inp_addr+16] = inp
-
-        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
-                                    steps=4, start=3)
-
-        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 4, 3)
-
-        dout = bytes(dev.read8(0x10 + i) for i in range(16))
-        self.assertEqual(dout, ref)
-
-    # -- Max steps ---------------------------------------------------------
-
-    def test_max_15_steps(self):
-        """15-step chain (max) completes correctly."""
-        dev, mem = self._make_wots()
-
-        seed = b'\x01' * 16
-        adrs = bytearray(b'\x02' * 32)
-        inp = bytearray(b'\x03' * 16)
-        seed_addr, adrs_addr, inp_addr = 0, 32, 80
-
-        mem[seed_addr:seed_addr+16] = seed
-        mem[adrs_addr:adrs_addr+32] = adrs
-        mem[inp_addr:inp_addr+16] = inp
-
-        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
-                                    steps=15, start=0)
-
-        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 15, 0)
-
-        dout = bytes(dev.read8(0x10 + i) for i in range(16))
-        self.assertEqual(dout, ref)
-
-    # -- Edge cases --------------------------------------------------------
-
-    def test_zero_steps_stays_idle(self):
-        """0 steps → status stays idle (no execution)."""
-        dev, mem = self._make_wots()
-        mem[0:16] = b'\xAA' * 16
-        mem[32:64] = b'\xBB' * 32
-        mem[80:96] = b'\xCC' * 16
-        self._run_chain(dev, mem, 0, 32, 80, 0, 0)
-        self.assertEqual(dev.read8(0x0E), 0, "0 steps → idle")
-
-    def test_steps_clamped_to_4bit(self):
-        """Steps register only uses low 4 bits (mask 0x0F)."""
-        dev, mem = self._make_wots()
-        seed = b'\x10' * 16
-        adrs = bytearray(32)
-        inp = bytearray(16)
-        mem[0:16] = seed
-        mem[32:64] = adrs
-        mem[80:96] = inp
-
-        # Write 0xFF to steps — should clamp to 15
-        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
-                                    steps=15, start=0)
-        self._run_chain(dev, mem, 0, 32, 80, 0xFF, 0)
-
-        dout = bytes(dev.read8(0x10 + i) for i in range(16))
-        self.assertEqual(dout, ref)
-
-    # -- Cycle counter -----------------------------------------------------
-
-    def test_cycle_estimate(self):
-        """Cycle register reports nonzero after execution."""
-        dev, mem = self._make_wots()
-        mem[0:16] = b'\x00' * 16
-        mem[32:64] = b'\x00' * 32
-        mem[80:96] = b'\x00' * 16
-        self._run_chain(dev, mem, 0, 32, 80, 3, 0)
-        cycles_est = dev.read8(0x0F)
-        self.assertGreater(cycles_est, 0, "cycle estimate should be nonzero")
-
-    # -- Bus registration --------------------------------------------------
-
-    def test_wots_on_bus(self):
-        """WOTS accelerator is reachable via DeviceBus in make_system()."""
-        sys = make_system()
-        bus = sys.bus
-        dev, off = bus.find_device(WOTS_BASE)
-        self.assertIsNotNone(dev, "WOTS device should be registered on bus")
-        self.assertEqual(dev.name, "WotsChain")
-        self.assertEqual(off, 0)
-
-    def test_wots_base_constant(self):
-        """WOTS_BASE matches expected MMIO offset."""
+    def test_capability_clear_and_python_reservation_inert(self):
+        """The micro-core bus reservation neither runs nor touches memory."""
+        sys_obj = make_system()
         self.assertEqual(WOTS_BASE, 0x08A0)
+        self.assertEqual(sys_obj.sysinfo.crypto_caps & (1 << 3), 0)
+        device, offset = sys_obj.bus.find_device(WOTS_BASE)
+        self.assertIs(device, sys_obj.wots)
+        self.assertEqual(offset, 0)
+
+        start = 0x2000
+        before = bytes(range(64))
+        sys_obj.cpu.mem[start:start + len(before)] = before
+        for register, value in (
+            (0x00, start & 0xFF), (0x01, (start >> 8) & 0xFF),
+            (0x04, (start + 16) & 0xFF),
+            (0x05, ((start + 16) >> 8) & 0xFF),
+            (0x08, (start + 48) & 0xFF),
+            (0x09, ((start + 48) >> 8) & 0xFF),
+            (0x0C, 15), (0x0D, 7), (0x0E, 1),
+        ):
+            device.write8(register, value)
+        self.assertEqual(device.read8(0x0E), 0)
+        self.assertEqual(device.read8(0x0F), 0)
+        self.assertEqual(
+            bytes(device.read8(0x10 + i) for i in range(16)),
+            bytes(16),
+        )
+        self.assertEqual(bytes(sys_obj.cpu.mem[start:start + len(before)]), before)
+
+    def test_full_core_direct_go_is_inert(self):
+        """Legacy GO cannot claim SHA3, report done, or publish DOUT."""
+        sys_obj = make_system()
+        wots_mmio = MMIO_START + WOTS_BASE
+        sha3_status = MMIO_START + 0x0781
+        sys_obj.cpu.mem_write8(wots_mmio + 0x0C, 15)
+        sys_obj.cpu.mem_write8(wots_mmio + 0x0E, 1)
+        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x0E), 0)
+        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x0F), 0)
+        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x10), 0)
+        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x1F), 0)
+        self.assertEqual(sys_obj.cpu.mem_read8(sha3_status), 0)
+        self.assertEqual(sys_obj.cpu._cs.crypto_wots_status(), 0)
 
 
 # ===========================================================================
@@ -32569,213 +33018,34 @@ class TestBusTimeout(unittest.TestCase):
                          "I flag should be cleared by trap entry")
 
 
-class TestSHA3LockAndBusErr(unittest.TestCase):
-    """Tests for §6c hardening: SHA3 lock checks, BUS-ERR CSR, WOTS guards.
+class TestBusErrCSR(unittest.TestCase):
+    """BUS-ERR CSR coverage retained independently of retired SHA/WOTS code."""
 
-    Verifies:
-    - SHA3 STATUS bit 2 (ext_locked) reflects WOTS active state
-    - WOTS-STATUS@ reads accelerator status register
-    - BUS-ERR@ / BUS-ERR-CLR CSR access words
-    - SHA3-INIT lock guard prevents SHA3 reset while WOTS holds the engine
-    - Python WotsChainAccel status lifecycle
-    """
-
-    # -- Helper: run a WOTS chain via MMIO to put WOTS in done state -------
-
-    @staticmethod
-    def _trigger_wots_via_mmio(sys_obj):
-        """Program and trigger a minimal WOTS chain via MMIO.
-        After this, WOTS status = 2 (done), SHA3 ext_locked = 1.
-        Data is pre-planted at 0x2000/0x2100/0x2200."""
-        cpu = sys_obj.cpu
-        seed_addr, adrs_addr, inp_addr = 0x2000, 0x2100, 0x2200
-        for i in range(16):
-            cpu.mem_write8(seed_addr + i, i)
-        for i in range(32):
-            cpu.mem_write8(adrs_addr + i, i)
-        for i in range(16):
-            cpu.mem_write8(inp_addr + i, 0xAA)
-
-        wots_mmio = MMIO_START + WOTS_BASE
-        code = assemble(f"""
-            ; Write seed_addr LE to WOTS+0x00..0x03
-            ldi64 r7, {wots_mmio}
-            ldi r0, {seed_addr & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(seed_addr >> 8) & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(seed_addr >> 16) & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(seed_addr >> 24) & 0xFF}
-            st.b r7, r0
-
-            ; Write adrs_addr LE to WOTS+0x04..0x07
-            ldi64 r7, {wots_mmio + 4}
-            ldi r0, {adrs_addr & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(adrs_addr >> 8) & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(adrs_addr >> 16) & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(adrs_addr >> 24) & 0xFF}
-            st.b r7, r0
-
-            ; Write input_addr LE to WOTS+0x08..0x0B
-            ldi64 r7, {wots_mmio + 8}
-            ldi r0, {inp_addr & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(inp_addr >> 8) & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(inp_addr >> 16) & 0xFF}
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, {(inp_addr >> 24) & 0xFF}
-            st.b r7, r0
-
-            ; steps=1 at WOTS+0x0C, start=0 at WOTS+0x0D
-            ldi64 r7, {wots_mmio + 0x0C}
-            ldi r0, 1
-            st.b r7, r0
-            addi r7, 1
-            ldi r0, 0
-            st.b r7, r0
-
-            ; GO at WOTS+0x0E
-            addi r7, 1
-            ldi r0, 1
-            st.b r7, r0
-
-            ; Read WOTS status into r2
-            ld.b r2, r7
-
-            ; Read SHA3 STATUS into r3
-            ldi64 r1, {MMIO_START + 0x0780 + 0x01}
-            ld.b r3, r1
-
+    def test_bus_err_csr_read(self):
+        """CSRR 0x5A returns 0 when no bus errors have occurred."""
+        sys_obj = make_system()
+        code = assemble("""
+            csrr r5, 0x5A
             halt
         """)
         sys_obj.load_binary(0, code)
         sys_obj.boot()
         run_until(sys_obj)
-
-    # -- C++ CryptoDevices ext_locked tests --------------------------------
-
-    def test_sha3_ext_locked_when_wots_idle(self):
-        """SHA3 STATUS bit 2 = 0 when WOTS is idle (status=0)."""
-        sys = make_system()
-        code = assemble("halt")
-        sys.load_binary(0, code)
-        sys.boot()
-        run_until(sys)
-        # Read SHA3 STATUS via C++ crypto_read8
-        val = sys.cpu._cs.crypto_read8(0x0780 + 0x01)
-        self.assertFalse(val & 0x04,
-                         f"ext_locked should be 0 when WOTS idle, got {val:#04x}")
-
-    def test_sha3_ext_locked_after_wots(self):
-        """SHA3 STATUS bit 2 = 1 after WOTS chain (status=2)."""
-        sys = make_system()
-        self._trigger_wots_via_mmio(sys)
-        # WOTS should be done
-        wots_st = sys.cpu._cs.crypto_wots_status()
-        self.assertEqual(wots_st, 2, "WOTS status should be 2 (done)")
-        # SHA3 STATUS bit 2 should be set
-        sha3_val = sys.cpu._cs.crypto_read8(0x0780 + 0x01)
-        self.assertTrue(sha3_val & 0x04,
-                        f"ext_locked should be 1 after WOTS chain, got {sha3_val:#04x}")
-
-    def test_sha3_ext_locked_via_cpu_mmio(self):
-        """CPU MMIO read of SHA3 STATUS reflects ext_locked correctly."""
-        sys = make_system()
-        self._trigger_wots_via_mmio(sys)
-        # r2 = WOTS status, r3 = SHA3 STATUS (both read by the asm)
-        self.assertEqual(sys.cpu.regs[2], 2, "WOTS status=2")
-        self.assertTrue(sys.cpu.regs[3] & 0x04,
-                        f"SHA3 STATUS bit 2 via CPU MMIO should be set, got {sys.cpu.regs[3]:#04x}")
-
-    # -- WOTS STATUS tests -------------------------------------------------
-
-    def test_wots_status_idle(self):
-        """Fresh WOTS status is 0 (idle)."""
-        sys = make_system()
-        code = assemble(f"""
-            ldi64 r1, {MMIO_START + WOTS_BASE + 0x0E}
-            ld.b r3, r1
-            halt
-        """)
-        sys.load_binary(0, code)
-        sys.boot()
-        run_until(sys)
-        self.assertEqual(sys.cpu.regs[3], 0)
-
-    def test_wots_status_done(self):
-        """WOTS status = 2 after chain completes."""
-        sys = make_system()
-        self._trigger_wots_via_mmio(sys)
-        self.assertEqual(sys.cpu.regs[2], 2)
-
-    # -- BUS-ERR CSR tests -------------------------------------------------
-
-    def test_bus_err_csr_read(self):
-        """CSRR 0x5A returns 0 when no bus errors have occurred."""
-        sys = make_system()
-        code = assemble("""
-            csrr r5, 0x5A
-            halt
-        """)
-        sys.load_binary(0, code)
-        sys.boot()
-        run_until(sys)
-        self.assertEqual(sys.cpu.regs[5], 0)
+        self.assertEqual(sys_obj.cpu.regs[5], 0)
 
     def test_bus_err_csr_write(self):
-        """CSRW 0x5A (W1C) doesn't crash the CPU."""
-        sys = make_system()
+        """CSRW 0x5A (W1C) does not crash the CPU."""
+        sys_obj = make_system()
         code = assemble("""
             ldi64 r1, 0xFFFF_FFFF_FFFF_FFFF
             csrw 0x5A, r1
             csrr r5, 0x5A
             halt
         """)
-        sys.load_binary(0, code)
-        sys.boot()
-        run_until(sys)
-        self.assertEqual(sys.cpu.regs[5], 0)
-
-    # -- Python WotsChainAccel lifecycle -----------------------------------
-
-    def test_python_wots_status_lifecycle(self):
-        """Python WotsChainAccel: status 0 → 2 after execute."""
-        dev = WotsChainAccel()
-        mem = bytearray(4096)
-        dev.attach_mem(mem)
-        self.assertEqual(dev._status, 0)
-        self.assertEqual(dev.read8(0x0E), 0)
-
-        # Plant data and trigger
-        mem[0:16] = bytes(range(16))
-        mem[100:132] = bytes(range(32))
-        mem[200:216] = bytes([0xAA] * 16)
-        dev.write8(0x00, 0);  dev.write8(0x01, 0)
-        dev.write8(0x02, 0);  dev.write8(0x03, 0)
-        dev.write8(0x04, 100); dev.write8(0x05, 0)
-        dev.write8(0x06, 0);   dev.write8(0x07, 0)
-        dev.write8(0x08, 200); dev.write8(0x09, 0)
-        dev.write8(0x0A, 0);   dev.write8(0x0B, 0)
-        dev.write8(0x0C, 1)   # steps=1
-        dev.write8(0x0D, 0)   # start=0
-        dev.write8(0x0E, 1)   # GO
-
-        self.assertEqual(dev._status, 2)
-        self.assertEqual(dev.read8(0x0E), 2)
+        sys_obj.load_binary(0, code)
+        sys_obj.boot()
+        run_until(sys_obj)
+        self.assertEqual(sys_obj.cpu.regs[5], 0)
 
 
 if __name__ == "__main__":

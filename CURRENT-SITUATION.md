@@ -1,5 +1,10 @@
 # Megapad-64 — Current Situation
 
+> Historical snapshot: this document records the project as of 2026-03-07,
+> including the since-retired WOTS prototype. Current crypto behavior and
+> checkpoint status are defined by
+> [`docs/crypto-interface-contract.md`](docs/crypto-interface-contract.md).
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.

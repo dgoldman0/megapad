@@ -54,11 +54,11 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0500     │  Mailbox (IPI)       │ │
     │   0x0600     │  Spinlock            │ │
     │   0x0700     │  AES-256/128-GCM     │ │
-    │   0x0780     │  SHA-3 / SHAKE       │ │
+    │   0x0780     │  SHA-3/SHAKE/Keccak  │ │
     │   0x07E0     │  QoS Config          │ │
     │   0x0800     │  TRNG                │ │
     │   0x0880     │  Port I/O Bridge     │ │
-    │   0x08A0     │  WOTS+ Chain Accel   │ │
+    │   0x08A0     │  WOTS Reserved       │ │
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
     │   0x0A00     │  Framebuffer         │ │
@@ -110,13 +110,13 @@ device occupies a small range:
 | **System Info** | `+0x0300` | 112 bytes | Board ID, topology, memory layout, crypto capabilities, requester count |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
-| **Spinlock** | `+0x0600` | 32 implemented bytes | Hardware spinlocks (8 implemented locks, 4 bytes each; selected expansion uses the full 64-byte aperture) |
+| **Spinlock** | `+0x0600` | 64 bytes | 16 hardware locks, 4 bytes each; lock 8 is reserved by the checked MMIO crypto guard |
 | **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
-| **SHA-3/SHAKE** | `+0x0780` | 96 bytes | Existing Keccak hash/XOF front end; command and timing reconciliation is pending |
+| **SHA-3/SHAKE/raw Keccak** | `+0x0780` | 96 bytes | Checked hash/XOF streaming plus indexed caller-owned Keccak-f[1600] state |
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
-| **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | Prototype register block; integrated RTL DMA/Keccak execution is incomplete |
+| **WOTS reservation** | `+0x08A0` | 32 bytes | Inert unadvertised aperture; no public prototype BIOS words remain and the production implementation is pending |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
@@ -125,17 +125,27 @@ device occupies a small range:
 
 The crypto register, ownership, and capability assignments are normative in
 [`crypto-interface-contract.md`](crypto-interface-contract.md). System Info
-now extends through `+0x6F`; capability bit 0 advertises the complete
-reflected/raw CRC path. Bits 1 through 3 remain clear until their SHA3,
-raw-Keccak, and WOTS contracts land. The checked CRC path uses per-core BIOS
-owner records and the cluster's existing CRC transaction lock, so it does not
-depend on the later requester-aware spinlock work.
+extends through `+0x6F` and reports `CRYPTO_CAPS = 0x7` at checkpoint 2:
+bit 0 is reflected/raw CRC, bit 1 is checked SHA3/SHAKE streaming, and bit 2
+is raw Keccak-f[1600]. Bit 3 remains clear because the production WOTS
+sequencer is not complete. SHA3/SHAKE and raw Keccak share the portable
+lock-8 guard; checked CRC continues to use topology-sized BIOS owner records
+and the cluster's CRC transaction lock.
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter uses 6-/8-bit
 watchdogs with terminal counts 63/255 and response deadlines 64/256 clocks;
-on timeout it returns sentinel data (`0xDEAD_DEAD_DEAD_DEAD`), asserts
-`bus_err`, and fires `IRQX_BUS`.
+on timeout it completes the fabric response with sentinel data
+(`0xDEAD_DEAD_DEAD_DEAD`) and an error sideband. READY, data, error, and the
+faulting address follow the same latched requester through the full-core
+data/I-cache mux and the cluster winner demultiplexer. CPU scalar and
+instruction paths treat that qualified response as a synchronous,
+unmaskable `IRQX_BUS`: sentinel data cannot reach a destination register or
+cache line, normal completion side effects do not retire, and `TRAP_ADDR`
+records the failed access. A failure while reading an RTI frame, writing a
+trap frame, or loading its vector fails closed with interrupts disabled
+instead of recursively faulting or accepting a corrupt frame. The sticky
+`CSR_BUS_ERR` record remains available for reset-time diagnosis.
 In the emulator, unmapped MMIO offsets raise `BusError`, which the SoC
 layer converts to `TrapError(IVEC_BUS_FAULT)`.
 
@@ -337,7 +347,7 @@ CLUSTER_EN.
 | NUM_FULL | `+0x48` | 64-bit | varies | Number of full (major) cores |
 | VRAM_BASE | `+0x50` | 64-bit | `0xFF00_0000` | Dedicated VRAM base address |
 | VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
-| CRYPTO_CAPS | `+0x60` | 64-bit | `0x1` | Bit 0: reflected/raw CRC; all other currently defined bits are clear |
+| CRYPTO_CAPS | `+0x60` | 64-bit | `0x7` | Bit 0: reflected/raw CRC; bit 1: checked SHA3/SHAKE; bit 2: raw Keccak-f[1600]; bit 3 (WOTS) is clear |
 | NUM_BUS_PORTS | `+0x68` | 64-bit | varies | Exact weighted-arbiter requester count: full cores + clusters + NIC + disk |
 
 Byte reads return the corresponding little-endian byte. Halfword, word, and
@@ -486,13 +496,108 @@ zeroizes the bank before another TACC operation is admitted.
 | Block | Performance | Use Case |
 |-------|-------------|----------|
 | AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
-| SHA-3/SHAKE | 24-round Keccak service; front-end timing under reconciliation | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
+| SHA-3/SHAKE/raw Keccak | One bounded 24-round shared Keccak service | Checked SHA3-256/512, SHAKE128/256, and raw Keccak-f[1600] |
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
 | Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519, per-core ISA) |
 | NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
 | KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
 | TRNG | 64 bits / 2 cycles | Hardware true random number generator |
+
+### SHA-3/SHAKE and raw Keccak-f[1600]
+
+The shared Keccak front end occupies the exact half-open range
+`[+0x0780,+0x07E0)`. Offsets in this table are relative to `+0x0780`:
+
+| Offset | Register | Access | Contract |
+|--------|----------|--------|----------|
+| `+0x00` | CMD | byte write | Complete command byte; reads return zero |
+| `+0x01` | STATUS | byte read | Phase in bits 1:0, owner class in bits 3:2; bits 7:4 are zero |
+| `+0x02` | CTRL | byte read/write | Complete hash mode 0..3 |
+| `+0x03` | ERROR | byte read | Stable device error code |
+| `+0x08` | DIN | byte write | One streaming input byte |
+| `+0x10..+0x4F` | DOUT | byte or aligned qword read | One stable 64-byte output window |
+| `+0x50` | STATE_INDEX | byte read/write | Raw lane index 0..24; no auto-increment |
+| `+0x58..+0x5F` | STATE_DATA | byte or aligned qword read/write | Selected little-endian 64-bit raw lane |
+
+`+0x04..+0x07` and `+0x51..+0x57` are reserved. Halfword and word accesses,
+misaligned qwords, wrong-direction accesses, and operations crossing a
+register or the 96-byte aperture fault as one architectural access before
+mutation. `STATUS`, `ERROR`, and `CTRL` remain responsive while the round
+service is busy.
+
+| CTRL | Construction | Rate | Output |
+|------|--------------|------|--------|
+| `0` | SHA3-256 | 136 bytes | fixed 32 bytes |
+| `1` | SHA3-512 | 72 bytes | fixed 64 bytes |
+| `2` | SHAKE128 | 168 bytes | extendable |
+| `3` | SHAKE256 | 136 bytes | extendable |
+
+The complete command values are `1` INIT, `3` FINAL, `4` NEXT, `6`
+KECCAK_F1600, and `7` CLEAR. Values `0`, `2`, `5`, and `8..255` are
+reserved; there is no command-5 32-byte sliding window. A full-rate `DIN`
+write starts automatic permutation with bounded MMIO backpressure. `FINAL`
+uses SHA3 delimiter `0x06` or SHAKE delimiter `0x1F`; `NEXT` advances one
+sequential 64-byte SHAKE window. `CLEAR` aborts or acknowledges, wipes all
+state and visible output, and releases the MMIO owner.
+
+One accepted permutation/window operation leaves BUSY within 32 core clocks;
+CLEAR reaches idle within 64. BIOS permits 64 acknowledged status reads for
+a normal command and 128 for clear, with a terminal value on the last poll
+winning. Timeout maps to checked status 5; a clear timeout retains lock 8 and
+the software owner fields.
+
+The packed phase values are 0 IDLE, 1 BUSY, 2 DONE, and 3 ERROR. Owner values
+are 0 none, 1 MMIO sponge, 2 MMIO raw, and 3 WOTS. Thus the normal sponge
+states are `0x04..0x07`, raw states are `0x08..0x0B`, and WOTS busy is
+`0x0D`. Checkpoint 2 advertises only the sponge and raw paths. Device error
+codes are 1 invalid command, 2 owner/phase conflict, 3 invalid mode, 4 invalid
+state index, 5 internal round-service failure/timeout, and 6 unavailable
+feature.
+
+The hardware window is always 64 bytes, but the public BIOS
+`SHAKE-READ ( dst len -- status )` accepts only 0..32 bytes per call and
+tracks a logical cursor across windows. Fixed `SHA3-FINAL` stages and
+publishes exactly 32 bytes for SHA3-256 or 64 bytes for SHA3-512. The checked
+BIOS status namespace is `0` OK, `1` UNSUPPORTED, `2` STATE/OWNER, `3`
+RANGE, `4` PROTECTED, `5` TIMEOUT, and `6` HARDWARE/PROTOCOL. The public
+surface is `SHA3-BEGIN`, `SHA3-UPDATE`, `SHA3-FINAL`, `SHAKE-FINAL`,
+`SHAKE-READ`, `SHA3-CLEAR`, and `KECCAK-F1600`; `SHA3-STATUS@` and
+`SHA3-MODE@` are diagnostic reads only.
+
+Raw state consists of 25 little-endian 64-bit lanes with lane index
+`x + 5*y`:
+
+```text
+memory[8 * (x + 5*y) + b] = state[x + 5*y][8*b +: 8]
+```
+
+`KECCAK-F1600 ( state-200 -- status )` qualifies the complete in-place
+caller span, loads all lanes, performs exactly 24 rounds, stages all lanes,
+clears the device, and then publishes the 200-byte result. It does not absorb,
+pad, separate domains, squeeze, or reverse bytes. Failure leaves the caller
+image unchanged.
+
+### Portable MMIO crypto guard
+
+The spinlock bank is an exact 64-byte aperture containing 16 locks. Lock 8 is
+the crypto guard: acquire is `SPINLOCK_BASE + 0x20` and release is
+`SPINLOCK_BASE + 0x21`. The checked BIOS acquires it internally and records
+full-width `CRYPTO-OWNER-CORE` and `CRYPTO-OWNER-TASK` values. Owner
+publication and removal occur in saved-interrupt-state critical sections, so
+same-core task re-entry returns STATE/OWNER without releasing an outer
+transaction. A failed hardware quiescence retains the owner fields and lock
+fail-closed.
+
+The main bus carries requester-valid plus the architectural global core ID
+with the winning request and holds both stable through the response. A
+full-core port supplies its full-core ID. A cluster port supplies
+`CLUSTER_ID_BASE +` the latched winning microcore index, not the shared bus
+port number. Cluster-internal SHA traffic and DMA requesters are invalid.
+Invalid or out-of-range requesters receive acknowledged non-mutating spinlock
+responses, with acquire reported busy. Spinlock owner storage covers the
+complete `NUM_CORES` global topology independently of mailbox full-core
+capacity.
 
 ### Field ALU (GF(2²⁵⁵−19) Coprocessor)
 

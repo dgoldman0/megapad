@@ -479,7 +479,7 @@ that cover every layer of the system.
 | `TestKDOSCRC` | CRC-BUF, CRC32-BUF, CRC32C-BUF, CRC64-BUF |
 | `TestKDOSDiagnostics` | .DIAG, BIST-REPORT, TILE-REPORT, .PERF |
 | `TestKDOSAES` | AES-ENCRYPT, AES-DECRYPT, .AES-STATUS |
-| `TestKDOSSHA3` | SHA3, .SHA3-STATUS, .SHA3 |
+| `TestKDOSSHA3Checkpoint2` | Checked SHA3-256/512, SHAKE128/256, SHAKE-READ/SHAKE-STREAM, status propagation |
 | `TestKDOSCrypto` | HASH, HMAC, ENCRYPT, DECRYPT, VERIFY |
 | `TestDiskUtil` | `diskutil.py`: format, inject, read, list, delete, sample image builder |
 | `TestBIOSHardening` | FSLOAD edge cases (multi-sector, colon defs, dot-quote, nested evaluate, empty, comments-only, long line), error line context, stack underflow detection, EVALUATE depth limit, dictionary-full guard |
@@ -490,7 +490,6 @@ that cover every layer of the system.
 | `TestKDOSMulticore` | KDOS multicore: CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR, CORES |
 | `TestKDOSNetStack` | Full network stack: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP (32 tests) |
 | `TestSQuote` | S" string word tests |
-| `TestKDOSSHAKE` | SHAKE128/256 XOF, SHA3-SQUEEZE, SHA3-SQUEEZE-NEXT, SHAKE-STREAM |
 | `TestKDOSTRNG` | RANDOM, RANDOM8, SEED-RNG, RANDOM32, RANDOM16, RAND-RANGE |
 | `TestKDOSHKDF` | HKDF-Extract, HKDF-Expand, SHA-3 HMAC key derivation |
 | `TestKDOSTLSRecord` | TLS 1.3 record layer: content type, length, AES-GCM encrypt/decrypt |

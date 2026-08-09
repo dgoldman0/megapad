@@ -189,9 +189,9 @@ The largest rewrite — the 512-bit SIMD tile engine.
 
 | Step | Deliverable | Tests |
 |------|-------------|-------|
-| 6.1 | `mp64_aes.v` — AES-256-GCM | `tb_crypto` |
-| 6.2 | `mp64_sha3.v` — SHA-3 / Keccak | `tb_crypto` |
-| 6.3 | `mp64_crc.v` — CRC-32/64 | `tb_crypto` |
+| 6.1 | `mp64_aes.v` — AES-256-GCM | `tb_aes` |
+| 6.2 | `mp64_sha3.v` + `mp64_keccak_core.v` — SHA-3 / raw Keccak | `tb_sha3_keccak` |
+| 6.3 | `mp64_crc_isa.v` — CRC-32/64 ISA service | `tb_crc_isa` |
 | 6.4 | `mp64_trng.v` — TRNG (sim model + platform hook) | `tb_trng` |
 | 6.5 | `mp64_ntt.v` — NTT with Barrett reduction (no `%`) | `tb_ntt` |
 | 6.7 | `mp64_kem.v` — ML-KEM-512 | `tb_kem` |

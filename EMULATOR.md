@@ -10,8 +10,8 @@ and an interactive CLI monitor/debugger.
 > seven physical tile engines, seven 2,048-bit full-width TACCs,
 > 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile execution
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
-> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512, WOTS+ Chain
-> Accel), optional
+> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512) and an inert
+> reserved WOTS aperture, optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
 > UDP, TAP), full TCP/IP network stack through TLS 1.3, cooperative
 > multitasking (4-task PAUSE/BACKGROUND/BACKGROUND2/BACKGROUND3), and
@@ -136,7 +136,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `accel/mp64_accel.cpp` | 3,280 | C++ CPU core (pybind11) — 63× speedup over PyPy, SEP dispatch fast path, STXI/STXD.D |
 | `accel_wrapper.py` | 897 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 909 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 2,542 | 19 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, WOTS+ Chain Accel, Port I/O Bridge |
+| `devices.py` | 2,542 | 19 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, inert WOTS reservation, Port I/O Bridge |
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
 | `system.py` | 1,018 | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,557 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
@@ -187,7 +187,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0880` | 16 B | Port I/O Bridge (remap CSR — maps OUT/INP to MMIO targets) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
 | `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
-| `+0x08A0` | 32 B | WOTS+ Chain Accelerator (SPHINCS+ hash chain sequencer) |
+| `+0x08A0` | 32 B | Reserved inert WOTS aperture; production sequencer pending |
 | `+0x0A00` | 64 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
@@ -520,8 +520,14 @@ modulo-128 position that disagrees with the saved offset.
 `AES-STATUS@` `AES-DIN!` `AES-DOUT@` `AES-TAG@` `AES-TAG!`
 
 **SHA-3 / SHAKE**
-`SHA3-INIT` `SHA3-UPDATE` `SHA3-FINAL` `SHA3-STATUS@`
-`SHA3-MODE!` `SHA3-MODE@` `SHA3-SQUEEZE` `SHA3-SQUEEZE-NEXT`
+`SHA3-BEGIN` `SHA3-UPDATE` `SHA3-FINAL` `SHA3-STATUS@`
+`SHAKE-FINAL` `SHA3-MODE@` `SHAKE-READ` `SHA3-CLEAR`
+`KECCAK-F1600`
+
+The checked words return the common status 0..6; `SHA3-STATUS@` and
+`SHA3-MODE@` are diagnostic raw reads. The removed transaction words and the
+prototype WOTS BIOS words have no aliases. `CRYPTO_CAPS = 0x7` advertises
+CRC, SHA3/SHAKE, and raw Keccak; WOTS bit 3 remains clear.
 
 **TRNG**
 `RANDOM` `RANDOM8` `SEED-RNG` `ENTROPY-FILL` `ENTROPY-READY?` — the raw

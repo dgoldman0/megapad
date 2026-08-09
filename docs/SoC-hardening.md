@@ -1,10 +1,13 @@
 # SoC Hardening Roadmap
 
-Status: in progress. The WOTS block and SHA3/WOTS diagnostic guards recorded
-in §7 and §10 are prototypes, not completed portable hardware contracts; the
-integrated WOTS DMA/Keccak path is stubbed and the existing guard does not
-serialize cores. The selected replacement is pinned in
-[`crypto-interface-contract.md`](crypto-interface-contract.md).
+Status: the checkpoint-2 implementation is present for checked SHA3/SHAKE,
+raw Keccak, the portable crypto guard, and global requester identity. Focused
+native, RTL, integrated-SoC, and BIOS checks are green; the checkpoint gate
+still awaits the approval-gated KDOS and TLS/network source-load tests. The old
+WOTS sequencer and diagnostic words recorded in §7 and §10 are retired
+historical prototypes; the `+0x8A0..+0x8BF` aperture remains inert until the
+selected production WOTS design lands in checkpoint 3. The authoritative
+contract is [`crypto-interface-contract.md`](crypto-interface-contract.md).
 Last updated: 2026-08-09
 
 ---
@@ -1018,8 +1021,8 @@ the SoC fabric where the other MMIO decode logic already lives.
 
 **Priority: high — dominant bottleneck in SPHINCS+ post-quantum signing**
 **Topology: shared (wraps the existing SHA3/SHAKE engine)**
-**Status: prototype only — Python/native compute a chain, while integrated
-RTL uses zero-data DMA and disconnected SHA signals**
+**Status: historical prototype — retired at checkpoint 2; every integrated
+backend now keeps the reserved aperture inert**
 **Origin: Akashic blockchain team request (2026-03-07)**
 
 The numeric register map, 64-bit context address, errors, byte-only access,
@@ -1438,15 +1441,21 @@ Two watchdog counters in `mp64_bus.v`:
 
 On timeout:
 1. Bus returns sentinel data and asserts `bus_ack` to unblock the
-   requesting core.
+   requesting port.
 2. `bus_err` pulse fires (active for 1 cycle per timeout event).
 3. `bus_err_sticky` latch set — persists until cleared via W1C write
    to `CSR_BUS_ERR` (address `0x5A`).
-4. `IRQX_BUS` (priority 5: IPI > **bus** > timer > uart > nic) fires
-   on each core receiving the timeout.
+4. READY and ERROR travel through the same latched full-core data/I-cache
+   owner or cluster winner. The owning CPU takes synchronous `IRQX_BUS`
+   before sentinel data or normal completion can retire. This response fault
+   is independent of IE and asynchronous IPI/timer/UART/NIC priority.
+5. An error while accessing the trap frame or vector fails closed in HALT
+   with IE clear; it never recursively stacks another frame or consumes the
+   sentinel as architectural state.
 
 Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
-`mp64_cpu.v` (`irq_bus` input), `mp64_soc.v` (wiring).
+`mp64_core_bus_mux.v`, `mp64_icache.v`, `mp64_cpu.v`,
+`mp64_cpu_micro.v`, `mp64_cluster.v`, and `mp64_soc.v`.
 
 ### Emulator Solution
 
@@ -1460,7 +1469,10 @@ Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
 
 - **RTL:** `tb_bus_arbiter.v` — tests 8 (MMIO timeout) and 9
   (MEM timeout).  Verify sentinel data, bus_err pulse, sticky latch
-  set, W1C clear, bus recovery.  38/38 total tests passing.
+  set, W1C clear, bus recovery. Response-path qualification additionally
+  passes `tb_core_bus_mux` 11/11, `tb_icache` 93/93, `tb_cpu_smoke`
+  130/130, `tb_cpu_micro` 123/123, `tb_cluster` 198/198, and integrated
+  `tb_soc_smoke` 22/22.
 - **Python (TestBusTimeout, 6 tests):** unmapped read/write raises
   `BusError`, mapped device no error, CPU MMIO read/write traps to
   `IVEC_BUS_FAULT`, trap handler entry (flag_i cleared).
@@ -1469,7 +1481,7 @@ Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
 
 ## 10. BIOS SHA3/WOTS Diagnostic Prototype
 
-**Status: diagnostic behavior exists, but it is not a portable lock guard**
+**Status: historical diagnostic prototype — removed at checkpoint 2**
 
 The current guard tests inconsistent status bits, prints rather than returning
 a checked error, and cannot serialize cores because portable RTL hardwires the
@@ -2561,7 +2573,8 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 ### §7 — WOTS+ Chain Accelerator (MMIO 0x8A0)
 
-- [x] Prototype Python/native model and register block exist
+- [x] Three-pointer Python/native/RTL prototype retired
+- [x] Reserved 32-byte aperture is inert in every integrated backend
 - [x] Production numeric contract pinned in `crypto-interface-contract.md`
 - [ ] Real 64-bit Bank 0 DMA requester integrated
 - [ ] Shared Keccak service connected and arbitrated
@@ -2576,16 +2589,19 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 ### §9 — Bus Arbiter MMIO/MEM ACK Timeout
 
 - [x] RTL implemented (watchdog counter, `0xDEAD_DEAD` sentinel)
+- [x] READY/error response follows the latched requester and traps
+  synchronously before sentinel publication
+- [x] Trap-frame and vector response failures fail closed
 - [x] Emulator implemented
 - [x] Tests passing
 
 ### §10 — BIOS SHA3/WOTS Diagnostic Prototype
 
-- [x] Prototype diagnostic words and tests exist
+- [x] Prototype diagnostic words removed without compatibility aliases
 - [x] Portable guard allocation and requester contract pinned
-- [ ] True global requester identity propagated through RTL
-- [ ] Spinlock 8 and same-core full-width owner fields implemented
-- [ ] Checked status-returning BIOS surface and failure cleanup qualified
+- [x] True global requester identity propagated through RTL
+- [x] Spinlock 8 and same-core full-width owner fields implemented
+- [x] Checked status-returning BIOS surface and failure cleanup qualified
 
 ### Appendix A — Historical ISA Planning Details
 

@@ -357,28 +357,35 @@ cipher suite 0x1301 (TLS_AES_128_GCM_SHA256).
 **Interrupt**: `IRQX_AES` (vector 12) fires when a block is done, for
 interrupt-driven streaming.
 
-### 4.2 SHA-3 / SHAKE Accelerator
+### 4.2 SHA-3 / SHAKE / raw Keccak accelerator
 
-Hardware SHA-3 (Keccak) supporting SHA3-256, SHA3-512, SHAKE128,
-SHAKE256.
+The checkpoint-2 block occupies exactly `0x780..0x7DF` and supports
+SHA3-256, SHA3-512, SHAKE128, SHAKE256, and caller-owned raw
+Keccak-f[1600]. Its sponge and raw paths share one 24-round service.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| `SHA_CMD` | 0x780 | W | Mode (0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256) |
-| `SHA_STATUS` | 0x781 | R | Busy/done/squeeze-ready |
-| `SHA_DIN` | 0x790 | W | 64-bit data input (absorb) |
-| `SHA_DOUT` | 0x7A0 | R | 64-bit hash output (squeeze) |
-| `SHA_RATE` | 0x7A8 | R | Rate in bytes for current mode |
-| `SHA_CTRL` | 0x7A9 | W | Init/absorb/squeeze/pad commands |
+| `SHA_CMD` | 0x780 | W8 | 1=INIT, 3=FINAL, 4=NEXT64, 6=KECCAK-F1600, 7=CLEAR; all other values reject |
+| `SHA_STATUS` | 0x781 | R8 | Packed phase in bits 1:0 and owner class in bits 3:2 |
+| `SHA_CTRL` | 0x782 | R/W8 | Mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256 |
+| `SHA_ERROR` | 0x783 | R8 | Stable protocol/internal error code |
+| `SHA_DIN` | 0x788 | W8 | One streaming absorb byte; full-rate writes apply backpressure |
+| `SHA_DOUT[0..63]` | 0x790..0x7CF | R8/R64 | Stable 64-byte output window; qword reads must be aligned |
+| `SHA_STATE_INDEX` | 0x7D0 | R/W8 | Raw lane selector, 0 through 24 |
+| `SHA_STATE_DATA` | 0x7D8..0x7DF | R/W8/R/W64 | Selected raw 64-bit lane, little endian |
 
-**Data flow**: Software initializes mode, then feeds message data 8
-bytes at a time. Hardware runs Keccak-f[1600] (24 rounds) when the
-rate buffer is full. For SHAKE, software can squeeze arbitrary-length
-output.
+Reserved addresses, wrong directions, unsupported widths, misalignment, and
+cross-register or cross-window accesses fault atomically. Software selects a
+mode, issues INIT, feeds bytes through DIN, then uses FINAL for the first
+fixed/XOF window. SHAKE uses NEXT for subsequent sequential 64-byte windows
+and ends with CLEAR. Raw callers load all 25 lanes through STATE_INDEX and
+STATE_DATA, issue command 6, read the resulting lanes, and clear. The exact
+state machine, access-width rules, status encodings, and zeroization behavior
+are defined in the [crypto interface contract](crypto-interface-contract.md).
 
-**Performance target**: Keccak-f[1600] in 24 cycles (1 round/cycle),
-absorb 136 bytes (SHA3-256 rate) in ~41 cycles (24 rounds + 17
-writes).
+**Performance target**: Keccak-f[1600] in 24 cycles (1 round/cycle).
+Absorption accepts one byte per MMIO write and automatically invokes the
+shared round service whenever the selected rate fills.
 
 ### 4.3 CRC
 
@@ -574,6 +581,7 @@ Additions to the existing MMIO map:
 | **0x7E0** | **16B** | **QoS Config** |
 | **0x800** | **64B** | **TRNG** |
 | **0x840** | **128B** | *(free; Field ALU is EXT.CRYPTO)* |
+| **0x8A0** | **32B** | **Reserved inert WOTS aperture; production sequencer pending** |
 | **0x8C0** | **64B** | **NTT Engine** |
 | **0x900** | **64B** | **KEM (ML-KEM-512)** |
 | **0x940** | **32B** | *(free; SHA-2 is EXT.CRYPTO)* |

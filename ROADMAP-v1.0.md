@@ -53,7 +53,7 @@ FPGA bitstream).  The project is functionally a complete system.
 | Category | Modules | Key files |
 |----------|--------:|-----------|
 | Core | 8 | cpu, cpu_micro, alu, fp16_alu, icache, cluster, string, dict |
-| Crypto | 7 | sha3, sha256, aes, field_alu, ntt, kem, wots |
+| Crypto | 7 | sha3, Keccak core, sha256, aes, field_alu, ntt, kem |
 | Memory | 2 | memory (4-bank), extmem |
 | Bus | 1 | bus (arbiter + QoS + timeout) |
 | Peripherals | 7 | uart, timer, disk, nic, trng, rtc, mailbox (crc removed—now ISA) |
@@ -130,7 +130,10 @@ Full L2–L7 network stack, bottom-up:
 42. ✅ **Technology-agnostic RTL** — `rtl/prim/` abstractions,
     `rtl/target/xilinx7/` + `rtl/target/asic/` overrides
 
-### SoC Hardening (Items 0, 5-bridge, 7, 9, 10) — ✅ DONE
+### SoC Hardening (Items 0, 5-bridge, 7, 9, 10)
+
+Checkpoint-2 implementation landed; source-load qualification and production
+WOTS remain pending.
 
 Per `docs/SoC-hardening.md`:
 
@@ -139,9 +142,9 @@ Per `docs/SoC-hardening.md`:
 - §2 ✅ **EXT.STRING engine** — ISA extension (prefix F9), 5 sub-ops (CMOVE, CMOVE>, BFILL, BCOMP, BSRCH)
 - §3 ✅ **EXT.DICT engine** — ISA extension (prefix FA), 4 sub-ops (DFIND, DINS, DDEL, DCLR)
 - §5 ✅ **Port I/O bridge** — 1802 OUT/INP → MMIO remap, byte-serial DMA
-- §7 ✅ **WOTS+ chain accelerator** — DMA-read FSM, wraps SHA3, 5.3× chain speedup
+- §7 🔄 **WOTS+ chain accelerator** — old three-pointer prototype retired; production context/DMA/shared-Keccak sequencer remains checkpoint-3 work
 - §9 ✅ **Bus timeout** — MMIO/MEM ACK watchdog, sticky latch, W1C clear, `IVEC_BUS_FAULT`
-- §10 ✅ **BIOS SHA3/WOTS lock guards** — `SHA3-LOCKED?`, `WOTS-STATUS@`, `BUS-ERR@`, `BUS-ERR-CLR`
+- §10 ✅ **Checked SHA3/SHAKE/raw-Keccak guard** — global requester identity, lock 8, full-width owner records, and status-bearing BIOS words; prototype aliases removed
 
 ### Additional Completed Items
 
@@ -165,8 +168,8 @@ compile/interpret loop, dictionary operations, string operations,
 math (integer + 64-bit), control flow, defining words (VARIABLE,
 CONSTANT, VALUE, CREATE/DOES>, DEFER), memory ops, I/O, UART
 driver, timer driver, disk driver (MP64FS read/write + FSLOAD +
-FSSAVE), NIC driver (send/recv/DMA), crypto (AES, SHA3, SHA256,
-TRNG, Field ALU, NTT, KEM, WOTS), CRC, framebuffer, port I/O
+FSSAVE), NIC driver (send/recv/DMA), crypto (AES, SHA3/SHAKE/raw
+Keccak, SHA256, TRNG, Field ALU, NTT, KEM), CRC, framebuffer, port I/O
 bridge, multicore (IPI, spinlocks), trap handlers (including bus
 fault with ERR= diagnostic), auto-boot, STC compiler.
 
@@ -196,7 +199,8 @@ buffers, §19 Hash tables, §20 Module system.
   micro-clusters), device bus, IRQ routing
 - `devices.py`: 2,542 lines — 18 device classes (UART, Timer, Storage,
   SysInfo, NIC, Mailbox, Spinlock, KEM, CRC, NTT, Framebuffer, CppFBProxy,
-  CppTimerProxy, RTC, PortBridgeCSR, WotsChainAccel, DeviceBus, plus
+  CppTimerProxy, RTC, PortBridgeCSR, inert WotsChainAccel reservation,
+  DeviceBus, plus
   AES/SHA3/SHA256/TRNG/FieldALU in C++ accel)
 - `cli.py`: 1,557 lines — interactive monitor/debugger, `--run` auto-boot
 - `display.py`: 1,872 lines — pygame GUI with terminal + graphics tabs,
@@ -209,8 +213,8 @@ buffers, §19 Hash tables, §20 Module system.
 
 31,608 total lines across 84 Verilog files:
 - 36 portable modules (16,175 lines): CPU (full + micro), ALU, FP16 ALU,
-  I-cache, cluster, string engine, dictionary engine, SHA3, SHA256, AES,
-  field ALU, NTT, KEM, WOTS, tile engine, 4-bank memory, ext memory,
+  I-cache, cluster, string engine, dictionary engine, SHA3, Keccak core,
+  SHA256, AES, field ALU, NTT, KEM, tile engine, 4-bank memory, ext memory,
   bus arbiter (QoS + timeout), UART, timer, disk, NIC, CRC, TRNG, RTC,
   mailbox, SoC, top, primitives (SRAM, MUL, PLL, clkgate, rst_sync, ROM)
 - 4 headers (1,298 lines): defs, pkg, cpu_common, cpu_funcs

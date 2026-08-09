@@ -93,7 +93,7 @@ ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
 SCHEMA_VERSION = 12
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 9
+STATE_SCHEMA_VERSION = 10
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -1464,12 +1464,18 @@ def _core_state(cpu) -> dict:
 
 def _native_device_state(cpu) -> dict:
     cs = cpu._cs
+    sha3_readable_addresses = (
+        tuple(range(0x0780, 0x0784))
+        + (0x0788,)
+        + tuple(range(0x0790, 0x07D1))
+        + tuple(range(0x07D8, 0x07E0))
+    )
     crypto_windows = {
         "aes_0x0700_0x076f": _blob_summary(bytes(
             cs.crypto_read8(address) for address in range(0x0700, 0x0770)
         )),
-        "sha3_0x0780_0x07cf": _blob_summary(bytes(
-            cs.crypto_read8(address) for address in range(0x0780, 0x07D0)
+        "sha3_readable_0x0780_0x07df": _blob_summary(bytes(
+            cs.crypto_read8(address) for address in sha3_readable_addresses
         )),
         "wots_0x08a0_0x08bf": _blob_summary(bytes(
             cs.crypto_read8(address) for address in range(0x08A0, 0x08C0)
@@ -1826,7 +1832,6 @@ def _shared_device_state(system: MegapadSystem) -> dict:
             "status": int(wots._status),
             "last_cycles": int(wots._last_cycles),
             "output": _blob_summary(wots._dout),
-            "memory_attached": wots._mem is not None,
         },
     }
 

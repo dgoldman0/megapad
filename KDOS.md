@@ -125,7 +125,10 @@ PORTS                          \ List all port bindings
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 - **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
-- **SHA-3 / SHAKE**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@, SHA3-MODE!, SHA3-MODE@, SHA3-SQUEEZE, SHA3-SQUEEZE-NEXT
+- **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
+  SHA3-FINAL, SHAKE-FINAL, SHAKE-READ, SHA3-CLEAR, KECCAK-F1600, plus the
+  diagnostic SHA3-STATUS@ and SHA3-MODE@ reads. The removed transaction and
+  prototype WOTS BIOS words have no aliases.
 - **TRNG**: RANDOM, RANDOM8, SEED-RNG
 - **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW, GF-A!, GF-R@, GF-PRIME, LOAD-PRIME, FMUL-ADD-RAW
 - **NTT engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
@@ -185,7 +188,9 @@ PORTS                          \ List all port bindings
 - **§1.3 CRC Integration**: ISA-backed exact-length CRC buffer helpers
 - **§1.4 Hardware Diagnostics**: MEM-TEST, DEV-PROBE, SYS-CHECK — BIST infrastructure
 - **§1.5 AES-256-GCM**: AES-ENCRYPT / AES-DECRYPT via MMIO AES engine (9 tests)
-- **§1.6 SHA-3 / Keccak-256**: HASH / HMAC via MMIO SHA3 engine (10 tests)
+- **§1.6 SHA-3 / Keccak-256**: Checked HASH / HMAC / SHAKE via the shared
+  MMIO Keccak engine; focused coverage is present and its full KDOS source-load
+  execution remains approval-gated
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
 
@@ -549,10 +554,15 @@ The BIOS provides:
   SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
 * **AES-256-GCM**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!,
   AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
-* **SHA-3 / Keccak-256**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@
+* **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
+  SHA3-FINAL, SHAKE-FINAL, SHAKE-READ, SHA3-CLEAR, KECCAK-F1600, with
+  diagnostic SHA3-STATUS@ and SHA3-MODE@ reads. `CRYPTO_CAPS = 0x7`
+  advertises CRC, SHA3/SHAKE, and raw Keccak; WOTS remains unadvertised.
 * **CRC**: CRC32-BUF, CRC32C-BUF, CRC64-BUF, CRC32-STR, .CRC32
 
-All required BIOS extensions for KDOS are **complete** as of v1.0.
+All required BIOS extensions for KDOS are implemented as of v1.0. Final
+checkpoint-2 KDOS and TLS/network source-load qualification remains
+approval-gated.
 
 ---
 

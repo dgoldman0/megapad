@@ -168,6 +168,37 @@ boot:
     ldi64 r11, var_task_active
     str r11, r1               ; core 0 starts in foreground task context
 
+    ; The portable MMIO-crypto guard is a single machine-wide transaction.
+    ; Hardware spinlock 8 resets independently, while these full-width owner
+    ; fields and logical cursors must also be returned to their cold state on
+    ; every BIOS boot before checked SHA3/Keccak words can be observed.
+    ldi64 r11, var_crypto_owner_core
+    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF
+    str r11, r0
+    ldi r0, 0
+    ldi64 r11, var_crypto_owner_task
+    str r11, r0
+    ldi64 r11, var_crypto_owner_kind
+    str r11, r0
+    ldi64 r11, var_crypto_mode
+    str r11, r0
+    ldi64 r11, var_crypto_phase
+    str r11, r0
+    ldi64 r11, var_crypto_window_offset
+    str r11, r0
+
+    ; Wipe the complete 200-byte staging area used for digest, XOF, and raw
+    ; state publication.  It is private BIOS storage and never aliases a
+    ; caller-managed span.
+    ldi64 r11, crypto_scratch
+    ldi r12, 25
+.boot_crypto_scratch_clear:
+    str r11, r0
+    addi r11, 8
+    dec r12
+    cmpi r12, 0
+    brne .boot_crypto_scratch_clear
+
     ldi r1, 10
     ldi64 r11, var_base
     str r11, r1               ; BASE = 10
@@ -11251,6 +11282,20 @@ w_quit:
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
+    ; Checked SHA3/Keccak accesses use two private byte helpers.  A fault
+    ; saves the architectural end-of-instruction PC, so recognize only the
+    ; instruction immediately following either helper access.  Returning
+    ; through the helper with R0=HARDWARE/PROTOCOL skips the faulting access
+    ; exactly once and leaves every unrelated bus fault on the diagnostic
+    ; path below.  No mutable recovery flag is shared between cores.
+    ldn r0, r15                       ; saved end PC
+    ldi64 r1, .sha3_mmio_read8_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_sha3
+    ldi64 r1, .sha3_mmio_write8_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_sha3
+
     ; ---- Phase 9: capture diagnostics into stack before any calls ----
     ; Push order: addr (top), PSEL, T (bottom).  Print order: addr, PSEL, T.
     csrr r0, 0x08               ; T register
@@ -11309,6 +11354,10 @@ bus_fault_handler:
     ldi64 r11, quit_loop
     call.l r11
     halt
+
+.bus_fault_checked_sha3:
+    ldi r0, 6                         ; HARDWARE/PROTOCOL
+    rti
 
 ; =====================================================================
 ;  Software Trap Handler (Syscall Dispatcher)
@@ -13194,183 +13243,977 @@ w_aes_tag_store:
     ret.l
 
 ; =====================================================================
-;  SHA-3 (Keccak-256) Hardware Accelerator
+;  Checked SHA-3 / SHAKE / raw Keccak-f[1600]
 ; =====================================================================
-; SHA3 base = 0xFFFF_FF00_0000_0780
-;   CMD    +0x00 (W)  0=init, 1=finalize
-;   STATUS +0x01 (R)  0=idle, 2=done
-;   DIN    +0x08 (W)  byte input (auto-absorbs at rate)
-;   DOUT   +0x10 (R)  32-byte hash output
+; SHA3 base = 0xFFFF_FF00_0000_0780, exact size 96 bytes.
+;   CMD         +0x00 (W byte)  1 INIT, 3 FINAL, 4 NEXT, 6 F1600, 7 CLEAR
+;   STATUS      +0x01 (R byte)  phase[1:0] | owner[3:2]
+;   CTRL        +0x02 (RW byte) mode 0..3
+;   ERROR       +0x03 (R byte)
+;   DIN         +0x08 (W byte)
+;   DOUT        +0x10..+0x4F (R byte/qword), one stable 64-byte window
+;   STATE_INDEX +0x50 (RW byte), lane 0..24
+;   STATE_DATA  +0x58..+0x5F (RW byte/qword), selected little-endian lane
+;
+; Checked words use the shared status namespace:
+;   0 OK, 1 UNSUPPORTED, 2 STATE/OWNER, 3 RANGE, 4 PROTECTED,
+;   5 TIMEOUT, 6 HARDWARE/PROTOCOL.
+; Hardware spinlock 8 plus full-width owner fields serialize the complete
+; transaction.  Fixed hashes and one-shot raw permutations publish only after
+; command 7 proves the engine quiescent.  SHAKE retains the guard until CLEAR.
 
-; SHA3-INIT ( -- )  Initialize SHA3 state (current mode).
-;   §6c guard: aborts if SHA3 is locked by WOTS accelerator.
-w_sha3_init:
-    ; Check ext_locked (bit 2 of SHA3 STATUS)
-    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
+; Resolve the full current {COREID,TASK-ID}.  Returns R0=0 or STATE/OWNER.
+_crypto_current_identity:
+    csrr r7, 0x20
+    ldi64 r11, 0xFFFF_FF00_0000_0310  ; SysInfo NUM_CORES
+    ldn r0, r11
+    cmp r7, r0
+    lbrcs .crypto_identity_bad
+    ldi r12, 0
+    cmpi r7, 0
+    brne .crypto_identity_ok
+    ldi64 r11, var_task_active
+    ldn r12, r11
+.crypto_identity_ok:
+    ldi r0, 0
+    ret.l
+.crypto_identity_bad:
+    ldi r0, 2
+    ret.l
+
+; Acquire lock 8 and publish the exact software owner.  A same-core
+; re-entrant hardware acquire observes the already-published owner and must
+; not release the outer transaction.
+_crypto_guard_acquire:
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crypto_current_identity
+    call.l r11
+    cmpi r0, 0
+    brne .crypto_acquire_restore
+    ldi64 r11, 0xFFFF_FF00_0000_0620  ; spinlock 8 acquire
     ld.b r0, r11
-    andi r0, 0x04
-    breq .sha3_init_ok
-    ; SHA3 locked by WOTS — print warning and return
-    ldi64 r10, str_sha3_locked
-    ldi64 r11, print_str
+    cmpi r0, 0
+    brne .crypto_acquire_busy
+    ldi64 r11, var_crypto_owner_core
+    ldn r1, r11
+    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF
+    cmp r1, r0
+    brne .crypto_acquire_busy          ; re-entry: retain outer lock
+    ldi64 r11, var_crypto_owner_task
+    str r11, r12                       ; task first
+    ldi64 r11, var_crypto_owner_core
+    str r11, r7                        ; publish core last
+    ldi r0, 0
+    br .crypto_acquire_restore
+.crypto_acquire_busy:
+    ldi r0, 2
+.crypto_acquire_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ret.l
+
+; Require the exact retained owner without touching the device on failure.
+_crypto_require_owner:
+    ldi64 r11, _crypto_current_identity
+    call.l r11
+    cmpi r0, 0
+    brne .crypto_require_done
+    ldi64 r11, var_crypto_owner_core
+    ldn r1, r11
+    cmp r1, r7
+    brne .crypto_require_bad
+    ldi64 r11, var_crypto_owner_task
+    ldn r1, r11
+    cmp r1, r12
+    breq .crypto_require_done
+.crypto_require_bad:
+    ldi r0, 2
+.crypto_require_done:
+    ret.l
+
+; Unpublish then release lock 8 in one saved-IE critical section.
+_crypto_guard_release:
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, var_crypto_owner_core
+    ldi64 r1, 0xFFFF_FFFF_FFFF_FFFF
+    str r11, r1
+    ldi r1, 0
+    ldi64 r11, var_crypto_owner_task
+    str r11, r1
+    ldi64 r11, 0xFFFF_FF00_0000_0621  ; spinlock 8 release
+    st.b r11, r1
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ret.l
+
+_crypto_wipe_scratch:
+    ldi64 r11, crypto_scratch
+    ldi r12, 25
+    ldi r1, 0
+.crypto_wipe_scratch_loop:
+    str r11, r1
+    addi r11, 8
+    dec r12
+    cmpi r12, 0
+    brne .crypto_wipe_scratch_loop
+    ret.l
+
+_crypto_reset_logical:
+    ldi r1, 0
+    ldi64 r11, var_crypto_owner_kind
+    str r11, r1
+    ldi64 r11, var_crypto_mode
+    str r11, r1
+    ldi64 r11, var_crypto_phase
+    str r11, r1
+    ldi64 r11, var_crypto_window_offset
+    str r11, r1
+    ret.l
+
+; Finish a proved-quiescent transaction.  Caller publication, when any,
+; occurs before this helper so the guard remains owned for the whole copy.
+_crypto_finish_release:
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11
+    ldi64 r11, _crypto_reset_logical
+    call.l r11
+    ldi64 r11, _crypto_guard_release
     call.l r11
     ret.l
-.sha3_init_ok:
-    ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
-    ldi r0, 1                          ; CMD_INIT=1
-    st.b r7, r0
+
+; Convert the generic caller-span helper to the common crypto statuses.
+; Input R9=address, R10=length; returns 0, 3, or 4.
+_crypto_span_status:
+    ldi64 r11, _caller_span_status
+    call.l r11
+    cmpi r0, 2
+    brne .crypto_span_maybe_protected
+    ldi r0, 3
+    ret.l
+.crypto_span_maybe_protected:
+    cmpi r0, 3
+    brne .crypto_span_done
+    ldi r0, 4
+.crypto_span_done:
     ret.l
 
-; SHA3-UPDATE ( addr len -- )  Feed len bytes to SHA3 absorber.
+; Execute one checked SHA3/Keccak byte transaction.  R7 is the MMIO address.
+; Reads return R1=data and R0=status; writes take R1=data and return R0=status.
+; The zero status is installed before the potentially faulting instruction so
+; normal completion falls directly through the saved-PC recovery label.
+_sha3_mmio_read8:
+    ldi r0, 0
+    ld.b r1, r7
+.sha3_mmio_read8_return:
+    ret.l
+
+_sha3_mmio_write8:
+    ldi r0, 0
+    st.b r7, r1
+.sha3_mmio_write8_return:
+    ret.l
+
+; Map a terminal device ERROR phase to a checked status.  ERROR=2 is the
+; only owner/state classification; every other code is hardware/protocol.
+_sha3_map_error:
+    ldi64 r7, 0xFFFF_FF00_0000_0783
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_map_done
+    mov r0, r1
+    cmpi r0, 2
+    brne .sha3_map_hardware
+    ldi r0, 2
+    ret.l
+.sha3_map_hardware:
+    ldi r0, 6
+.sha3_map_done:
+    ret.l
+
+; Bounded normal completion wait.  R13=expected DONE/IDLE status and
+; R12=the one legal BUSY status.  Terminal data on poll 64 wins.
+_sha3_wait_status:
+    ldi r10, 64
+    ldi64 r7, 0xFFFF_FF00_0000_0781
+.sha3_wait_status_loop:
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_wait_done
+    mov r0, r1
+    cmp r0, r13
+    breq .sha3_wait_ok
+    cmp r0, r12
+    brne .sha3_wait_terminal
+    dec r10
+    cmpi r10, 0
+    brne .sha3_wait_status_loop
+    ldi r0, 5
+    ret.l
+.sha3_wait_terminal:
+    cmpi r0, 0x03
+    breq .sha3_wait_error
+    cmpi r0, 0x07
+    breq .sha3_wait_error
+    cmpi r0, 0x0B
+    breq .sha3_wait_error
+    ldi r0, 6
+    ret.l
+.sha3_wait_error:
+    ldi64 r11, _sha3_map_error
+    call.l r11
+    ret.l
+.sha3_wait_ok:
+    ldi r0, 0
+.sha3_wait_done:
+    ret.l
+
+; Command 7 wait.  A terminal zero on poll 128 wins; sponge/raw BUSY are the
+; only nonterminal states.  Failure retains the software and hardware guard.
+_sha3_clear_hardware:
+    ldi64 r7, 0xFFFF_FF00_0000_0780
+    ldi r1, 7
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_clear_hardware_done
+    ldi r10, 128
+    inc r7                               ; STATUS
+.sha3_clear_wait_loop:
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_clear_hardware_done
+    mov r0, r1
+    cmpi r0, 0
+    breq .sha3_clear_ok
+    cmpi r0, 0x05
+    breq .sha3_clear_busy
+    cmpi r0, 0x09
+    breq .sha3_clear_busy
+    cmpi r0, 0x03
+    breq .sha3_clear_error
+    cmpi r0, 0x07
+    breq .sha3_clear_error
+    cmpi r0, 0x0B
+    breq .sha3_clear_error
+    ldi r0, 6
+    ret.l
+.sha3_clear_busy:
+    dec r10
+    cmpi r10, 0
+    brne .sha3_clear_wait_loop
+    ldi r0, 5
+    ret.l
+.sha3_clear_error:
+    ldi64 r11, _sha3_map_error
+    call.l r11
+    ret.l
+.sha3_clear_ok:
+    ldi r0, 0
+.sha3_clear_hardware_done:
+    ret.l
+
+; R13 is the first failure.  A successful cleanup returns that failure;
+; failed quiescence returns its own status and retains the guard fail-closed.
+_sha3_fail_cleanup:
+    subi r15, 8
+    str r15, r13
+    ldi64 r11, _sha3_clear_hardware
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_fail_clear_failed
+    ldi64 r11, _crypto_finish_release
+    call.l r11
+    ldn r0, r15
+    ldi r1, 0
+    str r15, r1
+    addi r15, 8
+    ret.l
+.sha3_fail_clear_failed:
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11
+    ldi r1, 0
+    str r15, r1
+    addi r15, 8
+    ret.l
+
+; SHA3-BEGIN ( mode -- status )
+w_sha3_begin:
+    ldn r13, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x02                      ; SHA3_STREAM
+    cmpi r0, 0
+    lbreq .sha3_begin_unsupported
+    cmpi r13, 0
+    lbrmi .sha3_begin_range
+    cmpi r13, 4
+    lbrcs .sha3_begin_range
+    ldi64 r11, _crypto_guard_acquire
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_begin_return
+    ldi64 r11, var_crypto_owner_kind
+    ldi r1, 1                          ; sponge
+    str r11, r1
+
+_sha3_begin_status_address:
+    ldi64 r7, 0xFFFF_FF00_0000_0781
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_begin_mmio_fail
+    cmpi r1, 0
+    lbrne .sha3_begin_protocol
+    inc r7                             ; CTRL
+    mov r1, r13
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_begin_mmio_fail
+    subi r7, 2                         ; CMD
+    ldi r1, 1
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_begin_mmio_fail
+    inc r7                             ; STATUS
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_begin_mmio_fail
+    cmpi r1, 0x04
+    lbrne .sha3_begin_protocol
+    ldi64 r11, var_crypto_mode
+    str r11, r13
+    ldi64 r11, var_crypto_phase
+    ldi r1, 1
+    str r11, r1                       ; absorb
+    ldi64 r11, var_crypto_window_offset
+    ldi r1, 0
+    str r11, r1
+    ldi r0, 0
+    br .sha3_begin_return
+.sha3_begin_protocol:
+    ldi r13, 6
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .sha3_begin_return
+.sha3_begin_mmio_fail:
+    mov r13, r0
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .sha3_begin_return
+.sha3_begin_unsupported:
+    ldi r0, 1
+    br .sha3_begin_return
+.sha3_begin_range:
+    ldi r0, 3
+.sha3_begin_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; SHA3-UPDATE ( src len -- status )
 w_sha3_update:
-    ldn r12, r14            ; r12 = len
+    ldn r10, r14
     addi r14, 8
-    ldn r9, r14             ; r9 = addr
-    addi r14, 8
-    cmpi r12, 0
-    breq .sha3_update_done
-    ldi64 r7, 0xFFFF_FF00_0000_0788   ; SHA3_DIN
-    ldi r11, 0              ; counter = 0
-.sha3_update_loop:
-    mov r13, r9
-    add r13, r11            ; src + counter
-    ld.b r0, r13            ; load byte from RAM
-    st.b r7, r0             ; write to DIN
-    addi r11, 1
-    cmp r11, r12            ; counter < len?
-    brcc .sha3_update_loop
-.sha3_update_done:
-    ret.l
-
-; SHA3-FINAL ( addr -- )  Finalize hash, copy output bytes to addr.
-;   Mode-aware: copies 32 bytes for SHA3-256, 64 bytes for SHA3-512.
-w_sha3_final:
-    ldn r9, r14             ; r9 = dest addr
-    addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
-    ldi r0, 3                          ; CMD_FINAL=3
-    st.b r7, r0             ; CMD=finalize
-    ; Determine output length from mode register
-    ldi64 r7, 0xFFFF_FF00_0000_0782   ; SHA3_CTRL (mode)
-    ld.b r1, r7             ; r1 = mode
-    cmpi r1, 1              ; mode 1 = SHA3-512?
-    ldi r10, 32             ; default 32 bytes
-    brne .sha3_final_setup
-    ldi r10, 64             ; SHA3-512: 64 bytes
-.sha3_final_setup:
-    ; Read r10 bytes from DOUT (offset 0x10)
-    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
-    ldi r12, 0
-.sha3_final_loop:
-    mov r11, r7
-    add r11, r12
-    ld.b r0, r11            ; read from DOUT
-    mov r13, r9
-    add r13, r12
-    st.b r13, r0            ; store to RAM
-    addi r12, 1
-    cmp r12, r10
-    brcc .sha3_final_loop
-    ret.l
-
-; SHA3-STATUS@ ( -- n )  Read SHA3 status register.
-w_sha3_status_fetch:
-    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
-    ld.b r0, r11
-    subi r14, 8
-    str r14, r0
-    ret.l
-
-; SHA3-MODE! ( mode -- )  Set SHA3/SHAKE mode: 0=SHA3-256 1=SHA3-512 2=SHAKE128 3=SHAKE256
-w_sha3_mode_store:
-    ldn r0, r14
-    addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_0782  ; SHA3_CTRL
-    st.b r11, r0
-    ret.l
-
-; SHA3-MODE@ ( -- mode )  Read current SHA3/SHAKE mode.
-w_sha3_mode_fetch:
-    ldi64 r11, 0xFFFF_FF00_0000_0782  ; SHA3_CTRL
-    ld.b r0, r11
-    subi r14, 8
-    str r14, r0
-    ret.l
-
-; SHA3-SQUEEZE ( addr len -- )  Squeeze len bytes of XOF output (SHAKE).
-;   Triggers CMD=SQUEEZE after each rate-block boundary, copies to addr.
-;   Assumes FINAL has already been called; first rate-block already in DOUT.
-;   For subsequent blocks, writes CMD=4 (SQUEEZE), then reads DOUT again.
-w_sha3_squeeze:
-    ldn r12, r14            ; r12 = len
-    addi r14, 8
-    ldn r9, r14             ; r9 = dest addr
-    addi r14, 8
-    cmpi r12, 0
-    breq .sha3_squeeze_done
-    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
-    ldi r11, 0              ; bytes read
-    ldi r1, 0               ; position within current block
-.sha3_squeeze_loop:
-    ; Read byte from DOUT[pos]
-    mov r13, r7
-    add r13, r1
-    ld.b r0, r13
-    ; Store to dest
-    mov r13, r9
-    add r13, r11
-    st.b r13, r0
-    addi r11, 1
-    addi r1, 1
-    ; Check if we need a new squeeze block
-    cmpi r1, 136            ; rate (SHA3-256/SHAKE256 rate, conservative)
-    brcc .sha3_squeeze_no_resqueeze
-    ; Trigger another squeeze permutation
-    ldi64 r13, 0xFFFF_FF00_0000_0780  ; SHA3_CMD
-    ldi r0, 4                          ; CMD_SQUEEZE
-    st.b r13, r0
-    ldi r1, 0               ; reset block position
-.sha3_squeeze_no_resqueeze:
-    cmp r11, r12
-    brcc .sha3_squeeze_loop
-.sha3_squeeze_done:
-    ret.l
-
-; SHA3-SQUEEZE-NEXT ( -- )  Trigger another squeeze permutation (CMD=5).
-;   For streaming XOF output. After this call, DOUT is refilled with the
-;   next rate bytes of SHAKE output.
-w_sha3_squeeze_next:
-    ldi64 r11, 0xFFFF_FF00_0000_0780  ; SHA3_CMD
-    ldi r0, 5                          ; CMD_SQUEEZE_NEXT
-    st.b r11, r0
-    ret.l
-
-; SHA3-DOUT@ ( addr -- )  Read hash output bytes from DOUT register to memory.
-;   Mode-aware: copies 32 bytes for SHA3-256, 64 bytes for SHA3-512.
-;   Does not trigger any command — just copies current DOUT contents.
-w_sha3_dout_fetch:
     ldn r9, r14
     addi r14, 8
-    ; Determine output length from mode register
-    ldi64 r7, 0xFFFF_FF00_0000_0782   ; SHA3_CTRL (mode)
-    ld.b r1, r7             ; r1 = mode
-    cmpi r1, 1              ; mode 1 = SHA3-512?
-    ldi r10, 32             ; default 32 bytes
-    brne .sha3_dout_setup
-    ldi r10, 64             ; SHA3-512: 64 bytes
-.sha3_dout_setup:
-    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x02
+    cmpi r0, 0
+    lbreq .sha3_update_unsupported
+    ldi64 r11, _crypto_require_owner
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_update_return
+    ldi64 r11, var_crypto_owner_kind
+    ldn r0, r11
+    cmpi r0, 1
+    brne .sha3_update_state_fail
+    ldi64 r11, var_crypto_phase
+    ldn r0, r11
+    cmpi r0, 1
+    brne .sha3_update_state_fail
+    cmpi r10, 0
+    lbrmi .sha3_update_range_fail
+    cmpi r10, 0
+    breq .sha3_update_ok
+    ldi64 r11, _crypto_span_status
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_update_checked_fail
+    ldi64 r7, 0xFFFF_FF00_0000_0788
     ldi r12, 0
-.sha3_dout_loop:
-    mov r11, r7
+.sha3_update_feed_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r1, r13
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_update_wait_fail
+    inc r12
+    cmp r12, r10
+    brcc .sha3_update_feed_loop
+    ldi r13, 0x04
+    ldi r12, 0x05
+    ldi64 r11, _sha3_wait_status
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_update_wait_fail
+.sha3_update_ok:
+    ldi r0, 0
+    br .sha3_update_return
+.sha3_update_state_fail:
+    ldi r13, 2
+    br .sha3_update_cleanup
+.sha3_update_range_fail:
+    ldi r13, 3
+    br .sha3_update_cleanup
+.sha3_update_checked_fail:
+    mov r13, r0
+    br .sha3_update_cleanup
+.sha3_update_wait_fail:
+    mov r13, r0
+.sha3_update_cleanup:
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .sha3_update_return
+.sha3_update_unsupported:
+    ldi r0, 1
+.sha3_update_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; SHA3-FINAL ( dst -- status )  Fixed SHA3 modes only.
+w_sha3_final:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x02
+    cmpi r0, 0
+    lbreq .sha3_final_unsupported
+    ldi64 r11, _crypto_require_owner
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_final_return
+    ldi64 r11, var_crypto_owner_kind
+    ldn r0, r11
+    cmpi r0, 1
+    lbrne .sha3_final_state_fail
+    ldi64 r11, var_crypto_phase
+    ldn r0, r11
+    cmpi r0, 1
+    lbrne .sha3_final_state_fail
+    ldi64 r11, var_crypto_mode
+    ldn r0, r11
+    cmpi r0, 2
+    lbrcs .sha3_final_state_fail
+    ldi r10, 32
+    cmpi r0, 1
+    brne .sha3_final_span
+    ldi r10, 64
+.sha3_final_span:
+    ldi64 r11, _crypto_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_final_checked_fail
+    ldi64 r7, 0xFFFF_FF00_0000_0780
+    ldi r1, 3
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_final_wait_fail
+    ldi r13, 0x06
+    ldi r12, 0x05
+    ldi64 r11, _sha3_wait_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .sha3_final_wait_fail
+
+    ; Stage the whole digest before clearing hardware or touching caller RAM.
+    ldi64 r7, 0xFFFF_FF00_0000_0790
+    ldi64 r11, crypto_scratch
+    ldi64 r1, var_crypto_mode
+    ldn r0, r1
+    ldi r10, 32
+    cmpi r0, 1
+    brne .sha3_final_stage
+    ldi r10, 64
+.sha3_final_stage:
+    ldi r12, 0
+.sha3_final_stage_loop:
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_final_stage_fail
+    ldi64 r11, crypto_scratch
     add r11, r12
-    ld.b r0, r11
+    st.b r11, r1
+    inc r7
+    inc r12
+    cmp r12, r10
+    brcc .sha3_final_stage_loop
+    ldi64 r11, _sha3_clear_hardware
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_final_clear_failed
+
+    ; Publish while the guard is still held, then wipe and release.
+    ldi64 r11, crypto_scratch
+    ldi64 r1, var_crypto_mode
+    ldn r0, r1
+    ldi r10, 32
+    cmpi r0, 1
+    brne .sha3_final_publish
+    ldi r10, 64
+.sha3_final_publish:
+    ldi r12, 0
+.sha3_final_publish_loop:
+    mov r13, r11
+    add r13, r12
+    ld.b r0, r13
     mov r13, r9
     add r13, r12
     st.b r13, r0
-    addi r12, 1
+    inc r12
     cmp r12, r10
-    brcc .sha3_dout_loop
+    brcc .sha3_final_publish_loop
+    ldi64 r11, _crypto_finish_release
+    call.l r11
+    ldi r0, 0
+    br .sha3_final_return
+.sha3_final_state_fail:
+    ldi r13, 2
+    br .sha3_final_cleanup
+.sha3_final_checked_fail:
+    mov r13, r0
+    br .sha3_final_cleanup
+.sha3_final_wait_fail:
+.sha3_final_stage_fail:
+    mov r13, r0
+.sha3_final_cleanup:
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .sha3_final_return
+.sha3_final_clear_failed:
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11                         ; retain guard fail-closed
+    br .sha3_final_return
+.sha3_final_unsupported:
+    ldi r0, 1
+.sha3_final_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; SHAKE-FINAL ( -- status )  Finalize XOF and retain ownership.
+w_shake_final:
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x02
+    cmpi r0, 0
+    lbreq .shake_final_unsupported
+    ldi64 r11, _crypto_require_owner
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_final_return
+    ldi64 r11, var_crypto_owner_kind
+    ldn r0, r11
+    cmpi r0, 1
+    lbrne .shake_final_state_fail
+    ldi64 r11, var_crypto_phase
+    ldn r0, r11
+    cmpi r0, 1
+    lbrne .shake_final_state_fail
+    ldi64 r11, var_crypto_mode
+    ldn r0, r11
+    cmpi r0, 2
+    brcc .shake_final_state_fail
+    ldi64 r7, 0xFFFF_FF00_0000_0780
+    ldi r1, 3
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_final_wait_fail
+    ldi r13, 0x06
+    ldi r12, 0x05
+    ldi64 r11, _sha3_wait_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_final_wait_fail
+    ldi64 r11, var_crypto_phase
+    ldi r1, 2                          ; squeeze/read
+    str r11, r1
+    ldi64 r11, var_crypto_window_offset
+    ldi r1, 0
+    str r11, r1
+    ldi r0, 0
+    br .shake_final_return
+.shake_final_state_fail:
+    ldi r13, 2
+    br .shake_final_cleanup
+.shake_final_wait_fail:
+    mov r13, r0
+.shake_final_cleanup:
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .shake_final_return
+.shake_final_unsupported:
+    ldi r0, 1
+.shake_final_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; SHAKE-READ ( dst len -- status ), with len exactly 0..32.
+w_shake_read:
+    ldn r10, r14
+    addi r14, 8
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x02
+    cmpi r0, 0
+    lbreq .shake_read_unsupported
+    ldi64 r11, _crypto_require_owner
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_read_return
+    ldi64 r11, var_crypto_owner_kind
+    ldn r0, r11
+    cmpi r0, 1
+    lbrne .shake_read_state_fail
+    ldi64 r11, var_crypto_phase
+    ldn r0, r11
+    cmpi r0, 2
+    lbrne .shake_read_state_fail
+    cmpi r10, 0
+    lbrmi .shake_read_range_fail
+    cmpi r10, 33
+    lbrcs .shake_read_range_fail
+    cmpi r10, 0
+    lbreq .shake_read_ok
+    ldi64 r11, _crypto_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_read_checked_fail
+
+    ; R12 = tentative hardware-window offset, R13 = staged byte count.
+    ldi64 r11, var_crypto_window_offset
+    ldn r12, r11
+    ldi r13, 0
+.shake_read_stage_outer:
+    cmpi r12, 64
+    brne .shake_read_have_window
+    ldi64 r7, 0xFFFF_FF00_0000_0780
+    ldi r1, 4
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_read_wait_fail
+    subi r15, 8
+    str r15, r10                       ; preserve requested length
+    subi r15, 8
+    str r15, r13                       ; preserve staged count
+    ldi r13, 0x06
+    ldi r12, 0x05
+    ldi64 r11, _sha3_wait_status
+    call.l r11
+    ldn r13, r15
+    ldi r1, 0
+    str r15, r1
+    addi r15, 8
+    ldn r10, r15
+    str r15, r1
+    addi r15, 8
+    cmpi r0, 0
+    lbrne .shake_read_wait_fail
+    ldi r12, 0
+.shake_read_have_window:
+    ; One byte at a time keeps the staging logic independent of alignment.
+    ldi64 r7, 0xFFFF_FF00_0000_0790
+    add r7, r12
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .shake_read_wait_fail
+    ldi64 r11, crypto_scratch
+    add r11, r13
+    st.b r11, r1
+    inc r12
+    inc r13
+    cmp r13, r10
+    lbrcc .shake_read_stage_outer
+
+    ; Commit the logical cursor only after the complete chunk is staged.
+    ldi64 r11, var_crypto_window_offset
+    str r11, r12
+    ldi64 r11, crypto_scratch
+    ldi r13, 0
+.shake_read_publish_loop:
+    mov r7, r11
+    add r7, r13
+    ld.b r0, r7
+    mov r7, r9
+    add r7, r13
+    st.b r7, r0
+    inc r13
+    cmp r13, r10
+    brcc .shake_read_publish_loop
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11
+.shake_read_ok:
+    ldi r0, 0
+    br .shake_read_return
+.shake_read_state_fail:
+    ldi r13, 2
+    br .shake_read_cleanup
+.shake_read_range_fail:
+    ldi r13, 3
+    br .shake_read_cleanup
+.shake_read_checked_fail:
+    mov r13, r0
+    br .shake_read_cleanup
+.shake_read_wait_fail:
+    mov r13, r0
+.shake_read_cleanup:
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .shake_read_return
+.shake_read_unsupported:
+    ldi r0, 1
+.shake_read_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; SHA3-CLEAR ( -- status )  Idempotent after successful cleanup.
+w_sha3_clear:
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x06                      ; SHA3_STREAM | KECCAK_F1600
+    cmpi r0, 0
+    lbreq .sha3_clear_unsupported
+    ldi64 r11, var_crypto_owner_core
+    ldn r0, r11
+    ldi64 r1, 0xFFFF_FFFF_FFFF_FFFF
+    cmp r0, r1
+    brne .sha3_clear_owned
+    ; Repeated cleanup is OK only when hardware is also unowned and idle.
+    ldi64 r7, 0xFFFF_FF00_0000_0781
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_clear_return
+    cmpi r1, 0
+    brne .sha3_clear_state
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11
+    ldi64 r11, _crypto_reset_logical
+    call.l r11
+    ldi r0, 0
+    br .sha3_clear_return
+.sha3_clear_owned:
+    ldi64 r11, _crypto_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_clear_return
+    ldi64 r11, _sha3_clear_hardware
+    call.l r11
+    cmpi r0, 0
+    brne .sha3_clear_failed
+    ldi64 r11, _crypto_finish_release
+    call.l r11
+    ldi r0, 0
+    br .sha3_clear_return
+.sha3_clear_failed:
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11                         ; retain guard fail-closed
+    br .sha3_clear_return
+.sha3_clear_state:
+    ldi r0, 2
+    br .sha3_clear_return
+.sha3_clear_unsupported:
+    ldi r0, 1
+.sha3_clear_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; KECCAK-F1600 ( state-200 -- status )
+w_keccak_f1600:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x04
+    cmpi r0, 0
+    lbreq .keccak_unsupported
+    ldi r10, 200
+    ldi64 r11, _crypto_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_return
+    ldi64 r11, _crypto_guard_acquire
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_return
+    ldi64 r11, var_crypto_owner_kind
+    ldi r1, 2                          ; raw
+    str r11, r1
+    ldi64 r7, 0xFFFF_FF00_0000_0781
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+    cmpi r1, 0
+    lbrne .keccak_protocol_fail
+
+    ; Load all 25 lanes through byte accesses so caller alignment is neutral.
+    ldi r12, 0                         ; lane
+.keccak_load_lane:
+    ldi64 r7, 0xFFFF_FF00_0000_07D0   ; STATE_INDEX
+    mov r1, r12
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+    ldi r13, 0                         ; byte in lane
+.keccak_load_byte:
+    mov r7, r12
+    lsli r7, 3
+    add r7, r13
+    add r7, r9
+    ld.b r1, r7
+    ldi64 r7, 0xFFFF_FF00_0000_07D8   ; STATE_DATA
+    add r7, r13
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+    inc r13
+    cmpi r13, 8
+    brcc .keccak_load_byte
+    inc r12
+    cmpi r12, 25
+    brcc .keccak_load_lane
+
+    ldi64 r7, 0xFFFF_FF00_0000_0780
+    ldi r1, 6
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+    ldi r13, 0x0A
+    ldi r12, 0x09
+    ldi64 r11, _sha3_wait_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+
+    ; Stage the complete returned state before clearing hardware.
+    ldi r12, 0
+.keccak_stage_lane:
+    ldi64 r7, 0xFFFF_FF00_0000_07D0
+    mov r1, r12
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+    ldi r13, 0
+.keccak_stage_byte:
+    ldi64 r7, 0xFFFF_FF00_0000_07D8
+    add r7, r13
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_wait_fail
+    mov r7, r12
+    lsli r7, 3
+    add r7, r13
+    ldi64 r11, crypto_scratch
+    add r11, r7
+    st.b r11, r1
+    inc r13
+    cmpi r13, 8
+    brcc .keccak_stage_byte
+    inc r12
+    cmpi r12, 25
+    brcc .keccak_stage_lane
+    ldi64 r11, _sha3_clear_hardware
+    call.l r11
+    cmpi r0, 0
+    lbrne .keccak_clear_failed
+
+    ldi64 r11, crypto_scratch
+    ldi r12, 0
+    ldi r13, 200                       ; CMPI is signed 8-bit; compare in-reg
+.keccak_publish_loop:
+    mov r7, r11
+    add r7, r12
+    ld.b r0, r7
+    mov r7, r9
+    add r7, r12
+    st.b r7, r0
+    inc r12
+    cmp r12, r13
+    brcc .keccak_publish_loop
+    ldi64 r11, _crypto_finish_release
+    call.l r11
+    ldi r0, 0
+    br .keccak_return
+.keccak_protocol_fail:
+    ldi r13, 6
+    br .keccak_cleanup
+.keccak_wait_fail:
+    mov r13, r0
+.keccak_cleanup:
+    ldi64 r11, _sha3_fail_cleanup
+    call.l r11
+    br .keccak_return
+.keccak_clear_failed:
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11                         ; retain guard fail-closed
+    br .keccak_return
+.keccak_unsupported:
+    ldi r0, 1
+.keccak_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; Diagnostic raw register queries retained outside the checked transaction
+; surface.  They do not acquire, advance, or release the portable guard.
+w_sha3_status_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0781
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+w_sha3_mode_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0782
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; =====================================================================
@@ -15500,167 +16343,6 @@ w_kem_decaps:
 ; KEM-STATUS@ ( -- n )  Read KEM status register.
 w_kem_status:
     ldi64 r7, 0xFFFF_FF00_0000_0900
-    ld.b r0, r7
-    subi r14, 8
-    str r14, r0
-    ret.l
-
-; =====================================================================
-;  WOTS+ Chain Hardware Accelerator
-; =====================================================================
-; WOTS base = 0xFFFF_FF00_0000_08A0
-;   SEED_ADDR  +0x00..+0x03 (W)  32-bit RAM address of seed (16 bytes)
-;   ADRS_ADDR  +0x04..+0x07 (W)  32-bit RAM address of ADRS (32 bytes)
-;   INPUT_ADDR +0x08..+0x0B (W)  32-bit RAM address of input (16 bytes)
-;   STEPS      +0x0C (W)  chain length (1..15)
-;   START      +0x0D (W)  starting step index (0..15)
-;   GO/STATUS  +0x0E (W=trigger, R: 0=idle,1=busy,2=done)
-;   CYCLES     +0x0F (R)  estimated cycle count >> 6
-;   DOUT       +0x10..+0x1F (R)  16-byte chain output
-
-; WOTS-CHAIN-HW ( seed-addr adrs-addr input-addr steps start -- )
-;   Programs the WOTS+ chain accelerator, triggers execution,
-;   polls for completion, then copies DOUT back to input-addr.
-;   §6c guard: checks SHA3 STATUS bit 1 (busy) — if SHA3 is mid-operation,
-;   WOTS would clobber its state.  Drops all 5 args and prints error.
-w_wots_chain_hw:
-    ; Guard: check SHA3 not busy (status bit 1)
-    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
-    ld.b r0, r11
-    andi r0, 0x02                      ; bit 1 = busy
-    breq .wots_guard_ok
-    ; SHA3 busy — drop 5 stack args and print warning
-    addi r14, 40                       ; 5 × 8 bytes
-    ldi64 r10, str_sha3_busy
-    ldi64 r11, print_str
-    call.l r11
-    ret.l
-.wots_guard_ok:
-    ; Pop: ( seed-addr adrs-addr input-addr steps start -- )
-    ldn r0, r14             ; r0 = start
-    addi r14, 8
-    ldn r1, r14             ; r1 = steps
-    addi r14, 8
-    ldn r9, r14             ; r9 = input-addr
-    addi r14, 8
-    ldn r10, r14            ; r10 = adrs-addr
-    addi r14, 8
-    ldn r12, r14            ; r12 = seed-addr
-    addi r14, 8
-
-    ; Preserve input-addr for writeback after chain completes
-    mov r11, r9             ; r11 = input-addr (safe copy)
-
-    ; WOTS MMIO base
-    ldi64 r7, 0xFFFF_FF00_0000_08A0
-
-    ; --- Write seed_addr LE to +0x00..+0x03 ---
-    mov r13, r7
-    st.b r13, r12
-    lsri r12, 8
-    addi r13, 1
-    st.b r13, r12
-    lsri r12, 8
-    addi r13, 1
-    st.b r13, r12
-    lsri r12, 8
-    addi r13, 1
-    st.b r13, r12
-
-    ; --- Write adrs_addr LE to +0x04..+0x07 ---
-    mov r13, r7
-    addi r13, 4
-    st.b r13, r10
-    lsri r10, 8
-    addi r13, 1
-    st.b r13, r10
-    lsri r10, 8
-    addi r13, 1
-    st.b r13, r10
-    lsri r10, 8
-    addi r13, 1
-    st.b r13, r10
-
-    ; --- Write input_addr LE to +0x08..+0x0B ---
-    mov r13, r7
-    addi r13, 8
-    st.b r13, r9
-    lsri r9, 8
-    addi r13, 1
-    st.b r13, r9
-    lsri r9, 8
-    addi r13, 1
-    st.b r13, r9
-    lsri r9, 8
-    addi r13, 1
-    st.b r13, r9
-
-    ; Restore input-addr from safe copy
-    mov r9, r11
-
-    ; --- Write steps to +0x0C ---
-    mov r13, r7
-    addi r13, 0x0C
-    st.b r13, r1
-
-    ; --- Write start to +0x0D ---
-    addi r13, 1
-    st.b r13, r0
-
-    ; --- Write GO (any value) to +0x0E — triggers execution ---
-    addi r13, 1
-    ldi r0, 1
-    st.b r13, r0
-
-    ; --- Poll status at +0x0E until == 2 (done) ---
-.wots_poll:
-    ld.b r0, r13
-    cmpi r0, 2
-    brne .wots_poll
-
-    ; --- Copy DOUT[0..15] to RAM[input_addr] ---
-    mov r13, r7
-    addi r13, 0x10            ; r13 = DOUT register base
-    ldi r12, 0
-.wots_copy:
-    mov r10, r13
-    add r10, r12
-    ld.b r0, r10              ; DOUT[i]
-    mov r10, r9
-    add r10, r12
-    st.b r10, r0              ; RAM[input_addr+i] = DOUT[i]
-    addi r12, 1
-    cmpi r12, 16
-    brcc .wots_copy
-
-    ret.l
-
-; =====================================================================
-;  WOTS / SHA3 Lock Check Words  (§6c hardening)
-; =====================================================================
-
-; SHA3-LOCKED? ( -- flag )  True if SHA3 engine is held by WOTS accelerator.
-;   Reads SHA3 STATUS register (+0x01); bit 2 = ext_locked.
-w_sha3_locked:
-    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
-    ld.b r0, r11
-    andi r0, 0x04                      ; isolate bit 2 (ext_locked)
-    ; Normalise to Forth flag: 0 or -1
-    cmpi r0, 0
-    breq .sha3_locked_no
-    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF   ; TRUE
-    br .sha3_locked_push
-.sha3_locked_no:
-    ldi r0, 0                          ; FALSE
-.sha3_locked_push:
-    subi r14, 8
-    str r14, r0
-    ret.l
-
-; WOTS-STATUS@ ( -- n )  Read WOTS accelerator status register.
-;   0=idle, 1=busy, 2=done.
-w_wots_status:
-    ldi64 r7, 0xFFFF_FF00_0000_08AE   ; WOTS_BASE + 0x0E (STATUS)
     ld.b r0, r7
     subi r14, 8
     str r14, r0
@@ -18595,18 +19277,18 @@ d_aes_tag_store:
     call.l r11
     ret.l
 
-; === SHA3-INIT ===
-d_sha3_init:
+; === SHA3-BEGIN ===
+d_sha3_begin:
     .dq d_aes_tag_store
-    .db 9
-    .ascii "SHA3-INIT"
-    ldi64 r11, w_sha3_init
+    .db 10
+    .ascii "SHA3-BEGIN"
+    ldi64 r11, w_sha3_begin
     call.l r11
     ret.l
 
 ; === SHA3-UPDATE ===
 d_sha3_update:
-    .dq d_sha3_init
+    .dq d_sha3_begin
     .db 11
     .ascii "SHA3-UPDATE"
     ldi64 r11, w_sha3_update
@@ -18631,54 +19313,54 @@ d_sha3_status_fetch:
     call.l r11
     ret.l
 
-; === SHA3-MODE! ===
-d_sha3_mode_store:
+; === SHAKE-FINAL ===
+d_shake_final:
     .dq d_sha3_status_fetch
-    .db 10
-    .ascii "SHA3-MODE!"
-    ldi64 r11, w_sha3_mode_store
+    .db 11
+    .ascii "SHAKE-FINAL"
+    ldi64 r11, w_shake_final
     call.l r11
     ret.l
 
 ; === SHA3-MODE@ ===
 d_sha3_mode_fetch:
-    .dq d_sha3_mode_store
+    .dq d_shake_final
     .db 10
     .ascii "SHA3-MODE@"
     ldi64 r11, w_sha3_mode_fetch
     call.l r11
     ret.l
 
-; === SHA3-SQUEEZE ===
-d_sha3_squeeze:
+; === SHAKE-READ ===
+d_shake_read:
     .dq d_sha3_mode_fetch
-    .db 12
-    .ascii "SHA3-SQUEEZE"
-    ldi64 r11, w_sha3_squeeze
-    call.l r11
-    ret.l
-
-; === SHA3-SQUEEZE-NEXT ===
-d_sha3_squeeze_next:
-    .dq d_sha3_squeeze
-    .db 17
-    .ascii "SHA3-SQUEEZE-NEXT"
-    ldi64 r11, w_sha3_squeeze_next
-    call.l r11
-    ret.l
-
-; === SHA3-DOUT@ ===
-d_sha3_dout_fetch:
-    .dq d_sha3_squeeze_next
     .db 10
-    .ascii "SHA3-DOUT@"
-    ldi64 r11, w_sha3_dout_fetch
+    .ascii "SHAKE-READ"
+    ldi64 r11, w_shake_read
+    call.l r11
+    ret.l
+
+; === SHA3-CLEAR ===
+d_sha3_clear:
+    .dq d_shake_read
+    .db 10
+    .ascii "SHA3-CLEAR"
+    ldi64 r11, w_sha3_clear
+    call.l r11
+    ret.l
+
+; === KECCAK-F1600 ===
+d_keccak_f1600:
+    .dq d_sha3_clear
+    .db 12
+    .ascii "KECCAK-F1600"
+    ldi64 r11, w_keccak_f1600
     call.l r11
     ret.l
 
 ; === SHA256-INIT ===
 d_sha256_init:
-    .dq d_sha3_dout_fetch
+    .dq d_keccak_f1600
     .db 11
     .ascii "SHA256-INIT"
     ldi64 r11, w_sha256_init
@@ -19081,36 +19763,9 @@ d_kem_status:
     call.l r11
     ret.l
 
-; === WOTS-CHAIN-HW ===
-d_wots_chain_hw:
-    .dq d_kem_status
-    .db 13
-    .ascii "WOTS-CHAIN-HW"
-    ldi64 r11, w_wots_chain_hw
-    call.l r11
-    ret.l
-
-; === SHA3-LOCKED? ===
-d_sha3_locked:
-    .dq d_wots_chain_hw
-    .db 12
-    .ascii "SHA3-LOCKED?"
-    ldi64 r11, w_sha3_locked
-    call.l r11
-    ret.l
-
-; === WOTS-STATUS@ ===
-d_wots_status:
-    .dq d_sha3_locked
-    .db 12
-    .ascii "WOTS-STATUS@"
-    ldi64 r11, w_wots_status
-    call.l r11
-    ret.l
-
 ; === BUS-ERR@ ===
 d_bus_err_fetch:
-    .dq d_wots_status
+    .dq d_kem_status
     .db 8
     .ascii "BUS-ERR@"
     ldi64 r11, w_bus_err_fetch
@@ -20226,6 +20881,21 @@ var_latest:
     .dq 0
 var_crc_owner_base:
     .dq 0                         ; topology-sized records begin at dict_free
+var_crypto_owner_core:
+    .dq 0xFFFFFFFFFFFFFFFF        ; UINT64_MAX means unowned
+var_crypto_owner_task:
+    .dq 0
+var_crypto_owner_kind:
+    .dq 0                         ; 0 none, 1 sponge, 2 raw
+var_crypto_mode:
+    .dq 0
+var_crypto_phase:
+    .dq 0                         ; 0 idle, 1 absorb, 2 squeeze
+var_crypto_window_offset:
+    .dq 0                         ; next byte in the stable 64-byte window
+crypto_scratch:
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0       ; private 200-byte staging area
 var_kernel_data_end:
     .dq 0                         ; first caller-manageable Bank 0 byte
 var_to_in:
@@ -20527,10 +21197,6 @@ str_fault_t:
     .asciiz " T="
 str_fault_buserr:
     .asciiz " ERR="
-str_sha3_locked:
-    .asciiz "SHA3 locked by WOTS\n"
-str_sha3_busy:
-    .asciiz "SHA3 busy — WOTS aborted\n"
 str_branch_overflow:
     .asciiz "Branch offset overflow\n"
 str_leave_overflow:

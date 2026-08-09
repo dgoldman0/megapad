@@ -972,9 +972,9 @@ VARIABLE _AEAD-REM
 \ =====================================================================
 \  §1.6  SHA-3 / SHAKE Hashing
 \ =====================================================================
-\  BIOS primitives (hardware accelerator at MMIO 0x0780):
-\    SHA3-INIT  SHA3-UPDATE  SHA3-FINAL  SHA3-STATUS@
-\    SHA3-MODE! SHA3-MODE@  SHA3-SQUEEZE
+\  Checked BIOS primitives (hardware accelerator at MMIO 0x0780):
+\    SHA3-BEGIN  SHA3-UPDATE  SHA3-FINAL  SHAKE-FINAL
+\    SHAKE-READ  SHA3-CLEAR  SHA3-STATUS@  SHA3-MODE@
 \  BIOS TRNG (hardware at MMIO 0x0800):
 \    RANDOM  RANDOM8  SEED-RNG
 \
@@ -985,68 +985,116 @@ VARIABLE _AEAD-REM
 2 CONSTANT SHAKE128-MODE
 3 CONSTANT SHAKE256-MODE
 
-CREATE SHA3-BUF 64 ALLOT
+\ Common checked-crypto status namespace.
+0 CONSTANT CRYPTO-OK
+1 CONSTANT CRYPTO-UNSUPPORTED
+2 CONSTANT CRYPTO-STATE
+3 CONSTANT CRYPTO-RANGE
+4 CONSTANT CRYPTO-PROTECTED
+5 CONSTANT CRYPTO-TIMEOUT
+6 CONSTANT CRYPTO-HARDWARE
 
-\ SHA3 ( addr len out -- )  SHA3-256 hash (32 bytes output).
-: SHA3
+2 CONSTANT CRYPTO-CAP-SHA3-STREAM
+4 CONSTANT CRYPTO-CAP-KECCAK-F1600
+
+\ Convert CALLER-SPAN-STATUS values to the common crypto namespace.
+: _CRYPTO-SPAN-STATUS ( addr len -- status )
+    CALLER-SPAN-STATUS
+    DUP 2 = IF DROP CRYPTO-RANGE EXIT THEN
+    DUP 3 = IF DROP CRYPTO-PROTECTED THEN ;
+
+\ SHA3 ( addr len out -- status )  SHA3-256 hash (32 bytes output).
+: SHA3  ( addr len out -- status )
     >R
-    SHA3-INIT
-    SHA3-UPDATE
+    SHA3-256-MODE SHA3-BEGIN DUP IF
+        >R 2DROP R> R> DROP EXIT
+    THEN DROP
+    SHA3-UPDATE DUP IF
+        R> DROP EXIT
+    THEN DROP
     R> SHA3-FINAL ;
 
-\ SHA3-512 ( addr len out -- )  SHA3-512 hash (64 bytes output).
-\   Sets mode to SHA3-512, hashes, copies 64 bytes, restores SHA3-256 mode.
-: SHA3-512  ( addr len out -- )
+\ SHA3-512 ( addr len out -- status )  SHA3-512 hash (64 bytes output).
+: SHA3-512  ( addr len out -- status )
     >R
-    SHA3-512-MODE SHA3-MODE!
-    SHA3-INIT
-    SHA3-UPDATE
-    R> SHA3-FINAL
-    SHA3-256-MODE SHA3-MODE! ;
+    SHA3-512-MODE SHA3-BEGIN DUP IF
+        >R 2DROP R> R> DROP EXIT
+    THEN DROP
+    SHA3-UPDATE DUP IF
+        R> DROP EXIT
+    THEN DROP
+    R> SHA3-FINAL ;
 
-: SHAKE128  ( addr len out outlen -- )
-    >R >R
-    SHAKE128-MODE SHA3-MODE!
-    SHA3-INIT
-    SHA3-UPDATE
-    R> R>
-    OVER SHA3-FINAL
-    DROP ;
+\ Preserve the first error when cleanup succeeds.  A cleanup failure takes
+\ precedence because the guard remains deliberately held fail-closed.
+: _SHAKE-CLEAN-ERROR ( status -- status )
+    >R
+    SHA3-CLEAR
+    DUP IF R> DROP EXIT THEN
+    DROP R> ;
 
-: SHAKE256  ( addr len out outlen -- )
-    >R >R
-    SHAKE256-MODE SHA3-MODE!
-    SHA3-INIT
-    SHA3-UPDATE
-    R> R>
-    OVER SHA3-FINAL
-    DROP
-    SHA3-256-MODE SHA3-MODE! ;
+: (SHAKE) ( addr len out outlen mode -- status )
+    DUP SHA3-BEGIN
+    DUP IF >R 2DROP 2DROP DROP R> EXIT THEN DROP DROP
+    \ Preflight the complete output so multi-window calls cannot publish a
+    \ prefix before discovering a bad later address.
+    2DUP _CRYPTO-SPAN-STATUS
+    DUP IF >R 2DROP 2DROP R> _SHAKE-CLEAN-ERROR EXIT THEN DROP
+    2SWAP SHA3-UPDATE
+    DUP IF >R 2DROP R> EXIT THEN DROP
+    SHAKE-FINAL
+    DUP IF >R 2DROP R> EXIT THEN DROP
+    BEGIN DUP 0> WHILE
+        OVER OVER 32 MIN SHAKE-READ
+        DUP IF >R 2DROP R> EXIT THEN DROP
+        DUP 32 MIN >R
+        R@ -
+        SWAP R> + SWAP
+    REPEAT
+    2DROP
+    SHA3-CLEAR ;
 
-\ SHAKE-STREAM ( addr blocks -- )
-\   Read `blocks` 32-byte chunks of continuous XOF output into addr.
-\   Must be called AFTER SHAKE-INIT + SHA3-UPDATE + SHA3-FINAL has been
-\   used to set up the SHAKE state.  First 32 bytes are already in DOUT
-\   after FINAL.  For each subsequent block, SHA3-SQUEEZE-NEXT permutes
-\   the Keccak state and refills DOUT.
-\
-\   BIOS primitives used:
-\     SHA3-DOUT@ ( addr -- )         — read 32 bytes from DOUT
-\     SHA3-SQUEEZE-NEXT ( -- )       — permute, refill DOUT
-: SHAKE-STREAM ( addr blocks -- )
-    0 DO
-        DUP SHA3-DOUT@          \ read current DOUT block
-        32 +                    \ advance addr
-        SHA3-SQUEEZE-NEXT       \ permute for next block
-    LOOP
-    DROP ;
+: SHAKE128  ( addr len out outlen -- status )
+    SHAKE128-MODE (SHAKE) ;
+
+: SHAKE256  ( addr len out outlen -- status )
+    SHAKE256-MODE (SHAKE) ;
+
+\ SHAKE-STREAM ( addr blocks -- status )
+\ Read 32-byte chunks from an already-finalized checked SHAKE transaction,
+\ then clear it on every success or failure path.
+: SHAKE-STREAM ( addr blocks -- status )
+    \ Probe with a zero-length read first: continuation ownership, capability,
+    \ and phase have priority over scalar or destination inspection.
+    OVER 0 SHAKE-READ
+    DUP IF >R 2DROP R> EXIT THEN DROP
+    DUP 0< IF
+        2DROP CRYPTO-RANGE _SHAKE-CLEAN-ERROR EXIT
+    THEN
+    \ Qualify the whole destination before publishing the first chunk.  Reject
+    \ a left shift that would lose high bits; a sign-bit result is rejected by
+    \ the shared span checker.  This derives the bound from caller address
+    \ arithmetic rather than imposing a private block-count capacity.
+    DUP 59 RSHIFT IF
+        2DROP CRYPTO-RANGE _SHAKE-CLEAN-ERROR EXIT
+    THEN
+    2DUP 5 LSHIFT _CRYPTO-SPAN-STATUS
+    DUP IF >R 2DROP R> _SHAKE-CLEAN-ERROR EXIT THEN DROP
+    BEGIN DUP 0> WHILE
+        OVER 32 SHAKE-READ
+        DUP IF >R 2DROP R> EXIT THEN DROP
+        SWAP 32 + SWAP 1-
+    REPEAT
+    2DROP SHA3-CLEAR ;
 
 : .SHA3-STATUS
     SHA3-STATUS@
+    3 AND
     DUP 0 = IF DROP ."  SHA3: idle" CR ELSE
+    DUP 1 = IF DROP ."  SHA3: busy" CR ELSE
     DUP 2 = IF DROP ."  SHA3: done" CR ELSE
-    DROP ."  SHA3: unknown" CR
-    THEN THEN ;
+    DROP ."  SHA3: error" CR
+    THEN THEN THEN ;
 
 : .SHA3  ( addr len -- )
     0 DO
@@ -1071,13 +1119,13 @@ CREATE SHA3-BUF 64 ALLOT
 \ =====================================================================
 \  High-level wrappers over AES-256-GCM (§1.5) and SHA-3 (§1.6).
 \
-\  HASH      ( addr len out -- )           SHA3-256 hash
-\  HMAC      ( key klen msg mlen out -- )   HMAC-SHA3-256
+\  HASH      ( addr len out -- status )           SHA3-256 hash
+\  HMAC      ( key klen msg mlen out -- status )  HMAC-SHA3-256
 \  ENCRYPT   ( key iv src dst len -- tag )  AES-256-GCM encrypt
 \  DECRYPT   ( key iv src dst len tag -- f) AES-256-GCM decrypt
 \  VERIFY    ( a1 a2 len -- flag )          constant-time compare
 
-\ HASH ( addr len hash-addr -- )  Alias for SHA3.
+\ HASH ( addr len hash-addr -- status )  Alias for SHA3.
 : HASH  SHA3 ;
 
 \ Checked SHA-256 status values mirror the BIOS streaming ABI.
@@ -1123,15 +1171,50 @@ CREATE SHA3-BUF 64 ALLOT
 \ HMAC(K,m) = SHA3((K ^ opad) || SHA3((K ^ ipad) || m))
 \ SHA3-256 rate (block size) = 136 bytes
 
+\ HMAC and HKDF use shared KDOS scratch, so one nonblocking hardware lock
+\ serializes both hash families across every core.  SHA3 callers take this
+\ lock before the checked BIOS path takes its private lock 8.
+9 CONSTANT HMAC-HKDF-LOCK
+
+: _HMAC-HKDF-TRY ( -- busy )
+    HMAC-HKDF-LOCK SPIN@ ;
+
+: _HMAC-HKDF-RELEASE ( -- )
+    HMAC-HKDF-LOCK SPIN! ;
+
+: _HMAC-HKDF-DROP-ARGS ( a b c d e -- )
+    2DROP 2DROP DROP ;
+
 136 CONSTANT HMAC-BLKSZ
 
 CREATE HMAC-IPAD 136 ALLOT
 CREATE HMAC-OPAD 136 ALLOT
 CREATE HMAC-INNER 32 ALLOT
+CREATE HMAC-KEY 32 ALLOT
 VARIABLE _HMAC-PAD-PTR
 VARIABLE _HMAC-XBYTE
 VARIABLE _HMAC-OUT
+VARIABLE _HMAC-KEY-PTR
+VARIABLE _HMAC-KEY-LEN
+VARIABLE _HMAC-MSG-PTR
+VARIABLE _HMAC-MSG-LEN
 VARIABLE _VERIFY-ACC
+
+: _HMAC-WIPE ( -- )
+    HMAC-IPAD HMAC-BLKSZ 0 FILL
+    HMAC-OPAD HMAC-BLKSZ 0 FILL
+    HMAC-INNER 32 0 FILL
+    HMAC-KEY 32 0 FILL
+    0 _HMAC-PAD-PTR !
+    0 _HMAC-XBYTE !
+    0 _HMAC-OUT !
+    0 _HMAC-KEY-PTR !
+    0 _HMAC-KEY-LEN !
+    0 _HMAC-MSG-PTR !
+    0 _HMAC-MSG-LEN ! ;
+
+: _HMAC-RETURN ( status -- status )
+    >R _HMAC-WIPE _HMAC-HKDF-RELEASE R> ;
 
 \ HMAC-PAD ( key-addr key-len pad-addr xor-byte -- )
 \   Zero pad, copy key into pad, XOR entire pad with xor-byte.
@@ -1141,7 +1224,7 @@ VARIABLE _VERIFY-ACC
     \ Zero the pad
     _HMAC-PAD-PTR @ HMAC-BLKSZ 0 FILL
     \ Copy key bytes into pad[0..klen-1]
-    0 DO                               \ key-addr  (limit=klen start=0)
+    0 ?DO                              \ key-addr  (limit=klen start=0)
         DUP I + C@                     \ key-addr byte
         _HMAC-PAD-PTR @ I + C!         \ key-addr
     LOOP DROP
@@ -1153,25 +1236,63 @@ VARIABLE _VERIFY-ACC
     LOOP
 ;
 
-\ HMAC ( key-addr key-len msg-addr msg-len out-addr -- )
-\   Compute HMAC-SHA3-256.
-: HMAC
-    _HMAC-OUT !                        \ save out-addr
-    >R >R                              \ R: mlen msg  S: key klen
-    \ Build ipad and opad from same key
-    2DUP HMAC-IPAD 54 HMAC-PAD        \ ipad = key XOR 0x36
-    HMAC-OPAD 92 HMAC-PAD             \ opad = key XOR 0x5C  (consumes key klen)
-    \ Inner hash: SHA3(ipad || message)
-    SHA3-INIT
-    HMAC-IPAD HMAC-BLKSZ SHA3-UPDATE
-    R> R> SHA3-UPDATE                  \ msg mlen
+\ Normalize a key, build both pads, and start the inner hash.
+\ Long HMAC keys are hashed per FIPS 198 rather than imposing a private
+\ capacity limit on callers.
+: _HMAC-BEGIN-NOLOCK ( key-addr key-len -- status )
+    _HMAC-KEY-LEN !
+    _HMAC-KEY-PTR !
+    _HMAC-KEY-PTR @ _HMAC-KEY-LEN @ _CRYPTO-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HMAC-KEY-LEN @ HMAC-BLKSZ > IF
+        _HMAC-KEY-PTR @ _HMAC-KEY-LEN @ HMAC-KEY SHA3
+        DUP IF EXIT THEN DROP
+        HMAC-KEY _HMAC-KEY-PTR !
+        32 _HMAC-KEY-LEN !
+    THEN
+    _HMAC-KEY-PTR @ _HMAC-KEY-LEN @
+    2DUP HMAC-IPAD 54 HMAC-PAD
+    HMAC-OPAD 92 HMAC-PAD
+    SHA3-256-MODE SHA3-BEGIN
+    DUP IF EXIT THEN DROP
+    HMAC-IPAD HMAC-BLKSZ SHA3-UPDATE ;
+
+\ Finish the active inner hash and compute the outer hash.
+: _HMAC-FINISH-NOLOCK ( out-addr -- status )
+    _HMAC-OUT !
     HMAC-INNER SHA3-FINAL
-    \ Outer hash: SHA3(opad || inner)
-    SHA3-INIT
+    DUP IF EXIT THEN DROP
+    SHA3-256-MODE SHA3-BEGIN
+    DUP IF EXIT THEN DROP
     HMAC-OPAD HMAC-BLKSZ SHA3-UPDATE
+    DUP IF EXIT THEN DROP
     HMAC-INNER 32 SHA3-UPDATE
-    _HMAC-OUT @ SHA3-FINAL
-;
+    DUP IF EXIT THEN DROP
+    _HMAC-OUT @ SHA3-FINAL ;
+
+\ Private HMAC core.  Its caller owns HMAC-HKDF-LOCK.
+: _HMAC-NOLOCK ( key-addr key-len msg-addr msg-len out-addr -- status )
+    _HMAC-OUT !
+    _HMAC-MSG-LEN !
+    _HMAC-MSG-PTR !
+    _HMAC-KEY-LEN !
+    _HMAC-KEY-PTR !
+    _HMAC-KEY-PTR @ _HMAC-KEY-LEN @ _HMAC-BEGIN-NOLOCK
+    DUP IF EXIT THEN DROP
+    _HMAC-MSG-PTR @ _HMAC-MSG-LEN @ SHA3-UPDATE
+    DUP IF EXIT THEN DROP
+    _HMAC-OUT @ _HMAC-FINISH-NOLOCK ;
+
+\ HMAC ( key-addr key-len msg-addr msg-len out-addr -- status )
+\ Capability absence wins over lock contention and argument validation.
+: HMAC  ( key-addr key-len msg-addr msg-len out-addr -- status )
+    CRYPTO-CAPS@ CRYPTO-CAP-SHA3-STREAM AND 0= IF
+        _HMAC-HKDF-DROP-ARGS CRYPTO-UNSUPPORTED EXIT
+    THEN
+    _HMAC-HKDF-TRY IF
+        _HMAC-HKDF-DROP-ARGS CRYPTO-STATE EXIT
+    THEN
+    _HMAC-NOLOCK _HMAC-RETURN ;
 
 \ ENCRYPT ( key iv src dst len -- tag-addr )  AES-256-GCM encrypt.
 : ENCRYPT  AES-ENCRYPT ;
@@ -1431,11 +1552,11 @@ _PQ-INFO-INIT
 \  Uses HMAC-SHA3-256 as the underlying PRF.
 \  Hash output length (L_H) = 32 bytes.
 \
-\  HKDF-EXTRACT ( salt slen ikm ilen out -- )
+\  HKDF-EXTRACT ( salt slen ikm ilen out -- status )
 \    PRK = HMAC(salt, IKM)
 \    If salt is 0 / slen=0, uses 32 zero bytes as salt.
 \
-\  HKDF-EXPAND ( prk info ilen len out -- )
+\  HKDF-EXPAND ( prk info ilen len out -- status )
 \    OKM = T(1) || T(2) || ...  truncated to len bytes.
 \    T(i) = HMAC(PRK, T(i-1) || info || i)
 
@@ -1446,7 +1567,6 @@ _HKDF-ZERO-SALT 32 0 FILL
 
 \ Scratch buffers for Expand
 CREATE _HKDF-T       32 ALLOT          \ T(i-1) / T(i) — running HMAC output
-CREATE _HKDF-BLOCK  200 ALLOT          \ T(i-1) || info || counter (max ~200B)
 VARIABLE _HKDF-PRK-PTR
 VARIABLE _HKDF-INFO-PTR
 VARIABLE _HKDF-INFO-LEN
@@ -1455,7 +1575,31 @@ VARIABLE _HKDF-REMAIN
 VARIABLE _HKDF-TPREV-LEN
 VARIABLE _HKDF-COUNTER
 
-: HKDF-EXTRACT ( salt slen ikm ilen out -- )
+: _HKDF-WIPE ( -- )
+    _HKDF-ZERO-SALT 32 0 FILL
+    _HKDF-T 32 0 FILL
+    0 _HKDF-PRK-PTR !
+    0 _HKDF-INFO-PTR !
+    0 _HKDF-INFO-LEN !
+    0 _HKDF-OUT-PTR !
+    0 _HKDF-REMAIN !
+    0 _HKDF-TPREV-LEN !
+    0 _HKDF-COUNTER !
+    _HMAC-WIPE ;
+
+: _HKDF-RETURN ( status -- status )
+    >R _HKDF-WIPE _HMAC-HKDF-RELEASE R> ;
+
+: _HKDF-OUTPUT-ALIASES-INPUT? ( -- flag )
+    _HKDF-REMAIN @ 0= IF FALSE EXIT THEN
+    _HKDF-OUT-PTR @ _HKDF-PRK-PTR @ HKDF-HASHLEN + <
+    _HKDF-PRK-PTR @ _HKDF-OUT-PTR @ _HKDF-REMAIN @ + < AND
+    _HKDF-INFO-LEN @ 0> IF
+        _HKDF-OUT-PTR @ _HKDF-INFO-PTR @ _HKDF-INFO-LEN @ + <
+        _HKDF-INFO-PTR @ _HKDF-OUT-PTR @ _HKDF-REMAIN @ + < AND OR
+    THEN ;
+
+: _HKDF-EXTRACT-NOLOCK ( salt slen ikm ilen out -- status )
     >R                                  \ R: out
     2SWAP                               \ ikm ilen salt slen
     DUP 0= IF                           \ null salt → use zero-salt
@@ -1465,37 +1609,51 @@ VARIABLE _HKDF-COUNTER
     \ HMAC( salt, IKM ) → out
     2SWAP                               \ salt slen ikm ilen
     R>                                  \ salt slen ikm ilen out
-    HMAC
+    _HMAC-NOLOCK
 ;
 
-: HKDF-EXPAND ( prk info ilen len out -- )
+: HKDF-EXTRACT ( salt slen ikm ilen out -- status )
+    CRYPTO-CAPS@ CRYPTO-CAP-SHA3-STREAM AND 0= IF
+        _HMAC-HKDF-DROP-ARGS CRYPTO-UNSUPPORTED EXIT
+    THEN
+    _HMAC-HKDF-TRY IF
+        _HMAC-HKDF-DROP-ARGS CRYPTO-STATE EXIT
+    THEN
+    _HKDF-EXTRACT-NOLOCK _HKDF-RETURN ;
+
+: _HKDF-EXPAND-NOLOCK ( prk info ilen len out -- status )
     _HKDF-OUT-PTR !
     _HKDF-REMAIN !
     _HKDF-INFO-LEN !
     _HKDF-INFO-PTR !
     _HKDF-PRK-PTR !
+    _HKDF-REMAIN @ 0< IF CRYPTO-RANGE EXIT THEN
+    _HKDF-REMAIN @ 8160 > IF CRYPTO-RANGE EXIT THEN
+    _HKDF-PRK-PTR @ HKDF-HASHLEN _CRYPTO-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HKDF-INFO-PTR @ _HKDF-INFO-LEN @ _CRYPTO-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HKDF-OUT-PTR @ _HKDF-REMAIN @ _CRYPTO-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HKDF-OUTPUT-ALIASES-INPUT? IF CRYPTO-RANGE EXIT THEN
     0 _HKDF-TPREV-LEN !                \ T(0) = empty
     1 _HKDF-COUNTER !                  \ counter starts at 1
     BEGIN _HKDF-REMAIN @ 0> WHILE
-        \ --- Build block: T(i-1) || info || counter_byte ---
-        \ Step 1: copy T(i-1) into _HKDF-BLOCK[0..]
+        \ Stream T(i-1), info, and the counter as separate HMAC segments.
+        \ This keeps info length caller-bounded instead of imposing a private
+        \ concatenation-buffer capacity.
+        _HKDF-PRK-PTR @ HKDF-HASHLEN _HMAC-BEGIN-NOLOCK
+        DUP IF EXIT THEN DROP
         _HKDF-TPREV-LEN @ 0> IF
-            _HKDF-T _HKDF-BLOCK _HKDF-TPREV-LEN @ CMOVE
+            _HKDF-T _HKDF-TPREV-LEN @ SHA3-UPDATE
+            DUP IF EXIT THEN DROP
         THEN
-        \ Step 2: append info at _HKDF-BLOCK[tprev_len..]
-        _HKDF-INFO-PTR @
-        _HKDF-BLOCK _HKDF-TPREV-LEN @ +
-        _HKDF-INFO-LEN @ CMOVE
-        \ Step 3: append counter byte
-        _HKDF-COUNTER @
-        _HKDF-BLOCK _HKDF-TPREV-LEN @ + _HKDF-INFO-LEN @ + C!
-        \ block_len = tprev_len + info_len + 1
-        _HKDF-TPREV-LEN @ _HKDF-INFO-LEN @ + 1+
-        \ --- HMAC(PRK, block) → _HKDF-T ---
-        >R                              \ R: block_len
-        _HKDF-PRK-PTR @ HKDF-HASHLEN
-        _HKDF-BLOCK R>
-        _HKDF-T HMAC                   \ ( )
+        _HKDF-INFO-PTR @ _HKDF-INFO-LEN @ SHA3-UPDATE
+        DUP IF EXIT THEN DROP
+        _HKDF-COUNTER 1 SHA3-UPDATE
+        DUP IF EXIT THEN DROP
+        _HKDF-T _HMAC-FINISH-NOLOCK
+        DUP IF EXIT THEN DROP
         \ --- Copy min(HASHLEN, remain) → output ---
         _HKDF-REMAIN @ HKDF-HASHLEN MIN
         _HKDF-T _HKDF-OUT-PTR @ ROT CMOVE
@@ -1507,7 +1665,17 @@ VARIABLE _HKDF-COUNTER
         HKDF-HASHLEN _HKDF-TPREV-LEN !
         _HKDF-COUNTER @ 1+ _HKDF-COUNTER !
     REPEAT
+    CRYPTO-OK
 ;
+
+: HKDF-EXPAND ( prk info ilen len out -- status )
+    CRYPTO-CAPS@ CRYPTO-CAP-SHA3-STREAM AND 0= IF
+        _HMAC-HKDF-DROP-ARGS CRYPTO-UNSUPPORTED EXIT
+    THEN
+    _HMAC-HKDF-TRY IF
+        _HMAC-HKDF-DROP-ARGS CRYPTO-STATE EXIT
+    THEN
+    _HKDF-EXPAND-NOLOCK _HKDF-RETURN ;
 
 \ =====================================================================
 \  §1.9b  HMAC-SHA256 / HKDF-SHA256 (for standard TLS 1.3)
@@ -1524,17 +1692,36 @@ VARIABLE _HKDF-COUNTER
 CREATE HMAC256-IPAD 64 ALLOT
 CREATE HMAC256-OPAD 64 ALLOT
 CREATE HMAC256-INNER 32 ALLOT
+CREATE HMAC256-KEY 32 ALLOT
 VARIABLE _HMAC256-PAD-PTR
 VARIABLE _HMAC256-XBYTE
 VARIABLE _HMAC256-OUT
+VARIABLE _HMAC256-KEY-PTR
+VARIABLE _HMAC256-KEY-LEN
 VARIABLE _HMAC256-MSG-PTR
 VARIABLE _HMAC256-MSG-LEN
+
+: _HMAC256-WIPE ( -- )
+    HMAC256-IPAD HMAC256-BLKSZ 0 FILL
+    HMAC256-OPAD HMAC256-BLKSZ 0 FILL
+    HMAC256-INNER 32 0 FILL
+    HMAC256-KEY 32 0 FILL
+    0 _HMAC256-PAD-PTR !
+    0 _HMAC256-XBYTE !
+    0 _HMAC256-OUT !
+    0 _HMAC256-KEY-PTR !
+    0 _HMAC256-KEY-LEN !
+    0 _HMAC256-MSG-PTR !
+    0 _HMAC256-MSG-LEN ! ;
+
+: _HMAC256-RETURN ( status -- status )
+    >R _HMAC256-WIPE _HMAC-HKDF-RELEASE R> ;
 
 : HMAC256-PAD ( key-addr key-len pad-addr xor-byte -- )
     _HMAC256-XBYTE !
     _HMAC256-PAD-PTR !
     _HMAC256-PAD-PTR @ HMAC256-BLKSZ 0 FILL
-    0 DO
+    0 ?DO
         DUP I + C@
         _HMAC256-PAD-PTR @ I + C!
     LOOP DROP
@@ -1545,34 +1732,56 @@ VARIABLE _HMAC256-MSG-LEN
     LOOP
 ;
 
-: HMAC-SHA256 ( key-addr key-len msg-addr msg-len out-addr -- status )
-    _HMAC256-OUT !
-    _HMAC256-MSG-LEN !
-    _HMAC256-MSG-PTR !
+: _HMAC256-BEGIN-NOLOCK ( key-addr key-len -- status )
+    _HMAC256-KEY-LEN !
+    _HMAC256-KEY-PTR !
+    _HMAC256-KEY-PTR @ _HMAC256-KEY-LEN @ SHA2-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HMAC256-KEY-LEN @ HMAC256-BLKSZ > IF
+        _HMAC256-KEY-PTR @ _HMAC256-KEY-LEN @ HMAC256-KEY SHA256
+        DUP IF EXIT THEN DROP
+        HMAC256-KEY _HMAC256-KEY-PTR !
+        32 _HMAC256-KEY-LEN !
+    THEN
+    _HMAC256-KEY-PTR @ _HMAC256-KEY-LEN @
     2DUP HMAC256-IPAD 54 HMAC256-PAD
     HMAC256-OPAD 92 HMAC256-PAD
-    \ Inner hash: SHA256(ipad || message)
     SHA256-INIT DUP IF EXIT THEN DROP
-    HMAC256-IPAD HMAC256-BLKSZ SHA256-UPDATE
-    DUP IF EXIT THEN DROP
-    _HMAC256-MSG-PTR @ _HMAC256-MSG-LEN @ SHA256-UPDATE
-    DUP IF EXIT THEN DROP
+    HMAC256-IPAD HMAC256-BLKSZ SHA256-UPDATE ;
+
+: _HMAC256-FINISH-NOLOCK ( out-addr -- status )
+    _HMAC256-OUT !
     HMAC256-INNER SHA256-FINAL
     DUP IF EXIT THEN DROP
-    \ Outer hash: SHA256(opad || inner)
     SHA256-INIT DUP IF EXIT THEN DROP
     HMAC256-OPAD HMAC256-BLKSZ SHA256-UPDATE
     DUP IF EXIT THEN DROP
     HMAC256-INNER 32 SHA256-UPDATE
     DUP IF EXIT THEN DROP
-    _HMAC256-OUT @ SHA256-FINAL
-;
+    _HMAC256-OUT @ SHA256-FINAL ;
+
+: _HMAC256-NOLOCK ( key-addr key-len msg-addr msg-len out-addr -- status )
+    _HMAC256-OUT !
+    _HMAC256-MSG-LEN !
+    _HMAC256-MSG-PTR !
+    _HMAC256-KEY-LEN !
+    _HMAC256-KEY-PTR !
+    _HMAC256-KEY-PTR @ _HMAC256-KEY-LEN @ _HMAC256-BEGIN-NOLOCK
+    DUP IF EXIT THEN DROP
+    _HMAC256-MSG-PTR @ _HMAC256-MSG-LEN @ SHA256-UPDATE
+    DUP IF EXIT THEN DROP
+    _HMAC256-OUT @ _HMAC256-FINISH-NOLOCK ;
+
+: HMAC-SHA256 ( key-addr key-len msg-addr msg-len out-addr -- status )
+    _HMAC-HKDF-TRY IF
+        _HMAC-HKDF-DROP-ARGS SHA256-STATE EXIT
+    THEN
+    _HMAC256-NOLOCK _HMAC256-RETURN ;
 
 \ Scratch buffers for HKDF-SHA256
 CREATE _HKDF256-ZERO-SALT  32 ALLOT
 _HKDF256-ZERO-SALT 32 0 FILL
 CREATE _HKDF256-T       32 ALLOT
-CREATE _HKDF256-BLOCK  200 ALLOT
 VARIABLE _HKDF256-PRK-PTR
 VARIABLE _HKDF256-INFO-PTR
 VARIABLE _HKDF256-INFO-LEN
@@ -1581,7 +1790,31 @@ VARIABLE _HKDF256-REMAIN
 VARIABLE _HKDF256-TPREV-LEN
 VARIABLE _HKDF256-COUNTER
 
-: HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- status )
+: _HKDF256-WIPE ( -- )
+    _HKDF256-ZERO-SALT 32 0 FILL
+    _HKDF256-T 32 0 FILL
+    0 _HKDF256-PRK-PTR !
+    0 _HKDF256-INFO-PTR !
+    0 _HKDF256-INFO-LEN !
+    0 _HKDF256-OUT-PTR !
+    0 _HKDF256-REMAIN !
+    0 _HKDF256-TPREV-LEN !
+    0 _HKDF256-COUNTER !
+    _HMAC256-WIPE ;
+
+: _HKDF256-RETURN ( status -- status )
+    >R _HKDF256-WIPE _HMAC-HKDF-RELEASE R> ;
+
+: _HKDF256-OUTPUT-ALIASES-INPUT? ( -- flag )
+    _HKDF256-REMAIN @ 0= IF FALSE EXIT THEN
+    _HKDF256-OUT-PTR @ _HKDF256-PRK-PTR @ 32 + <
+    _HKDF256-PRK-PTR @ _HKDF256-OUT-PTR @ _HKDF256-REMAIN @ + < AND
+    _HKDF256-INFO-LEN @ 0> IF
+        _HKDF256-OUT-PTR @ _HKDF256-INFO-PTR @ _HKDF256-INFO-LEN @ + <
+        _HKDF256-INFO-PTR @ _HKDF256-OUT-PTR @ _HKDF256-REMAIN @ + < AND OR
+    THEN ;
+
+: _HKDF256-EXTRACT-NOLOCK ( salt slen ikm ilen out -- status )
     >R
     2SWAP
     DUP 0= IF
@@ -1589,31 +1822,44 @@ VARIABLE _HKDF256-COUNTER
     THEN
     2SWAP
     R>
-    HMAC-SHA256
+    _HMAC256-NOLOCK
 ;
 
-: HKDF-SHA256-EXPAND ( prk info ilen len out -- status )
+: HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- status )
+    _HMAC-HKDF-TRY IF
+        _HMAC-HKDF-DROP-ARGS SHA256-STATE EXIT
+    THEN
+    _HKDF256-EXTRACT-NOLOCK _HKDF256-RETURN ;
+
+: _HKDF256-EXPAND-NOLOCK ( prk info ilen len out -- status )
     _HKDF256-OUT-PTR !
     _HKDF256-REMAIN !
     _HKDF256-INFO-LEN !
     _HKDF256-INFO-PTR !
     _HKDF256-PRK-PTR !
+    _HKDF256-REMAIN @ 0< IF SHA256-RANGE EXIT THEN
+    _HKDF256-REMAIN @ 8160 > IF SHA256-RANGE EXIT THEN
+    _HKDF256-PRK-PTR @ 32 SHA2-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HKDF256-INFO-PTR @ _HKDF256-INFO-LEN @ SHA2-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HKDF256-OUT-PTR @ _HKDF256-REMAIN @ SHA2-SPAN-STATUS
+    DUP IF EXIT THEN DROP
+    _HKDF256-OUTPUT-ALIASES-INPUT? IF SHA256-RANGE EXIT THEN
     0 _HKDF256-TPREV-LEN !
     1 _HKDF256-COUNTER !
     BEGIN _HKDF256-REMAIN @ 0> WHILE
+        _HKDF256-PRK-PTR @ 32 _HMAC256-BEGIN-NOLOCK
+        DUP IF EXIT THEN DROP
         _HKDF256-TPREV-LEN @ 0> IF
-            _HKDF256-T _HKDF256-BLOCK _HKDF256-TPREV-LEN @ CMOVE
+            _HKDF256-T _HKDF256-TPREV-LEN @ SHA256-UPDATE
+            DUP IF EXIT THEN DROP
         THEN
-        _HKDF256-INFO-PTR @
-        _HKDF256-BLOCK _HKDF256-TPREV-LEN @ +
-        _HKDF256-INFO-LEN @ CMOVE
-        _HKDF256-COUNTER @
-        _HKDF256-BLOCK _HKDF256-TPREV-LEN @ + _HKDF256-INFO-LEN @ + C!
-        _HKDF256-TPREV-LEN @ _HKDF256-INFO-LEN @ + 1+
-        >R
-        _HKDF256-PRK-PTR @ 32
-        _HKDF256-BLOCK R>
-        _HKDF256-T HMAC-SHA256
+        _HKDF256-INFO-PTR @ _HKDF256-INFO-LEN @ SHA256-UPDATE
+        DUP IF EXIT THEN DROP
+        _HKDF256-COUNTER 1 SHA256-UPDATE
+        DUP IF EXIT THEN DROP
+        _HKDF256-T _HMAC256-FINISH-NOLOCK
         DUP IF EXIT THEN DROP
         _HKDF256-REMAIN @ 32 MIN
         _HKDF256-T _HKDF256-OUT-PTR @ ROT CMOVE
@@ -1623,25 +1869,31 @@ VARIABLE _HKDF256-COUNTER
         32 _HKDF256-TPREV-LEN !
         _HKDF256-COUNTER @ 1+ _HKDF256-COUNTER !
     REPEAT
-    0
-;
+    SHA256-OK ;
 
-\ PQ-DERIVE ( out -- )
+: HKDF-SHA256-EXPAND ( prk info ilen len out -- status )
+    _HMAC-HKDF-TRY IF
+        _HMAC-HKDF-DROP-ARGS SHA256-STATE EXIT
+    THEN
+    _HKDF256-EXPAND-NOLOCK _HKDF256-RETURN ;
+
+\ PQ-DERIVE ( out -- status )
 \   Internal: HKDF-derive final 32-byte key from concatenated secrets.
 \   Assumes _PQ-CAT already has 64 bytes of combined keying material.
-: PQ-DERIVE ( out-addr -- )
+: PQ-DERIVE ( out-addr -- status )
     >R
     \ HKDF-Extract: salt=empty(0), ikm=_PQ-CAT(64B) → _PQ-PRK
     0 0 _PQ-CAT 64 _PQ-PRK HKDF-EXTRACT
+    DUP IF R> DROP EXIT THEN DROP
     \ HKDF-Expand: prk=_PQ-PRK, info="pq-hybrid"(9B), len=32, out
     _PQ-PRK _PQ-INFO 9 32 R> HKDF-EXPAND ;
 
-\ PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- )
+\ PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- status )
 \   Initiator side:
 \   1. X25519-DH with their X25519 public key → _PQ-SS-X
 \   2. Generate random coin, KYBER-ENCAPS with their Kyber pk → ct + _PQ-SS-K
 \   3. Concatenate, HKDF-derive → ss-out
-: PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- )
+: PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- status )
     >R >R                          \ R: ss-out ct-out
     \ X25519 DH
     SWAP                            \ Stack: kyber-pk their-x-pub
@@ -1657,19 +1909,19 @@ VARIABLE _HKDF256-COUNTER
     \ Derive final key
     R> PQ-DERIVE ;
 
-\ PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- )
+\ PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- status )
 \   Responder side:
 \   1. X25519-DH with their X25519 public key → _PQ-SS-X
 \   2. KYBER-DECAPS with ct and our Kyber sk → _PQ-SS-K
 \   3. Concatenate, HKDF-derive → ss-out
-: PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- )
+: PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- status )
     >R                              \ R: ss-out
     \ Stack: their-x-pub ct kyber-sk
     ROT                             \ Stack: ct kyber-sk their-x-pub
     X25519-PRIV OVER _PQ-SS-X X25519
     DROP                            \ Stack: ct kyber-sk
     \ KYBER-DECAPS ( ct sk ss -- )
-    SWAP _PQ-SS-K KYBER-DECAPS
+    _PQ-SS-K KYBER-DECAPS
     \ Concatenate
     _PQ-SS-X _PQ-CAT 32 CMOVE
     _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
@@ -6855,6 +7107,7 @@ VARIABLE MB-T   VARIABLE MB-P
 4 CONSTANT RING-LOCK
 5 CONSTANT HT-LOCK
 6 CONSTANT APP-LOCK
+\ Lock 7 is MSG-SLOCK; BIOS reserves lock 8; HMAC-HKDF-LOCK is lock 9.
 
 : DICT-ACQUIRE  ( -- )  DICT-LOCK LOCK ;
 : DICT-RELEASE  ( -- )  DICT-LOCK UNLOCK ;

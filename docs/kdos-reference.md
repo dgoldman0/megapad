@@ -179,13 +179,34 @@ AES-256 (default) and AES-128 (via `AES-KEY-MODE!`).
 
 ### §1.6 SHA-3 Hashing
 
-SHA-3 (Keccak) convenience words built on the BIOS SHA3 accelerator.
-Supports SHA3-256 and SHA3-512 via mode selection.
+Checked SHA-3 and SHAKE convenience words built on the guarded BIOS Keccak
+service. Checkpoint 2 reports `CRYPTO_CAPS = 0x7`; bit 1 advertises this
+streaming interface and bit 2 advertises the inherited raw
+`KECCAK-F1600` BIOS word. All words below return the first checked failure
+when required cleanup succeeds. A failed cleanup takes precedence and retains
+the guard fail-closed.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `SHA3` | `( addr len out -- )` | Compute SHA3-256 hash of *len* bytes at *addr*, write 32-byte digest to *out*. |
-| `SHA3-512` | `( addr len out -- )` | Compute SHA3-512 hash of *len* bytes at *addr*, write 64-byte digest to *out*. Sets mode via `SHA3-MODE!`, uses multi-squeeze for 64-byte digest. |
+| `SHA3` | `( addr len out -- status )` | Checked one-shot SHA3-256; begin, update, and fixed final publish 32 bytes on success. |
+| `SHA3-512` | `( addr len out -- status )` | Checked one-shot SHA3-512; fixed final stages and publishes the complete 64-byte digest. |
+| `SHAKE128` | `( addr len out outlen -- status )` | Checked one-shot SHAKE128; preflight the complete output, read it in chunks of at most 32 bytes, and clear on every handled terminal path. |
+| `SHAKE256` | `( addr len out outlen -- status )` | Checked one-shot SHAKE256 with the same staged BIOS-read and cleanup rules. |
+| `SHAKE-STREAM` | `( addr blocks -- status )` | From an already-finalized checked SHAKE transaction, validate owner/phase, preflight the complete overflow-safe `blocks*32` span, read 32-byte chunks, and then clear; a negative count returns RANGE and clears. |
+
+The common constants `CRYPTO-OK`, `CRYPTO-UNSUPPORTED`, `CRYPTO-STATE`,
+`CRYPTO-RANGE`, `CRYPTO-PROTECTED`, `CRYPTO-TIMEOUT`, and
+`CRYPTO-HARDWARE` name statuses 0 through 6. The BIOS hardware window is 64
+bytes, while each `SHAKE-READ` used by KDOS requests no more than 32 bytes.
+Fixed-output hashing uses `SHA3-FINAL`; SHAKE uses `SHAKE-FINAL` and must end
+with `SHA3-CLEAR`.
+
+KDOS inherits `KECCAK-F1600 ( state-200 -- status )` directly from BIOS. The
+200-byte image is 25 little-endian lanes in `x + 5*y` order:
+`memory[8*(x+5*y)+b] = state[x+5*y][8*b +: 8]`. The operation is an in-place
+raw 24-round permutation only: it does not absorb, pad, apply a domain
+separator, squeeze, or reverse bytes, and a failure leaves the image
+unchanged.
 
 ---
 
@@ -203,7 +224,7 @@ accelerator.  Used by the TLS 1.3 cipher suite 0x1301
 | `SHA256-CLEAR` | `( -- status )` | Idempotently abort, release, zeroize buffered/staged/visible state, and return 0. |
 | `SHA2-SPAN-STATUS` | `( addr len -- status )` | Pure pre-`INIT` check for one physical window and either SHA-2 context arena; returns only 0, 2, or 3. |
 | `SHA256` | `( addr len out -- status )` | Checked one-shot SHA-256; returns the first BIOS failure unchanged. |
-| `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- status )` | Checked HMAC-SHA256. Used internally by HKDF-SHA256 and the TLS 1.3 key schedule. |
+| `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- status )` | Checked HMAC-SHA256; hashes long keys and shares only its private no-lock core with HKDF-SHA256. |
 
 Streaming state is core-local. `INIT` and `FINAL`/`CLEAR` must execute on the
 same core. `SHA256-OK`, `SHA256-STATE`, `SHA256-RANGE`,
@@ -246,8 +267,8 @@ High-level crypto API combining AES and SHA3.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `HASH` | `( addr len out -- )` | Alias for SHA3-256. |
-| `HMAC` | `( key klen msg mlen out -- )` | HMAC-SHA3-256.  Uses ipad/opad (XOR 0x36/0x5C), block size 136. |
+| `HASH` | `( addr len out -- status )` | Checked alias for SHA3-256. |
+| `HMAC` | `( key klen msg mlen out -- status )` | Checked HMAC-SHA3-256. Uses ipad/opad (XOR 0x36/0x5C), block size 136, hashes long keys, and returns the first SHA3 failure. |
 | `ENCRYPT` | `( key iv src dst len -- tag-addr )` | AES-256-GCM encrypt (alias for AES-ENCRYPT). |
 | `DECRYPT` | `( key iv src dst len tag -- flag )` | AES-256-GCM decrypt (alias for AES-DECRYPT). |
 | `VERIFY` | `( addr1 addr2 len -- flag )` | Constant-time comparison.  Returns 0 if equal, -1 if different. |
@@ -274,10 +295,38 @@ HMAC-based Key Derivation Function (RFC 5869).  Two families: SHA3-HMAC
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `HKDF-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract (SHA3-HMAC): PRK = HMAC(salt, IKM).  32-byte output. |
-| `HKDF-EXPAND` | `( prk info ilen len out -- )` | Expand (SHA3-HMAC): OKM = HMAC(PRK, info \|\| counter).  Up to 255×32 bytes. |
+| `HKDF-EXTRACT` | `( salt slen ikm ilen out -- status )` | Checked SHA3-HMAC extract: PRK = HMAC(salt, IKM), with a 32-byte output; returns the HMAC status unchanged. |
+| `HKDF-EXPAND` | `( prk info ilen len out -- status )` | Checked SHA3-HMAC expand: OKM = HMAC(PRK, info \|\| counter), up to 255×32 bytes; returns the first failure unchanged. |
 | `HKDF-SHA256-EXTRACT` | `( salt slen ikm ilen out -- status )` | Checked extract (SHA-256): PRK = HMAC-SHA256(salt, IKM). 32-byte output on success. |
 | `HKDF-SHA256-EXPAND` | `( prk info ilen len out -- status )` | Checked expand (SHA-256): OKM = HMAC-SHA256(PRK, info \|\| counter). Up to 255×32 bytes; returns the first hash failure. |
+
+`HMAC`, `HMAC-SHA256`, and both HKDF families serialize their shared KDOS
+scratch with one nonblocking attempt on reserved hardware spinlock 9. Busy
+returns `CRYPTO-STATE` for the SHA3 family or `SHA256-STATE` for the SHA-256
+family. SHA3 capability absence is checked first and therefore still returns
+`CRYPTO-UNSUPPORTED` even when lock 9 is busy. The lock is held through all
+private no-lock HMAC stages and through zeroization of pads, normalized keys,
+intermediate digests, HKDF state, and pointer/length metadata. These wrappers
+do not yield; lock 9 serializes every full and microcore, and SHA3 calls use the
+fixed lock order 9 then the BIOS-managed crypto lock 8. Applications must not
+acquire lock 9 around these words or call them while retaining an active
+`SHA3-BEGIN`/SHAKE transaction.
+
+HKDF expansion preflights the complete output span and its fixed 32-byte PRK,
+then publishes one successful 32-byte-or-smaller block at a time. If a later
+checked hash operation fails, the word returns that first failure and leaves
+the already-completed output prefix in place. No unrelated 8,160-byte staging
+arena is imposed. Multi-window SHAKE wrappers have the same per-chunk
+publication rule, with each BIOS `SHAKE-READ` itself all-or-nothing.
+
+An HKDF expansion destination may not overlap its fixed 32-byte PRK or its
+nonempty info span, because both inputs are reread for each output block. Such
+an alias returns `CRYPTO-RANGE` for SHA3 HKDF or `SHA256-RANGE` for SHA-256
+HKDF before publishing output.
+
+The named HMAC/HKDF pads, intermediate buffers, normalized keys, counters, and
+metadata are private KDOS implementation storage. Application key, message,
+info, PRK, and destination spans must not alias them.
 
 ---
 
@@ -329,8 +378,8 @@ accelerator and NTT engine.
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `KYBER-KEYGEN` | `( seed pk sk -- )` | Generate ML-KEM-512 keypair.  *seed*: 64 bytes, *pk*: 800 bytes, *sk*: 1632 bytes. |
-| `KYBER-ENCAPS` | `( pk ct ss -- )` | Encapsulate: produce ciphertext (768 bytes) and shared secret (32 bytes). |
-| `KYBER-DECAPS` | `( sk ct ss -- )` | Decapsulate: recover shared secret from ciphertext using secret key. |
+| `KYBER-ENCAPS` | `( pk coin ct ss -- )` | Encapsulate with 32 caller-provided random bytes: produce ciphertext (768 bytes) and shared secret (32 bytes). |
+| `KYBER-DECAPS` | `( ct sk ss -- )` | Decapsulate: recover shared secret from ciphertext using the secret key. |
 | `KEM-STATUS@` | `( -- n )` | Read KEM accelerator status. |
 
 ---
@@ -343,10 +392,9 @@ a single 32-byte hybrid shared secret.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PQ-EXCHANGE` | `( seed pk sk -- )` | Full hybrid setup: X25519 keygen + ML-KEM keygen. |
-| `PQ-EXCHANGE-INIT` | `( peer-x25519 peer-pk ct ss -- )` | Initiator side: X25519 ECDH + ML-KEM encaps → hybrid SS. |
-| `PQ-EXCHANGE-RESP` | `( peer-x25519 ct ss -- )` | Responder side: X25519 ECDH + ML-KEM decaps → hybrid SS. |
-| `PQ-DERIVE` | `( x-ss k-ss out -- )` | Derive 32-byte hybrid key from X25519 SS + Kyber SS via HKDF. |
+| `PQ-EXCHANGE-INIT` | `( peer-x25519 peer-pk ct ss -- status )` | Initiator side: X25519 ECDH + ML-KEM encapsulation, followed by checked hybrid-key derivation. |
+| `PQ-EXCHANGE-RESP` | `( peer-x25519 ct sk ss -- status )` | Responder side: X25519 ECDH + ML-KEM decapsulation, followed by checked hybrid-key derivation. |
+| `PQ-DERIVE` | `( out -- status )` | Derive the 32-byte hybrid key from the internal concatenated X25519 and ML-KEM secrets, propagating checked HKDF status. |
 
 ---
 
@@ -970,10 +1018,11 @@ KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
 | `LOCK` | `( n -- )` | Acquire spinlock *n* with busy-wait (calls `SPIN@` in a loop). |
 | `UNLOCK` | `( n -- )` | Release spinlock *n* (calls `SPIN!`). |
 
-The eight hardware locks have one machine-wide allocation: 0 dictionary, 1
-UART, 2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application
-runtime concurrency (including Akashic `EVT-LOCK`), and 7 IPI messaging.
-Subsystems must not privately reuse a number from this map.
+The 16 hardware locks have one machine-wide allocation: 0 dictionary, 1 UART,
+2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application runtime
+concurrency (including Akashic `EVT-LOCK`), 7 IPI messaging, 8 the checked BIOS
+crypto guard, and 9 KDOS HMAC/HKDF scratch. Locks 10 through 15 are currently
+unassigned. Subsystems must not privately reuse a number from this map.
 
 ### Parallel Pipeline Execution
 
@@ -1581,12 +1630,12 @@ Record plaintext is bounded before scratch-buffer access. Application-data
 and alert sends consume a write sequence number only after TCP accepts the
 encrypted record.
 
-The suite-dispatch and key-schedule words expose checked status rather than
-silently discarding a SHA-256 failure:
+The suite-dispatch and key-schedule words expose checked status from either
+hash family rather than synthesizing success:
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TLS-HASH` | `( addr len out -- status )` | Dispatch to the negotiated transcript hash; the SHA3 path returns 0 and the SHA-256 path propagates its checked status. |
+| `TLS-HASH` | `( addr len out -- status )` | Dispatch to the negotiated transcript hash and return either SHA3 or SHA-256 status unchanged. |
 | `TLS-HMAC` | `( key klen msg mlen out -- status )` | Dispatch to the negotiated HMAC and return its status. |
 | `TLS-HKDF-EXTRACT` | `( salt slen ikm ilen out -- status )` | Dispatch HKDF-Extract and return its status. |
 | `TLS-HKDF-EXPAND` | `( prk info ilen len out -- status )` | Dispatch HKDF-Expand and return its status. |
@@ -1600,6 +1649,10 @@ Certificate and Finished verification map any nonzero hash status to their
 existing failure result. Record/handshake builders map it to a zero-length or
 failed result, so the higher-level `TLS-*` connection API remains fail-closed
 without advancing connection state after a partially derived key schedule.
+The private-suite empty hash is initialized through checked
+`SHA3`; its retained failure is returned by `TLS-DERIVE-DERIVED` only in
+SHA3 mode. The standard SHA-256 suite continues to use its independent fixed
+empty-hash constant.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

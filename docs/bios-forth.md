@@ -8,9 +8,10 @@ standard image places the KDOS core first.
 
 > **Implementation boundary.** This reference describes the checked-in BIOS
 > image. The numeric CRC, SHA3, Keccak, and WOTS interface is in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md). A
-> capability-dependent path remains unavailable until its complete backend and
-> checked BIOS path are implemented and the corresponding bit is advertised.
+> [`crypto-interface-contract.md`](crypto-interface-contract.md). Checkpoint 2
+> advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC (bit 0), checked
+> SHA3/SHAKE streaming (bit 1), and raw Keccak-f[1600] (bit 2). WOTS (bit 3)
+> remains unadvertised and has no prototype BIOS word surface.
 
 This document organizes the BIOS dictionary by functional category.  Each
 entry shows the **stack effect**
@@ -995,35 +996,70 @@ and must be updated, finalized, or cleared on their originating core.
 
 ---
 
-## SHA-3 / SHAKE Engine (9 words)
+## Checked SHA-3 / SHAKE / raw Keccak (9 words)
 
-The checked-in BIOS exposes prototype words for the MMIO SHA3 engine at
-`0xFFFF_FF00_0000_0780`, naming SHA3-256, SHA3-512, SHAKE128, and SHAKE256
-modes. Continued XOF squeeze is not qualified consistently across backends.
+The checked SHA aperture is exactly 96 bytes at
+`0xFFFF_FF00_0000_0780..0xFFFF_FF00_0000_07DF`. `CRYPTO_CAPS` bit 1
+advertises SHA3/SHAKE streaming and bit 2 advertises raw Keccak-f[1600]; both
+are set at checkpoint 2. Hash modes are 0=SHA3-256, 1=SHA3-512, 2=SHAKE128,
+and 3=SHAKE256.
 
-> **Prototype surface:** current backends disagree on command timing, status,
-> full-rate absorption, and continued squeeze. These words are documented here
-> only as the checked-in BIOS surface. The selected guarded replacement and
-> its numeric statuses are authoritative in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md#checked-sha3-shake-and-keccak-words)
-> and are not yet implemented or advertised.
+The aperture contains byte CMD `+0x00`, byte STATUS `+0x01`, byte CTRL
+`+0x02`, byte ERROR `+0x03`, byte DIN `+0x08`, the stable 64-byte DOUT window
+`+0x10..+0x4F`, byte STATE_INDEX `+0x50`, and the selected little-endian lane
+at STATE_DATA `+0x58..+0x5F`. DOUT and STATE_DATA permit aligned qword access;
+other defined accesses are byte-wide. Commands are exactly 1 INIT, 3 FINAL,
+4 NEXT, 6 KECCAK_F1600, and 7 CLEAR; 0, 2, 5, and 8..255 are reserved.
+STATUS packs phase (0 IDLE, 1 BUSY, 2 DONE, 3 ERROR) in bits 1:0 and owner
+(0 none, 1 sponge, 2 raw, 3 WOTS) in bits 3:2.
+
+All checked words use `0` OK, `1` UNSUPPORTED, `2` STATE/OWNER, `3` RANGE,
+`4` PROTECTED, `5` TIMEOUT, and `6` HARDWARE/PROTOCOL. Capability checks
+precede argument checks. Complete caller spans are qualified before device or
+destination mutation, and every destination-returning word stages its result
+before publication.
+
+Hardware spinlock 8 is reserved as `CRYPTO-LOCK`: acquire is at spinlock
+offset `+0x20` (absolute MMIO `+0x620`) and release at `+0x21`. The BIOS also
+publishes the full owning `(COREID,TASK-ID)` in shared fields. Acquire,
+owner-field publication, cleanup, and release preserve the caller's exact
+interrupt-enable state, so another task on the same physical core cannot
+re-enter the transaction. SHAKE retains the guard across calls; callers do
+not wrap checked words in `SPIN@`/`SPIN!` themselves.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `SHA3-INIT` | `( -- )` | Initialize SHA3 engine for a new hash computation. |
-| `SHA3-UPDATE` | `( addr len -- )` | Feed data (len bytes at addr) into SHA3 engine. |
-| `SHA3-FINAL` | `( addr -- )` | Finalize hash and store digest at addr. |
-| `SHA3-STATUS@` | `( -- status )` | Read prototype status: low phase `0`=idle, `1`=busy, `2`=done; native execution may also inject advisory bit 2. Diagnostic only. |
-| `SHA3-MODE!` | `( mode -- )` | Set hash mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256. |
-| `SHA3-MODE@` | `( -- mode )` | Read current hash mode. |
-| `SHA3-SQUEEZE` | `( addr len -- )` | Squeeze len bytes of XOF output to addr (SHAKE modes). |
-| `SHA3-SQUEEZE-NEXT` | `( -- )` | Write prototype command 5; current native execution advances a 32-byte sliding window. |
-| `SHA3-DOUT@` | `( addr -- )` | Copy the current DOUT window to memory: 64 bytes in SHA3-512 mode, otherwise 32 bytes. |
+| `SHA3-BEGIN` | `( mode -- status )` | Validate capability and mode, acquire the portable guard, program `CTRL`, and issue `INIT`. |
+| `SHA3-UPDATE` | `( src len -- status )` | Require the exact owner and absorb a complete caller-readable span. A zero length ignores `src`. |
+| `SHA3-FINAL` | `( dst -- status )` | Fixed modes only: stage 32/64 digest bytes, clear and scrub hardware, publish, wipe scratch, and release. |
+| `SHA3-STATUS@` | `( -- status )` | Diagnostic packed hardware status: phase in bits 1:0, owner in bits 3:2. It neither acquires nor advances the guard. |
+| `SHAKE-FINAL` | `( -- status )` | SHAKE modes only: finalize and set the logical output cursor to zero while retaining ownership. |
+| `SHA3-MODE@` | `( -- mode )` | Diagnostic raw `CTRL` read; it neither acquires nor advances the guard. |
+| `SHAKE-READ` | `( dst len -- status )` | Publish the next 0..32 XOF bytes. BIOS tracks a cursor over stable 64-byte hardware windows and issues `NEXT` only when needed. |
+| `SHA3-CLEAR` | `( -- status )` | Idempotently abort/acknowledge, wipe, and release. A clear timeout returns 5 and deliberately retains the guard fail-closed. |
+| `KECCAK-F1600` | `( state-200 -- status )` | In-place raw 24-round permutation of one qualified caller-owned 200-byte state. |
 
-The checked-in dictionary also contains `WOTS-CHAIN-HW`, `SHA3-LOCKED?`, and
-`WOTS-STATUS@`. They are prototype diagnostics rather than a portable
-serialization interface: their status tests neither establish machine-wide
-ownership nor make the RTL SHA front end responsive during WOTS activity.
+`SHA3-FINAL` is not a SHAKE finalizer, and `SHAKE-FINAL` is not a fixed hash
+finalizer; a mode/phase mismatch returns STATE/OWNER and clears the owned
+transaction. `SHAKE-READ` accepts at most 32 bytes even though the hardware
+publishes a stable 64-byte `DOUT` window. Fixed SHA3-512 finalization may
+stage all 64 digest bytes. SHAKE clients must finish with `SHA3-CLEAR` on
+both success and handled failure paths.
+
+`KECCAK-F1600` maps the caller image directly to the 25 little-endian lanes:
+
+```text
+lane = x + 5*y
+memory[8 * lane + b] = state[lane][8*b +: 8]
+```
+
+It applies no absorb, padding, domain separator, byte reversal, or squeeze.
+All 200 result bytes are staged, hardware is cleared, and only then is the
+caller image overwritten; any failure leaves it unchanged.
+
+The unreleased transaction/prototype words `SHA3-INIT`, `SHA3-MODE!`,
+`SHA3-SQUEEZE`, `SHA3-SQUEEZE-NEXT`, `SHA3-DOUT@`, `WOTS-CHAIN-HW`,
+`SHA3-LOCKED?`, and `WOTS-STATUS@` were removed without aliases.
 
 ---
 

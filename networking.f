@@ -5729,13 +5729,13 @@ CREATE TLS-HS-KYBER-CT  768 ALLOT      \ peer Kyber ciphertext (from SH)
 VARIABLE TLS-USE-SHA256   \ 0 = SHA3/AES-256 (0xFF01), 1 = SHA-256/AES-128 (0x1301)
 
 : TLS-HASH ( addr len out -- status )
-    TLS-USE-SHA256 @ IF SHA256 ELSE SHA3 0 THEN ;
+    TLS-USE-SHA256 @ IF SHA256 ELSE SHA3 THEN ;
 : TLS-HMAC ( key klen msg mlen out -- status )
-    TLS-USE-SHA256 @ IF HMAC-SHA256 ELSE HMAC 0 THEN ;
+    TLS-USE-SHA256 @ IF HMAC-SHA256 ELSE HMAC THEN ;
 : TLS-HKDF-EXTRACT ( salt slen ikm ilen out -- status )
-    TLS-USE-SHA256 @ IF HKDF-SHA256-EXTRACT ELSE HKDF-EXTRACT 0 THEN ;
+    TLS-USE-SHA256 @ IF HKDF-SHA256-EXTRACT ELSE HKDF-EXTRACT THEN ;
 : TLS-HKDF-EXPAND ( prk info ilen len out -- status )
-    TLS-USE-SHA256 @ IF HKDF-SHA256-EXPAND ELSE HKDF-EXPAND 0 THEN ;
+    TLS-USE-SHA256 @ IF HKDF-SHA256-EXPAND ELSE HKDF-EXPAND THEN ;
 : TLS-KEY-LEN ( -- n )
     TLS-USE-SHA256 @ IF 16 ELSE 32 THEN ;
 : TLS-SET-AES-MODE ( -- )
@@ -5766,7 +5766,8 @@ _TLS-ZERO-SECRET 32 0 FILL
 
 \ Pre-compute hash of empty string for both modes.
 CREATE TLS-EMPTY-HASH-SHA3 32 ALLOT
-SHA3-INIT  TLS-EMPTY-HASH-SHA3 SHA3-FINAL
+VARIABLE TLS-EMPTY-HASH-SHA3-STATUS
+0 0 TLS-EMPTY-HASH-SHA3 SHA3 TLS-EMPTY-HASH-SHA3-STATUS !
 CREATE TLS-EMPTY-HASH-SHA256
 227 C, 176 C, 196 C, 66 C, 152 C, 252 C, 28 C, 20 C,
 154 C, 251 C, 244 C, 200 C, 153 C, 111 C, 185 C, 36 C,
@@ -5930,6 +5931,14 @@ VARIABLE _TTA-LEN
 \   = HKDF-Expand-Label(Secret, "derived", SHA3-256(""), 32)
 : TLS-DERIVE-DERIVED ( secret out -- status )
     >R
+    \ A failed load-time checked hash must not feed an uninitialized digest
+    \ into the private SHA3 key schedule.  The standard SHA-256 suite keeps
+    \ using its fixed empty-hash constant independently.
+    TLS-USE-SHA256 @ 0= IF
+        TLS-EMPTY-HASH-SHA3-STATUS @ DUP IF
+            SWAP DROP R> DROP EXIT
+        THEN DROP
+    THEN
     TLS-L-DERIVED /TLS-L-DERIVED
     TLS-EMPTY-HASH 32 32 R> TLS-EXPAND-LABEL
 ;
@@ -6452,6 +6461,7 @@ VARIABLE _TPHM-TYPE
             _PQ-SS-X _PQ-CAT 32 CMOVE
             _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
             _TPHM-CTX @ TLS-CTX.SHARED PQ-DERIVE
+            IF -1 EXIT THEN
         ELSE
             \ Plain X25519
             _TPHM-CTX @ TLS-CTX.MY-PRIVKEY X25519-PRIV 32 CMOVE

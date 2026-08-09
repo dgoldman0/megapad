@@ -8,6 +8,7 @@ Python device implementation cannot mask a native contract divergence.
 from __future__ import annotations
 
 import hashlib
+import random
 
 import pytest
 
@@ -289,6 +290,55 @@ def test_native_raw_zero_state_matches_published_keccak_vector() -> None:
     _write(state, CMD, 6)
     state.crypto_tick(24)
     assert [_read_lane(state, index) for index in range(25)] == expected
+
+
+def test_native_seeded_random_differential_hash_xof_and_raw_states() -> None:
+    """Seeded varied inputs agree with independent library/local oracles."""
+    rng = random.Random(0x4D50_3634_5348_4133)
+    cases = (
+        (0, 136, lambda message: hashlib.sha3_256(message).digest()),
+        (1, 72, lambda message: hashlib.sha3_512(message).digest()),
+        (2, 168, lambda message: hashlib.shake_128(message).digest(192)),
+        (3, 136, lambda message: hashlib.shake_256(message).digest(192)),
+    )
+
+    for mode, rate, oracle in cases:
+        lengths = (0, rate - 1, rate, rate + 1, rng.randrange(2, 3 * rate))
+        for length in lengths:
+            message = rng.randbytes(length)
+            state = _new_device()
+            _write(state, CTRL, mode)
+            _write(state, CMD, 1)
+            for byte in message:
+                _write(state, DIN, byte)
+                if _read(state, STATUS) == 0x05:
+                    state.crypto_tick(24)
+            _write(state, CMD, 3)
+            state.crypto_tick(24)
+
+            expected = oracle(message)
+            if mode < 2:
+                assert _read_window(state)[:len(expected)] == expected
+            else:
+                actual = bytearray(_read_window(state))
+                for _ in range(2):
+                    _write(state, CMD, 4)
+                    state.crypto_tick(24)
+                    actual.extend(_read_window(state))
+                assert bytes(actual) == expected
+            _write(state, CMD, 7)
+            assert state._crypto_sha3_test_zeroized()
+
+    for _ in range(4):
+        initial = [rng.getrandbits(64) for _ in range(25)]
+        state = _new_device()
+        for index, lane in enumerate(initial):
+            _write_lane(state, index, lane)
+        _write(state, CMD, 6)
+        state.crypto_tick(24)
+        assert [_read_lane(state, index) for index in range(25)] == (
+            _keccak_oracle(initial)
+        )
 
 
 def test_native_error_owner_clear_and_zeroization_contract() -> None:

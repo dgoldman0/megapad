@@ -6,9 +6,10 @@ later-added BIOS entry.
 
 > **Implementation boundary.** This reference describes the checked-in BIOS
 > image. The numeric CRC, SHA3, Keccak, and WOTS interface is in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md). A
-> capability-dependent path remains unavailable until its complete backend and
-> checked BIOS path are implemented and the corresponding bit is advertised.
+> [`crypto-interface-contract.md`](crypto-interface-contract.md). Checkpoint 2
+> advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC (bit 0), checked
+> SHA3/SHAKE streaming (bit 1), and raw Keccak-f[1600] (bit 2). WOTS (bit 3)
+> remains unadvertised and has no prototype BIOS word surface.
 
 ---
 
@@ -36,8 +37,9 @@ Each entry is a linked list node:
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
 3. **Forth variables and private arena**: `STATE` = 0, `BASE` = 10, reserve
    and scrub `NUM_CORES × 16` bytes above `dict_free` for CRC owner records,
-   set `HERE` to the resulting kernel-data end, and set `LATEST` =
-   `latest_entry` (`TACC-CLAIM?`).
+   reset the full-width SHA/Keccak software owner fields, set `HERE` to the
+   resulting kernel-data end, and set `LATEST` = `latest_entry`
+   (`TACC-CLAIM?`). Hardware spinlock 8 resets independently.
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -654,29 +656,41 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 261 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
 | 262 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
 
-### SHA-3 / SHAKE Engine (9 words)
+### Checked SHA-3 / SHAKE / raw Keccak (9 words)
 
-These are prototype words whose command timing and status differ across the
-current backends. The selected guarded replacement is pinned in
-[`crypto-interface-contract.md`](crypto-interface-contract.md#checked-sha3-shake-and-keccak-words)
-and is not yet implemented or advertised.
+The 96-byte SHA aperture and checked BIOS path are implemented and advertised
+by `CRYPTO_CAPS` bits 1 and 2. The common status namespace is `0` OK, `1`
+UNSUPPORTED, `2` STATE/OWNER, `3` RANGE, `4` PROTECTED, `5` TIMEOUT, and `6`
+HARDWARE/PROTOCOL. A failed destination-returning operation leaves the caller
+destination unchanged.
+
+The checked surface owns hardware spinlock 8 (`+0x620` acquire, `+0x621`
+release) for a complete transaction and records the full `(COREID,TASK-ID)`
+in BIOS. Acquisition and owner publication are one interrupt-state-preserving
+critical section, preventing same-core task re-entry. Fixed hashes and raw
+Keccak release only after hardware `CLEAR` proves the engine scrubbed; SHAKE
+retains ownership after `SHAKE-FINAL` until `SHA3-CLEAR`.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 263 | `SHA3-INIT` | `( -- )` | | Initialize SHA3 engine for new hash computation |
-| 264 | `SHA3-UPDATE` | `( addr len -- )` | | Feed data (len bytes at addr) into SHA3 engine |
-| 265 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store digest at addr (mode-aware: 32B for SHA3-256, 64B for SHA3-512) |
-| 266 | `SHA3-STATUS@` | `( -- status )` | | Read prototype status: low phase `0`=idle, `1`=busy, `2`=done; native may also inject advisory bit 2. Diagnostic only |
-| 267 | `SHA3-MODE!` | `( mode -- )` | | Set mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256 |
-| 268 | `SHA3-MODE@` | `( -- mode )` | | Read current hash mode |
-| 269 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
-| 270 | `SHA3-SQUEEZE-NEXT` | `( -- )` | | Write prototype command 5; native execution advances a 32-byte sliding window |
-| — | `SHA3-DOUT@` | `( addr -- )` | | Checked-in source entry omitted from the older ordinal catalog; copy 64 DOUT bytes in SHA3-512 mode, otherwise 32 |
+| 263 | `SHA3-BEGIN` | `( mode -- status )` | | Require SHA-stream capability, validate mode 0..3, acquire the portable guard, select `CTRL`, and issue `INIT` |
+| 264 | `SHA3-UPDATE` | `( src len -- status )` | | Require the exact owner and absorb a complete caller-readable span; zero length ignores `src` |
+| 265 | `SHA3-FINAL` | `( dst -- status )` | | Fixed modes only: stage and publish exactly 32 or 64 digest bytes, clear/scrub, and release |
+| 266 | `SHA3-STATUS@` | `( -- status )` | | Diagnostic raw packed MMIO status: phase in bits 1:0 and owner class in bits 3:2; does not acquire or advance the guard |
+| 267 | `SHAKE-FINAL` | `( -- status )` | | SHAKE modes only: finalize the XOF, set the logical output cursor to zero, and retain ownership |
+| 268 | `SHA3-MODE@` | `( -- mode )` | | Diagnostic raw `CTRL` read; does not acquire or advance the guard |
+| 269 | `SHAKE-READ` | `( dst len -- status )` | | Publish the next 0..32 sequential XOF bytes from the 64-byte hardware window; stage before publishing |
+| 270 | `SHA3-CLEAR` | `( -- status )` | | Idempotently abort/clear an owned SHA transaction, wipe it, and release; failed quiescence retains the guard |
+| — | `KECCAK-F1600` | `( state-200 -- status )` | | In-place permutation of one checked 200-byte caller state; no absorb, padding, separator, or squeeze |
 
-The checked-in dictionary also contains `WOTS-CHAIN-HW`, `SHA3-LOCKED?`, and
-`WOTS-STATUS@`. They are prototype diagnostics rather than a portable
-serialization interface: their status tests neither establish machine-wide
-ownership nor make the RTL SHA front end responsive during WOTS activity.
+The removed unreleased words are `SHA3-INIT`, `SHA3-MODE!`, `SHA3-SQUEEZE`,
+`SHA3-SQUEEZE-NEXT`, `SHA3-DOUT@`, `WOTS-CHAIN-HW`, `SHA3-LOCKED?`, and
+`WOTS-STATUS@`; they are not compatibility aliases.
+
+`KECCAK-F1600` maps lane `x + 5*y`, little endian, without reversal:
+`memory[8*(x+5*y)+b] = state[x+5*y][8*b +: 8]`. It qualifies the complete
+read/write span, stages all 200 output bytes, clears hardware, and only then
+publishes them, so a failure leaves the input image unchanged.
 
 ### SHA-256 Streaming (4 words) — ISA-native (EXT.CRYPTO `FB`)
 
@@ -893,7 +907,7 @@ initialization, lifetime, or freedom from application-level aliases.
 | FP16 / BF16 Modes | 2 |
 | Instruction Cache | 5 |
 | AES-256/128-GCM Engine | 11 |
-| SHA-3 / SHAKE | 9 |
+| Checked SHA-3 / SHAKE / raw Keccak | 9 |
 | SHA-256 Streaming | 4 |
 | SHA-512 Streaming | 4 |
 | TRNG | 3 |
@@ -935,9 +949,9 @@ TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 | `0xFFFF_FF00_0000_0300` | System Info | Exact 112-byte window; `NUM_CORES`=+10, `CRYPTO_CAPS`=+60, `NUM_BUS_PORTS`=+68 |
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
-| `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |
+| `0xFFFF_FF00_0000_0600` | Spinlock | Exact 64-byte/16-lock aperture; per-lock ACQUIRE=+n*4, RELEASE=+n*4+1; lock 8 at +20/+21 is the crypto guard |
 | `0xFFFF_FF00_0000_0700` | AES-256-GCM | Key/IV/data/tag registers |
-| `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE | Rate/state/control (96 bytes) |
+| `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE/raw Keccak | Exact 96-byte aperture: CMD +00, STATUS +01, CTRL +02, ERROR +03, DIN +08, 64-byte DOUT +10..+4F, STATE_INDEX +50, STATE_DATA +58..+5F |
 | `0xFFFF_FF00_0000_0800` | TRNG | RAND8=+0, RAND64=+8..+F, STATUS=+10, SEED=+18..+1F |
 | `0xFFFF_FF00_0000_0880` | Field ALU | OP_A=+0..+1F, OP_B=+20..+3F, CMD=+40, STATUS=+41, RESULT=+48..+67, RESULT_HI=+68..+87 |
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |

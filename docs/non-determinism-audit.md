@@ -42,11 +42,12 @@
 - **Severity:** **HIGH**
 
 ### A-2. Bus Timeout Mechanism
-- **File:** `rtl/bus/mp64_bus.v` lines 130–145
-- **Mechanism:** A 32-cycle timeout counter (`BUS_TIMEOUT` in `mp64_defs.vh`
-  line 370) fires `bus_err` if a granted transaction receives no `ack`. The
-  timeout latency is fixed, but *whether* it fires depends on the target's
-  response time, which varies with contention.
+- **File:** `rtl/bus/mp64_bus.v`
+- **Mechanism:** The granted MMIO and memory transactions have fixed 64- and
+  256-clock response deadlines. A missing `ack` completes with `bus_err`; the
+  owning CPU receives a synchronous response fault and never publishes the
+  fabric sentinel. The timeout latency is fixed, but *whether* it fires
+  depends on the selected target's response time.
 - **Cycle-accuracy impact:** A timeout inserts a fixed penalty, but the decision
   to time-out vs. complete normally is non-deterministic from the perspective of
   an individual core.
@@ -362,13 +363,14 @@
   cryptographically incorrect.
 - **Severity:** **LOW** (stub, known incomplete)
 
-### G-8. WOTS+ Engine Returns Zero
-- **File:** `rtl/crypto/mp64_wots.v` lines 30–50
-- **Mechanism:** The WOTS+ engine is a stub that returns `hash_data_out = 0`
-  after a brief FSM cycle. No actual hash chain computation.
-- **Cycle-accuracy impact:** Nearly instant, deterministic, but functionally
-  incorrect.
-- **Severity:** **LOW** (stub, known incomplete)
+### G-8. WOTS+ Aperture Is Intentionally Inert
+- **File:** `rtl/soc/mp64_soc.v` (reserved WOTS responder)
+- **Mechanism:** Checkpoint 2 acknowledges the reserved WOTS aperture with
+  zero data and ignored writes. It issues no IRQ, DMA request, or shared
+  Keccak claim, and capability bit 3 remains clear.
+- **Cycle-accuracy impact:** The inert response is deterministic. No functional
+  WOTS result is promised until the production sequencer qualifies.
+- **Severity:** **NONE** (unadvertised checkpoint-2 reservation)
 
 ### G-9. CRC Fully Combinational — Zero Extra Cycles
 - **File:** `rtl/crypto/mp64_crc_isa.v` lines 20–70
@@ -777,7 +779,7 @@
 | G-5  | X25519 fixed          | LOW      |         |       |            |
 | G-6  | NTT twiddle init      | MEDIUM   |         |       | ✓          |
 | G-7  | KEM stub              | LOW      |         | ✓     |            |
-| G-8  | WOTS stub             | LOW      |         | ✓     |            |
+| G-8  | WOTS inert reservation | NONE     |         |       |            |
 | G-9  | CRC combinational     | NONE     |         |       |            |
 | G-10 | CMOV timing           | LOW      | ✓       |       |            |
 | H-1  | Tile mem priority     | HIGH     | ✓       |       |            |

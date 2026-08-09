@@ -54,7 +54,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
             "requirement_satisfied": True,
         }
         observation = result["accounting_probe"]["observation"]
-        assert observation["state_schema_version"] == 9
+        assert observation["state_schema_version"] == 10
         for core in observation["canonical_state"]["cores"]:
             assert core["instruction_cache"]["valid_lines"][
                 "size_bytes"
