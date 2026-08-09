@@ -39,7 +39,9 @@ implemented.
 ### Checked BIOS status values
 
 Every status-bearing checked word in this document uses the following status
-namespace. `CRC-FINAL@` is the sole result-only exception:
+namespace. `CRC-FINAL@` is the sole result-only operation among the checked
+transaction words. `CRYPTO-CAPS@` is a raw discovery query, not a checked
+operation:
 
 | Value | Name | Meaning |
 |---:|---|---|
@@ -997,11 +999,15 @@ cleanup path. Each wait sample consists of one successfully acknowledged
 byte read of `STATUS` followed immediately by the elapsed-cycle observation
 for that completed read. A successful read returns the addressed byte without
 an architectural bus fault; a fault is immediate status 6 and is not retried.
-A terminal status whose observed elapsed time is at most the deadline is
-classified before timeout, so terminal status observed exactly at the
-deadline wins. `BUSY` observed with elapsed time at least the deadline, or any
-status first observed after the deadline, is status 5. The clear wait uses the
-same ordering, with `IDLE` as its successful terminal status.
+Protocol validation precedes the elapsed-time decision: an impossible
+status/error combination, an out-of-range status, or unexpected `IDLE` is
+status 6 regardless of sample time. For protocol-valid states, a terminal
+status whose observed elapsed time is at most the deadline is classified
+before timeout, so terminal status observed exactly at the deadline wins.
+`BUSY` observed with elapsed time at least the deadline, or a protocol-valid
+terminal status first observed after the deadline, is status 5. The clear
+wait uses the same ordering, with `IDLE` as its only successful terminal
+status; any other non-`BUSY` clear status is status 6.
 
 BIOS saves `CSR_PERF_CTRL`, writes `saved | 1` to enable the physical core's
 counter without setting reset bit 1, and restores the saved bit-0 enable state
