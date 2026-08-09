@@ -1,7 +1,11 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA: CRC full migration DONE, SHA-2 ISA DONE, Field ALU ISA DONE, MMIO removal DONE — 55/58 items done)  
-Last updated: 2026-03-09
+Status: in progress. The WOTS block and SHA3/WOTS diagnostic guards recorded
+in §7 and §10 are prototypes, not completed portable hardware contracts; the
+integrated WOTS DMA/Keccak path is stubbed and the existing guard does not
+serialize cores. The selected replacement is pinned in
+[`crypto-interface-contract.md`](crypto-interface-contract.md).
+Last updated: 2026-08-09
 
 ---
 
@@ -1014,8 +1018,16 @@ the SoC fabric where the other MMIO decode logic already lives.
 
 **Priority: high — dominant bottleneck in SPHINCS+ post-quantum signing**
 **Topology: shared (wraps the existing SHA3/SHAKE engine)**
-**Status: ✅ DONE (emulator + RTL spec + 8 Python tests + 38/38 RTL tests)**
+**Status: prototype only — Python/native compute a chain, while integrated
+RTL uses zero-data DMA and disconnected SHA signals**
 **Origin: Akashic blockchain team request (2026-03-07)**
+
+The numeric register map, 64-bit context address, errors, byte-only access,
+real main-bus DMA, abort behavior, and shared-core ownership selected for
+production are authoritative in
+[`crypto-interface-contract.md`](crypto-interface-contract.md#wots-chain-contract).
+The remainder of this section records the earlier prototype and must not be
+used as a current hardware-completion claim.
 
 ### 7.1  Problem Statement
 
@@ -1048,7 +1060,15 @@ triggers the chain, and reads back a 16-byte result.  The sequencer
 performs all intermediate SHAKE-256 calls internally — no CPU
 instructions per step, no Forth dispatch, no MMIO round-trips.
 
-**Key design decision: DMA read channel, no bus master.**
+**Rejected prototype decision: DMA read channel, no bus master.**
+
+This wording does not define a realizable integrated-bus contract: the WOTS
+block must arbitrate for memory and carry stable requester metadata. The
+selected interface instead makes WOTS a real weighted-round-robin main-bus
+requester, appended without changing the existing NIC and disk requester
+indices. See
+[`crypto-interface-contract.md`](crypto-interface-contract.md#dma-abort-cleanup-and-publication).
+The text below records the earlier prototype rationale only.
 
 The accelerator needs to read 64 bytes of context from RAM at setup
 time (16 B PK.seed + 32 B ADRS + 16 B input).  Rather than requiring
@@ -1331,7 +1351,7 @@ sequencer FSM, computing 2–4 chains simultaneously:
 | 2       | ~190K       | ~3.9s               | ~2,100     |
 | 4       | ~105K       | ~2.1s               | ~6,200     |
 
-This is out of scope for v1,but the single-engine design is
+This is outside the current hardware work, but the single-engine design is
 structured to allow it: the DMA read port, MMIO registers, and FSM
 all generalise to N engines with a round-robin scheduler.
 
@@ -1447,9 +1467,19 @@ Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
 
 ---
 
-## 10. BIOS SHA3/WOTS Lock Guards + Diagnostic Words — ✅ DONE
+## 10. BIOS SHA3/WOTS Diagnostic Prototype
 
-**Status: ✅ Implemented in C++ accel + BIOS + tests (2026-03-07)**
+**Status: diagnostic behavior exists, but it is not a portable lock guard**
+
+The current guard tests inconsistent status bits, prints rather than returning
+a checked error, and cannot serialize cores because portable RTL hardwires the
+spinlock requester to core 0. During WOTS activity, integrated RTL also gates
+the complete SHA3 MMIO request, so even status reads can time out. The
+selected machine-wide guard, full-width owner fields, always-responsive SHA
+front end, and checked BIOS status surface are specified in
+[`crypto-interface-contract.md`](crypto-interface-contract.md#portable-crypto-guard).
+The details below are retained only as an audit record of the prototype being
+replaced.
 
 ### Problem
 
@@ -1466,9 +1496,10 @@ firmware-level visibility into bus errors or accelerator status.
 
 `CryptoDevices::read8` now injects **bit 2** (`ext_locked`) into the
 SHA3 STATUS register (offset 0x01 from SHA3\_BASE) whenever
-`wots.status != 0`.  This matches the RTL `sha3_mmio_blocked` signal
-so firmware sees a consistent lock indicator in both emulator and
-hardware.
+`wots.status != 0`. This does not match integrated RTL: RTL gates SHA3
+requests only while WOTS is busy and exposes no readable `ext_locked` bit;
+native execution therefore also leaves the advisory bit set after WOTS has
+reached done.
 
 #### BIOS (`bios.asm`)
 
@@ -1485,8 +1516,10 @@ hardware.
 
 - `SHA3-INIT`: checks SHA3 STATUS bit 2 (ext\_locked); if set, prints
   `"SHA3 locked by WOTS\n"` and aborts without touching the device.
-- `WOTS-CHAIN-HW`: checks SHA3 STATUS bit 1 (busy); if set, drops 5
-  stack arguments and prints `"SHA3 busy — WOTS aborted\n"`.
+- `WOTS-CHAIN-HW`: tests mask `0x02`, which is the current RTL `DONE` bit,
+  not `BUSY`; it therefore fails to guard an actually busy SHA engine. When
+  set, the prototype drops 5 stack arguments and prints
+  `"SHA3 busy — WOTS aborted\n"`.
 
 **Bus fault handler upgrade:**
 
@@ -1517,11 +1550,13 @@ All 1,739 tests passing (3 skipped — network).
 
 ---
 
-## Appendix A — Pre-Implementation ISA Details
+## Appendix A — Historical ISA Planning Details
 
-> **This section is the working spec for ISA additions planned in this
-> document.  It is NOT yet in `isa-reference.md` — move it there only
-> after implementation is committed and tested.  Encodings may change.**
+> **This section is historical planning material, not a normative ISA
+> source.** The currently executable encodings are in `isa-reference.md`.
+> Selected reflected/raw CRC and shared-Keccak changes are pinned in
+> `crypto-interface-contract.md` and remain unadvertised until their complete
+> implementation gates pass.
 
 ---
 
@@ -1976,10 +2011,12 @@ The owner must resume and execute FIN (it may reinitialize first), or the
 cluster must be reset/disabled; callers must not treat CRC ownership as an
 exception-safe region.
 
-**Pipeline:** Pure combinational.  CRC.B uses an 8-bit lookup table
-(~40 LUTs).  CRC.Q uses an 8-byte-wide parallel CRC circuit (~300 LUTs).
-The datapath result is available in one engine cycle. Micro-cores can stall
-for cluster arbitration or while another transaction owner holds the engine.
+**Pipeline:** The checked-in RTL uses a combinational bit recurrence, with
+`CRC.Q` composing eight byte recurrences in least-significant-byte-first
+order. The datapath result is architecturally available in one engine cycle.
+Micro-cores can stall for cluster arbitration or while another transaction
+owner holds the engine. Area and timing closure are unmeasured without a
+synthesis flow.
 
 **New CSRs:**
 
@@ -2511,12 +2548,12 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 ### §7 — WOTS+ Chain Accelerator (MMIO 0x8A0)
 
-- [x] Spec complete (MMIO register map, FSM, cycle budget)
-- [x] RTL spec (`mp64_wots.v`)
-- [x] Emulator implemented
-- [x] BIOS Forth words (WOTS-CHAIN, WOTS-STATUS@)
-- [x] Python tests (8 tests)
-- [x] RTL tests (38/38)
+- [x] Prototype Python/native model and register block exist
+- [x] Production numeric contract pinned in `crypto-interface-contract.md`
+- [ ] Real 64-bit Bank 0 DMA requester integrated
+- [ ] Shared Keccak service connected and arbitrated
+- [ ] Checked BIOS `WOTS-CHAIN` and cleanup paths implemented
+- [ ] Dedicated WOTS RTL and integrated DMA tests passing
 
 ### §8 — MMIO Map
 
@@ -2529,13 +2566,15 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] Emulator implemented
 - [x] Tests passing
 
-### §10 — BIOS SHA3/WOTS Lock Guards + Diagnostic Words
+### §10 — BIOS SHA3/WOTS Diagnostic Prototype
 
-- [x] C++ accelerator lock/unlock guards
-- [x] BIOS diagnostic words (SHA3-STATUS@, WOTS-STATUS@, etc.)
-- [x] Tests passing (8 tests)
+- [x] Prototype diagnostic words and tests exist
+- [x] Portable guard allocation and requester contract pinned
+- [ ] True global requester identity propagated through RTL
+- [ ] Spinlock 8 and same-core full-width owner fields implemented
+- [ ] Checked status-returning BIOS surface and failure cleanup qualified
 
-### Appendix A — Pre-Implementation ISA Details
+### Appendix A — Historical ISA Planning Details
 
 - [x] A.1: EXT prefix slot map (F9, FA, FB allocated)
 - [x] A.2: EXT.STRING encoding spec (F9 00–04)

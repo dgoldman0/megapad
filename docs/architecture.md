@@ -57,6 +57,8 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0780     │  SHA-3 / SHAKE       │ │
     │   0x07E0     │  QoS Config          │ │
     │   0x0800     │  TRNG                │ │
+    │   0x0880     │  Port I/O Bridge     │ │
+    │   0x08A0     │  WOTS+ Chain Accel   │ │
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
     │   0x0A00     │  Framebuffer         │ │
@@ -105,26 +107,35 @@ device occupies a small range:
 | **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 32 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers |
-| **System Info** | `+0x0300` | 96 bytes | Board ID, config, core topology, HBW, VRAM, cluster enable |
+| **System Info** | `+0x0300` | 96 bytes currently | Board ID, config, core topology, HBW, VRAM, cluster enable |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
-| **Spinlock** | `+0x0600` | 64 bytes | Hardware spinlocks (16 locks, 4 bytes each) |
+| **Spinlock** | `+0x0600` | 32 implemented bytes | Hardware spinlocks (8 implemented locks, 4 bytes each; selected expansion uses the full 64-byte aperture) |
 | **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
-| **SHA-3/SHAKE** | `+0x0780` | 96 bytes | Keccak hash / XOF accelerator (SHA3-256, SHA3-512, SHAKE) |
+| **SHA-3/SHAKE** | `+0x0780` | 96 bytes | Existing Keccak hash/XOF front end; command and timing reconciliation is pending |
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
+| **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | Prototype register block; integrated RTL DMA/Keccak execution is incomplete |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
-| **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | SPHINCS+ WOTS hash chain sequencer (wraps SHA3/SHAKE, DMA-read context) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 
+The selected crypto register, ownership, and capability assignments are
+normative in [`crypto-interface-contract.md`](crypto-interface-contract.md).
+They are not yet advertised by the current backends. That contract extends
+System Info through `+0x6F`, reserves spinlock 8 in a 16-lock bank, and
+requires true global requester identity before checked MMIO crypto uses the
+lock. Until those implementation gates land, `CRYPTO_CAPS` is unavailable
+and software must not infer support by probing optional MMIO addresses.
+
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
-(vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter enforces
-MMIO/MEM ACK timeouts (63/255 cycles); on timeout it returns sentinel
-data (`0xDEAD_DEAD_DEAD_DEAD`), asserts `bus_err`, and fires `IRQX_BUS`.
+(vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter uses 6-/8-bit
+watchdogs with terminal counts 63/255 and response deadlines 64/256 clocks;
+on timeout it returns sentinel data (`0xDEAD_DEAD_DEAD_DEAD`), asserts
+`bus_err`, and fires `IRQX_BUS`.
 In the emulator, unmapped MMIO offsets raise `BusError`, which the SoC
 layer converts to `TrapError(IVEC_BUS_FAULT)`.
 
@@ -326,6 +337,14 @@ Board identification and core-topology registers (12 × 64-bit aligned,
 | VRAM_BASE | `+0x50` | 64-bit | `0xFF00_0000` | Dedicated VRAM base address |
 | VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
 
+The selected crypto contract adds read-only `CRYPTO_CAPS` and `NUM_BUS_PORTS`
+qwords at `+0x60` and `+0x68`, making the exact device size 112 bytes. The
+latter reports the actual weighted-arbiter requester count so one portable
+BIOS image can derive WOTS deadlines. The current table remains the
+implemented baseline until all backends decode the extension, even when all
+capability bits are zero. See
+[`crypto-interface-contract.md`](crypto-interface-contract.md#capability-discovery).
+
 ---
 
 ## NIC (Network Interface Controller)
@@ -464,7 +483,7 @@ zeroizes the bank before another TACC operation is admitted.
 | Block | Performance | Use Case |
 |-------|-------------|----------|
 | AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
-| SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
+| SHA-3/SHAKE | 24-round Keccak service; front-end timing under reconciliation | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
 | Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519, per-core ISA) |

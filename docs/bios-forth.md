@@ -6,6 +6,12 @@ standard Forth REPL over the UART.  If a disk is attached it scans MP64FS for
 the first Forth-type file and loads it with the `FSLOAD` machinery.  The
 standard image places the KDOS core first.
 
+> **Implementation boundary.** This reference describes the checked-in BIOS
+> image. The selected numeric CRC, SHA3, Keccak, and WOTS interface is in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md); its selected
+> additions are not present at checkpoint 0. Capability-dependent paths remain
+> unavailable until the corresponding bit is implemented and advertised.
+
 This document organizes the BIOS dictionary by functional category.  Each
 entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
@@ -737,7 +743,7 @@ device.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `COREID` | `( -- n )` | Push this core’s hardware ID (0–3).  Reads CSR 0x20. |
+| `COREID` | `( -- n )` | Push this core’s hardware ID (`0` through `NCORES - 1`). Reads CSR 0x20. |
 | `NCORES` | `( -- n )` | Push the total number of hardware cores.  Reads CSR 0x21. |
 | `IPI-SEND` | `( xt core -- )` | Send an IPI to *core*: writes the 64-bit XT into the mailbox data register and triggers the interrupt.  The target core’s IPI handler will EXECUTE the XT. |
 | `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core.  Bit *n* set means an IPI from core *n* is pending. |
@@ -787,6 +793,13 @@ All modes are MSB-first and non-reflected, with all-ones init and XOR-out.
 Mode 0 uses the CRC-32/BZIP2 tuple, mode 1 uses the Castagnoli polynomial in
 non-reflected form, and mode 2 uses CRC-64/WE parameters. See the
 [ISA reference](isa-reference.md) for the complete tuples and check vectors.
+
+The selected reflected modes, raw final operation, and checked replacement
+words are pinned in
+[`crypto-interface-contract.md`](crypto-interface-contract.md#checked-crc-words).
+The table below remains the currently implemented BIOS surface until that
+coherent ISA/BIOS cutover lands; `CRC-POLY!` will then be removed rather than
+kept as an alias.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -978,22 +991,35 @@ and must be updated, finalized, or cleared on their originating core.
 
 ---
 
-## SHA-3 / SHAKE Engine (8 words)
+## SHA-3 / SHAKE Engine (9 words)
 
-Hardware-accelerated cryptographic hashing via the MMIO SHA3 engine
-at `0xFFFF_FF00_0000_0780`.  Supports SHA3-256, SHA3-512, SHAKE128,
-SHAKE256 modes, plus XOF squeeze for arbitrary-length output.
+The checked-in BIOS exposes prototype words for the MMIO SHA3 engine at
+`0xFFFF_FF00_0000_0780`, naming SHA3-256, SHA3-512, SHAKE128, and SHAKE256
+modes. Continued XOF squeeze is not qualified consistently across backends.
+
+> **Prototype surface:** current backends disagree on command timing, status,
+> full-rate absorption, and continued squeeze. These words are documented here
+> only as the checked-in BIOS surface. The selected guarded replacement and
+> its numeric statuses are authoritative in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md#checked-sha3-shake-and-keccak-words)
+> and are not yet implemented or advertised.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `SHA3-INIT` | `( -- )` | Initialize SHA3 engine for a new hash computation. |
 | `SHA3-UPDATE` | `( addr len -- )` | Feed data (len bytes at addr) into SHA3 engine. |
 | `SHA3-FINAL` | `( addr -- )` | Finalize hash and store digest at addr. |
-| `SHA3-STATUS@` | `( -- status )` | Read engine status: 0 = busy, 1 = ready. |
+| `SHA3-STATUS@` | `( -- status )` | Read prototype status: low phase `0`=idle, `1`=busy, `2`=done; native execution may also inject advisory bit 2. Diagnostic only. |
 | `SHA3-MODE!` | `( mode -- )` | Set hash mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256. |
 | `SHA3-MODE@` | `( -- mode )` | Read current hash mode. |
 | `SHA3-SQUEEZE` | `( addr len -- )` | Squeeze len bytes of XOF output to addr (SHAKE modes). |
-| `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | Auto-permute and squeeze next XOF block. |
+| `SHA3-SQUEEZE-NEXT` | `( -- )` | Write prototype command 5; current native execution advances a 32-byte sliding window. |
+| `SHA3-DOUT@` | `( addr -- )` | Copy the current DOUT window to memory: 64 bytes in SHA3-512 mode, otherwise 32 bytes. |
+
+The checked-in dictionary also contains `WOTS-CHAIN-HW`, `SHA3-LOCKED?`, and
+`WOTS-STATUS@`. They are prototype diagnostics rather than a portable
+serialization interface: their status tests neither establish machine-wide
+ownership nor make the RTL SHA front end responsive during WOTS activity.
 
 ---
 

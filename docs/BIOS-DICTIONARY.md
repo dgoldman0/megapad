@@ -4,6 +4,12 @@ The live dictionary link chain contains **473** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
+> **Implementation boundary.** This reference describes the checked-in BIOS
+> image. The selected numeric CRC, SHA3, Keccak, and WOTS interface is in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md); its selected
+> additions are not present at checkpoint 0. Capability-dependent paths remain
+> unavailable until the corresponding bit is implemented and advertised.
+
 ---
 
 ## Dictionary Entry Format
@@ -542,7 +548,7 @@ of compiled code.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 209 | `COREID` | `( -- n )` | | Push this core's hardware ID (0–3). Reads CSR 0x20. |
+| 209 | `COREID` | `( -- n )` | | Push this core's hardware ID (`0` through `NCORES - 1`). Reads CSR 0x20. |
 | 210 | `NCORES` | `( -- n )` | | Push total number of hardware cores. Reads CSR 0x21. |
 | 211 | `IPI-SEND` | `( xt core -- )` | | Send inter-processor interrupt: writes 64-bit XT to mailbox DATA, then triggers IPI to target core. |
 | 212 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N). MMIO at MBOX_BASE+0x09. |
@@ -565,6 +571,11 @@ of compiled code.
 | 224 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
 
 ### CRC Engine (8 words) — ISA-native (EXT.CRYPTO `FB`)
+
+The following table is the currently implemented surface. The selected
+reflected/raw cutover and checked stack effects are authoritative in
+[`crypto-interface-contract.md`](crypto-interface-contract.md#checked-crc-words);
+`CRC-POLY!` is removed when that cutover lands.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -639,18 +650,29 @@ of compiled code.
 | 261 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
 | 262 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
 
-### SHA-3 / SHAKE Engine (8 words)
+### SHA-3 / SHAKE Engine (9 words)
+
+These are prototype words whose command timing and status differ across the
+current backends. The selected guarded replacement is pinned in
+[`crypto-interface-contract.md`](crypto-interface-contract.md#checked-sha3-shake-and-keccak-words)
+and is not yet implemented or advertised.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 263 | `SHA3-INIT` | `( -- )` | | Initialize SHA3 engine for new hash computation |
 | 264 | `SHA3-UPDATE` | `( addr len -- )` | | Feed data (len bytes at addr) into SHA3 engine |
 | 265 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store digest at addr (mode-aware: 32B for SHA3-256, 64B for SHA3-512) |
-| 266 | `SHA3-STATUS@` | `( -- status )` | | Read engine status: 0 = busy, 1 = ready |
+| 266 | `SHA3-STATUS@` | `( -- status )` | | Read prototype status: low phase `0`=idle, `1`=busy, `2`=done; native may also inject advisory bit 2. Diagnostic only |
 | 267 | `SHA3-MODE!` | `( mode -- )` | | Set mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256 |
 | 268 | `SHA3-MODE@` | `( -- mode )` | | Read current hash mode |
 | 269 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
-| 270 | `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | | Auto-permute and squeeze next XOF block |
+| 270 | `SHA3-SQUEEZE-NEXT` | `( -- )` | | Write prototype command 5; native execution advances a 32-byte sliding window |
+| — | `SHA3-DOUT@` | `( addr -- )` | | Checked-in source entry omitted from the older ordinal catalog; copy 64 DOUT bytes in SHA3-512 mode, otherwise 32 |
+
+The checked-in dictionary also contains `WOTS-CHAIN-HW`, `SHA3-LOCKED?`, and
+`WOTS-STATUS@`. They are prototype diagnostics rather than a portable
+serialization interface: their status tests neither establish machine-wide
+ownership nor make the RTL SHA front end responsive during WOTS activity.
 
 ### SHA-256 Streaming (4 words) — ISA-native (EXT.CRYPTO `FB`)
 
@@ -699,15 +721,6 @@ CONTEXT-ALIAS. Empty spans succeed without inspecting the address. Internal
 physical-span results for address overflow and an unadvertised/cross-window
 range are both normalized to `2`. The word is suitable for atomic
 higher-level preflight before any SHA context is initialized.
-
-### CRC DMA (4 words)
-
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 275 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
-| 276 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
-| 277 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
-| 278 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
 
 ### TRNG (3 historical + 2 append-only words)
 
@@ -878,10 +891,9 @@ through 465 remains stable.
 | FP16 / BF16 Modes | 2 |
 | Instruction Cache | 5 |
 | AES-256/128-GCM Engine | 11 |
-| SHA-3 / SHAKE | 8 |
+| SHA-3 / SHAKE | 9 |
 | SHA-256 Streaming | 4 |
 | SHA-512 Streaming | 4 |
-| CRC DMA | 4 |
 | TRNG | 3 |
 | Checked Entropy Boundaries | 2 |
 | Caller Span Boundary | 1 |
@@ -890,7 +902,7 @@ through 465 remains stable.
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
-| **Catalogued subtotal** | **380** |
+| **Catalogued subtotal** | **377** |
 
 ### All Immediate Words (34)
 

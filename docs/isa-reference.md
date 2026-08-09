@@ -826,7 +826,7 @@ behind a hardware transaction lock. No removed CRC MMIO device is involved.
 
 With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
 
-#### CRC Sub-Operations (sub-op 0x00–0x05)
+#### Implemented CRC Sub-Operations (sub-op 0x00–0x05)
 
 | Sub-op | Mnemonic | Bytes | Operation |
 |--------|----------|-------|-----------|
@@ -869,6 +869,15 @@ CSRs are writable; a CRC_MODE write accepts only the complete values 0, 1,
 or 2, and canonicalizes every other 64-bit value to mode 0. On micro-cores
 the reads expose cluster-shared state and writes to either CRC CSR are
 ignored; use the CRC instructions to mutate shared state.
+
+> **Selected extension, not yet implemented:**
+> [`crypto-interface-contract.md`](crypto-interface-contract.md#crc-isa-contract)
+> assigns register-form sub-operation `0x06` to `CRC.FINRAW`, assigns exact
+> reflected modes 4, 5, and 6, and reserves `0x07..0x0F`. The existing table
+> above remains the executable ISA until the assembler, both execution
+> models, full-core and cluster RTL, checked BIOS words, tests, and
+> `CRC_REFLECT_RAW` capability gate land together. Code must not emit mode 4,
+> 5, 6, or sub-operation `0x06` against the checkpoint-0 implementation.
 
 #### SHA-2 Sub-Operations (sub-op 0x10–0x16)
 
