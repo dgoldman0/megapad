@@ -5359,7 +5359,7 @@ class TestMicroCluster(unittest.TestCase):
     def test_crc_reserved_subop_traps_as_two_byte_instruction(self):
         """Reserved CRC opcodes fail closed without consuming a third byte."""
         mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
-        mc.load_bytes(0, bytes((0xFB, 0x06, 0x15)))
+        mc.load_bytes(0, bytes((0xFB, 0x07, 0x15)))
         mc.pc = 0
         with self.assertRaises(TrapError) as ctx:
             mc.step()
@@ -5396,6 +5396,30 @@ class TestMicroCluster(unittest.TestCase):
         self.assertEqual(cl.crc_owner, 1)
         self.assertEqual(cl.crc_mode, 1)
         self.assertEqual(contender.pc, 0x103)
+
+    def test_cluster_crc_finraw_publishes_before_release(self):
+        """FINRAW commits the raw accumulator and releases its owner."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
+        owner = cl.cores[0]
+        owner.load_bytes(
+            0,
+            assemble("crc.mode 5\ncrc.init\ncrc.finraw r4, r0\nhalt"),
+        )
+        owner.pc = 0
+
+        owner.step()
+        owner.step()
+        self.assertTrue(cl.crc_locked)
+        owner.step()
+
+        snapshot = cl.crc_snapshot()
+        self.assertEqual(snapshot["acc"], 0xFFFF_FFFF)
+        self.assertEqual(snapshot["mode"], 5)
+        self.assertFalse(snapshot["locked"])
+        self.assertIsNone(snapshot["owner"])
+        self.assertEqual(owner.regs[4], 0xFFFF_FFFF)
 
     def test_cluster_crc_contended_rex_instruction_rewinds_prefix(self):
         """A stalled REX+CRC operand instruction retries from its prefix."""
@@ -6036,6 +6060,34 @@ class TestAssemblerBranchRange(unittest.TestCase):
         cpu.load_bytes(0, code)
         cpu.run(max_steps=100)
         self.assertEqual(cpu.regs[1], 0)  # ldi was skipped
+
+    def test_skip_over_crc_operand_instruction(self):
+        """SKIP uses the complete three-byte CRC instruction size."""
+        code = assemble(
+            "skip\n"
+            "crc.mode 5\n"
+            "inc r1\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.crc_mode, 0)
+        self.assertEqual(cpu.regs[1], 1)
+
+    def test_skip_over_rex_crc_operand_instruction(self):
+        """SKIP counts both the REX prefix and CRC register operand."""
+        code = assemble(
+            "skip\n"
+            "crc.b r16, r17\n"
+            "inc r1\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[16], 0)
+        self.assertEqual(cpu.regs[1], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -12334,13 +12386,13 @@ class TestKDOSCRC(_KDOSTestBase):
 
     def test_crc32c_8_bytes(self):
         """CRC32C-BUF of 8 bytes matches reference."""
-        # 8 bytes of 0x41 → CRC32C = 0xBD5B9F02 = 3176898306
+        # 8 bytes of 0x41 → reflected CRC32C = 0x68B63DE9 = 1756773865
         text = self._run_kdos([
             "CREATE crc-td4 8 ALLOT",
             "crc-td4 8 65 FILL",
             "crc-td4 8 CRC32C-BUF .",
         ])
-        self.assertIn("3176898306 ", text)
+        self.assertIn("1756773865 ", text)
 
     def test_crc32_vs_crc32c_differ(self):
         """CRC32 and CRC32C produce different results for same data."""
@@ -12372,20 +12424,26 @@ class TestKDOSCRC(_KDOSTestBase):
         ])
         text = self._run_kdos(lines)
         self.assertIn("4236843288 ", text)
-        self.assertIn("88346389 ", text)
+        self.assertIn("3808858755 ", text)
         self.assertIn("7128171145767219210 ", text)
 
     def test_crc_primitives_direct(self):
-        """Legacy FINAL/@ remains compatible with the atomic ISA final."""
+        """Checked primitives expose capability, status, raw state, and final."""
         text = self._run_kdos([
-            "0 CRC-POLY!",
-            "0xFFFFFFFF CRC-INIT!",
-            "0x4141414141414141 CRC-FEED",
-            "CRC-FINAL",
-            "CRC@ .",
+            '."  CAPS=" CRYPTO-CAPS@ .',
+            '."  MODE-ST=" 0 CRC-MODE! .',
+            '."  INIT-ST=" 0xFFFFFFFF CRC-INIT! .',
+            '."  FEED-ST=" 0x4141414141414141 CRC-FEED .',
+            'CRC@ ."  FETCH-ST=" . ."  RAW=" .',
+            '."  FINAL=" CRC-FINAL@ .',
         ])
-        # Same as CRC32 of 8 'A' bytes
-        self.assertIn("4120547386 ", text)
+        self.assertIn("CAPS=1 ", text)
+        self.assertIn("MODE-ST=0 ", text)
+        self.assertIn("INIT-ST=0 ", text)
+        self.assertIn("FEED-ST=0 ", text)
+        self.assertIn("FETCH-ST=0 ", text)
+        self.assertIn("RAW=174419909 ", text)
+        self.assertIn("FINAL=4120547386 ", text)
 
     def test_crc32_exact_tails_1_through_7(self):
         """CRC32-BUF hashes tail bytes without adding zero padding."""
@@ -12408,9 +12466,9 @@ class TestKDOSCRC(_KDOSTestBase):
         seed = 0x12345678
         expected = self._crc32_msb(b"A", seed)
         text = self._run_kdos([
-            "0 CRC-POLY!",
-            f"{seed} CRC-INIT!",
-            "65 CRC-FEED-BYTE",
+            "0 CRC-MODE! DROP",
+            f"{seed} CRC-INIT! DROP",
+            "65 CRC-FEED-BYTE DROP",
             "CRC-FINAL@ .",
         ])
         self.assertIn(f"{expected} ", text)
@@ -12419,19 +12477,19 @@ class TestKDOSCRC(_KDOSTestBase):
         """The accelerated quad path composes with exact byte tails."""
         expected = self._crc32_msb(b"ABCDEFGHIJK")
         text = self._run_kdos([
-            "0 CRC-POLY!",
-            "0xFFFFFFFF CRC-INIT!",
-            "0x4847464544434241 CRC-FEED",
-            "73 CRC-FEED-BYTE",
-            "74 CRC-FEED-BYTE",
-            "75 CRC-FEED-BYTE",
+            "0 CRC-MODE! DROP",
+            "0xFFFFFFFF CRC-INIT! DROP",
+            "0x4847464544434241 CRC-FEED DROP",
+            "73 CRC-FEED-BYTE DROP",
+            "74 CRC-FEED-BYTE DROP",
+            "75 CRC-FEED-BYTE DROP",
             "CRC-FINAL@ .",
         ])
         self.assertIn(f"{expected} ", text)
 
     def test_accelerated_crc_seed_and_invalid_mode(self):
         """C++ CRC validates full mode values and width-masks seeds."""
-        for invalid_mode in (3, 5, 0xFF):
+        for invalid_mode in (3, 7, 0xFF):
             with self.subTest(path="instruction", value=invalid_mode):
                 code = assemble(
                     f"crc.mode {invalid_mode}\n"
@@ -12480,10 +12538,42 @@ class TestKDOSCRC(_KDOSTestBase):
         cpu.run(max_steps=100)
         self.assertEqual(cpu.regs[7], 0xDEADBEEF89ABCDEF)
 
-    def test_accelerated_crc_reserved_subop_traps(self):
-        """The C++ core rejects reserved CRC op 6 after exactly two bytes."""
+    def test_accelerated_crc_reflected_vectors_and_raw_final(self):
+        """The native core implements all reflected tuples and raw final."""
+        feed = "\n".join(
+            f"ldi r2, {byte}\ncrc.b r1, r2"
+            for byte in b"123456789"
+        )
+        for mode, expected in (
+            (4, 0xCBF43926),
+            (5, 0xE3069283),
+            (6, 0x995DC9BBDF1939FA),
+        ):
+            with self.subTest(mode=mode):
+                code = assemble(
+                    f"crc.mode {mode}\ncrc.init\n{feed}\n"
+                    "crc.fin r4, r0\nhalt\n"
+                )
+                cpu = Megapad64(mem_size=4096)
+                cpu.load_bytes(0, code)
+                cpu.run(max_steps=100)
+                self.assertEqual(cpu.regs[4], expected)
+                self.assertEqual(cpu.crc_acc, expected)
+
+        code = assemble(
+            f"crc.mode 5\ncrc.init\n{feed}\n"
+            "crc.finraw r4, r0\nhalt\n"
+        )
         cpu = Megapad64(mem_size=4096)
-        cpu.load_bytes(0, bytes((0xFB, 0x06, 0x15)))
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[4], 0x1CF96D7C)
+        self.assertEqual(cpu.crc_acc, 0x1CF96D7C)
+
+    def test_accelerated_crc_reserved_subop_traps(self):
+        """The C++ core rejects reserved CRC op 7 after exactly two bytes."""
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, bytes((0xFB, 0x07, 0x15)))
         cpu.pc = 0
         with self.assertRaises(TrapError) as ctx:
             cpu.step()

@@ -261,9 +261,9 @@ module tb_cpu_micro;
         .crc_op    (crc_op),
         .crc_rs_val(crc_rs_val),
         .crc_imm8  (crc_imm8),
-        .crc_result(64'd0),
+        .crc_result(64'h0123_4567_89AB_CDEF),
         .crc_done  (crc_req),
-        .crc_rd_we_in(1'b0),
+        .crc_rd_we_in(crc_req && crc_op == ISA_CRC_FINRAW),
         .mex_req   (mex_req),
         .mex_ss    (mex_ss),
         .mex_op    (mex_op),
@@ -311,7 +311,6 @@ module tb_cpu_micro;
     // ========================================================================
     integer pass, fail, timeout;
     integer i;
-    integer saw_illegal;
 
     task clear_mem;
         integer j;
@@ -716,29 +715,137 @@ module tb_cpu_micro;
         check_reg(5, 64'd1, "T10 bare CRC.INIT preserves next opcode");
 
         // ============================================================
-        // TEST 11: reserved CRC op 6 traps after exactly two bytes.
+        // TEST 11: CRC.FINRAW is a three-byte register operation.
         // ============================================================
-        $display("Test 11: reserved CRC sub-op trap");
+        $display("Test 11: CRC.FINRAW register form");
         clear_mem;
-        mem[0] = 8'hFB; mem[1] = 8'h06;
-        mem[2] = 8'h15;                   // must not execute
+        mem[0] = 8'hFB; mem[1] = 8'h06; mem[2] = 8'h50;
+        mem[3] = 8'h16;                   // INC R6
+        mem[4] = 8'h02;
         reset_cpu;
-        saw_illegal = 0;
-        for (i = 0; i < 200; i = i + 1) begin
-            @(posedge clk);
-            if (u_cpu.ivec_id == IRQX_ILLEGAL_OP) begin
-                saw_illegal = 1;
-                i = 200;
-            end
-        end
-        if (!saw_illegal) begin
-            $display("FAIL T11: reserved CRC op did not trap");
+        wait_halt(500);
+        check_reg(5, 64'h0123_4567_89AB_CDEF,
+                  "T11 CRC.FINRAW writes destination");
+        check_reg(6, 64'd1, "T11 CRC.FINRAW preserves next opcode");
+
+        if (crc_op !== ISA_CRC_FINRAW || crc_imm8 !== 8'h50) begin
+            $display("FAIL T11: CRC request op=%0d operand=%02h",
+                     crc_op, crc_imm8);
             fail = fail + 1;
         end else begin
             pass = pass + 1;
         end
-        check_reg(3, 64'd2, "T11 reserved CRC op length=2");
-        check_reg(5, 64'd0, "T11 next opcode not executed");
+
+        // Reserved CRC operations now begin at 7 and remain bare traps.
+        // Inspect the pushed return PC after vectoring: the live program
+        // counter is independently advanced during decode and cannot prove
+        // that the trap frame captured the same post-instruction address.
+        $display("Test 11b: reserved CRC sub-op trap return PC");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'hFB; mem[4] = 8'h07;
+        mem[5] = 8'h15;
+        install_vector(IRQX_ILLEGAL_OP, 8'h40);
+        mem[8'h40] = 8'h02;
+        reset_cpu;
+        wait_halt(2000);
+        check64_value(u_cpu.ivec_id, IRQX_ILLEGAL_OP,
+                      "T11b reserved CRC vector");
+        check_mem_qword_le(13'h070, 64'd5,
+                           "T11b reserved CRC saved end PC");
+        check_reg(5, 64'd0, "T11b next opcode not executed");
+
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'hF2;
+        mem[4] = 8'hFB; mem[5] = 8'h07;
+        mem[6] = 8'h15;
+        install_vector(IRQX_ILLEGAL_OP, 8'h40);
+        mem[8'h40] = 8'h02;
+        reset_cpu;
+        wait_halt(2000);
+        check64_value(u_cpu.ivec_id, IRQX_ILLEGAL_OP,
+                      "T11b REX+reserved CRC vector");
+        check_mem_qword_le(13'h070, 64'd6,
+                           "T11b REX+reserved CRC saved end PC");
+        check_reg(5, 64'd0, "T11b REX next opcode not executed");
+
+        // ============================================================
+        // TEST 11c: SKIP resolves normal EXT.CRYPTO body lengths from the
+        // sub-op rather than always consuming the three-byte maximum.
+        // ============================================================
+        $display("Test 11c: SKIP normal CRC forms");
+        clear_mem;
+        mem[0] = 8'hF6; mem[1] = 8'h30; // SKIP.AL
+        mem[2] = 8'hFB; mem[3] = 8'h00; // bare CRC.INIT
+        mem[4] = 8'h15;
+        mem[5] = 8'h02;
+        reset_cpu;
+        wait_halt(500);
+        check_reg(5, 64'd1, "T11c SKIP bare CRC reaches next opcode");
+        check_reg(3, 64'd6, "T11c SKIP bare CRC exact length");
+
+        clear_mem;
+        mem[0] = 8'hF6; mem[1] = 8'h30;
+        mem[2] = 8'hFB; mem[3] = 8'h07; // bare reserved CRC op
+        mem[4] = 8'h15;
+        mem[5] = 8'h02;
+        reset_cpu;
+        wait_halt(500);
+        check_reg(5, 64'd1, "T11c SKIP reserved CRC reaches next opcode");
+        check_reg(3, 64'd6, "T11c SKIP reserved CRC exact length");
+        if (u_cpu.ivec_id !== 8'd0) begin
+            $display("FAIL T11c: skipped reserved CRC trapped, ivec=%02h",
+                     u_cpu.ivec_id);
+            fail = fail + 1;
+        end else begin
+            pass = pass + 1;
+        end
+
+        clear_mem;
+        mem[0] = 8'hF6; mem[1] = 8'h30;
+        mem[2] = 8'hFB; mem[3] = 8'h06; mem[4] = 8'h50;
+        mem[5] = 8'h16;
+        mem[6] = 8'h02;
+        reset_cpu;
+        wait_halt(500);
+        check_reg(5, 64'd0, "T11c SKIP FINRAW does not execute");
+        check_reg(6, 64'd1, "T11c SKIP FINRAW reaches next opcode");
+        check_reg(3, 64'd7, "T11c SKIP FINRAW exact length");
+
+        // ============================================================
+        // TEST 11d: a redundant REX prefix contributes one byte while the
+        // following CRC sub-op still selects its two- or three-byte body.
+        // ============================================================
+        $display("Test 11d: SKIP redundant REX + CRC forms");
+        clear_mem;
+        mem[0] = 8'hF6; mem[1] = 8'h30;
+        mem[2] = 8'hF2;                  // redundant REX.D
+        mem[3] = 8'hFB; mem[4] = 8'h07; // bare reserved CRC op
+        mem[5] = 8'h15;
+        mem[6] = 8'h02;
+        reset_cpu;
+        wait_halt(500);
+        check_reg(5, 64'd1, "T11d SKIP REX+reserved reaches next opcode");
+        check_reg(3, 64'd7, "T11d SKIP REX+reserved exact length");
+        if (u_cpu.ivec_id !== 8'd0) begin
+            $display("FAIL T11d: skipped REX+reserved CRC trapped");
+            fail = fail + 1;
+        end else begin
+            pass = pass + 1;
+        end
+
+        clear_mem;
+        mem[0] = 8'hF6; mem[1] = 8'h30;
+        mem[2] = 8'hF2;
+        mem[3] = 8'hFB; mem[4] = 8'h06; mem[5] = 8'h50;
+        mem[6] = 8'h16;
+        mem[7] = 8'h02;
+        reset_cpu;
+        wait_halt(500);
+        check_reg(5, 64'd0, "T11d SKIP REX+FINRAW does not execute");
+        check_reg(6, 64'd1, "T11d SKIP REX+FINRAW reaches next opcode");
+        check_reg(3, 64'd8, "T11d SKIP REX+FINRAW exact length");
 
         // ============================================================
         // TEST 12: TRAP + RTI preserves the documented stack frame.

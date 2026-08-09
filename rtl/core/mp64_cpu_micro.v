@@ -192,6 +192,8 @@ module mp64_cpu_micro (
     reg [3:0]  ibuf_len;
     reg [3:0]  ibuf_need;
     reg        fetch_pending;
+    reg        skip_fetch_pending;
+    reg        skip_has_rex;
 
     wire [3:0] fam = ibuf[0][7:4];
     wire [3:0] nib = ibuf[0][3:0];
@@ -199,6 +201,9 @@ module mp64_cpu_micro (
     // ====================================================================
     // CPU FSM
     // ====================================================================
+    localparam [4:0] CPU_SKIP_REX    = 5'd23;
+    localparam [4:0] CPU_SKIP_CRYPTO = 5'd24;
+
     reg [4:0]  cpu_state;
     function [7:0] mex_fault_vector;
         input [2:0] fault;
@@ -302,6 +307,8 @@ module mp64_cpu_micro (
             ext_active    <= 1'b0;
             ext_mod       <= 4'd0;
             fetch_pending <= 1'b0;
+            skip_fetch_pending <= 1'b0;
+            skip_has_rex <= 1'b0;
             ibuf_len      <= 4'd0;
             ibuf_need     <= 4'd1;
 
@@ -485,12 +492,17 @@ module mp64_cpu_micro (
                         //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
                         //   ibuf[2] = DR or imm8 (3-byte ops only)
                         if (ibuf[1][7:4] == 4'd0 &&
-                            ibuf[1][3:0] > ISA_CRC_SEED) begin
+                            ibuf[1][3:0] > ISA_CRC_FINRAW) begin
                             // Reserved CRC sub-ops are fail-closed two-byte
                             // instructions, matching full cores/emulators.
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            trap_return_pc <= R[psel];
+                            // Capture the same post-instruction PC scheduled
+                            // above. A REX prefix has already advanced R[P],
+                            // so the current CRC body's ibuf length is exact
+                            // for both prefixed and unprefixed encodings.
+                            trap_return_pc <=
+                                R[psel] + {60'd0, ibuf_len};
                             mem_data <= {56'd0, flags};
                             flags[6] <= 1'b0;
                             ivec_id  <= IRQX_ILLEGAL_OP;
@@ -655,6 +667,8 @@ module mp64_cpu_micro (
                             bus_addr  <= R[psel] + {60'd0, ibuf_len};
                             bus_wen   <= 1'b0;
                             bus_size  <= BUS_BYTE;
+                            skip_fetch_pending <= 1'b1;
+                            skip_has_rex <= 1'b0;
                             cpu_state <= CPU_SKIP;
                         end else
                             cpu_state <= CPU_FETCH;
@@ -1372,15 +1386,80 @@ module mp64_cpu_micro (
             end
 
             // ============================================================
-            // SKIP: advance PC past the next instruction
+            // SKIP: inspect the skipped instruction. EXT.CRYPTO needs its
+            // sub-op byte, and a redundant REX prefix contributes one byte.
             // ============================================================
             CPU_SKIP: begin
-                bus_valid <= 1'b1;
-                bus_addr  <= R[psel];
-                bus_wen   <= 1'b0;
-                bus_size  <= BUS_BYTE;
-                if (bus_ready) begin
-                    R[psel] <= R[psel] + {60'd0, instr_len(bus_rdata[7:0], 1'b0)};
+                if (!skip_fetch_pending) begin
+                    bus_valid <= 1'b1;
+                    bus_addr  <= R[psel];
+                    bus_wen   <= 1'b0;
+                    bus_size  <= BUS_BYTE;
+                    skip_fetch_pending <= 1'b1;
+                end else if (!bus_ready) begin
+                    bus_valid <= 1'b1;
+                end
+
+                if (bus_ready && skip_fetch_pending) begin
+                    skip_fetch_pending <= 1'b0;
+                    if (bus_rdata[7:0] >= 8'hF1 &&
+                        bus_rdata[7:0] <= 8'hF5) begin
+                        skip_has_rex <= 1'b1;
+                        cpu_state <= CPU_SKIP_REX;
+                    end else if (bus_rdata[7:0] == 8'hFB) begin
+                        skip_has_rex <= 1'b0;
+                        cpu_state <= CPU_SKIP_CRYPTO;
+                    end else begin
+                        R[psel] <= R[psel]
+                                   + {60'd0,
+                                      instr_len(bus_rdata[7:0], 1'b0)};
+                        cpu_state <= CPU_FETCH;
+                    end
+                end
+            end
+
+            CPU_SKIP_REX: begin
+                if (!skip_fetch_pending) begin
+                    bus_valid <= 1'b1;
+                    bus_addr  <= R[psel] + 64'd1;
+                    bus_wen   <= 1'b0;
+                    bus_size  <= BUS_BYTE;
+                    skip_fetch_pending <= 1'b1;
+                end else if (!bus_ready) begin
+                    bus_valid <= 1'b1;
+                end
+
+                if (bus_ready && skip_fetch_pending) begin
+                    skip_fetch_pending <= 1'b0;
+                    if (bus_rdata[7:0] == 8'hFB) begin
+                        cpu_state <= CPU_SKIP_CRYPTO;
+                    end else begin
+                        R[psel] <= R[psel] + 64'd1
+                                   + {60'd0,
+                                      instr_len(bus_rdata[7:0], 1'b1)};
+                        cpu_state <= CPU_FETCH;
+                    end
+                end
+            end
+
+            CPU_SKIP_CRYPTO: begin
+                if (!skip_fetch_pending) begin
+                    bus_valid <= 1'b1;
+                    bus_addr  <= R[psel]
+                                 + (skip_has_rex ? 64'd2 : 64'd1);
+                    bus_wen   <= 1'b0;
+                    bus_size  <= BUS_BYTE;
+                    skip_fetch_pending <= 1'b1;
+                end else if (!bus_ready) begin
+                    bus_valid <= 1'b1;
+                end
+
+                if (bus_ready && skip_fetch_pending) begin
+                    skip_fetch_pending <= 1'b0;
+                    R[psel] <= R[psel]
+                               + (skip_has_rex ? 64'd1 : 64'd0)
+                               + (crypto_is_bare(bus_rdata[7:0])
+                                  ? 64'd2 : 64'd3);
                     cpu_state <= CPU_FETCH;
                 end
             end

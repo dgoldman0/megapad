@@ -84,6 +84,7 @@ module mp64_soc #(
     localparam DISK_BUS_PORT = NIC_BUS_PORT + 1;
     localparam N_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + 2;
     localparam PORT_BITS    = $clog2(N_BUS_PORTS);
+    localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_0001;
 
     // System-wide reset (active-high for cores, active-low for peripherals)
     wire rst_h = ~sys_rst_n;
@@ -1468,8 +1469,42 @@ module mp64_soc #(
     wire mmio_sel_wots   = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1000101);// 0x8A0-0x8BF
     wire mmio_sel_rtc    = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1011000); // 0xB00-0xB1F
 
-    // SysInfo — read-only system information (0x300)
-    wire mmio_sel_sysinfo = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h3);
+    // SysInfo occupies the exact half-open range [0x300, 0x370).  Reject a
+    // misaligned or crossing request as one bus access instead of allowing the
+    // first byte to alias a valid register.
+    wire [3:0] sysinfo_access_bytes = 4'd1 << bus_mmio_size;
+    wire [12:0] sysinfo_access_end = {1'b0, mmio_addr_eff}
+                                       + sysinfo_access_bytes - 13'd1;
+    wire sysinfo_access_aligned =
+        (bus_mmio_size == BUS_BYTE) ||
+        (bus_mmio_size == BUS_HALF  && mmio_addr_eff[0]   == 1'b0) ||
+        (bus_mmio_size == BUS_WORD  && mmio_addr_eff[1:0] == 2'b00) ||
+        (bus_mmio_size == BUS_DWORD && mmio_addr_eff[2:0] == 3'b000);
+    wire mmio_sel_sysinfo = bus_mmio_req
+                            && (mmio_addr_eff >= 12'h300)
+                            && (sysinfo_access_end < 13'h370)
+                            && sysinfo_access_aligned;
+
+    reg [63:0] sysinfo_write_mask;
+    reg [63:0] sysinfo_read_mask;
+    always @(*) begin
+        case (bus_mmio_size)
+            BUS_BYTE:  sysinfo_write_mask = 64'h0000_0000_0000_00FF
+                                             << (mmio_addr_eff[2:0] * 8);
+            BUS_HALF:  sysinfo_write_mask = 64'h0000_0000_0000_FFFF
+                                             << (mmio_addr_eff[2:0] * 8);
+            BUS_WORD:  sysinfo_write_mask = 64'h0000_0000_FFFF_FFFF
+                                             << (mmio_addr_eff[2:0] * 8);
+            default:   sysinfo_write_mask = 64'hFFFF_FFFF_FFFF_FFFF;
+        endcase
+
+        case (bus_mmio_size)
+            BUS_BYTE:  sysinfo_read_mask = 64'h0000_0000_0000_00FF;
+            BUS_HALF:  sysinfo_read_mask = 64'h0000_0000_0000_FFFF;
+            BUS_WORD:  sysinfo_read_mask = 64'h0000_0000_FFFF_FFFF;
+            default:   sysinfo_read_mask = 64'hFFFF_FFFF_FFFF_FFFF;
+        endcase
+    end
 
     // ---- Peripheral instances -----------------------------------------------
 
@@ -1751,7 +1786,10 @@ module mp64_soc #(
         if (!sys_rst_n)
             sysinfo_cluster_en <= {64{1'b1}};  // all clusters enabled at reset
         else if (mmio_sel_sysinfo && bus_mmio_wen && mmio_addr_eff[6:3] == 4'h3)
-            sysinfo_cluster_en <= bus_mmio_wdata;
+            sysinfo_cluster_en <=
+                (sysinfo_cluster_en & ~sysinfo_write_mask)
+                | ((bus_mmio_wdata << (mmio_addr_eff[2:0] * 8))
+                   & sysinfo_write_mask);
     end
 
     // ========================================================================
@@ -1787,6 +1825,8 @@ module mp64_soc #(
         //   0x48  NUM_FULL      — number of full (major) cores
         //   0x50  VRAM_BASE     — dedicated VRAM base address
         //   0x58  VRAM_SIZE     — dedicated VRAM size in bytes
+        //   0x60  CRYPTO_CAPS   — independently qualified capabilities
+        //   0x68  NUM_BUS_PORTS — weighted-arbiter requester count
         if (mmio_sel_sysinfo) begin
             case (mmio_addr_eff[6:3])  // 64-bit aligned: offset >> 3
                 4'h0: mmio_rdata_mux = 64'h4D50_3634_0002_0001;  // BOARD_ID_VER
@@ -1801,8 +1841,13 @@ module mp64_soc #(
                 4'h9: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};  // 0x48 NUM_FULL
                 4'hA: mmio_rdata_mux = {32'd0, MP64_VRAM_BASE_ADDR};  // 0x50
                 4'hB: mmio_rdata_mux = {32'd0, MP64_VRAM_DEFAULT_SIZE}; // 0x58
+                4'hC: mmio_rdata_mux = CRYPTO_CAPS;              // 0x60
+                4'hD: mmio_rdata_mux = N_BUS_PORTS;              // 0x68
                 default: mmio_rdata_mux = 64'd0;
             endcase
+            mmio_rdata_mux = (mmio_rdata_mux
+                               >> (mmio_addr_eff[2:0] * 8))
+                              & sysinfo_read_mask;
             mmio_ack_mux = 1'b1;
         end
 

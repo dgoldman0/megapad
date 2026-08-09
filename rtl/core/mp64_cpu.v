@@ -207,9 +207,12 @@ module mp64_cpu #(
     // ====================================================================
     // CPU FSM — extra state for BIST
     // ====================================================================
-    localparam CPU_BIST = 5'd8;       // reuse FETCH_MORE slot (BIST is major only)
+    localparam CPU_BIST        = 5'd8;  // reuse FETCH_MORE slot (major only)
+    localparam CPU_SKIP_REX    = 5'd23;
+    localparam CPU_SKIP_CRYPTO = 5'd24;
 
     reg [4:0] cpu_state;
+    reg       skip_has_rex;
 
     function [7:0] mex_fault_vector;
         input [2:0] fault;
@@ -220,6 +223,23 @@ module mp64_cpu #(
                 MEX_FAULT_BUS:     mex_fault_vector = IRQX_BUS;
                 MEX_FAULT_PRIV:    mex_fault_vector = IRQX_PRIV;
                 default:           mex_fault_vector = IRQX_ILLEGAL_OP;
+            endcase
+        end
+    endfunction
+
+    function [7:0] select_icache_byte;
+        input [63:0] data;
+        input [2:0]  offset;
+        begin
+            case (offset)
+                3'd0: select_icache_byte = data[7:0];
+                3'd1: select_icache_byte = data[15:8];
+                3'd2: select_icache_byte = data[23:16];
+                3'd3: select_icache_byte = data[31:24];
+                3'd4: select_icache_byte = data[39:32];
+                3'd5: select_icache_byte = data[47:40];
+                3'd6: select_icache_byte = data[55:48];
+                default: select_icache_byte = data[63:56];
             endcase
         end
     endfunction
@@ -287,10 +307,10 @@ module mp64_cpu #(
     reg  [7:0]  crypto_imm_r;
     reg         crypto_active;
     reg  [63:0] crc_acc;
-    reg  [1:0]  crc_mode;
+    reg  [2:0]  crc_mode;
 
     wire [63:0] crc_acc_out, crc_result;
-    wire [1:0]  crc_mode_out;
+    wire [2:0]  crc_mode_out;
     wire        crc_acc_we, crc_mode_we, crc_rd_we;
 
     mp64_crc_isa u_crc_isa (
@@ -519,6 +539,7 @@ module mp64_cpu #(
             fetch_pc       <= 64'd0;
             ibuf_len       <= 5'd0;
             ibuf_need      <= 4'd1;
+            skip_has_rex   <= 1'b0;
 
             icache_enabled <= 1'b1;
             icache_inv_all <= 1'b0;
@@ -579,7 +600,7 @@ module mp64_cpu #(
             crypto_imm_r   <= 8'd0;
             crypto_active  <= 1'b0;
             crc_acc        <= 64'hFFFF_FFFF;
-            crc_mode       <= 2'd0;
+            crc_mode       <= 3'd0;
 
             sha_mode       <= 2'd0;
             sha_msglen_lo  <= 64'd0;
@@ -831,11 +852,11 @@ module mp64_cpu #(
                         //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
                         //   ibuf[2] = DR or imm8 (3-byte ops only)
                         if ((ibuf[1][7:4] == 4'd0 &&
-                             ibuf[1][3:0] > ISA_CRC_SEED) ||
+                             ibuf[1][3:0] > ISA_CRC_FINRAW) ||
                             (ibuf[1][7:4] == 4'd1 &&
                              ibuf[1][3:0] > ISA_SHA_RELEASE)) begin
-                            // Reserved CRC sub-ops are fail-closed two-byte
-                            // instructions, consistent with the emulators.
+                            // Reserved CRC/SHA sub-ops are fail-closed
+                            // two-byte instructions.
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
                             trap_return_pc <= R[psel] + {60'd0, ibuf_need};
@@ -1425,9 +1446,12 @@ module mp64_cpu #(
                             end
                             CSR_CRC_ACC:  crc_acc  <= R[nib[2:0]];
                             CSR_CRC_MODE:
-                                crc_mode <= (R[nib[2:0]] == 64'd1) ? 2'd1
-                                          : (R[nib[2:0]] == 64'd2) ? 2'd2
-                                          :                               2'd0;
+                                crc_mode <= (R[nib[2:0]] == 64'd1) ? 3'd1
+                                          : (R[nib[2:0]] == 64'd2) ? 3'd2
+                                          : (R[nib[2:0]] == 64'd4) ? 3'd4
+                                          : (R[nib[2:0]] == 64'd5) ? 3'd5
+                                          : (R[nib[2:0]] == 64'd6) ? 3'd6
+                                          :                               3'd0;
                             CSR_TSRC0:    sha_tsrc0  <= R[nib[2:0]];
                             CSR_SHA_MODE: sha_mode   <= R[nib[2:0]][1:0];
                             CSR_SHA_MSGLEN:    sha_msglen_lo <= R[nib[2:0]];
@@ -1493,7 +1517,7 @@ module mp64_cpu #(
                             CSR_DMA_STATUS:  R[nib[2:0]] <= dma_status;
                             CSR_DMA_CTRL:    R[nib[2:0]] <= dma_ctrl;
                             CSR_CRC_ACC:     R[nib[2:0]] <= crc_acc;
-                            CSR_CRC_MODE:    R[nib[2:0]] <= {62'd0, crc_mode};
+                            CSR_CRC_MODE:    R[nib[2:0]] <= {61'd0, crc_mode};
                             CSR_ACC0:        R[nib[2:0]] <= legacy_acc_state[0*64 +: 64];
                             CSR_ACC1:        R[nib[2:0]] <= legacy_acc_state[1*64 +: 64];
                             CSR_ACC2:        R[nib[2:0]] <= legacy_acc_state[2*64 +: 64];
@@ -2061,7 +2085,9 @@ module mp64_cpu #(
             end
 
             // ============================================================
-            // SKIP: read byte0 of next instr via I-cache, advance PC
+            // SKIP: inspect the first byte of the skipped instruction. A REX
+            // prefix and EXT.CRYPTO both require further lookahead before the
+            // complete architectural length is known.
             // ============================================================
             CPU_SKIP: begin
                 if (!icache_stall) begin
@@ -2069,25 +2095,86 @@ module mp64_cpu #(
                     icache_addr <= R[psel];
                 end
                 if (icache_hit) begin
-                    icache_req <= 1'b0;
                     begin : skip_block
                         reg [7:0] skip_byte;
                         reg [3:0] skip_len;
-                        case (R[psel][2:0])
-                            3'd0: skip_byte = icache_data[ 7: 0];
-                            3'd1: skip_byte = icache_data[15: 8];
-                            3'd2: skip_byte = icache_data[23:16];
-                            3'd3: skip_byte = icache_data[31:24];
-                            3'd4: skip_byte = icache_data[39:32];
-                            3'd5: skip_byte = icache_data[47:40];
-                            3'd6: skip_byte = icache_data[55:48];
-                            3'd7: skip_byte = icache_data[63:56];
-                        endcase
-                        skip_len = instr_len(skip_byte, 1'b0);
-                        R[psel]  <= R[psel]  + {59'd0, 1'b0, skip_len};
-                        fetch_pc <= R[psel]  + {59'd0, 1'b0, skip_len};
+                        skip_byte = select_icache_byte(icache_data,
+                                                       icache_addr[2:0]);
+                        if (skip_byte >= 8'hF1 && skip_byte <= 8'hF5) begin
+                            skip_has_rex <= 1'b1;
+                            icache_req  <= 1'b1;
+                            icache_addr <= R[psel] + 64'd1;
+                            cpu_state   <= CPU_SKIP_REX;
+                        end else if (skip_byte == 8'hFB) begin
+                            skip_has_rex <= 1'b0;
+                            icache_req  <= 1'b1;
+                            icache_addr <= R[psel] + 64'd1;
+                            cpu_state   <= CPU_SKIP_CRYPTO;
+                        end else begin
+                            icache_req <= 1'b0;
+                            skip_len = instr_len(skip_byte, 1'b0);
+                            R[psel]  <= R[psel]
+                                      + {60'd0, skip_len};
+                            fetch_pc <= R[psel]
+                                      + {60'd0, skip_len};
+                            cpu_state <= CPU_FETCH;
+                        end
                     end
-                    cpu_state <= CPU_FETCH;
+                end
+            end
+
+            // A skipped REX prefix contributes one byte and changes the
+            // following instruction's register-width decode. EXT.CRYPTO then
+            // needs its sub-op byte before its two- versus three-byte body is
+            // known.
+            CPU_SKIP_REX: begin
+                if (!icache_stall) begin
+                    icache_req  <= 1'b1;
+                    icache_addr <= R[psel] + 64'd1;
+                end
+                if (icache_hit) begin
+                    begin : skip_rex_block
+                        reg [7:0] skip_byte;
+                        reg [3:0] skip_len;
+                        skip_byte = select_icache_byte(icache_data,
+                                                       icache_addr[2:0]);
+                        if (skip_byte == 8'hFB) begin
+                            icache_req  <= 1'b1;
+                            icache_addr <= R[psel] + 64'd2;
+                            cpu_state   <= CPU_SKIP_CRYPTO;
+                        end else begin
+                            icache_req <= 1'b0;
+                            skip_len = instr_len(skip_byte, 1'b1) + 4'd1;
+                            R[psel]  <= R[psel]
+                                      + {60'd0, skip_len};
+                            fetch_pc <= R[psel]
+                                      + {60'd0, skip_len};
+                            cpu_state <= CPU_FETCH;
+                        end
+                    end
+                end
+            end
+
+            CPU_SKIP_CRYPTO: begin
+                if (!icache_stall) begin
+                    icache_req <= 1'b1;
+                    icache_addr <= R[psel]
+                                   + (skip_has_rex ? 64'd2 : 64'd1);
+                end
+                if (icache_hit) begin
+                    begin : skip_crypto_block
+                        reg [7:0] crypto_sub_op;
+                        reg [3:0] skip_len;
+                        crypto_sub_op = select_icache_byte(
+                            icache_data, icache_addr[2:0]);
+                        skip_len = (skip_has_rex ? 4'd1 : 4'd0)
+                                 + (crypto_is_bare(crypto_sub_op)
+                                    ? 4'd2 : 4'd3);
+                        icache_req <= 1'b0;
+                        R[psel]  <= R[psel] + {60'd0, skip_len};
+                        fetch_pc <= R[psel] + {60'd0, skip_len};
+                        cpu_state <= CPU_FETCH;
+                    end
                 end
             end
 

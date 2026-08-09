@@ -277,7 +277,7 @@ module tb_cpu_smoke;
 
     task check_reg;
         input [255:0] label;
-        input [3:0]   rn;
+        input [4:0]   rn;
         input [63:0]  expected;
         begin
             if (uut.R[rn] !== expected) begin
@@ -769,34 +769,97 @@ module tb_cpu_smoke;
 
         // -----------------------------------------------------------------
         // Test 10: CRC_MODE CSR validates the complete 64-bit value.
-        // Values 5 and 0xFF must not alias modes 1 and 3 after truncation.
+        // Reflected modes are retained; an invalid complete value becomes 0.
         // -----------------------------------------------------------------
         for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
 
-        mem[0]  = 8'h60; mem[1]  = 8'h20; mem[2]  = 8'h05; // LDI R2,5
-        mem[3]  = 8'hDA; mem[4]  = 8'h81;                  // CSRW CRC_MODE,R2
-        mem[5]  = 8'hD5; mem[6]  = 8'h81;                  // CSRR R5,CRC_MODE
-        mem[7]  = 8'h60; mem[8]  = 8'h20; mem[9]  = 8'hFF; // LDI R2,FF
-        mem[10] = 8'hDA; mem[11] = 8'h81;                  // CSRW CRC_MODE,R2
-        mem[12] = 8'hD6; mem[13] = 8'h81;                  // CSRR R6,CRC_MODE
-        mem[14] = 8'h02;                                    // HALT
+        mem[0]  = 8'h60; mem[1]  = 8'h20; mem[2]  = 8'h04;
+        mem[3]  = 8'hDA; mem[4]  = 8'h81; // CSRW CRC_MODE,R2
+        mem[5]  = 8'hD4; mem[6]  = 8'h81; // CSRR R4,CRC_MODE
+        mem[7]  = 8'h60; mem[8]  = 8'h20; mem[9]  = 8'h05;
+        mem[10] = 8'hDA; mem[11] = 8'h81;
+        mem[12] = 8'hD5; mem[13] = 8'h81;
+        mem[14] = 8'h60; mem[15] = 8'h20; mem[16] = 8'h06;
+        mem[17] = 8'hDA; mem[18] = 8'h81;
+        mem[19] = 8'hD6; mem[20] = 8'h81;
+        mem[21] = 8'h60; mem[22] = 8'h20; mem[23] = 8'h85;
+        mem[24] = 8'hDA; mem[25] = 8'h81;
+        mem[26] = 8'hD7; mem[27] = 8'h81;
+        mem[28] = 8'h02;
 
         rst = 1'b1;
         repeat (4) @(posedge clk);
         rst = 1'b0;
 
         run_to_halt;
-        check_reg("CRC_MODE CSR rejects 5", 5, 64'd0);
-        check_reg("CRC_MODE CSR rejects FF", 6, 64'd0);
+        check_reg("CRC_MODE CSR accepts 4", 4, 64'd4);
+        check_reg("CRC_MODE CSR accepts 5", 5, 64'd5);
+        check_reg("CRC_MODE CSR accepts 6", 6, 64'd6);
+        check_reg("CRC_MODE CSR rejects high alias 85", 7, 64'd0);
 
         // -----------------------------------------------------------------
-        // Test 11: reserved CRC sub-op 6 is a two-byte illegal instruction.
-        // The following INC is neither fetched as an operand nor executed.
+        // Test 11: CRC.FINRAW is a three-byte register operation in both
+        // ordinary and REX.D forms. It scrubs the high half in mode 5.
         // -----------------------------------------------------------------
         for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
 
-        mem[0] = 8'hFB; mem[1] = 8'h06;  // reserved CRC op (2 bytes)
-        mem[2] = 8'h15;                   // INC R5 (must not execute)
+        mem[0]  = 8'hF0; // EXT.IMM64
+        mem[1]  = 8'h60; mem[2] = 8'h20; // LDI64 R2
+        mem[3]  = 8'h78; mem[4]  = 8'h56;
+        mem[5]  = 8'h34; mem[6]  = 8'h12;
+        mem[7]  = 8'hEF; mem[8]  = 8'hBE;
+        mem[9]  = 8'hAD; mem[10] = 8'hDE;
+        mem[11] = 8'hDA; mem[12] = 8'h80; // CSRW CRC_ACC,R2
+        mem[13] = 8'h60; mem[14] = 8'h20; mem[15] = 8'h05;
+        mem[16] = 8'hDA; mem[17] = 8'h81; // mode 5
+        mem[18] = 8'hFB; mem[19] = 8'h06; mem[20] = 8'h50;
+        mem[21] = 8'hF2; // REX.D
+        mem[22] = 8'hFB; mem[23] = 8'h06; mem[24] = 8'h00;
+        mem[25] = 8'h16;                   // INC R6
+        mem[26] = 8'hD7; mem[27] = 8'h80; // CSRR R7,CRC_ACC
+        mem[28] = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        run_to_halt;
+        check_reg("CRC.FINRAW ordinary destination", 5,
+                  64'h0000_0000_1234_5678);
+        check_reg("CRC.FINRAW REX.D destination", 16,
+                  64'h0000_0000_1234_5678);
+        check_reg("CRC.FINRAW preserves following opcode", 6, 64'd1);
+        check_reg("CRC.FINRAW publishes CRC_ACC", 7,
+                  64'h0000_0000_1234_5678);
+
+        // -----------------------------------------------------------------
+        // Test 11b: a taken SKIP consumes the complete REX.D + FINRAW form.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'hF6; mem[1] = 8'h30; // SKIP.AL
+        mem[2] = 8'hF2;                  // REX.D
+        mem[3] = 8'hFB; mem[4] = 8'h06; mem[5] = 8'h00;
+        mem[6] = 8'h15;                  // INC R5
+        mem[7] = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        run_to_halt;
+        check_reg("SKIP REX+CRC leaves low destination", 0, 64'd0);
+        check_reg("SKIP REX+CRC leaves high destination", 16, 64'd0);
+        check_reg("SKIP REX+CRC reaches following opcode", 5, 64'd1);
+
+        // -----------------------------------------------------------------
+        // Test 11c: reserved CRC sub-op 7 remains a two-byte illegal
+        // instruction. The following INC is not executed.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'hFB; mem[1] = 8'h07;
+        mem[2] = 8'h15;
 
         rst = 1'b1;
         repeat (4) @(posedge clk);
@@ -811,13 +874,13 @@ module tb_cpu_smoke;
             end
         end
         if (!saw_illegal) begin
-            $display("FAIL [reserved CRC op did not trap]");
+            $display("FAIL [reserved CRC op 7 did not trap]");
             fail_count = fail_count + 1;
         end else begin
             pass_count = pass_count + 1;
         end
-        check_reg("reserved CRC op length", 3, 64'd2);
-        check_reg("reserved CRC op preserves next opcode", 5, 64'd0);
+        check_reg("reserved CRC op 7 length", 3, 64'd2);
+        check_reg("reserved CRC op 7 preserves next opcode", 5, 64'd0);
 
         // -----------------------------------------------------------------
         // Test 12: TRAP + RTI uses the documented FLAGS/PC stack order.

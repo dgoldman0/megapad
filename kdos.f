@@ -680,18 +680,22 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 \  §1.3  CRC Convenience Words
 \ =====================================================================
 \
-\  The BIOS provides eight primitives backed by the CRC ISA accelerator:
-\    CRC-POLY!  ( n -- )       0=BZIP2 tuple, 1=non-reflected Castagnoli,
-\                              2=CRC-64/WE parameters
-\    CRC-INIT!  ( n -- )       initial CRC value
-\    CRC-FEED   ( n -- )       feed 8 bytes (LE 64-bit cell)
-\    CRC-FEED-BYTE ( b -- )    feed exactly one byte
-\    CRC@       ( -- n )       current CRC result
-\    CRC-RESET  ( -- )         reset to init value
-\    CRC-FINAL  ( -- )         XOR-out (finalize)
-\    CRC-FINAL@ ( -- n )       atomically finalize and return result
+\  The BIOS provides one raw capability query and eight checked CRC words:
+\    CRYPTO-CAPS@   ( -- caps )
+\    CRC-MODE!      ( mode -- status )
+\    CRC-RESET      ( -- status )
+\    CRC-INIT!      ( seed -- status )
+\    CRC-FEED       ( cell -- status )
+\    CRC-FEED-BYTE  ( byte -- status )
+\    CRC@           ( -- raw status )
+\    CRC-RAW-FINAL@ ( -- raw status )
+\    CRC-FINAL@     ( -- finalized )
 \
-\  Below we build high-level words on top of those primitives.
+\  Convenience operations throw an unchanged nonzero checked status.  They
+\  keep their result-only public shape while the primitives remain available
+\  to code that wants explicit retry or error policy.
+
+: _CRC-REQUIRE-OK  ( status -- )  ?DUP IF THROW THEN ;
 
 \ CRC-BUF ( addr u -- )  Feed u bytes from addr into the CRC engine.
 \   Processes full 8-byte chunks via CRC-FEED, then feeds each remaining
@@ -699,13 +703,13 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 : CRC-BUF  ( addr u -- )
     \ Process full 8-byte chunks using BEGIN/WHILE/REPEAT
     BEGIN  DUP 8 >=  WHILE
-        OVER @ CRC-FEED
+        OVER @ CRC-FEED _CRC-REQUIRE-OK
         SWAP 8 + SWAP
         8 -
     REPEAT
     \ Remaining bytes: 0..7
     BEGIN  DUP 0 >  WHILE
-        OVER C@ CRC-FEED-BYTE
+        OVER C@ CRC-FEED-BYTE _CRC-REQUIRE-OK
         SWAP 1+ SWAP
         1-
     REPEAT
@@ -714,22 +718,22 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 
 \ CRC32-BUF ( addr u -- crc )  Compute CRC-32 of a buffer.
 : CRC32-BUF
-    0 CRC-POLY!
-    0xFFFFFFFF CRC-INIT!
+    0 CRC-MODE! _CRC-REQUIRE-OK
+    0xFFFFFFFF CRC-INIT! _CRC-REQUIRE-OK
     CRC-BUF
     CRC-FINAL@ ;
 
-\ CRC32C-BUF ( addr u -- crc )  Compute mode-1 non-reflected Castagnoli CRC.
+\ CRC32C-BUF ( addr u -- crc )  Compute standard reflected CRC-32C.
 : CRC32C-BUF
-    1 CRC-POLY!
-    0xFFFFFFFF CRC-INIT!
+    5 CRC-MODE! _CRC-REQUIRE-OK
+    0xFFFFFFFF CRC-INIT! _CRC-REQUIRE-OK
     CRC-BUF
     CRC-FINAL@ ;
 
 \ CRC64-BUF ( addr u -- crc )  Compute CRC-64/WE of a buffer.
 : CRC64-BUF
-    2 CRC-POLY!
-    0xFFFFFFFFFFFFFFFF CRC-INIT!
+    2 CRC-MODE! _CRC-REQUIRE-OK
+    0xFFFFFFFFFFFFFFFF CRC-INIT! _CRC-REQUIRE-OK
     CRC-BUF
     CRC-FINAL@ ;
 
@@ -2011,7 +2015,8 @@ XMEM-INIT      \ initialise at load time
 \
 \    System RAM (Bank 0, 1 MiB):
 \      0x00000 .. dict_free   BIOS code + dictionary
-\      dict_free .. ~0x7F000  KDOS dictionary + system heap
+\      dict_free .. kernel-data-end  topology-sized CRC owner records
+\      kernel-data-end .. ~0x7F000   KDOS dictionary + system heap
 \      0x80000 .. 0xFFFFF     Stacks (data + return)
 \
 \    External RAM (128 MiB by default, at 0x100000):

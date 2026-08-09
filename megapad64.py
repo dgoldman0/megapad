@@ -119,7 +119,7 @@ CSR_QOS_BWLIMIT    = 0x59   # Bandwidth limit
 
 # EXT.CRYPTO CSRs (Appendix B)
 CSR_CRC_ACC       = 0x80   # RW: 64-bit running CRC accumulator
-CSR_CRC_MODE      = 0x81   # RW full / R micro: exact CRC tuple select 0/1/2
+CSR_CRC_MODE      = 0x81   # RW full / R micro: exact complete CRC mode
 CSR_SHA_MODE      = 0x82   # RW: 0=SHA-256, 1=SHA-384, 2=SHA-512
 CSR_SHA_MSGLEN    = 0x83   # RW: total message length in bits (low 64)
 CSR_SHA_MSGLEN_HI = 0x84   # RW: total message length in bits (high 64)
@@ -939,7 +939,7 @@ class Megapad64:
         # EXT.CRYPTO CRC state (private here; micro-cores override with the
         # cluster-shared engine described in Appendix B, §B.3).
         self.crc_acc: int  = 0xFFFF_FFFF  # CRC accumulator
-        self.crc_mode: int = 0            # exact non-reflected tuple 0/1/2
+        self.crc_mode: int = 0            # exact complete mode 0/1/2/4/5/6
 
         # EXT.CRYPTO SHA-2 per-core state (Appendix B, §B.4)
         self.sha_mode: int      = 0   # 0=SHA-256, 1=SHA-384, 2=SHA-512
@@ -2081,7 +2081,7 @@ class Megapad64:
             # EXT.CRYPTO CSRs (Appendix B)
             CSR_CRC_ACC:       lambda v: setattr(self, 'crc_acc', v & 0xFFFF_FFFF_FFFF_FFFF),
             CSR_CRC_MODE:      lambda v: setattr(
-                self, 'crc_mode', v if v in (0, 1, 2) else 0),
+                self, 'crc_mode', v if v in self._CRC_MODES else 0),
             CSR_SHA_MODE:      lambda v: setattr(self, 'sha_mode', v & 0x03),
             CSR_SHA_MSGLEN:    lambda v: setattr(self, 'sha_msglen_lo', v & MASK64),
             CSR_SHA_MSGLEN_HI: lambda v: setattr(self, 'sha_msglen_hi', v & MASK64),
@@ -2735,31 +2735,52 @@ class Megapad64:
 
     # -- EXT.CRYPTO (prefix FB) --
 
-    # CRC polynomials (normal / MSB-first, non-reflected form)
-    _CRC_POLYS = {
-        0: (0x04C11DB7, 32),          # CRC-32/BZIP2 tuple
-        1: (0x1EDC6F41, 32),          # Castagnoli polynomial, non-reflected
-        2: (0x42F0E1EBA9EA3693, 64),  # CRC-64/WE tuple
+    # Complete CRC modes: polynomial used by the selected recurrence, width,
+    # and whether bytes are processed least-significant-bit first.
+    _CRC_MODES = {
+        0: (0x04C11DB7, 32, False),          # CRC-32/BZIP2
+        1: (0x1EDC6F41, 32, False),          # Castagnoli, non-reflected
+        2: (0x42F0E1EBA9EA3693, 64, False),  # CRC-64/WE
+        4: (0xEDB88320, 32, True),            # CRC-32/ISO-HDLC
+        5: (0x82F63B78, 32, True),            # CRC-32C
+        6: (0xC96C5795D7870F42, 64, True),    # CRC-64/XZ
     }
 
+    # EXT.CRYPTO sub-operations whose encoding includes a third byte.  This
+    # is architectural instruction sizing, so reserved operations remain
+    # two-byte instructions even when followed by arbitrary data.
+    _CRYPTO_THREE_BYTE_SUBOPS = frozenset({
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+        0x10, 0x13, 0x14,
+        0x29, 0x2B,
+    })
+
+    @classmethod
+    def _crypto_instruction_size(cls, sub_op: int) -> int:
+        return 3 if sub_op in cls._CRYPTO_THREE_BYTE_SUBOPS else 2
+
     @staticmethod
-    def _crc_update_byte(acc: int, byte: int, poly: int, width: int) -> int:
-        """Process one byte through the CRC, MSB-first (matching RTL)."""
-        if width == 64:
-            acc ^= byte << 56
+    def _crc_update_byte(acc: int, byte: int, poly: int, width: int,
+                         reflected: bool) -> int:
+        """Process one byte through the selected complete CRC recurrence."""
+        mask = MASK64 if width == 64 else 0xFFFF_FFFF
+        acc &= mask
+        if reflected:
+            acc ^= byte
             for _ in range(8):
-                if acc & (1 << 63):
-                    acc = ((acc << 1) & 0xFFFF_FFFF_FFFF_FFFF) ^ poly
+                if acc & 1:
+                    acc = (acc >> 1) ^ poly
                 else:
-                    acc = (acc << 1) & 0xFFFF_FFFF_FFFF_FFFF
-        else:  # width == 32
-            acc ^= byte << 24
+                    acc >>= 1
+        else:
+            acc ^= byte << (width - 8)
+            top = 1 << (width - 1)
             for _ in range(8):
-                if acc & (1 << 31):
-                    acc = ((acc << 1) & 0xFFFF_FFFF) ^ poly
+                if acc & top:
+                    acc = ((acc << 1) & mask) ^ poly
                 else:
-                    acc = (acc << 1) & 0xFFFF_FFFF
-        return acc
+                    acc = (acc << 1) & mask
+        return acc & mask
 
     def _exec_crypto(self) -> int:
         """Execute EXT.CRYPTO (FB) instruction.
@@ -2786,14 +2807,12 @@ class Megapad64:
         """CRC sub-ops (FB 00–0F).
         Full cores own local CRC state; micro-cores override this method to
         use the cluster-shared engine."""
-        poly_info = self._CRC_POLYS.get(self.crc_mode, self._CRC_POLYS[0])
-        poly, width = poly_info
+        mode_info = self._CRC_MODES.get(self.crc_mode, self._CRC_MODES[0])
+        poly, width, reflected = mode_info
+        width_mask = MASK64 if width == 64 else 0xFFFF_FFFF
 
         if op == 0x0:  # CRC.INIT
-            if self.crc_mode == 2:
-                self.crc_acc = 0xFFFF_FFFF_FFFF_FFFF
-            else:
-                self.crc_acc = 0xFFFF_FFFF
+            self.crc_acc = width_mask
             return 1
 
         elif op == 0x1:  # CRC.B Rd, Rs — feed one byte
@@ -2801,7 +2820,8 @@ class Megapad64:
             rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
             rs = (self._rex_s << 4) | (reg_byte & 0xF)
             b = self.regs[rs] & 0xFF
-            self.crc_acc = self._crc_update_byte(self.crc_acc, b, poly, width)
+            self.crc_acc = self._crc_update_byte(
+                self.crc_acc, b, poly, width, reflected)
             self.regs[rd] = self.crc_acc & MASK64
             return 1
 
@@ -2813,7 +2833,8 @@ class Megapad64:
             acc = self.crc_acc
             for i in range(8):
                 b = (val >> (i * 8)) & 0xFF
-                acc = self._crc_update_byte(acc, b, poly, width)
+                acc = self._crc_update_byte(
+                    acc, b, poly, width, reflected)
             self.crc_acc = acc
             self.regs[rd] = acc & MASK64
             return 1
@@ -2821,22 +2842,29 @@ class Megapad64:
         elif op == 0x3:  # CRC.FIN Rd, Rs — finalize
             reg_byte = self.fetch8()
             rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
-            mask = 0xFFFF_FFFF_FFFF_FFFF if self.crc_mode == 2 else 0xFFFF_FFFF
-            self.crc_acc = (self.crc_acc ^ mask) & MASK64
+            self.crc_acc = (
+                (self.crc_acc & width_mask) ^ width_mask
+            ) & width_mask
             self.regs[rd] = self.crc_acc
             return 1
 
         elif op == 0x4:  # CRC.MODE imm8
             imm8 = self.fetch8()
-            self.crc_mode = imm8 if imm8 in (0, 1, 2) else 0
+            self.crc_mode = imm8 if imm8 in self._CRC_MODES else 0
             return 1
 
         elif op == 0x5:  # CRC.SEED Rd, Rs — width-masked accumulator load
             reg_byte = self.fetch8()
             rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
             rs = (self._rex_s << 4) | (reg_byte & 0xF)
-            mask = MASK64 if self.crc_mode == 2 else 0xFFFF_FFFF
-            self.crc_acc = self.regs[rs] & mask
+            self.crc_acc = self.regs[rs] & width_mask
+            self.regs[rd] = self.crc_acc
+            return 1
+
+        elif op == 0x6:  # CRC.FINRAW Rd, Rs — publish without XOR-out
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            self.crc_acc &= width_mask
             self.regs[rd] = self.crc_acc
             return 1
 
@@ -5132,6 +5160,9 @@ class Megapad64:
                 return 3
             if n == 0xA:  # EXT.DICT: self-contained 3-byte
                 return 3
+            if n == 0xB:  # EXT.CRYPTO: selected 2- or 3-byte form
+                sub_op = self._icache_read_byte(u64(self.pc + 1))
+                return self._crypto_instruction_size(sub_op)
             b1 = self._icache_read_byte(u64(self.pc + 1))
             f2 = (b1 >> 4) & 0xF
             n2 = b1 & 0xF
@@ -5145,6 +5176,9 @@ class Megapad64:
                 return 4  # REX byte + F9 + sub-op + reg-byte
             if f2 == 0xF and n2 == 0xA:  # REX + FA
                 return 4  # REX byte + FA + sub-op + reg-byte
+            if f2 == 0xF and n2 == 0xB:  # REX + FB
+                sub_op = self._icache_read_byte(u64(self.pc + 2))
+                return 1 + self._crypto_instruction_size(sub_op)
             return 1 + self._family_size(f2, n2, u64(self.pc + 1))
         return self._family_size(f, n, self.pc)
 
@@ -5263,7 +5297,7 @@ class Megapad64Micro(Megapad64):
     SHARED resources via cluster:
     - MUL/DIV unit (round-robin arbitrated)
     - Tile/MEX ACC and TACC state (round-robin arbitrated)
-    - CRC engine (hardware-lock arbitrated; INIT acquires, FIN releases)
+    - CRC engine (hardware-lock arbitrated; INIT acquires, finals release)
 
     Tile selectors, mode, control, and shape/stride registers remain private
     to each caller and are sampled only when that caller is granted the
@@ -5491,9 +5525,9 @@ class Megapad64Micro(Megapad64):
 
         A contender leaves the complete instruction unconsumed by restoring
         its PC, modelling the RTL request stall/retry boundary. MODE, INIT,
-        and SEED acquire the lock; FIN commits its result before release.
+        and SEED acquire the lock; FIN and FINRAW publish before release.
         """
-        if op > 0x5:
+        if op > 0x6:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO CRC sub-op {op:#x} reserved")
 
@@ -5506,8 +5540,12 @@ class Megapad64Micro(Megapad64):
 
         cluster = self._cluster
         acquire = op in (0x0, 0x4, 0x5)
-        owned_by_other = (cluster.crc_locked and
-                          not cluster.crc_is_owner(self.core_id))
+        ownership = cluster.crc_snapshot()
+        local_core = self.core_id - cluster.id_base
+        owned_by_other = (
+            bool(ownership["locked"]) and
+            ownership["owner"] != local_core
+        )
         if owned_by_other or (acquire and
                               not cluster.crc_try_acquire(self.core_id)):
             # At entry FB and its sub-op have been fetched; a REX prefix is
@@ -5516,14 +5554,16 @@ class Megapad64Micro(Megapad64):
             self.pc = u64(self.pc - retry_len)
             return 3
 
-        self.crc_acc = cluster.crc_acc
-        self.crc_mode = cluster.crc_mode
+        shared = cluster.crc_snapshot()
+        self.crc_acc = int(shared["acc"])
+        self.crc_mode = int(shared["mode"])
         cycles = super()._exec_crc(op)
-        cluster.crc_acc = self.crc_acc
-        cluster.crc_mode = self.crc_mode
-
-        if op == 0x3:
-            cluster.crc_release(self.core_id)
+        cluster.crc_publish(
+            self.core_id,
+            acc=self.crc_acc,
+            mode=self.crc_mode,
+            release=op in (0x3, 0x6),
+        )
 
         return cycles + 3
 

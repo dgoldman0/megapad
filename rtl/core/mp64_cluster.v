@@ -215,7 +215,7 @@ module mp64_cluster #(
     reg [63:0]  cl_mpu_limit;
     reg [63:0]  cl_ivt_base;
     reg [63:0]  cl_crc_acc;        // cluster-shared CRC accumulator
-    reg [1:0]   cl_crc_mode;       // cluster-shared CRC mode (0/1/2)
+    reg [2:0]   cl_crc_mode;       // cluster-shared CRC mode
 
     // Cluster-shared SHA-2 metadata. The digest itself is the tile engine's
     // authoritative legacy ACC bank.
@@ -555,7 +555,7 @@ module mp64_cluster #(
                     CSR_BARRIER_ARRIVE:mc_cl_csr_rdata[gi*64 +: 64] = {{(64-N){1'b0}}, barrier_arrive};
                     CSR_BARRIER_STATUS:mc_cl_csr_rdata[gi*64 +: 64] = {{(63-N){1'b0}}, barrier_done, barrier_arrive};
                     CSR_CRC_ACC:       mc_cl_csr_rdata[gi*64 +: 64] = cl_crc_acc;
-                    CSR_CRC_MODE:      mc_cl_csr_rdata[gi*64 +: 64] = {62'd0, cl_crc_mode};
+                    CSR_CRC_MODE:      mc_cl_csr_rdata[gi*64 +: 64] = {61'd0, cl_crc_mode};
                     CSR_SHA_MODE:      mc_cl_csr_rdata[gi*64 +: 64] = {62'd0, cl_sha_mode};
                     CSR_SHA_MSGLEN:    mc_cl_csr_rdata[gi*64 +: 64] = cl_sha_msglen_lo;
                     CSR_SHA_MSGLEN_HI: mc_cl_csr_rdata[gi*64 +: 64] = cl_sha_msglen_hi;
@@ -944,8 +944,8 @@ module mp64_cluster #(
     // Unlike MUL (stateless), CRC is stateful: the accumulator persists
     // across calls.  A hardware lock protects multi-instruction CRC
     // sequences:
-    //   CRC.MODE or CRC.INIT acquires the lock (sets crc_locked, owner).
-    //   CRC.FIN  releases the lock.
+    //   CRC.MODE, CRC.INIT, or CRC.SEED acquires the lock and owner.
+    //   CRC.FIN or CRC.FINRAW releases the lock.
     //   While locked, only the lock owner can execute CRC ops.
     //   Other cores' crc_req stalls (they stay in CPU_CRYPTO).
     //
@@ -965,7 +965,7 @@ module mp64_cluster #(
     wire [63:0] crc_isa_rs_val;
     wire [7:0]  crc_isa_imm8;
     wire [63:0] crc_isa_acc_out;
-    wire [1:0]  crc_isa_mode_out;
+    wire [2:0]  crc_isa_mode_out;
     wire [63:0] crc_isa_result;
     wire        crc_isa_acc_we;
     wire        crc_isa_mode_we;
@@ -995,7 +995,8 @@ module mp64_cluster #(
         crc_any  = 1'b0;
         if (crc_locked) begin
             // Only the lock owner may proceed
-            if (mc_crc_req[crc_lock_owner]) begin
+            if (mc_crc_req[crc_lock_owner] &&
+                !micro_reset[crc_lock_owner]) begin
                 crc_next = crc_lock_owner;
                 crc_any  = 1'b1;
             end
@@ -1004,7 +1005,9 @@ module mp64_cluster #(
                 crc_cand = {1'b0, crc_last} + mi[ARB_BITS:0];
                 if (crc_cand >= N_VAL)
                     crc_cand = crc_cand - N_VAL;
-                if (!crc_any && mc_crc_req[crc_cand[ARB_BITS-1:0]]) begin
+                if (!crc_any &&
+                    mc_crc_req[crc_cand[ARB_BITS-1:0]] &&
+                    !micro_reset[crc_cand[ARB_BITS-1:0]]) begin
                     crc_next = crc_cand[ARB_BITS-1:0];
                     crc_any  = 1'b1;
                 end
@@ -1032,12 +1035,20 @@ module mp64_cluster #(
             crc_locked     <= 1'b0;
             crc_lock_owner <= {ARB_BITS{1'b0}};
             cl_crc_acc     <= 64'h0000_0000_FFFF_FFFF;
-            cl_crc_mode    <= 2'd0;
+            cl_crc_mode    <= 3'd0;
         end else begin
             crc_done_reg  <= 1'b0;
             crc_rd_we_reg <= 1'b0;
 
-            case (crc_state)
+            if (crc_state != CRC_IDLE &&
+                micro_cancel_pulse[crc_grant]) begin
+                // A caller reset cancels an admitted operation without
+                // architectural completion or shared-state writeback.  In
+                // WAIT_DROP it also stops a held stale request from pinning
+                // the arbiter after its caller has disappeared.
+                crc_state <= CRC_IDLE;
+            end else begin
+                case (crc_state)
                 CRC_IDLE: begin
                     if (crc_any) begin
                         crc_grant <= crc_next;
@@ -1064,8 +1075,9 @@ module mp64_cluster #(
                         // INIT independently remains a valid lock acquire.
                         crc_locked     <= 1'b1;
                         crc_lock_owner <= crc_grant;
-                    end else if (crc_isa_op == ISA_CRC_FIN) begin
-                        // CRC.FIN: release lock
+                    end else if (crc_isa_op == ISA_CRC_FIN ||
+                                 crc_isa_op == ISA_CRC_FINRAW) begin
+                        // Final publication releases the transaction lock.
                         crc_locked <= 1'b0;
                     end
 
@@ -1082,7 +1094,15 @@ module mp64_cluster #(
                 end
 
                 default: crc_state <= CRC_IDLE;
-            endcase
+                endcase
+            end
+
+            // An owner may reset between CRC instructions while the engine
+            // is idle, or while its current instruction is being canceled.
+            // Preserve the shared CRC data, but never leave its transaction
+            // lock owned by a microcore that no longer exists.
+            if (crc_locked && micro_cancel_pulse[crc_lock_owner])
+                crc_locked <= 1'b0;
         end
     end
 

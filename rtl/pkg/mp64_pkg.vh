@@ -49,7 +49,7 @@ localparam TACC_EPOCH_BITS              = 8;        // reset/cancellation genera
 // Derived (at default counts):
 //   NUM_MICRO_CORES = NUM_CLUSTERS × MICRO_PER_CLUSTER = 12
 //   NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES = 16
-//   NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS = 7
+//   NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + NIC + DISK = 9
 
 // Cluster scratchpad
 localparam MP64_CLUSTER_SPAD_BYTES = 1024;          // 1 KiB per cluster
@@ -164,7 +164,8 @@ localparam [3:0] ISA_CRC_B     = 4'd1;
 localparam [3:0] ISA_CRC_Q     = 4'd2;
 localparam [3:0] ISA_CRC_FIN   = 4'd3;
 localparam [3:0] ISA_CRC_MODEX = 4'd4;   // CRC.MODE (name avoids collision)
-localparam [3:0] ISA_CRC_SEED  = 4'd5;   // Load mode-width accumulator from Rs
+localparam [3:0] ISA_CRC_SEED   = 4'd5;  // Load mode-width accumulator from Rs
+localparam [3:0] ISA_CRC_FINRAW = 4'd6;  // Publish raw accumulator and release
 
 // --- EXT.CRYPTO SHA-2 sub-op codes (within SHA unit, sub_op[3:0]) ---
 localparam [3:0] ISA_SHA_INIT  = 4'd0;   // SHA.INIT imm8

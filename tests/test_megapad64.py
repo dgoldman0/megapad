@@ -2231,7 +2231,7 @@ def test_ext_prefix():
 
 
 def test_crc_isa():
-    """EXT.CRYPTO CRC ISA instructions (FB 00–05)"""
+    """EXT.CRYPTO CRC ISA instructions (FB 00–06)."""
     print("\n== EXT.CRYPTO CRC ISA (FB 0x) ==")
 
     # --- CRC.INIT (FB 00) — default mode 0 = CRC32 ---
@@ -2260,7 +2260,7 @@ def test_crc_isa():
     check("CRC.MODE 2 + CRC.INIT: CRC_ACC = 0xFFFFFFFFFFFFFFFF",
           cpu.crc_acc == 0xFFFFFFFFFFFFFFFF)
 
-    for invalid_mode in (3, 5, 0xFF):
+    for invalid_mode in (3, 7, 0xFF):
         cpu, _ = run_asm(f"""
             crc.mode {invalid_mode}
             crc.init
@@ -2270,8 +2270,8 @@ def test_crc_isa():
               cpu.crc_mode == 0 and cpu.crc_acc == 0xFFFFFFFF)
 
     # CSR mode selection follows the same full-value rule: values are
-    # validated before narrowing, so 5 must not alias mode 1.
-    for invalid_mode in (3, 5, 0xFF):
+    # validated before narrowing, so high bits cannot alias a valid mode.
+    for invalid_mode in (3, 7, 0x105, 0xFF):
         cpu, _ = run_asm(f"""
             ldi64 r2, {invalid_mode}
             csrw 0x81, r2
@@ -2487,10 +2487,23 @@ def test_crc_isa():
           cpu.regs[5] == 0xDEADBEEF89ABCDEF and
           cpu.crc_acc == 0xDEADBEEF89ABCDEF)
 
+    cpu, _ = run_asm("""
+        crc.mode 0
+        ldi64 r2, 0xDEADBEEF89ABCDEF
+        csrw 0x80, r2
+        crc.fin r4, r0
+        halt
+    """)
+    check("CRC.FIN masks stale high bits before 32-bit XOR-out",
+          cpu.regs[4] == 0x76543210 and cpu.crc_acc == 0x76543210)
+
     for mode, expected in (
             (0, 0xFC891918),
             (1, 0x05440F15),
-            (2, 0x62EC59E3F1A4F00A)):
+            (2, 0x62EC59E3F1A4F00A),
+            (4, 0xCBF43926),
+            (5, 0xE3069283),
+            (6, 0x995DC9BBDF1939FA)):
         feed = "\n".join(
             f"ldi r2, {byte}\ncrc.b r1, r2"
             for byte in b"123456789")
@@ -2500,8 +2513,17 @@ def test_crc_isa():
               cpu.regs[4] == expected and cpu.crc_acc == expected,
               f"got {cpu.regs[4]:#x}")
 
+    feed = "\n".join(
+        f"ldi r2, {byte}\ncrc.b r1, r2"
+        for byte in b"123456789")
+    cpu, _ = run_asm(
+        f"crc.mode 5\ncrc.init\n{feed}\ncrc.finraw r4, r0\nhalt")
+    check("CRC.FINRAW publishes the width-masked pre-XOR accumulator",
+          cpu.regs[4] == 0x1CF96D7C and cpu.crc_acc == 0x1CF96D7C,
+          f"got {cpu.regs[4]:#x}")
+
     cpu = Megapad64(mem_size=256)
-    cpu.load_bytes(0, bytes((0xFB, 0x06, 0x15)))
+    cpu.load_bytes(0, bytes((0xFB, 0x07, 0x15)))
     cpu.pc = 0
     try:
         cpu.step()

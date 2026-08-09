@@ -1112,7 +1112,7 @@ def test_nonengine_f_modifier_cannot_bypass_bus_arbitration(
     (
         (
             "crc",
-            bytes((0xFB, 0x06)),
+            bytes((0xFB, 0x07)),
             lambda cluster, core:
                 cluster.crc_try_acquire(core.core_id),
         ),

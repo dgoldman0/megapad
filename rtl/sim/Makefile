@@ -9,6 +9,7 @@ IVFLAGS  ?= -g2012
 
 # Common include path
 INC = -I../pkg
+CPU_FUNCS_DEP = ../pkg/mp64_cpu_funcs.vh
 
 # Source directories
 PRIM   = ../prim
@@ -111,7 +112,7 @@ platform_sim: tb_platform_sim.vvp
 	$(VVP) $<
 
 tb_platform_sim.vvp: tb_platform_sim.v $(PLAT)/mp64_platform_sim.v \
-                     $(SOC_ELAB_SRC)
+                     $(SOC_ELAB_SRC) $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_platform_sim -o $@ \
 		tb_platform_sim.v $(PLAT)/mp64_platform_sim.v $(SOC_ELAB_SRC)
 
@@ -167,8 +168,9 @@ phase3: alu bitfield crc_isa sha2_isa field_alu_isa icache cpu_smoke cluster cpu
 alu: tb_alu.vvp
 	$(VVP) $<
 
-tb_alu.vvp: tb_alu.v $(CORE)/mp64_alu.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+tb_alu.vvp: tb_alu.v $(CORE)/mp64_alu.v $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- Bitfield ALU ---
 bitfield: tb_bitfield.vvp
@@ -181,7 +183,7 @@ tb_bitfield.vvp: tb_bitfield.v $(CORE)/mp64_bitfield.v
 crc_isa: tb_crc_isa.vvp
 	$(VVP) $<
 
-tb_crc_isa.vvp: tb_crc_isa.v $(CRYPTO)/mp64_crc_isa.v
+tb_crc_isa.vvp: tb_crc_isa.v $(CRYPTO)/mp64_crc_isa.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- SHA-2 ISA engine ---
@@ -216,8 +218,9 @@ tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                   $(CRYPTO)/mp64_sha2_isa.v \
                   $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                   $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
-                  $(MEM)/mp64_memory.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                  $(MEM)/mp64_memory.v ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- Cluster (4 micro-cores + shared MUL/DIV + shared tile engine) ---
 cluster: tb_cluster.vvp
@@ -227,16 +230,20 @@ tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
                 $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v $(PRIM)/mp64_mul.v \
                 $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
                 $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
-                $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v \
+                ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- Micro-core standalone ---
 cpu_micro: tb_cpu_micro.vvp
 	$(VVP) $<
 
 tb_cpu_micro.vvp: tb_cpu_micro.v $(CORE)/mp64_cpu_micro.v $(CORE)/mp64_alu.v \
-                  $(CORE)/mp64_bitfield.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                  $(CORE)/mp64_bitfield.v ../pkg/mp64_pkg.vh \
+                  $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- Comprehensive opcode tests ---
 opcodes: tb_opcodes.vvp
@@ -248,8 +255,9 @@ tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                 $(CRYPTO)/mp64_sha2_isa.v \
                 $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                 $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
-                $(MEM)/mp64_memory.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                $(MEM)/mp64_memory.v ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- EXT.STRING engine (Forth string ops, prefix F9) ---
 string: tb_string.vvp
@@ -261,8 +269,9 @@ tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                $(CRYPTO)/mp64_sha2_isa.v \
                $(CORE)/mp64_icache.v \
                $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
-               $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+               $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- EXT.DICT engine (Forth dictionary ops, prefix FA) ---
 dict: tb_dict.vvp
@@ -274,8 +283,9 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
              $(CRYPTO)/mp64_sha2_isa.v \
              $(CORE)/mp64_icache.v \
              $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
-             $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+             $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # ==========================================================================
 # Phase 4: Peripherals, Crypto & GPU
@@ -467,8 +477,9 @@ tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v \
                         $(CORE)/mp64_icache.v \
                         $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                         $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v \
-                        $(BUS)/mp64_bus.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+                        $(BUS)/mp64_bus.v $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
 
 # --- Shared full-core data/I-cache bus ownership ---
 core_bus_mux: tb_core_bus_mux.vvp
@@ -497,7 +508,8 @@ tb_tacc_transfer.vvp: tb_tacc_transfer.v $(SOC)/mp64_tacc_transfer.v \
 tacc_soc: tb_tacc_soc.vvp
 	$(VVP) $<
 
-tb_tacc_soc.vvp: tb_tacc_soc.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+tb_tacc_soc.vvp: tb_tacc_soc.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh \
+                 $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_tacc_soc -o $@ \
 		tb_tacc_soc.v $(SOC_ELAB_SRC)
 
@@ -505,18 +517,20 @@ tb_tacc_soc.vvp: tb_tacc_soc.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
 soc_smoke: tb_soc_smoke.vvp
 	$(VVP) $<
 
-tb_soc_smoke.vvp: tb_soc_smoke.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+tb_soc_smoke.vvp: tb_soc_smoke.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh \
+                  $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_smoke -o $@ \
 		tb_soc_smoke.v $(SOC_ELAB_SRC)
 
 soc_tile_icache: tb_soc_tile_icache.vvp
 	$(VVP) $<
 
-tb_soc_tile_icache.vvp: tb_soc_tile_icache.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+tb_soc_tile_icache.vvp: tb_soc_tile_icache.v $(SOC_ELAB_SRC) \
+                        ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_tile_icache -o $@ \
 		tb_soc_tile_icache.v $(SOC_ELAB_SRC)
 
 soc_elaborate: mp64_soc.vvp
 
-mp64_soc.vvp: $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+mp64_soc.vvp: $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s mp64_soc -o $@ $(SOC_ELAB_SRC)

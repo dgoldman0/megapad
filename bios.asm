@@ -33,7 +33,8 @@
 ;  Memory map (1 MiB default)
 ;  ----------------------------
 ;    0x00000 – ~BIOS end   BIOS code + dictionary + strings
-;    dict_free  onward     User dictionary (HERE grows up)
+;    dict_free  onward     Topology-sized private CRC owner table
+;    kernel data end       User dictionary (HERE grows up)
 ;    ram/2 – 8  downward   Data stack   (R14 shrinks)
 ;    ram – 8    downward   Return stack (R15 shrinks)
 ;
@@ -46,7 +47,7 @@
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
-;    CRC    ISA-only (EXT.CRYPTO FB 00-05; no MMIO)
+;    CRC    ISA-only (EXT.CRYPTO FB 00-06; no MMIO)
 ;    SHA-2  ISA-only (EXT.CRYPTO FB 10-16; no MMIO)
 ;
 ;  Multicore CSRs
@@ -164,14 +165,61 @@ boot:
     ldi r1, 0
     ldi64 r11, var_state
     str r11, r1               ; STATE = 0 (interpreting)
+    ldi64 r11, var_task_active
+    str r11, r1               ; core 0 starts in foreground task context
 
     ldi r1, 10
     ldi64 r11, var_base
     str r11, r1               ; BASE = 10
 
-    ldi64 r1, dict_free
+    ; Reserve one full-width {COREID,TASK-ID} CRC owner record for every
+    ; global core advertised by System Info.  This arena is rebuilt and
+    ; scrubbed on every boot, before auto-booted code can observe it.
+    ldi64 r11, 0xFFFF_FF00_0000_0310  ; SysInfo NUM_CORES
+    ldn r12, r11
+    cmpi r12, 0
+    lbreq boot_bad_core_topology
+
+    ; bytes = NUM_CORES * 16, rejecting a shift that loses high bits.
+    mov r13, r12
+    lsli r13, 4
+    mov r0, r13
+    lsri r0, 4
+    cmp r0, r12
+    lbrne boot_bad_core_topology
+
+    ldi64 r1, dict_free               ; dynamic arena base
+    mov r7, r1
+    add r7, r13                       ; exclusive dynamic arena end
+    cmp r7, r1
+    lbrcc boot_bad_core_topology      ; address addition wrapped
+    cmp r7, r14
+    lbrcs boot_bad_core_topology      ; no room below initial data stack
+
+    ldi64 r11, var_crc_owner_base
+    str r11, r1
+    ldi64 r11, var_kernel_data_end
+    str r11, r7
+
+    ; Each record is {owner-core, owner-task}.  Publish the unowned sentinel
+    ; first and keep the task field zero.  Warm resets therefore cannot retain
+    ; an interrupted transaction's software ownership.
+    mov r11, r1
+    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF
+    ldi r7, 0
+.boot_crc_owner_clear:
+    str r11, r0
+    addi r11, 8
+    str r11, r7
+    addi r11, 8
+    dec r12
+    cmpi r12, 0
+    brne .boot_crc_owner_clear
+
+    ldi64 r11, var_kernel_data_end
+    ldn r1, r11
     ldi64 r11, var_here
-    str r11, r1               ; HERE = first free byte
+    str r11, r1               ; HERE = first byte after private kernel data
 
     ldi64 r1, latest_entry
     ldi64 r11, var_latest
@@ -309,6 +357,11 @@ no_autoboot:
     ; Fall into the outer interpreter
     ldi64 r11, forth_quit
     call.l r11
+    halt
+
+boot_bad_core_topology:
+    ; A zero, overflowing, or physically impossible advertised topology
+    ; cannot safely index the checked CRC owner table.
     halt
 
 ; =====================================================================
@@ -12600,80 +12653,381 @@ w_perf_reset:
     ret.l
 
 ; =====================================================================
-;  CRC Engine — ISA instructions (EXT.CRYPTO FB 00-05)
+;  CRC Engine — checked ISA transactions (EXT.CRYPTO FB 00-06)
 ; =====================================================================
-; CRC is now per-core / cluster-shared via ISA instructions.
-; No MMIO peripheral.  State lives in CSR 0x80 (CRC_ACC), 0x81 (CRC_MODE).
+; CRC is private on a full core and owner-arbitrated within a microcluster.
+; BIOS additionally tracks the complete (COREID,TASK-ID) caller in one
+; topology-sized record per global core.  Every record check and CRC
+; instruction executes with the caller's exact interrupt state saved.
 ;
 ;   CRC.INIT          — reset accumulator to all-ones (mode-dependent)
 ;   CRC.B   Rd, Rs    — feed 1 byte from Rs[7:0], result → Rd
 ;   CRC.Q   Rd, Rs    — feed 8 bytes from Rs (LE order), result → Rd
 ;   CRC.FIN Rd, Rs    — finalize atomically, result → CRC_ACC and Rd
-;   CRC.MODE imm8     — exact 0/1/2 select a tuple; every other value → 0
+;   CRC.MODE imm8     — select one complete mode
 ;   CRC.SEED Rd, Rs   — load a mode-width accumulator from Rs
+;   CRC.FINRAW Rd,Rs — publish raw accumulator and release atomically
 
-; CRC-POLY! ( n -- )  set CRC tuple: 0=BZIP2, 1=non-reflected Castagnoli,
-;                     2=CRC-64/WE parameters; every other value selects 0
-w_crc_poly_store:
-    ldn r0, r14
-    addi r14, 8
-    cmpi r0, 1
-    lbreq .crc_poly_1
-    cmpi r0, 2
-    lbreq .crc_poly_2
-    crc.mode 0                          ; also acquires shared CRC lock
+; CRYPTO-CAPS@ ( -- caps )  raw System Info capability discovery.
+w_crypto_caps_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0360  ; SysInfo CRYPTO_CAPS
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
     ret.l
-.crc_poly_1:
+
+; Resolve the calling context's topology-sized record.
+; Returns R0=0 and R10=record, R7=COREID, R12=TASK-ID, or R0=2 without
+; touching the table when COREID is outside advertised NUM_CORES.
+; Call only inside a saved-IE critical section.
+_crc_current_record:
+    csrr r7, 0x20                       ; full global COREID
+    ldi64 r11, 0xFFFF_FF00_0000_0310  ; SysInfo NUM_CORES
+    ldn r0, r11
+    cmp r7, r0
+    lbrcs .crc_current_record_bad      ; COREID >= NUM_CORES
+
+    mov r10, r7
+    lsli r10, 4                        ; one 16-byte record per core
+    ldi64 r11, var_crc_owner_base
+    ldn r11, r11
+    add r10, r11
+
+    ldi r12, 0                         ; worker/full secondary task identity
+    cmpi r7, 0
+    brne .crc_current_record_ok
+    ldi64 r11, var_task_active
+    ldn r12, r11                       ; core-0 cooperative task identity
+.crc_current_record_ok:
+    ldi r0, 0
+    ret.l
+.crc_current_record_bad:
+    ldi r0, 2
+    ret.l
+
+; Require the current record to contain the exact full caller identity.
+; Returns R0=0 or STATE/OWNER (2), preserving R10/R7/R12 on success.
+_crc_require_owner:
+    ldi64 r11, _crc_current_record
+    call.l r11
+    cmpi r0, 0
+    brne .crc_require_owner_done
+    ldn r11, r10
+    cmp r11, r7
+    brne .crc_require_owner_bad
+    mov r11, r10
+    addi r11, 8
+    ldn r11, r11
+    cmp r11, r12
+    breq .crc_require_owner_done
+.crc_require_owner_bad:
+    ldi r0, 2
+.crc_require_owner_done:
+    ret.l
+
+; Unpublish owner-core first, then clear the no-longer-visible task field.
+; R10 remains the record address; R0 and R13 are preserved.
+_crc_clear_owner:
+    ldi64 r11, 0xFFFF_FFFF_FFFF_FFFF
+    str r10, r11
+    mov r11, r10
+    addi r11, 8
+    ldi r1, 0
+    str r11, r1
+    ret.l
+
+_crc_push_status:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; Return R13 as the value followed by R0 as top-of-stack status.
+_crc_push_value_status:
+    subi r14, 8
+    str r14, r13
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; CRC-MODE! ( mode -- status )
+; Ordered validation: recognize complete mode, require reflected/raw
+; capability for 4/5/6, then check this core's software owner record.
+w_crc_mode_store:
+    ldn r13, r14
+    addi r14, 8
+    cmpi r13, 0
+    lbreq .crc_mode_valid
+    cmpi r13, 1
+    lbreq .crc_mode_valid
+    cmpi r13, 2
+    lbreq .crc_mode_valid
+    cmpi r13, 4
+    lbreq .crc_mode_reflected
+    cmpi r13, 5
+    lbreq .crc_mode_reflected
+    cmpi r13, 6
+    lbreq .crc_mode_reflected
+    ldi r0, 3                         ; RANGE: not one of the six modes
+    lbr .crc_mode_return
+
+.crc_mode_reflected:
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x01                    ; CRC_REFLECT_RAW
+    cmpi r0, 0
+    lbrne .crc_mode_valid
+    ldi r0, 1                         ; UNSUPPORTED
+    lbr .crc_mode_return
+
+.crc_mode_valid:
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0                       ; exact prior IE
+    di
+
+    ldi64 r11, _crc_current_record
+    call.l r11
+    cmpi r0, 0
+    lbrne .crc_mode_restore
+    ldn r11, r10
+    ldi64 r1, 0xFFFF_FFFF_FFFF_FFFF
+    cmp r11, r1
+    lbrne .crc_mode_owned
+
+    cmpi r13, 0
+    lbreq .crc_mode_issue_0
+    cmpi r13, 1
+    lbreq .crc_mode_issue_1
+    cmpi r13, 2
+    lbreq .crc_mode_issue_2
+    cmpi r13, 4
+    lbreq .crc_mode_issue_4
+    cmpi r13, 5
+    lbreq .crc_mode_issue_5
+    crc.mode 6
+    lbr .crc_mode_publish
+.crc_mode_issue_0:
+    crc.mode 0
+    lbr .crc_mode_publish
+.crc_mode_issue_1:
     crc.mode 1
-    ret.l
-.crc_poly_2:
+    lbr .crc_mode_publish
+.crc_mode_issue_2:
     crc.mode 2
+    lbr .crc_mode_publish
+.crc_mode_issue_4:
+    crc.mode 4
+    lbr .crc_mode_publish
+.crc_mode_issue_5:
+    crc.mode 5
+
+.crc_mode_publish:
+    mov r11, r10
+    addi r11, 8
+    str r11, r12                      ; task first
+    str r10, r7                       ; publish core last
+    ldi r0, 0
+    lbr .crc_mode_restore
+.crc_mode_owned:
+    ldi r0, 2                         ; STATE/OWNER
+.crc_mode_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+.crc_mode_return:
+    ldi64 r11, _crc_push_status
+    call.l r11
     ret.l
 
-; CRC-INIT! ( n -- )  acquire the CRC lock and set an arbitrary seed
-w_crc_init_store:
-    ldn r0, r14
-    addi r14, 8
-    crc.init
-    crc.seed r0, r0                     ; owner-arbitrated width-masked seed
-    ret.l
-
-; CRC-FEED ( n -- )  feed 8 bytes of data from TOS
-w_crc_feed:
-    ldn r0, r14
-    addi r14, 8
-    crc.q r0, r0                        ; feed 8 bytes, discard intermediate
-    ret.l
-
-; CRC-FEED-BYTE ( b -- )  feed TOS[7:0] as exactly one byte
-w_crc_feed_byte:
-    ldn r0, r14
-    addi r14, 8
-    crc.b r0, r0
-    ret.l
-
-; CRC@ ( -- n )  read current CRC accumulator (raw, not finalized)
-w_crc_fetch:
-    csrr r0, 0x80                       ; CSR_CRC_ACC
-    subi r14, 8
-    str r14, r0
-    ret.l
-
-; CRC-RESET ( -- )  reset CRC accumulator to all-ones
+; CRC-RESET ( -- status )  load the selected mode's all-ones initial value.
 w_crc_reset:
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_reset_restore
     crc.init
+    ldi r0, 0
+.crc_reset_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_status
+    call.l r11
     ret.l
 
-; CRC-FINAL ( -- )  finalize CRC; a later CRC@ can race on a shared engine.
-w_crc_final:
-    crc.fin r0, r0                      ; r0 = crc_acc ^ mask (finalized)
+; CRC-INIT! ( seed -- status )  load a mode-width arbitrary seed.
+w_crc_init_store:
+    ldn r13, r14
+    addi r14, 8
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_init_restore
+    crc.seed r13, r13
+    ldi r0, 0
+.crc_init_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_status
+    call.l r11
     ret.l
 
-; CRC-FINAL@ ( -- n )  atomically finalize and return the result directly.
+; CRC-FEED ( cell -- status )  feed eight bytes least-significant first.
+w_crc_feed:
+    ldn r13, r14
+    addi r14, 8
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_feed_restore
+    crc.q r13, r13
+    ldi r0, 0
+.crc_feed_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; CRC-FEED-BYTE ( byte -- status )  feed exactly the low byte.
+w_crc_feed_byte:
+    ldn r13, r14
+    addi r14, 8
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_feed_byte_restore
+    crc.b r13, r13
+    ldi r0, 0
+.crc_feed_byte_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_status
+    call.l r11
+    ret.l
+
+; CRC@ ( -- raw status )  owner-checked running accumulator read.
+w_crc_fetch:
+    ldi r13, 0
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_fetch_restore
+    csrr r0, 0x80                     ; CSR_CRC_ACC
+    mov r13, r0
+    ldi r0, 0
+.crc_fetch_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_value_status
+    call.l r11
+    ret.l
+
+; CRC-RAW-FINAL@ ( -- raw status )
+; A missing capability returns 0 1.  An exact owner of an already-open
+; non-reflected transaction is ordinarily finalized only to release it.
+w_crc_raw_final_fetch:
+    ldi r13, 0
+    ldi64 r11, 0xFFFF_FF00_0000_0360
+    ldn r0, r11
+    andi r0, 0x01
+    cmpi r0, 0
+    lbreq .crc_raw_unsupported
+
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_raw_restore
+    crc.finraw r13, r0
+    ldi64 r11, _crc_clear_owner
+    call.l r11
+    ldi r0, 0
+.crc_raw_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_value_status
+    call.l r11
+    ret.l
+
+.crc_raw_unsupported:
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_raw_unsupported_done
+    csrr r0, 0x81                     ; only modes 0/1/2 get release cleanup
+    cmpi r0, 0
+    breq .crc_raw_unsupported_release
+    cmpi r0, 1
+    breq .crc_raw_unsupported_release
+    cmpi r0, 2
+    brne .crc_raw_unsupported_done
+.crc_raw_unsupported_release:
+    crc.fin r11, r0                   ; discard finalized value
+    ldi64 r11, _crc_clear_owner
+    call.l r11
+.crc_raw_unsupported_done:
+    ldi r0, 1                         ; capability result has priority
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
+    ldi64 r11, _crc_push_value_status
+    call.l r11
+    ret.l
+
+; CRC-FINAL@ ( -- finalized )  result-only checked finalization.
+; Misuse returns zero and does not issue a CRC instruction.
 w_crc_final_fetch:
-    crc.fin r0, r0
+    ldi r13, 0
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0
+    di
+    ldi64 r11, _crc_require_owner
+    call.l r11
+    cmpi r0, 0
+    brne .crc_final_restore
+    crc.fin r13, r0
+    ldi64 r11, _crc_clear_owner
+    call.l r11
+.crc_final_restore:
+    ldn r1, r15
+    addi r15, 8
+    csrw 0x09, r1
     subi r14, 8
-    str r14, r0
+    str r14, r13
     ret.l
 
 ; =====================================================================
@@ -14385,9 +14739,9 @@ w_seed_rng:
 ;
 ; Nonempty spans must be non-null, nonnegative, nonwrapping, and wholly
 ; contained in one physical Bank 0, external, HBW, or VRAM window.  Bank 0
-; additionally admits only the caller-manageable interval beginning at
-; dict_free and ending before the result cell the public status word will
-; publish.
+; additionally admits only the caller-manageable interval beginning after
+; the topology-sized private kernel arena and ending before the result cell
+; the public status word will publish.
 ; This is a protection boundary, not an allocation-ownership proof.  It
 ; excludes the static BIOS image, all private BIOS arenas, and the live data
 ; and return stacks.  Empty spans ignore their unused address, including the
@@ -14413,8 +14767,10 @@ _caller_span_status:
     cmp r9, r2
     brcs .caller_span_nonbank0
 
-    ; Bank 0 bytes below dict_free are the immutable/static BIOS footprint.
-    ldi64 r11, dict_free
+    ; Bank 0 bytes below the boot-computed kernel-data end contain the static
+    ; BIOS footprint or topology-sized private CRC ownership records.
+    ldi64 r11, var_kernel_data_end
+    ldn r11, r11
     cmp r9, r11
     brcc .caller_span_protected
 
@@ -18095,18 +18451,18 @@ d_perf_reset:
     call.l r11
     ret.l
 
-; === CRC-POLY! ===
-d_crc_poly_store:
+; === CRC-MODE! ===
+d_crc_mode_store:
     .dq d_perf_reset
     .db 9
-    .ascii "CRC-POLY!"
-    ldi64 r11, w_crc_poly_store
+    .ascii "CRC-MODE!"
+    ldi64 r11, w_crc_mode_store
     call.l r11
     ret.l
 
 ; === CRC-INIT! ===
 d_crc_init_store:
-    .dq d_crc_poly_store
+    .dq d_crc_mode_store
     .db 9
     .ascii "CRC-INIT!"
     ldi64 r11, w_crc_init_store
@@ -18140,18 +18496,9 @@ d_crc_reset:
     call.l r11
     ret.l
 
-; === CRC-FINAL ===
-d_crc_final:
-    .dq d_crc_reset
-    .db 9
-    .ascii "CRC-FINAL"
-    ldi64 r11, w_crc_final
-    call.l r11
-    ret.l
-
 ; === AES-KEY! ===
 d_aes_key_store:
-    .dq d_crc_final
+    .dq d_crc_reset
     .db 8
     .ascii "AES-KEY!"
     ldi64 r11, w_aes_key_store
@@ -19666,8 +20013,6 @@ d_quote_close:
     call.l r11
     ret.l
 
-; CRC ABI extensions are appended so existing built-in dictionary ordinals
-; remain stable for tooling that still reports them.
 ; === CRC-FEED-BYTE ===
 d_crc_feed_byte:
     .dq d_quote_close
@@ -19677,18 +20022,36 @@ d_crc_feed_byte:
     call.l r11
     ret.l
 
+; === CRC-RAW-FINAL@ ===
+d_crc_raw_final_fetch:
+    .dq d_crc_feed_byte
+    .db 14
+    .ascii "CRC-RAW-FINAL@"
+    ldi64 r11, w_crc_raw_final_fetch
+    call.l r11
+    ret.l
+
 ; === CRC-FINAL@ ===
 d_crc_final_fetch:
-    .dq d_crc_feed_byte
+    .dq d_crc_raw_final_fetch
     .db 10
     .ascii "CRC-FINAL@"
     ldi64 r11, w_crc_final_fetch
     call.l r11
     ret.l
 
+; === CRYPTO-CAPS@ ===
+d_crypto_caps_fetch:
+    .dq d_crc_final_fetch
+    .db 12
+    .ascii "CRYPTO-CAPS@"
+    ldi64 r11, w_crypto_caps_fetch
+    call.l r11
+    ret.l
+
 ; === TX-FLUSH ===
 d_tx_flush:
-    .dq d_crc_final_fetch
+    .dq d_crypto_caps_fetch
     .db 8
     .ascii "TX-FLUSH"
     ldi64 r11, tx_flush
@@ -19861,6 +20224,10 @@ var_here:
     .dq 0
 var_latest:
     .dq 0
+var_crc_owner_base:
+    .dq 0                         ; topology-sized records begin at dict_free
+var_kernel_data_end:
+    .dq 0                         ; first caller-manageable Bank 0 byte
 var_to_in:
     .dq 0
 var_tib_len:
@@ -20451,5 +20818,5 @@ tx_ring_buf:
     .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
-; --- User dictionary free space starts here ---
+; --- Topology-sized private kernel data starts here at runtime ---
 dict_free:

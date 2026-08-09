@@ -51,6 +51,13 @@ namespace py = pybind11;
 static constexpr uint64_t MASK64 = 0xFFFFFFFFFFFFFFFFULL;
 static constexpr uint64_t SIGN64 = 1ULL << 63;
 
+static constexpr bool crc_mode_valid(uint64_t mode) noexcept {
+    return (
+        mode == 0 || mode == 1 || mode == 2 ||
+        mode == 4 || mode == 5 || mode == 6
+    );
+}
+
 // Condition codes
 enum CC {
     CC_AL=0, CC_EQ, CC_NE, CC_CS, CC_CC, CC_MI, CC_PL, CC_VS,
@@ -1601,7 +1608,7 @@ struct CPUState {
 
     // EXT.CRYPTO CRC state for accelerated full cores (Appendix B, §B.3)
     uint64_t crc_acc;   // 64-bit CRC accumulator
-    uint8_t  crc_mode;  // exact non-reflected parameter tuple 0/1/2
+    uint8_t  crc_mode;  // exact complete mode 0/1/2/4/5/6
 
     // EXT.CRYPTO SHA-2 per-core state (Appendix B, §B.4)
     uint8_t  sha_mode;       // 0=SHA-256, 1=SHA-384, 2=SHA-512
@@ -3692,7 +3699,7 @@ struct ClusterState {
             ) {
                 crc_locked = true;
                 crc_lock_owner = local_core;
-            } else if (operation == 0x3) {
+            } else if (operation == 0x3 || operation == 0x6) {
                 crc_locked = false;
                 crc_lock_owner = -1;
             }
@@ -7179,7 +7186,7 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             break;
         case CSR_CRC_ACC:  s.crc_acc = val; break;
         case CSR_CRC_MODE: {
-            s.crc_mode = (val == 1 || val == 2) ? (uint8_t)val : 0;
+            s.crc_mode = crc_mode_valid(val) ? (uint8_t)val : 0;
             break;
         }
         case CSR_SHA_MODE: s.sha_mode = val & 0x03; break;
@@ -7197,6 +7204,18 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 // ---------------------------------------------------------------------------
 //  _next_instruction_size — for SKIP mode
 // ---------------------------------------------------------------------------
+
+static int crypto_instruction_size(uint8_t sub_op) {
+    switch (sub_op) {
+        case 0x01: case 0x02: case 0x03:
+        case 0x04: case 0x05: case 0x06:
+        case 0x10: case 0x13: case 0x14:
+        case 0x29: case 0x2B:
+            return 3;
+        default:
+            return 2;
+    }
+}
 
 static int next_instruction_size(CPUState& s) {
     // SKIP performs its own cache lookup for the target instruction.
@@ -7232,7 +7251,29 @@ static int next_instruction_size(CPUState& s) {
         }
         case 0xD: return 2;  // CSR
         case 0xE: return 2;  // MEX
-        case 0xF: return 1;  // EXT prefix (shouldn't reach here)
+        case 0xF: {
+            int sub = peek & 0xF;
+            if (sub == 0x9 || sub == 0xA)
+                return 3;
+            if (sub == 0xB) {
+                uint8_t crypto_sub =
+                    icache_read_byte(s, pc(s) + 1);
+                return crypto_instruction_size(crypto_sub);
+            }
+            uint8_t next = icache_read_byte(s, pc(s) + 1);
+            int next_family = (next >> 4) & 0xF;
+            int next_sub = next & 0xF;
+            if (next_family == 0xF &&
+                (next_sub == 0x9 || next_sub == 0xA)) {
+                return 4;
+            }
+            if (next_family == 0xF && next_sub == 0xB) {
+                uint8_t crypto_sub =
+                    icache_read_byte(s, pc(s) + 2);
+                return 1 + crypto_instruction_size(crypto_sub);
+            }
+            return 1;  // retain the existing shallow estimate otherwise
+        }
         default: return 1;
     }
 }
@@ -9637,6 +9678,28 @@ static inline void sys_write8(
     mem_write8(s, addr, val);
 }
 
+static inline void preflight_sysinfo_fallback_span(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        uint32_t byte_count) {
+    static constexpr uint64_t SYSINFO_OFFSET = 0x0300;
+    static constexpr uint64_t SYSINFO_SIZE = 0x0070;
+    const uint64_t sysinfo_start = cb.mmio_start + SYSINFO_OFFSET;
+    const uint64_t sysinfo_end = sysinfo_start + SYSINFO_SIZE;
+    const uint64_t access_end = addr + byte_count;
+    if (addr >= sysinfo_end || access_end <= sysinfo_start)
+        return;
+    if (
+        addr < sysinfo_start ||
+        access_end > sysinfo_end ||
+        addr % byte_count != 0
+    ) {
+        s.trap_addr = addr;
+        throw std::runtime_error("TRAP:BUS_FAULT");
+    }
+}
+
 // Wider MMIO/HBW-aware reads/writes
 static inline uint64_t sys_read64(
         CPUState& s,
@@ -9653,6 +9716,7 @@ static inline uint64_t sys_read64(
             port_io);
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        preflight_sysinfo_fallback_span(s, cb, addr, 8);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.nic->handles(mmio_off)) {
             uint64_t v = 0;
@@ -9731,6 +9795,7 @@ static inline void sys_write64(
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        preflight_sysinfo_fallback_span(s, cb, addr, 8);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 8)) {
@@ -9806,6 +9871,7 @@ static inline uint16_t sys_read16(
             port_io));
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        preflight_sysinfo_fallback_span(s, cb, addr, 2);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.trng->handles(mmio_off)) {
             if (!s.trng->handles_span(mmio_off, 2))
@@ -9857,6 +9923,7 @@ static inline void sys_write16(
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        preflight_sysinfo_fallback_span(s, cb, addr, 2);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 2)) {
@@ -9931,6 +9998,7 @@ static inline uint32_t sys_read32(
             port_io));
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        preflight_sysinfo_fallback_span(s, cb, addr, 4);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.trng->handles(mmio_off)) {
             if (!s.trng->handles_span(mmio_off, 4))
@@ -10003,6 +10071,7 @@ static inline void sys_write32(
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        preflight_sysinfo_fallback_span(s, cb, addr, 4);
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 4)) {
@@ -10612,12 +10681,14 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
 //  EXT.CRYPTO (prefix FB) — per-core crypto ISA instructions
 // ---------------------------------------------------------------------------
 
-// CRC polynomials (normal / MSB-first, non-reflected form): mode 0 uses
-// CRC-32/BZIP2 parameters, mode 1 uses Castagnoli non-reflected, and mode 2
-// uses CRC-64/WE parameters.
-static constexpr uint32_t CRC32_POLY   = 0x04C11DB7u;
-static constexpr uint32_t CRC32C_POLY  = 0x1EDC6F41u;
-static constexpr uint64_t CRC64_POLY   = 0x42F0E1EBA9EA3693ull;
+// Complete CRC mode polynomials. Modes 0/1/2 use the normal MSB-first
+// recurrence; modes 4/5/6 use the reflected LSB-first recurrence.
+static constexpr uint32_t CRC32_POLY       = 0x04C11DB7u;
+static constexpr uint32_t CRC32C_POLY      = 0x1EDC6F41u;
+static constexpr uint64_t CRC64_POLY       = 0x42F0E1EBA9EA3693ull;
+static constexpr uint32_t CRC32_REF_POLY   = 0xEDB88320u;
+static constexpr uint32_t CRC32C_REF_POLY  = 0x82F63B78u;
+static constexpr uint64_t CRC64_REF_POLY   = 0xC96C5795D7870F42ull;
 
 static inline uint32_t crc_byte_32(uint32_t acc, uint8_t b, uint32_t poly) {
     acc ^= (uint32_t)b << 24;
@@ -10637,6 +10708,30 @@ static inline uint64_t crc_byte_64(uint64_t acc, uint8_t b, uint64_t poly) {
             acc = (acc << 1) ^ poly;
         else
             acc <<= 1;
+    }
+    return acc;
+}
+
+static inline uint32_t crc_byte_reflected_32(
+        uint32_t acc, uint8_t b, uint32_t poly) {
+    acc ^= b;
+    for (int i = 0; i < 8; i++) {
+        if (acc & 1u)
+            acc = (acc >> 1) ^ poly;
+        else
+            acc >>= 1;
+    }
+    return acc;
+}
+
+static inline uint64_t crc_byte_reflected_64(
+        uint64_t acc, uint8_t b, uint64_t poly) {
+    acc ^= b;
+    for (int i = 0; i < 8; i++) {
+        if (acc & 1ull)
+            acc = (acc >> 1) ^ poly;
+        else
+            acc >>= 1;
     }
     return acc;
 }
@@ -10951,12 +11046,22 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
 
     if (unit == 0x0) {
         // --- CRC unit ---
-        bool is64 = (s.crc_mode == 2);
-        uint32_t poly32 = (s.crc_mode == 1) ? CRC32C_POLY : CRC32_POLY;
+        if (!crc_mode_valid(s.crc_mode))
+            s.crc_mode = 0;
+        const bool reflected = (s.crc_mode & 0x4) != 0;
+        const int tuple = s.crc_mode & 0x3;
+        const bool is64 = tuple == 2;
+        const uint32_t poly32 = tuple == 1
+            ? (reflected ? CRC32C_REF_POLY : CRC32C_POLY)
+            : (reflected ? CRC32_REF_POLY : CRC32_POLY);
+        const uint64_t poly64 =
+            reflected ? CRC64_REF_POLY : CRC64_POLY;
+        const uint64_t width_mask =
+            is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
 
         switch (op) {
         case 0x0: { // CRC.INIT
-            s.crc_acc = is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
+            s.crc_acc = width_mask;
             return 1;
         }
         case 0x1: { // CRC.B Rd, Rs — feed one byte
@@ -10964,10 +11069,16 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
             int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
             uint8_t b = (uint8_t)(s.regs[rs] & 0xFF);
-            if (is64)
-                s.crc_acc = crc_byte_64(s.crc_acc, b, CRC64_POLY);
-            else
-                s.crc_acc = crc_byte_32((uint32_t)s.crc_acc, b, poly32);
+            if (is64) {
+                s.crc_acc = reflected
+                    ? crc_byte_reflected_64(s.crc_acc, b, poly64)
+                    : crc_byte_64(s.crc_acc, b, poly64);
+            } else {
+                s.crc_acc = reflected
+                    ? crc_byte_reflected_32(
+                        (uint32_t)s.crc_acc, b, poly32)
+                    : crc_byte_32((uint32_t)s.crc_acc, b, poly32);
+            }
             s.regs[rd] = s.crc_acc;
             return 1;
         }
@@ -10979,12 +11090,20 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             if (is64) {
                 uint64_t acc = s.crc_acc;
                 for (int i = 0; i < 8; i++)
-                    acc = crc_byte_64(acc, (uint8_t)(val >> (i * 8)), CRC64_POLY);
+                    acc = reflected
+                        ? crc_byte_reflected_64(
+                            acc, (uint8_t)(val >> (i * 8)), poly64)
+                        : crc_byte_64(
+                            acc, (uint8_t)(val >> (i * 8)), poly64);
                 s.crc_acc = acc;
             } else {
                 uint32_t acc = (uint32_t)s.crc_acc;
                 for (int i = 0; i < 8; i++)
-                    acc = crc_byte_32(acc, (uint8_t)(val >> (i * 8)), poly32);
+                    acc = reflected
+                        ? crc_byte_reflected_32(
+                            acc, (uint8_t)(val >> (i * 8)), poly32)
+                        : crc_byte_32(
+                            acc, (uint8_t)(val >> (i * 8)), poly32);
                 s.crc_acc = acc;
             }
             s.regs[rd] = s.crc_acc;
@@ -10993,21 +11112,27 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         case 0x3: { // CRC.FIN Rd, Rs — finalize
             uint8_t rb = fetch8(s);
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
-            uint64_t mask = is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
-            s.crc_acc ^= mask;
+            s.crc_acc = (s.crc_acc & width_mask) ^ width_mask;
             s.regs[rd] = s.crc_acc;
             return 1;
         }
         case 0x4: { // CRC.MODE imm8
             uint8_t imm = fetch8(s);
-            s.crc_mode = (imm == 1 || imm == 2) ? imm : 0;
+            s.crc_mode = crc_mode_valid(imm) ? imm : 0;
             return 1;
         }
         case 0x5: { // CRC.SEED Rd, Rs — width-masked accumulator load
             uint8_t rb = fetch8(s);
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
             int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
-            s.crc_acc = is64 ? s.regs[rs] : (uint32_t)s.regs[rs];
+            s.crc_acc = s.regs[rs] & width_mask;
+            s.regs[rd] = s.crc_acc;
+            return 1;
+        }
+        case 0x6: { // CRC.FINRAW Rd, Rs — publish without XOR-out
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            s.crc_acc &= width_mask;
             s.regs[rd] = s.crc_acc;
             return 1;
         }
@@ -14350,7 +14475,7 @@ static PendingClusterRequest classify_pending_cluster_request(
                 request.operation = crypto_subop & 0xF;
                 if (
                     unit == 0x0 &&
-                    request.operation <= 0x5
+                    request.operation <= 0x6
                 ) {
                     request.resource =
                         ClusterResourceKind::CRC;
@@ -25607,6 +25732,33 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return s.crypto->read8(mmio_off);
             return -1;
         })
+        .def("_native_singleton_preflight",
+             [](CPUState& s,
+                uint32_t mmio_off,
+                uint32_t width) -> int {
+            auto memory_guard = acquire_shared_memory_use(s);
+            const auto check_span = [mmio_off, width](const auto* device) {
+                if (!device->handles(mmio_off))
+                    return -1;
+                if (
+                    (width != 1 && width != 2 &&
+                     width != 4 && width != 8) ||
+                    mmio_off % width != 0 ||
+                    mmio_off >
+                        std::numeric_limits<uint32_t>::max() - (width - 1)
+                ) {
+                    return 0;
+                }
+                return device->handles(mmio_off + width - 1) ? 1 : 0;
+            };
+            int status = check_span(s.nic);
+            if (status >= 0)
+                return status;
+            status = check_span(s.trng);
+            if (status >= 0)
+                return status;
+            return check_span(s.crypto);
+        })
         .def("_native_singleton_write8",
              [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
             if (s.nic->handles(mmio_off))
@@ -28209,9 +28361,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     } else if (field == "mode") {
                         const int mode =
                             py::cast<int>(value);
-                        if (mode < 0 || mode > 2) {
+                        if (!crc_mode_valid(
+                                static_cast<uint64_t>(mode))) {
                             throw std::invalid_argument(
-                                "cluster CRC mode must be 0, 1, or 2");
+                                "cluster CRC mode must be 0, 1, 2, 4, 5, or 6");
                         }
                         next_mode = mode;
                     } else if (field == "locked") {
@@ -28251,6 +28404,55 @@ PYBIND11_MODULE(_mp64_accel, m) {
             },
             py::arg("cluster_index"),
             py::arg("changes"))
+        .def(
+            "_cluster_crc_publish",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core,
+               uint64_t acc,
+               int mode,
+               bool release) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    local_core < 0 ||
+                    local_core >= cluster.core_count
+                ) {
+                    throw std::out_of_range(
+                        "cluster CRC publisher is out of range");
+                }
+                if (!crc_mode_valid(
+                        static_cast<uint64_t>(mode))) {
+                    throw std::invalid_argument(
+                        "cluster CRC mode is invalid");
+                }
+                if (
+                    cluster.crc_locked &&
+                    cluster.crc_lock_owner != local_core
+                ) {
+                    throw std::logic_error(
+                        "nonowner cannot publish cluster CRC state");
+                }
+                cluster.crc_acc = acc;
+                cluster.crc_mode = mode;
+                if (
+                    release &&
+                    cluster.crc_locked &&
+                    cluster.crc_lock_owner == local_core
+                ) {
+                    cluster.crc_locked = false;
+                    cluster.crc_lock_owner = -1;
+                }
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"),
+            py::arg("acc"),
+            py::arg("mode"),
+            py::arg("release"))
         .def(
             "_cluster_crc_try_acquire",
             [](SystemState& system,

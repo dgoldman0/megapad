@@ -90,6 +90,7 @@ DICT_SUB = {
 CRYPTO_CRC_SUB = {
     "crc.init": 0x00, "crc.b": 0x01, "crc.q": 0x02,
     "crc.fin": 0x03, "crc.mode": 0x04, "crc.seed": 0x05,
+    "crc.finraw": 0x06,
 }
 # SHA-2 sub-ops (0x10–0x1F)
 CRYPTO_SHA_SUB = {
@@ -106,8 +107,8 @@ CRYPTO_GF_SUB = {
     "gf.x25519": 0x2D,
 }
 # All EXT.CRYPTO mnemonics that take Rd, Rs operands (3-byte: FB sub DR)
-CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin", "crc.seed", "sha.din", "sha.dout",
-                  "gf.cmov"}
+CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin", "crc.seed", "crc.finraw",
+                  "sha.din", "sha.dout", "gf.cmov"}
 # All EXT.CRYPTO mnemonics that take imm8 operand (3-byte: FB sub imm8)
 CRYPTO_IMM_OPS = {"crc.mode", "sha.init", "gf.prime"}
 # All EXT.CRYPTO mnemonics with no operand (2-byte: FB sub)

@@ -55,6 +55,7 @@ from megapad64 import (
     CSR_PERF_CTRL,
     CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
     CSR_ICACHE_CTRL, CSR_ICACHE_HITS, CSR_ICACHE_MISSES,
+    CSR_CRC_ACC, CSR_CRC_MODE,
     # Cluster MPU CSRs
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
     # IVEC IDs
@@ -625,6 +626,10 @@ def {_attr}(self, v):
             ivec = IVEC_DIV_ZERO
         elif "PRIV_FAULT" in msg:
             ivec = IVEC_PRIV_FAULT
+        elif "ALIGN_FAULT" in msg:
+            ivec = IVEC_ALIGN_FAULT
+        elif "BUS_FAULT" in msg:
+            ivec = IVEC_BUS_FAULT
         elif "ILLEGAL_OP" in msg:
             ivec = IVEC_ILLEGAL_OP
         elif "RESET" in msg:
@@ -1467,7 +1472,9 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.mpu_limit = cs.mpu_limit
     # EXT.CRYPTO state
     py_cpu.crc_acc = cs.crc_acc
-    py_cpu.crc_mode = cs.crc_mode
+    py_cpu.crc_mode = (
+        cs.crc_mode if cs.crc_mode in _PyMegapad64._CRC_MODES else 0
+    )
     py_cpu.sha_mode = cs.sha_mode
     py_cpu.sha_msglen_lo = cs.sha_msglen_lo
     py_cpu.sha_msglen_hi = cs.sha_msglen_hi
@@ -1612,7 +1619,11 @@ def _sync_py_to_cs(
     cs.mpu_limit = py_cpu.mpu_limit
     # EXT.CRYPTO state
     cs.crc_acc = py_cpu.crc_acc
-    cs.crc_mode = py_cpu.crc_mode
+    cs.crc_mode = (
+        py_cpu.crc_mode
+        if py_cpu.crc_mode in _PyMegapad64._CRC_MODES
+        else 0
+    )
     cs.sha_mode = py_cpu.sha_mode
     cs.sha_msglen_lo = py_cpu.sha_msglen_lo
     cs.sha_msglen_hi = py_cpu.sha_msglen_hi
@@ -1693,6 +1704,8 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_ICACHE_CTRL: lambda: cs.icache_enabled,
         CSR_ICACHE_HITS: lambda: cs.icache_hits,
         CSR_ICACHE_MISSES: lambda: cs.icache_misses,
+        CSR_CRC_ACC: lambda: cs.crc_acc,
+        CSR_CRC_MODE: lambda: cs.crc_mode,
     }
     fn = m.get(addr)
     return fn() if fn else 0
@@ -1757,6 +1770,10 @@ def _csr_write_py(cpu, addr: int, val: int):
             cs.perf_enable = 1
     elif addr == CSR_ICACHE_CTRL:
         cs.icache_control_write(val)
+    elif addr == CSR_CRC_ACC:
+        cs.crc_acc = u64(val)
+    elif addr == CSR_CRC_MODE:
+        cs.crc_mode = val if val in _PyMegapad64._CRC_MODES else 0
 
 # Pure-Python backend kept as _PyMegapad64 for ISA reference tests
 # and MEX fallback only — not used as main Megapad64.

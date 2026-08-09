@@ -2,8 +2,8 @@
 // tb_crc_isa.v — Testbench for the 32/64-bit CRC ISA parameter tuples
 // ============================================================================
 //
-// Tests the standalone combinational CRC ISA module with all 6 sub-ops
-// across all 3 polynomial modes.  Test vectors match the Python emulator.
+// Tests the standalone combinational CRC ISA module with all seven selected
+// sub-ops across all six complete parameter modes.
 //
 `timescale 1ns / 1ps
 
@@ -15,10 +15,10 @@ module tb_crc_isa;
     reg  [63:0] rs_val;
     reg  [7:0]  imm8;
     reg  [63:0] crc_acc_in;
-    reg  [1:0]  crc_mode_in;
+    reg  [2:0]  crc_mode_in;
 
     wire [63:0] crc_acc_out, result;
-    wire [1:0]  crc_mode_out;
+    wire [2:0]  crc_mode_out;
     wire        acc_we, mode_we, rd_we;
 
     mp64_crc_isa uut (
@@ -76,7 +76,7 @@ module tb_crc_isa;
 
     task check_mode;
         input [255:0] label;
-        input [1:0]   expected_mode;
+        input [2:0]   expected_mode;
         input         expected_mode_we;
         begin
             #1;
@@ -94,7 +94,7 @@ module tb_crc_isa;
 
     // Helper to run CRC.B and get updated acc (simulates sequential feed)
     reg [63:0] sim_acc;
-    reg [1:0]  sim_mode;
+    reg [2:0]  sim_mode;
 
     task feed_byte;
         input [7:0] data_byte;
@@ -130,9 +130,19 @@ module tb_crc_isa;
         end
     endtask
 
+    task do_finraw;
+        begin
+            op          = ISA_CRC_FINRAW;
+            rs_val      = 64'd0;
+            crc_acc_in  = sim_acc;
+            crc_mode_in = sim_mode;
+            #1;
+        end
+    endtask
+
     task check_123456789;
         input [255:0] label;
-        input [1:0]   mode_value;
+        input [2:0]   mode_value;
         input [63:0]  init_value;
         input [63:0]  expected;
         begin
@@ -143,6 +153,40 @@ module tb_crc_isa;
             feed_byte(8'h37); feed_byte(8'h38); feed_byte(8'h39);
             do_fin;
             check_result(label, expected, 1'b1);
+        end
+    endtask
+
+    task check_quad_matches_bytes;
+        input [255:0] label;
+        input [2:0]   mode_value;
+        input [63:0]  init_value;
+        input [63:0]  data_word;
+        reg [63:0] quad_acc;
+        reg [63:0] byte_acc;
+        integer qbi;
+        begin
+            sim_acc  = init_value;
+            sim_mode = mode_value;
+            feed_quad(data_word);
+            quad_acc = sim_acc;
+
+            byte_acc = init_value;
+            op = ISA_CRC_B;
+            crc_mode_in = mode_value;
+            for (qbi = 0; qbi < 8; qbi = qbi + 1) begin
+                crc_acc_in = byte_acc;
+                rs_val = data_word >> (qbi * 8);
+                #1;
+                byte_acc = crc_acc_out;
+            end
+
+            if (quad_acc !== byte_acc) begin
+                $display("FAIL [%0s]: quad=%016h bytes=%016h",
+                         label, quad_acc, byte_acc);
+                fail_count = fail_count + 1;
+            end else begin
+                pass_count = pass_count + 1;
+            end
         end
     endtask
 
@@ -159,42 +203,57 @@ module tb_crc_isa;
         rs_val      = 64'd0;
         imm8        = 8'd0;
         crc_acc_in  = 64'd0;
-        crc_mode_in = 2'd0;
+        crc_mode_in = 3'd0;
         check_acc("CRC.INIT CRC32", 64'h0000_0000_FFFF_FFFF, 1'b1);
 
         // ================================================================
         // 2. CRC.INIT — CRC64 mode
         // ================================================================
-        crc_mode_in = 2'd2;
+        crc_mode_in = 3'd2;
         check_acc("CRC.INIT CRC64", 64'hFFFF_FFFF_FFFF_FFFF, 1'b1);
+        crc_mode_in = 3'd6;
+        check_acc("CRC.INIT reflected CRC64", 64'hFFFF_FFFF_FFFF_FFFF,
+                  1'b1);
+        crc_mode_in = 3'd4;
+        check_acc("CRC.INIT reflected CRC32", 64'h0000_0000_FFFF_FFFF,
+                  1'b1);
 
         // ================================================================
         // 3. CRC.MODE — set mode to CRC32C (1)
         // ================================================================
         op          = ISA_CRC_MODEX;
         imm8        = 8'd1;
-        crc_mode_in = 2'd0;
-        check_mode("CRC.MODE 1", 2'd1, 1'b1);
+        crc_mode_in = 3'd0;
+        check_mode("CRC.MODE 1", 3'd1, 1'b1);
 
         // ================================================================
         // 4. CRC.MODE — set mode to CRC64 (2)
         // ================================================================
         imm8 = 8'd2;
-        check_mode("CRC.MODE 2", 2'd2, 1'b1);
+        check_mode("CRC.MODE 2", 3'd2, 1'b1);
 
-        // Every complete imm8 other than 1/2 canonicalizes to mode 0.
-        imm8 = 8'd3;
-        check_mode("CRC.MODE 3 canonicalizes to mode 0", 2'd0, 1'b1);
+        imm8 = 8'd4;
+        check_mode("CRC.MODE 4", 3'd4, 1'b1);
         imm8 = 8'd5;
-        check_mode("CRC.MODE 5 does not alias mode 1", 2'd0, 1'b1);
+        check_mode("CRC.MODE 5", 3'd5, 1'b1);
+        imm8 = 8'd6;
+        check_mode("CRC.MODE 6", 3'd6, 1'b1);
+
+        // Values outside the six complete tuples canonicalize to mode 0.
+        imm8 = 8'd3;
+        check_mode("CRC.MODE 3 canonicalizes to mode 0", 3'd0, 1'b1);
+        imm8 = 8'd7;
+        check_mode("CRC.MODE 7 canonicalizes to mode 0", 3'd0, 1'b1);
+        imm8 = 8'h85;
+        check_mode("CRC.MODE 85 does not alias mode 5", 3'd0, 1'b1);
         imm8 = 8'hFF;
-        check_mode("CRC.MODE FF canonicalizes to mode 0", 2'd0, 1'b1);
+        check_mode("CRC.MODE FF canonicalizes to mode 0", 3'd0, 1'b1);
 
         // ================================================================
         // 5. Mode-0 CRC of byte 'A' (0x41)
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
-        sim_mode = 2'd0;
+        sim_mode = 3'd0;
         feed_byte(8'h41);
         do_fin;
         check_result("CRC32 'A' FIN", 64'h0000_0000_81B0_2D8B, 1'b1);
@@ -203,7 +262,7 @@ module tb_crc_isa;
         // 6. Mode-0 CRC of "ABCD" (4 bytes)
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
-        sim_mode = 2'd0;
+        sim_mode = 3'd0;
         feed_byte(8'h41); // A
         feed_byte(8'h42); // B
         feed_byte(8'h43); // C
@@ -215,7 +274,7 @@ module tb_crc_isa;
         // 7. CRC.Q — feed 8 zero bytes in CRC32 mode
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
-        sim_mode = 2'd0;
+        sim_mode = 3'd0;
         feed_quad(64'h0000_0000_0000_0000);
         do_fin;
         check_result("CRC32 8x00 FIN", 64'h0000_0000_96FB_44A6, 1'b1);
@@ -227,7 +286,7 @@ module tb_crc_isa;
         //    As LE 64-bit: 0x4847464544434241
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
-        sim_mode = 2'd0;
+        sim_mode = 3'd0;
         feed_quad(64'h48474645_44434241);
 
         // Now verify byte-by-byte matches quad result
@@ -236,7 +295,7 @@ module tb_crc_isa;
             byte_acc = 64'h0000_0000_FFFF_FFFF;
 
             op          = ISA_CRC_B;
-            crc_mode_in = 2'd0;
+            crc_mode_in = 3'd0;
 
             crc_acc_in = byte_acc; rs_val = {56'd0, 8'h41}; #1; byte_acc = crc_acc_out;
             crc_acc_in = byte_acc; rs_val = {56'd0, 8'h42}; #1; byte_acc = crc_acc_out;
@@ -260,7 +319,7 @@ module tb_crc_isa;
         // 9. CRC.FIN atomically stores and returns the finalized value
         // ================================================================
         sim_acc  = 64'h0000_0000_DEAD_BEEF;
-        sim_mode = 2'd0;
+        sim_mode = 3'd0;
         op          = ISA_CRC_FIN;
         crc_acc_in  = sim_acc;
         crc_mode_in = sim_mode;
@@ -279,7 +338,7 @@ module tb_crc_isa;
         op          = ISA_CRC_B;
         rs_val      = {56'd0, 8'hFF};
         crc_acc_in  = 64'h0000_0000_FFFF_FFFF;
-        crc_mode_in = 2'd0;
+        crc_mode_in = 3'd0;
         #1;
         if (rd_we !== 1'b1) begin
             $display("FAIL [CRC.B rd_we]: rd_we=%b expected=1", rd_we);
@@ -293,7 +352,7 @@ module tb_crc_isa;
         // ================================================================
         op          = ISA_CRC_INIT;
         crc_acc_in  = 64'd0;
-        crc_mode_in = 2'd0;
+        crc_mode_in = 3'd0;
         #1;
         if (rd_we !== 1'b0) begin
             $display("FAIL [CRC.INIT no rd_we]: rd_we=%b expected=0", rd_we);
@@ -306,7 +365,7 @@ module tb_crc_isa;
         // 12. Mode-1 non-reflected Castagnoli CRC of 'A' (0x41)
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
-        sim_mode = 2'd1;
+        sim_mode = 3'd1;
         feed_byte(8'h41);
         do_fin;
         check_result("CRC mode 1 'A' FIN", 64'h0000_0000_7B18_0D8C, 1'b1);
@@ -316,7 +375,7 @@ module tb_crc_isa;
         //     Full 64-bit init, single byte, finalize
         // ================================================================
         sim_acc  = 64'hFFFF_FFFF_FFFF_FFFF;
-        sim_mode = 2'd2;
+        sim_mode = 3'd2;
         feed_byte(8'h41);
         do_fin;
         // Just verify result is non-zero and rd_we is set
@@ -334,7 +393,7 @@ module tb_crc_isa;
         op          = ISA_CRC_MODEX;
         imm8        = 8'd2;
         crc_acc_in  = 64'hDEAD_BEEF_CAFE_BABE;
-        crc_mode_in = 2'd0;
+        crc_mode_in = 3'd0;
         #1;
         if (acc_we !== 1'b0) begin
             $display("FAIL [CRC.MODE no acc_we]: acc_we=%b expected=0", acc_we);
@@ -347,7 +406,7 @@ module tb_crc_isa;
         // 15. Mixed CRC.Q + CRC.B tail matches eleven CRC.B operations
         // ================================================================
         sim_acc  = 64'h0000_0000_1234_5678;
-        sim_mode = 2'd0;
+        sim_mode = 3'd0;
         feed_quad(64'h48474645_44434241); // "ABCDEFGH"
         feed_byte(8'h49);
         feed_byte(8'h4A);
@@ -359,7 +418,7 @@ module tb_crc_isa;
             mixed_acc = sim_acc;
             byte_acc = 64'h0000_0000_1234_5678;
             op = ISA_CRC_B;
-            crc_mode_in = 2'd0;
+            crc_mode_in = 3'd0;
             for (bi = 0; bi < 11; bi = bi + 1) begin
                 crc_acc_in = byte_acc;
                 rs_val = 8'h41 + bi;
@@ -381,7 +440,7 @@ module tb_crc_isa;
         op          = ISA_CRC_SEED;
         rs_val      = 64'h0123_4567_89AB_CDEF;
         crc_acc_in  = 64'd0;
-        crc_mode_in = 2'd0;
+        crc_mode_in = 3'd0;
         #1;
         if (!acc_we || !rd_we ||
             crc_acc_out !== 64'h0000_0000_89AB_CDEF ||
@@ -393,7 +452,7 @@ module tb_crc_isa;
             pass_count = pass_count + 1;
         end
 
-        crc_mode_in = 2'd2;
+        crc_mode_in = 3'd2;
         #1;
         if (!acc_we || !rd_we ||
             crc_acc_out !== 64'h0123_4567_89AB_CDEF ||
@@ -406,16 +465,80 @@ module tb_crc_isa;
         end
 
         // ================================================================
-        // 17. Reserved sub-op (0x6) → no writes
+        // 17. CRC.FINRAW atomically publishes the mode-width raw state.
         // ================================================================
-        op          = 4'd6;
-        rs_val      = 64'h1234;
-        crc_acc_in  = 64'h0000_0000_FFFF_FFFF;
-        crc_mode_in = 2'd0;
+        sim_acc  = 64'hDEAD_BEEF_1234_5678;
+        sim_mode = 3'd5;
+        do_finraw;
+        if (!acc_we || !rd_we || mode_we ||
+            result !== 64'h0000_0000_1234_5678 ||
+            crc_acc_out !== result) begin
+            $display("FAIL [CRC.FINRAW 32-bit publish]: acc=%016h result=%016h acc_we=%b rd_we=%b",
+                     crc_acc_out, result, acc_we, rd_we);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        sim_acc  = 64'h0123_4567_89AB_CDEF;
+        sim_mode = 3'd6;
+        do_finraw;
+        if (!acc_we || !rd_we ||
+            result !== 64'h0123_4567_89AB_CDEF ||
+            crc_acc_out !== result) begin
+            $display("FAIL [CRC.FINRAW 64-bit publish]: acc=%016h result=%016h",
+                     crc_acc_out, result);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        // Every mode-width operation scrubs an injected high half in a
+        // 32-bit mode, including both feed widths and finalized publication.
+        op          = ISA_CRC_B;
+        rs_val      = 64'h41;
+        crc_acc_in  = 64'hDEAD_BEEF_FFFF_FFFF;
+        crc_mode_in = 3'd4;
+        #1;
+        if (crc_acc_out[63:32] !== 32'd0 || result !== crc_acc_out) begin
+            $display("FAIL [CRC.B high-half scrub]: acc=%016h result=%016h",
+                     crc_acc_out, result);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        op          = ISA_CRC_Q;
+        rs_val      = 64'h4847_4645_4443_4241;
+        crc_acc_in  = 64'hDEAD_BEEF_FFFF_FFFF;
+        crc_mode_in = 3'd5;
+        #1;
+        if (crc_acc_out[63:32] !== 32'd0 || result !== crc_acc_out) begin
+            $display("FAIL [CRC.Q high-half scrub]: acc=%016h result=%016h",
+                     crc_acc_out, result);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        op          = ISA_CRC_FIN;
+        crc_acc_in  = 64'hDEAD_BEEF_1234_5678;
+        crc_mode_in = 3'd0;
+        #1;
+        if (crc_acc_out !== 64'h0000_0000_EDCB_A987 ||
+            result !== crc_acc_out) begin
+            $display("FAIL [CRC.FIN high-half scrub]: acc=%016h result=%016h",
+                     crc_acc_out, result);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        // Reserved operations begin at 7 after FINRAW is selected.
+        op = 4'd7;
         #1;
         if (acc_we !== 1'b0 || mode_we !== 1'b0 || rd_we !== 1'b0) begin
-            $display("FAIL [reserved sub-op 6]: writes asserted (acc_we=%b mode_we=%b rd_we=%b)",
-                     acc_we, mode_we, rd_we);
+            $display("FAIL [reserved sub-op 7]: writes asserted");
             fail_count = fail_count + 1;
         end else begin
             pass_count = pass_count + 1;
@@ -424,15 +547,34 @@ module tb_crc_isa;
         // ================================================================
         // 18. Authoritative check vectors for every complete parameter tuple
         // ================================================================
-        check_123456789("mode 0 vector 123456789", 2'd0,
+        check_123456789("mode 0 vector 123456789", 3'd0,
                         64'h0000_0000_FFFF_FFFF,
                         64'h0000_0000_FC89_1918);
-        check_123456789("mode 1 vector 123456789", 2'd1,
+        check_123456789("mode 1 vector 123456789", 3'd1,
                         64'h0000_0000_FFFF_FFFF,
                         64'h0000_0000_0544_0F15);
-        check_123456789("mode 2 vector 123456789", 2'd2,
+        check_123456789("mode 2 vector 123456789", 3'd2,
                         64'hFFFF_FFFF_FFFF_FFFF,
                         64'h62EC_59E3_F1A4_F00A);
+        check_123456789("mode 4 vector 123456789", 3'd4,
+                        64'h0000_0000_FFFF_FFFF,
+                        64'h0000_0000_CBF4_3926);
+        check_123456789("mode 5 vector 123456789", 3'd5,
+                        64'h0000_0000_FFFF_FFFF,
+                        64'h0000_0000_E306_9283);
+        check_123456789("mode 6 vector 123456789", 3'd6,
+                        64'hFFFF_FFFF_FFFF_FFFF,
+                        64'h995D_C9BB_DF19_39FA);
+
+        check_quad_matches_bytes("mode 4 Q equals eight B", 3'd4,
+                                 64'h0000_0000_FFFF_FFFF,
+                                 64'h3837_3635_3433_3231);
+        check_quad_matches_bytes("mode 5 Q equals eight B", 3'd5,
+                                 64'h0000_0000_FFFF_FFFF,
+                                 64'h3837_3635_3433_3231);
+        check_quad_matches_bytes("mode 6 Q equals eight B", 3'd6,
+                                 64'hFFFF_FFFF_FFFF_FFFF,
+                                 64'h3837_3635_3433_3231);
 
         // ================================================================
         // Summary

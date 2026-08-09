@@ -313,6 +313,7 @@ module tb_cluster;
     integer tb_try_done_count;
     integer tb_stateless_done_count;
     integer tb_wait_seen;
+    reg [TACC_EPOCH_BITS-1:0] tb_caller_epoch_before;
     reg [2:0] tb_private_mex_fault;
     reg [2:0] tb_private_ctl_fault;
     reg [2:0] tb_try_fault;
@@ -883,7 +884,7 @@ module tb_cluster;
             end
         end
         check64("simultaneous CRC.MODE uses winner immediate",
-                {62'd0, uut.cl_crc_mode}, 64'd0);
+                {61'd0, uut.cl_crc_mode}, 64'd0);
         check64("simultaneous CRC.MODE locks winner",
                 {62'd0, uut.crc_lock_owner}, 64'd1);
         @(negedge clk);
@@ -945,22 +946,146 @@ module tb_cluster;
             pass_count = pass_count + 1;
         end
 
-        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd3, tb_crc_result);
-        check64("CRC mode 3 canonicalizes to mode 0", {62'd0, uut.cl_crc_mode},
-                64'd0);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd4, tb_crc_result);
+        check64("CRC mode 4 is retained", {61'd0, uut.cl_crc_mode}, 64'd4);
         drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd5, tb_crc_result);
-        check64("CRC mode 5 does not alias mode 1", {62'd0, uut.cl_crc_mode},
+        check64("CRC mode 5 is retained", {61'd0, uut.cl_crc_mode}, 64'd5);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd6, tb_crc_result);
+        check64("CRC mode 6 is retained", {61'd0, uut.cl_crc_mode}, 64'd6);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd3, tb_crc_result);
+        check64("CRC mode 3 canonicalizes to mode 0", {61'd0, uut.cl_crc_mode},
+                64'd0);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd7, tb_crc_result);
+        check64("CRC mode 7 canonicalizes to mode 0", {61'd0, uut.cl_crc_mode},
+                64'd0);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'h85, tb_crc_result);
+        check64("CRC mode 85 does not alias mode 5", {61'd0, uut.cl_crc_mode},
                 64'd0);
         drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'hFF, tb_crc_result);
-        check64("CRC mode FF canonicalizes to mode 0", {62'd0, uut.cl_crc_mode},
+        check64("CRC mode FF canonicalizes to mode 0", {61'd0, uut.cl_crc_mode},
                 64'd0);
+
+        // A reflected CRC-32C transaction publishes its true raw state and
+        // releases ownership in the same FINRAW grant.
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd5, tb_crc_result);
         drive_crc_op(0, ISA_CRC_INIT, 64'd0, 8'd0, tb_crc_result);
-        drive_crc_op(0, ISA_CRC_SEED, 64'h0000_0000_FFFF_FFFF,
+        drive_crc_op(0, ISA_CRC_Q, 64'h3837_3635_3433_3231,
                      8'd0, tb_crc_result);
-        drive_crc_op(0, ISA_CRC_B, 64'h41, 8'd0, tb_crc_result);
-        drive_crc_op(0, ISA_CRC_FIN, 64'd0, 8'd0, tb_crc_result);
-        check64("CRC owner 0 after handoff", tb_crc_result,
+        drive_crc_op(0, ISA_CRC_B, 64'h39, 8'd0, tb_crc_result);
+        drive_crc_op(0, ISA_CRC_FINRAW, 64'd0, 8'd0, tb_crc_result);
+        check64("CRC.FINRAW reflected raw result", tb_crc_result,
+                64'h0000_0000_1CF9_6D7C);
+        check64("CRC.FINRAW publishes shared accumulator", uut.cl_crc_acc,
+                64'h0000_0000_1CF9_6D7C);
+        if (uut.crc_locked !== 1'b0) begin
+            $display("FAIL [CRC.FINRAW lock release]: crc_locked=%b",
+                     uut.crc_locked);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        drive_crc_op(1, ISA_CRC_MODEX, 64'd0, 8'd0, tb_crc_result);
+        drive_crc_op(1, ISA_CRC_INIT, 64'd0, 8'd0, tb_crc_result);
+        drive_crc_op(1, ISA_CRC_B, 64'h41, 8'd0, tb_crc_result);
+        drive_crc_op(1, ISA_CRC_FIN, 64'd0, 8'd0, tb_crc_result);
+        check64("CRC owner 1 after FINRAW handoff", tb_crc_result,
                 64'h0000_0000_81B0_2D8B);
+
+        // Reset is also caller cancellation at the CRC request boundary.
+        // Cancel an admitted MODE before its ACTIVE commit and keep the
+        // request asserted while reset is high: there must be no completion,
+        // shared-state mutation, lock acquisition, or immediate readmission.
+        @(negedge clk);
+        tb_crc_op[0 +: 4] = ISA_CRC_MODEX;
+        tb_crc_imm8[0 +: 8] = 8'd5;
+        tb_crc_req[0] = 1'b1;
+        tb_crc_seen = 0;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(negedge clk);
+            if (uut.crc_state == uut.CRC_ACTIVE) begin
+                tb_crc_seen = 1;
+                i = 200;
+            end
+        end
+        if (!tb_crc_seen) begin
+            $display("FAIL [CRC ACTIVE cancellation admission timeout]");
+            fail_count = fail_count + 1;
+        end else begin
+            micro_reset[0] = 1'b1;
+            @(negedge clk);
+            check64("cancelled CRC ACTIVE returns idle",
+                    uut.crc_state, uut.CRC_IDLE);
+            check64("cancelled CRC ACTIVE suppresses completion",
+                    {62'd0, uut.crc_done_reg, uut.crc_rd_we_reg}, 64'd0);
+            check64("cancelled CRC ACTIVE preserves accumulator",
+                    uut.cl_crc_acc, 64'h0000_0000_81B0_2D8B);
+            check64("cancelled CRC ACTIVE preserves mode",
+                    {61'd0, uut.cl_crc_mode}, 64'd0);
+            check64("cancelled CRC ACTIVE does not consume turn",
+                    uut.crc_last, 64'd1);
+            check64("cancelled CRC ACTIVE does not acquire lock",
+                    uut.crc_locked, 64'd0);
+        end
+        @(negedge clk);
+        tb_crc_req[0] = 1'b0;
+        micro_reset[0] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        // An owner reset in WAIT_DROP must leave the held-request state and
+        // release the transaction lock.  The INIT has already committed, so
+        // cancellation preserves shared state while making a sibling runnable.
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd5, tb_crc_result);
+        @(negedge clk);
+        tb_crc_op[0 +: 4] = ISA_CRC_INIT;
+        tb_crc_imm8[0 +: 8] = 8'd0;
+        tb_crc_req[0] = 1'b1;
+        tb_crc_seen = 0;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(negedge clk);
+            if (uut.crc_state == uut.CRC_WAIT_DROP) begin
+                tb_crc_seen = 1;
+                i = 200;
+            end
+        end
+        if (!tb_crc_seen) begin
+            $display("FAIL [CRC WAIT_DROP cancellation admission timeout]");
+            fail_count = fail_count + 1;
+        end else begin
+            check64("CRC WAIT_DROP owner holds lock",
+                    uut.crc_locked, 64'd1);
+            check64("CRC WAIT_DROP retains owner",
+                    uut.crc_lock_owner, 64'd0);
+            micro_reset[0] = 1'b1;
+            @(negedge clk);
+            check64("cancelled CRC WAIT_DROP returns idle",
+                    uut.crc_state, uut.CRC_IDLE);
+            check64("cancelled CRC WAIT_DROP clears completion outputs",
+                    {62'd0, uut.crc_done_reg, uut.crc_rd_we_reg}, 64'd0);
+            check64("cancelled CRC WAIT_DROP releases owner lock",
+                    uut.crc_locked, 64'd0);
+            check64("cancelled CRC WAIT_DROP preserves committed INIT",
+                    uut.cl_crc_acc, 64'h0000_0000_FFFF_FFFF);
+            check64("cancelled CRC WAIT_DROP preserves mode",
+                    {61'd0, uut.cl_crc_mode}, 64'd5);
+        end
+        @(negedge clk);
+        tb_crc_req[0] = 1'b0;
+        micro_reset[0] = 1'b0;
+        repeat (3) @(negedge clk);
+
+        drive_crc_op(1, ISA_CRC_MODEX, 64'd0, 8'd0, tb_crc_result);
+        check64("CRC post-cancel handoff locks next owner",
+                uut.crc_locked, 64'd1);
+        check64("CRC post-cancel handoff records next owner",
+                uut.crc_lock_owner, 64'd1);
+        drive_crc_op(1, ISA_CRC_INIT, 64'd0, 8'd0, tb_crc_result);
+        drive_crc_op(1, ISA_CRC_B, 64'h41, 8'd0, tb_crc_result);
+        drive_crc_op(1, ISA_CRC_FIN, 64'd0, 8'd0, tb_crc_result);
+        check64("CRC post-cancel handoff completes", tb_crc_result,
+                64'h0000_0000_81B0_2D8B);
+        check64("CRC post-cancel handoff releases lock",
+                uut.crc_locked, 64'd0);
 
         release uut.mc_crc_req;
         release uut.mc_crc_op;
@@ -1155,6 +1280,7 @@ module tb_cluster;
         // a late leaf completion cannot be routed.
         tb_cancel_done_count = 0;
         @(negedge clk);
+        tb_caller_epoch_before = uut.tacc_caller_epoch[0];
         micro_reset[0] = 1'b1;
         repeat (3) begin
             @(negedge clk);
@@ -1185,7 +1311,9 @@ module tb_cluster;
         check64("cancelled active MEX releases common domain",
                 uut.legacy_state, uut.LEGACY_IDLE);
         check64("active reset advances caller epoch once",
-                uut.tacc_caller_epoch[0], 64'd1);
+                uut.tacc_caller_epoch[0],
+                tb_caller_epoch_before
+                    + {{(TACC_EPOCH_BITS-1){1'b0}}, 1'b1});
         repeat (3) @(negedge clk);
 
         // A fresh caller can use the engine after cancellation.

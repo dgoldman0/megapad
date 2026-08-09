@@ -753,6 +753,42 @@ def test_cluster_crc_lock_blocks_without_retiring_the_contender():
     assert snapshot["grant_counts"]["crc"] == 3
 
 
+def test_cluster_crc_finraw_commits_before_native_release():
+    """Native FINRAW makes its result visible with the unlocked snapshot."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.sysinfo.write8(0x18, 0x01)
+    cluster = system.clusters[0]
+    owner = cluster.cores[0]
+    address = 0x100
+    system.load_binary(
+        address,
+        assemble("crc.mode 5\ncrc.init\ncrc.finraw r4, r0\nhalt"),
+    )
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    owner.pc = address
+    owner.halted = False
+
+    system.run_batch_stats(3)
+
+    snapshot = cluster.crc_snapshot()
+    assert snapshot == {
+        "acc": 0xFFFF_FFFF,
+        "mode": 5,
+        "locked": False,
+        "owner": None,
+    }
+    assert owner.regs[4] == 0xFFFF_FFFF
+
+
 def test_direct_sha_transaction_blocks_nonowner_release_until_owner_release():
     """FINAL retains ownership; only the owner's RELEASE permits handoff."""
     system = MegapadSystem(

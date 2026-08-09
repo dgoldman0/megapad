@@ -62,6 +62,7 @@ from devices import (
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
     PortBridgeCSR,
     WotsChainAccel,
+    CRYPTO_CAP_CRC_REFLECT_RAW,
 )
 
 # Public system stepping must honor deliberate per-core step overrides, while
@@ -261,6 +262,7 @@ class MicroCluster:
         "tacc_force_pending",
         "tacc_epoch",
     )
+    _CRC_MODES = frozenset((0, 1, 2, 4, 5, 6))
     _SHARED_ENGINE_FIELDS = frozenset(
         ("acc", "tacc")
         + _SHARED_TACC_METADATA_FIELDS
@@ -441,6 +443,7 @@ class MicroCluster:
         self._crc_mode = 0
         self._crc_locked = False
         self._crc_owner: Optional[int] = None
+        self._crc_state_lock = threading.Lock()
         self._sha_locked = False
         self._sha_owner: Optional[int] = None
         self._tile_state = self._new_shared_engine_state()
@@ -475,7 +478,7 @@ class MicroCluster:
         self.cl_ivt_base = 0     # shared IVT base address
 
         # Cluster-shared CRC state. MODE, INIT, or SEED acquires the
-        # transaction lock; FIN publishes the final accumulator and releases
+        # transaction lock; FIN and FINRAW publish the accumulator and release
         # it. The owner is a local core index, matching the RTL arbiter.
         self.reset_shared_resources()
 
@@ -520,33 +523,74 @@ class MicroCluster:
         )
         return True
 
+    def crc_snapshot(self) -> dict:
+        """Return one coherent accumulator/mode/ownership observation."""
+        state = self._native_crc_snapshot()
+        if state is not None:
+            return dict(state)
+        with self._crc_state_lock:
+            return {
+                "acc": self._crc_acc,
+                "mode": self._crc_mode,
+                "locked": self._crc_locked,
+                "owner": self._crc_owner,
+            }
+
+    def crc_publish(self, global_core_id: int, *, acc: int, mode: int,
+                    release: bool = False) -> None:
+        """Atomically publish one granted CRC operation and optional release."""
+        local = int(global_core_id) - self.id_base
+        if not 0 <= local < self.n:
+            raise ValueError("cluster CRC publisher is out of range")
+        mode = int(mode)
+        if mode not in self._CRC_MODES:
+            raise ValueError("cluster CRC mode is invalid")
+        acc = int(acc) & ((1 << 64) - 1)
+        release = bool(release)
+        if self._native_cluster_index is not None:
+            self._native_system._cluster_crc_publish(
+                self._native_cluster_index,
+                local,
+                acc,
+                mode,
+                release,
+            )
+            return
+        with self._crc_state_lock:
+            if self._crc_locked and self._crc_owner != local:
+                raise RuntimeError("nonowner cannot publish cluster CRC state")
+            self._crc_acc = acc
+            self._crc_mode = mode
+            if release and self._crc_owner == local:
+                self._crc_locked = False
+                self._crc_owner = None
+
     @property
     def crc_acc(self) -> int:
-        state = self._native_crc_snapshot()
-        return self._crc_acc if state is None else int(state["acc"])
+        return int(self.crc_snapshot()["acc"])
 
     @crc_acc.setter
     def crc_acc(self, value: int):
         value = int(value) & ((1 << 64) - 1)
         if not self._native_crc_update(acc=value):
-            self._crc_acc = value
+            with self._crc_state_lock:
+                self._crc_acc = value
 
     @property
     def crc_mode(self) -> int:
-        state = self._native_crc_snapshot()
-        return self._crc_mode if state is None else int(state["mode"])
+        return int(self.crc_snapshot()["mode"])
 
     @crc_mode.setter
     def crc_mode(self, value: int):
         value = int(value)
-        value = value if value in (0, 1, 2) else 0
+        value = value if value in self._CRC_MODES else 0
         if not self._native_crc_update(mode=value):
-            self._crc_mode = value
+            with self._crc_state_lock:
+                self._crc_mode = value
 
     @property
     def crc_locked(self) -> bool:
-        state = self._native_crc_snapshot()
-        return self._crc_locked if state is None else bool(state["locked"])
+        return bool(self.crc_snapshot()["locked"])
 
     @crc_locked.setter
     def crc_locked(self, value: bool):
@@ -558,15 +602,13 @@ class MicroCluster:
                 )
             return
         if not self._native_crc_update(locked=False, owner=None):
-            self._crc_locked = False
-            self._crc_owner = None
+            with self._crc_state_lock:
+                self._crc_locked = False
+                self._crc_owner = None
 
     @property
     def crc_owner(self) -> Optional[int]:
-        state = self._native_crc_snapshot()
-        if state is None:
-            return self._crc_owner
-        owner = state["owner"]
+        owner = self.crc_snapshot()["owner"]
         return None if owner is None else int(owner)
 
     @crc_owner.setter
@@ -579,8 +621,9 @@ class MicroCluster:
             "owner": owner,
         }
         if not self._native_crc_update(**changes):
-            self._crc_locked = owner is not None
-            self._crc_owner = owner
+            with self._crc_state_lock:
+                self._crc_locked = owner is not None
+                self._crc_owner = owner
 
     def reset_crc(self):
         """Reset shared CRC state and release any stranded transaction."""
@@ -595,10 +638,11 @@ class MicroCluster:
                 },
             )
             return
-        self._crc_acc = 0xFFFF_FFFF
-        self._crc_mode = 0
-        self._crc_locked = False
-        self._crc_owner = None
+        with self._crc_state_lock:
+            self._crc_acc = 0xFFFF_FFFF
+            self._crc_mode = 0
+            self._crc_locked = False
+            self._crc_owner = None
 
     def reset_shared_resources(self):
         """Reset cluster engines, transaction locks, and grant cursors."""
@@ -646,10 +690,11 @@ class MicroCluster:
                     local,
                 )
             )
-        if not self._crc_locked:
-            self._crc_locked = True
-            self._crc_owner = local
-        return self._crc_owner == local
+        with self._crc_state_lock:
+            if not self._crc_locked:
+                self._crc_locked = True
+                self._crc_owner = local
+            return self._crc_owner == local
 
     def crc_is_owner(self, global_core_id: int) -> bool:
         local = global_core_id - self.id_base
@@ -660,7 +705,8 @@ class MicroCluster:
                     local,
                 )
             )
-        return self._crc_locked and self._crc_owner == local
+        with self._crc_state_lock:
+            return self._crc_locked and self._crc_owner == local
 
     def crc_release(self, global_core_id: int):
         """Release the CRC lock when the calling core owns it."""
@@ -671,9 +717,11 @@ class MicroCluster:
                 local,
             )
             return
-        if self.crc_is_owner(global_core_id):
-            self._crc_locked = False
-            self._crc_owner = None
+        local = global_core_id - self.id_base
+        with self._crc_state_lock:
+            if self._crc_locked and self._crc_owner == local:
+                self._crc_locked = False
+                self._crc_owner = None
 
     # -- Shared SHA transaction ownership --
 
@@ -1255,6 +1303,10 @@ class MegapadSystem:
             ext_mem_size=ext_mem_size,
             vram_base=self.vram_base,
             vram_size=vram_size,
+            crypto_caps=CRYPTO_CAP_CRC_REFLECT_RAW,
+            num_bus_ports=(
+                self.num_full_cores + self.num_clusters + 2
+            ),
         )
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
         self.mailbox.attach_ipi_router(
@@ -2002,6 +2054,36 @@ class MegapadSystem:
         cluster = getattr(cpu, '_cluster', None)
         native_state = getattr(cpu, '_cs', None)
 
+        def preflight_wide_mmio(addr: int, width: int, *, write: bool) -> int:
+            """Validate one MMIO transaction before byte decomposition."""
+            addr = u64(addr)
+            span_end = addr + width
+            if addr >= MMIO_END or span_end <= MMIO_START:
+                return addr
+            try:
+                if addr < MMIO_START or span_end > MMIO_END:
+                    raise BusError(addr - MMIO_START, write=write)
+                offset = addr - MMIO_START
+                if native_state is not None:
+                    native_status = (
+                        native_state._native_singleton_preflight(
+                            offset,
+                            width,
+                        )
+                    )
+                    if native_status > 0:
+                        return addr
+                    if native_status == 0:
+                        raise BusError(offset, write=write)
+                bus.preflight_access(offset, width, write=write)
+            except BusError:
+                cpu.trap_addr = addr
+                raise TrapError(
+                    IVEC_BUS_FAULT,
+                    f"Bus timeout @ {addr:#018x}",
+                )
+            return addr
+
         # MPU / privilege enforcement removed (user mode stripped).
 
         def patched_read8(addr: int) -> int:
@@ -2084,31 +2166,37 @@ class MegapadSystem:
         # Also patch wider reads/writes to go through the byte-level
         # functions so MMIO works for 16/32/64-bit accesses too.
         def patched_read16(addr: int) -> int:
+            addr = preflight_wide_mmio(addr, 2, write=False)
             b0 = patched_read8(addr)
             b1 = patched_read8(u64(addr + 1))
             return b0 | (b1 << 8)
 
         def patched_write16(addr: int, val: int):
+            addr = preflight_wide_mmio(addr, 2, write=True)
             patched_write8(addr, val & 0xFF)
             patched_write8(u64(addr + 1), (val >> 8) & 0xFF)
 
         def patched_read32(addr: int) -> int:
+            addr = preflight_wide_mmio(addr, 4, write=False)
             v = 0
             for i in range(4):
                 v |= patched_read8(u64(addr + i)) << (8 * i)
             return v
 
         def patched_write32(addr: int, val: int):
+            addr = preflight_wide_mmio(addr, 4, write=True)
             for i in range(4):
                 patched_write8(u64(addr + i), (val >> (8 * i)) & 0xFF)
 
         def patched_read64(addr: int) -> int:
+            addr = preflight_wide_mmio(addr, 8, write=False)
             v = 0
             for i in range(8):
                 v |= patched_read8(u64(addr + i)) << (8 * i)
             return v
 
         def patched_write64(addr: int, val: int):
+            addr = preflight_wide_mmio(addr, 8, write=True)
             for i in range(8):
                 patched_write8(u64(addr + i), (val >> (8 * i)) & 0xFF)
 

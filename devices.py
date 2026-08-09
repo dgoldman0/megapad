@@ -56,6 +56,19 @@ AUDIO_BASE   = 0x0C00
 PORT_BRIDGE_BASE = 0x0880
 WOTS_BASE    = 0x08A0
 
+# System Info crypto capability bits.  Bits above these assignments are
+# reserved and must read as zero.
+CRYPTO_CAP_CRC_REFLECT_RAW = 1 << 0
+CRYPTO_CAP_SHA3_STREAM = 1 << 1
+CRYPTO_CAP_KECCAK_F1600 = 1 << 2
+CRYPTO_CAP_WOTS_CHAIN = 1 << 3
+CRYPTO_CAP_MASK = (
+    CRYPTO_CAP_CRC_REFLECT_RAW
+    | CRYPTO_CAP_SHA3_STREAM
+    | CRYPTO_CAP_KECCAK_F1600
+    | CRYPTO_CAP_WOTS_CHAIN
+)
+
 # Default port-I/O bridge map — port N → 12-bit MMIO offset.
 # OUT N writes the byte to the mapped MMIO register;
 # INP N reads the byte from it.
@@ -1852,6 +1865,8 @@ class AudioOutput(Device):
 #   0x48  NUM_FULL     — number of full (major) cores
 #   0x50  VRAM_BASE    — dedicated VRAM base address
 #   0x58  VRAM_SIZE    — dedicated VRAM size in bytes
+#   0x60  CRYPTO_CAPS  — independently qualified crypto capabilities
+#   0x68  NUM_BUS_PORTS — weighted-arbiter requester count
 
 # Board ID + version packed as 64-bit LE value:
 #   bytes 0-1: version (minor=1, then 0x00)
@@ -1875,8 +1890,10 @@ class SystemInfo(Device):
                  ext_mem_base: int = 0,
                  ext_mem_size: int = 0,
                  vram_base: int = 0,
-                 vram_size: int = 0):
-        super().__init__("SysInfo", SYSINFO_BASE, 0x60)  # extended to 96 bytes
+                 vram_size: int = 0,
+                 crypto_caps: int = 0,
+                 num_bus_ports: int = 1):
+        super().__init__("SysInfo", SYSINFO_BASE, 0x70)
         if mem_size_kib is not None and bank0_size == (1 << 20):
             # Legacy caller: convert KiB → bytes
             bank0_size = mem_size_kib * 1024
@@ -1893,6 +1910,12 @@ class SystemInfo(Device):
         self.ext_mem_size = ext_mem_size
         self.vram_base = vram_base
         self.vram_size = vram_size
+        if crypto_caps < 0 or crypto_caps & ~CRYPTO_CAP_MASK:
+            raise ValueError("SystemInfo crypto_caps contains reserved bits")
+        if num_bus_ports < 1:
+            raise ValueError("SystemInfo num_bus_ports must be positive")
+        self.crypto_caps = crypto_caps
+        self.num_bus_ports = num_bus_ports
         # Legacy flags (kept for backward compat, not in RTL)
         self.has_storage = has_storage
         self.has_nic = has_nic
@@ -1911,10 +1934,12 @@ class SystemInfo(Device):
             0x48: self.num_full_cores,
             0x50: self.vram_base,
             0x58: self.vram_size,
+            0x60: self.crypto_caps,
+            0x68: self.num_bus_ports,
         }
 
     def read8(self, offset: int) -> int:
-        if offset < 0 or offset >= 0x60:
+        if offset < 0 or offset >= self.size:
             return 0
         reg_base = offset & ~0x07            # align down to 8
         byte_idx = offset & 0x07
@@ -4364,6 +4389,27 @@ class DeviceBus:
             if dev.base <= mmio_offset < dev.base + dev.size:
                 return dev, mmio_offset - dev.base
         return None, 0
+
+    def preflight_access(
+        self,
+        mmio_offset: int,
+        width: int,
+        *,
+        write: bool = False,
+    ) -> tuple[Device, int]:
+        """Validate one architectural MMIO access before any byte is used.
+
+        Multi-byte accesses must be naturally aligned and wholly contained in
+        one device window.  Performing this check before byte decomposition
+        prevents a crossing write from publishing a valid prefix before the
+        bus fault is reported.
+        """
+        if width not in (1, 2, 4, 8) or mmio_offset % width:
+            raise BusError(mmio_offset, write=write)
+        dev, local = self.find_device(mmio_offset)
+        if dev is None or local + width > dev.size:
+            raise BusError(mmio_offset, write=write)
+        return dev, local
 
     def read8(self, mmio_offset: int, *, requester_id: int = 0) -> int:
         dev, local = self.find_device(mmio_offset)

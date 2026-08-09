@@ -136,6 +136,91 @@ module tb_soc_smoke;
         check("Reduced cluster core IDs begin after instantiated full cores",
               u_soc.g_cluster[0].u_cluster.CLUSTER_ID_BASE == 8'd1);
 
+        // Exercise the integrated SysInfo decode directly.  The testbench
+        // temporarily owns the arbiter-to-MMIO seam so CPU fetch traffic
+        // cannot make these combinational checks nondeterministic.
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_wen = 1'b0;
+        force u_soc.bus_mmio_wdata = 64'd0;
+        force u_soc.bus_mmio_port_io = 1'b0;
+
+        force u_soc.bus_mmio_addr = 12'h360;
+        force u_soc.bus_mmio_size = BUS_DWORD;
+        #1;
+        check("SysInfo CRC capability is advertised",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h1);
+
+        force u_soc.bus_mmio_addr = 12'h368;
+        #1;
+        check("SysInfo reports every weighted-arbiter requester",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'd4);
+
+        force u_soc.bus_mmio_addr = 12'h305;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        #1;
+        check("SysInfo byte reads zero-extend an interior lane",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h0000_0000_0000_0036);
+
+        force u_soc.bus_mmio_addr = 12'h304;
+        force u_soc.bus_mmio_size = BUS_HALF;
+        #1;
+        check("SysInfo halfword reads zero-extend their lane",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h0000_0000_0000_3634);
+
+        force u_soc.bus_mmio_addr = 12'h300;
+        force u_soc.bus_mmio_size = BUS_WORD;
+        #1;
+        check("SysInfo word reads zero-extend their lane",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h0000_0000_0002_0001);
+
+        force u_soc.bus_mmio_addr = 12'h360;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        #1;
+        check("SysInfo byte reads use little-endian lanes",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h1);
+
+        force u_soc.bus_mmio_addr = 12'h361;
+        force u_soc.bus_mmio_size = BUS_HALF;
+        #1;
+        check("SysInfo rejects a misaligned access",
+              u_soc.bus_mmio_ack === 1'b0);
+
+        force u_soc.bus_mmio_addr = 12'h36F;
+        #1;
+        check("SysInfo rejects a crossing access",
+              u_soc.bus_mmio_ack === 1'b0);
+
+        force u_soc.bus_mmio_addr = 12'h370;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        #1;
+        check("SysInfo does not alias beyond its exact window",
+              u_soc.bus_mmio_ack === 1'b0);
+
+        force u_soc.bus_mmio_addr = 12'h360;
+        force u_soc.bus_mmio_size = BUS_DWORD;
+        force u_soc.bus_mmio_wen = 1'b1;
+        force u_soc.bus_mmio_wdata = 64'd0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_wen = 1'b0;
+        #1;
+        check("SysInfo capability writes are acknowledged and ignored",
+              u_soc.bus_mmio_ack === 1'b1
+              && u_soc.bus_mmio_rdata == 64'h1);
+
+        release u_soc.bus_mmio_req;
+        release u_soc.bus_mmio_addr;
+        release u_soc.bus_mmio_wdata;
+        release u_soc.bus_mmio_wen;
+        release u_soc.bus_mmio_size;
+        release u_soc.bus_mmio_port_io;
+
         // --- Check 2: Debug LEDs should be non-zero after reset ---
         repeat (5) @(posedge clk);
         check("Debug LEDs active after reset", debug_leds !== 8'h00);
