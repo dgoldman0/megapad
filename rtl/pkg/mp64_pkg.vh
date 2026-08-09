@@ -535,7 +535,7 @@ localparam [3:0] MBOX_STATUS  = 4'h9;
 localparam [3:0] MBOX_ACK     = 4'hA;
 
 // --- Hardware spinlocks ---
-localparam MP64_NUM_SPINLOCKS  = 8;
+localparam MP64_NUM_SPINLOCKS  = 16;
 localparam [3:0] SLOCK_ACQUIRE = 4'h0;
 localparam [3:0] SLOCK_RELEASE = 4'h1;
 

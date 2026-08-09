@@ -298,22 +298,24 @@ public:
             uint64_t delta,
             TimerDevice& timer,
             FramebufferDevice& framebuffer,
-            RTCDevice& rtc) {
+            RTCDevice& rtc,
+            CryptoDevices& crypto) {
         std::lock_guard<std::mutex> guard(mutex_);
-        advance_by_unlocked(delta, timer, framebuffer, rtc);
+        advance_by_unlocked(delta, timer, framebuffer, rtc, crypto);
     }
 
     void advance_to(
             uint64_t target,
             TimerDevice& timer,
             FramebufferDevice& framebuffer,
-            RTCDevice& rtc) {
+            RTCDevice& rtc,
+            CryptoDevices& crypto) {
         std::lock_guard<std::mutex> guard(mutex_);
         if (target < cycles_)
             throw std::invalid_argument(
                 "system cycle target cannot move backwards");
         advance_by_unlocked(
-            target - cycles_, timer, framebuffer, rtc);
+            target - cycles_, timer, framebuffer, rtc, crypto);
     }
 
     void set_event_deadline(int source_id, uint64_t deadline) {
@@ -388,7 +390,8 @@ private:
             uint64_t delta,
             TimerDevice& timer,
             FramebufferDevice& framebuffer,
-            RTCDevice& rtc) {
+            RTCDevice& rtc,
+            CryptoDevices& crypto) {
         if (delta == 0)
             return;
         if (cycles_ > std::numeric_limits<uint64_t>::max() - delta)
@@ -407,6 +410,7 @@ private:
         timer.tick(delta);
         framebuffer.tick(delta);
         rtc.tick(delta);
+        crypto.tick(delta);
         cycles_ = target;
     }
 
@@ -5930,8 +5934,6 @@ static inline void sync_nic_memory_ptrs(CPUState& s) {
 
 static inline void sync_main_memory_ptrs(CPUState& s) {
     s.uart->attach_mem(s.memory->mem, s.memory->mem_size);
-    s.crypto->wots.mem = s.memory->mem;
-    s.crypto->wots.mem_size = s.memory->mem_size;
     sync_nic_memory_ptrs(s);
 }
 
@@ -5951,8 +5953,6 @@ static inline void sync_system_main_memory_ptrs(SystemState& system) {
     system.shared_uart.attach_mem(
         system.shared_memory.mem,
         system.shared_memory.mem_size);
-    system.shared_crypto.wots.mem = system.shared_memory.mem;
-    system.shared_crypto.wots.mem_size = system.shared_memory.mem_size;
     sync_system_nic_memory_ptrs(system);
 }
 
@@ -9516,6 +9516,12 @@ static inline void preflight_resumable_bus_access(
     mpu_check(s, address);
 }
 
+[[noreturn]] static void reject_native_crypto_access(
+        CPUState& state, uint64_t address) {
+    state.trap_addr = address;
+    throw std::runtime_error("TRAP:BUS_FAULT");
+}
+
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(
         CPUState& s,
@@ -9540,8 +9546,11 @@ static inline uint8_t sys_read8(
             return s.uart->read8(mmio_off);
         if (s.trng->handles(mmio_off))
             return s.trng->read8(mmio_off);
-        if (s.crypto->handles(mmio_off))
+        if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->access_shape_valid(mmio_off, 1, false))
+                reject_native_crypto_access(s, addr);
             return s.crypto->read8(mmio_off);
+        }
         if (s.fb->handles(mmio_off))
             return s.fb->read8(mmio_off);
         if (s.timer->handles(mmio_off))
@@ -9625,6 +9634,8 @@ static inline void sys_write8(
             return;
         }
         if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->access_shape_valid(mmio_off, 1, true))
+                reject_native_crypto_access(s, addr);
             s.crypto->write8(mmio_off, val);
             icache_invalidate_span(s, addr, 1);
             return;
@@ -9733,6 +9744,8 @@ static inline uint64_t sys_read64(
             return v;
         }
         if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->preflight(mmio_off, 8, false))
+                reject_native_crypto_access(s, addr);
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
                 v |= (uint64_t)s.crypto->read8(mmio_off + i) << (8*i);
@@ -9811,6 +9824,8 @@ static inline void sys_write64(
             return;
         }
         if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->preflight(mmio_off, 8, true))
+                reject_native_crypto_access(s, addr);
             for (int i = 0; i < 8; i++)
                 s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             icache_invalidate_span(s, addr, 8);
@@ -9879,8 +9894,11 @@ static inline uint16_t sys_read16(
             return s.trng->read8(mmio_off) |
                    ((uint16_t)s.trng->read8(mmio_off + 1) << 8);
         }
-        if (s.crypto->handles(mmio_off))
+        if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->preflight(mmio_off, 2, false))
+                reject_native_crypto_access(s, addr);
             return s.crypto->read8(mmio_off) | ((uint16_t)s.crypto->read8(mmio_off+1) << 8);
+        }
         if (s.fb->handles(mmio_off))
             return s.fb->read8(mmio_off) |
                    ((uint16_t)s.fb->read8(mmio_off + 1) << 8);
@@ -9939,6 +9957,8 @@ static inline void sys_write16(
             return;
         }
         if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->preflight(mmio_off, 2, true))
+                reject_native_crypto_access(s, addr);
             s.crypto->write8(mmio_off, val & 0xFF);
             s.crypto->write8(mmio_off+1, (val >> 8) & 0xFF);
             icache_invalidate_span(s, addr, 2);
@@ -10009,6 +10029,8 @@ static inline uint32_t sys_read32(
             return v;
         }
         if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->preflight(mmio_off, 4, false))
+                reject_native_crypto_access(s, addr);
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
                 v |= (uint32_t)s.crypto->read8(mmio_off + i) << (8*i);
@@ -10087,6 +10109,8 @@ static inline void sys_write32(
             return;
         }
         if (s.crypto->handles(mmio_off)) {
+            if (!s.crypto->preflight(mmio_off, 4, true))
+                reject_native_crypto_access(s, addr);
             for (int i = 0; i < 4; i++)
                 s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             icache_invalidate_span(s, addr, 4);
@@ -18292,11 +18316,39 @@ static SystemBatchResult run_full_core_cycle_batch(
                     ready_pending,
                     scheduler_cycle);
             if (grant.has_value()) {
-                system.cycle_target_completion_cycle =
+                uint8_t backpressure_cycles = 0;
+                if (grant->target == BusTarget::MMIO &&
+                    grant->request.requester_id >= 0) {
+                    backpressure_cycles =
+                        system.shared_crypto.mmio_backpressure_cycles(
+                            static_cast<uint32_t>(
+                                grant->request.address),
+                            static_cast<uint32_t>(
+                                grant->request.width),
+                            grant->request.operation ==
+                                BusOperation::WRITE);
+                }
+                uint64_t completion_cycle =
                     checked_cycle_add(
                         grant->grant_cycle,
                         1,
                         "main bus target completion");
+                if (backpressure_cycles != 0) {
+                    const uint64_t permutation_boundary =
+                        checked_cycle_add(
+                            system.shared_clock.cycles(),
+                            backpressure_cycles,
+                            "SHA3 DIN backpressure boundary");
+                    completion_cycle = std::max(
+                        completion_cycle,
+                        permutation_boundary);
+                }
+                if (completion_cycle > grant->timeout_cycle) {
+                    throw std::logic_error(
+                        "native MMIO backpressure exceeds the main-bus "
+                        "timeout");
+                }
+                system.cycle_target_completion_cycle = completion_cycle;
             }
         }
         if (
@@ -19397,6 +19449,7 @@ settle_private_core_coordinator_instruction(
 struct UncontendedSingleCoreSegment {
     RunResult run{0, 0, RUN_LIMIT, -1};
     bool interrupt_boundary = false;
+    bool crypto_timing_boundary = false;
 };
 
 template <bool INJECT_FAILURE>
@@ -19443,6 +19496,13 @@ static void run_uncontended_single_core_segment_impl(
                         "injected uncontended single-core "
                         "scheduler failure");
                 }
+            }
+            if (
+                system.shared_crypto
+                    .requires_unbounded_timing_boundary()
+            ) {
+                segment.crypto_timing_boundary = true;
+                break;
             }
         } catch (const std::runtime_error& error) {
             const std::string what = error.what();
@@ -19710,6 +19770,16 @@ static void run_uncontended_single_core_round(
             publish_fragment(
                 0, 0, true, RUN_LIMIT);
             outcome.terminal_cores.push_back(0);
+            break;
+        }
+
+        if (segment.crypto_timing_boundary) {
+            // The outer scheduler's ordinary round settlement advances the
+            // shared clock and every device exactly once.  Ending only this
+            // round avoids a second timing path and confines the extra
+            // scheduler cadence to the short interval while SHA is BUSY.
+            publish_fragment(
+                0, 0, true, RUN_LIMIT);
             break;
         }
 
@@ -22072,6 +22142,28 @@ static void run_parallel_core_round(
                     "parallel core subfrontier "
                     "left an unexplained open dispatch");
             }
+        }
+
+        if (
+            system.shared_crypto
+                .requires_unbounded_timing_boundary()
+        ) {
+            // A parallel subfrontier may retire one coordinator-owned SHA
+            // command after its private prefixes.  Do not admit another
+            // subfrontier against the same unadvanced device timestamp.
+            for (
+                std::size_t reservation_index = 0;
+                reservation_index < reservations.size();
+                reservation_index++
+            ) {
+                if (done[reservation_index])
+                    continue;
+                close_dispatch(
+                    reservation_index,
+                    RUN_LIMIT);
+                done[reservation_index] = true;
+            }
+            break;
         }
     }
 
@@ -25486,9 +25578,6 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 *s.memory,
                 "CPUState crypto memory cannot be initialized while memory is in use");
             s.crypto->init();
-            // Ensure WOTS chain has current memory pointer
-            s.crypto->wots.mem = s.memory->mem;
-            s.crypto->wots.mem_size = s.memory->mem_size;
         })
         .def("disable_crypto", [](CPUState& s) {
             auto memory_guard = acquire_shared_memory_use(s);
@@ -25506,16 +25595,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("crypto_sha3_reset", [](CPUState& s) {
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->sha3.reset();
-            s.crypto->sha3.mode = 0;
         })
         .def("crypto_wots_reset", [](CPUState& s) {
-            MemoryMutationGuard guard(
-                *s.memory,
-                "CPUState WOTS memory cannot be reset while memory is in use");
+            auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->wots.reset();
-            s.crypto->wots.sha3 = &s.crypto->sha3;
-            s.crypto->wots.mem = s.memory->mem;
-            s.crypto->wots.mem_size = s.memory->mem_size;
         })
         .def("crypto_wots_status", [](CPUState& s) -> uint8_t {
             auto memory_guard = acquire_shared_memory_use(s);
@@ -25524,11 +25607,74 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // Direct crypto MMIO access (for testing / Python-side access)
         .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
             auto memory_guard = acquire_shared_memory_use(s);
+            if (!s.crypto->access_shape_valid(mmio_off, 1, false))
+                throw py::value_error("invalid native crypto byte read");
             return s.crypto->read8(mmio_off);
         })
         .def("crypto_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
             auto memory_guard = acquire_shared_memory_use(s);
+            if (!s.crypto->access_shape_valid(mmio_off, 1, true))
+                throw py::value_error("invalid native crypto byte write");
             s.crypto->write8(mmio_off, val);
+        })
+        .def("crypto_preflight",
+             [](CPUState& s,
+                uint32_t mmio_off,
+                uint32_t width,
+                bool write) -> bool {
+                auto memory_guard = acquire_shared_memory_use(s);
+                return s.crypto->preflight(mmio_off, width, write);
+             },
+             py::arg("mmio_off"),
+             py::arg("width"),
+             py::arg("write") = false)
+        .def("crypto_read64", [](CPUState& s, uint32_t mmio_off) -> uint64_t {
+            auto memory_guard = acquire_shared_memory_use(s);
+            if (!s.crypto->preflight(mmio_off, 8, false))
+                throw py::value_error("invalid native crypto qword read");
+            uint64_t value = 0;
+            for (int byte = 0; byte < 8; byte++) {
+                value |= static_cast<uint64_t>(
+                    s.crypto->read8(mmio_off + byte)) << (8 * byte);
+            }
+            return value;
+        })
+        .def("crypto_write64",
+             [](CPUState& s, uint32_t mmio_off, uint64_t value) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                if (!s.crypto->preflight(mmio_off, 8, true))
+                    throw py::value_error(
+                        "invalid native crypto qword write");
+                for (int byte = 0; byte < 8; byte++) {
+                    s.crypto->write8(
+                        mmio_off + byte,
+                        static_cast<uint8_t>(value >> (8 * byte)));
+                }
+             })
+        .def("crypto_tick", [](CPUState& s, uint64_t cycles) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.crypto->tick(cycles);
+        })
+        .def("_crypto_sha3_test_set_features",
+             [](CPUState& s, bool stream, bool raw) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                s.crypto->sha3.set_features(stream, raw);
+             })
+        .def("_crypto_sha3_test_fail_next", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.crypto->sha3.fail_next_operation = true;
+        })
+        .def("_crypto_sha3_test_claim_wots", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.crypto->sha3.claim_wots();
+        })
+        .def("_crypto_sha3_test_release_wots", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.crypto->sha3.release_wots();
+        })
+        .def("_crypto_sha3_test_zeroized", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.crypto->sha3.test_zeroized();
         })
         // ── NIC device ────────────────────────────────────────
         .def("nic_init", [](CPUState& s, py::bytes mac_bytes) {
@@ -25728,14 +25874,19 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return s.nic->read8(mmio_off);
             if (s.trng->handles(mmio_off))
                 return s.trng->read8(mmio_off);
-            if (s.crypto->handles(mmio_off))
+            if (s.crypto->handles(mmio_off)) {
+                if (!s.crypto->access_shape_valid(mmio_off, 1, false))
+                    throw py::value_error(
+                        "invalid native crypto byte read");
                 return s.crypto->read8(mmio_off);
+            }
             return -1;
         })
         .def("_native_singleton_preflight",
              [](CPUState& s,
                 uint32_t mmio_off,
-                uint32_t width) -> int {
+                uint32_t width,
+                bool write) -> int {
             auto memory_guard = acquire_shared_memory_use(s);
             const auto check_span = [mmio_off, width](const auto* device) {
                 if (!device->handles(mmio_off))
@@ -25757,8 +25908,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
             status = check_span(s.trng);
             if (status >= 0)
                 return status;
-            return check_span(s.crypto);
-        })
+            if (!s.crypto->handles(mmio_off))
+                return -1;
+            return s.crypto->preflight(mmio_off, width, write) ? 1 : 0;
+        },
+        py::arg("mmio_off"),
+        py::arg("width"),
+        py::arg("write") = false)
         .def("_native_singleton_write8",
              [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
             if (s.nic->handles(mmio_off))
@@ -25773,6 +25929,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return true;
             }
             if (s.crypto->handles(mmio_off)) {
+                if (!s.crypto->access_shape_valid(mmio_off, 1, true))
+                    throw py::value_error(
+                        "invalid native crypto byte write");
                 s.crypto->write8(mmio_off, value);
                 return true;
             }
@@ -29252,7 +29411,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     delta,
                     system.shared_timer,
                     system.shared_fb,
-                    system.shared_rtc);
+                    system.shared_rtc,
+                    system.shared_crypto);
             },
             py::arg("delta"))
         .def(
@@ -29298,7 +29458,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     target,
                     system.shared_timer,
                     system.shared_fb,
-                    system.shared_rtc);
+                    system.shared_rtc,
+                    system.shared_crypto);
             },
             py::arg("target"))
         .def(

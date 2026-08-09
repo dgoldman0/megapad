@@ -26,8 +26,9 @@
 //
 
 module mp64_bus #(
-    parameter N_PORTS   = 4,
-    parameter PORT_BITS = 3  // ceil(log2(N_PORTS)), must hold 0..N_PORTS-1
+    parameter N_PORTS          = 4,
+    parameter PORT_BITS        = 3, // ceil(log2(N_PORTS)); holds each port
+    parameter REQUESTER_ID_BITS = 8
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -39,6 +40,9 @@ module mp64_bus #(
     input  wire [N_PORTS-1:0]      cpu_wen,
     input  wire [N_PORTS*2-1:0]    cpu_size,
     input  wire [N_PORTS-1:0]      cpu_port_io,  // port I/O sideband per port
+    input  wire [N_PORTS-1:0]      cpu_requester_valid,
+    input  wire [N_PORTS*REQUESTER_ID_BITS-1:0]
+                                      cpu_requester_id,
     output reg  [N_PORTS*64-1:0]   cpu_rdata,
     output reg  [N_PORTS-1:0]      cpu_ready,
 
@@ -58,6 +62,8 @@ module mp64_bus #(
     output reg         mmio_wen,
     output reg  [1:0]  mmio_size,
     output reg         mmio_port_io,  // port I/O sideband (from winning CPU)
+    output reg         mmio_requester_valid,
+    output reg  [REQUESTER_ID_BITS-1:0] mmio_requester_id,
     input  wire [63:0] mmio_rdata,
     input  wire        mmio_ack,
 
@@ -103,6 +109,7 @@ module mp64_bus #(
     wire [63:0] core_wdata [0:N_PORTS-1];
     wire [1:0]  core_size  [0:N_PORTS-1];
     wire        core_pio   [0:N_PORTS-1];
+    wire [REQUESTER_ID_BITS-1:0] core_requester_id [0:N_PORTS-1];
 
     genvar gi;
     generate
@@ -111,6 +118,8 @@ module mp64_bus #(
             assign core_wdata[gi] = cpu_wdata[gi*64 +: 64];
             assign core_size[gi]  = cpu_size [gi*2  +: 2];
             assign core_pio[gi]   = cpu_port_io[gi];
+            assign core_requester_id[gi] = cpu_requester_id[
+                gi*REQUESTER_ID_BITS +: REQUESTER_ID_BITS];
         end
     endgenerate
 
@@ -264,6 +273,8 @@ module mp64_bus #(
             mmio_wen      <= 1'b0;
             mmio_size     <= 2'd0;
             mmio_port_io  <= 1'b0;
+            mmio_requester_valid <= 1'b0;
+            mmio_requester_id <= {REQUESTER_ID_BITS{1'b0}};
             mmio_timeout  <= {MMIO_TIMEOUT_BITS{1'b0}};
             mem_timeout   <= {MEM_TIMEOUT_BITS{1'b0}};
             bus_err       <= {N_PORTS{1'b0}};
@@ -301,6 +312,10 @@ module mp64_bus #(
                             mmio_wen      <= cpu_wen[next_grant];
                             mmio_size     <= core_size[next_grant];
                             mmio_port_io  <= core_pio[next_grant];
+                            mmio_requester_valid <=
+                                cpu_requester_valid[next_grant];
+                            mmio_requester_id <=
+                                core_requester_id[next_grant];
                             arb_state     <= ARB_MMIO_RESP;
                         end else begin
                             mem_req   <= 1'b1;
@@ -326,6 +341,9 @@ module mp64_bus #(
                         cpu_ready[grant]          <= 1'b1;
                         last_grant                <= grant;
                         mmio_req                  <= 1'b0;
+                        mmio_requester_valid      <= 1'b0;
+                        mmio_requester_id         <=
+                            {REQUESTER_ID_BITS{1'b0}};
                         served_last               <= 1'b1;
                         qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
                         mmio_timeout              <= {MMIO_TIMEOUT_BITS{1'b0}};
@@ -338,6 +356,9 @@ module mp64_bus #(
                         bus_err_sticky[grant]     <= 1'b1;
                         last_grant                <= grant;
                         mmio_req                  <= 1'b0;
+                        mmio_requester_valid      <= 1'b0;
+                        mmio_requester_id         <=
+                            {REQUESTER_ID_BITS{1'b0}};
                         served_last               <= 1'b1;
                         mmio_timeout              <= {MMIO_TIMEOUT_BITS{1'b0}};
                         arb_state                 <= ARB_IDLE;

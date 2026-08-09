@@ -338,6 +338,13 @@ def test_bus_requester_metadata_preserves_mailbox_payload_and_ack_contract():
     assert not hasattr(bus, "requester_id")
     assert not hasattr(system.mailbox, "_requester_id")
 
+    # Invalid metadata and IDs are rejected before selecting a mailbox slot.
+    bus.write8(MBOX_BASE, 0xCC, requester_id=0, requester_valid=False)
+    bus.write8(MBOX_BASE, 0xDD, requester_id=-1)
+    bus.write8(MBOX_BASE, 0xEE, requester_id=256)
+    assert system.mailbox.data == [0, 0, 0]
+    assert system.mailbox.pending == [0, 0, 0]
+
     payload0 = 0x0102_0304_0506_0708
     payload1 = 0xA1A2_A3A4_A5A6_A7A8
     for sender, payload in ((0, payload0), (1, payload1)):
@@ -368,22 +375,49 @@ def test_bus_requester_metadata_preserves_mailbox_payload_and_ack_contract():
 
 def test_bus_requester_metadata_preserves_spinlock_ownership_contract():
     """Spinlock test-and-set and owner release use the request metadata."""
-    system = _new_system(full_cores=2)
+    system = _new_system(full_cores=2, clusters=1)
     bus = system.bus
 
     assert not hasattr(system.spinlock, "_requester_id")
-    assert bus.read8(SPINLOCK_BASE, requester_id=1) == 0
-    assert bus.read8(SPINLOCK_BASE, requester_id=1) == 0
-    assert bus.read8(SPINLOCK_BASE, requester_id=0) == 1
-    assert system.spinlock.owner[0] == 1
+    assert system.spinlock.num_locks == 16
+    assert system.spinlock.num_cores == system.num_cores == 6
 
-    bus.write8(SPINLOCK_BASE + 1, 0, requester_id=0)
-    assert bus.read8(SPINLOCK_BASE, requester_id=0) == 1
-    assert system.spinlock.owner[0] == 1
+    # Lock 8 is in the expanded half of the aperture. Global core 5 is the
+    # last microcore in this reduced topology, despite sharing a cluster port.
+    lock8 = SPINLOCK_BASE + 8 * 4
+    assert bus.read8(lock8, requester_id=5) == 0
+    assert bus.read8(lock8, requester_id=5) == 0
+    assert bus.read8(lock8, requester_id=0) == 1
+    assert system.spinlock.owner[8] == 5
 
-    bus.write8(SPINLOCK_BASE + 1, 0, requester_id=1)
-    assert bus.read8(SPINLOCK_BASE, requester_id=0) == 0
-    assert system.spinlock.owner[0] == 0
+    # An invalid-valid bit, negative ID, exact upper bound, and formerly
+    # wrapping 256 ID all leave ownership unchanged. Invalid acquire is busy.
+    lock9 = SPINLOCK_BASE + 9 * 4
+    for requester_id, requester_valid in (
+        (5, False),
+        (-1, True),
+        (system.num_cores, True),
+        (256, True),
+    ):
+        bus.write8(
+            lock8 + 1,
+            0,
+            requester_id=requester_id,
+            requester_valid=requester_valid,
+        )
+        assert bus.read8(
+            lock9,
+            requester_id=requester_id,
+            requester_valid=requester_valid,
+        ) == 1
+        assert not system.spinlock.locked[9]
+        assert system.spinlock.owner[9] == -1
+        assert system.spinlock.locked[8]
+        assert system.spinlock.owner[8] == 5
+
+    bus.write8(lock8 + 1, 0, requester_id=5)
+    assert bus.read8(lock8, requester_id=0) == 0
+    assert system.spinlock.owner[8] == 0
 
 
 def test_native_ipi_router_does_not_replay_legacy_line_callbacks():

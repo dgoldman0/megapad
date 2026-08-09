@@ -9,7 +9,7 @@
 //    target core B's ID to MBOX_SEND → sets pending bit on core B → fires
 //    core B's IPI line.  Core B reads data + ACKs to clear pending.
 //
-// 2. SPINLOCKS — 8 hardware test-and-set locks
+// 2. SPINLOCKS — 16 hardware test-and-set locks
 //    Read SLOCK_ACQUIRE+N*4: returns 0 if lock acquired (was free),
 //    returns 1 if lock is busy (held by another core).  Atomic in hardware.
 //    Write SLOCK_RELEASE+N*4: releases lock N.
@@ -23,8 +23,9 @@
 `include "mp64_pkg.vh"
 
 module mp64_mailbox #(
-    parameter N_CORES = MP64_NUM_CORES_DEFAULT,     // number of cores to support
-    parameter ID_BITS = MP64_CORE_ID_BITS   // bits for core ID
+    parameter N_CORES = MP64_NUM_CORES_DEFAULT, // full-core mailbox count
+    parameter N_GLOBAL_CORES = N_CORES,       // full + micro spinlock owners
+    parameter ID_BITS = MP64_CORE_ID_BITS      // bits for global core ID
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -38,6 +39,7 @@ module mp64_mailbox #(
     output wire        ack,
 
     // === Which core is making this request (from arbiter grant) ===
+    input  wire               requester_valid,
     input  wire [ID_BITS-1:0] requester_id,
 
     // === IPI outputs — active-high, one per core ===
@@ -83,7 +85,11 @@ module mp64_mailbox #(
 
     // Address decode within MBOX region
     wire is_mbox  = (addr[11:8] == 4'h5);  // MBOX_BASE = 0x500
-    wire is_slock = (addr[11:8] == 4'h6);  // SPINLOCK_BASE = 0x600
+    wire is_slock = (addr[11:6] == 6'b011000); // 0x600..0x63F
+    wire requester_in_mailbox_range = requester_valid &&
+                                      requester_id < N_CORES;
+    wire requester_in_global_range = requester_valid &&
+                                     requester_id < N_GLOBAL_CORES;
 
     // Mailbox sub-register select (per requester)
     wire [3:0] mbox_reg = addr[3:0];
@@ -91,13 +97,14 @@ module mp64_mailbox #(
     // ========================================================================
     // Hardware spinlocks
     // ========================================================================
-    reg [N_CORES-1:0] slock_held  [0:MP64_NUM_SPINLOCKS-1]; // bit mask: who holds
+    reg [N_GLOBAL_CORES-1:0]
+                       slock_held  [0:MP64_NUM_SPINLOCKS-1]; // owner bit mask
     reg                slock_locked[0:MP64_NUM_SPINLOCKS-1]; // is lock held?
     reg [ID_BITS-1:0]  slock_owner[0:MP64_NUM_SPINLOCKS-1]; // owning core
 
     // Spinlock index from address: lock N at offset N*4
-    wire [2:0] slock_idx = addr[4:2];
-    wire [3:0] slock_reg = addr[1:0];
+    wire [3:0] slock_idx = addr[5:2];
+    wire [1:0] slock_reg = addr[1:0];
 
     // ========================================================================
     // Read mux
@@ -107,30 +114,34 @@ module mp64_mailbox #(
         rdata = 8'd0;
 
         if (is_mbox) begin
-            case (mbox_reg)
-                MBOX_DATA_LO: rdata = mbox_data[requester_id][7:0];
-                4'h1:         rdata = mbox_data[requester_id][15:8];
-                4'h2:         rdata = mbox_data[requester_id][23:16];
-                4'h3:         rdata = mbox_data[requester_id][31:24];
-                MBOX_DATA_HI: rdata = mbox_data[requester_id][39:32];
-                4'h5:         rdata = mbox_data[requester_id][47:40];
-                4'h6:         rdata = mbox_data[requester_id][55:48];
-                4'h7:         rdata = mbox_data[requester_id][63:56];
-                MBOX_STATUS: begin
-                    // The architectural status register is eight bits even
-                    // when a reduced SoC instantiates fewer requesters.
-                    rdata = 8'd0;
-                    for (ri = 0; ri < N_CORES && ri < 8; ri = ri + 1)
-                        rdata[ri] = mbox_pending[requester_id][ri];
-                end
-                default:      rdata = 8'd0;
-            endcase
+            if (requester_in_mailbox_range) begin
+                case (mbox_reg)
+                    MBOX_DATA_LO: rdata = mbox_data[requester_id][7:0];
+                    4'h1:         rdata = mbox_data[requester_id][15:8];
+                    4'h2:         rdata = mbox_data[requester_id][23:16];
+                    4'h3:         rdata = mbox_data[requester_id][31:24];
+                    MBOX_DATA_HI: rdata = mbox_data[requester_id][39:32];
+                    4'h5:         rdata = mbox_data[requester_id][47:40];
+                    4'h6:         rdata = mbox_data[requester_id][55:48];
+                    4'h7:         rdata = mbox_data[requester_id][63:56];
+                    MBOX_STATUS: begin
+                        // The architectural status register is eight bits
+                        // even when a reduced SoC has fewer full cores.
+                        rdata = 8'd0;
+                        for (ri = 0; ri < N_CORES && ri < 8; ri = ri + 1)
+                            rdata[ri] = mbox_pending[requester_id][ri];
+                    end
+                    default:      rdata = 8'd0;
+                endcase
+            end
         end else if (is_slock) begin
             // Read SLOCK_ACQUIRE: returns 0=acquired, 1=busy
             // (actual acquisition happens in sequential block below)
             if (slock_reg == SLOCK_ACQUIRE[1:0]) begin
-                rdata = {7'd0, slock_locked[slock_idx] &&
-                         (slock_owner[slock_idx] != requester_id)};
+                rdata = {7'd0,
+                         !requester_in_global_range ||
+                         (slock_locked[slock_idx] &&
+                          slock_owner[slock_idx] != requester_id)};
             end
         end
     end
@@ -148,13 +159,13 @@ module mp64_mailbox #(
             end
             for (wi = 0; wi < MP64_NUM_SPINLOCKS; wi = wi + 1) begin
                 slock_locked[wi] <= 1'b0;
-                slock_held[wi]   <= {N_CORES{1'b0}};
+                slock_held[wi]   <= {N_GLOBAL_CORES{1'b0}};
                 slock_owner[wi]  <= {ID_BITS{1'b0}};
             end
         end else begin
 
             // --- Mailbox writes ---
-            if (req && wen && is_mbox) begin
+            if (req && wen && is_mbox && requester_in_mailbox_range) begin
                 case (mbox_reg)
                     // Write outgoing data (stored per requester)
                     MBOX_DATA_LO: mbox_data[requester_id][7:0]   <= wdata;
@@ -183,7 +194,8 @@ module mp64_mailbox #(
             end
 
             // --- Spinlock acquire (on read of SLOCK_ACQUIRE) ---
-            if (req && !wen && is_slock && (slock_reg == SLOCK_ACQUIRE[1:0])) begin
+            if (req && !wen && is_slock && requester_in_global_range &&
+                (slock_reg == SLOCK_ACQUIRE[1:0])) begin
                 if (!slock_locked[slock_idx]) begin
                     // Lock was free — acquire it
                     slock_locked[slock_idx] <= 1'b1;
@@ -195,7 +207,8 @@ module mp64_mailbox #(
             end
 
             // --- Spinlock release (on write to SLOCK_RELEASE) ---
-            if (req && wen && is_slock && (slock_reg == SLOCK_RELEASE[1:0])) begin
+            if (req && wen && is_slock && requester_in_global_range &&
+                (slock_reg == SLOCK_RELEASE[1:0])) begin
                 if (slock_locked[slock_idx] &&
                     slock_owner[slock_idx] == requester_id) begin
                     slock_locked[slock_idx] <= 1'b0;

@@ -218,8 +218,8 @@ parameter [3:0] MBOX_STATUS  = 4'h9;     // +9: bit[n] = pending IPI from core n
 parameter [3:0] MBOX_ACK     = 4'hA;     // +A: write core_id to clear pending bit
 
 // Hardware spinlock registers (offsets from SPINLOCK_BASE)
-// 8 hardware spinlocks, test-and-set
-parameter NUM_SPINLOCKS    = 8;
+// 16 hardware spinlocks, test-and-set
+parameter NUM_SPINLOCKS    = 16;
 parameter [3:0] SLOCK_ACQUIRE = 4'h0;    // read: returns 0=acquired, 1=busy
 parameter [3:0] SLOCK_RELEASE = 4'h1;    // write: release lock
 // Lock N at SPINLOCK_BASE + N*4

@@ -4,6 +4,8 @@ from asm import assemble
 from devices import (
     BusError,
     CRYPTO_CAP_CRC_REFLECT_RAW,
+    CRYPTO_CAP_KECCAK_F1600,
+    CRYPTO_CAP_SHA3_STREAM,
     DeviceBus,
     SYSINFO_BASE,
     SystemInfo,
@@ -93,7 +95,11 @@ def test_system_reports_qualified_crypto_and_actual_bus_requesters():
     caps_addr = MMIO_START + SYSINFO_BASE + 0x60
     ports_addr = MMIO_START + SYSINFO_BASE + 0x68
 
-    assert system.cpu.mem_read64(caps_addr) == CRYPTO_CAP_CRC_REFLECT_RAW
+    assert system.cpu.mem_read64(caps_addr) == (
+        CRYPTO_CAP_CRC_REFLECT_RAW
+        | CRYPTO_CAP_SHA3_STREAM
+        | CRYPTO_CAP_KECCAK_F1600
+    )
     assert system.cpu.mem_read64(ports_addr) == 5  # 2 cores + cluster + NIC + disk
 
 

@@ -2373,13 +2373,13 @@ class MailboxDevice(Device):
         target_id: int,
         *,
         publish_payload: bool = False,
+        requester_valid: bool = True,
     ) -> bool:
         """Send using the frozen emulator contract for the selected path."""
-        requester_id &= 0xFF
-        target_id &= 0xFF
         if (
-            requester_id >= self.num_cores
-            or target_id >= self.num_cores
+            not requester_valid
+            or not 0 <= requester_id < self.num_cores
+            or not 0 <= target_id < self.num_cores
             or target_id == requester_id
         ):
             return False
@@ -2398,12 +2398,17 @@ class MailboxDevice(Device):
             self.on_ipi(target_id)
         return sent
 
-    def acknowledge_ipi(self, requester_id: int, source_id: int) -> bool:
-        requester_id &= 0xFF
-        source_id &= 0xFF
+    def acknowledge_ipi(
+        self,
+        requester_id: int,
+        source_id: int,
+        *,
+        requester_valid: bool = True,
+    ) -> bool:
         if (
-            requester_id >= self.num_cores
-            or source_id >= self.num_cores
+            not requester_valid
+            or not 0 <= requester_id < self.num_cores
+            or not 0 <= source_id < self.num_cores
         ):
             return False
         if self._router_ack is not None:
@@ -2420,9 +2425,14 @@ class MailboxDevice(Device):
             self.on_ack(requester_id)
         return acknowledged
 
-    def read8_for_requester(self, requester_id: int, offset: int) -> int:
-        requester_id &= 0xFF
-        if requester_id >= self.num_cores:
+    def read8_for_requester(
+        self,
+        requester_id: int,
+        offset: int,
+        *,
+        requester_valid: bool = True,
+    ) -> int:
+        if not requester_valid or not 0 <= requester_id < self.num_cores:
             return 0
         if 0x00 <= offset <= 0x07:
             # Read mailbox data for the requesting core's slot
@@ -2438,10 +2448,11 @@ class MailboxDevice(Device):
         requester_id: int,
         offset: int,
         value: int,
+        *,
+        requester_valid: bool = True,
     ):
         value &= 0xFF
-        requester_id &= 0xFF
-        if requester_id >= self.num_cores:
+        if not requester_valid or not 0 <= requester_id < self.num_cores:
             return
         if 0x00 <= offset <= 0x07:
             # Write to this core's outgoing data slot
@@ -2470,7 +2481,7 @@ class MailboxDevice(Device):
 # ---------------------------------------------------------------------------
 #  Hardware Spinlocks
 # ---------------------------------------------------------------------------
-# 8 test-and-set spinlocks with owner tracking.
+# 16 test-and-set spinlocks with owner tracking.
 # Read SLOCK_ACQUIRE: returns 0 if acquired, 1 if busy (atomic test-and-set).
 # Write SLOCK_RELEASE: releases the lock (only if caller is owner).
 #
@@ -2479,25 +2490,38 @@ class MailboxDevice(Device):
 #   +0  ACQUIRE (R) — read returns 0=got it, 1=busy
 #   +1  RELEASE (W) — write anything to release
 
-NUM_SPINLOCKS = 8
+NUM_SPINLOCKS = 16
+
 
 class SpinlockDevice(Device):
     """Hardware spinlocks with test-and-set semantics."""
 
-    def __init__(self, num_locks: int = NUM_SPINLOCKS):
+    def __init__(self, num_cores: int, num_locks: int = NUM_SPINLOCKS):
         super().__init__("Spinlock", SPINLOCK_BASE, num_locks * 4)
+        self.num_cores = num_cores
         self.num_locks = num_locks
         # locked[i] = True if lock i is held
         self.locked: list[bool] = [False] * num_locks
         # owner[i] = core_id that holds lock i (-1 if free)
         self.owner: list[int] = [-1] * num_locks
-    def read8_for_requester(self, requester_id: int, offset: int) -> int:
+
+    def read8_for_requester(
+        self,
+        requester_id: int,
+        offset: int,
+        *,
+        requester_valid: bool = True,
+    ) -> int:
         lock_idx = offset // 4
         sub = offset % 4
-        if lock_idx >= self.num_locks:
+        if not 0 <= lock_idx < self.num_locks:
             return 0xFF
-        requester_id &= 0xFF
         if sub == 0:  # ACQUIRE (test-and-set)
+            if (
+                not requester_valid
+                or not 0 <= requester_id < self.num_cores
+            ):
+                return 1
             if not self.locked[lock_idx]:
                 # Free — acquire it
                 self.locked[lock_idx] = True
@@ -2515,12 +2539,17 @@ class SpinlockDevice(Device):
         requester_id: int,
         offset: int,
         value: int,
+        *,
+        requester_valid: bool = True,
     ):
         lock_idx = offset // 4
         sub = offset % 4
-        if lock_idx >= self.num_locks:
+        if (
+            not 0 <= lock_idx < self.num_locks
+            or not requester_valid
+            or not 0 <= requester_id < self.num_cores
+        ):
             return
-        requester_id &= 0xFF
         if sub == 1:  # RELEASE
             if (
                 self.locked[lock_idx]
@@ -2545,7 +2574,7 @@ class SpinlockDevice(Device):
 # ---------------------------------------------------------------------------
 #  SHA-3 Accelerator — REMOVED (implemented in C++: accel/mp64_crypto.h)
 # ---------------------------------------------------------------------------
-# See CryptoSHA3 in mp64_crypto.h. MMIO range: 0x0780 – 0x07D0.
+# See CryptoSHA3 in mp64_crypto.h. MMIO range: 0x0780 – 0x07DF.
 
 
 
@@ -4228,27 +4257,16 @@ class PortBridgeCSR(Device):
 
 
 # ---------------------------------------------------------------------------
-#  WOTS+ Chain Accelerator — hardware-speed WOTS+ hash chains
+#  Retired WOTS+ prototype aperture
 # ---------------------------------------------------------------------------
-# Register map (offsets from WOTS_BASE = 0x08A0):
-#   +0x00  WOTS_SEED   (W, 32b)  RAM address of PK.seed (16 bytes)
-#   +0x04  WOTS_ADRS   (W, 32b)  RAM address of ADRS (32 bytes)
-#   +0x08  WOTS_INPUT  (W, 32b)  RAM address of chain input (16 bytes)
-#   +0x0C  WOTS_STEPS  (W, 8b)   Chain length (1–15)
-#   +0x0D  WOTS_START  (W, 8b)   Start step index (0–14)
-#   +0x0E  WOTS_GO     (W, 8b)   Trigger chain / WOTS_STATUS (R) 0/1/2
-#   +0x0F  WOTS_CYCLES (R, 8b)   Cycle count of last chain (÷64)
-#   +0x10  WOTS_DOUT   (R, 16B)  Result bytes [0..15]
-
-import hashlib as _hashlib_wots  # local alias to avoid shadowing
+# Checkpoint 2 keeps the reserved 0x8A0..0x8BF decode inert while the old
+# three-pointer/hashlib implementation is replaced by the checked context,
+# DMA, and shared-round-service design in checkpoint 3.  Its capability bit
+# is clear, GO cannot claim SHA3 or produce output, and the BIOS exposes no
+# WOTS word.
 
 class WotsChainAccel(Device):
-    """WOTS+ chain accelerator — computes multi-step SHAKE-256 chains
-    in hardware, eliminating per-step CPU/Forth dispatch overhead.
-
-    Uses DMA reads to fetch context from RAM and iterates SHAKE-256
-    internally.  Result is readable from MMIO DOUT registers.
-    """
+    """Inert reservation for the retired WOTS prototype aperture."""
 
     def __init__(self):
         super().__init__("WotsChain", WOTS_BASE, 0x20)
@@ -4260,44 +4278,12 @@ class WotsChainAccel(Device):
         self._status: int = 0     # 0=idle, 1=busy, 2=done
         self._last_cycles: int = 0
         self._dout = bytearray(16)
-        self._mem: bytearray | None = None  # set by system.py
-
-    def attach_mem(self, mem: bytearray):
-        """Give the WOTS accelerator direct read access to main RAM."""
-        self._mem = mem
 
     def _execute(self):
-        """Run the WOTS+ chain (synchronous in emulator)."""
-        if self._mem is None or self._steps == 0 or self._steps > 15:
-            self._status = 0
-            return
-
-        self._status = 1
-        mem = self._mem
-        ms = len(mem)
-
-        # DMA read: seed (16B), adrs (32B), input (16B)
-        seed = bytes(mem[(self._seed_addr + i) % ms] for i in range(16))
-        adrs = bytearray(mem[(self._adrs_addr + i) % ms] for i in range(32))
-        buf = bytearray(mem[(self._input_addr + i) % ms] for i in range(16))
-
-        # Iterate chain
-        for s in range(self._steps):
-            step_idx = self._start + s
-
-            # Mutate ADRS hash field (bytes 28..31, big-endian)
-            adrs[28] = 0
-            adrs[29] = 0
-            adrs[30] = (step_idx >> 8) & 0xFF
-            adrs[31] = step_idx & 0xFF
-
-            # SHAKE-256: absorb seed ‖ adrs ‖ buf, squeeze 16 bytes
-            h = _hashlib_wots.shake_256(seed + bytes(adrs) + bytes(buf))
-            buf = bytearray(h.digest(16))
-
-        self._dout = buf
-        self._last_cycles = 64 + self._steps * 530
-        self._status = 2
+        """Keep the unadvertised prototype inert until checkpoint 3."""
+        self._status = 0
+        self._last_cycles = 0
+        self._dout[:] = bytes(len(self._dout))
 
     def read8(self, offset: int) -> int:
         if offset == 0x0E:
@@ -4339,7 +4325,7 @@ class WotsChainAccel(Device):
         elif offset == 0x0D:
             self._start = value & 0x0F
         elif offset == 0x0E:
-            # GO — execute chain immediately (synchronous in emulator)
+            # The obsolete three-pointer GO is deliberately unavailable.
             self._execute()
 
 
@@ -4411,14 +4397,24 @@ class DeviceBus:
             raise BusError(mmio_offset, write=write)
         return dev, local
 
-    def read8(self, mmio_offset: int, *, requester_id: int = 0) -> int:
+    def read8(
+        self,
+        mmio_offset: int,
+        *,
+        requester_id: int = 0,
+        requester_valid: bool = True,
+    ) -> int:
         dev, local = self.find_device(mmio_offset)
         if dev:
             requester_read = getattr(
                 dev, "read8_for_requester", None
             )
             if requester_read is not None:
-                return requester_read(requester_id, local)
+                return requester_read(
+                    requester_id,
+                    local,
+                    requester_valid=requester_valid,
+                )
             return dev.read8(local)
         raise BusError(mmio_offset, write=False)
 
@@ -4428,6 +4424,7 @@ class DeviceBus:
         value: int,
         *,
         requester_id: int = 0,
+        requester_valid: bool = True,
     ):
         dev, local = self.find_device(mmio_offset)
         if dev:
@@ -4435,7 +4432,12 @@ class DeviceBus:
                 dev, "write8_for_requester", None
             )
             if requester_write is not None:
-                requester_write(requester_id, local, value)
+                requester_write(
+                    requester_id,
+                    local,
+                    value,
+                    requester_valid=requester_valid,
+                )
                 return
             dev.write8(local, value)
             return

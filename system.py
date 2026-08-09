@@ -63,6 +63,8 @@ from devices import (
     PortBridgeCSR,
     WotsChainAccel,
     CRYPTO_CAP_CRC_REFLECT_RAW,
+    CRYPTO_CAP_SHA3_STREAM,
+    CRYPTO_CAP_KECCAK_F1600,
 )
 
 # Public system stepping must honor deliberate per-core step overrides, while
@@ -1303,7 +1305,11 @@ class MegapadSystem:
             ext_mem_size=ext_mem_size,
             vram_base=self.vram_base,
             vram_size=vram_size,
-            crypto_caps=CRYPTO_CAP_CRC_REFLECT_RAW,
+            crypto_caps=(
+                CRYPTO_CAP_CRC_REFLECT_RAW
+                | CRYPTO_CAP_SHA3_STREAM
+                | CRYPTO_CAP_KECCAK_F1600
+            ),
             num_bus_ports=(
                 self.num_full_cores + self.num_clusters + 2
             ),
@@ -1315,7 +1321,7 @@ class MegapadSystem:
             send=self._native_system.ipi_send,
             acknowledge=self._native_system.ipi_ack,
         )
-        self.spinlock = SpinlockDevice()
+        self.spinlock = SpinlockDevice(num_cores=self.num_cores)
         self.ntt = NTTDevice()
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy
@@ -1369,10 +1375,10 @@ class MegapadSystem:
         for cpu in self.cores:
             self.port_bridge.attach_cpu(cpu)
 
-        # Python WOTS+ remains the micro-core bus device. Full-core native
-        # execution and continuations use SystemState's shared crypto block.
+        # Keep the retired WOTS aperture decoded for Python micro-core
+        # fallback.  Both this object and SystemState's native reservation are
+        # inert until the checkpoint-3 context/DMA service replaces them.
         self.wots = WotsChainAccel()
-        self.wots.attach_mem(self._shared_mem)
         self.bus.register(self.wots)
         self.bus.set_tick_driver(self.advance_system_cycles)
 
@@ -2069,6 +2075,7 @@ class MegapadSystem:
                         native_state._native_singleton_preflight(
                             offset,
                             width,
+                            write,
                         )
                     )
                     if native_status > 0:
@@ -2094,6 +2101,15 @@ class MegapadSystem:
                     # Every native core and its Python continuations must
                     # observe the same SystemState-owned SoC singleton.
                     if native_state is not None:
+                        native_status = (
+                            native_state._native_singleton_preflight(
+                                offset,
+                                1,
+                                False,
+                            )
+                        )
+                        if native_status == 0:
+                            raise BusError(offset, write=False)
                         native_value = (
                             native_state._native_singleton_read8(offset)
                         )
@@ -2120,6 +2136,15 @@ class MegapadSystem:
                 offset = addr - MMIO_START
                 try:
                     if native_state is not None:
+                        native_status = (
+                            native_state._native_singleton_preflight(
+                                offset,
+                                1,
+                                True,
+                            )
+                        )
+                        if native_status == 0:
+                            raise BusError(offset, write=True)
                         if native_state._native_singleton_write8(
                             offset,
                             val & 0xFF,

@@ -45,6 +45,8 @@ module mp64_cluster #(
     output wire [63:0] bus_wdata,
     output wire        bus_wen,
     output wire [1:0]  bus_size,
+    output wire        bus_requester_valid,
+    output wire [MP64_CORE_ID_BITS-1:0] bus_requester_id,
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
 
@@ -595,6 +597,13 @@ module mp64_cluster #(
     assign bus_wdata = arb_busy ? arb_bus_wdata : sha_bus_wdata;
     assign bus_wen   = arb_busy ? arb_bus_wen   : sha_bus_wen;
     assign bus_size  = arb_busy ? arb_bus_size  : sha_bus_size;
+    // Only an externally issued microcore transaction carries CPU identity.
+    // Cluster-internal SHA reads use the same physical port but are not an
+    // architectural core requester and therefore remain requester-invalid.
+    assign bus_requester_valid = arb_busy && arb_bus_valid;
+    assign bus_requester_id = bus_requester_valid
+        ? CLUSTER_ID_BASE + arb_grant
+        : {MP64_CORE_ID_BITS{1'b0}};
 
     // Round-robin next selection (no modulo — uses wrap-around subtraction)
     reg [ARB_BITS-1:0] arb_next;

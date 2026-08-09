@@ -25,6 +25,7 @@ module tb_bus_arbiter;
     // ========================================================================
     localparam N_PORTS   = 4;
     localparam PORT_BITS = 3;
+    localparam REQUESTER_ID_BITS = 8;
     localparam CLK_HALF  = 5;  // 100 MHz
 
     // ========================================================================
@@ -38,6 +39,8 @@ module tb_bus_arbiter;
     reg  [N_PORTS-1:0]      cpu_wen;
     reg  [N_PORTS*2-1:0]    cpu_size;
     reg  [N_PORTS-1:0]      cpu_port_io;
+    reg  [N_PORTS-1:0]      cpu_requester_valid;
+    reg  [N_PORTS*REQUESTER_ID_BITS-1:0] cpu_requester_id;
     wire [N_PORTS*64-1:0]   cpu_rdata;
     wire [N_PORTS-1:0]      cpu_ready;
     wire [N_PORTS-1:0]      bus_err;
@@ -55,6 +58,8 @@ module tb_bus_arbiter;
     wire [63:0] mmio_wdata;
     wire        mmio_wen;
     wire [1:0]  mmio_size;
+    wire        mmio_requester_valid;
+    wire [REQUESTER_ID_BITS-1:0] mmio_requester_id;
     reg  [63:0] mmio_rdata;
     reg         mmio_ack;
 
@@ -96,7 +101,8 @@ module tb_bus_arbiter;
     // ========================================================================
     mp64_bus #(
         .N_PORTS   (N_PORTS),
-        .PORT_BITS (PORT_BITS)
+        .PORT_BITS (PORT_BITS),
+        .REQUESTER_ID_BITS(REQUESTER_ID_BITS)
     ) dut (
         .clk           (clk),
         .rst_n         (rst_n),
@@ -106,6 +112,8 @@ module tb_bus_arbiter;
         .cpu_wen       (cpu_wen),
         .cpu_size      (cpu_size),
         .cpu_port_io   (cpu_port_io),
+        .cpu_requester_valid(cpu_requester_valid),
+        .cpu_requester_id(cpu_requester_id),
         .cpu_rdata     (cpu_rdata),
         .cpu_ready     (cpu_ready),
         .mem_req       (mem_req),
@@ -120,6 +128,8 @@ module tb_bus_arbiter;
         .mmio_wdata    (mmio_wdata),
         .mmio_wen      (mmio_wen),
         .mmio_size     (mmio_size),
+        .mmio_requester_valid(mmio_requester_valid),
+        .mmio_requester_id(mmio_requester_id),
         .mmio_rdata    (mmio_rdata),
         .mmio_ack      (mmio_ack),
         .qos_csr_wen   (qos_csr_wen),
@@ -142,6 +152,9 @@ module tb_bus_arbiter;
             cpu_wen       <= {N_PORTS{1'b0}};
             cpu_size      <= {(N_PORTS*2){1'b0}};
             cpu_port_io   <= {N_PORTS{1'b0}};
+            cpu_requester_valid <= {N_PORTS{1'b0}};
+            cpu_requester_id <=
+                {(N_PORTS*REQUESTER_ID_BITS){1'b0}};
             mem_rdata     <= 64'd0;
             mem_ack       <= 1'b0;
             mmio_rdata    <= 64'd0;
@@ -170,6 +183,9 @@ module tb_bus_arbiter;
             cpu_wdata[p*64 +: 64] <= wdata;
             cpu_wen[p]         <= wen;
             cpu_size[p*2 +: 2] <= sz;
+            cpu_requester_valid[p] <= 1'b1;
+            cpu_requester_id[
+                p*REQUESTER_ID_BITS +: REQUESTER_ID_BITS] <= p;
         end
     endtask
 
@@ -250,6 +266,8 @@ module tb_bus_arbiter;
         @(posedge clk); #1;
         check("mem_req clear after reset",  mem_req  == 1'b0);
         check("mmio_req clear after reset", mmio_req == 1'b0);
+        check("requester valid clear after reset",
+              mmio_requester_valid == 1'b0);
         check("cpu_ready clear after reset",cpu_ready == {N_PORTS{1'b0}});
 
         // ---- Test 2: Single port memory read ----
@@ -321,6 +339,7 @@ module tb_bus_arbiter;
         @(negedge clk);
         // MMIO address: upper 32 bits = 0xFFFF_FF00, lower 12 bits = UART
         drive_req(0, 64'hFFFF_FF00_0000_0000, 64'd0, 1'b0, 2'd3);
+        cpu_requester_id[0 +: REQUESTER_ID_BITS] <= 8'd13;
 
         begin : blk_t4
             integer wd;
@@ -333,6 +352,20 @@ module tb_bus_arbiter;
         check("mmio_req asserted",       mmio_req  == 1'b1);
         check("mmio_addr is UART",       mmio_addr == 12'h000);
         check("mmio_wen is 0 for read",  mmio_wen  == 1'b0);
+        check("mmio requester is valid", mmio_requester_valid == 1'b1);
+        check("mmio requester ID captured", mmio_requester_id == 8'd13);
+
+        // Source-side metadata may change once the arbiter has captured the
+        // request. The peripheral-facing identity must remain stable until
+        // the delayed response completes.
+        @(negedge clk);
+        cpu_requester_valid[0] <= 1'b0;
+        cpu_requester_id[0 +: REQUESTER_ID_BITS] <= 8'd55;
+        repeat (3) @(posedge clk); #1;
+        check("delayed requester valid remains captured",
+              mmio_requester_valid == 1'b1);
+        check("delayed requester ID remains captured",
+              mmio_requester_id == 8'd13);
 
         @(negedge clk);
         mmio_rdata <= 64'h0000_0000_0000_0055;  // UART RX = 'U'
@@ -342,9 +375,40 @@ module tb_bus_arbiter;
 
         wait_ready(0);
         check("mmio rdata correct", cpu_rdata[0*64 +: 64] == 64'h0000_0000_0000_0055);
+        check("requester valid clears after response",
+              mmio_requester_valid == 1'b0);
 
         @(negedge clk);
         clear_req(0);
+        @(negedge clk);
+
+        // A DMA/internal-style request retains an explicit invalid bit even
+        // though the physical port still has an arbitrary ID bus value.
+        drive_req(3, 64'hFFFF_FF00_0000_0600, 64'd0, 1'b0, 2'd0);
+        cpu_requester_valid[3] <= 1'b0;
+        cpu_requester_id[
+            3*REQUESTER_ID_BITS +: REQUESTER_ID_BITS] <= 8'hA5;
+        begin : blk_t4_invalid
+            integer wd;
+            wd = 0;
+            while (!mmio_req && wd < 20) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("invalid requester transaction reaches MMIO", mmio_req == 1'b1);
+        check("invalid requester bit remains clear",
+              mmio_requester_valid == 1'b0);
+        check("invalid requester ID bus is captured exactly",
+              mmio_requester_id == 8'hA5);
+        @(negedge clk);
+        mmio_rdata <= 64'd1;
+        mmio_ack <= 1'b1;
+        @(negedge clk);
+        mmio_ack <= 1'b0;
+        wait_ready(3);
+        @(negedge clk);
+        clear_req(3);
         @(negedge clk);
 
         // ---- Test 5: Round-robin (two ports) ----

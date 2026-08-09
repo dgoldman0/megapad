@@ -14,6 +14,7 @@
 //   9. Re-entrant spinlock (same core re-acquires → OK)
 //  10. Multiple spinlocks independence
 //  11. Spinlock owner tracking
+//  12. Expanded-bank global owners and invalid requester rejection
 //
 
 `timescale 1ns / 1ps
@@ -32,10 +33,14 @@ module tb_mailbox;
     reg         wen;
     wire [7:0]  rdata;
     wire        ack;
+    reg         requester_valid;
     reg  [MP64_CORE_ID_BITS-1:0] requester_id;
     wire [MP64_NUM_CORES_DEFAULT-1:0]     ipi_out;
 
-    mp64_mailbox u_mbox (
+    mp64_mailbox #(
+        .N_CORES(MP64_NUM_CORES_DEFAULT),
+        .N_GLOBAL_CORES(16)
+    ) u_mbox (
         .clk          (clk),
         .rst_n        (rst_n),
         .req          (req),
@@ -44,8 +49,13 @@ module tb_mailbox;
         .wen          (wen),
         .rdata        (rdata),
         .ack          (ack),
+        .requester_valid(requester_valid),
         .requester_id (requester_id),
-        .ipi_out      (ipi_out)
+        .ipi_out      (ipi_out),
+        .csr_ipi_wen  ({MP64_NUM_CORES_DEFAULT{1'b0}}),
+        .csr_ipi_addr ({MP64_NUM_CORES_DEFAULT*8{1'b0}}),
+        .csr_ipi_wdata({MP64_NUM_CORES_DEFAULT*64{1'b0}}),
+        .csr_ipi_rdata()
     );
 
     // ========================================================================
@@ -61,6 +71,7 @@ module tb_mailbox;
         @(posedge clk);
         req          <= 1'b1;
         wen          <= 1'b1;
+        requester_valid <= 1'b1;
         requester_id <= core;
         addr         <= offset;
         wdata        <= data;
@@ -78,6 +89,7 @@ module tb_mailbox;
         @(posedge clk);
         req          <= 1'b1;
         wen          <= 1'b0;
+        requester_valid <= 1'b1;
         requester_id <= core;
         addr         <= offset;
         @(posedge clk);
@@ -146,6 +158,7 @@ module tb_mailbox;
         fail_cnt = 0;
         req  = 0;
         wen  = 0;
+        requester_valid = 1'b1;
         requester_id = 2'd0;
         rst_n = 0;
         repeat (5) @(posedge clk);
@@ -366,6 +379,77 @@ module tb_mailbox;
         mbox_write(2'd3, {4'h6, 8'h15}, 8'h00);
         @(posedge clk);
         check_true(u_mbox.slock_locked[5] == 1'b0, "lock5 released by owner");
+
+        // ================================================================
+        // TEST 12 — Expanded global ownership and invalid requesters
+        // ================================================================
+        $display("\n=== TEST 12: Global spinlock owners ===");
+
+        // A microcore global ID can own lock 8 even though the mailbox has
+        // only four full-core slots and IPI outputs.
+        mbox_read(8'd15, 12'h620, rd);
+        check8(rd, 8'h00, "lock8 acquired by global core15");
+        @(posedge clk);
+        check_true(u_mbox.slock_owner[8] == 8'd15,
+                   "lock8 global owner=15");
+        check_true(u_mbox.slock_held[8][15] == 1'b1,
+                   "lock8 global owner bit set");
+        mbox_read(8'd0, 12'h620, rd);
+        check8(rd, 8'h01, "lock8 busy for full core0");
+
+        // The same global ID is outside the full-core mailbox domain and
+        // therefore cannot alias or mutate a full-core message slot.
+        mbox_write(8'd15, 12'h500, 8'hCC);
+        mbox_read(8'd0, 12'h500, rd);
+        check8(rd, 8'h42, "microcore cannot mutate full mailbox slot");
+
+        // DMA/internal metadata is requester-invalid. It receives an
+        // acknowledged busy acquire and cannot release an existing owner.
+        @(posedge clk);
+        req             <= 1'b1;
+        wen             <= 1'b0;
+        requester_valid <= 1'b0;
+        requester_id    <= 8'd0;
+        addr            <= 12'h624;
+        @(posedge clk);
+        rd = rdata;
+        req <= 1'b0;
+        check8(rd, 8'h01, "invalid requester acquire reports busy");
+        @(posedge clk);
+        check_true(u_mbox.slock_locked[9] == 1'b0,
+                   "invalid requester cannot acquire lock9");
+
+        @(posedge clk);
+        req             <= 1'b1;
+        wen             <= 1'b1;
+        requester_valid <= 1'b0;
+        requester_id    <= 8'd15;
+        addr            <= 12'h621;
+        wdata           <= 8'h00;
+        @(posedge clk);
+        req <= 1'b0;
+        wen <= 1'b0;
+        @(posedge clk);
+        check_true(u_mbox.slock_locked[8] == 1'b1,
+                   "invalid requester cannot release lock8");
+
+        // The exact upper bound is also rejected without mutation.
+        requester_valid = 1'b1;
+        mbox_read(8'd16, 12'h624, rd);
+        check8(rd, 8'h01, "out-of-range requester acquire reports busy");
+        @(posedge clk);
+        check_true(u_mbox.slock_locked[9] == 1'b0,
+                   "out-of-range requester cannot acquire lock9");
+
+        // The expanded address decoder reaches the final lock without
+        // aliasing the original lower eight.
+        mbox_write(8'd15, 12'h621, 8'h00);
+        mbox_read(8'd15, 12'h63C, rd);
+        check8(rd, 8'h00, "lock15 acquired by global core15");
+        @(posedge clk);
+        check_true(u_mbox.slock_owner[15] == 8'd15,
+                   "lock15 owner=15");
+        mbox_write(8'd15, 12'h63D, 8'h00);
 
         // ================================================================
         // SUMMARY

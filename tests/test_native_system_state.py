@@ -1114,7 +1114,7 @@ def test_system_remaining_native_peripherals_are_singletons() -> None:
     assert core0.crypto_read8(SHA3_BASE + 0x02) == 3
     core1.crypto_write8(WOTS_BASE + 0x0C, 1)
     core1.crypto_write8(WOTS_BASE + 0x0E, 1)
-    assert core0.crypto_wots_status() == 2
+    assert core0.crypto_wots_status() == 0
 
     core1.disable_trng()
     assert not core0.trng_enabled()
@@ -1300,7 +1300,7 @@ def test_standalone_remaining_native_peripherals_remain_private() -> None:
         pytest.param(NIC_BASE + 0x02, 0xA5, id="nic"),
         pytest.param(AES_BASE + 0x3A, 0x01, id="crypto"),
         pytest.param(TRNG_BASE + 0x10, 0x01, id="trng"),
-        pytest.param(WOTS_BASE + 0x0E, 0x02, id="wots"),
+        pytest.param(WOTS_BASE + 0x0E, 0x00, id="retired-wots"),
     ),
 )
 def test_full_core_python_fallback_reads_system_native_singletons(

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <limits>
 
 // =========================================================================
 //  AES primitives
@@ -594,146 +595,767 @@ static void keccak_f1600(uint64_t state[25]) {
 
         // ι
         state[0] ^= KECCAK_RC[round];
+
+        aes_secure_clear(C, sizeof(C));
+        aes_secure_clear(D, sizeof(D));
+        aes_secure_clear(B, sizeof(B));
     }
 }
 
 struct CryptoSHA3 {
-    uint64_t state[25];
-    uint8_t buf[168];       // max rate = 168 (SHAKE128)
-    int buf_len;
-    uint8_t mode;           // 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256
-    uint8_t status;
-    uint8_t digest[64];     // up to 64 bytes DOUT
+    enum Phase : uint8_t {
+        IDLE = 0,
+        BUSY = 1,
+        DONE = 2,
+        ERROR = 3,
+    };
 
-    // Streaming squeeze state
-    uint8_t squeeze_buf[4096];  // 4K squeeze buffer for streaming
-    int squeeze_buf_len;
-    int stream_pos;
+    enum Owner : uint8_t {
+        OWNER_NONE = 0,
+        OWNER_SPONGE = 1,
+        OWNER_RAW = 2,
+        OWNER_WOTS = 3,
+    };
+
+    enum ErrorCode : uint8_t {
+        ERR_NONE = 0,
+        ERR_INVALID_COMMAND = 1,
+        ERR_CONFLICT = 2,
+        ERR_INVALID_MODE = 3,
+        ERR_INVALID_STATE_INDEX = 4,
+        ERR_INTERNAL = 5,
+        ERR_UNAVAILABLE = 6,
+    };
+
+    enum PendingOperation : uint8_t {
+        OP_NONE = 0,
+        OP_ABSORB = 1,
+        OP_FINAL = 2,
+        OP_NEXT = 3,
+        OP_RAW = 4,
+        OP_CLEAR = 5,
+    };
+
+    enum WideOperation : uint8_t {
+        WIDE_NONE = 0,
+        WIDE_DOUT_READ = 1,
+        WIDE_STATE_READ = 2,
+        WIDE_STATE_WRITE = 3,
+    };
+
+    uint64_t state[25];
+    uint8_t buf[168];       // Maximum selected rate (SHAKE128).
+    uint8_t digest[64];     // Architecturally visible DOUT window.
+    uint16_t buf_len;
+    uint16_t squeeze_cursor;
+    uint8_t state_index;
+    uint8_t mode;           // 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256
+    uint8_t phase;
+    uint8_t owner;
+    uint8_t error;
+
+    PendingOperation pending;
+    uint8_t pending_cycles;
+    uint8_t held_din[168];
+    uint16_t held_din_len;
+    bool stream_available;
+    bool raw_available;
+
+    // A qword transaction is preflighted once and then may be decomposed by
+    // the fallback path into byte callbacks.  Reads use a stable snapshot;
+    // STATE_DATA writes publish the complete lane only on the eighth byte.
+    WideOperation wide_operation;
+    uint8_t wide_base;
+    uint8_t wide_position;
+    uint8_t wide_bytes[8];
+    uint8_t wide_error;
+    bool wide_preserve;
+
+    // Focused qualification seams.  They are never set by guest MMIO.
+    bool fail_next_operation;
 
     static constexpr int RATES[4] = {136, 72, 168, 136};
     static constexpr int OUTSZ[4] = {32, 64, 0, 0};
     static constexpr uint8_t DSEP[4] = {0x06, 0x06, 0x1F, 0x1F};
+    static constexpr uint8_t PERMUTATION_CYCLES = 24;
+    static constexpr uint8_t WINDOW_CYCLES = 1;
+    static constexpr uint8_t CLEAR_CYCLES = 1;
 
     int rate() const { return RATES[mode]; }
 
+    uint8_t packed_status() const {
+        return static_cast<uint8_t>((owner << 2) | phase);
+    }
+
+    bool mmio_busy_or_wots() const {
+        return phase == BUSY || owner == OWNER_WOTS;
+    }
+
+    void cancel_wide_access() {
+        wide_operation = WIDE_NONE;
+        wide_base = 0;
+        wide_position = 0;
+        wide_error = ERR_NONE;
+        wide_preserve = false;
+        aes_secure_clear(wide_bytes, sizeof(wide_bytes));
+    }
+
+    void wipe_transaction(bool preserve_mode) {
+        const uint8_t selected_mode = mode;
+        aes_secure_clear(state, sizeof(state));
+        aes_secure_clear(buf, sizeof(buf));
+        aes_secure_clear(held_din, sizeof(held_din));
+        aes_secure_clear(digest, sizeof(digest));
+        buf_len = 0;
+        squeeze_cursor = 0;
+        state_index = 0;
+        phase = IDLE;
+        owner = OWNER_NONE;
+        error = ERR_NONE;
+        pending = OP_NONE;
+        pending_cycles = 0;
+        held_din_len = 0;
+        fail_next_operation = false;
+        cancel_wide_access();
+        mode = preserve_mode ? selected_mode : 0;
+    }
+
     void reset() {
-        std::memset(state, 0, sizeof(state));
-        buf_len = 0;
-        status = 0;
-        std::memset(digest, 0, 64);
-        squeeze_buf_len = 0;
-        stream_pos = 0;
+        stream_available = true;
+        raw_available = true;
+        fail_next_operation = false;
+        mode = 0;
+        wipe_transaction(false);
     }
 
-    void absorb_block() {
-        int r = rate();
-        for (int i = 0; i < r / 8; i++) {
+    void set_features(bool stream, bool raw) {
+        stream_available = stream;
+        raw_available = raw;
+    }
+
+    void record_error(uint8_t code) {
+        error = code;
+        phase = ERROR;
+    }
+
+    void reject_conflict() {
+        if (!mmio_busy_or_wots())
+            record_error(ERR_CONFLICT);
+    }
+
+    void begin_operation(PendingOperation operation, uint8_t cycles) {
+        pending = operation;
+        pending_cycles = std::max<uint8_t>(cycles, 1);
+        phase = BUSY;
+        error = ERR_NONE;
+        cancel_wide_access();
+    }
+
+    void absorb_buffer() {
+        const int selected_rate = rate();
+        for (int i = 0; i < selected_rate / 8; i++) {
             uint64_t lane = 0;
             for (int j = 0; j < 8; j++)
-                lane |= (uint64_t)buf[i*8 + j] << (j*8);
+                lane |= static_cast<uint64_t>(buf[i * 8 + j]) << (j * 8);
             state[i] ^= lane;
         }
         keccak_f1600(state);
+        aes_secure_clear(buf, sizeof(buf));
         buf_len = 0;
     }
 
-    void extract_rate(uint8_t* out) {
-        int r = rate();
-        for (int i = 0; i < r / 8; i++) {
-            for (int j = 0; j < 8; j++)
-                out[i*8 + j] = (state[i] >> (j*8)) & 0xFF;
-        }
-    }
-
-    void finalize() {
-        int r = rate();
-        uint8_t pad[168];
-        std::memset(pad, 0, r);
-        std::memcpy(pad, buf, buf_len);
-        pad[buf_len] = DSEP[mode];
-        pad[r - 1] |= 0x80;
-
-        for (int i = 0; i < r / 8; i++) {
-            uint64_t lane = 0;
-            for (int j = 0; j < 8; j++)
-                lane |= (uint64_t)pad[i*8 + j] << (j*8);
-            state[i] ^= lane;
-        }
-        keccak_f1600(state);
-
-        uint8_t out[168];
-        extract_rate(out);
-
-        int outsz = OUTSZ[mode];
-        if (outsz > 0) {
-            std::memcpy(digest, out, outsz);
-        } else {
-            std::memcpy(digest, out, std::min(r, 64));
-        }
-
-        // Init squeeze buffer for streaming
-        squeeze_buf_len = std::min(r, (int)sizeof(squeeze_buf));
-        std::memcpy(squeeze_buf, out, squeeze_buf_len);
-        stream_pos = 0;
-        status = 2;
-    }
-
-    void squeeze() {
-        keccak_f1600(state);
-        uint8_t out[168];
-        extract_rate(out);
-        int r = rate();
-        std::memcpy(digest, out, std::min(r, 64));
-        status = 2;
-    }
-
-    void squeeze_next_stream() {
-        stream_pos += 32;
-        int r = rate();
-        while (stream_pos + 64 > squeeze_buf_len) {
-            // Need more data, apply keccak and extend buffer
-            keccak_f1600(state);
-            uint8_t out[168];
-            extract_rate(out);
-            int avail = std::min(r, (int)(sizeof(squeeze_buf) - squeeze_buf_len));
-            if (avail > 0) {
-                std::memcpy(squeeze_buf + squeeze_buf_len, out, avail);
-                squeeze_buf_len += avail;
+    void extract_rate(uint8_t* output) const {
+        const int selected_rate = rate();
+        for (int i = 0; i < selected_rate / 8; i++) {
+            for (int j = 0; j < 8; j++) {
+                output[i * 8 + j] = static_cast<uint8_t>(
+                    state[i] >> (j * 8));
             }
         }
-        // Copy 64 bytes from stream_pos into digest
-        int copy = std::min(64, squeeze_buf_len - stream_pos);
-        if (copy > 0)
-            std::memcpy(digest, squeeze_buf + stream_pos, copy);
-        if (copy < 64)
-            std::memset(digest + copy, 0, 64 - copy);
-        status = 2;
     }
 
-    uint8_t read8(uint32_t offset) const {
-        if (offset == 0x01) return status;
-        if (offset == 0x02) return mode;
-        if (offset >= 0x10 && offset < 0x50) {
-            int idx = offset - 0x10;
-            if (idx < 64) return digest[idx];
+    void complete_final() {
+        const int selected_rate = rate();
+        uint8_t padded[168]{};
+        std::memcpy(padded, buf, buf_len);
+        padded[buf_len] ^= DSEP[mode];
+        padded[selected_rate - 1] ^= 0x80;
+        for (int i = 0; i < selected_rate / 8; i++) {
+            uint64_t lane = 0;
+            for (int j = 0; j < 8; j++) {
+                lane |= static_cast<uint64_t>(padded[i * 8 + j]) <<
+                    (j * 8);
+            }
+            state[i] ^= lane;
         }
+        keccak_f1600(state);
+
+        uint8_t output[168]{};
+        extract_rate(output);
+        aes_secure_clear(digest, sizeof(digest));
+        const int output_size = OUTSZ[mode] == 0 ? 64 : OUTSZ[mode];
+        std::memcpy(digest, output, output_size);
+        squeeze_cursor = 64;
+        aes_secure_clear(buf, sizeof(buf));
+        buf_len = 0;
+        aes_secure_clear(output, sizeof(output));
+        aes_secure_clear(padded, sizeof(padded));
+    }
+
+    void complete_next() {
+        const int selected_rate = rate();
+        uint8_t current_rate[168]{};
+        uint8_t next_window[64]{};
+        extract_rate(current_rate);
+
+        const int tail = std::min<int>(64, selected_rate - squeeze_cursor);
+        std::memcpy(next_window, current_rate + squeeze_cursor, tail);
+        squeeze_cursor = static_cast<uint16_t>(squeeze_cursor + tail);
+        if (tail != 64) {
+            keccak_f1600(state);
+            extract_rate(current_rate);
+            const int head = 64 - tail;
+            std::memcpy(next_window + tail, current_rate, head);
+            squeeze_cursor = static_cast<uint16_t>(head);
+        }
+        std::memcpy(digest, next_window, sizeof(digest));
+        aes_secure_clear(next_window, sizeof(next_window));
+        aes_secure_clear(current_rate, sizeof(current_rate));
+    }
+
+    void fail_operation() {
+        // An internal round failure cannot publish prior output or leave the
+        // shared service owned.  CTRL is configuration and remains selected.
+        const uint8_t selected_mode = mode;
+        wipe_transaction(true);
+        mode = selected_mode;
+        phase = ERROR;
+        error = ERR_INTERNAL;
+    }
+
+    void complete_operation() {
+        const PendingOperation operation = pending;
+        pending = OP_NONE;
+        pending_cycles = 0;
+
+        if (operation == OP_CLEAR) {
+            wipe_transaction(true);
+            return;
+        }
+        if (fail_next_operation) {
+            fail_next_operation = false;
+            fail_operation();
+            return;
+        }
+
+        switch (operation) {
+            case OP_ABSORB:
+                absorb_buffer();
+                phase = IDLE;
+                if (held_din_len != 0) {
+                    std::memcpy(buf, held_din, held_din_len);
+                    buf_len = held_din_len;
+                    aes_secure_clear(held_din, sizeof(held_din));
+                    held_din_len = 0;
+                    if (buf_len == rate())
+                        begin_operation(OP_ABSORB, PERMUTATION_CYCLES);
+                }
+                break;
+            case OP_FINAL:
+                complete_final();
+                phase = DONE;
+                break;
+            case OP_NEXT:
+                complete_next();
+                phase = DONE;
+                break;
+            case OP_RAW:
+                keccak_f1600(state);
+                phase = DONE;
+                break;
+            case OP_NONE:
+            case OP_CLEAR:
+                break;
+        }
+    }
+
+    void tick(uint64_t cycles) {
+        while (cycles != 0 && pending != OP_NONE) {
+            if (cycles < pending_cycles) {
+                pending_cycles = static_cast<uint8_t>(
+                    pending_cycles - cycles);
+                return;
+            }
+            cycles -= pending_cycles;
+            complete_operation();
+        }
+    }
+
+    uint8_t din_backpressure_cycles() const {
+        if (phase == BUSY && pending == OP_ABSORB)
+            return std::max<uint8_t>(pending_cycles, 1);
+        return 0;
+    }
+
+    void command_clear() {
+        if (owner == OWNER_WOTS)
+            return;
+        if (phase == BUSY) {
+            pending = OP_CLEAR;
+            pending_cycles = CLEAR_CYCLES;
+            aes_secure_clear(held_din, sizeof(held_din));
+            held_din_len = 0;
+            cancel_wide_access();
+            return;
+        }
+        wipe_transaction(true);
+    }
+
+    void command_init() {
+        if (owner != OWNER_NONE || phase != IDLE) {
+            reject_conflict();
+            return;
+        }
+        if (!stream_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        const uint8_t selected_mode = mode;
+        wipe_transaction(true);
+        mode = selected_mode;
+        owner = OWNER_SPONGE;
+    }
+
+    void command_final() {
+        if (owner == OWNER_RAW) {
+            reject_conflict();
+            return;
+        }
+        if (!stream_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (owner != OWNER_SPONGE || phase != IDLE) {
+            reject_conflict();
+            return;
+        }
+        begin_operation(OP_FINAL, PERMUTATION_CYCLES);
+    }
+
+    void command_next() {
+        if (owner == OWNER_RAW) {
+            reject_conflict();
+            return;
+        }
+        if (!stream_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (mode < 2) {
+            record_error(ERR_INVALID_MODE);
+            return;
+        }
+        if (owner != OWNER_SPONGE || phase != DONE) {
+            reject_conflict();
+            return;
+        }
+        const bool crosses_rate = squeeze_cursor + 64 > rate();
+        begin_operation(
+            OP_NEXT,
+            crosses_rate ? PERMUTATION_CYCLES : WINDOW_CYCLES);
+    }
+
+    void command_raw() {
+        if (owner == OWNER_SPONGE) {
+            reject_conflict();
+            return;
+        }
+        if (!raw_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (!((owner == OWNER_NONE && phase == IDLE) ||
+              (owner == OWNER_RAW && (phase == IDLE || phase == DONE)))) {
+            reject_conflict();
+            return;
+        }
+        if (owner == OWNER_NONE) {
+            owner = OWNER_RAW;
+            aes_secure_clear(state, sizeof(state));
+        }
+        begin_operation(OP_RAW, PERMUTATION_CYCLES);
+    }
+
+    void write_command(uint8_t value) {
+        if (owner == OWNER_WOTS)
+            return;
+        if (phase == BUSY) {
+            if (value == 7)
+                command_clear();
+            return;
+        }
+        if (value == 7) {
+            command_clear();
+            return;
+        }
+        switch (value) {
+            case 1: command_init(); break;
+            case 3: command_final(); break;
+            case 4: command_next(); break;
+            case 6: command_raw(); break;
+            default: record_error(ERR_INVALID_COMMAND); break;
+        }
+    }
+
+    void write_ctrl(uint8_t value) {
+        if (mmio_busy_or_wots())
+            return;
+        if (owner != OWNER_NONE || phase != IDLE) {
+            reject_conflict();
+            return;
+        }
+        if (!stream_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (value > 3) {
+            record_error(ERR_INVALID_MODE);
+            return;
+        }
+        mode = value;
+        error = ERR_NONE;
+    }
+
+    void write_din(uint8_t value) {
+        if (owner == OWNER_WOTS)
+            return;
+        if (phase == BUSY) {
+            // The real MMIO front end holds the next DIN request until the
+            // automatic permutation completes. Native scheduling can have
+            // already-issued callbacks in flight, so retain every such byte
+            // that can arrive within one rate rather than acknowledge and
+            // discard any of them.
+            if (pending == OP_ABSORB && held_din_len < rate())
+                held_din[held_din_len++] = value;
+            return;
+        }
+        if (owner == OWNER_RAW) {
+            reject_conflict();
+            return;
+        }
+        if (!stream_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (owner != OWNER_SPONGE || phase != IDLE) {
+            reject_conflict();
+            return;
+        }
+        buf[buf_len++] = value;
+        if (buf_len == rate())
+            begin_operation(OP_ABSORB, PERMUTATION_CYCLES);
+    }
+
+    bool state_index_context_legal() const {
+        return (owner == OWNER_NONE && phase == IDLE) ||
+               (owner == OWNER_RAW && (phase == IDLE || phase == DONE));
+    }
+
+    void write_state_index(uint8_t value) {
+        if (mmio_busy_or_wots())
+            return;
+        if (owner == OWNER_SPONGE) {
+            reject_conflict();
+            return;
+        }
+        if (!raw_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (!state_index_context_legal()) {
+            reject_conflict();
+            return;
+        }
+        if (value > 24) {
+            record_error(ERR_INVALID_STATE_INDEX);
+            return;
+        }
+        state_index = value;
+    }
+
+    uint8_t read_state_index() {
+        if (mmio_busy_or_wots())
+            return 0;
+        if (owner == OWNER_SPONGE) {
+            reject_conflict();
+            return 0;
+        }
+        if (!raw_available)
+            return 0;
+        if (!state_index_context_legal()) {
+            reject_conflict();
+            return 0;
+        }
+        return state_index;
+    }
+
+    void commit_state_byte(uint8_t byte_index, uint8_t value) {
+        if (owner == OWNER_NONE) {
+            owner = OWNER_RAW;
+            phase = IDLE;
+            error = ERR_NONE;
+        }
+        const uint64_t mask = uint64_t{0xFF} << (byte_index * 8);
+        state[state_index] =
+            (state[state_index] & ~mask) |
+            (static_cast<uint64_t>(value) << (byte_index * 8));
+    }
+
+    void write_state_byte(uint8_t byte_index, uint8_t value) {
+        if (mmio_busy_or_wots())
+            return;
+        if (owner == OWNER_SPONGE) {
+            reject_conflict();
+            return;
+        }
+        if (!raw_available) {
+            record_error(ERR_UNAVAILABLE);
+            return;
+        }
+        if (!((owner == OWNER_NONE && phase == IDLE) ||
+              (owner == OWNER_RAW && phase == IDLE))) {
+            reject_conflict();
+            return;
+        }
+        commit_state_byte(byte_index, value);
+    }
+
+    uint8_t read_state_byte(uint8_t byte_index) {
+        if (mmio_busy_or_wots())
+            return 0;
+        if (owner == OWNER_SPONGE) {
+            reject_conflict();
+            return 0;
+        }
+        if (!raw_available)
+            return 0;
+        if (owner != OWNER_RAW || (phase != IDLE && phase != DONE)) {
+            reject_conflict();
+            return 0;
+        }
+        return static_cast<uint8_t>(
+            state[state_index] >> (byte_index * 8));
+    }
+
+    uint8_t read_dout_byte(uint8_t byte_index) {
+        if (mmio_busy_or_wots())
+            return 0;
+        if (owner == OWNER_RAW) {
+            reject_conflict();
+            return 0;
+        }
+        if (!stream_available)
+            return 0;
+        if (owner != OWNER_SPONGE || phase != DONE) {
+            reject_conflict();
+            return 0;
+        }
+        return digest[byte_index];
+    }
+
+    void classify_wide_read(uint32_t offset) {
+        wide_error = ERR_NONE;
+        wide_preserve = false;
+        aes_secure_clear(wide_bytes, sizeof(wide_bytes));
+        if (mmio_busy_or_wots()) {
+            wide_preserve = true;
+            return;
+        }
+        if (offset == 0x58) {
+            if (owner == OWNER_SPONGE) {
+                wide_error = ERR_CONFLICT;
+                return;
+            }
+            if (!raw_available)
+                return;
+            if (owner != OWNER_RAW || (phase != IDLE && phase != DONE)) {
+                wide_error = ERR_CONFLICT;
+                return;
+            }
+            for (int i = 0; i < 8; i++) {
+                wide_bytes[i] = static_cast<uint8_t>(
+                    state[state_index] >> (8 * i));
+            }
+            return;
+        }
+        if (owner == OWNER_RAW) {
+            wide_error = ERR_CONFLICT;
+            return;
+        }
+        if (!stream_available)
+            return;
+        if (owner != OWNER_SPONGE || phase != DONE) {
+            wide_error = ERR_CONFLICT;
+            return;
+        }
+        std::memcpy(wide_bytes, digest + (offset - 0x10), 8);
+    }
+
+    void classify_wide_state_write() {
+        wide_error = ERR_NONE;
+        wide_preserve = false;
+        aes_secure_clear(wide_bytes, sizeof(wide_bytes));
+        if (mmio_busy_or_wots()) {
+            wide_preserve = true;
+            return;
+        }
+        if (owner == OWNER_SPONGE) {
+            wide_error = ERR_CONFLICT;
+            return;
+        }
+        if (!raw_available) {
+            wide_error = ERR_UNAVAILABLE;
+            return;
+        }
+        if (!((owner == OWNER_NONE && phase == IDLE) ||
+              (owner == OWNER_RAW && phase == IDLE)))
+            wide_error = ERR_CONFLICT;
+    }
+
+    void begin_wide_access(uint32_t offset, bool write) {
+        cancel_wide_access();
+        wide_base = static_cast<uint8_t>(offset);
+        wide_position = 0;
+        if (write) {
+            wide_operation = WIDE_STATE_WRITE;
+            classify_wide_state_write();
+        } else {
+            wide_operation = offset == 0x58
+                ? WIDE_STATE_READ
+                : WIDE_DOUT_READ;
+            classify_wide_read(offset);
+        }
+    }
+
+    bool consume_wide_read(uint32_t offset, uint8_t& value) {
+        if ((wide_operation != WIDE_DOUT_READ &&
+             wide_operation != WIDE_STATE_READ) ||
+            offset != static_cast<uint32_t>(wide_base + wide_position)) {
+            return false;
+        }
+        value = wide_bytes[wide_position++];
+        if (wide_position == 8) {
+            const uint8_t terminal_error = wide_error;
+            cancel_wide_access();
+            if (terminal_error != ERR_NONE)
+                record_error(terminal_error);
+        }
+        return true;
+    }
+
+    bool consume_wide_write(uint32_t offset, uint8_t value) {
+        if (wide_operation != WIDE_STATE_WRITE ||
+            offset != uint32_t{0x58} + wide_position) {
+            return false;
+        }
+        wide_bytes[wide_position++] = value;
+        if (wide_position == 8) {
+            const uint8_t terminal_error = wide_error;
+            const bool preserve = wide_preserve;
+            uint64_t lane = 0;
+            for (int i = 0; i < 8; i++)
+                lane |= static_cast<uint64_t>(wide_bytes[i]) << (8 * i);
+            cancel_wide_access();
+            if (terminal_error != ERR_NONE) {
+                record_error(terminal_error);
+            } else if (!preserve) {
+                if (owner == OWNER_NONE) {
+                    owner = OWNER_RAW;
+                    phase = IDLE;
+                    error = ERR_NONE;
+                }
+                state[state_index] = lane;
+            }
+        }
+        return true;
+    }
+
+    uint8_t read8(uint32_t offset) {
+        uint8_t wide_value = 0;
+        if (consume_wide_read(offset, wide_value))
+            return wide_value;
+        if (wide_operation != WIDE_NONE)
+            cancel_wide_access();
+
+        if (offset == 0x00 || offset == 0x08)
+            return 0;
+        if (offset == 0x01)
+            return packed_status();
+        if (offset == 0x02)
+            return stream_available ? mode : 0;
+        if (offset == 0x03)
+            return error;
+        if (offset >= 0x10 && offset < 0x50)
+            return read_dout_byte(static_cast<uint8_t>(offset - 0x10));
+        if (offset == 0x50)
+            return read_state_index();
+        if (offset >= 0x58 && offset < 0x60)
+            return read_state_byte(static_cast<uint8_t>(offset - 0x58));
         return 0;
     }
 
     void write8(uint32_t offset, uint8_t value) {
-        if (offset == 0x00) {  // CMD
-            if (value == 1)      reset();
-            else if (value == 3) finalize();
-            else if (value == 4) squeeze();
-            else if (value == 5) squeeze_next_stream();
-        } else if (offset == 0x02) {
-            mode = value & 0x03;
-        } else if (offset == 0x08) {  // DIN
-            buf[buf_len++] = value;
-            if (buf_len == rate()) {
-                absorb_block();
+        if (consume_wide_write(offset, value))
+            return;
+        if (wide_operation != WIDE_NONE)
+            cancel_wide_access();
+
+        if (offset == 0x00)
+            write_command(value);
+        else if (offset == 0x02)
+            write_ctrl(value);
+        else if (offset == 0x08)
+            write_din(value);
+        else if (offset == 0x50)
+            write_state_index(value);
+        else if (offset >= 0x58 && offset < 0x60)
+            write_state_byte(static_cast<uint8_t>(offset - 0x58), value);
+    }
+
+    bool claim_wots() {
+        if (owner != OWNER_NONE || phase != IDLE)
+            return false;
+        owner = OWNER_WOTS;
+        phase = BUSY;
+        error = ERR_NONE;
+        return true;
+    }
+
+    void release_wots() {
+        if (owner == OWNER_WOTS)
+            wipe_transaction(true);
+    }
+
+    bool test_zeroized() const {
+        const auto all_zero = [](const void* address, std::size_t length) {
+            const uint8_t* bytes = static_cast<const uint8_t*>(address);
+            for (std::size_t index = 0; index < length; index++) {
+                if (bytes[index] != 0)
+                    return false;
             }
-        }
+            return true;
+        };
+        return phase == IDLE && owner == OWNER_NONE && error == ERR_NONE &&
+               pending == OP_NONE && pending_cycles == 0 && buf_len == 0 &&
+               squeeze_cursor == 0 && state_index == 0 &&
+               !fail_next_operation && wide_operation == WIDE_NONE &&
+               wide_base == 0 && wide_position == 0 &&
+               wide_error == ERR_NONE && !wide_preserve &&
+               all_zero(state, sizeof(state)) &&
+               all_zero(buf, sizeof(buf)) &&
+               all_zero(held_din, sizeof(held_din)) &&
+               all_zero(digest, sizeof(digest)) &&
+               all_zero(wide_bytes, sizeof(wide_bytes));
     }
 };
 
@@ -1136,11 +1758,12 @@ static BigNum make_p256_p() {
 
 
 // =========================================================================
-//  WOTS+ Chain Accelerator
+//  Retired WOTS+ prototype aperture
 // =========================================================================
 //
-//  Computes an entire WOTS+ hash chain in C++, iterating SHAKE-256
-//  internally.  Eliminates per-step CPU/Python round-trips.
+//  Checkpoint 2 deliberately removes the direct WOTS-to-CryptoSHA3 adapter.
+//  The production context/DMA/shared-service state machine lands as one
+//  coherent checkpoint 3 change; the obsolete GO below remains inert.
 //
 //  MMIO register map (32 bytes at offset 0x8A0):
 //    +0x00  WOTS_SEED   (W, 32b)  RAM address of PK.seed
@@ -1166,13 +1789,6 @@ struct WotsChain {
     // Output
     uint8_t dout[16];
 
-    // Memory pointer (set by CPUState init, points to main RAM)
-    uint8_t* mem;
-    uint64_t mem_size;
-
-    // SHA3 engine pointer (shared with CryptoDevices)
-    CryptoSHA3* sha3;
-
     void reset() {
         seed_addr = 0;
         adrs_addr = 0;
@@ -1185,69 +1801,13 @@ struct WotsChain {
     }
 
     void execute() {
-        if (!mem || !sha3 || steps == 0 || steps > 15) {
-            status = 0;
-            return;
-        }
-
-        status = 1;
-
-        // DMA read: load seed (16B), adrs (32B), input (16B)
-        uint8_t seed[16], adrs[32], buf[16];
-        for (int i = 0; i < 16; i++)
-            seed[i] = mem[(seed_addr + i) % mem_size];
-        for (int i = 0; i < 32; i++)
-            adrs[i] = mem[(adrs_addr + i) % mem_size];
-        for (int i = 0; i < 16; i++)
-            buf[i] = mem[(input_addr + i) % mem_size];
-
-        // Iterate chain: steps times starting at start_step
-        for (int s = 0; s < steps; s++) {
-            int step_idx = start_step + s;
-
-            // Mutate ADRS hash field (bytes 28..31, big-endian)
-            adrs[28] = 0;
-            adrs[29] = 0;
-            adrs[30] = (uint8_t)((step_idx >> 8) & 0xFF);
-            adrs[31] = (uint8_t)(step_idx & 0xFF);
-
-            // SHAKE-256 (mode 3): absorb seed ‖ adrs ‖ buf, squeeze 16 bytes
-            sha3->reset();
-            sha3->mode = 3;  // SHAKE-256
-
-            // Absorb seed (16 bytes)
-            for (int i = 0; i < 16; i++) {
-                sha3->buf[sha3->buf_len++] = seed[i];
-                if (sha3->buf_len == sha3->rate())
-                    sha3->absorb_block();
-            }
-
-            // Absorb ADRS (32 bytes)
-            for (int i = 0; i < 32; i++) {
-                sha3->buf[sha3->buf_len++] = adrs[i];
-                if (sha3->buf_len == sha3->rate())
-                    sha3->absorb_block();
-            }
-
-            // Absorb buf (16 bytes) = previous output or initial input
-            for (int i = 0; i < 16; i++) {
-                sha3->buf[sha3->buf_len++] = buf[i];
-                if (sha3->buf_len == sha3->rate())
-                    sha3->absorb_block();
-            }
-
-            // Finalize and squeeze
-            sha3->finalize();
-
-            // Extract first 16 bytes into buf for next iteration
-            for (int i = 0; i < 16; i++)
-                buf[i] = sha3->digest[i];
-        }
-
-        // Latch result
-        std::memcpy(dout, buf, 16);
-        last_cycles = (uint16_t)(64 + steps * 530);
-        status = 2;
+        // The three-pointer prototype is intentionally nonfunctional while
+        // checkpoint 3 replaces it with the production 64-bit context/DMA
+        // contract.  In particular it must not reset or borrow the MMIO SHA
+        // object: that would bypass the selected shared-service ownership.
+        status = 0;
+        last_cycles = 0;
+        aes_secure_clear(dout, sizeof(dout));
     }
 
     static constexpr uint32_t BASE = 0x08A0;
@@ -1287,7 +1847,7 @@ struct WotsChain {
             case 0x0C: steps = value & 0x0F; break;
             case 0x0D: start_step = value & 0x0F; break;
             case 0x0E:
-                // GO — execute chain immediately (synchronous in emulator)
+                // Obsolete prototype GO remains inert until checkpoint 3.
                 execute();
                 break;
             default: break;
@@ -1310,16 +1870,14 @@ struct CryptoDevices {
     static constexpr uint32_t AES_BASE    = 0x0700;
     static constexpr uint32_t AES_END     = 0x0770;
     static constexpr uint32_t SHA3_BASE   = 0x0780;
-    static constexpr uint32_t SHA3_END    = 0x07D0; // expanded for SHA3-512 (64-byte DOUT at 0x10-0x4F)
+    static constexpr uint32_t SHA3_END    = 0x07E0;
     static constexpr uint32_t WOTS_BASE   = 0x08A0;
     static constexpr uint32_t WOTS_END    = 0x08C0;
 
     void init() {
         aes.reset();
         sha3.reset();
-        sha3.mode = 0;
         wots.reset();
-        wots.sha3 = &sha3;  // WOTS wraps the existing SHA3 engine
         enabled = true;
     }
 
@@ -1332,17 +1890,95 @@ struct CryptoDevices {
         return false;
     }
 
+    static bool sha3_byte_access_valid(uint32_t offset, bool write) {
+        if (write) {
+            return offset == 0x00 || offset == 0x02 || offset == 0x08 ||
+                   offset == 0x50 ||
+                   (offset >= 0x58 && offset < 0x60);
+        }
+        return offset == 0x00 || offset == 0x01 || offset == 0x02 ||
+               offset == 0x03 || offset == 0x08 ||
+               (offset >= 0x10 && offset < 0x50) ||
+               offset == 0x50 ||
+               (offset >= 0x58 && offset < 0x60);
+    }
+
+    static bool sha3_access_shape_valid(
+            uint32_t offset, uint32_t width, bool write) {
+        if (width == 1)
+            return sha3_byte_access_valid(offset, write);
+        if (width != 8 || offset % 8 != 0)
+            return false;
+        if (write)
+            return offset == 0x58;
+        return (offset >= 0x10 && offset <= 0x48) || offset == 0x58;
+    }
+
+    bool access_shape_valid(
+            uint32_t mmio_offset, uint32_t width, bool write) const {
+        if (!handles(mmio_offset) ||
+            (width != 1 && width != 2 && width != 4 && width != 8) ||
+            mmio_offset % width != 0 ||
+            mmio_offset >
+                std::numeric_limits<uint32_t>::max() - (width - 1)) {
+            return false;
+        }
+        const uint32_t last = mmio_offset + width - 1;
+        if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END) {
+            if (last >= SHA3_END)
+                return false;
+            return sha3_access_shape_valid(
+                mmio_offset - SHA3_BASE, width, write);
+        }
+        if (mmio_offset >= AES_BASE && mmio_offset < AES_END)
+            return last < AES_END;
+        if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
+            return last < WOTS_END;
+        return false;
+    }
+
+    // Validate a complete architectural access before fallback byte
+    // decomposition.  A valid SHA qword also installs the stable snapshot or
+    // staged-lane transaction consumed by the following eight callbacks.
+    bool preflight(uint32_t mmio_offset, uint32_t width, bool write) {
+        if (!access_shape_valid(mmio_offset, width, write))
+            return false;
+        if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END &&
+            width == 8) {
+            sha3.begin_wide_access(mmio_offset - SHA3_BASE, write);
+        }
+        return true;
+    }
+
+    void tick(uint64_t cycles) {
+        if (enabled)
+            sha3.tick(cycles);
+    }
+
+    bool requires_unbounded_timing_boundary() const {
+        // Unbounded native execution settles device time at scheduler-round
+        // boundaries.  Once a SHA operation is in flight, guest instructions
+        // must not repeatedly observe the pre-settlement BUSY state while
+        // accumulating cycles that have not yet reached the device.
+        return enabled && sha3.pending != CryptoSHA3::OP_NONE;
+    }
+
+    uint8_t mmio_backpressure_cycles(
+            uint32_t mmio_offset,
+            uint32_t width,
+            bool write) const {
+        if (enabled && write && width == 1 &&
+            mmio_offset == SHA3_BASE + 0x08) {
+            return sha3.din_backpressure_cycles();
+        }
+        return 0;
+    }
+
     uint8_t read8(uint32_t mmio_offset) {
         if (mmio_offset >= AES_BASE && mmio_offset < AES_END)
             return aes.read8(mmio_offset - AES_BASE);
-        if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END) {
-            uint8_t val = sha3.read8(mmio_offset - SHA3_BASE);
-            // §6a: STATUS register (offset +0x01) bit 2 = ext_locked
-            // (WOTS chain active — SHA3 engine is exclusively held)
-            if ((mmio_offset - SHA3_BASE) == 0x01 && wots.status != 0)
-                val |= 0x04;   // bit 2 = ext_locked
-            return val;
-        }
+        if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END)
+            return sha3.read8(mmio_offset - SHA3_BASE);
         if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
             return wots.read8(mmio_offset);
         return 0xFF;

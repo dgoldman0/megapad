@@ -52,7 +52,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic \
+        peripherals disk_controller disk_bus_dma disk_lint crypto sha3_keccak aes ntt kem nic \
         nic_lint nic_bus mailbox trng tile fp_exact tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
@@ -326,12 +326,24 @@ tb_disk_bus_dma.vvp: tb_disk_bus_dma.v sd_spi_model.v \
                      ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Crypto (SHA-3, AES) ---
-crypto: tb_crypto.vvp
+# --- Crypto (authoritative SHA3/Keccak contract plus AES regression) ---
+crypto: sha3_keccak aes
+
+sha3_keccak: tb_sha3_keccak.vvp
 	$(VVP) $<
 
-tb_crypto.vvp: tb_crypto.v \
-               $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_aes.v
+tb_sha3_keccak.vvp: tb_sha3_keccak.v \
+                      $(CRYPTO)/mp64_sha3.v \
+                      $(CRYPTO)/mp64_keccak_core.v \
+                      ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_sha3_keccak -o $@ \
+		tb_sha3_keccak.v $(CRYPTO)/mp64_sha3.v \
+		$(CRYPTO)/mp64_keccak_core.v
+
+aes: tb_aes.vvp
+	$(VVP) $<
+
+tb_aes.vvp: tb_aes.v $(CRYPTO)/mp64_aes.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- NTT ---
@@ -346,7 +358,8 @@ kem: tb_kem.vvp
 	$(VVP) $<
 
 tb_kem.vvp: tb_kem.v $(CRYPTO)/mp64_kem.v \
-            $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_ntt.v
+            $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_keccak_core.v \
+            $(CRYPTO)/mp64_ntt.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- NIC ---

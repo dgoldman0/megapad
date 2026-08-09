@@ -84,7 +84,10 @@ module mp64_soc #(
     localparam DISK_BUS_PORT = NIC_BUS_PORT + 1;
     localparam N_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + 2;
     localparam PORT_BITS    = $clog2(N_BUS_PORTS);
-    localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_0001;
+    // Checkpoint 2 qualifies reflected/raw CRC, SHA3 streaming, and public
+    // raw Keccak independently.  The reserved WOTS aperture below is inert,
+    // has no requester port, and must not advertise WOTS_CHAIN.
+    localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_0007;
 
     // System-wide reset (active-high for cores, active-low for peripherals)
     wire rst_h = ~sys_rst_n;
@@ -232,7 +235,9 @@ module mp64_soc #(
     // ---- SysInfo localparams (match emulator devices.py register map) ----
     localparam [63:0] MEM_SIZE_BYTES  = MEM_DEPTH * 512 / 8 * 4;  // 4 banks total
     localparam [63:0] BANK0_SIZE      = MEM_DEPTH * 512 / 8;      // 1 bank (system RAM)
-    localparam [63:0] NUM_ALL_CORES   = NUM_CORES + NUM_CLUSTERS * CORES_PER_CLUSTER;
+    localparam integer NUM_GLOBAL_CORES =
+        NUM_CORES + NUM_CLUSTERS * CORES_PER_CLUSTER;
+    localparam [63:0] NUM_ALL_CORES   = NUM_GLOBAL_CORES;
     localparam [63:0] HBW_SIZE_BYTES  = 3 * BANK0_SIZE;           // 3 HBW banks
     localparam [31:0] EXT_MEM_BASE    = MP64_EXT_MEM_BASE;
     // The external allocation window ends where the distinct VRAM window
@@ -405,6 +410,9 @@ module mp64_soc #(
     wire [63:0] cluster_bus_wdata [0:NUM_CLUSTERS-1];
     wire        cluster_bus_wen   [0:NUM_CLUSTERS-1];
     wire [1:0]  cluster_bus_size  [0:NUM_CLUSTERS-1];
+    wire        cluster_bus_requester_valid[0:NUM_CLUSTERS-1];
+    wire [MP64_CORE_ID_BITS-1:0]
+                cluster_bus_requester_id[0:NUM_CLUSTERS-1];
     wire [63:0] cluster_bus_rdata [0:NUM_CLUSTERS-1];
     wire        cluster_bus_ready [0:NUM_CLUSTERS-1];
 
@@ -470,6 +478,9 @@ module mp64_soc #(
                 .bus_wdata   (cluster_bus_wdata[ki]),
                 .bus_wen     (cluster_bus_wen[ki]),
                 .bus_size    (cluster_bus_size[ki]),
+                .bus_requester_valid(
+                    cluster_bus_requester_valid[ki]),
+                .bus_requester_id(cluster_bus_requester_id[ki]),
                 .bus_rdata   (cluster_bus_rdata[ki]),
                 .bus_ready   (cluster_bus_ready[ki]),
 
@@ -596,6 +607,9 @@ module mp64_soc #(
     wire [N_BUS_PORTS-1:0]    bus_cpu_wen;
     wire [N_BUS_PORTS*2-1:0]  bus_cpu_size;
     wire [N_BUS_PORTS-1:0]    bus_cpu_port_io;
+    wire [N_BUS_PORTS-1:0]    bus_cpu_requester_valid;
+    wire [N_BUS_PORTS*MP64_CORE_ID_BITS-1:0]
+                              bus_cpu_requester_id;
     wire [N_BUS_PORTS*64-1:0] bus_cpu_rdata;
     wire [N_BUS_PORTS-1:0]    bus_cpu_ready;
     wire [N_BUS_PORTS-1:0]    bus_err_w;
@@ -612,6 +626,10 @@ module mp64_soc #(
             assign bus_cpu_wen  [pi]           = muxed_wen[pi];
             assign bus_cpu_size [pi*2  +: 2]   = muxed_size[pi];
             assign bus_cpu_port_io[pi]         = muxed_port_io[pi];
+            assign bus_cpu_requester_valid[pi] = 1'b1;
+            assign bus_cpu_requester_id[
+                pi*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+                    pi[MP64_CORE_ID_BITS-1:0];
         end
 
         // Ports [NUM_CORES..NIC_BUS_PORT-1]: clusters
@@ -623,6 +641,11 @@ module mp64_soc #(
             assign bus_cpu_wen  [P]           = cluster_bus_wen[pi];
             assign bus_cpu_size [P*2  +: 2]   = cluster_bus_size[pi];
             assign bus_cpu_port_io[P]          = 1'b0;
+            assign bus_cpu_requester_valid[P] =
+                cluster_bus_requester_valid[pi];
+            assign bus_cpu_requester_id[
+                P*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+                    cluster_bus_requester_id[pi];
         end
     endgenerate
 
@@ -635,6 +658,10 @@ module mp64_soc #(
     assign bus_cpu_wen  [NIC_BUS_PORT]                 = nic_dma_wen;
     assign bus_cpu_size [NIC_BUS_PORT*2 +: 2]          = BUS_BYTE;
     assign bus_cpu_port_io[NIC_BUS_PORT]               = 1'b0;
+    assign bus_cpu_requester_valid[NIC_BUS_PORT]        = 1'b0;
+    assign bus_cpu_requester_id[
+        NIC_BUS_PORT*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+            {MP64_CORE_ID_BITS{1'b0}};
     assign nic_dma_bus_rdata = bus_cpu_rdata[NIC_BUS_PORT*64 +: 64];
     assign nic_dma_rdata = nic_dma_bus_rdata[nic_dma_addr[2:0]*8 +: 8];
     assign nic_dma_ack   = bus_cpu_ready[NIC_BUS_PORT];
@@ -647,6 +674,10 @@ module mp64_soc #(
     assign bus_cpu_wen  [DISK_BUS_PORT]                 = disk_dma_wen;
     assign bus_cpu_size [DISK_BUS_PORT*2 +: 2]          = BUS_BYTE;
     assign bus_cpu_port_io[DISK_BUS_PORT]               = 1'b0;
+    assign bus_cpu_requester_valid[DISK_BUS_PORT]        = 1'b0;
+    assign bus_cpu_requester_id[
+        DISK_BUS_PORT*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+            {MP64_CORE_ID_BITS{1'b0}};
     assign disk_dma_bus_rdata = bus_cpu_rdata[DISK_BUS_PORT*64 +: 64];
     assign disk_dma_rdata = disk_dma_bus_rdata[disk_dma_addr[2:0]*8 +: 8];
     assign disk_dma_ack = bus_cpu_ready[DISK_BUS_PORT];
@@ -684,10 +715,13 @@ module mp64_soc #(
     wire        bus_mmio_ack;
 
     wire        bus_mmio_port_io;
+    wire        bus_mmio_requester_valid;
+    wire [MP64_CORE_ID_BITS-1:0] bus_mmio_requester_id;
 
     mp64_bus #(
         .N_PORTS   (N_BUS_PORTS),
-        .PORT_BITS (PORT_BITS)
+        .PORT_BITS (PORT_BITS),
+        .REQUESTER_ID_BITS(MP64_CORE_ID_BITS)
     ) u_bus (
         .clk       (sys_clk),
         .rst_n     (sys_rst_n),
@@ -698,6 +732,8 @@ module mp64_soc #(
         .cpu_wen   (bus_cpu_wen),
         .cpu_size  (bus_cpu_size),
         .cpu_port_io(bus_cpu_port_io),
+        .cpu_requester_valid(bus_cpu_requester_valid),
+        .cpu_requester_id(bus_cpu_requester_id),
         .cpu_rdata (bus_cpu_rdata),
         .cpu_ready (bus_cpu_ready),
 
@@ -715,6 +751,8 @@ module mp64_soc #(
         .mmio_wen   (bus_mmio_wen),
         .mmio_size  (bus_mmio_size),
         .mmio_port_io(bus_mmio_port_io),
+        .mmio_requester_valid(bus_mmio_requester_valid),
+        .mmio_requester_id(bus_mmio_requester_id),
         .mmio_rdata (bus_mmio_rdata),
         .mmio_ack   (bus_mmio_ack),
 
@@ -1458,8 +1496,10 @@ module mp64_soc #(
     wire mmio_sel_timer  = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h1); // 0x100
     wire mmio_sel_disk   = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h2); // 0x200
     wire mmio_sel_nic    = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h4); // 0x400
-    wire mmio_sel_mbox   = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h5
-                                         || mmio_addr_eff[11:8] == 4'h6);// 0x500-0x6FF
+    wire mmio_sel_mbox   = bus_mmio_req &&
+                           ((mmio_addr_eff[11:4] == 8'h50) ||
+                            (mmio_addr_eff[11:6] == 6'b011000));
+                           // Mailbox 0x500-0x50F, spinlocks 0x600-0x63F.
     wire mmio_sel_aes    = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b01110); // 0x700-0x77F
     wire mmio_sel_sha3   = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b01111)
                                          && (mmio_addr_eff[6:5] != 2'b11);// 0x780-0x7DF (96 bytes)
@@ -1617,7 +1657,8 @@ module mp64_soc #(
     wire        mbox_ack;
 
     mp64_mailbox #(
-        .N_CORES (NUM_CORES)
+        .N_CORES        (NUM_CORES),
+        .N_GLOBAL_CORES (NUM_GLOBAL_CORES)
     ) u_mailbox (
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
@@ -1627,7 +1668,8 @@ module mp64_soc #(
         .wen   (bus_mmio_wen),
         .rdata (mbox_rdata_raw),
         .ack   (mbox_ack),
-        .requester_id ({MP64_CORE_ID_BITS{1'b0}}),  // TODO: from arbiter grant
+        .requester_valid(bus_mmio_requester_valid),
+        .requester_id   (bus_mmio_requester_id),
         .ipi_out      (ipi_out),
         .csr_ipi_wen  ({NUM_CORES{1'b0}}),
         .csr_ipi_addr ({NUM_CORES*8{1'b0}}),
@@ -1655,68 +1697,45 @@ module mp64_soc #(
 
     wire [63:0] sha3_rdata;
     wire        sha3_ack;
-    wire        sha3_irq;
     wire        wots_active;
 
     mp64_sha3 u_sha3 (
-        .clk   (sys_clk),
-        .rst_n (sys_rst_n),
-        .req   (mmio_sel_sha3 && !wots_active),  // blocked when WOTS chain running
-        .addr  (mmio_addr_eff[6:0]),
-        .wdata (bus_mmio_wdata),
-        .wen   (bus_mmio_wen),
-        .rdata (sha3_rdata),
-        .ack   (sha3_ack),
-        .irq   (sha3_irq)
+        .clk             (sys_clk),
+        .rst_n           (sys_rst_n),
+        // The front end remains selected while any future WOTS requester
+        // owns the shared service so STATUS/ERROR never turn into timeouts.
+        .req             (mmio_sel_sha3),
+        .addr            (mmio_addr_eff[6:0]),
+        .wdata           (bus_mmio_wdata),
+        .wen             (bus_mmio_wen),
+        .size            (bus_mmio_size),
+        .rdata           (sha3_rdata),
+        .ack             (sha3_ack),
+        .sha3_stream_en  (CRYPTO_CAPS[1]),
+        .keccak_f1600_en (CRYPTO_CAPS[2]),
+
+        // Production WOTS integration is checkpoint 3.  The old standalone
+        // controller below cannot claim or observe this service.
+        .wots_claim      (1'b0),
+        .wots_grant      (),
+        .wots_owned      (),
+        .wots_perm_req   (1'b0),
+        .wots_state_in   (1600'd0),
+        .wots_state_out  (),
+        .wots_perm_busy  (),
+        .wots_perm_done  (),
+        .wots_release    (1'b0),
+        .wots_abort      (1'b0)
     );
 
-    // WOTS+ chain accelerator (wraps SHA3 engine)
-    wire [63:0] wots_rdata;
-    wire        wots_ack;
-    wire        wots_irq;
-
-    // DMA read port (connects to bus arbiter / memory)
-    wire        wots_dma_req;
-    wire [31:0] wots_dma_addr;
-    reg  [7:0]  wots_dma_rdata;
-    reg         wots_dma_ack;
-
-    // DMA read: lowest priority, direct memory access
-    always @(posedge sys_clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            wots_dma_rdata <= 8'd0;
-            wots_dma_ack   <= 1'b0;
-        end else begin
-            wots_dma_ack <= wots_dma_req;  // 1-cycle latency
-            if (wots_dma_req)
-                wots_dma_rdata <= 8'd0; // RTL stub; real impl reads from SRAM
-        end
-    end
-
-    mp64_wots u_wots (
-        .clk           (sys_clk),
-        .rst_n         (sys_rst_n),
-        .req           (mmio_sel_wots),
-        .addr          (mmio_addr_eff[4:0]),
-        .wdata         (bus_mmio_wdata),
-        .wen           (bus_mmio_wen),
-        .rdata         (wots_rdata),
-        .ack           (wots_ack),
-        .dma_req       (wots_dma_req),
-        .dma_addr      (wots_dma_addr),
-        .dma_rdata     (wots_dma_rdata),
-        .dma_ack       (wots_dma_ack),
-        .sha3_cmd_valid(),   // TODO: wire to SHA3 internal port
-        .sha3_cmd      (),
-        .sha3_din_valid(),
-        .sha3_din      (),
-        .sha3_dout     (8'd0),
-        .sha3_ready    (1'b1),
-        .sha3_mode_wr  (),
-        .sha3_mode_val (),
-        .active        (wots_active),
-        .irq_done      (wots_irq)
-    );
+    // Checkpoint 2 retires the functional three-pointer WOTS prototype.
+    // Preserve its reserved aperture as an inert responder until the checked
+    // context/DMA/shared-service controller lands atomically in checkpoint 3.
+    // Its capability bit is clear, writes have no effect, and reads are zero.
+    wire [63:0] wots_rdata = 64'd0;
+    wire        wots_ack = mmio_sel_wots;
+    wire        wots_irq = 1'b0;
+    assign      wots_active = 1'b0;
 
     wire [63:0] trng_rdata;
     wire        trng_ack;

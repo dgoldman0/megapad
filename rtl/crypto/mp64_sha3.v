@@ -1,415 +1,733 @@
 // ============================================================================
-// mp64_sha3.v — SHA-3 / SHAKE Accelerator (Keccak-f[1600])
+// mp64_sha3.v -- checked SHA3/SHAKE and raw Keccak MMIO front end
 // ============================================================================
 //
-// MMIO base: 0x780 (96 bytes).
+// The front end implements the 96-byte checkpoint-2 register window.  It owns
+// policy, padding, output-window construction, and arbitration; the reusable
+// mp64_keccak_core below it is the sole 24-round datapath.
 //
-// Modes:
-//   0 = SHA3-256 (rate=1088 bits = 136 bytes, output=256 bits = 32 bytes)
-//   1 = SHA3-512 (rate=576  bits = 72  bytes, output=512 bits = 64 bytes)
-//   2 = SHAKE128 (rate=1344 bits = 168 bytes, extendable)
-//   3 = SHAKE256 (rate=1088 bits = 136 bytes, extendable)
+// MMIO sizes use the common BUS_* encoding.  Byte accesses are accepted at
+// byte registers.  Aligned qwords are additionally accepted for DOUT and
+// STATE_DATA.  A reserved address, wrong direction, forbidden size,
+// misalignment, or crossing access is deliberately left unacknowledged so the
+// containing SoC reports one architectural bus fault without partial mutation.
 //
-// Byte-level register map (matching C++ accelerator / BIOS):
-//   0x00  CMD    (W)   1=INIT, 2=ABSORB, 3=FINAL, 4=SQUEEZE, 5=SQUEEZE_NEXT
-//   0x01  STATUS (R)   0=idle, 2=done
-//   0x02  CTRL   (RW)  mode[1:0]
-//   0x08  DIN    (W)   byte input; auto-XOR into Keccak state at din_ptr
-//   0x10..0x4F  DOUT (R)  digest[0..63] — extracted from state after finalize
-//
-// Keccak-f[1600]: 25 lanes × 64 bits = 1600-bit state
-//   24 rounds, 1 round per cycle → 24 cycles per permutation
-//
+// The WOTS service port is a claim/execute/release interface for checkpoint 3.
+// While wots_owned is asserted, STATUS is 0x0d and the MMIO front end remains
+// responsive, but no MMIO state or command mutation can disturb the owner.
 
 `include "mp64_pkg.vh"
 
 module mp64_sha3 (
-    input  wire        clk,
-    input  wire        rst_n,
+    input  wire          clk,
+    input  wire          rst_n,
 
-    // MMIO interface (byte-addressed within 96-byte window)
-    input  wire        req,
-    input  wire [6:0]  addr,       // byte offset within SHA3 block (0x00-0x5F)
-    input  wire [63:0] wdata,
-    input  wire        wen,
-    output reg  [63:0] rdata,
-    output reg         ack,
+    input  wire          req,
+    input  wire [6:0]    addr,
+    input  wire [63:0]   wdata,
+    input  wire          wen,
+    input  wire [1:0]    size,
+    output reg  [63:0]   rdata,
+    output reg           ack,
 
-    // Interrupt
-    output reg         irq
+    // Independently advertised public paths.
+    input  wire          sha3_stream_en,
+    input  wire          keccak_f1600_en,
+
+    // Shared-service requester used by the production WOTS controller.
+    input  wire          wots_claim,
+    output reg           wots_grant,
+    output wire          wots_owned,
+    input  wire          wots_perm_req,
+    input  wire [1599:0] wots_state_in,
+    output wire [1599:0] wots_state_out,
+    output wire          wots_perm_busy,
+    output reg           wots_perm_done,
+    input  wire          wots_release,
+    input  wire          wots_abort
 );
 
-    // ========================================================================
-    // Keccak state: 5×5 array of 64-bit lanes = 1600 bits
-    // ========================================================================
-    reg [63:0] state [0:24];   // state[x + 5*y]
+    localparam [1:0] PHASE_IDLE  = 2'd0;
+    localparam [1:0] PHASE_BUSY  = 2'd1;
+    localparam [1:0] PHASE_DONE  = 2'd2;
+    localparam [1:0] PHASE_ERROR = 2'd3;
 
-    // ========================================================================
-    // Command/Status registers
-    // ========================================================================
-    localparam [2:0] CMD_NOP     = 3'd0;
-    localparam [2:0] CMD_INIT    = 3'd1;
-    localparam [2:0] CMD_ABSORB  = 3'd2;
-    localparam [2:0] CMD_FINAL   = 3'd3;
-    localparam [2:0] CMD_SQUEEZE = 3'd4;
+    localparam [1:0] OWNER_NONE   = 2'd0;
+    localparam [1:0] OWNER_SPONGE = 2'd1;
+    localparam [1:0] OWNER_RAW    = 2'd2;
+    localparam [1:0] OWNER_WOTS   = 2'd3;
 
-    reg [1:0]  mode;           // 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256
-    reg        busy;
-    reg        done;
-    reg [7:0]  rate_bytes;     // Rate in bytes for current mode
-    reg [7:0]  din_ptr;        // Byte pointer into rate region
+    localparam [7:0] ERROR_NONE        = 8'd0;
+    localparam [7:0] ERROR_COMMAND     = 8'd1;
+    localparam [7:0] ERROR_CONFLICT    = 8'd2;
+    localparam [7:0] ERROR_MODE        = 8'd3;
+    localparam [7:0] ERROR_STATE_INDEX = 8'd4;
+    localparam [7:0] ERROR_SERVICE     = 8'd5;
+    localparam [7:0] ERROR_UNAVAILABLE = 8'd6;
 
-    // Digest buffer — filled from state after finalize/squeeze
-    reg [7:0]  digest [0:63]; // up to 64 bytes (SHA3-512)
+    localparam [2:0] OP_NONE      = 3'd0;
+    localparam [2:0] OP_AUTO      = 3'd1;
+    localparam [2:0] OP_FINAL     = 3'd2;
+    localparam [2:0] OP_NEXT_COPY = 3'd3;
+    localparam [2:0] OP_NEXT_PERM = 3'd4;
+    localparam [2:0] OP_RAW       = 3'd5;
 
-    // ========================================================================
-    // Keccak Round Constants
-    // ========================================================================
-    function [63:0] rc;
-        input [4:0] round;
-        begin
-            case (round)
-                5'd0:  rc = 64'h0000_0000_0000_0001;
-                5'd1:  rc = 64'h0000_0000_0000_8082;
-                5'd2:  rc = 64'h8000_0000_0000_808A;
-                5'd3:  rc = 64'h8000_0000_8000_8000;
-                5'd4:  rc = 64'h0000_0000_0000_808B;
-                5'd5:  rc = 64'h0000_0000_8000_0001;
-                5'd6:  rc = 64'h8000_0000_8000_8081;
-                5'd7:  rc = 64'h8000_0000_0000_8009;
-                5'd8:  rc = 64'h0000_0000_0000_008A;
-                5'd9:  rc = 64'h0000_0000_0000_0088;
-                5'd10: rc = 64'h0000_0000_8000_8009;
-                5'd11: rc = 64'h0000_0000_8000_000A;
-                5'd12: rc = 64'h0000_0000_8000_808B;
-                5'd13: rc = 64'h8000_0000_0000_008B;
-                5'd14: rc = 64'h8000_0000_0000_8089;
-                5'd15: rc = 64'h8000_0000_0000_8003;
-                5'd16: rc = 64'h8000_0000_0000_8002;
-                5'd17: rc = 64'h8000_0000_0000_0080;
-                5'd18: rc = 64'h0000_0000_0000_800A;
-                5'd19: rc = 64'h8000_0000_8000_000A;
-                5'd20: rc = 64'h8000_0000_8000_8081;
-                5'd21: rc = 64'h8000_0000_0000_8080;
-                5'd22: rc = 64'h0000_0000_8000_0001;
-                5'd23: rc = 64'h8000_0000_8000_8008;
-                default: rc = 64'd0;
-            endcase
-        end
-    endfunction
+    localparam [1:0] CLEAN_MMIO    = 2'd0;
+    localparam [1:0] CLEAN_FAILURE = 2'd1;
+    localparam [1:0] CLEAN_WOTS    = 2'd2;
 
-    // Rotation offsets: rot[x + 5*y]
-    function [5:0] rot_offset;
-        input [4:0] idx;
-        begin
-            case (idx)
-                5'd0:  rot_offset = 6'd0;   // (0,0)
-                5'd1:  rot_offset = 6'd1;   // (1,0)
-                5'd2:  rot_offset = 6'd62;  // (2,0)
-                5'd3:  rot_offset = 6'd28;  // (3,0)
-                5'd4:  rot_offset = 6'd27;  // (4,0)
-                5'd5:  rot_offset = 6'd36;  // (0,1)
-                5'd6:  rot_offset = 6'd44;  // (1,1)
-                5'd7:  rot_offset = 6'd6;   // (2,1)
-                5'd8:  rot_offset = 6'd55;  // (3,1)
-                5'd9:  rot_offset = 6'd20;  // (4,1)
-                5'd10: rot_offset = 6'd3;   // (0,2)
-                5'd11: rot_offset = 6'd10;  // (1,2)
-                5'd12: rot_offset = 6'd43;  // (2,2)
-                5'd13: rot_offset = 6'd25;  // (3,2)
-                5'd14: rot_offset = 6'd39;  // (4,2)
-                5'd15: rot_offset = 6'd41;  // (0,3)
-                5'd16: rot_offset = 6'd45;  // (1,3)
-                5'd17: rot_offset = 6'd15;  // (2,3)
-                5'd18: rot_offset = 6'd21;  // (3,3)
-                5'd19: rot_offset = 6'd8;   // (4,3)
-                5'd20: rot_offset = 6'd18;  // (0,4)
-                5'd21: rot_offset = 6'd2;   // (1,4)
-                5'd22: rot_offset = 6'd61;  // (2,4)
-                5'd23: rot_offset = 6'd56;  // (3,4)
-                5'd24: rot_offset = 6'd14;  // (4,4)
-                default: rot_offset = 6'd0;
-            endcase
-        end
-    endfunction
+    reg [1:0] owner;
+    reg [1:0] phase;
+    reg [7:0] error_code;
+    reg [1:0] mode;
+    reg [7:0] din_ptr;
+    reg [8:0] squeeze_pos;
+    reg [4:0] state_index;
 
-    // 64-bit rotate left
-    function [63:0] rotl64;
-        input [63:0] val;
-        input [5:0]  amt;
-        begin
-            rotl64 = (val << amt) | (val >> (6'd0 - amt));
-        end
-    endfunction
+    reg [7:0] output_window [0:63];
+    reg [7:0] crossing_tail [0:63];
+    reg [6:0] crossing_count;
 
-    // ========================================================================
-    // Keccak-f[1600] — one round combinational, 24 rounds sequential
-    // ========================================================================
-    reg [4:0]  round_cnt;
-    reg        permuting;
+    reg [2:0] operation;
+    reg [5:0] operation_cycles;
+    reg       cleanup_pending;
+    reg [1:0] cleanup_reason;
+    reg       req_seen;
+    reg       wots_claim_seen;
 
-    // Intermediate values for θ, ρ, π, χ, ι steps
-    reg [63:0] c [0:4];        // Column parities
-    reg [63:0] d [0:4];        // θ diffs
-    reg [63:0] b [0:24];       // After θ+ρ+π
-    reg [63:0] ns [0:24];      // Next state
+    wire [7:0] rate_bytes = (mode == 2'd0) ? 8'd136 :
+                            (mode == 2'd1) ? 8'd72  :
+                            (mode == 2'd2) ? 8'd168 : 8'd136;
 
-    integer x, y, idx;
+    // --------------------------------------------------------------------
+    // One shared Keccak service
+    // --------------------------------------------------------------------
+    reg          core_start;
+    reg          core_load_start;
+    reg [1599:0] core_state_in;
+    reg          core_lane_we;
+    reg [4:0]    core_lane_index;
+    reg [63:0]   core_lane_wdata;
+    reg [7:0]    core_lane_wstrb;
+    reg          core_clear;
 
-    // One Keccak round (combinational)
+    wire [63:0]   core_lane_rdata;
+    wire [1599:0] core_state_out;
+    wire          core_busy;
+    wire          core_done;
+    wire          core_clear_done;
+
+    mp64_keccak_core u_keccak_core (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .start       (core_start),
+        .load_start  (core_load_start),
+        .state_in    (core_state_in),
+        .lane_we     (core_lane_we),
+        .lane_index  (core_lane_index),
+        .lane_wdata  (core_lane_wdata),
+        .lane_wstrb  (core_lane_wstrb),
+        .lane_rdata  (core_lane_rdata),
+        .state_out   (core_state_out),
+        .clear       (core_clear),
+        .clear_done  (core_clear_done),
+        .busy        (core_busy),
+        .done        (core_done)
+    );
+
+    assign wots_owned     = (owner == OWNER_WOTS);
+    assign wots_state_out = (owner == OWNER_WOTS) ? core_state_out : 1600'd0;
+    assign wots_perm_busy = (owner == OWNER_WOTS) && core_busy;
+
+    // A new WOTS claim wins a same-cycle collision with an MMIO mutation.
+    // Reads still retire against the pre-edge state and become 0x0d on the
+    // following access.
+    wire wots_claim_accept = wots_claim && !wots_claim_seen &&
+                             owner == OWNER_NONE && phase == PHASE_IDLE &&
+                             !cleanup_pending && !core_busy;
+
+    // --------------------------------------------------------------------
+    // Whole-access MMIO preflight
+    // --------------------------------------------------------------------
+    reg access_valid;
     always @(*) begin
-        // θ step: compute column parities
-        for (x = 0; x < 5; x = x + 1)
-            c[x] = state[x] ^ state[x+5] ^ state[x+10] ^ state[x+15] ^ state[x+20];
-
-        // θ step: compute D values
-        for (x = 0; x < 5; x = x + 1)
-            d[x] = c[(x+4)%5] ^ rotl64(c[(x+1)%5], 6'd1);
-
-        // θ + ρ + π combined
-        for (y = 0; y < 5; y = y + 1)
-            for (x = 0; x < 5; x = x + 1) begin
-                idx = x + 5*y;
-                // π: B[y, 2x+3y mod 5] = rot(A[x,y] ^ D[x], r[x,y])
-                b[y + 5*((2*x + 3*y) % 5)] = rotl64(state[idx] ^ d[x], rot_offset(idx[4:0]));
+        access_valid = 1'b0;
+        if (size == BUS_BYTE) begin
+            if (wen) begin
+                access_valid = (addr == 7'h00) || (addr == 7'h02) ||
+                               (addr == 7'h08) || (addr == 7'h50) ||
+                               (addr >= 7'h58 && addr <= 7'h5f);
+            end else begin
+                access_valid = (addr == 7'h00) || (addr == 7'h01) ||
+                               (addr == 7'h02) || (addr == 7'h03) ||
+                               (addr == 7'h08) ||
+                               (addr >= 7'h10 && addr <= 7'h4f) ||
+                               (addr == 7'h50) ||
+                               (addr >= 7'h58 && addr <= 7'h5f);
             end
-
-        // χ step
-        for (y = 0; y < 5; y = y + 1)
-            for (x = 0; x < 5; x = x + 1)
-                ns[x + 5*y] = b[x + 5*y] ^ (~b[((x+1)%5) + 5*y] & b[((x+2)%5) + 5*y]);
-
-        // ι step (applied only to lane 0)
-        ns[0] = ns[0] ^ rc(round_cnt);
+        end else if (size == BUS_DWORD) begin
+            if (wen)
+                access_valid = (addr == 7'h58);
+            else
+                access_valid = (addr == 7'h58) ||
+                               (addr >= 7'h10 && addr <= 7'h48 &&
+                                addr[2:0] == 3'b000);
+        end
     end
 
-    // ========================================================================
-    // Rate calculation
-    // ========================================================================
+    // The only MMIO request held rather than retired is the byte immediately
+    // following a full rate block.  It is accepted at byte zero after the
+    // automatic permutation completes.
+    wire hold_auto_din = req && !req_seen && access_valid && wen &&
+                         size == BUS_BYTE && addr == 7'h08 &&
+                         owner == OWNER_SPONGE && phase == PHASE_BUSY &&
+                         operation == OP_AUTO && !wots_claim_accept;
+
+    // Candidate states for operations that must atomically alter bytes before
+    // round zero.  Keccak lanes and the memory image are both little endian.
+    reg [1599:0] absorbed_state;
+    reg [1599:0] padded_state;
     always @(*) begin
-        case (mode)
-            2'd0: rate_bytes = 8'd136;  // SHA3-256
-            2'd1: rate_bytes = 8'd72;   // SHA3-512
-            2'd2: rate_bytes = 8'd168;  // SHAKE128
-            2'd3: rate_bytes = 8'd136;  // SHAKE256
-        endcase
+        absorbed_state = core_state_out;
+        absorbed_state[din_ptr*8 +: 8] =
+            core_state_out[din_ptr*8 +: 8] ^ wdata[7:0];
+
+        padded_state = core_state_out;
+        padded_state[din_ptr*8 +: 8] =
+            padded_state[din_ptr*8 +: 8] ^
+            ((mode >= 2'd2) ? 8'h1f : 8'h06);
+        padded_state[(rate_bytes-1'b1)*8 +: 8] =
+            padded_state[(rate_bytes-1'b1)*8 +: 8] ^ 8'h80;
     end
 
-    // ========================================================================
-    // Main FSM
-    // ========================================================================
-    localparam [1:0] S_IDLE    = 2'd0;
-    localparam [1:0] S_PERMUTE = 2'd1;
-    localparam [1:0] S_PAD     = 2'd2;
-    localparam [1:0] S_EXTRACT = 2'd3;
-
-    reg [1:0] sha_state;
-    reg       do_final;    // Set when CMD_FINAL: pad first, then permute
-
-    integer ki;
+    integer i;
+    integer tail_count;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            sha_state  <= S_IDLE;
-            busy       <= 1'b0;
-            done       <= 1'b0;
-            irq        <= 1'b0;
-            permuting  <= 1'b0;
-            round_cnt  <= 5'd0;
-            mode       <= 2'd0;
-            din_ptr    <= 8'd0;
-            do_final   <= 1'b0;
-            for (ki = 0; ki < 25; ki = ki + 1)
-                state[ki] <= 64'd0;
-            for (ki = 0; ki < 64; ki = ki + 1)
-                digest[ki] <= 8'd0;
-        end else begin
-            irq <= 1'b0;
+            ack               <= 1'b0;
+            rdata             <= 64'd0;
+            req_seen          <= 1'b0;
+            wots_claim_seen   <= 1'b0;
+            wots_grant        <= 1'b0;
+            wots_perm_done    <= 1'b0;
 
-            case (sha_state)
-                S_IDLE: begin
-                    done <= 1'b0;
-                end
+            owner             <= OWNER_NONE;
+            phase             <= PHASE_IDLE;
+            error_code        <= ERROR_NONE;
+            mode              <= 2'd0;
+            din_ptr           <= 8'd0;
+            squeeze_pos       <= 9'd0;
+            state_index       <= 5'd0;
+            crossing_count    <= 7'd0;
+            operation         <= OP_NONE;
+            operation_cycles  <= 6'd0;
+            cleanup_pending   <= 1'b0;
+            cleanup_reason    <= CLEAN_MMIO;
 
-                S_PAD: begin
-                    // Apply SHA-3 padding: byte at din_ptr gets 0x06 (SHA3) or 0x1F (SHAKE)
-                    // Last byte of rate block gets 0x80 OR'd
-                    // Then XOR into state
-                    begin : pad_block
-                        reg [7:0] pad_byte;
-                        reg [4:0] lane_idx;
-                        reg [2:0] byte_pos;
-                        reg [63:0] pad_word;
+            core_start        <= 1'b0;
+            core_load_start   <= 1'b0;
+            core_state_in     <= 1600'd0;
+            core_lane_we      <= 1'b0;
+            core_lane_index   <= 5'd0;
+            core_lane_wdata   <= 64'd0;
+            core_lane_wstrb   <= 8'd0;
+            core_clear        <= 1'b0;
 
-                        // First pad byte
-                        pad_byte = (mode >= 2'd2) ? 8'h1F : 8'h06;
-                        lane_idx = din_ptr[7:3];
-                        byte_pos = din_ptr[2:0];
-                        pad_word = 64'd0;
-                        pad_word[byte_pos*8 +: 8] = pad_byte;
-                        state[lane_idx] <= state[lane_idx] ^ pad_word;
-
-                        // Last byte of rate: OR 0x80
-                        if (din_ptr == (rate_bytes - 8'd1)) begin
-                            // Same byte gets both pad_byte and 0x80
-                            pad_word[byte_pos*8 +: 8] = pad_byte | 8'h80;
-                            state[lane_idx] <= state[lane_idx] ^ pad_word;
-                        end else begin
-                            // Set bit 7 of last rate byte
-                            begin : last_byte_block
-                                reg [7:0] last_ptr;
-                                reg [4:0] last_lane;
-                                reg [2:0] last_bpos;
-                                reg [63:0] last_word;
-                                last_ptr = rate_bytes - 8'd1;
-                                last_lane = last_ptr[7:3];
-                                last_bpos = last_ptr[2:0];
-                                last_word = 64'd0;
-                                last_word[last_bpos*8 +: 8] = 8'h80;
-                                state[last_lane] <= state[last_lane] ^ last_word;
-                            end
-                        end
-                    end
-
-                    // Start permutation
-                    round_cnt <= 5'd0;
-                    permuting <= 1'b1;
-                    sha_state <= S_PERMUTE;
-                end
-
-                S_PERMUTE: begin
-                    if (permuting) begin
-                        // Apply one round
-                        for (ki = 0; ki < 25; ki = ki + 1)
-                            state[ki] <= ns[ki];
-
-                        if (round_cnt == 5'd23) begin
-                            permuting <= 1'b0;
-                            busy <= 1'b0;
-                            done <= 1'b1;
-                            irq <= 1'b1;
-                            din_ptr <= 8'd0;
-                            sha_state <= S_EXTRACT;
-                        end else begin
-                            round_cnt <= round_cnt + 5'd1;
-                        end
-                    end
-                end
-
-                // Extract digest bytes from state lanes (little-endian)
-                S_EXTRACT: begin
-                    begin : extract_block
-                        integer ei;
-                        for (ei = 0; ei < 8; ei = ei + 1) begin
-                            // Lane 0..7 → digest[0..63]
-                            digest[ei*8 + 0] <= state[ei][ 7: 0];
-                            digest[ei*8 + 1] <= state[ei][15: 8];
-                            digest[ei*8 + 2] <= state[ei][23:16];
-                            digest[ei*8 + 3] <= state[ei][31:24];
-                            digest[ei*8 + 4] <= state[ei][39:32];
-                            digest[ei*8 + 5] <= state[ei][47:40];
-                            digest[ei*8 + 6] <= state[ei][55:48];
-                            digest[ei*8 + 7] <= state[ei][63:56];
-                        end
-                    end
-                    sha_state <= S_IDLE;
-                end
-
-                default: sha_state <= S_IDLE;
-            endcase
-
-            // ============================================================
-            // Register writes from MMIO (byte-addressed)
-            // ============================================================
-            if (req && wen) begin
-                case (addr)
-                    // CMD register (offset 0x00) — byte write
-                    7'h00: begin
-                        case (wdata[2:0])
-                            CMD_INIT: begin
-                                // Reset state
-                                for (ki = 0; ki < 25; ki = ki + 1)
-                                    state[ki] <= 64'd0;
-                                din_ptr <= 8'd0;
-                                done <= 1'b0;
-                                busy <= 1'b0;
-                            end
-                            CMD_ABSORB: begin
-                                // Start Keccak-f permutation
-                                busy <= 1'b1;
-                                done <= 1'b0;
-                                round_cnt <= 5'd0;
-                                permuting <= 1'b1;
-                                sha_state <= S_PERMUTE;
-                            end
-                            CMD_FINAL: begin
-                                // Pad then permute
-                                busy <= 1'b1;
-                                done <= 1'b0;
-                                do_final <= 1'b1;
-                                sha_state <= S_PAD;
-                            end
-                            CMD_SQUEEZE: begin
-                                // Additional squeeze: just re-permute
-                                busy <= 1'b1;
-                                done <= 1'b0;
-                                round_cnt <= 5'd0;
-                                permuting <= 1'b1;
-                                sha_state <= S_PERMUTE;
-                            end
-                            default: ;
-                        endcase
-                    end
-
-                    // CTRL register (offset 0x02) — mode select
-                    7'h02: begin
-                        mode <= wdata[1:0];
-                    end
-
-                    // DIN register (offset 0x08) — byte input
-                    // XOR byte into correct position within Keccak state
-                    7'h08: begin
-                        if (din_ptr < rate_bytes) begin : din_byte_block
-                            reg [4:0] lane;
-                            reg [2:0] bpos;
-                            reg [63:0] byte_xor;
-                            lane = din_ptr[7:3];
-                            bpos = din_ptr[2:0];
-                            byte_xor = 64'd0;
-                            byte_xor[bpos*8 +: 8] = wdata[7:0];
-                            state[lane] <= state[lane] ^ byte_xor;
-                            din_ptr <= din_ptr + 8'd1;
-                        end
-                    end
-
-                    default: ;
-                endcase
+            for (i = 0; i < 64; i = i + 1) begin
+                output_window[i] <= 8'd0;
+                crossing_tail[i] <= 8'd0;
             end
-        end
-    end
+        end else begin
+            ack             <= 1'b0;
+            rdata           <= 64'd0;
+            wots_grant      <= 1'b0;
+            wots_perm_done  <= 1'b0;
+            core_start      <= 1'b0;
+            core_load_start <= 1'b0;
+            core_state_in   <= 1600'd0;
+            core_lane_we    <= 1'b0;
+            core_lane_wdata <= 64'd0;
+            core_lane_wstrb <= 8'd0;
+            core_clear      <= 1'b0;
 
-    // ========================================================================
-    // Register reads (byte-addressed)
-    // ========================================================================
-    always @(posedge clk) begin
-        ack <= 1'b0;
-        if (req) begin
-            ack <= 1'b1;
-            if (!wen) begin
-                if (addr == 7'h01) begin
-                    // STATUS (offset 0x01): {done, busy}
-                    rdata <= {62'd0, done, busy};
-                end else if (addr == 7'h02) begin
-                    // CTRL (offset 0x02): mode
-                    rdata <= {62'd0, mode};
-                end else if (addr >= 7'h10 && addr < 7'h50) begin
-                    // DOUT (offset 0x10..0x4F): digest bytes
-                    rdata <= {56'd0, digest[addr[5:0] - 6'h10]};
-                end else begin
-                    rdata <= 64'd0;
+            if (!req)
+                req_seen <= 1'b0;
+            if (!wots_claim)
+                wots_claim_seen <= 1'b0;
+
+            // ------------------------------------------------------------
+            // Completion, watchdog, and ordered cleanup
+            // ------------------------------------------------------------
+            if (cleanup_pending) begin
+                if (core_clear_done) begin
+                    cleanup_pending  <= 1'b0;
+                    operation        <= OP_NONE;
+                    operation_cycles <= 6'd0;
+                    din_ptr          <= 8'd0;
+                    squeeze_pos      <= 9'd0;
+                    state_index      <= 5'd0;
+                    crossing_count   <= 7'd0;
+                    owner            <= OWNER_NONE;
+                    for (i = 0; i < 64; i = i + 1) begin
+                        output_window[i] <= 8'd0;
+                        crossing_tail[i] <= 8'd0;
+                    end
+
+                    if (cleanup_reason == CLEAN_FAILURE) begin
+                        phase      <= PHASE_ERROR;
+                        error_code <= ERROR_SERVICE;
+                    end else begin
+                        phase      <= PHASE_IDLE;
+                        error_code <= ERROR_NONE;
+                    end
+                end
+            end else if (owner == OWNER_WOTS) begin
+                // WOTS owns the service across every chain step, including
+                // the idle gaps between permutations.
+                if (wots_abort) begin
+                    core_clear      <= 1'b1;
+                    cleanup_pending <= 1'b1;
+                    cleanup_reason  <= CLEAN_WOTS;
+                end else if (wots_release && !core_busy) begin
+                    core_clear      <= 1'b1;
+                    cleanup_pending <= 1'b1;
+                    cleanup_reason  <= CLEAN_WOTS;
+                end else if (core_done) begin
+                    wots_perm_done <= 1'b1;
+                end else if (wots_perm_req && !core_busy) begin
+                    core_state_in   <= wots_state_in;
+                    core_load_start <= 1'b1;
                 end
             end else begin
-                rdata <= 64'd0;
+                if (phase == PHASE_BUSY && owner != OWNER_NONE &&
+                    operation_cycles == 6'd31) begin
+                    core_clear      <= 1'b1;
+                    cleanup_pending <= 1'b1;
+                    cleanup_reason  <= CLEAN_FAILURE;
+                end else if (operation == OP_NEXT_COPY) begin
+                    for (i = 0; i < 64; i = i + 1)
+                        output_window[i] <=
+                            core_state_out[(squeeze_pos+i)*8 +: 8];
+                    squeeze_pos      <= squeeze_pos + 9'd64;
+                    phase            <= PHASE_DONE;
+                    operation        <= OP_NONE;
+                    operation_cycles <= 6'd0;
+                end else if (core_done) begin
+                    case (operation)
+                        OP_AUTO: begin
+                            phase      <= PHASE_IDLE;
+                            operation  <= OP_NONE;
+                        end
+
+                        OP_FINAL: begin
+                            for (i = 0; i < 64; i = i + 1) begin
+                                if (mode == 2'd0 && i >= 32)
+                                    output_window[i] <= 8'd0;
+                                else
+                                    output_window[i] <=
+                                        core_state_out[i*8 +: 8];
+                            end
+                            din_ptr     <= 8'd0;
+                            squeeze_pos <= (mode >= 2'd2) ? 9'd64 : 9'd0;
+                            phase       <= PHASE_DONE;
+                            operation   <= OP_NONE;
+                        end
+
+                        OP_NEXT_PERM: begin
+                            for (i = 0; i < 64; i = i + 1) begin
+                                if (i < crossing_count)
+                                    output_window[i] <= crossing_tail[i];
+                                else
+                                    output_window[i] <=
+                                        core_state_out[(i-crossing_count)*8 +: 8];
+                            end
+                            squeeze_pos <= 9'd64 - crossing_count;
+                            phase       <= PHASE_DONE;
+                            operation   <= OP_NONE;
+                        end
+
+                        OP_RAW: begin
+                            phase     <= PHASE_DONE;
+                            operation <= OP_NONE;
+                        end
+
+                        default: begin
+                            // A completion without a matching front-end
+                            // operation is an internal protocol failure.
+                            core_clear      <= 1'b1;
+                            cleanup_pending <= 1'b1;
+                            cleanup_reason  <= CLEAN_FAILURE;
+                        end
+                    endcase
+                    operation_cycles <= 6'd0;
+                end else if (phase == PHASE_BUSY && owner != OWNER_NONE) begin
+                    operation_cycles <= operation_cycles + 6'd1;
+                end
+            end
+
+            // ------------------------------------------------------------
+            // WOTS arbitration.  Claim has priority over a same-cycle MMIO
+            // mutation; the MMIO request is still acknowledged and preserved.
+            // ------------------------------------------------------------
+            if (wots_claim_accept) begin
+                wots_claim_seen <= 1'b1;
+                wots_grant      <= 1'b1;
+                owner           <= OWNER_WOTS;
+                phase           <= PHASE_BUSY;
+                error_code      <= ERROR_NONE;
+                operation       <= OP_NONE;
+            end
+
+            // ------------------------------------------------------------
+            // MMIO transaction.  Invalid whole accesses never ACK and never
+            // mutate architectural device state.
+            // ------------------------------------------------------------
+            if (req && !req_seen && !hold_auto_din) begin
+                req_seen <= 1'b1;
+                if (access_valid) begin
+                    ack <= 1'b1;
+
+                    if (!wen) begin
+                        // -------------------------- reads -----------------
+                        if (addr == 7'h01) begin
+                            rdata <= {60'd0, owner, phase};
+                        end else if (addr == 7'h03) begin
+                            rdata <= {56'd0, error_code};
+                        end else if (addr == 7'h00 || addr == 7'h08) begin
+                            rdata <= 64'd0;
+                        end else if (addr == 7'h02) begin
+                            rdata <= sha3_stream_en ? {62'd0, mode} : 64'd0;
+                        end else if (addr >= 7'h10 && addr <= 7'h4f) begin
+                            if (sha3_stream_en && !cleanup_pending &&
+                                !wots_claim_accept &&
+                                owner == OWNER_SPONGE &&
+                                phase == PHASE_DONE) begin
+                                if (size == BUS_DWORD) begin
+                                    for (i = 0; i < 8; i = i + 1)
+                                        rdata[i*8 +: 8] <=
+                                            output_window[addr-7'h10+i];
+                                end else begin
+                                    rdata <= {56'd0,
+                                        output_window[addr-7'h10]};
+                                end
+                            end else if ((!cleanup_pending &&
+                                         owner != OWNER_WOTS &&
+                                         !wots_claim_accept &&
+                                         phase != PHASE_BUSY) &&
+                                        sha3_stream_en) begin
+                                error_code <= ERROR_CONFLICT;
+                                phase      <= PHASE_ERROR;
+                            end
+                        end else if (addr == 7'h50) begin
+                            if (!keccak_f1600_en) begin
+                                rdata <= 64'd0;
+                            end else if (!cleanup_pending &&
+                                !wots_claim_accept &&
+                                ((owner == OWNER_NONE && phase == PHASE_IDLE) ||
+                                 (owner == OWNER_RAW &&
+                                  (phase == PHASE_IDLE ||
+                                   phase == PHASE_DONE)))) begin
+                                rdata <= {59'd0, state_index};
+                            end else if (!cleanup_pending &&
+                                         owner != OWNER_WOTS &&
+                                         !wots_claim_accept &&
+                                         phase != PHASE_BUSY) begin
+                                error_code <= ERROR_CONFLICT;
+                                phase      <= PHASE_ERROR;
+                            end
+                        end else begin
+                            // STATE_DATA byte or qword.
+                            if (!keccak_f1600_en) begin
+                                rdata <= 64'd0;
+                            end else if (!cleanup_pending &&
+                                !wots_claim_accept &&
+                                owner == OWNER_RAW &&
+                                (phase == PHASE_IDLE ||
+                                 phase == PHASE_DONE)) begin
+                                if (size == BUS_DWORD)
+                                    rdata <= core_state_out[
+                                                state_index*64 +: 64];
+                                else
+                                    rdata <= {56'd0,
+                                      core_state_out[
+                                        state_index*64 +
+                                        (addr-7'h58)*8 +: 8]};
+                            end else if (!cleanup_pending &&
+                                         owner != OWNER_WOTS &&
+                                         !wots_claim_accept &&
+                                         phase != PHASE_BUSY) begin
+                                error_code <= ERROR_CONFLICT;
+                                phase      <= PHASE_ERROR;
+                            end
+                        end
+                    end else if (cleanup_pending ||
+                                 owner == OWNER_WOTS ||
+                                 wots_claim_accept ||
+                                 phase == PHASE_BUSY) begin
+                        // Busy/WOTS preservation has first priority.  CLEAR is
+                        // accepted during an MMIO-owned BUSY operation only.
+                        if (addr == 7'h00 && wdata[7:0] == 8'd7 &&
+                            owner != OWNER_WOTS && !wots_claim_accept) begin
+                            core_clear      <= 1'b1;
+                            cleanup_pending <= 1'b1;
+                            cleanup_reason  <= CLEAN_MMIO;
+                        end
+                    end else begin
+                        // -------------------------- writes ----------------
+                        case (addr)
+                            7'h00: begin
+                                // Complete-byte command decode; no aliases.
+                                case (wdata[7:0])
+                                    8'd1: begin // INIT
+                                        if (owner == OWNER_RAW) begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (!sha3_stream_en) begin
+                                            error_code <= ERROR_UNAVAILABLE;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (owner == OWNER_NONE &&
+                                                     phase == PHASE_IDLE) begin
+                                            owner             <= OWNER_SPONGE;
+                                            phase             <= PHASE_IDLE;
+                                            error_code        <= ERROR_NONE;
+                                            din_ptr           <= 8'd0;
+                                            squeeze_pos       <= 9'd0;
+                                            state_index       <= 5'd0;
+                                            crossing_count    <= 7'd0;
+                                            operation         <= OP_NONE;
+                                            operation_cycles  <= 6'd0;
+                                            core_clear        <= 1'b1;
+                                            for (i = 0; i < 64;
+                                                 i = i + 1) begin
+                                                output_window[i] <= 8'd0;
+                                                crossing_tail[i] <= 8'd0;
+                                            end
+                                        end else begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end
+                                    end
+
+                                    8'd3: begin // FINAL
+                                        if (owner == OWNER_RAW) begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (!sha3_stream_en) begin
+                                            error_code <= ERROR_UNAVAILABLE;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (owner == OWNER_SPONGE &&
+                                                     phase == PHASE_IDLE) begin
+                                            core_state_in     <= padded_state;
+                                            core_load_start   <= 1'b1;
+                                            phase             <= PHASE_BUSY;
+                                            operation         <= OP_FINAL;
+                                            operation_cycles  <= 6'd0;
+                                        end else begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end
+                                    end
+
+                                    8'd4: begin // NEXT
+                                        if (owner == OWNER_RAW) begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (!sha3_stream_en) begin
+                                            error_code <= ERROR_UNAVAILABLE;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (owner == OWNER_SPONGE &&
+                                                     phase == PHASE_DONE &&
+                                                     mode < 2'd2) begin
+                                            error_code <= ERROR_MODE;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (owner == OWNER_SPONGE &&
+                                                     phase == PHASE_DONE) begin
+                                            phase            <= PHASE_BUSY;
+                                            operation_cycles <= 6'd0;
+                                            if (squeeze_pos + 9'd64 <=
+                                                {1'b0, rate_bytes}) begin
+                                                operation <= OP_NEXT_COPY;
+                                            end else begin
+                                                tail_count = rate_bytes -
+                                                             squeeze_pos;
+                                                crossing_count <= tail_count;
+                                                for (i = 0; i < 64;
+                                                     i = i + 1) begin
+                                                    if (i < tail_count)
+                                                        crossing_tail[i] <=
+                                                          core_state_out[
+                                                            (squeeze_pos+i)*8
+                                                            +: 8];
+                                                    else
+                                                        crossing_tail[i] <=
+                                                            8'd0;
+                                                end
+                                                core_start <= 1'b1;
+                                                operation  <= OP_NEXT_PERM;
+                                            end
+                                        end else begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end
+                                    end
+
+                                    8'd6: begin // raw Keccak-f[1600]
+                                        if (owner == OWNER_SPONGE) begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (!keccak_f1600_en) begin
+                                            error_code <= ERROR_UNAVAILABLE;
+                                            phase      <= PHASE_ERROR;
+                                        end else if (owner == OWNER_NONE &&
+                                                     phase == PHASE_IDLE) begin
+                                            owner             <= OWNER_RAW;
+                                            phase             <= PHASE_BUSY;
+                                            error_code        <= ERROR_NONE;
+                                            operation         <= OP_RAW;
+                                            operation_cycles  <= 6'd0;
+                                            core_state_in     <= 1600'd0;
+                                            core_load_start   <= 1'b1;
+                                        end else if (owner == OWNER_RAW &&
+                                            (phase == PHASE_IDLE ||
+                                             phase == PHASE_DONE)) begin
+                                            phase             <= PHASE_BUSY;
+                                            error_code        <= ERROR_NONE;
+                                            operation         <= OP_RAW;
+                                            operation_cycles  <= 6'd0;
+                                            core_start        <= 1'b1;
+                                        end else begin
+                                            error_code <= ERROR_CONFLICT;
+                                            phase      <= PHASE_ERROR;
+                                        end
+                                    end
+
+                                    8'd7: begin // CLEAR
+                                        core_clear      <= 1'b1;
+                                        cleanup_pending <= 1'b1;
+                                        cleanup_reason  <= CLEAN_MMIO;
+                                        operation       <= OP_NONE;
+                                        if (owner != OWNER_NONE)
+                                            phase <= PHASE_BUSY;
+                                    end
+
+                                    default: begin // 0, 2, 5, and 8..255
+                                        error_code <= ERROR_COMMAND;
+                                        phase      <= PHASE_ERROR;
+                                    end
+                                endcase
+                            end
+
+                            7'h02: begin // CTRL
+                                if (owner == OWNER_RAW) begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end else if (!sha3_stream_en) begin
+                                    error_code <= ERROR_UNAVAILABLE;
+                                    phase      <= PHASE_ERROR;
+                                end else if (owner == OWNER_NONE &&
+                                             phase == PHASE_IDLE) begin
+                                    if (wdata[7:0] <= 8'd3) begin
+                                        mode <= wdata[1:0];
+                                    end else begin
+                                        error_code <= ERROR_MODE;
+                                        phase      <= PHASE_ERROR;
+                                    end
+                                end else begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end
+                            end
+
+                            7'h08: begin // DIN
+                                if (owner == OWNER_RAW) begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end else if (!sha3_stream_en) begin
+                                    error_code <= ERROR_UNAVAILABLE;
+                                    phase      <= PHASE_ERROR;
+                                end else if (owner == OWNER_SPONGE &&
+                                             phase == PHASE_IDLE) begin
+                                    if (din_ptr == rate_bytes - 8'd1) begin
+                                        core_state_in     <= absorbed_state;
+                                        core_load_start   <= 1'b1;
+                                        din_ptr           <= 8'd0;
+                                        phase             <= PHASE_BUSY;
+                                        operation         <= OP_AUTO;
+                                        operation_cycles  <= 6'd0;
+                                    end else begin
+                                        core_lane_index <= din_ptr[7:3];
+                                        core_lane_wdata <=
+                                          core_state_out[
+                                            din_ptr[7:3]*64 +: 64] ^
+                                          {8{wdata[7:0]}};
+                                        core_lane_wstrb <=
+                                          (8'b0000_0001 << din_ptr[2:0]);
+                                        core_lane_we <= 1'b1;
+                                        din_ptr <= din_ptr + 8'd1;
+                                    end
+                                end else begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end
+                            end
+
+                            7'h50: begin // STATE_INDEX
+                                if (owner == OWNER_SPONGE) begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end else if (!keccak_f1600_en) begin
+                                    error_code <= ERROR_UNAVAILABLE;
+                                    phase      <= PHASE_ERROR;
+                                end else if ((owner == OWNER_NONE &&
+                                             phase == PHASE_IDLE) ||
+                                            (owner == OWNER_RAW &&
+                                             (phase == PHASE_IDLE ||
+                                              phase == PHASE_DONE))) begin
+                                    if (wdata[7:0] <= 8'd24)
+                                        state_index <= wdata[4:0];
+                                    else begin
+                                        error_code <= ERROR_STATE_INDEX;
+                                        phase      <= PHASE_ERROR;
+                                    end
+                                end else begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end
+                            end
+
+                            default: begin // STATE_DATA byte or qword
+                                if (owner == OWNER_SPONGE) begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end else if (!keccak_f1600_en) begin
+                                    error_code <= ERROR_UNAVAILABLE;
+                                    phase      <= PHASE_ERROR;
+                                end else if ((owner == OWNER_NONE &&
+                                             phase == PHASE_IDLE) ||
+                                            (owner == OWNER_RAW &&
+                                             phase == PHASE_IDLE)) begin
+                                    owner           <= OWNER_RAW;
+                                    phase           <= PHASE_IDLE;
+                                    error_code      <= ERROR_NONE;
+                                    core_lane_index <= state_index;
+                                    if (size == BUS_DWORD) begin
+                                        core_lane_wdata <= wdata;
+                                        core_lane_wstrb <= 8'hff;
+                                    end else begin
+                                        core_lane_wdata <= {8{wdata[7:0]}};
+                                        core_lane_wstrb <=
+                                          (8'b0000_0001 << addr[2:0]);
+                                    end
+                                    core_lane_we <= 1'b1;
+                                end else begin
+                                    error_code <= ERROR_CONFLICT;
+                                    phase      <= PHASE_ERROR;
+                                end
+                            end
+                        endcase
+                    end
+                end
             end
         end
     end

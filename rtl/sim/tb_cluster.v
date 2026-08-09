@@ -34,8 +34,25 @@ module tb_cluster;
     wire [63:0] bus_wdata;
     wire        bus_wen;
     wire [1:0]  bus_size;
+    wire        bus_requester_valid;
+    wire [MP64_CORE_ID_BITS-1:0] bus_requester_id;
     reg  [63:0] bus_rdata;
     reg         bus_ready;
+    reg         tb_bus_requester_seen;
+    reg  [MP64_CORE_ID_BITS-1:0] tb_bus_requester_id;
+    reg  [255:0] tb_bus_requester_ids_seen;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            tb_bus_requester_seen <= 1'b0;
+            tb_bus_requester_id <= {MP64_CORE_ID_BITS{1'b0}};
+            tb_bus_requester_ids_seen <= 256'd0;
+        end else if (bus_requester_valid) begin
+            tb_bus_requester_seen <= 1'b1;
+            tb_bus_requester_id <= bus_requester_id;
+            tb_bus_requester_ids_seen[bus_requester_id] <= 1'b1;
+        end
+    end
 
     always @(negedge clk) begin
         bus_ready <= 1'b0;
@@ -137,6 +154,8 @@ module tb_cluster;
         .bus_wdata  (bus_wdata),
         .bus_wen    (bus_wen),
         .bus_size   (bus_size),
+        .bus_requester_valid(bus_requester_valid),
+        .bus_requester_id(bus_requester_id),
         .bus_rdata  (bus_rdata),
         .bus_ready  (bus_ready),
 
@@ -506,6 +525,8 @@ module tb_cluster;
         check_mc1_state("all-halt: mc1", CPU_HALT);
         check_mc2_state("all-halt: mc2", CPU_HALT);
         check_mc3_state("all-halt: mc3", CPU_HALT);
+        check64("shared cluster port preserves all global requester IDs",
+                tb_bus_requester_ids_seen[7:4], 64'hF);
 
         // The shared image stage reports one stall event for its owning
         // cluster. Route it only into the microcore holding the active MEX
@@ -1733,11 +1754,14 @@ module tb_cluster;
         force uut.mc_bus_wdata = 256'd0;
         force uut.mc_bus_wen = 4'b0000;
         force uut.mc_bus_size = {2'd0, BUS_DWORD, 4'd0};
+        tb_bus_requester_seen = 1'b0;
         repeat (2) @(negedge clk);
         check64("normal bus waits behind SHA drain",
                 {62'd0, uut.arb_busy, uut.mc_bus_ready[2]}, 64'd0);
         check64("drain still presents canceled SHA request",
                 {63'd0, bus_valid}, 64'd1);
+        check64("cluster-internal SHA requester is invalid",
+                {63'd0, bus_requester_valid}, 64'd0);
 
         // Return the already-captured SHA response. It is consumed only as a
         // drain event and cannot acknowledge the waiting normal request.
@@ -1780,6 +1804,10 @@ module tb_cluster;
         check64("normal bus gets its own post-drain response",
                 uut.mc_bus_rdata[2*64 +: 64],
                 64'h1122_3344_5566_7788);
+        check64("microcore request publishes requester-valid",
+                {63'd0, tb_bus_requester_seen}, 64'd1);
+        check64("microcore request publishes global core ID",
+                tb_bus_requester_id, CLUSTER_ID_BASE + 8'd2);
         release uut.mc_bus_valid;
         release uut.mc_bus_addr;
         release uut.mc_bus_wdata;
