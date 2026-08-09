@@ -800,23 +800,25 @@ long to retry:
 | `TILE-TEST@` | `( -- n )` | Read tile self-test result |
 | `TILE-DETAIL@` | `( -- n )` | Read tile self-test failure detail bitmask |
 
-### CRC Engine (8 BIOS words)
+### CRC Engine and Capability Discovery (9 BIOS words)
 
 These are ISA-backed CRC words, not tile operations. Full cores have private
-CRC state; a micro-core cluster shares an owner-arbitrated CRC engine. The
-exact mode tuples and transaction semantics are defined in
+CRC state; a micro-core cluster shares an owner-arbitrated CRC engine. BIOS
+adds full `(COREID,TASK-ID)` ownership checks under exact interrupt-state
+preservation. The exact mode tuples and transaction semantics are defined in
 [isa-reference.md](isa-reference.md).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CRC-POLY!` | `( n -- )` | Select mode 0/1/2; every other complete value selects mode 0 |
-| `CRC-INIT!` | `( n -- )` | Acquire and load a mode-width seed |
-| `CRC-FEED` | `( n -- )` | Feed 8 bytes, least-significant byte first |
-| `CRC-FEED-BYTE` | `( b -- )` | Feed exactly `b[7:0]` |
-| `CRC@` | `( -- n )` | Read current shared or private CRC_ACC |
-| `CRC-RESET` | `( -- )` | Reset to the mode's all-ones initial value |
-| `CRC-FINAL` | `( -- )` | Finalize and release; separate `CRC@` can race on shared engines |
-| `CRC-FINAL@` | `( -- n )` | Atomically finalize, release, and return the result |
+| `CRYPTO-CAPS@` | `( -- caps )` | Read raw System Info crypto capabilities |
+| `CRC-MODE!` | `( mode -- status )` | Begin checked mode 0/1/2/4/5/6 without changing the accumulator |
+| `CRC-RESET` | `( -- status )` | Require the exact owner and reset to the mode's all-ones initial value |
+| `CRC-INIT!` | `( seed -- status )` | Require the exact owner and load a mode-width seed |
+| `CRC-FEED` | `( cell -- status )` | Require the exact owner and feed 8 bytes, least-significant byte first |
+| `CRC-FEED-BYTE` | `( byte -- status )` | Require the exact owner and feed exactly the low byte |
+| `CRC@` | `( -- raw status )` | Return the running accumulator followed by checked status |
+| `CRC-RAW-FINAL@` | `( -- raw status )` | Atomically return raw state and release; requires reflected/raw capability |
+| `CRC-FINAL@` | `( -- finalized )` | Atomically XOR-finalize and release; misuse returns zero |
 
 ---
 

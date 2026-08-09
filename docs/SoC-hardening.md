@@ -1984,32 +1984,38 @@ the former MMIO CRC device.
 | `FB 01 DR` | **CRC.B Rd, Rs** | 3 | 1 | Feed byte: `CRC_ACC ← crc_step(CRC_ACC, R[s][7:0])`.  Rd ← `CRC_ACC` (updated value). |
 | `FB 02 DR` | **CRC.Q Rd, Rs** | 3 | 1 | Feed `R[s]` as eight bytes, least-significant byte first. Rd ← updated CRC_ACC. |
 | `FB 03 DR` | **CRC.FIN Rd, Rs** | 3 | 1 | XOR-out and write the finalized value to CRC_ACC and Rd atomically. Rs is ignored. |
-| `FB 04 imm8` | **CRC.MODE imm8** | 3 | 1 | Select mode only when the complete imm8 is 0, 1, or 2; every other value selects mode 0. |
+| `FB 04 imm8` | **CRC.MODE imm8** | 3 | 1 | Select mode only when the complete imm8 is 0, 1, 2, 4, 5, or 6; every other value selects mode 0. |
 | `FB 05 DR` | **CRC.SEED Rd, Rs** | 3 | 1 | Load a mode-width seed from Rs and return the stored value in Rd (32-bit modes zero-extend `Rs[31:0]`). |
-| `FB 06`–`0F` | *(reserved)* | 2 | — | Trap as `ILLEGAL_OP`. |
+| `FB 06 DR` | **CRC.FINRAW Rd, Rs** | 3 | 1 | Publish the width-masked raw accumulator to CRC_ACC and Rd atomically. Rs is ignored. |
+| `FB 07`–`0F` | *(reserved)* | 2 | — | Trap as `ILLEGAL_OP`. |
 
-All modes are MSB-first and non-reflected. Their complete parameter tuples
-and canonical check values are:
+Modes 0/1/2 use the normal MSB-first recurrence. Modes 4/5/6 use the true
+reflected LSB-first recurrence with the reciprocal polynomial. Their complete
+parameter tuples and canonical check values are:
 
-| Mode | Parameterization | Width | Polynomial | Init | XOR-out | `"123456789"` |
-|------|------------------|-------|------------|------|---------|-----------------|
-| 0 | CRC-32/BZIP2 | 32 | `0x04C11DB7` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0xFC891918` |
-| 1 | Castagnoli polynomial, non-reflected | 32 | `0x1EDC6F41` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0x05440F15` |
-| 2 | CRC-64/WE parameters | 64 | `0x42F0E1EBA9EA3693` | `0xFFFFFFFFFFFFFFFF` | `0xFFFFFFFFFFFFFFFF` | `0x62EC59E3F1A4F00A` |
+| Mode | Parameterization | Width | Polynomial | Direction | Final | Raw |
+|------|------------------|-------|------------|-----------|-------|-----|
+| 0 | CRC-32/BZIP2 | 32 | `0x04C11DB7` | MSB first | `0xFC891918` | `0x0376E6E7` |
+| 1 | Castagnoli, non-reflected | 32 | `0x1EDC6F41` | MSB first | `0x05440F15` | `0xFABBF0EA` |
+| 2 | CRC-64/WE | 64 | `0x42F0E1EBA9EA3693` | MSB first | `0x62EC59E3F1A4F00A` | `0x9D13A61C0E5B0FF5` |
+| 4 | CRC-32/ISO-HDLC | 32 | `0xEDB88320` | LSB first | `0xCBF43926` | `0x340BC6D9` |
+| 5 | CRC-32C | 32 | `0x82F63B78` | LSB first | `0xE3069283` | `0x1CF96D7C` |
+| 6 | CRC-64/XZ | 64 | `0xC96C5795D7870F42` | LSB first | `0x995DC9BBDF1939FA` | `0x66A2364420E6C605` |
 
-Mode 1 is not the commonly reflected CRC-32C tuple. Mode 2 uses the ECMA
-polynomial but is not CRC-64/ECMA-182, whose init and XOR-out are zero.
-After reset, mode=0 and CRC_ACC=`0xFFFFFFFF`.
+Every mode uses an all-ones initial accumulator and all-ones XOR-out. Mode 1
+is not the commonly reflected CRC-32C tuple. Mode 2 uses the ECMA polynomial
+but is not CRC-64/ECMA-182, whose init and XOR-out are zero. After reset,
+mode=0 and CRC_ACC=`0xFFFFFFFF`.
 
 On a shared micro engine, MODE, INIT, and SEED acquire or retain the
 transaction lock. Another core's CRC instruction waits and retries until the
-owner executes FIN. FIN commits the finalized accumulator and releases the
-lock in the same grant.
+owner executes FIN or FINRAW. Both final operations publish the accumulator
+and release the lock in the same grant.
 
-Traps and software exception unwinding do not implicitly release this lock.
-The owner must resume and execute FIN (it may reinitialize first), or the
-cluster must be reset/disabled; callers must not treat CRC ownership as an
-exception-safe region.
+Software exception unwinding does not implicitly release this lock. The owner
+must resume and execute a final operation (it may reinitialize first), or the
+cluster must be reset/disabled. A microcore reset cancels an in-flight CRC
+operation, suppresses its late completion, and releases that core's lock.
 
 **Pipeline:** The checked-in RTL uses a combinational bit recurrence, with
 `CRC.Q` composing eight byte recurrences in least-significant-byte-first
@@ -2023,7 +2029,7 @@ synthesis flow.
 | CSR Addr | Name | Width | R/W | Description |
 |----------|------|-------|-----|-------------|
 | `0x80` | **CRC_ACC** | 64 | RW full / R micro | Running or finalized accumulator; micro writes are ignored |
-| `0x81` | **CRC_MODE** | 64 | RW full / R micro | Full-core writes accept exactly 0/1/2 and map every other complete value to 0; micro writes are ignored |
+| `0x81` | **CRC_MODE** | 64 | RW full / R micro | Full-core writes accept exactly 0/1/2/4/5/6 and map every other complete value to 0; micro writes are ignored |
 
 **Flags:** None modified.
 
@@ -2230,12 +2236,12 @@ of field ops per signature.
 
 | Range | Unit | Count | Status |
 |-------|------|-------|--------|
-| `0x00–0x0F` | CRC | 6 used, 10 reserved | Implemented |
+| `0x00–0x0F` | CRC | 7 used, 9 reserved | Implemented |
 | `0x10–0x1F` | SHA-2 (256/384/512) | 7 used, 9 reserved | Proposed |
 | `0x20–0x2F` | Field ALU (multi-prime) | 14 used, 2 reserved | Proposed |
 | `0x30–0xFF` | *(free — 208 slots)* | | Future |
 
-**Total new instructions: 27** (6 CRC + 7 SHA-2 + 14 Field ALU).
+**Total instructions: 28** (7 CRC + 7 SHA-2 + 14 Field ALU).
 
 ---
 
@@ -2244,7 +2250,7 @@ of field ops per signature.
 | CSR Addr | Name | Width | R/W | Description |
 |----------|------|-------|-----|-------------|
 | `0x80` | CRC_ACC | 64 | RW full / R micro | Running or finalized CRC accumulator; micro writes ignored |
-| `0x81` | CRC_MODE | 64 | RW full / R micro | Exact 0/1/2 selection; other full-core writes become 0, micro writes ignored |
+| `0x81` | CRC_MODE | 64 | RW full / R micro | Exact 0/1/2/4/5/6 selection; other full-core writes become 0, micro writes ignored |
 | `0x82` | SHA_MODE | 2 | RW | SHA-2 algorithm select |
 | `0x83` | SHA_MSGLEN | 64 | RW | Message length (low) |
 | `0x84` | SHA_MSGLEN_HI | 64 | RW | Message length (high) |
@@ -2264,6 +2270,7 @@ CSR range 0x80–0x8F reserved for crypto.  6 used, 10 free.
 | CRC.FIN | FB 03 DR | 3 | 4 |
 | CRC.MODE | FB 04 imm8 | 3 | — |
 | CRC.SEED | FB 05 DR | 3 | 4 |
+| CRC.FINRAW | FB 06 DR | 3 | 4 |
 | SHA.INIT | FB 10 imm8 | 3 | — |
 | SHA.ROUND | FB 11 | 2 | — |
 | SHA.PAD | FB 12 | 2 | — |
@@ -2306,9 +2313,9 @@ anywhere.  The MMIO address at 0x980 is freed.  `CRCDevice` removed
 from the emulator.  BIOS CRC words rewritten to use ISA instructions.
 Micro-cores access CRC through the cluster-shared `mp64_crc_isa`
 engine with a hardware-lock arbiter. CRC.MODE, CRC.INIT, and CRC.SEED
-acquire or retain ownership; CRC.FIN commits the final value and releases
-ownership atomically. The micro-core CRC CSRs are read-only views of shared
-state and ignore writes.
+acquire or retain ownership; CRC.FIN and CRC.FINRAW publish their values and
+release ownership atomically. The micro-core CRC CSRs are read-only views of
+shared state and ignore writes.
 
 **SHA-2 MMIO removal (DONE):** `mp64_sha256.v` removed from SoC and
 FPGA synthesis.  MMIO address 0x940 freed.  SHA256Device removed from
@@ -2365,8 +2372,9 @@ elif ext_op == 0xFB:
     op   = sub & 0xF
 
     if unit == 0x0:  # --- CRC ---
+        is64 = crc_mode in (2, 6)
         if op == 0x0:    # CRC.INIT
-            crc_acc = 0xFFFFFFFFFFFFFFFF if crc_mode == 2 else 0xFFFFFFFF
+            crc_acc = 0xFFFFFFFFFFFFFFFF if is64 else 0xFFFFFFFF
         elif op == 0x1:  # CRC.B
             rd, rs = decode_DR(ibuf[2])
             crc_acc = crc_update_byte(crc_acc, R[rs] & 0xFF, crc_mode)
@@ -2378,16 +2386,21 @@ elif ext_op == 0xFB:
             R[rd] = crc_acc
         elif op == 0x3:  # CRC.FIN
             rd, rs = decode_DR(ibuf[2])
-            mask = 0xFFFFFFFFFFFFFFFF if crc_mode == 2 else 0xFFFFFFFF
+            mask = 0xFFFFFFFFFFFFFFFF if is64 else 0xFFFFFFFF
             crc_acc ^= mask
             R[rd] = crc_acc
         elif op == 0x4:  # CRC.MODE
             value = ibuf[2]
-            crc_mode = value if value in (0, 1, 2) else 0
+            crc_mode = value if value in (0, 1, 2, 4, 5, 6) else 0
         elif op == 0x5:  # CRC.SEED
             rd, rs = decode_DR(ibuf[2])
-            mask = 0xFFFFFFFFFFFFFFFF if crc_mode == 2 else 0xFFFFFFFF
+            mask = 0xFFFFFFFFFFFFFFFF if is64 else 0xFFFFFFFF
             crc_acc = R[rs] & mask
+            R[rd] = crc_acc
+        elif op == 0x6:  # CRC.FINRAW
+            rd, rs = decode_DR(ibuf[2])
+            mask = 0xFFFFFFFFFFFFFFFF if is64 else 0xFFFFFFFF
+            crc_acc &= mask
             R[rd] = crc_acc
         else:
             trap(ILLEGAL_OP)
@@ -2589,10 +2602,10 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] B.0: Rationale + per-core area budget
 - [x] B.1: EXT prefix slot map updated (FB assigned)
 - [x] B.2: Encoding scheme (sub-op high/low nibble split)
-- [x] B.3: CRC ISA spec (6 instructions, 2 CRC CSRs)
+- [x] B.3: CRC ISA spec (7 instructions, 2 CRC CSRs)
 - [x] B.4: SHA-2 ISA spec (7 instructions, 3 new CSRs)
 - [x] B.5: Field ALU ISA spec (14 instructions, 1 new CSR)
-- [x] B.6: Sub-op map (27 total instructions)
+- [x] B.6: Sub-op map (28 total instructions)
 - [x] B.7: New CSR summary (0x80–0x85)
 - [x] B.8: Instruction length summary
 - [x] B.9: MMIO migration plan (3 phases)

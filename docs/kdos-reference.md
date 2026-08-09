@@ -127,22 +127,26 @@ buffer length: full 8-byte chunks use `CRC-FEED`, and a 0–7 byte tail uses
 `CRC-FINAL@`, so finalization and final-value capture are one shared-engine
 operation.
 
-These wrappers do not make ownership exception-safe. On a micro-core, a
-caller that begins a CRC transaction must still reach `CRC-FINAL@`; a trap or
-`THROW` does not release the cluster lock.
+Every status-bearing primitive is checked. KDOS throws the unchanged nonzero
+BIOS status, allowing an enclosing `CATCH` to choose retry or error policy.
+Normal wrapper signatures remain result-only. These wrappers cannot make an
+unrelated exception transaction-safe: after successful `CRC-MODE!`, the owner
+must still reach `CRC-FINAL@` because a trap or arbitrary `THROW` does not
+release CRC state.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `CRC-BUF` | `( addr len -- )` | Feed a buffer into the active CRC transaction, using 8-byte acceleration plus exact byte tails. |
 | `CRC32-BUF` | `( addr len -- crc )` | Mode 0 CRC-32/BZIP2 tuple over a buffer. |
-| `CRC32C-BUF` | `( addr len -- crc )` | Mode 1 non-reflected Castagnoli tuple over a buffer. |
+| `CRC32C-BUF` | `( addr len -- crc )` | Standard reflected CRC-32C using mode 5; throws UNSUPPORTED when `CRC_REFLECT_RAW` is unavailable. |
 | `CRC64-BUF` | `( addr len -- crc )` | Mode 2 CRC-64/WE tuple over a buffer. |
 | `CRC32-STR` | `( c-addr len -- crc )` | Readability alias for `CRC32-BUF`. |
 | `.CRC32` | `( addr len -- )` | Print `CRC32-BUF` in hexadecimal while preserving the caller's numeric base. |
 
-All three modes are MSB-first/non-reflected and use all-ones init and
-XOR-out. The exact polynomials and `"123456789"` check values are specified
-in the [ISA reference](isa-reference.md).
+`CRC32-BUF` and `CRC64-BUF` are the MSB-first modes 0 and 2. `CRC32C-BUF` is
+the LSB-first reflected mode 5. All use all-ones init and XOR-out. The exact
+polynomials and `"123456789"` check values are specified in the
+[ISA reference](isa-reference.md).
 
 ---
 

@@ -826,7 +826,7 @@ behind a hardware transaction lock. No removed CRC MMIO device is involved.
 
 With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
 
-#### Implemented CRC Sub-Operations (sub-op 0x00–0x05)
+#### Implemented CRC Sub-Operations (sub-op 0x00–0x06)
 
 | Sub-op | Mnemonic | Bytes | Operation |
 |--------|----------|-------|-----------|
@@ -834,50 +834,52 @@ With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
 | `0x01` | **CRC.B Rd, Rs** | 3 | Feed `Rs[7:0]`; write the running accumulator to Rd. |
 | `0x02` | **CRC.Q Rd, Rs** | 3 | Feed eight bytes from Rs, least-significant byte first; write the running accumulator to Rd. |
 | `0x03` | **CRC.FIN Rd, Rs** | 3 | Apply the mode's XOR-out to CRC_ACC and Rd atomically. Rs is ignored. |
-| `0x04` | **CRC.MODE imm8** | 3 | Select mode 0, 1, or 2. Any other complete imm8 value selects mode 0. |
-| `0x05` | **CRC.SEED Rd, Rs** | 3 | Load CRC_ACC from Rs and copy the stored value to Rd. Modes 0/1 retain and zero-extend `Rs[31:0]`; mode 2 retains all 64 bits. |
-| `0x06`–`0x0F` | *(reserved)* | 2 | Trap as `ILLEGAL_OP`. |
+| `0x04` | **CRC.MODE imm8** | 3 | Select complete mode 0, 1, 2, 4, 5, or 6. Any other complete imm8 value selects mode 0. |
+| `0x05` | **CRC.SEED Rd, Rs** | 3 | Load CRC_ACC from Rs and copy the stored value to Rd. The 32-bit modes retain and zero-extend `Rs[31:0]`; the 64-bit modes retain all 64 bits. |
+| `0x06` | **CRC.FINRAW Rd, Rs** | 3 | Copy the mode-width raw accumulator to CRC_ACC and Rd without XOR-out or bit reversal. Rs is ignored. |
+| `0x07`–`0x0F` | *(reserved)* | 2 | Trap as `ILLEGAL_OP`. |
 
-All three modes process bytes most-significant-bit first and are
-non-reflected (`refin=false`, `refout=false`). Their complete parameter
-tuples are:
+Modes 0, 1, and 2 process each byte most-significant-bit first. Modes 4, 5,
+and 6 use the corresponding reciprocal polynomial and a real
+least-significant-bit-first right-shifting recurrence. `CRC.Q` always consumes
+the register's least-significant byte first, matching ascending addresses
+after a little-endian load.
 
-| Mode | Parameterization | Width | Polynomial | Init | XOR-out | `"123456789"` |
-|------|------------------|-------|------------|------|---------|-----------------|
-| 0 | CRC-32/BZIP2 | 32 | `0x04C11DB7` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0xFC891918` |
-| 1 | Castagnoli polynomial, non-reflected | 32 | `0x1EDC6F41` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0x05440F15` |
-| 2 | CRC-64/WE parameters | 64 | `0x42F0E1EBA9EA3693` | `0xFFFFFFFFFFFFFFFF` | `0xFFFFFFFFFFFFFFFF` | `0x62EC59E3F1A4F00A` |
+| Mode | Parameterization | Direction | Width | Datapath polynomial | `"123456789"` finalized | Raw |
+|------|------------------|-----------|-------|---------------------|--------------------------|-----|
+| 0 | CRC-32/BZIP2 | MSB-first | 32 | `0x04C11DB7` | `0xFC891918` | `0x0376E6E7` |
+| 1 | Castagnoli, non-reflected | MSB-first | 32 | `0x1EDC6F41` | `0x05440F15` | `0xFABB_F0EA` |
+| 2 | CRC-64/WE | MSB-first | 64 | `0x42F0E1EBA9EA3693` | `0x62EC59E3F1A4F00A` | `0x9D13A61C0E5B0FF5` |
+| 4 | CRC-32/ISO-HDLC | LSB-first | 32 | `0xEDB88320` | `0xCBF43926` | `0x340BC6D9` |
+| 5 | CRC-32C | LSB-first | 32 | `0x82F63B78` | `0xE3069283` | `0x1CF96D7C` |
+| 6 | CRC-64/XZ | LSB-first | 64 | `0xC96C5795D7870F42` | `0x995DC9BBDF1939FA` | `0x66A2364420E6C605` |
 
-Mode 1 is not the commonly reflected CRC-32C tuple, and mode 2 is not
-CRC-64/ECMA-182 (which uses a zero initial value and zero XOR-out). The
-table and check values above are authoritative.
+Every mode uses an all-ones initial value and an all-ones `CRC.FIN` XOR-out
+at its width. `CRC.FINRAW` omits the XOR-out. Every write-producing operation
+in a 32-bit mode clears the high half of CRC_ACC and Rd.
 
 Full cores keep CRC state per core. `CRC.MODE`, `CRC.INIT`, and `CRC.SEED`
 acquire or retain the owning transaction on a micro-core cluster's shared
 engine. While another micro-core owns that transaction, CRC instructions
-stall and retry. `CRC.FIN` updates CRC_ACC and Rd and releases ownership in
-one engine grant.
+stall and retry. `CRC.FIN` and `CRC.FINRAW` update CRC_ACC and Rd and release
+ownership in the same engine grant. An unlocked `CRC.B`, `CRC.Q`, or final
+operation remains available to low-level code; the checked BIOS surface
+provides transaction-lifetime enforcement for ordinary callers.
 
 Ownership is a deliberate lifetime rule, not exception unwinding: the owner
-must eventually execute `CRC.FIN` before another micro-core can acquire the
-engine. A hardware trap or software `THROW` does not release the lock. The
-same owner may resume, reinitialize, and finalize the transaction; resetting
-or disabling the cluster also clears CRC state and ownership.
+must eventually execute one of the final operations before another micro-core
+can acquire the engine. A hardware trap or software `THROW` does not release
+the lock. The same owner may resume, reinitialize, and finalize the
+transaction; resetting or disabling the cluster also clears CRC state and
+ownership. Resetting an individual micro-core cancels any operation admitted
+for that caller without completion or writeback, preserves CRC state committed
+by earlier operations, and releases the lock when that caller owned it.
 
 CSR `0x80` reads CRC_ACC and CSR `0x81` reads CRC_MODE. On full cores both
 CSRs are writable; a CRC_MODE write accepts only the complete values 0, 1,
-or 2, and canonicalizes every other 64-bit value to mode 0. On micro-cores
+2, 4, 5, or 6, and canonicalizes every other 64-bit value to mode 0. On micro-cores
 the reads expose cluster-shared state and writes to either CRC CSR are
 ignored; use the CRC instructions to mutate shared state.
-
-> **Selected extension, not yet implemented:**
-> [`crypto-interface-contract.md`](crypto-interface-contract.md#crc-isa-contract)
-> assigns register-form sub-operation `0x06` to `CRC.FINRAW`, assigns exact
-> reflected modes 4, 5, and 6, and reserves `0x07..0x0F`. The existing table
-> above remains the executable ISA until the assembler, both execution
-> models, full-core and cluster RTL, checked BIOS words, tests, and
-> `CRC_REFLECT_RAW` capability gate land together. Code must not emit mode 4,
-> 5, 6, or sub-operation `0x06` against the checkpoint-0 implementation.
 
 #### SHA-2 Sub-Operations (sub-op 0x10–0x16)
 
@@ -1055,7 +1057,7 @@ low nibble of the opcode byte.
 | `0x72` | **ICACHE_MISSES** | 64 | R | I-cache miss counter (since last invalidate) |
 | | | | | |
 | `0x80` | **CRC_ACC** | 64 | RW full / R micro | Running or finalized CRC accumulator; micro-core writes are ignored |
-| `0x81` | **CRC_MODE** | 64 | RW full / R micro | 0/1/2 select a CRC tuple; every other complete value becomes 0 on full-core writes, and micro-core writes are ignored |
+| `0x81` | **CRC_MODE** | 64 | RW full / R micro | 0/1/2/4/5/6 select a complete CRC mode; every other complete value becomes 0 on full-core writes, and micro-core writes are ignored |
 | `0x82` | **SHA_MODE** | 8 | RW | SHA-2 mode: 0=SHA-256, 1=SHA-384, 2=SHA-512 |
 | `0x83` | **SHA_MSGLEN** | 64 | RW | SHA-2 message length (low 64 bits, for padding) |
 | `0x84` | **SHA_MSGLEN_HI** | 64 | RW | SHA-2 message length (high 64 bits, SHA-512 only) |

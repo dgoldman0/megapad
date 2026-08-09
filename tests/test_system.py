@@ -3673,6 +3673,49 @@ class TestBIOS(unittest.TestCase):
                    "CELLS", "CREATE", "BL", "TRUE", "FALSE"]:
             self.assertIn(w, text, f"WORDS missing {w}")
 
+    def test_crc_dictionary_surface_is_exact(self):
+        """The checked CRC words replace the removed unchecked names."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["WORDS"])
+        for word in (
+            "CRYPTO-CAPS@",
+            "CRC-MODE!",
+            "CRC-RESET",
+            "CRC-INIT!",
+            "CRC-FEED",
+            "CRC-FEED-BYTE",
+            "CRC@",
+            "CRC-RAW-FINAL@",
+            "CRC-FINAL@",
+        ):
+            self.assertRegex(text, rf"(?<!\S){re.escape(word)}(?!\S)")
+        for removed in ("CRC-POLY!", "CRC-FINAL"):
+            self.assertNotRegex(
+                text,
+                rf"(?<!\S){re.escape(removed)}(?!\S)",
+            )
+
+    def test_crc_capability_absence_rejects_reflection_and_cleans_raw_final(self):
+        """Unsupported raw finalization releases an owned normal transaction."""
+        sys, buf = self._boot_bios()
+        sys.sysinfo.crypto_caps = 0
+        sys.sysinfo._regs[0x60] = 0
+        text = self._run_forth(sys, buf, [
+            '."  CAPS=" CRYPTO-CAPS@ .',
+            '."  REFLECT-ST=" 5 CRC-MODE! .',
+            '."  NORMAL-ST=" 0 CRC-MODE! .',
+            "0xFFFFFFFF CRC-INIT! DROP",
+            'CRC-RAW-FINAL@ ."  RAW-ST=" . ."  RAW=" .',
+            '."  REOPEN-ST=" 0 CRC-MODE! .',
+            "CRC-FINAL@ DROP",
+        ])
+        self.assertIn("CAPS=0 ", text)
+        self.assertIn("REFLECT-ST=1 ", text)
+        self.assertIn("NORMAL-ST=0 ", text)
+        self.assertIn("RAW-ST=1 ", text)
+        self.assertIn("RAW=0 ", text)
+        self.assertIn("REOPEN-ST=0 ", text)
+
     # -- v1.0 BIOS words --
 
     def test_2over(self):
@@ -4889,8 +4932,8 @@ class TestBIOSTACC(unittest.TestCase):
         base = (labels["dict_free"] + 4095) & ~63
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
-    def test_tacc_dictionary_append_only(self):
-        """The eight ABI words extend, rather than renumber, the old tail."""
+    def test_tacc_dictionary_tail_chain(self):
+        """The eight TACC words form the exact live dictionary tail."""
         labels = self._labels
         chain = (
             ("d_tacc_claim_q", "d_tacc_status_fetch"),
@@ -4920,7 +4963,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 473)
+        self.assertEqual(len(seen), 474)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5484,6 +5527,50 @@ class TestMicroCluster(unittest.TestCase):
         sys.boot()
         self.assertEqual(sys.clusters[0].crc_acc, 0xFFFF_FFFF)
         self.assertFalse(sys.clusters[0].crc_locked)
+
+    def test_bios_crc_owner_arena_tracks_global_topology(self):
+        """BIOS places one scrubbed owner record after the image per core."""
+        labels = {}
+        with open(BIOS_PATH) as source_file:
+            code = assemble(source_file.read(), labels_out=labels)
+        sys = MegapadSystem(
+            ram_size=1 << 20,
+            num_cores=1,
+            num_clusters=3,
+        )
+        sys.load_binary(0, code)
+        sys.boot()
+        for _ in range(2_000_000):
+            if sys.cpu.idle:
+                break
+            sys.cpu.step()
+        self.assertTrue(sys.cpu.idle)
+
+        def read_label_qword(label):
+            address = labels[label]
+            return int.from_bytes(
+                sys.cpu.mem[address:address + 8],
+                "little",
+            )
+
+        owner_base = read_label_qword("var_crc_owner_base")
+        kernel_data_end = read_label_qword("var_kernel_data_end")
+        self.assertEqual(owner_base, labels["dict_free"])
+        self.assertEqual(
+            kernel_data_end,
+            owner_base + sys.num_cores * 16,
+        )
+        self.assertEqual(read_label_qword("var_here"), kernel_data_end)
+        for core_id in range(sys.num_cores):
+            record = owner_base + core_id * 16
+            self.assertEqual(
+                int.from_bytes(sys.cpu.mem[record:record + 8], "little"),
+                0xFFFF_FFFF_FFFF_FFFF,
+            )
+            self.assertEqual(
+                int.from_bytes(sys.cpu.mem[record + 8:record + 16], "little"),
+                0,
+            )
 
     def test_mex_traps_on_standalone_micro_core(self):
         """MEX (tile engine) raises ILLEGAL_OP on standalone micro-cores (no cluster)."""
@@ -12445,6 +12532,40 @@ class TestKDOSCRC(_KDOSTestBase):
         self.assertIn("RAW=174419909 ", text)
         self.assertIn("FINAL=4120547386 ", text)
 
+    def test_crc_raw_final_checked_path(self):
+        """CRC-RAW-FINAL@ publishes raw mode-5 state and clears ownership."""
+        lines = [
+            '."  MODE-ST=" 5 CRC-MODE! .',
+            "0xFFFFFFFF CRC-INIT! DROP",
+        ]
+        lines.extend(f"{byte} CRC-FEED-BYTE DROP" for byte in b"123456789")
+        lines.extend([
+            'CRC-RAW-FINAL@ ."  RAW-ST=" . ."  RAW=" .',
+            'CRC@ ."  POST-ST=" . ."  POST-RAW=" .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("MODE-ST=0 ", text)
+        self.assertIn("RAW-ST=0 ", text)
+        self.assertIn("RAW=486108540 ", text)
+        self.assertIn("POST-ST=2 ", text)
+        self.assertIn("POST-RAW=0 ", text)
+
+    def test_crc_owner_is_full_task_identity(self):
+        """A different cooperative task cannot use the foreground transaction."""
+        text = self._run_kdos([
+            "VARIABLE CRC-OTHER-ST",
+            ": CRC-OTHER-TRY  CRC@ NIP CRC-OTHER-ST ! ;",
+            '."  OPEN-ST=" 0 CRC-MODE! .',
+            "' CRC-OTHER-TRY BACKGROUND",
+            "PAUSE",
+            '."  OTHER-ST=" CRC-OTHER-ST @ .',
+            '."  REENTER-ST=" 0 CRC-MODE! .',
+            "CRC-FINAL@ DROP",
+        ])
+        self.assertIn("OPEN-ST=0 ", text)
+        self.assertIn("OTHER-ST=2 ", text)
+        self.assertIn("REENTER-ST=2 ", text)
+
     def test_crc32_exact_tails_1_through_7(self):
         """CRC32-BUF hashes tail bytes without adding zero padding."""
         data = b"ABCDEFG"
@@ -13057,7 +13178,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 473)
+        self.assertEqual(len(seen), 474)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)

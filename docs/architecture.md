@@ -107,7 +107,7 @@ device occupies a small range:
 | **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 32 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers |
-| **System Info** | `+0x0300` | 96 bytes currently | Board ID, config, core topology, HBW, VRAM, cluster enable |
+| **System Info** | `+0x0300` | 112 bytes | Board ID, topology, memory layout, crypto capabilities, requester count |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 32 implemented bytes | Hardware spinlocks (8 implemented locks, 4 bytes each; selected expansion uses the full 64-byte aperture) |
@@ -123,13 +123,13 @@ device occupies a small range:
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 
-The selected crypto register, ownership, and capability assignments are
-normative in [`crypto-interface-contract.md`](crypto-interface-contract.md).
-They are not yet advertised by the current backends. That contract extends
-System Info through `+0x6F`, reserves spinlock 8 in a 16-lock bank, and
-requires true global requester identity before checked MMIO crypto uses the
-lock. Until those implementation gates land, `CRYPTO_CAPS` is unavailable
-and software must not infer support by probing optional MMIO addresses.
+The crypto register, ownership, and capability assignments are normative in
+[`crypto-interface-contract.md`](crypto-interface-contract.md). System Info
+now extends through `+0x6F`; capability bit 0 advertises the complete
+reflected/raw CRC path. Bits 1 through 3 remain clear until their SHA3,
+raw-Keccak, and WOTS contracts land. The checked CRC path uses per-core BIOS
+owner records and the cluster's existing CRC transaction lock, so it does not
+depend on the later requester-aware spinlock work.
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter uses 6-/8-bit
@@ -319,8 +319,9 @@ filesystem before use.
 
 ## System Info
 
-Board identification and core-topology registers (12 × 64-bit aligned,
-96 bytes total).  All registers are read-only except CLUSTER_EN.
+Board identification, topology, and capability registers in the exact
+half-open range `[+0x00,+0x70)`. All registers are read-only except
+CLUSTER_EN.
 
 | Register | Offset | Width | Default | Description |
 |----------|--------|-------|---------|-------------|
@@ -336,14 +337,16 @@ Board identification and core-topology registers (12 × 64-bit aligned,
 | NUM_FULL | `+0x48` | 64-bit | varies | Number of full (major) cores |
 | VRAM_BASE | `+0x50` | 64-bit | `0xFF00_0000` | Dedicated VRAM base address |
 | VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
+| CRYPTO_CAPS | `+0x60` | 64-bit | `0x1` | Bit 0: reflected/raw CRC; all other currently defined bits are clear |
+| NUM_BUS_PORTS | `+0x68` | 64-bit | varies | Exact weighted-arbiter requester count: full cores + clusters + NIC + disk |
 
-The selected crypto contract adds read-only `CRYPTO_CAPS` and `NUM_BUS_PORTS`
-qwords at `+0x60` and `+0x68`, making the exact device size 112 bytes. The
-latter reports the actual weighted-arbiter requester count so one portable
-BIOS image can derive WOTS deadlines. The current table remains the
-implemented baseline until all backends decode the extension, even when all
-capability bits are zero. See
-[`crypto-interface-contract.md`](crypto-interface-contract.md#capability-discovery).
+Byte reads return the corresponding little-endian byte. Halfword, word, and
+qword accesses must be naturally aligned and wholly contained in the device
+window; invalid spans fault before any prefix of a write is published. Writes
+to CRYPTO_CAPS and NUM_BUS_PORTS are acknowledged and ignored. The requester
+count will include the WOTS bus port when that requester is integrated. See
+[`crypto-interface-contract.md`](crypto-interface-contract.md#capability-discovery)
+for the independent capability-bit assignments.
 
 ---
 

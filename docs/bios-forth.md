@@ -7,10 +7,10 @@ the first Forth-type file and loads it with the `FSLOAD` machinery.  The
 standard image places the KDOS core first.
 
 > **Implementation boundary.** This reference describes the checked-in BIOS
-> image. The selected numeric CRC, SHA3, Keccak, and WOTS interface is in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md); its selected
-> additions are not present at checkpoint 0. Capability-dependent paths remain
-> unavailable until the corresponding bit is implemented and advertised.
+> image. The numeric CRC, SHA3, Keccak, and WOTS interface is in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md). A
+> capability-dependent path remains unavailable until its complete backend and
+> checked BIOS path are implemented and the corresponding bit is advertised.
 
 This document organizes the BIOS dictionary by functional category.  Each
 entry shows the **stack effect**
@@ -776,41 +776,44 @@ BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 
 ---
 
-## CRC Engine (8 words)
+## CRC Engine and Capability Discovery (9 words)
 
 CRC computation uses EXT.CRYPTO `FB` instructions. Full cores have private
 state; each micro-core cluster shares an accelerator protected by a hardware
-transaction lock. `CRC-POLY!` or `CRC-INIT!` begins a transaction and
-finalization releases it. CRC state lives in CSR 0x80 (CRC_ACC) and CSR 0x81
-(CRC_MODE). Micro-cores may read those CSRs, but writes are ignored; the BIOS
-words mutate shared state through owner-arbitrated CRC instructions.
+transaction owner. `CRC-MODE!` begins a checked transaction without changing
+the accumulator. Finalization releases it. CRC state lives in CSR 0x80
+(CRC_ACC) and CSR 0x81 (CRC_MODE). Micro-cores may read those CSRs, but writes
+are ignored; the BIOS words mutate shared state through owner-arbitrated CRC
+instructions.
 
-The owning micro-core must reach a final operation: traps and `THROW` do not
-auto-release the lock. The same owner can resume, reset/reseed, and finalize;
-cluster reset or disable also clears ownership.
+At boot, BIOS reserves and scrubs one 16-byte owner record for every global
+core advertised by System Info. Each record holds the full `COREID` and
+`TASK-ID`. Record checks, CRC instructions, publication, and cleanup run in
+critical sections which restore the caller's exact interrupt-enable state.
+This prevents another cooperative task on the same core from entering an
+already-active transaction. The owner must still reach a final operation:
+traps and `THROW` do not automatically release CRC state.
 
-All modes are MSB-first and non-reflected, with all-ones init and XOR-out.
-Mode 0 uses the CRC-32/BZIP2 tuple, mode 1 uses the Castagnoli polynomial in
-non-reflected form, and mode 2 uses CRC-64/WE parameters. See the
+Modes 0, 1, and 2 are MSB-first CRC-32/BZIP2, non-reflected Castagnoli, and
+CRC-64/WE. Modes 4, 5, and 6 are their LSB-first reflected counterparts and
+require capability bit `CRC_REFLECT_RAW`. See the
 [ISA reference](isa-reference.md) for the complete tuples and check vectors.
 
-The selected reflected modes, raw final operation, and checked replacement
-words are pinned in
-[`crypto-interface-contract.md`](crypto-interface-contract.md#checked-crc-words).
-The table below remains the currently implemented BIOS surface until that
-coherent ISA/BIOS cutover lands; `CRC-POLY!` will then be removed rather than
-kept as an alias.
+Checked status values are 0 OK, 1 UNSUPPORTED, 2 STATE/OWNER, and 3 RANGE.
+`CRC@` and `CRC-RAW-FINAL@` return the value first and status on top.
+`CRC-FINAL@` is deliberately result-only and returns zero on owner misuse.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CRC-POLY!` | `( n -- )` | Select mode 0, 1, or 2 and begin/retain a transaction; every other complete value selects mode 0. |
-| `CRC-INIT!` | `( n -- )` | Acquire the shared engine and set a mode-width seed (low 32 bits in modes 0/1, all 64 bits in mode 2). |
-| `CRC-FEED` | `( n -- )` | Feed 8 bytes, least-significant byte first. |
-| `CRC-FEED-BYTE` | `( b -- )` | Feed exactly `b[7:0]` as one byte. |
-| `CRC@` | `( -- n )` | Read the current raw or finalized accumulator. |
-| `CRC-RESET` | `( -- )` | Acquire and reset to the mode's all-ones default. |
-| `CRC-FINAL` | `( -- )` | Finalize into CRC_ACC and release the shared lock. A later `CRC@` is a separate operation and can race another micro-core transaction. |
-| `CRC-FINAL@` | `( -- n )` | Atomically finalize, release, and return the result; authoritative final-read word for shared-core use. |
+| `CRYPTO-CAPS@` | `( -- caps )` | Read the raw System Info `CRYPTO_CAPS` qword. |
+| `CRC-MODE!` | `( mode -- status )` | Validate mode 0/1/2/4/5/6, check reflected capability when needed, and begin a checked transaction without changing CRC_ACC. |
+| `CRC-RESET` | `( -- status )` | Require the exact owner and reset to the selected mode's all-ones default. |
+| `CRC-INIT!` | `( seed -- status )` | Require the exact owner and set a mode-width seed. |
+| `CRC-FEED` | `( cell -- status )` | Require the exact owner and feed 8 bytes, least-significant byte first. |
+| `CRC-FEED-BYTE` | `( byte -- status )` | Require the exact owner and feed exactly the low byte. |
+| `CRC@` | `( -- raw status )` | Return the running accumulator to the exact owner; misuse returns `0 2`. |
+| `CRC-RAW-FINAL@` | `( -- raw status )` | Atomically return the unmodified accumulator and release. Capability absence returns `0 1` and releases an exact-owner non-reflected transaction through ordinary finalization. |
+| `CRC-FINAL@` | `( -- finalized )` | Atomically XOR-finalize and release; misuse returns zero without touching hardware. |
 
 ---
 
@@ -899,10 +902,11 @@ unconditional OK and ignores the unused address. For a nonempty span, negative
 address or length cells, null, address wrap, crossing an advertised physical
 window, and an unadvertised range all return RANGE.
 
-Bank 0 admits only `[dict_free, caller-DSP-8)`. This excludes the static
-BIOS/private footprint, live data and return stacks, and the status result
-cell. External, HBW, and VRAM spans are admitted when they fit wholly in the
-corresponding nonempty SysInfo window.
+Bank 0 admits only `[kernel-data-end, caller-DSP-8)`. The boot-computed lower
+bound follows the topology-sized CRC owner table, excluding it together with
+the static BIOS/private footprint, live data and return stacks, and the status
+result cell. External, HBW, and VRAM spans are admitted when they fit wholly
+in the corresponding nonempty SysInfo window.
 
 One conservative boundary serves both input reads and output writes because
 it qualifies ordinary caller-manageable memory, not every byte the machine
@@ -1043,8 +1047,9 @@ no-op, including `(0,0)`, and its unused address is ignored. A nonempty
 address must be nonnegative; null with a nonzero length is RANGE.
 A nonempty destination must fit wholly and without wrap in one advertised
 Bank 0, external, HBW, or VRAM physical window. Bank 0 is further limited to
-`[dict_free, caller-DSP-8)`, excluding the complete static BIOS/private
-footprint, every live stack byte, and the future status cell. This is a
+`[kernel-data-end, caller-DSP-8)`, excluding the complete static BIOS/private
+footprint, the dynamic CRC owner table, every live stack byte, and the future
+status cell. This is a
 protection boundary, not an allocation-ownership check; callers remain
 responsible for supplying a buffer they manage. The word applies this policy
 through the shared `CALLER-SPAN-STATUS` implementation before its first

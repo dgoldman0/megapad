@@ -98,10 +98,10 @@ window. A misaligned, crossing, or out-of-window access faults as one
 architectural access; it must not alias an earlier register. Writes to
 `CRYPTO_CAPS` or `NUM_BUS_PORTS` are acknowledged and ignored.
 
-Checkpoint 0 assigns these fields but does not add the System Info extension
-to an executing backend, so neither new qword is yet readable and no
-capability is advertised. When the extension first lands, every unqualified
-capability bit reads zero; source presence alone never sets one.
+The exact System Info extension is implemented in the execution models and
+integrated RTL. Capability bit 0 is set with the qualified reflected/raw CRC
+path; bits 1 through 3 remain zero. Source presence alone never sets a
+capability.
 
 ## Portable crypto guard
 
@@ -262,7 +262,10 @@ engine is unowned. Such a one-operation grant does not make `B` or `Q` a
 retained transaction, and an unowned final has no owner to release. Checked
 software must begin with `CRC-MODE!` before feeding or finalizing. Traps and
 Forth `THROW` do not unwind the hardware owner; checked failure cleanup must
-finalize through the owning context.
+finalize through the owning context. An individual micro-core reset is an
+explicit hardware cancellation: it suppresses completion and writeback for an
+admitted operation, preserves state committed by earlier operations, and
+releases the transaction lock if the reset caller owned it.
 
 ### Checked CRC words
 
@@ -334,9 +337,8 @@ mode-width raw value followed by status 0.
 `CRC-FINAL@` retains its result-only public shape. After a successful
 `CRC-MODE!` it executes `CRC.FIN`, clears the owner record, and returns the
 finalized value. Misuse without the matching owner returns zero and does not
-touch hardware. The misleading `CRC-POLY!` public name is removed when
-MegaPad callers migrate; the racy no-result `CRC-FINAL` word is removed at the
-same cutover. No aliases are retained.
+touch hardware. The misleading `CRC-POLY!` public name and the racy no-result
+`CRC-FINAL` word are removed. No aliases are retained.
 
 ## SHA3/SHAKE and raw Keccak MMIO contract
 
@@ -1073,15 +1075,15 @@ implement.
 
 ## Current divergence and migration ledger
 
-This section identifies implementation and consumer assumptions that must be
-changed in later checkpoints. It is descriptive of the checkpoint-0 baseline,
-not an alternate contract.
+This section records the implementation cutovers and the assumptions that
+remain for later checkpoints. It is status evidence, not an alternate
+contract.
 
 ### CRC implementation and consumers
 
-The current CRC path implements only modes 0, 1, and 2 and reserves
-sub-operation `0x06`. Mode 5 and operation 6 are explicitly asserted invalid
-by tests in:
+The CRC path implements all six modes and register-form sub-operation `0x06`.
+Mode 7 and operation 7 are the first invalid reflected-mode and CRC-operation
+fixtures in:
 
 - `tests/test_megapad64.py`;
 - `tests/test_system.py`;
@@ -1091,25 +1093,22 @@ by tests in:
 - `rtl/sim/tb_cpu_micro.v`; and
 - `rtl/sim/tb_cpu_smoke.v`.
 
-The implementation cutover must update `asm.py`, `megapad64.py`,
+The implementation cutover updates `asm.py`, `megapad64.py`,
 `accel/mp64_accel.cpp`, `accel_wrapper.py`, `rtl/pkg/mp64_pkg.vh`,
 `rtl/pkg/mp64_cpu_funcs.vh`, `rtl/crypto/mp64_crc_isa.v`, both CPU decoders,
 cluster arbitration/state, native snapshots, and runtime instruction-length
-classification together. Runtime skip sizing already mishandles some
-three-byte `EXT.CRYPTO` operations; `CRC.FINRAW` needs explicit normal and REX
-skip/trap-PC coverage.
+classification together. Full-core and microcore SKIP paths use
+sub-operation lookahead for normal and redundant-REX `EXT.CRYPTO` encodings,
+including two-byte reserved traps and the three-byte `CRC.FINRAW` form.
 
-The Python/native models currently zero the high 32 bits after a 32-bit feed,
-while RTL can preserve high bits injected through the full-core accumulator
-CSR. The implementation must adopt this document's zero-extension rule and
-add CSR-high-half differential tests.
+Python, native, and RTL apply the same high-half zero-extension rule after
+every write-producing 32-bit CRC operation, including state injected through
+the full-core accumulator CSR.
 
-Current BIOS/KDOS callers use the no-status `CRC-POLY!` surface. KDOS
-`CRC32C-BUF` currently selects non-reflected mode 1, so its name does not mean
-standard CRC-32C. During migration, standard `CRC32C-BUF` selects reflected
-mode 5; any genuinely needed non-reflected Castagnoli helper receives an
-explicit name, otherwise it is removed. The GPT software IEEE CRC remains in
-place until the later MegaPad adoption checkpoint.
+BIOS exposes the checked CRC surface in this document, and KDOS
+`CRC32C-BUF` selects reflected mode 5. No compatibility aliases preserve the
+removed no-status words. The GPT software IEEE CRC remains in place until the
+later MegaPad adoption checkpoint.
 
 `docs/BIOS-DICTIONARY.md` previously listed CRC DMA words that do not exist
 after CRC moved to the ISA. Checkpoint 0 removes those phantom rows rather
@@ -1180,21 +1179,19 @@ is still a defect and must be removed.
 
 ### Guard and System Info prerequisites
 
-Python and RTL currently implement eight spinlocks; this contract selects the
-full documented 16-lock aperture. KDOS assigns all eight current locks:
+Python and RTL currently implement eight spinlocks. KDOS assigns all eight:
 dictionary, UART, filesystem, heap, ring, hash table, application/event, and
 messaging. RTL also hardwires mailbox/spinlock requester identity to core 0.
-Lock-bank
-expansion, true global requester propagation, invalid-requester behavior, and
-same-core full-width owner-field tests must land before the checked MMIO
-crypto words.
+Lock-bank expansion, true global requester propagation, invalid-requester
+behavior, and same-core full-width owner-field tests remain prerequisites for
+the checked MMIO crypto guard in later checkpoints. Checked CRC does not use
+that guard: it uses topology-sized BIOS owner records and the cluster's CRC
+transaction lock.
 
-The current Python System Info window ends at `+0x5F`; RTL acknowledges the
-whole `+0x300` page and can alias upper offsets because too few address bits
-are decoded. The implementation must make `[+0x00,+0x70)` exact in every
-backend, reject crossing and `+0x70` accesses, expose the exact main-bus port
-count at `+0x68`, and expose zero capability bits before any feature is
-enabled.
+Python/native and RTL implement the exact System Info range
+`[+0x00,+0x70)`, reject misaligned, crossing, and `+0x70` accesses, expose the
+main-bus requester count at `+0x68`, and independently gate capabilities at
+`+0x60`.
 
 ## Qualification anchors
 

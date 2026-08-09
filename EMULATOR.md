@@ -175,7 +175,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0000` | 16 B | UART (serial console) |
 | `+0x0100` | 16 B | Timer |
 | `+0x0200` | 16 B | Storage controller |
-| `+0x0300` | 96 B | System Info (board ID, topology, VRAM) |
+| `+0x0300` | 112 B | System Info (board ID, topology, VRAM, crypto capabilities, bus ports) |
 | `+0x0400` | 128 B | NIC (Network Interface) |
 | `+0x0500` | 16 B | Mailbox (inter-core IPI) |
 | `+0x0600` | 64 B | Spinlock (hardware mutexes) |
@@ -222,7 +222,9 @@ restore it.
          │  BIOS code           │  ~5650 bytes
          │  dictionary entries  │
          │  strings / IVT / TIB │
-         ├──────────────────────┤ ← dict_free / HERE
+         ├──────────────────────┤ ← dict_free
+         │ CRC owner records    │  NUM_CORES × 16 bytes
+         ├──────────────────────┤ ← kernel-data-end / HERE
          │  user dictionary     │  grows ↑
          │  (HERE advances)     │
          │          ...         │
@@ -285,8 +287,10 @@ Sector-based block device backed by a host file.  Sector size is 512 bytes.
 
 ### System Info
 
-Board identification and core-topology registers (12 × 64-bit aligned,
-96 bytes).  All read-only except CLUSTER_EN.
+Board identification and core-topology registers (14 × 64-bit aligned,
+112 bytes). All read-only except CLUSTER_EN. Byte reads select the
+corresponding little-endian byte; wider reads must be naturally aligned and
+remain wholly inside the exact window.
 
 | Offset | Name | Description |
 |---|---|---|
@@ -302,6 +306,8 @@ Board identification and core-topology registers (12 × 64-bit aligned,
 | `+0x48` | NUM_FULL | Number of full (major) cores |
 | `+0x50` | VRAM_BASE | Dedicated VRAM base address |
 | `+0x58` | VRAM_SIZE | Dedicated VRAM size in bytes |
+| `+0x60` | CRYPTO_CAPS | Independent qualified crypto capability bits; unassigned bits read zero |
+| `+0x68` | NUM_BUS_PORTS | Exact requester-port count in the main weighted arbiter |
 
 ---
 
@@ -317,7 +323,9 @@ provides an interactive REPL over UART.
 2. Check COREID (CSR 0x20) — secondary cores branch to worker loop
 3. Set up UART base in R8, TX ring descriptor pointer in R19, subroutine pointers in R4/R5/R6.  Register the ring buffer with the UART (write R19 to TX_RING_BASE).
 4. Enable timer, install IVT for bus fault handler
-5. Initialise Forth variables: STATE=0, BASE=10, HERE=dict_free, LATEST
+5. Initialise Forth variables, reserve and scrub `NUM_CORES × 16` bytes above
+   `dict_free` for checked CRC owner records, then set `HERE` to the resulting
+   kernel-data end
 6. Print banner (`Megapad-64 Forth BIOS v1.0`, RAM size)
 7. Auto-boot: if disk present, scan MP64FS for first Forth file, FSLOAD it
 8. Enter the outer interpreter (`QUIT` loop)
@@ -462,8 +470,8 @@ valid/dirty state, and can be followed by normal recovery.
 `PERF-CYCLES` `PERF-STALLS` `PERF-TILEOPS` `PERF-EXTMEM` `PERF-RESET`
 
 **CRC engine (ISA-native, EXT.CRYPTO)**
-`CRC-POLY!` `CRC-INIT!` `CRC-FEED` `CRC-FEED-BYTE` `CRC@` `CRC-RESET`
-`CRC-FINAL` `CRC-FINAL@`
+`CRYPTO-CAPS@` `CRC-MODE!` `CRC-RESET` `CRC-INIT!` `CRC-FEED`
+`CRC-FEED-BYTE` `CRC@` `CRC-RAW-FINAL@` `CRC-FINAL@`
 
 **SHA-256 engine (ISA-native, EXT.CRYPTO)**
 `SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-CLEAR`
@@ -525,11 +533,12 @@ supplemental and cannot make an unusable source healthy.
 canonical true only for exact `STATUS == 1`.
 
 The checked word accepts every empty span (including `(0,0)`) as a no-op.
-Nonempty destinations must be nonnegative, non-null, and fit wholly, without wrap,
-in one advertised Bank 0, external, HBW, or VRAM window. Bank 0 is narrowed
-to `[dict_free, caller-DSP-8)`, keeping the static BIOS/private footprint,
-live stacks, and future result cell out of reach. This geometry is a
-protection boundary rather than proof that the caller owns an allocation.
+Nonempty destinations must be nonnegative, non-null, and fit wholly, without
+wrap, in one advertised Bank 0, external, HBW, or VRAM window. Bank 0 is
+narrowed to `[kernel-data-end, caller-DSP-8)`, keeping the static BIOS/private
+footprint, topology-sized CRC owner records, live stacks, and future result
+cell out of reach. This geometry is a protection boundary rather than proof
+that the caller owns an allocation.
 Exact `USABLE == 1` is required before every byte and after completion. A
 detected post-start loss wipes the entire admitted destination; an initial
 loss writes nothing.

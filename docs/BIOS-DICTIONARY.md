@@ -1,14 +1,14 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **473** entries.  The numbered
+The live dictionary link chain contains **474** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
 > **Implementation boundary.** This reference describes the checked-in BIOS
-> image. The selected numeric CRC, SHA3, Keccak, and WOTS interface is in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md); its selected
-> additions are not present at checkpoint 0. Capability-dependent paths remain
-> unavailable until the corresponding bit is implemented and advertised.
+> image. The numeric CRC, SHA3, Keccak, and WOTS interface is in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md). A
+> capability-dependent path remains unavailable until its complete backend and
+> checked BIOS path are implemented and the corresponding bit is advertised.
 
 ---
 
@@ -34,7 +34,10 @@ Each entry is a linked list node:
 
 1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled.  The TX ring buffer address is written to UART TX_RING_BASE (`+0x08`).
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
-3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (`TACC-CLAIM?`).
+3. **Forth variables and private arena**: `STATE` = 0, `BASE` = 10, reserve
+   and scrub `NUM_CORES × 16` bytes above `dict_free` for CRC owner records,
+   set `HERE` to the resulting kernel-data end, and set `LATEST` =
+   `latest_entry` (`TACC-CLAIM?`).
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -570,23 +573,24 @@ of compiled code.
 | 223 | `PERF-EXTMEM` | `( -- n )` | | Read external memory beat counter (CSR 0x6B) |
 | 224 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
 
-### CRC Engine (8 words) — ISA-native (EXT.CRYPTO `FB`)
+### CRC Engine and Capability Discovery (9 words) — ISA-native (EXT.CRYPTO `FB`)
 
-The following table is the currently implemented surface. The selected
-reflected/raw cutover and checked stack effects are authoritative in
-[`crypto-interface-contract.md`](crypto-interface-contract.md#checked-crc-words);
-`CRC-POLY!` is removed when that cutover lands.
+BIOS records the full `(COREID,TASK-ID)` owner in a topology-sized private
+table. Checks and CRC instructions run with the exact caller interrupt state
+saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
+2 STATE/OWNER, and 3 RANGE.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CRC-POLY!` | `( n -- )` | Select mode 0/1/2 with `crc.mode` and begin/retain a transaction; every other complete value selects mode 0 |
-| `CRC-INIT!` | `( n -- )` | Acquire with `crc.init`, then load a mode-width seed with `crc.seed` |
-| `CRC-FEED` | `( n -- )` | Feed 8 bytes in little-endian order with `crc.q` |
-| `CRC-FEED-BYTE` | `( b -- )` | Feed exactly `b[7:0]` with `crc.b` |
-| `CRC@` | `( -- n )` | Read CRC_ACC (raw during a transaction, finalized after FIN) |
-| `CRC-RESET` | `( -- )` | Acquire and reset to the selected mode's all-ones default |
-| `CRC-FINAL` | `( -- )` | Finalize into CRC_ACC and release; a subsequent `CRC@` can race another shared-engine owner |
-| `CRC-FINAL@` | `( -- n )` | Atomically finalize, release, and return the result; authoritative shared-core final read |
+| `CRYPTO-CAPS@` | `( -- caps )` | Read the raw System Info `CRYPTO_CAPS` qword |
+| `CRC-MODE!` | `( mode -- status )` | Select mode 0/1/2/4/5/6 without changing CRC_ACC; reflected modes require capability bit 0 |
+| `CRC-RESET` | `( -- status )` | Require the exact owner and reset to the selected all-ones initial value |
+| `CRC-INIT!` | `( seed -- status )` | Require the exact owner and load a mode-width seed with `crc.seed` |
+| `CRC-FEED` | `( cell -- status )` | Require the exact owner and feed 8 bytes in little-endian order with `crc.q` |
+| `CRC-FEED-BYTE` | `( byte -- status )` | Require the exact owner and feed exactly the low byte with `crc.b` |
+| `CRC@` | `( -- raw status )` | Return owner-visible CRC_ACC followed by status; misuse returns `0 2` |
+| `CRC-RAW-FINAL@` | `( -- raw status )` | Atomically return raw CRC_ACC and release; unsupported returns `0 1` with exact-owner non-reflected cleanup |
+| `CRC-FINAL@` | `( -- finalized )` | Atomically XOR-finalize and release; owner misuse returns zero without a CRC instruction |
 
 ### Memory BIST (5 words)
 
@@ -743,9 +747,10 @@ including `(0,0)`, and its unused address is ignored. Every nonempty address
 must be nonnegative; a nonempty null destination is RANGE. Every
 nonempty span must fit wholly and without wrap in one advertised Bank 0,
 external, HBW, or VRAM window. Within Bank 0, only
-`[dict_free, caller-DSP-8)` is admitted: the lower bound protects the entire
-static BIOS/private-state footprint, while the upper bound protects the live
-stacks and the status cell that the word will return. This boundary does not
+`[kernel-data-end, caller-DSP-8)` is admitted: the boot-computed lower bound
+protects the entire static BIOS/private-state footprint and dynamic CRC owner
+table, while the upper bound protects the live stacks and the status cell
+that the word will return. This boundary does not
 prove allocation ownership; the caller must still supply a buffer it manages.
 `ENTROPY-FILL` applies this policy through the shared
 `CALLER-SPAN-STATUS` implementation before reading the TRNG.
@@ -777,9 +782,10 @@ RANGE for a negative address or length cell, null, wrap, a cross-window
 interval, or an interval outside Bank 0 and the nonempty external, HBW, and
 VRAM windows advertised by SysInfo.
 
-Within Bank 0, only `[dict_free, caller-DSP-8)` is admitted, excluding the
-static BIOS/private footprint, live stacks, and the result cell. This same
-conservative caller-managed policy is used for input and output spans; it
+Within Bank 0, only `[kernel-data-end, caller-DSP-8)` is admitted, excluding
+the static BIOS/private footprint, dynamic CRC owner records, live stacks,
+and the result cell. This same conservative caller-managed policy is used for
+input and output spans; it
 intentionally does not expose readable static BIOS storage. Success proves
 geometry and platform protection only, not allocation ownership, mutability,
 initialization, lifetime, or freedom from application-level aliases.
@@ -841,22 +847,18 @@ initialization, lifetime, or freedom from application-level aliases.
 | 318 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
 | 319 | `TASK-ID` | `( -- n )` | | Return executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0 |
 
-### Full-width TACC (8 append-only words)
-
-These headers are appended after the previously newest entry rather than
-inserted into the historical Tile Engine table.  Therefore every ordinal
-through 465 remains stable.
+### Full-width TACC (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 466 | `TAMAC` | `( -- )` | | Accumulate the `TSRC0` × `TSRC1` tile products into owned, valid TACC lanes (`t.amac`, `E1 06`) |
-| 467 | `TACC-TRY` | `( -- )` | | Atomically try to claim TACC; always retires without waiting and returns no flag (`F8 E3 02`) |
-| 468 | `TACC-CLEAR` | `( -- )` | | Latch the current legal `TMODE`, zero TACC, and establish valid dirty state (`F8 E3 03`) |
-| 469 | `TACC-LOAD` | `( -- )` | | Atomically load the canonical 256-byte image at `TSRC0` and latch its current format (`F8 E3 04`) |
-| 470 | `TACC-STORE` | `( -- )` | | Store the canonical 256-byte image at `TDST`; clear `DIRTY` only after complete success (`F8 E3 05`) |
-| 471 | `TACC-RELEASE` | `( -- )` | | Zeroize, invalidate, and release caller-owned TACC (`F8 E3 06`) |
-| 472 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
-| 473 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
+| 467 | `TAMAC` | `( -- )` | | Accumulate the `TSRC0` × `TSRC1` tile products into owned, valid TACC lanes (`t.amac`, `E1 06`) |
+| 468 | `TACC-TRY` | `( -- )` | | Atomically try to claim TACC; always retires without waiting and returns no flag (`F8 E3 02`) |
+| 469 | `TACC-CLEAR` | `( -- )` | | Latch the current legal `TMODE`, zero TACC, and establish valid dirty state (`F8 E3 03`) |
+| 470 | `TACC-LOAD` | `( -- )` | | Atomically load the canonical 256-byte image at `TSRC0` and latch its current format (`F8 E3 04`) |
+| 471 | `TACC-STORE` | `( -- )` | | Store the canonical 256-byte image at `TDST`; clear `DIRTY` only after complete success (`F8 E3 05`) |
+| 472 | `TACC-RELEASE` | `( -- )` | | Zeroize, invalidate, and release caller-owned TACC (`F8 E3 06`) |
+| 473 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
+| 474 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
 
 ---
 
@@ -884,7 +886,7 @@ through 465 remains stable.
 | RTC / System Clock | 7 |
 | Multicore | 11 |
 | Performance Counters | 5 |
-| CRC Engine | 8 |
+| CRC Engine and Capability Discovery | 9 |
 | Memory BIST | 5 |
 | Tile Self-Test | 3 |
 | Stride / 2D Addressing | 6 |
@@ -902,7 +904,7 @@ through 465 remains stable.
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
-| **Catalogued subtotal** | **377** |
+| **Catalogued subtotal** | **378** |
 
 ### All Immediate Words (34)
 
@@ -919,7 +921,8 @@ TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 → ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
 → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
 → SHA512-INIT → TX-FLUSH
-→ CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
+→ CRYPTO-CAPS@ → CRC-FINAL@ → CRC-RAW-FINAL@ → CRC-FEED-BYTE
+→ ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
 ```
 
 ### MMIO Address Map
@@ -929,6 +932,7 @@ TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 | `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2 |
 | `0xFFFF_FF00_0000_0100` | Timer | COUNT=+0..+3, COMPARE=+4..+7, CTRL=+8, STATUS=+9 |
 | `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL=+11..+14, RESULT=+15, COMPLETE=+16..+19, MEDIA_GEN=+1A..+1D, CAPS=+1E, TRANSFERRED=+1F, EXPECTED_MEDIA_GEN=+20..+23, GUARDED_CMD=+24 |
+| `0xFFFF_FF00_0000_0300` | System Info | Exact 112-byte window; `NUM_CORES`=+10, `CRYPTO_CAPS`=+60, `NUM_BUS_PORTS`=+68 |
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
 | `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |
@@ -939,14 +943,15 @@ TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |
-| `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`) |
+| `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`/`crc.finraw`) |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |
 
 ### Memory Layout
 
 ```
 0x00000                BIOS code + dictionary + strings + TIB(256B) + IVT(64B)
-dict_free →            User dictionary (HERE grows upward)
+dict_free →            NUM_CORES × 16-byte private CRC owner records
+kernel-data-end →      User dictionary (HERE grows upward)
 ram_size/2 ↓           Data stack (R14 grows downward)
 ram_size/2 →           FSLOAD file buffer (grows upward, shared region)
 ram_size ↓             Return stack (R15 grows downward)
