@@ -39,10 +39,14 @@ module mp64_core_bus_mux (
 
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
+    input  wire        bus_error,
     output wire [63:0] core_rdata,
     output wire        core_ready,
+    output wire        core_error,
     output wire [63:0] ic_rdata,
-    output wire        ic_ready
+    output wire        ic_ready,
+    output wire        ic_error,
+    output wire [63:0] ic_error_addr
 );
 
     reg        owner_active;
@@ -80,6 +84,12 @@ module mp64_core_bus_mux (
     assign ic_rdata = bus_rdata;
     assign core_ready = bus_ready && owner_active && !owner_icache;
     assign ic_ready = bus_ready && owner_active && owner_icache;
+    // Error qualification uses the same captured owner as READY.  A refill
+    // timeout therefore cannot become a data exception merely because the
+    // CPU presents a data request while the response is returning.
+    assign core_error = bus_error && core_ready;
+    assign ic_error = bus_error && ic_ready;
+    assign ic_error_addr = owner_addr;
 
     always @(posedge clk) begin
         if (!rst_n) begin

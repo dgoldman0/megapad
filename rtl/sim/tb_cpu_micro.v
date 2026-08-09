@@ -39,15 +39,25 @@ module tb_cpu_micro;
     wire [1:0]  bus_size;
     reg  [63:0] bus_rdata;
     reg         bus_ready;
+    reg         bus_error;
+    reg         bus_fault_enable;
+    reg  [63:0] bus_fault_addr;
+    reg         bus_fault_wen;
+    reg         irq_ipi;
 
     // Respond between CPU sampling edges so each ready pulse acknowledges
     // exactly one held request, including back-to-back trap-frame accesses.
     always @(negedge clk) begin
         bus_ready <= 1'b0;
         bus_rdata <= 64'd0;
+        bus_error <= 1'b0;
         if (bus_valid) begin
             bus_ready <= 1'b1;
-            if (bus_wen) begin
+            if (bus_fault_enable && bus_addr == bus_fault_addr &&
+                bus_wen == bus_fault_wen) begin
+                bus_rdata <= 64'hDEAD_DEAD_DEAD_DEAD;
+                bus_error <= 1'b1;
+            end else if (bus_wen) begin
                 case (bus_size)
                     BUS_BYTE:  mem[bus_addr[12:0]] <= bus_wdata[7:0];
                     BUS_HALF: begin
@@ -247,9 +257,10 @@ module tb_cpu_micro;
         .bus_size  (bus_size),
         .bus_rdata (bus_rdata),
         .bus_ready (bus_ready),
+        .bus_error (bus_error),
         .mpu_fault (1'b0),
         .irq_timer (1'b0),
-        .irq_ipi   (1'b0),
+        .irq_ipi   (irq_ipi),
         .ef_flags  (4'd0),
         .mul_req   (mul_req),
         .mul_op    (mul_op),
@@ -500,6 +511,11 @@ module tb_cpu_micro;
         tile_csr_read_count = 0;
         tile_csr_hold_cycles = 0;
         tile_csr_hold_errors = 0;
+        bus_error = 1'b0;
+        bus_fault_enable = 1'b0;
+        bus_fault_addr = 64'd0;
+        bus_fault_wen = 1'b0;
+        irq_ipi = 1'b0;
 
         // ============================================================
         // TEST 1: NOP + HALT
@@ -1154,6 +1170,102 @@ module tb_cpu_micro;
             $fatal(1, "delayed CSR responder observed only %0d held cycles",
                    tile_csr_hold_cycles);
         tile_csr_delay_cycles = 0;
+
+        // ============================================================
+        // TEST 18: the cluster response-error sideband creates a precise,
+        // unmaskable data fault.  Keep IE clear and IPI high so BUS must be
+        // selected synchronously, and ensure sentinel data is never written.
+        // ============================================================
+        $display("Test 18: precise main-bus response errors");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'h60; mem[4] = 8'h40; mem[5] = 8'h90;
+        mem[6] = 8'h60; mem[7] = 8'h60; mem[8] = 8'h5A;
+        mem[9] = 8'h50; mem[10] = 8'h64; // LDR.64 R6,[R4]
+        mem[11] = 8'h02;
+        install_vector(IRQX_BUS, 8'h40);
+        mem[8'h40] = 8'h02;
+        cl_priv_level = 1'b0;
+        bus_fault_enable = 1'b1;
+        bus_fault_addr = 64'h90;
+        bus_fault_wen = 1'b0;
+        reset_cpu;
+        @(negedge clk);
+        u_cpu.flags = 8'h25;
+        irq_ipi = 1'b1;
+        wait_halt(2000);
+        bus_fault_enable = 1'b0;
+        irq_ipi = 1'b0;
+        check64_value(u_cpu.ivec_id, IRQX_BUS,
+                      "bus read error vector with IE clear");
+        check64_value(u_cpu.trap_addr, 64'h90,
+                      "bus read error faulting address");
+        check_reg(6, 64'h5A,
+                  "bus read error suppresses sentinel writeback");
+        check_mem_qword_le(13'h070, 64'd11,
+                           "bus read error saves current end PC");
+        check_mem_qword_le(13'h078, 64'h25,
+                           "bus read error saves flags with IE clear");
+
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'h60; mem[4] = 8'h40; mem[5] = 8'h98;
+        mem[6] = 8'h60; mem[7] = 8'h50; mem[8] = 8'h66;
+        mem[9] = 8'h54; mem[10] = 8'h45; // STR.64 [R4],R5
+        mem[11] = 8'h02;
+        mem[8'h98] = 8'hA5; mem[8'h99] = 8'hA5;
+        mem[8'h9A] = 8'hA5; mem[8'h9B] = 8'hA5;
+        mem[8'h9C] = 8'hA5; mem[8'h9D] = 8'hA5;
+        mem[8'h9E] = 8'hA5; mem[8'h9F] = 8'hA5;
+        install_vector(IRQX_BUS, 8'h40);
+        mem[8'h40] = 8'h02;
+        bus_fault_enable = 1'b1;
+        bus_fault_addr = 64'h98;
+        bus_fault_wen = 1'b1;
+        reset_cpu;
+        @(negedge clk);
+        u_cpu.flags = 8'h21;
+        irq_ipi = 1'b1;
+        wait_halt(2000);
+        bus_fault_enable = 1'b0;
+        irq_ipi = 1'b0;
+        check64_value(u_cpu.ivec_id, IRQX_BUS,
+                      "bus write error vector with IE clear");
+        check64_value(u_cpu.trap_addr, 64'h98,
+                      "bus write error faulting address");
+        check_mem_qword_le(13'h098, 64'hA5A5_A5A5_A5A5_A5A5,
+                           "bus write error does not retire store");
+        check_mem_qword_le(13'h070, 64'd11,
+                           "bus write error saves current end PC");
+        check_mem_qword_le(13'h078, 64'h21,
+                           "bus write error saves flags with IE clear");
+
+        // Microcores fetch through the same cluster port.  A fetch response
+        // error must trap before the sentinel byte enters the partial ibuf.
+        clear_mem;
+        install_vector(IRQX_BUS, 8'h40);
+        mem[8'h40] = 8'h02;
+        bus_fault_enable = 1'b1;
+        bus_fault_addr = 64'd0;
+        bus_fault_wen = 1'b0;
+        reset_cpu;
+        @(negedge clk);
+        u_cpu.R[15] = 64'h80;
+        u_cpu.flags = 8'h25;
+        irq_ipi = 1'b1;
+        wait_halt(2000);
+        bus_fault_enable = 1'b0;
+        irq_ipi = 1'b0;
+        check64_value(u_cpu.ivec_id, IRQX_BUS,
+                      "instruction response error vector");
+        check64_value(u_cpu.trap_addr, 64'd0,
+                      "instruction response error address");
+        check64_value(u_cpu.ibuf_len, 64'd0,
+                      "instruction response error discards partial ibuf");
+        check_mem_qword_le(13'h070, 64'd0,
+                           "instruction response error saves retry PC");
+        check_mem_qword_le(13'h078, 64'h25,
+                           "instruction response error saves flags");
 
         // ============================================================
         // Summary

@@ -131,6 +131,7 @@ module mp64_soc #(
     wire        core_bus_port_io [0:NUM_CORES-1];
     wire [63:0] core_bus_rdata [0:NUM_CORES-1];
     wire        core_bus_ready [0:NUM_CORES-1];
+    wire        core_bus_error [0:NUM_CORES-1];
 
     // I-cache → bus (refill path)
     wire [63:0] ic_bus_addr    [0:NUM_CORES-1];
@@ -139,6 +140,8 @@ module mp64_soc #(
     wire [1:0]  ic_bus_size    [0:NUM_CORES-1];
     wire [63:0] ic_bus_rdata   [0:NUM_CORES-1];
     wire        ic_bus_ready   [0:NUM_CORES-1];
+    wire        ic_bus_error   [0:NUM_CORES-1];
+    wire [63:0] ic_bus_error_addr[0:NUM_CORES-1];
 
     // CPU ↔ I-cache
     wire [63:0] cpu_icache_addr    [0:NUM_CORES-1];
@@ -273,6 +276,8 @@ module mp64_soc #(
                 .icache_data     (cpu_icache_data[ci]),
                 .icache_hit      (cpu_icache_hit[ci]),
                 .icache_stall    (cpu_icache_stall[ci]),
+                .icache_error    (ic_bus_error[ci]),
+                .icache_error_addr(ic_bus_error_addr[ci]),
                 .icache_enabled  (cpu_icache_enabled[ci]),
                 .icache_inv_all  (cpu_icache_inv_all[ci]),
                 .icache_inv_line (cpu_icache_inv_line[ci]),
@@ -290,6 +295,7 @@ module mp64_soc #(
                 .bus_port_io     (core_bus_port_io[ci]),
                 .bus_rdata       (core_bus_rdata[ci]),
                 .bus_ready       (core_bus_ready[ci]),
+                .bus_error       (core_bus_error[ci]),
 
                 // CSR / MEX (tile engine)
                 .csr_wen         (core_csr_wen[ci]),
@@ -334,7 +340,6 @@ module mp64_soc #(
                 .irq_uart        (irq_uart_w),
                 .irq_nic         (irq_nic_w),
                 .irq_ipi         (ipi_out[ci]),
-                .irq_bus         (bus_err_w[ci]),
 
                 // Info
                 .mem_size_bytes  (MEM_SIZE_BYTES),
@@ -376,6 +381,7 @@ module mp64_soc #(
                 .bus_addr    (ic_bus_addr[ci]),
                 .bus_rdata   (ic_bus_rdata[ci]),
                 .bus_ready   (ic_bus_ready[ci]),
+                .bus_error   (ic_bus_error[ci]),
                 .bus_wen     (ic_bus_wen[ci]),
                 .bus_size    (ic_bus_size[ci]),
 
@@ -415,6 +421,7 @@ module mp64_soc #(
                 cluster_bus_requester_id[0:NUM_CLUSTERS-1];
     wire [63:0] cluster_bus_rdata [0:NUM_CLUSTERS-1];
     wire        cluster_bus_ready [0:NUM_CLUSTERS-1];
+    wire        cluster_bus_error [0:NUM_CLUSTERS-1];
 
     // Per-cluster tile memory ports (from shared tile engines)
     wire        cluster_tile_req    [0:NUM_CLUSTERS-1];
@@ -483,6 +490,7 @@ module mp64_soc #(
                 .bus_requester_id(cluster_bus_requester_id[ki]),
                 .bus_rdata   (cluster_bus_rdata[ki]),
                 .bus_ready   (cluster_bus_ready[ki]),
+                .bus_error   (cluster_bus_error[ki]),
 
                 .irq_timer   ({CORES_PER_CLUSTER{irq_timer_w}}),
                 .irq_ipi     ({CORES_PER_CLUSTER{1'b0}}),
@@ -569,6 +577,7 @@ module mp64_soc #(
     generate
         for (mi = 0; mi < NUM_CORES; mi = mi + 1) begin : g_bus_mux
             wire bus_resp_ready;
+            wire bus_resp_error;
             wire [63:0] bus_resp_rdata;
 
             mp64_core_bus_mux u_core_bus_mux (
@@ -592,10 +601,14 @@ module mp64_soc #(
                 .mux_port_io  (muxed_port_io[mi]),
                 .bus_rdata    (bus_resp_rdata),
                 .bus_ready    (bus_resp_ready),
+                .bus_error    (bus_resp_error),
                 .core_rdata   (core_bus_rdata[mi]),
                 .core_ready   (core_bus_ready[mi]),
+                .core_error   (core_bus_error[mi]),
                 .ic_rdata     (ic_bus_rdata[mi]),
-                .ic_ready     (ic_bus_ready[mi])
+                .ic_ready     (ic_bus_ready[mi]),
+                .ic_error     (ic_bus_error[mi]),
+                .ic_error_addr(ic_bus_error_addr[mi])
             );
         end
     endgenerate
@@ -689,11 +702,13 @@ module mp64_soc #(
             // Route through the mux demux logic above
             assign g_bus_mux[pi].bus_resp_rdata = bus_cpu_rdata[pi*64 +: 64];
             assign g_bus_mux[pi].bus_resp_ready = bus_cpu_ready[pi];
+            assign g_bus_mux[pi].bus_resp_error = bus_err_w[pi];
         end
         for (pi = 0; pi < NUM_CLUSTERS; pi = pi + 1) begin : g_unpack_cluster
             localparam P = NUM_CORES + pi;
             assign cluster_bus_rdata[pi] = bus_cpu_rdata[P*64 +: 64];
             assign cluster_bus_ready[pi] = bus_cpu_ready[P];
+            assign cluster_bus_error[pi] = bus_err_w[P];
         end
     endgenerate
 

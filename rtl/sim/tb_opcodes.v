@@ -154,7 +154,8 @@ module tb_opcodes;
         .bus_valid  (ic_bus_valid),
         .bus_addr   (ic_bus_addr),
         .bus_rdata  (ic_bus_rdata),
-        .bus_ready  (ic_bus_ready)
+        .bus_ready  (ic_bus_ready),
+        .bus_error  (1'b0)
     );
 
     mp64_cpu uut (
@@ -168,6 +169,8 @@ module tb_opcodes;
         .icache_data    (ic_fetch_data),
         .icache_hit     (ic_fetch_hit),
         .icache_stall   (ic_fetch_stall),
+        .icache_error   (1'b0),
+        .icache_error_addr(64'd0),
         .icache_enabled (ic_enabled),
         .icache_inv_all (ic_inv_all),
         .icache_inv_line(ic_inv_line),
@@ -181,6 +184,7 @@ module tb_opcodes;
         .bus_size  (bus_size),
         .bus_rdata (bus_rdata),
         .bus_ready (bus_ready),
+        .bus_error (1'b0),
         .csr_wen   (csr_wen_w),
         .csr_addr  (csr_addr_w),
         .csr_wdata (csr_wdata_w),

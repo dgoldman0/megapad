@@ -30,10 +30,14 @@ module tb_core_bus_mux;
 
     reg  [63:0] bus_rdata;
     reg         bus_ready;
+    reg         bus_error;
     wire [63:0] core_rdata;
     wire        core_ready;
+    wire        core_error;
     wire [63:0] ic_rdata;
     wire        ic_ready;
+    wire        ic_error;
+    wire [63:0] ic_error_addr;
 
     integer pass_count;
     integer fail_count;
@@ -59,10 +63,14 @@ module tb_core_bus_mux;
         .mux_port_io  (mux_port_io),
         .bus_rdata    (bus_rdata),
         .bus_ready    (bus_ready),
+        .bus_error    (bus_error),
         .core_rdata   (core_rdata),
         .core_ready   (core_ready),
+        .core_error   (core_error),
         .ic_rdata     (ic_rdata),
-        .ic_ready     (ic_ready)
+        .ic_ready     (ic_ready),
+        .ic_error     (ic_error),
+        .ic_error_addr(ic_error_addr)
     );
 
     initial clk = 1'b0;
@@ -105,6 +113,7 @@ module tb_core_bus_mux;
         ic_size = 2'd3;
         bus_rdata = 64'd0;
         bus_ready = 1'b0;
+        bus_error = 1'b0;
 
         repeat (2) clock;
         rst_n = 1'b1;
@@ -118,12 +127,18 @@ module tb_core_bus_mux;
               && mux_addr == 64'h1000);
         bus_rdata = 64'h1111_1111_1111_1111;
         bus_ready = 1'b1;
+        bus_error = 1'b1;
         #1;
         check("refill-low ready routed only to cache",
               ic_ready && !core_ready
               && ic_rdata == 64'h1111_1111_1111_1111);
+        check("refill-low error cannot reach CPU data path",
+              ic_error && !core_error);
+        check("refill-low error reports captured refill address",
+              ic_error_addr == 64'h1000);
         clock;
         bus_ready = 1'b0;
+        bus_error = 1'b0;
         ic_valid = 1'b0;
 
         // During the refill gap, an IRQ stack store can claim the port.
@@ -150,11 +165,15 @@ module tb_core_bus_mux;
         core_valid = 1'b0;
         bus_rdata = 64'h2222_2222_2222_2222;
         bus_ready = 1'b1;
+        bus_error = 1'b1;
         #1;
         check("store response cannot be reclassified as refill",
               core_ready && !ic_ready);
+        check("store error follows the captured data owner",
+              core_error && !ic_error);
         clock;
         bus_ready = 1'b0;
+        bus_error = 1'b0;
 
         // The waiting refill-high request now becomes the next owner.
         clock;

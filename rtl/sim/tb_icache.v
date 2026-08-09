@@ -18,6 +18,7 @@ module tb_icache;
     wire [63:0] bus_addr;
     reg  [63:0] bus_rdata;
     reg         bus_ready;
+    reg         bus_error;
     wire        bus_wen;
     wire [1:0]  bus_size;
     reg         inv_all, inv_line;
@@ -38,6 +39,7 @@ module tb_icache;
         .bus_addr    (bus_addr),
         .bus_rdata   (bus_rdata),
         .bus_ready   (bus_ready),
+        .bus_error   (bus_error),
         .bus_wen     (bus_wen),
         .bus_size    (bus_size),
         .inv_all     (inv_all),
@@ -250,6 +252,7 @@ module tb_icache;
         fetch_valid = 1'b0;
         bus_rdata   = 64'd0;
         bus_ready   = 1'b0;
+        bus_error   = 1'b0;
         inv_all     = 1'b0;
         inv_line    = 1'b0;
         inv_addr    = 64'd0;
@@ -499,10 +502,41 @@ module tb_icache;
         assert_false("T9 drained request releases bus", bus_valid);
 
         // ================================================================
-        // Test 10: idle interface has neither hit nor stall
+        // Test 10: an owner-qualified refill error is never cached as an
+        // instruction response.  The held fetch retries from the same line
+        // and can only become a hit after two successful refill beats.
         // ================================================================
-        assert_false("T10 no hit without request", fetch_hit);
-        assert_false("T10 no stall without request", fetch_stall);
+        begin_request(64'h0000_0000_0000_0600);
+        while (!bus_valid)
+            @(posedge clk);
+        @(negedge clk);
+        assert_eq("T10 faulting refill address", bus_addr,
+                  64'h0000_0000_0000_0600);
+        bus_rdata = 64'hDEAD_DEAD_DEAD_DEAD;
+        bus_ready = 1'b1;
+        bus_error = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        bus_ready = 1'b0;
+        bus_error = 1'b0;
+        #1;
+        assert_false("T10 refill error publishes no hit", fetch_hit);
+        assert_false("T10 refill error releases failed request", bus_valid);
+        @(posedge clk);
+        #1;
+        complete_refill(64'h0000_0000_0000_0600,
+                        64'h6000_0000_0000_0001,
+                        64'h6000_0000_0000_0002);
+        assert_true("T10 successful retry publishes hit", fetch_hit);
+        assert_eq("T10 retry data is not timeout sentinel", fetch_data,
+                  64'h6000_0000_0000_0001);
+        finish_response;
+
+        // ================================================================
+        // Test 11: idle interface has neither hit nor stall
+        // ================================================================
+        assert_false("T11 no hit without request", fetch_hit);
+        assert_false("T11 no stall without request", fetch_stall);
 
         #20;
         $display("");

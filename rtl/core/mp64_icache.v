@@ -46,6 +46,7 @@ module mp64_icache (
     output reg  [63:0] bus_addr,
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
+    input  wire        bus_error,
     output wire        bus_wen,
     output wire [1:0]  bus_size,
 
@@ -279,13 +280,22 @@ module mp64_icache (
                     IC_REFILL_LO: begin
                         bus_valid <= 1'b1;
                         if (bus_ready) begin
-                            data_lo[refill_index] <= bus_rdata;
-                            // Insert a request-low cycle between beats.  This
-                            // also flushes a registered READY from simple RTL
-                            // slaves before the second address is presented.
-                            state     <= IC_REFILL_GAP;
                             bus_valid <= 1'b0;
-                            bus_addr  <= refill_base + 64'd8;
+                            if (bus_error) begin
+                                // The owner-qualified error is consumed by
+                                // the CPU as an instruction-side BUS fault.
+                                // Do not cache the arbiter's sentinel or
+                                // issue the second line beat.
+                                valid[refill_index] <= 1'b0;
+                                state <= IC_IDLE;
+                            end else begin
+                                data_lo[refill_index] <= bus_rdata;
+                                // Insert a request-low cycle between beats.
+                                // This also flushes registered READY before
+                                // the second address is presented.
+                                state <= IC_REFILL_GAP;
+                                bus_addr <= refill_base + 64'd8;
+                            end
                         end
                     end
 
@@ -297,19 +307,24 @@ module mp64_icache (
                     IC_REFILL_HI: begin
                         bus_valid <= 1'b1;
                         if (bus_ready) begin
-                            data_hi[refill_index] <= bus_rdata;
                             bus_valid <= 1'b0;
-                            if (!refill_killed
-                                    && !inv_matches_refill) begin
-                                tags[refill_index]  <= refill_tag;
-                                valid[refill_index] <= 1'b1;
-                                response_data <= refill_upper
-                                               ? bus_rdata
-                                               : data_lo[refill_index];
-                                state <= IC_RESPONSE;
-                            end else begin
+                            if (bus_error) begin
                                 valid[refill_index] <= 1'b0;
                                 state <= IC_IDLE;
+                            end else begin
+                                data_hi[refill_index] <= bus_rdata;
+                                if (!refill_killed
+                                        && !inv_matches_refill) begin
+                                    tags[refill_index]  <= refill_tag;
+                                    valid[refill_index] <= 1'b1;
+                                    response_data <= refill_upper
+                                                   ? bus_rdata
+                                                   : data_lo[refill_index];
+                                    state <= IC_RESPONSE;
+                                end else begin
+                                    valid[refill_index] <= 1'b0;
+                                    state <= IC_IDLE;
+                                end
                             end
                         end
                     end
@@ -317,9 +332,13 @@ module mp64_icache (
                     IC_BYPASS: begin
                         bus_valid <= 1'b1;
                         if (bus_ready) begin
-                            response_data <= bus_rdata;
                             bus_valid <= 1'b0;
-                            state <= IC_RESPONSE;
+                            if (bus_error) begin
+                                state <= IC_IDLE;
+                            end else begin
+                                response_data <= bus_rdata;
+                                state <= IC_RESPONSE;
+                            end
                         end
                     end
 

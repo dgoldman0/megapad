@@ -35,14 +35,24 @@ module tb_cpu_smoke;
     wire [1:0]  bus_size;
     reg  [63:0] bus_rdata;
     reg         bus_ready;
+    reg         bus_error;
+    reg         bus_fault_enable;
+    reg  [63:0] bus_fault_addr;
+    reg         bus_fault_wen;
+    reg         irq_ipi;
 
     // 1-cycle response (combinational)
     always @(negedge clk) begin
         bus_ready <= 1'b0;
         bus_rdata <= 64'd0;
+        bus_error <= 1'b0;
         if (bus_valid) begin
             bus_ready <= 1'b1;
-            if (bus_wen) begin
+            if (bus_fault_enable && bus_addr == bus_fault_addr &&
+                bus_wen == bus_fault_wen) begin
+                bus_rdata <= 64'hDEAD_DEAD_DEAD_DEAD;
+                bus_error <= 1'b1;
+            end else if (bus_wen) begin
                 case (bus_size)
                     BUS_BYTE:  mem[bus_addr[11:0]] <= bus_wdata[7:0];
                     BUS_HALF: begin
@@ -95,6 +105,8 @@ module tb_cpu_smoke;
     wire        icache_req;
     reg  [63:0] icache_data;
     reg         icache_hit;
+    reg         icache_error;
+    reg  [63:0] icache_error_addr;
     wire        icache_enabled, icache_inv_all, icache_inv_line;
     wire [63:0] icache_inv_addr;
     wire [6:0]  icache_inv_size;
@@ -203,6 +215,8 @@ module tb_cpu_smoke;
         .icache_data    (icache_data),
         .icache_hit     (icache_hit),
         .icache_stall   (1'b0),
+        .icache_error   (icache_error),
+        .icache_error_addr(icache_error_addr),
         .icache_enabled (icache_enabled),
         .icache_inv_all (icache_inv_all),
         .icache_inv_line(icache_inv_line),
@@ -217,6 +231,7 @@ module tb_cpu_smoke;
         .bus_size  (bus_size),
         .bus_rdata (bus_rdata),
         .bus_ready (bus_ready),
+        .bus_error (bus_error),
 
         // Tile/MEX stubs
         .csr_wen   (csr_wen_w),
@@ -257,7 +272,7 @@ module tb_cpu_smoke;
         .irq_timer (1'b0),
         .irq_uart  (1'b0),
         .irq_nic   (1'b0),
-        .irq_ipi   (1'b0),
+        .irq_ipi   (irq_ipi),
 
         // I-cache stats
         .icache_stat_hits  (64'd0),
@@ -526,6 +541,13 @@ module tb_cpu_smoke;
         captured_mex_funct_byte = 8'd0;
         captured_mex_ext_mod = 4'd0;
         captured_mex_ext_active = 1'b0;
+        bus_error = 1'b0;
+        bus_fault_enable = 1'b0;
+        bus_fault_addr = 64'd0;
+        bus_fault_wen = 1'b0;
+        irq_ipi = 1'b0;
+        icache_error = 1'b0;
+        icache_error_addr = 64'd0;
 
         // Clear memory
         for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
@@ -1116,6 +1138,102 @@ module tb_cpu_smoke;
                 tacc_ctl_dispatch_count, 64'd1);
         check64("user reserved-only control write retires",
                 uut.cpu_state, CPU_HALT);
+
+        // -----------------------------------------------------------------
+        // Test 18: main-bus response errors are precise, unmaskable data
+        // faults.  The read case also proves timeout sentinel data never
+        // reaches the destination register, even with IE clear and IPI high.
+        // -----------------------------------------------------------------
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'h60; mem[4] = 8'h40; mem[5] = 8'h90;
+        mem[6] = 8'h60; mem[7] = 8'h60; mem[8] = 8'h5A;
+        mem[9] = 8'h50; mem[10] = 8'h64; // LDR.64 R6,[R4]
+        mem[11] = 8'h02;
+        install_vector(IRQX_BUS, 8'h40);
+        mem[8'h40] = 8'h02;
+        bus_fault_enable = 1'b1;
+        bus_fault_addr = 64'h90;
+        bus_fault_wen = 1'b0;
+        reset_cpu;
+        @(negedge clk);
+        uut.flags = 8'h25; // IE=0; retain nontrivial saved flags
+        irq_ipi = 1'b1;
+        run_to_halt;
+        bus_fault_enable = 1'b0;
+        irq_ipi = 1'b0;
+        check64("bus read error selects BUS vector with IE clear",
+                uut.ivec_id, IRQX_BUS);
+        check64("bus read error records faulting address",
+                uut.trap_addr, 64'h90);
+        check_reg("bus read error suppresses sentinel writeback",
+                  6, 64'h5A);
+        check_mem_qword_be("bus read error saves current end PC",
+                           12'h070, 64'd11);
+        check_mem_qword_be("bus read error saves flags with IE clear",
+                           12'h078, 64'h25);
+
+        // A failed store likewise traps before its normal completion and the
+        // responder's unchanged memory image remains observable.
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80;
+        mem[3] = 8'h60; mem[4] = 8'h40; mem[5] = 8'h98;
+        mem[6] = 8'h60; mem[7] = 8'h50; mem[8] = 8'h66;
+        mem[9] = 8'h54; mem[10] = 8'h45; // STR.64 [R4],R5
+        mem[11] = 8'h02;
+        mem[8'h98] = 8'hA5; mem[8'h99] = 8'hA5;
+        mem[8'h9A] = 8'hA5; mem[8'h9B] = 8'hA5;
+        mem[8'h9C] = 8'hA5; mem[8'h9D] = 8'hA5;
+        mem[8'h9E] = 8'hA5; mem[8'h9F] = 8'hA5;
+        install_vector(IRQX_BUS, 8'h40);
+        mem[8'h40] = 8'h02;
+        bus_fault_enable = 1'b1;
+        bus_fault_addr = 64'h98;
+        bus_fault_wen = 1'b1;
+        reset_cpu;
+        @(negedge clk);
+        uut.flags = 8'h21;
+        irq_ipi = 1'b1;
+        run_to_halt;
+        bus_fault_enable = 1'b0;
+        irq_ipi = 1'b0;
+        check64("bus write error selects BUS vector with IE clear",
+                uut.ivec_id, IRQX_BUS);
+        check64("bus write error records faulting address",
+                uut.trap_addr, 64'h98);
+        check_mem_qword_be("bus write error does not retire store",
+                           12'h098, 64'hA5A5_A5A5_A5A5_A5A5);
+        check_mem_qword_be("bus write error saves current end PC",
+                           12'h070, 64'd11);
+        check_mem_qword_be("bus write error saves flags with IE clear",
+                           12'h078, 64'h21);
+
+        // The mux-qualified instruction sideband is separately unmaskable.
+        // It reports the captured refill beat, while the saved PC remains the
+        // not-yet-retired instruction address for an eventual retry.
+        clear_mem;
+        install_vector(IRQX_BUS, 8'h40);
+        mem[8'h40] = 8'h02;
+        reset_cpu;
+        @(negedge clk);
+        uut.R[15] = 64'h80;
+        uut.flags = 8'h25;
+        irq_ipi = 1'b1;
+        icache_error_addr = 64'h0000_0000_0000_1200;
+        icache_error = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        icache_error = 1'b0;
+        irq_ipi = 1'b0;
+        run_to_halt;
+        check64("instruction refill error selects BUS vector",
+                uut.ivec_id, IRQX_BUS);
+        check64("instruction refill error reports captured beat",
+                uut.trap_addr, 64'h0000_0000_0000_1200);
+        check_mem_qword_be("instruction refill error saves retry PC",
+                           12'h070, 64'd0);
+        check_mem_qword_be("instruction refill error saves flags",
+                           12'h078, 64'h25);
 
         // =================================================================
         $display("===========================================");

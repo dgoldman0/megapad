@@ -38,6 +38,10 @@ module tb_cluster;
     wire [MP64_CORE_ID_BITS-1:0] bus_requester_id;
     reg  [63:0] bus_rdata;
     reg         bus_ready;
+    reg         bus_error;
+    reg         bus_fault_enable;
+    reg  [63:0] bus_fault_addr;
+    reg         bus_fault_wen;
     reg         tb_bus_requester_seen;
     reg  [MP64_CORE_ID_BITS-1:0] tb_bus_requester_id;
     reg  [255:0] tb_bus_requester_ids_seen;
@@ -57,9 +61,14 @@ module tb_cluster;
     always @(negedge clk) begin
         bus_ready <= 1'b0;
         bus_rdata <= 64'd0;
+        bus_error <= 1'b0;
         if (bus_valid) begin
             bus_ready <= 1'b1;
-            if (bus_wen) begin
+            if (bus_fault_enable && bus_addr == bus_fault_addr &&
+                bus_wen == bus_fault_wen) begin
+                bus_rdata <= 64'hDEAD_DEAD_DEAD_DEAD;
+                bus_error <= 1'b1;
+            end else if (bus_wen) begin
                 case (bus_size)
                     BUS_BYTE:  mem[bus_addr[11:0]] <= bus_wdata[7:0];
                     BUS_HALF: begin
@@ -158,6 +167,7 @@ module tb_cluster;
         .bus_requester_id(bus_requester_id),
         .bus_rdata  (bus_rdata),
         .bus_ready  (bus_ready),
+        .bus_error  (bus_error),
 
         .irq_timer  ({N{1'b0}}),
         .irq_ipi    ({N{1'b0}}),
@@ -506,6 +516,10 @@ module tb_cluster;
         tile_engine_reset = 1'b0;
         micro_reset = {N{1'b0}};
         tacc_xfer_stall_cycle = 1'b0;
+        bus_error = 1'b0;
+        bus_fault_enable = 1'b0;
+        bus_fault_addr = 64'd0;
+        bus_fault_wen = 1'b0;
 
         // Clear memory
         for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
@@ -2401,6 +2415,52 @@ module tb_cluster;
         release uut.mc_tile_csr_wen;
         release uut.mc_tile_csr_addr;
         release uut.mc_tile_csr_wdata;
+
+        // A main-bus error follows the same captured cluster grant as READY;
+        // no losing microcore may observe it.  Also mirror MPU-fault entry by
+        // dropping the shared privilege level before the winner traps.
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+        repeat (2) @(negedge clk);
+        force uut.mc_bus_valid = 4'b0100;
+        force uut.mc_bus_addr =
+            {64'd0, 64'h0000_0000_0000_0900, 128'd0};
+        force uut.mc_bus_wdata = 256'd0;
+        force uut.mc_bus_wen = 4'b0000;
+        force uut.mc_bus_size = {2'd0, BUS_DWORD, 4'd0};
+        uut.cl_priv_level = 1'b1;
+        bus_fault_enable = 1'b1;
+        bus_fault_addr = 64'h900;
+        bus_fault_wen = 1'b0;
+        tb_wait_seen = 0;
+        for (i = 0; i < 100; i = i + 1) begin
+            @(posedge clk);
+            #1;
+            if (uut.mc_bus_ready[2]) begin
+                tb_wait_seen = 1;
+                i = 100;
+            end
+        end
+        if (!tb_wait_seen) begin
+            $display("FAIL [cluster bus-error response timeout]");
+            fail_count = fail_count + 1;
+        end else begin
+            check64("cluster bus error follows winning ready only",
+                    {56'd0, uut.mc_bus_error, uut.mc_bus_ready},
+                    64'h0000_0000_0000_0044);
+            check64("cluster bus error preserves sentinel for diagnostics",
+                    uut.mc_bus_rdata[2*64 +: 64],
+                    64'hDEAD_DEAD_DEAD_DEAD);
+            check64("cluster bus error drops shared privilege",
+                    uut.cl_priv_level, 64'd0);
+        end
+        bus_fault_enable = 1'b0;
+        release uut.mc_bus_valid;
+        release uut.mc_bus_addr;
+        release uut.mc_bus_wdata;
+        release uut.mc_bus_wen;
+        release uut.mc_bus_size;
 
         // =================================================================
         $display("===========================================");

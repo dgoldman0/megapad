@@ -49,6 +49,7 @@ module mp64_cluster #(
     output wire [MP64_CORE_ID_BITS-1:0] bus_requester_id,
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
+    input  wire        bus_error,
 
     // === Per-micro-core interrupts ===
     input  wire [N-1:0] irq_timer,
@@ -131,6 +132,7 @@ module mp64_cluster #(
     wire [N*2-1:0]      mc_bus_size;
     reg  [N*64-1:0]     mc_bus_rdata;
     reg  [N-1:0]        mc_bus_ready;
+    reg  [N-1:0]        mc_bus_error;
     reg  [N-1:0]        mc_mpu_fault;
 
     // Per-micro-core MUL/DIV wires
@@ -291,6 +293,7 @@ module mp64_cluster #(
                 .bus_size   (mc_bus_size [gi*2  +: 2]),
                 .bus_rdata  (mc_bus_rdata[gi*64 +: 64]),
                 .bus_ready  (mc_bus_ready[gi]),
+                .bus_error  (mc_bus_error[gi]),
 
                 .mpu_fault  (mc_mpu_fault[gi]),
 
@@ -680,6 +683,7 @@ module mp64_cluster #(
             arb_bus_wen   <= 1'b0;
             arb_bus_size  <= 2'd0;
             mc_bus_ready <= {N{1'b0}};
+            mc_bus_error <= {N{1'b0}};
             mc_bus_rdata <= {(N*64){1'b0}};
             mc_mpu_fault <= {N{1'b0}};
             cl_priv_level <= 1'b0;
@@ -688,6 +692,7 @@ module mp64_cluster #(
             cl_ivt_base   <= 64'd0;
         end else begin
             mc_bus_ready <= {N{1'b0}};
+            mc_bus_error <= {N{1'b0}};
             mc_mpu_fault <= {N{1'b0}};
             arb_bus_valid <= 1'b0;
 
@@ -707,6 +712,9 @@ module mp64_cluster #(
                     if (bus_ready) begin
                         mc_bus_rdata[arb_grant*64 +: 64] <= bus_rdata;
                         mc_bus_ready[arb_grant] <= 1'b1;
+                        mc_bus_error[arb_grant] <= bus_error;
+                        if (bus_error)
+                            cl_priv_level <= 1'b0;
                         arb_last  <= arb_grant;
                         arb_busy  <= 1'b0;
                         arb_bus_valid <= 1'b0;

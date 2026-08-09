@@ -45,6 +45,7 @@ module mp64_cpu_micro (
     output reg  [1:0]  bus_size,
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
+    input  wire        bus_error,
 
     // === Cluster MPU fault (from cluster arbiter) ===
     input  wire        mpu_fault,
@@ -410,6 +411,32 @@ module mp64_cpu_micro (
                     perf_tileops <= perf_tileops + 64'd1;
             end
 
+            // Instruction bytes use the same cluster data port.  A response
+            // error is synchronous to the winning microcore and must abort
+            // the partial decode before the sentinel byte can enter ibuf.
+            if (bus_ready && bus_error &&
+                    ((cpu_state == CPU_FETCH_MORE && fetch_pending) ||
+                     (cpu_state == CPU_SKIP && skip_fetch_pending) ||
+                     (cpu_state == CPU_SKIP_REX && skip_fetch_pending) ||
+                     (cpu_state == CPU_SKIP_CRYPTO &&
+                      skip_fetch_pending))) begin
+                bus_valid <= 1'b0;
+                fetch_pending <= 1'b0;
+                skip_fetch_pending <= 1'b0;
+                skip_has_rex <= 1'b0;
+                ibuf_len <= 4'd0;
+                ibuf_need <= 4'd1;
+                trap_addr <= bus_addr;
+                R[spsel] <= R[spsel] - 64'd8;
+                effective_addr <= R[spsel] - 64'd8;
+                trap_return_pc <= R[psel];
+                mem_data <= {56'd0, flags};
+                flags[6] <= 1'b0;
+                ivec_id <= IRQX_BUS;
+                post_action <= POST_IRQ_VEC;
+                bus_size <= BUS_DWORD;
+                cpu_state <= CPU_MEM_WRITE;
+            end else begin
             case (cpu_state)
 
             // ============================================================
@@ -1097,7 +1124,23 @@ module mp64_cpu_micro (
             CPU_MEM_READ: begin
                 bus_addr <= effective_addr;
                 bus_wen  <= 1'b0;
-                if (bus_ready && mpu_fault) begin
+                if (bus_ready && bus_error) begin
+                    // The cluster returns error and ready to the same
+                    // winning microcore.  Treat that response as a precise,
+                    // synchronous data fault before sentinel data or normal
+                    // load side effects can reach architectural state.
+                    bus_valid <= 1'b0;
+                    trap_addr <= effective_addr;
+                    R[spsel] <= R[spsel] - 64'd8;
+                    effective_addr <= R[spsel] - 64'd8;
+                    trap_return_pc <= R[psel];
+                    mem_data <= {56'd0, flags};
+                    flags[6] <= 1'b0;
+                    ivec_id  <= IRQX_BUS;
+                    post_action <= POST_IRQ_VEC;
+                    bus_size <= BUS_DWORD;
+                    cpu_state <= CPU_MEM_WRITE;
+                end else if (bus_ready && mpu_fault) begin
                     bus_valid <= 1'b0;
                     trap_addr <= effective_addr;
                     R[spsel] <= R[spsel] - 64'd8;
@@ -1140,9 +1183,17 @@ module mp64_cpu_micro (
                 bus_wen  <= 1'b0;
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
-                    flags <= bus_rdata[7:0];
-                    // Note: priv_level restored at cluster level via trap return
-                    cpu_state <= CPU_FETCH;
+                    if (bus_error) begin
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        flags[6] <= 1'b0;
+                        cpu_state <= CPU_HALT;
+                    end else begin
+                        flags <= bus_rdata[7:0];
+                        // priv_level is restored at cluster level via return.
+                        cpu_state <= CPU_FETCH;
+                    end
                 end else begin
                     bus_valid <= 1'b1;
                 end
@@ -1155,7 +1206,31 @@ module mp64_cpu_micro (
                 bus_addr  <= effective_addr;
                 bus_wdata <= mem_data;
                 bus_wen   <= 1'b1;
-                if (bus_ready && mpu_fault) begin
+                if (bus_ready && bus_error) begin
+                    bus_valid <= 1'b0;
+                    if (post_action == POST_NONE) begin
+                        // A failed store does not retire its addressing side
+                        // effects. Preserve its end-PC and flags precisely.
+                        trap_addr <= effective_addr;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        trap_return_pc <= R[psel];
+                        mem_data <= {56'd0, flags};
+                        flags[6] <= 1'b0;
+                        ivec_id  <= IRQX_BUS;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else begin
+                        // An unwritable trap stack cannot host another fault
+                        // frame. Fail closed instead of recursing or treating
+                        // the errored response as a successful push.
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        cpu_state <= CPU_HALT;
+                    end
+                end else if (bus_ready && mpu_fault) begin
                     bus_valid <= 1'b0;
                     trap_addr <= effective_addr;
                     R[spsel] <= R[spsel] - 64'd8;
@@ -1194,9 +1269,17 @@ module mp64_cpu_micro (
                 bus_size  <= BUS_DWORD;
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
-                    effective_addr <= cl_ivt_base + {56'd0, ivec_id, 3'b000};
-                    bus_size <= BUS_DWORD;
-                    cpu_state <= CPU_IRQ_LOAD;
+                    if (bus_error) begin
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        cpu_state <= CPU_HALT;
+                    end else begin
+                        effective_addr <= cl_ivt_base +
+                                          {56'd0, ivec_id, 3'b000};
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_IRQ_LOAD;
+                    end
                 end else begin
                     bus_valid <= 1'b1;
                 end
@@ -1211,8 +1294,15 @@ module mp64_cpu_micro (
                 bus_size <= BUS_DWORD;
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
-                    R[psel] <= bus_rdata;
-                    cpu_state <= CPU_FETCH;
+                    if (bus_error) begin
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        cpu_state <= CPU_HALT;
+                    end else begin
+                        R[psel] <= bus_rdata;
+                        cpu_state <= CPU_FETCH;
+                    end
                 end else begin
                     bus_valid <= 1'b1;
                 end
@@ -1465,6 +1555,7 @@ module mp64_cpu_micro (
             end
 
             endcase
+            end
         end
     end
 

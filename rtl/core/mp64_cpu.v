@@ -44,6 +44,8 @@ module mp64_cpu #(
     input  wire [63:0] icache_data,
     input  wire        icache_hit,
     input  wire        icache_stall,
+    input  wire        icache_error,
+    input  wire [63:0] icache_error_addr,
     output reg         icache_enabled,
     output reg         icache_inv_all,
     output reg         icache_inv_line,
@@ -59,6 +61,7 @@ module mp64_cpu #(
     output reg         bus_port_io,  // asserted during OUT/INP memory cycles
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
+    input  wire        bus_error,
 
     // === Tile/MEX engine interface ===
     output reg         csr_wen,
@@ -110,7 +113,6 @@ module mp64_cpu #(
     input  wire        irq_uart,
     input  wire        irq_nic,
     input  wire        irq_ipi,
-    input  wire        irq_bus,
 
     // === I-cache statistics (from icache module) ===
     input  wire [63:0] icache_stat_hits,
@@ -255,7 +257,6 @@ module mp64_cpu #(
         irq_vector  = 4'd0;
         if (flags[6]) begin           // I flag
             if      (irq_ipi)   begin irq_pending = 1'b1; irq_vector = IRQX_IPI;             end
-            else if (irq_bus)   begin irq_pending = 1'b1; irq_vector = IRQX_BUS;             end
             else if (irq_timer) begin irq_pending = 1'b1; irq_vector = {1'b0, IRQ_TIMER};    end
             else if (irq_uart)  begin irq_pending = 1'b1; irq_vector = IRQX_UART;            end
             else if (irq_nic)   begin irq_pending = 1'b1; irq_vector = IRQX_NIC;             end
@@ -697,6 +698,54 @@ module mp64_cpu #(
                     tile_selftest <= 2'd2;
             end
 
+            // Instruction refills share the physical bus port with CPU data,
+            // but the response owner is captured by mp64_core_bus_mux.  Only
+            // an owner-qualified cache error reaches this path.  Fetch and
+            // skip states have no partially retired instruction, so their
+            // current PC is the precise retry point; errors from a canceled
+            // refill are drained by the cache and ignored in other states.
+            if (icache_error &&
+                    (cpu_state == CPU_FETCH || cpu_state == CPU_SKIP ||
+                     cpu_state == CPU_SKIP_REX ||
+                     cpu_state == CPU_SKIP_CRYPTO)) begin
+                trap_addr <= icache_error_addr;
+                R[spsel] <= R[spsel] - 64'd8;
+                effective_addr <= R[spsel] - 64'd8;
+                trap_return_pc <= R[psel];
+                mem_data <= {55'd0, priv_level, flags};
+                flags[6] <= 1'b0;
+                priv_level <= 1'b0;
+                ivec_id <= IRQX_BUS;
+                post_action <= POST_IRQ_VEC;
+                bus_size <= BUS_DWORD;
+                icache_req <= 1'b0;
+                ibuf_len <= 5'd0;
+                ibuf_need <= 4'd1;
+                cpu_state <= CPU_MEM_WRITE;
+            end else if (bus_ready && bus_error &&
+                    (cpu_state == CPU_MEMALU_RD ||
+                     cpu_state == CPU_SHA_LOAD ||
+                     cpu_state == CPU_BIST ||
+                     cpu_state == CPU_STRING ||
+                     cpu_state == CPU_DICT)) begin
+                // These multi-cycle engines also originate transactions on
+                // the CPU data port.  Skip their normal completion block on
+                // an errored response so neither sentinel data nor a false
+                // successful beat can retire architecturally.
+                bus_valid <= 1'b0;
+                trap_addr <= bus_addr;
+                R[spsel] <= R[spsel] - 64'd8;
+                effective_addr <= R[spsel] - 64'd8;
+                trap_return_pc <= R[psel];
+                mem_data <= {55'd0, priv_level, flags};
+                flags[6] <= 1'b0;
+                priv_level <= 1'b0;
+                ivec_id <= IRQX_BUS;
+                post_action <= POST_IRQ_VEC;
+                bus_size <= BUS_DWORD;
+                bist_running <= 1'b0;
+                cpu_state <= CPU_MEM_WRITE;
+            end else begin
             case (cpu_state)
 
             // ============================================================
@@ -1728,54 +1777,73 @@ module mp64_cpu #(
                     bus_wen   <= 1'b0;
                     if (bus_ready) begin
                         bus_valid <= 1'b0;
-                        case (mem_sub)
-                            4'hC: R[dst_reg] <= {{56{bus_rdata[7]}}, bus_rdata[7:0]};
-                            4'hD: R[dst_reg] <= {{48{bus_rdata[15]}}, bus_rdata[15:0]};
-                            4'hE: R[dst_reg] <= {{32{bus_rdata[31]}}, bus_rdata[31:0]};
-                            4'hF: begin
-                                if (io_is_inp) begin
-                                    D <= bus_rdata[7:0];
-                                    effective_addr <= R[xsel];
-                                    mem_data <= {56'd0, bus_rdata[7:0]};
-                                    bus_size <= BUS_BYTE;
-                                    cpu_state <= CPU_MEM_WRITE;
-                                end else begin
+                        if (bus_error) begin
+                            // A completed main-bus error is a synchronous
+                            // fault of this exact data access.  Do not let
+                            // timeout sentinel data reach architectural
+                            // state, and do not consult IE or asynchronous
+                            // interrupt priority before entering IRQX_BUS.
+                            trap_addr <= effective_addr;
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            trap_return_pc <= R[psel];
+                            mem_data <= {55'd0, priv_level, flags};
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_BUS;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
+                            case (mem_sub)
+                                4'hC: R[dst_reg] <= {{56{bus_rdata[7]}}, bus_rdata[7:0]};
+                                4'hD: R[dst_reg] <= {{48{bus_rdata[15]}}, bus_rdata[15:0]};
+                                4'hE: R[dst_reg] <= {{32{bus_rdata[31]}}, bus_rdata[31:0]};
+                                4'hF: begin
+                                    if (io_is_inp) begin
+                                        D <= bus_rdata[7:0];
+                                        effective_addr <= R[xsel];
+                                        mem_data <= {56'd0, bus_rdata[7:0]};
+                                        bus_size <= BUS_BYTE;
+                                        cpu_state <= CPU_MEM_WRITE;
+                                    end else begin
+                                        R[dst_reg] <= bus_rdata;
+                                        if (dst_reg == psel) fetch_pc <= bus_rdata;
+                                    end
+                                end
+                                4'h5: begin // 1802 RET
+                                    T <= bus_rdata[15:0];
+                                    xsel <= bus_rdata[12:8]; psel <= bus_rdata[4:0];
+                                    flags[6] <= 1'b1;
+                                    fetch_pc <= R[bus_rdata[4:0]];
+                                    cpu_state <= CPU_FETCH;
+                                end
+                                4'hB: begin // DIS
+                                    T <= bus_rdata[15:0];
+                                    xsel <= bus_rdata[12:8]; psel <= bus_rdata[4:0];
+                                    flags[6] <= 1'b0;
+                                    fetch_pc <= R[bus_rdata[4:0]];
+                                    cpu_state <= CPU_FETCH;
+                                end
+                                default: begin
                                     R[dst_reg] <= bus_rdata;
                                     if (dst_reg == psel) fetch_pc <= bus_rdata;
                                 end
-                            end
-                            4'h5: begin // 1802 RET
-                                T <= bus_rdata[15:0];
-                                xsel <= bus_rdata[12:8]; psel <= bus_rdata[4:0];
-                                flags[6] <= 1'b1;
-                                fetch_pc <= R[bus_rdata[4:0]];
+                            endcase
+
+                            if (mem_sub == 4'h1) R[src_reg] <= R[src_reg] + 64'd8;
+                            if (mem_sub == 4'h3) R[xsel]    <= R[xsel]    + 64'd8;
+
+                            if (post_action == POST_RTI_POP2) begin
+                                effective_addr <= R[spsel];
+                                R[spsel] <= R[spsel] + 64'd8;
+                                bus_size <= BUS_DWORD;
+                                post_action <= POST_NONE;
+                                cpu_state <= CPU_MEM_READ2;
+                            end else if ((mem_sub != 4'hF || !io_is_inp)
+                                         && mem_sub != 4'h5 && mem_sub != 4'hB) begin
                                 cpu_state <= CPU_FETCH;
                             end
-                            4'hB: begin // DIS
-                                T <= bus_rdata[15:0];
-                                xsel <= bus_rdata[12:8]; psel <= bus_rdata[4:0];
-                                flags[6] <= 1'b0;
-                                fetch_pc <= R[bus_rdata[4:0]];
-                                cpu_state <= CPU_FETCH;
-                            end
-                            default: begin
-                                R[dst_reg] <= bus_rdata;
-                                if (dst_reg == psel) fetch_pc <= bus_rdata;
-                            end
-                        endcase
-
-                        if (mem_sub == 4'h1) R[src_reg] <= R[src_reg] + 64'd8;
-                        if (mem_sub == 4'h3) R[xsel]    <= R[xsel]    + 64'd8;
-
-                        if (post_action == POST_RTI_POP2) begin
-                            effective_addr <= R[spsel];
-                            R[spsel] <= R[spsel] + 64'd8;
-                            bus_size <= BUS_DWORD;
-                            post_action <= POST_NONE;
-                            cpu_state <= CPU_MEM_READ2;
-                        end else if ((mem_sub != 4'hF || !io_is_inp)
-                                     && mem_sub != 4'h5 && mem_sub != 4'hB) begin
-                            cpu_state <= CPU_FETCH;
                         end
                     end
                 end
@@ -1790,9 +1858,18 @@ module mp64_cpu #(
                 bus_wen   <= 1'b0;
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
-                    flags <= bus_rdata[7:0];
-                    priv_level <= bus_rdata[8];
-                    cpu_state <= CPU_FETCH;
+                    if (bus_error) begin
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        flags[6] <= 1'b0;
+                        priv_level <= 1'b0;
+                        cpu_state <= CPU_HALT;
+                    end else begin
+                        flags <= bus_rdata[7:0];
+                        priv_level <= bus_rdata[8];
+                        cpu_state <= CPU_FETCH;
+                    end
                 end
             end
 
@@ -1815,15 +1892,44 @@ module mp64_cpu #(
                     bus_wen   <= 1'b1;
                     if (bus_ready) begin
                         bus_valid <= 1'b0;
-                        if (mem_sub == 4'h5) R[xsel] <= R[xsel] - 64'd8;
-                        if (post_action == POST_IRQ_VEC) begin
-                            R[spsel] <= R[spsel] - 64'd8;
-                            effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= trap_return_pc;
-                            post_action <= POST_NONE;
-                            cpu_state <= CPU_IRQ_PUSH;
-                        end else
-                            cpu_state <= CPU_FETCH;
+                        if (bus_error) begin
+                            if (post_action == POST_NONE) begin
+                                // The failed store has no architectural
+                                // completion side effects.  Build the precise
+                                // fault frame from its already-advanced PC.
+                                trap_addr <= effective_addr;
+                                R[spsel] <= R[spsel] - 64'd8;
+                                effective_addr <= R[spsel] - 64'd8;
+                                trap_return_pc <= R[psel];
+                                mem_data <= {55'd0, priv_level, flags};
+                                flags[6] <= 1'b0;
+                                priv_level <= 1'b0;
+                                ivec_id <= IRQX_BUS;
+                                post_action <= POST_IRQ_VEC;
+                                bus_size <= BUS_DWORD;
+                                cpu_state <= CPU_MEM_WRITE;
+                            end else begin
+                                // The first trap-frame store itself failed.
+                                // Re-entering the same unwritable stack would
+                                // recurse forever, while pretending success
+                                // would publish a corrupt frame.  Fail closed;
+                                // CSR_BUS_ERR remains the reset-time record.
+                                trap_addr <= effective_addr;
+                                ivec_id <= IRQX_BUS;
+                                post_action <= POST_NONE;
+                                cpu_state <= CPU_HALT;
+                            end
+                        end else begin
+                            if (mem_sub == 4'h5) R[xsel] <= R[xsel] - 64'd8;
+                            if (post_action == POST_IRQ_VEC) begin
+                                R[spsel] <= R[spsel] - 64'd8;
+                                effective_addr <= R[spsel] - 64'd8;
+                                mem_data <= trap_return_pc;
+                                post_action <= POST_NONE;
+                                cpu_state <= CPU_IRQ_PUSH;
+                            end else
+                                cpu_state <= CPU_FETCH;
+                        end
                     end
                 end
             end
@@ -1839,9 +1945,20 @@ module mp64_cpu #(
                 bus_size  <= BUS_DWORD;
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
-                    effective_addr <= ivt_base + {56'd0, ivec_id, 3'b000};
-                    bus_size <= BUS_DWORD;
-                    cpu_state <= CPU_IRQ_LOAD;
+                    if (bus_error) begin
+                        // No second stack location is available for a
+                        // recursive fault frame.  Preserve the failing
+                        // address and stop with interrupts already masked.
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        cpu_state <= CPU_HALT;
+                    end else begin
+                        effective_addr <= ivt_base +
+                                          {56'd0, ivec_id, 3'b000};
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_IRQ_LOAD;
+                    end
                 end
             end
 
@@ -1855,9 +1972,18 @@ module mp64_cpu #(
                 bus_size  <= BUS_DWORD;
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
-                    R[psel] <= bus_rdata;
-                    fetch_pc <= bus_rdata;
-                    cpu_state <= CPU_FETCH;
+                    if (bus_error) begin
+                        // A faulting vector read cannot consume the sentinel
+                        // as a handler PC and cannot safely stack again.
+                        trap_addr <= effective_addr;
+                        ivec_id <= IRQX_BUS;
+                        post_action <= POST_NONE;
+                        cpu_state <= CPU_HALT;
+                    end else begin
+                        R[psel] <= bus_rdata;
+                        fetch_pc <= bus_rdata;
+                        cpu_state <= CPU_FETCH;
+                    end
                 end
             end
 
@@ -2346,13 +2472,14 @@ module mp64_cpu #(
             end
 
             endcase
+            end
 
             // Every completed write on this core's data port invalidates the
             // exact writer-local byte span.  This central point includes
             // scalar stores, both interrupt stack writes, BIST, and the
             // EXT.STRING engine, and it remains active while lookup is
             // disabled.
-            if (bus_valid && bus_wen && bus_ready) begin
+            if (bus_valid && bus_wen && bus_ready && !bus_error) begin
                 icache_inv_line <= 1'b1;
                 icache_inv_addr <= bus_addr;
                 case (bus_size)
