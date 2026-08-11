@@ -1763,11 +1763,10 @@ def _csr_write_py(cpu, addr: int, val: int):
             cs.tile_selftest = 2
             cs.tile_st_detail = 0
     elif addr == CSR_PERF_CTRL:
-        if val & 1: cs.perf_enable = 1
+        cs.perf_enable = val & 1
         if val & 2:
             cs.perf_cycles = 0; cs.perf_stalls = 0
             cs.perf_tileops = 0; cs.perf_extmem = 0
-            cs.perf_enable = 1
     elif addr == CSR_ICACHE_CTRL:
         cs.icache_control_write(val)
     elif addr == CSR_CRC_ACC:

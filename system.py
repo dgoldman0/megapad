@@ -56,12 +56,11 @@ from devices import (
     AudioOutput,
     MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
-    CppRTCProxy,
+    CppRTCProxy, CppWotsProxy,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
     SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
     PortBridgeCSR,
-    WotsChainAccel,
     CRYPTO_CAP_CRC_REFLECT_RAW,
     CRYPTO_CAP_SHA3_STREAM,
     CRYPTO_CAP_KECCAK_F1600,
@@ -1218,7 +1217,7 @@ class MegapadSystem:
         self._native_system = NativeSystemState(
             num_cores,
             self.num_cores,
-            num_cores + num_clusters + 2,
+            num_cores + num_clusters + 3,
             worker_count,
         )
         self._native_system.attach_mem(self._shared_mem, ram_size)
@@ -1311,7 +1310,7 @@ class MegapadSystem:
                 | CRYPTO_CAP_KECCAK_F1600
             ),
             num_bus_ports=(
-                self.num_full_cores + self.num_clusters + 2
+                self.num_full_cores + self.num_clusters + 3
             ),
         )
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
@@ -1375,11 +1374,11 @@ class MegapadSystem:
         for cpu in self.cores:
             self.port_bridge.attach_cpu(cpu)
 
-        # Keep the retired WOTS aperture decoded for Python micro-core
-        # fallback.  Both this object and SystemState's native reservation are
-        # inert until the checkpoint-3 context/DMA service replaces them.
-        self.wots = WotsChainAccel()
-        self.bus.register(self.wots)
+        # WOTS has one authoritative SystemState-owned controller.  This thin
+        # facade exists for direct Python diagnostics and micro-core fallback;
+        # it carries no independent programming or private state.
+        self.wots = CppWotsProxy(self.cores[0]._cs)
+        self.bus.register(self.wots, externally_clocked=True)
         self.bus.set_tick_driver(self.advance_system_cycles)
 
         # Wire storage DMA to shared memory
@@ -2427,10 +2426,11 @@ class MegapadSystem:
             if cluster_enable_mask & (1 << index):
                 cluster.set_enabled(True)
 
-        # The shared NIC survives a warm CPU boot. Re-register any held DMA
-        # beat on the freshly reset fabric so unbounded execution cannot
-        # orphan it and the next cycle-bounded call resumes the same byte.
-        self._native_system._adopt_native_nic_cycle_dma()
+        # The shared NIC survives a warm CPU boot; WOTS was atomically reset
+        # with the fabric above. Re-register native endpoint views on the
+        # fresh strict timeline so a held NIC beat cannot be orphaned and the
+        # WOTS endpoint begins from its authoritative idle state.
+        self._native_system._adopt_native_cycle_dma()
         self._booted = True
 
     # -----------------------------------------------------------------
@@ -2825,6 +2825,14 @@ class MegapadSystem:
             stop_cycle=int(result.stop_cycle),
         )
 
+    def _service_unbounded_native_dma_locked(self) -> int:
+        """Advance native NIC/WOTS fabric work without retiring a CPU."""
+        return int(
+            self._native_system._service_unbounded_native_dma(
+                self._settle_native_system_round,
+            )
+        )
+
     def _run_native_full_core_cycle_batch(
         self,
         max_system_cycles: int,
@@ -2929,14 +2937,24 @@ class MegapadSystem:
                 "storage rejected its strict-cycle DMA completion"
             )
 
+    def _accept_storage_dma(self, token: int, _grant) -> None:
+        """Validate capture of the disk beat retained until completion."""
+        _active, pending = self.storage.cycle_dma_view()
+        if pending is None or int(pending.token) != int(token):
+            raise RuntimeError(
+                "storage DMA acceptance does not match its pending beat"
+            )
+
     def _cycle_dma_callback_sets(self):
-        """Bind the native NIC and Python storage DMA endpoints."""
+        """Bind NIC, disk, and native WOTS in stable physical order."""
         return [
-            (None, None),
+            (None, None, None),
             (
                 self._inspect_storage_dma,
+                self._accept_storage_dma,
                 self._complete_storage_dma,
             ),
+            (None, None, None),
         ]
 
     def step(self) -> int:
@@ -2966,11 +2984,18 @@ class MegapadSystem:
                 if not cpu.halted and not cpu.idle
             )
             if active_cores == 0:
-                self.bus.tick(1)
-                return 1
+                dma_cycles = self._service_unbounded_native_dma_locked()
+                if dma_cycles == 0:
+                    self.bus.tick(1)
+                return max(dma_cycles, 1)
             result = self._run_native_system_batch(active_cores)
             return max(result.system_cycles_advanced, 1)
 
+        # Legacy per-core stepping remains necessary for deliberate step
+        # overrides.  Native NIC/WOTS requesters still belong to the physical
+        # main bus, so drain work retained from a prior round before allowing
+        # the next guest instruction to observe it.
+        dma_cycles = self._service_unbounded_native_dma_locked()
         total_cycles = 0
         elapsed_cycles = 0
         pending_error = None
@@ -3011,7 +3036,7 @@ class MegapadSystem:
         # Cores in one deterministic round share one elapsed system frontier.
         if elapsed_cycles > 0:
             self.bus.tick(elapsed_cycles)
-        elif pending_error is None:
+        elif pending_error is None and dma_cycles == 0:
             self.bus.tick(1)
         self._drain_native_uart_output()
 
@@ -3019,8 +3044,12 @@ class MegapadSystem:
             raise pending_error
 
         self._deliver_pending_interrupts()
+        # A completed instruction in this legacy round may have launched a
+        # native WOTS/NIC beat.  Service it through the same weighted fabric
+        # used by ordinary native batches before the next guest instruction.
+        dma_cycles += self._service_unbounded_native_dma_locked()
 
-        return max(total_cycles, 1)
+        return max(total_cycles + dma_cycles, 1)
 
     def run_batch(self, n: int = 100_000) -> int:
         """Return the aggregate instructions from one native system batch."""

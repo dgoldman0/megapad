@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 
 import pytest
 
 import _mp64_accel
 from asm import assemble
-from devices import NIC_BASE
+from devices import MMIO_BASE, NIC_BASE
 from system import MegapadSystem
 
 
@@ -34,6 +35,33 @@ def _system(
     system.boot(entry=0)
     _prime_instruction_cache(system, 0, len(code))
     return system
+
+
+def _start_unbounded_wots(
+    system: MegapadSystem,
+    context_address: int,
+    *,
+    start: int,
+    steps: int,
+) -> None:
+    for offset in range(8):
+        system.wots.write8(offset, context_address >> (8 * offset))
+    system.wots.write8(0x08, steps)
+    system.wots.write8(0x09, start)
+    system.wots.write8(0x0A, 1)
+
+
+def _unbounded_wots_reference(
+    context: bytes,
+    start: int,
+    steps: int,
+) -> bytes:
+    node = context[48:64]
+    for chain_index in range(steps):
+        adrs = bytearray(context[16:48])
+        adrs[28:32] = (start + chain_index).to_bytes(4, "big")
+        node = hashlib.shake_256(context[:16] + adrs + node).digest(16)
+    return node
 
 
 def _prime_instruction_cache(
@@ -104,6 +132,11 @@ class _DmaEndpoint:
             self.beats[0] if self.beats else None,
         )
 
+    def accept(self, token: int, grant) -> None:
+        assert self.beats
+        assert self.beats[0].token == token
+        assert grant.request.requester_id == self.requester_id
+
     def complete(self, token: int, result) -> None:
         assert self.beats
         assert self.beats[0].token == token
@@ -134,8 +167,9 @@ def _attach_dma_endpoints(
     disk: _DmaEndpoint,
 ) -> None:
     system._cycle_dma_callback_sets = lambda: [
-        (nic.inspect, nic.complete),
-        (disk.inspect, disk.complete),
+        (nic.inspect, nic.accept, nic.complete),
+        (disk.inspect, disk.accept, disk.complete),
+        (None, None, None),
     ]
 
 
@@ -1210,3 +1244,132 @@ def test_unbounded_instruction_limit_and_zero_budget_report_stop_cycle():
     assert no_progress.instructions_executed == 0
     assert no_progress.system_cycles_advanced == 0
     assert no_progress.stop_cycle == 1
+
+
+@pytest.mark.parametrize(("full_cores", "clusters"), ((1, 0), (2, 1)))
+def test_unbounded_native_wots_uses_appended_physical_bus_port_in_all_topologies(
+    full_cores: int,
+    clusters: int,
+) -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=full_cores,
+        num_clusters=clusters,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=1,
+    )
+    system.load_binary(0, assemble("halt"))
+    system.boot(entry=0)
+    context_address = 0x180
+    context = bytes((index * 23 + 11) & 0xFF for index in range(64))
+    system.cpu.mem[context_address:context_address + 64] = context
+    _start_unbounded_wots(
+        system,
+        context_address,
+        start=3,
+        steps=2,
+    )
+
+    result = system.run_batch_stats(1)
+
+    snapshot = system._native_system._wots_snapshot()
+    assert snapshot["status"] == 2
+    assert snapshot["error"] == 0
+    assert snapshot["dout"] == _unbounded_wots_reference(context, 3, 2)
+    assert snapshot["private_zeroized"]
+    assert result.system_cycles_advanced >= 64
+    owner = system._native_system
+    wots_port = owner.main_bus_port_for_requester(
+        owner.WOTS_DMA_REQUESTER_ID
+    )
+    bus = owner._main_bus_snapshot()
+    assert wots_port == bus.port_count - 1
+    assert bus.last_issue_sequences[wots_port] == 64
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_error"),
+    (
+        (_mp64_accel.BusFault.TARGET_FAULT, 6),
+        (_mp64_accel.BusFault.MEMORY_TIMEOUT, 7),
+    ),
+)
+def test_unbounded_native_wots_uses_same_forced_response_classification(
+    fault,
+    expected_error: int,
+) -> None:
+    system = _system(assemble("halt"), cores=1)
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    owner = system._native_system
+    owner._test_force_next_wots_dma_fault(fault)
+    _start_unbounded_wots(system, context_address, start=0, steps=0)
+
+    system.run_batch_stats(1)
+
+    snapshot = owner._wots_snapshot()
+    assert snapshot["status"] == 3
+    assert snapshot["error"] == expected_error
+    assert snapshot["private_zeroized"]
+    assert owner._main_bus_snapshot().active_grant is None
+    assert not owner.cycle_execution_pending
+
+
+def test_unbounded_wots_suppression_preserves_beat_until_real_local_timeout(
+) -> None:
+    system = _system(assemble("halt"), cores=1)
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    owner = system._native_system
+    owner._test_set_wots_dma_acceptance_suppressed(True)
+    _start_unbounded_wots(system, context_address, start=0, steps=0)
+    held = owner._wots_snapshot()
+    held_token = held["dma_token"]
+    held_address = held["dma_address"]
+
+    result = system.run_batch_stats(1)
+
+    snapshot = owner._wots_snapshot()
+    assert held_token is not None
+    assert held_address == context_address
+    assert snapshot["status"] == 3
+    assert snapshot["error"] == 8
+    assert snapshot["cycles"] == held["dma_accept_cycles"]
+    assert snapshot["private_zeroized"]
+    assert result.system_cycles_advanced >= held["dma_accept_cycles"]
+    owner._test_set_wots_dma_acceptance_suppressed(False)
+
+
+def test_unbounded_guest_nic_command_uses_native_main_bus_dma_service() -> None:
+    system = _system(assemble("st.b r1, r2\nhalt"), cores=1)
+    state = system.cpu._cs
+    payload_address = 0x180
+    payload = b"fabric-nic"
+    system.cpu.mem[
+        payload_address:payload_address + len(payload)
+    ] = payload
+    for offset in range(8):
+            state.nic_write8(
+                NIC_BASE + 0x02 + offset,
+                (payload_address >> (8 * offset)) & 0xFF,
+            )
+    state.nic_write8(NIC_BASE + 0x0A, len(payload) & 0xFF)
+    state.nic_write8(NIC_BASE + 0x0B, len(payload) >> 8)
+    system.cpu.regs[1] = MMIO_BASE + NIC_BASE
+    system.cpu.regs[2] = 1
+
+    result = system.run_batch_stats(2)
+
+    assert result.system_stop_reason == "instruction_limit"
+    assert state.nic_get_tx_count() == 1
+    assert state.nic_drain_one_tx() == payload
+    assert state.nic_cycle_dma_snapshot()["pending"] is None
+    owner = system._native_system
+    nic_port = owner.main_bus_port_for_requester(
+        owner.NIC_DMA_REQUESTER_ID
+    )
+    assert owner._main_bus_snapshot().last_issue_sequences[nic_port] == len(
+        payload
+    )

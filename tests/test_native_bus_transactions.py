@@ -1,21 +1,15 @@
-"""Phase 2 main-bus transaction and arbitration oracles.
+"""Native main-bus transaction and arbitration oracles.
 
 These tests select the integrated ``mp64_soc`` contract, not every feature of
 the reusable ``mp64_bus`` module.  The SoC presents four full-core ports, three
-cluster ports, NIC DMA, and disk DMA.  It ties the generic QoS write sideband
-off, so its observable reset configuration is equal-weight round-robin with no
-bandwidth limit.  Future hard-QoS eligibility/reservation is deliberately
-separate from this peer-ordering primitive: it may filter which requests are
-eligible, but it must not add a second weighted preference among those peers,
-and unused reserved capacity remains work-conserving.
+cluster ports, NIC DMA, disk DMA, and an appended WOTS read requester. Existing
+NIC/disk indices stay fixed; WOTS is always the final physical port, with
+immutable weight 1 and no bandwidth throttle. Other ports implement the same
+1..255 weighted round-robin and 65536-cycle bandwidth epochs as the RTL.
 
 The reset credit, held-request bubble, target decode, and timeout edges below
-come from ``rtl/bus/mp64_bus.v``.  Its current nine-port scan truncates an
-intermediate sum and can starve ports 7/8 after a high-port grant; the sparse
-oracle pins the selected equal, work-conserving contract rather than copying
-that defect.  The RTL correction and its HDL regression are staged as the
-immediate post-milestone fix.  This transaction primitive does not execute a
-target yet; resumable cores and target dispatch are the next Phase 2 element.
+come from ``rtl/bus/mp64_bus.v``. The sparse oracle covers the non-power-of-two
+ten-port wrap without reproducing the old truncated intermediate sum.
 """
 
 from __future__ import annotations
@@ -31,6 +25,7 @@ BusFault = _mp64_accel.BusFault
 BusOperation = _mp64_accel.BusOperation
 BusOrderingMetadata = _mp64_accel.BusOrderingMetadata
 BusRequest = _mp64_accel.BusRequest
+BusResponseCode = _mp64_accel.BusResponseCode
 BusTarget = _mp64_accel.BusTarget
 BusWidth = _mp64_accel.BusWidth
 
@@ -77,40 +72,45 @@ def _complete_write(
     grant,
     cycle: int,
     *,
+    read_value=None,
     fault=BusFault.NONE,
     target_effects_committed: bool = True,
 ):
     _advance_to(owner, cycle)
     return owner._main_bus_complete(
         grant.grant_sequence,
+        read_value=read_value,
         fault=fault,
         target_effects_committed=target_effects_committed,
     )
 
 
 def test_integrated_soc_topology_keeps_requester_identity_separate_from_ports():
-    owner = NativeSystemState(4, 16, 9)
+    owner = NativeSystemState(4, 16, 10)
     nic = owner.NIC_DMA_REQUESTER_ID
     disk = owner.DISK_DMA_REQUESTER_ID
+    wots = owner.WOTS_DMA_REQUESTER_ID
 
-    assert owner.main_bus_port_count == 9
+    assert owner.main_bus_port_count == 10
     assert [
         owner.main_bus_port_for_requester(requester)
-        for requester in (0, 1, 2, 3, 4, 7, 8, 11, 12, 15, nic, disk)
-    ] == [0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 7, 8]
+        for requester in (
+            0, 1, 2, 3, 4, 7, 8, 11, 12, 15, nic, disk, wots
+        )
+    ] == [0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 7, 8, 9]
 
     # The compatibility constructor can still derive fixed four-core clusters.
-    assert NativeSystemState(2, 6).main_bus_port_count == 5
+    assert NativeSystemState(2, 6).main_bus_port_count == 6
     with pytest.raises(ValueError, match="exactly match"):
-        NativeSystemState(4, 16, 8)
+        NativeSystemState(4, 16, 9)
     with pytest.raises(ValueError, match="exactly match"):
-        NativeSystemState(4, 16, 10)
+        NativeSystemState(4, 16, 11)
     with pytest.raises(IndexError, match="outside"):
         owner.main_bus_port_for_requester(16)
 
 
 def test_request_grant_and_result_preserve_explicit_transaction_metadata():
-    owner = NativeSystemState(4, 16, 9)
+    owner = NativeSystemState(4, 16, 10)
     request = _request(
         owner,
         12,
@@ -150,14 +150,16 @@ def test_request_grant_and_result_preserve_explicit_transaction_metadata():
     assert result.completion_cycle == 6
     assert result.read_value is None
     assert result.fault == BusFault.NONE
+    assert result.response_code == BusResponseCode.OK
     assert result.target_effects_committed
 
     with pytest.raises(AttributeError):
         request.address = 0
 
 
-def test_reset_credit_and_round_robin_match_the_nine_port_rtl_trace():
-    owner = NativeSystemState(4, 16, 9)
+def test_reset_credit_and_round_robin_match_the_ten_port_rtl_trace():
+    owner = NativeSystemState(4, 16, 10)
+    owner.attach_mem(bytearray(0x200), 0x200)
     requesters = [
         0,
         1,
@@ -168,15 +170,25 @@ def test_reset_credit_and_round_robin_match_the_nine_port_rtl_trace():
         12,
         owner.NIC_DMA_REQUESTER_ID,
         owner.DISK_DMA_REQUESTER_ID,
+        owner.WOTS_DMA_REQUESTER_ID,
     ]
     pending = [
-        _request(owner, requester, 1)
+        _request(
+            owner,
+            requester,
+            1,
+            operation=(
+                BusOperation.READ
+                if requester == owner.WOTS_DMA_REQUESTER_ID
+                else BusOperation.WRITE
+            ),
+        )
         for requester in reversed(requesters)
     ]
     trace = []
     cycle = 0
 
-    for expected_port in range(9):
+    for expected_port in range(10):
         grant = owner._main_bus_try_grant(pending)
         trace.append(
             (
@@ -192,11 +204,21 @@ def test_reset_credit_and_round_robin_match_the_nine_port_rtl_trace():
             if request.ordering.main_port_id != expected_port
         ]
         cycle += 1
-        _complete_write(owner, grant, cycle)
+        _complete_write(
+            owner,
+            grant,
+            cycle,
+            read_value=(
+                0
+                if grant.request.requester_id
+                == owner.WOTS_DMA_REQUESTER_ID
+                else None
+            ),
+        )
         cycle += 1
         _advance_to(owner, cycle)
 
-    # Wrap from disk port 8 back to core port 0.
+    # Wrap from appended WOTS port 9 back to core port 0.
     wrapped = _request(owner, 0, 2, ready_cycle=cycle)
     grant = owner._main_bus_try_grant([wrapped])
     trace.append(
@@ -217,12 +239,13 @@ def test_reset_credit_and_round_robin_match_the_nine_port_rtl_trace():
         (12, 6, 12),
         (14, 7, owner.NIC_DMA_REQUESTER_ID),
         (16, 8, owner.DISK_DMA_REQUESTER_ID),
-        (18, 0, 0),
+        (18, 9, owner.WOTS_DMA_REQUESTER_ID),
+        (20, 0, 0),
     ]
 
 
 def test_reset_scan_starts_at_port_one_when_port_zero_is_absent():
-    owner = NativeSystemState(4, 16, 9)
+    owner = NativeSystemState(4, 16, 10)
     port_two = _request(owner, 2, 1)
     port_one = _request(owner, 1, 1)
 
@@ -231,8 +254,8 @@ def test_reset_scan_starts_at_port_one_when_port_zero_is_absent():
     assert grant.request.ordering.main_port_id == 1
 
 
-def test_sparse_nine_port_wrap_remains_work_conserving_after_disk():
-    owner = NativeSystemState(4, 16, 9)
+def test_sparse_ten_port_wrap_remains_work_conserving_after_disk():
+    owner = NativeSystemState(4, 16, 10)
     disk = owner.DISK_DMA_REQUESTER_ID
     nic = owner.NIC_DMA_REQUESTER_ID
 
@@ -260,7 +283,7 @@ def test_sparse_nine_port_wrap_remains_work_conserving_after_disk():
 
 
 def test_main_bus_round_robin_state_is_independent_of_core_batch_cursor():
-    owner = NativeSystemState(4, 16, 9)
+    owner = NativeSystemState(4, 16, 10)
     owner.scheduler_cursor = 3
 
     grant = owner._main_bus_try_grant([
@@ -273,7 +296,7 @@ def test_main_bus_round_robin_state_is_independent_of_core_batch_cursor():
 
 
 def test_active_grant_holds_payload_and_prevents_preemption():
-    owner = NativeSystemState(2, 2, 4)
+    owner = NativeSystemState(2, 2, 5)
     first = _request(
         owner,
         0,
@@ -304,7 +327,7 @@ def test_active_grant_holds_payload_and_prevents_preemption():
 
 
 def test_same_held_port_gets_one_idle_edge_but_another_port_does_not():
-    same_owner = NativeSystemState(1, 1, 3)
+    same_owner = NativeSystemState(1, 1, 4)
     first = same_owner._main_bus_try_grant(
         [_request(same_owner, 0, 1)]
     )
@@ -328,7 +351,7 @@ def test_same_held_port_gets_one_idle_edge_but_another_port_does_not():
         == 3
     )
 
-    other_owner = NativeSystemState(1, 1, 3)
+    other_owner = NativeSystemState(1, 1, 4)
     first = other_owner._main_bus_try_grant(
         [_request(other_owner, 0, 1)]
     )
@@ -346,7 +369,7 @@ def test_same_held_port_gets_one_idle_edge_but_another_port_does_not():
 
     # Requester identity does not bypass the physical-port guard: two
     # micro-cores in one cluster still share main-bus port 4.
-    cluster_owner = NativeSystemState(4, 16, 9)
+    cluster_owner = NativeSystemState(4, 16, 10)
     first_cluster_core = cluster_owner._main_bus_try_grant(
         [_request(cluster_owner, 4, 1)]
     )
@@ -366,7 +389,7 @@ def test_same_held_port_gets_one_idle_edge_but_another_port_does_not():
 
 
 def test_timeout_edges_target_decode_sentinel_and_sticky_fault_match_rtl():
-    owner = NativeSystemState(1, 1, 3)
+    owner = NativeSystemState(1, 1, 4)
     request = _request(
         owner,
         0,
@@ -401,12 +424,13 @@ def test_timeout_edges_target_decode_sentinel_and_sticky_fault_match_rtl():
     assert result.completion_cycle == 64
     assert result.read_value == owner.MAIN_BUS_TIMEOUT_SENTINEL
     assert result.fault == BusFault.MMIO_TIMEOUT
+    assert result.response_code == BusResponseCode.TARGET_FAULT
     assert not result.target_effects_committed
     assert owner.main_bus_timeout_cycle is None
-    assert owner._main_bus_snapshot().sticky_bus_errors == [1, 0, 0]
+    assert owner._main_bus_snapshot().sticky_bus_errors == [1, 0, 0, 0]
 
     # The RTL recognizes only address[63:32] == 0xFFFF_FF00 as MMIO.
-    memory_owner = NativeSystemState(1, 1, 3)
+    memory_owner = NativeSystemState(1, 1, 4)
     memory_request = _request(
         memory_owner,
         0,
@@ -423,7 +447,7 @@ def test_timeout_edges_target_decode_sentinel_and_sticky_fault_match_rtl():
 
 
 def test_ack_on_terminal_timeout_edge_wins_and_read_completion_is_validated():
-    owner = NativeSystemState(1, 1, 3)
+    owner = NativeSystemState(1, 1, 4)
     request = _request(
         owner,
         0,
@@ -456,11 +480,198 @@ def test_ack_on_terminal_timeout_edge_wins_and_read_completion_is_validated():
     assert result.completion_cycle == grant.timeout_cycle
     assert result.read_value == 0x1234
     assert result.fault == BusFault.NONE
-    assert owner._main_bus_snapshot().sticky_bus_errors == [0, 0, 0]
+    assert result.response_code == BusResponseCode.OK
+    assert owner._main_bus_snapshot().sticky_bus_errors == [0, 0, 0, 0]
+
+
+def test_weighted_round_robin_honors_three_beat_burst_and_weight_255():
+    owner = NativeSystemState(2, 2, 5)
+    owner._main_bus_set_port_weight(0, 255)
+    assert owner._main_bus_snapshot().weights[0] == 255
+    owner._main_bus_set_port_weight(0, 3)
+
+    # Move past port 0's special reset credit so the configured burst begins
+    # at an ordinary round boundary.
+    prime = owner._main_bus_try_grant([_request(owner, 1, 1)])
+    assert prime.request.ordering.main_port_id == 1
+    _complete_write(owner, prime, 1)
+    _advance_to(owner, 2)
+
+    next_issue = {0: 1, 1: 2}
+    trace = []
+    while len(trace) < 4:
+        pending = [
+            _request(owner, requester, next_issue[requester])
+            for requester in (0, 1)
+        ]
+        grant = owner._main_bus_try_grant(pending)
+        if grant is None:
+            _advance_to(owner, owner.system_cycles + 1)
+            continue
+        requester = grant.request.requester_id
+        trace.append(grant.request.ordering.main_port_id)
+        next_issue[requester] += 1
+        _complete_write(owner, grant, owner.system_cycles + 1)
+        if len(trace) < 4:
+            _advance_to(owner, owner.system_cycles + 1)
+
+    assert trace == [0, 0, 0, 1]
+
+
+def test_bandwidth_epoch_and_wots_fixed_qos_are_explicit():
+    owner = NativeSystemState(1, 1, 4)
+    wots_port = owner.main_bus_port_for_requester(
+        owner.WOTS_DMA_REQUESTER_ID
+    )
+
+    owner._main_bus_set_port_weight(wots_port, 255)
+    owner._main_bus_set_port_bandwidth_limit(wots_port, 0xFFFF)
+    owner._main_bus_set_port_bandwidth_limit(0, 1)
+    snapshot = owner._main_bus_snapshot()
+    assert snapshot.weights == [1, 1, 1, 1]
+    assert snapshot.bandwidth_limits == [1, 0, 0, 0]
+    assert snapshot.fixed_weight_one_unlimited == [0, 0, 0, 1]
+
+    first = owner._main_bus_try_grant([_request(owner, 0, 1)])
+    _complete_write(owner, first, 1)
+    snapshot = owner._main_bus_snapshot()
+    assert snapshot.bandwidth_counts == [1, 0, 0, 0]
+
+    second = _request(owner, 0, 2, ready_cycle=2)
+    assert owner._main_bus_next_arbitration_cycle([second]) == (
+        owner.MAIN_BUS_QOS_EPOCH_CYCLES
+    )
+    _advance_to(owner, owner.MAIN_BUS_QOS_EPOCH_CYCLES)
+    grant = owner._main_bus_try_grant([second])
+    assert grant.grant_cycle == owner.MAIN_BUS_QOS_EPOCH_CYCLES
+    snapshot = owner._main_bus_snapshot()
+    assert snapshot.qos_epoch_start_cycle == owner.MAIN_BUS_QOS_EPOCH_CYCLES
+    assert snapshot.bandwidth_counts == [0, 0, 0, 0]
+
+
+def test_wots_bus_validation_and_success_response_classification():
+    owner = NativeSystemState(1, 1, 4)
+    memory = bytearray(64)
+    memory[63] = 0xA5
+    owner.attach_mem(memory, len(memory))
+    wots = owner.WOTS_DMA_REQUESTER_ID
+
+    invalid = (
+        (
+            _request(owner, wots, 1, address=0),
+            "read-only",
+        ),
+        (
+            _request(
+                owner,
+                wots,
+                1,
+                operation=BusOperation.READ,
+                address=0,
+                width=BusWidth.HALF,
+            ),
+            "byte-wide",
+        ),
+        (
+            _request(
+                owner,
+                wots,
+                1,
+                operation=BusOperation.READ,
+                address=len(memory),
+            ),
+            "Bank 0",
+        ),
+        (
+            _request(
+                owner,
+                wots,
+                1,
+                operation=BusOperation.READ,
+                address=MMIO_ADDRESS,
+            ),
+            "Bank 0",
+        ),
+    )
+    for request, message in invalid:
+        with pytest.raises(ValueError, match=message):
+            owner._main_bus_try_grant([request])
+
+    request = _request(
+        owner,
+        wots,
+        1,
+        operation=BusOperation.READ,
+        address=63,
+    )
+    grant = owner._main_bus_try_grant([request])
+    _advance_to(owner, 1)
+    result = owner._main_bus_complete(
+        grant.grant_sequence,
+        read_value=memory[63],
+        target_effects_committed=True,
+    )
+
+    assert result.response_code == BusResponseCode.OK
+    assert owner._wots_classify_bus_result(result) == BusResponseCode.OK
+
+
+def test_wots_response_codes_distinguish_target_timeout_and_protocol():
+    def owner_and_grant():
+        owner = NativeSystemState(1, 1, 4)
+        memory = bytearray(1)
+        owner.attach_mem(memory, len(memory))
+        grant = owner._main_bus_try_grant([
+            _request(
+                owner,
+                owner.WOTS_DMA_REQUESTER_ID,
+                1,
+                operation=BusOperation.READ,
+                address=0,
+            )
+        ])
+        return owner, grant
+
+    target_owner, target_grant = owner_and_grant()
+    _advance_to(target_owner, 1)
+    target = target_owner._main_bus_complete(
+        target_grant.grant_sequence,
+        fault=BusFault.TARGET_FAULT,
+    )
+    assert target.response_code == BusResponseCode.TARGET_FAULT
+    assert target_owner._wots_classify_bus_result(target) == (
+        BusResponseCode.TARGET_FAULT
+    )
+    assert target_owner._main_bus_snapshot().sticky_bus_errors == [
+        0, 0, 0, 1
+    ]
+
+    timeout_owner, timeout_grant = owner_and_grant()
+    _advance_to(timeout_owner, timeout_grant.timeout_cycle)
+    timeout = timeout_owner._main_bus_complete(
+        timeout_grant.grant_sequence,
+        fault=BusFault.MEMORY_TIMEOUT,
+    )
+    assert timeout.response_code == BusResponseCode.MEMORY_TIMEOUT
+    assert timeout_owner._wots_classify_bus_result(timeout) == (
+        BusResponseCode.MEMORY_TIMEOUT
+    )
+
+    protocol_owner, protocol_grant = owner_and_grant()
+    _advance_to(protocol_owner, 1)
+    protocol = protocol_owner._main_bus_complete(
+        protocol_grant.grant_sequence,
+        read_value=0,
+        target_effects_committed=False,
+    )
+    assert protocol.response_code == BusResponseCode.OK
+    assert protocol_owner._wots_classify_bus_result(protocol) == (
+        BusResponseCode.PROTOCOL
+    )
 
 
 def test_invalid_port_snapshots_and_replayed_sequences_are_transactional():
-    owner = NativeSystemState(4, 16, 9)
+    owner = NativeSystemState(4, 16, 10)
     core_four = _request(owner, 4, 1)
     core_five = _request(owner, 5, 2)
     baseline = owner._main_bus_snapshot()
@@ -498,7 +709,7 @@ def test_invalid_port_snapshots_and_replayed_sequences_are_transactional():
 
 
 def test_versioned_reset_snapshot_replays_the_initial_tie_deterministically():
-    owner = NativeSystemState(2, 2, 4)
+    owner = NativeSystemState(2, 2, 5)
     first = owner._main_bus_try_grant([
         _request(owner, 1, 1),
         _request(owner, 0, 1),
@@ -507,8 +718,8 @@ def test_versioned_reset_snapshot_replays_the_initial_tie_deterministically():
 
     owner._main_bus_reset()
     snapshot = owner._main_bus_snapshot()
-    assert snapshot.schema_version == 1
-    assert snapshot.port_count == 4
+    assert snapshot.schema_version == 2
+    assert snapshot.port_count == 5
     assert snapshot.last_grant == 0
     assert snapshot.reset_port_zero_credit
     assert snapshot.next_grant_sequence == 1
@@ -516,8 +727,14 @@ def test_versioned_reset_snapshot_replays_the_initial_tie_deterministically():
     assert not snapshot.served_last
     assert snapshot.last_arbitration_cycle is None
     assert snapshot.active_grant is None
-    assert snapshot.last_issue_sequences == [0, 0, 0, 0]
-    assert snapshot.sticky_bus_errors == [0, 0, 0, 0]
+    assert snapshot.last_issue_sequences == [0, 0, 0, 0, 0]
+    assert snapshot.sticky_bus_errors == [0, 0, 0, 0, 0]
+    assert snapshot.weights == [1, 1, 1, 1, 1]
+    assert snapshot.bandwidth_limits == [0, 0, 0, 0, 0]
+    assert snapshot.bandwidth_counts == [0, 0, 0, 0, 0]
+    assert snapshot.fixed_weight_one_unlimited == [0, 0, 0, 0, 1]
+    assert snapshot.weight_remaining == 1
+    assert snapshot.qos_epoch_start_cycle == 1
 
     replay = owner._main_bus_try_grant([
         _request(owner, 1, 1, ready_cycle=1),
@@ -548,7 +765,7 @@ def test_cold_boot_resets_owned_main_bus_state():
     assert snapshot.active_grant is None
     assert snapshot.next_grant_sequence == 1
     assert snapshot.reset_port_zero_credit
-    assert snapshot.sticky_bus_errors == [0, 0, 0]
+    assert snapshot.sticky_bus_errors == [0, 0, 0, 0]
 
 
 @pytest.mark.parametrize(

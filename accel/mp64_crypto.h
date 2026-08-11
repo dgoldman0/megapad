@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <stdexcept>
 
 // =========================================================================
 //  AES primitives
@@ -643,6 +644,12 @@ struct CryptoSHA3 {
         WIDE_STATE_WRITE = 3,
     };
 
+    enum WotsResult : uint8_t {
+        WOTS_PENDING = 0,
+        WOTS_READY = 1,
+        WOTS_FAILED = 2,
+    };
+
     uint64_t state[25];
     uint8_t buf[168];       // Maximum selected rate (SHAKE128).
     uint8_t digest[64];     // Architecturally visible DOUT window.
@@ -684,6 +691,12 @@ struct CryptoSHA3 {
     int rate() const { return RATES[mode]; }
 
     uint8_t packed_status() const {
+        // WOTS owns the raw permutation service without exposing its
+        // internal DONE/ERROR sampling transitions through the guest MMIO
+        // aperture.  The architectural owner/busy value is therefore stable
+        // for the complete borrowed interval.
+        if (owner == OWNER_WOTS)
+            return 0x0D;
         return static_cast<uint8_t>((owner << 2) | phase);
     }
 
@@ -824,8 +837,26 @@ struct CryptoSHA3 {
     }
 
     void fail_operation() {
-        // An internal round failure cannot publish prior output or leave the
-        // shared service owned.  CTRL is configuration and remains selected.
+        // An internal round failure cannot publish prior output.  A WOTS
+        // borrower retains ownership just long enough for its controller to
+        // sample FAILED, abort, and release in controller order; public MMIO
+        // operations wipe and release immediately. CTRL remains selected.
+        if (owner == OWNER_WOTS) {
+            aes_secure_clear(state, sizeof(state));
+            aes_secure_clear(buf, sizeof(buf));
+            aes_secure_clear(held_din, sizeof(held_din));
+            aes_secure_clear(digest, sizeof(digest));
+            buf_len = 0;
+            squeeze_cursor = 0;
+            state_index = 0;
+            pending = OP_NONE;
+            pending_cycles = 0;
+            held_din_len = 0;
+            cancel_wide_access();
+            phase = ERROR;
+            error = ERR_INTERNAL;
+            return;
+        }
         const uint8_t selected_mode = mode;
         wipe_transaction(true);
         mode = selected_mode;
@@ -1323,12 +1354,89 @@ struct CryptoSHA3 {
     }
 
     bool claim_wots() {
+        // The internal WOTS borrower is independent of the guest-visible raw
+        // permutation aperture.  A backend may expose WOTS_CHAIN while
+        // deliberately keeping public KECCAK_F1600 unavailable.
         if (owner != OWNER_NONE || phase != IDLE)
             return false;
+        aes_secure_clear(state, sizeof(state));
+        aes_secure_clear(buf, sizeof(buf));
+        aes_secure_clear(held_din, sizeof(held_din));
+        aes_secure_clear(digest, sizeof(digest));
+        buf_len = 0;
+        squeeze_cursor = 0;
+        state_index = 0;
+        pending = OP_NONE;
+        pending_cycles = 0;
+        held_din_len = 0;
+        cancel_wide_access();
         owner = OWNER_WOTS;
         phase = BUSY;
         error = ERR_NONE;
         return true;
+    }
+
+    bool submit_wots_state(const uint8_t* input, std::size_t length) {
+        if (owner != OWNER_WOTS || phase != BUSY ||
+            pending != OP_NONE || input == nullptr || length != 200) {
+            return false;
+        }
+        for (std::size_t lane_index = 0; lane_index < 25; lane_index++) {
+            uint64_t lane = 0;
+            for (std::size_t byte_index = 0; byte_index < 8; byte_index++) {
+                lane |= static_cast<uint64_t>(
+                    input[lane_index * 8 + byte_index]) <<
+                    (byte_index * 8);
+            }
+            state[lane_index] = lane;
+        }
+        begin_operation(OP_RAW, PERMUTATION_CYCLES);
+        return true;
+    }
+
+    WotsResult take_wots_result(uint8_t output[200]) {
+        if (owner != OWNER_WOTS)
+            return WOTS_FAILED;
+        if (phase == ERROR)
+            return WOTS_FAILED;
+        if (pending != OP_NONE || phase != DONE)
+            return WOTS_PENDING;
+        if (output == nullptr)
+            return WOTS_FAILED;
+        for (std::size_t lane_index = 0; lane_index < 25; lane_index++) {
+            for (std::size_t byte_index = 0; byte_index < 8; byte_index++) {
+                output[lane_index * 8 + byte_index] =
+                    static_cast<uint8_t>(
+                        state[lane_index] >> (byte_index * 8));
+            }
+        }
+        aes_secure_clear(state, sizeof(state));
+        phase = BUSY;
+        error = ERR_NONE;
+        return WOTS_READY;
+    }
+
+    void abort_wots() {
+        if (owner != OWNER_WOTS)
+            return;
+        aes_secure_clear(state, sizeof(state));
+        aes_secure_clear(buf, sizeof(buf));
+        aes_secure_clear(held_din, sizeof(held_din));
+        aes_secure_clear(digest, sizeof(digest));
+        buf_len = 0;
+        squeeze_cursor = 0;
+        state_index = 0;
+        pending = OP_NONE;
+        pending_cycles = 0;
+        held_din_len = 0;
+        fail_next_operation = false;
+        cancel_wide_access();
+        phase = BUSY;
+        error = ERR_NONE;
+    }
+
+    bool wots_quiescent() const {
+        return owner == OWNER_WOTS && pending == OP_NONE;
     }
 
     void release_wots() {
@@ -1758,100 +1866,558 @@ static BigNum make_p256_p() {
 
 
 // =========================================================================
-//  Retired WOTS+ prototype aperture
+//  Checked WOTS+ chain controller
 // =========================================================================
 //
-//  Checkpoint 2 deliberately removes the direct WOTS-to-CryptoSHA3 adapter.
-//  The production context/DMA/shared-service state machine lands as one
-//  coherent checkpoint 3 change; the obsolete GO below remains inert.
-//
-//  MMIO register map (32 bytes at offset 0x8A0):
-//    +0x00  WOTS_SEED   (W, 32b)  RAM address of PK.seed
-//    +0x04  WOTS_ADRS   (W, 32b)  RAM address of ADRS
-//    +0x08  WOTS_INPUT  (W, 32b)  RAM address of chain input
-//    +0x0C  WOTS_STEPS  (W, 8b)   Chain length (1–15)
-//    +0x0D  WOTS_START  (W, 8b)   Start step index (0–14)
-//    +0x0E  WOTS_GO     (W, 8b)   Trigger | WOTS_STATUS (R) 0/1/2
-//    +0x0F  WOTS_CYCLES (R, 8b)   Cycle count of last chain (÷64)
-//    +0x10  WOTS_DOUT   (R, 16B)  Result bytes
-//
+//  The controller consumes one checked 64-byte context in Bank 0 through a
+//  stable byte-DMA endpoint.  It borrows CryptoSHA3's raw permutation path;
+//  it never owns a second Keccak implementation and never reads host memory
+//  directly.
 
 struct WotsChain {
-    // Configuration (written by CPU)
-    uint32_t seed_addr;
-    uint32_t adrs_addr;
-    uint32_t input_addr;
-    uint8_t  steps;       // 1–15
-    uint8_t  start_step;  // 0–14
-    uint8_t  status;      // 0=idle, 1=busy, 2=done
-    uint16_t last_cycles; // profiling
+    enum Status : uint8_t {
+        STATUS_IDLE = 0,
+        STATUS_BUSY = 1,
+        STATUS_DONE = 2,
+        STATUS_ERROR = 3,
+    };
 
-    // Output
-    uint8_t dout[16];
+    enum ErrorCode : uint8_t {
+        ERROR_NONE = 0,
+        ERROR_INVALID_COMMAND = 1,
+        ERROR_OWNER = 2,
+        ERROR_STEPS = 3,
+        ERROR_START = 4,
+        ERROR_CONTEXT_SPAN = 5,
+        ERROR_TARGET_FAULT = 6,
+        ERROR_MEMORY_TIMEOUT = 7,
+        ERROR_ACCEPT_TIMEOUT = 8,
+        ERROR_INTERNAL = 9,
+    };
 
-    void reset() {
-        seed_addr = 0;
-        adrs_addr = 0;
-        input_addr = 0;
-        steps = 0;
-        start_step = 0;
-        status = 0;
-        last_cycles = 0;
-        std::memset(dout, 0, 16);
+    enum DmaResponse : uint8_t {
+        DMA_RESPONSE_OK = 0,
+        DMA_RESPONSE_TARGET_FAULT = 1,
+        DMA_RESPONSE_MEMORY_TIMEOUT = 2,
+        DMA_RESPONSE_PROTOCOL = 3,
+    };
+
+    enum WorkPhase : uint8_t {
+        PHASE_IDLE = 0,
+        PHASE_DMA_REQUEST = 1,
+        PHASE_DMA_RESPONSE = 2,
+        PHASE_KECCAK = 3,
+        PHASE_ABORT_KECCAK = 4,
+    };
+
+    struct DmaView {
+        bool active = false;
+        bool has_beat = false;
+        uint64_t token = 0;
+        uint64_t address = 0;
+    };
+
+    static constexpr uint32_t BASE = 0x08A0;
+    static constexpr uint32_t END = 0x08C0;
+    static constexpr uint64_t MEM_RESPONSE_DEADLINE = 256;
+    static constexpr uint64_t BUS_BEAT_SLOT_CYCLES = 258;
+    static constexpr uint64_t KECCAK_SERVICE_CYCLES = 32;
+    static constexpr uint64_t CONTROL_CYCLES = 512;
+
+    CryptoSHA3* keccak_service = nullptr;
+
+    // Architectural state.
+    uint64_t context_addr = 0;
+    uint8_t steps = 0;
+    uint8_t start_step = 0;
+    uint8_t status = STATUS_IDLE;
+    uint8_t error = ERROR_NONE;
+    uint32_t cycles = 0;
+    uint8_t dout[16]{};
+
+    // Immutable topology-derived bounds.
+    uint64_t bank0_size = 0;
+    uint32_t num_bus_ports = 1;
+    uint64_t dma_accept_cycles = 1;
+    uint64_t dma_beat_cycles = 257;
+    uint64_t max_request_cycles = 0;
+    uint64_t clear_cycles = 0;
+
+    // Private request state.
+    WorkPhase phase = PHASE_IDLE;
+    uint64_t active_context_addr = 0;
+    uint8_t active_steps = 0;
+    uint8_t active_start = 0;
+    uint8_t context[64]{};
+    uint8_t keccak_state[200]{};
+    uint8_t node[16]{};
+    uint8_t dma_index = 0;
+    uint8_t chain_index = 0;
+    uint64_t next_dma_token = 1;
+    bool dma_beat_present = false;
+    uint64_t dma_token = 0;
+    uint64_t dma_address = 0;
+    bool dma_accepted = false;
+    uint64_t dma_accept_elapsed = 0;
+    bool keccak_claimed = false;
+    bool clear_pending = false;
+
+    void init(CryptoSHA3* service) {
+        keccak_service = service;
+        next_dma_token = 1;
+        configure(0, 1);
+        reset();
     }
 
-    void execute() {
-        // The three-pointer prototype is intentionally nonfunctional while
-        // checkpoint 3 replaces it with the production 64-bit context/DMA
-        // contract.  In particular it must not reset or borrow the MMIO SHA
-        // object: that would bypass the selected shared-service ownership.
-        status = 0;
-        last_cycles = 0;
+    void configure(uint64_t configured_bank0_size, uint32_t port_count) {
+        if (port_count == 0)
+            throw std::invalid_argument(
+                "WOTS main-bus port count must be positive");
+        const unsigned __int128 accept =
+            static_cast<unsigned __int128>(port_count - 1) * 255 *
+                BUS_BEAT_SLOT_CYCLES +
+            1;
+        const unsigned __int128 beat = accept + MEM_RESPONSE_DEADLINE;
+        const unsigned __int128 request =
+            64 * beat + 15 * KECCAK_SERVICE_CYCLES + CONTROL_CYCLES;
+        const unsigned __int128 clear =
+            beat + KECCAK_SERVICE_CYCLES + 64;
+        if (request >= (static_cast<unsigned __int128>(1) << 63) ||
+            clear >= (static_cast<unsigned __int128>(1) << 63)) {
+            throw std::invalid_argument(
+                "WOTS service deadline exceeds signed-safe range");
+        }
+        bank0_size = configured_bank0_size;
+        num_bus_ports = port_count;
+        dma_accept_cycles = static_cast<uint64_t>(accept);
+        dma_beat_cycles = static_cast<uint64_t>(beat);
+        max_request_cycles = static_cast<uint64_t>(request);
+        clear_cycles = static_cast<uint64_t>(clear);
+    }
+
+    void reset_architectural_state(bool reset_cycles) {
+        context_addr = 0;
+        steps = 0;
+        start_step = 0;
+        status = STATUS_IDLE;
+        error = ERROR_NONE;
+        if (reset_cycles)
+            cycles = 0;
         aes_secure_clear(dout, sizeof(dout));
     }
 
-    static constexpr uint32_t BASE = 0x08A0;
-    static constexpr uint32_t END  = 0x08C0;
+    void scrub_private_state() {
+        phase = PHASE_IDLE;
+        active_context_addr = 0;
+        active_steps = 0;
+        active_start = 0;
+        aes_secure_clear(context, sizeof(context));
+        aes_secure_clear(keccak_state, sizeof(keccak_state));
+        aes_secure_clear(node, sizeof(node));
+        dma_index = 0;
+        chain_index = 0;
+        dma_beat_present = false;
+        dma_token = 0;
+        dma_address = 0;
+        dma_accepted = false;
+        dma_accept_elapsed = 0;
+        keccak_claimed = false;
+        clear_pending = false;
+    }
+
+    void scrub_working_buffers_preserving_owner() {
+        active_context_addr = 0;
+        active_steps = 0;
+        active_start = 0;
+        aes_secure_clear(context, sizeof(context));
+        aes_secure_clear(keccak_state, sizeof(keccak_state));
+        aes_secure_clear(node, sizeof(node));
+        dma_index = 0;
+        chain_index = 0;
+        dma_beat_present = false;
+        dma_token = 0;
+        dma_address = 0;
+        dma_accepted = false;
+        dma_accept_elapsed = 0;
+        clear_pending = false;
+    }
+
+    void reset() {
+        if (keccak_claimed && keccak_service != nullptr) {
+            keccak_service->abort_wots();
+            keccak_service->release_wots();
+        }
+        reset_architectural_state(true);
+        scrub_private_state();
+    }
 
     bool handles(uint32_t mmio_offset) const {
         return mmio_offset >= BASE && mmio_offset < END;
     }
 
     uint8_t read8(uint32_t mmio_offset) const {
-        uint32_t off = mmio_offset - BASE;
-        switch (off) {
-            case 0x0E: return status;
-            case 0x0F: return (uint8_t)(last_cycles >> 6); // ÷64
-            default:
-                if (off >= 0x10 && off <= 0x1F)
-                    return dout[off - 0x10];
-                return 0;
-        }
+        const uint32_t offset = mmio_offset - BASE;
+        if (offset <= 0x07)
+            return static_cast<uint8_t>(context_addr >> (offset * 8));
+        if (offset == 0x08)
+            return steps;
+        if (offset == 0x09)
+            return start_step;
+        if (offset == 0x0A)
+            return status;
+        if (offset == 0x0B)
+            return error;
+        if (offset >= 0x0C && offset <= 0x0F)
+            return static_cast<uint8_t>(cycles >> ((offset - 0x0C) * 8));
+        if (offset >= 0x10 && offset <= 0x1F)
+            return dout[offset - 0x10];
+        return 0;
     }
 
     void write8(uint32_t mmio_offset, uint8_t value) {
-        uint32_t off = mmio_offset - BASE;
-        switch (off) {
-            case 0x00: seed_addr = (seed_addr & 0xFFFFFF00u) | value; break;
-            case 0x01: seed_addr = (seed_addr & 0xFFFF00FFu) | ((uint32_t)value << 8); break;
-            case 0x02: seed_addr = (seed_addr & 0xFF00FFFFu) | ((uint32_t)value << 16); break;
-            case 0x03: seed_addr = (seed_addr & 0x00FFFFFFu) | ((uint32_t)value << 24); break;
-            case 0x04: adrs_addr = (adrs_addr & 0xFFFFFF00u) | value; break;
-            case 0x05: adrs_addr = (adrs_addr & 0xFFFF00FFu) | ((uint32_t)value << 8); break;
-            case 0x06: adrs_addr = (adrs_addr & 0xFF00FFFFu) | ((uint32_t)value << 16); break;
-            case 0x07: adrs_addr = (adrs_addr & 0x00FFFFFFu) | ((uint32_t)value << 24); break;
-            case 0x08: input_addr = (input_addr & 0xFFFFFF00u) | value; break;
-            case 0x09: input_addr = (input_addr & 0xFFFF00FFu) | ((uint32_t)value << 8); break;
-            case 0x0A: input_addr = (input_addr & 0xFF00FFFFu) | ((uint32_t)value << 16); break;
-            case 0x0B: input_addr = (input_addr & 0x00FFFFFFu) | ((uint32_t)value << 24); break;
-            case 0x0C: steps = value & 0x0F; break;
-            case 0x0D: start_step = value & 0x0F; break;
-            case 0x0E:
-                // Obsolete prototype GO remains inert until checkpoint 3.
-                execute();
-                break;
-            default: break;
+        const uint32_t offset = mmio_offset - BASE;
+        if (offset == 0x0A) {
+            write_command(value);
+            return;
         }
+        if (status != STATUS_IDLE)
+            return;
+        if (offset <= 0x07) {
+            const uint64_t shift = static_cast<uint64_t>(offset) * 8;
+            context_addr =
+                (context_addr & ~(uint64_t{0xFF} << shift)) |
+                (static_cast<uint64_t>(value) << shift);
+        } else if (offset == 0x08) {
+            steps = value;
+        } else if (offset == 0x09) {
+            start_step = value;
+        }
+    }
+
+    void write_command(uint8_t command) {
+        if (command == 0)
+            return;
+        if (command == 2) {
+            clear();
+            return;
+        }
+        if (status != STATUS_IDLE)
+            return;
+        if (command != 1) {
+            aes_secure_clear(dout, sizeof(dout));
+            error = ERROR_INVALID_COMMAND;
+            status = STATUS_ERROR;
+            return;
+        }
+        go();
+    }
+
+    void publish_validation_error(uint8_t code) {
+        error = code;
+        status = STATUS_ERROR;
+    }
+
+    void go() {
+        aes_secure_clear(dout, sizeof(dout));
+        error = ERROR_NONE;
+        cycles = 0;
+        if (steps > 15) {
+            publish_validation_error(ERROR_STEPS);
+            return;
+        }
+        if (start_step > 15 ||
+            (steps != 0 &&
+             static_cast<uint16_t>(start_step) + steps > 15)) {
+            publish_validation_error(ERROR_START);
+            return;
+        }
+        const unsigned __int128 context_end =
+            static_cast<unsigned __int128>(context_addr) + 64;
+        if (context_addr > std::numeric_limits<uint64_t>::max() - 63 ||
+            context_end >
+                static_cast<unsigned __int128>(bank0_size)) {
+            publish_validation_error(ERROR_CONTEXT_SPAN);
+            return;
+        }
+        if (steps != 0 &&
+            (keccak_service == nullptr || !keccak_service->claim_wots())) {
+            publish_validation_error(ERROR_OWNER);
+            return;
+        }
+        status = STATUS_BUSY;
+        active_context_addr = context_addr;
+        active_steps = steps;
+        active_start = start_step;
+        keccak_claimed = steps != 0;
+        issue_dma_request();
+    }
+
+    void issue_dma_request() {
+        dma_token = next_dma_token++;
+        dma_address = active_context_addr + dma_index;
+        dma_beat_present = true;
+        dma_accepted = false;
+        dma_accept_elapsed = 0;
+        phase = PHASE_DMA_REQUEST;
+    }
+
+    DmaView cycle_dma_view() const {
+        DmaView view;
+        view.active = status == STATUS_BUSY;
+        if (phase == PHASE_DMA_REQUEST && dma_beat_present) {
+            view.has_beat = true;
+            view.token = dma_token;
+            view.address = dma_address;
+        }
+        return view;
+    }
+
+    bool cycle_dma_accept(uint64_t token) {
+        if (status != STATUS_BUSY || phase != PHASE_DMA_REQUEST ||
+            !dma_beat_present || dma_token != token) {
+            return false;
+        }
+        dma_accepted = true;
+        phase = PHASE_DMA_RESPONSE;
+        return true;
+    }
+
+    bool cycle_dma_complete(
+            uint64_t token,
+            uint8_t response_code,
+            bool has_read_value,
+            uint8_t read_value) {
+        if (status != STATUS_BUSY || phase != PHASE_DMA_RESPONSE ||
+            !dma_accepted || !dma_beat_present || dma_token != token) {
+            return false;
+        }
+        dma_beat_present = false;
+        dma_token = 0;
+        dma_address = 0;
+        dma_accepted = false;
+        if (clear_pending) {
+            finish_clear();
+            return true;
+        }
+        if (response_code == DMA_RESPONSE_TARGET_FAULT) {
+            finish_error(ERROR_TARGET_FAULT);
+            return true;
+        }
+        if (response_code == DMA_RESPONSE_MEMORY_TIMEOUT) {
+            finish_error(ERROR_MEMORY_TIMEOUT);
+            return true;
+        }
+        if (response_code != DMA_RESPONSE_OK || !has_read_value) {
+            finish_error(ERROR_INTERNAL);
+            return true;
+        }
+        context[dma_index++] = read_value;
+        if (dma_index < sizeof(context)) {
+            issue_dma_request();
+            return true;
+        }
+        if (active_steps == 0) {
+            finish_success(context + 48);
+            return true;
+        }
+        std::memcpy(node, context + 48, sizeof(node));
+        chain_index = 0;
+        submit_keccak_state();
+        return true;
+    }
+
+    void submit_keccak_state() {
+        aes_secure_clear(keccak_state, sizeof(keccak_state));
+        std::memcpy(keccak_state, context, 48);
+        const uint32_t step =
+            static_cast<uint32_t>(active_start) + chain_index;
+        keccak_state[44] = static_cast<uint8_t>(step >> 24);
+        keccak_state[45] = static_cast<uint8_t>(step >> 16);
+        keccak_state[46] = static_cast<uint8_t>(step >> 8);
+        keccak_state[47] = static_cast<uint8_t>(step);
+        std::memcpy(keccak_state + 48, node, sizeof(node));
+        keccak_state[64] = 0x1F;
+        keccak_state[135] = 0x80;
+        if (keccak_service == nullptr ||
+            !keccak_service->submit_wots_state(
+                keccak_state, sizeof(keccak_state))) {
+            if (keccak_service != nullptr)
+                keccak_service->abort_wots();
+            phase = PHASE_ABORT_KECCAK;
+            clear_pending = false;
+            error = ERROR_INTERNAL;
+            return;
+        }
+        phase = PHASE_KECCAK;
+    }
+
+    uint64_t cycles_to_local_event() const {
+        if (status != STATUS_BUSY)
+            return std::numeric_limits<uint64_t>::max();
+        if (phase == PHASE_DMA_REQUEST) {
+            return dma_accept_cycles > dma_accept_elapsed
+                ? dma_accept_cycles - dma_accept_elapsed
+                : 1;
+        }
+        if (phase == PHASE_ABORT_KECCAK)
+            return 1;
+        if (phase == PHASE_KECCAK &&
+            (keccak_service == nullptr ||
+             keccak_service->pending == CryptoSHA3::OP_NONE)) {
+            return 1;
+        }
+        return std::numeric_limits<uint64_t>::max();
+    }
+
+    void saturating_add_cycles(uint64_t elapsed) {
+        if (elapsed >=
+            static_cast<uint64_t>(
+                std::numeric_limits<uint32_t>::max() - cycles)) {
+            cycles = std::numeric_limits<uint32_t>::max();
+        } else {
+            cycles += static_cast<uint32_t>(elapsed);
+        }
+    }
+
+    void advance_without_service_event(uint64_t elapsed) {
+        if (elapsed == 0 || status != STATUS_BUSY)
+            return;
+        saturating_add_cycles(elapsed);
+        if (phase == PHASE_DMA_REQUEST) {
+            dma_accept_elapsed += elapsed;
+            if (dma_accept_elapsed >= dma_accept_cycles) {
+                dma_beat_present = false;
+                dma_token = 0;
+                dma_address = 0;
+                finish_error(ERROR_ACCEPT_TIMEOUT);
+            }
+        }
+    }
+
+    void sample_service_boundary() {
+        if (status != STATUS_BUSY)
+            return;
+        if (phase == PHASE_KECCAK) {
+            uint8_t result[200]{};
+            const CryptoSHA3::WotsResult service_result =
+                keccak_service == nullptr
+                    ? CryptoSHA3::WOTS_FAILED
+                    : keccak_service->take_wots_result(result);
+            if (service_result == CryptoSHA3::WOTS_PENDING) {
+                aes_secure_clear(result, sizeof(result));
+                return;
+            }
+            if (service_result != CryptoSHA3::WOTS_READY) {
+                aes_secure_clear(result, sizeof(result));
+                if (keccak_service != nullptr)
+                    keccak_service->abort_wots();
+                phase = PHASE_ABORT_KECCAK;
+                clear_pending = false;
+                error = ERROR_INTERNAL;
+                return;
+            }
+            std::memcpy(keccak_state, result, sizeof(result));
+            std::memcpy(node, result, sizeof(node));
+            aes_secure_clear(result, sizeof(result));
+            chain_index++;
+            if (chain_index == active_steps)
+                finish_success(node);
+            else
+                submit_keccak_state();
+            return;
+        }
+        if (phase == PHASE_ABORT_KECCAK &&
+            keccak_service != nullptr &&
+            keccak_service->wots_quiescent()) {
+            if (clear_pending)
+                finish_clear();
+            else
+                finish_error(
+                    error == ERROR_NONE
+                    ? static_cast<uint8_t>(ERROR_INTERNAL)
+                    : error);
+        }
+    }
+
+    void clear() {
+        if (status != STATUS_BUSY) {
+            const uint32_t retained_cycles = cycles;
+            reset_architectural_state(false);
+            cycles = retained_cycles;
+            scrub_private_state();
+            return;
+        }
+        clear_pending = true;
+        if (phase == PHASE_DMA_RESPONSE)
+            return;
+        if (phase == PHASE_KECCAK) {
+            if (keccak_service != nullptr)
+                keccak_service->abort_wots();
+            phase = PHASE_ABORT_KECCAK;
+            return;
+        }
+        if (phase == PHASE_ABORT_KECCAK)
+            return;
+        dma_beat_present = false;
+        dma_token = 0;
+        dma_address = 0;
+        finish_clear();
+    }
+
+    void release_keccak() {
+        if (keccak_claimed && keccak_service != nullptr)
+            keccak_service->release_wots();
+    }
+
+    void finish_success(const uint8_t result[16]) {
+        uint8_t terminal[16];
+        std::memcpy(terminal, result, sizeof(terminal));
+        scrub_working_buffers_preserving_owner();
+        release_keccak();
+        keccak_claimed = false;
+        phase = PHASE_IDLE;
+        std::memcpy(dout, terminal, sizeof(dout));
+        aes_secure_clear(terminal, sizeof(terminal));
+        error = ERROR_NONE;
+        status = STATUS_DONE;
+    }
+
+    void finish_error(uint8_t code) {
+        scrub_working_buffers_preserving_owner();
+        release_keccak();
+        keccak_claimed = false;
+        phase = PHASE_IDLE;
+        aes_secure_clear(dout, sizeof(dout));
+        error = code;
+        status = STATUS_ERROR;
+    }
+
+    void finish_clear() {
+        const uint32_t retained_cycles = cycles;
+        scrub_working_buffers_preserving_owner();
+        release_keccak();
+        reset_architectural_state(false);
+        cycles = retained_cycles;
+        scrub_private_state();
+    }
+
+    bool private_zeroized() const {
+        const auto all_zero = [](const void* address, std::size_t length) {
+            const uint8_t* bytes = static_cast<const uint8_t*>(address);
+            for (std::size_t index = 0; index < length; index++) {
+                if (bytes[index] != 0)
+                    return false;
+            }
+            return true;
+        };
+        return active_context_addr == 0 && active_steps == 0 &&
+               active_start == 0 && all_zero(context, sizeof(context)) &&
+               all_zero(keccak_state, sizeof(keccak_state)) &&
+               all_zero(node, sizeof(node)) && dma_index == 0 &&
+               chain_index == 0 && !dma_beat_present && dma_token == 0 &&
+               dma_address == 0 && !dma_accepted &&
+               dma_accept_elapsed == 0 && !keccak_claimed &&
+               !clear_pending;
     }
 };
 
@@ -1877,8 +2443,12 @@ struct CryptoDevices {
     void init() {
         aes.reset();
         sha3.reset();
-        wots.reset();
+        wots.init(&sha3);
         enabled = true;
+    }
+
+    void configure_wots(uint64_t bank0_size, uint32_t num_bus_ports) {
+        wots.configure(bank0_size, num_bus_ports);
     }
 
     // Returns true if offset is handled by a C++ crypto device
@@ -1932,8 +2502,11 @@ struct CryptoDevices {
         }
         if (mmio_offset >= AES_BASE && mmio_offset < AES_END)
             return last < AES_END;
-        if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
-            return last < WOTS_END;
+        if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END) {
+            const uint32_t offset = mmio_offset - WOTS_BASE;
+            return width == 1 && last < WOTS_END &&
+                (!write || offset <= 0x0A);
+        }
         return false;
     }
 
@@ -1951,8 +2524,27 @@ struct CryptoDevices {
     }
 
     void tick(uint64_t cycles) {
-        if (enabled)
-            sha3.tick(cycles);
+        if (!enabled)
+            return;
+        while (cycles != 0) {
+            uint64_t elapsed = cycles;
+            if (sha3.pending != CryptoSHA3::OP_NONE) {
+                elapsed = std::min<uint64_t>(
+                    elapsed,
+                    std::max<uint8_t>(sha3.pending_cycles, 1));
+            }
+            elapsed = std::min<uint64_t>(
+                elapsed,
+                wots.cycles_to_local_event());
+            // Every live event reports a positive distance.  Preserve a
+            // defensive one-cycle frontier if corrupted private state ever
+            // violates that invariant.
+            elapsed = std::max<uint64_t>(elapsed, 1);
+            sha3.tick(elapsed);
+            wots.advance_without_service_event(elapsed);
+            wots.sample_service_boundary();
+            cycles -= elapsed;
+        }
     }
 
     bool requires_unbounded_timing_boundary() const {
@@ -1960,7 +2552,9 @@ struct CryptoDevices {
         // boundaries.  Once a SHA operation is in flight, guest instructions
         // must not repeatedly observe the pre-settlement BUSY state while
         // accumulating cycles that have not yet reached the device.
-        return enabled && sha3.pending != CryptoSHA3::OP_NONE;
+        return enabled &&
+            (sha3.pending != CryptoSHA3::OP_NONE ||
+             wots.status == WotsChain::STATUS_BUSY);
     }
 
     uint8_t mmio_backpressure_cycles(

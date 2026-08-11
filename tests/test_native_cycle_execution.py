@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from types import SimpleNamespace
 
@@ -26,7 +27,11 @@ from devices import (
     STORAGE_STATUS_BUSY,
     STORAGE_STATUS_PRESENT,
     STORAGE_STATUS_RESULT_VALID,
+    SHA3_BASE,
     UART_BASE,
+    WOTS_BASE,
+    WOTS_BUS_BEAT_SLOT_CYCLES,
+    WOTS_KECCAK_SERVICE_CYCLES,
 )
 from system import MegapadSystem
 
@@ -83,6 +88,40 @@ def _system(
     if not cold_instruction_cache:
         _prime_instruction_cache(system, 0, len(code))
     return system
+
+
+def _write_wots_context_address(system: MegapadSystem, address: int) -> None:
+    for offset in range(8):
+        system.wots.write8(offset, address >> (8 * offset))
+
+
+def _start_native_wots(
+    system: MegapadSystem,
+    context_address: int,
+    *,
+    start: int,
+    steps: int,
+) -> None:
+    _write_wots_context_address(system, context_address)
+    system.wots.write8(0x08, steps)
+    system.wots.write8(0x09, start)
+    system.wots.write8(0x0A, 1)
+
+
+def _wots_reference(context: bytes, start: int, steps: int) -> bytes:
+    node = context[48:64]
+    for chain_index in range(steps):
+        adrs = bytearray(context[16:48])
+        adrs[28:32] = (start + chain_index).to_bytes(4, "big")
+        node = hashlib.shake_256(context[:16] + adrs + node).digest(16)
+    return node
+
+
+def _wots_request_bound(snapshot: dict, steps: int) -> int:
+    """Return the normative bound for this request, not the 15-step max."""
+    return int(snapshot["max_request_cycles"]) - (
+        (15 - steps) * WOTS_KECCAK_SERVICE_CYCLES
+    )
 
 
 def _install_vector(
@@ -716,7 +755,7 @@ def test_warm_boot_cancels_suspended_execution_and_restores_bus_credit():
     assert snapshot.active_grant is None
     assert snapshot.next_grant_sequence == 1
     assert snapshot.reset_port_zero_credit
-    assert snapshot.last_issue_sequences == [0, 0, 0, 0]
+    assert snapshot.last_issue_sequences == [0, 0, 0, 0, 0]
     pending = system._native_system.external_event_pending
     assert [(event.sequence, event.cycle) for event in pending] == [
         (sequence, event_cycle)
@@ -737,22 +776,26 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
 
     bus_state = phase0._main_bus_state(system)
 
-    assert phase0.SCHEMA_VERSION == 12
-    assert phase0.STATE_SCHEMA_VERSION == 10
+    assert phase0.SCHEMA_VERSION == 13
+    assert phase0.STATE_SCHEMA_VERSION == 12
     assert bus_state["arbitration_contract"] == {
-        "hard_qos_role": (
-            "determines must/may eligibility and reserved entitlement only"
-        ),
-        "simultaneously_eligible_peer_order": "equal_round_robin",
-        "unused_reserved_capacity": "work_conserving",
-        "best_effort_weights": "none",
-        "secondary_ordering_biases": [],
+        "policy": "weighted_round_robin",
+        "weight_range": [1, 255],
+        "bandwidth_epoch_cycles": 65536,
+        "zero_bandwidth_limit": "unlimited",
+        "unused_capacity": "work_conserving",
+        "post_completion_bubble_cycles": 1,
+        "wots_qos": {
+            "weight": 1,
+            "bandwidth_limit": 0,
+            "programmable": False,
+        },
     }
     assert bus_state["cycle_execution_pending"]
     assert len(bus_state["cycle_pending_requests"]) == 1
-    assert bus_state["last_issue_sequences"] == [1, 0, 0, 0]
+    assert bus_state["last_issue_sequences"] == [1, 0, 0, 0, 0]
     assert bus_state["dma_coordinator"] == {
-        "schema_version": 1,
+        "schema_version": 2,
         "endpoints": [
             {
                 "requester_id": -1,
@@ -760,6 +803,7 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
                 "next_issue_sequence": 1,
                 "highest_observed_token": 0,
                 "timeline_active": False,
+                "pending_accepted": False,
                 "pending_token": None,
                 "pending_request": None,
             },
@@ -769,10 +813,24 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
                 "next_issue_sequence": 1,
                 "highest_observed_token": 0,
                 "timeline_active": False,
+                "pending_accepted": False,
+                "pending_token": None,
+                "pending_request": None,
+            },
+            {
+                "requester_id": -3,
+                "main_bus_port_id": 4,
+                "next_issue_sequence": 1,
+                "highest_observed_token": 0,
+                "timeline_active": False,
+                "pending_accepted": False,
                 "pending_token": None,
                 "pending_request": None,
             },
         ],
+        "active_target_forced_fault": None,
+        "next_wots_forced_fault": None,
+        "wots_dma_acceptance_suppressed": False,
     }
     with pytest.raises(RuntimeError, match="requires quiescent"):
         phase0._state_observation(
@@ -847,7 +905,7 @@ def test_native_nic_dma_snapshot_rejects_active_system_batch():
     "payload_bytes",
     [SECTOR_SIZE, SECTOR_SIZE * 2],
 )
-def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
+def test_phase0_strict_dma_probe_uses_real_weighted_round_robin_ports(
     payload_bytes,
 ):
     import bench_phase0_concurrency as phase0
@@ -863,7 +921,7 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
     assert sample["stop_reason"] == "all_halted"
     assert sample["payload_bytes_per_endpoint"] == payload_bytes
     assert sample["total_dma_payload_bytes"] == payload_bytes * 2
-    assert sample["main_bus"]["port_count"] == 4
+    assert sample["main_bus"]["port_count"] == 5
     assert sample["main_bus"]["nic_port_id"] == 2
     assert sample["main_bus"]["disk_port_id"] == 3
     assert sample["main_bus"]["issue_sequence_deltas"] == [
@@ -871,6 +929,7 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
         3,
         payload_bytes,
         payload_bytes,
+        0,
     ]
     assert sample["main_bus"]["grant_sequence_delta"] == (
         payload_bytes * 2 + 6
@@ -891,13 +950,15 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
             for port in (2, 3)
         ],
     ]
-    assert report["arbitration_contract"][
-        "simultaneously_eligible_peer_order"
-    ] == "equal_round_robin"
-    assert report["arbitration_contract"]["best_effort_weights"] == "none"
-    assert report["arbitration_contract"][
-        "secondary_ordering_biases"
-    ] == []
+    assert report["arbitration_contract"]["policy"] == (
+        "weighted_round_robin"
+    )
+    assert report["arbitration_contract"]["weight_range"] == [1, 255]
+    assert report["arbitration_contract"]["wots_qos"] == {
+        "weight": 1,
+        "bandwidth_limit": 0,
+        "programmable": False,
+    }
     assert report["configuration"]["one_shot_cycle_budget"] == (
         payload_bytes * 8 + 256
     )
@@ -909,7 +970,7 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
     )
 
     observation = sample["observation"]
-    assert observation["state_schema_version"] == 10
+    assert observation["state_schema_version"] == 12
     metrics = observation["workload_metrics"]["strict_nic_disk_dma"]
     assert metrics["published_nic_frames"]["entries"] == [
         metrics["nic_source"]
@@ -934,6 +995,7 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
             "next_issue_sequence": payload_bytes + 1,
             "highest_observed_token": payload_bytes,
             "timeline_active": False,
+            "pending_accepted": False,
             "pending_token": None,
             "pending_request": None,
         },
@@ -943,6 +1005,17 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
             "next_issue_sequence": payload_bytes + 1,
             "highest_observed_token": payload_bytes,
             "timeline_active": False,
+            "pending_accepted": False,
+            "pending_token": None,
+            "pending_request": None,
+        },
+        {
+            "requester_id": -3,
+            "main_bus_port_id": 4,
+            "next_issue_sequence": 1,
+            "highest_observed_token": 0,
+            "timeline_active": False,
+            "pending_accepted": False,
             "pending_token": None,
             "pending_request": None,
         },
@@ -1645,13 +1718,16 @@ def test_cycle_execution_rejects_realtime_rtc_before_mutation():
 
 
 class _CycleDmaStub:
-    """Pure endpoint view plus exactly-once completion for scheduler oracles."""
+    """Pure endpoint view plus exact capture/completion scheduler oracles."""
 
     def __init__(self, requester_id, beats, completion_log=None):
         self.requester_id = requester_id
         self.beats = list(beats)
         self.inspect_cycles = []
+        self.acceptances = []
         self.completions = []
+        self.results = []
+        self._accepted_tokens = set()
         self.completion_log = (
             completion_log if completion_log is not None else []
         )
@@ -1665,10 +1741,27 @@ class _CycleDmaStub:
             pending=self.beats[0],
         )
 
+    def accept(self, token, grant):
+        assert self.beats
+        beat = self.beats[0]
+        assert token == beat.token
+        assert token not in self._accepted_tokens
+        assert grant.request.requester_id == self.requester_id
+        assert grant.request.address == beat.address
+        assert grant.request.operation == beat.operation
+        assert grant.request.write_data == beat.write_data
+        self._accepted_tokens.add(int(token))
+        self.acceptances.append((
+            int(token),
+            int(grant.grant_sequence),
+            int(grant.grant_cycle),
+        ))
+
     def complete(self, token, result):
         assert self.beats
         beat = self.beats[0]
         assert token == beat.token
+        assert int(token) in self._accepted_tokens
         assert result.grant.request.requester_id == self.requester_id
         assert result.grant.request.address == beat.address
         assert result.grant.request.operation == beat.operation
@@ -1681,6 +1774,7 @@ class _CycleDmaStub:
             int(result.grant.request.address),
             None if result.read_value is None else int(result.read_value),
         )
+        self.results.append(result)
         self.completions.append(record)
         self.completion_log.append(record)
         self.beats.pop(0)
@@ -1703,17 +1797,22 @@ def _dma_beat(
     )
 
 
-def _attach_cycle_dma_stubs(system, nic=None, disk=None):
+def _attach_cycle_dma_stubs(system, nic=None, disk=None, wots=None):
     system._cycle_dma_callback_sets = lambda: [
         (
-            (nic.inspect, nic.complete)
+            (nic.inspect, nic.accept, nic.complete)
             if nic is not None
-            else (None, None)
+            else (None, None, None)
         ),
         (
-            (disk.inspect, disk.complete)
+            (disk.inspect, disk.accept, disk.complete)
             if disk is not None
-            else (None, None)
+            else (None, None, None)
+        ),
+        (
+            (wots.inspect, wots.accept, wots.complete)
+            if wots is not None
+            else (None, None, None)
         ),
     ]
 
@@ -1762,6 +1861,8 @@ def _run_equal_dma_case(*, sliced):
             max_instructions=100,
         )
 
+    assert [entry[0] for entry in nic.acceptances] == [1, 2]
+    assert [entry[0] for entry in disk.acceptances] == [101, 102]
     snapshot = owner._main_bus_snapshot()
     return (
         bytes(system.cpu.mem[0x180:0x184]),
@@ -1804,8 +1905,66 @@ def test_dma_endpoints_are_equal_peers_and_slice_identical():
     assert stop == "all_halted"
     assert last_grant == 2
     assert grants == 5
-    assert issues == (0, 2, 2)
+    assert issues == (0, 2, 2, 0)
     assert not pending
+
+
+def test_wots_dma_capture_edge_fault_hook_and_snapshot_are_explicit():
+    system = _system(assemble("halt"))
+    owner = system._native_system
+    wots = _CycleDmaStub(
+        owner.WOTS_DMA_REQUESTER_ID,
+        [
+            _dma_beat(
+                1,
+                operation=_mp64_accel.BusOperation.READ,
+                address=0x180,
+            )
+        ],
+    )
+    _attach_cycle_dma_stubs(system, wots=wots)
+
+    with pytest.raises(ValueError, match="target-fault or memory-timeout"):
+        owner._test_force_next_wots_dma_fault(_mp64_accel.BusFault.NONE)
+    owner._test_force_next_wots_dma_fault(
+        _mp64_accel.BusFault.TARGET_FAULT
+    )
+    armed = owner._cycle_dma_snapshot()
+    assert armed["schema_version"] == 2
+    assert armed["next_wots_forced_fault"] == (
+        _mp64_accel.BusFault.TARGET_FAULT
+    )
+    assert [endpoint["requester_id"] for endpoint in armed["endpoints"]] == [
+        owner.NIC_DMA_REQUESTER_ID,
+        owner.DISK_DMA_REQUESTER_ID,
+        owner.WOTS_DMA_REQUESTER_ID,
+    ]
+    assert [endpoint["main_bus_port_id"] for endpoint in armed["endpoints"]] == [
+        1, 2, 3
+    ]
+    assert not any(
+        endpoint["pending_accepted"] for endpoint in armed["endpoints"]
+    )
+
+    result = system.run_cycle_batch(8, max_instructions=100)
+
+    assert result.system_stop_reason == "all_halted"
+    assert wots.acceptances == [(1, 1, 0)]
+    assert len(wots.completions) == len(wots.results) == 1
+    response = wots.results[0]
+    assert response.fault == _mp64_accel.BusFault.TARGET_FAULT
+    assert response.response_code == _mp64_accel.BusResponseCode.TARGET_FAULT
+    assert owner._wots_classify_bus_result(response) == (
+        _mp64_accel.BusResponseCode.TARGET_FAULT
+    )
+    settled = owner._cycle_dma_snapshot()
+    assert settled["active_target_forced_fault"] is None
+    assert settled["next_wots_forced_fault"] is None
+    wots_state = settled["endpoints"][2]
+    assert not wots_state["timeline_active"]
+    assert not wots_state["pending_accepted"]
+    assert wots_state["pending_token"] is None
+    assert wots_state["pending_request"] is None
 
 
 def test_dma_zero_budgets_do_not_inspect_or_mutate_endpoints():
@@ -2027,7 +2186,7 @@ def test_warm_boot_clears_cached_dma_endpoint_and_bus_frontier():
     assert not owner.cycle_execution_pending
     assert snapshot.active_grant is None
     assert snapshot.next_grant_sequence == 1
-    assert snapshot.last_issue_sequences == [0, 0, 0]
+    assert snapshot.last_issue_sequences == [0, 0, 0, 0]
 
 
 def _write_native_nic_register(system, offset, value, width):
@@ -2791,3 +2950,470 @@ def test_storage_strict_dma_fault_reports_exact_applied_prefix(tmp_path):
         ._main_bus_snapshot()
         .last_issue_sequences[disk_port]
     ) == 10
+
+
+@pytest.mark.parametrize(("start", "steps"), ((15, 0), (4, 3)))
+def test_native_wots_strict_endpoint_uses_checked_context_and_shared_keccak(
+    start: int,
+    steps: int,
+) -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    context = bytes((index * 29 + 7) & 0xFF for index in range(64))
+    system.cpu.mem[context_address:context_address + 64] = context
+
+    _start_native_wots(
+        system,
+        context_address,
+        start=start,
+        steps=steps,
+    )
+    busy = system.wots.snapshot()
+    assert busy["status"] == 1
+    assert busy["phase"] == "dma-request"
+    assert busy["keccak_claimed"] == (steps != 0)
+
+    request_bound = _wots_request_bound(busy, steps)
+    system.run_cycle_batch(request_bound, max_instructions=100)
+
+    settled = system.wots.snapshot()
+    assert settled["status"] == 2
+    assert settled["error"] == 0
+    assert settled["dout"] == _wots_reference(context, start, steps)
+    assert settled["cycles"] <= request_bound
+    assert settled["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+
+
+def test_native_wots_every_valid_geometry_matches_reference_at_bank_edges(
+) -> None:
+    system = _system(assemble("halt"))
+    halted = system.run_cycle_batch(1, max_instructions=100)
+    assert halted.system_stop_reason == "all_halted"
+
+    context = bytes((index * 29 + 7) & 0xFF for index in range(64))
+    valid_pairs = [
+        (start, steps)
+        for start in range(16)
+        for steps in range(16 - start)
+    ]
+    assert len(valid_pairs) == 136
+
+    owner = system._native_system
+    wots_port = owner.main_bus_port_for_requester(
+        owner.WOTS_DMA_REQUESTER_ID
+    )
+    for context_address in (0, system.cpu.mem_size - len(context)):
+        system.cpu.mem[context_address:context_address + len(context)] = (
+            context
+        )
+        for start, steps in valid_pairs:
+            issues_before = int(
+                owner._main_bus_snapshot().last_issue_sequences[wots_port]
+            )
+            _start_native_wots(
+                system,
+                context_address,
+                start=start,
+                steps=steps,
+            )
+            busy = system.wots.snapshot()
+            assert busy["status"] == 1, (context_address, start, steps)
+            request_bound = _wots_request_bound(busy, steps)
+
+            system.run_cycle_batch(
+                request_bound,
+                max_instructions=100,
+            )
+
+            settled = system.wots.snapshot()
+            assert settled["status"] == 2, (
+                context_address,
+                start,
+                steps,
+            )
+            assert settled["error"] == 0
+            assert settled["dout"] == _wots_reference(
+                context,
+                start,
+                steps,
+            )
+            assert settled["cycles"] <= request_bound
+            assert settled["private_zeroized"]
+            assert system.cpu._cs._crypto_sha3_test_zeroized()
+            assert (
+                int(
+                    owner._main_bus_snapshot()
+                    .last_issue_sequences[wots_port]
+                )
+                - issues_before
+            ) == len(context)
+
+            system.wots.write8(0x0A, 2)
+            assert system.wots.snapshot()["status"] == 0
+            assert system.wots.private_zeroized()
+
+
+def test_native_wots_guest_go_step_services_dma_with_contract_bound() -> None:
+    system = _system(assemble("st.b r1, r2\nhalt"))
+    context_address = 0x180
+    context = bytes((index * 17 + 3) & 0xFF for index in range(64))
+    system.cpu.mem[context_address:context_address + len(context)] = context
+    _write_wots_context_address(system, context_address)
+    system.wots.write8(0x08, 2)
+    system.wots.write8(0x09, 2)
+    system.cpu.regs[1] = MMIO_BASE + WOTS_BASE + 0x0A
+    system.cpu.regs[2] = 1
+    owner = system._native_system
+    wots_port = owner.main_bus_port_for_requester(
+        owner.WOTS_DMA_REQUESTER_ID
+    )
+    issues_before = int(
+        owner._main_bus_snapshot().last_issue_sequences[wots_port]
+    )
+
+    clock_before = int(owner.system_cycles)
+    returned_cycles = system.step()
+    assert returned_cycles == int(owner.system_cycles) - clock_before
+
+    settled = system.wots.snapshot()
+    assert settled["status"] == 2
+    assert settled["error"] == 0
+    assert settled["dout"] == _wots_reference(context, 2, 2)
+    assert settled["cycles"] <= _wots_request_bound(settled, 2)
+    assert settled["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+    assert (
+        int(owner._main_bus_snapshot().last_issue_sequences[wots_port])
+        - issues_before
+    ) == len(context)
+
+
+def test_native_wots_halted_public_step_services_retained_dma() -> None:
+    system = _system(assemble("halt"))
+    system.step()
+    assert system.cpu.halted
+
+    context_address = 0x180
+    context = bytes((index * 41 + 5) & 0xFF for index in range(64))
+    system.cpu.mem[context_address:context_address + len(context)] = context
+    _start_native_wots(system, context_address, start=7, steps=1)
+    busy = system.wots.snapshot()
+
+    clock_before = int(system._native_system.system_cycles)
+    returned_cycles = system.step()
+    assert returned_cycles == (
+        int(system._native_system.system_cycles) - clock_before
+    )
+
+    settled = system.wots.snapshot()
+    assert settled["status"] == 2
+    assert settled["error"] == 0
+    assert settled["dout"] == _wots_reference(context, 7, 1)
+    assert settled["cycles"] <= _wots_request_bound(busy, 1)
+    assert settled["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+
+
+def test_native_wots_halted_clustered_step_services_retained_dma() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=1,
+    )
+    system.load_binary(0, assemble("halt"))
+    system.boot(entry=0)
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+
+    context_address = 0x180
+    context = bytes((index * 43 + 11) & 0xFF for index in range(64))
+    system.cpu.mem[context_address:context_address + len(context)] = context
+    _start_native_wots(system, context_address, start=3, steps=2)
+    busy = system.wots.snapshot()
+
+    clock_before = int(system._native_system.system_cycles)
+    returned_cycles = system.step()
+    assert returned_cycles == (
+        int(system._native_system.system_cycles) - clock_before
+    )
+
+    settled = system.wots.snapshot()
+    assert settled["status"] == 2
+    assert settled["error"] == 0
+    assert settled["dout"] == _wots_reference(context, 3, 2)
+    assert settled["cycles"] <= _wots_request_bound(busy, 2)
+    assert settled["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+
+
+def test_native_wots_internal_service_is_independent_of_public_raw_feature(
+) -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    context = bytes((index * 17 + 3) & 0xFF for index in range(64))
+    system.cpu.mem[context_address:context_address + 64] = context
+    state = system.cpu._cs
+    state._crypto_sha3_test_set_features(True, False)
+
+    _start_native_wots(system, context_address, start=2, steps=2)
+    busy = system.wots.snapshot()
+    system.run_cycle_batch(
+        _wots_request_bound(busy, 2),
+        max_instructions=100,
+    )
+
+    assert system.wots.snapshot()["dout"] == _wots_reference(context, 2, 2)
+    assert state.crypto_read8(SHA3_BASE + 0x50) == 0
+    state.crypto_write8(SHA3_BASE + 0x00, 6)
+    assert state.crypto_read8(SHA3_BASE + 0x01) == 3
+    assert state.crypto_read8(SHA3_BASE + 0x03) == 6
+    state.crypto_write8(SHA3_BASE + 0x00, 7)
+    assert state._crypto_sha3_test_zeroized()
+
+
+def test_native_wots_byte_shape_and_u64_context_end_checks_are_exact() -> None:
+    system = _system(assemble("halt"))
+    state = system.cpu._cs
+
+    for offset in range(0x20):
+        assert state.crypto_preflight(WOTS_BASE + offset, 1, False)
+        assert state.crypto_preflight(WOTS_BASE + offset, 1, True) is (
+            offset <= 0x0A
+        )
+    for width in (2, 4, 8):
+        assert not state.crypto_preflight(WOTS_BASE, width, False)
+        assert not state.crypto_preflight(WOTS_BASE, width, True)
+
+    # UINT64_MAX-63 is the exact exclusive-end wrap that a native 64-bit
+    # addition must not turn into Bank0 address zero.  Its two neighbors also
+    # remain ordinary context-span failures in this small Bank0 topology.
+    for context_address in (
+        (1 << 64) - 65,
+        (1 << 64) - 64,
+        (1 << 64) - 63,
+    ):
+        _write_wots_context_address(system, context_address)
+        system.wots.write8(0x08, 0)
+        system.wots.write8(0x09, 0)
+        system.wots.write8(0x0A, 1)
+        assert system.wots.read8(0x0A) == 3
+        assert system.wots.read8(0x0B) == 5
+        assert system.wots.snapshot()["private_zeroized"]
+        system.wots.write8(0x0A, 2)
+        assert system.wots.read8(0x0A) == 0
+
+    _start_native_wots(system, system.cpu.mem_size - 64, start=15, steps=0)
+    assert system.wots.read8(0x0A) == 1
+    system.wots.write8(0x0A, 2)
+    assert system.wots.read8(0x0A) == 0
+    assert system.wots.private_zeroized()
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_error"),
+    (
+        (_mp64_accel.BusFault.TARGET_FAULT, 6),
+        (_mp64_accel.BusFault.MEMORY_TIMEOUT, 7),
+    ),
+)
+def test_native_wots_strict_bus_faults_use_classified_terminal_response(
+    fault,
+    expected_error: int,
+) -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    owner = system._native_system
+    owner._test_force_next_wots_dma_fault(fault)
+    _start_native_wots(system, context_address, start=0, steps=0)
+
+    busy = system.wots.snapshot()
+    system.run_cycle_batch(
+        _wots_request_bound(busy, 0),
+        max_instructions=100,
+    )
+
+    snapshot = owner._wots_snapshot()
+    assert snapshot["status"] == 3
+    assert snapshot["error"] == expected_error
+    assert snapshot["private_zeroized"]
+    assert snapshot["dout"] == bytes(16)
+
+
+def test_native_wots_real_held_beat_reaches_local_accept_timeout() -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    owner = system._native_system
+    owner._test_set_wots_dma_acceptance_suppressed(True)
+    _start_native_wots(system, context_address, start=0, steps=0)
+    deadline = int(owner._wots_snapshot()["dma_accept_cycles"])
+
+    system.run_cycle_batch(deadline, max_instructions=100)
+
+    snapshot = owner._wots_snapshot()
+    assert snapshot["status"] == 3
+    assert snapshot["error"] == 8
+    assert snapshot["cycles"] == deadline
+    assert snapshot["private_zeroized"]
+    owner._test_set_wots_dma_acceptance_suppressed(False)
+
+
+def test_native_wots_clear_cancels_unaccepted_dma_immediately() -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    owner = system._native_system
+    owner._test_set_wots_dma_acceptance_suppressed(True)
+    _start_native_wots(system, context_address, start=0, steps=1)
+
+    before = owner._wots_snapshot()
+    assert before["phase"] == "dma-request"
+    assert before["dma_token"] is not None
+    system.wots.write8(0x0A, 2)
+
+    cleared = owner._wots_snapshot()
+    assert cleared["status"] == 0
+    assert cleared["error"] == 0
+    assert cleared["phase"] == "idle"
+    assert cleared["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+    assert owner._main_bus_snapshot().active_grant is None
+    owner._test_set_wots_dma_acceptance_suppressed(False)
+
+
+def test_native_wots_clear_drains_an_accepted_dma_response() -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    system._native_system._test_force_next_wots_dma_fault(
+        _mp64_accel.BusFault.MEMORY_TIMEOUT
+    )
+    _start_native_wots(system, context_address, start=0, steps=1)
+
+    for _ in range(WOTS_BUS_BEAT_SLOT_CYCLES):
+        system.run_cycle_batch(1, max_instructions=100)
+        accepted = system.wots.snapshot()
+        if accepted["phase"] == "dma-response":
+            break
+        assert accepted["status"] == 1
+    else:
+        pytest.fail("WOTS DMA was not accepted within one physical beat slot")
+    assert accepted["dma_accepted"]
+
+    clear_clock = int(system._native_system.system_cycles)
+    system.wots.write8(0x0A, 2)
+    pending = system.wots.snapshot()
+    assert pending["status"] == 1
+    assert pending["clear_pending"]
+    system.run_cycle_batch(
+        int(pending["clear_cycles"]),
+        max_instructions=100,
+    )
+
+    cleared = system.wots.snapshot()
+    assert (
+        int(system._native_system.system_cycles) - clear_clock
+        <= int(pending["clear_cycles"])
+    )
+    assert cleared["status"] == 0
+    assert cleared["error"] == 0
+    assert cleared["phase"] == "idle"
+    assert cleared["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+    assert system._native_system._main_bus_snapshot().active_grant is None
+
+
+def test_native_wots_clear_aborts_active_shared_keccak_then_scrubs() -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    _start_native_wots(system, context_address, start=0, steps=1)
+    busy = system.wots.snapshot()
+
+    # No other DMA requester is live, so every byte must capture and return
+    # within one physical beat slot.  Stop at the first Keccak-owned edge.
+    for _ in range(64 * WOTS_BUS_BEAT_SLOT_CYCLES):
+        system.run_cycle_batch(1, max_instructions=100)
+        active = system.wots.snapshot()
+        if active["phase"] == "keccak":
+            break
+        assert active["status"] == 1
+    else:
+        pytest.fail("WOTS did not reach its shared-Keccak phase")
+
+    clear_clock = int(system._native_system.system_cycles)
+    system.wots.write8(0x0A, 2)
+    pending = system.wots.snapshot()
+    assert pending["phase"] == "abort-keccak"
+    assert pending["clear_pending"]
+    system.run_cycle_batch(
+        int(pending["clear_cycles"]),
+        max_instructions=100,
+    )
+
+    cleared = system.wots.snapshot()
+    assert (
+        int(system._native_system.system_cycles) - clear_clock
+        <= int(pending["clear_cycles"])
+    )
+    assert cleared["status"] == 0
+    assert cleared["error"] == 0
+    assert cleared["phase"] == "idle"
+    assert cleared["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+
+
+def test_native_wots_shared_service_failure_aborts_then_scrubs() -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    system.cpu._cs._crypto_sha3_test_fail_next()
+    _start_native_wots(system, context_address, start=0, steps=1)
+
+    busy = system.wots.snapshot()
+    system.run_cycle_batch(
+        _wots_request_bound(busy, 1),
+        max_instructions=100,
+    )
+
+    snapshot = system.wots.snapshot()
+    assert snapshot["status"] == 3
+    assert snapshot["error"] == 9
+    assert snapshot["private_zeroized"]
+    assert system.cpu._cs._crypto_sha3_test_zeroized()
+
+
+def test_warm_boot_drains_accepted_wots_response_and_releases_owner() -> None:
+    system = _system(assemble("halt"))
+    context_address = 0x180
+    system.cpu.mem[context_address:context_address + 64] = bytes(range(64))
+    owner = system._native_system
+    owner._test_force_next_wots_dma_fault(
+        _mp64_accel.BusFault.MEMORY_TIMEOUT
+    )
+    _start_native_wots(system, context_address, start=0, steps=1)
+
+    system.run_cycle_batch(1, max_instructions=100)
+
+    assert owner._wots_snapshot()["phase"] == "dma-response"
+    assert any(
+        endpoint["pending_accepted"]
+        for endpoint in owner._cycle_dma_snapshot()["endpoints"]
+        if endpoint["requester_id"] == owner.WOTS_DMA_REQUESTER_ID
+    )
+
+    system.boot(entry=0)
+
+    snapshot = owner._wots_snapshot()
+    assert snapshot["status"] == 0
+    assert snapshot["error"] == 0
+    assert snapshot["private_zeroized"]
+    assert owner._main_bus_snapshot().active_grant is None
+    assert not owner.cycle_execution_pending

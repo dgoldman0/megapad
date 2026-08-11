@@ -100,7 +100,7 @@ def test_system_reports_qualified_crypto_and_actual_bus_requesters():
         | CRYPTO_CAP_SHA3_STREAM
         | CRYPTO_CAP_KECCAK_F1600
     )
-    assert system.cpu.mem_read64(ports_addr) == 5  # 2 cores + cluster + NIC + disk
+    assert system.cpu.mem_read64(ports_addr) == 6  # 2 cores + cluster + NIC + disk + WOTS
 
 
 def test_python_wide_mmio_preflight_prevents_partial_sysinfo_write():

@@ -91,9 +91,9 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 10
+STATE_SCHEMA_VERSION = 12
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -111,13 +111,17 @@ STRICT_DMA_MAX_INSTRUCTIONS = 16
 DETERMINISTIC_RTC_EPOCH_MS = 946_684_800_000  # 2000-01-01T00:00:00Z
 
 ARBITRATION_CONTRACT = {
-    "hard_qos_role": (
-        "determines must/may eligibility and reserved entitlement only"
-    ),
-    "simultaneously_eligible_peer_order": "equal_round_robin",
-    "unused_reserved_capacity": "work_conserving",
-    "best_effort_weights": "none",
-    "secondary_ordering_biases": [],
+    "policy": "weighted_round_robin",
+    "weight_range": [1, 255],
+    "bandwidth_epoch_cycles": 65536,
+    "zero_bandwidth_limit": "unlimited",
+    "unused_capacity": "work_conserving",
+    "post_completion_bubble_cycles": 1,
+    "wots_qos": {
+        "weight": 1,
+        "bandwidth_limit": 0,
+        "programmable": False,
+    },
 }
 
 STATE_COMPARISON_SCOPE = {
@@ -146,7 +150,9 @@ STATE_COMPARISON_SCOPE = {
         "buffers and ordered frame queues represented by stable hashes",
         "SystemState-owned native timer, framebuffer (including palette), "
         "RTC, UART geometry, UART, crypto-MMIO-visible, NIC-MMIO-visible, "
-        "and TRNG state as observed through every full core",
+        "and TRNG state as observed through every full core, plus the "
+        "authoritative WOTS architectural/private snapshot and its "
+        "topology-derived deadlines",
         "native system-cycle and event-horizon state, logical scheduler "
         "cursor, complete main-bus arbiter snapshot, observable quiescent "
         "cycle-execution state, complete NIC/disk DMA coordinator and "
@@ -228,13 +234,12 @@ STATE_COMPARISON_SCOPE = {
         {
             "state": (
                 "native AES write-only key/IV/input and running GHASH state; "
-                "SHA-3 sponge, absorb, and squeeze state; and WOTS write-only "
-                "configuration beyond bytes returned by crypto_read8"
+                "and SHA-3 sponge, absorb, and squeeze state"
             ),
             "reason": (
                 "the oracle hashes all non-destructively MMIO-readable crypto "
-                "bytes, but those additional future-affecting internals are "
-                "not bound"
+                "bytes and the complete bound WOTS snapshot, but those AES "
+                "and public SHA-3 future-affecting internals are not bound"
             ),
         },
         {
@@ -1236,6 +1241,7 @@ def _dma_coordinator_state(system: MegapadSystem) -> dict:
                 endpoint["highest_observed_token"]
             ),
             "timeline_active": bool(endpoint["timeline_active"]),
+            "pending_accepted": bool(endpoint["pending_accepted"]),
             "pending_token": (
                 None
                 if endpoint["pending_token"] is None
@@ -1248,6 +1254,62 @@ def _dma_coordinator_state(system: MegapadSystem) -> dict:
     return {
         "schema_version": int(snapshot["schema_version"]),
         "endpoints": endpoints,
+        "active_target_forced_fault": (
+            None
+            if snapshot["active_target_forced_fault"] is None
+            else _enum_name(snapshot["active_target_forced_fault"])
+        ),
+        "next_wots_forced_fault": (
+            None
+            if snapshot["next_wots_forced_fault"] is None
+            else _enum_name(snapshot["next_wots_forced_fault"])
+        ),
+        "wots_dma_acceptance_suppressed": bool(
+            snapshot["wots_dma_acceptance_suppressed"]
+        ),
+    }
+
+
+def _native_wots_state(system: MegapadSystem) -> dict:
+    snapshot = system.cpu._cs.crypto_wots_snapshot()
+    return {
+        "context_addr": int(snapshot["context_addr"]),
+        "steps": int(snapshot["steps"]),
+        "start": int(snapshot["start"]),
+        "status": int(snapshot["status"]),
+        "error": int(snapshot["error"]),
+        "cycles": int(snapshot["cycles"]),
+        "dout": _blob_summary(bytes(snapshot["dout"])),
+        "phase": str(snapshot["phase"]),
+        "active_context_addr": int(snapshot["active_context_addr"]),
+        "active_steps": int(snapshot["active_steps"]),
+        "active_start": int(snapshot["active_start"]),
+        "dma_index": int(snapshot["dma_index"]),
+        "chain_index": int(snapshot["chain_index"]),
+        "next_dma_token": int(snapshot["next_dma_token"]),
+        "dma_token": (
+            None
+            if snapshot["dma_token"] is None
+            else int(snapshot["dma_token"])
+        ),
+        "dma_address": (
+            None
+            if snapshot["dma_address"] is None
+            else int(snapshot["dma_address"])
+        ),
+        "dma_accepted": bool(snapshot["dma_accepted"]),
+        "dma_accept_elapsed": int(snapshot["dma_accept_elapsed"]),
+        "keccak_claimed": bool(snapshot["keccak_claimed"]),
+        "clear_pending": bool(snapshot["clear_pending"]),
+        "private_zeroized": bool(snapshot["private_zeroized"]),
+        "topology": {
+            "bank0_size": int(snapshot["bank0_size"]),
+            "num_bus_ports": int(snapshot["num_bus_ports"]),
+            "dma_accept_cycles": int(snapshot["dma_accept_cycles"]),
+            "dma_beat_cycles": int(snapshot["dma_beat_cycles"]),
+            "max_request_cycles": int(snapshot["max_request_cycles"]),
+            "clear_cycles": int(snapshot["clear_cycles"]),
+        },
     }
 
 
@@ -1282,6 +1344,19 @@ def _main_bus_state(system: MegapadSystem) -> dict:
         "sticky_bus_errors": [
             int(value) for value in snapshot.sticky_bus_errors
         ],
+        "weights": [int(value) for value in snapshot.weights],
+        "bandwidth_limits": [
+            int(value) for value in snapshot.bandwidth_limits
+        ],
+        "bandwidth_counts": [
+            int(value) for value in snapshot.bandwidth_counts
+        ],
+        "fixed_weight_one_unlimited": [
+            bool(value)
+            for value in snapshot.fixed_weight_one_unlimited
+        ],
+        "weight_remaining": int(snapshot.weight_remaining),
+        "qos_epoch_start_cycle": int(snapshot.qos_epoch_start_cycle),
         "cycle_execution_pending": bool(
             owner.cycle_execution_pending
         ),
@@ -1692,6 +1767,7 @@ def _shared_device_state(system: MegapadSystem) -> dict:
     system_cycles, event_deadlines, event_deadline, event_sources = (
         system._native_system.system_clock_snapshot()
     )
+    native_wots = _native_wots_state(system)
     return {
         "scheduler": {
             "next_core_index": int(system._scheduler_cursor),
@@ -1823,15 +1899,11 @@ def _shared_device_state(system: MegapadSystem) -> dict:
             "table": [int(value) for value in port_bridge._table],
             "control": int(port_bridge._ctrl),
         },
-        "python_wots_chain": {
-            "seed_addr": int(wots._seed_addr),
-            "adrs_addr": int(wots._adrs_addr),
-            "input_addr": int(wots._input_addr),
-            "steps": int(wots._steps),
-            "start": int(wots._start),
-            "status": int(wots._status),
-            "last_cycles": int(wots._last_cycles),
-            "output": _blob_summary(wots._dout),
+        "native_wots": {
+            "register_window": _blob_summary(bytes(
+                wots.read8(offset) for offset in range(0x20)
+            )),
+            "snapshot": native_wots,
         },
     }
 
@@ -1846,6 +1918,7 @@ def _state_observation_locked(workload: Workload) -> dict:
     coordinator = _dma_coordinator_state(system)
     storage_active, storage_pending = system.storage.cycle_dma_view()
     nic_dma = system.cpu._cs.nic_cycle_dma_snapshot()
+    wots = _native_wots_state(system)
     endpoint_pending = any(
         endpoint["timeline_active"]
         or endpoint["pending_token"] is not None
@@ -1858,6 +1931,13 @@ def _state_observation_locked(workload: Workload) -> dict:
         or bool(nic_dma["rx_active"])
         or bool(nic_dma["tx_active"])
         or nic_dma["pending"] is not None
+        or wots["status"] == 1
+        or wots["phase"] != "idle"
+        or wots["dma_token"] is not None
+        or wots["dma_accepted"]
+        or wots["keccak_claimed"]
+        or wots["clear_pending"]
+        or not wots["private_zeroized"]
     )
     if (
         system._native_system.cycle_execution_pending
@@ -1865,8 +1945,8 @@ def _state_observation_locked(workload: Workload) -> dict:
         or device_pending
     ):
         raise RuntimeError(
-            "Phase 0 canonical state requires quiescent cycle and DMA "
-            "execution"
+            "Phase 0 canonical state requires quiescent cycle, DMA, and "
+            "WOTS execution"
         )
     cores = [_core_state(cpu) for cpu in system.cores]
     memory = {
@@ -2495,7 +2575,7 @@ def _strict_nic_disk_dma_report(
                 value == sliced_state_without_boundary_count
                 for value in timed_state_without_boundary_count
             ),
-        "default_eligible_peer_trace_is_equal_round_robin":
+        "default_weight_one_peer_trace_is_round_robin":
             trace == expected_trace,
     }
     return {
@@ -3924,10 +4004,10 @@ def run_report(
                 ]
                 for report in strict_worker_reports
             ),
-        "strict_dma_default_eligible_peer_trace_is_equal_round_robin":
+        "strict_dma_default_weight_one_peer_trace_is_round_robin":
             all(
                 report["validation"][
-                    "default_eligible_peer_trace_is_equal_round_robin"
+                    "default_weight_one_peer_trace_is_round_robin"
                 ]
                 for report in strict_worker_reports
             ),

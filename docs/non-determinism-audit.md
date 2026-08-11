@@ -28,14 +28,17 @@
 
 ### A-1. Weighted Round-Robin Grant Depends on Request Timing
 - **File:** `rtl/bus/mp64_bus.v` lines 49–120
-- **Mechanism:** The bus arbiter uses a weighted round-robin scheme across 7 master
-  ports (4 major cores + 3 clusters). The grant sequence depends on which masters
-  assert `req` in which cycle. Three parameters control priority:
-  `req_weight[i]` (CSR-configurable), current `req_credit[i]`, and the rotating
-  `rr_ptr`. When credits deplete, a master must wait until the credit window
-  resets. Any change in the relative timing of bus requests (e.g., one core stalls
-  in cache refill while another does not) produces a different grant sequence and
-  different per-core cycle counts.
+- **Mechanism:** The bus arbiter uses a weighted round-robin scheme across the
+  configured full-core and microcluster ports plus three DMA requesters (NIC,
+  disk, and WOTS). The exact total is exported as `NUM_BUS_PORTS`; WOTS is
+  appended after disk without moving the earlier DMA indices. The grant
+  sequence depends on which masters assert `req` in which cycle. Selection is
+  controlled by each eligible port's `qos_weight`, the current port's
+  `weight_remain`, and the rotating `last_grant` position. Bandwidth-limited
+  ports additionally become ineligible after their configured completed-beat
+  count until the fixed 65,536-cycle epoch rolls over. Any change in relative
+  request timing (for example, one core stalling on a cache refill) changes the
+  grant sequence and per-core cycle counts.
 - **Cycle-accuracy impact:** Every bus transaction (memory load/store, I-cache
   refill, peripheral access, BIST, SHA W-load, DMA) flows through this arbiter.
   A single grant reordering can cascade through the entire execution timeline.
@@ -53,14 +56,20 @@
   an individual core.
 - **Severity:** **MEDIUM**
 
-### A-3. QoS Bandwidth Limiting
+### A-3. QoS Configuration Is Not Architecturally Routed
 - **File:** `rtl/bus/mp64_bus.v` lines 95–115, CSR definitions in
   `rtl/pkg/mp64_defs.vh` lines 460–464 (`CSR_QOS_WEIGHT`, `CSR_QOS_BWLIMIT`)
-- **Mechanism:** Per-core QoS weights and bandwidth limits are software-writable
-  CSRs. Changing them at runtime alters the bus grant pattern mid-execution.
-- **Cycle-accuracy impact:** Dynamic QoS changes reshape bus traffic patterns
-  unpredictably.
-- **Severity:** **MEDIUM**
+- **Mechanism:** The arbiter module has packed sideband fields for weight bytes
+  on requester ports 0..7 and bandwidth-limit halfwords on ports 0..3, but the
+  integrated SoC ties `qos_csr_wen` low. CPU CSR storage at `0x58..0x59` is
+  not routed to that sideband. Thus architectural software cannot currently
+  reshape the fabric policy; only explicit unit/native test seams can do so.
+  Ports outside the packed fields retain reset/elaborated policy. The WOTS
+  requester is independently fixed at weight 1 and unlimited bandwidth.
+- **Cycle-accuracy impact:** None from architectural runtime writes in the
+  integrated configuration. Explicit test configuration predictably changes
+  arbitration and must be part of the recorded fixture.
+- **Severity:** **NONE** (configuration seam, not runtime nondeterminism)
 
 ---
 
@@ -319,10 +328,11 @@
 ### G-3. SHA-3 / Keccak-f Fixed 24-Round Pipeline
 - **File:** `rtl/crypto/mp64_sha3.v` lines 30–140
 - **Mechanism:** Keccak-f[1600] runs 24 rounds, each taking 1 cycle
-  (combinational round function). Total: 24 cycles per permutation. This is
-  deterministic.
-- **Cycle-accuracy impact:** Fixed 24 cycles. MMIO bus access adds variable
-  envelope.
+  (combinational round function). Ordinary SHA3/SHAKE, raw permutation, and
+  WOTS use this one physical service. A granted permutation is deterministic;
+  admission depends on which owner already holds the service.
+- **Cycle-accuracy impact:** Fixed 24 rounds after admission. MMIO access,
+  owner collision, and WOTS's main-bus context reads add a variable envelope.
 - **Severity:** **LOW**
 
 ### G-4. Field ALU Non-Synthesizable Modular Arithmetic
@@ -363,14 +373,24 @@
   cryptographically incorrect.
 - **Severity:** **LOW** (stub, known incomplete)
 
-### G-8. WOTS+ Aperture Is Intentionally Inert
-- **File:** `rtl/soc/mp64_soc.v` (reserved WOTS responder)
-- **Mechanism:** Checkpoint 2 acknowledges the reserved WOTS aperture with
-  zero data and ignored writes. It issues no IRQ, DMA request, or shared
-  Keccak claim, and capability bit 3 remains clear.
-- **Cycle-accuracy impact:** The inert response is deterministic. No functional
-  WOTS result is promised until the production sequencer qualifies.
-- **Severity:** **NONE** (unadvertised checkpoint-2 reservation)
+### G-8. WOTS Chain Has a Contention-Dependent Bounded Envelope
+- **Files:** `rtl/crypto/mp64_wots.v`, `rtl/soc/mp64_soc.v`, and
+  `rtl/bus/mp64_bus.v`
+- **Mechanism:** Checkpoint 3's byte-only WOTS controller reads exactly 64
+  ascending Bank 0 bytes through the real weighted arbiter, one accepted beat
+  at a time, then runs 0..15 permutations on the shared Keccak service. The
+  requester is fixed at weight 1 with no bandwidth cap. Request acceptance and
+  memory response therefore depend on competing traffic, but explicit
+  accept/response handshakes distinguish target fault, memory timeout, local
+  accept timeout, and protocol failure. Zero steps still performs the 64-byte
+  read without claiming Keccak.
+- **Cycle-accuracy impact:** `CYCLES` and wall completion vary with bus
+  contention. The architectural request and clear deadlines are conservative
+  functions of `NUM_BUS_PORTS`, the maximum legal competing weight, the
+  256-clock memory response bound, and fixed Keccak/control allowances.
+  Acceptance or a terminal response on its final legal clock wins over the
+  corresponding timeout.
+- **Severity:** **MEDIUM** (variable but explicitly bounded and classified)
 
 ### G-9. CRC Fully Combinational — Zero Extra Cycles
 - **File:** `rtl/crypto/mp64_crc_isa.v` lines 20–70
@@ -726,12 +746,15 @@
   DMA completion will hang.
 - **Severity:** **LOW** (stub)
 
-### L-5. ROM Boot Determinism
+### L-5. Standalone ROM-Image Determinism
 - **File:** `rtl/prim/mp64_rom.v` lines 10–25
-- **Mechanism:** Boot ROM is loaded from `bios.rom` via `$readmemh`. The ROM
-  content is fixed at elaboration time. Boot is deterministic given the same
-  ROM image.
-- **Cycle-accuracy impact:** None (deterministic).
+- **Mechanism:** The ROM wrapper consumes a generated `$readmemh` hex image
+  (normally `fpga/bios.hex`, derived from the raw `bios.rom`). Its contents are
+  fixed at elaboration time. Boot is deterministic given the same generated
+  image and wrapper geometry. This standalone wrapper is not wired into the
+  current full-SoC Bank 0 path, so its result is not FPGA boot evidence.
+- **Cycle-accuracy impact:** None for the standalone ROM read path; full-SoC
+  boot remains outside this evidence.
 - **Severity:** **NONE**
 
 ### L-6. Bitfield ALU Tier 1 Sub-Ops Stub
@@ -751,7 +774,7 @@
 |------|-----------------------|----------|---------|-------|------------|
 | A-1  | Bus RR arbitration    | HIGH     | ✓       |       |            |
 | A-2  | Bus timeout           | MEDIUM   | ✓       |       |            |
-| A-3  | QoS runtime change    | MEDIUM   | ✓       |       |            |
+| A-3  | QoS config sideband   | NONE     |         |       |            |
 | B-1  | DP SRAM collision     | HIGH     | ✓       | ✓     | ✓          |
 | B-2  | SRAM uninitialized    | MEDIUM   |         | ✓     |            |
 | B-3  | Ext mem latency       | HIGH     | ✓       |       |            |
@@ -779,7 +802,7 @@
 | G-5  | X25519 fixed          | LOW      |         |       |            |
 | G-6  | NTT twiddle init      | MEDIUM   |         |       | ✓          |
 | G-7  | KEM stub              | LOW      |         | ✓     |            |
-| G-8  | WOTS inert reservation | NONE     |         |       |            |
+| G-8  | WOTS bus/shared-core envelope | MEDIUM | ✓       |       |            |
 | G-9  | CRC combinational     | NONE     |         |       |            |
 | G-10 | CMOV timing           | LOW      | ✓       |       |            |
 | H-1  | Tile mem priority     | HIGH     | ✓       |       |            |
@@ -810,7 +833,7 @@
 | L-2  | Perf counters         | LOW      | ✓       |       |            |
 | L-3  | SysInfo enable mask   | MEDIUM   | ✓       |       |            |
 | L-4  | DMA ring stub         | LOW      | ✓       |       |            |
-| L-5  | ROM boot              | NONE     |         |       |            |
+| L-5  | Standalone ROM image  | NONE     |         |       |            |
 | L-6  | Bitfield stubs        | LOW      |         | ✓     |            |
 
 ### Severity Distribution

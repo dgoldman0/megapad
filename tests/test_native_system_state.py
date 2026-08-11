@@ -704,7 +704,8 @@ def test_native_system_batch_rejects_nonterminal_zero_step_settlement() -> None:
     assert stats.instructions_executed == 1
 
 
-def test_native_system_batch_rejects_cycle_accounting_overflow() -> None:
+def test_native_system_batch_rejects_cycle_overflow_after_settled_prefix(
+) -> None:
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -722,12 +723,15 @@ def test_native_system_batch_rejects_cycle_accounting_overflow() -> None:
 
     with pytest.raises(
         OverflowError,
-        match="native scheduler cycle accounting overflow",
+        match="native scheduler per-core cycle accounting overflow",
     ):
         system.run_batch_stats(2)
 
     assert system.cpu.pc == 0
-    assert system._native_system.system_cycles == 0
+    # The first continuation is a completed coordinator prefix.  Current
+    # scheduler exception semantics retain and clock that prefix before the
+    # second continuation's cumulative accounting overflow is rethrown.
+    assert system._native_system.system_cycles == (1 << 63) - 1
 
     system._settle_native_core_continuation = original_settlement
     stats = system.run_batch_stats(1)
@@ -1020,7 +1024,10 @@ def test_megapad_system_wraps_native_owned_full_cores() -> None:
 
     assert owner.full_core_count == 2
     assert owner.all_core_count == system.num_cores == 6
-    assert owner.main_bus_port_count == 5
+    assert owner.main_bus_port_count == 6
+    assert owner.main_bus_port_for_requester(owner.NIC_DMA_REQUESTER_ID) == 3
+    assert owner.main_bus_port_for_requester(owner.DISK_DMA_REQUESTER_ID) == 4
+    assert owner.main_bus_port_for_requester(owner.WOTS_DMA_REQUESTER_ID) == 5
     assert all(cpu._system_owner is owner for cpu in system.cores[:2])
 
     owner.core(0).set_reg(10, 0x1234)
@@ -1112,8 +1119,8 @@ def test_system_remaining_native_peripherals_are_singletons() -> None:
 
     core1.crypto_write8(SHA3_BASE + 0x02, 3)
     assert core0.crypto_read8(SHA3_BASE + 0x02) == 3
-    core1.crypto_write8(WOTS_BASE + 0x0C, 1)
-    core1.crypto_write8(WOTS_BASE + 0x0E, 1)
+    core1.crypto_write8(WOTS_BASE + 0x00, 0xA5)
+    assert core0.crypto_read8(WOTS_BASE + 0x00) == 0xA5
     assert core0.crypto_wots_status() == 0
 
     core1.disable_trng()
@@ -1300,7 +1307,7 @@ def test_standalone_remaining_native_peripherals_remain_private() -> None:
         pytest.param(NIC_BASE + 0x02, 0xA5, id="nic"),
         pytest.param(AES_BASE + 0x3A, 0x01, id="crypto"),
         pytest.param(TRNG_BASE + 0x10, 0x01, id="trng"),
-        pytest.param(WOTS_BASE + 0x0E, 0x00, id="retired-wots"),
+        pytest.param(WOTS_BASE + 0x08, 0x0B, id="wots-steps"),
     ),
 )
 def test_full_core_python_fallback_reads_system_native_singletons(
@@ -1323,9 +1330,8 @@ def test_full_core_python_fallback_reads_system_native_singletons(
         primary.nic_write8(mmio_offset, expected)
     elif mmio_offset == AES_BASE + 0x3A:
         primary.crypto_write8(mmio_offset, expected)
-    elif mmio_offset == WOTS_BASE + 0x0E:
-        primary.crypto_write8(WOTS_BASE + 0x0C, 1)
-        primary.crypto_write8(WOTS_BASE + 0x0E, 1)
+    elif mmio_offset == WOTS_BASE + 0x08:
+        primary.crypto_write8(mmio_offset, expected)
 
     # LOAD2D is a transactional Python fallback. Keep its eager TSRC0 tile
     # read in RAM, then gather through the target byte from its 64-byte-aligned
@@ -1355,7 +1361,7 @@ def test_full_core_python_fallback_reads_system_native_singletons(
     "mmio_offset",
     (
         pytest.param(NIC_BASE + 0x02, id="nic"),
-        pytest.param(SHA3_BASE + 0x02, id="crypto"),
+        pytest.param(WOTS_BASE + 0x00, id="crypto"),
     ),
 )
 def test_full_core_python_fallback_writes_system_native_singletons(
@@ -1393,7 +1399,7 @@ def test_full_core_python_fallback_writes_system_native_singletons(
     if mmio_offset == NIC_BASE + 0x02:
         assert primary.nic_read8(mmio_offset) == written
     else:
-        assert primary.crypto_read8(mmio_offset) == written & 0x03
+        assert primary.crypto_read8(mmio_offset) == written
 
 
 def test_system_timer_is_one_native_instance_for_every_full_core() -> None:

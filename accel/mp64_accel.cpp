@@ -1027,6 +1027,17 @@ enum class BusFault : uint8_t {
     TARGET_FAULT = 3,
 };
 
+// The integrated fabric returns this two-bit terminal classification to DMA
+// requesters. BusFault retains the richer host diagnostic (including which
+// target timed out); consumers such as WOTS use this code rather than sentinel
+// data or the shared sticky BUS_ERR latch.
+enum class BusResponseCode : uint8_t {
+    OK = 0,
+    TARGET_FAULT = 1,
+    MEMORY_TIMEOUT = 2,
+    PROTOCOL = 3,
+};
+
 static bool main_bus_address_is_mmio(uint64_t address) {
     return static_cast<uint32_t>(address >> 32) == 0xFFFFFF00U;
 }
@@ -1060,13 +1071,14 @@ struct BusResult {
     uint64_t completion_cycle = 0;
     std::optional<uint64_t> read_value;
     BusFault fault = BusFault::NONE;
+    BusResponseCode response_code = BusResponseCode::OK;
     bool target_effects_committed = false;
 };
 
 // A device endpoint describes only the next immutable byte beat that it is
 // ready to place on its physical main-bus port.  Eligibility belongs to the
 // endpoint; ordering among simultaneously eligible endpoints belongs solely
-// to MainBusArbiter's equal round robin.
+// to MainBusArbiter's weighted round robin.
 struct DmaBeat {
     uint64_t token = 0;
     std::optional<uint64_t> ready_cycle;
@@ -1081,7 +1093,7 @@ struct DmaEndpointView {
 };
 
 struct MainBusSnapshot {
-    static constexpr uint64_t SCHEMA_VERSION = 1;
+    static constexpr uint64_t SCHEMA_VERSION = 2;
 
     uint64_t schema_version = SCHEMA_VERSION;
     int port_count = 0;
@@ -1094,31 +1106,80 @@ struct MainBusSnapshot {
     std::optional<BusGrant> active_grant;
     std::vector<uint64_t> last_issue_sequences;
     std::vector<uint8_t> sticky_bus_errors;
+    std::vector<uint8_t> weights;
+    std::vector<uint16_t> bandwidth_limits;
+    std::vector<uint16_t> bandwidth_counts;
+    std::vector<uint8_t> fixed_weight_one_unlimited;
+    uint8_t weight_remaining = 1;
+    uint64_t qos_epoch_start_cycle = 0;
 };
 
 class MainBusArbiter {
 public:
     static constexpr uint64_t MMIO_TIMEOUT_CYCLES = 64;
     static constexpr uint64_t MEMORY_TIMEOUT_CYCLES = 256;
+    static constexpr uint64_t QOS_EPOCH_CYCLES = 1ULL << 16;
     static constexpr uint64_t TIMEOUT_SENTINEL =
         0xDEADDEADDEADDEADULL;
 
     MainBusArbiter() = default;
 
-    void configure(int port_count) {
-        if (port_count < 1 || port_count > 257)
+    void configure(
+            int port_count,
+            std::optional<int> fixed_weight_one_unlimited_port =
+                std::nullopt) {
+        if (port_count < 1 || port_count > 258)
             throw std::invalid_argument(
-                "main bus port count must be between 1 and 257");
+                "main bus port count must be between 1 and 258");
+        if (fixed_weight_one_unlimited_port.has_value() &&
+            (*fixed_weight_one_unlimited_port < 0 ||
+             *fixed_weight_one_unlimited_port >= port_count)) {
+            throw std::invalid_argument(
+                "fixed main-bus QoS port is out of range");
+        }
         port_count_ = port_count;
         last_issue_sequences_.assign(
             static_cast<std::size_t>(port_count), 0);
         sticky_bus_errors_.assign(
             static_cast<std::size_t>(port_count), 0);
+        weights_.assign(
+            static_cast<std::size_t>(port_count), 1);
+        bandwidth_limits_.assign(
+            static_cast<std::size_t>(port_count), 0);
+        bandwidth_counts_.assign(
+            static_cast<std::size_t>(port_count), 0);
+        fixed_weight_one_unlimited_.assign(
+            static_cast<std::size_t>(port_count), 0);
+        if (fixed_weight_one_unlimited_port.has_value()) {
+            fixed_weight_one_unlimited_[static_cast<std::size_t>(
+                *fixed_weight_one_unlimited_port)] = 1;
+        }
         reset(0);
     }
 
     int port_count() const {
         return port_count_;
+    }
+
+    void set_port_weight(int port, uint8_t weight) {
+        require_port(port);
+        const std::size_t index = static_cast<std::size_t>(port);
+        if (fixed_weight_one_unlimited_[index])
+            return;
+        // Match the RTL CSR: zero normalizes to the minimum legal weight.
+        weights_[index] = std::max<uint8_t>(weight, 1);
+    }
+
+    void set_port_bandwidth_limit(
+            int port,
+            uint16_t limit,
+            uint64_t system_cycle) {
+        require_port(port);
+        synchronize_qos_epoch(system_cycle);
+        const std::size_t index = static_cast<std::size_t>(port);
+        if (fixed_weight_one_unlimited_[index])
+            return;
+        bandwidth_limits_[index] = limit;
     }
 
     std::optional<uint64_t> active_timeout_cycle() const {
@@ -1138,11 +1199,13 @@ public:
     void reset(uint64_t system_cycle) {
         require_configured();
         last_grant_ = 0;
-        // This is the literal mp64_bus reset state.  It gives port 0 the first
-        // post-reset tie; after that, every eligible peer has equal weight.
+        // This is the literal mp64_bus reset state. It gives port 0 one initial
+        // credit; subsequent bursts consume the selected port's 1..255 weight.
         reset_port_zero_credit_ = true;
+        weight_remaining_ = 1;
         next_grant_sequence_ = 1;
         earliest_arbitration_cycle_ = system_cycle;
+        qos_epoch_start_cycle_ = system_cycle;
         served_last_ = false;
         last_arbitration_cycle_.reset();
         active_grant_.reset();
@@ -1154,6 +1217,15 @@ public:
             sticky_bus_errors_.begin(),
             sticky_bus_errors_.end(),
             0);
+        std::fill(weights_.begin(), weights_.end(), 1);
+        std::fill(
+            bandwidth_limits_.begin(),
+            bandwidth_limits_.end(),
+            0);
+        std::fill(
+            bandwidth_counts_.begin(),
+            bandwidth_counts_.end(),
+            0);
     }
 
     std::optional<BusGrant> try_grant(
@@ -1162,6 +1234,7 @@ public:
         require_configured();
         if (active_grant_.has_value())
             return std::nullopt;
+        synchronize_qos_epoch(system_cycle);
         const auto slots = validate_pending(pending);
         if (system_cycle < earliest_arbitration_cycle_)
             return std::nullopt;
@@ -1224,10 +1297,12 @@ public:
             system_cycle + timeout_delta,
         };
 
-        // Hard QoS is an eligibility/reservation concern, not a secondary
-        // ordering bias.  The integrated RTL's write sideband is tied off, so
-        // this primitive orders all ready peers by equal round-robin.  Consume
-        // the sole reset credit after the first issued transaction.
+        if (winner == last_grant_ && weight_remaining_ != 0) {
+            weight_remaining_--;
+        } else {
+            weight_remaining_ = static_cast<uint8_t>(
+                effective_weight(winner) - 1);
+        }
         reset_port_zero_credit_ = false;
 
         next_grant_sequence_++;
@@ -1241,10 +1316,11 @@ public:
 
     std::optional<uint64_t> next_arbitration_cycle(
             const std::vector<BusRequest>& pending,
-            uint64_t system_cycle) const {
+            uint64_t system_cycle) {
         require_configured();
         if (active_grant_.has_value())
             return std::nullopt;
+        synchronize_qos_epoch(system_cycle);
         validate_pending(pending);
         if (pending.empty())
             return std::nullopt;
@@ -1260,8 +1336,16 @@ public:
 
         std::optional<uint64_t> earliest;
         for (const BusRequest& request : pending) {
-            const uint64_t candidate =
+            uint64_t candidate =
                 std::max(first_cycle, request.ready_cycle);
+            const int port = request.ordering.main_port_id;
+            if (!bandwidth_eligible_at(port, candidate)) {
+                const std::optional<uint64_t> next_epoch =
+                    next_qos_epoch_cycle();
+                if (!next_epoch.has_value())
+                    continue;
+                candidate = std::max(candidate, *next_epoch);
+            }
             if (!earliest.has_value() || candidate < *earliest)
                 earliest = candidate;
         }
@@ -1324,12 +1408,27 @@ public:
                 "a successful bus read requires a result value");
         }
 
+        synchronize_qos_epoch(system_cycle);
         if (is_timeout)
             read_value = TIMEOUT_SENTINEL;
 
+        BusResponseCode response_code = BusResponseCode::OK;
+        if (fault == BusFault::MMIO_TIMEOUT ||
+            fault == BusFault::TARGET_FAULT) {
+            response_code = BusResponseCode::TARGET_FAULT;
+        } else if (fault == BusFault::MEMORY_TIMEOUT) {
+            response_code = BusResponseCode::MEMORY_TIMEOUT;
+        }
+
         const std::size_t port = static_cast<std::size_t>(
             grant.request.ordering.main_port_id);
-        if (is_timeout)
+        // Match the fabric's beats-per-epoch counter: an acknowledged target
+        // response consumes bandwidth even when it reports TARGET_FAULT;
+        // an arbiter-generated timeout does not. Unlimited and fixed-QoS
+        // ports still count usage even though the count cannot throttle them.
+        if (!is_timeout)
+            bandwidth_counts_[port]++;
+        if (response_code != BusResponseCode::OK)
             sticky_bus_errors_[port] = 1;
 
         BusResult result{
@@ -1337,6 +1436,7 @@ public:
             system_cycle,
             read_value,
             fault,
+            response_code,
             target_effects_committed,
         };
 
@@ -1349,19 +1449,32 @@ public:
 
     MainBusSnapshot snapshot() const {
         require_configured();
-        return {
-            MainBusSnapshot::SCHEMA_VERSION,
-            port_count_,
-            last_grant_,
-            reset_port_zero_credit_,
-            next_grant_sequence_,
-            earliest_arbitration_cycle_,
-            served_last_,
-            last_arbitration_cycle_,
-            active_grant_,
-            last_issue_sequences_,
-            sticky_bus_errors_,
-        };
+        MainBusSnapshot result;
+        result.schema_version = MainBusSnapshot::SCHEMA_VERSION;
+        result.port_count = port_count_;
+        result.last_grant = last_grant_;
+        result.reset_port_zero_credit = reset_port_zero_credit_;
+        result.next_grant_sequence = next_grant_sequence_;
+        result.earliest_arbitration_cycle = earliest_arbitration_cycle_;
+        result.served_last = served_last_;
+        result.last_arbitration_cycle = last_arbitration_cycle_;
+        result.active_grant = active_grant_;
+        result.last_issue_sequences = last_issue_sequences_;
+        result.sticky_bus_errors = sticky_bus_errors_;
+        result.weights = weights_;
+        result.bandwidth_limits = bandwidth_limits_;
+        result.bandwidth_counts = bandwidth_counts_;
+        result.fixed_weight_one_unlimited =
+            fixed_weight_one_unlimited_;
+        result.weight_remaining = weight_remaining_;
+        result.qos_epoch_start_cycle = qos_epoch_start_cycle_;
+        return result;
+    }
+
+    MainBusSnapshot snapshot_at(uint64_t system_cycle) {
+        require_configured();
+        synchronize_qos_epoch(system_cycle);
+        return snapshot();
     }
 
 private:
@@ -1393,6 +1506,59 @@ private:
     void require_configured() const {
         if (port_count_ < 1)
             throw std::logic_error("main bus arbiter is not configured");
+    }
+
+    void require_port(int port) const {
+        require_configured();
+        if (port < 0 || port >= port_count_)
+            throw std::out_of_range("main bus QoS port is out of range");
+    }
+
+    uint8_t effective_weight(int port) const {
+        const std::size_t index = static_cast<std::size_t>(port);
+        return fixed_weight_one_unlimited_[index]
+            ? uint8_t{1}
+            : std::max<uint8_t>(weights_[index], 1);
+    }
+
+    std::optional<uint64_t> next_qos_epoch_cycle() const {
+        if (qos_epoch_start_cycle_ >
+            std::numeric_limits<uint64_t>::max() - QOS_EPOCH_CYCLES) {
+            return std::nullopt;
+        }
+        return qos_epoch_start_cycle_ + QOS_EPOCH_CYCLES;
+    }
+
+    void synchronize_qos_epoch(uint64_t system_cycle) {
+        if (system_cycle < qos_epoch_start_cycle_)
+            throw std::logic_error("main bus QoS clock moved backwards");
+        const uint64_t elapsed = system_cycle - qos_epoch_start_cycle_;
+        if (elapsed < QOS_EPOCH_CYCLES)
+            return;
+        const uint64_t completed_epochs = elapsed / QOS_EPOCH_CYCLES;
+        if (completed_epochs >
+            (std::numeric_limits<uint64_t>::max() -
+             qos_epoch_start_cycle_) / QOS_EPOCH_CYCLES) {
+            throw std::overflow_error("main bus QoS epoch overflow");
+        }
+        qos_epoch_start_cycle_ += completed_epochs * QOS_EPOCH_CYCLES;
+        std::fill(
+            bandwidth_counts_.begin(),
+            bandwidth_counts_.end(),
+            0);
+    }
+
+    bool bandwidth_eligible_at(int port, uint64_t cycle) const {
+        const std::size_t index = static_cast<std::size_t>(port);
+        if (fixed_weight_one_unlimited_[index] ||
+            bandwidth_limits_[index] == 0) {
+            return true;
+        }
+        const std::optional<uint64_t> next_epoch =
+            next_qos_epoch_cycle();
+        if (next_epoch.has_value() && cycle >= *next_epoch)
+            return true;
+        return bandwidth_counts_[index] < bandwidth_limits_[index];
     }
 
     std::vector<const BusRequest*> validate_pending(
@@ -1435,11 +1601,17 @@ private:
             const BusRequest* request =
                 slots[static_cast<std::size_t>(port)];
             return request != nullptr &&
-                   request->ready_cycle <= system_cycle;
+                   request->ready_cycle <= system_cycle &&
+                   bandwidth_eligible_at(port, system_cycle);
         };
 
         if (reset_port_zero_credit_ && eligible(last_grant_))
             return last_grant_;
+
+        if (!reset_port_zero_credit_ && weight_remaining_ != 0 &&
+            eligible(last_grant_)) {
+            return last_grant_;
+        }
 
         for (int offset = 1; offset <= port_count_; offset++) {
             int candidate = last_grant_ + offset;
@@ -1454,13 +1626,19 @@ private:
     int port_count_ = 0;
     int last_grant_ = 0;
     bool reset_port_zero_credit_ = true;
+    uint8_t weight_remaining_ = 1;
     uint64_t next_grant_sequence_ = 1;
     uint64_t earliest_arbitration_cycle_ = 0;
+    uint64_t qos_epoch_start_cycle_ = 0;
     bool served_last_ = false;
     std::optional<uint64_t> last_arbitration_cycle_;
     std::optional<BusGrant> active_grant_;
     std::vector<uint64_t> last_issue_sequences_;
     std::vector<uint8_t> sticky_bus_errors_;
+    std::vector<uint8_t> weights_;
+    std::vector<uint16_t> bandwidth_limits_;
+    std::vector<uint16_t> bandwidth_counts_;
+    std::vector<uint8_t> fixed_weight_one_unlimited_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1994,6 +2172,17 @@ struct DmaCycleState {
     uint64_t next_issue_sequence = 1;
     uint64_t highest_observed_token = 0;
     bool timeline_active = false;
+    bool pending_accepted = false;
+    std::optional<uint64_t> pending_token;
+    std::optional<BusRequest> pending_request;
+};
+
+// Ordinary native execution uses the same physical arbiter without claiming
+// strict-cycle ownership.  These caches keep an unaccepted native NIC/WOTS
+// beat bit-for-bit stable across arbitration bubbles and across another DMA
+// endpoint winning first.
+struct UnboundedNativeDmaState {
+    int requester_id = 0;
     std::optional<uint64_t> pending_token;
     std::optional<BusRequest> pending_request;
 };
@@ -4505,6 +4694,7 @@ private:
 struct SystemState {
     static constexpr int NIC_DMA_REQUESTER_ID = -1;
     static constexpr int DISK_DMA_REQUESTER_ID = -2;
+    static constexpr int WOTS_DMA_REQUESTER_ID = -3;
     static constexpr int MICRO_CORES_PER_CLUSTER = 4;
 
     explicit SystemState(
@@ -4530,16 +4720,24 @@ struct SystemState {
             full_core_count,
             all_core_count);
         const int minimum_main_bus_ports =
-            full_core_count + required_cluster_ports + 2;
+            full_core_count + required_cluster_ports + 3;
         if (main_bus_port_count == 0)
             main_bus_port_count = minimum_main_bus_ports;
         if (main_bus_port_count != minimum_main_bus_ports)
             throw std::invalid_argument(
                 "main_bus_port_count must exactly match the system topology");
 
-        main_bus.configure(main_bus_port_count);
+        // WOTS is appended after disk, so legacy NIC/disk physical indices do
+        // not move. Its selected deadline requires immutable weight 1 and no
+        // bandwidth throttle in every supported topology.
+        main_bus.configure(
+            main_bus_port_count,
+            main_bus_port_count - 1);
         shared_interrupts.configure(all_core_count);
         shared_crypto.init();
+        shared_crypto.configure_wots(
+            shared_memory.mem_size,
+            static_cast<uint32_t>(main_bus.port_count()));
         cluster_states.reserve(
             static_cast<std::size_t>(required_cluster_ports));
         for (
@@ -4608,6 +4806,12 @@ struct SystemState {
             NIC_DMA_REQUESTER_ID;
         dma_cycle_states[1].requester_id =
             DISK_DMA_REQUESTER_ID;
+        dma_cycle_states[2].requester_id =
+            WOTS_DMA_REQUESTER_ID;
+        unbounded_dma_states[0].requester_id =
+            NIC_DMA_REQUESTER_ID;
+        unbounded_dma_states[1].requester_id =
+            WOTS_DMA_REQUESTER_ID;
         advertised_core_count = all_core_count;
         configured_worker_count = worker_count;
         worker_pool =
@@ -4809,8 +5013,10 @@ struct SystemState {
     int main_bus_port_for_requester(int requester_id) const {
         const int port_count = main_bus.port_count();
         if (requester_id == NIC_DMA_REQUESTER_ID)
-            return port_count - 2;
+            return port_count - 3;
         if (requester_id == DISK_DMA_REQUESTER_ID)
+            return port_count - 2;
+        if (requester_id == WOTS_DMA_REQUESTER_ID)
             return port_count - 1;
         if (requester_id < 0 || requester_id >= advertised_core_count)
             throw std::out_of_range(
@@ -4822,7 +5028,7 @@ struct SystemState {
             (requester_id - full_core_count()) /
             MICRO_CORES_PER_CLUSTER;
         const int cluster_port_count =
-            port_count - full_core_count() - 2;
+            port_count - full_core_count() - 3;
         if (cluster_index >= cluster_port_count)
             throw std::out_of_range(
                 "micro-core requester has no main bus cluster port");
@@ -4845,6 +5051,20 @@ struct SystemState {
             request.width != BusWidth::BYTE) {
             throw std::invalid_argument(
                 "main-bus DMA requesters are byte-wide");
+        }
+        if (request.requester_id == WOTS_DMA_REQUESTER_ID) {
+            if (request.operation != BusOperation::READ)
+                throw std::invalid_argument(
+                    "WOTS main-bus requests are read-only");
+            if (request.ordering.port_io)
+                throw std::invalid_argument(
+                    "WOTS main-bus requests cannot use port I/O");
+            if (main_bus_address_is_mmio(request.address) ||
+                !shared_memory.mem ||
+                request.address >= shared_memory.mem_size) {
+                throw std::invalid_argument(
+                    "WOTS main-bus requests must target Bank 0");
+            }
         }
     }
 
@@ -4876,9 +5096,17 @@ struct SystemState {
             state.next_issue_sequence = 1;
             state.highest_observed_token = 0;
             state.timeline_active = false;
+            state.pending_accepted = false;
             state.pending_token.reset();
             state.pending_request.reset();
         }
+        for (UnboundedNativeDmaState& state :
+             unbounded_dma_states) {
+            state.pending_token.reset();
+            state.pending_request.reset();
+        }
+        cycle_target_forced_fault.reset();
+        test_next_wots_dma_fault.reset();
         cycle_execution_pending.store(
             false,
             std::memory_order_release);
@@ -4945,10 +5173,18 @@ struct SystemState {
     // vectors above, so vector growth cannot invalidate these addresses.
     std::vector<CPUState*> execution_cores;
     std::vector<FullCoreCycleState> full_core_cycle_states;
-    std::array<DmaCycleState, 2> dma_cycle_states{};
+    std::array<DmaCycleState, 3> dma_cycle_states{};
+    std::array<UnboundedNativeDmaState, 2>
+        unbounded_dma_states{};
     TaccImageTransferStage tacc_image_stage{};
     TileMemoryTransport tile_memory_transport{};
     std::optional<uint64_t> cycle_target_completion_cycle;
+    std::optional<BusFault> cycle_target_forced_fault;
+    std::optional<BusFault> test_next_wots_dma_fault;
+    // Test-only fabric seam.  The controller's held valid beat remains
+    // untouched; native schedulers simply omit it from arbitration until the
+    // seam is disabled, allowing the real local accept deadline to expire.
+    bool test_suppress_wots_dma_acceptance = false;
     // Serializes native scheduling with clock/deadline mutation. Recursive
     // acquisition is required when a Python round-settlement callback advances
     // the clock on the same scheduler thread.
@@ -7172,11 +7408,10 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             if (val == 1) { s.tile_selftest = 2; s.tile_st_detail = 0; }
             break;
         case CSR_PERF_CTRL:
-            if (val & 1) s.perf_enable = 1;
+            s.perf_enable = val & 1;
             if (val & 2) {
                 s.perf_cycles = 0; s.perf_stalls = 0;
                 s.perf_tileops = 0; s.perf_extmem = 0;
-                s.perf_enable = 1;
             }
             break;
         case CSR_ICACHE_CTRL:
@@ -9477,6 +9712,7 @@ static int exec_mex(
 struct DmaEndpointCallbacks {
     int requester_id = 0;
     std::function<DmaEndpointView(uint64_t)> inspect;
+    std::function<void(uint64_t, const BusGrant&)> accept;
     std::function<void(uint64_t, const BusResult&)> complete;
 };
 
@@ -10232,6 +10468,85 @@ struct DmaTargetAccess {
     bool target_effects_committed = false;
 };
 
+static BusResponseCode classify_wots_dma_result(
+        const BusResult& result) {
+    const BusRequest& request = result.grant.request;
+    if (request.requester_id !=
+            SystemState::WOTS_DMA_REQUESTER_ID ||
+        request.operation != BusOperation::READ ||
+        request.width != BusWidth::BYTE ||
+        request.ordering.port_io ||
+        result.grant.target != BusTarget::MEMORY) {
+        return BusResponseCode::PROTOCOL;
+    }
+    if (result.response_code == BusResponseCode::TARGET_FAULT)
+        return BusResponseCode::TARGET_FAULT;
+    if (result.response_code == BusResponseCode::MEMORY_TIMEOUT)
+        return BusResponseCode::MEMORY_TIMEOUT;
+    if (result.response_code != BusResponseCode::OK ||
+        result.fault != BusFault::NONE ||
+        !result.read_value.has_value() ||
+        !result.target_effects_committed) {
+        return BusResponseCode::PROTOCOL;
+    }
+    return BusResponseCode::OK;
+}
+
+static const char* wots_phase_name(WotsChain::WorkPhase phase) {
+    switch (phase) {
+        case WotsChain::PHASE_IDLE:
+            return "idle";
+        case WotsChain::PHASE_DMA_REQUEST:
+            return "dma-request";
+        case WotsChain::PHASE_DMA_RESPONSE:
+            return "dma-response";
+        case WotsChain::PHASE_KECCAK:
+            return "keccak";
+        case WotsChain::PHASE_ABORT_KECCAK:
+            return "abort-keccak";
+    }
+    throw std::logic_error("invalid native WOTS phase");
+}
+
+static py::dict native_wots_snapshot(const WotsChain& wots) {
+    py::dict snapshot;
+    snapshot["context_addr"] = wots.context_addr;
+    snapshot["steps"] = wots.steps;
+    snapshot["start"] = wots.start_step;
+    snapshot["status"] = wots.status;
+    snapshot["error"] = wots.error;
+    snapshot["cycles"] = wots.cycles;
+    snapshot["dout"] = py::bytes(
+        reinterpret_cast<const char*>(wots.dout),
+        sizeof(wots.dout));
+    snapshot["phase"] = wots_phase_name(wots.phase);
+    snapshot["active_context_addr"] = wots.active_context_addr;
+    snapshot["active_steps"] = wots.active_steps;
+    snapshot["active_start"] = wots.active_start;
+    snapshot["dma_index"] = wots.dma_index;
+    snapshot["chain_index"] = wots.chain_index;
+    snapshot["next_dma_token"] = wots.next_dma_token;
+    if (wots.dma_beat_present) {
+        snapshot["dma_token"] = wots.dma_token;
+        snapshot["dma_address"] = wots.dma_address;
+    } else {
+        snapshot["dma_token"] = py::none();
+        snapshot["dma_address"] = py::none();
+    }
+    snapshot["dma_accepted"] = wots.dma_accepted;
+    snapshot["dma_accept_elapsed"] = wots.dma_accept_elapsed;
+    snapshot["keccak_claimed"] = wots.keccak_claimed;
+    snapshot["clear_pending"] = wots.clear_pending;
+    snapshot["private_zeroized"] = wots.private_zeroized();
+    snapshot["bank0_size"] = wots.bank0_size;
+    snapshot["num_bus_ports"] = wots.num_bus_ports;
+    snapshot["dma_accept_cycles"] = wots.dma_accept_cycles;
+    snapshot["dma_beat_cycles"] = wots.dma_beat_cycles;
+    snapshot["max_request_cycles"] = wots.max_request_cycles;
+    snapshot["clear_cycles"] = wots.clear_cycles;
+    return snapshot;
+}
+
 static uint8_t* resolve_dma_memory_byte(
         MemoryMappings& memory,
         uint64_t address,
@@ -10274,6 +10589,22 @@ static DmaTargetAccess execute_dma_bus_target(
         request.ordering.port_io) {
         throw std::logic_error(
             "DMA target received a non-byte or port-I/O request");
+    }
+
+    if (request.requester_id ==
+        SystemState::WOTS_DMA_REQUESTER_ID) {
+        if (request.operation != BusOperation::READ ||
+            grant.target != BusTarget::MEMORY ||
+            !system.shared_memory.mem ||
+            request.address >= system.shared_memory.mem_size) {
+            throw std::logic_error(
+                "WOTS DMA target escaped its read-only Bank 0 contract");
+        }
+        return {
+            std::optional<uint64_t>{
+                system.shared_memory.mem[request.address]},
+            true,
+        };
     }
 
     // The selected compatibility contract for native NIC DMA has always
@@ -14681,6 +15012,10 @@ struct DeferredClusterRequest {
     PendingClusterRequest request{};
 };
 
+static void service_unbounded_native_dma(
+    SystemState& system,
+    const std::function<void(int64_t, bool, bool, bool)>& settle_round);
+
 static SystemBatchResult run_native_system_batch(
         SystemState& system,
         int64_t max_steps,
@@ -14784,6 +15119,13 @@ static SystemBatchResult run_native_system_batch(
             &profile.prepare_batch_ns);
         prepare_batch();
     }
+
+    // Native NIC and WOTS are physical main-bus requesters in ordinary
+    // execution too.  Drain work already present at entry before deciding
+    // that an all-idle/all-halted CPU topology has no progress to make.
+    service_unbounded_native_dma(
+        system,
+        profiled_settle_round);
 
     const bool any_active = std::any_of(
         system.execution_cores.begin(),
@@ -14929,6 +15271,9 @@ static SystemBatchResult run_native_system_batch(
             true,
             false,
             true);
+        service_unbounded_native_dma(
+            system,
+            profiled_settle_round);
         result.rounds++;
 
         if (outcome.steps != 0)
@@ -16193,7 +16538,7 @@ static void refresh_cycle_dma_requests(
         uint64_t current_cycle) {
     if (callbacks.size() != system.dma_cycle_states.size()) {
         throw std::invalid_argument(
-            "one callback endpoint is required for NIC and disk DMA");
+            "one callback endpoint is required for NIC, disk, and WOTS DMA");
     }
 
     const MainBusSnapshot bus = system.main_bus.snapshot();
@@ -16204,6 +16549,7 @@ static void refresh_cycle_dma_requests(
                 state.requester_id);
         if (endpoint.requester_id != state.requester_id ||
             !endpoint.inspect ||
+            !endpoint.accept ||
             !endpoint.complete) {
             throw std::invalid_argument(
                 "cycle DMA callbacks do not match their physical endpoint");
@@ -16213,9 +16559,10 @@ static void refresh_cycle_dma_requests(
             bus.active_grant->request.requester_id ==
                 state.requester_id) {
             if (!state.pending_request.has_value() ||
-                !state.pending_token.has_value()) {
+                !state.pending_token.has_value() ||
+                !state.pending_accepted) {
                 throw std::logic_error(
-                    "captured DMA grant has no held endpoint request");
+                    "captured DMA grant has no accepted endpoint request");
             }
             state.timeline_active = true;
             continue;
@@ -16230,6 +16577,10 @@ static void refresh_cycle_dma_requests(
         state.timeline_active =
             view.active || view.pending.has_value();
         if (!view.pending.has_value()) {
+            if (state.pending_accepted) {
+                throw std::logic_error(
+                    "accepted DMA beat disappeared before completion");
+            }
             state.pending_token.reset();
             state.pending_request.reset();
             continue;
@@ -16248,6 +16599,10 @@ static void refresh_cycle_dma_requests(
 
         if (state.pending_token.has_value() &&
             *state.pending_token == beat.token) {
+            if (state.pending_accepted) {
+                throw std::logic_error(
+                    "accepted DMA beat lost its active bus grant");
+            }
             if (!state.pending_request.has_value() ||
                 !cycle_dma_request_matches_beat(
                     *state.pending_request,
@@ -16265,6 +16620,18 @@ static void refresh_cycle_dma_requests(
             throw std::runtime_error(
                 "DMA endpoint token did not advance monotonically");
         }
+        const int main_port =
+            system.main_bus_port_for_requester(state.requester_id);
+        const uint64_t last_bus_issue =
+            bus.last_issue_sequences[
+                static_cast<std::size_t>(main_port)];
+        if (last_bus_issue == std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error(
+                "main-bus DMA issue sequence exhausted");
+        }
+        state.next_issue_sequence = std::max(
+            state.next_issue_sequence,
+            last_bus_issue + 1);
         if (state.next_issue_sequence ==
             std::numeric_limits<uint64_t>::max()) {
             throw std::overflow_error(
@@ -16274,6 +16641,7 @@ static void refresh_cycle_dma_requests(
         const uint64_t issue_sequence =
             state.next_issue_sequence++;
         state.highest_observed_token = beat.token;
+        state.pending_accepted = false;
         state.pending_token = beat.token;
         state.pending_request = BusRequest{
             state.requester_id,
@@ -16283,8 +16651,7 @@ static void refresh_cycle_dma_requests(
             BusWidth::BYTE,
             beat.write_data,
             BusOrderingMetadata{
-                system.main_bus_port_for_requester(
-                    state.requester_id),
+                main_port,
                 issue_sequence,
                 false,
             },
@@ -16387,6 +16754,437 @@ static bool held_dma_request_matches_grant(
                granted.ordering.issue_sequence &&
            pending.ordering.port_io ==
                granted.ordering.port_io;
+}
+
+static void accept_cycle_dma_grant(
+        SystemState& system,
+        const std::vector<DmaEndpointCallbacks>& callbacks,
+        const BusGrant& grant) {
+    if (grant.request.requester_id >= 0)
+        return;
+    DmaCycleState& state = cycle_dma_state_for_requester(
+        system,
+        grant.request.requester_id);
+    if (!state.pending_request.has_value() ||
+        !state.pending_token.has_value() ||
+        state.pending_accepted ||
+        !held_dma_request_matches_grant(
+            *state.pending_request,
+            grant.request)) {
+        throw std::logic_error(
+            "captured DMA grant has no matching unaccepted beat");
+    }
+
+    // Capture is irrevocable even if an observer callback reports a host-side
+    // failure. Mark it first so reset/drain diagnostics never misclassify the
+    // already-owned bus transaction as withdrawable.
+    state.pending_accepted = true;
+    const DmaEndpointCallbacks& endpoint =
+        cycle_dma_callbacks_for_requester(
+            callbacks,
+            grant.request.requester_id);
+    endpoint.accept(*state.pending_token, grant);
+}
+
+static UnboundedNativeDmaState&
+unbounded_dma_state_for_requester(
+        SystemState& system,
+        int requester_id) {
+    for (UnboundedNativeDmaState& state :
+         system.unbounded_dma_states) {
+        if (state.requester_id == requester_id)
+            return state;
+    }
+    throw std::logic_error(
+        "ordinary native DMA requester has no endpoint cache");
+}
+
+static DmaEndpointView inspect_unbounded_native_dma(
+        SystemState& system,
+        int requester_id) {
+    DmaEndpointView view;
+    if (requester_id == SystemState::NIC_DMA_REQUESTER_ID) {
+        view.active = system.shared_nic.has_cycle_dma_work();
+        const std::optional<NICDMABeat> beat =
+            system.shared_nic.cycle_dma_beat();
+        if (beat.has_value()) {
+            view.pending = DmaBeat{
+                beat->token,
+                std::nullopt,
+                beat->write
+                    ? BusOperation::WRITE
+                    : BusOperation::READ,
+                beat->address,
+                beat->write_data,
+            };
+        }
+        return view;
+    }
+    if (requester_id == SystemState::WOTS_DMA_REQUESTER_ID) {
+        const WotsChain::DmaView native_view =
+            system.shared_crypto.wots.cycle_dma_view();
+        view.active = native_view.active;
+        if (native_view.has_beat) {
+            view.pending = DmaBeat{
+                native_view.token,
+                std::nullopt,
+                BusOperation::READ,
+                native_view.address,
+                0,
+            };
+        }
+        return view;
+    }
+    throw std::logic_error(
+        "ordinary native DMA requester is unsupported");
+}
+
+static void refresh_unbounded_native_dma_requests(
+        SystemState& system,
+        uint64_t current_cycle) {
+    const MainBusSnapshot bus = system.main_bus.snapshot();
+    for (UnboundedNativeDmaState& state :
+         system.unbounded_dma_states) {
+        const DmaEndpointView view =
+            inspect_unbounded_native_dma(
+                system,
+                state.requester_id);
+        if (view.pending.has_value() && !view.active) {
+            throw std::logic_error(
+                "inactive ordinary DMA endpoint exposed a beat");
+        }
+        if (!view.pending.has_value()) {
+            state.pending_token.reset();
+            state.pending_request.reset();
+            continue;
+        }
+
+        const DmaBeat& beat = *view.pending;
+        if (beat.token == 0) {
+            throw std::logic_error(
+                "ordinary DMA beat token must be positive");
+        }
+        if (state.pending_token.has_value() &&
+            *state.pending_token == beat.token) {
+            if (!state.pending_request.has_value() ||
+                !cycle_dma_request_matches_beat(
+                    *state.pending_request,
+                    beat)) {
+                throw std::logic_error(
+                    "ordinary held DMA beat changed before capture");
+            }
+            continue;
+        }
+        if (state.pending_token.has_value()) {
+            throw std::logic_error(
+                "ordinary DMA endpoint replaced its held beat");
+        }
+
+        const int main_port =
+            system.main_bus_port_for_requester(
+                state.requester_id);
+        const uint64_t last_issue =
+            bus.last_issue_sequences[
+                static_cast<std::size_t>(main_port)];
+        if (last_issue == std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error(
+                "ordinary DMA issue sequence exhausted");
+        }
+        state.pending_token = beat.token;
+        state.pending_request = BusRequest{
+            state.requester_id,
+            beat.ready_cycle.value_or(current_cycle),
+            beat.operation,
+            beat.address,
+            BusWidth::BYTE,
+            beat.write_data,
+            BusOrderingMetadata{
+                main_port,
+                last_issue + 1,
+                false,
+            },
+        };
+        system.validate_main_bus_request(
+            *state.pending_request);
+    }
+}
+
+static void settle_unbounded_native_clock_to(
+        SystemState& system,
+        uint64_t target_cycle,
+        const std::function<
+            void(int64_t, bool, bool, bool)>& settle_round) {
+    uint64_t current_cycle = system.shared_clock.cycles();
+    if (target_cycle < current_cycle) {
+        throw std::logic_error(
+            "ordinary DMA clock frontier moved backwards");
+    }
+    while (current_cycle < target_cycle) {
+        const uint64_t delta = std::min<uint64_t>(
+            target_cycle - current_cycle,
+            static_cast<uint64_t>(
+                std::numeric_limits<int64_t>::max()));
+        // Use the ordinary scheduler's architectural round settlement: this
+        // advances all registered clocks/devices and delivers any interrupt
+        // made visible by the fabric interval.
+        settle_round(
+            static_cast<int64_t>(delta),
+            true,
+            false,
+            true);
+        const uint64_t expected = current_cycle + delta;
+        if (system.shared_clock.cycles() != expected) {
+            throw std::runtime_error(
+                "ordinary DMA settlement did not reach its clock frontier");
+        }
+        current_cycle = expected;
+    }
+}
+
+static std::optional<uint64_t>
+unbounded_wots_accept_deadline(
+        const SystemState& system,
+        uint64_t current_cycle) {
+    const WotsChain& wots = system.shared_crypto.wots;
+    if (wots.status != WotsChain::STATUS_BUSY ||
+        wots.phase != WotsChain::PHASE_DMA_REQUEST ||
+        !wots.dma_beat_present) {
+        return std::nullopt;
+    }
+    const uint64_t remaining =
+        wots.dma_accept_cycles > wots.dma_accept_elapsed
+            ? wots.dma_accept_cycles - wots.dma_accept_elapsed
+            : 0;
+    return checked_cycle_add(
+        current_cycle,
+        remaining,
+        "ordinary WOTS accept deadline");
+}
+
+static void service_unbounded_native_dma(
+        SystemState& system,
+        const std::function<
+            void(int64_t, bool, bool, bool)>& settle_round) {
+    if (system.has_cycle_execution_pending()) {
+        throw std::runtime_error(
+            "ordinary DMA service cannot take strict-cycle ownership");
+    }
+    if (system.main_bus.active_timeout_cycle().has_value()) {
+        throw std::runtime_error(
+            "ordinary DMA service cannot adopt an active main-bus grant");
+    }
+
+    while (true) {
+        const uint64_t current_cycle =
+            system.shared_clock.cycles();
+        refresh_unbounded_native_dma_requests(
+            system,
+            current_cycle);
+
+        std::vector<BusRequest> pending;
+        pending.reserve(system.unbounded_dma_states.size());
+        for (const UnboundedNativeDmaState& state :
+             system.unbounded_dma_states) {
+            if (!state.pending_request.has_value())
+                continue;
+            if (state.requester_id ==
+                    SystemState::WOTS_DMA_REQUESTER_ID &&
+                system.test_suppress_wots_dma_acceptance) {
+                continue;
+            }
+            pending.push_back(*state.pending_request);
+        }
+
+        if (!pending.empty()) {
+            const std::optional<uint64_t> arbitration_cycle =
+                system.main_bus.next_arbitration_cycle(
+                    pending,
+                    current_cycle);
+            if (!arbitration_cycle.has_value()) {
+                throw std::logic_error(
+                    "ordinary DMA requests have no arbitration frontier");
+            }
+
+            const std::optional<uint64_t> accept_deadline =
+                unbounded_wots_accept_deadline(
+                    system,
+                    current_cycle);
+            if (accept_deadline.has_value() &&
+                *accept_deadline < *arbitration_cycle) {
+                settle_unbounded_native_clock_to(
+                    system,
+                    *accept_deadline,
+                    settle_round);
+                continue;
+            }
+
+            // Arbitration/capture precedes the controller's local timeout on
+            // a coincident edge.  MainBusArbiter may consume an empty held-
+            // valid guard edge; in that case settle the elapsed interval and
+            // ask it for the next physical edge.
+            const std::optional<BusGrant> grant =
+                system.main_bus.try_grant(
+                    pending,
+                    *arbitration_cycle);
+            if (!grant.has_value()) {
+                settle_unbounded_native_clock_to(
+                    system,
+                    *arbitration_cycle,
+                    settle_round);
+                continue;
+            }
+
+            UnboundedNativeDmaState& endpoint_state =
+                unbounded_dma_state_for_requester(
+                    system,
+                    grant->request.requester_id);
+            if (!endpoint_state.pending_token.has_value() ||
+                !endpoint_state.pending_request.has_value() ||
+                !held_dma_request_matches_grant(
+                    *endpoint_state.pending_request,
+                    grant->request)) {
+                throw std::logic_error(
+                    "ordinary DMA grant lost its held endpoint beat");
+            }
+            const uint64_t token =
+                *endpoint_state.pending_token;
+            if (grant->request.requester_id ==
+                    SystemState::WOTS_DMA_REQUESTER_ID &&
+                !system.shared_crypto.wots.cycle_dma_accept(token)) {
+                throw std::logic_error(
+                    "ordinary WOTS rejected its DMA capture");
+            }
+
+            BusFault fault = BusFault::NONE;
+            std::optional<BusFault> forced_fault;
+            if (grant->request.requester_id ==
+                    SystemState::WOTS_DMA_REQUESTER_ID &&
+                system.test_next_wots_dma_fault.has_value()) {
+                forced_fault = system.test_next_wots_dma_fault;
+                system.test_next_wots_dma_fault.reset();
+                fault = *forced_fault;
+            }
+            uint64_t completion_cycle = checked_cycle_add(
+                grant->grant_cycle,
+                1,
+                "ordinary DMA target completion");
+            if (forced_fault == BusFault::MEMORY_TIMEOUT)
+                completion_cycle = grant->timeout_cycle;
+
+            settle_unbounded_native_clock_to(
+                system,
+                completion_cycle,
+                settle_round);
+
+            DmaTargetAccess target;
+            if (!forced_fault.has_value()) {
+                try {
+                    auto memory_guard =
+                        acquire_shared_memory_use(
+                            *system.cores.front(),
+                            /*permit_native_execution=*/true);
+                    target = execute_dma_bus_target(
+                        system,
+                        *grant);
+                } catch (...) {
+                    fault = BusFault::TARGET_FAULT;
+                    target.read_value.reset();
+                    target.target_effects_committed = true;
+                }
+            }
+
+            const BusResult result = system.main_bus.complete(
+                grant->grant_sequence,
+                completion_cycle,
+                target.read_value,
+                fault,
+                target.target_effects_committed);
+            endpoint_state.pending_token.reset();
+            endpoint_state.pending_request.reset();
+
+            if (grant->request.requester_id ==
+                SystemState::WOTS_DMA_REQUESTER_ID) {
+                const BusResponseCode classified =
+                    classify_wots_dma_result(result);
+                const bool has_read_value =
+                    classified == BusResponseCode::OK &&
+                    result.read_value.has_value() &&
+                    *result.read_value <= 0xFF;
+                if (!system.shared_crypto.wots.cycle_dma_complete(
+                        token,
+                        static_cast<uint8_t>(classified),
+                        has_read_value,
+                        has_read_value
+                            ? static_cast<uint8_t>(*result.read_value)
+                            : 0)) {
+                    throw std::logic_error(
+                        "ordinary WOTS rejected its DMA response");
+                }
+            } else {
+                std::optional<uint8_t> read_value;
+                if (grant->request.operation == BusOperation::READ) {
+                    read_value = static_cast<uint8_t>(
+                        result.read_value.value_or(0));
+                }
+                if (!system.shared_nic.complete_cycle_dma(
+                        token,
+                        read_value)) {
+                    throw std::logic_error(
+                        "ordinary NIC rejected its DMA response");
+                }
+            }
+            continue;
+        }
+
+        WotsChain& wots = system.shared_crypto.wots;
+        if (wots.status != WotsChain::STATUS_BUSY)
+            break;
+        if (wots.phase == WotsChain::PHASE_DMA_REQUEST) {
+            const std::optional<uint64_t> deadline =
+                unbounded_wots_accept_deadline(
+                    system,
+                    current_cycle);
+            if (!deadline.has_value()) {
+                throw std::logic_error(
+                    "busy WOTS request has no local accept deadline");
+            }
+            settle_unbounded_native_clock_to(
+                system,
+                *deadline,
+                settle_round);
+            continue;
+        }
+        if (wots.phase == WotsChain::PHASE_KECCAK ||
+            wots.phase == WotsChain::PHASE_ABORT_KECCAK) {
+            uint64_t elapsed = wots.cycles_to_local_event();
+            if (system.shared_crypto.sha3.pending !=
+                CryptoSHA3::OP_NONE) {
+                elapsed = std::min<uint64_t>(
+                    elapsed,
+                    std::max<uint8_t>(
+                        system.shared_crypto.sha3.pending_cycles,
+                        1));
+            }
+            if (elapsed == std::numeric_limits<uint64_t>::max()) {
+                throw std::logic_error(
+                    "busy WOTS service has no completion frontier");
+            }
+            settle_unbounded_native_clock_to(
+                system,
+                checked_cycle_add(
+                    current_cycle,
+                    elapsed,
+                    "ordinary WOTS service frontier"),
+                settle_round);
+            continue;
+        }
+        if (wots.phase == WotsChain::PHASE_DMA_RESPONSE) {
+            throw std::logic_error(
+                "ordinary WOTS response escaped its captured bus grant");
+        }
+        throw std::logic_error(
+            "busy WOTS controller has an invalid private phase");
+    }
 }
 
 static bool held_tile_request_matches_grant(
@@ -17077,6 +17875,7 @@ static void complete_cycle_bus_target(
                 grant.request.requester_id);
         if (!dma_state.pending_request.has_value() ||
             !dma_state.pending_token.has_value() ||
+            !dma_state.pending_accepted ||
             !held_dma_request_matches_grant(
                 *dma_state.pending_request,
                 grant.request)) {
@@ -17085,20 +17884,24 @@ static void complete_cycle_bus_target(
         }
 
         DmaTargetAccess target;
-        BusFault fault = BusFault::NONE;
-        try {
-            auto memory_guard =
-                acquire_shared_memory_use(
-                    *system.cores.front());
-            target = execute_dma_bus_target(
-                system,
-                grant);
-        } catch (...) {
-            fault = BusFault::TARGET_FAULT;
-            target.read_value.reset();
-            // The exact byte target is single-effect, but an exception can
-            // occur after the target changed.  Never retry it as untouched.
-            target.target_effects_committed = true;
+        const std::optional<BusFault> forced_fault =
+            system.cycle_target_forced_fault;
+        BusFault fault = forced_fault.value_or(BusFault::NONE);
+        if (!forced_fault.has_value()) {
+            try {
+                auto memory_guard =
+                    acquire_shared_memory_use(
+                        *system.cores.front());
+                target = execute_dma_bus_target(
+                    system,
+                    grant);
+            } catch (...) {
+                fault = BusFault::TARGET_FAULT;
+                target.read_value.reset();
+                // The exact byte target is single-effect, but an exception can
+                // occur after the target changed. Never retry it as untouched.
+                target.target_effects_committed = true;
+            }
         }
 
         BusResult result = system.main_bus.complete(
@@ -17109,9 +17912,11 @@ static void complete_cycle_bus_target(
             target.target_effects_committed);
         const uint64_t completed_token =
             *dma_state.pending_token;
+        dma_state.pending_accepted = false;
         dma_state.pending_request.reset();
         dma_state.pending_token.reset();
         system.cycle_target_completion_cycle.reset();
+        system.cycle_target_forced_fault.reset();
 
         const DmaEndpointCallbacks& endpoint =
             cycle_dma_callbacks_for_requester(
@@ -17123,6 +17928,11 @@ static void complete_cycle_bus_target(
             dma_callbacks,
             completion_cycle);
         return;
+    }
+
+    if (system.cycle_target_forced_fault.has_value()) {
+        throw std::logic_error(
+            "forced WOTS response attached to a core bus grant");
     }
 
     const int core_index = full_core_index_for_requester(
@@ -17832,7 +18642,7 @@ static SystemBatchResult run_full_core_cycle_batch(
     if (dma_callbacks.size() !=
         system.dma_cycle_states.size()) {
         throw std::invalid_argument(
-            "one callback endpoint is required for NIC and disk DMA");
+            "one callback endpoint is required for NIC, disk, and WOTS DMA");
     }
     if (system.shared_rtc.snapshot().realtime) {
         throw std::runtime_error(
@@ -18333,6 +19143,16 @@ static SystemBatchResult run_full_core_cycle_batch(
                         grant->grant_cycle,
                         1,
                         "main bus target completion");
+                if (grant->request.requester_id ==
+                        SystemState::WOTS_DMA_REQUESTER_ID &&
+                    system.test_next_wots_dma_fault.has_value()) {
+                    const BusFault forced_fault =
+                        *system.test_next_wots_dma_fault;
+                    system.test_next_wots_dma_fault.reset();
+                    system.cycle_target_forced_fault = forced_fault;
+                    if (forced_fault == BusFault::MEMORY_TIMEOUT)
+                        completion_cycle = grant->timeout_cycle;
+                }
                 if (backpressure_cycles != 0) {
                     const uint64_t permutation_boundary =
                         checked_cycle_add(
@@ -18349,6 +19169,15 @@ static SystemBatchResult run_full_core_cycle_batch(
                         "timeout");
                 }
                 system.cycle_target_completion_cycle = completion_cycle;
+                // This is the architectural ready/valid capture edge. Target
+                // scheduling is installed first only so a diagnostic callback
+                // exception leaves an exactly resumable captured transaction.
+                // No endpoint-visible cancellation or deadline is processed
+                // between try_grant and this notification.
+                accept_cycle_dma_grant(
+                    system,
+                    dma_callbacks,
+                    *grant);
             }
         }
         if (
@@ -19499,7 +20328,8 @@ static void run_uncontended_single_core_segment_impl(
             }
             if (
                 system.shared_crypto
-                    .requires_unbounded_timing_boundary()
+                    .requires_unbounded_timing_boundary() ||
+                system.shared_nic.has_cycle_dma_work()
             ) {
                 segment.crypto_timing_boundary = true;
                 break;
@@ -22146,7 +22976,8 @@ static void run_parallel_core_round(
 
         if (
             system.shared_crypto
-                .requires_unbounded_timing_boundary()
+                .requires_unbounded_timing_boundary() ||
+            system.shared_nic.has_cycle_dma_work()
         ) {
             // A parallel subfrontier may retire one coordinator-owned SHA
             // command after its private prefixes.  Do not admit another
@@ -24990,6 +25821,10 @@ build_native_nic_dma_callbacks(SystemState& system) {
             }
             return view;
         };
+    endpoint.accept =
+        [](uint64_t, const BusGrant&) {
+            // NIC has no pre/post-capture cancellation distinction.
+        };
     endpoint.complete =
         [&system](
                 uint64_t token,
@@ -25012,12 +25847,72 @@ build_native_nic_dma_callbacks(SystemState& system) {
 }
 
 static DmaEndpointCallbacks
+build_native_wots_dma_callbacks(SystemState& system) {
+    DmaEndpointCallbacks endpoint;
+    endpoint.requester_id =
+        SystemState::WOTS_DMA_REQUESTER_ID;
+    endpoint.inspect =
+        [&system](uint64_t) {
+            const WotsChain::DmaView native_view =
+                system.shared_crypto.wots.cycle_dma_view();
+            DmaEndpointView view;
+            view.active = native_view.active;
+            if (native_view.has_beat &&
+                !system.test_suppress_wots_dma_acceptance) {
+                view.pending = DmaBeat{
+                    native_view.token,
+                    std::nullopt,
+                    BusOperation::READ,
+                    native_view.address,
+                    0,
+                };
+            }
+            return view;
+        };
+    endpoint.accept =
+        [&system](uint64_t token, const BusGrant&) {
+            if (!system.shared_crypto.wots.cycle_dma_accept(token)) {
+                throw std::logic_error(
+                    "native WOTS rejected its DMA acceptance");
+            }
+        };
+    endpoint.complete =
+        [&system](
+                uint64_t token,
+                const BusResult& result) {
+            const BusResponseCode classified =
+                classify_wots_dma_result(result);
+            const bool has_read_value =
+                classified == BusResponseCode::OK &&
+                result.read_value.has_value() &&
+                *result.read_value <= 0xFF;
+            const uint8_t read_value = has_read_value
+                ? static_cast<uint8_t>(*result.read_value)
+                : 0;
+            if (!system.shared_crypto.wots.cycle_dma_complete(
+                    token,
+                    static_cast<uint8_t>(classified),
+                    has_read_value,
+                    read_value)) {
+                throw std::logic_error(
+                    "native WOTS rejected its DMA completion");
+            }
+        };
+    return endpoint;
+}
+
+static DmaEndpointCallbacks
 build_inactive_dma_callbacks(int requester_id) {
     DmaEndpointCallbacks endpoint;
     endpoint.requester_id = requester_id;
     endpoint.inspect =
         [](uint64_t) {
             return DmaEndpointView{};
+        };
+    endpoint.accept =
+        [](uint64_t, const BusGrant&) {
+            throw std::logic_error(
+                "inactive DMA endpoint received an acceptance");
         };
     endpoint.complete =
         [](uint64_t, const BusResult&) {
@@ -25034,7 +25929,7 @@ build_system_dma_callbacks(
     if (callback_sets.size() !=
         system.dma_cycle_states.size()) {
         throw std::invalid_argument(
-            "one callback endpoint is required for NIC and disk DMA");
+            "one callback endpoint is required for NIC, disk, and WOTS DMA");
     }
 
     std::vector<DmaEndpointCallbacks> callbacks;
@@ -25045,27 +25940,36 @@ build_system_dma_callbacks(
         py::tuple callback_set =
             py::cast<py::tuple>(
                 callback_sets[index]);
-        if (callback_set.size() != 2) {
+        if (callback_set.size() != 3) {
             throw std::invalid_argument(
                 "each DMA callback endpoint must contain inspect "
-                "and completion entries");
+                "accept, and completion entries");
         }
         py::object inspect_object = callback_set[0];
-        py::object complete_object = callback_set[1];
-        if (inspect_object.is_none() !=
-            complete_object.is_none()) {
+        py::object accept_object = callback_set[1];
+        py::object complete_object = callback_set[2];
+        const bool all_none = inspect_object.is_none() &&
+            accept_object.is_none() && complete_object.is_none();
+        const bool all_present = !inspect_object.is_none() &&
+            !accept_object.is_none() && !complete_object.is_none();
+        if (!all_none && !all_present) {
             throw std::invalid_argument(
-                "a DMA endpoint must provide both callbacks or neither");
+                "a DMA endpoint must provide all callbacks or none");
         }
 
         DmaEndpointCallbacks endpoint;
         endpoint.requester_id =
             system.dma_cycle_states[index].requester_id;
-        if (inspect_object.is_none()) {
+        if (all_none) {
             if (endpoint.requester_id ==
                 SystemState::NIC_DMA_REQUESTER_ID) {
                 endpoint =
                     build_native_nic_dma_callbacks(
+                        system);
+            } else if (endpoint.requester_id ==
+                       SystemState::WOTS_DMA_REQUESTER_ID) {
+                endpoint =
+                    build_native_wots_dma_callbacks(
                         system);
             } else {
                 endpoint =
@@ -25075,6 +25979,8 @@ build_system_dma_callbacks(
         } else {
             py::function inspect =
                 inspect_object.cast<py::function>();
+            py::function accept =
+                accept_object.cast<py::function>();
             py::function complete =
                 complete_object.cast<py::function>();
             endpoint.inspect =
@@ -25084,6 +25990,13 @@ build_system_dma_callbacks(
                     if (view.is_none())
                         return DmaEndpointView{};
                     return view.cast<DmaEndpointView>();
+                };
+            endpoint.accept =
+                [accept](
+                        uint64_t token,
+                        const BusGrant& grant) {
+                    py::gil_scoped_acquire acquire;
+                    accept(token, grant);
                 };
             endpoint.complete =
                 [complete](
@@ -25383,6 +26296,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "main memory size exceeds attached buffer capacity");
                 s.memory->mem_size = size;
                 sync_main_memory_ptrs(s);
+                s.crypto->configure_wots(size, 1);
             })
         // Register access
         .def("get_reg", [](const CPUState& s, int i) { return s.regs[i & 0x1F]; })
@@ -25410,6 +26324,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 s.memory->mem_size = size;
                 s.memory->mem_capacity = prepared.capacity;
                 sync_main_memory_ptrs(s);
+                s.crypto->configure_wots(size, 1);
             }
             // PyBuffer_Release may invoke arbitrary exporter code.  Release
             // the replaced export only after the mapping lock is free.
@@ -25578,6 +26493,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 *s.memory,
                 "CPUState crypto memory cannot be initialized while memory is in use");
             s.crypto->init();
+            s.crypto->configure_wots(s.memory->mem_size, 1);
         })
         .def("disable_crypto", [](CPUState& s) {
             auto memory_guard = acquire_shared_memory_use(s);
@@ -25603,6 +26519,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("crypto_wots_status", [](CPUState& s) -> uint8_t {
             auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto->wots.status;
+        })
+        .def("crypto_wots_snapshot", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return native_wots_snapshot(s.crypto->wots);
+        })
+        .def("crypto_wots_private_zeroized", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.crypto->wots.private_zeroized();
         })
         // Direct crypto MMIO access (for testing / Python-side access)
         .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
@@ -26669,6 +27593,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .value("MEMORY_TIMEOUT", BusFault::MEMORY_TIMEOUT)
         .value("TARGET_FAULT", BusFault::TARGET_FAULT);
 
+    py::enum_<BusResponseCode>(m, "BusResponseCode")
+        .value("OK", BusResponseCode::OK)
+        .value("TARGET_FAULT", BusResponseCode::TARGET_FAULT)
+        .value("MEMORY_TIMEOUT", BusResponseCode::MEMORY_TIMEOUT)
+        .value("PROTOCOL", BusResponseCode::PROTOCOL);
+
     py::class_<BusOrderingMetadata>(m, "BusOrderingMetadata")
         .def(
             py::init([](
@@ -26751,6 +27681,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("read_value", &BusResult::read_value)
         .def_readonly("fault", &BusResult::fault)
         .def_readonly(
+            "response_code",
+            &BusResult::response_code)
+        .def_readonly(
             "target_effects_committed",
             &BusResult::target_effects_committed)
         ;
@@ -26830,6 +27763,22 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly(
             "sticky_bus_errors",
             &MainBusSnapshot::sticky_bus_errors)
+        .def_readonly("weights", &MainBusSnapshot::weights)
+        .def_readonly(
+            "bandwidth_limits",
+            &MainBusSnapshot::bandwidth_limits)
+        .def_readonly(
+            "bandwidth_counts",
+            &MainBusSnapshot::bandwidth_counts)
+        .def_readonly(
+            "fixed_weight_one_unlimited",
+            &MainBusSnapshot::fixed_weight_one_unlimited)
+        .def_readonly(
+            "weight_remaining",
+            &MainBusSnapshot::weight_remaining)
+        .def_readonly(
+            "qos_epoch_start_cycle",
+            &MainBusSnapshot::qos_epoch_start_cycle)
         ;
 
     py::enum_<ExternalEventKind>(m, "ExternalEventKind")
@@ -29021,6 +29970,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return SystemState::DISK_DMA_REQUESTER_ID;
             })
         .def_property_readonly_static(
+            "WOTS_DMA_REQUESTER_ID",
+            [](py::object) {
+                return SystemState::WOTS_DMA_REQUESTER_ID;
+            })
+        .def_property_readonly_static(
             "MAIN_BUS_MMIO_TIMEOUT_CYCLES",
             [](py::object) {
                 return MainBusArbiter::MMIO_TIMEOUT_CYCLES;
@@ -29029,6 +29983,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "MAIN_BUS_MEMORY_TIMEOUT_CYCLES",
             [](py::object) {
                 return MainBusArbiter::MEMORY_TIMEOUT_CYCLES;
+            })
+        .def_property_readonly_static(
+            "MAIN_BUS_QOS_EPOCH_CYCLES",
+            [](py::object) {
+                return MainBusArbiter::QOS_EPOCH_CYCLES;
             })
         .def_property_readonly_static(
             "MAIN_BUS_TIMEOUT_SENTINEL",
@@ -29044,6 +30003,43 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "main_bus_port_for_requester",
             &SystemState::main_bus_port_for_requester,
             py::arg("requester_id"))
+        .def(
+            "_main_bus_set_port_weight",
+            [](SystemState& system, int port, uint8_t weight) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire) ||
+                    system.has_cycle_execution_pending() ||
+                    system.main_bus.snapshot()
+                        .active_grant.has_value()) {
+                    throw std::runtime_error(
+                        "main bus QoS cannot change during active execution");
+                }
+                system.main_bus.set_port_weight(port, weight);
+            },
+            py::arg("port"),
+            py::arg("weight"))
+        .def(
+            "_main_bus_set_port_bandwidth_limit",
+            [](SystemState& system, int port, uint16_t limit) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire) ||
+                    system.has_cycle_execution_pending() ||
+                    system.main_bus.snapshot()
+                        .active_grant.has_value()) {
+                    throw std::runtime_error(
+                        "main bus QoS cannot change during active execution");
+                }
+                system.main_bus.set_port_bandwidth_limit(
+                    port,
+                    limit,
+                    system.shared_clock.cycles());
+            },
+            py::arg("port"),
+            py::arg("limit"))
         .def(
             "_main_bus_try_grant",
             [](SystemState& system,
@@ -29115,8 +30111,77 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](SystemState& system) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                return system.main_bus.snapshot();
+                return system.main_bus.snapshot_at(
+                    system.shared_clock.cycles());
             })
+        .def(
+            "_wots_classify_bus_result",
+            [](SystemState&, const BusResult& result) {
+                return classify_wots_dma_result(result);
+            },
+            py::arg("result"))
+        .def(
+            "_wots_snapshot",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                py::dict snapshot = native_wots_snapshot(
+                    system.shared_crypto.wots);
+                snapshot["dma_acceptance_suppressed"] =
+                    system.test_suppress_wots_dma_acceptance;
+                return snapshot;
+            })
+        .def(
+            "_wots_private_zeroized",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.shared_crypto.wots.private_zeroized();
+            })
+        .def(
+            "_test_force_next_wots_dma_fault",
+            [](SystemState& system, BusFault fault) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (fault != BusFault::TARGET_FAULT &&
+                    fault != BusFault::MEMORY_TIMEOUT) {
+                    throw std::invalid_argument(
+                        "forced WOTS DMA fault must be target-fault or "
+                        "memory-timeout");
+                }
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire) ||
+                    system.has_cycle_execution_pending() ||
+                    system.main_bus.snapshot()
+                        .active_grant.has_value() ||
+                    system.cycle_target_forced_fault.has_value()) {
+                    throw std::runtime_error(
+                        "forced WOTS DMA fault requires a clean cycle "
+                        "timeline");
+                }
+                if (system.test_next_wots_dma_fault.has_value()) {
+                    throw std::runtime_error(
+                        "a forced WOTS DMA fault is already armed");
+                }
+                system.test_next_wots_dma_fault = fault;
+            },
+            py::arg("fault"))
+        .def(
+            "_test_set_wots_dma_acceptance_suppressed",
+            [](SystemState& system, bool suppressed) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire) ||
+                    system.main_bus.snapshot()
+                        .active_grant.has_value()) {
+                    throw std::runtime_error(
+                        "WOTS DMA acceptance suppression requires no "
+                        "active native batch or captured bus grant");
+                }
+                system.test_suppress_wots_dma_acceptance = suppressed;
+            },
+            py::arg("suppressed"))
         .def(
             "_main_bus_reset",
             [](SystemState& system) {
@@ -29135,6 +30200,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 }
                 system.main_bus.reset(
                     system.shared_clock.cycles());
+                for (UnboundedNativeDmaState& state :
+                     system.unbounded_dma_states) {
+                    state.pending_token.reset();
+                    state.pending_request.reset();
+                }
             })
         .def(
             "_reset_cycle_execution",
@@ -29166,9 +30236,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 system.reset_cycle_execution();
                 system.main_bus.reset(
                     system.shared_clock.cycles());
+                // A warm reset withdraws an unaccepted WOTS beat, drains the
+                // shared raw service, and publishes the architectural idle
+                // state at the same native ownership boundary.
+                system.shared_crypto.wots.reset();
             })
         .def(
-            "_adopt_native_nic_cycle_dma",
+            "_adopt_native_cycle_dma",
             [](SystemState& system) {
                 std::vector<DmaEndpointCallbacks> callbacks;
                 callbacks.reserve(
@@ -29179,6 +30253,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         SystemState::NIC_DMA_REQUESTER_ID) {
                         callbacks.push_back(
                             build_native_nic_dma_callbacks(
+                                system));
+                    } else if (state.requester_id ==
+                               SystemState::WOTS_DMA_REQUESTER_ID) {
+                        callbacks.push_back(
+                            build_native_wots_dma_callbacks(
                                 system));
                     } else {
                         callbacks.push_back(
@@ -29192,14 +30271,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 if (system.native_batch_active.load(
                         std::memory_order_acquire)) {
                     throw std::runtime_error(
-                        "native NIC DMA cannot be adopted during an "
+                        "native DMA cannot be adopted during an "
                         "active native system batch");
                 }
                 if (system.has_cycle_execution_pending() ||
                     system.main_bus.snapshot()
                         .active_grant.has_value()) {
                     throw std::runtime_error(
-                        "native NIC DMA adoption requires a clean "
+                        "native DMA adoption requires a clean "
                         "cycle timeline");
                 }
                 refresh_cycle_dma_requests(
@@ -29258,6 +30337,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         state.highest_observed_token;
                     endpoint["timeline_active"] =
                         state.timeline_active;
+                    endpoint["pending_accepted"] =
+                        state.pending_accepted;
                     if (state.pending_token.has_value()) {
                         endpoint["pending_token"] =
                             *state.pending_token;
@@ -29275,8 +30356,22 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     endpoints.append(endpoint);
                 }
                 py::dict snapshot;
-                snapshot["schema_version"] = 1;
+                snapshot["schema_version"] = 2;
                 snapshot["endpoints"] = endpoints;
+                if (system.cycle_target_forced_fault.has_value()) {
+                    snapshot["active_target_forced_fault"] = py::cast(
+                        *system.cycle_target_forced_fault);
+                } else {
+                    snapshot["active_target_forced_fault"] = py::none();
+                }
+                if (system.test_next_wots_dma_fault.has_value()) {
+                    snapshot["next_wots_forced_fault"] = py::cast(
+                        *system.test_next_wots_dma_fault);
+                } else {
+                    snapshot["next_wots_forced_fault"] = py::none();
+                }
+                snapshot["wots_dma_acceptance_suppressed"] =
+                    system.test_suppress_wots_dma_acceptance;
                 return snapshot;
             })
         .def_property(
@@ -29814,6 +30909,56 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return system.external_events.replay_sealed();
             })
         .def(
+            "_service_unbounded_native_dma",
+            [](SystemState& system,
+               py::function settle_round) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (!system.shared_nic.has_cycle_dma_work() &&
+                    system.shared_crypto.wots.status !=
+                        WotsChain::STATUS_BUSY) {
+                    return uint64_t{0};
+                }
+                if (system.main_bus.active_timeout_cycle().has_value()) {
+                    throw std::runtime_error(
+                        "active main-bus grants require cycle-bounded "
+                        "native execution");
+                }
+                if (system.has_cycle_execution_pending()) {
+                    throw std::runtime_error(
+                        "suspended cycle execution requires cycle-bounded "
+                        "native execution");
+                }
+                if (system.external_events.next_cycle().has_value()) {
+                    throw std::runtime_error(
+                        "pending external events require cycle-bounded "
+                        "native execution");
+                }
+                if (system.shared_clock.snapshot().has_deadline) {
+                    throw std::runtime_error(
+                        "active event horizons require cycle-bounded "
+                        "native execution");
+                }
+
+                NativeBatchActiveGuard active_guard(system);
+                const uint64_t clock_start =
+                    system.shared_clock.cycles();
+                service_unbounded_native_dma(
+                    system,
+                    [&](int64_t cycles,
+                        bool advance_clock,
+                        bool drain_uart,
+                        bool deliver_interrupts) {
+                        settle_round(
+                            cycles,
+                            advance_clock,
+                            drain_uart,
+                            deliver_interrupts);
+                    });
+                return system.shared_clock.cycles() - clock_start;
+            },
+            py::arg("settle_round"))
+        .def(
             "run_full_core_batch",
             [](SystemState& system,
                int64_t max_steps,
@@ -29829,6 +30974,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         callback_sets,
                         system.execution_cores.size(),
                         "execution");
+                // Guest NIC commands in ordinary native execution expose
+                // their stable DMA beats to the same physical fabric service
+                // as WOTS instead of draining host memory synchronously from
+                // the MMIO callback.
+                for (StepCallbacks& callback : callbacks)
+                    callback.strict_cycle_dma = true;
 
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
@@ -30023,6 +31174,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     system.shared_memory.mem_capacity =
                         prepared.capacity;
                     sync_system_main_memory_ptrs(system);
+                    system.shared_crypto.configure_wots(
+                        size,
+                        static_cast<uint32_t>(
+                            system.main_bus.port_count()));
                 }
                 // Releasing an exporter may invoke Python, so the old lease
                 // remains alive until after the mapping lock is free.

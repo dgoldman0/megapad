@@ -20,7 +20,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
     )
 
     assert report["schema"] == phase0.SCHEMA
-    assert report["schema_version"] == 12
+    assert report["schema_version"] == 13
     assert report["configuration"]["full_core_counts"] == [4]
     assert report["configuration"]["worker_counts"] == [1, 2, 4]
     assert not report["configuration"]["host_profile"]
@@ -54,7 +54,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
             "requirement_satisfied": True,
         }
         observation = result["accounting_probe"]["observation"]
-        assert observation["state_schema_version"] == 10
+        assert observation["state_schema_version"] == 12
         for core in observation["canonical_state"]["cores"]:
             assert core["instruction_cache"]["valid_lines"][
                 "size_bytes"
