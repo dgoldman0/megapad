@@ -6,6 +6,7 @@ from devices import (
     CRYPTO_CAP_CRC_REFLECT_RAW,
     CRYPTO_CAP_KECCAK_F1600,
     CRYPTO_CAP_SHA3_STREAM,
+    CRYPTO_CAP_WOTS_CHAIN,
     DeviceBus,
     SYSINFO_BASE,
     SystemInfo,
@@ -99,6 +100,7 @@ def test_system_reports_qualified_crypto_and_actual_bus_requesters():
         CRYPTO_CAP_CRC_REFLECT_RAW
         | CRYPTO_CAP_SHA3_STREAM
         | CRYPTO_CAP_KECCAK_F1600
+        | CRYPTO_CAP_WOTS_CHAIN
     )
     assert system.cpu.mem_read64(ports_addr) == 6  # 2 cores + cluster + NIC + disk + WOTS
 

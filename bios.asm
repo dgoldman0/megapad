@@ -171,7 +171,7 @@ boot:
     ; The portable MMIO-crypto guard is a single machine-wide transaction.
     ; Hardware spinlock 8 resets independently, while these full-width owner
     ; fields and logical cursors must also be returned to their cold state on
-    ; every BIOS boot before checked SHA3/Keccak words can be observed.
+    ; every BIOS boot before checked SHA3/Keccak/WOTS words can be observed.
     ldi64 r11, var_crypto_owner_core
     ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF
     str r11, r0
@@ -187,9 +187,9 @@ boot:
     ldi64 r11, var_crypto_window_offset
     str r11, r0
 
-    ; Wipe the complete 200-byte staging area used for digest, XOF, and raw
-    ; state publication.  It is private BIOS storage and never aliases a
-    ; caller-managed span.
+    ; Wipe the complete 200-byte staging area used for digest, XOF, raw state,
+    ; and WOTS result publication.  It is private BIOS storage and never
+    ; aliases a caller-managed span.
     ldi64 r11, crypto_scratch
     ldi r12, 25
 .boot_crypto_scratch_clear:
@@ -11282,7 +11282,7 @@ w_quit:
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
-    ; Checked SHA3/Keccak accesses use two private byte helpers.  A fault
+    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers.  A fault
     ; saves the architectural end-of-instruction PC, so recognize only the
     ; instruction immediately following either helper access.  Returning
     ; through the helper with R0=HARDWARE/PROTOCOL skips the faulting access
@@ -13405,7 +13405,8 @@ _crypto_span_status:
 .crypto_span_done:
     ret.l
 
-; Execute one checked SHA3/Keccak byte transaction.  R7 is the MMIO address.
+; Execute one checked SHA3/Keccak/WOTS byte transaction.  R7 is the MMIO
+; address.
 ; Reads return R1=data and R0=status; writes take R1=data and return R0=status.
 ; The zero status is installed before the potentially faulting instruction so
 ; normal completion falls directly through the saved-PC recovery label.
@@ -14198,6 +14199,549 @@ w_keccak_f1600:
 .keccak_return:
     ldi64 r11, _crc_push_status
     call.l r11
+    ret.l
+
+; =====================================================================
+;  Checked WOTS chain accelerator
+; =====================================================================
+; WOTS base = 0xFFFF_FF00_0000_08A0, exact size 32 bytes.
+;   CONTEXT_ADDR +0x00..+0x07 (RW byte) 64-bit little-endian Bank 0 address
+;   STEPS       +0x08         (RW byte) complete value 0..15
+;   START       +0x09         (RW byte) complete value 0..15
+;   CMD/STATUS  +0x0A         (W/R byte) 1 GO, 2 CLEAR / 0..3 phase
+;   ERROR       +0x0B         (R byte)
+;   CYCLES      +0x0C..+0x0F (R byte) diagnostic only
+;   DOUT        +0x10..+0x1F (R byte) stable 16-byte terminal result
+;
+; WOTS-CHAIN uses an 80-byte private return-stack frame:
+;   +00 context, +08 start, +16 steps, +24 destination,
+;   +32 request deadline, +40 clear deadline, +48 saved PERF_CTRL bit 0,
+;   +56 first/returned status, +64 wait start, +72 saved core R2.
+; CALL.L temporarily grows R15 below this frame; every helper restores it.
+
+; WOTS-CHAIN ( context-64 start steps dst-16 -- status )
+w_wots_chain:
+    subi r15, 80
+
+    ; Consume the complete public signature before any checked return.
+    ldn r0, r14                         ; destination
+    addi r14, 8
+    mov r11, r15
+    addi r11, 24
+    str r11, r0
+    ldn r0, r14                         ; steps
+    addi r14, 8
+    mov r11, r15
+    addi r11, 16
+    str r11, r0
+    ldn r0, r14                         ; start
+    addi r14, 8
+    mov r11, r15
+    addi r11, 8
+    str r11, r0
+    ldn r0, r14                         ; context
+    addi r14, 8
+    str r15, r0
+
+    ; Capability has strict priority over every malformed argument.
+    ldi64 r11, 0xFFFF_FF00_0000_0360  ; SysInfo CRYPTO_CAPS
+    ldn r0, r11
+    andi r0, 0x08                      ; WOTS_CHAIN
+    cmpi r0, 0
+    lbreq .wots_unsupported
+
+    ; Validate complete scalar cells.  The nonzero sum uses full-width
+    ; arithmetic even though both independently checked operands fit a byte.
+    mov r11, r15
+    addi r11, 16
+    ldn r12, r11                       ; steps
+    cmpi r12, 0
+    lbrmi .wots_range
+    cmpi r12, 16
+    lbrcs .wots_range
+    mov r11, r15
+    addi r11, 8
+    ldn r13, r11                       ; start
+    cmpi r13, 0
+    lbrmi .wots_range
+    cmpi r13, 16
+    lbrcs .wots_range
+    cmpi r12, 0
+    breq .wots_scalars_ok
+    add r13, r12
+    cmpi r13, 16
+    lbrcs .wots_range
+.wots_scalars_ok:
+
+    ; R2 is the per-core stack-zone top on secondary full cores, not the
+    ; physical end of Bank 0.  The common span helper deliberately consumes
+    ; R2 as its Bank 0 limit, so install the authoritative SysInfo geometry
+    ; across both complete-span checks and restore the core ABI value before
+    ; any guard or device mutation.
+    mov r11, r15
+    addi r11, 72
+    str r11, r2
+    ldi64 r11, 0xFFFF_FF00_0000_0308  ; SysInfo BANK0_SIZE
+    ldn r2, r11
+
+    ; The context first follows the common caller-readable protection policy,
+    ; then the stricter WOTS physical-domain rule.  Its exclusive end must be
+    ; nonwrapping and no greater than the advertised Bank 0 size now in R2.
+    ldn r9, r15
+    ldi r10, 64
+    ldi64 r11, _crypto_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_span_restore_return
+    mov r7, r9
+    addi r7, 64
+    cmp r7, r9
+    lbrcc .wots_span_restore_range
+    cmp r7, r2
+    breq .wots_context_ok
+    brcc .wots_context_ok
+    lbr .wots_span_restore_range
+.wots_context_ok:
+
+    ; Destination may use any caller-writable domain admitted by the common
+    ; exact-span policy.  Context/destination overlap is deliberately legal.
+    mov r11, r15
+    addi r11, 24
+    ldn r9, r11
+    ldi r10, 16
+    ldi64 r11, _crypto_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_span_restore_return
+
+    mov r11, r15
+    addi r11, 72
+    ldn r2, r11
+    lbr .wots_spans_ok
+
+.wots_span_restore_range:
+    ldi r0, 3
+.wots_span_restore_return:
+    mov r11, r15
+    addi r11, 72
+    ldn r2, r11
+    lbr .wots_return
+.wots_spans_ok:
+
+    ; Derive both exact BIOS deadlines from advertised NUM_BUS_PORTS:
+    ;   beat = (N-1)*65790 + 257
+    ;   request = beat*64 + steps*32 + 640
+    ;   clear = beat + 224
+    ; UMULH and monotonic unsigned-add checks reject every intermediate
+    ; overflow.  The final sign checks enforce each bound below 2^63.
+    ldi64 r11, 0xFFFF_FF00_0000_0368  ; SysInfo NUM_BUS_PORTS
+    ldn r7, r11
+    cmpi r7, 0
+    lbreq .wots_topology_hardware
+    dec r7
+    ldi64 r1, 65790
+    mov r12, r7
+    umul r12, r1                       ; low base
+    mov r13, r7
+    umulh r13, r1                      ; high base
+    cmpi r13, 0
+    lbrne .wots_topology_hardware
+
+    mov r7, r12
+    ldi64 r1, 257
+    add r12, r1                        ; beat
+    cmp r12, r7
+    lbrcc .wots_topology_hardware
+
+    ldi r1, 64
+    mov r9, r12
+    umul r9, r1                        ; request low
+    mov r10, r12
+    umulh r10, r1                      ; request high
+    cmpi r10, 0
+    lbrne .wots_topology_hardware
+    mov r11, r15
+    addi r11, 16
+    ldn r10, r11                       ; steps
+    lsli r10, 5
+    mov r7, r9
+    add r9, r10
+    cmp r9, r7
+    lbrcc .wots_topology_hardware
+    mov r7, r9
+    ldi64 r1, 640
+    add r9, r1
+    cmp r9, r7
+    lbrcc .wots_topology_hardware
+    cmpi r9, 0
+    lbrmi .wots_topology_hardware
+    mov r11, r15
+    addi r11, 32
+    str r11, r9
+
+    mov r7, r12
+    ldi64 r1, 224
+    add r7, r1
+    cmp r7, r12
+    lbrcc .wots_topology_hardware
+    cmpi r7, 0
+    lbrmi .wots_topology_hardware
+    mov r11, r15
+    addi r11, 40
+    str r11, r7
+
+    ; One nonblocking portable-guard attempt follows every pure preflight.
+    ldi64 r11, _crypto_guard_acquire
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_return
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11
+    ldi64 r11, var_crypto_owner_kind
+    ldi r1, 3                          ; WOTS
+    str r11, r1
+
+    ; PERF_CTRL bit 0 is caller state.  Enable without asserting reset bit 1,
+    ; and route every subsequent path through an exact saved-bit restoration.
+    csrr r0, 0x6C
+    andi r0, 1
+    mov r11, r15
+    addi r11, 48
+    str r11, r0
+    mov r1, r0
+    ori r1, 1
+    csrw 0x6C, r1
+
+    ; A coherent checked transaction starts only from IDLE with ERROR=0.
+_wots_initial_status_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08AA
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    cmpi r1, 0
+    lbrne .wots_protocol_cleanup
+    inc r7                               ; ERROR
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    cmpi r1, 0
+    lbrne .wots_protocol_cleanup
+
+    ; Program the complete context address little-endian with byte stores.
+    ldn r13, r15
+    ldi r12, 0
+_wots_context_program_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08A0
+.wots_context_program_loop:
+    mov r1, r13
+    andi r1, 0xFF
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    lsri r13, 8
+    inc r7
+    inc r12
+    cmpi r12, 8
+    brcc .wots_context_program_loop
+
+    mov r11, r15
+    addi r11, 16
+    ldn r1, r11                       ; STEPS
+_wots_steps_program_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08A8
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11                       ; START
+    inc r7
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+
+    ; Acknowledged GO precedes the request-deadline start sample.
+    inc r7                              ; CMD/STATUS
+    ldi r1, 1                           ; GO
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    csrr r0, 0x68
+    mov r11, r15
+    addi r11, 64
+    str r11, r0
+
+    ; Each sample reads STATUS and immediately observes elapsed PERF cycles.
+    ; BUSY is classified from that completed STATUS read alone: a later ERROR
+    ; read could race a BUSY-to-ERROR transition and manufacture a false pair.
+    ; Terminal states persist, so only they receive the checked ERROR read.
+    ; Protocol validation precedes the saved elapsed decision.
+.wots_request_wait:
+_wots_request_status_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08AA
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    mov r13, r1                         ; sampled status
+    ; CSRR's architectural register field is only three bits (R0..R7).
+    ; Read through R0, then preserve the sample in the WOTS elapsed register.
+    csrr r0, 0x68
+    mov r12, r0
+    mov r11, r15
+    addi r11, 64
+    ldn r7, r11
+    sub r12, r7                         ; modulo-2^64 elapsed
+    cmpi r13, 4
+    lbrcs .wots_protocol_cleanup
+    cmpi r13, 0
+    lbreq .wots_protocol_cleanup        ; unexpected IDLE after GO
+    cmpi r13, 1
+    lbreq .wots_request_busy
+
+    ; DONE/ERROR persist until CLEAR, so this ERROR byte belongs to the
+    ; terminal STATUS sample even if the read takes additional bus cycles.
+_wots_request_error_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08AB
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    mov r10, r1                         ; terminal error
+    cmpi r13, 2
+    lbreq .wots_request_done
+
+    ; ERROR is valid only with one defined nonzero code 1..9.
+    cmpi r10, 0
+    lbreq .wots_protocol_cleanup
+    cmpi r10, 10
+    lbrcs .wots_protocol_cleanup
+    mov r11, r15
+    addi r11, 32
+    ldn r7, r11
+    cmp r12, r7
+    breq .wots_request_error_in_time
+    brcc .wots_request_error_in_time
+    lbr .wots_timeout_cleanup
+.wots_request_error_in_time:
+    cmpi r10, 2
+    lbreq .wots_owner_cleanup
+    cmpi r10, 7
+    lbreq .wots_timeout_cleanup
+    cmpi r10, 8
+    lbreq .wots_timeout_cleanup
+    lbr .wots_protocol_cleanup
+
+.wots_request_busy:
+    mov r11, r15
+    addi r11, 32
+    ldn r7, r11
+    cmp r12, r7
+    lbrcs .wots_timeout_cleanup         ; BUSY at equality times out
+    lbr .wots_request_wait
+
+.wots_request_done:
+    cmpi r10, 0
+    lbrne .wots_protocol_cleanup
+    mov r11, r15
+    addi r11, 32
+    ldn r7, r11
+    cmp r12, r7
+    breq .wots_stage_result             ; terminal at equality wins
+    brcc .wots_stage_result
+    lbr .wots_timeout_cleanup
+
+    ; Stage all DOUT before CLEAR and before any caller-visible store.
+.wots_stage_result:
+    ldi r12, 0
+_wots_dout_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08B0
+.wots_stage_loop:
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_begin_cleanup
+    ldi64 r11, crypto_scratch
+    add r11, r12
+    st.b r11, r1
+    inc r7
+    inc r12
+    cmpi r12, 16
+    brcc .wots_stage_loop
+    ldi r0, 0
+    lbr .wots_begin_cleanup
+
+.wots_owner_cleanup:
+    ldi r0, 2
+    lbr .wots_begin_cleanup
+.wots_timeout_cleanup:
+    ldi r0, 5
+    lbr .wots_begin_cleanup
+.wots_protocol_cleanup:
+    ldi r0, 6
+
+    ; Save the first result, issue CLEAR, and take an independent start sample
+    ; only after that command is acknowledged.  Cleanup failure overrides it.
+.wots_begin_cleanup:
+    mov r11, r15
+    addi r11, 56
+    str r11, r0
+_wots_clear_command_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08AA
+    ldi r1, 2                           ; CLEAR
+    ldi64 r11, _sha3_mmio_write8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_clear_failed
+    csrr r0, 0x68
+    mov r11, r15
+    addi r11, 64
+    str r11, r0
+
+.wots_clear_wait:
+_wots_clear_status_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08AA
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_clear_failed
+    mov r13, r1                         ; sampled status
+    ; As in the request poll, use an encodable CSR destination explicitly.
+    csrr r0, 0x68
+    mov r12, r0
+    mov r11, r15
+    addi r11, 64
+    ldn r7, r11
+    sub r12, r7
+    ; Classify the completed STATUS read before consulting elapsed time.
+    ; As above, do not pair BUSY with an ERROR read taken after a possible
+    ; transition.  IDLE persists and is the only clear terminal worth reading.
+    cmpi r13, 4
+    lbrcs .wots_clear_protocol_failed
+    cmpi r13, 0
+    breq .wots_clear_idle
+    cmpi r13, 1
+    breq .wots_clear_busy
+    lbr .wots_clear_protocol_failed     ; every other non-BUSY state fails
+
+.wots_clear_busy:
+    mov r11, r15
+    addi r11, 40
+    ldn r7, r11
+    cmp r12, r7
+    lbrcs .wots_clear_timeout           ; BUSY at equality times out
+    lbr .wots_clear_wait
+
+.wots_clear_idle:
+_wots_clear_error_address:
+    ldi64 r7, 0xFFFF_FF00_0000_08AB
+    ldi64 r11, _sha3_mmio_read8
+    call.l r11
+    cmpi r0, 0
+    lbrne .wots_clear_failed
+    cmpi r1, 0
+    brne .wots_clear_protocol_failed
+    mov r11, r15
+    addi r11, 40
+    ldn r7, r11
+    cmp r12, r7
+    breq .wots_clear_complete           ; IDLE at equality wins
+    brcc .wots_clear_complete
+    lbr .wots_clear_timeout             ; late IDLE remains fail-closed
+
+.wots_clear_protocol_failed:
+    ldi r0, 6
+    lbr .wots_clear_failed
+.wots_clear_timeout:
+    ldi r0, 5
+
+    ; No proved IDLE: restore caller PERF state, wipe scratch, and deliberately
+    ; retain owner kind 3 plus spinlock 8 until machine reset.
+.wots_clear_failed:
+    mov r11, r15
+    addi r11, 56
+    str r11, r0                         ; cleanup failure has precedence
+    mov r11, r15
+    addi r11, 48
+    ldn r1, r11
+    csrw 0x6C, r1
+    ldi64 r11, _crypto_wipe_scratch
+    call.l r11
+    mov r11, r15
+    addi r11, 56
+    ldn r0, r11
+    lbr .wots_return
+
+    ; Proved IDLE permits publication only on the successful checked-return
+    ; path, followed by ordinary release.  The sixteen caller stores are not
+    ; an inter-core atomic memory transaction.
+.wots_clear_complete:
+    mov r11, r15
+    addi r11, 56
+    ldn r0, r11
+    cmpi r0, 0
+    brne .wots_release_failure
+    ldi64 r11, crypto_scratch
+    mov r7, r15
+    addi r7, 24
+    ldn r9, r7                          ; destination
+    ldi r12, 0
+.wots_publish_loop:
+    ld.b r1, r11
+    st.b r9, r1
+    inc r11
+    inc r9
+    inc r12
+    cmpi r12, 16
+    brcc .wots_publish_loop
+
+.wots_release_failure:
+    ; Restore PERF before guard release can re-enable the caller's interrupts.
+    mov r11, r15
+    addi r11, 48
+    ldn r1, r11
+    csrw 0x6C, r1
+    ldi64 r11, _crypto_finish_release
+    call.l r11
+    mov r11, r15
+    addi r11, 56
+    ldn r0, r11
+    lbr .wots_return
+
+.wots_topology_hardware:
+    ldi r0, 6
+    lbr .wots_return
+.wots_range:
+    ldi r0, 3
+    lbr .wots_return
+.wots_unsupported:
+    ldi r0, 1
+
+    ; Erase frame-resident addresses, bounds, and saved timing state on every
+    ; return.  R13 carries only the public status across this local wipe.
+.wots_return:
+    mov r13, r0
+    mov r11, r15
+    ldi r12, 10
+    ldi r1, 0
+.wots_frame_wipe_loop:
+    str r11, r1
+    addi r11, 8
+    dec r12
+    cmpi r12, 0
+    brne .wots_frame_wipe_loop
+    addi r15, 80
+    ; Push the public status inline.  Calling the generic helper here would
+    ; write its return address back into the high qword of the erased frame.
+    mov r0, r13
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; Diagnostic raw register queries retained outside the checked transaction
@@ -20859,12 +21403,21 @@ d_tacc_status_fetch:
     ret.l
 
 ; === TACC-CLAIM? ===
-latest_entry:
 d_tacc_claim_q:
     .dq d_tacc_status_fetch
     .db 11
     .ascii "TACC-CLAIM?"
     ldi64 r11, w_tacc_claim_q
+    call.l r11
+    ret.l
+
+; === WOTS-CHAIN ===
+latest_entry:
+d_wots_chain:
+    .dq d_tacc_claim_q
+    .db 10
+    .ascii "WOTS-CHAIN"
+    ldi64 r11, w_wots_chain
     call.l r11
     ret.l
 
@@ -20886,7 +21439,7 @@ var_crypto_owner_core:
 var_crypto_owner_task:
     .dq 0
 var_crypto_owner_kind:
-    .dq 0                         ; 0 none, 1 sponge, 2 raw
+    .dq 0                         ; 0 none, 1 sponge, 2 raw, 3 WOTS
 var_crypto_mode:
     .dq 0
 var_crypto_phase:

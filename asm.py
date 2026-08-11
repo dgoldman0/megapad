@@ -845,7 +845,13 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         rn = _parse_reg(ops[0])
         csr_addr = _parse_imm(ops[1])
         # CSRR: W=0, reg in low 3 bits of N
-        n_nibble = rn & 0x7
+        if rn > 7:
+            raise AsmError(
+                lineno,
+                "CSRR register must be R0-R7; the encoding has a 3-bit "
+                "register field",
+            )
+        n_nibble = rn
         out.append(0xD0 | n_nibble)
         out.append(csr_addr & 0xFF)
         return out
@@ -853,7 +859,13 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         csr_addr = _parse_imm(ops[0])
         rn = _parse_reg(ops[1])
         # CSRW: W=1, reg in low 3 bits
-        n_nibble = 0x8 | (rn & 0x7)
+        if rn > 7:
+            raise AsmError(
+                lineno,
+                "CSRW register must be R0-R7; the encoding has a 3-bit "
+                "register field",
+            )
+        n_nibble = 0x8 | rn
         out.append(0xD0 | n_nibble)
         out.append(csr_addr & 0xFF)
         return out

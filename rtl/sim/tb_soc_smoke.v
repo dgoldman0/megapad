@@ -153,9 +153,9 @@ module tb_soc_smoke;
         force u_soc.bus_mmio_addr = 12'h360;
         force u_soc.bus_mmio_size = BUS_DWORD;
         #1;
-        check("SysInfo keeps WOTS capability clear pending qualification",
+        check("SysInfo advertises the qualified checkpoint-3 capabilities",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'h7);
+              && u_soc.bus_mmio_rdata == 64'hF);
 
         force u_soc.bus_mmio_addr = 12'h368;
         #1;
@@ -189,7 +189,7 @@ module tb_soc_smoke;
         #1;
         check("SysInfo byte reads use little-endian lanes",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'h7);
+              && u_soc.bus_mmio_rdata == 64'hF);
 
         force u_soc.bus_mmio_addr = 12'h361;
         force u_soc.bus_mmio_size = BUS_HALF;
@@ -218,7 +218,7 @@ module tb_soc_smoke;
         #1;
         check("SysInfo capability writes are acknowledged and ignored",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'h7);
+              && u_soc.bus_mmio_rdata == 64'hF);
 
         // Exercise raw Keccak through the integrated SoC decode/mux rather
         // than only through the standalone SHA front-end bench.
@@ -284,8 +284,7 @@ module tb_soc_smoke;
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata[7:0] == 8'h00);
 
-        // The production byte-only WOTS front end is wired, but capability
-        // bit 3 remains clear until full cross-backend qualification.
+        // Exercise the qualified production byte-only WOTS front end.
         force u_soc.bus_mmio_req = 1'b0;
         @(posedge clk);
         #1;
@@ -295,7 +294,7 @@ module tb_soc_smoke;
         force u_soc.bus_mmio_size = BUS_BYTE;
         @(posedge clk);
         #1;
-        check("Integrated WOTS controller reports reset IDLE while unadvertised",
+        check("Integrated WOTS controller reports reset IDLE",
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata == 64'h0
               && u_soc.wots_active === 1'b0);

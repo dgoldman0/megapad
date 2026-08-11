@@ -64,6 +64,7 @@ from devices import (
     CRYPTO_CAP_CRC_REFLECT_RAW,
     CRYPTO_CAP_SHA3_STREAM,
     CRYPTO_CAP_KECCAK_F1600,
+    CRYPTO_CAP_WOTS_CHAIN,
 )
 
 # Public system stepping must honor deliberate per-core step overrides, while
@@ -1308,6 +1309,7 @@ class MegapadSystem:
                 CRYPTO_CAP_CRC_REFLECT_RAW
                 | CRYPTO_CAP_SHA3_STREAM
                 | CRYPTO_CAP_KECCAK_F1600
+                | CRYPTO_CAP_WOTS_CHAIN
             ),
             num_bus_ports=(
                 self.num_full_cores + self.num_clusters + 3

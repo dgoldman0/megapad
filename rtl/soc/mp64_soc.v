@@ -87,11 +87,9 @@ module mp64_soc #(
                                $clog2(N_BUS_PORTS);
     localparam [N_BUS_PORTS-1:0] WOTS_FIXED_QOS_MASK =
         {1'b1, {(N_BUS_PORTS-1){1'b0}}};
-    // Checkpoint 2 qualifies reflected/raw CRC, SHA3 streaming, and public
-    // raw Keccak independently.  The checkpoint-3 WOTS controller is wired to
-    // the appended requester and shared round service below, but capability
-    // bit 3 remains clear until its complete backend/BIOS qualification gate.
-    localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_0007;
+    // Checkpoint 3 qualifies reflected/raw CRC, SHA3 streaming, public raw
+    // Keccak, and the checked WOTS controller independently.
+    localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_000F;
 
     // System-wide reset (active-high for cores, active-low for peripherals)
     wire rst_h = ~sys_rst_n;
@@ -1784,9 +1782,8 @@ module mp64_soc #(
         .wots_abort      (wots_sha_abort)
     );
 
-    // Checked WOTS controller.  Source presence is not capability evidence;
-    // CRYPTO_CAPS.WOTS_CHAIN stays clear until this path and the other
-    // backends, checked BIOS word, fresh artifacts, and sequential gate pass.
+    // Checked WOTS controller, qualified through the production DMA, Bank 0,
+    // and shared-Keccak path before CRYPTO_CAPS.WOTS_CHAIN was published.
     wire [63:0] wots_rdata;
     wire        wots_ack;
 

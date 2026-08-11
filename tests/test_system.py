@@ -51,6 +51,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import _mp64_accel
+
 from accel_wrapper import (
     HaltError,
     Megapad64,
@@ -67,7 +69,7 @@ from megapad64 import (
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
     CSR_CRC_ACC, CSR_CRC_MODE,
     CSR_D, CSR_DF, CSR_Q, CSR_T,
-    CSR_IVT_BASE, CSR_IE, CSR_ICACHE_CTRL,
+    CSR_IVT_BASE, CSR_IE, CSR_ICACHE_CTRL, CSR_PERF_CTRL,
     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
     CSR_SB, CSR_SR, CSR_SC, CSR_SW,
@@ -79,7 +81,7 @@ from system import MegapadSystem, MMIO_START, MicroCluster
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
-    NetworkDevice, DeviceBus, BusError,
+    NetworkDevice, Device, DeviceBus, BusError,
     STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH,
     STORAGE_RESULT_MEDIA_FAILURE, STORAGE_RESULT_FLUSH_FAILURE,
     STORAGE_RESULT_MEDIA_REMOVED, STORAGE_RESULT_UNSUPPORTED,
@@ -1388,6 +1390,11 @@ class TestBIOS(unittest.TestCase):
                 sys_obj.step()
             except HaltError:
                 break
+        else:
+            raise AssertionError(
+                "BIOS snapshot boot exhausted its infrastructure step "
+                "budget before reaching idle"
+            )
         cls._bios_snapshot = (
             bytes(sys_obj.cpu.mem),
             cls._save_cpu_state(sys_obj.cpu),
@@ -4933,9 +4940,10 @@ class TestBIOSTACC(unittest.TestCase):
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
     def test_tacc_dictionary_tail_chain(self):
-        """The eight TACC words form the exact live dictionary tail."""
+        """WOTS appends after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_wots_chain", "d_tacc_claim_q"),
             ("d_tacc_claim_q", "d_tacc_status_fetch"),
             ("d_tacc_status_fetch", "d_tacc_release"),
             ("d_tacc_release", "d_tacc_store"),
@@ -4946,7 +4954,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(labels["latest_entry"], labels["d_tacc_claim_q"])
+        self.assertEqual(labels["latest_entry"], labels["d_wots_chain"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -4963,7 +4971,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 474)
+        self.assertEqual(len(seen), 472)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6046,6 +6054,15 @@ class TestMicroCluster(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestAssemblerBranchRange(unittest.TestCase):
+    def test_csr_register_field_rejects_unencodable_aliases(self):
+        self.assertEqual(assemble("csrr r7, 0x68"), bytes((0xD7, 0x68)))
+        self.assertEqual(assemble("csrw 0x6C, r7"), bytes((0xDF, 0x6C)))
+        for source in ("csrr r8, 0x68", "csrr r12, 0x68",
+                       "csrw 0x6C, r8", "csrw 0x6C, r31"):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(AsmError, "R0-R7"):
+                    assemble(source)
+
     def test_short_branch_in_range(self):
         code = assemble("loop:\n  br loop")
         self.assertEqual(len(code), 2)
@@ -10101,6 +10118,11 @@ class TestBIOSHardening(unittest.TestCase):
                 sys_obj.step()
             except HaltError:
                 break
+        else:
+            raise AssertionError(
+                "BIOS hardening snapshot boot exhausted its infrastructure "
+                "step budget before reaching idle"
+            )
         cls._bios_snapshot = (
             bytes(sys_obj.cpu.mem),
             cls._save_cpu_state(sys_obj.cpu),
@@ -13102,7 +13124,7 @@ class TestBIOSSHA3Checkpoint2(unittest.TestCase):
         for word in (
             "CRYPTO-CAPS@", "SHA3-BEGIN", "SHA3-UPDATE", "SHA3-FINAL",
             "SHA3-STATUS@", "SHAKE-FINAL", "SHA3-MODE@", "SHAKE-READ",
-            "SHA3-CLEAR", "KECCAK-F1600",
+            "SHA3-CLEAR", "KECCAK-F1600", "WOTS-CHAIN",
         ):
             self.assertRegex(text, rf"(?<!\S){re.escape(word)}(?!\S)")
         for removed in (
@@ -13111,8 +13133,8 @@ class TestBIOSSHA3Checkpoint2(unittest.TestCase):
             "SHA3-LOCKED?", "WOTS-STATUS@",
         ):
             self.assertNotRegex(text, rf"(?<!\S){re.escape(removed)}(?!\S)")
-        self.assertIn("CAPS=7 ", text)
-        self.assertIn("WOTS-CAP=0 ", text)
+        self.assertIn("CAPS=15 ", text)
+        self.assertIn("WOTS-CAP=8 ", text)
 
     def test_faulting_checked_status_access_returns_six_after_cleanup(self):
         """A checked SHA bus fault is consumed once and follows cleanup."""
@@ -13452,6 +13474,1039 @@ class TestBIOSSHA3Checkpoint2(unittest.TestCase):
         self._assert_crypto_clean(sys_obj)
 
 
+class _ScriptedWotsMMIO(Device):
+    """Small byte-MMIO double for BIOS protocol/deadline qualification.
+
+    A sample is ``(status, error, deadline_action)``.  ``equal`` and
+    ``late`` rewrite the active BIOS frame deadline from the elapsed value
+    already held in R12 at the terminal ERROR-byte read.  ``zero`` makes a
+    sample unambiguously late before a branch that must classify protocol
+    first.  A one-sample script is held indefinitely, which also permits a
+    real firmware CLEAR timeout without inventing a fake timeout response.
+    """
+
+    _MASK64 = (1 << 64) - 1
+
+    def __init__(
+        self,
+        system,
+        base,
+        *,
+        request_samples,
+        clear_samples,
+        dout=bytes(range(16)),
+        initial=(0, 0),
+    ):
+        super().__init__("Scripted WOTS", base, 0x20)
+        if not request_samples or not clear_samples:
+            raise ValueError("scripted WOTS phases require at least one sample")
+        if len(dout) != 16:
+            raise ValueError("scripted WOTS DOUT must be exactly 16 bytes")
+        self._system = system
+        self._scripts = {
+            "request": tuple(request_samples),
+            "clear": tuple(clear_samples),
+        }
+        self._indices = {"request": 0, "clear": 0}
+        self._programmed = bytearray(10)
+        self._dout = bytes(dout)
+        self._initial_status, self._initial_error = initial
+        self._phase = "initial"
+        self._last_error = self._initial_error
+        self._pending_deadline_action = None
+        self._frame_base = None
+        self.commands = []
+        self.captured_deadlines = []
+
+    @property
+    def phase(self):
+        return self._phase
+
+    def _capture_frame(self):
+        # The checked byte helper has one CALL.L return cell below the
+        # WOTS-owned frame while its MMIO instruction is in flight.
+        self._frame_base = int(self._system.cpu.regs[15]) + 8
+
+    def _capture_deadlines(self, command):
+        if self._frame_base is None:
+            raise AssertionError("scripted command has no WOTS frame")
+        values = []
+        for offset in (32, 40):
+            address = self._frame_base + offset
+            values.append(int.from_bytes(
+                self._system._shared_mem[address:address + 8],
+                "little",
+            ))
+        self.captured_deadlines.append((command, *values))
+
+    def _apply_deadline(self, action):
+        if action is None:
+            return
+        if self._frame_base is None:
+            raise AssertionError("scripted deadline action has no WOTS frame")
+        if action == "zero":
+            deadline = 0
+        else:
+            elapsed = int(self._system.cpu.regs[12]) & self._MASK64
+            if action == "equal":
+                deadline = elapsed
+            elif action == "late":
+                if elapsed == 0:
+                    raise AssertionError("terminal sample has zero elapsed time")
+                deadline = elapsed - 1
+            elif action == "in-time":
+                deadline = (elapsed + 1) & self._MASK64
+            else:
+                raise AssertionError(
+                    f"unknown scripted deadline action {action!r}"
+                )
+        offset = 32 if self._phase == "request" else 40
+        address = self._frame_base + offset
+        self._system._shared_mem[address:address + 8] = deadline.to_bytes(
+            8,
+            "little",
+        )
+
+    def _next_status_sample(self):
+        script = self._scripts[self._phase]
+        index = self._indices[self._phase]
+        sample = script[min(index, len(script) - 1)]
+        self._indices[self._phase] = index + 1
+        status, error, action = sample
+        self._last_error = error
+
+        reads_error = (
+            self._phase == "request" and status in (2, 3)
+        ) or (
+            self._phase == "clear" and status == 0
+        )
+        if reads_error:
+            self._pending_deadline_action = action
+        else:
+            self._pending_deadline_action = None
+            self._apply_deadline(action)
+        return status
+
+    def read8(self, offset):
+        if 0 <= offset < 10:
+            return self._programmed[offset]
+        if offset == 0x0A:
+            if self._phase == "initial":
+                return self._initial_status
+            return self._next_status_sample()
+        if offset == 0x0B:
+            if self._phase == "initial":
+                return self._initial_error
+            self._apply_deadline(self._pending_deadline_action)
+            self._pending_deadline_action = None
+            return self._last_error
+        if 0x10 <= offset < 0x20:
+            return self._dout[offset - 0x10]
+        return 0
+
+    def write8(self, offset, value):
+        value &= 0xFF
+        if 0 <= offset < 10:
+            self._programmed[offset] = value
+            return
+        if offset != 0x0A:
+            return
+        self.commands.append(value)
+        if value == 1:
+            self._capture_frame()
+            self._capture_deadlines(value)
+            self._phase = "request"
+            self._indices["request"] = 0
+        elif value == 2:
+            self._capture_frame()
+            self._capture_deadlines(value)
+            self._phase = "clear"
+            self._indices["clear"] = 0
+
+
+class TestBIOSWotsCheckpoint3(unittest.TestCase):
+    """Checked BIOS WOTS word over the strict-cycle DMA/main-bus path."""
+
+    _CONTEXT_ADDR = 0x1E000
+    _DEST_ADDR = 0x1E100
+    _SCRIPT_WOTS_BASE = 0x0D00
+    _MASK64 = (1 << 64) - 1
+    _MMIO_LOAD_LABELS = (
+        ("_wots_initial_status_address", 0x0A),
+        ("_wots_context_program_address", 0x00),
+        ("_wots_steps_program_address", 0x08),
+        ("_wots_request_status_address", 0x0A),
+        ("_wots_request_error_address", 0x0B),
+        ("_wots_dout_address", 0x10),
+        ("_wots_clear_command_address", 0x0A),
+        ("_wots_clear_status_address", 0x0A),
+        ("_wots_clear_error_address", 0x0B),
+    )
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+        self._bios_labels = self._bios_harness._bios_labels
+
+    def _boot_bios(self):
+        return self._bios_harness._boot_bios()
+
+    @staticmethod
+    def _reference(context, start, steps):
+        """Independent SHAKE256 oracle for the selected WOTS chain ABI."""
+        seed = context[:16]
+        adrs = context[16:48]
+        node = context[48:64]
+        for step in range(steps):
+            step_adrs = bytearray(adrs)
+            step_adrs[28:32] = (start + step).to_bytes(4, "big")
+            node = hashlib.shake_256(seed + step_adrs + node).digest(16)
+        return node
+
+    def _run_forth_cycle(
+        self,
+        sys_obj,
+        buf,
+        input_lines,
+        *,
+        max_cycles=2_000_000,
+        max_instructions=2_000_000,
+    ):
+        """Run a short Forth command through authoritative strict-cycle DMA."""
+        payload = ("\n".join(input_lines) + "\nBYE\n").encode()
+        pos = 0
+        cycles = 0
+        instructions = 0
+
+        while cycles < max_cycles and instructions < max_instructions:
+            if sys_obj.cpu.halted:
+                break
+            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                if pos >= len(payload):
+                    break
+                chunk = _next_line_chunk(payload, pos)
+                sys_obj.uart.inject_input(chunk)
+                pos += len(chunk)
+                continue
+
+            result = sys_obj.run_cycle_batch(
+                min(4096, max_cycles - cycles),
+                max_instructions=min(
+                    100_000,
+                    max_instructions - instructions,
+                ),
+            )
+            cycles += int(result.system_cycles_advanced)
+            instructions += int(result.instructions_executed)
+            if (
+                result.system_cycles_advanced == 0
+                and result.instructions_executed == 0
+                and not sys_obj.cpu.halted
+                and not sys_obj.cpu.idle
+            ):
+                self.fail("strict-cycle WOTS runner made no progress")
+        else:
+            self.fail(
+                "strict-cycle WOTS runner exhausted its infrastructure "
+                "safety budget before the Forth driver terminated "
+                f"(cycles={cycles}/{max_cycles}, "
+                f"instructions={instructions}/{max_instructions})"
+            )
+
+        return uart_text(buf)
+
+    @staticmethod
+    def _context_fixture():
+        return bytes((index * 29 + 7) & 0xFF for index in range(64))
+
+    @staticmethod
+    def _load_u64(sys_obj, address):
+        return int.from_bytes(sys_obj.cpu.mem[address:address + 8], "little")
+
+    @staticmethod
+    def _store_u64(sys_obj, address, value):
+        sys_obj.cpu.mem[address:address + 8] = int(value).to_bytes(
+            8,
+            "little",
+        )
+
+    def _prepare_valid_call(self, sys_obj, *, saved_perf=0):
+        context = self._context_fixture()
+        sentinel = bytes((0xA5,)) * 16
+        sys_obj.cpu.mem[
+            self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+        ] = context
+        sys_obj.cpu.mem[
+            self._DEST_ADDR:self._DEST_ADDR + 16
+        ] = sentinel
+        sys_obj.cpu.csr_write(CSR_PERF_CTRL, saved_perf)
+        return context, sentinel
+
+    def _patch_wots_mmio_base(self, sys_obj, fake_base):
+        """Redirect every independent WOTS literal to one test device."""
+        for label, offset in self._MMIO_LOAD_LABELS:
+            address = self._bios_labels[label]
+            real_load = assemble(
+                f"ldi64 r7, {MMIO_START + WOTS_BASE + offset}"
+            )
+            fake_load = assemble(
+                f"ldi64 r7, {MMIO_START + fake_base + offset}"
+            )
+            self.assertEqual(len(fake_load), len(real_load))
+            self.assertEqual(
+                bytes(sys_obj.cpu.mem[address:address + len(real_load)]),
+                real_load,
+            )
+            for index, value in enumerate(fake_load):
+                sys_obj.cpu.mem_write8(address + index, value)
+
+    def _boot_scripted_wots(
+        self,
+        *,
+        request_samples,
+        clear_samples,
+        dout=bytes(range(16)),
+        initial=(0, 0),
+    ):
+        sys_obj, buf = self._boot_bios()
+        existing, _ = sys_obj.bus.find_device(self._SCRIPT_WOTS_BASE)
+        self.assertIsNone(existing)
+        device = _ScriptedWotsMMIO(
+            sys_obj,
+            self._SCRIPT_WOTS_BASE,
+            request_samples=request_samples,
+            clear_samples=clear_samples,
+            dout=dout,
+            initial=initial,
+        )
+        sys_obj.bus.register(device)
+        self._patch_wots_mmio_base(sys_obj, self._SCRIPT_WOTS_BASE)
+        return sys_obj, buf, device
+
+    def _assert_released_and_scrubbed(self, sys_obj):
+        labels = self._bios_labels
+        self.assertEqual(
+            self._load_u64(sys_obj, labels["var_crypto_owner_core"]),
+            self._MASK64,
+        )
+        for name in (
+            "var_crypto_owner_task",
+            "var_crypto_owner_kind",
+            "var_crypto_mode",
+            "var_crypto_phase",
+            "var_crypto_window_offset",
+        ):
+            self.assertEqual(self._load_u64(sys_obj, labels[name]), 0)
+        scratch = labels["crypto_scratch"]
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[scratch:scratch + 200]),
+            bytes(200),
+        )
+        self.assertFalse(sys_obj.spinlock.locked[8])
+        self.assertEqual(sys_obj.spinlock.owner[8], -1)
+        self.assertEqual(sys_obj.wots.read8(0x0A), 0)
+        self.assertEqual(sys_obj.wots.read8(0x0B), 0)
+        self.assertEqual(
+            bytes(sys_obj.wots.read8(0x10 + index) for index in range(16)),
+            bytes(16),
+        )
+
+    def _assert_guard_retained_fail_closed(self, sys_obj):
+        self.assertEqual(
+            self._load_u64(
+                sys_obj,
+                self._bios_labels["var_crypto_owner_core"],
+            ),
+            0,
+        )
+        self.assertEqual(
+            self._load_u64(
+                sys_obj,
+                self._bios_labels["var_crypto_owner_kind"],
+            ),
+            3,
+        )
+        self.assertTrue(sys_obj.spinlock.locked[8])
+        self.assertEqual(sys_obj.spinlock.owner[8], 0)
+        scratch = self._bios_labels["crypto_scratch"]
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[scratch:scratch + 200]),
+            bytes(200),
+        )
+
+    def test_secondary_core_uses_physical_geometry_and_wipes_frame(self):
+        """R2 remains a zone top while SysInfo classifies the full span."""
+        sys_obj = make_system(ram_kib=1024, num_cores=2)
+        capture_uart(sys_obj)
+        sys_obj.load_binary(0, self._bios_harness.bios_code)
+        self._bios_harness._register_accel_hooks(sys_obj)
+        sys_obj.boot()
+        for _ in range(3_000_000):
+            if all(core.idle for core in sys_obj.cores[:2]):
+                break
+            sys_obj.step()
+        else:
+            self.fail("two-core BIOS did not reach its idle topology")
+
+        core = sys_obj.cores[1]
+        saved_r2 = int(core.regs[2])
+        entry_rsp = int(core.regs[15])
+        initial_dsp = int(core.regs[14])
+        self.assertEqual(saved_r2, 0xF0000)
+        self.assertEqual(entry_rsp, saved_r2)
+        self.assertEqual(initial_dsp, saved_r2 - 0x8000)
+
+        # This is mapped Bank 0 memory, but it lies above the secondary
+        # core's stack-zone top.  Treating R2 as Bank 0 geometry would call
+        # it non-Bank-0 and later return RANGE instead of PROTECTED.
+        context = 0xF8000
+        destination = self._DEST_ADDR
+        sentinel = bytes((0xA5,)) * 16
+        sys_obj.cpu.mem[destination:destination + 16] = sentinel
+        before_device = bytes(sys_obj.wots.read8(i) for i in range(32))
+
+        stack = initial_dsp - 32
+        self._store_u64(sys_obj, stack + 0, destination)
+        self._store_u64(sys_obj, stack + 8, 0)       # steps
+        self._store_u64(sys_obj, stack + 16, 0)      # start
+        self._store_u64(sys_obj, stack + 24, context)
+        core.regs[14] = stack
+
+        trampoline = 0x22000
+        sys_obj.load_binary(
+            trampoline,
+            assemble(
+                f"ldi64 r11, {self._bios_labels['w_wots_chain']}\n"
+                "call.l r11\n"
+                "halt\n"
+            ),
+        )
+        core.pc = trampoline
+        core.halted = False
+        core.idle = False
+        for _ in range(256):
+            if core.halted:
+                break
+            result = sys_obj.run_cycle_batch(
+                4096,
+                max_instructions=100_000,
+            )
+            if (
+                result.system_cycles_advanced == 0
+                and result.instructions_executed == 0
+            ):
+                self.fail("secondary-core WOTS trampoline made no progress")
+        else:
+            self.fail("secondary-core WOTS trampoline did not halt")
+
+        self.assertEqual(core.regs[2], saved_r2)
+        self.assertEqual(core.regs[15], entry_rsp)
+        self.assertEqual(core.regs[14], initial_dsp - 8)
+        self.assertEqual(self._load_u64(sys_obj, core.regs[14]), 4)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[destination:destination + 16]),
+            sentinel,
+        )
+        self.assertEqual(
+            bytes(sys_obj.wots.read8(i) for i in range(32)),
+            before_device,
+        )
+
+        # The trampoline CALL cell is immediately above this interval.
+        # Every byte owned by the 80-byte WOTS frame must remain erased.
+        frame_start = entry_rsp - 8 - 80
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[frame_start:frame_start + 80]),
+            bytes(80),
+        )
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_zero_and_nonzero_vectors_restore_both_perf_enable_states(self):
+        """The word stages, clears, publishes, and restores PERF bit 0."""
+        context = self._context_fixture()
+        for marker, start, steps, saved_perf in (
+            ("ZERO", 15, 0, 0),
+            ("CHAIN", 4, 3, 1),
+        ):
+            with self.subTest(marker=marker):
+                sys_obj, buf = self._boot_bios()
+                sys_obj.cpu.mem[
+                    self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+                ] = context
+                sys_obj.cpu.mem[
+                    self._DEST_ADDR:self._DEST_ADDR + 16
+                ] = bytes((0xA5,)) * 16
+                sys_obj.cpu.csr_write(CSR_PERF_CTRL, saved_perf)
+
+                text = self._run_forth_cycle(sys_obj, buf, [
+                    f'."  {marker}=" {self._CONTEXT_ADDR} {start} '
+                    f'{steps} {self._DEST_ADDR} WOTS-CHAIN .',
+                ])
+
+                self.assertIn(f"{marker}=0 ", text)
+                self.assertEqual(
+                    bytes(
+                        sys_obj.cpu.mem[
+                            self._DEST_ADDR:self._DEST_ADDR + 16
+                        ]
+                    ),
+                    self._reference(context, start, steps),
+                )
+                self.assertEqual(
+                    sys_obj.cpu.csr_read(CSR_PERF_CTRL),
+                    saved_perf,
+                )
+                self._assert_released_and_scrubbed(sys_obj)
+
+    def test_existing_native_owner_maps_to_state_and_restores_perf_one(self):
+        """A WOTS-owned shared Keccak bank reports checked STATE status."""
+        sys_obj, buf = self._boot_bios()
+        _, sentinel = self._prepare_valid_call(sys_obj, saved_perf=1)
+        self.assertTrue(sys_obj.cpu._cs._crypto_sha3_test_claim_wots())
+        try:
+            text = self._run_forth_cycle(sys_obj, buf, [
+                f'."  OWNER=" {self._CONTEXT_ADDR} 1 1 '
+                f'{self._DEST_ADDR} WOTS-CHAIN .',
+            ])
+        finally:
+            sys_obj.cpu._cs._crypto_sha3_test_release_wots()
+
+        self.assertIn("OWNER=2 ", text)
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    self._DEST_ADDR:self._DEST_ADDR + 16
+                ]
+            ),
+            sentinel,
+        )
+        self.assertEqual(sys_obj.cpu.csr_read(CSR_PERF_CTRL), 1)
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_forced_native_dma_faults_map_and_cleanup(self):
+        """Target fault is hardware; memory timeout retains timeout status."""
+        cases = (
+            (
+                "TARGET",
+                _mp64_accel.BusFault.TARGET_FAULT,
+                6,
+            ),
+            (
+                "MEMORY",
+                _mp64_accel.BusFault.MEMORY_TIMEOUT,
+                5,
+            ),
+        )
+        for marker, fault, expected_status in cases:
+            with self.subTest(marker=marker):
+                sys_obj, buf = self._boot_bios()
+                _, sentinel = self._prepare_valid_call(
+                    sys_obj,
+                    saved_perf=1,
+                )
+                sys_obj._native_system._test_force_next_wots_dma_fault(
+                    fault
+                )
+
+                text = self._run_forth_cycle(sys_obj, buf, [
+                    f'."  {marker}=" {self._CONTEXT_ADDR} 0 0 '
+                    f'{self._DEST_ADDR} WOTS-CHAIN .',
+                ])
+
+                self.assertIn(f"{marker}={expected_status} ", text)
+                self.assertEqual(
+                    bytes(
+                        sys_obj.cpu.mem[
+                            self._DEST_ADDR:self._DEST_ADDR + 16
+                        ]
+                    ),
+                    sentinel,
+                )
+                self.assertEqual(
+                    sys_obj.cpu.csr_read(CSR_PERF_CTRL),
+                    1,
+                )
+                self._assert_released_and_scrubbed(sys_obj)
+
+    def test_native_acceptance_suppression_reaches_checked_timeout(self):
+        """The production test hook exercises ERROR=8 and ordinary CLEAR."""
+        sys_obj, buf = self._boot_bios()
+        _, sentinel = self._prepare_valid_call(sys_obj, saved_perf=0)
+        owner = sys_obj._native_system
+        owner._test_set_wots_dma_acceptance_suppressed(True)
+        try:
+            text = self._run_forth_cycle(sys_obj, buf, [
+                f'."  ACCEPT=" {self._CONTEXT_ADDR} 0 0 '
+                f'{self._DEST_ADDR} WOTS-CHAIN .',
+            ])
+        finally:
+            owner._test_set_wots_dma_acceptance_suppressed(False)
+
+        self.assertIn("ACCEPT=5 ", text)
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    self._DEST_ADDR:self._DEST_ADDR + 16
+                ]
+            ),
+            sentinel,
+        )
+        self.assertEqual(sys_obj.cpu.csr_read(CSR_PERF_CTRL), 0)
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_scripted_request_and_clear_deadline_boundaries(self):
+        """Terminal equality wins; late terminal and CLEAR remain private."""
+        dout = bytes((0xE0 + index) & 0xFF for index in range(16))
+        cases = (
+            (
+                "EQUAL",
+                ((2, 0, "equal"),),
+                ((0, 0, "equal"),),
+                0,
+                True,
+                False,
+            ),
+            (
+                "REQUEST-LATE",
+                ((2, 0, "late"),),
+                ((0, 0, "equal"),),
+                5,
+                False,
+                False,
+            ),
+            (
+                "CLEAR-LATE",
+                ((2, 0, "equal"),),
+                ((0, 0, "late"),),
+                5,
+                False,
+                True,
+            ),
+            (
+                "CLEAR-BUSY",
+                ((2, 0, "equal"),),
+                ((1, 0, None),),
+                5,
+                False,
+                True,
+            ),
+        )
+        for (
+            marker,
+            request_samples,
+            clear_samples,
+            expected_status,
+            publishes,
+            fail_closed,
+        ) in cases:
+            with self.subTest(marker=marker):
+                sys_obj, buf, device = self._boot_scripted_wots(
+                    request_samples=request_samples,
+                    clear_samples=clear_samples,
+                    dout=dout,
+                )
+                _, sentinel = self._prepare_valid_call(
+                    sys_obj,
+                    saved_perf=0,
+                )
+
+                text = self._run_forth_cycle(sys_obj, buf, [
+                    f'."  {marker}=" {self._CONTEXT_ADDR} 2 1 '
+                    f'{self._DEST_ADDR} WOTS-CHAIN .',
+                ])
+
+                self.assertIn(f"{marker}={expected_status} ", text)
+                self.assertEqual(device.commands, [1, 2])
+                self.assertEqual(device.phase, "clear")
+                expected_destination = dout if publishes else sentinel
+                self.assertEqual(
+                    bytes(
+                        sys_obj.cpu.mem[
+                            self._DEST_ADDR:self._DEST_ADDR + 16
+                        ]
+                    ),
+                    expected_destination,
+                )
+                self.assertEqual(
+                    sys_obj.cpu.csr_read(CSR_PERF_CTRL),
+                    0,
+                )
+                if fail_closed:
+                    self._assert_guard_retained_fail_closed(sys_obj)
+                    self.assertEqual(
+                        bytes(sys_obj.wots.read8(i) for i in range(32)),
+                        bytes(32),
+                    )
+                else:
+                    self._assert_released_and_scrubbed(sys_obj)
+
+    def test_scripted_deadlines_match_advertised_topology_and_steps(self):
+        """The firmware frame retains both contract-derived deadlines."""
+        port_count = 9
+        steps = 3
+        sys_obj, buf, device = self._boot_scripted_wots(
+            request_samples=((2, 0, None),),
+            clear_samples=((0, 0, None),),
+        )
+        sys_obj.sysinfo.num_bus_ports = port_count
+        sys_obj.sysinfo._regs[0x68] = port_count
+        self._prepare_valid_call(sys_obj)
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            f'."  FORMULA=" {self._CONTEXT_ADDR} 4 {steps} '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+        ])
+
+        beat_cycles = (port_count - 1) * 65_790 + 257
+        request_cycles = beat_cycles * 64 + steps * 32 + 640
+        clear_cycles = beat_cycles + 224
+        self.assertIn("FORMULA=0 ", text)
+        self.assertEqual(device.commands, [1, 2])
+        self.assertEqual(
+            device.captured_deadlines,
+            [
+                (1, request_cycles, clear_cycles),
+                (2, request_cycles, clear_cycles),
+            ],
+        )
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_scripted_busy_request_expires_at_derived_deadline(self):
+        """A persistent BUSY request times out without a fake terminal."""
+        sys_obj, buf, device = self._boot_scripted_wots(
+            request_samples=((1, 0, None),),
+            clear_samples=((0, 0, None),),
+        )
+        sys_obj.sysinfo.num_bus_ports = 1
+        sys_obj.sysinfo._regs[0x68] = 1
+        _, sentinel = self._prepare_valid_call(sys_obj)
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            f'."  BUSY-TIMEOUT=" {self._CONTEXT_ADDR} 0 0 '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+        ])
+
+        self.assertIn("BUSY-TIMEOUT=5 ", text)
+        self.assertEqual(device.commands, [1, 2])
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    self._DEST_ADDR:self._DEST_ADDR + 16
+                ]
+            ),
+            sentinel,
+        )
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_scripted_request_protocol_precedes_late_elapsed(self):
+        """Impossible terminal pairs stay HARDWARE even when late."""
+        cases = (
+            ("STATUS-4", (4, 0, "zero")),
+            ("IDLE", (0, 0, "zero")),
+            ("DONE-ERROR", (2, 1, "zero")),
+            ("ERROR-ZERO", (3, 0, "zero")),
+            ("ERROR-RESERVED", (3, 10, "zero")),
+        )
+        for marker, request_sample in cases:
+            with self.subTest(marker=marker):
+                sys_obj, buf, device = self._boot_scripted_wots(
+                    request_samples=(request_sample,),
+                    clear_samples=((0, 0, "equal"),),
+                )
+                _, sentinel = self._prepare_valid_call(sys_obj)
+
+                text = self._run_forth_cycle(sys_obj, buf, [
+                    f'."  {marker}=" {self._CONTEXT_ADDR} 2 1 '
+                    f'{self._DEST_ADDR} WOTS-CHAIN .',
+                ])
+
+                self.assertIn(f"{marker}=6 ", text)
+                self.assertEqual(device.commands, [1, 2])
+                self.assertEqual(
+                    bytes(
+                        sys_obj.cpu.mem[
+                            self._DEST_ADDR:self._DEST_ADDR + 16
+                        ]
+                    ),
+                    sentinel,
+                )
+                self._assert_released_and_scrubbed(sys_obj)
+
+    def test_scripted_initial_and_clear_protocol_failures(self):
+        """Start incoherence releases after CLEAR; bad CLEAR fails closed."""
+        cases = (
+            (
+                "INITIAL-BUSY",
+                (1, 0),
+                ((0, 0, "equal"),),
+                [2],
+                False,
+            ),
+            (
+                "INITIAL-ERROR",
+                (0, 1),
+                ((0, 0, "equal"),),
+                [2],
+                False,
+            ),
+            (
+                "CLEAR-DONE",
+                (0, 0),
+                ((2, 0, "zero"),),
+                [1, 2],
+                True,
+            ),
+            (
+                "CLEAR-ERROR",
+                (0, 0),
+                ((0, 1, "zero"),),
+                [1, 2],
+                True,
+            ),
+        )
+        for marker, initial, clear_samples, commands, fail_closed in cases:
+            with self.subTest(marker=marker):
+                sys_obj, buf, device = self._boot_scripted_wots(
+                    initial=initial,
+                    request_samples=((2, 0, "equal"),),
+                    clear_samples=clear_samples,
+                )
+                _, sentinel = self._prepare_valid_call(sys_obj)
+
+                text = self._run_forth_cycle(sys_obj, buf, [
+                    f'."  {marker}=" {self._CONTEXT_ADDR} 2 1 '
+                    f'{self._DEST_ADDR} WOTS-CHAIN .',
+                ])
+
+                self.assertIn(f"{marker}=6 ", text)
+                self.assertEqual(device.commands, commands)
+                self.assertEqual(
+                    bytes(
+                        sys_obj.cpu.mem[
+                            self._DEST_ADDR:self._DEST_ADDR + 16
+                        ]
+                    ),
+                    sentinel,
+                )
+                if fail_closed:
+                    self._assert_guard_retained_fail_closed(sys_obj)
+                else:
+                    self._assert_released_and_scrubbed(sys_obj)
+
+    def test_context_destination_overlap_uses_the_staged_context(self):
+        """Publishing over the input node happens only after DMA and CLEAR."""
+        sys_obj, buf = self._boot_bios()
+        context = self._context_fixture()
+        destination = self._CONTEXT_ADDR + 48
+        sys_obj.cpu.mem[
+            self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+        ] = context
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            f'."  OVERLAP=" {self._CONTEXT_ADDR} 3 2 '
+            f'{destination} WOTS-CHAIN .',
+        ])
+
+        self.assertIn("OVERLAP=0 ", text)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[self._CONTEXT_ADDR:destination]),
+            context[:48],
+        )
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[destination:destination + 16]),
+            self._reference(context, 3, 2),
+        )
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_unsupported_has_priority_and_touches_no_transaction_state(self):
+        """A clear WOTS capability wins over malformed cells and all mutation."""
+        sys_obj, buf = self._boot_bios()
+        sys_obj.sysinfo.crypto_caps &= ~0x08
+        sys_obj.sysinfo._regs[0x60] = sys_obj.sysinfo.crypto_caps
+        sys_obj.cpu.csr_write(CSR_PERF_CTRL, 0)
+        before = bytes(sys_obj.wots.read8(index) for index in range(32))
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            '."  UNSUPPORTED=" -1 -1 -1 -1 WOTS-CHAIN .',
+        ])
+
+        self.assertIn("UNSUPPORTED=1 ", text)
+        self.assertEqual(
+            bytes(sys_obj.wots.read8(index) for index in range(32)),
+            before,
+        )
+        self.assertEqual(sys_obj.cpu.csr_read(CSR_PERF_CTRL), 0)
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_scalar_range_and_protected_spans_preserve_destination(self):
+        """All complete preflight failures precede guard and device mutation."""
+        sys_obj, buf = self._boot_bios()
+        context = self._context_fixture()
+        protected = self._bios_labels["crypto_scratch"]
+        sys_obj.cpu.mem[
+            self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+        ] = context
+        sys_obj.cpu.mem[
+            self._DEST_ADDR:self._DEST_ADDR + 16
+        ] = bytes((0xA5,)) * 16
+        before = bytes(sys_obj.wots.read8(index) for index in range(32))
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            f'."  START=" {self._CONTEXT_ADDR} 16 0 '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+            f'."  SUM=" {self._CONTEXT_ADDR} 15 1 '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+            f'."  ADDRESS=" -1 0 0 {self._DEST_ADDR} WOTS-CHAIN .',
+            f'."  CONTEXT-P=" {protected} 0 0 '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+            f'."  DEST-P=" {self._CONTEXT_ADDR} 0 0 '
+            f'{protected} WOTS-CHAIN .',
+        ])
+
+        for marker in ("START", "SUM", "ADDRESS"):
+            self.assertIn(f"{marker}=3 ", text)
+        for marker in ("CONTEXT-P", "DEST-P"):
+            self.assertIn(f"{marker}=4 ", text)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[self._DEST_ADDR:self._DEST_ADDR + 16]),
+            bytes((0xA5,)) * 16,
+        )
+        self.assertEqual(
+            bytes(sys_obj.wots.read8(index) for index in range(32)),
+            before,
+        )
+        self._assert_released_and_scrubbed(sys_obj)
+
+    def test_zero_or_overflowing_topology_fails_before_guard_and_perf(self):
+        """NUM_BUS_PORTS arithmetic is checked without a firmware cap."""
+        context = self._context_fixture()
+        for marker, port_count in (
+            ("ZERO-PORTS", 0),
+            ("OVERFLOW", 1 << 63),
+        ):
+            with self.subTest(marker=marker):
+                sys_obj, buf = self._boot_bios()
+                sys_obj.cpu.mem[
+                    self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+                ] = context
+                sys_obj.cpu.mem[
+                    self._DEST_ADDR:self._DEST_ADDR + 16
+                ] = bytes((0xA5,)) * 16
+                sys_obj.sysinfo.num_bus_ports = port_count
+                sys_obj.sysinfo._regs[0x68] = port_count
+                sys_obj.cpu.csr_write(CSR_PERF_CTRL, 0)
+                before = bytes(
+                    sys_obj.wots.read8(index) for index in range(32)
+                )
+
+                text = self._run_forth_cycle(sys_obj, buf, [
+                    f'."  {marker}=" {self._CONTEXT_ADDR} 0 0 '
+                    f'{self._DEST_ADDR} WOTS-CHAIN .',
+                ])
+
+                self.assertIn(f"{marker}=6 ", text)
+                self.assertEqual(
+                    bytes(
+                        sys_obj.cpu.mem[
+                            self._DEST_ADDR:self._DEST_ADDR + 16
+                        ]
+                    ),
+                    bytes((0xA5,)) * 16,
+                )
+                self.assertEqual(
+                    bytes(sys_obj.wots.read8(i) for i in range(32)),
+                    before,
+                )
+                self.assertEqual(sys_obj.cpu.csr_read(CSR_PERF_CTRL), 0)
+                self._assert_released_and_scrubbed(sys_obj)
+
+    def test_guard_contention_returns_state_without_touching_wots(self):
+        """The portable guard is one nonblocking attempt after preflight."""
+        sys_obj, buf = self._boot_bios()
+        context = self._context_fixture()
+        sys_obj.cpu.mem[
+            self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+        ] = context
+        sys_obj.cpu.mem[
+            self._DEST_ADDR:self._DEST_ADDR + 16
+        ] = bytes((0xA5,)) * 16
+        sys_obj.spinlock.locked[8] = True
+        sys_obj.spinlock.owner[8] = 1
+        before = bytes(sys_obj.wots.read8(index) for index in range(32))
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            f'."  BUSY=" {self._CONTEXT_ADDR} 0 0 '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+        ])
+
+        self.assertIn("BUSY=2 ", text)
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[self._DEST_ADDR:self._DEST_ADDR + 16]),
+            bytes((0xA5,)) * 16,
+        )
+        self.assertEqual(
+            bytes(sys_obj.wots.read8(index) for index in range(32)),
+            before,
+        )
+        self.assertEqual(
+            self._load_u64(
+                sys_obj,
+                self._bios_labels["var_crypto_owner_core"],
+            ),
+            self._MASK64,
+        )
+        self.assertEqual(
+            self._load_u64(
+                sys_obj,
+                self._bios_labels["var_crypto_owner_kind"],
+            ),
+            0,
+        )
+
+    def test_faulting_clear_restores_perf_and_retains_guard_fail_closed(self):
+        """A CLEAR bus fault suppresses publication and requires reset."""
+        sys_obj, buf = self._boot_bios()
+        context = self._context_fixture()
+        sys_obj.cpu.mem[
+            self._CONTEXT_ADDR:self._CONTEXT_ADDR + 64
+        ] = context
+        sys_obj.cpu.mem[
+            self._DEST_ADDR:self._DEST_ADDR + 16
+        ] = bytes((0xA5,)) * 16
+        sys_obj.cpu.csr_write(CSR_PERF_CTRL, 1)
+
+        address_load = self._bios_labels["_wots_clear_command_address"]
+        command_address = MMIO_START + WOTS_BASE + 0x0A
+        readonly_address = MMIO_START + WOTS_BASE + 0x0B
+        command_load = assemble(f"ldi64 r7, {command_address}")
+        faulting_load = assemble(f"ldi64 r7, {readonly_address}")
+        self.assertEqual(len(faulting_load), len(command_load))
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    address_load:address_load + len(command_load)
+                ]
+            ),
+            command_load,
+        )
+        for offset, value in enumerate(faulting_load):
+            sys_obj.cpu.mem_write8(address_load + offset, value)
+
+        text = self._run_forth_cycle(sys_obj, buf, [
+            f'."  CLEAR-FAULT=" {self._CONTEXT_ADDR} 2 1 '
+            f'{self._DEST_ADDR} WOTS-CHAIN .',
+        ])
+
+        self.assertIn("CLEAR-FAULT=6 ", text)
+        self.assertNotIn("BUS FAULT", text.upper())
+        self.assertEqual(
+            bytes(sys_obj.cpu.mem[self._DEST_ADDR:self._DEST_ADDR + 16]),
+            bytes((0xA5,)) * 16,
+        )
+        self.assertEqual(sys_obj.cpu.csr_read(CSR_PERF_CTRL), 1)
+        self._assert_guard_retained_fail_closed(sys_obj)
+
+
 class TestBIOSSHA2(unittest.TestCase):
     """Focused BIOS qualification for checked SHA-2 transaction cleanup."""
 
@@ -13508,7 +14563,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 474)
+        self.assertEqual(len(seen), 472)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -14876,11 +15931,17 @@ class TestBIOSEntropyFill(unittest.TestCase):
         return bytes(sys_obj.cpu.mem[start:start + length])
 
     def test_dictionary_append_preserves_every_older_link(self):
-        """The full-TACC ABI extends the checked caller-span tail."""
+        """WOTS appends without changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
             labels["latest_entry"],
-            labels["d_tacc_claim_q"],
+            labels["d_wots_chain"],
+        )
+        wots_previous = int.from_bytes(
+            self._bios_harness.bios_code[
+                labels["d_wots_chain"]:labels["d_wots_chain"] + 8
+            ],
+            "little",
         )
         claim_previous = int.from_bytes(
             self._bios_harness.bios_code[
@@ -14907,6 +15968,7 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
+        self.assertEqual(wots_previous, labels["d_tacc_claim_q"])
         self.assertEqual(claim_previous, labels["d_tacc_status_fetch"])
         self.assertEqual(caller_span_previous, labels["d_entropy_ready"])
         self.assertEqual(ready_previous, labels["d_entropy_fill"])
@@ -32677,57 +33739,6 @@ class TestKDOSWInput(_KDOSTestBase):
         self.assertIn("5 ", text)      # length = 5
         # Verify dump file was written
         self.assertTrue(os.path.exists(dump_path))
-
-
-# ===========================================================================
-#  Checkpoint-2 retired WOTS reservation
-# ===========================================================================
-
-class TestCheckpoint2WotsReservation(unittest.TestCase):
-    """The old direct WOTS prototype is decoded but unadvertised and inert."""
-
-    def test_capability_clear_and_python_reservation_inert(self):
-        """The micro-core bus reservation neither runs nor touches memory."""
-        sys_obj = make_system()
-        self.assertEqual(WOTS_BASE, 0x08A0)
-        self.assertEqual(sys_obj.sysinfo.crypto_caps & (1 << 3), 0)
-        device, offset = sys_obj.bus.find_device(WOTS_BASE)
-        self.assertIs(device, sys_obj.wots)
-        self.assertEqual(offset, 0)
-
-        start = 0x2000
-        before = bytes(range(64))
-        sys_obj.cpu.mem[start:start + len(before)] = before
-        for register, value in (
-            (0x00, start & 0xFF), (0x01, (start >> 8) & 0xFF),
-            (0x04, (start + 16) & 0xFF),
-            (0x05, ((start + 16) >> 8) & 0xFF),
-            (0x08, (start + 48) & 0xFF),
-            (0x09, ((start + 48) >> 8) & 0xFF),
-            (0x0C, 15), (0x0D, 7), (0x0E, 1),
-        ):
-            device.write8(register, value)
-        self.assertEqual(device.read8(0x0E), 0)
-        self.assertEqual(device.read8(0x0F), 0)
-        self.assertEqual(
-            bytes(device.read8(0x10 + i) for i in range(16)),
-            bytes(16),
-        )
-        self.assertEqual(bytes(sys_obj.cpu.mem[start:start + len(before)]), before)
-
-    def test_full_core_direct_go_is_inert(self):
-        """Legacy GO cannot claim SHA3, report done, or publish DOUT."""
-        sys_obj = make_system()
-        wots_mmio = MMIO_START + WOTS_BASE
-        sha3_status = MMIO_START + 0x0781
-        sys_obj.cpu.mem_write8(wots_mmio + 0x0C, 15)
-        sys_obj.cpu.mem_write8(wots_mmio + 0x0E, 1)
-        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x0E), 0)
-        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x0F), 0)
-        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x10), 0)
-        self.assertEqual(sys_obj.cpu.mem_read8(wots_mmio + 0x1F), 0)
-        self.assertEqual(sys_obj.cpu.mem_read8(sha3_status), 0)
-        self.assertEqual(sys_obj.cpu._cs.crypto_wots_status(), 0)
 
 
 # ===========================================================================
