@@ -32,9 +32,10 @@ parameter MICRO_PER_CLUSTER = 4;           // Micro-cores per cluster
 parameter NUM_MICRO_CORES = NUM_CLUSTERS * MICRO_PER_CLUSTER;  // 12 total
 parameter NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES;       // 16 total
 
-// Bus port topology: each full core = 1 port, each cluster = 1 port
-parameter NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS;          // 7 bus ports
-parameter BUS_PORT_BITS   = 3;             // ceil(log2(7))
+// Bus port topology: full cores + clusters + NIC + disk + WOTS.
+parameter NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + 3;
+parameter BUS_PORT_BITS   = (NUM_BUS_PORTS <= 1) ? 1 :
+                            $clog2(NUM_BUS_PORTS);
 
 // Micro-core global ID mapping:
 //   Full cores:  0 – 3

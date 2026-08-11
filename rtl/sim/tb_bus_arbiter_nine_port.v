@@ -1,9 +1,10 @@
 // ============================================================================
-// tb_bus_arbiter_nine_port.v — Integrated-topology round-robin regression
+// tb_bus_arbiter_nine_port.v — Nine-port generic round-robin regression
 // ============================================================================
 //
-// The default SoC has nine physical main-bus ports:
-//   0..3 full cores, 4..6 clusters, 7 NIC DMA, 8 disk DMA.
+// This was the integrated topology before the checkpoint-3 WOTS requester was
+// appended.  Retain it as a reusable-arbiter non-power-of-two regression; the
+// current ten-port SoC topology has its own adjacent bench.
 //
 // This bench pins the non-power-of-two wrap cases that a four-port arbiter
 // cannot expose.  In particular, it proves that the held-valid safeguard
@@ -12,6 +13,7 @@
 //
 
 `timescale 1ns/1ps
+`include "mp64_pkg.vh"
 
 module tb_bus_arbiter_nine_port;
 
@@ -82,6 +84,7 @@ module tb_bus_arbiter_nine_port;
         .mem_size      (mem_size),
         .mem_rdata     (mem_rdata),
         .mem_ack       (mem_ack),
+        .mem_resp_code (BUS_RESP_OK),
         .mmio_req      (mmio_req),
         .mmio_addr     (mmio_addr),
         .mmio_wdata    (mmio_wdata),

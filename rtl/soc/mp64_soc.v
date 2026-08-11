@@ -9,10 +9,10 @@
 //   Clusters  (×3)  ─┼─→  Bus arbiter  ─┬─→  Memory subsystem ─→ Ext-mem
 //                     │                  └─→  MMIO decoder
 //                     │
-//   BIOS ROM ────────→ (mapped at addr 0x0 via memory initialisation)
+//   BIOS image ──────→ (platform-provisioned into Bank 0 at address 0)
 //
 // MMIO peripherals:  UART, Timer, Disk (SD), Mailbox, NIC,
-//                    AES, SHA-3, CRC, TRNG, Field ALU, NTT, KEM
+//                    AES, SHA-3, WOTS, CRC, TRNG, Field ALU, NTT, KEM
 //
 // Tile engines: one private engine per full core and one per microcluster
 //
@@ -33,8 +33,7 @@ module mp64_soc #(
     parameter CORES_PER_CLUSTER = 4,
     parameter MEM_DEPTH         = 16384,    // per-bank depth (×512-bit rows)
     parameter EXT_MEM_SIZE_PARAM = 0,         // ext bytes; 0 = up to VRAM_BASE
-    parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192,
-    parameter BIOS_INIT_FILE    = "rom.hex"
+    parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
@@ -82,11 +81,16 @@ module mp64_soc #(
     // ========================================================================
     localparam NIC_BUS_PORT  = NUM_CORES + NUM_CLUSTERS;
     localparam DISK_BUS_PORT = NIC_BUS_PORT + 1;
-    localparam N_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + 2;
-    localparam PORT_BITS    = $clog2(N_BUS_PORTS);
+    localparam WOTS_BUS_PORT = DISK_BUS_PORT + 1;
+    localparam N_BUS_PORTS   = WOTS_BUS_PORT + 1;
+    localparam PORT_BITS     = (N_BUS_PORTS <= 1) ? 1 :
+                               $clog2(N_BUS_PORTS);
+    localparam [N_BUS_PORTS-1:0] WOTS_FIXED_QOS_MASK =
+        {1'b1, {(N_BUS_PORTS-1){1'b0}}};
     // Checkpoint 2 qualifies reflected/raw CRC, SHA3 streaming, and public
-    // raw Keccak independently.  The reserved WOTS aperture below is inert,
-    // has no requester port, and must not advertise WOTS_CHAIN.
+    // raw Keccak independently.  The checkpoint-3 WOTS controller is wired to
+    // the appended requester and shared round service below, but capability
+    // bit 3 remains clear until its complete backend/BIOS qualification gate.
     localparam [63:0] CRYPTO_CAPS = 64'h0000_0000_0000_0007;
 
     // System-wide reset (active-high for cores, active-low for peripherals)
@@ -104,15 +108,12 @@ module mp64_soc #(
         {(NUM_CLUSTERS*CORES_PER_CLUSTER){1'b0}};
 
     // ========================================================================
-    // BIOS ROM  (64-bit × 4096 words = 32 KiB, mapped at addr 0)
+    // BIOS image  (build-sized prefix of Bank 0, mapped at address zero)
     // ========================================================================
-    // Not directly in the memory path — the BIOS is loaded into Bank 0
-    // SRAM via the INIT_FILE mechanism.  We keep a ROM copy for read-only
-    // BIOS access via MMIO if desired, but the primary execution path is
-    // through the memory subsystem which holds the code in its SRAM.
-    //
-    // For synthesis, Bank 0 SRAM can be initialised from the same hex file.
-    // For simulation, the testbench or Python model loads BIOS into memory.
+    // This SoC module has no separate BIOS ROM and does not initialize Bank 0.
+    // Simulation loaders and any eventual deployable board flow must provision
+    // the build-sized image explicitly.  The standalone mp64_bios_rom target in
+    // fpga/synth_yosys_all.tcl is a contents/resource check, not a boot path.
 
     // ========================================================================
     // CPU Cores + I-Caches
@@ -550,20 +551,12 @@ module mp64_soc #(
     //              [NUM_CORES..NIC_BUS_PORT-1] = cluster buses
     //              [NIC_BUS_PORT] = NIC byte-DMA master
     //              [DISK_BUS_PORT] = disk byte-DMA master
+    //              [WOTS_BUS_PORT] = WOTS read-only byte-DMA master
     //
-    // WAIT — I-caches also need bus access for refills.  The bus has
-    // N_PORTS master ports.  We need:
-    //   - 4 CPU data ports
-    //   - 4 I-cache refill ports
-    //   - 3 cluster ports
-    //   = 11 ports total
-    //
-    // But mp64_bus default is N_PORTS=4 (or NUM_CORES+NUM_CLUSTERS=7).
-    // I-cache refill accesses go through the *same CPU data port* since
-    // the CPU stalls while the I-cache refills — the I-cache refill bus
-    // and CPU data bus are TIME-MULTIPLEXED, not simultaneous.
-    //
-    // So we mux each core's data bus vs icache refill onto one port.
+    // Each full core's I-cache refill shares its data requester because the
+    // core stalls during refill; those two sources are time-multiplexed below.
+    // The reusable mp64_bus default is only four ports, so this top passes the
+    // complete derived core/cluster/NIC/disk/WOTS count explicitly.
 
     // Per-core muxed bus signals (icache has priority when it's refilling)
     wire [63:0] muxed_addr  [0:NUM_CORES-1];
@@ -625,6 +618,8 @@ module mp64_soc #(
                               bus_cpu_requester_id;
     wire [N_BUS_PORTS*64-1:0] bus_cpu_rdata;
     wire [N_BUS_PORTS-1:0]    bus_cpu_ready;
+    wire [N_BUS_PORTS-1:0]    bus_cpu_accept;
+    wire [N_BUS_PORTS*2-1:0]  bus_cpu_resp_code;
     wire [N_BUS_PORTS-1:0]    bus_err_w;
     wire [63:0]               nic_dma_bus_rdata;
     wire [63:0]               disk_dma_bus_rdata;
@@ -696,6 +691,31 @@ module mp64_soc #(
     assign disk_dma_ack = bus_cpu_ready[DISK_BUS_PORT];
     assign disk_dma_err = bus_err_w[DISK_BUS_PORT];
 
+    // The production WOTS controller is an ordinary read-only byte requester.
+    // ACCEPT marks capture; READY and RESP_CODE are the later terminal beat.
+    wire        wots_dma_valid;
+    wire [63:0] wots_dma_addr;
+    wire        wots_dma_accept;
+    wire [63:0] wots_dma_rdata;
+    wire        wots_dma_resp_valid;
+    wire [1:0]  wots_dma_resp_code;
+    assign bus_cpu_valid[WOTS_BUS_PORT]                 = wots_dma_valid;
+    assign bus_cpu_addr [WOTS_BUS_PORT*64 +: 64]        = wots_dma_addr;
+    assign bus_cpu_wdata[WOTS_BUS_PORT*64 +: 64]        = 64'd0;
+    assign bus_cpu_wen  [WOTS_BUS_PORT]                 = 1'b0;
+    assign bus_cpu_size [WOTS_BUS_PORT*2 +: 2]          = BUS_BYTE;
+    assign bus_cpu_port_io[WOTS_BUS_PORT]               = 1'b0;
+    assign bus_cpu_requester_valid[WOTS_BUS_PORT]       = 1'b0;
+    assign bus_cpu_requester_id[
+        WOTS_BUS_PORT*MP64_CORE_ID_BITS +: MP64_CORE_ID_BITS] =
+            {MP64_CORE_ID_BITS{1'b0}};
+    assign wots_dma_accept = bus_cpu_accept[WOTS_BUS_PORT];
+    assign wots_dma_rdata =
+        bus_cpu_rdata[WOTS_BUS_PORT*64 +: 64];
+    assign wots_dma_resp_valid = bus_cpu_ready[WOTS_BUS_PORT];
+    assign wots_dma_resp_code =
+        bus_cpu_resp_code[WOTS_BUS_PORT*2 +: 2];
+
     // Unpack bus responses back to cores and clusters
     generate
         for (pi = 0; pi < NUM_CORES; pi = pi + 1) begin : g_unpack_core
@@ -736,7 +756,8 @@ module mp64_soc #(
     mp64_bus #(
         .N_PORTS   (N_BUS_PORTS),
         .PORT_BITS (PORT_BITS),
-        .REQUESTER_ID_BITS(MP64_CORE_ID_BITS)
+        .REQUESTER_ID_BITS(MP64_CORE_ID_BITS),
+        .FIXED_WEIGHT1_MASK(WOTS_FIXED_QOS_MASK)
     ) u_bus (
         .clk       (sys_clk),
         .rst_n     (sys_rst_n),
@@ -751,6 +772,8 @@ module mp64_soc #(
         .cpu_requester_id(bus_cpu_requester_id),
         .cpu_rdata (bus_cpu_rdata),
         .cpu_ready (bus_cpu_ready),
+        .cpu_accept(bus_cpu_accept),
+        .cpu_resp_code(bus_cpu_resp_code),
 
         .mem_req   (bus_mem_req),
         .mem_addr  (bus_mem_addr),
@@ -759,6 +782,10 @@ module mp64_soc #(
         .mem_size  (bus_mem_size),
         .mem_rdata (bus_mem_rdata),
         .mem_ack   (bus_mem_ack),
+        // Bank 0 SRAM has no target-fault source.  The explicit response-code
+        // seam remains available to the WOTS controller and focused fault
+        // injection without conflating a target fault with bus timeout.
+        .mem_resp_code(BUS_RESP_OK),
 
         .mmio_req   (bus_mmio_req),
         .mmio_addr  (bus_mmio_addr),
@@ -1522,6 +1549,12 @@ module mp64_soc #(
     wire mmio_sel_ntt    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100011);// 0x8C0-0x8FF
     wire mmio_sel_kem    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100100);// 0x900-0x93F
     wire mmio_sel_wots   = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1000101);// 0x8A0-0x8BF
+    // Keep the aperture selected for malformed transfers so the bus reports
+    // one target fault, but never present a partial/illegal access to the
+    // controller itself.  All reads are byte-wide; only +00..+0A are writable.
+    wire wots_access_shape_valid =
+        (bus_mmio_size == BUS_BYTE) &&
+        (!bus_mmio_wen || (mmio_addr_eff[4:0] <= 5'h0a));
     wire mmio_sel_rtc    = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1011000); // 0xB00-0xB1F
 
     // SysInfo occupies the exact half-open range [0x300, 0x370).  Reject a
@@ -1713,12 +1746,22 @@ module mp64_soc #(
     wire [63:0] sha3_rdata;
     wire        sha3_ack;
     wire        wots_active;
+    wire        wots_sha_claim;
+    wire        wots_sha_grant;
+    wire        wots_sha_owned;
+    wire        wots_sha_perm_req;
+    wire [1599:0] wots_sha_state_in;
+    wire [1599:0] wots_sha_state_out;
+    wire        wots_sha_perm_busy;
+    wire        wots_sha_perm_done;
+    wire        wots_sha_release;
+    wire        wots_sha_abort;
 
     mp64_sha3 u_sha3 (
         .clk             (sys_clk),
         .rst_n           (sys_rst_n),
-        // The front end remains selected while any future WOTS requester
-        // owns the shared service so STATUS/ERROR never turn into timeouts.
+        // The front end remains selected while WOTS owns the shared service,
+        // so STATUS/ERROR never turn into target timeouts.
         .req             (mmio_sel_sha3),
         .addr            (mmio_addr_eff[6:0]),
         .wdata           (bus_mmio_wdata),
@@ -1729,28 +1772,55 @@ module mp64_soc #(
         .sha3_stream_en  (CRYPTO_CAPS[1]),
         .keccak_f1600_en (CRYPTO_CAPS[2]),
 
-        // Production WOTS integration is checkpoint 3.  The old standalone
-        // controller below cannot claim or observe this service.
-        .wots_claim      (1'b0),
-        .wots_grant      (),
-        .wots_owned      (),
-        .wots_perm_req   (1'b0),
-        .wots_state_in   (1600'd0),
-        .wots_state_out  (),
-        .wots_perm_busy  (),
-        .wots_perm_done  (),
-        .wots_release    (1'b0),
-        .wots_abort      (1'b0)
+        .wots_claim      (wots_sha_claim),
+        .wots_grant      (wots_sha_grant),
+        .wots_owned      (wots_sha_owned),
+        .wots_perm_req   (wots_sha_perm_req),
+        .wots_state_in   (wots_sha_state_in),
+        .wots_state_out  (wots_sha_state_out),
+        .wots_perm_busy  (wots_sha_perm_busy),
+        .wots_perm_done  (wots_sha_perm_done),
+        .wots_release    (wots_sha_release),
+        .wots_abort      (wots_sha_abort)
     );
 
-    // Checkpoint 2 retires the functional three-pointer WOTS prototype.
-    // Preserve its reserved aperture as an inert responder until the checked
-    // context/DMA/shared-service controller lands atomically in checkpoint 3.
-    // Its capability bit is clear, writes have no effect, and reads are zero.
-    wire [63:0] wots_rdata = 64'd0;
-    wire        wots_ack = mmio_sel_wots;
-    wire        wots_irq = 1'b0;
-    assign      wots_active = 1'b0;
+    // Checked WOTS controller.  Source presence is not capability evidence;
+    // CRYPTO_CAPS.WOTS_CHAIN stays clear until this path and the other
+    // backends, checked BIOS word, fresh artifacts, and sequential gate pass.
+    wire [63:0] wots_rdata;
+    wire        wots_ack;
+
+    mp64_wots #(
+        .BANK0_SIZE  (BANK0_SIZE),
+        .N_BUS_PORTS (N_BUS_PORTS)
+    ) u_wots (
+        .clk            (sys_clk),
+        .rst_n          (sys_rst_n),
+        .req            (mmio_sel_wots && wots_access_shape_valid),
+        .addr           (mmio_addr_eff[4:0]),
+        .wdata          (bus_mmio_wdata),
+        .wen            (bus_mmio_wen),
+        .size           (bus_mmio_size),
+        .rdata          (wots_rdata),
+        .ack            (wots_ack),
+        .active         (wots_active),
+        .dma_valid      (wots_dma_valid),
+        .dma_addr       (wots_dma_addr),
+        .dma_accept     (wots_dma_accept),
+        .dma_rdata      (wots_dma_rdata),
+        .dma_resp_valid (wots_dma_resp_valid),
+        .dma_resp_code  (wots_dma_resp_code),
+        .sha_claim      (wots_sha_claim),
+        .sha_grant      (wots_sha_grant),
+        .sha_owned      (wots_sha_owned),
+        .sha_perm_req   (wots_sha_perm_req),
+        .sha_state_in   (wots_sha_state_in),
+        .sha_state_out  (wots_sha_state_out),
+        .sha_perm_busy  (wots_sha_perm_busy),
+        .sha_perm_done  (wots_sha_perm_done),
+        .sha_release    (wots_sha_release),
+        .sha_abort      (wots_sha_abort)
+    );
 
     wire [63:0] trng_rdata;
     wire        trng_ack;
@@ -1860,7 +1930,8 @@ module mp64_soc #(
         //   0x50  VRAM_BASE     — dedicated VRAM base address
         //   0x58  VRAM_SIZE     — dedicated VRAM size in bytes
         //   0x60  CRYPTO_CAPS   — independently qualified capabilities
-        //   0x68  NUM_BUS_PORTS — weighted-arbiter requester count
+        //   0x68  NUM_BUS_PORTS — weighted-arbiter requester count, including
+        //                           the physical WOTS requester slot
         if (mmio_sel_sysinfo) begin
             case (mmio_addr_eff[6:3])  // 64-bit aligned: offset >> 3
                 4'h0: mmio_rdata_mux = 64'h4D50_3634_0002_0001;  // BOARD_ID_VER

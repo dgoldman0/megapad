@@ -68,7 +68,9 @@ read_verilog -sv -Irtl/pkg \
     rtl/crypto/mp64_kem.v          \
     rtl/crypto/mp64_ntt.v          \
     rtl/crypto/mp64_sha2_isa.v     \
-    rtl/crypto/mp64_sha3.v
+    rtl/crypto/mp64_keccak_core.v  \
+    rtl/crypto/mp64_sha3.v         \
+    rtl/crypto/mp64_wots.v
 
 # ---- SoC integration --------------------------------------------------------
 read_verilog -sv -Irtl/pkg \

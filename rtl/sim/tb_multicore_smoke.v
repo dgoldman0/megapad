@@ -117,6 +117,7 @@ module tb_multicore_smoke;
         .mem_size  (mem_size),
         .mem_rdata (mem_rdata),
         .mem_ack   (mem_ack),
+        .mem_resp_code(BUS_RESP_OK),
         .mmio_req  (mmio_req),
         .mmio_addr (mmio_addr),
         .mmio_wdata(mmio_wdata),

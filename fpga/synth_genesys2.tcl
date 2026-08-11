@@ -66,7 +66,9 @@ set rtl_files [list \
     ${RTL_DIR}/crypto/mp64_kem.v                   \
     ${RTL_DIR}/crypto/mp64_ntt.v                   \
     ${RTL_DIR}/crypto/mp64_sha2_isa.v              \
+    ${RTL_DIR}/crypto/mp64_keccak_core.v           \
     ${RTL_DIR}/crypto/mp64_sha3.v                  \
+    ${RTL_DIR}/crypto/mp64_wots.v                  \
     ${RTL_DIR}/soc/mp64_core_bus_mux.v             \
     ${RTL_DIR}/soc/mp64_tile_port_arbiter.v        \
     ${RTL_DIR}/soc/mp64_tacc_transfer.v            \

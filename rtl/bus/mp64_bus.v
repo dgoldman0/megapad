@@ -2,7 +2,7 @@
 // mp64_bus.v — Multi-Master Bus Arbiter & Address Decoder
 // ============================================================================
 //
-// Routes requests from N_PORTS CPU masters to two targets:
+// Routes requests from N_PORTS CPU/DMA masters to two targets:
 //   - Memory subsystem (internal BRAM + external forwarding)
 //   - MMIO peripherals (decoded by upper address bits)
 //
@@ -17,9 +17,10 @@
 //   CSR_QOS_BWLIMIT — packed [15:0] per port (up to 4 ports)
 //
 // Protocol (3-state FSM):
-//   IDLE      — pick next eligible requesting port; register request
+//   IDLE      — pick next eligible port; ACCEPT marks the capture edge
 //   MMIO_RESP — capture mmio_rdata, assert cpu_ready, return to IDLE
-//   MEM_WAIT  — hold mem_req; wait for mem_ack, capture mem_rdata
+//   MEM_WAIT  — hold mem_req; wait for mem_ack, capture data/response code
+// READY is a terminal response-valid pulse and is distinct from ACCEPT.
 //
 // Coding standard:
 //   Verilog-2001 · sync reset · non-blocking assigns · no `%` operator
@@ -28,7 +29,11 @@
 module mp64_bus #(
     parameter N_PORTS          = 4,
     parameter PORT_BITS        = 3, // ceil(log2(N_PORTS)); holds each port
-    parameter REQUESTER_ID_BITS = 8
+    parameter REQUESTER_ID_BITS = 8,
+    // A set bit makes that requester an immutable weight-1, unlimited peer.
+    // The production SoC uses this for the appended WOTS DMA requester so a
+    // custom/reduced topology cannot accidentally throttle the checked bound.
+    parameter [N_PORTS-1:0] FIXED_WEIGHT1_MASK = {N_PORTS{1'b0}}
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -45,6 +50,10 @@ module mp64_bus #(
                                       cpu_requester_id,
     output reg  [N_PORTS*64-1:0]   cpu_rdata,
     output reg  [N_PORTS-1:0]      cpu_ready,
+    // ACCEPT is combinationally one-hot during the exact ARB_IDLE capture
+    // edge.  READY is the later terminal response-valid pulse.
+    output wire [N_PORTS-1:0]      cpu_accept,
+    output reg  [N_PORTS*2-1:0]    cpu_resp_code,
 
     // === Memory subsystem target ===
     output reg         mem_req,
@@ -54,6 +63,7 @@ module mp64_bus #(
     output reg  [1:0]  mem_size,
     input  wire [63:0] mem_rdata,
     input  wire        mem_ack,
+    input  wire [1:0]  mem_resp_code,
 
     // === MMIO peripheral target ===
     output reg         mmio_req,
@@ -138,36 +148,32 @@ module mp64_bus #(
             for (qi = 0; qi < N_PORTS; qi = qi + 1) begin
                 qos_weight[qi]  <= 8'd1;
                 qos_bwlimit[qi] <= 16'd0;
-                qos_bw_cnt[qi]  <= 16'd0;
             end
             epoch_timer    <= 16'd0;
             qos_csr_rdata  <= 64'd0;
-            bus_err_sticky <= {N_PORTS{1'b0}};
         end else begin
-            // Epoch timer — reset BW counters every 65536 cycles
+            // Epoch timer.  Bandwidth-counter rollover and completion
+            // accounting have their single sequential owner below.
             epoch_timer <= epoch_timer + 16'd1;
-            if (epoch_timer == 16'hFFFF) begin
-                for (qi = 0; qi < N_PORTS; qi = qi + 1)
-                    qos_bw_cnt[qi] <= 16'd0;
-            end
 
             // CSR writes
             if (qos_csr_wen) begin
                 case (qos_csr_addr)
                     CSR_QOS_WEIGHT: begin
                         for (qi = 0; qi < N_PORTS && qi < 8; qi = qi + 1)
-                            qos_weight[qi] <= (qos_csr_wdata[qi*8 +: 8] == 8'd0)
-                                            ? 8'd1
-                                            : qos_csr_wdata[qi*8 +: 8];
+                            if (!FIXED_WEIGHT1_MASK[qi])
+                                qos_weight[qi] <=
+                                    (qos_csr_wdata[qi*8 +: 8] == 8'd0)
+                                    ? 8'd1
+                                    : qos_csr_wdata[qi*8 +: 8];
                     end
                     CSR_QOS_BWLIMIT: begin
                         for (qi = 0; qi < N_PORTS && qi < 4; qi = qi + 1)
-                            qos_bwlimit[qi] <= qos_csr_wdata[qi*16 +: 16];
+                            if (!FIXED_WEIGHT1_MASK[qi])
+                                qos_bwlimit[qi] <=
+                                    qos_csr_wdata[qi*16 +: 16];
                     end
-                    CSR_BUS_ERR: begin
-                        // Write-1-to-clear: clear the bits that are written as 1
-                        bus_err_sticky <= bus_err_sticky & ~qos_csr_wdata[N_PORTS-1:0];
-                    end
+                    CSR_BUS_ERR: ; // W1C is owned by the arbiter FSM below.
                     default: ;
                 endcase
             end
@@ -178,15 +184,47 @@ module mp64_bus #(
                 w_pack  = 64'd0;
                 bw_pack = 64'd0;
                 for (qi = 0; qi < N_PORTS && qi < 8; qi = qi + 1)
-                    w_pack[qi*8 +: 8] = qos_weight[qi];
+                    w_pack[qi*8 +: 8] = FIXED_WEIGHT1_MASK[qi]
+                                             ? 8'd1 : qos_weight[qi];
                 for (qi = 0; qi < N_PORTS && qi < 4; qi = qi + 1)
-                    bw_pack[qi*16 +: 16] = qos_bwlimit[qi];
+                    bw_pack[qi*16 +: 16] = FIXED_WEIGHT1_MASK[qi]
+                                               ? 16'd0 : qos_bwlimit[qi];
                 case (qos_csr_addr)
                     CSR_QOS_WEIGHT:  qos_csr_rdata <= w_pack;
                     CSR_QOS_BWLIMIT: qos_csr_rdata <= bw_pack;
                     CSR_BUS_ERR:     qos_csr_rdata <= {{(64-N_PORTS){1'b0}}, bus_err_sticky};
                     default:         qos_csr_rdata <= 64'd0;
                 endcase
+            end
+        end
+    end
+
+    // A captured target response consumes bandwidth; a watchdog-generated
+    // timeout does not.  Synchronize the 65536-cycle epoch first, then count a
+    // same-edge acknowledged response into the new epoch.  This block is the
+    // sole sequential owner of qos_bw_cnt[] so synthesis never has to resolve
+    // reset/rollover writes against terminal-response increments.
+    wire qos_counted_completion =
+        (arb_state == ARB_MMIO_RESP && mmio_ack) ||
+        (arb_state == ARB_MEM_WAIT && mem_ack);
+
+    integer bi;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            for (bi = 0; bi < N_PORTS; bi = bi + 1)
+                qos_bw_cnt[bi] <= 16'd0;
+        end else begin
+            for (bi = 0; bi < N_PORTS; bi = bi + 1) begin
+                if (epoch_timer == 16'hffff) begin
+                    if (qos_counted_completion &&
+                        grant == bi[PORT_BITS-1:0])
+                        qos_bw_cnt[bi] <= 16'd1;
+                    else
+                        qos_bw_cnt[bi] <= 16'd0;
+                end else if (qos_counted_completion &&
+                             grant == bi[PORT_BITS-1:0]) begin
+                    qos_bw_cnt[bi] <= qos_bw_cnt[bi] + 16'd1;
+                end
             end
         end
     end
@@ -199,7 +237,8 @@ module mp64_bus #(
     generate
         for (ei = 0; ei < N_PORTS; ei = ei + 1) begin : g_elig
             assign eligible[ei] = cpu_valid[ei] &&
-                (qos_bwlimit[ei] == 16'd0 || qos_bw_cnt[ei] < qos_bwlimit[ei]);
+                (FIXED_WEIGHT1_MASK[ei] || qos_bwlimit[ei] == 16'd0 ||
+                 qos_bw_cnt[ei] < qos_bwlimit[ei]);
         end
     endgenerate
 
@@ -230,7 +269,7 @@ module mp64_bus #(
                 // Synthesisable wrap-around without %.  Preserve one extra
                 // bit until after subtraction so a non-power-of-two fabric
                 // cannot lose high ports when last_grant + rr_i crosses the
-                // PORT_BITS boundary (the integrated SoC has nine ports).
+                // PORT_BITS boundary (the integrated SoC has ten ports).
                 rr_candidate_wide =
                     {1'b0, last_grant} + rr_i[PORT_BITS:0];
                 if (rr_candidate_wide >= N_PORTS[PORT_BITS:0])
@@ -250,6 +289,20 @@ module mp64_bus #(
     // ========================================================================
     wire is_mmio = (core_addr[next_grant][63:32] == MP64_MMIO_HI);
 
+    // Request capture is a ready/valid edge, not a delayed notification.  This
+    // distinction lets an aborting requester give capture priority over a
+    // same-edge cancellation and drain the now-irrevocable terminal response.
+    wire capture_request = rst_n && arb_state == ARB_IDLE && any_request &&
+                           !(served_last && next_grant == last_grant);
+
+    genvar ai;
+    generate
+        for (ai = 0; ai < N_PORTS; ai = ai + 1) begin : g_accept
+            assign cpu_accept[ai] = capture_request &&
+                                    (next_grant == ai[PORT_BITS-1:0]);
+        end
+    endgenerate
+
     // ========================================================================
     // Main Arbiter FSM
     // ========================================================================
@@ -263,6 +316,7 @@ module mp64_bus #(
             mem_req       <= 1'b0;
             mmio_req      <= 1'b0;
             cpu_ready     <= {N_PORTS{1'b0}};
+            cpu_resp_code <= {(N_PORTS*2){1'b0}};
             cpu_rdata     <= {(N_PORTS*64){1'b0}};
             mem_addr      <= 64'd0;
             mem_wdata     <= 64'd0;
@@ -278,11 +332,19 @@ module mp64_bus #(
             mmio_timeout  <= {MMIO_TIMEOUT_BITS{1'b0}};
             mem_timeout   <= {MEM_TIMEOUT_BITS{1'b0}};
             bus_err       <= {N_PORTS{1'b0}};
+            bus_err_sticky <= {N_PORTS{1'b0}};
         end else begin
             // Default: clear bus_err pulses each cycle
             bus_err <= {N_PORTS{1'b0}};
             // Default: clear ready pulses each cycle
             cpu_ready <= {N_PORTS{1'b0}};
+            cpu_resp_code <= {(N_PORTS*2){1'b0}};
+
+            // One sequential owner for the sticky error latch.  A terminal
+            // error later in this block wins over a same-cycle W1C request.
+            if (qos_csr_wen && qos_csr_addr == CSR_BUS_ERR)
+                bus_err_sticky <= bus_err_sticky &
+                                  ~qos_csr_wdata[N_PORTS-1:0];
 
             case (arb_state)
 
@@ -293,8 +355,7 @@ module mp64_bus #(
                     mem_req  <= 1'b0;
                     mmio_req <= 1'b0;
 
-                    if (any_request &&
-                        !(served_last && next_grant == last_grant)) begin
+                    if (capture_request) begin
 
                         grant       <= next_grant;
                         served_last <= 1'b0;
@@ -302,6 +363,8 @@ module mp64_bus #(
                         // Update weight counter
                         if (next_grant == last_grant && weight_remain > 8'd0)
                             weight_remain <= weight_remain - 8'd1;
+                        else if (FIXED_WEIGHT1_MASK[next_grant])
+                            weight_remain <= 8'd0;
                         else
                             weight_remain <= qos_weight[next_grant] - 8'd1;
 
@@ -339,19 +402,21 @@ module mp64_bus #(
                     if (mmio_ack) begin
                         cpu_rdata[grant*64 +: 64] <= mmio_rdata;
                         cpu_ready[grant]          <= 1'b1;
+                        cpu_resp_code[grant*2 +: 2] <= BUS_RESP_OK;
                         last_grant                <= grant;
                         mmio_req                  <= 1'b0;
                         mmio_requester_valid      <= 1'b0;
                         mmio_requester_id         <=
                             {REQUESTER_ID_BITS{1'b0}};
                         served_last               <= 1'b1;
-                        qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
                         mmio_timeout              <= {MMIO_TIMEOUT_BITS{1'b0}};
                         arb_state                 <= ARB_IDLE;
                     end else if (&mmio_timeout) begin
                         // Timeout — return sentinel, signal error
                         cpu_rdata[grant*64 +: 64] <= 64'hDEAD_DEAD_DEAD_DEAD;
                         cpu_ready[grant]          <= 1'b1;
+                        cpu_resp_code[grant*2 +: 2] <=
+                            BUS_RESP_TARGET_FAULT;
                         bus_err[grant]            <= 1'b1;
                         bus_err_sticky[grant]     <= 1'b1;
                         last_grant                <= grant;
@@ -376,16 +441,22 @@ module mp64_bus #(
                     if (mem_ack) begin
                         cpu_rdata[grant*64 +: 64] <= mem_rdata;
                         cpu_ready[grant]          <= 1'b1;
+                        cpu_resp_code[grant*2 +: 2] <= mem_resp_code;
+                        if (mem_resp_code != BUS_RESP_OK) begin
+                            bus_err[grant]        <= 1'b1;
+                            bus_err_sticky[grant] <= 1'b1;
+                        end
                         last_grant                <= grant;
                         mem_req                   <= 1'b0;
                         served_last               <= 1'b1;
-                        qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
                         mem_timeout               <= {MEM_TIMEOUT_BITS{1'b0}};
                         arb_state                 <= ARB_IDLE;
                     end else if (&mem_timeout) begin
                         // Timeout — return sentinel, signal error
                         cpu_rdata[grant*64 +: 64] <= 64'hDEAD_DEAD_DEAD_DEAD;
                         cpu_ready[grant]          <= 1'b1;
+                        cpu_resp_code[grant*2 +: 2] <=
+                            BUS_RESP_MEM_TIMEOUT;
                         bus_err[grant]            <= 1'b1;
                         bus_err_sticky[grant]     <= 1'b1;
                         last_grant                <= grant;

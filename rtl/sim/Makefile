@@ -52,11 +52,11 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals disk_controller disk_bus_dma disk_lint crypto sha3_keccak aes ntt kem nic \
+        peripherals disk_controller disk_bus_dma disk_lint crypto sha3_keccak wots aes ntt kem nic \
         nic_lint nic_bus mailbox trng tile fp_exact tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
-        tacc_transfer tacc_soc soc_smoke soc_tile_icache soc_elaborate
+        tacc_transfer tacc_soc soc_smoke soc_wots soc_tile_icache soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -132,14 +132,19 @@ clean:
 # ==========================================================================
 
 # --- Bus arbiter ---
-bus_arbiter: tb_bus_arbiter.vvp tb_bus_arbiter_nine_port.vvp
+bus_arbiter: tb_bus_arbiter.vvp tb_bus_arbiter_nine_port.vvp \
+	             tb_bus_arbiter_ten_port.vvp
 	$(VVP) tb_bus_arbiter.vvp
 	$(VVP) tb_bus_arbiter_nine_port.vvp
+	$(VVP) tb_bus_arbiter_ten_port.vvp
 
 tb_bus_arbiter.vvp: tb_bus_arbiter.v $(BUS)/mp64_bus.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 tb_bus_arbiter_nine_port.vvp: tb_bus_arbiter_nine_port.v $(BUS)/mp64_bus.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+tb_bus_arbiter_ten_port.vvp: tb_bus_arbiter_ten_port.v $(BUS)/mp64_bus.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Memory subsystem ---
@@ -326,8 +331,8 @@ tb_disk_bus_dma.vvp: tb_disk_bus_dma.v sd_spi_model.v \
                      ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Crypto (authoritative SHA3/Keccak contract plus AES regression) ---
-crypto: sha3_keccak aes
+# --- Crypto (authoritative SHA3/Keccak/WOTS contracts plus AES regression) ---
+crypto: sha3_keccak wots aes
 
 sha3_keccak: tb_sha3_keccak.vvp
 	$(VVP) $<
@@ -338,6 +343,18 @@ tb_sha3_keccak.vvp: tb_sha3_keccak.v \
                       ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_sha3_keccak -o $@ \
 		tb_sha3_keccak.v $(CRYPTO)/mp64_sha3.v \
+		$(CRYPTO)/mp64_keccak_core.v
+
+wots: tb_wots.vvp
+	$(VVP) $<
+
+tb_wots.vvp: tb_wots.v \
+               $(CRYPTO)/mp64_wots.v \
+               $(CRYPTO)/mp64_sha3.v \
+               $(CRYPTO)/mp64_keccak_core.v \
+               ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_wots -o $@ \
+		tb_wots.v $(CRYPTO)/mp64_wots.v $(CRYPTO)/mp64_sha3.v \
 		$(CRYPTO)/mp64_keccak_core.v
 
 aes: tb_aes.vvp
@@ -467,7 +484,7 @@ tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
 # ==========================================================================
 
 phase5: qos multicore_smoke core_bus_mux tile_port_arbiter tacc_soc \
-        tacc_transfer soc_smoke soc_tile_icache soc_elaborate
+        tacc_transfer soc_smoke soc_wots soc_tile_icache soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
 
@@ -534,6 +551,15 @@ tb_soc_smoke.vvp: tb_soc_smoke.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh \
                   $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_smoke -o $@ \
 		tb_soc_smoke.v $(SOC_ELAB_SRC)
+
+# --- Integrated WOTS requester, Bank0, and shared Keccak transaction ---
+soc_wots: tb_soc_wots.vvp
+	$(VVP) $<
+
+tb_soc_wots.vvp: tb_soc_wots.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh \
+                 $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_wots -o $@ \
+		tb_soc_wots.v $(SOC_ELAB_SRC)
 
 soc_tile_icache: tb_soc_tile_icache.vvp
 	$(VVP) $<

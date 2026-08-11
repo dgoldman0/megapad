@@ -84,6 +84,7 @@ module tb_nic_bus_dma;
         .mem_req(mem_req), .mem_addr(mem_addr), .mem_wdata(mem_wdata),
         .mem_wen(mem_wen), .mem_size(mem_size),
         .mem_rdata(mem_rdata), .mem_ack(mem_ack),
+        .mem_resp_code(BUS_RESP_OK),
         .mmio_req(mmio_req), .mmio_addr(mmio_addr), .mmio_wdata(mmio_wdata),
         .mmio_wen(mmio_wen), .mmio_size(mmio_size),
         .mmio_port_io(mmio_port_io), .mmio_rdata(64'd0),

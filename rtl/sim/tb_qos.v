@@ -10,6 +10,8 @@
 //   5. Epoch timer resets BW counters
 //   6. Throttled core re-eligible after epoch
 //   7. Weight=0 clamped to 1 (no starvation)
+// The CSR readback cases also prove that an immutable DMA-style peer rejects
+// weight and bandwidth-cap programming.
 //
 
 `timescale 1ns / 1ps
@@ -88,7 +90,11 @@ module tb_qos;
     // ========================================================================
     // DUT
     // ========================================================================
-    mp64_bus u_bus (
+    // Port 3 stands in for a WOTS requester in a reduced/custom topology.  Its
+    // service bound requires immutable weight 1 and no bandwidth cap.
+    mp64_bus #(
+        .FIXED_WEIGHT1_MASK(4'b1000)
+    ) u_bus (
         .clk        (clk),
         .rst_n      (rst_n),
         .cpu_valid  (cpu_valid),
@@ -105,6 +111,7 @@ module tb_qos;
         .mem_size   (mem_size),
         .mem_rdata  (mem_rdata),
         .mem_ack    (mem_ack),
+        .mem_resp_code(BUS_RESP_OK),
         .mmio_req   (mmio_req),
         .mmio_addr  (mmio_addr),
         .mmio_wdata (mmio_wdata),
@@ -235,7 +242,8 @@ module tb_qos;
         reset_all;
         qos_write(CSR_QOS_WEIGHT, 64'h00000000_04030201);  // core0=1,1=2,2=3,3=4
         qos_read(CSR_QOS_WEIGHT, rd64);
-        check64("weights", rd64[31:0], 32'h04030201);
+        check64("programmable weights plus immutable port 3",
+                rd64[31:0], 32'h01030201);
 
         // =================================================================
         // TEST 2: CSR bwlimit write/readback
@@ -244,7 +252,8 @@ module tb_qos;
         $display("\n=== TEST %0d: QoS bwlimit CSR readback ===", test_num);
         qos_write(CSR_QOS_BWLIMIT, 64'h0008_0004_0010_0002);
         qos_read(CSR_QOS_BWLIMIT, rd64);
-        check64("bwlimits", rd64, 64'h0008_0004_0010_0002);
+        check64("programmable caps plus uncapped port 3", rd64,
+                64'h0000_0004_0010_0002);
 
         // =================================================================
         // TEST 3: Weight=0 clamped to 1
@@ -433,14 +442,15 @@ module tb_qos;
         $display("\n========================================");
         $display("  QoS Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);
         $display("========================================");
+        if (fail_cnt != 0)
+            $fatal(1, "tb_qos failed %0d checks", fail_cnt);
         $finish;
     end
 
     // Watchdog
     initial begin
         #500000;
-        $display("TIMEOUT: QoS TestBench exceeded 500us");
-        $finish;
+        $fatal(1, "tb_qos infrastructure safety window expired");
     end
 
 endmodule

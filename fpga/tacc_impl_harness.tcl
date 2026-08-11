@@ -157,7 +157,9 @@ set required_rtl [list \
     rtl/crypto/mp64_kem.v \
     rtl/crypto/mp64_ntt.v \
     rtl/crypto/mp64_sha2_isa.v \
+    rtl/crypto/mp64_keccak_core.v \
     rtl/crypto/mp64_sha3.v \
+    rtl/crypto/mp64_wots.v \
     rtl/soc/mp64_core_bus_mux.v \
     rtl/soc/mp64_tile_port_arbiter.v \
     rtl/soc/mp64_soc.v \

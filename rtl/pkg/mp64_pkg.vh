@@ -49,7 +49,7 @@ localparam TACC_EPOCH_BITS              = 8;        // reset/cancellation genera
 // Derived (at default counts):
 //   NUM_MICRO_CORES = NUM_CLUSTERS × MICRO_PER_CLUSTER = 12
 //   NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES = 16
-//   NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + NIC + DISK = 9
+//   NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + NIC + DISK + WOTS = 10
 
 // Cluster scratchpad
 localparam MP64_CLUSTER_SPAD_BYTES = 1024;          // 1 KiB per cluster
@@ -547,6 +547,14 @@ localparam [1:0] BUS_BYTE  = 2'd0;
 localparam [1:0] BUS_HALF  = 2'd1;
 localparam [1:0] BUS_WORD  = 2'd2;
 localparam [1:0] BUS_DWORD = 2'd3;
+
+// Terminal main-bus response classification.  Response data and this code are
+// valid together with the per-port READY pulse.  A requester observes ACCEPT
+// separately when the arbiter first captures its stable request payload.
+localparam [1:0] BUS_RESP_OK           = 2'd0;
+localparam [1:0] BUS_RESP_TARGET_FAULT = 2'd1;
+localparam [1:0] BUS_RESP_MEM_TIMEOUT  = 2'd2;
+localparam [1:0] BUS_RESP_PROTOCOL     = 2'd3;
 
 // ============================================================================
 // §9 — Interrupt Vectors

@@ -135,6 +135,12 @@ module tb_soc_smoke;
               && $bits(u_soc.tile_src_req_bus) == 2);
         check("Reduced cluster core IDs begin after instantiated full cores",
               u_soc.g_cluster[0].u_cluster.CLUSTER_ID_BASE == 8'd1);
+        check("WOTS appends after stable NIC and disk requester indices",
+              u_soc.NIC_BUS_PORT == 2 && u_soc.DISK_BUS_PORT == 3 &&
+              u_soc.WOTS_BUS_PORT == 4 && u_soc.N_BUS_PORTS == 5);
+        check("Integrated WOTS requester resets idle and fixed-QoS",
+              u_soc.bus_cpu_valid[u_soc.WOTS_BUS_PORT] === 1'b0 &&
+              u_soc.WOTS_FIXED_QOS_MASK == 5'b1_0000);
 
         // Exercise the integrated SysInfo decode directly.  The testbench
         // temporarily owns the arbiter-to-MMIO seam so CPU fetch traffic
@@ -147,7 +153,7 @@ module tb_soc_smoke;
         force u_soc.bus_mmio_addr = 12'h360;
         force u_soc.bus_mmio_size = BUS_DWORD;
         #1;
-        check("SysInfo checkpoint-2 crypto capabilities are advertised",
+        check("SysInfo keeps WOTS capability clear pending qualification",
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata == 64'h7);
 
@@ -155,7 +161,7 @@ module tb_soc_smoke;
         #1;
         check("SysInfo reports every weighted-arbiter requester",
               u_soc.bus_mmio_ack === 1'b1
-              && u_soc.bus_mmio_rdata == 64'd4);
+              && u_soc.bus_mmio_rdata == 64'd5);
 
         force u_soc.bus_mmio_addr = 12'h305;
         force u_soc.bus_mmio_size = BUS_BYTE;
@@ -278,18 +284,80 @@ module tb_soc_smoke;
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata[7:0] == 8'h00);
 
-        // The checkpoint-3 WOTS address is decoded now but remains inert.
-        force u_soc.bus_mmio_addr = 12'h8AE;
-        force u_soc.bus_mmio_wen = 1'b1;
-        force u_soc.bus_mmio_wdata = 64'h1;
+        // The production byte-only WOTS front end is wired, but capability
+        // bit 3 remains clear until full cross-backend qualification.
+        force u_soc.bus_mmio_req = 1'b0;
         @(posedge clk);
         #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_addr = 12'h8AA;
         force u_soc.bus_mmio_wen = 1'b0;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        @(posedge clk);
         #1;
-        check("Integrated WOTS reservation acknowledges inert zero status",
+        check("Integrated WOTS controller reports reset IDLE while unadvertised",
               u_soc.bus_mmio_ack === 1'b1
               && u_soc.bus_mmio_rdata == 64'h0
               && u_soc.wots_active === 1'b0);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_addr = 12'h8A0;
+        force u_soc.bus_mmio_wen = 1'b1;
+        force u_soc.bus_mmio_wdata = 64'hA5;
+        @(posedge clk);
+        #1;
+        check("Integrated WOTS accepts byte programming while IDLE",
+              u_soc.bus_mmio_ack === 1'b1);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_wen = 1'b0;
+        @(posedge clk);
+        #1;
+        check("Integrated WOTS programming readback is little-endian byte data",
+              u_soc.bus_mmio_ack === 1'b1 &&
+              u_soc.bus_mmio_rdata[7:0] == 8'hA5);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_addr = 12'h8AA;
+        force u_soc.bus_mmio_size = BUS_DWORD;
+        @(posedge clk);
+        #1;
+        check("Integrated WOTS rejects wider MMIO before controller request",
+              u_soc.mmio_sel_wots === 1'b1 &&
+              u_soc.bus_mmio_ack === 1'b0 &&
+              u_soc.u_wots.req === 1'b0 &&
+              u_soc.u_wots.context_addr_reg[7:0] == 8'hA5 &&
+              u_soc.u_wots.status_reg == 2'd0 &&
+              u_soc.u_wots.error_reg == 8'd0 &&
+              u_soc.wots_active === 1'b0);
+
+        force u_soc.bus_mmio_req = 1'b0;
+        @(posedge clk);
+        #1;
+        force u_soc.bus_mmio_req = 1'b1;
+        force u_soc.bus_mmio_addr = 12'h8AB;
+        force u_soc.bus_mmio_wen = 1'b1;
+        force u_soc.bus_mmio_wdata = 64'hFF;
+        force u_soc.bus_mmio_size = BUS_BYTE;
+        @(posedge clk);
+        #1;
+        check("Integrated WOTS rejects writes to read-only bytes before controller request",
+              u_soc.mmio_sel_wots === 1'b1 &&
+              u_soc.bus_mmio_ack === 1'b0 &&
+              u_soc.u_wots.req === 1'b0 &&
+              u_soc.u_wots.context_addr_reg[7:0] == 8'hA5 &&
+              u_soc.u_wots.status_reg == 2'd0 &&
+              u_soc.u_wots.error_reg == 8'd0 &&
+              u_soc.wots_active === 1'b0);
 
         release u_soc.bus_mmio_req;
         release u_soc.bus_mmio_addr;
@@ -319,15 +387,14 @@ module tb_soc_smoke;
             $display("ALL TESTS PASSED");
 
         if (fail_count > 0)
-            $finish(1);
-        $finish(0);
+            $fatal(1, "tb_soc_smoke failed %0d checks", fail_count);
+        $finish;
     end
 
     // Timeout watchdog
     initial begin
         #50000;
-        $display("TIMEOUT after 50us — aborting");
-        $finish(1);
+        $fatal(1, "tb_soc_smoke timeout after 50us");
     end
 
 endmodule

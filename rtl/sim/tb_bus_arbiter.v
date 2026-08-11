@@ -14,9 +14,14 @@
 //   5. Round-robin fairness (two ports requesting simultaneously)
 //   6. QoS weight CSR write & read-back
 //   7. Bandwidth throttling (port throttled after limit hit)
+//   8. MMIO timeout and target-fault response
+//   9. Memory timeout and recovery
+//  10. Acknowledged target response wins the terminal watchdog edge
+//  11. Epoch rollover precedes response accounting on the same edge
 //
 
 `timescale 1ns/1ps
+`include "mp64_pkg.vh"
 
 module tb_bus_arbiter;
 
@@ -43,6 +48,8 @@ module tb_bus_arbiter;
     reg  [N_PORTS*REQUESTER_ID_BITS-1:0] cpu_requester_id;
     wire [N_PORTS*64-1:0]   cpu_rdata;
     wire [N_PORTS-1:0]      cpu_ready;
+    wire [N_PORTS-1:0]      cpu_accept;
+    wire [N_PORTS*2-1:0]    cpu_resp_code;
     wire [N_PORTS-1:0]      bus_err;
 
     wire        mem_req;
@@ -52,6 +59,7 @@ module tb_bus_arbiter;
     wire [1:0]  mem_size;
     reg  [63:0] mem_rdata;
     reg         mem_ack;
+    reg  [1:0]  mem_resp_code;
 
     wire        mmio_req;
     wire [11:0] mmio_addr;
@@ -116,6 +124,8 @@ module tb_bus_arbiter;
         .cpu_requester_id(cpu_requester_id),
         .cpu_rdata     (cpu_rdata),
         .cpu_ready     (cpu_ready),
+        .cpu_accept    (cpu_accept),
+        .cpu_resp_code (cpu_resp_code),
         .mem_req       (mem_req),
         .mem_addr      (mem_addr),
         .mem_wdata     (mem_wdata),
@@ -123,6 +133,7 @@ module tb_bus_arbiter;
         .mem_size      (mem_size),
         .mem_rdata     (mem_rdata),
         .mem_ack       (mem_ack),
+        .mem_resp_code (mem_resp_code),
         .mmio_req      (mmio_req),
         .mmio_addr     (mmio_addr),
         .mmio_wdata    (mmio_wdata),
@@ -157,6 +168,7 @@ module tb_bus_arbiter;
                 {(N_PORTS*REQUESTER_ID_BITS){1'b0}};
             mem_rdata     <= 64'd0;
             mem_ack       <= 1'b0;
+            mem_resp_code <= BUS_RESP_OK;
             mmio_rdata    <= 64'd0;
             mmio_ack      <= 1'b0;
             qos_csr_wen   <= 1'b0;
@@ -269,11 +281,18 @@ module tb_bus_arbiter;
         check("requester valid clear after reset",
               mmio_requester_valid == 1'b0);
         check("cpu_ready clear after reset",cpu_ready == {N_PORTS{1'b0}});
+        check("cpu_accept clear without a request",
+              cpu_accept == {N_PORTS{1'b0}});
+        check("response code clear without READY",
+              cpu_resp_code == {(N_PORTS*2){1'b0}});
 
         // ---- Test 2: Single port memory read ----
         $display("--- Test 2: Memory read port 0 ---");
         @(negedge clk);
         drive_req(0, 64'h0000_0100, 64'd0, 1'b0, 2'd3);  // read addr 0x100, dword
+        #1;
+        check("capture-edge ACCEPT is one-hot for port 0",
+              cpu_accept == 4'b0001);
 
         // Wait for arbiter to issue mem_req
         begin : blk_t2
@@ -285,6 +304,8 @@ module tb_bus_arbiter;
             end
         end
         check("mem_req asserted for read", mem_req == 1'b1);
+        check("ACCEPT drops after the capture edge",
+              cpu_accept == {N_PORTS{1'b0}});
         check("mem_addr correct",         mem_addr == 64'h0000_0100);
         check("mem_wen is 0 for read",    mem_wen  == 1'b0);
 
@@ -299,6 +320,8 @@ module tb_bus_arbiter;
         wait_ready(0);
         check("cpu_ready[0] asserted",    cpu_ready[0] == 1'b1);
         check("cpu_rdata correct",        cpu_rdata[0*64 +: 64] == 64'hDEAD_BEEF_CAFE_BABE);
+        check("memory success reports OK",
+              cpu_resp_code[0*2 +: 2] == BUS_RESP_OK);
 
         @(negedge clk);
         clear_req(0);
@@ -589,6 +612,8 @@ module tb_bus_arbiter;
         check("T8 cpu_ready after timeout",   cpu_ready[0] == 1'b1);
         check("T8 sentinel rdata",            cpu_rdata[0*64 +: 64] == 64'hDEAD_DEAD_DEAD_DEAD);
         check("T8 bus_err[0] asserted",       bus_err[0] == 1'b1);
+        check("T8 MMIO timeout reports target fault",
+              cpu_resp_code[0*2 +: 2] == BUS_RESP_TARGET_FAULT);
         // Verify sticky latch via CSR read
         @(negedge clk);
         qos_csr_addr <= 8'h5A;  // CSR_BUS_ERR
@@ -640,6 +665,8 @@ module tb_bus_arbiter;
         check("T9 cpu_ready after timeout",   cpu_ready[1] == 1'b1);
         check("T9 sentinel rdata",            cpu_rdata[1*64 +: 64] == 64'hDEAD_DEAD_DEAD_DEAD);
         check("T9 bus_err[1] asserted",       bus_err[1] == 1'b1);
+        check("T9 memory watchdog reports memory timeout",
+              cpu_resp_code[1*2 +: 2] == BUS_RESP_MEM_TIMEOUT);
         // Verify bus returns to IDLE (can serve another request)
         @(negedge clk);
         clear_req(1);
@@ -665,6 +692,87 @@ module tb_bus_arbiter;
         clear_req(2);
         @(negedge clk);
 
+        // ---- Test 10: target-classified terminal response ----------------
+        $display("--- Test 10: MEM target fault response ---");
+        reset;
+        @(negedge clk);
+        drive_req(0, 64'h0000_0A00, 64'd0, 1'b0, 2'd0);
+        #1;
+        check("T10 ACCEPT identifies the captured requester",
+              cpu_accept == 4'b0001);
+
+        begin : blk_t10a
+            integer wd;
+            wd = 0;
+            while (!mem_req && wd < 20) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T10 mem_req asserted", mem_req == 1'b1);
+
+        @(negedge clk);
+        // A target response on the watchdog's terminal cycle wins over the
+        // arbiter-generated MEM_TIMEOUT classification.  Put the same edge
+        // on the 65536-cycle epoch boundary: rollover happens first, then the
+        // acknowledged target response is counted in the new epoch.
+        force dut.mem_timeout = 8'hff;
+        force dut.epoch_timer = 16'hffff;
+        mem_rdata     <= 64'd0;
+        mem_resp_code <= BUS_RESP_TARGET_FAULT;
+        mem_ack       <= 1'b1;
+        @(negedge clk);
+        release dut.mem_timeout;
+        release dut.epoch_timer;
+        mem_ack       <= 1'b0;
+        mem_resp_code <= BUS_RESP_OK;
+        wait_ready(0);
+        check("T10 target response completes requester", cpu_ready[0]);
+        check("T10 preserves target-fault classification",
+              cpu_resp_code[0*2 +: 2] == BUS_RESP_TARGET_FAULT);
+        check("T10 target fault raises architectural bus error", bus_err[0]);
+        check("T10 boundary target response starts new epoch count at one",
+              dut.qos_bw_cnt[0] == 16'd1);
+        @(negedge clk);
+        clear_req(0);
+        @(negedge clk);
+
+        // ---- Test 11: epoch boundary with watchdog timeout ----------------
+        $display("--- Test 11: BW epoch/timeout collision ---");
+        reset;
+        @(negedge clk);
+        drive_req(1, 64'h0000_0B00, 64'd0, 1'b0, 2'd0);
+        begin : blk_t11a
+            integer wd;
+            wd = 0;
+            while (!mem_req && wd < 20) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T11 mem_req asserted", mem_req == 1'b1);
+
+        @(negedge clk);
+        dut.qos_bw_cnt[0] = 16'd5;
+        dut.qos_bw_cnt[1] = 16'd7;
+        force dut.epoch_timer = 16'hffff;
+        force dut.mem_timeout = 8'hff;
+        // No mem_ack: this is an arbiter-generated timeout, not a counted
+        // target response, so the fresh epoch remains empty.
+        @(negedge clk);
+        release dut.epoch_timer;
+        release dut.mem_timeout;
+        wait_ready(1);
+        check("T11 boundary watchdog produces memory timeout",
+              cpu_ready[1] &&
+              cpu_resp_code[1*2 +: 2] == BUS_RESP_MEM_TIMEOUT);
+        check("T11 boundary watchdog leaves all fresh-epoch counts at zero",
+              dut.qos_bw_cnt[0] == 16'd0 &&
+              dut.qos_bw_cnt[1] == 16'd0);
+        @(negedge clk);
+        clear_req(1);
+        @(negedge clk);
+
         // ================================================================
         // Summary
         // ================================================================
@@ -672,7 +780,7 @@ module tb_bus_arbiter;
         $display("=== tb_bus_arbiter: %0d passed, %0d failed ===",
                  pass_count, fail_count);
         if (fail_count > 0)
-            $display("*** FAILURES DETECTED ***");
+            $fatal(1, "tb_bus_arbiter failed %0d checks", fail_count);
 
         #100;
         $finish;
@@ -681,8 +789,7 @@ module tb_bus_arbiter;
     // Timeout watchdog
     initial begin
         #200000;
-        $display("TIMEOUT");
-        $finish;
+        $fatal(1, "tb_bus_arbiter timeout");
     end
 
 endmodule

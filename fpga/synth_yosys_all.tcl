@@ -5,7 +5,8 @@
 # Synthesises each major design module individually for Xilinx 7-series.
 # Verifies that all modules map cleanly to LUTs/FFs/BRAMs/DSPs.
 #
-# The BIOS ROM is synthesised with real contents from fpga/bios.hex.
+# The standalone BIOS ROM target is synthesised with the checked contents from
+# fpga/bios.hex.  Full-SoC manifests do not instantiate this diagnostic wrapper.
 #
 # Usage:  cd megapad-64 && yosys -s fpga/synth_yosys_all.tcl
 #
@@ -79,7 +80,9 @@ read_verilog -sv -Irtl/pkg \
     rtl/periph/mp64_mailbox.v  \
     rtl/periph/mp64_trng.v     \
     rtl/crypto/mp64_aes.v      \
+    rtl/crypto/mp64_keccak_core.v \
     rtl/crypto/mp64_sha3.v     \
+    rtl/crypto/mp64_wots.v     \
     rtl/crypto/mp64_ntt.v      \
     rtl/crypto/mp64_kem.v      \
     rtl/gpu/mp64_tacc.v    \
@@ -165,24 +168,27 @@ tee -a fpga/build/synth_all_stats.txt stat -tech xilinx
 
 # === 9. ROM with BIOS =========================================================
 log -------------------------------------------------------------------
-log  [9/9] mp64_rom  (BIOS ROM — 3794 × 64-bit words via wrapper)
+log  [9/9] mp64_rom  (BIOS ROM — checked artifact in 14-bit address space)
 log -------------------------------------------------------------------
 
-# Instantiate ROM with BIOS-appropriate parameters (ADDR_W=12, DATA_W=64)
+# The checkpoint-3 image exceeds 8,192 words, so fourteen address bits are the
+# smallest natural ROM address space that holds the checked build artifact.
+# Keep this target tied to the generated FPGA artifact, not the stale historical
+# rom.hex name or an image-specific exact word count in a log message.
 read_verilog -sv <<EOT
 module mp64_bios_rom (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        ce,
-    input  wire [11:0] addr,
+    input  wire [13:0] addr,
     output wire [63:0] rdata
 );
     mp64_rom #(
-        .ADDR_W    (12),
+        .ADDR_W    (14),
         .DATA_W    (64),
-        .DEPTH     (4096),
+        .DEPTH     (16384),
         .OUT_REG   (1),
-        .INIT_FILE ("rom.hex")
+        .INIT_FILE ("fpga/bios.hex")
     ) u_bios (
         .clk   (clk),
         .rst_n (rst_n),
