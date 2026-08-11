@@ -122,7 +122,7 @@ def test_phase2_snapshot_save_rejects_before_touching_destination(tmp_path):
     destination = tmp_path / "existing.mp64"
     destination.write_bytes(b"keep this file intact")
 
-    with pytest.raises(RuntimeError, match="native Phase 2 timeline"):
+    with pytest.raises(RuntimeError, match="native system timeline"):
         save_snapshot(system, str(destination))
 
     assert destination.read_bytes() == b"keep this file intact"

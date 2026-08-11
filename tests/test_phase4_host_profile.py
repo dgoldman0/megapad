@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 12
+    assert report["schema_version"] == 13
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -143,7 +143,7 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 12
+    assert report["schema_version"] == 13
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]

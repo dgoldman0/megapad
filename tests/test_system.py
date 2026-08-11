@@ -21513,7 +21513,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         self.assertIn("BADFIRST=90 ", text)
         self.assertIn("BADEND=90 ", text)
         self.assertIn("BADTR=13 ", text)
-        self.assertIn("BADSTATE=0 ", text)
+        self.assertIn("BADSTATE=1 ", text)
 
     def test_build_ch_hybrid_key_share_group(self):
         """Explicit hybrid ClientHello uses the private ML-KEM group."""
