@@ -197,10 +197,9 @@ PORTS                          \ List all port bindings
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
 
-**Tests**: 1,687 passing
-- 1,007 test_system.py (40 classes: KDOS, BIOS, multicore, crypto, PQC, network, FS, devices)
-- 23 test_megapad64.py (CPU + tile engine)
-- 38 test_networking.py (NIC backends, TAP, ARP, ICMP, UDP, TCP)
+**Checkpoint-4 full Python regression**: 3,425 passed, with three conditional
+live-network skips. The ordered crypto/GPT gates and the complete serial RTL
+suite also passed.
 
 **Crypto checkpoint boundary:** Checkpoint 3 is complete. The production
 byte-only WOTS controller and checked BIOS word use a 64-bit read-only Bank 0
@@ -210,9 +209,9 @@ removed KDOS's private GPT IEEE loop: headers use a checked resident-buffer
 mode-4 transaction, while entry arrays carry raw state through short
 per-sector transactions that release ownership before the next disk read.
 The live `.CRC-DIAG` covers all six canonical `"123456789"` results plus the
-mode-5 raw vector. Fresh final artifacts and the approved full sequential
-regression remain before Akashic refactoring begins in a user-selected
-Akashic worktree.
+mode-5 raw vector. Fresh native and BIOS artifacts reproduced exactly, and
+the approved full sequential regression is green. MegaPad checkpoint 4 is
+complete; Akashic refactoring is a separate task in a user-selected worktree.
 
 ### � Roadmap to v1.0
 
@@ -586,10 +585,10 @@ The BIOS provides:
   and .ICACHE
 
 The checkpoint-3 BIOS interface required by KDOS is implemented as of v1.0.
-Checkpoint-2 KDOS and TLS/network source-load qualification is green, and the
-checkpoint-4 GPT CRC adoption plus diagnostics have landed. Fresh final
-artifacts and the full approved sequential regression remain before Akashic
-adoption.
+Checkpoint-2 KDOS and TLS/network source-load qualification is green, and
+checkpoint 4 has completed GPT CRC adoption, diagnostics, fresh-artifact
+reproduction, the ordered focused matrix, the full serial RTL sweep, and the
+approved Python regression. Akashic adoption remains separately scoped.
 
 ---
 

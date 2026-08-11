@@ -159,9 +159,11 @@ Missing capability is partition `UNSUPPORTED` with raw BIOS cause 1; owner
 contention is partition `BUSY` with raw cause 2. Neither case falls back to
 software or disturbs a preexisting transaction.
 
-The checkpoint-4 adoption and authoritative diagnostics are implemented.
-Fresh final artifacts and the full approved MegaPad regression remain before
-the MegaPad-local gate permits any Akashic refactor.
+The checkpoint-4 adoption and authoritative diagnostics are implemented and
+qualified. Fresh native and BIOS artifacts reproduced exactly, the complete
+serial RTL suite passed, and the approved Python regression completed with
+3,425 passed and three conditional live-network skips. Akashic refactoring is
+now a separate task that still requires a user-selected worktree.
 
 ---
 
@@ -315,10 +317,11 @@ UNSUPPORTED, 2 STATE/OWNER, 3 RANGE, 4 PROTECTED, 5 TIMEOUT, and 6
 HARDWARE/PROTOCOL.
 
 Checkpoint 3 delivered this BIOS primitive after the full qualification gate
-enabled capability bit 3; it does not authorize Akashic adoption. The KDOS GPT
-hardware CRC replacement and diagnostics are now implemented. Fresh artifacts
-and the full approved sequential regression remain in checkpoint 4; Akashic
-CRC, raw-Keccak, and WOTS refactoring follows only after that gate.
+enabled capability bit 3; it did not itself authorize Akashic adoption. The
+KDOS GPT hardware CRC replacement, diagnostics, fresh artifacts, ordered
+focused qualification, full serial RTL sweep, and approved Python regression
+are now complete at checkpoint 4. Akashic CRC, raw-Keccak, and WOTS
+refactoring remains a separately authorized, user-selected-worktree task.
 
 ---
 

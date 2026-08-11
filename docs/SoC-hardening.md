@@ -1,11 +1,13 @@
 # SoC Hardening Roadmap
 
-Status: checkpoint 3 is complete for checked SHA3/SHAKE, raw Keccak, the
-portable crypto guard, global requester identity, and the production WOTS
-chain. Checkpoint 4's KDOS GPT mode-4 hardware CRC adoption and authoritative
-CRC diagnostics are implemented; fresh artifacts and the full approved
-sequential regression remain. The old WOTS sequencer and diagnostic words
-recorded in §7 and §10 remain retired historical prototypes; the exact
+Status: checkpoints 0 through 4 are complete. Checked SHA3/SHAKE, raw Keccak,
+the portable crypto guard, global requester identity, the production WOTS
+chain, KDOS GPT mode-4 hardware CRC adoption, and authoritative CRC
+diagnostics are implemented and qualified. Fresh native/BIOS artifacts
+reproduced exactly, the full serial RTL sweep passed, and the approved Python
+regression completed with 3,425 passed and three conditional live-network
+skips. The old WOTS sequencer and diagnostic words recorded in §7 and §10
+remain retired historical prototypes; the exact
 `+0x8A0..+0x8BF` aperture now implements the qualified byte-only context/DMA
 controller. The authoritative contract is
 [`crypto-interface-contract.md`](crypto-interface-contract.md).

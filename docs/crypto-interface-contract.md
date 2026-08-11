@@ -1,11 +1,13 @@
 # Crypto interface contract
 
-Status: implemented and qualified through checkpoint 3. Checkpoint 4's KDOS
-GPT reflected-hardware-CRC adoption and authoritative diagnostics are also
-implemented. The checked-in backends advertise `CRYPTO_CAPS = 0xF`; source
-presence alone remains insufficient support evidence. Fresh final artifacts
-and the full approved MegaPad regression remain before checkpoint 4 can close
-and Akashic refactoring can begin.
+Status: implemented and qualified through checkpoint 4. KDOS GPT uses checked
+reflected hardware CRC, authoritative diagnostics are live, and the checked-in
+backends advertise `CRYPTO_CAPS = 0xF`; source presence alone remains
+insufficient support evidence. Fresh final artifacts reproduced exactly, the
+ordered focused matrix and full serial RTL sweep passed, and the approved
+Python regression completed with 3,425 passed and three conditional
+live-network skips. Akashic refactoring is a separate task that requires a
+user-selected worktree.
 
 This document is the numeric source of truth for MegaPad's reflected CRC,
 SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain work. It defines both the
@@ -1138,11 +1140,11 @@ implement.
 - Capability bits describe complete landed behavior in the executing backend,
   not source presence, a standalone RTL module, or emulator convenience.
 
-## Implementation status and remaining adoption ledger
+## Implementation status and downstream adoption ledger
 
-This section records completed implementation cutovers and the remaining
-MegaPad adoption/qualification boundary. It is status evidence, not an
-alternate contract.
+This section records the completed MegaPad implementation and qualification
+cutovers plus the separately authorized downstream adoption boundary. It is
+status evidence, not an alternate contract.
 
 ### CRC implementation and consumers
 
@@ -1256,12 +1258,13 @@ The caller's 16 ordinary result stores occur only after complete staging and a
 successful CLEAR; this is ordered staged publication, not an atomic 16-byte
 memory write.
 
-Checkpoint 3 is not the downstream application cutover. Checkpoint 4 has now
-removed KDOS's private GPT IEEE loop, adopted the reflected hardware path,
-and added authoritative diagnostics. Fresh native and BIOS artifacts plus the
-full approved sequential MegaPad regression remain. Only after those gates
-close may a user-selected Akashic worktree adopt the reflected CRC,
-raw-Keccak, and WOTS primitives.
+Checkpoint 3 was not the downstream application cutover. Checkpoint 4 removed
+KDOS's private GPT IEEE loop, adopted the reflected hardware path, added
+authoritative diagnostics, reproduced fresh native and BIOS artifacts, and
+completed the ordered focused matrix, full serial RTL sweep, and approved
+Python regression. The MegaPad gate is closed. A user-selected Akashic
+worktree may adopt the reflected CRC, raw-Keccak, and WOTS primitives only in
+a separate authorized task.
 
 ### Guard and System Info checkpoint 2
 
@@ -1311,3 +1314,10 @@ sequential under the repository resource-safety rules. Emulator success does
 not qualify integrated RTL, and RTL simulation does not establish synthesis,
 timing closure, board behavior, power, entropy quality, or side-channel
 properties.
+
+Checkpoint-4 closure ran these anchors sequentially against fresh artifacts.
+`make -C rtl/sim -j1 all` completed successfully, and the definitive
+`make test-sequential` run completed with 3,425 passed and three conditional
+live-network skips. The skipped cases depend on external TAP/network reachability
+and do not weaken the executed UDP, device, CRC/GPT, SHA3, Keccak, WOTS, bus,
+or SoC coverage.

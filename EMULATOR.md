@@ -353,9 +353,11 @@ ordering.
 Checkpoint 4 has replaced KDOS's private GPT IEEE CRC loop with checked mode-4
 resident-buffer transactions and raw-state chaining that releases ownership
 between disk reads. `.CRC-DIAG` now exercises all six standard finalized
-vectors plus reflected raw finalization. Fresh native/BIOS artifacts and the
-full approved sequential regression remain; Akashic adoption begins only
-after that MegaPad gate, in a user-selected Akashic worktree.
+vectors plus reflected raw finalization. Fresh native and BIOS builds were
+reproduced byte-for-byte; the ordered focused gates, full serial RTL sweep,
+and approved Python regression completed with 3,425 passed and three
+environment-conditional live-network skips. The MegaPad gate is complete;
+Akashic adoption is a separate task in a user-selected Akashic worktree.
 
 ---
 

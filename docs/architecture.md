@@ -647,9 +647,12 @@ Checkpoint 4 has replaced KDOS's private GPT IEEE loop with checked reflected
 mode-4 hardware. Header buffers are one transaction; entry arrays carry raw
 state through short resident-sector transactions and release before each next
 disk read. Standard-vector diagnostics cover modes 0/1/2/4/5/6 and mode-5
-raw finalization. Fresh final artifacts and the full approved sequential
-regression remain before a user-selected Akashic worktree may adopt the
-checked CRC, raw-Keccak, and WOTS interfaces.
+raw finalization. Fresh final artifacts reproduced byte-for-byte, the ordered
+focused matrix and full serial RTL sweep passed, and the approved Python
+regression completed with 3,425 passed and three conditional live-network
+skips. MegaPad checkpoint 4 is complete; a user-selected Akashic worktree may
+adopt the checked CRC, raw-Keccak, and WOTS interfaces in a separately
+authorized task.
 
 ### Portable MMIO crypto guard
 

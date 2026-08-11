@@ -135,9 +135,12 @@ Full L2–L7 network stack, bottom-up:
 
 Checkpoint 3 is complete, including the production WOTS controller, native
 and RTL fabric integration, checked BIOS word, capability publication, and
-focused sequential qualification. Checkpoint 4's KDOS GPT hardware CRC
-cutover and authoritative diagnostics have landed; fresh final artifacts and
-the full approved sequential regression remain.
+focused sequential qualification. Checkpoint 4 is also complete: KDOS GPT
+uses checked reflected hardware CRC, the authoritative diagnostics are live,
+fresh final artifacts reproduced exactly, the ordered focused matrix passed,
+the full serial RTL sweep passed, and the approved Python regression completed
+with 3,425 passed and three conditional live-network skips. Akashic adoption
+is separately scoped and requires a user-selected worktree.
 
 Per `docs/SoC-hardening.md`:
 
