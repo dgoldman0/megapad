@@ -73,7 +73,8 @@ FPGA bitstream).  The project is functionally a complete system.
 1. ✅ **Memory allocator** — `ALLOCATE`, `FREE`, `RESIZE`, `HEAP-SETUP`, `.HEAP`
 2. ✅ **CATCH/THROW** — exception handling, nested catch, re-throw
 3. ✅ **CRC integration** — `CRC-BUF`, `CRC32-BUF`, `CRC32C-BUF`, `CRC64-BUF`
-4. ✅ **Hardware diagnostics** — `.DIAG`, `BIST-REPORT`, `TILE-REPORT`, `.PERF`
+4. ✅ **Hardware diagnostics** — `DIAG`, `.CRC-DIAG`, `.BIST-STATUS`,
+   `.TILE-DIAG`, `.ICACHE`, `.PERF`
 
 ### Layer 1: Crypto Stack (Items 5–8) — ✅ DONE
 
@@ -134,8 +135,9 @@ Full L2–L7 network stack, bottom-up:
 
 Checkpoint 3 is complete, including the production WOTS controller, native
 and RTL fabric integration, checked BIOS word, capability publication, and
-focused sequential qualification. Checkpoint 4 remains the KDOS GPT hardware
-CRC cutover, diagnostics, fresh final artifacts, and full approved regression.
+focused sequential qualification. Checkpoint 4's KDOS GPT hardware CRC
+cutover and authoritative diagnostics have landed; fresh final artifacts and
+the full approved sequential regression remain.
 
 Per `docs/SoC-hardening.md`:
 

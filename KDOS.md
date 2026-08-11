@@ -188,7 +188,8 @@ PORTS                          \ List all port bindings
 - **§1.1 Memory Allocator**: ALLOCATE / FREE / RESIZE — first-fit heap with coalescing (13 tests)
 - **§1.2 CATCH/THROW**: ANS-style exception handling with nested catch frames (8 tests)
 - **§1.3 CRC Integration**: ISA-backed exact-length CRC buffer helpers
-- **§1.4 Hardware Diagnostics**: MEM-TEST, DEV-PROBE, SYS-CHECK — BIST infrastructure
+- **§1.4 Hardware Diagnostics**: DIAG, .CRC-DIAG, .BIST-STATUS,
+  .TILE-DIAG, .ICACHE, and .PERF
 - **§1.5 AES-256-GCM**: AES-ENCRYPT / AES-DECRYPT via MMIO AES engine (9 tests)
 - **§1.6 SHA-3 / Keccak-256**: Checked HASH / HMAC / SHAKE via the shared
   MMIO Keccak engine; focused coverage and the complete checkpoint-2 KDOS/TLS
@@ -204,13 +205,14 @@ PORTS                          \ List all port bindings
 **Crypto checkpoint boundary:** Checkpoint 3 is complete. The production
 byte-only WOTS controller and checked BIOS word use a 64-bit read-only Bank 0
 DMA requester appended after disk and the one shared Keccak service. The
-checked-in configuration reports `CRYPTO_CAPS = 0xF`. This is not yet the
-Akashic cutover. Checkpoint 4 must replace KDOS's private
-GPT IEEE CRC loop with the
-reflected hardware path, add standard-vector diagnostics, regenerate the
-native and BIOS artifacts, and pass the full approved MegaPad regression
-sequentially. Akashic refactoring follows that completed MegaPad gate in a
-user-selected Akashic worktree.
+checked-in configuration reports `CRYPTO_CAPS = 0xF`. Checkpoint 4 has now
+removed KDOS's private GPT IEEE loop: headers use a checked resident-buffer
+mode-4 transaction, while entry arrays carry raw state through short
+per-sector transactions that release ownership before the next disk read.
+The live `.CRC-DIAG` covers all six canonical `"123456789"` results plus the
+mode-5 raw vector. Fresh final artifacts and the approved full sequential
+regression remain before Akashic refactoring begins in a user-selected
+Akashic worktree.
 
 ### � Roadmap to v1.0
 
@@ -578,12 +580,16 @@ The BIOS provides:
   raw Keccak, and WOTS independently. Any backend without the complete WOTS
   path must leave bit 3 clear, making this word return `UNSUPPORTED` before
   argument or device access.
-* **CRC**: CRC32-BUF, CRC32C-BUF, CRC64-BUF, CRC32-STR, .CRC32
+* **CRC**: CRC32-BUF, CRC32C-BUF, CRC64-BUF, CRC32-STR, .CRC32; GPT
+  validation uses the checked reflected mode-4/raw-final path
+* **Diagnostics**: DIAG, .CRC-DIAG, .PERF, .BIST-STATUS, .TILE-DIAG,
+  and .ICACHE
 
 The checkpoint-3 BIOS interface required by KDOS is implemented as of v1.0.
-Checkpoint-2 KDOS and TLS/network source-load qualification is green;
-checkpoint-4 GPT CRC adoption, diagnostics, fresh artifacts, and the full
-approved sequential regression remain before Akashic adoption.
+Checkpoint-2 KDOS and TLS/network source-load qualification is green, and the
+checkpoint-4 GPT CRC adoption plus diagnostics have landed. Fresh final
+artifacts and the full approved sequential regression remain before Akashic
+adoption.
 
 ---
 

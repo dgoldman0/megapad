@@ -181,6 +181,12 @@ Zero alone denotes success.  Public predicates include `IOR-PARTIAL?` and
 partition 4.  Range errors use code 18; partition capacity and workspace
 errors use codes 21 and 22 respectively.
 
+GPT's checked CRC source retains the BIOS status in `IOR>RAW`: missing
+reflected/raw capability is raw 1, partition code 23, and the unsupported
+flag; CRC ownership contention is raw 2 and partition code 24.  The scanner
+does not relabel either failure as corrupt media and does not fall back to a
+private software checksum.
+
 ## Partition discovery API
 
 All three scanners have the same caller-owned interface:
@@ -270,6 +276,15 @@ The current contract does not silently recover one GPT copy from the other.
 Both headers, both arrays, and their mutual agreement are required; any
 single-copy corruption rejects the table transactionally.
 
+All GPT CRC-32 values use checked hardware mode 4 (CRC-32/ISO-HDLC).  A header
+is checked in one transaction after temporarily zeroing its stored CRC field;
+the field is restored even when acquisition is unsupported or busy.  Entry
+arrays never retain ownership across storage I/O.  Each already-resident
+sector chunk seeds mode 4 from the prior raw accumulator, feeds its exact byte
+count, and uses raw finalization to release.  The final partial chunk is not
+padded, and the IEEE all-ones XOR-out is applied once after the complete
+declared array length.
+
 ## Qualification requirements
 
 The executable storage-object suite must cover:
@@ -281,6 +296,11 @@ The executable storage-object suite must cover:
 - raw identity translation and bounded-slice translation;
 - a media swap at guarded-command acceptance proving stale fail-closed
   behavior and replacement-media non-mutation;
-- valid external MBR and GPT images; and
-- corrupt signatures, CRCs, extents, capacity, and workspace with no partial
+- valid external MBR and GPT images;
+- mode-4 GPT execution, multi-sector raw-state chaining, exact partial tails,
+  capability absence, busy-owner preservation, and reacquisition after an
+  injected later-sector read failure;
+- independent primary/backup header and primary/backup array CRC corruption;
+  and
+- corrupt signatures, extents, capacity, and workspace with no partial
   volume publication.

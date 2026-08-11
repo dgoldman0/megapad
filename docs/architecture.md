@@ -643,11 +643,13 @@ status mapping are normative in the
 
 Checkpoint 3 completed this hardware/BIOS primitive after the documented
 qualification gate enabled capability bit 3; it is not the Akashic cutover.
-Checkpoint 4 must first replace KDOS's private GPT IEEE CRC loop with
-the reflected hardware CRC path, add authoritative diagnostics, regenerate
-native and BIOS artifacts, and pass the full approved MegaPad regression
-sequentially. Only after that gate may a user-selected Akashic worktree be
-refactored onto the checked CRC, raw-Keccak, and WOTS interfaces.
+Checkpoint 4 has replaced KDOS's private GPT IEEE loop with checked reflected
+mode-4 hardware. Header buffers are one transaction; entry arrays carry raw
+state through short resident-sector transactions and release before each next
+disk read. Standard-vector diagnostics cover modes 0/1/2/4/5/6 and mode-5
+raw finalization. Fresh final artifacts and the full approved sequential
+regression remain before a user-selected Akashic worktree may adopt the
+checked CRC, raw-Keccak, and WOTS interfaces.
 
 ### Portable MMIO crypto guard
 

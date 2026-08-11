@@ -350,10 +350,12 @@ bytes; clear timeout retains crypto guard 8 fail-closed. See the
 the complete error map, deadline formulas, state construction, and cleanup
 ordering.
 
-Checkpoint 4 still replaces KDOS's private GPT IEEE CRC loop, adds
-standard-vector diagnostics, regenerates the native/BIOS artifacts, and runs
-the full approved regression sequentially. Akashic adoption begins only after
-that MegaPad gate, in a user-selected Akashic worktree.
+Checkpoint 4 has replaced KDOS's private GPT IEEE CRC loop with checked mode-4
+resident-buffer transactions and raw-state chaining that releases ownership
+between disk reads. `.CRC-DIAG` now exercises all six standard finalized
+vectors plus reflected raw finalization. Fresh native/BIOS artifacts and the
+full approved sequential regression remain; Akashic adoption begins only
+after that MegaPad gate, in a user-selected Akashic worktree.
 
 ---
 

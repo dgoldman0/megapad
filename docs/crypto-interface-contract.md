@@ -1,12 +1,11 @@
 # Crypto interface contract
 
-Status: implemented and qualified through checkpoint 3. The production WOTS
-controller, real Bank 0 DMA, shared-Keccak ownership, and checked BIOS word
-extend the checkpoint-2 crypto surface. The checked-in backends advertise
-`CRYPTO_CAPS = 0xF` after that complete path passed its focused qualification;
-source presence alone remains insufficient support evidence. Checkpoint 4
-KDOS adoption and the full approved MegaPad regression remain before Akashic
-refactoring.
+Status: implemented and qualified through checkpoint 3. Checkpoint 4's KDOS
+GPT reflected-hardware-CRC adoption and authoritative diagnostics are also
+implemented. The checked-in backends advertise `CRYPTO_CAPS = 0xF`; source
+presence alone remains insufficient support evidence. Fresh final artifacts
+and the full approved MegaPad regression remain before checkpoint 4 can close
+and Akashic refactoring can begin.
 
 This document is the numeric source of truth for MegaPad's reflected CRC,
 SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain work. It defines both the
@@ -1173,8 +1172,12 @@ the full-core accumulator CSR.
 
 BIOS exposes the checked CRC surface in this document, and KDOS
 `CRC32C-BUF` selects reflected mode 5. No compatibility aliases preserve the
-removed no-status words. The GPT software IEEE CRC remains in place until the
-later MegaPad adoption checkpoint.
+removed no-status words. KDOS GPT now selects reflected IEEE mode 4 through
+the checked surface. Headers use one resident-buffer transaction; partition
+arrays reseed short per-sector transactions with the prior raw accumulator,
+raw-finalize to release before each subsequent disk read, and apply XOR-out
+once at completion. Unsupported and busy failures retain raw BIOS causes 1
+and 2 in the partition ior and never use a software fallback.
 
 `docs/BIOS-DICTIONARY.md` previously listed CRC DMA words that do not exist
 after CRC moved to the ISA. Checkpoint 0 removes those phantom rows rather
@@ -1253,12 +1256,12 @@ The caller's 16 ordinary result stores occur only after complete staging and a
 successful CLEAR; this is ordered staged publication, not an atomic 16-byte
 memory write.
 
-Checkpoint 3 is not the downstream application cutover. Checkpoint 4 first
-replaces KDOS's private GPT IEEE CRC loop with the reflected hardware path,
-adds authoritative diagnostics, regenerates the native and BIOS artifacts,
-and runs the full approved MegaPad regression sequentially. Only after that
-MegaPad-local gate may a user-selected Akashic worktree adopt the reflected
-CRC, raw-Keccak, and WOTS primitives.
+Checkpoint 3 is not the downstream application cutover. Checkpoint 4 has now
+removed KDOS's private GPT IEEE loop, adopted the reflected hardware path,
+and added authoritative diagnostics. Fresh native and BIOS artifacts plus the
+full approved sequential MegaPad regression remain. Only after those gates
+close may a user-selected Akashic worktree adopt the reflected CRC,
+raw-Keccak, and WOTS primitives.
 
 ### Guard and System Info checkpoint 2
 

@@ -477,7 +477,7 @@ that cover every layer of the system.
 | `TestKDOSAllocator` | ALLOCATE, FREE, RESIZE, heap management |
 | `TestKDOSExceptions` | CATCH, THROW, nested catch, rethrow |
 | `TestKDOSCRC` | CRC-BUF, CRC32-BUF, CRC32C-BUF, CRC64-BUF |
-| `TestKDOSDiagnostics` | .DIAG, BIST-REPORT, TILE-REPORT, .PERF |
+| `TestKDOSDiagnostics` | `DIAG`, `.CRC-DIAG`, `.BIST-STATUS`, `.TILE-DIAG`, `.ICACHE`, `.PERF`, CRC ownership cleanup |
 | `TestKDOSAES` | AES-ENCRYPT, AES-DECRYPT, .AES-STATUS |
 | `TestKDOSSHA3Checkpoint2` | Checked SHA3-256/512, SHAKE128/256, SHAKE-READ/SHAKE-STREAM, status propagation |
 | `TestKDOSCrypto` | HASH, HMAC, ENCRYPT, DECRYPT, VERIFY |

@@ -2,9 +2,10 @@
 
 Status: checkpoint 3 is complete for checked SHA3/SHAKE, raw Keccak, the
 portable crypto guard, global requester identity, and the production WOTS
-chain. Focused native, RTL, integrated-SoC, BIOS, and sequential publication
-qualification is green. The old WOTS sequencer and diagnostic words recorded
-in §7 and §10 remain retired historical prototypes; the exact
+chain. Checkpoint 4's KDOS GPT mode-4 hardware CRC adoption and authoritative
+CRC diagnostics are implemented; fresh artifacts and the full approved
+sequential regression remain. The old WOTS sequencer and diagnostic words
+recorded in §7 and §10 remain retired historical prototypes; the exact
 `+0x8A0..+0x8BF` aperture now implements the qualified byte-only context/DMA
 controller. The authoritative contract is
 [`crypto-interface-contract.md`](crypto-interface-contract.md).

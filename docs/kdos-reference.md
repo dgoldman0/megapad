@@ -150,23 +150,38 @@ the LSB-first reflected mode 5. All use all-ones init and XOR-out. The exact
 polynomials and `"123456789"` check values are specified in the
 [ISA reference](isa-reference.md).
 
-GPT verification still uses KDOS's private software reflected IEEE CRC loop;
-`CRC32-BUF` is the non-reflected BZIP2 tuple and is not a compatible alias.
-Checkpoint 4 replaces that private GPT loop with a checked mode-4 hardware
-transaction, adds authoritative diagnostics, regenerates the native and BIOS
-artifacts, and runs the full approved MegaPad regression sequentially. That
-MegaPad-local adoption gate precedes any Akashic refactor.
+GPT verification uses reflected IEEE mode 4; `CRC32-BUF` remains the
+non-reflected BZIP2 tuple and is not a compatible alias. Header checks own one
+checked resident-buffer transaction. Entry-array checks seed each resident
+sector with the prior raw state, use `CRC-RAW-FINAL@` to release before the
+next disk read, and apply the IEEE XOR-out once after the final partial chunk.
+Missing capability is partition `UNSUPPORTED` with raw BIOS cause 1; owner
+contention is partition `BUSY` with raw cause 2. Neither case falls back to
+software or disturbs a preexisting transaction.
+
+The checkpoint-4 adoption and authoritative diagnostics are implemented.
+Fresh final artifacts and the full approved MegaPad regression remain before
+the MegaPad-local gate permits any Akashic refactor.
 
 ---
 
 ### §1.4 Hardware Diagnostics
 
-Live test monitor and diagnostic words.
+Live hardware status and self-test words. `CRC-DIAG?` feeds one qword and one
+byte of `"123456789"` through the checked BIOS surface and requires modes
+0/1/2/4/5/6 plus mode-5 raw finalization to match their canonical values.
+Each acquired transaction is released on success or checked failure; a busy
+acquisition leaves the caller's existing transaction unchanged.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `HW-DIAG` | `( -- )` | Run a comprehensive hardware diagnostics suite (UART, Timer, CRC, AES, SHA3). |
-| `.DIAG` | `( label pass -- )` | Print a pass/fail diagnostic line. |
+| `CRC-DIAG?` | `( -- flag )` | Return true only when all six canonical finalized CRC vectors and the reflected raw vector pass. |
+| `.CRC-DIAG` | `( -- )` | Run and print the checked CRC standard-vector result. |
+| `.PERF` | `( -- )` | Print performance counters. |
+| `.BIST-STATUS` | `( -- )` | Print the retained memory-BIST status without rerunning destructive BIST. |
+| `.TILE-DIAG` | `( -- )` | Run the tile datapath self-test and print its result. |
+| `.ICACHE` | `( -- )` | Print instruction-cache hit and miss counters. |
+| `DIAG` | `( -- )` | Run `.PERF`, `.CRC-DIAG`, `.BIST-STATUS`, `.TILE-DIAG`, and `.ICACHE` in order. |
 
 ---
 
@@ -301,9 +316,9 @@ HARDWARE/PROTOCOL.
 
 Checkpoint 3 delivered this BIOS primitive after the full qualification gate
 enabled capability bit 3; it does not authorize Akashic adoption. The KDOS GPT
-CRC replacement, diagnostics, fresh artifacts, and full approved
-sequential regression form checkpoint 4; Akashic CRC, raw-Keccak, and WOTS
-refactoring follows only after that gate.
+hardware CRC replacement and diagnostics are now implemented. Fresh artifacts
+and the full approved sequential regression remain in checkpoint 4; Akashic
+CRC, raw-Keccak, and WOTS refactoring follows only after that gate.
 
 ---
 
