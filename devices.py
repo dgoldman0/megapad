@@ -4257,76 +4257,569 @@ class PortBridgeCSR(Device):
 
 
 # ---------------------------------------------------------------------------
-#  Retired WOTS+ prototype aperture
+#  Checked WOTS+ chain controller
 # ---------------------------------------------------------------------------
-# Checkpoint 2 keeps the reserved 0x8A0..0x8BF decode inert while the old
-# three-pointer/hashlib implementation is replaced by the checked context,
-# DMA, and shared-round-service design in checkpoint 3.  Its capability bit
-# is clear, GO cannot claim SHA3 or produce output, and the BIOS exposes no
-# WOTS word.
+
+WOTS_STATUS_IDLE = 0
+WOTS_STATUS_BUSY = 1
+WOTS_STATUS_DONE = 2
+WOTS_STATUS_ERROR = 3
+
+WOTS_ERROR_NONE = 0
+WOTS_ERROR_INVALID_COMMAND = 1
+WOTS_ERROR_OWNER = 2
+WOTS_ERROR_STEPS = 3
+WOTS_ERROR_START = 4
+WOTS_ERROR_CONTEXT_SPAN = 5
+WOTS_ERROR_TARGET_FAULT = 6
+WOTS_ERROR_MEMORY_TIMEOUT = 7
+WOTS_ERROR_ACCEPT_TIMEOUT = 8
+WOTS_ERROR_INTERNAL = 9
+
+WOTS_DMA_RESPONSE_OK = 0
+WOTS_DMA_RESPONSE_TARGET_FAULT = 1
+WOTS_DMA_RESPONSE_MEMORY_TIMEOUT = 2
+WOTS_DMA_RESPONSE_PROTOCOL = 3
+
+WOTS_MEM_RESPONSE_DEADLINE = 256
+WOTS_BUS_BEAT_SLOT_CYCLES = 258
+WOTS_KECCAK_SERVICE_CYCLES = 32
+WOTS_CONTROL_CYCLES = 512
+
+
+@dataclass(frozen=True)
+class WotsDMABeat:
+    """One stable, read-only byte request from the WOTS controller."""
+
+    token: int
+    address: int
+
 
 class WotsChainAccel(Device):
-    """Inert reservation for the retired WOTS prototype aperture."""
+    """Checked WOTS chain state machine with an explicit DMA endpoint.
 
-    def __init__(self):
+    ``keccak_service`` is the already-shared SHA/Keccak owner.  The controller
+    never reads host memory itself: a fabric inspects ``cycle_dma_view()``,
+    reports capture through ``cycle_dma_accept()``, and later returns exactly
+    one terminal response through ``cycle_dma_complete()``.
+
+    The injected service supplies ``claim_wots()``,
+    ``submit_wots_state(bytes)``, ``take_wots_result()``, ``abort_wots()``,
+    ``wots_quiescent()``, and ``release_wots()``.  Keeping that service
+    external prevents this reference controller from becoming a second
+    Keccak datapath.
+    """
+
+    _PHASE_IDLE = "idle"
+    _PHASE_DMA_REQUEST = "dma-request"
+    _PHASE_DMA_RESPONSE = "dma-response"
+    _PHASE_KECCAK = "keccak"
+    _PHASE_ABORT_KECCAK = "abort-keccak"
+
+    def __init__(
+        self,
+        *,
+        bank0_size: int = 1 << 20,
+        num_bus_ports: int = 1,
+        keccak_service=None,
+    ):
         super().__init__("WotsChain", WOTS_BASE, 0x20)
-        self._seed_addr: int = 0
-        self._adrs_addr: int = 0
-        self._input_addr: int = 0
-        self._steps: int = 0
-        self._start: int = 0
-        self._status: int = 0     # 0=idle, 1=busy, 2=done
-        self._last_cycles: int = 0
+        if not 0 <= bank0_size <= (1 << 64):
+            raise ValueError("WOTS Bank 0 size must fit the 64-bit domain")
+        if num_bus_ports < 1:
+            raise ValueError("WOTS main-bus port count must be positive")
+
+        self.bank0_size = int(bank0_size)
+        self.num_bus_ports = int(num_bus_ports)
+        self.dma_accept_cycles = (
+            (self.num_bus_ports - 1)
+            * 255
+            * WOTS_BUS_BEAT_SLOT_CYCLES
+            + 1
+        )
+        self.dma_beat_cycles = (
+            self.dma_accept_cycles + WOTS_MEM_RESPONSE_DEADLINE
+        )
+        self.max_request_cycles = (
+            64 * self.dma_beat_cycles
+            + 15 * WOTS_KECCAK_SERVICE_CYCLES
+            + WOTS_CONTROL_CYCLES
+        )
+        self.clear_cycles = (
+            self.dma_beat_cycles
+            + WOTS_KECCAK_SERVICE_CYCLES
+            + 64
+        )
+        if (
+            self.max_request_cycles >= (1 << 63)
+            or self.clear_cycles >= (1 << 63)
+        ):
+            raise ValueError("WOTS service deadline exceeds signed-safe range")
+
+        self._keccak_service = keccak_service
+        self._next_dma_token = 1
+        self._reset_architectural_state(reset_cycles=True)
+        self._scrub_private_state()
+
+    @staticmethod
+    def access_shape_valid(
+        offset: int,
+        width: int,
+        *,
+        write: bool,
+    ) -> bool:
+        """Accept only the byte operations defined by the WOTS ABI."""
+        if width != 1 or not 0 <= offset < 0x20:
+            return False
+        if write:
+            return 0x00 <= offset <= 0x0A
+        return True
+
+    def _reset_architectural_state(self, *, reset_cycles: bool) -> None:
+        self._context_addr = 0
+        self._steps = 0
+        self._start = 0
+        self._status = WOTS_STATUS_IDLE
+        self._error = WOTS_ERROR_NONE
+        if reset_cycles:
+            self._cycles = 0
         self._dout = bytearray(16)
 
-    def _execute(self):
-        """Keep the unadvertised prototype inert until checkpoint 3."""
-        self._status = 0
-        self._last_cycles = 0
-        self._dout[:] = bytes(len(self._dout))
+    def _scrub_private_state(self) -> None:
+        self._phase = self._PHASE_IDLE
+        self._active_context_addr = 0
+        self._active_steps = 0
+        self._active_start = 0
+        self._context = bytearray(64)
+        self._keccak_state = bytearray(200)
+        self._node = bytearray(16)
+        self._dma_index = 0
+        self._chain_index = 0
+        self._dma_beat: Optional[WotsDMABeat] = None
+        self._dma_accepted = False
+        self._dma_accept_elapsed = 0
+        self._keccak_claimed = False
+        self._clear_pending = False
+
+    def reset(self) -> None:
+        """Apply the common machine reset and abandon all private work."""
+        if self._keccak_claimed and self._keccak_service is not None:
+            self._keccak_service.abort_wots()
+            self._keccak_service.release_wots()
+        self._reset_architectural_state(reset_cycles=True)
+        self._scrub_private_state()
 
     def read8(self, offset: int) -> int:
-        if offset == 0x0E:
+        if 0x00 <= offset <= 0x07:
+            return (self._context_addr >> (8 * offset)) & 0xFF
+        if offset == 0x08:
+            return self._steps
+        if offset == 0x09:
+            return self._start
+        if offset == 0x0A:
             return self._status
-        if offset == 0x0F:
-            return (self._last_cycles >> 6) & 0xFF
+        if offset == 0x0B:
+            return self._error
+        if 0x0C <= offset <= 0x0F:
+            return (self._cycles >> (8 * (offset - 0x0C))) & 0xFF
         if 0x10 <= offset <= 0x1F:
             return self._dout[offset - 0x10]
         return 0
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
-        if offset == 0x00:
-            self._seed_addr = (self._seed_addr & 0xFFFFFF00) | value
-        elif offset == 0x01:
-            self._seed_addr = (self._seed_addr & 0xFFFF00FF) | (value << 8)
-        elif offset == 0x02:
-            self._seed_addr = (self._seed_addr & 0xFF00FFFF) | (value << 16)
-        elif offset == 0x03:
-            self._seed_addr = (self._seed_addr & 0x00FFFFFF) | (value << 24)
-        elif offset == 0x04:
-            self._adrs_addr = (self._adrs_addr & 0xFFFFFF00) | value
-        elif offset == 0x05:
-            self._adrs_addr = (self._adrs_addr & 0xFFFF00FF) | (value << 8)
-        elif offset == 0x06:
-            self._adrs_addr = (self._adrs_addr & 0xFF00FFFF) | (value << 16)
-        elif offset == 0x07:
-            self._adrs_addr = (self._adrs_addr & 0x00FFFFFF) | (value << 24)
+        if offset == 0x0A:
+            self._write_command(value)
+            return
+        if self._status != WOTS_STATUS_IDLE:
+            return
+        if 0x00 <= offset <= 0x07:
+            shift = 8 * offset
+            self._context_addr = (
+                (self._context_addr & ~(0xFF << shift))
+                | (value << shift)
+            )
         elif offset == 0x08:
-            self._input_addr = (self._input_addr & 0xFFFFFF00) | value
+            self._steps = value
         elif offset == 0x09:
-            self._input_addr = (self._input_addr & 0xFFFF00FF) | (value << 8)
-        elif offset == 0x0A:
-            self._input_addr = (self._input_addr & 0xFF00FFFF) | (value << 16)
-        elif offset == 0x0B:
-            self._input_addr = (self._input_addr & 0x00FFFFFF) | (value << 24)
-        elif offset == 0x0C:
-            self._steps = value & 0x0F
-        elif offset == 0x0D:
-            self._start = value & 0x0F
-        elif offset == 0x0E:
-            # The obsolete three-pointer GO is deliberately unavailable.
-            self._execute()
+            self._start = value
+
+    def _write_command(self, command: int) -> None:
+        if command == 0:
+            return
+        if command == 2:
+            self._clear()
+            return
+        if self._status != WOTS_STATUS_IDLE:
+            return
+        if command != 1:
+            self._dout[:] = bytes(16)
+            self._error = WOTS_ERROR_INVALID_COMMAND
+            self._status = WOTS_STATUS_ERROR
+            return
+        self._go()
+
+    def _go(self) -> None:
+        self._dout[:] = bytes(16)
+        self._error = WOTS_ERROR_NONE
+        self._cycles = 0
+
+        if self._steps > 15:
+            self._publish_validation_error(WOTS_ERROR_STEPS)
+            return
+        if (
+            self._start > 15
+            or (self._steps != 0 and self._start + self._steps > 15)
+        ):
+            self._publish_validation_error(WOTS_ERROR_START)
+            return
+        if (
+            self._context_addr > (1 << 64) - 64
+            or self._context_addr + 64 > self.bank0_size
+        ):
+            self._publish_validation_error(WOTS_ERROR_CONTEXT_SPAN)
+            return
+
+        service = self._keccak_service
+        if self._steps != 0:
+            if service is None or not service.claim_wots():
+                self._publish_validation_error(WOTS_ERROR_OWNER)
+                return
+
+        self._status = WOTS_STATUS_BUSY
+        self._active_context_addr = self._context_addr
+        self._active_steps = self._steps
+        self._active_start = self._start
+        self._keccak_claimed = self._steps != 0
+        self._issue_dma_request()
+
+    def _publish_validation_error(self, error: int) -> None:
+        self._error = error
+        self._status = WOTS_STATUS_ERROR
+
+    def _issue_dma_request(self) -> None:
+        token = self._next_dma_token
+        self._next_dma_token += 1
+        self._dma_beat = WotsDMABeat(
+            token=token,
+            address=self._active_context_addr + self._dma_index,
+        )
+        self._dma_accepted = False
+        self._dma_accept_elapsed = 0
+        self._phase = self._PHASE_DMA_REQUEST
+
+    def cycle_dma_view(
+        self,
+    ) -> tuple[bool, Optional[WotsDMABeat]]:
+        """Return an immutable snapshot of the WOTS DMA endpoint."""
+        active = self._status == WOTS_STATUS_BUSY
+        beat = self._dma_beat if self._phase == self._PHASE_DMA_REQUEST else None
+        return active, beat
+
+    def snapshot(self) -> dict:
+        """Return one coherent architectural/private diagnostic record."""
+        beat = self._dma_beat
+        return {
+            "context_addr": self._context_addr,
+            "steps": self._steps,
+            "start": self._start,
+            "status": self._status,
+            "error": self._error,
+            "cycles": self._cycles,
+            "dout": bytes(self._dout),
+            "phase": self._phase,
+            "active_context_addr": self._active_context_addr,
+            "active_steps": self._active_steps,
+            "active_start": self._active_start,
+            "dma_index": self._dma_index,
+            "chain_index": self._chain_index,
+            "dma_token": None if beat is None else beat.token,
+            "dma_address": None if beat is None else beat.address,
+            "dma_accepted": self._dma_accepted,
+            "dma_accept_elapsed": self._dma_accept_elapsed,
+            "keccak_claimed": self._keccak_claimed,
+            "clear_pending": self._clear_pending,
+            "private_zeroized": self.private_zeroized(),
+        }
+
+    def private_zeroized(self) -> bool:
+        """Whether all nonarchitectural request material is scrubbed."""
+        return (
+            self._active_context_addr == 0
+            and self._active_steps == 0
+            and self._active_start == 0
+            and not any(self._context)
+            and not any(self._keccak_state)
+            and not any(self._node)
+            and self._dma_index == 0
+            and self._chain_index == 0
+            and self._dma_beat is None
+            and not self._dma_accepted
+            and self._dma_accept_elapsed == 0
+            and not self._keccak_claimed
+            and not self._clear_pending
+        )
+
+    def cycle_dma_accept(self, token: int) -> bool:
+        """Report the exact edge on which the fabric captured one beat."""
+        beat = self._dma_beat
+        if (
+            self._status != WOTS_STATUS_BUSY
+            or self._phase != self._PHASE_DMA_REQUEST
+            or beat is None
+            or beat.token != token
+        ):
+            return False
+        self._dma_accepted = True
+        self._phase = self._PHASE_DMA_RESPONSE
+        return True
+
+    def cycle_dma_complete(
+        self,
+        token: int,
+        *,
+        response_code: int,
+        read_value: Optional[int],
+    ) -> bool:
+        """Consume the sole terminal response owed by an accepted beat."""
+        beat = self._dma_beat
+        if (
+            self._status != WOTS_STATUS_BUSY
+            or self._phase != self._PHASE_DMA_RESPONSE
+            or not self._dma_accepted
+            or beat is None
+            or beat.token != token
+        ):
+            return False
+
+        self._dma_beat = None
+        self._dma_accepted = False
+        if self._clear_pending:
+            self._finish_clear()
+            return True
+
+        try:
+            response_code = operator.index(response_code)
+        except Exception:
+            response_code = WOTS_DMA_RESPONSE_PROTOCOL
+
+        if response_code == WOTS_DMA_RESPONSE_TARGET_FAULT:
+            self._finish_error(WOTS_ERROR_TARGET_FAULT)
+            return True
+        if response_code == WOTS_DMA_RESPONSE_MEMORY_TIMEOUT:
+            self._finish_error(WOTS_ERROR_MEMORY_TIMEOUT)
+            return True
+        if response_code != WOTS_DMA_RESPONSE_OK:
+            self._finish_error(WOTS_ERROR_INTERNAL)
+            return True
+        try:
+            byte_value = operator.index(read_value)
+        except Exception:
+            byte_value = -1
+        if not 0 <= byte_value <= 0xFF:
+            self._finish_error(WOTS_ERROR_INTERNAL)
+            return True
+
+        self._context[self._dma_index] = byte_value
+        self._dma_index += 1
+        if self._dma_index < 64:
+            self._issue_dma_request()
+            return True
+        if self._active_steps == 0:
+            self._finish_success(bytes(self._context[48:64]))
+            return True
+
+        self._node[:] = self._context[48:64]
+        self._chain_index = 0
+        self._submit_keccak_state()
+        return True
+
+    def _build_keccak_state(self) -> bytearray:
+        state = bytearray(200)
+        state[0:16] = self._context[0:16]
+        state[16:48] = self._context[16:48]
+        step = self._active_start + self._chain_index
+        state[44:48] = step.to_bytes(4, "big")
+        state[48:64] = self._node
+        state[64] = 0x1F
+        state[135] = 0x80
+        return state
+
+    def _submit_keccak_state(self) -> None:
+        self._keccak_state[:] = self._build_keccak_state()
+        if not self._keccak_service.submit_wots_state(
+            bytes(self._keccak_state)
+        ):
+            self._keccak_service.abort_wots()
+            self._phase = self._PHASE_ABORT_KECCAK
+            self._clear_pending = False
+            self._error = WOTS_ERROR_INTERNAL
+            return
+        self._phase = self._PHASE_KECCAK
+
+    def tick(self, cycles: int):
+        if cycles < 0:
+            raise ValueError("WOTS cycles cannot advance by a negative value")
+        while cycles and self._status == WOTS_STATUS_BUSY:
+            if self._phase == self._PHASE_DMA_REQUEST:
+                remaining = (
+                    self.dma_accept_cycles - self._dma_accept_elapsed
+                )
+                elapsed = min(cycles, remaining)
+                self._cycles = min(
+                    0xFFFF_FFFF,
+                    self._cycles + elapsed,
+                )
+                self._dma_accept_elapsed += elapsed
+                if cycles >= remaining:
+                    self._dma_beat = None
+                    self._finish_error(WOTS_ERROR_ACCEPT_TIMEOUT)
+                return
+
+            # An accepted beat has no controller-local response deadline;
+            # the main bus owes one classified terminal response.  With no
+            # fabric event supplied here, the interval can be jumped.
+            if self._phase == self._PHASE_DMA_RESPONSE:
+                self._cycles = min(
+                    0xFFFF_FFFF,
+                    self._cycles + cycles,
+                )
+                return
+
+            # Shared-service completion is sampled at a clock boundary.  A
+            # ready result can immediately submit the next chain step, so
+            # loop at most once per remaining step rather than skipping an
+            # already-visible completion inside a large tick.
+            self._cycles = min(0xFFFF_FFFF, self._cycles + 1)
+            cycles -= 1
+
+            if self._phase == self._PHASE_KECCAK:
+                result = self._keccak_service.take_wots_result()
+                if result is None:
+                    self._cycles = min(
+                        0xFFFF_FFFF,
+                        self._cycles + cycles,
+                    )
+                    return
+                try:
+                    result = bytes(result)
+                except Exception:
+                    result = b""
+                if len(result) != 200:
+                    self._keccak_service.abort_wots()
+                    self._phase = self._PHASE_ABORT_KECCAK
+                    self._clear_pending = False
+                    self._error = WOTS_ERROR_INTERNAL
+                    continue
+                self._keccak_state[:] = result
+                self._node[:] = result[0:16]
+                self._chain_index += 1
+                if self._chain_index == self._active_steps:
+                    self._finish_success(bytes(self._node))
+                else:
+                    self._submit_keccak_state()
+                continue
+
+            if self._phase == self._PHASE_ABORT_KECCAK:
+                if self._keccak_service.wots_quiescent():
+                    if self._clear_pending:
+                        self._finish_clear()
+                    else:
+                        error = self._error or WOTS_ERROR_INTERNAL
+                        self._finish_error(error)
+                else:
+                    self._cycles = min(
+                        0xFFFF_FFFF,
+                        self._cycles + cycles,
+                    )
+                    return
+
+    def _clear(self) -> None:
+        if self._status != WOTS_STATUS_BUSY:
+            retained_cycles = self._cycles
+            self._reset_architectural_state(reset_cycles=False)
+            self._cycles = retained_cycles
+            self._scrub_private_state()
+            return
+
+        self._clear_pending = True
+        if self._phase == self._PHASE_DMA_RESPONSE:
+            return
+        if self._phase == self._PHASE_KECCAK:
+            self._keccak_service.abort_wots()
+            self._phase = self._PHASE_ABORT_KECCAK
+            return
+        if self._phase == self._PHASE_ABORT_KECCAK:
+            return
+        self._dma_beat = None
+        self._finish_clear()
+
+    def _release_keccak(self) -> None:
+        if self._keccak_claimed and self._keccak_service is not None:
+            self._keccak_service.release_wots()
+
+    def _finish_success(self, result: bytes) -> None:
+        terminal = bytes(result)
+        self._scrub_working_buffers_preserving_owner()
+        self._release_keccak()
+        self._keccak_claimed = False
+        self._phase = self._PHASE_IDLE
+        self._dout[:] = terminal
+        self._error = WOTS_ERROR_NONE
+        self._status = WOTS_STATUS_DONE
+
+    def _finish_error(self, error: int) -> None:
+        self._scrub_working_buffers_preserving_owner()
+        self._release_keccak()
+        self._keccak_claimed = False
+        self._phase = self._PHASE_IDLE
+        self._dout[:] = bytes(16)
+        self._error = error
+        self._status = WOTS_STATUS_ERROR
+
+    def _finish_clear(self) -> None:
+        retained_cycles = self._cycles
+        self._scrub_working_buffers_preserving_owner()
+        self._release_keccak()
+        self._reset_architectural_state(reset_cycles=False)
+        self._cycles = retained_cycles
+        self._scrub_private_state()
+
+    def _scrub_working_buffers_preserving_owner(self) -> None:
+        self._active_context_addr = 0
+        self._active_steps = 0
+        self._active_start = 0
+        self._context[:] = bytes(64)
+        self._keccak_state[:] = bytes(200)
+        self._node[:] = bytes(16)
+        self._dma_index = 0
+        self._chain_index = 0
+        self._dma_beat = None
+        self._dma_accepted = False
+        self._dma_accept_elapsed = 0
+        self._clear_pending = False
+
+
+class CppWotsProxy(Device):
+    """Thin Python facade over the SystemState-owned native WOTS engine."""
+
+    access_shape_valid = staticmethod(WotsChainAccel.access_shape_valid)
+
+    def __init__(self, cs):
+        super().__init__("WotsChain", WOTS_BASE, 0x20)
+        self._cs = cs
+
+    def read8(self, offset: int) -> int:
+        return self._cs.crypto_read8(WOTS_BASE + offset)
+
+    def write8(self, offset: int, value: int):
+        self._cs.crypto_write8(WOTS_BASE + offset, value & 0xFF)
+
+    def snapshot(self) -> dict:
+        return dict(self._cs.crypto_wots_snapshot())
+
+    def private_zeroized(self) -> bool:
+        return bool(self._cs.crypto_wots_private_zeroized())
 
 
 # ---------------------------------------------------------------------------
@@ -4395,6 +4888,12 @@ class DeviceBus:
         dev, local = self.find_device(mmio_offset)
         if dev is None or local + width > dev.size:
             raise BusError(mmio_offset, write=write)
+        shape_valid = getattr(dev, "access_shape_valid", None)
+        if (
+            shape_valid is not None
+            and not shape_valid(local, width, write=write)
+        ):
+            raise BusError(mmio_offset, write=write)
         return dev, local
 
     def read8(
@@ -4406,6 +4905,12 @@ class DeviceBus:
     ) -> int:
         dev, local = self.find_device(mmio_offset)
         if dev:
+            shape_valid = getattr(dev, "access_shape_valid", None)
+            if (
+                shape_valid is not None
+                and not shape_valid(local, 1, write=False)
+            ):
+                raise BusError(mmio_offset, write=False)
             requester_read = getattr(
                 dev, "read8_for_requester", None
             )
@@ -4428,6 +4933,12 @@ class DeviceBus:
     ):
         dev, local = self.find_device(mmio_offset)
         if dev:
+            shape_valid = getattr(dev, "access_shape_valid", None)
+            if (
+                shape_valid is not None
+                and not shape_valid(local, 1, write=True)
+            ):
+                raise BusError(mmio_offset, write=True)
             requester_write = getattr(
                 dev, "write8_for_requester", None
             )
