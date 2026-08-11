@@ -1,15 +1,20 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **474** entries.  The numbered
+The `bios.asm` dictionary link chain contains **472** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
-> **Implementation boundary.** This reference describes the checked-in BIOS
-> image. The numeric CRC, SHA3, Keccak, and WOTS interface is in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md). Checkpoint 2
-> advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC (bit 0), checked
-> SHA3/SHAKE streaming (bit 1), and raw Keccak-f[1600] (bit 2). WOTS (bit 3)
-> remains unadvertised and has no prototype BIOS word surface.
+> **Implementation boundary.** This reference describes the checked-in
+> `bios.asm` source. A generated `bios.rom` reflects it only after explicit
+> artifact regeneration. The numeric CRC, SHA3, Keccak, and WOTS interface is in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md). The qualified
+> checkpoint-3 configuration advertises `CRYPTO_CAPS = 0xF`: reflected/raw
+> CRC (bit 0), checked SHA3/SHAKE streaming (bit 1), raw Keccak-f[1600]
+> (bit 2), and the production checked WOTS chain with real Bank 0 DMA (bit 3).
+> The complete checkpoint-3 backend path has passed qualification and the
+> checked-in `bios.rom` was regenerated from this source. A derivative backend
+> missing that path must keep bit 3 clear; `WOTS-CHAIN` then returns
+> `UNSUPPORTED` before argument or device access.
 
 ---
 
@@ -37,9 +42,9 @@ Each entry is a linked list node:
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
 3. **Forth variables and private arena**: `STATE` = 0, `BASE` = 10, reserve
    and scrub `NUM_CORES × 16` bytes above `dict_free` for CRC owner records,
-   reset the full-width SHA/Keccak software owner fields, set `HERE` to the
+   reset the full-width SHA/Keccak/WOTS software owner fields, set `HERE` to the
    resulting kernel-data end, and set `LATEST` = `latest_entry`
-   (`TACC-CLAIM?`). Hardware spinlock 8 resets independently.
+   (`WOTS-CHAIN`). Hardware spinlock 8 resets independently.
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
 5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
@@ -865,14 +870,30 @@ initialization, lifetime, or freedom from application-level aliases.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 467 | `TAMAC` | `( -- )` | | Accumulate the `TSRC0` × `TSRC1` tile products into owned, valid TACC lanes (`t.amac`, `E1 06`) |
-| 468 | `TACC-TRY` | `( -- )` | | Atomically try to claim TACC; always retires without waiting and returns no flag (`F8 E3 02`) |
-| 469 | `TACC-CLEAR` | `( -- )` | | Latch the current legal `TMODE`, zero TACC, and establish valid dirty state (`F8 E3 03`) |
-| 470 | `TACC-LOAD` | `( -- )` | | Atomically load the canonical 256-byte image at `TSRC0` and latch its current format (`F8 E3 04`) |
-| 471 | `TACC-STORE` | `( -- )` | | Store the canonical 256-byte image at `TDST`; clear `DIRTY` only after complete success (`F8 E3 05`) |
-| 472 | `TACC-RELEASE` | `( -- )` | | Zeroize, invalidate, and release caller-owned TACC (`F8 E3 06`) |
-| 473 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
-| 474 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
+| 464 | `TAMAC` | `( -- )` | | Accumulate the `TSRC0` × `TSRC1` tile products into owned, valid TACC lanes (`t.amac`, `E1 06`) |
+| 465 | `TACC-TRY` | `( -- )` | | Atomically try to claim TACC; always retires without waiting and returns no flag (`F8 E3 02`) |
+| 466 | `TACC-CLEAR` | `( -- )` | | Latch the current legal `TMODE`, zero TACC, and establish valid dirty state (`F8 E3 03`) |
+| 467 | `TACC-LOAD` | `( -- )` | | Atomically load the canonical 256-byte image at `TSRC0` and latch its current format (`F8 E3 04`) |
+| 468 | `TACC-STORE` | `( -- )` | | Store the canonical 256-byte image at `TDST`; clear `DIRTY` only after complete success (`F8 E3 05`) |
+| 469 | `TACC-RELEASE` | `( -- )` | | Zeroize, invalidate, and release caller-owned TACC (`F8 E3 06`) |
+| 470 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
+| 471 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
+
+### Checked WOTS Chain (1 word)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 472 | `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | | Check capability and complete arguments, run the 64-bit Bank 0 DMA/shared-Keccak chain under crypto guard 8, stage 16 result bytes, prove `CLEAR` reached `IDLE`, then publish and release |
+
+`context-64` is exactly `PK.seed[16] || ADRS[32] || node[16]`. `start` and
+`steps` are each 0..15; when `steps` is nonzero their widened sum is at most
+15. The word uses the common checked status namespace and leaves all 16
+destination bytes unchanged on every failure. BIOS derives its request and
+clear deadlines from System Info `NUM_BUS_PORTS`, measures them with the
+calling core's `PERF_CYCLES`, restores the caller's `PERF_CTRL` enable bit,
+and makes no scheduler/yield call during the timed interval. Failed clear
+quiescence wipes private scratch but retains owner kind 3 and spinlock 8 until
+machine reset.
 
 ---
 
@@ -918,7 +939,8 @@ initialization, lifetime, or freedom from application-level aliases.
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
-| **Catalogued subtotal** | **378** |
+| Checked WOTS Chain | 1 |
+| **Catalogued subtotal** | **379** |
 
 ### All Immediate Words (34)
 
@@ -927,10 +949,10 @@ initialization, lifetime, or freedom from application-level aliases.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The TACC guest interface closes the newest appended segment:
+The checked WOTS word closes the newest appended segment:
 
 ```
-TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
+WOTS-CHAIN → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 → TACC-CLEAR → TACC-TRY → TAMAC → CALLER-SPAN-STATUS
 → ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
 → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
@@ -953,7 +975,9 @@ TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 | `0xFFFF_FF00_0000_0700` | AES-256-GCM | Key/IV/data/tag registers |
 | `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE/raw Keccak | Exact 96-byte aperture: CMD +00, STATUS +01, CTRL +02, ERROR +03, DIN +08, 64-byte DOUT +10..+4F, STATE_INDEX +50, STATE_DATA +58..+5F |
 | `0xFFFF_FF00_0000_0800` | TRNG | RAND8=+0, RAND64=+8..+F, STATUS=+10, SEED=+18..+1F |
-| `0xFFFF_FF00_0000_0880` | Field ALU | OP_A=+0..+1F, OP_B=+20..+3F, CMD=+40, STATUS=+41, RESULT=+48..+67, RESULT_HI=+68..+87 |
+| `0xFFFF_FF00_0000_0840` | *(free)* | Field ALU is ISA-native (`EXT.CRYPTO FB 20..2D`); no MMIO device occupies this range |
+| `0xFFFF_FF00_0000_0880` | Port I/O Bridge | PORT1_TARGET..PORT7_TARGET=+00..+0D (16-bit LE, low 12 bits used), BRIDGE_CTRL=+0E |
+| `0xFFFF_FF00_0000_08A0` | WOTS Chain | Exact byte-only 32-byte aperture: CONTEXT_ADDR=+00..+07, STEPS=+08, START=+09, CMD/STATUS=+0A, ERROR=+0B, CYCLES=+0C..+0F, DOUT=+10..+1F |
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |

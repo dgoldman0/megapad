@@ -132,8 +132,10 @@ Full L2–L7 network stack, bottom-up:
 
 ### SoC Hardening (Items 0, 5-bridge, 7, 9, 10)
 
-Checkpoint 2 is complete, including sequential KDOS/TLS source-load
-qualification. Production WOTS remains checkpoint-3 work.
+Checkpoint 3 is complete, including the production WOTS controller, native
+and RTL fabric integration, checked BIOS word, capability publication, and
+focused sequential qualification. Checkpoint 4 remains the KDOS GPT hardware
+CRC cutover, diagnostics, fresh final artifacts, and full approved regression.
 
 Per `docs/SoC-hardening.md`:
 
@@ -142,7 +144,7 @@ Per `docs/SoC-hardening.md`:
 - §2 ✅ **EXT.STRING engine** — ISA extension (prefix F9), 5 sub-ops (CMOVE, CMOVE>, BFILL, BCOMP, BSRCH)
 - §3 ✅ **EXT.DICT engine** — ISA extension (prefix FA), 4 sub-ops (DFIND, DINS, DDEL, DCLR)
 - §5 ✅ **Port I/O bridge** — 1802 OUT/INP → MMIO remap, byte-serial DMA
-- §7 🔄 **WOTS+ chain accelerator** — old three-pointer prototype retired; production context/DMA/shared-Keccak sequencer remains checkpoint-3 work
+- §7 ✅ **WOTS+ chain accelerator** — old three-pointer prototype retired; production context/DMA/shared-Keccak sequencer and checked BIOS path qualified at checkpoint 3
 - §9 ✅ **Bus timeout** — MMIO/MEM ACK watchdog, sticky latch, W1C clear, `IVEC_BUS_FAULT`
 - §10 ✅ **Checked SHA3/SHAKE/raw-Keccak guard** — global requester identity, lock 8, full-width owner records, and status-bearing BIOS words; prototype aliases removed
 
@@ -199,7 +201,7 @@ buffers, §19 Hash tables, §20 Module system.
   micro-clusters), device bus, IRQ routing
 - `devices.py`: 2,542 lines — 18 device classes (UART, Timer, Storage,
   SysInfo, NIC, Mailbox, Spinlock, KEM, CRC, NTT, Framebuffer, CppFBProxy,
-  CppTimerProxy, RTC, PortBridgeCSR, inert WotsChainAccel reservation,
+  CppTimerProxy, RTC, PortBridgeCSR, checked WotsChainAccel and CppWotsProxy,
   DeviceBus, plus
   AES/SHA3/SHA256/TRNG/FieldALU in C++ accel)
 - `cli.py`: 1,557 lines — interactive monitor/debugger, `--run` auto-boot

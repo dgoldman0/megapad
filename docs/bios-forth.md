@@ -6,12 +6,17 @@ standard Forth REPL over the UART.  If a disk is attached it scans MP64FS for
 the first Forth-type file and loads it with the `FSLOAD` machinery.  The
 standard image places the KDOS core first.
 
-> **Implementation boundary.** This reference describes the checked-in BIOS
-> image. The numeric CRC, SHA3, Keccak, and WOTS interface is in
-> [`crypto-interface-contract.md`](crypto-interface-contract.md). Checkpoint 2
-> advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC (bit 0), checked
-> SHA3/SHAKE streaming (bit 1), and raw Keccak-f[1600] (bit 2). WOTS (bit 3)
-> remains unadvertised and has no prototype BIOS word surface.
+> **Implementation boundary.** This reference describes the checked-in
+> `bios.asm` source. A generated `bios.rom` reflects it only after explicit
+> artifact regeneration. The numeric CRC, SHA3, Keccak, and WOTS interface is in
+> [`crypto-interface-contract.md`](crypto-interface-contract.md). The qualified
+> checkpoint-3 configuration advertises `CRYPTO_CAPS = 0xF`: reflected/raw
+> CRC (bit 0), checked SHA3/SHAKE streaming (bit 1), raw Keccak-f[1600]
+> (bit 2), and the production checked WOTS chain with real Bank 0 DMA (bit 3).
+> The complete checkpoint-3 backend path has passed qualification and the
+> checked-in `bios.rom` was regenerated from this source. A derivative backend
+> missing that path must keep bit 3 clear; `WOTS-CHAIN` then returns
+> `UNSUPPORTED` before argument or device access.
 
 This document organizes the BIOS dictionary by functional category.  Each
 entry shows the **stack effect**
@@ -1060,6 +1065,50 @@ caller image overwritten; any failure leaves it unchanged.
 The unreleased transaction/prototype words `SHA3-INIT`, `SHA3-MODE!`,
 `SHA3-SQUEEZE`, `SHA3-SQUEEZE-NEXT`, `SHA3-DOUT@`, `WOTS-CHAIN-HW`,
 `SHA3-LOCKED?`, and `WOTS-STATUS@` were removed without aliases.
+
+---
+
+## Checked WOTS Chain (1 word)
+
+The WOTS accelerator is the exact byte-only 32-byte aperture
+`0xFFFF_FF00_0000_08A0..0xFFFF_FF00_0000_08BF`:
+
+| Offset | Register | Access |
+|--------|----------|--------|
+| `+0x00..+0x07` | 64-bit little-endian `CONTEXT_ADDR` | read/write bytes |
+| `+0x08` | `STEPS` | read/write byte |
+| `+0x09` | `START` | read/write byte |
+| `+0x0A` | `CMD` / `STATUS` | write/read byte |
+| `+0x0B` | `ERROR` | read byte |
+| `+0x0C..+0x0F` | saturating diagnostic `CYCLES` | read bytes |
+| `+0x10..+0x1F` | stable 16-byte `DOUT` | read bytes |
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | Run one checked WOTS chain, stage its complete result, clear hardware, and only then publish the 16 bytes with ordinary byte stores. |
+
+`context-64` is exactly 16 bytes of `PK.seed`, 32 bytes of ADRS, and the
+16-byte input node. It must be one complete nonwrapping caller-readable Bank 0
+span. `dst-16` follows the common caller-writable-span policy and may overlap
+the context. `start` and `steps` are each 0..15; for nonzero work their widened
+sum is at most 15. A zero-step call still performs all 64 ascending DMA reads
+and returns the staged input node without claiming the shared Keccak service.
+
+The word uses the common checked statuses: `0` OK, `1` UNSUPPORTED, `2`
+STATE/OWNER, `3` RANGE, `4` PROTECTED, `5` TIMEOUT, and `6`
+HARDWARE/PROTOCOL. Capability and all scalar/span checks precede both guard
+and device access. It then makes one nonblocking spinlock-8 attempt, records
+owner kind 3, programs only byte registers, and polls with the calling core's
+64-bit `PERF_CYCLES` counter. BIOS derives the request and clear bounds from
+System Info `NUM_BUS_PORTS`, enables `PERF_CTRL` without resetting counters,
+and restores the caller's saved enable bit on every post-enable return.
+
+On `DONE`, BIOS stages all 16 DOUT bytes, issues `CLEAR`, and publishes only
+after `STATUS` reaches `IDLE` within the independent clear deadline. Every
+failure leaves all destination bytes unchanged. A failed or late clear wipes
+the complete private staging area, restores `PERF_CTRL`, and retains both the
+software owner and spinlock 8 fail-closed until machine reset. The complete
+timed interval contains no `PAUSE`, `TASK-YIELD`, or other scheduler call.
 
 ---
 

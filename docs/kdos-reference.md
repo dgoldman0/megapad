@@ -26,6 +26,8 @@ organized by their source sections in `kdos.f` and `networking.f`.
    - [§1.5 AES-256/128-GCM Encryption](#15-aes-256128-gcm-encryption)
    - [§1.6 SHA-3 Hashing](#16-sha-3-hashing)
    - [§1.6a SHA-256 Hashing](#16a-sha-256-hashing)
+   - [§1.6b SHA-512 Hashing](#16b-sha-512-hashing)
+   - [§1.6c Checked WOTS Chain](#16c-checked-wots-chain)
    - [§1.7 Unified Crypto Words](#17-unified-crypto-words)
    - [§1.8 X25519 ECDH](#18-x25519-ecdh)
    - [§1.9 HKDF Key Derivation](#19-hkdf-key-derivation)
@@ -148,6 +150,13 @@ the LSB-first reflected mode 5. All use all-ones init and XOR-out. The exact
 polynomials and `"123456789"` check values are specified in the
 [ISA reference](isa-reference.md).
 
+GPT verification still uses KDOS's private software reflected IEEE CRC loop;
+`CRC32-BUF` is the non-reflected BZIP2 tuple and is not a compatible alias.
+Checkpoint 4 replaces that private GPT loop with a checked mode-4 hardware
+transaction, adds authoritative diagnostics, regenerates the native and BIOS
+artifacts, and runs the full approved MegaPad regression sequentially. That
+MegaPad-local adoption gate precedes any Akashic refactor.
+
 ---
 
 ### §1.4 Hardware Diagnostics
@@ -180,11 +189,12 @@ AES-256 (default) and AES-128 (via `AES-KEY-MODE!`).
 ### §1.6 SHA-3 Hashing
 
 Checked SHA-3 and SHAKE convenience words built on the guarded BIOS Keccak
-service. Checkpoint 2 reports `CRYPTO_CAPS = 0x7`; bit 1 advertises this
-streaming interface and bit 2 advertises the inherited raw
-`KECCAK-F1600` BIOS word. All words below return the first checked failure
-when required cleanup succeeds. A failed cleanup takes precedence and retains
-the guard fail-closed.
+service. The qualified checkpoint-3 configuration reports
+`CRYPTO_CAPS = 0xF`; bit 1 advertises this streaming interface, bit 2
+advertises the inherited raw `KECCAK-F1600` BIOS word, and bit 3 independently
+advertises the checked WOTS chain described below. All words below return the
+first checked failure when required cleanup succeeds. A failed cleanup takes
+precedence and retains the guard fail-closed.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -258,6 +268,42 @@ offset below 128, byte-aligned low length, and matching low-length
 modulo-128 position before an empty UPDATE or destination preflight. Every
 failure aborts and wipes; a failed `FINAL` does not publish a digest to a
 non-context destination.
+
+---
+
+### §1.6c Checked WOTS Chain
+
+KDOS inherits the qualified production BIOS entry directly. The checked-in
+checkpoint-3 configuration advertises bit 3. A derivative backend that keeps
+the bit clear leaves the word discoverable, but it returns `UNSUPPORTED`
+before argument or device access:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | Run one checked 0..15-step chain using the read-only Bank 0 DMA requester and shared Keccak service. |
+
+`context-64` is exactly `PK.seed[16] || ADRS[32] || node[16]` and must be a
+complete nonwrapping readable Bank 0 span. `dst-16` follows the ordinary
+caller-writable-span policy and may overlap the context. The word checks
+WOTS capability before all arguments, validates widened start/step geometry,
+derives bounded request and clear waits from `NUM_BUS_PORTS`, and holds crypto
+guard 8 without yielding. Zero steps still reads all 64 context bytes and
+returns the input node without claiming Keccak.
+
+On success BIOS stages all 16 result bytes, proves hardware CLEAR reached
+IDLE, then copies those bytes to the caller. This is ordered staged
+publication through ordinary stores, not one atomic 16-byte memory write.
+Every checked failure leaves all destination bytes unchanged. If CLEAR itself
+times out, BIOS returns TIMEOUT but retains the software owner and guard
+fail-closed until machine reset. The common checked statuses are 0 OK, 1
+UNSUPPORTED, 2 STATE/OWNER, 3 RANGE, 4 PROTECTED, 5 TIMEOUT, and 6
+HARDWARE/PROTOCOL.
+
+Checkpoint 3 delivered this BIOS primitive after the full qualification gate
+enabled capability bit 3; it does not authorize Akashic adoption. The KDOS GPT
+CRC replacement, diagnostics, fresh artifacts, and full approved
+sequential regression form checkpoint 4; Akashic CRC, raw-Keccak, and WOTS
+refactoring follows only after that gate.
 
 ---
 

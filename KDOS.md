@@ -109,7 +109,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (360 words, ~14,524 lines):
+**BIOS v1.0** (472 words):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -128,12 +128,14 @@ PORTS                          \ List all port bindings
 - **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
   SHA3-FINAL, SHAKE-FINAL, SHAKE-READ, SHA3-CLEAR, KECCAK-F1600, plus the
   diagnostic SHA3-STATUS@ and SHA3-MODE@ reads. The removed transaction and
-  prototype WOTS BIOS words have no aliases.
+  prototype WOTS BIOS words have no aliases; the replacement is the qualified
+  checked production word
+  `WOTS-CHAIN ( context-64 start steps dst-16 -- status )`.
 - **TRNG**: RANDOM, RANDOM8, SEED-RNG
 - **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW, GF-A!, GF-R@, GF-PRIME, LOAD-PRIME, FMUL-ADD-RAW
 - **NTT engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
 - **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
-- **CRC**: exact-length byte/quad feeds and 32/64-bit non-reflected tuple helpers
+- **CRC**: exact-length byte/quad feeds, reflected and non-reflected 32/64-bit tuples, and raw finalization
 
 **KDOS core (`kdos.f`):**
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
@@ -198,6 +200,17 @@ PORTS                          \ List all port bindings
 - 1,007 test_system.py (40 classes: KDOS, BIOS, multicore, crypto, PQC, network, FS, devices)
 - 23 test_megapad64.py (CPU + tile engine)
 - 38 test_networking.py (NIC backends, TAP, ARP, ICMP, UDP, TCP)
+
+**Crypto checkpoint boundary:** Checkpoint 3 is complete. The production
+byte-only WOTS controller and checked BIOS word use a 64-bit read-only Bank 0
+DMA requester appended after disk and the one shared Keccak service. The
+checked-in configuration reports `CRYPTO_CAPS = 0xF`. This is not yet the
+Akashic cutover. Checkpoint 4 must replace KDOS's private
+GPT IEEE CRC loop with the
+reflected hardware path, add standard-vector diagnostics, regenerate the
+native and BIOS artifacts, and pass the full approved MegaPad regression
+sequentially. Akashic refactoring follows that completed MegaPad gate in a
+user-selected Akashic worktree.
 
 ### � Roadmap to v1.0
 
@@ -504,10 +517,11 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **NIC** | Ethernet device with DMA and TX/RX queues; 1514-byte no-FCS frame limit carrying a 1500-byte IP MTU |
 | **SysInfo** | Board ID, RAM size, feature flags |
 | **Mailbox** | Inter-core IPI messaging (4 cores) |
-| **Spinlock** | 8 hardware mutexes for shared resources |
-| **CRC** | ISA-backed 32/64-bit non-reflected tuples with exact byte tails |
+| **Spinlock** | 16 hardware mutexes; lock 8 is the checked MMIO crypto guard |
+| **CRC** | ISA-backed reflected and non-reflected 32/64-bit tuples with exact byte tails and raw finalization |
 | **AES** | AES-256-GCM authenticated encryption |
 | **SHA-3** | Keccak-f[1600]: SHA3-256/512, SHAKE128/256, XOF squeeze |
+| **WOTS Chain** | Checked 0..15-step sequencer using read-only Bank 0 context DMA and the shared Keccak service |
 | **TRNG** | Hardware CSPRNG (ring-oscillator + SHA-3 conditioner on FPGA) |
 | **Field ALU** | GF(2²⁵⁵−19) arithmetic + raw 256×256→512-bit multiply |
 | **NTT** | 256-point NTT/INTT, configurable modulus (ML-KEM / ML-DSA) |
@@ -522,7 +536,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 360 words, ~14,524 lines) is the **permanent,
+The BIOS Forth (v1.0, 472 words) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -530,7 +544,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 360 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 472 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE
@@ -556,12 +570,20 @@ The BIOS provides:
   AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
 * **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
   SHA3-FINAL, SHAKE-FINAL, SHAKE-READ, SHA3-CLEAR, KECCAK-F1600, with
-  diagnostic SHA3-STATUS@ and SHA3-MODE@ reads. `CRYPTO_CAPS = 0x7`
-  advertises CRC, SHA3/SHAKE, and raw Keccak; WOTS remains unadvertised.
+  diagnostic SHA3-STATUS@ and SHA3-MODE@ reads.
+* **Checked WOTS chain**: WOTS-CHAIN validates capability and complete caller
+  spans, drives the byte-only 64-bit Bank 0 DMA interface under crypto guard
+  8, stages the 16-byte result, and publishes only after successful CLEAR.
+  The qualified checkpoint-3 `CRYPTO_CAPS = 0xF` advertises CRC, SHA3/SHAKE,
+  raw Keccak, and WOTS independently. Any backend without the complete WOTS
+  path must leave bit 3 clear, making this word return `UNSUPPORTED` before
+  argument or device access.
 * **CRC**: CRC32-BUF, CRC32C-BUF, CRC64-BUF, CRC32-STR, .CRC32
 
-All required BIOS extensions for KDOS are implemented as of v1.0.
-Checkpoint-2 KDOS and TLS/network source-load qualification is green.
+The checkpoint-3 BIOS interface required by KDOS is implemented as of v1.0.
+Checkpoint-2 KDOS and TLS/network source-load qualification is green;
+checkpoint-4 GPT CRC adoption, diagnostics, fresh artifacts, and the full
+approved sequential regression remain before Akashic adoption.
 
 ---
 

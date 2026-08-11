@@ -1,16 +1,19 @@
 # Crypto interface contract
 
-Status: selected implementation contract. Checkpoint 2 is complete and
-advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC, checked SHA3/SHAKE
-streaming, and raw Keccak-f[1600]. Focused native, RTL, integrated-SoC, BIOS,
-and sequential KDOS/TLS source-load qualification is green. Production WOTS
-remains unadvertised.
+Status: implemented and qualified through checkpoint 3. The production WOTS
+controller, real Bank 0 DMA, shared-Keccak ownership, and checked BIOS word
+extend the checkpoint-2 crypto surface. The checked-in backends advertise
+`CRYPTO_CAPS = 0xF` after that complete path passed its focused qualification;
+source presence alone remains insufficient support evidence. Checkpoint 4
+KDOS adoption and the full approved MegaPad regression remain before Akashic
+refactoring.
 
 This document is the numeric source of truth for MegaPad's reflected CRC,
 SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain work. It defines both the
-landed checkpoint-2 interface and the selected production WOTS interface.
-The implementation ledger near the end records completed cutovers and the
-remaining WOTS divergence; it is not an alternate contract.
+landed checkpoint-2 interface and the selected checkpoint-3 production WOTS
+interface. The implementation ledger near the end records completed cutovers
+and the remaining adoption/qualification boundary; it is not an alternate
+contract.
 
 The keywords **must**, **must not**, **shall**, **shall not**, and **may** are
 normative. Numeric values are hexadecimal unless a table says otherwise.
@@ -108,10 +111,11 @@ architectural access; it must not alias an earlier register. Writes to
 `CRYPTO_CAPS` or `NUM_BUS_PORTS` are acknowledged and ignored.
 
 The exact System Info extension is implemented in the execution models and
-integrated RTL. Checkpoint 2 advertises bits 0 through 2 (`0x7`) for the
-qualified reflected/raw CRC, SHA3/SHAKE, and raw Keccak paths. Bit 3 remains
-zero until the production WOTS path qualifies. Source presence alone never
-sets a capability.
+integrated RTL. The checked-in checkpoint-3 configuration advertises bits 0
+through 3 (`0xF`) for reflected/raw CRC, SHA3/SHAKE, raw Keccak, and the
+production WOTS path. Bit 3 was held at zero until the real
+DMA/shared-core/controller path and checked BIOS word passed the required
+cross-backend qualification. Source presence alone never sets a capability.
 
 ## Portable crypto guard
 
@@ -1135,10 +1139,11 @@ implement.
 - Capability bits describe complete landed behavior in the executing backend,
   not source presence, a standalone RTL module, or emulator convenience.
 
-## Implementation status and remaining divergence ledger
+## Implementation status and remaining adoption ledger
 
-This section records completed implementation cutovers and the production
-WOTS work that remains. It is status evidence, not an alternate contract.
+This section records completed implementation cutovers and the remaining
+MegaPad adoption/qualification boundary. It is status evidence, not an
+alternate contract.
 
 ### CRC implementation and consumers
 
@@ -1199,8 +1204,8 @@ selected checkpoint-2 interface:
   the private-suite empty hash is constructed through the checked SHA3
   wrapper.
 
-System Info advertises bits 0 through 2 (`0x7`) in the execution model and
-integrated RTL, while WOTS bit 3 remains clear. The stale 32-byte command-5,
+Checkpoint 2 advertised bits 0 through 2 (`0x7`) in the execution model and
+integrated RTL while WOTS bit 3 remained clear. The stale 32-byte command-5,
 immediate-completion, advisory-lock, and non-waiting BIOS assumptions were
 removed. Focused checkpoint-2 sources include
 `tests/test_native_sha3_model.py`, the SHA/guard coverage in
@@ -1212,34 +1217,48 @@ all nine passed.
 
 ### WOTS implementation and bus topology
 
-Checkpoint 2 reserves the complete `+0x8A0..+0x8BF` aperture without exposing
-a functional prototype in any backend. Python `WotsChainAccel` and native
-`WotsChain` may retain the old programming bytes only as inert private
-latches; obsolete `GO` remains idle with zero cycles/output and performs no
-memory access, DMA, or Keccak claim. Integrated RTL acknowledges the reserved
-aperture as a zero responder with ignored writes, no IRQ or DMA, and inactive
-shared-service hooks. Production WOTS lands atomically in checkpoint 3 with
-the selected 64-bit context, DMA, checked state machine, and Keccak ownership
-contract; capability bit 3 remains clear until then.
+Checkpoint 2's inert `+0x8A0..+0x8BF` reservation remains historical evidence:
+it exposed no functional prototype or capability and performed no memory
+access, DMA, or Keccak claim. Checkpoint 3 replaces that reservation—without
+an alias or compatibility mode—with the byte-only 64-bit context interface,
+checked state machine, real read-only Bank 0 DMA, and one shared-Keccak owner
+defined above. The removed modulo-wrapped, three-pointer behavior is not a
+compatibility surface and has not returned.
 
-There is no WOTS RTL test target. A dedicated unit bench and integrated
-DMA/bus/Keccak tests are required before `WOTS_CHAIN` can be set.
+WOTS is the third DMA endpoint, appended after disk so the existing NIC and
+disk requester indices remain stable. Native/Python callback topology,
+snapshots, arbitration, response classification, and port-count assertions
+include all three DMA ports. `NUM_BUS_PORTS` is therefore full-core ports plus
+microcluster ports plus NIC, disk, and WOTS. The WOTS port has immutable
+weight 1 and unlimited bandwidth while its capability is advertised.
 
-Adding WOTS as the third DMA endpoint affects hard-coded NIC-and-disk arrays,
-callback checks, snapshots, and port-count assertions in native scheduling,
-including `tests/test_native_bus_transactions.py`,
-`tests/test_native_cycle_execution.py`, and
-`tests/test_native_system_state.py`. Existing NIC and disk requester indices
-remain stable.
+The native controller and Python reference expose the same command/status,
+request-accept, one-outstanding-beat, classified-response, abort-drain,
+zeroization, reset, and shared-owner behavior. Integrated RTL instantiates the
+production controller, connects its requester to the main arbiter, and uses
+the existing Keccak round service rather than a duplicate. The dedicated WOTS
+unit bench and integrated bus/DMA/shared-owner coverage are part of the
+checkpoint-3 qualification gate. Those tests and the checked BIOS path passed,
+so the checked-in System Info surface now publishes capability bit 3.
 
-Native `CSR_PERF_CTRL` writes currently diverge from RTL/Python: a zero value
-does not disable `perf_enable`, and a value with reset bit 1 forces enable.
-Before BIOS uses `CSR_PERF_CYCLES` for the checked deadline, native writes
-must adopt exact bit-0 enable semantics and independent bit-1 reset semantics;
-save/enable/restore parity needs a differential test.
+Native `CSR_PERF_CTRL` now follows RTL/Python exactly: bit 0 alone selects
+enable, bit 1 independently clears counters, and writing reset without enable
+does not force the counter on. Differential truth-table coverage protects the
+save/enable/restore behavior used by `WOTS-CHAIN` deadlines.
 
-The removed modulo-wrapped, three-pointer behavior is not a compatibility
-surface and must not return in checkpoint 3.
+The public BIOS word is the checked `WOTS-CHAIN` contract above. It does not
+retain the prototype print-and-return words, does not infer a requester count
+from core topology, and does not publish any caller byte on a checked failure.
+The caller's 16 ordinary result stores occur only after complete staging and a
+successful CLEAR; this is ordered staged publication, not an atomic 16-byte
+memory write.
+
+Checkpoint 3 is not the downstream application cutover. Checkpoint 4 first
+replaces KDOS's private GPT IEEE CRC loop with the reflected hardware path,
+adds authoritative diagnostics, regenerates the native and BIOS artifacts,
+and runs the full approved MegaPad regression sequentially. Only after that
+MegaPad-local gate may a user-selected Akashic worktree adopt the reflected
+CRC, raw-Keccak, and WOTS primitives.
 
 ### Guard and System Info checkpoint 2
 

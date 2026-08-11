@@ -55,10 +55,10 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0600     │  Spinlock            │ │
     │   0x0700     │  AES-256/128-GCM     │ │
     │   0x0780     │  SHA-3/SHAKE/Keccak  │ │
-    │   0x07E0     │  QoS Config          │ │
+    │   0x07E0     │  Reserved            │ │
     │   0x0800     │  TRNG                │ │
     │   0x0880     │  Port I/O Bridge     │ │
-    │   0x08A0     │  WOTS Reserved       │ │
+    │   0x08A0     │  WOTS Chain          │ │
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
     │   0x0A00     │  Framebuffer         │ │
@@ -79,8 +79,8 @@ MMIO devices live at the top of the address space.
 
 | Address | Content |
 |---------|---------|
-| `0x0000_0000` | **Bank 0** — BIOS code (loaded at boot, ~20 KB) |
-| `0x0000_4F00`+ | Forth dictionary grows upward from HERE |
+| `0x0000_0000` | **Bank 0** — generated BIOS image (size is build-specific) |
+| `dict_free`+ | Forth dictionary grows upward from HERE |
 | *(varies)* | KDOS core code, buffer data, FS caches, task stacks |
 | *(varies)* | Free space between HERE and SP |
 | ← SP | Data stack grows downward from top of Bank 0 |
@@ -95,6 +95,11 @@ HERE.  Standard autoexec then redirects `HERE` to the XMEM userland zone
 before loading `networking.f` and `tools.f`; those modules do not consume the
 Bank 0 dictionary.  The data stack lives at the top of RAM and grows
 downward.  The return stack sits below the data stack.
+
+The emulator/CLI explicitly loads the generated BIOS image into Bank 0. The
+current integrated-RTL FPGA measurement wrappers do not provision that Bank 0
+image; the standalone `mp64_rom` synthesis target therefore measures ROM
+contents but is not evidence of a bootable full SoC.
 
 ### MMIO Region
 
@@ -113,10 +118,10 @@ device occupies a small range:
 | **Spinlock** | `+0x0600` | 64 bytes | 16 hardware locks, 4 bytes each; lock 8 is reserved by the checked MMIO crypto guard |
 | **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
 | **SHA-3/SHAKE/raw Keccak** | `+0x0780` | 96 bytes | Checked hash/XOF streaming plus indexed caller-owned Keccak-f[1600] state |
-| **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
+| **Reserved** | `+0x07E0` | 16 bytes | No integrated QoS MMIO device; accesses fault |
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
-| **WOTS reservation** | `+0x08A0` | 32 bytes | Inert unadvertised aperture; no public prototype BIOS words remain and the production implementation is pending |
+| **WOTS Chain** | `+0x08A0` | 32 bytes | Qualified checked byte-only WOTS chain sequencer with 64-bit read-only Bank 0 context DMA |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
@@ -125,12 +130,15 @@ device occupies a small range:
 
 The crypto register, ownership, and capability assignments are normative in
 [`crypto-interface-contract.md`](crypto-interface-contract.md). System Info
-extends through `+0x6F` and reports `CRYPTO_CAPS = 0x7` at checkpoint 2:
-bit 0 is reflected/raw CRC, bit 1 is checked SHA3/SHAKE streaming, and bit 2
-is raw Keccak-f[1600]. Bit 3 remains clear because the production WOTS
-sequencer is not complete. SHA3/SHAKE and raw Keccak share the portable
-lock-8 guard; checked CRC continues to use topology-sized BIOS owner records
-and the cluster's CRC transaction lock.
+extends through `+0x6F`. The qualified checkpoint-3 configuration reports
+`CRYPTO_CAPS = 0xF`: bit 0 is reflected/raw CRC, bit 1 is checked SHA3/SHAKE
+streaming, bit 2 is raw Keccak-f[1600], and bit 3 is the production WOTS
+chain. The checked-in backends completed the real DMA, shared-Keccak,
+checked-BIOS, and cross-backend qualification before publishing bit 3; source
+presence alone does not advertise the feature. SHA3/SHAKE, raw Keccak, and WOTS share
+one physical Keccak round service and the portable lock-8 guard. Checked CRC
+continues to use topology-sized BIOS owner records and the cluster's CRC
+transaction lock.
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter uses 6-/8-bit
@@ -347,14 +355,16 @@ CLUSTER_EN.
 | NUM_FULL | `+0x48` | 64-bit | varies | Number of full (major) cores |
 | VRAM_BASE | `+0x50` | 64-bit | `0xFF00_0000` | Dedicated VRAM base address |
 | VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
-| CRYPTO_CAPS | `+0x60` | 64-bit | `0x7` | Bit 0: reflected/raw CRC; bit 1: checked SHA3/SHAKE; bit 2: raw Keccak-f[1600]; bit 3 (WOTS) is clear |
-| NUM_BUS_PORTS | `+0x68` | 64-bit | varies | Exact weighted-arbiter requester count: full cores + clusters + NIC + disk |
+| CRYPTO_CAPS | `+0x60` | 64-bit | `0xF` | Bit 0: reflected/raw CRC; bit 1: checked SHA3/SHAKE; bit 2: raw Keccak-f[1600]; bit 3: production WOTS chain |
+| NUM_BUS_PORTS | `+0x68` | 64-bit | varies | Exact weighted-arbiter requester count: full cores + clusters + NIC + disk + WOTS |
 
 Byte reads return the corresponding little-endian byte. Halfword, word, and
 qword accesses must be naturally aligned and wholly contained in the device
 window; invalid spans fault before any prefix of a write is published. Writes
 to CRYPTO_CAPS and NUM_BUS_PORTS are acknowledged and ignored. The requester
-count will include the WOTS bus port when that requester is integrated. See
+count includes three appended DMA requesters—NIC, disk, and WOTS—after the
+full-core and microcluster ports. WOTS is appended after disk, so the existing
+NIC and disk physical indices do not move. See
 [`crypto-interface-contract.md`](crypto-interface-contract.md#capability-discovery)
 for the independent capability-bit assignments.
 
@@ -497,6 +507,7 @@ zeroizes the bank before another TACC operation is admitted.
 |-------|-------------|----------|
 | AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
 | SHA-3/SHAKE/raw Keccak | One bounded 24-round shared Keccak service | Checked SHA3-256/512, SHAKE128/256, and raw Keccak-f[1600] |
+| WOTS Chain | 0–15 shared Keccak permutations after one 64-byte context read | Production Winternitz chain primitive over a caller-owned Bank 0 context |
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
 | Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519, per-core ISA) |
@@ -550,10 +561,11 @@ the software owner fields.
 The packed phase values are 0 IDLE, 1 BUSY, 2 DONE, and 3 ERROR. Owner values
 are 0 none, 1 MMIO sponge, 2 MMIO raw, and 3 WOTS. Thus the normal sponge
 states are `0x04..0x07`, raw states are `0x08..0x0B`, and WOTS busy is
-`0x0D`. Checkpoint 2 advertises only the sponge and raw paths. Device error
-codes are 1 invalid command, 2 owner/phase conflict, 3 invalid mode, 4 invalid
-state index, 5 internal round-service failure/timeout, and 6 unavailable
-feature.
+`0x0D`. While WOTS owns the round service, SHA `STATUS`, `ERROR`, and `CTRL`
+reads remain responsive, but mutating SHA accesses are suppressed or rejected
+without disturbing WOTS. Device error codes are 1 invalid command, 2
+owner/phase conflict, 3 invalid mode, 4 invalid state index, 5 internal
+round-service failure/timeout, and 6 unavailable feature.
 
 The hardware window is always 64 bytes, but the public BIOS
 `SHAKE-READ ( dst len -- status )` accepts only 0..32 bytes per call and
@@ -577,6 +589,65 @@ caller span, loads all lanes, performs exactly 24 rounds, stages all lanes,
 clears the device, and then publishes the 200-byte result. It does not absorb,
 pad, separate domains, squeeze, or reverse bytes. Failure leaves the caller
 image unchanged.
+
+### WOTS chain sequencer
+
+The checkpoint-3 WOTS accelerator occupies the exact half-open byte range
+`[+0x08A0,+0x08C0)`. It consumes one immutable 64-byte Bank 0 context:
+16 bytes of `PK.seed`, 32 bytes of ADRS, and a 16-byte input node. Hardware
+holds one 64-bit context address and never writes caller memory.
+
+| Offset | Register | Access | Contract |
+|--------|----------|--------|----------|
+| `+0x00..+0x07` | CONTEXT_ADDR | byte read/write | Little-endian 64-bit physical address |
+| `+0x08` | STEPS | byte read/write | Complete value 0..15 |
+| `+0x09` | START | byte read/write | Complete value 0..15; nonzero work requires `START + STEPS <= 15` |
+| `+0x0A` | CMD / STATUS | byte write/read | Commands 0 NOP, 1 GO, 2 CLEAR; status 0 IDLE, 1 BUSY, 2 DONE, 3 ERROR |
+| `+0x0B` | ERROR | byte read | Stable terminal error code |
+| `+0x0C..+0x0F` | CYCLES | byte read | Saturating little-endian 32-bit service count retained across CLEAR |
+| `+0x10..+0x1F` | DOUT | byte read | Stable 16-byte terminal result |
+
+Every WOTS register is byte-only. Wider, misaligned, crossing, reserved, or
+wrong-direction accesses fault atomically before mutation. Programming bytes
+change only in IDLE; DONE and ERROR remain stable until CLEAR. GO validates
+steps, widened start/step geometry, the complete nonwrapping Bank 0 context
+span, and—for nonzero work—shared Keccak ownership, in that order. Error
+codes are 1 invalid command, 2 owner unavailable, 3 steps, 4 geometry, 5
+context span/domain, 6 DMA target fault, 7 memory-response timeout, 8 local
+request-accept timeout, and 9 internal protocol failure.
+
+Each successful request performs exactly 64 ascending byte reads through a
+real read-only main-bus requester. The requester is fixed at weight 1 with no
+bandwidth cap, permits one accepted outstanding beat, and receives an
+explicit `OK`, target-fault, memory-timeout, or protocol response. CLEAR may
+withdraw an unaccepted beat; after acceptance it drains the terminal response
+before returning IDLE. Zero steps still performs all 64 reads and returns the
+input node unchanged without claiming Keccak.
+
+For each nonzero step, the controller builds the selected SHAKE256 rate block,
+overwrites ADRS bytes 28..31 with `START + step` in big-endian form, performs
+one raw 24-round permutation on the sole shared Keccak service, and takes the
+next 16-byte node. Success, failure, CLEAR, and reset scrub private context and
+Keccak state before release or terminal publication.
+
+The public checked BIOS boundary is
+`WOTS-CHAIN ( context-64 start steps dst-16 -- status )`. It checks capability
+and complete spans first, derives its bounded request and clear deadlines from
+the read-only `NUM_BUS_PORTS`, uses `CSR_PERF_CYCLES` with exact save/enable/
+restore semantics, stages all 16 output bytes, clears the device, and only
+then publishes. Failure leaves the destination unchanged. A clear timeout
+returns TIMEOUT and retains lock 8 and software ownership fail-closed until
+machine reset. The complete state machine, deadlines, state construction, and
+status mapping are normative in the
+[`crypto-interface-contract.md`](crypto-interface-contract.md#wots-chain-contract).
+
+Checkpoint 3 completed this hardware/BIOS primitive after the documented
+qualification gate enabled capability bit 3; it is not the Akashic cutover.
+Checkpoint 4 must first replace KDOS's private GPT IEEE CRC loop with
+the reflected hardware CRC path, add authoritative diagnostics, regenerate
+native and BIOS artifacts, and pass the full approved MegaPad regression
+sequentially. Only after that gate may a user-selected Akashic worktree be
+refactored onto the checked CRC, raw-Keccak, and WOTS interfaces.
 
 ### Portable MMIO crypto guard
 
@@ -781,7 +852,7 @@ read do take the checked wipe path.
 | Feature | CSR Range | Description |
 |---------|-----------|-------------|
 | Tile DMA | 0x50–0x55 | Descriptor-ring DMA engine for async tile copies |
-| QoS | 0x58–0x59 | Per-core bus priority weight and bandwidth limit |
+| QoS | 0x58–0x59 | Per-core CSR storage; not currently routed to the main-arbiter QoS sideband |
 | BIST | 0x60–0x63 | Memory self-test (March C−, checkerboard, addr-as-data) |
 | Tile self-test | 0x64–0x65 | Datapath functional check (~200 cycles) |
 | Perf counters | 0x68–0x6C | Cycles, stalls, tile ops, ext-mem beats |
@@ -923,12 +994,12 @@ the correct default for pre-privilege firmware.
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │  BIOS  (bios.asm)                               │
-│  Subroutine-threaded Forth, 360 dictionary words │
+│  Subroutine-threaded Forth, 472 dictionary words │
 │  Disk I/O, FSLOAD, UART, timer, tile engine      │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
 │  4× CPU, RAM+BIST, UART, Timer, Storage, NIC,  │
-│  Tile Engine+FP16, AES, SHA-3, SHA-256,          │
+│  Tile Engine+FP16, AES, SHA-3, SHA-256, WOTS,    │
 │  DMA, QoS, TRNG, Field ALU, NTT, KEM, FB         │
 │  CRC: per-core ISA + cluster-shared (no MMIO)     │
 └─────────────────────────────────────────────────┘
@@ -1087,7 +1158,7 @@ After a full KDOS boot with filesystem loaded:
 
 | Region | Approximate Size | Contents |
 |--------|-----------------|----------|
-| BIOS code | ~20 KB | Machine code, IVT, boot logic |
+| Generated BIOS image | Build-dependent | Machine code, static dictionary, IVT, boot logic, and private storage |
 | KDOS core dictionary | Build-dependent | Bank 0 definitions and strings from `kdos.f` |
 | Userland dictionary | Build-dependent | `networking.f`, `tools.f`, and later user definitions in XMEM |
 | Buffers | ~10 KB | 6 demo buffers, histogram bins |
@@ -1146,20 +1217,20 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | 3,002 | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | 991 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 2,287 | UART, Timer, Storage, NIC, Mailbox, Spinlock, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
-| BIOS | `bios.asm` | 14,524 | Forth interpreter, boot, multicore, 360 dictionary words |
-| OS core | `kdos.f` | ~8,100 | Bank 0 buffers, kernels, TUI, FS, crypto, module loading, PQC, multicore |
-| Networking | `networking.f` | ~7,500 | Userland Ethernet through TLS, sockets, and UDP data-port transport |
-| Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |
-| Assembler | `asm.py` | 792 | Two-pass macro assembler |
-| CLI/Monitor | `cli.py` | 1,557 | Debug, inspect, boot, headless TCP server |
-| Disk tools | `diskutil.py` | 1,162 | Build/manage disk images |
-| Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| Tests | `test_system.py` | 24,033 | 1,592 integration tests (74 classes) |
-| Tests | `test_networking.py` | 187 | 13 real-network tests |
-| Tests | `test_fs_hardening.py` | — | 27 filesystem hardening tests |
-| C++ accel | `mp64_accel.cpp` | 3,229 | Hot-path accelerator (NEXT/ALU/mem/STXI) |
-| RTL | `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides |
-| RTL tests | `rtl/sim/` | ~11,100 | 28 testbenches (~414 hardware assertions) |
+| CPU emulator | `megapad64.py` | — | Full ISA + extended tile engine implementation |
+| System glue | `system.py` | — | Heterogeneous SoC, MMIO, mailbox IPI, spinlocks, shared native execution state |
+| Devices | `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
+| BIOS | `bios.asm` | — | Forth interpreter, boot, multicore, 472 dictionary words |
+| OS core | `kdos.f` | — | Bank 0 buffers, kernels, TUI, FS, crypto, module loading, PQC, multicore |
+| Networking | `networking.f` | — | Userland Ethernet through TLS, sockets, and UDP data-port transport |
+| Tools | `tools.f` | — | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |
+| Assembler | `asm.py` | — | Two-pass macro assembler |
+| CLI/Monitor | `cli.py` | — | Debug, inspect, boot, headless TCP server |
+| Disk tools | `diskutil.py` | — | Build/manage disk images |
+| Tests | `tests/test_megapad64.py` | — | CPU + tile engine coverage |
+| Tests | `tests/test_system.py` | — | System integration coverage |
+| Tests | `tests/test_networking.py` | — | Real-network coverage |
+| Tests | `tests/test_fs_hardening.py` | — | Filesystem hardening coverage |
+| C++ accel | `accel/mp64_accel.cpp` | — | Native execution and system-state accelerator |
+| RTL | `rtl/` | — | Portable Verilog modules and target overrides |
+| RTL tests | `rtl/sim/` | — | Verilog testbenches |

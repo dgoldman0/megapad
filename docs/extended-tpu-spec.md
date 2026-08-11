@@ -30,8 +30,8 @@ existing tile engine and SoC infrastructure:
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
 | **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium | ✅ FP16/BF16 done; ☐ scalar FP32 |
 | **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator and functional RTL; ☐ routed FPGA acceptance |
-| **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, 32/64-bit CRC tuples | Large | ✅ Implemented (emulator + BIOS + KDOS) |
-| **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | ✅ CSRs + QoS done; DMA design only |
+| **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE/raw Keccak, checked WOTS chain, 32/64-bit CRC tuples | Large | ✅ Checkpoint-3 WOTS path qualified across execution models, integrated RTL, and BIOS; FPGA routing remains a separate acceptance gate |
+| **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | Weighted arbiter implemented; architectural QoS programming is not integrated; DMA remains design-only |
 | **Reliability / BIST** | Memory self-test, tile datapath check, perf counters | Small | ✅ Implemented |
 
 All new features are **backward-compatible** — existing code runs
@@ -359,9 +359,10 @@ interrupt-driven streaming.
 
 ### 4.2 SHA-3 / SHAKE / raw Keccak accelerator
 
-The checkpoint-2 block occupies exactly `0x780..0x7DF` and supports
+The shared front end occupies exactly `0x780..0x7DF` and supports
 SHA3-256, SHA3-512, SHAKE128, SHAKE256, and caller-owned raw
-Keccak-f[1600]. Its sponge and raw paths share one 24-round service.
+Keccak-f[1600]. Its sponge and raw paths and the checkpoint-3 WOTS sequencer
+share one physical 24-round service; no feature gate duplicates that core.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
@@ -387,7 +388,50 @@ are defined in the [crypto interface contract](crypto-interface-contract.md).
 Absorption accepts one byte per MMIO write and automatically invokes the
 shared round service whenever the selected rate fills.
 
-### 4.3 CRC
+### 4.3 WOTS chain sequencer
+
+The selected production WOTS interface is the exact byte-only range
+`0x8A0..0x8BF`.
+It reads one immutable context from Bank 0:
+`PK.seed[16] || ADRS[32] || node[16]`.
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| `WOTS_CONTEXT_ADDR[0..7]` | 0x8A0..0x8A7 | R/W8 | Little-endian 64-bit physical address |
+| `WOTS_STEPS` | 0x8A8 | R/W8 | Complete step count 0..15 |
+| `WOTS_START` | 0x8A9 | R/W8 | Complete starting index 0..15 |
+| `WOTS_CMD_STATUS` | 0x8AA | W8/R8 | Commands NOP=0, GO=1, CLEAR=2; status IDLE=0, BUSY=1, DONE=2, ERROR=3 |
+| `WOTS_ERROR` | 0x8AB | R8 | Stable terminal error code |
+| `WOTS_CYCLES[0..3]` | 0x8AC..0x8AF | R8 | Saturating little-endian service-cycle count |
+| `WOTS_DOUT[0..15]` | 0x8B0..0x8BF | R8 | Stable terminal node |
+
+Any wider, misaligned, crossing, reserved, or wrong-direction access faults
+as one architectural access before mutation. Programming changes only in
+IDLE, and terminal status/output remain stable through NOP or rejected writes
+until CLEAR. GO validates steps, widened nonzero `START + STEPS <= 15`
+geometry, the complete nonwrapping Bank 0 context span, and nonzero-work
+Keccak ownership in that order.
+
+WOTS is a real 64-bit read-only main-bus requester appended after disk. It is
+fixed at weight 1 with no bandwidth cap, allows one accepted outstanding byte
+read, and consumes an explicit OK, target-fault, memory-timeout, or protocol
+response. Every successful request reads exactly 64 ascending bytes. Zero
+steps returns the input node without claiming Keccak; each nonzero step uses
+one raw permutation after inserting `START + step` into ADRS bytes 28..31 in
+big-endian form and applying the SHAKE256 delimiter/padding block. CLEAR
+withdraws a request before acceptance or drains its one accepted response,
+then scrubs private DMA/context/Keccak state before IDLE.
+
+The checked BIOS word is
+`WOTS-CHAIN ( context-64 start steps dst-16 -- status )`. It preflights
+capability and complete spans, computes bounded waits from read-only
+`NUM_BUS_PORTS`, stages the result, clears hardware, and only then writes the
+caller destination. Failure writes no destination byte; clear timeout retains
+crypto guard 8 fail-closed. Exact errors, deadline formulas, state bytes, and
+cleanup ordering are in the
+[crypto interface contract](crypto-interface-contract.md#wots-chain-contract).
+
+### 4.4 CRC
 
 CRC is an EXT.CRYPTO ISA facility, not an extended-TPU MMIO block. Full cores
 have private state and each micro-core cluster shares an owner-arbitrated
@@ -396,7 +440,7 @@ atomic final publication. The exact non-reflected parameter tuples, encodings,
 and canonical vectors are specified in the [ISA reference](isa-reference.md#extcrypto--core-crypto-isa-fb).
 The 8-byte datapath processes a 512-byte disk sector in 64 feed operations.
 
-### 4.4 SHA-256 (SHA-2) Accelerator
+### 4.5 SHA-256 (SHA-2) Accelerator
 
 SHA-256 for TLS 1.3 cipher suite 0x1301
 (TLS_AES_128_GCM_SHA256) and HMAC/HKDF key derivation is an EXT.CRYPTO ISA
@@ -476,19 +520,25 @@ external memory latency:
 
 ### 5.3 Per-Core QoS Arbitration
 
-The bus arbiter (mp64_bus.v) currently uses simple round-robin. We add
-a **weighted round-robin** mode with per-core priority registers:
+The bus arbiter uses **weighted round-robin** with packed QoS registers. The
+single 64-bit weight CSR exposes ports 0..7, and the single 64-bit bandwidth
+CSR exposes ports 0..3; other ports retain their elaborated/reset policy:
 
 | CSR | Address | Description |
 |-----|---------|-------------|
-| `QOS_WEIGHT` | `0x58` | This core's bus priority weight (1–15, default 4) |
-| `QOS_BWLIMIT` | `0x59` | Max bus transactions per quantum (0 = unlimited) |
+| `QOS_WEIGHT` | `0x58` | Eight packed 8-bit requester weights for ports 0..7 (1–255; encoded zero canonicalizes to 1) |
+| `QOS_BWLIMIT` | `0x59` | Four packed 16-bit maximum-beat values for ports 0..3 per 65,536-cycle epoch (0 = unlimited) |
 
-Higher weight → more bus slots per round. This prevents a tile-DMA-heavy
-core from starving latency-sensitive cores.
+Higher weight → more consecutive bus beats before rotation. The WOTS port
+is immutable weight 1/unlimited while capability bit 3 is advertised, so
+software cannot invalidate its checked deadline by throttling that requester.
 
-A global **QOS_QUANTUM** register (MMIO 0x7E0) sets the time window
-for bandwidth accounting (default: 256 cycles).
+Bandwidth accounting resets on the fixed 16-bit epoch wrap (65,536 clocks).
+These registers are an arbiter-module sideband today: integrated
+`mp64_soc.v` ties `qos_csr_wen` low, and CPU CSR storage at `0x58..0x59` is
+not connected to it. Consequently architectural software cannot currently
+change the fabric policy; focused arbiter/native test seams can exercise the
+packed configuration directly.
 
 ---
 
@@ -572,22 +622,29 @@ Additions to the existing MMIO map:
 | 0x000 | 16B | UART (existing) |
 | 0x100 | 16B | Timer (existing) |
 | 0x200 | 24B | Disk (existing, including read-only capacity) |
-| 0x300 | 96B | SysInfo (12 × 64-bit regs) |
+| 0x300 | 112B | SysInfo (14 × 64-bit regs, including `CRYPTO_CAPS` and `NUM_BUS_PORTS`) |
 | 0x400 | 128B | NIC (existing) |
 | 0x500 | 16B | Mailbox (existing) |
 | 0x600 | 64B | Spinlocks (existing) |
 | **0x700** | **64B** | **AES-256/128-GCM** |
 | **0x780** | **96B** | **SHA-3/SHAKE** |
-| **0x7E0** | **16B** | **QoS Config** |
-| **0x800** | **64B** | **TRNG** |
+| **0x7E0** | **16B** | **Reserved; no integrated QoS MMIO device** |
+| **0x800** | **32B** | **TRNG** |
 | **0x840** | **128B** | *(free; Field ALU is EXT.CRYPTO)* |
-| **0x8A0** | **32B** | **Reserved inert WOTS aperture; production sequencer pending** |
+| **0x8A0** | **32B** | **Checked byte-only WOTS chain sequencer** |
 | **0x8C0** | **64B** | **NTT Engine** |
 | **0x900** | **64B** | **KEM (ML-KEM-512)** |
 | **0x940** | **32B** | *(free; SHA-2 is EXT.CRYPTO)* |
 | **0x980** | **32B** | *(free; CRC is EXT.CRYPTO)* |
 | **0xA00** | **64B** | **Framebuffer** |
 | **0xB00** | **32B** | **RTC / System Clock** |
+
+The qualified checkpoint-3 System Info value is `CRYPTO_CAPS = 0xF`. Its
+`NUM_BUS_PORTS` value is the exact full-core plus microcluster port count plus
+three appended DMA requesters: NIC, disk, and WOTS. WOTS is appended after
+disk, preserving both earlier physical indices. Bit 3 was held clear until the
+production controller, real DMA, shared service, and checked BIOS path
+qualified together.
 
 ### CSR Address Map (Extended)
 
@@ -666,7 +723,7 @@ Recommended build order based on dependencies and complexity:
 | **A** | TMUL/MAC family (§2.1) | 2 days | None |
 | **B** | Saturating arith + rounding (§2.2) | 2 days | TMODE extension |
 | **B** | Tile views / SHUFFLE (§2.3) | 3 days | None |
-| **B** | CRC32/CRC64 (§4.3) | 2 days | None |
+| **B** | CRC32/CRC64 (§4.4) | 2 days | None |
 | **B** | Memory BIST (§6.1) | 2 days | None |
 | **C** | Strided/2D addressing (§2.5) | 3 days | None |
 | **C** | Tile datapath self-test (§6.2) | 1 day | Phase A tile ops |

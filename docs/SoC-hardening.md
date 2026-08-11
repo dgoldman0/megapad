@@ -1,12 +1,12 @@
 # SoC Hardening Roadmap
 
-Status: checkpoint 2 is complete for checked SHA3/SHAKE, raw Keccak, the
-portable crypto guard, and global requester identity. Focused native, RTL,
-integrated-SoC, BIOS, and sequential KDOS/TLS source-load qualification is
-green. The old WOTS sequencer and diagnostic words recorded in §7 and §10 are
-retired historical prototypes; the `+0x8A0..+0x8BF` aperture remains inert
-until the selected production WOTS design lands in checkpoint 3. The
-authoritative contract is
+Status: checkpoint 3 is complete for checked SHA3/SHAKE, raw Keccak, the
+portable crypto guard, global requester identity, and the production WOTS
+chain. Focused native, RTL, integrated-SoC, BIOS, and sequential publication
+qualification is green. The old WOTS sequencer and diagnostic words recorded
+in §7 and §10 remain retired historical prototypes; the exact
+`+0x8A0..+0x8BF` aperture now implements the qualified byte-only context/DMA
+controller. The authoritative contract is
 [`crypto-interface-contract.md`](crypto-interface-contract.md).
 Last updated: 2026-08-11
 
@@ -1021,16 +1021,16 @@ the SoC fabric where the other MMIO decode logic already lives.
 
 **Priority: high — dominant bottleneck in SPHINCS+ post-quantum signing**
 **Topology: shared (wraps the existing SHA3/SHAKE engine)**
-**Status: historical prototype — retired at checkpoint 2; every integrated
-backend now keeps the reserved aperture inert**
+**Status: production replacement qualified at checkpoint 3; the remainder of
+this section records the prototype retired at checkpoint 2**
 **Origin: Akashic blockchain team request (2026-03-07)**
 
 The numeric register map, 64-bit context address, errors, byte-only access,
-real main-bus DMA, abort behavior, and shared-core ownership selected for
-production are authoritative in
+real main-bus DMA, abort behavior, and shared-core ownership now implemented
+in production are authoritative in
 [`crypto-interface-contract.md`](crypto-interface-contract.md#wots-chain-contract).
 The remainder of this section records the earlier prototype and must not be
-used as a current hardware-completion claim.
+used as the current interface or implementation description.
 
 ### 7.1  Problem Statement
 
@@ -2574,12 +2574,12 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 ### §7 — WOTS+ Chain Accelerator (MMIO 0x8A0)
 
 - [x] Three-pointer Python/native/RTL prototype retired
-- [x] Reserved 32-byte aperture is inert in every integrated backend
+- [x] Checkpoint-2 inert bridge removed when the production controller landed
 - [x] Production numeric contract pinned in `crypto-interface-contract.md`
-- [ ] Real 64-bit Bank 0 DMA requester integrated
-- [ ] Shared Keccak service connected and arbitrated
-- [ ] Checked BIOS `WOTS-CHAIN` and cleanup paths implemented
-- [ ] Dedicated WOTS RTL and integrated DMA tests passing
+- [x] Real 64-bit Bank 0 DMA requester integrated
+- [x] Shared Keccak service connected and arbitrated
+- [x] Checked BIOS `WOTS-CHAIN` and cleanup paths implemented
+- [x] Dedicated WOTS RTL and integrated DMA tests passing
 
 ### §8 — MMIO Map
 

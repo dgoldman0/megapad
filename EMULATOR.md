@@ -5,17 +5,19 @@ memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
 > **Branch:** `main`
-> **Status:** Fully functional.  473-word BIOS v1.0 Forth system running on
-> a 16-core heterogeneous SoC (4 full cores + 3×4 micro-clusters) with
+> **Status:** Fully functional.  BIOS v1.0 source with a 472-word Forth
+> dictionary targeting a 16-core heterogeneous SoC (4 full cores + 3×4
+> micro-clusters) with
 > seven physical tile engines, seven 2,048-bit full-width TACCs,
 > 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile execution
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
-> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512) and an inert
-> reserved WOTS aperture, optional
+> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512) plus a
+> qualified checked WOTS chain with real Bank 0 DMA and shared
+> Keccak, optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
 > UDP, TAP), full TCP/IP network stack through TLS 1.3, cooperative
 > multitasking (4-task PAUSE/BACKGROUND/BACKGROUND2/BACKGROUND3), and
-> 1,731 tests passing.
+> broad Python and RTL qualification coverage.
 
 ---
 
@@ -90,22 +92,22 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                      cli.py  (995 lines)                 │
+│                      cli.py                              │
 │       Interactive monitor / debugger / console           │
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│                    system.py  (1,002 lines)               │
+│                    system.py                              │
 │       MegapadSystem — 16-core heterogeneous SoC          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py  (2,405 lines)│  │
+│  │  megapad64.py │    │       devices.py          │  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  32 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
 │  │  full ISA     │    │ ┌─────────┐ ┌───────┐        │  │
 │  │  private tile │    │ │ SysInfo │ │Mailbox│  NIC   │  │
-│  │  (2516 lines) │    │ └─────────┘ └───────┘        │  │
+│  │               │    │ └─────────┘ └───────┘        │  │
 │  │  extended ops │    │ ┌──────────┐ ┌─────┐         │  │
 │  │  FP16/BF16   │    │ │ Spinlock │ │ CRC │ DevBus  │  │
 │  └──────────────┘    │ └──────────┘ └─────┘         │  │
@@ -121,36 +123,36 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │    one tile/MEX/TACC engine, 1K scratchpad, HW barrier)   │
 │  + 4 private full-core tile/MEX/TACC engines              │
 │                                                          │
-│          asm.py  (788 lines)  — two-pass assembler        │
+│          asm.py  — two-pass assembler                      │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (14,957 lines) — Forth BIOS v1.0, 473 words
-    bios.rom  (~26 KB)       — precompiled binary
+    bios.asm  — Forth BIOS v1.0, 472 words
+    bios.rom                 — generated precompiled binary; size is build-specific
 ```
 
 ### Source files
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | 3,315 | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
-| `accel/mp64_accel.cpp` | 3,280 | C++ CPU core (pybind11) — 63× speedup over PyPy, SEP dispatch fast path, STXI/STXD.D |
-| `accel_wrapper.py` | 897 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
-| `asm.py` | 909 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 2,542 | 19 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, inert WOTS reservation, Port I/O Bridge |
-| `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
-| `system.py` | 1,018 | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
-| `cli.py` | 1,557 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 14,957 | Forth BIOS v1.0 — subroutine-threaded interpreter, 473 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
-| `test_megapad64.py` | 2,647 | CPU + tile engine test suite — 25 tests |
-| `test_system.py` | 24,761 | System integration tests — 1,634 tests (77 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile, port I/O bridge, bus timeout) |
-| `test_networking.py` | 187 | Real-networking tests — 13 tests |
-| `test_fs_hardening.py` | — | Filesystem hardening tests — 27 tests |
-| `setup_accel.py` | 35 | pybind11 build configuration for C++ extension |
-| `bench_accel.py` | 139 | C++ vs Python speed comparison script |
-| `Makefile` | 190 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
-| `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
-| `rtl/` | ~16,200 | 36 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
-| `rtl/sim/` | ~13,200 | 32 Verilog testbenches (~430 hardware assertions) |
+| `megapad64.py` | — | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
+| `accel/mp64_accel.cpp` | — | C++ CPU core (pybind11) — SEP dispatch fast path, STXI/STXD.D |
+| `accel_wrapper.py` | — | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
+| `asm.py` | — | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
+| `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
+| `nic_backends.py` | — | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
+| `system.py` | — | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `cli.py` | — | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
+| `bios.asm` | — | Forth BIOS v1.0 — subroutine-threaded interpreter, 472 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
+| `tests/test_megapad64.py` | — | CPU + tile engine test suite |
+| `tests/test_system.py` | — | System integration tests: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile, port I/O bridge, and bus timeout |
+| `tests/test_networking.py` | — | Real-networking tests |
+| `tests/test_fs_hardening.py` | — | Filesystem hardening tests |
+| `setup_accel.py` | — | pybind11 build configuration for C++ extension |
+| `bench_accel.py` | — | C++ vs Python speed comparison script |
+| `Makefile` | — | Build, sequential test, and accelerator targets |
+| `conftest.py` | — | Test fixtures, snapshot caching, live status reporting |
+| `rtl/` | — | Portable Verilog modules and target overrides |
+| `rtl/sim/` | — | Verilog testbenches |
 | **Total** | **~60,000** | |
 
 ---
@@ -181,13 +183,13 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0600` | 64 B | Spinlock (hardware mutexes) |
 | `+0x0700` | 64 B | AES-256/128-GCM (authenticated encryption) |
 | `+0x0780` | 96 B | SHA-3/SHAKE (hashing, key derivation) |
-| `+0x07E0` | 16 B | QoS Config (bus arbitration weights) |
+| `+0x07E0` | 16 B | Reserved; no integrated QoS MMIO device (access faults) |
 | `+0x0800` | 32 B | TRNG (hardware entropy source) |
-| `+0x0840` | 128 B | Field ALU (GF(2²⁵⁵−19) arithmetic) |
+| `+0x0840` | 128 B | Free; Field ALU is ISA-native (`EXT.CRYPTO FB 20..2D`) |
 | `+0x0880` | 16 B | Port I/O Bridge (remap CSR — maps OUT/INP to MMIO targets) |
+| `+0x08A0` | 32 B | Qualified checked byte-only WOTS chain (64-bit read-only Bank 0 context DMA) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
 | `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
-| `+0x08A0` | 32 B | Reserved inert WOTS aperture; production sequencer pending |
 | `+0x0A00` | 64 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
@@ -309,12 +311,56 @@ remain wholly inside the exact window.
 | `+0x60` | CRYPTO_CAPS | Independent qualified crypto capability bits; unassigned bits read zero |
 | `+0x68` | NUM_BUS_PORTS | Exact requester-port count in the main weighted arbiter |
 
+The checked-in checkpoint-3 configuration reports `CRYPTO_CAPS = 0xF`:
+reflected/raw CRC, checked SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain.
+Bit 3 was published only after the real DMA, shared-service, BIOS, and
+cross-backend qualification passed; source presence alone is not capability
+evidence. `NUM_BUS_PORTS` is exactly the full-core ports plus microcluster
+ports plus NIC, disk, and WOTS. WOTS is the read-only requester appended after
+disk; existing NIC and disk indices remain unchanged.
+
+### WOTS Chain
+
+The WOTS device is the exact byte-only range `+0x08A0..+0x08BF`:
+
+| Offset | Name | R/W | Description |
+|---|---|---|---|
+| `+0x00`–`+0x07` | CONTEXT_ADDR | RW8 | Little-endian 64-bit address of the exact 64-byte Bank 0 context |
+| `+0x08` | STEPS | RW8 | Chain steps, 0..15 |
+| `+0x09` | START | RW8 | Starting hash index, 0..15 |
+| `+0x0A` | CMD / STATUS | W8/R8 | Commands NOP=0, GO=1, CLEAR=2; states IDLE=0, BUSY=1, DONE=2, ERROR=3 |
+| `+0x0B` | ERROR | R8 | Stable terminal error 0..9 |
+| `+0x0C`–`+0x0F` | CYCLES | R8 | Saturating little-endian 32-bit busy/abort-drain count |
+| `+0x10`–`+0x1F` | DOUT | R8 | Stable 16-byte terminal node |
+
+The context is `PK.seed[16] || ADRS[32] || node[16]`. A successful request
+always issues exactly 64 ascending, read-only Bank 0 DMA bytes. Zero steps
+returns the input node after that read without claiming Keccak; nonzero work
+uses the same physical 24-round service as SHA3/SHAKE and raw Keccak. The
+requester has fixed weight 1 and no bandwidth limit, with one explicit
+accepted beat and classified terminal response at a time. CLEAR withdraws an
+unaccepted request or drains an accepted beat before returning IDLE.
+
+`WOTS-CHAIN ( context-64 start steps dst-16 -- status )` is the only public
+BIOS entry. It checks capability and complete spans, computes bounded waits
+from `NUM_BUS_PORTS`, stages the result, proves CLEAR reached IDLE, and only
+then writes the caller destination. A checked failure publishes no destination
+bytes; clear timeout retains crypto guard 8 fail-closed. See the
+[numeric contract](docs/crypto-interface-contract.md#wots-chain-contract) for
+the complete error map, deadline formulas, state construction, and cleanup
+ordering.
+
+Checkpoint 4 still replaces KDOS's private GPT IEEE CRC loop, adds
+standard-vector diagnostics, regenerates the native/BIOS artifacts, and runs
+the full approved regression sequentially. Akashic adoption begins only after
+that MegaPad gate, in a user-selected Akashic worktree.
+
 ---
 
 ## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (14,524 lines, ~28 KB).  It boots from address 0 and
+Megapad-64 assembly. It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
@@ -364,7 +410,7 @@ buffer), then tokenises and interprets:
 | R17 | EXIT handler (`sep r17` = pop return address from RSP, branch) |
 | R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |
 
-### Built-in words (473)
+### Built-in words (472)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -525,9 +571,11 @@ modulo-128 position that disagrees with the saved offset.
 `KECCAK-F1600`
 
 The checked words return the common status 0..6; `SHA3-STATUS@` and
-`SHA3-MODE@` are diagnostic raw reads. The removed transaction words and the
-prototype WOTS BIOS words have no aliases. `CRYPTO_CAPS = 0x7` advertises
-CRC, SHA3/SHAKE, and raw Keccak; WOTS bit 3 remains clear.
+`SHA3-MODE@` are diagnostic raw reads. The removed transaction and prototype
+WOTS words have no aliases. The production checked
+`WOTS-CHAIN ( context-64 start steps dst-16 -- status )` is a distinct BIOS
+word, and the qualified checkpoint-3 configuration advertises all four bits
+with `CRYPTO_CAPS = 0xF`.
 
 **TRNG**
 `RANDOM` `RANDOM8` `SEED-RNG` `ENTROPY-FILL` `ENTROPY-READY?` — the raw
@@ -761,7 +809,7 @@ PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
 adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 473 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 472 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch, network stack,
 TLS 1.3, socket API, post-quantum crypto), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC
