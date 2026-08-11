@@ -1,11 +1,10 @@
 # Crypto interface contract
 
-Status: selected implementation contract. The checkpoint-2 implementation
+Status: selected implementation contract. Checkpoint 2 is complete and
 advertises `CRYPTO_CAPS = 0x7`: reflected/raw CRC, checked SHA3/SHAKE
-streaming, and raw Keccak-f[1600]. Focused native, RTL, integrated-SoC, and
-BIOS qualification is green; final checkpoint qualification awaits the
-approval-gated KDOS and TLS/network source-load tests. Production WOTS remains
-unadvertised.
+streaming, and raw Keccak-f[1600]. Focused native, RTL, integrated-SoC, BIOS,
+and sequential KDOS/TLS source-load qualification is green. Production WOTS
+remains unadvertised.
 
 This document is the numeric source of truth for MegaPad's reflected CRC,
 SHA3/SHAKE, raw Keccak-f[1600], and WOTS chain work. It defines both the
@@ -765,9 +764,9 @@ then copies the staged state to the caller and releases. The caller pointer is
 never retained by hardware. Every failure leaves all 200 caller bytes
 unchanged.
 
-Checkpoint-2 caller source migration is implemented. Its focused source-slice
-checks are green; complete KDOS and TLS/network source-load qualification is
-still approval-gated. The public transaction words
+Checkpoint-2 caller source migration is complete. Its focused source-slice
+checks and complete KDOS/TLS networking source-load qualification are green.
+The public transaction words
 `SHA3-MODE!`, `SHA3-INIT`, `SHA3-SQUEEZE`, `SHA3-SQUEEZE-NEXT`, and
 `SHA3-DOUT@` are removed and are not kept as aliases in the unreleased
 interface.
@@ -1206,7 +1205,10 @@ immediate-completion, advisory-lock, and non-waiting BIOS assumptions were
 removed. Focused checkpoint-2 sources include
 `tests/test_native_sha3_model.py`, the SHA/guard coverage in
 `tests/test_concurrency_handoff.py`, and `rtl/sim/tb_sha3_keccak.v`; the stale
-mixed `rtl/sim/tb_crypto.v` was split into SHA/Keccak and AES benches.
+mixed `rtl/sim/tb_crypto.v` was split into SHA/Keccak and AES benches. The
+final sequential source-load gate selected all seven
+`TestKDOSSHA3Checkpoint2` cases plus the SHA-256 and SHA3 TLS dispatch cases;
+all nine passed.
 
 ### WOTS implementation and bus topology
 

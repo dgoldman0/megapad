@@ -189,8 +189,8 @@ PORTS                          \ List all port bindings
 - **§1.4 Hardware Diagnostics**: MEM-TEST, DEV-PROBE, SYS-CHECK — BIST infrastructure
 - **§1.5 AES-256-GCM**: AES-ENCRYPT / AES-DECRYPT via MMIO AES engine (9 tests)
 - **§1.6 SHA-3 / Keccak-256**: Checked HASH / HMAC / SHAKE via the shared
-  MMIO Keccak engine; focused coverage is present and its full KDOS source-load
-  execution remains approval-gated
+  MMIO Keccak engine; focused coverage and the complete checkpoint-2 KDOS/TLS
+  source-load gate are green
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
 
@@ -560,9 +560,8 @@ The BIOS provides:
   advertises CRC, SHA3/SHAKE, and raw Keccak; WOTS remains unadvertised.
 * **CRC**: CRC32-BUF, CRC32C-BUF, CRC64-BUF, CRC32-STR, .CRC32
 
-All required BIOS extensions for KDOS are implemented as of v1.0. Final
-checkpoint-2 KDOS and TLS/network source-load qualification remains
-approval-gated.
+All required BIOS extensions for KDOS are implemented as of v1.0.
+Checkpoint-2 KDOS and TLS/network source-load qualification is green.
 
 ---
 

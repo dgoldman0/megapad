@@ -242,7 +242,7 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `S"` | *compile:* `( -- addr len )` | Compile an inline string literal.  At runtime, pushes the address and length.  Use inside a `: ... ;` definition. |
+| `S"` | `( -- addr len )` | In a definition, compile an inline string literal whose address and length are pushed at runtime. At the REPL, return a transient literal in the BIOS-private string buffer. The transient form is suitable for immediate CPU-only consumers such as `COMPARE`, but checked device words reject it as protected memory; compile the literal or copy it into caller-managed storage before passing it to checked crypto, entropy, or DMA interfaces. |
 | `."` | *see below* | Print a string literal.  Works in **both** interpret and compile modes: in a definition it compiles inline and prints at runtime; at the REPL it prints immediately. |
 | `WORD` | `( delim -- addr )` | Parse the next token delimited by *delim* from the input buffer.  Returns a counted-string address. |
 | `COUNT` | `( c-addr -- addr len )` | Convert a counted string (length byte at c-addr) to an address+length pair. |

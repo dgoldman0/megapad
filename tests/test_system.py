@@ -14606,6 +14606,10 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
             '."  STATUSES=" CRYPTO-OK . CRYPTO-UNSUPPORTED .'
             " CRYPTO-STATE . CRYPTO-RANGE . CRYPTO-PROTECTED ."
             " CRYPTO-TIMEOUT . CRYPTO-HARDWARE .",
+            # Interpret-mode S" is backed by BIOS-private transient storage,
+            # not by caller-managed dictionary memory.
+            '."  TRANSIENT-SPAN=" S" checkpoint-2"'
+            " CALLER-SPAN-STATUS .",
             '."  CLEAR=" SHA3-CLEAR .',
             ".SHA3-STATUS",
         ])
@@ -14620,6 +14624,7 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
         self.assertIn("BF0=165 ", text)
         self.assertIn("BX0=165 ", text)
         self.assertIn("STATUSES=0 1 2 3 4 5 6 ", text)
+        self.assertIn("TRANSIENT-SPAN=3 ", text)
         self.assertIn("SHA3: idle", text)
 
     def test_hmac_hkdf_lock9_contention_preserves_status_precedence(self):
@@ -14712,10 +14717,16 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
             "INIT-LONG-H256",
             "CREATE LONG-OUT-H3 32 ALLOT",
             "CREATE LONG-OUT-H256 32 ALLOT",
-            '."  LONG-H3-ST=" LONG-H3 137 S" checkpoint-2"'
-            " LONG-OUT-H3 HMAC .",
-            '."  LONG-H256-ST=" LONG-H256 65 S" checkpoint-2"'
-            " LONG-OUT-H256 HMAC-SHA256 .",
+            # Compile the message inline so it is ordinary caller-managed
+            # dictionary memory.  Interpret-mode S" uses the deliberately
+            # BIOS-private transient string buffer, which checked SHA3 must
+            # reject as CRYPTO-PROTECTED.
+            ': RUN-LONG-H3 LONG-H3 137 S" checkpoint-2"'
+            " LONG-OUT-H3 HMAC ;",
+            ': RUN-LONG-H256 LONG-H256 65 S" checkpoint-2"'
+            " LONG-OUT-H256 HMAC-SHA256 ;",
+            '."  LONG-H3-ST=" RUN-LONG-H3 .',
+            '."  LONG-H256-ST=" RUN-LONG-H256 .',
             '."  LONG-H3-DIGEST=" LONG-OUT-H3 32 .SHA3',
             '."  LONG-H256-DIGEST=" LONG-OUT-H256 32 .SHA3',
         ])
@@ -14769,10 +14780,15 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
             '."  INFO-UNCHANGED=" ALIAS-INFO ALIAS-INFO-REF 17 VERIFY .',
             "CREATE EXPAND-H3 65 ALLOT",
             "CREATE EXPAND-H256 65 ALLOT",
-            '."  EXPAND-H3-ST=" EXPAND-PRK S" checkpoint-2-info"'
-            " 65 EXPAND-H3 HKDF-EXPAND .",
-            '."  EXPAND-H256-ST=" EXPAND-PRK S" checkpoint-2-info"'
-            " 65 EXPAND-H256 HKDF-SHA256-EXPAND .",
+            # As above, compile the info literal into caller-managed
+            # dictionary memory instead of using the protected transient
+            # interpret-mode S" buffer.
+            ': RUN-EXPAND-H3 EXPAND-PRK S" checkpoint-2-info"'
+            " 65 EXPAND-H3 HKDF-EXPAND ;",
+            ': RUN-EXPAND-H256 EXPAND-PRK S" checkpoint-2-info"'
+            " 65 EXPAND-H256 HKDF-SHA256-EXPAND ;",
+            '."  EXPAND-H3-ST=" RUN-EXPAND-H3 .',
+            '."  EXPAND-H256-ST=" RUN-EXPAND-H256 .',
             '."  EXPAND-H3-DIGEST=" EXPAND-H3 65 .SHA3',
             '."  EXPAND-H256-DIGEST=" EXPAND-H256 65 .SHA3',
         ])

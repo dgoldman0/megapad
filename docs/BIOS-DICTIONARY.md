@@ -280,7 +280,7 @@ status and diagnostics.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 88 | `S"` | `( -- addr len )` | ✓ | Compile inline string; runtime pushes (addr len) |
+| 88 | `S"` | `( -- addr len )` | ✓ | Compile inline string; at the REPL return a BIOS-private transient buffer that checked crypto, entropy, and DMA words reject as protected |
 | 89 | `."` | `( -- )` | ✓ | State-smart: interpret → print immediately; compile → compile inline string + print at runtime |
 | 90 | `WORD` | `( char "ccc" -- c-addr )` | | Parse input delimited by char, store counted string at HERE (transient) |
 | 91 | `COUNT` | `( c-addr -- addr len )` | | Convert counted string to (addr len) pair |

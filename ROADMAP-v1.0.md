@@ -132,8 +132,8 @@ Full L2–L7 network stack, bottom-up:
 
 ### SoC Hardening (Items 0, 5-bridge, 7, 9, 10)
 
-Checkpoint-2 implementation landed; source-load qualification and production
-WOTS remain pending.
+Checkpoint 2 is complete, including sequential KDOS/TLS source-load
+qualification. Production WOTS remains checkpoint-3 work.
 
 Per `docs/SoC-hardening.md`:
 

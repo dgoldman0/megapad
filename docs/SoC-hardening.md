@@ -1,14 +1,14 @@
 # SoC Hardening Roadmap
 
-Status: the checkpoint-2 implementation is present for checked SHA3/SHAKE,
-raw Keccak, the portable crypto guard, and global requester identity. Focused
-native, RTL, integrated-SoC, and BIOS checks are green; the checkpoint gate
-still awaits the approval-gated KDOS and TLS/network source-load tests. The old
-WOTS sequencer and diagnostic words recorded in §7 and §10 are retired
-historical prototypes; the `+0x8A0..+0x8BF` aperture remains inert until the
-selected production WOTS design lands in checkpoint 3. The authoritative
-contract is [`crypto-interface-contract.md`](crypto-interface-contract.md).
-Last updated: 2026-08-09
+Status: checkpoint 2 is complete for checked SHA3/SHAKE, raw Keccak, the
+portable crypto guard, and global requester identity. Focused native, RTL,
+integrated-SoC, BIOS, and sequential KDOS/TLS source-load qualification is
+green. The old WOTS sequencer and diagnostic words recorded in §7 and §10 are
+retired historical prototypes; the `+0x8A0..+0x8BF` aperture remains inert
+until the selected production WOTS design lands in checkpoint 3. The
+authoritative contract is
+[`crypto-interface-contract.md`](crypto-interface-contract.md).
+Last updated: 2026-08-11
 
 ---
 
