@@ -12546,7 +12546,7 @@ class TestKDOSCRC(_KDOSTestBase):
             'CRC@ ."  FETCH-ST=" . ."  RAW=" .',
             '."  FINAL=" CRC-FINAL@ .',
         ])
-        self.assertIn("CAPS=1 ", text)
+        self.assertIn("CAPS=15 ", text)
         self.assertIn("MODE-ST=0 ", text)
         self.assertIn("INIT-ST=0 ", text)
         self.assertIn("FEED-ST=0 ", text)
@@ -12726,6 +12726,48 @@ class TestKDOSCRC(_KDOSTestBase):
 class TestKDOSDiagnostics(_KDOSTestBase):
     """Tests for §1.4 Hardware Diagnostics."""
 
+    def test_crc_diag_authoritative_vectors_and_releases_owner(self):
+        """The live diagnostic checks every approved CRC tuple and raw mode."""
+        text = self._run_kdos([
+            '0 0xFC891918 FALSE _CRC-DIAG-ONE ." [[CRC-M0]]" .',
+            '1 0x05440F15 FALSE _CRC-DIAG-ONE ." [[CRC-M1]]" .',
+            '2 0x62EC59E3F1A4F00A FALSE _CRC-DIAG-ONE ." [[CRC-M2]]" .',
+            '4 0xCBF43926 FALSE _CRC-DIAG-ONE ." [[CRC-M4]]" .',
+            '5 0xE3069283 FALSE _CRC-DIAG-ONE ." [[CRC-M5]]" .',
+            '6 0x995DC9BBDF1939FA FALSE _CRC-DIAG-ONE ." [[CRC-M6]]" .',
+            '5 0x1CF96D7C TRUE _CRC-DIAG-ONE ." [[CRC-M5-RAW]]" .',
+            ".CRC-DIAG",
+            '4 CRC-MODE! ." [[CRC-REACQUIRE]]" .',
+            "CRC-FINAL@ DROP",
+        ])
+        for marker in (
+            "CRC-M0", "CRC-M1", "CRC-M2", "CRC-M4", "CRC-M5",
+            "CRC-M6", "CRC-M5-RAW",
+        ):
+            self.assertIn(f"[[{marker}]]-1 ", text)
+        self.assertIn("CRC Standard Vectors", text)
+        self.assertIn("PASS (modes 0,1,2,4,5,6 and mode-5 raw)", text)
+        self.assertIn("[[CRC-REACQUIRE]]0 ", text)
+
+    def test_crc_diag_preserves_preexisting_transaction(self):
+        """A busy diagnostic neither finalizes nor mutates its caller's CRC."""
+        text = self._run_kdos([
+            "VARIABLE CRC-DIAG-BEFORE",
+            "0 CRC-MODE! DROP",
+            "CRC-RESET DROP",
+            "0x4847464544434241 CRC-FEED DROP",
+            "CRC@ DROP CRC-DIAG-BEFORE !",
+            ".CRC-DIAG",
+            ('CRC@ DUP ." [[CRC-OWNER-ST]]" . DROP '
+             'CRC-DIAG-BEFORE @ = ." [[CRC-OWNER-SAME]]" .'),
+            "CRC-FINAL@ DROP",
+            'CRC@ NIP ." [[CRC-POST-ST]]" .',
+        ])
+        self.assertIn("FAIL (busy, unsupported, or vector mismatch)", text)
+        self.assertIn("[[CRC-OWNER-ST]]0 ", text)
+        self.assertIn("[[CRC-OWNER-SAME]]-1 ", text)
+        self.assertIn("[[CRC-POST-ST]]2 ", text)
+
     def test_perf_display(self):
         """.PERF shows performance counter labels and values."""
         text = self._run_kdos([".PERF"])
@@ -12760,6 +12802,8 @@ class TestKDOSDiagnostics(_KDOSTestBase):
         text = self._run_kdos(["DIAG"])
         self.assertIn("Hardware Diagnostics", text)
         self.assertIn("Performance Counters", text)
+        self.assertIn("CRC Standard Vectors", text)
+        self.assertIn("PASS (modes 0,1,2,4,5,6 and mode-5 raw)", text)
         self.assertIn("Memory BIST", text)
         self.assertIn("Tile Datapath", text)
         self.assertIn("I-Cache", text)

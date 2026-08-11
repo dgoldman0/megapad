@@ -14,7 +14,12 @@ import struct
 import tempfile
 from collections.abc import Callable, Sequence
 
-from devices import SECTOR_SIZE, STORAGE_CMD_WRITE
+from devices import (
+    SECTOR_SIZE,
+    STORAGE_CMD_READ,
+    STORAGE_CMD_WRITE,
+    STORAGE_RESULT_MEDIA_FAILURE,
+)
 from tests.test_system import (
     KDOS_TEST_EXT_MEM_MIB,
     _KDOSTestBase,
@@ -655,11 +660,161 @@ class TestKDOSBlockVolume(_KDOSTestBase):
                 self.assertEqual(_marked_int(text, "[[PART-INDEX1]]"), 1)
                 self.assertEqual(_marked_int(text, "[[PART-VALID1]]"), -1)
 
-    def test_invalid_gpt_crc_is_rejected_without_partial_volumes(self):
+    def test_gpt_uses_mode4_hardware_across_multisector_tail(self):
+        """GPT chains raw mode-4 chunks and releases the architectural owner."""
+        image = _gpt_image(entry_count=33)
+        declared_crc = struct.unpack_from("<I", image, SECTOR_SIZE + 88)[0]
+        path = self._write_image(image)
+        system, text = self._run_live([
+            "CREATE P-BD /BLOCK-DEVICE ALLOT",
+            f"CREATE P-VOLS {4 * VOLUME_SIZE} ALLOT",
+            "CREATE P-WORK PART-WORKSPACE-MIN ALLOT",
+            "P-BD BD-OPEN DROP",
+            ('P-BD P-VOLS 4 P-WORK PART-WORKSPACE-MIN GPT-SCAN SWAP '
+             '." [[HW-GPT-COUNT]]" . ." [[HW-GPT-IOR]]" .'),
+            'CRC@ NIP ." [[HW-GPT-OWNER-ST]]" .',
+        ], storage_image=path)
+
+        self.assertEqual(_marked_int(text, "[[HW-GPT-COUNT]]"), 2)
+        self.assertEqual(_marked_int(text, "[[HW-GPT-IOR]]"), 0)
+        self.assertEqual(_marked_int(text, "[[HW-GPT-OWNER-ST]]"), 2)
+        self.assertEqual(system.cpu.crc_mode, 4)
+        self.assertEqual(system.cpu.crc_acc, declared_crc ^ 0xFFFF_FFFF)
+
+    def test_gpt_crc_failures_are_independent_and_transactional(self):
+        """Either header or either array fails closed on its own bad CRC."""
+        template = _gpt_image()
+        total_sectors = len(template) // SECTOR_SIZE
+        backup_header = (total_sectors - 1) * SECTOR_SIZE
+        backup_entries_lba = struct.unpack_from("<Q", template, backup_header + 72)[0]
+        cases = (
+            ("primary-header", SECTOR_SIZE + 16),
+            ("backup-header", backup_header + 16),
+            ("primary-array", 2 * SECTOR_SIZE + 127),
+            ("backup-array", backup_entries_lba * SECTOR_SIZE + 127),
+        )
+        for label, offset in cases:
+            with self.subTest(region=label):
+                image = template.copy()
+                image[offset] ^= 0x80
+                text = self._assert_scan_rejected(image, "GPT-SCAN", 20)
+                self.assertEqual(_marked_int(text, "[[PART-BASE0]]"), 0)
+
+    def test_gpt_capability_absence_has_no_software_fallback(self):
+        """A missing reflected/raw capability is partition UNSUPPORTED."""
         image = _gpt_image()
-        image[SECTOR_SIZE + 16] ^= 0x80
-        text = self._assert_scan_rejected(image, "GPT-SCAN", 20)
-        self.assertEqual(_marked_int(text, "[[PART-BASE0]]"), 0)
+        stored_header_crc = struct.unpack_from("<I", image, SECTOR_SIZE + 16)[0]
+        path = self._write_image(image)
+        observed = {}
+
+        def configure(system):
+            system.sysinfo.crypto_caps &= ~0x01
+            system.sysinfo._regs[0x60] = system.sysinfo.crypto_caps
+            observed["before"] = (system.cpu.crc_mode, system.cpu.crc_acc)
+
+        system, text = self._run_live([
+            "CREATE P-BD /BLOCK-DEVICE ALLOT",
+            f"CREATE P-VOLS {4 * VOLUME_SIZE} ALLOT",
+            "CREATE P-WORK PART-WORKSPACE-MIN ALLOT",
+            "P-BD BD-OPEN DROP",
+            ('P-BD P-VOLS 4 P-WORK PART-WORKSPACE-MIN GPT-SCAN SWAP '
+             '." [[NOCRC-COUNT]]" . DUP IOR>CODE ." [[NOCRC-CODE]]" . '
+             'DUP IOR>DOMAIN ." [[NOCRC-DOMAIN]]" . '
+             'IOR>RAW ." [[NOCRC-RAW]]" .'),
+            'P-BD BD.REFS @ ." [[NOCRC-REFS]]" .',
+            'P-WORK 16 + L@ ." [[NOCRC-HEADER-CRC]]" .',
+        ], storage_image=path, configure=configure)
+
+        self.assertEqual(_marked_int(text, "[[NOCRC-COUNT]]"), 0)
+        self.assertEqual(_marked_int(text, "[[NOCRC-CODE]]"), 23)
+        self.assertEqual(_marked_int(text, "[[NOCRC-DOMAIN]]"), 4)
+        self.assertEqual(_marked_int(text, "[[NOCRC-RAW]]"), 1)
+        self.assertEqual(_marked_int(text, "[[NOCRC-REFS]]"), 0)
+        self.assertEqual(_marked_int(text, "[[NOCRC-HEADER-CRC]]"),
+                         stored_header_crc)
+        self.assertEqual((system.cpu.crc_mode, system.cpu.crc_acc),
+                         observed["before"])
+
+    def test_gpt_busy_preserves_the_callers_crc_transaction(self):
+        """GPT reports raw STATE without finalizing a same-task owner."""
+        path = self._write_image(_gpt_image())
+        _system, text = self._run_live([
+            "CREATE P-BD /BLOCK-DEVICE ALLOT",
+            f"CREATE P-VOLS {4 * VOLUME_SIZE} ALLOT",
+            "CREATE P-WORK PART-WORKSPACE-MIN ALLOT",
+            "VARIABLE P-CRC-BEFORE",
+            "P-BD BD-OPEN DROP",
+            "0 CRC-MODE! DROP CRC-RESET DROP",
+            "0x4847464544434241 CRC-FEED DROP",
+            "CRC@ DROP P-CRC-BEFORE !",
+            ('P-BD P-VOLS 4 P-WORK PART-WORKSPACE-MIN GPT-SCAN SWAP '
+             '." [[BUSYCRC-COUNT]]" . DUP IOR>CODE ." [[BUSYCRC-CODE]]" . '
+             'DUP IOR>DOMAIN ." [[BUSYCRC-DOMAIN]]" . '
+             'IOR>RAW ." [[BUSYCRC-RAW]]" .'),
+            'P-BD BD.REFS @ ." [[BUSYCRC-REFS]]" .',
+            ('CRC@ DUP ." [[BUSYCRC-OWNER-ST]]" . DROP '
+             'P-CRC-BEFORE @ = ." [[BUSYCRC-SAME]]" .'),
+            "CRC-FINAL@ DROP",
+        ], storage_image=path)
+
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-COUNT]]"), 0)
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-CODE]]"), 24)
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-DOMAIN]]"), 4)
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-RAW]]"), 2)
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-REFS]]"), 0)
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-OWNER-ST]]"), 0)
+        self.assertEqual(_marked_int(text, "[[BUSYCRC-SAME]]"), -1)
+
+    def test_gpt_later_array_read_failure_leaves_crc_reacquirable(self):
+        """A later sector failure occurs between released raw CRC chunks."""
+        path = self._write_image(_gpt_image(entry_count=33))
+        fault = {"triggered": False}
+
+        def configure(system):
+            accept = system.storage._accept_command
+
+            def fail_primary_array_lba_3(command, *, expected_generation=None):
+                if (
+                    not fault["triggered"]
+                    and command == STORAGE_CMD_READ
+                    and system.storage.sector_num == 3
+                ):
+                    fault["triggered"] = True
+                    system.storage.inject_fault(
+                        "start",
+                        result=STORAGE_RESULT_MEDIA_FAILURE,
+                        command=STORAGE_CMD_READ,
+                    )
+                return accept(command, expected_generation=expected_generation)
+
+            system.storage._accept_command = fail_primary_array_lba_3
+
+        _system, text = self._run_live([
+            "CREATE P-BD /BLOCK-DEVICE ALLOT",
+            f"CREATE P-VOLS {4 * VOLUME_SIZE} ALLOT",
+            "CREATE P-WORK PART-WORKSPACE-MIN ALLOT",
+            "P-BD BD-OPEN DROP",
+            ('P-BD P-VOLS 4 P-WORK PART-WORKSPACE-MIN GPT-SCAN SWAP '
+             '." [[CRCIO-COUNT]]" . ." [[CRCIO-IOR]]" .'),
+            '4 CRC-MODE! ." [[CRCIO-REACQUIRE]]" .',
+            "CRC-FINAL@ DROP",
+        ], storage_image=path, configure=configure)
+
+        self.assertTrue(fault["triggered"])
+        self.assertEqual(_marked_int(text, "[[CRCIO-COUNT]]"), 0)
+        self.assertNotEqual(_marked_int(text, "[[CRCIO-IOR]]"), 0)
+        self.assertEqual(_marked_int(text, "[[CRCIO-REACQUIRE]]"), 0)
+
+    def test_gpt_private_bit_loop_is_removed(self):
+        """The end-to-end proof cannot silently fall back to the old loop."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "kdos.f"), encoding="utf-8") as source:
+            kdos = source.read()
+        self.assertNotIn("_IEEE-CRC", kdos)
+        self.assertNotIn("0xEDB88320", kdos)
+        self.assertIn(": _CRC32-IEEE-RAW?", kdos)
+        self.assertIn("4 CRC-MODE!", kdos)
+        self.assertIn("CRC-RAW-FINAL@", kdos)
 
     def test_gpt_reserved_header_tail_must_be_zero(self):
         image = _gpt_image()

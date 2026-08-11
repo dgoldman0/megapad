@@ -697,24 +697,32 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 
 : _CRC-REQUIRE-OK  ( status -- )  ?DUP IF THROW THEN ;
 
-\ CRC-BUF ( addr u -- )  Feed u bytes from addr into the CRC engine.
-\   Processes full 8-byte chunks via CRC-FEED, then feeds each remaining
-\   byte exactly once.  No padding bytes become part of the checksum.
-: CRC-BUF  ( addr u -- )
+\ _CRC-BUF-CHECKED ( addr u -- status )  Non-throwing exact buffer feed.
+\   The status form lets storage and diagnostic callers release only a CRC
+\   transaction that they actually acquired.  It processes full 8-byte
+\   chunks via CRC-FEED, then feeds each remaining byte exactly once.
+: _CRC-BUF-CHECKED  ( addr u -- status )
     \ Process full 8-byte chunks using BEGIN/WHILE/REPEAT
     BEGIN  DUP 8 >=  WHILE
-        OVER @ CRC-FEED _CRC-REQUIRE-OK
+        OVER @ CRC-FEED ?DUP IF
+            >R 2DROP R> EXIT
+        THEN
         SWAP 8 + SWAP
         8 -
     REPEAT
     \ Remaining bytes: 0..7
     BEGIN  DUP 0 >  WHILE
-        OVER C@ CRC-FEED-BYTE _CRC-REQUIRE-OK
+        OVER C@ CRC-FEED-BYTE ?DUP IF
+            >R 2DROP R> EXIT
+        THEN
         SWAP 1+ SWAP
         1-
     REPEAT
-    2DROP
+    2DROP 0
 ;
+
+\ CRC-BUF ( addr u -- )  Throw an unchanged checked feed failure.
+: CRC-BUF  ( addr u -- )  _CRC-BUF-CHECKED _CRC-REQUIRE-OK ;
 
 \ CRC32-BUF ( addr u -- crc )  Compute CRC-32 of a buffer.
 : CRC32-BUF
@@ -753,6 +761,56 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 \    BIST-FULL, BIST-QUICK, BIST-STATUS, BIST-FAIL-ADDR, BIST-FAIL-DATA
 \    TILE-TEST, TILE-TEST@, TILE-DETAIL@
 \    ICACHE-ON, ICACHE-OFF, ICACHE-INV, ICACHE-HITS, ICACHE-MISSES
+
+\ The CRC diagnostic is intentionally implemented through the checked BIOS
+\ surface, not through a software oracle.  One quad plus one byte exercises
+\ the exact mixed-fragment path for the canonical "123456789" vector.
+CREATE _CRC-DIAG-DATA
+  49 C, 50 C, 51 C, 52 C, 53 C, 54 C, 55 C, 56 C, 57 C,
+VARIABLE _CRC-DIAG-RAW
+VARIABLE _CRC-DIAG-EXPECT
+
+: _CRC-DIAG-RUN?  ( mode raw-final? -- value status )
+    _CRC-DIAG-RAW !
+    CRC-MODE! ?DUP IF 0 SWAP EXIT THEN
+    CRC-RESET ?DUP IF
+        >R CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    _CRC-DIAG-DATA 9 _CRC-BUF-CHECKED ?DUP IF
+        >R CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    _CRC-DIAG-RAW @ IF
+        CRC-RAW-FINAL@
+        DUP IF
+            >R DROP CRC-FINAL@ DROP 0 R>
+        THEN
+    ELSE
+        CRC-FINAL@ 0
+    THEN ;
+
+: _CRC-DIAG-ONE  ( mode expected raw-final? -- flag )
+    _CRC-DIAG-RAW !
+    _CRC-DIAG-EXPECT !
+    _CRC-DIAG-RAW @ _CRC-DIAG-RUN?
+    DUP IF 2DROP FALSE EXIT THEN
+    DROP _CRC-DIAG-EXPECT @ = ;
+
+: CRC-DIAG?  ( -- flag )
+    0 0xFC891918 FALSE _CRC-DIAG-ONE
+    1 0x05440F15 FALSE _CRC-DIAG-ONE AND
+    2 0x62EC59E3F1A4F00A FALSE _CRC-DIAG-ONE AND
+    4 0xCBF43926 FALSE _CRC-DIAG-ONE AND
+    5 0xE3069283 FALSE _CRC-DIAG-ONE AND
+    6 0x995DC9BBDF1939FA FALSE _CRC-DIAG-ONE AND
+    5 0x1CF96D7C TRUE _CRC-DIAG-ONE AND ;
+
+: .CRC-DIAG  ( -- )
+    CR ."   CRC Standard Vectors" CR
+    CRC-DIAG? IF
+        ."     PASS (modes 0,1,2,4,5,6 and mode-5 raw)" CR
+    ELSE
+        ."     FAIL (busy, unsupported, or vector mismatch)" CR
+    THEN ;
 
 \ .PERF ( -- )  Display performance counters.
 : .PERF
@@ -795,6 +853,7 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 : DIAG
     CR ."  ======== Hardware Diagnostics ========" CR
     .PERF
+    .CRC-DIAG
     .BIST-STATUS
     .TILE-DIAG
     .ICACHE
@@ -3889,8 +3948,20 @@ VARIABLE _VR-VOL
     IOR-MAKE CONSTANT PART-E-WORKSPACE
 2 IOR-C-UNSUPPORTED IOR-D-PARTITION IOR-F-UNSUPPORTED
     IOR-MAKE CONSTANT PART-E-UNSUPPORTED
+1 IOR-C-UNSUPPORTED IOR-D-PARTITION IOR-F-UNSUPPORTED
+    IOR-MAKE CONSTANT PART-E-CRC-UNSUPPORTED
+2 IOR-C-BUSY IOR-D-PARTITION 0
+    IOR-MAKE CONSTANT PART-E-CRC-BUSY
 14 IOR-C-BAD-DESCRIPTOR IOR-D-PARTITION 0
     IOR-MAKE CONSTANT PART-E-BAD-DESCRIPTOR
+
+\ Translate the checked BIOS CRC status without pretending engine contention
+\ is corrupt media.  RANGE is impossible for the fixed mode-4 path and is
+\ therefore an internal parser/backend mismatch rather than a disk result.
+: _GPT-CRC-STATUS>IOR  ( status -- ior )
+    DUP 1 = IF DROP PART-E-CRC-UNSUPPORTED EXIT THEN
+    DUP 2 = IF DROP PART-E-CRC-BUSY EXIT THEN
+    14 IOR-D-PARTITION 0 IOR-MAKE ;
 
 VARIABLE _PART-BD
 VARIABLE _PART-OUT
@@ -4042,22 +4113,31 @@ VARIABLE _MBR-INDEX-V
     _PART-COUNT @ 0 ;
 
 \ GPT uses the reflected IEEE CRC-32 tuple.  KDOS's general CRC32-BUF is the
-\ non-reflected BZIP2 tuple and is deliberately not reused here.
-VARIABLE _IEEE-CRC
-: CRC32-IEEE-START  ( -- )  0xFFFFFFFF _IEEE-CRC ! ;
-: CRC32-IEEE-FEED  ( addr bytes -- )
-    BEGIN DUP 0> WHILE
-        OVER C@ _IEEE-CRC @ XOR
-        8 0 DO
-            DUP 1 AND IF 1 RSHIFT 0xEDB88320 XOR ELSE 1 RSHIFT THEN
-        LOOP
-        0xFFFFFFFF AND _IEEE-CRC !
-        SWAP 1+ SWAP 1-
-    REPEAT
-    2DROP ;
-: CRC32-IEEE-FINISH  ( -- crc )  _IEEE-CRC @ INVERT 0xFFFFFFFF AND ;
+\ non-reflected BZIP2 tuple and is deliberately not reused here.  Each call
+\ below owns mode 4 only while bytes already resident in Bank 0 are fed, then
+\ raw-final releases the engine before any later storage I/O.
+: _CRC32-IEEE-RAW?  ( addr bytes seed -- raw status )
+    4 CRC-MODE! ?DUP IF
+        >R 2DROP DROP 0 R> EXIT
+    THEN
+    CRC-INIT! ?DUP IF
+        >R 2DROP CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    _CRC-BUF-CHECKED ?DUP IF
+        >R CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    CRC-RAW-FINAL@
+    DUP IF
+        >R DROP CRC-FINAL@ DROP 0 R>
+    THEN ;
+
+: _CRC32-IEEE-CHECKED  ( addr bytes -- crc status )
+    0xFFFFFFFF _CRC32-IEEE-RAW?
+    DUP IF EXIT THEN
+    DROP INVERT 0xFFFFFFFF AND 0 ;
+
 : CRC32-IEEE-BUF  ( addr bytes -- crc )
-    CRC32-IEEE-START CRC32-IEEE-FEED CRC32-IEEE-FINISH ;
+    _CRC32-IEEE-CHECKED _CRC-REQUIRE-OK ;
 
 : _GUID-ZERO?  ( guid -- flag )  DUP @ SWAP 8 + @ OR 0= ;
 : _GUID-SAME?  ( guid-a guid-b -- flag )
@@ -4075,13 +4155,19 @@ VARIABLE _GH-BUF
 VARIABLE _GH-CUR
 VARIABLE _GH-BACK
 VARIABLE _GH-SAVED-CRC
+VARIABLE _GPT-CRC-IOR
 
 : _GPT-HEADER-CRC?  ( header -- flag )
     DUP _GH-BUF !
     16 + L@ _GH-SAVED-CRC !
     0 _GH-BUF @ 16 + L!
-    _GH-BUF @ DUP 12 + L@ CRC32-IEEE-BUF
+    _GH-BUF @ DUP 12 + L@ _CRC32-IEEE-CHECKED
     _GH-SAVED-CRC @ _GH-BUF @ 16 + L!
+    DUP IF
+        _GPT-CRC-STATUS>IOR _GPT-CRC-IOR !
+        DROP FALSE EXIT
+    THEN
+    DROP
     _GH-SAVED-CRC @ = ;
 
 : _GPT-HEADER-VALID?  ( header current-lba backup-lba -- flag )
@@ -4196,19 +4282,25 @@ VARIABLE _GA-LBA
 VARIABLE _GA-REM
 VARIABLE _GA-CHUNK
 VARIABLE _GA-EXPECTED
+VARIABLE _GA-RAW
 
 : _GPT-ARRAY-CRC?  ( array-lba expected-crc -- ior )
     _GA-EXPECTED ! _GA-LBA !
     _GPT-ARRAY-BYTES @ _GA-REM !
-    CRC32-IEEE-START
+    0xFFFFFFFF _GA-RAW !
     BEGIN _GA-REM @ 0> WHILE
         _PART-WS @ _GA-LBA @ _PART-READ ?DUP IF EXIT THEN
         _GA-REM @ SECTOR MIN DUP _GA-CHUNK !
-        _PART-WS @ SWAP CRC32-IEEE-FEED
+        _PART-WS @ SWAP _GA-RAW @ _CRC32-IEEE-RAW?
+        DUP IF
+            _GPT-CRC-STATUS>IOR >R DROP R> EXIT
+        THEN
+        DROP _GA-RAW !
         1 _GA-LBA +!
         _GA-CHUNK @ NEGATE _GA-REM +!
     REPEAT
-    CRC32-IEEE-FINISH _GA-EXPECTED @ = IF 0 ELSE PART-E-CORRUPT THEN ;
+    _GA-RAW @ INVERT 0xFFFFFFFF AND _GA-EXPECTED @ =
+    IF 0 ELSE PART-E-CORRUPT THEN ;
 
 : _GPT-ARRAYS-AGREE?  ( -- ior )
     _GPT-ARRAY-BYTES @ _GA-REM !
@@ -4322,12 +4414,14 @@ VARIABLE _GPC-P
 
 : _GPT-SCAN  ( bd volumes max workspace bytes -- count ior )
     _PART-SETUP ?DUP IF 0 SWAP EXIT THEN
+    0 _GPT-CRC-IOR !
     _PART-BD @ BD.SECTORS 6 < IF PART-E-CORRUPT _PART-FAIL EXIT THEN
     _PART-WS @ 0 _PART-READ ?DUP IF _PART-FAIL EXIT THEN
     _GPT-PROTECTIVE-MBR? 0= IF PART-E-CORRUPT _PART-FAIL EXIT THEN
 
     _PART-WS @ 1 _PART-READ ?DUP IF _PART-FAIL EXIT THEN
     _PART-WS @ 1 _PART-BD @ BD.SECTORS 1- _GPT-HEADER-VALID? 0= IF
+        _GPT-CRC-IOR @ ?DUP IF _PART-FAIL EXIT THEN
         PART-E-CORRUPT _PART-FAIL EXIT
     THEN
     _PART-WS @ _GPT-SAVE-PRIMARY
@@ -4335,8 +4429,12 @@ VARIABLE _GPC-P
     _PART-WS @ 512 + _PART-BD @ BD.SECTORS 1- _PART-READ ?DUP IF
         _PART-FAIL EXIT
     THEN
+    0 _GPT-CRC-IOR !
     _PART-WS @ 512 + _PART-BD @ BD.SECTORS 1- 1
-        _GPT-HEADER-VALID? 0= IF PART-E-CORRUPT _PART-FAIL EXIT THEN
+        _GPT-HEADER-VALID? 0= IF
+            _GPT-CRC-IOR @ ?DUP IF _PART-FAIL EXIT THEN
+            PART-E-CORRUPT _PART-FAIL EXIT
+        THEN
     _PART-WS @ 512 + _GPT-HEADERS-AGREE? 0= IF
         PART-E-CORRUPT _PART-FAIL EXIT
     THEN
