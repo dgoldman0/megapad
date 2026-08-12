@@ -1633,10 +1633,10 @@ control, retransmit, and TIME_WAIT reaper (60 s 2×MSL) with automatic
 scavenge-on-alloc.  The standard networking loader requires XMEM.  A guarded
 one-connection Bank-0 allocation path remains for manually composed builds,
 but it is not a qualified deployment profile.  The logical table cost is
-237,496 bytes per connection; backing allocator alignment may round the
-physical reservation upward. The exact XMEM total is 237,520 bytes for one
-connection and `n * 237,496 + 24` for odd `n`; even counts require exactly
-`n * 237,496`.
+237,536 bytes per connection; backing allocator alignment may round the
+physical reservation upward. The exact XMEM total is 237,552 bytes for one
+connection and `n * 237,536 + 16` for odd `n`; even counts require exactly
+`n * 237,536`.
 
 Each listener TCB has an embedded **accept queue** (8 slots).  Incoming
 SYNs allocate a fresh TCB — the listener stays in LISTEN and never
@@ -1699,6 +1699,9 @@ handler wiring.
 | `TLS-CREDENTIAL-SIGN` | `( slot+1 generation hash-be der-a der-cap -- der-u ior )` | Sign one 32-byte SHA-256 digest through the lower-owned P-256 key. DER is staged and published atomically using its actual encoded length, up to 72 bytes. |
 | `TLS-CREDENTIAL-SIGN-CANCEL` | `( slot+1 generation -- ior )` | Under lock 11 alone, request cancellation of that credential's exact active operation generation. Returns `BUSY` for same-core lock-10 activity and `NO-ACTIVE` when no sign is in progress. |
 | `TLS-CREDENTIAL-DELETE` | `( slot+1 generation -- ior )` | On core 0, synchronously revoke a non-referenced credential, wipe its key/record and complete allocated DER-chain payload, free the payload, and stale the old handle. |
+| `TLS-SERVER-CONTEXT-BEGIN` | `( ctx slot+1 generation alpn-a alpn-u -- ior )` | Begin a server-role handshake with one pinned credential and an owned zero-or-one-name ALPN policy. Setup is atomic and the pin remains held until publish, abort, close, or another terminal path releases it. |
+| `TLS-PARSE-CLIENT-HELLO` | `( ctx msg-a msg-u -- alert ior )` | Retain and transactionally admit one complete TLS 1.3 ClientHello. Peer protocol failures return a wire alert with zero `ior`; local failures use zero alert and a negative status. |
+| `TLS-SERVER-PREPARE-HELLO` | `( ctx -- alert ior )` | From an admitted ClientHello, apply pinned-chain signature policy, obtain checked ephemeral/random entropy, build exact ServerHello and EncryptedExtensions bytes, derive X25519/SHA-256 handshake secrets, install server-write/client-read record epochs at sequence zero, and publish the prepared server-hello phase last. Failures erase all phase output while retaining the admitted ClientHello and credential pin for alert/abort cleanup. |
 
 The public `EC-*` words above are the branch-bearing, public-data verification
 path. They are not suitable for private scalars. Server signing uses a distinct
@@ -1810,12 +1813,12 @@ four-core emulator capstone has exercised a real full-batch signature and
 peer-core cancellation with atomic output and complete owner/metadata cleanup.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
-context is 968 bytes. Each context also owns a 230,648-byte receive/server
+context is 968 bytes. Each context also owns a 230,688-byte receive/server
 workspace:
 a 16,896-byte partial-record lane and an aligned retained-data lane capable of
 holding the bounded 73,732-byte post-handshake message, plus a 131,146-byte
 ClientHello lane, 8,192-byte duplicate-extension bitmap, 512-byte immutable
-server-message ledger, and 160 bytes of exact flight metadata. Incomplete encrypted
+server-message ledger, and 200 bytes of exact flight metadata. Incomplete encrypted
 application records, authenticated plaintext left after a caller-sized read,
 and fragmented post-handshake messages therefore survive across calls without
 aliasing another context.  Cryptographic work and the transient global
@@ -1825,7 +1828,7 @@ into connection-owned or caller storage and scrub their complete global
 staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
 writes to its caller-selected output and does not scrub that output.  Together
 with the 5,816-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 237,496 bytes per connection,
+descriptors, the logical network-table cost is 237,536 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
 

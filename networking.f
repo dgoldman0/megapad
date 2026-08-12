@@ -7798,6 +7798,14 @@ VARIABLE TLS-RX-WORKSPACES  0 TLS-RX-WORKSPACES !
 80 CONSTANT TLS-SERVER-CV-MAX
 40 CONSTANT TLS-SERVER-FIN-MAX
 
+\ Prepared-flight and replay markers are scalar protocol state, not capacity
+\ limits.  Later stages extend these enums as additional immutable messages
+\ become ready for the same coordinator.
+0 CONSTANT TLS-SERVER-FLIGHT-NONE
+1 CONSTANT TLS-SERVER-FLIGHT-SERVER-HELLO
+0 CONSTANT TLS-SERVER-TRANSCRIPT-NONE
+1 CONSTANT TLS-SERVER-TRANSCRIPT-CH-SH
+
 : _TLS-SERVER-PINNED?  ( ctx -- flag )
     DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
     DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER =
@@ -8919,6 +8927,14 @@ VARIABLE _TSCP-FLAGS
 VARIABLE _TSCP-FALLBACK
 VARIABLE _TSCP-SHA1
 
+: _TSCP-SCRATCH-WIPE  ( -- )
+    _TSCP-BITMAP @ ?DUP IF TLS-SERVER-EXT-BITMAP-CAPACITY 0 FILL THEN
+    0 _TSCP-CTX ! 0 _TSCP-META ! 0 _TSCP-BITMAP !
+    0 _TSCP-LIST-P ! 0 _TSCP-LIST-U !
+    0 _TSCP-POS ! 0 _TSCP-END ! 0 _TSCP-NEXT !
+    0 _TSCP-COUNT ! 0 _TSCP-SCHEME ! 0 _TSCP-FLAGS !
+    0 _TSCP-FALLBACK ! 0 _TSCP-SHA1 ! ;
+
 : _TSCP-BIT-SET  ( scheme -- )
     DUP 3 RSHIFT _TSCP-BITMAP @ + DUP C@
     ROT 7 AND 1 SWAP LSHIFT OR SWAP C! ;
@@ -8935,10 +8951,10 @@ VARIABLE _TSCP-SHA1
     TSMF-CERT-SIG-FALLBACK TSMF-CERT-SIG-SHA1 OR INVERT AND
     _TSCP-FALLBACK @ IF TSMF-CERT-SIG-FALLBACK OR THEN
     _TSCP-SHA1 @ IF TSMF-CERT-SIG-SHA1 OR THEN
-    SWAP ! _TSCP-BITMAP-WIPE 0 ;
+    SWAP ! _TSCP-SCRATCH-WIPE 0 ;
 
 : _TSCP-RETURN  ( alert -- alert )
-    >R _TSCP-BITMAP-WIPE R> ;
+    >R _TSCP-SCRATCH-WIPE R> ;
 
 \ Apply the effective certificate-signature list to every transmitted entry.
 \ This registry has one pinned chain and no alternate-chain selector.  A
@@ -9301,8 +9317,8 @@ VARIABLE _TSHH-SH-U
 : _TSHH-CLEAR  ( -- status )
     _TSHH-TOUCHED @ IF SHA256-CLEAR ELSE SHA256-OK THEN ;
 
-: _TSHH-BODY  ( ctx -- status )
-    DUP _TSHH-CTX ! TLS-RXW.SERVER-META _TSHH-META !
+: _TSHH-BODY  ( -- status )
+    _TSHH-CTX @ TLS-RXW.SERVER-META _TSHH-META !
     _TSHH-CTX @ TLS-CTX.TRANSCRIPT _TSHH-OUT !
     _TSHH-CTX @ TLS-CTX.ROLE @ TLS-ROLE-SERVER <>
     _TSHH-CTX @ TLS-CRYPTO-PROFILE
@@ -9331,8 +9347,8 @@ VARIABLE _TSHH-SH-U
     _TSHH-META @ TSM.SH-LEN + @ SHA256-UPDATE DUP IF EXIT THEN DROP
     _TSHH-OUT @ SHA256-FINAL ;
 
-: _TSHH-UNWIND  ( ctx throw -- )
-    >R DROP _TSHH-CLEAR
+: _TSHH-UNWIND  ( throw -- )
+    >R _TSHH-CLEAR
     ?DUP IF R> DROP _TSHH-WIPE THROW THEN
     _TSHH-WIPE R> THROW ;
 
@@ -9346,7 +9362,7 @@ VARIABLE _TSHH-SH-U
 \ The checked SHA transaction is finalized and cleared before any HKDF/HMAC
 \ call may begin, so lower lock 8 never spans key-schedule work or a yield.
 : (_TLS-SERVER-HELLO-TRANSCRIPT-HASH)  ( ctx -- ior )
-    0 _TSHH-TOUCHED !
+    _TSHH-CTX ! 0 _TSHH-TOUCHED !
     ['] _TSHH-BODY CATCH
     DUP IF _TSHH-UNWIND THEN DROP
     _TSHH-FINISH ;
@@ -9823,6 +9839,148 @@ VARIABLE _TKSH-CTX
 : TLS-KS-HANDSHAKE ( ctx -- status )
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
     (TLS-KS-HANDSHAKE) _TLS-OWNER-RETURN ;
+
+\ --- Atomic server hello and handshake-epoch preparation ---
+\
+\ TLS-SERVER-PREPARE-HELLO ( ctx -- alert ior )
+\   Starting from one admitted, retained ClientHello, prepare the immutable
+\   ServerHello and EncryptedExtensions, derive the role-correct handshake
+\   epochs, and publish TLSH-SERVER-HELLO last.  A peer-policy failure returns
+\   a positive wire alert with ior zero.  Local failures return alert zero and
+\   a terminal status while retaining the ClientHello and credential pin for
+\   alert/abort cleanup.
+
+VARIABLE _TSPH-CTX
+VARIABLE _TSPH-META
+VARIABLE _TSPH-SH-U
+VARIABLE _TSPH-EE-U
+
+: _TSPH-SCRATCH-WIPE  ( -- )
+    TLS-TEMP-SECRET 32 0 FILL
+    TLS-TEMP-SECRET2 32 0 FILL
+    _TLS-SUPPLIED-HASH 32 0 FILL
+    TLS-HS-HASH 32 0 FILL
+    TLS-FINISHED-KEY 32 0 FILL
+    TLS-VERIFY-DATA 32 0 FILL
+    TLS-FINISHED-MSG 40 0 FILL
+    _TCD-WIPE _TEL-WIPE _TSHH-WIPE _TSCP-SCRATCH-WIPE
+    0 _TDD-CTX ! 0 _TDD-SECRET ! 0 _TDD-OUT !
+    0 _TDS-CTX ! 0 _TDS-SECRET ! 0 _TDS-LABEL ! 0 _TDS-LLEN !
+    0 _TDS-HASH ! 0 _TDS-OUT !
+    0 _TIS-CTX ! 0 _TIS-SECRET ! 0 _TKSH-CTX !
+    0 _TSBH-CTX ! 0 _TSBH-META ! 0 _TSBH-OUT ! 0 _TSBH-CH !
+    0 _TSBH-SID-U ! 0 _TSBH-P ! 0 _TSBH-U !
+    0 _TSBE-CTX ! 0 _TSBE-OUT ! 0 _TSBE-NAME-U !
+    0 _TSHX-CTX !
+    0 _TSPH-META ! 0 _TSPH-SH-U ! 0 _TSPH-EE-U !
+    0 _TSPH-CTX ! ;
+
+: _TSPH-PHASE-WIPE  ( -- )
+    _TSPH-CTX @ ?DUP IF
+        DUP TLS-RXW.SERVER-LEDGER TLS-SERVER-LEDGER-CAPACITY 0 FILL
+        DUP TLS-RXW.SERVER-META TSM.FLIGHT-PHASE +
+        TSM.GROUP TSM.FLIGHT-PHASE - 0 FILL
+        DUP TLS-CTX.TRANSCRIPT 32 0 FILL
+        DUP TLS-CTX.MY-PUBKEY 32 0 FILL
+        DUP TLS-EXPORTER-WIPE
+        DUP TLS-RECORD-SECRETS-WIPE
+        TLS-HANDSHAKE-SECRETS-WIPE
+    THEN ;
+
+: _TSPH-CONTEXT-READY?  ( ctx -- flag )
+    DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX.STATE @ TLSS-HANDSHAKE =
+    OVER TLS-CTX.ROLE @ TLS-ROLE-SERVER = AND
+    OVER TLS-CTX.HS-STATE @ TLSH-SERVER-CLIENT-HELLO = AND
+    OVER TLS-CTX.ERROR @ TLS-E-OK = AND
+    OVER TLS-CRYPTO-PROFILE TLS-CRYPTO-AES128-SHA256 = AND
+    OVER _TLS-SERVER-PINNED? AND
+    OVER TLS-RXW.SERVER-META TSM.FLAGS + @
+    TSMF-CLIENT-HELLO-VALID AND 0<> AND
+    OVER TLS-RXW.SERVER-META TSM.GROUP + @
+    TLS-GROUP-X25519 = AND
+    SWAP DROP ;
+
+: _TSPH-LOCAL-FAIL  ( ior -- alert ior )
+    DUP _TSPH-CTX @ TLS-CTX.ERROR !
+    >R _TSPH-PHASE-WIPE 0 R> ;
+
+: _TSPH-PEER-FAIL  ( alert -- alert ior )
+    >R _TSPH-PHASE-WIPE R> 0 ;
+
+\ Revalidate and reset only phase-owned outputs.  The deterministic vector
+\ path calls this under the same owner, stages 64 bytes at MY-PRIVKEY, then
+\ invokes _TSPH-RUN-STAGED; the public path obtains those bytes from entropy.
+: _TSPH-BEGIN  ( ctx -- alert ior )
+    DUP _TSPH-CTX ! TLS-RXW.SERVER-META _TSPH-META !
+    _TSPH-CTX @ _TSPH-CONTEXT-READY? 0= IF 0 TLS-E-STATE EXIT THEN
+    _TSPH-META @ TSM.CH-LEN + @ DUP 4 <
+    OVER _TSPH-META @ TSM.CH-FILLED + @ <> OR
+    SWAP TLS-SERVER-CH-CAPACITY > OR IF 0 TLS-E-STATE EXIT THEN
+    _TSPH-PHASE-WIPE
+    _TSPH-CTX @ _TLS-SERVER-CERTIFICATE-POLICY
+    DUP IF _TSPH-PEER-FAIL EXIT THEN DROP
+    0 0 ;
+
+: _TSPH-RUN-STAGED  ( -- alert ior )
+    \ The second half of the one checked fill temporarily holds ServerRandom.
+    _TSPH-CTX @ TLS-CTX.MY-PUBKEY
+    _TSPH-CTX @ TLS-RXW.SERVER-LEDGER TSL.SH 6 + + 32 MOVE
+    _TSPH-CTX @ _TLS-SERVER-X25519
+    DUP IF _TSPH-PEER-FAIL EXIT THEN DROP
+    \ The private scalar has no consumer after the shared secret is complete.
+    _TSPH-CTX @ TLS-CTX.MY-PRIVKEY 32 0 FILL
+    _TSPH-CTX @ _TLS-SERVER-BUILD-SERVER-HELLO DUP _TSPH-SH-U !
+    DUP 0= IF DROP TLS-E-STATE _TSPH-LOCAL-FAIL EXIT THEN
+    _TSPH-META @ TSM.SH-LEN + !
+    _TSPH-CTX @ _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS DUP _TSPH-EE-U !
+    DUP 0= IF DROP TLS-E-STATE _TSPH-LOCAL-FAIL EXIT THEN
+    _TSPH-META @ TSM.EE-LEN + !
+    _TSPH-CTX @ (_TLS-SERVER-HELLO-TRANSCRIPT-HASH)
+    DUP IF _TSPH-LOCAL-FAIL EXIT THEN DROP
+    _TSPH-CTX @ _TSPH-CTX @ TLS-CTX.TRANSCRIPT
+    (TLS-KS-HANDSHAKE-HASH)
+    DUP IF _TSPH-LOCAL-FAIL EXIT THEN DROP
+    \ Shared input and the early schedule are superseded by HS-SECRET now.
+    _TSPH-CTX @ TLS-CTX.SHARED 32 0 FILL
+    _TSPH-CTX @ TLS-CTX.EARLY 32 0 FILL
+    TLS-SERVER-FLIGHT-SERVER-HELLO
+    _TSPH-META @ TSM.FLIGHT-PHASE + !
+    0 _TSPH-META @ TSM.PHASE-OFF + !
+    TLS-SERVER-TRANSCRIPT-CH-SH
+    _TSPH-META @ TSM.TRANSCRIPT-PHASE + !
+    \ This is the sole publication marker for a complete prepared phase.
+    TLSH-SERVER-HELLO _TSPH-CTX @ TLS-CTX.HS-STATE !
+    0 0 ;
+
+: _TSPH-BODY  ( -- alert ior )
+    _TSPH-CTX @ _TSPH-BEGIN
+    2DUP OR IF EXIT THEN 2DROP
+    _TSPH-CTX @ TLS-CTX.MY-PRIVKEY 64 ENTROPY-FILL
+    DUP IF
+        DUP 1 = IF DROP TLS-E-HANDSHAKE-CRYPTO ELSE DROP TLS-E-STATE THEN
+        _TSPH-LOCAL-FAIL EXIT
+    THEN DROP
+    _TSPH-RUN-STAGED ;
+
+: _TSPH-UNWIND  ( throw -- )
+    >R
+    TLS-E-HANDSHAKE-CRYPTO _TSPH-CTX @ TLS-CTX.ERROR !
+    _TSPH-PHASE-WIPE _TSPH-SCRATCH-WIPE
+    R> DUP 0> IF THROW THEN
+    >R TLS-OWNER-RELEASE R> THROW ;
+
+: _TSPH-FINISH  ( alert ior -- alert ior )
+    >R >R _TSPH-SCRATCH-WIPE TLS-OWNER-RELEASE R> R> ;
+
+: _TSPH-GUARD  ( ctx xt -- alert ior )
+    SWAP _TSPH-CTX !
+    CATCH DUP IF _TSPH-UNWIND THEN DROP _TSPH-FINISH ;
+
+: TLS-SERVER-PREPARE-HELLO  ( ctx -- alert ior )
+    DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP 0 TLS-E-STATE EXIT THEN
+    TLS-OWNER-TRY IF DROP 0 TLS-E-BUSY EXIT THEN
+    ['] _TSPH-BODY _TSPH-GUARD ;
 
 \ --- Key Schedule Phase 2 ---
 \ TLS-KS-APPLICATION ( ctx -- status )

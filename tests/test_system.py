@@ -25140,6 +25140,407 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_server_prepare_hello_publishes_exact_handshake_epoch(self):
+        """One atomic phase publishes the RFC wire image and server epochs."""
+        alice_public = bytes.fromhex(
+            "8520f0098930a754748b7ddcb43ef75a"
+            "0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        )
+        bob_private = bytes.fromhex(
+            "5dab087e624a8a4b79e17f8b83800ee6"
+            "6f3bb1292618b6fd1c2f8b27ff88e0eb"
+        )
+        bob_public = bytes.fromhex(
+            "de9edb7d7b7dc1b4d35b61c2ece43537"
+            "3f8343c85b78674dadfc7e146f882b4f"
+        )
+        server_random = bytes(range(0x80, 0xA0))
+        session_id = bytes(range(0x20, 0x40))
+        hello = self._client_hello(shares=((29, alice_public),))
+        server_hello = (
+            b"\x02" + self._u24(118) + b"\x03\x03"
+            + server_random + b"\x20" + session_id
+            + b"\x13\x01\x00\x00\x2e"
+            + b"\x00\x2b\x00\x02\x03\x04"
+            + b"\x00\x33\x00\x24\x00\x1d\x00\x20"
+            + bob_public
+        )
+        encrypted_extensions = bytes.fromhex(
+            "08000011000f0010000b0009087261626269742f31"
+        )
+        transcript_hash = hashlib.sha256(hello + server_hello).digest()
+        handshake_secret = bytes.fromhex(
+            "e4e520f8ca639e6562121a8d006bbce3"
+            "e012f049744806f283e99c54cab713f3"
+        )
+        client_hs = bytes.fromhex(
+            "cea2456116058e5b6b84675272bfc22b"
+            "9e63b11c0b30eccb8f3ff76b30ea9206"
+        )
+        server_hs = bytes.fromhex(
+            "22bc939f37b82861039f242c85cba55b"
+            "16397cc6d7456204b7fc35c28348b517"
+        )
+        client_key = bytes.fromhex("dba4834fb151c14fd263a63d7fa8b57f")
+        server_key = bytes.fromhex("96d25dfc2d7c5c7c7bc2c47267fa5df4")
+        client_iv = bytes.fromhex("9688dcabe198c4da2d695f37")
+        server_iv = bytes.fromhex("e6ba01ee3d9df6814fe6d8a8")
+
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("phase-entropy", bob_private + server_random),
+            ("expected-pub", bob_public),
+            ("client-hello", hello),
+            ("expected-sh", server_hello),
+            ("expected-ee", encrypted_extensions),
+            ("expected-transcript", transcript_hash),
+            ("expected-hs", handshake_secret),
+            ("expected-c-hs", client_hs),
+            ("expected-s-hs", server_hs),
+            ("expected-c-key", client_key),
+            ("expected-s-key", server_key),
+            ("expected-c-iv", client_iv),
+            ("expected-s-iv", server_iv),
+            ("zero-pad", bytes(16)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'TLS-OWNER-TRY ." OWNER=" .',
+            'server-ctx @ _TSPH-BEGIN ." BEGIN-IOR=" . '
+            '." BEGIN-ALERT=" .',
+            "phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            '_TSPH-RUN-STAGED ." RUN-IOR=" . ." RUN-ALERT=" .',
+            "_TSPH-SCRATCH-WIPE TLS-OWNER-RELEASE",
+            '." SH=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'expected-sh 122 _XC-BYTES= .',
+            '." EE=" server-ctx @ TLS-RXW.SERVER-LEDGER TSL.EE + '
+            'expected-ee 21 _XC-BYTES= .',
+            '." TRANSCRIPT=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'expected-transcript 32 _XC-BYTES= .',
+            '." HS-SECRET=" server-ctx @ TLS-CTX.HS-SECRET '
+            'expected-hs 32 _XC-BYTES= .',
+            '." C-HS=" server-ctx @ TLS-CTX.C-HS-TRAFFIC '
+            'expected-c-hs 32 _XC-BYTES= .',
+            '." S-HS=" server-ctx @ TLS-CTX.S-HS-TRAFFIC '
+            'expected-s-hs 32 _XC-BYTES= .',
+            '." WR-KEY=" server-ctx @ TLS-CTX.WR-KEY '
+            'expected-s-key 16 _XC-BYTES= .',
+            '." RD-KEY=" server-ctx @ TLS-CTX.RD-KEY '
+            'expected-c-key 16 _XC-BYTES= .',
+            '." WR-IV=" server-ctx @ TLS-CTX.WR-IV '
+            'expected-s-iv 12 _XC-BYTES= .',
+            '." RD-IV=" server-ctx @ TLS-CTX.RD-IV '
+            'expected-c-iv 12 _XC-BYTES= .',
+            '." WR-KEY-PAD=" server-ctx @ TLS-CTX.WR-KEY 16 + '
+            'zero-pad 16 _XC-BYTES= .',
+            '." RD-KEY-PAD=" server-ctx @ TLS-CTX.RD-KEY 16 + '
+            'zero-pad 16 _XC-BYTES= .',
+            '." WR-IV-PAD=" server-ctx @ TLS-CTX.WR-IV 12 + '
+            'zero-pad 4 _XC-BYTES= .',
+            '." RD-IV-PAD=" server-ctx @ TLS-CTX.RD-IV 12 + '
+            'zero-pad 4 _XC-BYTES= .',
+            '." WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." PUB=" server-ctx @ TLS-CTX.MY-PUBKEY '
+            'expected-pub 32 _XC-BYTES= .',
+            '." PRIVATE-ZERO=" server-ctx @ TLS-CTX.MY-PRIVKEY '
+            '_BN256-ZERO? .',
+            '." SHARED-ZERO=" server-ctx @ TLS-CTX.SHARED '
+            '_BN256-ZERO? .',
+            '." EARLY-ZERO=" server-ctx @ TLS-CTX.EARLY '
+            '_BN256-ZERO? .',
+            '." TEMP-ZERO=" TLS-TEMP-SECRET _BN256-ZERO? .',
+            '." HASH-TEMP-ZERO=" _TLS-SUPPLIED-HASH _BN256-ZERO? .',
+            '." HS-HASH-ZERO=" TLS-HS-HASH _BN256-ZERO? .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS-STATE=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." SH-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.SH-LEN + @ .',
+            '." EE-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.EE-LEN + @ .',
+            '." FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." PHASE-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.PHASE-OFF + @ .',
+            '." TR-PHASE=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.TRANSCRIPT-PHASE + @ .',
+            '." FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." TSPH-CTX=" _TSPH-CTX @ .',
+            '." TKSH-CTX=" _TKSH-CTX @ .',
+            'server-ctx @ TLS-SERVER-PREPARE-HELLO '
+            '." RETRY-IOR=" . ." RETRY-ALERT=" .',
+            '." RETRY-SH=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'expected-sh 122 _XC-BYTES= .',
+            '." RETRY-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." OWNER-DEPTH=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." PREPARE-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "OWNER=0 ", "BEGIN-IOR=0 BEGIN-ALERT=0 ",
+            "RUN-IOR=0 RUN-ALERT=0 ",
+            "SH=-1 ", "EE=-1 ", "TRANSCRIPT=-1 ",
+            "HS-SECRET=-1 ", "C-HS=-1 ", "S-HS=-1 ",
+            "WR-KEY=-1 ", "RD-KEY=-1 ",
+            "WR-IV=-1 ", "RD-IV=-1 ",
+            "WR-KEY-PAD=-1 ", "RD-KEY-PAD=-1 ",
+            "WR-IV-PAD=-1 ", "RD-IV-PAD=-1 ",
+            "WR-SEQ=0 ", "RD-SEQ=0 ", "PUB=-1 ",
+            "PRIVATE-ZERO=-1 ", "SHARED-ZERO=-1 ",
+            "EARLY-ZERO=-1 ", "TEMP-ZERO=-1 ",
+            "HASH-TEMP-ZERO=-1 ", "HS-HASH-ZERO=-1 ",
+            "STATE=1 ", "HS-STATE=12 ", "ERROR=0 ",
+            "SH-LEN=122 ", "EE-LEN=21 ", "FLIGHT=1 ",
+            "PHASE-OFF=0 ", "TR-PHASE=1 ", "FLAGS=11 ",
+            "TSPH-CTX=0 ", "TKSH-CTX=0 ",
+            "RETRY-IOR=-4204 RETRY-ALERT=0 ",
+            "RETRY-SH=-1 ", "RETRY-HS=12 ", "OWNER-DEPTH=0 ",
+            "PREPARE-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_hello_uses_checked_entropy_publicly(self):
+        """The public phase fills entropy once and publishes no private input."""
+        hello = self._client_hello()
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("client-hello", hello),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ TLS-SERVER-PREPARE-HELLO '
+            '." IOR=" . ." ALERT=" .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." SH-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.SH-LEN + @ .',
+            '." EE-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.EE-LEN + @ .',
+            '." PRIVATE-ZERO=" server-ctx @ TLS-CTX.MY-PRIVKEY '
+            '_BN256-ZERO? .',
+            '." SHARED-ZERO=" server-ctx @ TLS-CTX.SHARED '
+            '_BN256-ZERO? .',
+            '." EARLY-ZERO=" server-ctx @ TLS-CTX.EARLY '
+            '_BN256-ZERO? .',
+            '." PUBLIC-NONZERO=" server-ctx @ TLS-CTX.MY-PUBKEY '
+            '_BN256-ZERO? 0= .',
+            '." HS-NONZERO=" server-ctx @ TLS-CTX.HS-SECRET '
+            '_BN256-ZERO? 0= .',
+            '." WR-NONZERO=" server-ctx @ TLS-CTX.WR-KEY '
+            '_BN256-ZERO? 0= .',
+            '." RD-NONZERO=" server-ctx @ TLS-CTX.RD-KEY '
+            '_BN256-ZERO? 0= .',
+            '." SH-TYPE=" server-ctx @ TLS-RXW.SERVER-LEDGER C@ .',
+            '." EE-TYPE=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'TSL.EE + C@ .',
+            '." OWNER-DEPTH=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." PUBLIC-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "IOR=0 ALERT=0 ", "STATE=1 ", "HS=12 ", "ERROR=0 ",
+            "SH-LEN=122 ", "EE-LEN=21 ",
+            "PRIVATE-ZERO=-1 ", "SHARED-ZERO=-1 ",
+            "EARLY-ZERO=-1 ", "PUBLIC-NONZERO=-1 ",
+            "HS-NONZERO=-1 ", "WR-NONZERO=-1 ", "RD-NONZERO=-1 ",
+            "SH-TYPE=2 ", "EE-TYPE=8 ", "OWNER-DEPTH=0 ",
+            "PUBLIC-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_hello_entropy_failure_is_terminal_and_atomic(self):
+        """Unavailable hardware entropy revokes the phase and retains cleanup state."""
+        hello = self._client_hello()
+        der_chain = TestKDOSTLSCredentials._fixture("leaf")
+        lines = self._forth_bytes("tc-chain", der_chain)
+        lines += self._forth_bytes("tc-key", TestKDOSTLSCredentials.PRIVATE_D3)
+        lines += [
+            "VARIABLE tc-slot VARIABLE tc-gen VARIABLE tc-ior",
+            '1 TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            f"tc-chain {len(der_chain)} tc-key TLS-CREDENTIAL-PROVISION",
+            "tc-ior ! tc-gen ! tc-slot !",
+        ]
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("client-hello", hello),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ TLS-SERVER-PREPARE-HELLO '
+            '." IOR=" . ." ALERT=" .',
+            '." READY=" ENTROPY-READY? .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." CH=" server-ctx @ TLS-RXW.SERVER-CH '
+            f'client-hello {len(hello)} _XC-BYTES= .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." SH-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.SH-LEN + @ .',
+            '." EE-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.EE-LEN + @ .',
+            '." FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            '_BN256-ZERO? .',
+            '." TRANSCRIPT=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            '_BN256-ZERO? .',
+            '." PRIVATE=" server-ctx @ TLS-CTX.MY-PRIVKEY '
+            '_BN256-ZERO? .',
+            '." PUBLIC=" server-ctx @ TLS-CTX.MY-PUBKEY '
+            '_BN256-ZERO? .',
+            '." SHARED=" server-ctx @ TLS-CTX.SHARED '
+            '_BN256-ZERO? .',
+            '." HS-SECRET=" server-ctx @ TLS-CTX.HS-SECRET '
+            '_BN256-ZERO? .',
+            '." WR=" server-ctx @ TLS-CTX.WR-KEY '
+            '_BN256-ZERO? .',
+            '." RD=" server-ctx @ TLS-CTX.RD-KEY '
+            '_BN256-ZERO? .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." ENTROPY-FINAL-DEPTH=" DEPTH .',
+        ]
+        text, _ = TestKDOSSHA3Checkpoint2._run_kdos_inspected(
+            self,
+            lines,
+            mutate_system=lambda sys_obj: (
+                sys_obj.cpu._cs._trng_test_health_loss_after(0)
+            ),
+        )
+        for token in (
+            "IOR=-4216 ALERT=0 ", "READY=0 ", "STATE=1 ",
+            "HS=11 ", "ERROR=-4216 ", "FLAGS=11 ", "CH=-1 ",
+            "REFS=1 ", "SH-LEN=0 ", "EE-LEN=0 ", "FLIGHT=0 ",
+            "LEDGER=-1 ", "TRANSCRIPT=-1 ", "PRIVATE=-1 ",
+            "PUBLIC=-1 ", "SHARED=-1 ", "HS-SECRET=-1 ",
+            "WR=-1 ", "RD=-1 ", "OWNER=0 ", "REFS-END=0 ",
+            "ENTROPY-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_hello_rolls_back_peer_and_throw_failures(self):
+        """Peer alerts stay retryable; local throws revoke every phase output."""
+        zero_share_hello = self._client_hello(
+            shares=((29, bytes(32)),),
+        )
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("zero-share-hello", zero_share_hello),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ zero-share-hello {len(zero_share_hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ TLS-SERVER-PREPARE-HELLO '
+            '." PEER-IOR=" . ." PEER-ALERT=" .',
+            '." PEER-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." PEER-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." PEER-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." PEER-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." PEER-CH=" server-ctx @ TLS-RXW.SERVER-CH '
+            f'zero-share-hello {len(zero_share_hello)} _XC-BYTES= .',
+            '." PEER-SH-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.SH-LEN + @ .',
+            '." PEER-EE-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.EE-LEN + @ .',
+            '." PEER-FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." PEER-LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            '_BN256-ZERO? .',
+            '." PEER-TRANSCRIPT=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            '_BN256-ZERO? .',
+            '." PEER-PRIVATE=" server-ctx @ TLS-CTX.MY-PRIVKEY '
+            '_BN256-ZERO? .',
+            '." PEER-PUBLIC=" server-ctx @ TLS-CTX.MY-PUBKEY '
+            '_BN256-ZERO? .',
+            '." PEER-SHARED=" server-ctx @ TLS-CTX.SHARED '
+            '_BN256-ZERO? .',
+            '." PEER-HS-SECRET=" server-ctx @ TLS-CTX.HS-SECRET '
+            '_BN256-ZERO? .',
+            '." PEER-WR=" server-ctx @ TLS-CTX.WR-KEY '
+            '_BN256-ZERO? .',
+            '." PEER-RD=" server-ctx @ TLS-CTX.RD-KEY '
+            '_BN256-ZERO? .',
+            ': _TSPH-TEST-THROW -777 THROW ;',
+            ': _TSPH-TEST-RUN '
+            "server-ctx @ ['] _TSPH-TEST-THROW _TSPH-GUARD 2DROP ;",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER 512 165 FILL",
+            "server-ctx @ TLS-CTX.TRANSCRIPT 32 165 FILL",
+            "server-ctx @ TLS-CTX.HS-SECRET 32 165 FILL",
+            "server-ctx @ TLS-CTX.WR-KEY 32 165 FILL",
+            "server-ctx @ TLS-CTX.RD-KEY 32 165 FILL",
+            "TLS-OWNER-TRY DROP",
+            "' _TSPH-TEST-RUN CATCH",
+            '." THROW=" .',
+            '." THROW-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." THROW-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." THROW-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." THROW-CH=" server-ctx @ TLS-RXW.SERVER-CH '
+            f'zero-share-hello {len(zero_share_hello)} _XC-BYTES= .',
+            '." THROW-LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            '_BN256-ZERO? .',
+            '." THROW-TRANSCRIPT=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            '_BN256-ZERO? .',
+            '." THROW-HS-SECRET=" server-ctx @ TLS-CTX.HS-SECRET '
+            '_BN256-ZERO? .',
+            '." THROW-WR=" server-ctx @ TLS-CTX.WR-KEY '
+            '_BN256-ZERO? .',
+            '." THROW-RD=" server-ctx @ TLS-CTX.RD-KEY '
+            '_BN256-ZERO? .',
+            '." THROW-OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." ROLLBACK-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "PEER-IOR=0 PEER-ALERT=47 ",
+            "PEER-STATE=1 ", "PEER-HS=11 ", "PEER-ERROR=0 ",
+            "PEER-FLAGS=11 ", "PEER-CH=-1 ",
+            "PEER-SH-LEN=0 ", "PEER-EE-LEN=0 ", "PEER-FLIGHT=0 ",
+            "PEER-LEDGER=-1 ", "PEER-TRANSCRIPT=-1 ",
+            "PEER-PRIVATE=-1 ", "PEER-PUBLIC=-1 ",
+            "PEER-SHARED=-1 ", "PEER-HS-SECRET=-1 ",
+            "PEER-WR=-1 ", "PEER-RD=-1 ",
+            "THROW=-777 ", "THROW-ERROR=-4216 ", "THROW-HS=11 ",
+            "THROW-FLAGS=11 ", "THROW-CH=-1 ",
+            "THROW-LEDGER=-1 ", "THROW-TRANSCRIPT=-1 ",
+            "THROW-HS-SECRET=-1 ", "THROW-WR=-1 ", "THROW-RD=-1 ",
+            "THROW-OWNER=0 ", "ROLLBACK-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_server_hello_ledger_uses_exact_wire_maxima(self):
         """Maximum and absent ALPN consume their exact ledger intervals."""
         maximum_alpn = bytes(range(1, 256))

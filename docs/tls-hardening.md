@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, per-context application RX, and lower-owned P-256 server credentials implemented; authenticated server handshake and listener integration remain gated
+Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, per-context application RX, and the atomic server ClientHello/ServerHello handshake epoch implemented; the authenticated server certificate flight and listener integration remain gated
 Last updated: 2026-08-12
 
 ## Purpose
@@ -27,10 +27,17 @@ secure byte stream and should not implement another TLS engine.  Listener
 policy, application protocol behavior, peer authorization, and service
 identity remain higher-layer responsibilities.
 
-The current implementation is not a TLS server.  In particular, copying the
-client handshake and reversing its traffic keys would omit the mandatory
-server proof of possession in `CertificateVerify`.  The following lower-level
-facts gate an authenticated server role:
+The current implementation is not yet a complete listening TLS server. KDOS
+now admits and retains a full-width ClientHello, applies the pinned credential
+policy, obtains one checked 64-byte entropy transaction, constructs exact
+ServerHello and EncryptedExtensions messages, performs X25519, hashes
+ClientHello || ServerHello, and installs role-correct handshake epochs as one
+atomic phase. It publishes the server-hello state only after all of those
+operations succeed. It still must construct, sign, protect, and replay the
+Certificate through Finished flight and authenticate the client Finished.
+Copying the client handshake and merely reversing its traffic keys would omit
+the mandatory server proof of possession in `CertificateVerify`. The
+following lower-level facts continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
   verification data. Private signing now uses the separate fixed-schedule
@@ -60,10 +67,12 @@ client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
-the server gate still requires server-handshake construction, configuration,
-and secure listener/accept integration. Reusing `EC-MUL`, injecting a host
-callback, or precomputing a fixture signature remains test scaffolding rather
-than a server security result.
+the server gate still requires the Certificate, CertificateVerify, and
+Finished construction/signing transaction, protected flight replay,
+client-Finished verification, configuration, and secure listener/accept
+integration. Reusing `EC-MUL`, injecting a host callback, or precomputing a
+fixture signature remains test scaffolding rather than a server security
+result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
 hash state, per-context application RX state, and enforced serialized scratch
@@ -503,11 +512,11 @@ Internal handshake parsers and builders are covered by the owned blocking
 connection path and are not independent concurrent entry points.
 
 State that must survive an application receive call is not shared scratch.
-Each 968-byte `/TLS-CTX` indexes a 230,648-byte `/TLS-RX-WORKSPACE`: a
+Each 968-byte `/TLS-CTX` indexes a 230,688-byte `/TLS-RX-WORKSPACE`: a
 16,896-byte partial-record lane plus an aligned retained-data lane bounded for
 a 73,732-byte post-handshake message, a protocol-derived 131,146-byte
 ClientHello lane, an 8,192-byte bitmap covering all uint16 extension types,
-and a 512-byte immutable server-message ledger with 160 bytes of exact flight
+and a 512-byte immutable server-message ledger with 200 bytes of exact flight
 metadata. Incomplete encrypted records,
 authenticated plaintext remainder, and fragmented post-handshake messages are
 therefore isolated by context.  The high-level application receive and
@@ -515,9 +524,9 @@ owner-held blocking-handshake paths use the transient global plaintext buffer
 only while lock 10 is held and scrub its complete contents before releasing
 ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
 output and does not scrub that output.  With a 5,816-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 237,496 bytes per connection;
+descriptors, the logical network-table cost is 237,536 bytes per connection;
 the four XMEM table allocations are normalized independently, so one
-connection reserves 237,520 bytes and two reserve 474,992; capacity uses the
+connection reserves 237,552 bytes and two reserve 475,072; capacity uses the
 exact aggregate.
 
 Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
