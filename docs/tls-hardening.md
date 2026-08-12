@@ -179,7 +179,13 @@ all four trials execute a real fixed-schedule base multiplication and complete
 cap. An exhausted batch performs candidate four's rejection transition and
 continues with another batch, so zero/out-of-range `k` and the required
 ECDSA-level `r=0` or `s=0` retry semantics are complete without a hidden
-attempt limit.
+attempt limit. A lower credential operation may arm one exact cancellation
+generation. The signer samples it only after a complete four-trial batch and
+before accepting that batch's result; cancellation therefore has bounded
+batch-boundary latency without truncating private arithmetic. The credential
+owner must additionally stage DER and arbitrate a request arriving after that
+sample before caller publication. Every terminal cleanup disarms the borrowed
+generation cell.
 
 Modulo-order arithmetic uses ordinary residues under the custom P-256 order
 with its deliberate zero Montgomery-selector buffer. The signer reduces the

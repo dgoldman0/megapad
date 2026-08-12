@@ -23430,6 +23430,52 @@ class TestKDOSECDSA(_KDOSNetworkTestBase):
         self.assertIn("P256=-1 ", text)
         self.assertIn("OWNER=0 ", text)
 
+    def test_rfc6979_cancellation_waits_for_a_complete_batch(self):
+        """An armed generation cancels atomically after four real trials."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+        core = self._forth_definition("_EPS-PRIVATE-CORE")
+        self.assertLess(core.index("_EPS-FOUR-TRIAL-BATCH"),
+                        core.index("_EPS-CANCELLED?"))
+        self.assertEqual(core.count("_EPS-CANCELLED?"), 1)
+
+        lines = self._store_bytes("eps-cancel-d", private_le)
+        lines += self._store_bytes("eps-cancel-h", digest)
+        lines.extend([
+            "CREATE eps-cancel-out 72 ALLOT eps-cancel-out 72 165 FILL",
+            "VARIABLE eps-cancel-request 1 eps-cancel-request !",
+            ": eps-cancel-out-atomic? TRUE 72 0 DO",
+            "  eps-cancel-out I + C@ 165 = AND LOOP ;",
+            ": eps-cancel-work-zero? TRUE /ECDSA-P256-SIGN-WORK 0 DO",
+            "  _ECDSA-P256-SIGN-WORK I + C@ 0= AND LOOP ;",
+            ": eps-cancel-p256-zero? TRUE /P256-SECRET-WORK 0 DO",
+            "  _P256-SECRET-WORK I + C@ 0= AND LOOP ;",
+            "eps-cancel-request _EPS-CANCEL-A !",
+            "1 _EPS-CANCEL-GENERATION !",
+            "eps-cancel-d eps-cancel-h eps-cancel-out 72",
+            "_ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." IOR=" . ." LEN=" .',
+            '." ATOMIC=" eps-cancel-out-atomic? .',
+            '." WORK=" eps-cancel-work-zero? .',
+            '." P256=" eps-cancel-p256-zero? .',
+            '." ARMED=" _EPS-CANCEL-A @ .',
+            '." GENERATION=" _EPS-CANCEL-GENERATION @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("IOR=-4317 LEN=0 ", text)
+        self.assertIn("ATOMIC=-1 ", text)
+        self.assertIn("WORK=-1 ", text)
+        self.assertIn("P256=-1 ", text)
+        self.assertIn("ARMED=0 ", text)
+        self.assertIn("GENERATION=0 ", text)
+        self.assertIn("OWNER=0 ", text)
+
     def test_ecdsa_decode_sig_valid(self):
         """ECDSA-DECODE-SIG decodes a DER-encoded signature into r, s."""
         # Simple test: r=1, s=2

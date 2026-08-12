@@ -6171,8 +6171,29 @@ _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL
 -4314 CONSTANT _EPS-E-CAPACITY
 -4315 CONSTANT _EPS-E-CRYPTO
 -4316 CONSTANT _EPS-E-INTERNAL
+-4317 CONSTANT _EPS-E-CANCELLED
 -4391 CONSTANT _EPS-X-HMAC
 -4392 CONSTANT _EPS-X-INTERNAL
+-4393 CONSTANT _EPS-X-CANCELLED
+
+\ An opaque credential operation may arm one exact cancellation-generation
+\ cell while it invokes the raw signer.  Raw qualification calls leave the
+\ address zero.  The signer samples only after a complete four-trial batch,
+\ so cancellation cannot truncate a trial, publish partial arithmetic, or
+\ become an attempt limit.  Cleanup always disarms the borrowed cell.
+VARIABLE _EPS-CANCEL-A
+VARIABLE _EPS-CANCEL-GENERATION
+0 _EPS-CANCEL-A ! 0 _EPS-CANCEL-GENERATION !
+
+: _EPS-CANCELLED? ( -- flag )
+    _EPS-CANCEL-A @ ?DUP IF
+        @ _EPS-CANCEL-GENERATION @ =
+    ELSE
+        FALSE
+    THEN ;
+
+: _EPS-CANCEL-DISARM ( -- )
+    0 _EPS-CANCEL-A ! 0 _EPS-CANCEL-GENERATION ! ;
 
 : _EPS-WORK-WIPE ( -- )
     _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL ;
@@ -6413,6 +6434,11 @@ _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL
     _EPS-RFC-INIT
     BEGIN
         _EPS-FOUR-TRIAL-BATCH
+        \ Cancellation is observed only after all four real trials.  Check
+        \ before accepting a found pair so a request already present at this
+        \ boundary suppresses ordinary first-batch publication.  The owning
+        \ credential layer arbitrates any later request against staged DER.
+        _EPS-CANCELLED? IF _EPS-X-CANCELLED THROW THEN
         _EPS-FOUND @ 0=
     WHILE
         \ Candidate four needs the same RFC rejection transition before the
@@ -6441,6 +6467,7 @@ _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL
 
 : _EPS-CLEANUP ( -- )
     \ This also covers a throw while the nested P-256 lane is live.
+    _EPS-CANCEL-DISARM
     _P256S-CLEANUP
     _EPS-FIELD-CLEAR
     _EPS-WORK-WIPE ;
@@ -6462,6 +6489,9 @@ _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL
         THEN
         DUP _EPS-X-INTERNAL = IF
             DROP 0 _EPS-E-INTERNAL _EPS-FINISH EXIT
+        THEN
+        DUP _EPS-X-CANCELLED = IF
+            DROP 0 _EPS-E-CANCELLED _EPS-FINISH EXIT
         THEN
         _EPS-UNWIND
     THEN DROP
