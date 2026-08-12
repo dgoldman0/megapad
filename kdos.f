@@ -116,14 +116,16 @@ VARIABLE PN-LEN
 \  §1.1  Memory Allocator
 \ =====================================================================
 \
-\  First-fit free-list allocator.  Each block has a 16-byte header:
+\  Bank-0 first-fit free-list allocator.  Each block has a 24-byte header:
 \    +0   next    pointer to next free block (0 = end of list)
 \    +8   size    usable bytes in this block (excludes header)
+\    +16  magic   allocation canary (zero while free)
 \
-\  ALLOCATE returns an address past the header.  FREE takes that
-\  address, backs up 16 bytes to find the header, and inserts
-\  the block into the free list (sorted by address, coalescing
-\  adjacent blocks).
+\  The private Bank-0 allocator returns an address past the header.  Its
+\  paired free takes that address, backs up 24 bytes to find the header, and
+\  inserts the block into the free list (sorted by address and coalescing
+\  adjacent blocks).  §1.0b later routes public ALLOCATE/FREE through XMEM
+\  when available and exposes DMA-ALLOCATE/DMA-FREE for explicit Bank 0.
 \
 \  The heap lives above HERE (which is reserved for the Forth
 \  dictionary).  HEAP-BASE marks the start; it's set at load time
@@ -180,12 +182,18 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 \ -- Stack-proximity guard constant --
 4096 CONSTANT HEAP-GUARD   \ minimum gap between heap top and stack bottom
 
+\ Late Bank-0 source compilation grows the dictionary after the system heap
+\ is initialised.  Keep that dictionary reserve ahead of every persistent heap
+\ allocation; graphics.f currently uses a little over 18 KiB of it.
+32768 CONSTANT LATE-DICT-RESERVE
+
 \ HEAP-SETUP ( -- )  initialise the heap above HERE
-\   Leaves a 16 KiB gap above HERE for late Bank-0 dictionary growth,
+\   Leaves LATE-DICT-RESERVE bytes above HERE for late Bank-0 dictionary growth,
 \   then creates one large free block spanning to the stack guard.
 : HEAP-SETUP  ( -- )
     HEAP-INIT @ IF EXIT THEN
-    HERE  16384  + TALIGN  HEAP-BASE !
+    TALIGN
+    HERE LATE-DICT-RESERVE + HEAP-BASE !
     \ Heap end = data-stack bottom - 4096 guard
     MEM-SIZE 2 / 4096 -   ( heap-end )
     HEAP-BASE @ -          ( available-bytes )
@@ -2424,7 +2432,7 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
 \  Full design: docs/arenas.md
 
 \ -- Source constants --
-0 CONSTANT A-HEAP    \ arena backed by Bank 0 heap
+0 CONSTANT A-HEAP    \ arena backed by the general ALLOCATE/FREE route
 1 CONSTANT A-XMEM    \ arena backed by external RAM
 2 CONSTANT A-HBW     \ arena backed by HBW math RAM
 
@@ -8672,6 +8680,11 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     ."     n f FTRUNCATE          Set file size (clamps cursor)" CR
     ."     f FSIZE / f F.INFO     File size / info" CR
     ."     FILES                  List legacy files" CR
+    CR ."   MODULE WORDS (CORE 0 ONLY):" CR
+    ."     PROVIDED id            Register exact 1..246-byte ID (case-sensitive)" CR
+    ."     MODULE? id             Query exact ID -> flag" CR
+    ."     REQUIRE path           Load source once via PROVIDED" CR
+    ."     MODULES                List exact IDs and count" CR
     CR ."   SCHEDULER WORDS:" CR
     ."     ' word 0 TASK name     Create named task (xt pri)" CR
     ."     xt SPAWN               Spawn anonymous task" CR
@@ -9374,7 +9387,9 @@ VARIABLE _MG-NEXT
     IF _MOD-FREE ELSE DROP THEN ;
 
 VARIABLE _MOD-GROW-PENDING
+VARIABLE _MOD-GROW-READY
 0 _MOD-GROW-PENDING !
+0 _MOD-GROW-READY !
 
 : _MOD-TRY-PENDING-GROWTH  ( -- )
     _MOD-GROW-PENDING @ IF
@@ -9432,14 +9447,20 @@ VARIABLE _MRB-NODE
 : _MOD-COMMIT-FRAME  ( -- )
     _LD-TXN-HEAD @
     0 _LD-TXN-HEAD !
-    DUP IF 1 _MOD-GROW-PENDING ! THEN
+    DUP IF
+        1 _MOD-GROW-PENDING !
+        1 _MOD-GROW-READY !
+    THEN
     BEGIN DUP WHILE
         DUP _MN-PROV @ SWAP _MN-PROV 0 SWAP !
     REPEAT
     DROP ;
 
 : _MOD-AFTER-RELEASE  ( -- )
-    _LD-SP @ 0= IF _MOD-TRY-PENDING-GROWTH THEN ;
+    _LD-SP @ 0= _MOD-GROW-READY @ AND IF
+        0 _MOD-GROW-READY !
+        _MOD-TRY-PENDING-GROWTH
+    THEN ;
 
 ' _MOD-COMMIT-FRAME   IS _LD-TXN-COMMIT
 ' _MOD-ROLLBACK-FRAME IS _LD-TXN-ROLLBACK

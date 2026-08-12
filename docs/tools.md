@@ -516,7 +516,8 @@ that cover every layer of the system.
 | `TestKDOSRing` | Ring buffer data structure |
 | `TestKDOSHashTable` | Hash table: insert, lookup, delete, rehash |
 | `TestKDOSFramebuffer` | Framebuffer MMIO: pixel write, scroll, clear |
-| `TestKDOSModuleSystem` | Module system: LOAD, MODULE/END-MODULE, import |
+| `TestKDOSModuleSystem` | Module loading: `LOAD`, `PROVIDED`, `MODULE?`, `REQUIRE`, `MODULES`, relative paths, stack contracts, and rollback |
+| `TestKDOSDynamicModuleRegistry` | Dynamic exact-ID registry: growth beyond the former boundary, long shared-prefix IDs, cycles, allocation failure, XMEM reset, and no-XMEM operation |
 | `TestKDOSGraphicsModule` | Graphics module: sprites, tiles, palette |
 | `TestHeadlessDisplay` | Headless display: TCP terminal server mode |
 | `TestPortSend` | Data port send/recv, cross-task communication |

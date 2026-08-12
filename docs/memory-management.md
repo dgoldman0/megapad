@@ -21,7 +21,8 @@ different bus with different characteristics:
    ├─ BIOS code + dict (~20 KB)
    ├─ KDOS core dictionary
    ├─ HERE ↓ (grows up)
-   │    ... free heap space ...
+   │    ... 32 KiB late-dictionary reserve ...
+   ├─ Bank 0 heap (grows through its free list)
    ├─ data stack SP ↑ (grows down)
    └─ return stack
  0x000F_FFFF
@@ -89,19 +90,40 @@ anything that should survive until the next `MARKER`.
 **When not to use:** temporary buffers, per-request scratch, anything
 you want to free independently.
 
-### 2.2 Heap — `ALLOCATE`, `FREE`, `RESIZE`
+### 2.2 General Heap — `ALLOCATE`, `FREE`, `RESIZE`
 
-A first-fit free-list allocator in Bank 0.  Each block carries a
-16-byte header (next pointer + size).  `FREE` inserts addresses in
-sorted order and coalesces adjacent blocks.
+`ALLOCATE` is a region-aware front end.  When external memory is present it
+uses the XMEM free-list/bump allocator and places an 8-byte total-size prefix
+before the returned address.  Without XMEM it uses the Bank 0 first-fit
+free-list.  Each Bank 0 block carries a 24-byte header (next pointer, usable
+size, and allocation canary); `FREE` routes by address, inserts Bank 0 blocks
+in sorted order, and coalesces adjacent free blocks.
 
 - **Lifetime:** until explicitly `FREE`d.
-- **Region:** Bank 0, above `HERE`, below the data stack.
-- **Cost:** O(n) where n = number of free blocks.
+- **Region:** XMEM when present; otherwise Bank 0 above `HERE` and below the
+  data stack.
+- **Cost:** O(n) free-list search; the XMEM path may fall back to an O(1) bump
+  allocation.
 - **Constraint:** core-0 only (`?CORE0` guard).
 - **Size contract:** requests must be strictly positive. Values that cannot be
   aligned and represented in a signed cell fail before heap or free-list state
   changes.
+
+`DMA-ALLOCATE`, `DMA-FREE`, and `DMA-RESIZE` explicitly select the Bank 0
+heap even when XMEM is present.  They are the correct lifetime/placement API
+for DMA payloads and for persistent system metadata, such as module-registry
+entries, that must survive `XMEM-RESET`.
+
+On first Bank 0 allocation, `HEAP-SETUP` tile-aligns the system dictionary and
+places `HEAP-BASE` `LATE-DICT-RESERVE` bytes above it.  That named 32 KiB
+reserve is available to modules that must still compile into Bank 0 after heap
+initialization; heap allocations begin above the reserve rather than occupying
+live late-dictionary space.
+
+An ordinary `ALLOCATE` result obtained while XMEM is present must not be kept
+across `XMEM-RESET`; the reset reclaims the general XMEM region and clears its
+free-list.  Choose the explicit Bank 0 API when reset-independent lifetime is
+required.
 
 ```forth
 1024 ALLOCATE ABORT" OOM"   ( addr )
@@ -109,7 +131,7 @@ sorted order and coalesces adjacent blocks.
 FREE                        \ return to free list
 ```
 
-**Diagnostic words:**
+**Bank 0 diagnostic words:**
 
 | Word | Stack | Purpose |
 |------|-------|---------|
@@ -233,7 +255,7 @@ scratch ARENA-DESTROY                     \ backing freed, descriptor zeroed
 
 | Constant | Value | Backing region |
 |----------|-------|----------------|
-| `A-HEAP` | 0 | Bank 0 heap (`ALLOCATE`/`FREE`) |
+| `A-HEAP` | 0 | General `ALLOCATE`/`FREE` route (XMEM when present, otherwise Bank 0) |
 | `A-XMEM` | 1 | External RAM (XMEM bump + free-list) |
 | `A-HBW` | 2 | HBW math RAM (bump only) |
 
@@ -302,7 +324,7 @@ dictionary rather than in those temporary buffers.
 Lifetime         Strategy           Reclaim             Region
 ────────────────────────────────────────────────────────────────
 Permanent        Dictionary         MARKER / FORGET     Bank 0 / XMEM
-Long-lived       Heap ALLOCATE      FREE                Bank 0
+Long-lived       Heap ALLOCATE      FREE                XMEM / Bank 0
 Scoped           Arena              ARENA-DESTROY       Any
 Transactional    Arena + snapshot    ARENA-ROLLBACK      Any
 Ephemeral        Bump (raw)         XMEM-RESET /        XMEM / HBW
@@ -337,9 +359,10 @@ The defenses:
    allocation can't fragment.  When the arena is destroyed, 100% of
    its backing is returned as a single contiguous block.
 
-2. **The heap coalesces on FREE.**  Adjacent free blocks are merged
-   immediately (forward + backward coalescing).  This keeps
-   fragmentation bounded for well-behaved alloc/free patterns.
+2. **Bank 0 heap blocks coalesce on FREE.**  Adjacent free blocks are merged
+   immediately (forward + backward coalescing).  XMEM frees instead enter its
+   reusable free-list.  These policies keep fragmentation bounded for
+   well-behaved alloc/free patterns.
 
 3. **HEAP-FRAG tells you the truth.**  A perfectly defragmented heap
    has `HEAP-FRAG` = 1 (one large free block).  Higher values mean
@@ -376,7 +399,8 @@ message if `COREID` ≠ 0.
 
 | Core-0 only | Why |
 |---|---|
-| `ALLOCATE`, `FREE`, `RESIZE` | Shared heap free-list + scratch |
+| `ALLOCATE`, `FREE`, `RESIZE` | Shared XMEM/Bank 0 allocator state + scratch |
+| `DMA-ALLOCATE`, `DMA-FREE`, `DMA-RESIZE` | Shared Bank 0 heap free-list + scratch |
 | `ARENA-NEW`, `ARENA-NEW-AT` | Uses AR-SZ, AR-SRC, AR-BLK |
 | `ARENA-DESTROY` | Calls `FREE` or `XMEM-FREE-BLOCK` |
 
@@ -474,6 +498,11 @@ userland zone is reserved at `ENTER-USERLAND` time and is not
 reclaimable by the XMEM allocator.  `LEAVE-USERLAND` switches `HERE`
 back to Bank 0 without affecting XMEM allocations.
 
+The module registry deliberately does not live in either XMEM zone.  Its
+stable exact-ID entries and any grown bucket vector use the Bank 0 heap through
+private `DMA-ALLOCATE`/`DMA-FREE` wrappers, so registrations made before or
+after entering userland remain valid across `XMEM-RESET`.
+
 The `XBUF` word allocates data buffers preferring XMEM (to conserve
 Bank 0 dictionary space), then advances the floor:
 
@@ -492,7 +521,8 @@ Bank 0 dictionary space), then advances the floor:
 | Permanent definition | `: FOO ... ;` | Bank 0 / userland | Until `MARKER`/`FORGET` |
 | Permanent variable | `VARIABLE X` | Bank 0 / userland | Until `MARKER`/`FORGET` |
 | Permanent buffer | `CREATE BUF 256 ALLOT` | Bank 0 / userland | Until `MARKER`/`FORGET` |
-| Heap object | `256 ALLOCATE` | Bank 0 | Until `FREE` |
+| General heap object | `256 ALLOCATE` | XMEM / Bank 0 | Until `FREE` |
+| Explicit Bank 0 object | `256 DMA-ALLOCATE` | Bank 0 | Until `DMA-FREE` |
 | Scoped scratch | `4096 A-HEAP ARENA-NEW` | Any | Until `ARENA-DESTROY` |
 | Temp arena (no dict leak) | `desc 4096 A-XMEM ARENA-NEW-AT` | Any | Until `ARENA-DESTROY` |
 | Raw bump (XMEM) | `4096 XMEM-ALLOT` | XMEM | Until `XMEM-RESET` |
@@ -583,8 +613,9 @@ Every allocation strategy on the system has a known worst-case cost:
 | Arena `ARENA-ALLOT` | O(1) — advance ptr, bounds check |
 | HBW/XMEM bump | O(1) — advance pointer, bounds check |
 | XMEM bump with free-list | O(n) where n = freed arena blocks |
-| Heap `ALLOCATE` | O(n) where n = free-list length |
-| Heap `FREE` | O(n) — sorted insert + coalesce |
+| General `ALLOCATE` | O(n) free-list search; XMEM may fall back to O(1) bump allocation |
+| General `FREE` | O(1) XMEM free-list prepend, or O(n) Bank 0 sorted insert + coalesce |
+| `DMA-ALLOCATE` / `DMA-FREE` | O(n) Bank 0 free-list search / sorted insert + coalesce |
 
 For real-time workloads (tile engine, NIC frame assembly), only the
 O(1) paths are acceptable.  The system is designed so that the fast

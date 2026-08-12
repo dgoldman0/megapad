@@ -10,10 +10,15 @@ heap, then `autoexec.f` enters userland, loads `networking.f` through KDOS
 `REQUIRE`, configures the network, and loads `tools.f`.  The KDOS loader reads
 large and fragmented extents in bounded batches without reusing the BIOS's
 active KDOS boot buffer.  Transfer allocations are reclaimed after normal or
-thrown evaluation; a failed relative `REQUIRE` also restores its caller's
-directory and rolls back the provisional module mark so a corrected retry can
-run.  This keeps Ethernet through TLS, sockets, and the UDP-backed data-port
-transport out of the Bank 0 core.
+thrown evaluation.  Its dynamic module registry retains complete,
+case-sensitive IDs in the Bank 0 heap, independent of filename limits and
+XMEM resets; chained entries are limited by available memory rather than a
+fixed module count.  `REQUIRE` pre-registers an ID to break dependency cycles.
+If evaluation throws, evaluator and directory state are restored and every ID
+owned by that loader frame is rolled back, while already successful nested
+dependencies survive.  Entry OOM throws before any source line executes, and
+duplicate registration allocates nothing.  This keeps Ethernet through TLS,
+sockets, and the UDP-backed data-port transport out of the Bank 0 core.
 
 ---
 
@@ -169,6 +174,10 @@ PORTS                          \ List all port bindings
 - **DEFER/IS**: Deferred word mechanism — OPEN is a DEFER word for VFS interception
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
 - **Refactored file I/O**: FWRITE/FREAD with cursor advancement and used_bytes tracking
+- **Module registry**: core-0-only `PROVIDED`, `MODULE?`, `REQUIRE`, and
+  `MODULES` over exact 1–246-byte IDs, with dynamic Bank 0 chains,
+  allocation-neutral duplicates, cycle-breaking pre-registration, and
+  frame-scoped rollback
 - **Python diskutil.py**: MP64FS image formatter, file injector/reader/lister/deleter
 - **Documentation browser**: TOPICS, LESSONS, DOC, TUTORIAL, DESCRIBE (word lookup)
 - **Doc file display**: .DOC-CHUNK with 20-line pagination and "--- more ---" prompt
@@ -185,7 +194,9 @@ PORTS                          \ List all port bindings
 - **Boot placement**: Loaded by standard autoexec after `ENTER-USERLAND`
 
 **Layer 1: Core Infrastructure** (✅ Items 1-8, committed):
-- **§1.1 Memory Allocator**: ALLOCATE / FREE / RESIZE — first-fit heap with coalescing (13 tests)
+- **§1.1 Memory Allocator**: region-aware `ALLOCATE` / `FREE` / `RESIZE`,
+  explicit Bank 0 `DMA-*` operations, and a 32 KiB late system-dictionary
+  reserve before the Bank 0 first-fit heap
 - **§1.2 CATCH/THROW**: ANS-style exception handling with nested catch frames (8 tests)
 - **§1.3 CRC Integration**: ISA-backed exact-length CRC buffer helpers
 - **§1.4 Hardware Diagnostics**: DIAG, .CRC-DIAG, .BIST-STATUS,
