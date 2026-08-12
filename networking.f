@@ -5475,9 +5475,10 @@ VARIABLE _TPC-KEEP
 \  +880    ROLE           8     NONE, CLIENT, or SERVER
 \  +888    SUITE          8     Negotiated cipher suite; zero until sealed
 \  +896    HASH-ID        8     Hash paired with the negotiated suite
-\  Total: 904 bytes
+\  +904    EXPORTER-MS   32     TLS 1.3 exporter master secret
+\  Total: 936 bytes
 
-904 CONSTANT /TLS-CTX
+936 CONSTANT /TLS-CTX
 16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -5515,6 +5516,7 @@ VARIABLE _TPC-KEEP
 : TLS-CTX.ROLE        ( ctx -- addr ) 880 + ;
 : TLS-CTX.SUITE       ( ctx -- addr ) 888 + ;
 : TLS-CTX.HASH-ID     ( ctx -- addr ) 896 + ;
+: TLS-CTX.EXPORTER-MS ( ctx -- addr ) 904 + ;
 
 \ -- TLS context table (dynamic, XMEM-backed) --
 VARIABLE TLS-CTXS   0 TLS-CTXS !
@@ -5552,7 +5554,8 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 4 CONSTANT TLSH-CERT-RCVD
 5 CONSTANT TLSH-CV-RCVD
 6 CONSTANT TLSH-SERVER-FINISHED
-7 CONSTANT TLSH-CONNECTED
+7 CONSTANT TLSH-APPLICATION-READY
+8 CONSTANT TLSH-CONNECTED
 
 0 CONSTANT TLS-E-OK
 -4201 CONSTANT TLS-E-PEER-ALERT
@@ -5560,6 +5563,56 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 -4203 CONSTANT TLS-E-RECORD
 -4204 CONSTANT TLS-E-STATE
 -4205 CONSTANT TLS-E-ALPN-CONFIG
+-4206 CONSTANT TLS-E-BUSY
+-4207 CONSTANT TLS-E-EXPORT-STATE
+-4208 CONSTANT TLS-E-EXPORT-PARAM
+-4209 CONSTANT TLS-E-EXPORT-RANGE
+-4210 CONSTANT TLS-E-EXPORT-ALIAS
+-4211 CONSTANT TLS-E-EXPORT-CRYPTO
+-4212 CONSTANT TLS-E-LOCAL-ALERT
+
+\ --- Machine-Wide TLS Workspace Owner ---
+\ Locks 8 and 9 belong to checked BIOS crypto and KDOS HMAC/HKDF.  TLS owns
+\ lock 10 and always acquires it before either lower lock.  Hardware locks are
+\ reentrant only by physical core and have no depth, so software additionally
+\ binds recursion to both core and task and refuses a different task on the
+\ same core without touching the hardware lock.
+10 CONSTANT TLS-OWNER-LOCK
+VARIABLE TLS-OWNER-CORE
+VARIABLE TLS-OWNER-TASK
+VARIABLE TLS-OWNER-DEPTH
+
+: _TLS-OWNER-CLEAR ( -- )
+    -1 TLS-OWNER-CORE ! -1 TLS-OWNER-TASK ! 0 TLS-OWNER-DEPTH ! ;
+
+: _TLS-OWNER? ( -- flag )
+    COREID TLS-OWNER-CORE @ =
+    TASK-ID TLS-OWNER-TASK @ = AND ;
+
+: TLS-OWNER-TRY ( -- ior )
+    TLS-OWNER-DEPTH @ 0> IF
+        _TLS-OWNER? 0= IF TLS-E-BUSY EXIT THEN
+        TLS-OWNER-DEPTH @ 1+ DUP 0> 0= IF DROP TLS-E-BUSY EXIT THEN
+        TLS-OWNER-DEPTH ! TLS-E-OK EXIT
+    THEN
+    TLS-OWNER-LOCK SPIN@ IF TLS-E-BUSY EXIT THEN
+    COREID TLS-OWNER-CORE ! TASK-ID TLS-OWNER-TASK !
+    1 TLS-OWNER-DEPTH ! TLS-E-OK ;
+
+: TLS-OWNER-RELEASE ( -- )
+    TLS-OWNER-DEPTH @ 0= IF EXIT THEN
+    _TLS-OWNER? 0= IF EXIT THEN
+    TLS-OWNER-DEPTH @ 1- DUP TLS-OWNER-DEPTH ! IF EXIT THEN
+    -1 TLS-OWNER-CORE ! -1 TLS-OWNER-TASK !
+    TLS-OWNER-LOCK SPIN! ;
+
+: _TLS-OWNER-RETURN ( ior -- ior )
+    >R TLS-OWNER-RELEASE R> ;
+
+_TLS-OWNER-CLEAR
+
+: TLS-EXPORTER-WIPE ( ctx -- )
+    TLS-CTX.EXPORTER-MS 32 0 FILL ;
 
 \ TLS-ALPN-CONFIGURE ( ctx name-a name-u -- ior )
 \   Copy one exact, required ALPN ProtocolName into connection-owned storage.
@@ -5569,7 +5622,7 @@ VARIABLE _TAC-CTX
 VARIABLE _TAC-NAME
 VARIABLE _TAC-LEN
 
-: TLS-ALPN-CONFIGURE ( ctx name-a name-u -- ior )
+: (TLS-ALPN-CONFIGURE) ( ctx name-a name-u -- ior )
     _TAC-LEN ! _TAC-NAME ! _TAC-CTX !
     _TAC-CTX @ 0= IF TLS-E-ALPN-CONFIG EXIT THEN
     _TAC-CTX @ TLS-CTX.STATE @ TLSS-NONE <> IF
@@ -5600,6 +5653,10 @@ VARIABLE _TAC-LEN
     TLS-ALPN-NONE _TAC-CTX @ TLS-CTX.ALPN-PROFILE !
     TLS-ALPN-NONE _TAC-CTX @ TLS-CTX.ALPN-NEGOTIATED !
     TLS-E-OK ;
+
+: TLS-ALPN-CONFIGURE ( ctx name-a name-u -- ior )
+    TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    (TLS-ALPN-CONFIGURE) _TLS-OWNER-RETURN ;
 
 : TLS-ALPN-CONFIGURED ( ctx -- name-a name-u )
     DUP TLS-CTX.ALPN-NAME SWAP TLS-CTX.ALPN-NAME-LEN @ ;
@@ -5649,10 +5706,11 @@ VARIABLE _TRO-B-U
 
 : _TLS-RANGES-OVERLAP? ( a a-u b b-u -- flag )
     _TRO-B-U ! _TRO-B ! _TRO-A-U ! _TRO-A !
+    _TRO-A-U @ 0= _TRO-B-U @ 0= OR IF 0 EXIT THEN
     _TRO-A @ _TRO-B @ _TRO-B-U @ + U<
     _TRO-B @ _TRO-A @ _TRO-A-U @ + U< AND ;
 
-: TLS-ALPN-BUILD-OFFER ( ctx out-a out-u -- written ior )
+: (TLS-ALPN-BUILD-OFFER) ( ctx out-a out-u -- written ior )
     _TABO-CAP ! _TABO-OUT ! _TABO-CTX !
     _TABO-CTX @ 0= IF 0 TLS-E-ALPN-CONFIG EXIT THEN
     _TABO-CTX @ TLS-CTX.ALPN-NAME-LEN @ DUP _TABO-LEN !
@@ -5670,7 +5728,7 @@ VARIABLE _TRO-B-U
     THEN
     _TABO-OUT @ _TABO-NEED @
     _TABO-CTX @ TLS-CTX.ALPN-NAME _TABO-LEN @
-    _TLS-RANGES-OVERLAP? IF 0 TLS-E-ALPN-CONFIG EXIT THEN DROP
+    _TLS-RANGES-OVERLAP? IF 0 TLS-E-ALPN-CONFIG EXIT THEN
     \ Copy the possibly overlapping source before writing the header.  MOVE
     \ supplies memmove semantics for ordinary caller-side aliases; output may
     \ not overlap the sealed context storage itself.
@@ -5681,6 +5739,11 @@ VARIABLE _TRO-B-U
     _TABO-LEN @ 1+ _TABO-OUT @ 4 + NW16!
     _TABO-LEN @ _TABO-OUT @ 6 + C!
     _TABO-NEED @ TLS-E-OK ;
+
+: TLS-ALPN-BUILD-OFFER ( ctx out-a out-u -- written ior )
+    TLS-OWNER-TRY IF 2DROP DROP 0 TLS-E-BUSY EXIT THEN
+    (TLS-ALPN-BUILD-OFFER)
+    >R >R TLS-OWNER-RELEASE R> R> ;
 
 \ TLS-ALPN-CHECK-SELECTION ( ctx ext-a ext-u -- ior )
 \   Validate complete EncryptedExtensions ALPN extension_data without
@@ -5718,13 +5781,17 @@ VARIABLE _TAAS-NAME-LEN
 \ TLS-ALPN-ACCEPT-SELECTION ( ctx ext-a ext-u -- ior )
 \   Standalone exact selection parser.  Publication occurs only after all
 \   nested lengths and bytes have passed the check above.
-: TLS-ALPN-ACCEPT-SELECTION ( ctx ext-a ext-u -- ior )
+: (TLS-ALPN-ACCEPT-SELECTION) ( ctx ext-a ext-u -- ior )
     TLS-ALPN-CHECK-SELECTION DUP IF EXIT THEN DROP
     _TAAS-NAME-LEN @ _TAAS-CTX @ TLS-CTX.ALPN-SELECTED-LEN !
     _TAAS-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF
         TLS-ALPN-HTTP11 _TAAS-CTX @ TLS-CTX.ALPN-NEGOTIATED !
     THEN
     TLS-E-OK ;
+
+: TLS-ALPN-ACCEPT-SELECTION ( ctx ext-a ext-u -- ior )
+    TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    (TLS-ALPN-ACCEPT-SELECTION) _TLS-OWNER-RETURN ;
 
 0  CONSTANT TLS-CONNECT-E-OK
 1  CONSTANT TLS-CONNECT-E-CONFIG
@@ -5741,6 +5808,7 @@ VARIABLE _TAAS-NAME-LEN
 12 CONSTANT TLS-CONNECT-E-HANDSHAKE-PROCESS
 13 CONSTANT TLS-CONNECT-E-FINISHED
 14 CONSTANT TLS-CONNECT-E-AUTH
+15 CONSTANT TLS-CONNECT-E-BUSY
 VARIABLE TLS-CONNECT-LAST-ERROR
 TLS-CONNECT-E-OK TLS-CONNECT-LAST-ERROR !
 
@@ -5795,11 +5863,14 @@ VARIABLE _TER-ILEN    \ inner length = plen + 1 (data + content_type)
 DEFER TLS-SET-AES-MODE
 
 : TLS-ENCRYPT-RECORD ( ctx ctype pt plen rec -- reclen )
+    TLS-OWNER-TRY IF 2DROP 2DROP DROP 0 EXIT THEN
     _TER-REC !  _TER-PLEN !  _TER-PT !
     _TER-CTYPE !  _TER-CTX !
     \ The inner buffer must also hold the trailing content-type byte.
-    _TER-PLEN @ DUP 0< SWAP /TLS-INNER-BUF >= OR IF 0 EXIT THEN
-    _TER-CTX @ TLS-SET-AES-MODE IF 0 EXIT THEN
+    _TER-PLEN @ DUP 0< SWAP /TLS-INNER-BUF >= OR IF
+        TLS-OWNER-RELEASE 0 EXIT
+    THEN
+    _TER-CTX @ TLS-SET-AES-MODE IF TLS-OWNER-RELEASE 0 EXIT THEN
     \ 1. Build inner plaintext: data || content_type (exact, no padding)
     _TER-PT @ TLS-INNER-BUF _TER-PLEN @ CMOVE
     _TER-CTYPE @ TLS-INNER-BUF _TER-PLEN @ + C!
@@ -5827,6 +5898,7 @@ DEFER TLS-SET-AES-MODE
     _TER-CTX @ TLS-CTX.WR-SEQ DUP @ 1+ SWAP !
     \ 8. Return total record length
     _TER-ILEN @ 5 + 16 +
+    >R TLS-OWNER-RELEASE R>
 ;
 
 \ --- TLS Record Decryption ---
@@ -5841,12 +5913,13 @@ VARIABLE _TDR-PLAIN
 VARIABLE _TDR-CLEN
 
 : TLS-DECRYPT-RECORD ( ctx rec rlen plain -- ctype plen | -1 0 )
+    TLS-OWNER-TRY IF 2DROP 2DROP -1 0 EXIT THEN
     _TDR-PLAIN !  _TDR-RLEN !  _TDR-REC !  _TDR-CTX !
     \ Encrypted payload length = rec-len - 5 (header) - 16 (tag)
     _TDR-RLEN @ 5 - 16 -  DUP _TDR-CLEN !
-    DUP 1 < IF DROP -1 0 EXIT THEN
+    DUP 1 < IF DROP TLS-OWNER-RELEASE -1 0 EXIT THEN
     DROP
-    _TDR-CTX @ TLS-SET-AES-MODE IF -1 0 EXIT THEN
+    _TDR-CTX @ TLS-SET-AES-MODE IF TLS-OWNER-RELEASE -1 0 EXIT THEN
     \ 1. Build nonce from read IV + read seq
     _TDR-CTX @ TLS-CTX.RD-IV
     _TDR-CTX @ TLS-CTX.RD-SEQ @
@@ -5859,17 +5932,18 @@ VARIABLE _TDR-CLEN
     _TDR-CLEN @                                      \ cipher_len
     _TDR-REC @ 5 + _TDR-CLEN @ +                     \ tag address
     AES-DECRYPT-AEAD                                  \ → flag (0=ok, -1=fail)
-    0<> IF -1 0 EXIT THEN
+    0<> IF TLS-OWNER-RELEASE -1 0 EXIT THEN
     \ 3. Increment read sequence number
     _TDR-CTX @ TLS-CTX.RD-SEQ DUP @ 1+ SWAP !
     \ 4. Extract inner content type = last non-zero byte of plaintext
     _TDR-CLEN @
     BEGIN
         1-
-        DUP 0< IF DROP -1 0 EXIT THEN
+        DUP 0< IF DROP TLS-OWNER-RELEASE -1 0 EXIT THEN
         DUP _TDR-PLAIN @ + C@ 0<>
     UNTIL
     DUP _TDR-PLAIN @ + C@  SWAP                      \ ctype plen
+    TLS-OWNER-RELEASE
 ;
 
 \ .TLS-STATUS ( ctx -- )  Print TLS context status.
@@ -5958,71 +6032,87 @@ VARIABLE _TCD-C
 VARIABLE _TCD-CU
 
 : TLS-HASH ( ctx addr len out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-AU ! _TCD-A ! _TCD-CTX !
     _TCD-CTX @ TLS-CRYPTO-PROFILE
     DUP TLS-CRYPTO-AES128-SHA256 = IF
-        DROP _TCD-A @ _TCD-AU @ _TCD-C @ SHA256 EXIT
+        DROP _TCD-A @ _TCD-AU @ _TCD-C @ SHA256
+        _TLS-OWNER-RETURN EXIT
     THEN
     TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-AU @ _TCD-C @ SHA3 EXIT
+        _TCD-A @ _TCD-AU @ _TCD-C @ SHA3 _TLS-OWNER-RETURN EXIT
     THEN
-    TLS-E-STATE ;
+    TLS-E-STATE _TLS-OWNER-RETURN ;
 
 : TLS-HMAC ( ctx key klen msg mlen out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-BU ! _TCD-B ! _TCD-AU ! _TCD-A ! _TCD-CTX !
     _TCD-CTX @ TLS-CRYPTO-PROFILE
     DUP TLS-CRYPTO-AES128-SHA256 = IF
         DROP _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @
-        HMAC-SHA256 EXIT
+        HMAC-SHA256 _TLS-OWNER-RETURN EXIT
     THEN
     TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HMAC EXIT
+        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HMAC
+        _TLS-OWNER-RETURN EXIT
     THEN
-    TLS-E-STATE ;
+    TLS-E-STATE _TLS-OWNER-RETURN ;
 
 : TLS-HKDF-EXTRACT ( ctx salt slen ikm ilen out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-BU ! _TCD-B ! _TCD-AU ! _TCD-A ! _TCD-CTX !
     _TCD-CTX @ TLS-CRYPTO-PROFILE
     DUP TLS-CRYPTO-AES128-SHA256 = IF
         DROP _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @
-        HKDF-SHA256-EXTRACT EXIT
+        HKDF-SHA256-EXTRACT _TLS-OWNER-RETURN EXIT
     THEN
     TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HKDF-EXTRACT EXIT
+        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HKDF-EXTRACT
+        _TLS-OWNER-RETURN EXIT
     THEN
-    TLS-E-STATE ;
+    TLS-E-STATE _TLS-OWNER-RETURN ;
 
 : TLS-HKDF-EXPAND ( ctx prk info ilen len out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-CU ! _TCD-BU ! _TCD-B ! _TCD-A ! _TCD-CTX !
     _TCD-CTX @ TLS-CRYPTO-PROFILE
     DUP TLS-CRYPTO-AES128-SHA256 = IF
         DROP _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @
-        HKDF-SHA256-EXPAND EXIT
+        HKDF-SHA256-EXPAND _TLS-OWNER-RETURN EXIT
     THEN
     TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @ HKDF-EXPAND EXIT
+        _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @ HKDF-EXPAND
+        _TLS-OWNER-RETURN EXIT
     THEN
-    TLS-E-STATE ;
+    TLS-E-STATE _TLS-OWNER-RETURN ;
 
 : TLS-KEY-LEN ( ctx -- n )
-    TLS-CRYPTO-PROFILE
-    DUP TLS-CRYPTO-AES128-SHA256 = IF DROP 16 EXIT THEN
-    TLS-CRYPTO-AES256-SHA3 = IF 32 ELSE 0 THEN ;
-
-: (TLS-SET-AES-MODE) ( ctx -- ior )
+    TLS-OWNER-TRY IF DROP 0 EXIT THEN
     TLS-CRYPTO-PROFILE
     DUP TLS-CRYPTO-AES128-SHA256 = IF
-        DROP 1 AES-KEY-MODE! TLS-E-OK EXIT
+        DROP TLS-OWNER-RELEASE 16 EXIT
+    THEN
+    TLS-CRYPTO-AES256-SHA3 = IF 32 ELSE 0 THEN
+    >R TLS-OWNER-RELEASE R> ;
+
+: (TLS-SET-AES-MODE) ( ctx -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    TLS-CRYPTO-PROFILE
+    DUP TLS-CRYPTO-AES128-SHA256 = IF
+        DROP 1 AES-KEY-MODE! TLS-E-OK _TLS-OWNER-RETURN EXIT
     THEN
     TLS-CRYPTO-AES256-SHA3 = IF
-        0 AES-KEY-MODE! TLS-E-OK EXIT
+        0 AES-KEY-MODE! TLS-E-OK _TLS-OWNER-RETURN EXIT
     THEN
-    TLS-E-STATE ;
+    TLS-E-STATE _TLS-OWNER-RETURN ;
 
 ' (TLS-SET-AES-MODE) IS TLS-SET-AES-MODE
 
 \ --- Scratch Buffers for Handshake ---
-CREATE TLS-HKDF-LABEL  64 ALLOT
+\ RFC 8446 HkdfLabel: uint16 length + uint8 label + uint8 context.
+\ The two opaque vectors may each occupy their complete uint8 range.
+514 CONSTANT TLS-HKDF-LABEL-CAPACITY
+CREATE TLS-HKDF-LABEL TLS-HKDF-LABEL-CAPACITY ALLOT
 73728 CONSTANT TLS-HS-TR-MAX
 TLS-HS-TR-MAX XBUF TLS-HS-TRANSCRIPT
 VARIABLE TLS-HS-TR-LEN
@@ -6044,6 +6134,34 @@ CREATE TLS-VERIFY-DATA 32 ALLOT
 CREATE TLS-FINISHED-MSG 40 ALLOT
 CREATE _TLS-ZERO-SECRET 32 ALLOT
 _TLS-ZERO-SECRET 32 0 FILL
+
+: TLS-HANDSHAKE-SECRETS-WIPE ( ctx | 0 -- )
+    ?DUP IF
+        DUP TLS-CTX.HS-SECRET 32 0 FILL
+        DUP TLS-CTX.MS-SECRET 32 0 FILL
+        DUP TLS-CTX.MY-PRIVKEY 32 0 FILL
+        DUP TLS-CTX.SHARED 32 0 FILL
+        DUP TLS-CTX.EARLY 32 0 FILL
+        DUP TLS-CTX.C-HS-TRAFFIC 32 0 FILL
+        DUP TLS-CTX.S-HS-TRAFFIC 32 0 FILL
+        DUP TLS-CTX.C-AP-TRAFFIC 32 0 FILL
+        TLS-CTX.S-AP-TRAFFIC 32 0 FILL
+    THEN
+    TLS-TEMP-SECRET 32 0 FILL TLS-TEMP-SECRET2 32 0 FILL
+    TLS-FINISHED-KEY 32 0 FILL TLS-VERIFY-DATA 32 0 FILL
+    TLS-HS-HASH 32 0 FILL TLS-FINISHED-MSG 40 0 FILL
+    X25519-PRIV 32 0 FILL X25519-SHARED 32 0 FILL
+    _PQ-SS-X 32 0 FILL _PQ-SS-K 32 0 FILL _PQ-CAT 64 0 FILL
+    _PQ-PRK 32 0 FILL _PQ-COIN 32 0 FILL
+    TLS-HS-KYBER-SEED 64 0 FILL TLS-HS-KYBER-SK 1632 0 FILL ;
+
+: TLS-RECORD-SECRETS-WIPE ( ctx -- )
+    DUP TLS-CTX.WR-KEY 32 0 FILL
+    DUP TLS-CTX.WR-IV 16 0 FILL
+    DUP TLS-CTX.WR-SEQ 0 SWAP !
+    DUP TLS-CTX.RD-KEY 32 0 FILL
+    DUP TLS-CTX.RD-IV 16 0 FILL
+    TLS-CTX.RD-SEQ 0 SWAP ! ;
 
 \ Pre-compute hash of empty string for both modes.
 CREATE TLS-EMPTY-HASH-SHA3 32 ALLOT
@@ -6086,6 +6204,10 @@ CREATE TLS-L-C-AP-TR   99 C, 32 C, 97 C, 112 C, 32 C, 116 C, 114 C, 97 C, 102 C,
 CREATE TLS-L-S-AP-TR   115 C, 32 C, 97 C, 112 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
 12 CONSTANT /TLS-L-S-AP-TR
 
+CREATE TLS-L-EXP-MASTER
+    101 C, 120 C, 112 C, 32 C, 109 C, 97 C, 115 C, 116 C, 101 C, 114 C,
+10 CONSTANT /TLS-L-EXP-MASTER
+
 CREATE TLS-L-FINISHED   102 C, 105 C, 110 C, 105 C, 115 C, 104 C, 101 C, 100 C,
 8 CONSTANT /TLS-L-FINISHED
 
@@ -6102,9 +6224,42 @@ VARIABLE _TEL-CLEN
 VARIABLE _TEL-OLEN
 VARIABLE _TEL-OUT
 
+: _TEL-WIPE ( -- )
+    TLS-HKDF-LABEL TLS-HKDF-LABEL-CAPACITY 0 FILL
+    0 _TEL-TLS-CTX ! 0 _TEL-SECRET ! 0 _TEL-LABEL ! 0 _TEL-LLEN !
+    0 _TEL-CTXP ! 0 _TEL-CLEN ! 0 _TEL-OLEN ! 0 _TEL-OUT ! ;
+
+: _TEL-RETURN ( ior -- ior )
+    >R _TEL-WIPE TLS-OWNER-RELEASE R> ;
+
 : TLS-EXPAND-LABEL ( ctx secret label llen context clen olen out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TEL-OUT !  _TEL-OLEN !  _TEL-CLEN !  _TEL-CTXP !
     _TEL-LLEN !  _TEL-LABEL !  _TEL-SECRET ! _TEL-TLS-CTX !
+    _TEL-TLS-CTX @ TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-LLEN @ DUP 1 < SWAP 249 > OR IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-CLEN @ DUP 0< SWAP 255 > OR IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-OLEN @ DUP 0< SWAP 8160 > OR IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-SECRET @ 32 CALLER-SPAN-STATUS IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-LABEL @ _TEL-LLEN @ CALLER-SPAN-STATUS IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-CTXP @ _TEL-CLEN @ CALLER-SPAN-STATUS IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
+    _TEL-OUT @ _TEL-OLEN @ CALLER-SPAN-STATUS IF
+        TLS-E-STATE _TEL-RETURN EXIT
+    THEN
     \ [0-1] output length (big-endian)
     _TEL-OLEN @ 8 RSHIFT TLS-HKDF-LABEL C!
     _TEL-OLEN @ 255 AND TLS-HKDF-LABEL 1+ C!
@@ -6130,6 +6285,7 @@ VARIABLE _TEL-OUT
     _TEL-TLS-CTX @ _TEL-SECRET @ TLS-HKDF-LABEL
     _TEL-LLEN @ 10 + _TEL-CLEN @ +
     _TEL-OLEN @ _TEL-OUT @ TLS-HKDF-EXPAND
+    _TEL-RETURN
 ;
 
 \ TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
@@ -6265,7 +6421,7 @@ VARIABLE _TDS-OUT
 \   Prerequisite: ctx.SHARED filled, transcript = CH||SH.
 VARIABLE _TKSH-CTX
 
-: TLS-KS-HANDSHAKE ( ctx -- status )
+: (TLS-KS-HANDSHAKE) ( ctx -- status )
     _TKSH-CTX !
     \ Set AES key mode for negotiated suite
     _TKSH-CTX @ TLS-SET-AES-MODE DUP IF EXIT THEN DROP
@@ -6313,14 +6469,32 @@ VARIABLE _TKSH-CTX
     0
 ;
 
+: TLS-KS-HANDSHAKE ( ctx -- status )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    (TLS-KS-HANDSHAKE) _TLS-OWNER-RETURN ;
+
 \ --- Key Schedule Phase 2 ---
 \ TLS-KS-APPLICATION ( ctx -- status )
 \   Derive and install application traffic keys from master secret.
 \   Prerequisite: HS-SECRET set, transcript through server Finished.
 VARIABLE _TKSA-CTX
 
-: TLS-KS-APPLICATION ( ctx -- status )
+: _TKSA-PENDING-WIPE ( -- )
+    TLS-TEMP-SECRET 32 0 FILL TLS-TEMP-SECRET2 32 0 FILL ;
+
+: _TKSA-FAIL ( ior -- ior )
+    _TKSA-CTX @ ?DUP IF
+        DUP TLS-EXPORTER-WIPE
+        DUP TLS-RECORD-SECRETS-WIPE
+        TLS-HANDSHAKE-SECRETS-WIPE
+    ELSE
+        _TKSA-PENDING-WIPE
+    THEN ;
+
+: (TLS-KS-APPLICATION) ( ctx -- status )
     _TKSA-CTX !
+    _TKSA-PENDING-WIPE
+    _TKSA-CTX @ TLS-CTX.EXPORTER-MS 32 0 FILL
     _TKSA-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
     _TKSA-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR
     IF TLS-E-STATE EXIT THEN
@@ -6338,45 +6512,56 @@ VARIABLE _TKSA-CTX
     \ 1. derived_hs = Expand-Label(HS, "derived", empty_hash, 32)
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.HS-SECRET
     TLS-TEMP-SECRET TLS-DERIVE-DERIVED
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSA-FAIL EXIT THEN DROP
     \ 2. MS = HKDF-Extract(derived_hs, 0*32)
     _TKSA-CTX @ TLS-TEMP-SECRET 32  _TLS-ZERO-SECRET 32
     _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-HKDF-EXTRACT
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSA-FAIL EXIT THEN DROP
     \ 3. c_ap_traffic = Derive-Secret(MS, "c ap traffic", Hash(full))
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.MS-SECRET
     TLS-L-C-AP-TR /TLS-L-C-AP-TR
     _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC  TLS-DERIVE-SECRET
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSA-FAIL EXIT THEN DROP
     \ 4. s_ap_traffic = Derive-Secret(MS, "s ap traffic", Hash(full))
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.MS-SECRET
     TLS-L-S-AP-TR /TLS-L-S-AP-TR
     _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC  TLS-DERIVE-SECRET
-    DUP IF EXIT THEN DROP
-    \ 5-6. Client app key+IV → WR-KEY/WR-IV
+    DUP IF _TKSA-FAIL EXIT THEN DROP
+    \ 5. exporter_master_secret = Derive-Secret(MS, "exp master", Hash(full))
+    _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.MS-SECRET
+    TLS-L-EXP-MASTER /TLS-L-EXP-MASTER
+    TLS-TEMP-SECRET2 TLS-DERIVE-SECRET
+    DUP IF _TKSA-FAIL EXIT THEN DROP
+    \ 6-7. Client app key+IV → WR-KEY/WR-IV
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
     TLS-L-KEY /TLS-L-KEY  0 0  _TKSA-CTX @ TLS-KEY-LEN
     _TKSA-CTX @ TLS-CTX.WR-KEY
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
     TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.WR-IV
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
-    \ 7-8. Server app key+IV → RD-KEY/RD-IV
+    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
+    \ 8-9. Server app key+IV → RD-KEY/RD-IV
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
     TLS-L-KEY /TLS-L-KEY  0 0  _TKSA-CTX @ TLS-KEY-LEN
     _TKSA-CTX @ TLS-CTX.RD-KEY
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
     TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.RD-IV
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
-    \ 9. Zero sequence numbers
+    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
+    \ 10. Zero sequence numbers
     0 _TKSA-CTX @ TLS-CTX.WR-SEQ !
     0 _TKSA-CTX @ TLS-CTX.RD-SEQ !
-    \ 10. Mark connection established
-    TLSS-ESTABLISHED _TKSA-CTX @ TLS-CTX.STATE !
-    TLSH-CONNECTED _TKSA-CTX @ TLS-CTX.HS-STATE !
+    \ Publish the exporter secret only after every derivation succeeds.  The
+    \ connection remains in HANDSHAKE until TCP accepts the client Finished.
+    TLS-TEMP-SECRET2 _TKSA-CTX @ TLS-CTX.EXPORTER-MS 32 MOVE
+    _TKSA-PENDING-WIPE
+    TLSH-APPLICATION-READY _TKSA-CTX @ TLS-CTX.HS-STATE !
     0
 ;
+
+: TLS-KS-APPLICATION ( ctx -- status )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    (TLS-KS-APPLICATION) _TLS-OWNER-RETURN ;
 
 \ --- ClientHello Builder ---
 \ TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
@@ -6885,12 +7070,14 @@ VARIABLE _TPHM-TYPE
 \ TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
 \   After server Finished verified and appended to transcript:
 \   1. Build+encrypt client Finished (using handshake keys)
-\   2. Derive and install application traffic keys
+\   2. Derive and stage application traffic/exporter secrets
+\   The caller must send the complete record and then call
+\   TLS-HANDSHAKE-PUBLISH before application or exporter access.
 \   Returns encrypted client Finished record length.
 VARIABLE _THC-CTX
 VARIABLE _THC-REC
 
-: TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
+: (TLS-HANDSHAKE-COMPLETE) ( ctx rec -- reclen )
     _THC-REC !  _THC-CTX !
     _THC-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
     _THC-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR IF 0 EXIT THEN
@@ -6900,6 +7087,175 @@ VARIABLE _THC-REC
     _THC-CTX @ TLS-KS-APPLICATION IF R> DROP 0 EXIT THEN
     R>
 ;
+
+: TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
+    TLS-OWNER-TRY IF 2DROP 0 EXIT THEN
+    (TLS-HANDSHAKE-COMPLETE)
+    >R TLS-OWNER-RELEASE R> ;
+
+\ TLS-HANDSHAKE-PUBLISH ( ctx -- ior )
+\   Publish ESTABLISHED only after TCP accepted the complete client Finished.
+\   The exporter master secret remains; superseded schedule secrets are wiped.
+: (TLS-HANDSHAKE-PUBLISH) ( ctx -- ior )
+    DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.STATE @ TLSS-HANDSHAKE <>
+    OVER TLS-CTX.HS-STATE @ TLSH-APPLICATION-READY <> OR
+    OVER TLS-CTX.PEER-AUTH @ 1 <> OR
+    OVER TLS-CTX.ERROR @ TLS-E-OK <> OR
+    OVER TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = OR IF
+        DROP TLS-E-STATE EXIT
+    THEN
+    DUP TLS-HANDSHAKE-SECRETS-WIPE
+    DUP TLSH-CONNECTED SWAP TLS-CTX.HS-STATE !
+    TLSS-ESTABLISHED SWAP TLS-CTX.STATE !
+    TLS-TR-RESET TLS-HS-RBUF-RESET TLS-E-OK
+;
+
+: TLS-HANDSHAKE-PUBLISH ( ctx -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    (TLS-HANDSHAKE-PUBLISH) _TLS-OWNER-RETURN ;
+
+\ =====================================================================
+\  §16.9a  TLS 1.3 Exporters (RFC 8446 §7.5)
+\ =====================================================================
+\
+\ TLS-EXPORT
+\ ( ctx label-a label-u context-a context-u out-a out-u -- ior )
+\
+\ The caller receives only derived output.  EXPORTER-MS is never returned.
+\ The destination is published with one final MOVE after both HKDF expansions
+\ succeed, and all intermediate/result scratch is wiped on every return.
+
+CREATE TLS-L-EXPORTER
+    101 C, 120 C, 112 C, 111 C, 114 C, 116 C, 101 C, 114 C,
+8 CONSTANT /TLS-L-EXPORTER
+
+32 CONSTANT TLS-EXPORT-HASH-LEN
+8160 CONSTANT TLS-EXPORT-OUTPUT-MAX
+CREATE TLS-EXPORT-INNER 32 ALLOT
+CREATE TLS-EXPORT-CONTEXT-HASH 32 ALLOT
+TLS-EXPORT-OUTPUT-MAX XBUF TLS-EXPORT-RESULT
+
+VARIABLE _TEX-CTX
+VARIABLE _TEX-LABEL
+VARIABLE _TEX-LLEN
+VARIABLE _TEX-CONTEXT
+VARIABLE _TEX-CLEN
+VARIABLE _TEX-OUT
+VARIABLE _TEX-OLEN
+VARIABLE _TCM-CTX
+
+: TLS-CTX-MEMBER? ( ctx -- flag )
+    _TCM-CTX !
+    TLS-CTXS @ DUP 0= IF DROP 0 EXIT THEN
+    _TCM-CTX @ OVER U< IF DROP 0 EXIT THEN
+    _TCM-CTX @ SWAP -
+    DUP /TLS-CTX MOD 0= SWAP /TLS-CTX TLS-MAX-CTX * U< AND ;
+
+: _TEX-BUFFERS-WIPE ( -- )
+    TLS-EXPORT-INNER 32 0 FILL
+    TLS-EXPORT-CONTEXT-HASH 32 0 FILL
+    TLS-EXPORT-RESULT TLS-EXPORT-OUTPUT-MAX 0 FILL ;
+
+: _TEX-META-WIPE ( -- )
+    0 _TEX-CTX ! 0 _TEX-LABEL ! 0 _TEX-LLEN !
+    0 _TEX-CONTEXT ! 0 _TEX-CLEN ! 0 _TEX-OUT ! 0 _TEX-OLEN ! ;
+
+: _TEX-WIPE ( -- )
+    _TEX-BUFFERS-WIPE _TEX-META-WIPE ;
+
+: _TEX-RETURN ( ior -- ior )
+    >R _TEX-WIPE TLS-OWNER-RELEASE R> ;
+
+: _TEX-VALIDATE-RETURN ( ior -- ior )
+    >R _TEX-META-WIPE TLS-OWNER-RELEASE R> ;
+
+: _TEX-INTERNAL-OVERLAP? ( addr len -- flag )
+    DUP 0= IF 2DROP 0 EXIT THEN
+    2DUP TLS-CTXS @ /TLS-CTX TLS-MAX-CTX * _TLS-RANGES-OVERLAP? IF
+        2DROP -1 EXIT
+    THEN
+    2DUP TLS-HKDF-LABEL TLS-HKDF-LABEL-CAPACITY
+    _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
+    2DUP TLS-EXPORT-INNER 32 _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
+    2DUP TLS-EXPORT-CONTEXT-HASH 32 _TLS-RANGES-OVERLAP? IF
+        2DROP -1 EXIT
+    THEN
+    TLS-EXPORT-RESULT TLS-EXPORT-OUTPUT-MAX _TLS-RANGES-OVERLAP? ;
+
+: _TEX-LABEL-VALID? ( -- flag )
+    _TEX-LLEN @ 0 DO
+        _TEX-LABEL @ I + C@ DUP 32 < SWAP 126 > OR IF
+            0 UNLOOP EXIT
+        THEN
+    LOOP -1 ;
+
+: _TEX-VALIDATE ( -- ior )
+    _TEX-CTX @ TLS-CTX-MEMBER? 0= IF TLS-E-EXPORT-STATE EXIT THEN
+    _TEX-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
+    _TEX-CTX @ TLS-CTX.HS-STATE @ TLSH-CONNECTED <> OR
+    _TEX-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR
+    _TEX-CTX @ TLS-CTX.ERROR @ TLS-E-OK <> OR
+    _TEX-CTX @ TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = OR IF
+        TLS-E-EXPORT-STATE EXIT
+    THEN
+    _TEX-LLEN @ DUP 1 < SWAP 249 > OR IF TLS-E-EXPORT-PARAM EXIT THEN
+    _TEX-CLEN @ 0< IF TLS-E-EXPORT-PARAM EXIT THEN
+    _TEX-OLEN @ DUP 0< SWAP TLS-EXPORT-OUTPUT-MAX > OR IF
+        TLS-E-EXPORT-PARAM EXIT
+    THEN
+    _TEX-LABEL @ _TEX-LLEN @ CALLER-SPAN-STATUS IF
+        TLS-E-EXPORT-RANGE EXIT
+    THEN
+    _TEX-CONTEXT @ _TEX-CLEN @ CALLER-SPAN-STATUS IF
+        TLS-E-EXPORT-RANGE EXIT
+    THEN
+    _TEX-OUT @ _TEX-OLEN @ CALLER-SPAN-STATUS IF
+        TLS-E-EXPORT-RANGE EXIT
+    THEN
+    _TEX-LABEL-VALID? 0= IF TLS-E-EXPORT-PARAM EXIT THEN
+    _TEX-LABEL @ _TEX-LLEN @ _TEX-INTERNAL-OVERLAP? IF
+        TLS-E-EXPORT-ALIAS EXIT
+    THEN
+    _TEX-CONTEXT @ _TEX-CLEN @ _TEX-INTERNAL-OVERLAP? IF
+        TLS-E-EXPORT-ALIAS EXIT
+    THEN
+    _TEX-OUT @ _TEX-OLEN @ _TEX-INTERNAL-OVERLAP? IF
+        TLS-E-EXPORT-ALIAS EXIT
+    THEN
+    _TEX-OUT @ _TEX-OLEN @ _TEX-LABEL @ _TEX-LLEN @
+    _TLS-RANGES-OVERLAP? IF TLS-E-EXPORT-ALIAS EXIT THEN
+    _TEX-OUT @ _TEX-OLEN @ _TEX-CONTEXT @ _TEX-CLEN @
+    _TLS-RANGES-OVERLAP? IF TLS-E-EXPORT-ALIAS EXIT THEN
+    TLS-E-OK ;
+
+: TLS-EXPORT
+    ( ctx label-a label-u context-a context-u out-a out-u -- ior )
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
+    _TEX-OLEN ! _TEX-OUT ! _TEX-CLEN ! _TEX-CONTEXT !
+    _TEX-LLEN ! _TEX-LABEL ! _TEX-CTX !
+    _TEX-VALIDATE DUP IF _TEX-VALIDATE-RETURN EXIT THEN DROP
+    \ Validation must precede the wipe: an invalid caller may point its
+    \ destination at exporter scratch, and output is unchanged on refusal.
+    _TEX-BUFFERS-WIPE
+    \ Derive-Secret(EXPORTER-MS, caller label, Hash("")) without exposing it.
+    _TEX-CTX @ _TEX-CTX @ TLS-CTX.EXPORTER-MS
+    _TEX-LABEL @ _TEX-LLEN @
+    _TEX-CTX @ TLS-EMPTY-HASH TLS-EXPORT-HASH-LEN
+    TLS-EXPORT-HASH-LEN TLS-EXPORT-INNER TLS-EXPAND-LABEL
+    IF TLS-E-EXPORT-CRYPTO _TEX-RETURN EXIT THEN
+    \ Hash the raw caller context; arbitrary admitted lengths collapse to 32B.
+    _TEX-CTX @ _TEX-CONTEXT @ _TEX-CLEN @
+    TLS-EXPORT-CONTEXT-HASH TLS-HASH
+    IF TLS-E-EXPORT-CRYPTO _TEX-RETURN EXIT THEN
+    \ Expand the intermediate with the fixed RFC 8446 "exporter" label.
+    _TEX-CTX @ TLS-EXPORT-INNER
+    TLS-L-EXPORTER /TLS-L-EXPORTER
+    TLS-EXPORT-CONTEXT-HASH TLS-EXPORT-HASH-LEN
+    _TEX-OLEN @ TLS-EXPORT-RESULT TLS-EXPAND-LABEL
+    IF TLS-E-EXPORT-CRYPTO _TEX-RETURN EXIT THEN
+    TLS-EXPORT-RESULT _TEX-OUT @ _TEX-OLEN @ MOVE
+    TLS-E-OK _TEX-RETURN ;
 
 \ =====================================================================
 \  §16.10  TLS 1.3 Application Data (RFC 8446 §5.1)
@@ -6922,7 +7278,7 @@ VARIABLE _TSD-CTX
 VARIABLE _TSD-SRC
 VARIABLE _TSD-LEN
 
-: TLS-SEND-DATA ( ctx addr len -- actual )
+: (TLS-SEND-DATA) ( ctx addr len -- actual )
     _TSD-LEN !  _TSD-SRC !  _TSD-CTX !
     _TSD-LEN @ 0> 0= IF 0 EXIT THEN
     _TSD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
@@ -6945,6 +7301,10 @@ VARIABLE _TSD-LEN
         DROP -1 _TSD-CTX @ TLS-CTX.WR-SEQ +! 0
     THEN
 ;
+
+: TLS-SEND-DATA ( ctx addr len -- actual )
+    TLS-OWNER-TRY IF 2DROP DROP 0 EXIT THEN
+    (TLS-SEND-DATA) >R TLS-OWNER-RELEASE R> ;
 
 \ -- TLS record reassembly --
 \   Real servers send multiple TLS records in one TCP segment
@@ -7200,28 +7560,33 @@ VARIABLE _TPA-LEN
     _TPA-LEN @ 2 <> IF
         TLS-E-RECORD _TPA-CTX @ TLS-CTX.ERROR !
         0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
+        _TPA-CTX @ TLS-EXPORTER-WIPE
         TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 EXIT
     THEN
     _TPA-DATA @ C@ DUP 1 <> SWAP 2 <> AND IF
         TLS-E-RECORD _TPA-CTX @ TLS-CTX.ERROR !
         0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
+        _TPA-CTX @ TLS-EXPORTER-WIPE
         TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 EXIT
     THEN
     _TPA-DATA @ 1+ C@ 0= IF
         TLS-E-OK _TPA-CTX @ TLS-CTX.ERROR !
         0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
+        _TPA-CTX @ TLS-EXPORTER-WIPE
         TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! 0 EXIT
     THEN
     TLS-E-PEER-ALERT _TPA-CTX @ TLS-CTX.ERROR !
     0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
+    _TPA-CTX @ TLS-EXPORTER-WIPE
     TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 ;
 
 : _TLS-POST-HANDSHAKE-FAIL ( ctx -- -1 )
     TLS-E-POST-HANDSHAKE OVER TLS-CTX.ERROR !
     0 OVER TLS-CTX.PEER-AUTH !
+    DUP TLS-EXPORTER-WIPE
     TLSS-CLOSING SWAP TLS-CTX.STATE ! -1 ;
 
-: TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
+: (TLS-RECV-DATA) ( ctx addr maxlen -- actual | -1 )
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
     _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
     _TRD-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF 0 EXIT THEN
@@ -7243,7 +7608,9 @@ VARIABLE _TPA-LEN
     _TRD-CTX @ TLS-CTX.TCB @  TLS-READ-RECORD-NB
     DUP 0= IF
         DROP TLS-RBUF-ERROR @ IF
-            TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR ! -1
+            TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
+            0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
+            _TRD-CTX @ TLS-EXPORTER-WIPE -1
         ELSE
             \ TCP EOF without an authenticated close_notify is TLS
             \ truncation, not a clean end-of-stream.  Retained plaintext was
@@ -7252,6 +7619,7 @@ VARIABLE _TPA-LEN
                 TCB.STATE @ TCPS-CLOSE-WAIT = IF
                     TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
                     0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
+                    _TRD-CTX @ TLS-EXPORTER-WIPE
                     TLSS-CLOSING _TRD-CTX @ TLS-CTX.STATE ! -1
                 ELSE
                     0
@@ -7272,7 +7640,9 @@ VARIABLE _TPA-LEN
         OVER TLS-CT-HANDSHAKE = IF
             2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
         THEN
-        2DROP TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR ! -1 EXIT
+        2DROP TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
+        0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
+        _TRD-CTX @ TLS-EXPORTER-WIPE -1 EXIT
     THEN
     \ A fragmented NewSessionTicket must be completed by HANDSHAKE records;
     \ accepting application data or alerts here would silently abandon an
@@ -7295,10 +7665,22 @@ VARIABLE _TPA-LEN
     >R _TRD-CTX @ _TRD-DST @ _TRD-MAXLEN @ R> _TLS-APP-DELIVER
 ;
 
+: TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
+    TLS-OWNER-TRY IF 2DROP DROP 0 EXIT THEN
+    (TLS-RECV-DATA) >R TLS-OWNER-RELEASE R> ;
+
 \ --- TLS-SEND-ALERT ---
 \ Send a TLS alert (e.g., close_notify = level=1, desc=0).
 CREATE TLS-ALERT-BUF 2 ALLOT
 VARIABLE _TSA-CTX
+
+: _TLS-LOCAL-FATAL-FINISH ( -- )
+    TLS-ALERT-BUF C@ 2 = IF
+        TLS-E-LOCAL-ALERT _TSA-CTX @ TLS-CTX.ERROR !
+        0 _TSA-CTX @ TLS-CTX.PEER-AUTH !
+        _TSA-CTX @ TLS-EXPORTER-WIPE
+        TLSS-CLOSING _TSA-CTX @ TLS-CTX.STATE !
+    THEN ;
 
 : _TLS-ALERT-WRITE-OPEN?  ( ctx -- flag )
     DUP TLS-CTX.STATE @ TLSS-ESTABLISHED =
@@ -7309,24 +7691,36 @@ VARIABLE _TSA-CTX
     TLS-ALERT-BUF 1+ C@ 0= AND OR
     SWAP DROP ;
 
-: TLS-SEND-ALERT ( ctx level desc -- )
+: (TLS-SEND-ALERT) ( ctx level desc -- )
     TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
     _TSA-CTX !
-    _TSA-CTX @ _TLS-ALERT-WRITE-OPEN? 0= IF EXIT THEN
-    _TSA-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF EXIT THEN
+    _TSA-CTX @ _TLS-ALERT-WRITE-OPEN? 0= IF
+        _TLS-LOCAL-FATAL-FINISH EXIT
+    THEN
+    _TSA-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF
+        _TLS-LOCAL-FATAL-FINISH EXIT
+    THEN
     _TSA-CTX @  TLS-CT-ALERT  TLS-ALERT-BUF  2
     TLS-SEND-REC  TLS-ENCRYPT-RECORD
-    DUP 0= IF DROP EXIT THEN
+    DUP 0= IF DROP _TLS-LOCAL-FATAL-FINISH EXIT THEN
     \ Send via TCP
     _TSA-CTX @ TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND
     0= IF -1 _TSA-CTX @ TLS-CTX.WR-SEQ +! THEN
+    _TLS-LOCAL-FATAL-FINISH
 ;
+
+: TLS-SEND-ALERT-TRY ( ctx level desc -- ior )
+    TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    (TLS-SEND-ALERT) TLS-OWNER-RELEASE TLS-E-OK ;
+
+: TLS-SEND-ALERT ( ctx level desc -- )
+    TLS-SEND-ALERT-TRY DROP ;
 
 \ --- TLS-CLOSE ---
 \ Send close_notify alert and close TCP connection.
 VARIABLE _TCL-CTX
 
-: TLS-CLOSE ( ctx -- )
+: (TLS-CLOSE) ( ctx -- )
     DUP _TCL-CTX ! TLS-CTX.STATE @ TLSS-NONE = IF EXIT THEN
     _TCL-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED = IF
         _TCL-CTX @ 1 0 TLS-SEND-ALERT        \ close_notify
@@ -7335,6 +7729,13 @@ VARIABLE _TCL-CTX
     _TCL-CTX @ /TLS-CTX 0 FILL
 ;
 
+: TLS-CLOSE-TRY ( ctx -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    (TLS-CLOSE) TLS-OWNER-RELEASE TLS-E-OK ;
+
+: TLS-CLOSE ( ctx -- )
+    TLS-CLOSE-TRY DROP ;
+
 \ --- TLS-ABORT ---
 \ Reclaim the associated TCB immediately and wipe the complete context.
 \ The only possible wire action is TCP-ABORT's cached-route RST; this word
@@ -7342,11 +7743,12 @@ VARIABLE _TCL-CTX
 0 CONSTANT TLS-ABORT-S-LOCAL
 1 CONSTANT TLS-ABORT-S-RST-SENT
 2 CONSTANT TLS-ABORT-S-NONE
+3 CONSTANT TLS-ABORT-S-BUSY
 
 VARIABLE _TLA-CTX
 VARIABLE _TLA-STATUS
 
-: TLS-ABORT  ( ctx -- status )
+: (TLS-ABORT)  ( ctx -- status )
     DUP _TLA-CTX !
     TLS-ABORT-S-NONE _TLA-STATUS !
     TLS-CTX.STATE @ TLSS-NONE <> IF
@@ -7363,6 +7765,10 @@ VARIABLE _TLA-STATUS
     THEN
     _TLA-CTX @ /TLS-CTX 0 FILL
     _TLA-STATUS @ ;
+
+: TLS-ABORT ( ctx -- status )
+    TLS-OWNER-TRY IF DROP TLS-ABORT-S-BUSY EXIT THEN
+    (TLS-ABORT) >R TLS-OWNER-RELEASE R> ;
 
 \ =====================================================================
 \  §16.11  TLS 1.3 Connection API
@@ -7435,11 +7841,13 @@ VARIABLE _TLSC-CH-LEN
 
 : _TLSC-FAIL ( -- 0 )
     _TLSC-TCB @ ?DUP IF TCP-CLOSE THEN
-    _TLSC-CTX @ ?DUP IF DUP /TLS-CTX 0 FILL THEN
+    _TLSC-CTX @ ?DUP IF
+        DUP TLS-HANDSHAKE-SECRETS-WIPE DUP /TLS-CTX 0 FILL DROP
+    THEN
     0 _TLSC-TCB ! 0 _TLSC-CTX !
     0 _TLSC-CH-ADDR ! 0 _TLSC-CH-LEN ! 0 ;
 
-: TLS-CONNECT-NAMED-MODE ( rip rport lport name-a name-u hello -- ctx | 0 )
+: (TLS-CONNECT-NAMED-MODE) ( rip rport lport name-a name-u hello -- ctx | 0 )
     TLS-CONNECT-E-OK TLS-CONNECT-LAST-ERROR !
     _TLSC-HELLO ! _TLSC-NAME-LEN ! _TLSC-NAME !
     _TLSC-HELLO @ DUP TLS-HELLO-STANDARD < SWAP TLS-HELLO-HYBRID > OR IF
@@ -7590,9 +7998,14 @@ VARIABLE _TLSC-CH-LEN
         TLS-CONNECT-E-FINISHED TLS-CONNECT-LAST-ERROR !
         DROP _TLSC-FAIL EXIT
     THEN
+    DUP _TLSC-RLEN !
     _TLSC-TCB @  TLS-SEND-REC  ROT  TCP-SEND
-    0= IF
+    _TLSC-RLEN @ <> IF
         TLS-CONNECT-E-FINISHED TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    _TLSC-CTX @ TLS-HANDSHAKE-PUBLISH IF
+        TLS-CONNECT-E-AUTH TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
     THEN
     _TLSC-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
@@ -7603,6 +8016,14 @@ VARIABLE _TLSC-CH-LEN
     \ 10. Return context
     _TLSC-CTX @
 ;
+
+: TLS-CONNECT-NAMED-MODE ( rip rport lport name-a name-u hello -- ctx | 0 )
+    TLS-OWNER-TRY IF
+        TLS-CONNECT-E-BUSY TLS-CONNECT-LAST-ERROR !
+        2DROP 2DROP 2DROP 0 EXIT
+    THEN
+    (TLS-CONNECT-NAMED-MODE)
+    >R TLS-OWNER-RELEASE R> ;
 
 \ TLS-CONNECT-NAMED ( rip rport lport name-a name-u -- ctx | 0 )
 \   Connect using one exact, caller-provided required ALPN ProtocolName.
@@ -7623,23 +8044,30 @@ VARIABLE _TLSCP-LPORT
 VARIABLE _TLSCP-PROFILE
 VARIABLE _TLSCP-HELLO
 
+: _TLSCP-RETURN ( ctx -- ctx )
+    >R TLS-OWNER-RELEASE R> ;
+
 : TLS-CONNECT-MODE ( rip rport lport profile hello -- ctx | 0 )
+    TLS-OWNER-TRY IF
+        TLS-CONNECT-E-BUSY TLS-CONNECT-LAST-ERROR !
+        2DROP 2DROP DROP 0 EXIT
+    THEN
     _TLSCP-HELLO ! _TLSCP-PROFILE ! _TLSCP-LPORT !
     _TLSCP-RPORT ! _TLSCP-RIP !
     _TLSCP-PROFILE @ TLS-ALPN-NONE = IF
         _TLSCP-RIP @ _TLSCP-RPORT @ _TLSCP-LPORT @ 0 0
-        _TLSCP-HELLO @ TLS-CONNECT-NAMED-MODE EXIT
+        _TLSCP-HELLO @ (TLS-CONNECT-NAMED-MODE) _TLSCP-RETURN EXIT
     THEN
     _TLSCP-PROFILE @ TLS-ALPN-HTTP11 <> IF
-        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR ! 0 EXIT
+        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR ! 0 _TLSCP-RETURN EXIT
     THEN
     _TLSCP-RIP @ _TLSCP-RPORT @ _TLSCP-LPORT @
     TLS-ALPN-HTTP11-NAME /TLS-ALPN-HTTP11-NAME _TLSCP-HELLO @
-    TLS-CONNECT-NAMED-MODE
+    (TLS-CONNECT-NAMED-MODE)
     DUP IF
         TLS-ALPN-HTTP11 OVER TLS-CTX.ALPN-PROFILE !
         TLS-ALPN-HTTP11 OVER TLS-CTX.ALPN-NEGOTIATED !
-    THEN ;
+    THEN _TLSCP-RETURN ;
 
 : TLS-CONNECT-ALPN ( rip rport lport profile -- ctx | 0 )
     TLS-HELLO-STANDARD TLS-CONNECT-MODE ;
@@ -7712,7 +8140,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \  tables fall back to Bank 0 with a conservative floor of 16.
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
-\    Per-connection cost = /TCB + /TLS-CTX + 2×/SOCK = 6784 bytes
+\    Per-connection cost = /TCB + /TLS-CTX + 2×/SOCK = 6816 bytes
 \
 \  Called once at load time.  Safe to call again (idempotent if
 \  tables haven't been used yet).
@@ -7801,32 +8229,25 @@ VARIABLE _SACC-TCB
     R>
 ;
 
-\ --- CONNECT ( sd rip rport -- ior ) ---
-\ Active open: TCP connect (+ TLS handshake if TLS socket).
-VARIABLE _SCON-SD
-VARIABLE _SCON-RIP
-VARIABLE _SCON-RPORT
-
 : CONNECT ( sd rip rport -- ior )
-    _SCON-RPORT !  _SCON-RIP !  _SCON-SD !
-    _SCON-SD @ SOCK.FLAGS @ 1 AND IF
+    ROT DUP SOCK.FLAGS @ 1 AND IF       \ rip rport sd
         \ TLS socket
-        _SCON-RIP @  _SCON-RPORT @  _SCON-SD @ SOCK.LOCAL-PORT @
+        DUP >R SOCK.LOCAL-PORT @        \ rip rport lport; R: sd
         TLS-CONNECT
-        DUP 0= IF DROP -1 EXIT THEN
-        _SCON-SD @ SOCK.HANDLE !
-        SOCKST-TLS _SCON-SD @ SOCK.STATE !
+        DUP 0= IF DROP R> DROP -1 EXIT THEN
+        R@ SOCK.HANDLE !
+        SOCKST-TLS R> SOCK.STATE !
         0
     ELSE
         \ Plain TCP
-        _SCON-RIP @  _SCON-RPORT @  _SCON-SD @ SOCK.LOCAL-PORT @
+        DUP >R SOCK.LOCAL-PORT @        \ rip rport lport; R: sd
         TCP-CONNECT
-        DUP 0= IF DROP -1 EXIT THEN
-        _SCON-SD @ SOCK.HANDLE !
-        _SCON-SD @ SOCK.HANDLE @ 50 TCP-WAIT-ESTABLISHED IF
-            SOCKST-TCP _SCON-SD @ SOCK.STATE !
+        DUP 0= IF DROP R> DROP -1 EXIT THEN
+        DUP R@ SOCK.HANDLE !
+        50 TCP-WAIT-ESTABLISHED IF
+            SOCKST-TCP R> SOCK.STATE !
             0
-        ELSE -1 THEN
+        ELSE R> DROP -1 THEN
     THEN
 ;
 
@@ -7854,10 +8275,19 @@ VARIABLE _SCON-RPORT
 : CLOSE ( sd -- )
     DUP SOCK.HANDLE @ 0<> IF
         DUP SOCK.STATE @ CASE
-            SOCKST-TCP     OF DUP SOCK.HANDLE @ TCP-CLOSE  ENDOF
-            SOCKST-TLS     OF DUP SOCK.HANDLE @ TLS-CLOSE  ENDOF
-            SOCKST-ACCEPTED OF DUP SOCK.HANDLE @ TCP-CLOSE ENDOF
-            SOCKST-LISTENING OF DUP SOCK.HANDLE @ TCB-INIT ENDOF
+            SOCKST-TCP OF
+                DUP SOCK.HANDLE @ TCP-CLOSE
+            ENDOF
+            SOCKST-TLS OF
+                DUP SOCK.HANDLE @ TLS-CLOSE-TRY
+                IF DROP EXIT THEN
+            ENDOF
+            SOCKST-ACCEPTED OF
+                DUP SOCK.HANDLE @ TCP-CLOSE
+            ENDOF
+            SOCKST-LISTENING OF
+                DUP SOCK.HANDLE @ TCB-INIT
+            ENDOF
         ENDCASE
     THEN
     /SOCK 0 FILL   \ reset slot to FREE

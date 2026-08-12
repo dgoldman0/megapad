@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile implemented; server role gated on a qualified signer
+Status: authenticated bounded client profile, generic ALPN, exporters, and serialized TLS ownership implemented; server role gated on a qualified signer
 Last updated: 2026-08-12
 
 ## Purpose
@@ -11,7 +11,9 @@ security architecture. Host tools may generate fixtures and drive tests, but
 KDOS parses the wire message, builds the path, verifies signatures, checks the
 clock and hostname, and gates application traffic.
 
-The relevant standards are [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/rfc8446)
+The relevant standards are [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/rfc8446),
+[TLS 1.3 Traces (RFC 8448)](https://www.rfc-editor.org/rfc/rfc8448),
+[the TLS exporter channel binding (RFC 9266)](https://www.rfc-editor.org/rfc/rfc9266),
 and [PKIX certificates (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280).
 The current implementation is a deliberately bounded profile of those
 standards, not a complete WebPKI implementation.
@@ -44,9 +46,9 @@ facts gate an authenticated server role:
   qualify protocol behavior; they cannot establish physical key-generation or
   ephemeral-secret entropy claims.
 - Transcript, certificate, record, plaintext, and several cryptographic
-  scratch arenas are module-global.  The lower module must enforce one exact
-  owner or move retained state into connection-owned storage before concurrent
-  TLS connections are supported.
+  scratch arenas are module-global.  The lower module now serializes their
+  public use under one exact owner; independently progressing TLS connections
+  remain unsupported until that state becomes connection-owned.
 
 The first interoperable server signature profile should be
 `ecdsa_secp256r1_sha256`, which matches the existing certificate parser and
@@ -59,9 +61,9 @@ precomputing a fixture signature is test scaffolding rather than a server
 security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
-hash state, and enforced scratch ownership are independently useful client and
-server substrate.  They may be qualified before the signer exists, but they do
-not by themselves make a listening socket TLS-capable.  Evidence must keep
+hash state, and enforced serialized scratch ownership are now implemented as
+independently useful client/server substrate.  They do not by themselves make
+a listening socket TLS-capable.  Evidence must keep
 emulator protocol correctness, RTL behavior, and physical entropy/side-channel
 claims separate.
 
@@ -71,9 +73,9 @@ publishes the hash identifier first and the suite last; the suite is the sealed
 marker.  Hash, HMAC, HKDF, Finished, key schedule, and each record operation
 reject an unset or mismatched pair instead of consulting a process-global mode
 bit.  Record operations also reselect the AES width from their context before
-touching output.  This closes cross-context algorithm confusion, but it does
-not yet make operations concurrent: the AES selector and the larger scratch
-arenas still require the owner described below.
+touching output.  The machine-wide TLS owner described below serializes the
+AES selector and larger scratch arenas; this prevents cross-context corruption
+but does not make operations concurrent.
 
 ## Security Invariant
 
@@ -91,9 +93,12 @@ arenas still require the owner described below.
 9. Exact ALPN byte selection when the caller configures a required protocol.
 
 Only step 7 sets `TLS-CTX.PEER-AUTH`. The application key schedule additionally
-requires `TLSH-SERVER-FINISHED`; it otherwise returns without changing the
-connection to `TLSS-ESTABLISHED`. Starting a new ClientHello clears the retained
-leaf key, certificate status, and authentication bit.
+requires `TLSH-SERVER-FINISHED`; it stages application keys and the exporter
+master secret in `TLSH-APPLICATION-READY` without publishing an established
+connection. Only after `TCP-SEND` accepts the complete local Finished record
+does `TLS-HANDSHAKE-PUBLISH` set `TLSS-ESTABLISHED`, expose exporter use, and
+wipe superseded schedule secrets. Starting a new ClientHello clears the
+retained leaf key, certificate status, authentication bit, and exporter state.
 
 ## Implemented Native Profile
 
@@ -254,6 +259,49 @@ established and the peer is authenticated; earlier calls return `0 0`. Plain
 while Akashic migrates; they compose the same generic bytes and are not a
 registry for additional application protocols.
 
+### TLS exporters and serialized ownership
+
+After the transcript includes the authenticated server Finished,
+`TLS-KS-APPLICATION` derives `exporter_master_secret` with the TLS 1.3
+`"exp master"` label. It stages that value alongside the application record
+keys, but exporter access remains unavailable until the local Finished record
+has been accepted in full and `TLS-HANDSHAKE-PUBLISH` publishes the connection.
+The public `TLS-EXPORT` construction is:
+
+```text
+intermediate = Derive-Secret(exporter_master_secret, caller_label, "")
+context_hash = Hash(raw_caller_context)
+output       = HKDF-Expand-Label(intermediate, "exporter",
+                                 context_hash, requested_length)
+```
+
+The caller label is 1 through 249 printable ASCII bytes, the raw context is
+hashed without an application-specific interpretation, and the output bound
+is the TLS 1.3 HKDF limit of 8160 bytes for the implemented 32-byte hashes.
+All caller spans are checked before derivation. Input or output overlap with
+TLS contexts or exporter/HKDF scratch is rejected, as is output overlap with
+the caller label or context. Output is staged and copied once only after both
+expansions succeed; the exporter master secret is never returned. Fatal
+records, alerts, close, abort, context reuse, and handshake failure make it
+unavailable and wipe the retained value.
+
+The exporter known-answer test derives the RFC 8448 exporter master secret
+from that RFC's master secret and transcript hash. It then applies RFC 9266's
+`EXPORTER-Channel-Binding`, empty-context, 32-byte tuple. RFC 9266 specifies
+the tuple rather than a final byte vector, so the checked expected output was
+reproduced independently from the RFC 8448 inputs.
+
+Hardware lock 10 is the machine-wide TLS workspace owner. Recursion is bound
+to the exact `(COREID,TASK-ID)` with a software depth, which closes the
+hardware lock's depthless same-core reacquire case. The acquisition order is
+TLS lock 10, KDOS HMAC/HKDF lock 9, then checked BIOS crypto lock 8. Public
+connection, record, application-data, alert, close/abort, crypto-dispatch,
+handshake-publication, and exporter entry points acquire it nonblockingly.
+Contention does not mutate shared TLS scratch; status-bearing operations return
+their documented busy status and void/backpressure operations remain inert.
+Internal handshake parsers and builders are covered by the owned blocking
+connection path and are not independent concurrent entry points.
+
 Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
 use the interoperable public profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and
 X25519. Its
@@ -304,7 +352,9 @@ distinguish clean `close_notify` from fatal or malformed records. Application
 send and receive both require an established, authenticated context.
 Application-key derivation likewise returns `TLS-E-STATE` unless certificate
 authentication, the server-Finished state, and the exact configured ALPN bytes
-are all satisfied; zero means the complete application schedule was installed.
+are all satisfied. Zero means the application schedule and exporter secret were
+staged, not that the connection was published; `TLS-HANDSHAKE-PUBLISH` is the
+separate establishment boundary after complete local-Finished acceptance.
 
 Session resumption is not implemented. Authenticated post-handshake
 `NewSessionTicket` messages are reassembled in the bounded handshake buffer,
@@ -358,6 +408,14 @@ Native guest tests cover:
 - rejection of early Finished and unauthenticated application-key derivation;
 - generic non-HTTP ALPN encoding, exact selection, bounds, duplicate and
   malformed refusal, output atomicity, and per-context result state;
+- RFC 8448 exporter-master derivation plus the RFC 9266 channel-binding tuple,
+  context binding, state/bounds/alias refusal, atomic output, and scratch wipe;
+- application-secret staging before explicit establishment publication, with
+  superseded handshake/application schedule material wiped afterward;
+- recursive TLS ownership, different-task contention, outermost release, and
+  record/application regressions under the owner;
+- local fatal-alert revocation under transport backpressure, including
+  exporter wipe and atomic post-fatal refusal;
 - standard-only and explicit private-hybrid ClientHello wire layouts;
 - immediate established/readable TCP waits and record-fill completion;
 - TCP/TLS send backpressure without retransmission-buffer or sequence loss;
@@ -408,19 +466,23 @@ trust bundle.
 
 ### Concurrency
 
-ALPN result, endpoint role, negotiated suite/hash, traffic keys, authorization
-state, and connection errors are per-context. Handshake transcript,
-certificate descriptors, cryptographic scratch, record buffers, and hybrid
-key-exchange buffers remain global. The
-current API does not yet enforce a machine-wide TLS/crypto owner, so callers
-must serialize all TLS and cryptographic use. RSA's core-0 phase gate protects
-only RSA scratch. The BIOS SHA-256 transaction now uses a complete private
-context per core, validates all caller spans, and wipes on every terminal
-path; it is therefore isolated from SHA-256 work on other cores. It is not
-per task, so a cooperative task must not yield with an open `SHA256-INIT`
-transaction and permit another task on the same core to reinitialize it.
-TLS still requires a cooperative owner because its transcript, HMAC/HKDF,
-certificate, record, and key-schedule scratch buffers are module-global.
+ALPN result, endpoint role, negotiated suite/hash, traffic keys, exporter
+master, authorization state, and connection errors are per-context. Handshake
+transcript, certificate descriptors, cryptographic scratch, record buffers,
+and hybrid key-exchange buffers remain global. Public mutating and
+cryptographic TLS operations therefore acquire machine-wide lock 10 under an
+exact `(COREID,TASK-ID)` owner for the complete operation. A second connection
+receives nonblocking contention; it cannot progress concurrently. The enforced
+lock order is 10, then KDOS HMAC/HKDF lock 9, then checked BIOS crypto lock 8.
+
+RSA's core-0 phase gate remains an additional protection for RSA scratch. The
+BIOS SHA-256 transaction uses a complete private context per core, validates
+all caller spans, and wipes on every terminal path; it is isolated from
+SHA-256 work on other cores. It is not per task, so a cooperative task must
+not yield with an open `SHA256-INIT` transaction and permit another task on the
+same core to reinitialize it. The TLS owner prevents that situation on the
+networking paths covered above. True parallel TLS progress still requires
+moving the remaining module-global state into connection-owned workspaces.
 
 ## Acceptance Before Provider Credentials
 

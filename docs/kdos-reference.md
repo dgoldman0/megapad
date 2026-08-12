@@ -1085,8 +1085,9 @@ KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
 The 16 hardware locks have one machine-wide allocation: 0 dictionary, 1 UART,
 2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application runtime
 concurrency (including Akashic `EVT-LOCK`), 7 IPI messaging, 8 the checked BIOS
-crypto guard, and 9 KDOS HMAC/HKDF scratch. Locks 10 through 15 are currently
-unassigned. Subsystems must not privately reuse a number from this map.
+crypto guard, 9 KDOS HMAC/HKDF scratch, and 10 the KDOS TLS workspace owner.
+Locks 11 through 15 are currently unassigned. Subsystems must not privately
+reuse a number from this map.
 
 ### Parallel Pipeline Execution
 
@@ -1679,9 +1680,11 @@ handler wiring.
 
 ### §16.8–§16.11 TLS 1.3
 
-Full TLS 1.3 implementation with **dual-mode cipher suite** support:
-- **0xFF01** — AES-256-GCM + SHA3-256 (custom, default)
-- **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446)
+Authenticated bounded TLS 1.3 client profile with **dual-mode cipher suite**
+support:
+
+- **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
+- **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
 
 Includes record-layer framing with reassembly buffers, multi-message
 handshake processing, SNI (Server Name Indication), Change Cipher
@@ -1707,7 +1710,9 @@ hash family rather than synthesizing success:
 | `TLS-DERIVE-DERIVED` | `( ctx secret out -- status )` | Derive the TLS 1.3 `"derived"` secret and return status. |
 | `TLS-DERIVE-SECRET` | `( ctx secret label llen out -- status )` | Hash the transcript under the context profile and derive a traffic secret. |
 | `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Stop at the first hash/HKDF failure; the handshake caller advances state only on zero. |
-| `TLS-KS-APPLICATION` | `( ctx -- status )` | Stop at the first hash/HKDF failure and mark the connection established only on zero. |
+| `TLS-KS-APPLICATION` | `( ctx -- status )` | Stage application traffic keys and the exporter master secret; leave the context in `TLSH-APPLICATION-READY`. |
+| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | After TCP accepts the complete local Finished record, publish `TLSS-ESTABLISHED` and wipe superseded schedule secrets. |
+| `TLS-EXPORT` | `( ctx label-a label-u context-a context-u out-a out-u -- ior )` | Derive 0..8160 authenticated exporter bytes into a non-aliasing caller span. Labels are printable 1..249-byte values; output is atomic and the exporter master is never exposed. |
 | `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |
 | `TLS-ALPN-CONFIGURED` | `( ctx -- name-a name-u )` | Return the context-owned configured ProtocolName. |
 | `TLS-ALPN-SELECTED` | `( ctx -- name-a name-u )` | Return the exact selection only for an established authenticated context; otherwise return `0 0`. |
@@ -1723,23 +1728,35 @@ The private-suite empty hash is initialized through checked
 SHA3 mode. The standard SHA-256 suite continues to use its independent fixed
 empty-hash constant.
 
+The public connection, record, application-data, alert, close/abort, crypto
+dispatch, and exporter entry points are serialized by `TLS-OWNER-LOCK` (hardware
+lock 10). Recursion is tracked by `(COREID,TASK-ID)` and a software depth, so a
+different task on the same physical core cannot exploit the hardware lock's
+depthless same-core reacquire behavior. Lock order is TLS 10, KDOS HMAC/HKDF 9,
+then checked BIOS crypto 8. Contention is nonblocking: connection setup records
+`TLS-CONNECT-E-BUSY`, exporters return `TLS-E-BUSY`, and transport operations
+make no scratch mutation. The exporter uses 8,224 bytes of global staged-output
+and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
+context is 936 bytes, reflected in the dynamic network-table budget.
+
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TLS-CONNECT` | `( rip rport lport -- tls \| 0 )` | TLS handshake over TCP without ALPN: ClientHello → authenticated key schedule → Finished. |
 | `TLS-CONNECT-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | As above, requiring one exact caller-provided ALPN ProtocolName. |
 | `TLS-CONNECT-HYBRID-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | Explicit private-hybrid ClientHello with the same generic ALPN contract. |
-| `TLS-SEND` | `( tls buf len -- )` | Encrypt and send application data. |
+| `TLS-SEND` | `( tls buf len -- actual )` | Encrypt and send application data. |
 | `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
-| `TLS-CLOSE` | `( tls -- )` | Send `close_notify` alert and tear down connection. |
-| `TLS-SEND-ALERT` | `( ctx level desc -- )` | Send a TLS alert (e.g., 2 0 for `close_notify`). |
-| `TLS-READ-RECORD` | `( tcb -- rlen \| 0 )` | Read and parse one TLS record from the reassembly buffer. |
-| `TLS-READ-RECORD-NB` | `( tcb -- rlen \| 0 )` | Non-blocking variant of `TLS-READ-RECORD`. |
-| `TLS-PROCESS-HS-MSG` | `( ctx msg mlen -- flag )` | Process a single handshake message. |
-| `TLS-PROCESS-HS-MSGS` | `( ctx plain plen -- flag )` | Process multiple handshake messages from one record. |
-| `TLS-RBUF-FILL` | `( tcb need -- flag )` | Fill reassembly buffer with at least *need* bytes (blocking). |
-| `TLS-RBUF-FILL-NB` | `( tcb need -- flag )` | Non-blocking fill variant.  Returns false if no data available. |
-| `TLS-RBUF-CONSUME` | `( n -- )` | Consume *n* bytes from the reassembly buffer head. |
+| `TLS-CLOSE-TRY` | `( tls -- ior )` | Nonblocking close attempt; return `TLS-E-BUSY` without mutation when another task owns TLS scratch. |
+| `TLS-CLOSE` | `( tls -- )` | Compatibility close that drops the `TLS-CLOSE-TRY` status; callers requiring retry visibility use the checked form. |
+| `TLS-SEND-ALERT-TRY` | `( ctx level desc -- ior )` | Nonblocking checked alert attempt; owner contention returns `TLS-E-BUSY` for caller retry. Once admitted, a local fatal alert revokes authorization and exporters even if transport backpressure prevents emission. |
+| `TLS-SEND-ALERT` | `( ctx level desc -- )` | Compatibility wrapper for alerts such as warning-level `1 0` `close_notify`; it drops the checked attempt status. |
 | `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles record reassembly + decryption. |
+
+The raw `TLS-READ-RECORD[-NB]`, `TLS-PROCESS-HS-MSG[S]`,
+`TLS-RBUF-FILL[-NB]`, and `TLS-RBUF-CONSUME` words are internal building
+blocks used beneath the owner-guarded connection and application paths. Direct
+calls are reserved for sequential qualification fixtures; they are not
+independently concurrent public transport operations.
 
 **Variables:** `TLS-SNI-HOST` (256-byte storage for a DNS name of at most 253 bytes),
 `TLS-SNI-LEN` (current SNI length).
@@ -1759,4 +1776,4 @@ BSD-style socket interface over TCP and TLS (§17 in `networking.f`).
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
 | `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
-| `CLOSE` | `( sd -- )` | Close socket and release resources. |
+| `CLOSE` | `( sd -- )` | Close socket and release resources. A contended TLS close preserves the descriptor and handle so a later call can retry. |

@@ -7205,7 +7205,8 @@ VARIABLE MB-T   VARIABLE MB-P
 4 CONSTANT RING-LOCK
 5 CONSTANT HT-LOCK
 6 CONSTANT APP-LOCK
-\ Lock 7 is MSG-SLOCK; BIOS reserves lock 8; HMAC-HKDF-LOCK is lock 9.
+\ Lock 7 is MSG-SLOCK; BIOS reserves lock 8; HMAC-HKDF-LOCK is lock 9;
+\ networking.f reserves lock 10 for its machine-wide TLS workspace owner.
 
 : DICT-ACQUIRE  ( -- )  DICT-LOCK LOCK ;
 : DICT-RELEASE  ( -- )  DICT-LOCK UNLOCK ;
@@ -7231,7 +7232,10 @@ VARIABLE MB-T   VARIABLE MB-P
     ."    4 = Ring Buffers" CR
     ."    5 = Hash Tables" CR
     ."    6 = Application Runtime" CR
-    ."    7 = IPI Messaging" CR ;
+    ."    7 = IPI Messaging" CR
+    ."    8 = Checked BIOS Crypto" CR
+    ."    9 = KDOS HMAC/HKDF" CR
+    ."    10 = KDOS TLS Workspace" CR ;
 
 \ =====================================================================
 \  §8.8  Micro-Cluster Support

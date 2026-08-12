@@ -122,20 +122,23 @@ cross-backend qualification. Source presence alone never sets a capability.
 
 ### Allocation
 
-The portable BIOS guard is hardware spinlock 8.  KDOS reserves the adjacent
-hardware spinlock 9 for HMAC/HKDF wrapper scratch:
+The portable BIOS guard is hardware spinlock 8. KDOS reserves the adjacent
+hardware spinlocks 9 and 10 for HMAC/HKDF and TLS workspace ownership:
 
 | Lock | Purpose | Acquire | Release |
 |---:|---|---:|---:|
 | 8 | Checked BIOS crypto/device ownership | `SPINLOCK_BASE + 0x20`, absolute offset `+0x620` | `SPINLOCK_BASE + 0x21`, absolute offset `+0x621` |
 | 9 | KDOS HMAC/HKDF shared scratch | `SPINLOCK_BASE + 0x24`, absolute offset `+0x624` | `SPINLOCK_BASE + 0x25`, absolute offset `+0x625` |
+| 10 | KDOS TLS shared workspace | `SPINLOCK_BASE + 0x28`, absolute offset `+0x628` | `SPINLOCK_BASE + 0x29`, absolute offset `+0x629` |
 
 The spinlock bank is 16 locks in the documented 64-byte aperture. Locks 0
 through 7 are already assigned by KDOS; lock 8 is named `CRYPTO-LOCK` and is
 reserved for the BIOS contract, while lock 9 is named `HMAC-HKDF-LOCK` and is
-reserved by KDOS. Both acquisition paths perform one atomic, nonblocking
-attempt. Busy maps to the family's checked state status; callers may yield and
-retry outside the checked word.
+reserved by KDOS. Lock 10 is named `TLS-OWNER-LOCK` and serializes KDOS TLS
+transcript, certificate, record, plaintext, exporter, and related handshake
+scratch. All three acquisition paths perform one atomic, nonblocking attempt.
+Busy maps to the family's checked state status; callers may yield and retry
+outside the checked word.
 
 The guard is held for these complete lifetimes:
 
@@ -176,6 +179,13 @@ not acquire lock 9 themselves or call a public HMAC/HKDF wrapper while already
 holding it. They also must not enter those wrappers while retaining lock 8 via
 an active `SHA3-BEGIN`/SHAKE transaction; such a call is an API-order error even
 though both guards are nonblocking and therefore cannot deadlock.
+
+Public KDOS TLS operations that touch shared workspace acquire lock 10 first.
+Recursive entry is tracked in software by the exact
+`(COREID,TASK-ID)` and a depth count because hardware same-core reacquisition
+does not supply recursion depth. TLS may call KDOS HMAC/HKDF and checked BIOS
+crypto only in the strict order 10, then 9, then 8. Code holding either lower
+lock must not call upward into TLS.
 
 The KDOS multi-window SHAKE wrappers and multi-block HKDF expansion preflight
 their complete caller output spans, then publish successful checked chunks in
