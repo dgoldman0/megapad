@@ -57,7 +57,7 @@ to a backlog of 5 for `listen()`.
 | `TCP-LISTEN` | Initialise accept-queue fields (head=0, tail=0, count=0). |
 | `TCP-CLOSE` (LISTEN case) | Drain accept queue: close any pending TCBs before resetting listener. |
 | `SOCK-ACCEPT` | Dequeue from accept queue instead of transplanting listener TCB.  No re-open of listener needed. |
-| `NET-TABLES-INIT` | Budget comment update (6344 → 6432 per connection). |
+| `NET-TABLES-INIT` | Dynamic budget tracks the 880-byte TLS context: 6760 bytes per connection with the current TCB and two socket descriptors. |
 
 ### Unchanged words
 

@@ -20907,7 +20907,7 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=608 ", text)
+        self.assertIn("SZ=880 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -20945,6 +20945,142 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
         self.assertIn("CCS=-1 ", text)
         self.assertIn("BADCCS=0 ", text)
         self.assertIn("LONGCCS=0 ", text)
+
+
+# ---------------------------------------------------------------------------
+#  TLS generic ALPN tests — protocol-neutral offer and exact selection
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSGenericALPN(_KDOSNetworkTestBase):
+    """ALPN helpers operate on exact caller bytes without key generation."""
+
+    def test_generic_alpn_exact_offer_and_selection(self):
+        """A non-HTTP ProtocolName is copied, encoded, and selected exactly."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            'test-ctx @ S" rabbit/1" TLS-ALPN-CONFIGURE ." CFG=" .',
+            "CREATE offer 32 ALLOT offer 32 165 FILL",
+            "test-ctx @ offer 32 TLS-ALPN-BUILD-OFFER",
+            '." BIOR=" . ." BLEN=" .',
+            '." TYPE=" offer NW16@ .',
+            '." ELEN=" offer 2 + NW16@ .',
+            '." LLEN=" offer 4 + NW16@ .',
+            '." NLEN=" offer 6 + C@ .',
+            '." OFFER=" offer 7 + 8 TYPE CR',
+            '." MAX-WIRE=" 915 TLS-SNI-HOST-CAPACITY 9 + + '
+            'TLS-ALPN-NAME-MAX 7 + + 77 + 9 + .',
+            '." CAP=" TLS-CH-BUF-CAPACITY .',
+            "test-ctx @ offer 4 + 11 TLS-ALPN-ACCEPT-SELECTION",
+            '." SIOR=" .',
+            '." EARLY=" test-ctx @ TLS-ALPN-SELECTED NIP .',
+            "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
+            "1 test-ctx @ TLS-CTX.PEER-AUTH !",
+            '." SELECTED=" test-ctx @ TLS-ALPN-SELECTED TYPE CR',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CFG=0 ", text)
+        self.assertIn("BIOR=0 ", text)
+        self.assertIn("BLEN=15 ", text)
+        self.assertIn("TYPE=16 ", text)
+        self.assertIn("ELEN=11 ", text)
+        self.assertIn("LLEN=9 ", text)
+        self.assertIn("NLEN=8 ", text)
+        self.assertIn("OFFER=rabbit/1", text)
+        self.assertIn("MAX-WIRE=1525 ", text)
+        self.assertIn("CAP=1536 ", text)
+        self.assertIn("SIOR=0 ", text)
+        self.assertIn("EARLY=0 ", text)
+        self.assertIn("SELECTED=rabbit/1", text)
+
+    def test_generic_alpn_bounds_duplicates_and_atomic_refusal(self):
+        """Bounds and malformed EE input fail without partial publication."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            'test-ctx @ S" rabbit/1" TLS-ALPN-CONFIGURE DROP',
+            "CREATE offer 32 ALLOT offer 32 165 FILL",
+            "test-ctx @ offer 32 TLS-ALPN-BUILD-OFFER 2DROP",
+            "test-ctx @ offer 4 + 11 TLS-ALPN-ACCEPT-SELECTION DROP",
+            "CREATE short-out 15 ALLOT short-out 15 90 FILL",
+            "test-ctx @ short-out 14 TLS-ALPN-BUILD-OFFER",
+            '." SHORT-IOR=" . ." SHORT-LEN=" .',
+            '." SHORT-FIRST=" short-out C@ .',
+            '." SHORT-LAST=" short-out 14 + C@ .',
+            "test-ctx @ TLS-CTX.ALPN-NAME 32 TLS-ALPN-BUILD-OFFER",
+            '." ALIAS-IOR=" . ." ALIAS-LEN=" .',
+            '." ALIAS-CONFIG=" test-ctx @ TLS-ALPN-CONFIGURED TYPE CR',
+            "CREATE max-name TLS-ALPN-NAME-MAX ALLOT",
+            "max-name TLS-ALPN-NAME-MAX 113 FILL",
+            "test-ctx @ max-name TLS-ALPN-NAME-MAX TLS-ALPN-CONFIGURE DROP",
+            "CREATE max-offer 272 ALLOT",
+            "test-ctx @ max-offer 272 TLS-ALPN-BUILD-OFFER",
+            '." MAX-IOR=" . ." MAX-LEN=" .',
+            '." MAX-ELEN=" max-offer 2 + NW16@ .',
+            '." MAX-LLEN=" max-offer 4 + NW16@ .',
+            '." MAX-NLEN=" max-offer 6 + C@ .',
+            "test-ctx @ max-offer 4 + 258 TLS-ALPN-ACCEPT-SELECTION",
+            '." MAX-SELECT=" .',
+            'test-ctx @ S" rabbit/1" TLS-ALPN-CONFIGURE DROP',
+            "test-ctx @ offer 4 + 11 TLS-ALPN-ACCEPT-SELECTION DROP",
+            "test-ctx @ offer 4 + 10 TLS-ALPN-ACCEPT-SELECTION",
+            '." TRUNC=" .',
+            "test-ctx @ offer 4 + 12 TLS-ALPN-ACCEPT-SELECTION",
+            '." TRAIL=" .',
+            "test-ctx @ 0 1 TLS-ALPN-CONFIGURE",
+            '." NULL=" .',
+            "test-ctx @ offer 256 TLS-ALPN-CONFIGURE",
+            '." LONG=" .',
+            "test-ctx @ -4 8 TLS-ALPN-CONFIGURE",
+            '." WRAP=" .',
+            '." CONFIG=" test-ctx @ TLS-ALPN-CONFIGURED TYPE CR',
+            "120 offer 7 + C!",
+            "test-ctx @ offer 4 + 11 TLS-ALPN-ACCEPT-SELECTION",
+            '." MISMATCH=" .',
+            '." PRESERVED=" test-ctx @ TLS-CTX.ALPN-SELECTED-LEN @ .',
+            "114 offer 7 + C!",
+            "CREATE dup-ee 36 ALLOT dup-ee 36 0 FILL",
+            "8 dup-ee C! 32 dup-ee 3 + C! 30 dup-ee 4 + NW16!",
+            "offer dup-ee 6 + 15 MOVE offer dup-ee 21 + 15 MOVE",
+            "test-ctx @ dup-ee 36 TLS-PARSE-ENCRYPTED-EXT",
+            '." DUP=" .',
+            '." AFTER-DUP=" test-ctx @ TLS-CTX.ALPN-SELECTED-LEN @ .',
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            'test-ctx @ S" h2" TLS-ALPN-CONFIGURE',
+            '." STARTED=" .',
+            "TLSS-NONE test-ctx @ TLS-CTX.STATE !",
+            "test-ctx @ 0 0 TLS-ALPN-CONFIGURE",
+            '." CLEAR=" .',
+            "test-ctx @ TLS-ALPN-CONFIGURED NIP",
+            '." CLEAR-LEN=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("SHORT-IOR=-4205 ", text)
+        self.assertIn("SHORT-LEN=0 ", text)
+        self.assertIn("SHORT-FIRST=90 ", text)
+        self.assertIn("SHORT-LAST=90 ", text)
+        self.assertIn("ALIAS-IOR=-4205 ", text)
+        self.assertIn("ALIAS-LEN=0 ", text)
+        self.assertIn("ALIAS-CONFIG=rabbit/1", text)
+        self.assertIn("MAX-IOR=0 ", text)
+        self.assertIn("MAX-LEN=262 ", text)
+        self.assertIn("MAX-ELEN=258 ", text)
+        self.assertIn("MAX-LLEN=256 ", text)
+        self.assertIn("MAX-NLEN=255 ", text)
+        self.assertIn("MAX-SELECT=0 ", text)
+        self.assertIn("TRUNC=-4205 ", text)
+        self.assertIn("TRAIL=-4205 ", text)
+        self.assertIn("NULL=-4205 ", text)
+        self.assertIn("LONG=-4205 ", text)
+        self.assertIn("WRAP=-4205 ", text)
+        self.assertIn("CONFIG=rabbit/1", text)
+        self.assertIn("MISMATCH=-4205 ", text)
+        self.assertIn("PRESERVED=8 ", text)
+        self.assertIn("DUP=-1 ", text)
+        self.assertIn("AFTER-DUP=0 ", text)
+        self.assertIn("STARTED=-4205 ", text)
+        self.assertIn("CLEAR=0 ", text)
+        self.assertIn("CLEAR-LEN=0 ", text)
 
 
 # ---------------------------------------------------------------------------
@@ -21297,7 +21433,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=608 ", text)
+        self.assertIn("SZ=880 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -21501,7 +21637,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("DNS=-1 ", text)
         self.assertIn("WORST=1278 ", text)
-        self.assertIn("CAP=1280 ", text)
+        self.assertIn("CAP=1536 ", text)
         self.assertIn("LEN=438 ", text)
         self.assertIn("RECORD=433 ", text)
         self.assertIn("FIRST=97 ", text)

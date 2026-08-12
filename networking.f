@@ -5283,8 +5283,12 @@ VARIABLE TLS-SNI-LEN
 2052 CONSTANT TLS-SIG-RSA-PSS-RSAE-SHA256
 1025 CONSTANT TLS-SIG-RSA-PKCS1-SHA256
 
+\ ALPN protocol identifiers are opaque caller-provided bytes.  These two
+\ values remain only as a temporary compatibility selector for the existing
+\ TLS-CONNECT-ALPN HTTP caller; they are not the generic representation.
 0 CONSTANT TLS-ALPN-NONE
 1 CONSTANT TLS-ALPN-HTTP11
+255 CONSTANT TLS-ALPN-NAME-MAX
 CREATE TLS-ALPN-HTTP11-NAME
     104 C, 116 C, 116 C, 112 C, 47 C, 49 C, 46 C, 49 C,
 8 CONSTANT /TLS-ALPN-HTTP11-NAME
@@ -5459,14 +5463,18 @@ VARIABLE _TPC-KEEP
 \  +520    PSK            32    Pre-shared key (reserved)
 \  +552    PEER-AUTH      8     1 after chain and CertificateVerify succeed
 \  +560    ERROR          8     Last connection-level TLS status
-\  +568    ALPN-PROFILE   8     Requested application protocol profile
-\  +576    ALPN-NEGOTIATED 8    Confirmed application protocol profile
+\  +568    ALPN-PROFILE   8     Temporary NONE/HTTP compatibility selector
+\  +576    ALPN-NEGOTIATED 8    Temporary HTTP compatibility result
 \  +584    HELLO-PROFILE  8     Standard or private hybrid wire profile
 \  +592    APP-OFF        8     Offset of unread decrypted application data
 \  +600    APP-LEN        8     Bytes of unread decrypted application data
-\  Total: 608 bytes
+\  +608    ALPN-NAME-LEN  8     Exact configured protocol-name length
+\  +616    ALPN-NAME      255   Owned configured protocol-name bytes
+\  +871    PAD            1
+\  +872    ALPN-SELECTED-LEN 8  Exact selected name length, zero until proven
+\  Total: 880 bytes
 
-608 CONSTANT /TLS-CTX
+880 CONSTANT /TLS-CTX
 16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -5498,6 +5506,9 @@ VARIABLE _TPC-KEEP
 : TLS-CTX.HELLO-PROFILE ( ctx -- addr ) 584 + ;
 : TLS-CTX.APP-OFF     ( ctx -- addr ) 592 + ;
 : TLS-CTX.APP-LEN     ( ctx -- addr ) 600 + ;
+: TLS-CTX.ALPN-NAME-LEN ( ctx -- addr ) 608 + ;
+: TLS-CTX.ALPN-NAME   ( ctx -- addr ) 616 + ;
+: TLS-CTX.ALPN-SELECTED-LEN ( ctx -- addr ) 872 + ;
 
 \ -- TLS context table (dynamic, XMEM-backed) --
 VARIABLE TLS-CTXS   0 TLS-CTXS !
@@ -5535,6 +5546,172 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 -4202 CONSTANT TLS-E-POST-HANDSHAKE
 -4203 CONSTANT TLS-E-RECORD
 -4204 CONSTANT TLS-E-STATE
+-4205 CONSTANT TLS-E-ALPN-CONFIG
+
+\ TLS-ALPN-CONFIGURE ( ctx name-a name-u -- ior )
+\   Copy one exact, required ALPN ProtocolName into connection-owned storage.
+\   A zero length intentionally disables ALPN.  Invalid input leaves the
+\   previous configuration and negotiation result untouched.
+VARIABLE _TAC-CTX
+VARIABLE _TAC-NAME
+VARIABLE _TAC-LEN
+
+: TLS-ALPN-CONFIGURE ( ctx name-a name-u -- ior )
+    _TAC-LEN ! _TAC-NAME ! _TAC-CTX !
+    _TAC-CTX @ 0= IF TLS-E-ALPN-CONFIG EXIT THEN
+    _TAC-CTX @ TLS-CTX.STATE @ TLSS-NONE <> IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAC-LEN @ DUP 0< SWAP TLS-ALPN-NAME-MAX > OR IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAC-LEN @ 0> _TAC-NAME @ 0= AND IF TLS-E-ALPN-CONFIG EXIT THEN
+    _TAC-LEN @ 0> IF
+        _TAC-NAME @ _TAC-LEN @ + _TAC-NAME @ U<
+    ELSE
+        FALSE
+    THEN IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    \ MOVE admits a caller slice that aliases this same context.  Publish the
+    \ new length only after validation and the complete bounded copy.
+    _TAC-LEN @ 0> IF
+        _TAC-NAME @ _TAC-CTX @ TLS-CTX.ALPN-NAME _TAC-LEN @ MOVE
+    THEN
+    _TAC-LEN @ TLS-ALPN-NAME-MAX < IF
+        _TAC-CTX @ TLS-CTX.ALPN-NAME _TAC-LEN @ +
+        TLS-ALPN-NAME-MAX _TAC-LEN @ - 0 FILL
+    THEN
+    _TAC-LEN @ _TAC-CTX @ TLS-CTX.ALPN-NAME-LEN !
+    0 _TAC-CTX @ TLS-CTX.ALPN-SELECTED-LEN !
+    TLS-ALPN-NONE _TAC-CTX @ TLS-CTX.ALPN-PROFILE !
+    TLS-ALPN-NONE _TAC-CTX @ TLS-CTX.ALPN-NEGOTIATED !
+    TLS-E-OK ;
+
+: TLS-ALPN-CONFIGURED ( ctx -- name-a name-u )
+    DUP TLS-CTX.ALPN-NAME SWAP TLS-CTX.ALPN-NAME-LEN @ ;
+
+: TLS-ALPN-SELECTED ( ctx -- name-a name-u )
+    DUP TLS-CTX.STATE @ TLSS-ESTABLISHED <>
+    OVER TLS-CTX.PEER-AUTH @ 1 <> OR IF DROP 0 0 EXIT THEN
+    DUP TLS-CTX.ALPN-NAME SWAP TLS-CTX.ALPN-SELECTED-LEN @ ;
+
+\ Seal the temporary HTTP selector into the same owned generic storage used
+\ by all other protocols.  A conflicting direct-field configuration fails.
+VARIABLE _TAP-CTX
+
+: _TLS-ALPN-PREPARE ( ctx -- ior )
+    _TAP-CTX !
+    _TAP-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-NONE = IF
+        TLS-E-OK EXIT
+    THEN
+    _TAP-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 <> IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAP-CTX @ TLS-CTX.ALPN-NAME-LEN @ 0= IF
+        _TAP-CTX @ TLS-ALPN-HTTP11-NAME /TLS-ALPN-HTTP11-NAME
+        TLS-ALPN-CONFIGURE DUP IF EXIT THEN DROP
+        TLS-ALPN-HTTP11 _TAP-CTX @ TLS-CTX.ALPN-PROFILE !
+        TLS-E-OK EXIT
+    THEN
+    _TAP-CTX @ TLS-CTX.ALPN-NAME-LEN @ /TLS-ALPN-HTTP11-NAME <>
+    IF TLS-E-ALPN-CONFIG EXIT THEN
+    _TAP-CTX @ TLS-CTX.ALPN-NAME TLS-ALPN-HTTP11-NAME
+    /TLS-ALPN-HTTP11-NAME _XC-BYTES= 0= IF TLS-E-ALPN-CONFIG EXIT THEN
+    TLS-E-OK ;
+
+\ TLS-ALPN-BUILD-OFFER ( ctx out-a out-u -- written ior )
+\   Serialize one complete ALPN ClientHello extension from the context-owned
+\   ProtocolName.  Zero configured bytes intentionally emits no extension.
+\   Bounds are checked before the destination is modified.
+VARIABLE _TABO-CTX
+VARIABLE _TABO-OUT
+VARIABLE _TABO-CAP
+VARIABLE _TABO-LEN
+VARIABLE _TABO-NEED
+VARIABLE _TRO-A
+VARIABLE _TRO-A-U
+VARIABLE _TRO-B
+VARIABLE _TRO-B-U
+
+: _TLS-RANGES-OVERLAP? ( a a-u b b-u -- flag )
+    _TRO-B-U ! _TRO-B ! _TRO-A-U ! _TRO-A !
+    _TRO-A @ _TRO-B @ _TRO-B-U @ + U<
+    _TRO-B @ _TRO-A @ _TRO-A-U @ + U< AND ;
+
+: TLS-ALPN-BUILD-OFFER ( ctx out-a out-u -- written ior )
+    _TABO-CAP ! _TABO-OUT ! _TABO-CTX !
+    _TABO-CTX @ 0= IF 0 TLS-E-ALPN-CONFIG EXIT THEN
+    _TABO-CTX @ TLS-CTX.ALPN-NAME-LEN @ DUP _TABO-LEN !
+    DUP 0< SWAP TLS-ALPN-NAME-MAX > OR IF
+        0 TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TABO-LEN @ 0= IF 0 TLS-E-OK EXIT THEN
+    _TABO-LEN @ 7 + _TABO-NEED !
+    _TABO-OUT @ 0= _TABO-CAP @ 0< OR
+    _TABO-CAP @ _TABO-NEED @ < OR IF
+        0 TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TABO-OUT @ _TABO-NEED @ + _TABO-OUT @ U< IF
+        0 TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TABO-OUT @ _TABO-NEED @
+    _TABO-CTX @ TLS-CTX.ALPN-NAME _TABO-LEN @
+    _TLS-RANGES-OVERLAP? IF 0 TLS-E-ALPN-CONFIG EXIT THEN DROP
+    \ Copy the possibly overlapping source before writing the header.  MOVE
+    \ supplies memmove semantics for ordinary caller-side aliases; output may
+    \ not overlap the sealed context storage itself.
+    _TABO-CTX @ TLS-CTX.ALPN-NAME
+    _TABO-OUT @ 7 + _TABO-LEN @ MOVE
+    16 _TABO-OUT @ NW16!
+    _TABO-LEN @ 3 + _TABO-OUT @ 2 + NW16!
+    _TABO-LEN @ 1+ _TABO-OUT @ 4 + NW16!
+    _TABO-LEN @ _TABO-OUT @ 6 + C!
+    _TABO-NEED @ TLS-E-OK ;
+
+\ TLS-ALPN-CHECK-SELECTION ( ctx ext-a ext-u -- ior )
+\   Validate complete EncryptedExtensions ALPN extension_data without
+\   publishing a result.  The full EncryptedExtensions parser uses this form
+\   so a later duplicate or malformed extension cannot leave a partial result.
+VARIABLE _TAAS-CTX
+VARIABLE _TAAS-EXT
+VARIABLE _TAAS-LEN
+VARIABLE _TAAS-NAME-LEN
+
+: TLS-ALPN-CHECK-SELECTION ( ctx ext-a ext-u -- ior )
+    _TAAS-LEN ! _TAAS-EXT ! _TAAS-CTX !
+    _TAAS-CTX @ 0= _TAAS-EXT @ 0= OR IF TLS-E-ALPN-CONFIG EXIT THEN
+    _TAAS-CTX @ TLS-CTX.ALPN-NAME-LEN @ 0= IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAAS-LEN @ 3 < IF TLS-E-ALPN-CONFIG EXIT THEN
+    _TAAS-EXT @ _TAAS-LEN @ + _TAAS-EXT @ U< IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAAS-EXT @ _BE16@ 2 + _TAAS-LEN @ <> IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAAS-EXT @ 2 + C@ DUP _TAAS-NAME-LEN !
+    DUP 0= SWAP 3 + _TAAS-LEN @ <> OR IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAAS-NAME-LEN @ _TAAS-CTX @ TLS-CTX.ALPN-NAME-LEN @ <> IF
+        TLS-E-ALPN-CONFIG EXIT
+    THEN
+    _TAAS-EXT @ 3 + _TAAS-CTX @ TLS-CTX.ALPN-NAME
+    _TAAS-NAME-LEN @ _XC-BYTES= 0= IF TLS-E-ALPN-CONFIG EXIT THEN
+    TLS-E-OK ;
+
+\ TLS-ALPN-ACCEPT-SELECTION ( ctx ext-a ext-u -- ior )
+\   Standalone exact selection parser.  Publication occurs only after all
+\   nested lengths and bytes have passed the check above.
+: TLS-ALPN-ACCEPT-SELECTION ( ctx ext-a ext-u -- ior )
+    TLS-ALPN-CHECK-SELECTION DUP IF EXIT THEN DROP
+    _TAAS-NAME-LEN @ _TAAS-CTX @ TLS-CTX.ALPN-SELECTED-LEN !
+    _TAAS-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF
+        TLS-ALPN-HTTP11 _TAAS-CTX @ TLS-CTX.ALPN-NEGOTIATED !
+    THEN
+    TLS-E-OK ;
 
 0  CONSTANT TLS-CONNECT-E-OK
 1  CONSTANT TLS-CONNECT-E-CONFIG
@@ -5751,9 +5928,10 @@ TLS-HS-TR-MAX 4 + CONSTANT TLS-HS-RBUF-MAX
 TLS-HS-RBUF-MAX XBUF TLS-HS-RBUF
 VARIABLE TLS-HS-RBUF-LEN
 VARIABLE TLS-HS-RBUF-ERROR
-\ The largest admitted hybrid ClientHello is 1278 bytes; the builder measures
-\ the complete record against this arena before changing any handshake state.
-1280 CONSTANT TLS-CH-BUF-CAPACITY
+\ The largest admitted hybrid ClientHello is 1525 bytes with maximum DNS SNI
+\ and a maximum-width ALPN ProtocolName.  The builder measures the complete
+\ record against this arena before changing any handshake state.
+1536 CONSTANT TLS-CH-BUF-CAPACITY
 TLS-CH-BUF-CAPACITY XBUF TLS-CH-BUF
 CREATE TLS-HS-HASH 32 ALLOT
 CREATE TLS-TEMP-SECRET 32 ALLOT
@@ -6021,9 +6199,17 @@ VARIABLE _TKSA-CTX
     _TKSA-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
     _TKSA-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR
     IF TLS-E-STATE EXIT THEN
-    _TKSA-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 =
-    _TKSA-CTX @ TLS-CTX.ALPN-NEGOTIATED @ TLS-ALPN-HTTP11 <> AND
-    IF TLS-E-STATE EXIT THEN
+    \ A configured protocol is required, exact, and not published until the
+    \ complete EncryptedExtensions message has passed validation.
+    _TKSA-CTX @ TLS-CTX.ALPN-NAME-LEN @ DUP 0> IF
+        _TKSA-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ <>
+        IF TLS-E-STATE EXIT THEN
+    ELSE
+        DROP
+        _TKSA-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ 0<> IF
+            TLS-E-STATE EXIT
+        THEN
+    THEN
     \ 1. derived_hs = Expand-Label(HS, "derived", empty_hash, 32)
     _TKSA-CTX @ TLS-CTX.HS-SECRET  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
     DUP IF EXIT THEN DROP
@@ -6088,8 +6274,6 @@ VARIABLE _TBCH-FIXED
     TLS-SNI-LEN @ DUP 0< SWAP TLS-SNI-HOST-CAPACITY > OR IF
         0 0 EXIT
     THEN
-    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @
-    DUP TLS-ALPN-NONE < SWAP TLS-ALPN-HTTP11 > OR IF 0 0 EXIT THEN
     _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @
     DUP TLS-HELLO-STANDARD < SWAP TLS-HELLO-HYBRID > OR IF 0 0 EXIT THEN
     _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-HYBRID =
@@ -6098,12 +6282,17 @@ VARIABLE _TBCH-FIXED
         TLS-SNI-HOST TLS-SNI-LEN @ FALSE DNS-NAME-VALID? 0=
         IF 0 0 EXIT THEN
     THEN
+    \ Seal the temporary HTTP selector only after every non-ALPN input has
+    \ passed validation.  Every admitted maximum now fits the arena, so the
+    \ remaining size preflight cannot expose a partially prepared attempt.
+    _TBCH-CTX @ _TLS-ALPN-PREPARE IF 0 0 EXIT THEN
+    _TBCH-CTX @ TLS-CTX.ALPN-NAME-LEN @
+    DUP 0< SWAP TLS-ALPN-NAME-MAX > OR IF 0 0 EXIT THEN
     \ Compute and bound the complete record before changing any TLS state.
     _TBCH-HYBRID @ IF 915 77 ELSE 77 75 THEN
     _TBCH-FIXED !
     TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN
-    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 =
-    IF 15 + THEN
+    _TBCH-CTX @ TLS-CTX.ALPN-NAME-LEN @ ?DUP IF 7 + + THEN
     DUP _TBCH-FIXED @ + 9 + TLS-CH-BUF-CAPACITY > IF
         DROP 0 0 EXIT
     THEN
@@ -6113,6 +6302,7 @@ VARIABLE _TBCH-FIXED
     _TPC-RESET
     0 _TBCH-CTX @ TLS-CTX.PEER-AUTH !
     TLS-ALPN-NONE _TBCH-CTX @ TLS-CTX.ALPN-NEGOTIATED !
+    0 _TBCH-CTX @ TLS-CTX.ALPN-SELECTED-LEN !
     0 _TBCH-POS !
     \ Generate the standard X25519 share. Private hybrid callers additionally
     \ generate an ML-KEM-512 keypair for their private-use share.
@@ -6214,16 +6404,10 @@ VARIABLE _TBCH-FIXED
         255 AND _TBCH-C!
     THEN
     0 _TBCH-C!  29 _TBCH-C!                       \ x25519 (0x001D)
-    \ 7. ALPN (0x0010), when the caller selected the HTTP/1.1 profile.
-    _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF
-        0 _TBCH-C! 16 _TBCH-C!                     \ type = 0x0010
-        0 _TBCH-C! 11 _TBCH-C!                     \ extension data length
-        0 _TBCH-C! 9 _TBCH-C!                      \ protocol list length
-        8 _TBCH-C!                                  \ protocol name length
-        TLS-ALPN-HTTP11-NAME TLS-CH-BUF _TBCH-POS @ +
-        /TLS-ALPN-HTTP11-NAME CMOVE
-        /TLS-ALPN-HTTP11-NAME _TBCH-POS +!
-    THEN
+    \ 7. ALPN (0x0010), offering the caller's one exact required protocol.
+    _TBCH-CTX @ TLS-CH-BUF _TBCH-POS @ +
+    TLS-CH-BUF-CAPACITY _TBCH-POS @ - TLS-ALPN-BUILD-OFFER
+    DUP IF 2DROP 0 0 EXIT THEN DROP _TBCH-POS +!
     \ Set handshake state
     TLSS-HANDSHAKE _TBCH-CTX @ TLS-CTX.STATE !
     TLSH-CLIENT-HELLO-SENT _TBCH-CTX @ TLS-CTX.HS-STATE !
@@ -6337,10 +6521,13 @@ VARIABLE _TPEE-END
 VARIABLE _TPEE-TYPE
 VARIABLE _TPEE-LEN
 VARIABLE _TPEE-SEEN-ALPN
+VARIABLE _TPEE-ALPN-LEN
 
 : TLS-PARSE-ENCRYPTED-EXT ( ctx msg mlen -- flag )
-    _TPEE-MLEN ! _TPEE-MSG ! _TPEE-CTX ! 0 _TPEE-SEEN-ALPN !
+    _TPEE-MLEN ! _TPEE-MSG ! _TPEE-CTX !
+    0 _TPEE-SEEN-ALPN ! 0 _TPEE-ALPN-LEN !
     TLS-ALPN-NONE _TPEE-CTX @ TLS-CTX.ALPN-NEGOTIATED !
+    0 _TPEE-CTX @ TLS-CTX.ALPN-SELECTED-LEN !
     _TPEE-MLEN @ 6 < IF -1 EXIT THEN
     _TPEE-MSG @ C@ TLSHT-ENCRYPTED-EXT <> IF -1 EXIT THEN
     _TPEE-MSG @ 1+ _BE24@ _TPEE-MLEN @ 4 - <> IF -1 EXIT THEN
@@ -6356,18 +6543,22 @@ VARIABLE _TPEE-SEEN-ALPN
         _TPEE-TYPE @ 16 = IF
             _TPEE-SEEN-ALPN @ IF -1 EXIT THEN
             1 _TPEE-SEEN-ALPN !
-            _TPEE-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 <> IF -1 EXIT THEN
-            _TPEE-LEN @ 11 <> IF -1 EXIT THEN
-            _TPEE-POS @ _BE16@ 9 <> IF -1 EXIT THEN
-            _TPEE-POS @ 2 + C@ /TLS-ALPN-HTTP11-NAME <> IF -1 EXIT THEN
-            _TPEE-POS @ 3 + TLS-ALPN-HTTP11-NAME
-            /TLS-ALPN-HTTP11-NAME _XC-BYTES= 0= IF -1 EXIT THEN
-            TLS-ALPN-HTTP11 _TPEE-CTX @ TLS-CTX.ALPN-NEGOTIATED !
+            _TPEE-CTX @ _TPEE-POS @ _TPEE-LEN @
+            TLS-ALPN-CHECK-SELECTION IF -1 EXIT THEN
+            _TPEE-POS @ 2 + C@ _TPEE-ALPN-LEN !
         THEN
         _TPEE-LEN @ _TPEE-POS +!
     REPEAT
-    _TPEE-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 =
+    _TPEE-CTX @ TLS-CTX.ALPN-NAME-LEN @ 0>
     _TPEE-SEEN-ALPN @ 0= AND IF -1 EXIT THEN
+    _TPEE-CTX @ TLS-CTX.ALPN-NAME-LEN @ 0=
+    _TPEE-SEEN-ALPN @ AND IF -1 EXIT THEN
+    _TPEE-SEEN-ALPN @ IF
+        _TPEE-ALPN-LEN @ _TPEE-CTX @ TLS-CTX.ALPN-SELECTED-LEN !
+        _TPEE-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF
+            TLS-ALPN-HTTP11 _TPEE-CTX @ TLS-CTX.ALPN-NEGOTIATED !
+        THEN
+    THEN
     0 ;
 
 \ --- Finished MAC Verification ---
@@ -7025,8 +7216,10 @@ VARIABLE _TLA-STATUS
 \  TLS-CONNECT ( rip rport lport -- ctx | 0 )
 \    Allocate TLS context, do TCP connect, run full TLS handshake.
 \    Blocks until handshake completes or times out.
+\  TLS-CONNECT-NAMED ( rip rport lport name-a name-u -- ctx | 0 )
+\    As above, requiring one exact caller-provided ALPN ProtocolName.
 \  TLS-CONNECT-ALPN ( rip rport lport profile -- ctx | 0 )
-\    As above, requiring the selected application protocol profile.
+\    Temporary compatibility wrapper for NONE or HTTP/1.1 only.
 \
 \  TLS-SEND ( ctx addr len -- actual )
 \    Encrypt and send application data.  (Alias for TLS-SEND-DATA.)
@@ -7077,7 +7270,8 @@ VARIABLE _TLSC-CTX
 VARIABLE _TLSC-TCB
 VARIABLE _TLSC-RLEN
 VARIABLE _TLSC-CTYPE
-VARIABLE _TLSC-ALPN
+VARIABLE _TLSC-NAME
+VARIABLE _TLSC-NAME-LEN
 VARIABLE _TLSC-HELLO
 VARIABLE _TLSC-CH-ADDR
 VARIABLE _TLSC-CH-LEN
@@ -7088,18 +7282,18 @@ VARIABLE _TLSC-CH-LEN
     0 _TLSC-TCB ! 0 _TLSC-CTX !
     0 _TLSC-CH-ADDR ! 0 _TLSC-CH-LEN ! 0 ;
 
-: TLS-CONNECT-MODE ( rip rport lport alpn hello -- ctx | 0 )
+: TLS-CONNECT-NAMED-MODE ( rip rport lport name-a name-u hello -- ctx | 0 )
     TLS-CONNECT-E-OK TLS-CONNECT-LAST-ERROR !
-    DUP TLS-HELLO-STANDARD < OVER TLS-HELLO-HYBRID > OR IF
+    _TLSC-HELLO ! _TLSC-NAME-LEN ! _TLSC-NAME !
+    _TLSC-HELLO @ DUP TLS-HELLO-STANDARD < SWAP TLS-HELLO-HYBRID > OR IF
         TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
-        DROP 2DROP 2DROP 0 EXIT
+        2DROP DROP 0 EXIT
     THEN
-    _TLSC-HELLO !
-    DUP TLS-ALPN-NONE < OVER TLS-ALPN-HTTP11 > OR IF
+    _TLSC-NAME-LEN @ DUP 0< SWAP TLS-ALPN-NAME-MAX > OR
+    _TLSC-NAME-LEN @ 0> _TLSC-NAME @ 0= AND OR IF
         TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
-        DROP 2DROP DROP 0 EXIT
+        2DROP DROP 0 EXIT
     THEN
-    _TLSC-ALPN !
     TLS-SNI-LEN @ DUP 1 < SWAP TLS-SNI-HOST-CAPACITY > OR
     TLS-TRUST-COUNT @ 0= OR IF
         TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
@@ -7114,7 +7308,10 @@ VARIABLE _TLSC-CH-LEN
     THEN
     _TLSC-CTX !
     _TLSC-CTX @ /TLS-CTX 0 FILL
-    _TLSC-ALPN @ _TLSC-CTX @ TLS-CTX.ALPN-PROFILE !
+    _TLSC-CTX @ _TLSC-NAME @ _TLSC-NAME-LEN @ TLS-ALPN-CONFIGURE IF
+        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
+        R> R> R> 2DROP DROP _TLSC-FAIL EXIT
+    THEN
     _TLSC-HELLO @ _TLSC-CTX @ TLS-CTX.HELLO-PROFILE !
     \ 2. Prepare ClientHello before opening TCP. Ephemeral key generation can
     \ be expensive on small targets; doing it after connect lets public peers
@@ -7249,6 +7446,43 @@ VARIABLE _TLSC-CH-LEN
     _TLSC-CTX @
 ;
 
+\ TLS-CONNECT-NAMED ( rip rport lport name-a name-u -- ctx | 0 )
+\   Connect using one exact, caller-provided required ALPN ProtocolName.
+\   Zero length intentionally makes no ALPN offer.  The name is copied into
+\   the allocated context before ClientHello construction.
+: TLS-CONNECT-NAMED ( rip rport lport name-a name-u -- ctx | 0 )
+    TLS-HELLO-STANDARD TLS-CONNECT-NAMED-MODE ;
+
+: TLS-CONNECT-HYBRID-NAMED ( rip rport lport name-a name-u -- ctx | 0 )
+    TLS-HELLO-HYBRID TLS-CONNECT-NAMED-MODE ;
+
+\ Temporary migration bridge for the current HTTP caller.  The generic named
+\ entry points above are the production contract; no new protocol enum is to
+\ be added here.
+VARIABLE _TLSCP-RIP
+VARIABLE _TLSCP-RPORT
+VARIABLE _TLSCP-LPORT
+VARIABLE _TLSCP-PROFILE
+VARIABLE _TLSCP-HELLO
+
+: TLS-CONNECT-MODE ( rip rport lport profile hello -- ctx | 0 )
+    _TLSCP-HELLO ! _TLSCP-PROFILE ! _TLSCP-LPORT !
+    _TLSCP-RPORT ! _TLSCP-RIP !
+    _TLSCP-PROFILE @ TLS-ALPN-NONE = IF
+        _TLSCP-RIP @ _TLSCP-RPORT @ _TLSCP-LPORT @ 0 0
+        _TLSCP-HELLO @ TLS-CONNECT-NAMED-MODE EXIT
+    THEN
+    _TLSCP-PROFILE @ TLS-ALPN-HTTP11 <> IF
+        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR ! 0 EXIT
+    THEN
+    _TLSCP-RIP @ _TLSCP-RPORT @ _TLSCP-LPORT @
+    TLS-ALPN-HTTP11-NAME /TLS-ALPN-HTTP11-NAME _TLSCP-HELLO @
+    TLS-CONNECT-NAMED-MODE
+    DUP IF
+        TLS-ALPN-HTTP11 OVER TLS-CTX.ALPN-PROFILE !
+        TLS-ALPN-HTTP11 OVER TLS-CTX.ALPN-NEGOTIATED !
+    THEN ;
+
 : TLS-CONNECT-ALPN ( rip rport lport profile -- ctx | 0 )
     TLS-HELLO-STANDARD TLS-CONNECT-MODE ;
 
@@ -7320,7 +7554,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \  tables fall back to Bank 0 with a conservative floor of 16.
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
-\    Per-connection cost ≈ /TCB + /TLS-CTX + 2×/SOCK ≈ 6432 bytes
+\    Per-connection cost = /TCB + /TLS-CTX + 2×/SOCK = 6760 bytes
 \
 \  Called once at load time.  Safe to call again (idempotent if
 \  tables haven't been used yet).

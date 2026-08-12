@@ -1708,6 +1708,11 @@ hash family rather than synthesizing success:
 | `TLS-DERIVE-SECRET` | `( secret label llen out -- status )` | Hash the transcript and derive a traffic secret, stopping at the first failure. |
 | `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Stop at the first hash/HKDF failure; the handshake caller advances state only on zero. |
 | `TLS-KS-APPLICATION` | `( ctx -- status )` | Stop at the first hash/HKDF failure and mark the connection established only on zero. |
+| `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |
+| `TLS-ALPN-CONFIGURED` | `( ctx -- name-a name-u )` | Return the context-owned configured ProtocolName. |
+| `TLS-ALPN-SELECTED` | `( ctx -- name-a name-u )` | Return the exact selection only for an established authenticated context; otherwise return `0 0`. |
+| `TLS-ALPN-BUILD-OFFER` | `( ctx out-a out-u -- written ior )` | Atomically serialize the generic single-name ClientHello ALPN extension into bounded caller storage. |
+| `TLS-ALPN-ACCEPT-SELECTION` | `( ctx ext-a ext-u -- ior )` | Validate and publish one exact EncryptedExtensions ALPN selection. |
 
 Certificate and Finished verification map any nonzero hash status to their
 existing failure result. Record/handshake builders map it to a zero-length or
@@ -1720,7 +1725,9 @@ empty-hash constant.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TLS-CONNECT` | `( ip port -- tls )` | TLS handshake over TCP: ClientHello → key schedule → Finished.  Auto-selects cipher suite. |
+| `TLS-CONNECT` | `( rip rport lport -- tls \| 0 )` | TLS handshake over TCP without ALPN: ClientHello → authenticated key schedule → Finished. |
+| `TLS-CONNECT-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | As above, requiring one exact caller-provided ALPN ProtocolName. |
+| `TLS-CONNECT-HYBRID-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | Explicit private-hybrid ClientHello with the same generic ALPN contract. |
 | `TLS-SEND` | `( tls buf len -- )` | Encrypt and send application data. |
 | `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
 | `TLS-CLOSE` | `( tls -- )` | Send `close_notify` alert and tear down connection. |
@@ -1734,7 +1741,7 @@ empty-hash constant.
 | `TLS-RBUF-CONSUME` | `( n -- )` | Consume *n* bytes from the reassembly buffer head. |
 | `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles record reassembly + decryption. |
 
-**Variables:** `TLS-SNI-HOST` (64-byte buffer for SNI hostname),
+**Variables:** `TLS-SNI-HOST` (256-byte storage for a DNS name of at most 253 bytes),
 `TLS-SNI-LEN` (current SNI length).
 
 ---

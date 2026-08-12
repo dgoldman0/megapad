@@ -78,7 +78,7 @@ claims separate.
    signature.
 7. `CertificateVerify`, proving possession of the authenticated leaf key.
 8. The server `Finished` MAC.
-9. Exact `http/1.1` ALPN selection when the caller requests that profile.
+9. Exact ALPN byte selection when the caller configures a required protocol.
 
 Only step 7 sets `TLS-CTX.PEER-AUTH`. The application key schedule additionally
 requires `TLSH-SERVER-FINISHED`; it otherwise returns without changing the
@@ -228,21 +228,34 @@ Handshake messages are reassembled across protected records in a bounded
 must be the only plaintext handshake message before encrypted traffic begins.
 Transcript and reassembly overflow are sticky fatal failures.
 
-`TLS-CONNECT-ALPN` stores the requested and negotiated application protocol in
-the connection context. The currently implemented application profile is
-`http/1.1`; its ClientHello offer and EncryptedExtensions selection are both
-checked exactly. Plain `TLS-CONNECT` requests no ALPN profile.
+`TLS-ALPN-CONFIGURE` copies zero or one exact ProtocolName into connection-owned
+storage before the handshake.  A nonempty name is bounded by ALPN's one-byte
+wire length, so its admitted size is 1 through 255 bytes.  ClientHello emits
+the caller's bytes without interpreting them, and EncryptedExtensions must
+select that one name exactly.  Missing, empty, duplicate, truncated, trailing,
+or mismatched selections fail before a result is published.
 
-Ordinary `TLS-CONNECT` and `TLS-CONNECT-ALPN` use the interoperable public
-profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and X25519. Its
+`TLS-CONNECT-NAMED` and `TLS-CONNECT-HYBRID-NAMED` are the protocol-neutral
+blocking entry points. `TLS-ALPN-CONFIGURED` returns the owned configured
+bytes. `TLS-ALPN-SELECTED` publishes the result only after the connection is
+established and the peer is authenticated; earlier calls return `0 0`. Plain
+`TLS-CONNECT` requests no ALPN.  `TLS-CONNECT-ALPN` and
+`TLS-CONNECT-HYBRID-ALPN` temporarily preserve the existing `http/1.1` caller
+while Akashic migrates; they compose the same generic bytes and are not a
+registry for additional application protocols.
+
+Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
+use the interoperable public profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and
+X25519. Its
 `signature_algorithms` extension is exactly
 `ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256`; the separate
 `signature_algorithms_cert` extension is exactly
 `ecdsa_secp256r1_sha256, rsa_pkcs1_sha256`. The standard extension block is 77
 bytes.
 
-`TLS-CONNECT-HYBRID` and `TLS-CONNECT-HYBRID-ALPN` explicitly select MegaPad's
-private X25519 plus ML-KEM-512 profile. That profile uses IANA private-use
+`TLS-CONNECT-HYBRID` and `TLS-CONNECT-HYBRID-NAMED` explicitly select MegaPad's
+private X25519 plus ML-KEM-512 profile. The temporary hybrid HTTP wrapper uses
+the same path. That profile uses IANA private-use
 NamedGroup `0xFE00` and private cipher suite `0xFF01`, has a 915-byte extension
 block, and is not advertised to public servers. The private key-share shape
 must not be placed under a registered group code point belonging to another
@@ -280,7 +293,7 @@ permitted during the handshake. Incoming alerts clear peer authorization and
 distinguish clean `close_notify` from fatal or malformed records. Application
 send and receive both require an established, authenticated context.
 Application-key derivation likewise returns `TLS-E-STATE` unless certificate
-authentication, the server-Finished state, and the configured ALPN profile
+authentication, the server-Finished state, and the exact configured ALPN bytes
 are all satisfied; zero means the complete application schedule was installed.
 
 Session resumption is not implemented. Authenticated post-handshake
@@ -333,7 +346,8 @@ Native guest tests cover:
 - stale-key clearing on every failed Certificate message;
 - a real CertificateVerify signature from the fixture leaf key;
 - rejection of early Finished and unauthenticated application-key derivation;
-- ALPN offer, exact selection, missing-selection, and per-context state;
+- generic non-HTTP ALPN encoding, exact selection, bounds, duplicate and
+  malformed refusal, output atomicity, and per-context result state;
 - standard-only and explicit private-hybrid ClientHello wire layouts;
 - immediate established/readable TCP waits and record-fill completion;
 - TCP/TLS send backpressure without retransmission-buffer or sequence loss;
