@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, per-context application RX, and a qualified internal P-256 signer implemented; server role gated on credential ownership and handshake integration
+Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, per-context application RX, and lower-owned P-256 server credentials implemented; authenticated server handshake and listener integration remain gated
 Last updated: 2026-08-12
 
 ## Purpose
@@ -37,10 +37,10 @@ facts gate an authenticated server role:
   operation documented below; the two paths are not interchangeable.
 - The fixed RSA-2048 path implements the public exponent only.  There is no
   private RSA operation, PSS signing path, or blinding contract.
-- KDOS has no protected private-key store or TLS credential-handle lifecycle.
-  A future opaque handle can prevent accidental exposure to higher layers, but
-  it cannot claim HSM-style isolation from arbitrary local supervisor code on
-  the current machine.
+- KDOS now has a lower-owned private-key and TLS credential-handle lifecycle.
+  Its two-cell opaque handle prevents accidental raw-pointer exposure to
+  higher layers, but the storage remains ordinary KDOS memory and cannot claim
+  HSM-style isolation from arbitrary local supervisor code on this machine.
 - The checked `ENTROPY-FILL` BIOS interface fails atomically, but the checked-in
   RTL TRNG backend is deterministic development logic.  Emulator vectors can
   qualify protocol behavior; they cannot establish physical key-generation or
@@ -58,11 +58,12 @@ The first interoperable server signature profile is
 `ecdsa_secp256r1_sha256`, which matches the existing certificate parser and
 client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
-and complete signer scratch cleanup are implemented. Closing the server gate
-still requires owned credential storage, public-key matching, cancellation,
-and handshake integration. Reusing `EC-MUL`, injecting a host callback, or
-precomputing a fixture signature remains test scaffolding rather than a server
-security result.
+complete signer scratch cleanup, lower-owned credential storage, public-key
+matching, and cancellation publication arbitration are implemented. Closing
+the server gate still requires server-handshake construction, configuration,
+and secure listener/accept integration. Reusing `EC-MUL`, injecting a host
+callback, or precomputing a fixture signature remains test scaffolding rather
+than a server security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
 hash state, per-context application RX state, and enforced serialized scratch
@@ -112,9 +113,13 @@ retained leaf key, certificate status, authentication bit, and exporter state.
 ### Bounded DER and X.509
 
 `DER-READ` accepts definite, canonical DER lengths of at most four length
-octets and never reads beyond the caller's limit. `X509-DESC-PARSE` accepts
-certificates from 128 through 8192 bytes and records borrowed slices in a
-208-byte `/X509-CERT` descriptor.
+octets and never reads beyond the caller's limit. `X509-DESC-PARSE` accepts a
+positive caller-bounded span whose canonical outer DER object consumes that
+span exactly, and records borrowed slices in a 208-byte `/X509-CERT`
+descriptor. It has no private 128-through-8192-byte certificate limit. The
+trust-bundle and client Certificate-message surfaces impose that range as
+their own profile bound; the server credential surface instead uses the TLS
+uint24 framing bound described below.
 
 The parser currently requires:
 
@@ -164,9 +169,9 @@ owner acquisition, and caught Forth exceptions clear the inversion state used
 by the operation, clear Field ACC and raw-multiply previous-result halves,
 scrub the complete workspace, and release ownership. A busy return acquires
 nothing and leaves the current owner's workspace untouched. The raw internal
-entry is a qualification substrate, not the eventual credential API:
-long-term private keys remain lower-owned and will be addressed through opaque
-generational handles.
+entry remains qualification substrate rather than a public raw-key API. The
+credential words described below retain long-term private keys in lower-owned
+records and expose only opaque two-cell generational handles.
 
 The internal ECDSA-P256-SHA256 composition adds an exact 856-byte signing
 lane, for 1,816 bytes across the two newly composed private lanes while it
@@ -179,13 +184,13 @@ all four trials execute a real fixed-schedule base multiplication and complete
 cap. An exhausted batch performs candidate four's rejection transition and
 continues with another batch, so zero/out-of-range `k` and the required
 ECDSA-level `r=0` or `s=0` retry semantics are complete without a hidden
-attempt limit. A lower credential operation may arm one exact cancellation
-generation. The signer samples it only after a complete four-trial batch and
-before accepting that batch's result; cancellation therefore has bounded
-batch-boundary latency without truncating private arithmetic. The credential
-owner must additionally stage DER and arbitrate a request arriving after that
-sample before caller publication. Every terminal cleanup disarms the borrowed
-generation cell.
+attempt limit. `TLS-CREDENTIAL-SIGN` arms one exact operation generation, and
+the signer samples it only after a complete four-trial batch and before
+accepting that batch's result. Cancellation therefore has batch-boundary
+latency without truncating private arithmetic. The credential wrapper signs
+into a private DER lane and arbitrates a request arriving after that sample
+under lock 11 before caller publication. Every terminal cleanup disarms the
+borrowed generation cell.
 
 Modulo-order arithmetic uses ordinary residues under the custom P-256 order
 with its deliberate zero Montgomery-selector buffer. The signer reduces the
@@ -206,6 +211,92 @@ depth. Lower HMAC operations independently own and wipe their scratch. The
 qualification establishes an ordinary-case fixed architectural schedule, not
 physical power-analysis resistance, and Forth `CATCH` does not contain an
 architectural trap.
+
+### Lower-owned server credentials
+
+`TLS-CREDENTIAL-POOL-INIT` is a once-only core-0 control-plane operation. The
+caller selects a positive slot count; KDOS allocates one exact 184-byte record
+per slot, plus only the backing allocator's required alignment. The pool has
+no compile-time maximum, is independent of TLS connection count, and is not
+silently reduced to the client path builder's eight-certificate capacity.
+The pool requires XMEM and is protected below `XMEM-FLOOR`. This is an
+explicit platform requirement, not a credential-count cap: the canonical
+loadable networking module already relies on the XMEM userland dictionary and
+dynamic tables, while the 1 MiB Bank-0 layout cannot host that complete source
+after KDOS has established its heap.
+
+A public credential identity is the two-cell pair `(slot+1, generation)`.
+Neither cell is a memory pointer, zero is not a valid generation, deletion
+preserves the old generation so the preceding handle becomes stale, and a
+slot is retired rather than allowing generation wrap to revive an old
+authority. Each signing operation has a separate generation used only to bind
+cancellation to that exact operation. These generations are in-memory
+capability metadata, not durable anti-rollback counters.
+
+`TLS-CREDENTIAL-PROVISION` accepts a leaf-first concatenation of
+self-delimiting DER Certificate values and one 32-byte little-endian P-256
+private scalar. The nonempty chain is copied into an exact lower allocation
+before validation; TLS `CertificateEntry` lengths and extension vectors are
+not credential state. There is no private entry-count or per-certificate
+8192-byte ceiling. Every entry must have an exact canonical outer Certificate
+SEQUENCE containing, in order, a TBS SEQUENCE, AlgorithmIdentifier SEQUENCE,
+and a nonempty byte-aligned signature BIT STRING. Only the leaf is deeply
+parsed by the implemented X.509 profile; intermediates remain opaque after
+that shallow structural proof.
+
+The protocol bound is the synthesized wire sum `sum(DER length + 5) <=
+0xFFFFFB`: three bytes for each certificate length and two bytes for the
+initially empty per-entry extension vector, within the TLS uint24 Certificate
+body after its empty request context and list header. The server handshake
+will generate that framing while streaming the flight. It must not force a
+large admitted chain through the existing fixed transcript arena.
+
+The leaf must have an uncompressed P-256 public key, must not be a CA, and,
+when present, KeyUsage must allow digital signatures and EKU must allow server
+authentication or any usage. Provisioning computes `dG` with the private
+fixed-schedule path and compares the complete 65-byte public point before it
+publishes the slot. This proves certificate/key correspondence; it does not
+authenticate the chain, check its signatures or validity interval, or apply a
+client trust/hostname policy.
+
+`TLS-CREDENTIAL-PUBLIC` copies the 65-byte public point and reports signature
+scheme `ecdsa_secp256r1_sha256` plus the certificate count.
+`TLS-CREDENTIAL-CHAIN` supports a zero-output length query or copies the exact
+owned concatenated-DER chain. `TLS-CREDENTIAL-SIGN` accepts only an opaque
+handle and a 32-byte SHA-256 digest, signs into lower staging, and publishes
+only the actual DER span, bounded by the mathematical 72-byte P-256 maximum,
+after capacity, alias, and late-cancellation checks. In particular, the
+qualified 71-byte vector requires only 71 output bytes. None of these
+operations returns a private-key address.
+
+`TLS-CREDENTIAL-SIGN-CANCEL` takes the short registry lock without taking the
+TLS workspace owner, so its metadata path is suitable for a different
+physical core to mark the currently active operation generation. Lock 11 has
+an explicit nonrecursive `(COREID,TASK-ID)` software owner because its
+hardware primitive is depthless and same-core reentrant. Same-core
+cancellation while lock 10 is active returns busy; a different physical core
+may publish the request. The synchronous signer checks only after a complete
+four-trial batch, and lock 11 arbitrates a later request before publication.
+The four-core emulator capstone executes this path with a real full-batch
+credential signature: a peer physical core cancels the exact operation,
+caller output remains unchanged, and both credential and TLS owner state are
+clean afterward. This is architectural emulator evidence, not a physical
+board or interrupt-handler claim.
+
+`TLS-CREDENTIAL-DELETE` is synchronous core-0 revocation. It refuses a live
+reference, clears the complete record except for stale-generation metadata,
+wipes the complete allocated DER-chain payload including allocator padding,
+and frees that payload. Provisioning and signing failures publish neither a
+partial handle nor caller output, release their owners, and wipe private and
+allocation staging. Runtime `XMEM-RESET` is deferred through a credential-aware
+wrapper: it refuses reset while credentials are active, preserves the
+floor-protected pool after all credentials are deleted, and retains the
+underlying no-XMEM reset as a no-op.
+
+Credential statuses occupy `-4320` through `-4334`: state, range, allocation,
+capacity, stale handle, malformed DER chain, unsupported leaf profile,
+invalid key, key mismatch, busy, alias, lower crypto failure, cancelled, no
+active signing operation, and retired generation respectively.
 
 ### Fixed RSA-2048
 
@@ -294,6 +385,12 @@ vector, and rejects more than eight entries. It requires SNI and a loaded
 trust store. The leaf public key is copied to CertificateVerify scratch only
 after the full path succeeds; every failure clears that scratch first.
 
+Those are client receive/path-building bounds. In particular, this surface
+admits only 128-through-8192-byte entries and retains at most eight
+descriptors. They do not constrain the separately owned server credential
+list, whose count follows its caller-provided TLS vector and whose total size
+is bounded by the Certificate body's uint24 wire length.
+
 The handshake dispatcher enforces the prototype's certificate-authenticated
 sequence:
 
@@ -362,10 +459,14 @@ reproduced independently from the RFC 8448 inputs.
 
 Hardware lock 10 is the machine-wide TLS workspace owner. Recursion is bound
 to the exact `(COREID,TASK-ID)` with a software depth, which closes the
-hardware lock's depthless same-core reacquire case. The acquisition order is
-TLS lock 10, KDOS HMAC/HKDF lock 9, then checked BIOS crypto lock 8. Public
-connection, record, application-data, alert, close/abort, crypto-dispatch,
-handshake-publication, and exporter entry points acquire it nonblockingly.
+hardware lock's depthless same-core reacquire case. Public connection, record,
+application-data, alert, close/abort, crypto-dispatch,
+handshake-publication, exporter, and ordinary credential entry points acquire
+it nonblockingly. Credential registry publication uses hardware lock 11 only
+in a short section beneath lock 10 and releases it before lower crypto. The
+resulting order is 10, optionally 11 and release, then KDOS HMAC/HKDF lock 9
+and checked BIOS crypto lock 8. Credential cancellation takes only lock 11 and
+does not call crypto while holding it.
 Contention does not mutate shared TLS scratch; status-bearing operations return
 their documented busy status and void/backpressure operations remain inert.
 Internal handshake parsers and builders are covered by the owned blocking
@@ -470,9 +571,10 @@ This is an explicit, updateable deployment profile, not equivalent to
 validating or trusting the unsupported parent. Intermediate rotation requires
 a trust-bundle update.
 
-No remote API credential should be provisioned until the intended endpoint's
-current chain is representable by the installed bundle and a credential-free
-live handshake succeeds on the machine.
+No remote API token or equivalent application secret should be provisioned
+until the intended endpoint's current chain is representable by the installed
+bundle and a credential-free live handshake succeeds on the machine. That
+client-side application secret is unrelated to a local TLS server credential.
 
 ## Verified Tests
 
@@ -530,9 +632,9 @@ Native guest tests cover:
 - clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
-Signer qualification uses only standardized or synthetic test scalars,
-including the RFC 6979 Appendix A P-256 key. None enters a product trust bundle
-or lower credential slot.
+Signer and credential fixtures use only standardized or synthetic test
+scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
+credential. None enters a product trust bundle or production credential slot.
 
 ## Remaining Release Blockers
 
@@ -540,7 +642,9 @@ or lower credential slot.
 
 - Define a signed native trust-bundle update format and immutable bootstrap
   verification key or reviewed physical provisioning ceremony.
-- Persist accepted generation state if rollback resistance is required.
+- Persist accepted trust-bundle generation state if rollback resistance is
+  required. In-memory credential-handle generations are stale-authority
+  protection, not durable rollback state.
 - Establish an explicit root/intermediate policy and expiry/rotation process.
 - Decide whether revocation is supported through stapled OCSP, short-lived
   scoped anchors, or another bounded policy.
@@ -580,9 +684,13 @@ buffers remain global. Public mutating and cryptographic TLS operations
 therefore acquire machine-wide lock 10 under an exact `(COREID,TASK-ID)` owner
 for the complete operation. A second connection receives nonblocking
 contention and cannot execute concurrently while that shared scratch is in
-use, but alternating application receive calls retain independent state. The
-enforced lock order is 10, then KDOS HMAC/HKDF lock 9, then checked BIOS crypto
-lock 8.
+use, but alternating application receive calls retain independent state.
+Credential provisioning, deletion, and signing also use lock 10. They take
+lock 11 only for a short registry transition and release it before calling
+lower crypto, preserving the order 10, 11 (released), then KDOS HMAC/HKDF lock
+9 and checked BIOS crypto lock 8. `TLS-CREDENTIAL-SIGN-CANCEL` is the narrow
+exception: it takes only lock 11 so cancellation metadata can be published
+while a signer owns lock 10; it performs no cryptography while holding 11.
 
 RSA's core-0 phase gate remains an additional protection for RSA scratch. The
 BIOS SHA-256 transaction uses a complete private context per core, validates
@@ -593,7 +701,7 @@ same core to reinitialize it. The TLS owner prevents that situation on the
 networking paths covered above. True parallel TLS progress still requires
 moving the remaining module-global state into connection-owned workspaces.
 
-## Acceptance Before Provider Credentials
+## Acceptance Before Remote API Secrets
 
 1. All native TLS/X.509/ECDSA/RSA tests pass with no unresolved KDOS words.
 2. The installed trust bundle is reviewed and scoped to the target endpoint.
@@ -601,5 +709,6 @@ moving the remaining module-global state into connection-owned workspaces.
 4. A credential-free live handshake authenticates the expected chain.
 5. HTTP response bytes can be streamed without overflowing TLS or transcript
    buffers.
-6. Only then may a provider retrieve an in-memory credential and construct an
-   Authorization header.
+6. Only then may a provider retrieve an in-memory API token or similar
+   application secret and construct an Authorization header. This gate does
+   not describe the local TLS server-credential pool.

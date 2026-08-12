@@ -1092,9 +1092,10 @@ KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
 The 16 hardware locks have one machine-wide allocation: 0 dictionary, 1 UART,
 2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application runtime
 concurrency (including Akashic `EVT-LOCK`), 7 IPI messaging, 8 the checked BIOS
-crypto guard, 9 KDOS HMAC/HKDF scratch, and 10 the KDOS TLS workspace owner.
-Locks 11 through 15 are currently unassigned. Subsystems must not privately
-reuse a number from this map.
+crypto guard, 9 KDOS HMAC/HKDF scratch, 10 the KDOS TLS workspace owner, and
+11 the short TLS credential-registry/cancellation lock. Locks 12 through 15
+are currently unassigned. Subsystems must not privately reuse a number from
+this map.
 
 ### Parallel Pipeline Execution
 
@@ -1674,7 +1675,7 @@ handler wiring.
 | `DER-SKIP` | `( addr -- next-addr )` | Skip one TLV element entirely. |
 | `DER-FIND-TAG` | `( addr limit tag -- val-addr val-len \| 0 0 )` | Find first element with matching tag. |
 | `X509-PARSE` | `( cert clen -- ior )` | Parse a DER X.509 certificate into compatibility buffers. Returns 0, -1 for malformed or oversized copied fields, or -2 for a well-formed unsupported key profile. |
-| `X509-DESC-PARSE` | `( cert clen desc -- ior )` | Parse a certificate into a borrowed-slice descriptor. Returns 0, -1 for malformed input, or -2 for a well-formed unsupported key profile. |
+| `X509-DESC-PARSE` | `( cert clen desc -- ior )` | Parse one positive caller-bounded exact DER span into a borrowed-slice descriptor. Returns 0, -1 for malformed input, or -2 for a well-formed unsupported key profile. It has no generic 128..8192-byte policy bound; provisioning and wire consumers impose their own profile limits. |
 | `X509-CHECK-HOST` | `( hostname hlen -- flag )` | Verify hostname against SAN dNSNames. Supports wildcards. 0=match, -1=no match. |
 | `EC-DOUBLE` | `( Px Py Pz Rx Ry Rz -- )` | P-256 Jacobian point doubling. |
 | `EC-ADD` | `( P1x P1y P1z P2x P2y P2z Rx Ry Rz -- )` | P-256 Jacobian point addition. |
@@ -1689,8 +1690,15 @@ handler wiring.
 | `RSA2048-PKCS1-SHA256-VERIFY` | `( hash modulus sig siglen -- flag )` | Verify exact RSA-2048 PKCS#1 v1.5 SHA-256 certificate padding. Blocking compatibility primitive. |
 | `RSA2048-PSS-SHA256-VERIFY` | `( hash modulus sig siglen -- flag )` | Verify exact RSA-PSS/SHA-256 with MGF1-SHA256 and 32-byte salt. Blocking compatibility primitive. |
 | `X509-VERIFY-CHAIN` | `( certs count hostname hlen now -- ior )` | Validate a bounded mixed ECDSA/RSA certificate path to a provisioned scoped anchor. |
-| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- flag )` | Parse the bounded TLS Certificate message and authenticate its leaf through the configured path and hostname policy. |
+| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- ior )` | Parse the bounded client-side TLS Certificate message and authenticate its leaf through the configured path and hostname policy. This receive/path profile retains at most eight 128..8192-byte certificates. |
 | `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify using ECDSA-P256-SHA256 or RSA-PSS-RSAE-SHA256 according to the authenticated leaf key. |
+| `TLS-CREDENTIAL-POOL-INIT` | `( count -- ior )` | Once on core 0, establish a caller-sized pool of exact 184-byte server-credential records. Capacity has no compile-time or connection-derived maximum. |
+| `TLS-CREDENTIAL-PROVISION` | `( der-chain-a der-chain-u private-le -- slot+1 generation ior )` | Copy a leaf-first concatenation of self-delimiting DER certificates, structurally validate every Certificate envelope, deeply validate only the leaf, import one 32-byte little-endian P-256 scalar, prove its complete public point matches the leaf, and return a two-cell opaque handle. |
+| `TLS-CREDENTIAL-PUBLIC` | `( slot+1 generation public-a scheme-a -- count ior )` | Resolve a live handle, optionally copy the 65-byte public point and `ecdsa_secp256r1_sha256` scheme cell, and return certificate count. Zero output addresses request only count/status. |
+| `TLS-CREDENTIAL-CHAIN` | `( slot+1 generation out-a out-cap -- u ior )` | Copy the exact owned concatenated-DER chain. `0 0` is a length query; other failures leave output unchanged. |
+| `TLS-CREDENTIAL-SIGN` | `( slot+1 generation hash-be der-a der-cap -- der-u ior )` | Sign one 32-byte SHA-256 digest through the lower-owned P-256 key. DER is staged and published atomically using its actual encoded length, up to 72 bytes. |
+| `TLS-CREDENTIAL-SIGN-CANCEL` | `( slot+1 generation -- ior )` | Under lock 11 alone, request cancellation of that credential's exact active operation generation. Returns `BUSY` for same-core lock-10 activity and `NO-ACTIVE` when no sign is in progress. |
+| `TLS-CREDENTIAL-DELETE` | `( slot+1 generation -- ior )` | On core 0, synchronously revoke a non-referenced credential, wipe its key/record and complete allocated DER-chain payload, free the payload, and stale the old handle. |
 
 The public `EC-*` words above are the branch-bearing, public-data verification
 path. They are not suitable for private scalars. Server signing uses a distinct
@@ -1699,11 +1707,36 @@ architectural schedule and a fully scrubbed 960-byte owned workspace. Its
 RFC 6979 ECDSA-P256-SHA256 composition uses a separate exact 856-byte lane,
 four complete signing trials per ordinary fixed-work batch, unbounded
 standards-correct batch continuation, and staged minimal DER publication by
-actual caller capacity. These underscore-prefixed operations are intentionally
-absent from the public word table; credential provisioning will expose a
-lower-owned key through an opaque generational handle rather than make raw
-private-key spans a general networking API. The fixed schedule is an
+actual caller capacity. These underscore-prefixed operations remain absent
+from the public word table. The credential words above expose the lower-owned
+key only through `(slot+1,generation)`; a raw private-key span is accepted only
+at the core-0 import boundary and is never returned. The fixed schedule is an
 architectural timing claim, not a physical DPA-resistance claim.
+
+The provisioned server chain is a nonempty leaf-first concatenation of
+self-delimiting DER Certificate values. There is no entry-count or private
+8192-byte cap. Every entry must have an exact canonical outer Certificate
+SEQUENCE with its three shallow children; only the leaf is parsed under the
+native X.509 profile. Intermediates are otherwise opaque. The leaf must be a
+non-CA uncompressed P-256 key, permit digital signatures and server
+authentication when those extensions are present, and match the imported
+scalar exactly. Provisioning proves identity consistency; it does not perform
+client trust/path, hostname, validity, or chain-signature validation.
+
+The handshake synthesizes each `CertificateEntry` as uint24 DER length, DER
+bytes, and an initially empty uint16 extension vector. The admitted bound is
+the exact wire sum `sum(DER length + 5) <= 0xFFFFFB`, derived from the TLS
+uint24 handshake-body maximum after the empty request context and list length.
+No TLS framing or connection-dependent extension bytes are stored in the
+credential.
+
+Credential status values are `0` success, then `-4320..-4334` for state,
+range, allocation, capacity, stale handle, malformed DER chain, unsupported
+leaf profile, invalid scalar, leaf/key mismatch, busy, alias, lower
+crypto failure, cancelled, no active sign, and retired generation. Handle and
+operation generations never publish zero; a slot or operation retires instead
+of wrapping to a value that could revive stale authority. These are volatile
+capability generations, not durable rollback counters.
 
 ### §16.8–§16.11 TLS 1.3
 
@@ -1756,14 +1789,26 @@ The private-suite empty hash is initialized through checked
 SHA3 mode. The standard SHA-256 suite continues to use its independent fixed
 empty-hash constant.
 
-The public connection, record, application-data, alert, close/abort, crypto
-dispatch, and exporter entry points are serialized by `TLS-OWNER-LOCK` (hardware
-lock 10). Recursion is tracked by `(COREID,TASK-ID)` and a software depth, so a
-different task on the same physical core cannot exploit the hardware lock's
-depthless same-core reacquire behavior. Lock order is TLS 10, KDOS HMAC/HKDF 9,
-then checked BIOS crypto 8. Contention is nonblocking: connection setup records
-`TLS-CONNECT-E-BUSY`, exporters return `TLS-E-BUSY`, and transport operations
-make no scratch mutation. The exporter uses 8,224 bytes of global staged-output
+The public connection, record, application-data, alert, close/abort, crypto,
+exporter, and ordinary credential entry points are serialized by
+`TLS-OWNER-LOCK` (hardware lock 10). Recursion is tracked by
+`(COREID,TASK-ID)` and a software depth, so a different task on the same
+physical core cannot exploit the hardware lock's depthless same-core reacquire
+behavior. Credential registry transitions briefly take hardware lock 11
+beneath lock 10 and release it before calling lower crypto. Lock 11 is itself
+bound to an exact nonrecursive `(COREID,TASK-ID)` software owner so depthless
+same-core hardware reacquisition cannot steal or release it. The resulting
+order is TLS 10, optionally credential 11 and release, KDOS HMAC/HKDF 9, then
+checked BIOS crypto 8. `TLS-CREDENTIAL-SIGN-CANCEL` takes only lock 11, performs
+no crypto, and therefore can publish an exact operation-generation request
+while a signer retains lock 10. Contention is nonblocking: connection setup
+records `TLS-CONNECT-E-BUSY`, exporters return `TLS-E-BUSY`, credential words
+return their busy status, and transport operations make no scratch mutation.
+Same-core cancellation while lock 10 is active returns credential busy;
+different-core cancellation remains the concurrent path. A sequentially run
+four-core emulator capstone has exercised a real full-batch signature and
+peer-core cancellation with atomic output and complete owner/metadata cleanup.
+The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 968 bytes.  Each context also owns a 90,632-byte receive workspace:
 a 16,896-byte partial-record lane and an aligned retained-data lane capable of
@@ -1780,6 +1825,16 @@ with the 5,816-byte TCB and two 32-byte socket
 descriptors, the logical network-table cost is 97,480 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
+
+The caller-sized credential pool requires XMEM, is allocated once as
+`count * 184` logical bytes plus only allocator alignment, and is protected
+below `XMEM-FLOOR`. Requiring XMEM reflects the canonical networking-module
+load geometry; it is not a fixed credential-count limit. Each concatenated
+DER chain is a separate exact reclaimable allocation.
+`TLS-CREDENTIAL-DELETE` wipes and frees that chain. The public `XMEM-RESET` is
+credential-aware: with XMEM it refuses while any credential remains active,
+then preserves the floor-protected pool after all credentials are deleted; on
+a machine without XMEM its underlying bulk-reset action remains a no-op.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

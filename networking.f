@@ -3844,8 +3844,10 @@ VARIABLE _XDP-AFTER-EXT
 : X509-DESC-PARSE ( cert-a cert-u descriptor -- ior )
     _XDP-OUT ! _XDP-CERT-U ! _XDP-CERT-A !
     _XDP-OUT @ X509-CERT-INIT
-    _XDP-CERT-U @ 128 < _XDP-CERT-U @ 8192 > OR IF -1 EXIT THEN
-    _XDP-CERT-A @ _XDP-CERT-U @ + _XDP-LIMIT !
+    _XDP-CERT-U @ 1 < IF -1 EXIT THEN
+    _XDP-CERT-A @ _XDP-CERT-U @ +
+    DUP _XDP-CERT-A @ U< IF DROP -1 EXIT THEN
+    _XDP-LIMIT !
     _XDP-CERT-A @ _XDP-LIMIT @ DER-READ IF -1 EXIT THEN
     _DB-TAG @ 48 <> _DB-NEXT @ _XDP-LIMIT @ <> OR IF -1 EXIT THEN
     _XDP-CERT-A @ _XDP-OUT @ XC.CERT-A + !
@@ -6225,6 +6227,9 @@ VARIABLE _EPS-CANCEL-GENERATION
     2DUP HMAC256-IPAD
     _HMAC256-MSG-LEN 1 CELLS + HMAC256-IPAD -
     _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP _EPS-CANCEL-A
+    _EPS-CANCEL-GENERATION 1 CELLS + _EPS-CANCEL-A -
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
     2DROP FALSE ;
 
 : _EPS-ARGS-STATUS ( d-le hash-be out cap -- ior )
@@ -6496,6 +6501,767 @@ VARIABLE _EPS-CANCEL-GENERATION
         _EPS-UNWIND
     THEN DROP
     _EPS-FINISH ;
+
+\ =====================================================================
+\  §16.7c.1  Lower-owned TLS server credentials
+\ =====================================================================
+\
+\ Credentials live in a caller-sized pool established once by a core-0
+\ control-plane operation.  Pool capacity is not derived from connection
+\ count and has no compile-time product maximum.  The public identity is two
+\ cells `(slot+1, generation)`: no pointer is exposed, generation zero is
+\ invalid, and a slot is permanently retired rather than wrapping its
+\ generation.  This is an accidental-exposure boundary inside KDOS, not an
+\ HSM or a protection claim against privileged local memory inspection.
+\
+\ Provisioning accepts a leaf-first concatenation of self-delimiting DER
+\ Certificate values and one 32-byte little-endian P-256 scalar.  It never
+\ stores TLS CertificateEntry framing or connection-dependent extensions.
+\ The complete chain is copied into one exact allocation.  Every entry must
+\ have the exact shallow X.509 Certificate envelope; only the leaf is deeply
+\ parsed, and its public key must exactly equal the fixed-schedule `dG` result
+\ before the record is published.  DER size and entry count have no private
+\ policy cap: the sum of DER bytes plus the five bytes of empty-extension TLS
+\ framing per entry must fit the protocol's uint24 Certificate-list bound.
+
+184 CONSTANT /TLS-CREDENTIAL
+
+0   CONSTANT TC.STATE
+8   CONSTANT TC.GENERATION
+16  CONSTANT TC.REFS
+24  CONSTANT TC.NEXT-SIGN
+32  CONSTANT TC.ACTIVE-SIGN
+40  CONSTANT TC.CANCEL-SIGN
+48  CONSTANT TC.CHAIN-A
+56  CONSTANT TC.CHAIN-U
+64  CONSTANT TC.CERT-COUNT
+72  CONSTANT TC.SCHEME
+80  CONSTANT TC.PRIVATE
+112 CONSTANT TC.PUBLIC
+
+0 CONSTANT TCS-FREE
+1 CONSTANT TCS-ACTIVE
+2 CONSTANT TCS-RETIRED
+
+1027 CONSTANT TLS-SIG-ECDSA-SECP256R1-SHA256
+0xFFFFFB CONSTANT TLS-CREDENTIAL-WIRE-LIST-MAX
+
+0     CONSTANT TLS-CREDENTIAL-OK
+-4320 CONSTANT TLS-CREDENTIAL-E-STATE
+-4321 CONSTANT TLS-CREDENTIAL-E-RANGE
+-4322 CONSTANT TLS-CREDENTIAL-E-ALLOC
+-4323 CONSTANT TLS-CREDENTIAL-E-CAPACITY
+-4324 CONSTANT TLS-CREDENTIAL-E-STALE
+-4325 CONSTANT TLS-CREDENTIAL-E-CERT
+-4326 CONSTANT TLS-CREDENTIAL-E-PROFILE
+-4327 CONSTANT TLS-CREDENTIAL-E-KEY
+-4328 CONSTANT TLS-CREDENTIAL-E-MISMATCH
+-4329 CONSTANT TLS-CREDENTIAL-E-BUSY
+-4330 CONSTANT TLS-CREDENTIAL-E-ALIAS
+-4331 CONSTANT TLS-CREDENTIAL-E-CRYPTO
+-4332 CONSTANT TLS-CREDENTIAL-E-CANCELLED
+-4333 CONSTANT TLS-CREDENTIAL-E-NO-ACTIVE
+-4334 CONSTANT TLS-CREDENTIAL-E-RETIRED
+
+11 CONSTANT TLS-CREDENTIAL-LOCK
+
+VARIABLE TLS-CREDENTIALS       0 TLS-CREDENTIALS !
+VARIABLE TLS-CREDENTIAL-CAPACITY 0 TLS-CREDENTIAL-CAPACITY !
+VARIABLE TLS-CREDENTIAL-ACTIVE 0 TLS-CREDENTIAL-ACTIVE !
+VARIABLE TLS-CREDENTIAL-POOL-ALLOCATED 0 TLS-CREDENTIAL-POOL-ALLOCATED !
+VARIABLE _TC-LOCK-OWNER-CORE -1 _TC-LOCK-OWNER-CORE !
+VARIABLE _TC-LOCK-OWNER-TASK -1 _TC-LOCK-OWNER-TASK !
+
+CREATE _TC-LEAF /X509-CERT ALLOT
+CREATE _TC-DER-STAGE 72 ALLOT
+CREATE _TC-PUBLIC-STAGE 65 ALLOT
+CREATE _TC-X 32 ALLOT
+CREATE _TC-Y 32 ALLOT
+CREATE _TC-PRIVATE-STAGE 32 ALLOT
+
+VARIABLE _TC-POOL-BYTES
+VARIABLE _TC-SLOT
+VARIABLE _TC-GENERATION
+VARIABLE _TC-INDEX
+VARIABLE _TC-I
+VARIABLE _TC-COUNT
+VARIABLE _TC-POS
+VARIABLE _TC-END
+VARIABLE _TC-CERT-U
+VARIABLE _TC-CERT-END
+VARIABLE _TC-INNER-POS
+VARIABLE _TC-WIRE-U
+VARIABLE _TC-CHAIN-A
+VARIABLE _TC-CHAIN-LEN
+VARIABLE _TC-PRIVATE-A
+VARIABLE _TC-COPY-A
+VARIABLE _TC-H1
+VARIABLE _TC-H2
+VARIABLE _TC-HASH
+VARIABLE _TC-OUT
+VARIABLE _TC-CAP
+VARIABLE _TC-WRITTEN
+VARIABLE _TC-IOR
+VARIABLE _TC-OP-GEN
+VARIABLE _TC-PUB-OUT
+VARIABLE _TC-SCHEME-OUT
+VARIABLE _TC-CHAIN-OUT
+CREATE _TC-STATIC-END
+
+: _TC@ ( index -- record )
+    /TLS-CREDENTIAL * TLS-CREDENTIALS @ + ;
+
+: _TC-LOCK-OWNER? ( -- flag )
+    COREID _TC-LOCK-OWNER-CORE @ =
+    TASK-ID _TC-LOCK-OWNER-TASK @ = AND ;
+
+: _TC-LOCK-TRY ( -- ior )
+    \ Hardware spinlocks are depthless and reentrant by physical core.  The
+    \ software owner prevents another task on that core from appearing to
+    \ acquire and later releasing the real owner's lock.
+    _TC-LOCK-OWNER-CORE @ -1 <> IF TLS-CREDENTIAL-E-BUSY EXIT THEN
+    TLS-CREDENTIAL-LOCK SPIN@ IF TLS-CREDENTIAL-E-BUSY EXIT THEN
+    \ Publish core last; it is the validity field for the owner pair.
+    TASK-ID _TC-LOCK-OWNER-TASK !
+    COREID _TC-LOCK-OWNER-CORE !
+    TLS-CREDENTIAL-OK ;
+
+: _TC-LOCK ( -- )
+    BEGIN _TC-LOCK-TRY DUP WHILE DROP YIELD? REPEAT DROP ;
+
+: _TC-UNLOCK ( -- )
+    _TC-LOCK-OWNER? 0= IF EXIT THEN
+    -1 _TC-LOCK-OWNER-TASK !
+    -1 _TC-LOCK-OWNER-CORE !
+    TLS-CREDENTIAL-LOCK SPIN! ;
+
+: _TC-META-WIPE ( -- )
+    _TC-LEAF /X509-CERT 0 FILL
+    _TC-DER-STAGE 72 0 FILL
+    _TC-PUBLIC-STAGE 65 0 FILL
+    _TC-X 32 0 FILL
+    _TC-Y 32 0 FILL
+    _TC-PRIVATE-STAGE 32 0 FILL
+    0 _TC-POOL-BYTES ! 0 _TC-SLOT ! 0 _TC-GENERATION ! 0 _TC-INDEX !
+    0 _TC-I ! 0 _TC-COUNT ! 0 _TC-POS ! 0 _TC-END !
+    0 _TC-CERT-U ! 0 _TC-CERT-END ! 0 _TC-INNER-POS ! 0 _TC-WIRE-U !
+    0 _TC-CHAIN-A ! 0 _TC-CHAIN-LEN !
+    0 _TC-PRIVATE-A ! 0 _TC-COPY-A ! 0 _TC-H1 ! 0 _TC-H2 !
+    0 _TC-HASH ! 0 _TC-OUT ! 0 _TC-CAP ! 0 _TC-WRITTEN !
+    0 _TC-IOR ! 0 _TC-OP-GEN ! 0 _TC-PUB-OUT ! 0 _TC-SCHEME-OUT !
+    0 _TC-CHAIN-OUT ! ;
+
+: _TC-ALLOCATION-U ( allocation-a -- allocated-payload-u )
+    DUP MEM-SIZE >= IF
+        8 - @ _XMEM-NORMALIZE-SIZE 8 -
+    ELSE
+        /ALLOC-HDR - 8 + @
+    THEN ;
+
+: _TC-ALLOCATION-SPAN ( allocation-a -- owner-a owner-u )
+    DUP MEM-SIZE >= IF
+        DUP _TC-ALLOCATION-U 8 + SWAP 8 - SWAP
+    ELSE
+        DUP _TC-ALLOCATION-U /ALLOC-HDR +
+        SWAP /ALLOC-HDR - SWAP
+    THEN ;
+
+: _TC-COPY-FREE ( -- )
+    _TC-COPY-A @ ?DUP IF
+        DUP DUP _TC-ALLOCATION-U 0 FILL FREE
+        0 _TC-COPY-A !
+    THEN ;
+
+: _TC-STAGE-WIPE ( -- )
+    _TC-LEAF /X509-CERT 0 FILL
+    _TC-DER-STAGE 72 0 FILL
+    _TC-PUBLIC-STAGE 65 0 FILL
+    _TC-X 32 0 FILL
+    _TC-Y 32 0 FILL
+    _TC-PRIVATE-STAGE 32 0 FILL ;
+
+: _TC-ARGS-SPAN ( addr len -- ior )
+    CALLER-SPAN-STATUS IF TLS-CREDENTIAL-E-RANGE ELSE 0 THEN ;
+
+: _TC-RANGES-OVERLAP? ( a a-u b b-u -- flag )
+    \ This stack-only form cannot corrupt an argument that happens to point
+    \ at the generic TLS overlap scratch.  All credential caller spans have
+    \ already passed CALLER-SPAN-STATUS before reaching this predicate.
+    2DUP + 4 PICK SWAP U<
+    4 PICK 4 PICK + 3 PICK SWAP U< AND
+    NIP NIP NIP NIP ;
+
+: _TC-LOWER-ALIAS? ( addr len -- flag )
+    \ Reproduce the raw signer's complete owned envelope with the pure
+    \ credential overlap predicate.  Calling _EPS-INTERNAL-ALIAS? here would
+    \ write its comparison scratch after the signer had already scrubbed it.
+    2DUP _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP _P256-SECRET-WORK /P256-SECRET-WORK
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP TLS-OWNER-CORE
+    TLS-OWNER-DEPTH 1 CELLS + TLS-OWNER-CORE -
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP P256-GX _EC-ONE 32 + P256-GX -
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP _P256-N-INV 32
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP HMAC256-IPAD
+    _HMAC256-MSG-LEN 1 CELLS + HMAC256-IPAD -
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP _EPS-CANCEL-A
+    _EPS-CANCEL-GENERATION 1 CELLS + _EPS-CANCEL-A -
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DROP FALSE ;
+
+: _TC-OWNED-ALIAS? ( addr len -- flag )
+    DUP 0= IF 2DROP FALSE EXIT THEN
+    \ Compose the raw signer's complete lower-owned envelope first.  It
+    \ includes the TLS owner cells, P-256/ECDSA/HMAC lanes, and the exact
+    \ cancellation-hook span; credential staging must not bypass it.
+    2DUP _TC-LOWER-ALIAS? IF 2DROP TRUE EXIT THEN
+    \ _TLS-RANGES-OVERLAP? writes these four scratch cells, so credential
+    \ admission must reject their span using the non-mutating predicate.
+    2DUP _TRO-A _TRO-B-U 1 CELLS + _TRO-A -
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP
+    TLS-CREDENTIALS _TC-STATIC-END TLS-CREDENTIALS -
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP
+    TLS-CREDENTIALS @ TLS-CREDENTIAL-POOL-ALLOCATED @
+    _TC-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    TLS-CREDENTIAL-CAPACITY @ 0 DO
+        I _TC@ DUP TC.STATE + @ TCS-ACTIVE = IF
+            TC.CHAIN-A + @ _TC-ALLOCATION-SPAN
+            2OVER 2SWAP
+            _TC-RANGES-OVERLAP? IF
+                2DROP TRUE UNLOOP EXIT
+            THEN
+        ELSE
+            DROP
+        THEN
+    LOOP
+    2DROP FALSE ;
+
+: _TC-HANDLE-RESOLVE ( slot+1 generation -- record ior )
+    _TC-GENERATION !
+    DUP 1 < OVER TLS-CREDENTIAL-CAPACITY @ > OR IF
+        DROP 0 TLS-CREDENTIAL-E-STALE EXIT
+    THEN
+    1- _TC@ DUP _TC-SLOT !
+    DUP TC.STATE + @ TCS-ACTIVE <>
+    OVER TC.GENERATION + @ _TC-GENERATION @ <> OR IF
+        DROP 0 TLS-CREDENTIAL-E-STALE EXIT
+    THEN
+    0 ;
+
+\ Cancellation cannot use the shared credential metadata: it deliberately
+\ runs on another core while the signer owns lock 10 and those cells.  This
+\ resolver therefore uses only its data stack plus one saved generation.
+: _TC-CANCEL-RESOLVE ( slot+1 generation -- record ior )
+    >R
+    DUP 1 < OVER TLS-CREDENTIAL-CAPACITY @ > OR IF
+        DROP R> DROP 0 TLS-CREDENTIAL-E-STALE EXIT
+    THEN
+    1- _TC@ DUP TC.STATE + @ TCS-ACTIVE <>
+    OVER TC.GENERATION + @ R@ <> OR IF
+        DROP R> DROP 0 TLS-CREDENTIAL-E-STALE EXIT
+    THEN
+    R> DROP 0 ;
+
+: _TC-NEXT-GENERATION ( record -- generation ior )
+    TC.GENERATION + @ DUP 0= IF DROP 1 0 EXIT THEN
+    DUP 1+ DUP 0= IF
+        2DROP 0 TLS-CREDENTIAL-E-RETIRED EXIT
+    THEN
+    NIP 0 ;
+
+: _TC-FIND-FREE ( -- ior )
+    TLS-CREDENTIAL-CAPACITY @ 0 DO
+        I _TC@ DUP TC.STATE + @ TCS-FREE = IF
+            DUP _TC-SLOT !
+            DUP _TC-NEXT-GENERATION DUP 0= IF
+                DROP _TC-GENERATION ! DROP
+                I _TC-INDEX ! 0 UNLOOP EXIT
+            THEN
+            \ A generation that cannot advance retires this slot.  Continue
+            \ the same search so another caller-provided slot can be used.
+            DROP DROP TCS-RETIRED SWAP TC.STATE + !
+        ELSE
+            DROP
+        THEN
+    LOOP
+    TLS-CREDENTIAL-E-CAPACITY ;
+
+: _TC-PROVISION-ARGS ( chain-a chain-u private-a -- ior )
+    _TC-PRIVATE-A ! _TC-CHAIN-LEN ! _TC-CHAIN-A !
+    _TC-CHAIN-LEN @ DUP 1 < SWAP TLS-CREDENTIAL-WIRE-LIST-MAX > OR IF
+        TLS-CREDENTIAL-E-RANGE EXIT
+    THEN
+    _TC-CHAIN-A @ _TC-CHAIN-LEN @ _TC-ARGS-SPAN IF
+        TLS-CREDENTIAL-E-RANGE EXIT
+    THEN
+    _TC-PRIVATE-A @ 32 _TC-ARGS-SPAN IF
+        TLS-CREDENTIAL-E-RANGE EXIT
+    THEN
+    _TC-CHAIN-A @ _TC-CHAIN-LEN @ _TC-OWNED-ALIAS? IF
+        TLS-CREDENTIAL-E-ALIAS EXIT
+    THEN
+    _TC-PRIVATE-A @ 32 _TC-OWNED-ALIAS? IF
+        TLS-CREDENTIAL-E-ALIAS EXIT
+    THEN
+    _TC-CHAIN-A @ _TC-CHAIN-LEN @ _TC-PRIVATE-A @ 32
+    _TC-RANGES-OVERLAP? IF TLS-CREDENTIAL-E-ALIAS EXIT THEN
+    _TC-PRIVATE-A @ _TC-PRIVATE-STAGE 32 MOVE
+    0 ;
+
+\ Validate one exact shallow X.509 Certificate envelope.  This deliberately
+\ does not interpret an intermediate's TBS fields or algorithms: it proves
+\ the outer SEQUENCE contains exactly a TBS SEQUENCE, AlgorithmIdentifier
+\ SEQUENCE, and a nonempty byte-aligned signature BIT STRING.
+: _TC-CERT-ENVELOPE ( cert-a cert-end -- ior )
+    _TC-CERT-END ! _TC-INNER-POS !
+    _TC-INNER-POS @ _TC-CERT-END @ DER-READ IF
+        TLS-CREDENTIAL-E-CERT EXIT
+    THEN
+    _DB-TAG @ 48 <> IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    _DB-VAL @ _TC-INNER-POS !
+    _DB-NEXT @ _TC-CERT-END @ <> IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    _TC-INNER-POS @ _TC-CERT-END @ DER-READ IF
+        TLS-CREDENTIAL-E-CERT EXIT
+    THEN
+    _DB-TAG @ 48 <> IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    _DB-NEXT @ _TC-INNER-POS !
+    _TC-INNER-POS @ _TC-CERT-END @ DER-READ IF
+        TLS-CREDENTIAL-E-CERT EXIT
+    THEN
+    _DB-TAG @ 48 <> IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    _DB-NEXT @ _TC-INNER-POS !
+    _TC-INNER-POS @ _TC-CERT-END @ DER-READ IF
+        TLS-CREDENTIAL-E-CERT EXIT
+    THEN
+    _DB-TAG @ 3 <> _DB-LEN @ 2 < OR IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    _DB-VAL @ C@ IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    _DB-NEXT @ _TC-CERT-END @ <> IF TLS-CREDENTIAL-E-CERT EXIT THEN
+    0 ;
+
+\ Validate the copied leaf-first concatenated DER chain with no entry-count
+\ limit.  Only the leaf is deeply parsed.  The running wire size reserves the
+\ exact uint24 length and empty uint16 extensions each CertificateEntry will
+\ acquire when the server handshake streams it.
+: _TC-CHAIN-VALIDATE ( -- ior )
+    _TC-COPY-A @ _TC-POS !
+    _TC-COPY-A @ _TC-CHAIN-LEN @ + _TC-END !
+    0 _TC-COUNT !
+    0 _TC-WIRE-U !
+    BEGIN _TC-POS @ _TC-END @ < WHILE
+        _TC-POS @ _TC-END @ DER-READ IF TLS-CREDENTIAL-E-CERT EXIT THEN
+        _DB-TAG @ 48 <> IF TLS-CREDENTIAL-E-CERT EXIT THEN
+        _DB-NEXT @ DUP _TC-CERT-END !
+        _TC-POS @ - _TC-CERT-U !
+        _TC-POS @ _TC-CERT-END @ _TC-CERT-ENVELOPE DUP IF EXIT THEN DROP
+        _TC-CERT-U @ TLS-CREDENTIAL-WIRE-LIST-MAX 5 - > IF
+            TLS-CREDENTIAL-E-RANGE EXIT
+        THEN
+        TLS-CREDENTIAL-WIRE-LIST-MAX _TC-WIRE-U @ -
+        _TC-CERT-U @ 5 + < IF TLS-CREDENTIAL-E-RANGE EXIT THEN
+        _TC-CERT-U @ 5 + _TC-WIRE-U +!
+        _TC-COUNT @ 0= IF
+            _TC-POS @ _TC-CERT-U @ _TC-LEAF X509-DESC-PARSE DUP IF
+                DUP X509-PARSE-UNSUPPORTED = IF
+                    DROP TLS-CREDENTIAL-E-PROFILE EXIT
+                THEN
+                DROP TLS-CREDENTIAL-E-CERT EXIT
+            THEN DROP
+            _TC-LEAF XC.PUB-ALGO + @ X509-ALG-P256 <>
+            _TC-LEAF XC.PUB-U + @ 65 <> OR
+            _TC-LEAF XC.PUB-A + @ C@ 4 <> OR IF
+                TLS-CREDENTIAL-E-PROFILE EXIT
+            THEN
+            _TC-LEAF XC.FLAGS + @ DUP XCF-CA AND IF
+                DROP TLS-CREDENTIAL-E-PROFILE EXIT
+            THEN
+            DUP XCF-KU-SEEN AND IF
+                _TC-LEAF XC.KEY-USAGE + @ 128 AND 0= IF
+                    DROP TLS-CREDENTIAL-E-PROFILE EXIT
+                THEN
+            THEN
+            XCF-EKU-SEEN AND IF
+                _TC-LEAF XC.EKU + @ XEKU-SERVER-AUTH XEKU-ANY OR
+                AND 0= IF TLS-CREDENTIAL-E-PROFILE EXIT THEN
+            THEN
+            _TC-LEAF XC.PUB-A + @ _TC-PUBLIC-STAGE 65 MOVE
+        THEN
+        _TC-CERT-END @ _TC-POS !
+        1 _TC-COUNT +!
+    REPEAT
+    _TC-POS @ _TC-END @ <> _TC-COUNT @ 0= OR IF
+        TLS-CREDENTIAL-E-CERT EXIT
+    THEN
+    0 ;
+
+: _TC-DERIVE-PUBLIC ( -- ior )
+    _TC-PRIVATE-STAGE _TC-X _TC-Y _P256-SECRET-BASE-MUL-CHECKED
+    DUP _P256S-E-SCALAR = IF DROP TLS-CREDENTIAL-E-KEY EXIT THEN
+    DUP TLS-E-BUSY = IF DROP TLS-CREDENTIAL-E-BUSY EXIT THEN
+    DUP IF DROP TLS-CREDENTIAL-E-CRYPTO EXIT THEN DROP
+    4 _TC-PUBLIC-STAGE C@ <> IF TLS-CREDENTIAL-E-MISMATCH EXIT THEN
+    32 0 DO
+        _TC-X 31 I - + C@ _TC-PUBLIC-STAGE 1+ I + C@ <> IF
+            TLS-CREDENTIAL-E-MISMATCH UNLOOP EXIT
+        THEN
+        _TC-Y 31 I - + C@ _TC-PUBLIC-STAGE 33 + I + C@ <> IF
+            TLS-CREDENTIAL-E-MISMATCH UNLOOP EXIT
+        THEN
+    LOOP
+    0 ;
+
+: _TC-PUBLISH-PROVISION ( -- slot+1 generation ior )
+    _TC-FIND-FREE DUP IF
+        0 0 ROT EXIT
+    THEN DROP
+    \ Publish state last.  All pointer, key, and generation fields are valid
+    \ before another registry reader can resolve this handle.
+    _TC-SLOT @ /TLS-CREDENTIAL 0 FILL
+    _TC-GENERATION @ _TC-SLOT @ TC.GENERATION + !
+    _TC-COPY-A @ _TC-SLOT @ TC.CHAIN-A + !
+    _TC-CHAIN-LEN @ _TC-SLOT @ TC.CHAIN-U + !
+    _TC-COUNT @ _TC-SLOT @ TC.CERT-COUNT + !
+    TLS-SIG-ECDSA-SECP256R1-SHA256 _TC-SLOT @ TC.SCHEME + !
+    _TC-PRIVATE-STAGE _TC-SLOT @ TC.PRIVATE + 32 MOVE
+    _TC-PUBLIC-STAGE _TC-SLOT @ TC.PUBLIC + 65 MOVE
+    TCS-ACTIVE _TC-SLOT @ TC.STATE + !
+    1 TLS-CREDENTIAL-ACTIVE +!
+    0 _TC-COPY-A !
+    _TC-INDEX @ 1+ _TC-GENERATION @ 0 ;
+
+: _TC-PROVISION-UNWIND ( throw -- )
+    >R
+    _TC-COPY-FREE
+    _TC-STAGE-WIPE
+    TLS-OWNER-RELEASE
+    R> THROW ;
+
+\ TLS-CREDENTIAL-PROVISION
+\   ( der-chain-a der-chain-u private-le -- slot+1 generation ior )
+\ The caller key is admitted only at this import boundary.  On every failure
+\ no slot is published and the copied DER chain is wiped before being freed.
+: TLS-CREDENTIAL-PROVISION ( chain-a chain-u private-a -- slot+1 gen ior )
+    COREID IF 2DROP DROP 0 0 TLS-CREDENTIAL-E-STATE EXIT THEN
+    TLS-OWNER-TRY IF 2DROP DROP 0 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+    TLS-CREDENTIALS @ 0= IF
+        2DROP DROP 0 0 TLS-CREDENTIAL-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-STAGE-WIPE 0 _TC-COPY-A !
+    _TC-PROVISION-ARGS DUP IF
+        _TC-STAGE-WIPE
+        0 0 ROT _TLS-OWNER-RETURN EXIT
+    THEN DROP
+    _TC-CHAIN-LEN @ ALLOCATE DUP IF
+        2DROP _TC-STAGE-WIPE
+        0 0 TLS-CREDENTIAL-E-ALLOC _TLS-OWNER-RETURN EXIT
+    THEN DROP _TC-COPY-A !
+    _TC-COPY-A @ DUP _TC-ALLOCATION-U 0 FILL
+    _TC-CHAIN-A @ _TC-COPY-A @ _TC-CHAIN-LEN @ MOVE
+    _TC-CHAIN-VALIDATE DUP IF
+        _TC-COPY-FREE _TC-STAGE-WIPE
+        0 0 ROT _TLS-OWNER-RETURN EXIT
+    THEN DROP
+    ['] _TC-DERIVE-PUBLIC CATCH
+    DUP IF _TC-PROVISION-UNWIND THEN DROP
+    DUP IF
+        _TC-COPY-FREE _TC-STAGE-WIPE
+        0 0 ROT _TLS-OWNER-RETURN EXIT
+    THEN DROP
+    _TC-LOCK-TRY DUP IF
+        _TC-COPY-FREE _TC-STAGE-WIPE
+        0 0 ROT _TLS-OWNER-RETURN EXIT
+    THEN DROP
+    _TC-PUBLISH-PROVISION
+    _TC-UNLOCK
+    _TC-IOR ! _TC-GENERATION ! _TC-H1 !
+    _TC-IOR @ IF _TC-COPY-FREE THEN
+    _TC-STAGE-WIPE
+    _TC-H1 @ _TC-GENERATION @ _TC-IOR @
+    >R >R >R TLS-OWNER-RELEASE R> R> R> ;
+
+\ TLS-CREDENTIAL-POOL-INIT ( count -- ior )
+\   Establish a caller-selected pool once.  The exact record allocation is
+\   protected below XMEM-FLOOR before publication; no runtime reset can
+\   invalidate live credential records.  The loadable networking module and
+\   its dynamic tables already require XMEM in the canonical board geometry,
+\   so do not advertise a dictionary fallback that cannot host the module.
+\   DER chains are individually reclaimable allocations above the
+\   floor and XMEM-RESET is refused while any credential is active.
+: TLS-CREDENTIAL-POOL-INIT ( count -- ior )
+    COREID IF DROP TLS-CREDENTIAL-E-STATE EXIT THEN
+    TLS-OWNER-TRY IF DROP TLS-CREDENTIAL-E-BUSY EXIT THEN
+    TLS-CREDENTIALS @ IF DROP TLS-CREDENTIAL-E-STATE _TLS-OWNER-RETURN EXIT THEN
+    XMEM? 0= IF DROP TLS-CREDENTIAL-E-ALLOC _TLS-OWNER-RETURN EXIT THEN
+    DUP 1 < OVER 0x7FFFFFFFFFFFFFF0 /TLS-CREDENTIAL / > OR IF
+        DROP TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT
+    THEN
+    DUP /TLS-CREDENTIAL * DUP _TC-POOL-BYTES !
+    DUP _XMEM-NORMALIZE-SIZE _TC-I ! XMEM-ALLOT?
+    DUP IF
+        2DROP DROP TLS-CREDENTIAL-E-ALLOC _TLS-OWNER-RETURN EXIT
+    THEN DROP
+    DUP _TC-I @ 0 FILL
+    TLS-CREDENTIALS !
+    TLS-CREDENTIAL-CAPACITY !
+    _TC-I @ TLS-CREDENTIAL-POOL-ALLOCATED !
+    XMEM-HERE @ XMEM-FLOOR !
+    0 TLS-CREDENTIAL-ACTIVE !
+    _TC-META-WIPE
+    TLS-CREDENTIAL-OK _TLS-OWNER-RETURN ;
+
+\ Return the leaf key and certificate count without exposing owned storage.
+\ Exact outputs are optional only as complete pairs: public-a may be zero to
+\ query scheme/count, while a nonzero key destination must span 65 bytes.
+: TLS-CREDENTIAL-PUBLIC ( slot+1 generation public-a scheme-a -- count ior )
+    TLS-OWNER-TRY IF 2DROP 2DROP 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-SCHEME-OUT ! _TC-PUB-OUT ! _TC-H2 ! _TC-H1 !
+    _TC-H1 @ _TC-H2 @ _TC-HANDLE-RESOLVE DUP IF
+        NIP 0 SWAP _TLS-OWNER-RETURN EXIT
+    THEN DROP _TC-SLOT !
+    _TC-PUB-OUT @ IF
+        _TC-PUB-OUT @ 65 _TC-ARGS-SPAN IF
+            0 TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT
+        THEN
+    THEN
+    _TC-SCHEME-OUT @ IF
+        _TC-SCHEME-OUT @ 1 CELLS _TC-ARGS-SPAN IF
+            0 TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT
+        THEN
+    THEN
+    _TC-PUB-OUT @ IF
+        _TC-PUB-OUT @ 65 _TC-OWNED-ALIAS? IF
+            0 TLS-CREDENTIAL-E-ALIAS _TLS-OWNER-RETURN EXIT
+        THEN
+    THEN
+    _TC-SCHEME-OUT @ IF
+        _TC-SCHEME-OUT @ 1 CELLS _TC-OWNED-ALIAS? IF
+            0 TLS-CREDENTIAL-E-ALIAS _TLS-OWNER-RETURN EXIT
+        THEN
+    THEN
+    _TC-PUB-OUT @ 0<> _TC-SCHEME-OUT @ 0<> AND IF
+        _TC-PUB-OUT @ 65 _TC-SCHEME-OUT @ 1 CELLS
+        _TC-RANGES-OVERLAP? IF
+            0 TLS-CREDENTIAL-E-ALIAS _TLS-OWNER-RETURN EXIT
+        THEN
+    THEN
+    _TC-PUB-OUT @ IF _TC-SLOT @ TC.PUBLIC + _TC-PUB-OUT @ 65 MOVE THEN
+    _TC-SCHEME-OUT @ IF
+        _TC-SLOT @ TC.SCHEME + @ _TC-SCHEME-OUT @ !
+    THEN
+    _TC-SLOT @ TC.CERT-COUNT + @ 0 _TLS-OWNER-RETURN ;
+
+\ Copy the exact owned concatenated DER chain into caller storage.  A zero
+\ output with zero capacity is a length query; every other insufficient/invalid
+\ destination leaves caller memory unchanged.
+: TLS-CREDENTIAL-CHAIN ( slot+1 generation out-a out-cap -- u ior )
+    TLS-OWNER-TRY IF 2DROP 2DROP 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-CAP ! _TC-CHAIN-OUT ! _TC-H2 ! _TC-H1 !
+    _TC-H1 @ _TC-H2 @ _TC-HANDLE-RESOLVE DUP IF
+        NIP 0 SWAP _TLS-OWNER-RETURN EXIT
+    THEN DROP _TC-SLOT !
+    _TC-SLOT @ TC.CHAIN-U + @ _TC-CHAIN-LEN !
+    _TC-CHAIN-OUT @ 0= _TC-CAP @ 0= AND IF
+        _TC-CHAIN-LEN @ 0 _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-CAP @ 0< IF
+        0 TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-CAP @ _TC-CHAIN-LEN @ < IF
+        0 TLS-CREDENTIAL-E-CAPACITY _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-CHAIN-OUT @ _TC-CHAIN-LEN @ _TC-ARGS-SPAN IF
+        0 TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-CHAIN-OUT @ _TC-CHAIN-LEN @ _TC-OWNED-ALIAS? IF
+        0 TLS-CREDENTIAL-E-ALIAS _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-SLOT @ TC.CHAIN-A + @ _TC-CHAIN-OUT @ _TC-CHAIN-LEN @ MOVE
+    _TC-CHAIN-LEN @ 0 _TLS-OWNER-RETURN ;
+
+: _TC-SIGN-STATUS ( eps-ior -- credential-ior )
+    DUP 0= IF EXIT THEN
+    DUP _EPS-E-CANCELLED = IF DROP TLS-CREDENTIAL-E-CANCELLED EXIT THEN
+    DUP _EPS-E-CAPACITY = IF DROP TLS-CREDENTIAL-E-CAPACITY EXIT THEN
+    DUP _EPS-E-RANGE = IF DROP TLS-CREDENTIAL-E-RANGE EXIT THEN
+    DUP _EPS-E-ALIAS = IF DROP TLS-CREDENTIAL-E-ALIAS EXIT THEN
+    DUP TLS-E-BUSY = IF DROP TLS-CREDENTIAL-E-BUSY EXIT THEN
+    DROP TLS-CREDENTIAL-E-CRYPTO ;
+
+: _TC-SIGN-ACTIVATE ( -- ior )
+    _TC-LOCK-TRY DUP IF EXIT THEN DROP
+    _TC-SLOT @ TC.STATE + @ TCS-ACTIVE <>
+    _TC-SLOT @ TC.GENERATION + @ _TC-GENERATION @ <> OR
+    _TC-SLOT @ TC.REFS + @ 0<> OR IF
+        _TC-UNLOCK TLS-CREDENTIAL-E-STALE EXIT
+    THEN
+    _TC-SLOT @ TC.NEXT-SIGN + @ 1+ DUP 0= IF
+        DROP _TC-UNLOCK TLS-CREDENTIAL-E-RETIRED EXIT
+    THEN
+    DUP _TC-OP-GEN !
+    _TC-SLOT @ TC.NEXT-SIGN + !
+    _TC-OP-GEN @ _TC-SLOT @ TC.ACTIVE-SIGN + !
+    0 _TC-SLOT @ TC.CANCEL-SIGN + !
+    1 _TC-SLOT @ TC.REFS + !
+    _TC-UNLOCK 0 ;
+
+: _TC-SIGN-FINISH ( -- cancelled )
+    \ Signing still owns TLS lock 10, so delete/provision cannot invalidate
+    \ the record.  Lock 11 arbitrates a late cancellation request against the
+    \ staged DER before caller publication.
+    _TC-LOCK
+    _TC-SLOT @ TC.CANCEL-SIGN + @ _TC-OP-GEN @ =
+    >R
+    0 _TC-SLOT @ TC.REFS + !
+    0 _TC-SLOT @ TC.ACTIVE-SIGN + !
+    0 _TC-SLOT @ TC.CANCEL-SIGN + !
+    _TC-UNLOCK R> ;
+
+: _TC-SIGN-RUN ( -- der-u ior )
+    _TC-SLOT @ TC.PRIVATE + _TC-HASH @ _TC-DER-STAGE 72
+    _ECDSA-P256-SHA256-SIGN-CHECKED ;
+
+: _TC-SIGN-UNWIND ( throw -- )
+    \ The raw signer cleans and releases its nested owner depth before an
+    \ unknown THROW escapes.  This layer must still unpin the credential,
+    \ clear its hook/staging, release the outer owner depth, and rethrow.
+    >R
+    _EPS-CANCEL-DISARM
+    _TC-SIGN-FINISH DROP
+    _TC-DER-STAGE 72 0 FILL
+    TLS-OWNER-RELEASE
+    R> THROW ;
+
+\ TLS-CREDENTIAL-SIGN
+\   ( slot+1 generation hash-be der-a der-cap -- der-u ior )
+\ Resolve and pin the lower key under lock 10, sign only into a lower staging
+\ lane, then arbitrate a late cancel under lock 11 before atomic publication.
+: TLS-CREDENTIAL-SIGN ( slot+1 gen hash out cap -- der-u ior )
+    TLS-OWNER-TRY IF DROP 2DROP 2DROP 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-CAP ! _TC-OUT ! _TC-HASH ! _TC-H2 ! _TC-H1 !
+    _TC-H1 @ _TC-H2 @ _TC-HANDLE-RESOLVE DUP IF
+        NIP 0 SWAP _TLS-OWNER-RETURN EXIT
+    THEN DROP _TC-SLOT !
+    _TC-GENERATION @ _TC-SLOT @ TC.GENERATION + @ <> IF
+        0 TLS-CREDENTIAL-E-STALE _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-DER-STAGE 72 0 FILL
+    _TC-HASH @ 32 _TC-ARGS-SPAN IF
+        0 TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-HASH @ 32 _TC-OWNED-ALIAS? IF
+        0 TLS-CREDENTIAL-E-ALIAS _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-CAP @ 0< IF 0 TLS-CREDENTIAL-E-RANGE _TLS-OWNER-RETURN EXIT THEN
+    _TC-SIGN-ACTIVATE DUP IF
+        0 SWAP _TLS-OWNER-RETURN EXIT
+    THEN DROP
+    _TC-SLOT @ TC.CANCEL-SIGN + _EPS-CANCEL-A !
+    _TC-OP-GEN @ _EPS-CANCEL-GENERATION !
+    ['] _TC-SIGN-RUN CATCH
+    DUP IF _TC-SIGN-UNWIND THEN DROP
+    \ A normal raw return can be BUSY before its cleanup path acquired a
+    \ nested owner depth.  Disarm explicitly on every return nonetheless.
+    _EPS-CANCEL-DISARM
+    _TC-IOR ! _TC-WRITTEN !
+    _TC-SIGN-FINISH _TC-I !
+    _TC-IOR @ _TC-SIGN-STATUS _TC-IOR !
+    _TC-I @ IF TLS-CREDENTIAL-E-CANCELLED _TC-IOR ! THEN
+    _TC-IOR @ 0= IF
+        _TC-CAP @ _TC-WRITTEN @ < IF
+            TLS-CREDENTIAL-E-CAPACITY _TC-IOR !
+        ELSE
+            _TC-OUT @ _TC-WRITTEN @ _TC-ARGS-SPAN IF
+                TLS-CREDENTIAL-E-RANGE _TC-IOR !
+            ELSE
+                _TC-OUT @ _TC-WRITTEN @ _TC-OWNED-ALIAS? IF
+                    TLS-CREDENTIAL-E-ALIAS _TC-IOR !
+                ELSE
+                    _TC-OUT @ _TC-WRITTEN @ _TC-HASH @ 32
+                    _TC-RANGES-OVERLAP? IF
+                        TLS-CREDENTIAL-E-ALIAS _TC-IOR !
+                    ELSE
+                        _TC-DER-STAGE _TC-OUT @ _TC-WRITTEN @ MOVE
+                    THEN
+                THEN
+            THEN
+        THEN
+    THEN
+    _TC-IOR @ IF 0 _TC-WRITTEN ! THEN
+    _TC-DER-STAGE 72 0 FILL
+    _TC-WRITTEN @ _TC-IOR @
+    >R >R TLS-OWNER-RELEASE R> R> ;
+
+\ A cancellation request takes only lock 11 so a different physical core can
+\ publish it while signing owns lock 10.  Same-core cooperative tasks cannot
+\ preempt the monolithic private operation; Checkpoint 4's handshake machine
+\ will provide caller-visible begin/poll/cancel progress.
+: TLS-CREDENTIAL-SIGN-CANCEL ( slot+1 generation -- ior )
+    \ A same-core caller cannot run concurrently with the monolithic signer;
+    \ refusing it also prevents cooperative reentry through depthless lock 11.
+    TLS-OWNER-DEPTH @ 0>
+    TLS-OWNER-CORE @ COREID = AND IF
+        2DROP TLS-CREDENTIAL-E-BUSY EXIT
+    THEN
+    _TC-LOCK-TRY DUP IF >R 2DROP R> EXIT THEN DROP
+    _TC-CANCEL-RESOLVE DUP IF
+        NIP _TC-UNLOCK EXIT
+    THEN DROP
+    DUP TC.ACTIVE-SIGN + @ DUP 0= IF
+        2DROP _TC-UNLOCK TLS-CREDENTIAL-E-NO-ACTIVE EXIT
+    THEN
+    SWAP TC.CANCEL-SIGN + !
+    _TC-UNLOCK 0 ;
+
+\ TLS-CREDENTIAL-DELETE ( slot+1 generation -- ior )
+\ Revocation is synchronous and fail-closed.  A live sign owns lock 10, so
+\ delete returns BUSY before it can resolve or wipe the referenced record.
+: TLS-CREDENTIAL-DELETE ( slot+1 generation -- ior )
+    COREID IF 2DROP TLS-CREDENTIAL-E-STATE EXIT THEN
+    TLS-OWNER-TRY IF 2DROP TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-GENERATION ! _TC-H1 !
+    _TC-LOCK-TRY DUP IF _TLS-OWNER-RETURN EXIT THEN DROP
+    _TC-H1 @ _TC-GENERATION @ _TC-HANDLE-RESOLVE DUP IF
+        NIP _TC-UNLOCK _TLS-OWNER-RETURN EXIT
+    THEN DROP _TC-SLOT !
+    _TC-SLOT @ TC.REFS + @ IF
+        _TC-UNLOCK TLS-CREDENTIAL-E-BUSY _TLS-OWNER-RETURN EXIT
+    THEN
+    _TC-SLOT @ TC.CHAIN-A + @ _TC-COPY-A !
+    _TC-SLOT @ TC.CHAIN-U + @ _TC-CHAIN-LEN !
+    _TC-SLOT @ TC.GENERATION + @ _TC-GENERATION !
+    \ Preserve the nonzero generation after wiping so stale handles cannot
+    \ revive when this same slot is reused.
+    _TC-SLOT @ /TLS-CREDENTIAL 0 FILL
+    _TC-GENERATION @ _TC-SLOT @ TC.GENERATION + !
+    TCS-FREE _TC-SLOT @ TC.STATE + !
+    -1 TLS-CREDENTIAL-ACTIVE +!
+    _TC-UNLOCK
+    _TC-COPY-FREE
+    _TC-STAGE-WIPE
+    0 _TLS-OWNER-RETURN ;
+
+\ Runtime XMEM bulk reset is incompatible with a live exact certificate blob.
+\ Keep the original primitive internal and publish a checked KDOS wrapper.
+: (TLS-XMEM-RESET) ( -- )
+    \ With no external memory the primitive is an unconditional no-op.  The
+    \ credential pool itself requires XMEM, so there is no persistent Bank-0
+    \ credential allocation to reconcile.
+    XMEM? 0= IF EXIT THEN
+    ?CORE0
+    TLS-OWNER-TRY IF TLS-CREDENTIAL-E-BUSY THROW THEN
+    TLS-CREDENTIAL-ACTIVE @ IF
+        TLS-OWNER-RELEASE TLS-CREDENTIAL-E-BUSY THROW
+    THEN
+    (XMEM-RESET)
+    TLS-OWNER-RELEASE ;
+
+' (TLS-XMEM-RESET) IS XMEM-RESET
 
 0  CONSTANT TLS-CONNECT-E-OK
 1  CONSTANT TLS-CONNECT-E-CONFIG

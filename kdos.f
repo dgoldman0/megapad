@@ -2283,14 +2283,19 @@ VARIABLE _RS-OLD   \ saved old-addr for xmem resize
 
 VARIABLE XMEM-FLOOR  0 XMEM-FLOOR !
 
-\ XMEM-RESET ( -- )  reclaim all external memory (bulk free)
+\ (XMEM-RESET) ( -- )  primitive external-memory bulk reset
 \   Respects XMEM-FLOOR — will not reset below the userland zone.
 \   Also clears the free-list (all blocks return to the bump region).
-: XMEM-RESET  ( -- )
+: (XMEM-RESET)  ( -- )
     XMEM? IF
         XMEM-FLOOR @ ?DUP IF XMEM-HERE ! ELSE EXT-MEM-BASE XMEM-HERE ! THEN
         0 XMEM-FL !
     THEN ;
+
+\ The public action is deferred so later lower subsystems with persistent
+\ allocations can refuse a destructive reset while an owned object is live.
+DEFER XMEM-RESET
+' (XMEM-RESET) IS XMEM-RESET
 
 \ XMEM-FREE ( -- u )  bytes remaining in ext mem
 : XMEM-FREE  ( -- u )
@@ -7220,7 +7225,8 @@ VARIABLE MB-T   VARIABLE MB-P
 5 CONSTANT HT-LOCK
 6 CONSTANT APP-LOCK
 \ Lock 7 is MSG-SLOCK; BIOS reserves lock 8; HMAC-HKDF-LOCK is lock 9;
-\ networking.f reserves lock 10 for its machine-wide TLS workspace owner.
+\ networking.f reserves lock 10 for its machine-wide TLS workspace owner and
+\ lock 11 for short credential-registry publication/cancellation sections.
 
 : DICT-ACQUIRE  ( -- )  DICT-LOCK LOCK ;
 : DICT-RELEASE  ( -- )  DICT-LOCK UNLOCK ;
@@ -7249,7 +7255,8 @@ VARIABLE MB-T   VARIABLE MB-P
     ."    7 = IPI Messaging" CR
     ."    8 = Checked BIOS Crypto" CR
     ."    9 = KDOS HMAC/HKDF" CR
-    ."    10 = KDOS TLS Workspace" CR ;
+    ."    10 = KDOS TLS Workspace" CR
+    ."    11 = KDOS TLS Credentials" CR ;
 
 \ =====================================================================
 \  §8.8  Micro-Cluster Support

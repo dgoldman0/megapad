@@ -89,15 +89,24 @@ anything that should survive until the next `MARKER`.
 **When not to use:** temporary buffers, per-request scratch, anything
 you want to free independently.
 
-### 2.2 Heap — `ALLOCATE`, `FREE`, `RESIZE`
+### 2.2 Reclaimable allocation — `ALLOCATE`, `FREE`, `RESIZE`
 
-A first-fit free-list allocator in Bank 0.  Each block carries a
-16-byte header (next pointer + size).  `FREE` inserts addresses in
-sorted order and coalesces adjacent blocks.
+`ALLOCATE` is an XMEM-aware dispatch. When external memory is present it uses
+the XMEM free-list/bump allocator; otherwise it uses the Bank 0 first-fit heap.
+`FREE` and `RESIZE` inspect the address and route it back to the owning
+allocator.
+
+A Bank 0 allocation has a 24-byte header and an eight-byte-aligned payload of
+at least 16 bytes. Its sorted free list coalesces adjacent blocks. An XMEM
+allocation rounds its payload to eight bytes with the same minimum, stores an
+8-byte total-size prefix, and lets `XMEM-ALLOT?` normalize the complete block
+to its 16-byte recyclable boundary. That final padding belongs to the live
+allocation and is recovered by `FREE`.
 
 - **Lifetime:** until explicitly `FREE`d.
-- **Region:** Bank 0, above `HERE`, below the data stack.
-- **Cost:** O(n) where n = number of free blocks.
+- **Region:** XMEM when present; otherwise Bank 0 above `HERE` and below the
+  data stack.
+- **Cost:** O(n) where n is the relevant free-list length.
 - **Constraint:** core-0 only (`?CORE0` guard).
 - **Size contract:** requests must be strictly positive. Values that cannot be
   aligned and represented in a signed cell fail before heap or free-list state
@@ -109,7 +118,7 @@ sorted order and coalesces adjacent blocks.
 FREE                        \ return to free list
 ```
 
-**Diagnostic words:**
+**Bank 0 diagnostic words:**
 
 | Word | Stack | Purpose |
 |------|-------|---------|
@@ -135,7 +144,7 @@ Simple pointer-advance allocators for the two large memory regions.
 ```forth
 XMEM-ALLOT   ( u -- addr )   \ bump-allocate u bytes
 XMEM-ALLOT?  ( u -- addr ior ) \ checked form; 0/-1 on failure
-XMEM-RESET   ( -- )          \ reset pointer to floor (bulk free)
+XMEM-RESET   ( -- )          \ checked reset to floor (bulk free)
 XMEM-FREE    ( -- u )        \ bytes remaining
 .XMEM        ( -- )          \ print status
 XMEM?        ( -- flag )     \ hardware present?
@@ -149,7 +158,8 @@ pointer. Allocation and free sizes are normalized upward to 16 bytes,
 the size of a free-list node. First-fit reuse therefore splits only on
 recyclable boundaries: padding is temporary space owned by the live
 allocation and is recovered when the caller frees with its original request
-size. `XMEM-RESET` clears the free-list along with the pointer.
+size. The underlying `(XMEM-RESET)` clears the free-list along with the
+pointer.
 
 XMEM allocation sizes are strictly positive. `XMEM-ALLOT` aborts on an
 invalid or out-of-range request, while `XMEM-ALLOT?` returns `0 -1`. Bounds
@@ -161,8 +171,35 @@ unchanged.
 
 **Floor protection:** `XMEM-FLOOR` marks the boundary between
 kernel-reserved XMEM allocations (file buffers loaded at boot) and
-the general-purpose region.  `XMEM-RESET` will not reclaim below
-the floor.
+the general-purpose region. The public `XMEM-RESET` is a deferred checked
+action whose underlying primitive never reclaims below the floor. The
+networking module installs a credential-aware wrapper: on an XMEM machine it
+acquires TLS ownership, throws `TLS-CREDENTIAL-E-BUSY` if ownership is
+contended or any credential is active, and otherwise performs the reset. When
+XMEM is absent, `XMEM-RESET` remains a no-op and does not disturb Bank 0 or
+dictionary state.
+
+#### TLS credential allocations
+
+`TLS-CREDENTIAL-POOL-INIT` makes one persistent caller-sized pool. Its logical
+size is exactly `count * 184`; XMEM adds only the normal 16-byte allocation
+normalization. The pool is then protected below `XMEM-FLOOR`.
+`TLS-CREDENTIAL-POOL-INIT` returns `TLS-CREDENTIAL-E-ALLOC` when XMEM is
+absent. The canonical 1 MiB Bank-0 layout cannot safely source-load the full
+networking module after KDOS establishes its heap, so the credential layer
+does not advertise a dictionary fallback that the enclosing module cannot
+use.
+
+Each credential's copied leaf-first concatenated DER chain has an independent
+XMEM `ALLOCATE` lifetime above the floor. TLS `CertificateEntry` framing and
+per-entry extension vectors are not stored in this allocation; the server
+handshake synthesizes them while streaming the flight.
+Provisioning zeroes the complete payload extent before copying the logical
+bytes. Failure and `TLS-CREDENTIAL-DELETE` wipe that complete payload,
+including allocator padding, before `FREE`. Deletion also wipes the 184-byte
+record except for the nonzero generation retained to make old handles stale.
+All active credentials must be deleted before an XMEM reset can proceed; the
+pool itself survives the admitted reset.
 
 #### HBW (Math RAM)
 
@@ -233,7 +270,7 @@ scratch ARENA-DESTROY                     \ backing freed, descriptor zeroed
 
 | Constant | Value | Backing region |
 |----------|-------|----------------|
-| `A-HEAP` | 0 | Bank 0 heap (`ALLOCATE`/`FREE`) |
+| `A-HEAP` | 0 | Reclaimable `ALLOCATE`/`FREE` dispatch (XMEM when present, otherwise Bank 0) |
 | `A-XMEM` | 1 | External RAM (XMEM bump + free-list) |
 | `A-HBW` | 2 | HBW math RAM (bump only) |
 
@@ -302,7 +339,7 @@ dictionary rather than in those temporary buffers.
 Lifetime         Strategy           Reclaim             Region
 ────────────────────────────────────────────────────────────────
 Permanent        Dictionary         MARKER / FORGET     Bank 0 / XMEM
-Long-lived       Heap ALLOCATE      FREE                Bank 0
+Long-lived       ALLOCATE           FREE                XMEM / Bank 0
 Scoped           Arena              ARENA-DESTROY       Any
 Transactional    Arena + snapshot    ARENA-ROLLBACK      Any
 Ephemeral        Bump (raw)         XMEM-RESET /        XMEM / HBW
@@ -337,7 +374,7 @@ The defenses:
    allocation can't fragment.  When the arena is destroyed, 100% of
    its backing is returned as a single contiguous block.
 
-2. **The heap coalesces on FREE.**  Adjacent free blocks are merged
+2. **The Bank 0 heap coalesces on FREE.** Adjacent free blocks are merged
    immediately (forward + backward coalescing).  This keeps
    fragmentation bounded for well-behaved alloc/free patterns.
 
@@ -345,7 +382,7 @@ The defenses:
    has `HEAP-FRAG` = 1 (one large free block).  Higher values mean
    the free list has been split.  Monitor this during development.
 
-4. **XMEM and HBW use bump allocators.**  No fragmentation is
+4. **XMEM and HBW have bump allocation paths.** No fragmentation is
    possible within the bump region.  The XMEM free-list (for
    destroyed arenas) can fragment over many create/destroy cycles,
    but `XMEM-RESET` clears it completely.
@@ -376,7 +413,7 @@ message if `COREID` ≠ 0.
 
 | Core-0 only | Why |
 |---|---|
-| `ALLOCATE`, `FREE`, `RESIZE` | Shared heap free-list + scratch |
+| `ALLOCATE`, `FREE`, `RESIZE` | Shared Bank 0/XMEM free lists and scratch |
 | `ARENA-NEW`, `ARENA-NEW-AT` | Uses AR-SZ, AR-SRC, AR-BLK |
 | `ARENA-DESTROY` | Calls `FREE` or `XMEM-FREE-BLOCK` |
 
@@ -492,7 +529,7 @@ Bank 0 dictionary space), then advances the floor:
 | Permanent definition | `: FOO ... ;` | Bank 0 / userland | Until `MARKER`/`FORGET` |
 | Permanent variable | `VARIABLE X` | Bank 0 / userland | Until `MARKER`/`FORGET` |
 | Permanent buffer | `CREATE BUF 256 ALLOT` | Bank 0 / userland | Until `MARKER`/`FORGET` |
-| Heap object | `256 ALLOCATE` | Bank 0 | Until `FREE` |
+| Reclaimable object | `256 ALLOCATE` | XMEM when present; otherwise Bank 0 | Until `FREE` |
 | Scoped scratch | `4096 A-HEAP ARENA-NEW` | Any | Until `ARENA-DESTROY` |
 | Temp arena (no dict leak) | `desc 4096 A-XMEM ARENA-NEW-AT` | Any | Until `ARENA-DESTROY` |
 | Raw bump (XMEM) | `4096 XMEM-ALLOT` | XMEM | Until `XMEM-RESET` |
@@ -508,7 +545,7 @@ Bank 0 dictionary space), then advances the floor:
 | Arena destroy | `arena ARENA-DESTROY` | O(1) | Entire arena |
 | Arena reset | `arena ARENA-RESET` | O(1) | All arena allocs (keeps backing) |
 | Arena rollback | `arena snap ARENA-ROLLBACK` | O(1) | Allocs after snapshot |
-| Bulk XMEM reset | `XMEM-RESET` | O(1) | All XMEM above floor |
+| Checked bulk XMEM reset | `XMEM-RESET` | O(1) | All XMEM above floor, only when no TLS credential is active; no-op without XMEM |
 | Bulk HBW reset | `HBW-RESET` | O(1) | All HBW |
 
 ### Inspecting Memory
@@ -583,8 +620,8 @@ Every allocation strategy on the system has a known worst-case cost:
 | Arena `ARENA-ALLOT` | O(1) — advance ptr, bounds check |
 | HBW/XMEM bump | O(1) — advance pointer, bounds check |
 | XMEM bump with free-list | O(n) where n = freed arena blocks |
-| Heap `ALLOCATE` | O(n) where n = free-list length |
-| Heap `FREE` | O(n) — sorted insert + coalesce |
+| Reclaimable `ALLOCATE` | O(n) where n = the selected allocator's free-list length |
+| Reclaimable `FREE` | O(n) for Bank 0 sorted insert/coalesce; O(1) XMEM head insert |
 
 For real-time workloads (tile engine, NIC frame assembly), only the
 O(1) paths are acceptable.  The system is designed so that the fast
@@ -689,7 +726,7 @@ Need temporary scratch for one operation?
   └─ Arena  (ARENA-NEW / ARENA-DESTROY)
 
 Need multiple objects with independent lifetimes?
-  └─ Heap  (ALLOCATE / FREE)
+  └─ Reclaimable allocation  (ALLOCATE / FREE)
 
 Need permanent data or code?
   └─ Dictionary  (ALLOT / CREATE / :)

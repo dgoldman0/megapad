@@ -19960,6 +19960,82 @@ class TestKDOSMulticore(unittest.TestCase):
         self.assertIn("10 = KDOS TLS Workspace", text)
         self.assertNotIn("RSA Scratch", text)
 
+    def test_tls_credential_cross_core_cancel_capstone(self):
+        """A physical peer core cancels one real full-batch credential sign."""
+        fixture_dir = os.path.join(PROJECT_ROOT, "tests", "fixtures", "tls")
+        with open(os.path.join(fixture_dir, "leaf.der.b64"), "rb") as stream:
+            leaf = base64.b64decode(stream.read())
+        private_d3 = b"\x03" + bytes(31)
+        digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+
+        def forth_bytes(name, data):
+            lines = [f"CREATE {name}"]
+            for offset in range(0, len(data), 16):
+                lines.append(" ".join(
+                    f"{byte} C," for byte in data[offset:offset + 16]
+                ))
+            return lines
+
+        lines = forth_bytes("tcc-chain", leaf)
+        lines += forth_bytes("tcc-key", private_d3)
+        lines += forth_bytes("tcc-hash", digest)
+        lines += [
+            "VARIABLE tcc-slot VARIABLE tcc-gen VARIABLE tcc-prov-ior",
+            "VARIABLE tcc-sign-u VARIABLE tcc-sign-ior",
+            "VARIABLE tcc-cancel-ior VARIABLE tcc-attempts",
+            "VARIABLE tcc-ready VARIABLE tcc-done",
+            "CREATE tcc-out 72 ALLOT tcc-out 72 165 FILL",
+            ": tcc-cancel-worker",
+            "  -1 tcc-ready !",
+            "  BEGIN",
+            "    tcc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ 0<>",
+            "    tcc-done @ OR",
+            "  UNTIL",
+            "  tcc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ 0= IF",
+            "    TLS-CREDENTIAL-E-NO-ACTIVE tcc-cancel-ior ! EXIT",
+            "  THEN",
+            "  BEGIN",
+            "    1 tcc-attempts +!",
+            "    tcc-slot @ tcc-gen @ TLS-CREDENTIAL-SIGN-CANCEL",
+            "    DUP TLS-CREDENTIAL-E-BUSY =",
+            "  WHILE DROP REPEAT",
+            "  tcc-cancel-ior ! ;",
+            '1 TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            f"tcc-chain {len(leaf)} tcc-key TLS-CREDENTIAL-PROVISION",
+            "tcc-prov-ior ! tcc-gen ! tcc-slot !",
+            '." PROVISION=" tcc-prov-ior @ .',
+            "' tcc-cancel-worker 1 CORE-RUN",
+            "BEGIN tcc-ready @ UNTIL",
+            "tcc-slot @ tcc-gen @ tcc-hash tcc-out 72 "
+            "TLS-CREDENTIAL-SIGN",
+            "tcc-sign-ior ! tcc-sign-u ! -1 tcc-done !",
+            "1 CORE-WAIT",
+            '." SIGN-IOR=" tcc-sign-ior @ . ." SIGN-U=" tcc-sign-u @ .',
+            '." CANCEL-IOR=" tcc-cancel-ior @ .',
+            '." ATTEMPTS=" tcc-attempts @ .',
+            ': tcc-output-atomic? TRUE 72 0 DO '
+            'tcc-out I + C@ 165 = AND LOOP ;',
+            '." ATOMIC=" tcc-output-atomic? .',
+            '." REFS=" tcc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." ACTIVE-SIGN=" tcc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ .',
+            '." CANCEL-SIGN=" tcc-slot @ 1- _TC@ TC.CANCEL-SIGN + @ .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." CRED-OWNER=" _TC-LOCK-OWNER-CORE @ .',
+        ]
+        text = self._run_mc(lines, max_steps=400_000_000)
+        for token in (
+            "INIT=0 ", "PROVISION=0 ",
+            "SIGN-IOR=-4332 SIGN-U=0 ", "CANCEL-IOR=0 ",
+            "ATOMIC=-1 ", "REFS=0 ", "ACTIVE-SIGN=0 ",
+            "CANCEL-SIGN=0 ", "TLS-OWNER=0 ", "CRED-OWNER=-1 ",
+        ):
+            self.assertIn(token, text)
+        attempts = int(text.split("ATTEMPTS=")[-1].split()[0])
+        self.assertGreaterEqual(attempts, 1)
+
     def test_rsa_public_scratch_is_rejected_off_core_zero(self):
         """Every public RSA scratch entry rejects a physical worker core."""
         text = self._run_mc([
@@ -23577,6 +23653,423 @@ class TestKDOSECDSA(_KDOSNetworkTestBase):
             "CORRUPT=-1 " in text or
             "CORRUPT=18446744073709551615 " in text
         )
+
+
+class TestKDOSTLSCredentials(_KDOSNetworkTestBase):
+    """Lower-owned, generation-bound TLS server credential registry."""
+
+    FIXTURE_DIR = os.path.join(PROJECT_ROOT, "tests", "fixtures", "tls")
+    PRIVATE_D3 = b"\x03" + bytes(31)
+    SAMPLE_DIGEST = bytes.fromhex(
+        "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+        "1a831d0268e9891562113d8a62add1bf"
+    )
+    SAMPLE_DER_D3 = bytes.fromhex(
+        "3045022100ddd87977a70458ec238547a2ca851b61"
+        "7633175d0329d6539c0c59cda5cb437202204303"
+        "13458db158c356c30551e57e35836a9e4aabaf17"
+        "ef18363cdcd76572a94a"
+    )
+
+    @classmethod
+    def _fixture(cls, name: str) -> bytes:
+        path = os.path.join(cls.FIXTURE_DIR, f"{name}.der.b64")
+        with open(path, "rb") as stream:
+            return base64.b64decode(stream.read())
+
+    @staticmethod
+    def _forth_bytes(name: str, data: bytes) -> list[str]:
+        lines = [f"CREATE {name}"]
+        for offset in range(0, len(data), 16):
+            lines.append(" ".join(
+                f"{byte} C," for byte in data[offset:offset + 16]
+            ))
+        return lines
+
+    @staticmethod
+    def _der_chain(certs: list[bytes]) -> bytes:
+        return b"".join(certs)
+
+    @classmethod
+    def _leaf_public(cls) -> bytes:
+        leaf = cls._fixture("leaf")
+        marker = bytes.fromhex("03420004")
+        start = leaf.index(marker) + 3
+        return leaf[start:start + 65]
+
+    @classmethod
+    def _provision_lines(cls, *, capacity=1, certs=None,
+                         private=None) -> tuple[list[str], bytes]:
+        if certs is None:
+            certs = [cls._fixture("leaf")]
+        if private is None:
+            private = cls.PRIVATE_D3
+        der_chain = cls._der_chain(certs)
+        lines = cls._forth_bytes("tc-chain", der_chain)
+        lines += cls._forth_bytes("tc-chain-copy", der_chain)
+        lines += cls._forth_bytes("tc-key", private)
+        lines += [
+            "VARIABLE tc-slot VARIABLE tc-gen VARIABLE tc-ior",
+            f'{capacity} TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            f"tc-chain {len(der_chain)} tc-key TLS-CREDENTIAL-PROVISION",
+            "tc-ior ! tc-gen ! tc-slot !",
+            '." PROVISION-DEPTH=" DEPTH .',
+        ]
+        return lines, der_chain
+
+    def test_credential_roundtrip_owns_sources_and_signs_exact_der(self):
+        """Import copies identity/key and opaque signing matches d=3 KAT."""
+        lines, der_chain = self._provision_lines(capacity=2)
+        lines += self._forth_bytes("tc-pub-ex", self._leaf_public())
+        lines += self._forth_bytes("tc-hash", self.SAMPLE_DIGEST)
+        lines += self._forth_bytes("tc-der-ex", self.SAMPLE_DER_D3)
+        lines += [
+            '." PROV=" tc-ior @ . ." SLOT=" tc-slot @ . '
+            '." GEN=" tc-gen @ .',
+            '." CERT-ALLOC=" tc-slot @ 1- _TC@ TC.CHAIN-A + @ '
+            '_TC-ALLOCATION-U .',
+            f"tc-chain {len(der_chain)} 0 FILL tc-key 32 0 FILL",
+            "CREATE tc-pub 65 ALLOT VARIABLE tc-scheme",
+            "tc-slot @ tc-gen @ tc-pub tc-scheme TLS-CREDENTIAL-PUBLIC",
+            '." PUB-IOR=" . ." COUNT=" .',
+            '." PUB=" tc-pub tc-pub-ex 65 _XC-BYTES= .',
+            '." SCHEME=" tc-scheme @ .',
+            f"CREATE tc-chain-out {len(der_chain)} ALLOT",
+            f"tc-slot @ tc-gen @ tc-chain-out {len(der_chain)} "
+            "TLS-CREDENTIAL-CHAIN",
+            '." CHAIN-IOR=" . ." CHAIN-U=" .',
+            f'." CHAIN=" tc-chain-out tc-chain-copy {len(der_chain)} '
+            "_XC-BYTES= .",
+            "CREATE tc-der 71 ALLOT tc-der 71 165 FILL",
+            "tc-slot @ tc-gen @ tc-hash tc-der 71 TLS-CREDENTIAL-SIGN",
+            '." SIGN-IOR=" . ." SIGN-U=" .',
+            '." DER=" tc-der tc-der-ex 71 _XC-BYTES= .',
+            '." ACTIVE=" TLS-CREDENTIAL-ACTIVE @ .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "PROVISION-DEPTH=0 ",
+            "PROV=0 ", "SLOT=1 ", "GEN=1 ",
+            "CERT-ALLOC=472 ",
+            "PUB-IOR=0 COUNT=1 ", "PUB=-1 ", "SCHEME=1027 ",
+            f"CHAIN-IOR=0 CHAIN-U={len(der_chain)} ", "CHAIN=-1 ",
+            "SIGN-IOR=0 SIGN-U=71 ", "DER=-1 ", "ACTIVE=1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_pool_and_chain_counts_are_not_connection_capped(self):
+        """Caller-selected nine-slot pool and nine-entry chain both work."""
+        leaf = self._fixture("leaf")
+        leaf_chain = self._der_chain([leaf])
+        der_chain = self._der_chain([leaf] * 9)
+        lines = self._forth_bytes("tc-one-chain", leaf_chain)
+        lines += self._forth_bytes("tc-chain", der_chain)
+        lines += self._forth_bytes("tc-key", self.PRIVATE_D3)
+        lines += [
+            "VARIABLE tc-slot VARIABLE tc-gen VARIABLE tc-ior",
+            "VARIABLE tc-failures 0 tc-failures !",
+            '9 TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            ": tc-fill-eight 8 0 DO",
+            f"  tc-one-chain {len(leaf_chain)} tc-key "
+            "TLS-CREDENTIAL-PROVISION",
+            "  tc-ior ! tc-gen ! tc-slot !",
+            "  tc-ior @ IF 1 tc-failures +! THEN",
+            "LOOP ;",
+            "tc-fill-eight",
+            f"tc-chain {len(der_chain)} tc-key TLS-CREDENTIAL-PROVISION",
+            "tc-ior ! tc-gen ! tc-slot !",
+            "tc-ior @ IF 1 tc-failures +! THEN",
+            '." FAILURES=" tc-failures @ .',
+            '." ACTIVE=" TLS-CREDENTIAL-ACTIVE @ .',
+            '." CAPACITY=" TLS-CREDENTIAL-CAPACITY @ .',
+            '." POOL-ALLOC=" TLS-CREDENTIAL-POOL-ALLOCATED @ .',
+            "tc-slot @ tc-gen @ 0 0 TLS-CREDENTIAL-PUBLIC",
+            '." PUBLIC-IOR=" . ." CHAIN-COUNT=" .',
+            f"CREATE tc-chain-out {len(der_chain)} ALLOT",
+            f"tc-slot @ tc-gen @ tc-chain-out {len(der_chain)} "
+            "TLS-CREDENTIAL-CHAIN",
+            '." CHAIN-IOR=" . ." CHAIN-U=" .',
+            f'." CHAIN=" tc-chain-out tc-chain {len(der_chain)} _XC-BYTES= .',
+            f"tc-one-chain {len(leaf_chain)} tc-key TLS-CREDENTIAL-PROVISION",
+            '." FULL-IOR=" . ." FULL-GEN=" . ." FULL-SLOT=" .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "FAILURES=0 ", "ACTIVE=9 ", "CAPACITY=9 ",
+            "POOL-ALLOC=1664 ",
+            "PUBLIC-IOR=0 CHAIN-COUNT=9 ",
+            f"CHAIN-IOR=0 CHAIN-U={len(der_chain)} ", "CHAIN=-1 ",
+            "FULL-IOR=-4323 FULL-GEN=0 FULL-SLOT=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_provision_failures_are_transactional(self):
+        """Malformed, invalid, mismatched, and aliased imports publish none."""
+        leaf_chain = self._der_chain([self._fixture("leaf")])
+        malformed = b"\x00\x00\x01\x30\x00\x00"
+        lines = self._forth_bytes("tc-chain", leaf_chain)
+        lines += self._forth_bytes("tc-bad-chain", malformed)
+        lines += self._forth_bytes("tc-zero", bytes(32))
+        lines += self._forth_bytes("tc-four", b"\x04" + bytes(31))
+        lines += [
+            '2 TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            f"tc-bad-chain {len(malformed)} tc-four TLS-CREDENTIAL-PROVISION",
+            '." CERT-IOR=" . 2DROP',
+            f"tc-chain {len(leaf_chain)} tc-zero TLS-CREDENTIAL-PROVISION",
+            '." KEY-IOR=" . 2DROP',
+            f"tc-chain {len(leaf_chain)} tc-four TLS-CREDENTIAL-PROVISION",
+            '." MISMATCH-IOR=" . 2DROP',
+            f"tc-chain {len(leaf_chain)} tc-chain TLS-CREDENTIAL-PROVISION",
+            '." ALIAS-IOR=" . 2DROP',
+            '." ACTIVE=" TLS-CREDENTIAL-ACTIVE @ .',
+            '." FREE0=" 0 _TC@ TC.STATE + @ .',
+            '." FREE1=" 1 _TC@ TC.STATE + @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "CERT-IOR=-4325 ", "KEY-IOR=-4327 ",
+            "MISMATCH-IOR=-4328 ", "ALIAS-IOR=-4330 ",
+            "ACTIVE=0 ", "FREE0=0 ", "FREE1=0 ", "OWNER=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_intermediates_require_only_exact_certificate_envelope(self):
+        """Opaque intermediates need a Certificate envelope, not leaf profile."""
+        leaf = self._fixture("leaf")
+        # Certificate ::= SEQUENCE { SEQUENCE {}, SEQUENCE {}, BIT STRING 0x00 }
+        # This is deliberately not a semantically parseable X.509 leaf, but it
+        # has the exact shallow certificate envelope required of intermediates.
+        opaque_intermediate = bytes.fromhex("30083000300003020000")
+        # A BIT STRING containing only its unused-bits octet has no signature.
+        malformed_intermediate = bytes.fromhex("300730003000030100")
+        accepted_chain = self._der_chain([leaf, opaque_intermediate])
+        rejected_chain = self._der_chain([leaf, malformed_intermediate])
+        lines = self._forth_bytes("tc-good-chain", accepted_chain)
+        lines += self._forth_bytes("tc-bad-chain", rejected_chain)
+        lines += self._forth_bytes("tc-key", self.PRIVATE_D3)
+        lines += [
+            "VARIABLE tc-good-ior VARIABLE tc-good-gen VARIABLE tc-good-slot",
+            '2 TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            f"tc-good-chain {len(accepted_chain)} tc-key "
+            "TLS-CREDENTIAL-PROVISION",
+            'tc-good-ior ! tc-good-gen ! tc-good-slot !',
+            '." GOOD-IOR=" tc-good-ior @ .',
+            'tc-good-slot @ tc-good-gen @ 0 0 TLS-CREDENTIAL-PUBLIC',
+            '." GOOD-PUBLIC=" . ." GOOD-COUNT=" .',
+            f"tc-bad-chain {len(rejected_chain)} tc-key "
+            "TLS-CREDENTIAL-PROVISION",
+            '." BAD-IOR=" . 2DROP',
+            '." ACTIVE=" TLS-CREDENTIAL-ACTIVE @ .',
+            '." DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "GOOD-IOR=0 ",
+            "GOOD-PUBLIC=0 GOOD-COUNT=2 ",
+            "BAD-IOR=-4325 ", "ACTIVE=1 ", "DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_sign_uses_actual_output_span_and_is_atomic(self):
+        """Only actual DER geometry matters; real aliases remain atomic."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("tc-hash", self.SAMPLE_DIGEST)
+        lines += self._forth_bytes("tc-hash-copy", self.SAMPLE_DIGEST)
+        lines += self._forth_bytes("tc-der-ex", self.SAMPLE_DER_D3)
+        lines += [
+            ': tc-eps-zero? TRUE /ECDSA-P256-SIGN-WORK 0 DO '
+            '_ECDSA-P256-SIGN-WORK I + C@ 0= AND LOOP ;',
+            ': tc-overlap-geometry? '
+            '100 20 110 1 _TC-RANGES-OVERLAP? '
+            '100 20 120 1 _TC-RANGES-OVERLAP? 0= AND '
+            '100 20 80 20 _TC-RANGES-OVERLAP? 0= AND '
+            '100 20 90 40 _TC-RANGES-OVERLAP? AND ;',
+            '." GEOMETRY=" tc-overlap-geometry? .',
+            "CREATE tc-short 71 ALLOT tc-short 71 165 FILL",
+            "tc-slot @ tc-gen @ tc-hash tc-short 70 TLS-CREDENTIAL-SIGN",
+            '." SHORT-IOR=" . ." SHORT-U=" .',
+            ': tc-short-atomic? TRUE 71 0 DO tc-short I + C@ 165 = AND LOOP ;',
+            '." SHORT-ATOMIC=" tc-short-atomic? .',
+            "CREATE tc-zone 160 ALLOT tc-zone 160 165 FILL",
+            "tc-hash tc-zone 80 + 32 MOVE",
+            "tc-slot @ tc-gen @ tc-zone 80 + tc-zone 112 "
+            "TLS-CREDENTIAL-SIGN",
+            '." TAIL-IOR=" . ." TAIL-U=" .',
+            '." TAIL-DER=" tc-zone tc-der-ex 71 _XC-BYTES= .',
+            '." TAIL-HASH=" tc-zone 80 + tc-hash-copy 32 _XC-BYTES= .',
+            '." SIGN-WORK-ZERO=" tc-eps-zero? .',
+            "tc-hash-copy tc-hash 32 MOVE",
+            "tc-slot @ tc-gen @ tc-hash tc-hash 71 TLS-CREDENTIAL-SIGN",
+            '." ALIAS-IOR=" . ." ALIAS-U=" .',
+            '." HASH-ATOMIC=" tc-hash tc-hash-copy 32 _XC-BYTES= .',
+            "tc-slot @ tc-gen @ tc-hash "
+            "tc-slot @ 1- _TC@ TC.PRIVATE + 71 "
+            "TLS-CREDENTIAL-SIGN",
+            '." OWNED-IOR=" . ." OWNED-U=" .',
+            '." KEY=" tc-slot @ 1- _TC@ TC.PRIVATE + C@ .',
+            "tc-slot @ tc-gen @ tc-hash TLS-OWNER-DEPTH 71 "
+            "TLS-CREDENTIAL-SIGN",
+            '." OWNER-ALIAS-IOR=" . ." OWNER-ALIAS-U=" .',
+            '." OWNER-DEPTH=" TLS-OWNER-DEPTH @ .',
+            "tc-slot @ tc-gen @ tc-hash "
+            "tc-slot @ 1- _TC@ TC.CHAIN-A + @ 8 - 71 "
+            "TLS-CREDENTIAL-SIGN",
+            '." HEADER-IOR=" . ." HEADER-U=" .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "GEOMETRY=-1 ",
+            "SHORT-IOR=-4323 SHORT-U=0 ", "SHORT-ATOMIC=-1 ",
+            "TAIL-IOR=0 TAIL-U=71 ", "TAIL-DER=-1 ", "TAIL-HASH=-1 ",
+            "SIGN-WORK-ZERO=-1 ",
+            "ALIAS-IOR=-4330 ALIAS-U=0 ", "HASH-ATOMIC=-1 ",
+            "OWNED-IOR=-4330 OWNED-U=0 ", "KEY=3 ",
+            "OWNER-ALIAS-IOR=-4330 OWNER-ALIAS-U=0 ",
+            "OWNER-DEPTH=0 ", "HEADER-IOR=-4330 HEADER-U=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_delete_stales_handle_and_reset_preserves_pool(self):
+        """Delete wipes records, stale handles fail, and reset keeps the pool."""
+        lines, der_chain = self._provision_lines()
+        lines += [
+            "VARIABLE tc-old-slot tc-slot @ tc-old-slot !",
+            "VARIABLE tc-old-gen tc-gen @ tc-old-gen !",
+            "VARIABLE tc-pool TLS-CREDENTIALS @ tc-pool !",
+            "VARIABLE tc-chain-a tc-slot @ 1- _TC@ TC.CHAIN-A + @ tc-chain-a !",
+            "VARIABLE tc-chain-alloc tc-chain-a @ _TC-ALLOCATION-U "
+            "tc-chain-alloc !",
+            ': tc-freed-tail-zero? TRUE tc-chain-alloc @ 8 DO '
+            'tc-chain-a @ I + C@ 0= AND LOOP ;',
+            "VARIABLE tc-reset-ior",
+            "' XMEM-RESET CATCH tc-reset-ior !",
+            '." LIVE-RESET=" tc-reset-ior @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." ACTIVE0=" TLS-CREDENTIAL-ACTIVE @ .',
+            '." STATE0=" 0 _TC@ TC.STATE + @ .',
+            '." GEN0=" 0 _TC@ TC.GENERATION + @ .',
+            '." CHAIN-A0=" 0 _TC@ TC.CHAIN-A + @ .',
+            '." PRIVATE0=" 0 _TC@ TC.PRIVATE + C@ .',
+            '." FREED-TAIL=" tc-freed-tail-zero? .',
+            "tc-old-slot @ tc-old-gen @ 0 0 TLS-CREDENTIAL-PUBLIC",
+            '." STALE-IOR=" . ." STALE-COUNT=" .',
+            "XMEM-RESET",
+            '." POOL=" TLS-CREDENTIALS @ tc-pool @ = .',
+            '." CAPACITY=" TLS-CREDENTIAL-CAPACITY @ .',
+            f"tc-chain-copy {len(der_chain)} tc-key "
+            "TLS-CREDENTIAL-PROVISION tc-ior ! tc-gen ! tc-slot !",
+            '." REPROV=" tc-ior @ . ." SLOT=" tc-slot @ . '
+            '." GEN=" tc-gen @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("LIVE-RESET=", text)
+        live_reset = int(text.split("LIVE-RESET=")[-1].split()[0])
+        self.assertNotEqual(live_reset, 0)
+        for token in (
+            "DELETE=0 ", "ACTIVE0=0 ", "STATE0=0 ", "GEN0=1 ",
+            "CHAIN-A0=0 ", "PRIVATE0=0 ",
+            "FREED-TAIL=-1 ",
+            "STALE-IOR=-4324 STALE-COUNT=0 ",
+            "POOL=-1 ", "CAPACITY=1 ",
+            "REPROV=0 SLOT=1 GEN=2 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_wrap_retires_slot_and_cancel_targets_exact_operation(self):
+        """Generation wrap skips a slot; cancellation cannot redirect state."""
+        leaf_chain = self._der_chain([self._fixture("leaf")])
+        lines = self._forth_bytes("tc-chain", leaf_chain)
+        lines += self._forth_bytes("tc-key", self.PRIVATE_D3)
+        lines += [
+            '3 TLS-CREDENTIAL-POOL-INIT ." INIT=" .',
+            "-1 0 _TC@ TC.GENERATION + !",
+            "VARIABLE tc-a-slot VARIABLE tc-a-gen VARIABLE tc-a-ior",
+            f"tc-chain {len(leaf_chain)} tc-key TLS-CREDENTIAL-PROVISION",
+            "tc-a-ior ! tc-a-gen ! tc-a-slot !",
+            '." A-IOR=" tc-a-ior @ . ." A-SLOT=" tc-a-slot @ . '
+            '." A-GEN=" tc-a-gen @ .',
+            '." RETIRED=" 0 _TC@ TC.STATE + @ .',
+            "VARIABLE tc-b-slot VARIABLE tc-b-gen VARIABLE tc-b-ior",
+            f"tc-chain {len(leaf_chain)} tc-key TLS-CREDENTIAL-PROVISION",
+            "tc-b-ior ! tc-b-gen ! tc-b-slot !",
+            "TLS-OWNER-TRY DROP",
+            "tc-a-slot @ tc-a-gen @ _TC-HANDLE-RESOLVE DROP _TC-SLOT !",
+            '_TC-SIGN-ACTIVATE ." ACTIVATE=" .',
+            "tc-a-slot @ tc-a-gen @ TLS-CREDENTIAL-SIGN-CANCEL",
+            '." SAME-CORE-CANCEL=" .',
+            "TLS-OWNER-RELEASE",
+            "tc-b-slot @ tc-b-gen @ TLS-CREDENTIAL-SIGN-CANCEL",
+            '." WRONG-CANCEL=" .',
+            "tc-a-slot @ tc-a-gen @ TLS-CREDENTIAL-SIGN-CANCEL",
+            '." CANCEL=" .',
+            "TLS-OWNER-TRY DROP",
+            '_TC-SIGN-FINISH ." FINISH-CANCELLED=" .',
+            '." REFS=" _TC-SLOT @ TC.REFS + @ .',
+            '." ACTIVE-SIGN=" _TC-SLOT @ TC.ACTIVE-SIGN + @ .',
+            '." CANCEL-SIGN=" _TC-SLOT @ TC.CANCEL-SIGN + @ .',
+            '_TC-SIGN-ACTIVATE ." ACTIVATE2=" .',
+            '_TC-SIGN-FINISH ." FINISH2=" .',
+            '." OP-GEN=" _TC-OP-GEN @ .',
+            "-1 _TC-SLOT @ TC.NEXT-SIGN + !",
+            '_TC-SIGN-ACTIVATE ." OP-WRAP=" .',
+            '." WRAP-REFS=" _TC-SLOT @ TC.REFS + @ .',
+            "TLS-OWNER-RELEASE",
+            '_TC-LOCK-TRY ." LOCK1=" .',
+            '_TC-LOCK-TRY ." LOCK2=" .',
+            '." LOCK-OWNER=" _TC-LOCK-OWNER? .',
+            '_TC-UNLOCK',
+            '_TC-LOCK-TRY ." LOCK3=" .',
+            '_TC-UNLOCK',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "A-IOR=0 A-SLOT=2 A-GEN=1 ", "RETIRED=2 ",
+            "ACTIVATE=0 ", "SAME-CORE-CANCEL=-4329 ",
+            "WRONG-CANCEL=-4333 ", "CANCEL=0 ",
+            "FINISH-CANCELLED=-1 ", "REFS=0 ", "ACTIVE-SIGN=0 ",
+            "CANCEL-SIGN=0 ", "ACTIVATE2=0 ", "FINISH2=0 ",
+            "OP-GEN=2 ", "OP-WRAP=-4334 ", "WRAP-REFS=0 ",
+            "LOCK1=0 ", "LOCK2=-4329 ", "LOCK-OWNER=-1 ",
+            "LOCK3=0 ", "OWNER=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_credential_source_has_protocol_not_fixture_limits(self):
+        """Credential capacity derives from callers/TLS framing, not eight."""
+        source = Path(NETWORKING_PATH).read_text(encoding="utf-8")
+        x509 = TestKDOSECDSA._forth_definition("X509-DESC-PARSE")
+        validate = TestKDOSECDSA._forth_definition("_TC-CHAIN-VALIDATE")
+        envelope = TestKDOSECDSA._forth_definition("_TC-CERT-ENVELOPE")
+        cancel = TestKDOSECDSA._forth_definition("_TC-CANCEL-RESOLVE")
+        sign = TestKDOSECDSA._forth_definition("TLS-CREDENTIAL-SIGN")
+        pool = TestKDOSECDSA._forth_definition(
+            "TLS-CREDENTIAL-POOL-INIT"
+        )
+        reset = TestKDOSECDSA._forth_definition("(TLS-XMEM-RESET)")
+        self.assertNotIn("8192", x509)
+        self.assertNotIn("8192", validate)
+        self.assertNotRegex(validate, r"_TC-COUNT\s+@\s+8")
+        self.assertIn(
+            "0xFFFFFB CONSTANT TLS-CREDENTIAL-WIRE-LIST-MAX", source
+        )
+        self.assertEqual(envelope.count("DER-READ"), 4)
+        self.assertEqual(validate.count("X509-DESC-PARSE"), 1)
+        self.assertNotIn("TLS-CREDENTIAL-CERTIFICATE", source)
+        self.assertIn("TLS-CREDENTIAL-CAPACITY @ 0 DO", source)
+        for shared in ("_TC-SLOT", "_TC-GENERATION", "_TC-H1", "_TC-H2"):
+            self.assertNotIn(shared, cancel)
+        self.assertNotIn(
+            "_TC-OUT @ _TC-CAP @ _TC-HASH @ 32", sign
+        )
+        self.assertIn(
+            "_TC-OUT @ _TC-WRITTEN @ _TC-HASH @ 32", sign
+        )
+        self.assertIn(
+            "XMEM? 0= IF DROP TLS-CREDENTIAL-E-ALLOC", pool
+        )
+        self.assertIn("XMEM? 0= IF EXIT THEN", reset)
 
 
 class TestKDOSRSA(_KDOSNetworkTestBase):

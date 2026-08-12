@@ -122,21 +122,26 @@ cross-backend qualification. Source presence alone never sets a capability.
 
 ### Allocation
 
-The portable BIOS guard is hardware spinlock 8. KDOS reserves the adjacent
-hardware spinlocks 9 and 10 for HMAC/HKDF and TLS workspace ownership:
+The portable BIOS guard is hardware spinlock 8. KDOS reserves hardware
+spinlocks 9 through 11 for HMAC/HKDF, TLS workspace ownership, and short TLS
+credential-registry/cancellation transitions:
 
 | Lock | Purpose | Acquire | Release |
 |---:|---|---:|---:|
 | 8 | Checked BIOS crypto/device ownership | `SPINLOCK_BASE + 0x20`, absolute offset `+0x620` | `SPINLOCK_BASE + 0x21`, absolute offset `+0x621` |
 | 9 | KDOS HMAC/HKDF shared scratch | `SPINLOCK_BASE + 0x24`, absolute offset `+0x624` | `SPINLOCK_BASE + 0x25`, absolute offset `+0x625` |
 | 10 | KDOS TLS shared workspace | `SPINLOCK_BASE + 0x28`, absolute offset `+0x628` | `SPINLOCK_BASE + 0x29`, absolute offset `+0x629` |
+| 11 | KDOS TLS credential registry/cancellation | `SPINLOCK_BASE + 0x2C`, absolute offset `+0x62C` | `SPINLOCK_BASE + 0x2D`, absolute offset `+0x62D` |
 
 The spinlock bank is 16 locks in the documented 64-byte aperture. Locks 0
 through 7 are already assigned by KDOS; lock 8 is named `CRYPTO-LOCK` and is
 reserved for the BIOS contract, while lock 9 is named `HMAC-HKDF-LOCK` and is
 reserved by KDOS. Lock 10 is named `TLS-OWNER-LOCK` and serializes KDOS TLS
-transcript, certificate, record, plaintext, exporter, and related handshake
-scratch. All three acquisition paths perform one atomic, nonblocking attempt.
+transcript, certificate, record, plaintext, exporter, credential signing, and
+related handshake scratch. Lock 11 is `TLS-CREDENTIAL-LOCK`; it protects only
+short credential record, reference, operation-generation, and cancellation
+transitions. The checked acquisition paths perform an atomic attempt, except
+for the signer's terminal lock-11 arbitration after it already owns lock 10.
 Busy maps to the family's checked state status; callers may yield and retry
 outside the checked word.
 
@@ -183,9 +188,49 @@ though both guards are nonblocking and therefore cannot deadlock.
 Public KDOS TLS operations that touch shared workspace acquire lock 10 first.
 Recursive entry is tracked in software by the exact
 `(COREID,TASK-ID)` and a depth count because hardware same-core reacquisition
-does not supply recursion depth. TLS may call KDOS HMAC/HKDF and checked BIOS
-crypto only in the strict order 10, then 9, then 8. Code holding either lower
-lock must not call upward into TLS.
+does not supply recursion depth. An ordinary credential operation may briefly
+take lock 11 under lock 10 but releases it before allocator or cryptographic
+work. TLS may then call KDOS HMAC/HKDF and checked BIOS crypto only in the
+strict order 10, optional 11 and release, then 9, then 8. Code holding either
+lower crypto lock must not call upward into TLS.
+
+`TLS-CREDENTIAL-SIGN-CANCEL` is deliberately outside that nesting: it takes
+only lock 11, whose nonrecursive software owner records exact
+`(COREID,TASK-ID)`, resolves the two-cell `(slot+1,generation)` authority without
+touching the signer's shared metadata, and copies the active operation
+generation into its cancellation field. It neither acquires lock 10 nor calls
+an allocator or crypto word. This permits the metadata request to be issued
+from another physical core while signing holds lock 10. Same-core cancellation
+while lock 10 is active returns credential busy; depthless hardware same-core
+reacquisition can neither steal nor release the registry lock. A qualified
+four-core emulator journey has exercised peer-core cancellation during one
+real full-batch credential signature and verified atomic output plus complete
+owner and operation-metadata cleanup; this is not interrupt-handler or
+physical-board evidence.
+
+### Lower-owned TLS signing capability
+
+The public server-signing boundary accepts a raw 32-byte little-endian P-256
+scalar only during core-0 credential provisioning. It copies the scalar into
+a 184-byte lower record only after the complete P-256 public point matches the
+leaf certificate, then returns a two-cell opaque generational handle rather
+than a pointer. The pool size is caller-selected and certificate-chain count
+has no private cap. Credential storage is a leaf-first concatenation of
+self-delimiting DER Certificate values, not TLS framing. Every entry has an
+exact shallow Certificate envelope and only the leaf is deeply parsed. The
+synthesized wire sum `sum(DER length + 5)` must fit `0xFFFFFB`, the TLS uint24
+Certificate-body remainder after its empty request context and list length.
+This is KDOS memory ownership against accidental exposure, not an HSM or a
+privileged-code protection boundary.
+
+Opaque signing uses deterministic ECDSA-P256-SHA256, lower DER staging, the
+actual encoded caller capacity, and both the signer's complete-batch cancel
+sample and lock-11 late-publication arbitration. Delete preserves only stale
+generation metadata while wiping the record and the complete allocated DER
+chain before free. Provision, sign, cancel, delete, alias,
+capacity, lower-crypto, and unexpected-throw paths are defined to publish no
+partial authority or signature and to wipe their owned private staging before
+release.
 
 The KDOS multi-window SHAKE wrappers and multi-block HKDF expansion preflight
 their complete caller output spans, then publish successful checked chunks in
@@ -1119,7 +1164,7 @@ exact externally observable states before a new request can be accepted:
 
 | Surface | Reset state |
 |---|---|
-| Portable guards | Spinlocks 8 and 9 are free; `CRYPTO-OWNER-CORE = UINT64_MAX`; `CRYPTO-OWNER-TASK = 0`; every per-core checked CRC owner record is unowned. |
+| Portable guards | Spinlocks 8 through 11 are free; `CRYPTO-OWNER-CORE = UINT64_MAX`; `CRYPTO-OWNER-TASK = 0`; every per-core checked CRC owner record is unowned. KDOS initializes its software TLS owner and credential registry separately when their modules load. |
 | CRC engine | Mode 0; `CRC_ACC = 0x00000000FFFFFFFF`; every microcluster CRC hardware owner is none; no CRC operation is pending. |
 | SHA/Keccak front end | `CTRL = 0`; `STATUS = 0x00`; `ERROR = 0`; `STATE_INDEX = 0`; all 25 lanes, `DOUT`, rate/input storage, staging, and cursors are zero; no completion is pending and no round-service owner exists. |
 | WOTS | `STATUS = IDLE`; `ERROR = 0`; `CYCLES = 0`; all programming bytes, `DOUT`, private context, constructed state, counters, and transients are zero; no DMA beat is outstanding and no Keccak claim exists. |
@@ -1127,6 +1172,16 @@ exact externally observable states before a new request can be accepted:
 Capability values are configuration state, not mutable transaction state; a
 reset does not manufacture support that the executing backend does not
 implement.
+
+Runtime `XMEM-RESET` is a KDOS memory-lifetime action, not the hardware reset
+described by this table. The networking module defers it through lock 10 and,
+when XMEM exists, refuses it with credential busy status while any credential
+is active. After synchronous deletion wipes and frees every DER chain,
+reset reclaims only above `XMEM-FLOOR` and therefore preserves the
+caller-sized credential record pool and its stale generations. Without XMEM,
+the bulk-reset action is a no-op, but the XMEM-dependent credential pool cannot
+be initialized. Credential handles are volatile and make no claim of
+surviving cold machine reset.
 
 ## Shared implementation invariants
 
@@ -1279,8 +1334,9 @@ a separate authorized task.
 ### Guard and System Info checkpoint 2
 
 The execution model and RTL implement the exact 64-byte, 16-lock spinlock
-aperture. Lock 8 is reserved for checked MMIO crypto and KDOS reserves lock 9
-for its HMAC/HKDF scratch. Main-bus arbitration
+aperture. Lock 8 is reserved for checked MMIO crypto; KDOS reserves lock 9 for
+HMAC/HKDF scratch, lock 10 for TLS workspace ownership, and lock 11 for short
+TLS credential registry/cancellation transitions. Main-bus arbitration
 preserves requester-valid and the winning architectural global core ID
 through the response; cluster requests use the latched winning microcore
 identity, while DMA and cluster-internal SHA traffic are requester-invalid.
