@@ -24351,6 +24351,731 @@ class TestKDOSTLSCredentials(_KDOSNetworkTestBase):
         self.assertIn("XMEM? 0= IF EXIT THEN", reset)
 
 
+class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
+    """Transactional server policy and full-width ClientHello admission."""
+
+    ALPN = b"rabbit/1"
+    SHARE = b"\x09" + bytes(31)
+
+    @staticmethod
+    def _u16(value: int) -> bytes:
+        return value.to_bytes(2, "big")
+
+    @staticmethod
+    def _u24(value: int) -> bytes:
+        return value.to_bytes(3, "big")
+
+    @classmethod
+    def _ext(cls, extension_type: int, data: bytes) -> bytes:
+        return cls._u16(extension_type) + cls._u16(len(data)) + data
+
+    @classmethod
+    def _standard_extensions(
+        cls,
+        *,
+        alpn: bytes | None = ALPN,
+        include_versions: bool = True,
+        include_sigalgs: bool = True,
+        include_sigalgs_cert: bool = True,
+        include_groups: bool = True,
+        include_key_share: bool = True,
+        signature_schemes: tuple[int, ...] = (0x0403, 0x0804),
+        groups: tuple[int, ...] = (29,),
+        shares: tuple[tuple[int, bytes], ...] | None = None,
+        duplicate_alpn: bool = False,
+        psk_before_alpn: bool = False,
+        psk: bytes | None = None,
+        psk_modes: bytes | None = None,
+        early_data: bool = False,
+        unknown: bool = False,
+        extra_extensions: tuple[bytes, ...] = (),
+    ) -> list[bytes]:
+        extensions: list[bytes] = []
+        if include_versions:
+            extensions.append(cls._ext(43, b"\x02\x03\x04"))
+        if include_key_share:
+            # Deliberately put key_share before supported_groups.  Extension
+            # order cannot affect the parser's cross-extension decision.
+            if shares is None:
+                shares = ((29, cls.SHARE),)
+            share_entries = b"".join(
+                cls._u16(group) + cls._u16(len(share)) + share
+                for group, share in shares
+            )
+            key_share = cls._u16(len(share_entries)) + share_entries
+            extensions.append(cls._ext(51, key_share))
+        if include_sigalgs:
+            schemes = b"".join(cls._u16(scheme) for scheme in signature_schemes)
+            extensions.append(
+                cls._ext(13, cls._u16(len(schemes)) + schemes)
+            )
+        if include_sigalgs_cert:
+            extensions.append(
+                cls._ext(
+                    50,
+                    cls._u16(4) + cls._u16(0x0403) + cls._u16(0x0401),
+                )
+            )
+        if include_groups:
+            group_bytes = b"".join(cls._u16(group) for group in groups)
+            extensions.append(
+                cls._ext(10, cls._u16(len(group_bytes)) + group_bytes)
+            )
+        if psk_before_alpn:
+            extensions.append(cls._ext(41, b""))
+        if early_data:
+            extensions.append(cls._ext(42, b""))
+        if psk_modes is not None:
+            extensions.append(cls._ext(45, psk_modes))
+        if alpn is not None:
+            alpn_data = cls._u16(len(alpn) + 1) + bytes([len(alpn)]) + alpn
+            extensions.append(cls._ext(16, alpn_data))
+            if duplicate_alpn:
+                extensions.append(cls._ext(16, alpn_data))
+        if unknown:
+            extensions.append(cls._ext(0xFAFA, b"xyz"))
+        extensions.extend(extra_extensions)
+        if psk is not None:
+            extensions.append(cls._ext(41, psk))
+        return extensions
+
+    @classmethod
+    def _client_hello(
+        cls,
+        *,
+        alpn: bytes | None = ALPN,
+        suites: tuple[int, ...] = (0x1301,),
+        include_versions: bool = True,
+        include_sigalgs: bool = True,
+        include_sigalgs_cert: bool = True,
+        include_groups: bool = True,
+        include_key_share: bool = True,
+        signature_schemes: tuple[int, ...] = (0x0403, 0x0804),
+        groups: tuple[int, ...] = (29,),
+        shares: tuple[tuple[int, bytes], ...] | None = None,
+        duplicate_alpn: bool = False,
+        psk_before_alpn: bool = False,
+        psk: bytes | None = None,
+        psk_modes: bytes | None = None,
+        early_data: bool = False,
+        unknown: bool = False,
+        extra_extensions: tuple[bytes, ...] = (),
+        legacy_version: int = 0x0303,
+        session_id: bytes = bytes(range(32, 64)),
+        compression: bytes = b"\x00",
+        include_extensions: bool = True,
+        handshake_type: int = 1,
+    ) -> bytes:
+        extensions = b"".join(cls._standard_extensions(
+            alpn=alpn,
+            include_versions=include_versions,
+            include_sigalgs=include_sigalgs,
+            include_sigalgs_cert=include_sigalgs_cert,
+            include_groups=include_groups,
+            include_key_share=include_key_share,
+            signature_schemes=signature_schemes,
+            groups=groups,
+            shares=shares,
+            duplicate_alpn=duplicate_alpn,
+            psk_before_alpn=psk_before_alpn,
+            psk=psk,
+            psk_modes=psk_modes,
+            early_data=early_data,
+            unknown=unknown,
+            extra_extensions=extra_extensions,
+        ))
+        suite_bytes = b"".join(cls._u16(suite) for suite in suites)
+        body = (
+            cls._u16(legacy_version)
+            + bytes(range(32))
+            + bytes([len(session_id)])
+            + session_id
+            + cls._u16(len(suite_bytes))
+            + suite_bytes
+            + bytes([len(compression)])
+            + compression
+        )
+        if include_extensions:
+            body += cls._u16(len(extensions)) + extensions
+        return bytes([handshake_type]) + cls._u24(len(body)) + body
+
+    @classmethod
+    def _offered_psk(cls, identity: bytes = b"i", binder: bytes = bytes(32)) -> bytes:
+        identity_entry = cls._u16(len(identity)) + identity + bytes(4)
+        binder_entry = bytes([len(binder)]) + binder
+        return (
+            cls._u16(len(identity_entry)) + identity_entry
+            + cls._u16(len(binder_entry)) + binder_entry
+        )
+
+    @staticmethod
+    def _forth_bytes(name: str, data: bytes) -> list[str]:
+        return TestKDOSTLSCredentials._forth_bytes(name, data)
+
+    @classmethod
+    def _provision_lines(cls) -> tuple[list[str], bytes]:
+        return TestKDOSTLSCredentials._provision_lines()
+
+    def test_server_context_begin_pins_policy_and_close_releases_it(self):
+        """Server setup is one transaction and no cleanup loses its lease."""
+        lines, der_chain = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ 0 1 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." NULL-IOR=" .',
+            '." REFS0=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN-IOR=" .',
+            "server-alpn 8 120 FILL",
+            '." ROLE=" server-ctx @ TLS-CTX.ROLE @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." CFG=" server-ctx @ TLS-ALPN-CONFIGURED TYPE CR',
+            '." H1=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CRED-H1 + @ .',
+            '." GEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CRED-GEN + @ .',
+            '." CHAIN-A=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-A + @ 0<> .',
+            '." CHAIN-U=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-U + @ .',
+            '." COUNT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-COUNT + @ .',
+            '." SCHEME=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CRED-SCHEME + @ .',
+            '." WIRE=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.WIRE-LIST-U + @ .',
+            '." FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." REFS1=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "server-ctx @ tc-slot @ tc-gen @ S\" rabbit/1\" "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." LIVE-IOR=" .',
+            '." REFS-LIVE=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE",
+            '." BUSY-DELETE=" .',
+            "VARIABLE tables-ior ' NET-TABLES-INIT CATCH tables-ior !",
+            '." TABLES-IOR=" tables-ior @ .',
+            '." REFS-TABLES=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "VARIABLE tcp-init-ior ' TCP-INIT-ALL CATCH tcp-init-ior !",
+            '." TCP-INIT-IOR=" tcp-init-ior @ .',
+            '." REFS-TCP=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '_TC-LOCK-TRY ." LOCK-IOR=" .',
+            'TLSS-NONE server-ctx @ TLS-CTX.STATE !',
+            'server-ctx @ TLS-CLOSE-TRY ." BUSY-CLOSE=" .',
+            '." REFS-BUSY=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FLAGS-BUSY=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." H1-BUSY=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CRED-H1 + @ .',
+            '_TC-UNLOCK',
+            "server-ctx @ TLS-CLOSE-TRY",
+            '." CLOSE=" .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." STATE-END=" server-ctx @ TLS-CTX.STATE @ .',
+            '." META-END=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            "tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE",
+            '." DELETE=" .',
+            '." BEGIN-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "NULL-IOR=-4205 ", "REFS0=0 ",
+            "BEGIN-IOR=0 ", "ROLE=2 ", "STATE=1 ", "HS=10 ",
+            "CFG=rabbit/1", "H1=1 ", "GEN=1 ", "CHAIN-A=-1 ",
+            f"CHAIN-U={len(der_chain)} ", "COUNT=1 ", "SCHEME=1027 ",
+            f"WIRE={len(der_chain) + 5} ", "FLAGS=1 ", "REFS1=1 ",
+            "LIVE-IOR=-4204 ", "REFS-LIVE=1 ",
+            "BUSY-DELETE=-4329 ", "REFS-TABLES=1 ", "REFS-TCP=1 ",
+            "TABLES-IOR=-4214 ",
+            "TCP-INIT-IOR=-4215 ",
+            "LOCK-IOR=0 ", "BUSY-CLOSE=-4206 ", "REFS-BUSY=1 ",
+            "FLAGS-BUSY=1 ", "H1-BUSY=1 ",
+            "CLOSE=0 ", "REFS-END=0 ", "STATE-END=0 ",
+            "META-END=0 ", "DELETE=0 ",
+            "BEGIN-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_abort_releases_pin_before_workspace_erasure(self):
+        """Abort cannot erase the generational handle before unpinning it."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." META=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." ABORT-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "ABORT=0 ", "REFS=0 ", "STATE=0 ", "META=0 ", "DELETE=0 ",
+            "ABORT-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_terminal_paths_release_the_credential_pin(self):
+        """Publish, fatal input, and peer close all release before wiping."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += self._forth_bytes("fatal-alert", b"\x02")
+        lines += self._forth_bytes("close-alert", b"\x01\x00")
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SUITE-AES128-SHA256 server-ctx @ TLS-CTX.SUITE !",
+            "TLS-HASH-SHA256 server-ctx @ TLS-CTX.HASH-ID !",
+            "TLSH-APPLICATION-READY server-ctx @ TLS-CTX.HS-STATE !",
+            "1 server-ctx @ TLS-CTX.PEER-AUTH !",
+            'server-ctx @ TLS-HANDSHAKE-PUBLISH ." PUBLISH=" .',
+            '." PUBLISH-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." PUBLISH-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." PUBLISH-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-OWNER-TRY DROP",
+            'server-ctx @ fatal-alert 1 TLS-PROCESS-ALERT ." FATAL=" .',
+            "TLS-OWNER-RELEASE",
+            '." FATAL-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FATAL-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." FATAL-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            "server-ctx @ TLS-CLOSE-TRY DROP",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-OWNER-TRY DROP",
+            'server-ctx @ close-alert 2 TLS-PROCESS-ALERT ." PEER-CLOSE=" .',
+            "TLS-OWNER-RELEASE",
+            '." PEER-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." PEER-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." PEER-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            "server-ctx @ TLS-CLOSE-TRY DROP",
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TERMINAL-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "PUBLISH=0 ", "PUBLISH-REFS=0 ", "PUBLISH-FLAGS=0 ",
+            "PUBLISH-STATE=2 ", "FATAL=-1 ", "FATAL-REFS=0 ",
+            "FATAL-FLAGS=0 ", "FATAL-STATE=3 ", "PEER-CLOSE=0 ",
+            "PEER-REFS=0 ", "PEER-FLAGS=0 ", "PEER-STATE=3 ",
+            "DELETE=0 ", "TERMINAL-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_client_hello_selection_is_atomic_before_wire_alert(self):
+        """Late failures preserve configuration and publish no profile."""
+        mismatch = self._client_hello(alpn=b"rabbit/2")
+        duplicate = self._client_hello(duplicate_alpn=True)
+        psk_order = self._client_hello(psk_before_alpn=True)
+        missing_sig = self._client_hello(include_sigalgs=False)
+        no_versions = self._client_hello(include_versions=False)
+        no_suite = self._client_hello(suites=(0x1302,))
+        valid = self._client_hello(unknown=True)
+        truncated = valid[:-1]
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        for name, message in (
+            ("ch-mismatch", mismatch),
+            ("ch-duplicate", duplicate),
+            ("ch-psk-order", psk_order),
+            ("ch-missing-sig", missing_sig),
+            ("ch-no-versions", no_versions),
+            ("ch-no-suite", no_suite),
+            ("ch-truncated", truncated),
+            ("ch-valid", valid),
+            ("ch-share", self.SHARE),
+        ):
+            lines += self._forth_bytes(name, message)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+        ]
+        for label, name, message in (
+            ("MISMATCH", "ch-mismatch", mismatch),
+            ("DUP", "ch-duplicate", duplicate),
+            ("PSK", "ch-psk-order", psk_order),
+            ("MISSING", "ch-missing-sig", missing_sig),
+            ("VERS", "ch-no-versions", no_versions),
+            ("SUITE", "ch-no-suite", no_suite),
+            ("TRUNC", "ch-truncated", truncated),
+        ):
+            lines += [
+                f"server-ctx @ {name} {len(message)} TLS-PARSE-CLIENT-HELLO",
+                f'." {label}-IOR=" . ." {label}-ALERT=" .',
+            ]
+        lines += [
+            '." PRE-SUITE=" server-ctx @ TLS-CTX.SUITE @ .',
+            '." PRE-HASH=" server-ctx @ TLS-CTX.HASH-ID @ .',
+            '." PRE-SELECT=" server-ctx @ TLS-CTX.ALPN-SELECTED-LEN @ .',
+            '." PRE-PEER=" server-ctx @ TLS-CTX.PEER-PUBKEY C@ .',
+            '." PRE-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." PRE-CH=" server-ctx @ TLS-RXW.SERVER-META TSM.CH-LEN + @ .',
+            '." PRE-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." PRE-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            f"server-ctx @ ch-valid {len(valid)} TLS-PARSE-CLIENT-HELLO",
+            '." VALID-IOR=" . ." VALID-ALERT=" .',
+            '." SUITE=" server-ctx @ TLS-CTX.SUITE @ .',
+            '." HASH=" server-ctx @ TLS-CTX.HASH-ID @ .',
+            '." SELECT=" server-ctx @ TLS-CTX.ALPN-SELECTED-LEN @ .',
+            '." GROUP=" server-ctx @ TLS-RXW.SERVER-META TSM.GROUP + @ .',
+            '." PEER=" server-ctx @ TLS-CTX.PEER-PUBKEY '
+            'ch-share 32 _XC-BYTES= .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." CH-LEN=" server-ctx @ TLS-RXW.SERVER-META TSM.CH-LEN + @ .',
+            '." CH-FILLED=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-FILLED + @ .',
+            f'." OWNED=" server-ctx @ TLS-RXW.SERVER-CH ch-valid {len(valid)} '
+            '_XC-BYTES= .',
+            '." FLAGS=" server-ctx @ TLS-RXW.SERVER-META TSM.FLAGS + @ .',
+            '." BM0=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP C@ .',
+            '." BMLAST=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP '
+            'TLS-SERVER-EXT-BITMAP-CAPACITY 1- + C@ .',
+            '." FINAL-DEPTH=" DEPTH .',
+            "server-ctx @ TLS-CLOSE-TRY DROP",
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "MISMATCH-IOR=0 MISMATCH-ALERT=120 ",
+            "DUP-IOR=0 DUP-ALERT=47 ",
+            "PSK-IOR=0 PSK-ALERT=47 ",
+            "MISSING-IOR=0 MISSING-ALERT=109 ",
+            "VERS-IOR=0 VERS-ALERT=70 ",
+            "SUITE-IOR=0 SUITE-ALERT=40 ",
+            "TRUNC-IOR=0 TRUNC-ALERT=50 ",
+            "PRE-SUITE=0 ", "PRE-HASH=0 ", "PRE-SELECT=0 ",
+            "PRE-PEER=0 ", "PRE-HS=10 ", "PRE-CH=0 ",
+            "PRE-FLAGS=1 ", "PRE-REFS=1 ",
+            "VALID-IOR=0 VALID-ALERT=0 ", "SUITE=4865 ", "HASH=1 ",
+            "SELECT=8 ", "GROUP=29 ", "PEER=-1 ", "HS=11 ",
+            f"CH-LEN={len(valid)} ", f"CH-FILLED={len(valid)} ",
+            "OWNED=-1 ", "FLAGS=3 ", "BM0=0 ", "BMLAST=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_client_hello_versions_and_malformed_vectors_choose_wire_alerts(self):
+        """Framing failures and TLS-version rejection stay distinguishable."""
+        zero_sni = self._u16(3) + b"\x00\x00\x00"
+        cases = (
+            ("TYPE", self._client_hello(handshake_type=2), 10),
+            ("LEGACY", self._client_hello(legacy_version=0x0301), 70),
+            ("SESSION", self._client_hello(session_id=bytes(33)), 50),
+            ("NOEXT", self._client_hello(include_extensions=False), 70),
+            (
+                "LEGACYCOMP",
+                self._client_hello(
+                    compression=b"\x01",
+                    include_extensions=False,
+                ),
+                70,
+            ),
+            ("TLS13COMP", self._client_hello(compression=b"\x01"), 47),
+            ("ZEROSHARE", self._client_hello(shares=((29, b""),)), 50),
+            ("ZEROALPN", self._client_hello(alpn=b""), 50),
+            (
+                "ZEROSNI",
+                self._client_hello(
+                    extra_extensions=(self._ext(0, zero_sni),),
+                ),
+                50,
+            ),
+        )
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        for label, message, _ in cases:
+            lines += self._forth_bytes(f"ch-{label.lower()}", message)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+        ]
+        for label, message, _ in cases:
+            lines += [
+                f"server-ctx @ ch-{label.lower()} {len(message)} "
+                "TLS-PARSE-CLIENT-HELLO",
+                f'." {label}-IOR=" . ." {label}-ALERT=" .',
+            ]
+        lines += [
+            '." FRAMING-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." FRAMING-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FRAMING-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for label, _, alert in cases:
+            self.assertIn(f"{label}-IOR=0 {label}-ALERT={alert} ", text)
+        for token in (
+            "FRAMING-HS=10 ", "FRAMING-FLAGS=1 ",
+            "FRAMING-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_client_hello_cross_extension_relationships_are_enforced(self):
+        """Selection validates ALPN, DHE ordering, PSK modes, and early data."""
+        psk = self._offered_psk()
+        duplicate_sni_entries = (
+            b"\x07" + self._u16(1) + b"a"
+            + b"\x07" + self._u16(1) + b"b"
+        )
+        duplicate_sni = self._u16(len(duplicate_sni_entries)) + duplicate_sni_entries
+        failures = (
+            ("NOALPN", self._client_hello(alpn=None), 109),
+            (
+                "SIG",
+                self._client_hello(signature_schemes=(0x0804,)),
+                40,
+            ),
+            (
+                "GROUP",
+                self._client_hello(groups=(23,), shares=((23, b"x"),)),
+                40,
+            ),
+            (
+                "ORDER",
+                self._client_hello(
+                    groups=(23, 29),
+                    shares=((29, self.SHARE), (23, b"x")),
+                ),
+                47,
+            ),
+            (
+                "UNLISTED",
+                self._client_hello(
+                    groups=(29,),
+                    shares=((23, b"x"), (29, self.SHARE)),
+                ),
+                47,
+            ),
+            (
+                "SNI",
+                self._client_hello(
+                    extra_extensions=(self._ext(0, duplicate_sni),),
+                ),
+                47,
+            ),
+            ("PSKNOMODE", self._client_hello(psk=psk), 109),
+            (
+                "BADPSK",
+                self._client_hello(psk=b"", psk_modes=b"\x01\x01"),
+                50,
+            ),
+            ("EARLY", self._client_hello(early_data=True), 47),
+            (
+                "MODELEN",
+                self._client_hello(psk=psk, psk_modes=b"\x02\x01"),
+                50,
+            ),
+            (
+                "PSKONLY",
+                self._client_hello(
+                    include_sigalgs=False,
+                    include_groups=False,
+                    include_key_share=False,
+                    psk=psk,
+                    psk_modes=b"\x01\x00",
+                ),
+                40,
+            ),
+        )
+        valid = self._client_hello(
+            psk=psk,
+            psk_modes=b"\x01\x02",
+            early_data=True,
+        )
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        for label, message, _ in failures:
+            lines += self._forth_bytes(f"ch-{label.lower()}", message)
+        lines += self._forth_bytes("ch-psk-valid", valid)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+        ]
+        for label, message, _ in failures:
+            lines += [
+                f"server-ctx @ ch-{label.lower()} {len(message)} "
+                "TLS-PARSE-CLIENT-HELLO",
+                f'." {label}-IOR=" . ." {label}-ALERT=" .',
+            ]
+        lines += [
+            f"server-ctx @ ch-psk-valid {len(valid)} "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." PSKVALID-IOR=" . ." PSKVALID-ALERT=" .',
+            '." PSKVALID-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." PSKVALID-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REL-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for label, _, alert in failures:
+            self.assertIn(f"{label}-IOR=0 {label}-ALERT={alert} ", text)
+        for token in (
+            "PSKVALID-IOR=0 PSKVALID-ALERT=0 ",
+            "PSKVALID-FLAGS=7 ", "PSKVALID-HS=11 ",
+            "REL-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_public_spans_and_wire_maximum_alpn_are_transactional(self):
+        """Natural wire-width ALPN works; invalid aliases mutate nothing."""
+        maximum_alpn = bytes(range(1, 256))
+        oversize_alpn = maximum_alpn + b"x"
+        valid = self._client_hello(alpn=maximum_alpn)
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("max-alpn", maximum_alpn)
+        lines += self._forth_bytes("expected-alpn", maximum_alpn)
+        lines += self._forth_bytes("oversize-alpn", oversize_alpn)
+        lines += self._forth_bytes("max-alpn-ch", valid)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ oversize-alpn 256 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." OVERSIZE-BEGIN=" .',
+            '90 _TSCB-ALPN C!',
+            "server-ctx @ tc-slot @ tc-gen @ _TSCB-ALPN 1 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." ALIAS-BEGIN=" . ." ALIAS-BEGIN-BYTE=" _TSCB-ALPN C@ .',
+            '90 _TCM-CTX C!',
+            "server-ctx @ tc-slot @ tc-gen @ _TCM-CTX 1 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." MEMBER-ALIAS-BEGIN=" . '
+            '." MEMBER-ALIAS-BYTE=" _TCM-CTX C@ .',
+            "server-ctx @ tc-slot @ tc-gen @ max-alpn 255 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." MAX-BEGIN=" .',
+            "max-alpn 255 120 FILL",
+            '." CONFIG-U=" server-ctx @ TLS-ALPN-CONFIGURED '
+            'DUP . DROP expected-alpn 255 _XC-BYTES= '
+            '." CONFIG-COPIED=" .',
+            "server-ctx @ max-alpn-ch TLS-SERVER-CH-CAPACITY 1+ "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." OVERCAP-IOR=" . ." OVERCAP-ALERT=" .',
+            "server-ctx @ 0 1 TLS-PARSE-CLIENT-HELLO",
+            '." NULL-IOR=" . ." NULL-ALERT=" .',
+            "server-ctx @ server-ctx @ 1 TLS-PARSE-CLIENT-HELLO",
+            '." CTXALIAS-IOR=" . ." CTXALIAS-ALERT=" .',
+            "server-ctx @ server-ctx @ TLS-RXW.SERVER-CH 1 "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." WORKALIAS-IOR=" . ." WORKALIAS-ALERT=" .',
+            '90 _TPCH-IN C!',
+            "server-ctx @ _TPCH-IN 1 TLS-PARSE-CLIENT-HELLO",
+            '." SCRATCH-IOR=" . ." SCRATCH-ALERT=" . '
+            '." SCRATCH-BYTE=" _TPCH-IN C@ .',
+            f"server-ctx @ max-alpn-ch {len(valid)} "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." MAX-IOR=" . ." MAX-ALERT=" .',
+            '." SELECTED=" server-ctx @ TLS-CTX.ALPN-SELECTED-LEN @ .',
+            '." MAX-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." SPAN-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "OVERSIZE-BEGIN=-4205 ",
+            "ALIAS-BEGIN=-4205 ALIAS-BEGIN-BYTE=90 ",
+            "MEMBER-ALIAS-BEGIN=-4205 MEMBER-ALIAS-BYTE=90 ",
+            "MAX-BEGIN=0 ", "CONFIG-U=255 CONFIG-COPIED=-1 ",
+            "OVERCAP-IOR=-4213 OVERCAP-ALERT=0 ",
+            "NULL-IOR=-4213 NULL-ALERT=0 ",
+            "CTXALIAS-IOR=-4213 CTXALIAS-ALERT=0 ",
+            "WORKALIAS-IOR=-4213 WORKALIAS-ALERT=0 ",
+            "SCRATCH-IOR=-4213 SCRATCH-ALERT=0 SCRATCH-BYTE=90 ",
+            "MAX-IOR=0 MAX-ALERT=0 ", "SELECTED=255 ",
+            "MAX-FLAGS=3 ", "SPAN-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_client_hello_protocol_maximum_capstone(self):
+        """The exact 131146-byte CH admits 32767 suites and 16366 extensions."""
+        extensions = b"".join(self._standard_extensions())
+        self.assertEqual(len(extensions), 92)
+        self.assertEqual(len(self._standard_extensions()), 6)
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += self._forth_bytes("max-extensions", extensions)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "VARIABLE max-ch TLS-SERVER-CH-CAPACITY XMEM-ALLOT max-ch !",
+            "max-ch @ TLS-SERVER-CH-CAPACITY 0 FILL",
+            "1 max-ch @ C! 2 max-ch @ 1+ C! 0 max-ch @ 2 + C! "
+            "70 max-ch @ 3 + C!",
+            "771 max-ch @ 4 + NW16!",
+            "32 max-ch @ 38 + C!",
+            "65534 max-ch @ 71 + NW16!",
+            ": fill-max-suites 32766 0 DO 32768 I + "
+            "max-ch @ 73 + I 2 * + NW16! LOOP ;",
+            "fill-max-suites",
+            "4865 max-ch @ 65605 + NW16!",
+            "1 max-ch @ 65607 + C!",
+            "65535 max-ch @ 65609 + NW16!",
+            "max-extensions max-ch @ 65611 + 92 MOVE",
+            ": fill-max-extensions 16359 0 DO 1000 I + "
+            "max-ch @ 65703 + I 4 * + NW16! LOOP ;",
+            "fill-max-extensions",
+            "17359 max-ch @ 131139 + NW16!",
+            "3 max-ch @ 131141 + NW16!",
+            "1 max-ch @ 131143 + C! 2 max-ch @ 131144 + C! "
+            "3 max-ch @ 131145 + C!",
+            "server-ctx @ max-ch @ TLS-SERVER-CH-CAPACITY "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." IOR=" . ." ALERT=" .',
+            '." CAP=" TLS-SERVER-CH-CAPACITY .',
+            '." LEN=" server-ctx @ TLS-RXW.SERVER-META TSM.CH-LEN + @ .',
+            '." FILLED=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-FILLED + @ .',
+            '." SUITE=" server-ctx @ TLS-CTX.SUITE @ .',
+            '." HASH=" server-ctx @ TLS-CTX.HASH-ID @ .',
+            '." GROUP=" server-ctx @ TLS-RXW.SERVER-META TSM.GROUP + @ .',
+            '." LAST-SUITE=" server-ctx @ TLS-RXW.SERVER-CH '
+            '65605 + _BE16@ .',
+            '." LAST-EXT=" server-ctx @ TLS-RXW.SERVER-CH '
+            '131139 + _BE16@ .',
+            '." UNKNOWN-U=" server-ctx @ TLS-RXW.SERVER-CH '
+            '131141 + _BE16@ .',
+            '." PAYLOAD=" server-ctx @ TLS-RXW.SERVER-CH '
+            '131143 + C@ . server-ctx @ TLS-RXW.SERVER-CH '
+            '131144 + C@ . server-ctx @ TLS-RXW.SERVER-CH '
+            '131145 + C@ .',
+            '." OWNED=" server-ctx @ TLS-RXW.SERVER-CH max-ch @ '
+            'TLS-SERVER-CH-CAPACITY _XC-BYTES= .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." MAX-FINAL-DEPTH=" DEPTH .',
+            "server-ctx @ TLS-ABORT DROP",
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "IOR=0 ALERT=0 ", "CAP=131146 ",
+            "LEN=131146 ", "FILLED=131146 ", "SUITE=4865 ",
+            "HASH=1 ", "GROUP=29 ", "LAST-SUITE=4865 ",
+            "LAST-EXT=17359 ", "UNKNOWN-U=3 ", "PAYLOAD=1 2 3 ",
+            "OWNED=-1 ", "HS=11 ", "MAX-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+
 class TestKDOSRSA(_KDOSNetworkTestBase):
     """Bounded RSA-2048 arithmetic, DER, padding, and TLS dispatch."""
 
@@ -25969,29 +26694,29 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '0 TLS-CTX@ TLS-RXW@ - .',
             '."  END=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
             'TLS-SERVER-META-CAPACITY + 0 TLS-CTX@ TLS-RXW@ - .',
-            '."  CAP0=" 237496 NET-XMEM-CAPACITY .',
+            '."  CAP0=" 237504 NET-XMEM-CAPACITY .',
             '."  CAP1=" 237520 NET-XMEM-CAPACITY .',
-            '."  EDGE1=" 474991 NET-XMEM-CAPACITY .',
-            '."  CAP2=" 474992 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 475007 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 475008 NET-XMEM-CAPACITY .',
             '." MAX=" TLS-MAX-CTX .',
             '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
         ])
         self.assertIn("CTX=968 ", text)
-        self.assertIn("RX=230648 ", text)
-        self.assertIn("STRIDE=230648 ", text)
-        self.assertIn("COST=237496 ", text)
+        self.assertIn("RX=230656 ", text)
+        self.assertIn("STRIDE=230656 ", text)
+        self.assertIn("COST=237504 ", text)
         self.assertIn("PHYS1=237520 ", text)
-        self.assertIn("PHYS2=474992 ", text)
-        self.assertIn("PHYS3=712512 ", text)
+        self.assertIn("PHYS2=475008 ", text)
+        self.assertIn("PHYS3=712528 ", text)
         self.assertIn("CHCAP=131146 ", text)
         self.assertIn("BITMAP=8192 ", text)
         self.assertIn("LEDGER=512 ", text)
-        self.assertIn("META=160 ", text)
+        self.assertIn("META=168 ", text)
         self.assertIn("OFF-CH=90632 ", text)
         self.assertIn("OFF-BM=221784 ", text)
         self.assertIn("OFF-LEDGER=229976 ", text)
         self.assertIn("OFF-META=230488 ", text)
-        self.assertIn("END=230648 ", text)
+        self.assertIn("END=230656 ", text)
         self.assertIn("CAP0=0 ", text)
         self.assertIn("CAP1=1 ", text)
         self.assertIn("EDGE1=1 ", text)
