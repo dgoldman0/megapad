@@ -6607,6 +6607,10 @@ VARIABLE _TC-OP-GEN
 VARIABLE _TC-PUB-OUT
 VARIABLE _TC-SCHEME-OUT
 VARIABLE _TC-CHAIN-OUT
+VARIABLE _TC-PIN-CHAIN-A
+VARIABLE _TC-PIN-CHAIN-U
+VARIABLE _TC-PIN-COUNT
+VARIABLE _TC-PIN-SCHEME
 CREATE _TC-STATIC-END
 
 : _TC@ ( index -- record )
@@ -6650,7 +6654,9 @@ CREATE _TC-STATIC-END
     0 _TC-PRIVATE-A ! 0 _TC-COPY-A ! 0 _TC-H1 ! 0 _TC-H2 !
     0 _TC-HASH ! 0 _TC-OUT ! 0 _TC-CAP ! 0 _TC-WRITTEN !
     0 _TC-IOR ! 0 _TC-OP-GEN ! 0 _TC-PUB-OUT ! 0 _TC-SCHEME-OUT !
-    0 _TC-CHAIN-OUT ! ;
+    0 _TC-CHAIN-OUT !
+    0 _TC-PIN-CHAIN-A ! 0 _TC-PIN-CHAIN-U ! 0 _TC-PIN-COUNT !
+    0 _TC-PIN-SCHEME ! ;
 
 : _TC-ALLOCATION-U ( allocation-a -- allocated-payload-u )
     DUP MEM-SIZE >= IF
@@ -7097,10 +7103,16 @@ CREATE _TC-STATIC-END
 : _TC-SIGN-ACTIVATE ( -- ior )
     _TC-LOCK-TRY DUP IF EXIT THEN DROP
     _TC-SLOT @ TC.STATE + @ TCS-ACTIVE <>
-    _TC-SLOT @ TC.GENERATION + @ _TC-GENERATION @ <> OR
-    _TC-SLOT @ TC.REFS + @ 0<> OR IF
+    _TC-SLOT @ TC.GENERATION + @ _TC-GENERATION @ <> OR IF
         _TC-UNLOCK TLS-CREDENTIAL-E-STALE EXIT
     THEN
+    _TC-SLOT @ TC.ACTIVE-SIGN + @ 0<> IF
+        _TC-UNLOCK TLS-CREDENTIAL-E-BUSY EXIT
+    THEN
+    _TC-SLOT @ TC.REFS + @ 1+ DUP 0= IF
+        DROP _TC-UNLOCK TLS-CREDENTIAL-E-CAPACITY EXIT
+    THEN
+    _TC-I !
     _TC-SLOT @ TC.NEXT-SIGN + @ 1+ DUP 0= IF
         DROP _TC-UNLOCK TLS-CREDENTIAL-E-RETIRED EXIT
     THEN
@@ -7108,7 +7120,7 @@ CREATE _TC-STATIC-END
     _TC-SLOT @ TC.NEXT-SIGN + !
     _TC-OP-GEN @ _TC-SLOT @ TC.ACTIVE-SIGN + !
     0 _TC-SLOT @ TC.CANCEL-SIGN + !
-    1 _TC-SLOT @ TC.REFS + !
+    _TC-I @ _TC-SLOT @ TC.REFS + !
     _TC-UNLOCK 0 ;
 
 : _TC-SIGN-FINISH ( -- cancelled )
@@ -7118,10 +7130,46 @@ CREATE _TC-STATIC-END
     _TC-LOCK
     _TC-SLOT @ TC.CANCEL-SIGN + @ _TC-OP-GEN @ =
     >R
-    0 _TC-SLOT @ TC.REFS + !
+    _TC-SLOT @ TC.REFS + DUP @ 1- SWAP !
     0 _TC-SLOT @ TC.ACTIVE-SIGN + !
     0 _TC-SLOT @ TC.CANCEL-SIGN + !
     _TC-UNLOCK R> ;
+
+\ Internal server-flight credential lease.  The exact current TLS owner may
+\ pin immutable chain metadata under lock order 10 -> 11.  No pointer escapes
+\ the lower TLS engine, and delete cannot reclaim the allocation while any
+\ flight/sign reference remains.
+: _TC-PIN-BORROW ( slot+1 gen -- chain-a chain-u cert-count scheme ior )
+    _TLS-OWNER? 0= IF 2DROP 0 0 0 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-GENERATION ! _TC-H1 !
+    _TC-LOCK-TRY DUP IF >R 0 0 0 0 R> EXIT THEN DROP
+    _TC-H1 @ _TC-GENERATION @ _TC-HANDLE-RESOLVE DUP IF
+        NIP >R _TC-UNLOCK 0 0 0 0 R> EXIT
+    THEN DROP _TC-SLOT !
+    _TC-SLOT @ TC.REFS + @ 1+ DUP 0= IF
+        DROP _TC-UNLOCK 0 0 0 0 TLS-CREDENTIAL-E-CAPACITY EXIT
+    THEN
+    _TC-SLOT @ TC.REFS + !
+    _TC-SLOT @ TC.CHAIN-A + @ _TC-PIN-CHAIN-A !
+    _TC-SLOT @ TC.CHAIN-U + @ _TC-PIN-CHAIN-U !
+    _TC-SLOT @ TC.CERT-COUNT + @ _TC-PIN-COUNT !
+    _TC-SLOT @ TC.SCHEME + @ _TC-PIN-SCHEME !
+    _TC-UNLOCK
+    _TC-PIN-CHAIN-A @ _TC-PIN-CHAIN-U @ _TC-PIN-COUNT @
+    _TC-PIN-SCHEME @ TLS-CREDENTIAL-OK ;
+
+: _TC-UNPIN ( slot+1 gen -- ior )
+    _TLS-OWNER? 0= IF 2DROP TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-GENERATION ! _TC-H1 !
+    _TC-LOCK-TRY DUP IF EXIT THEN DROP
+    _TC-H1 @ _TC-GENERATION @ _TC-HANDLE-RESOLVE DUP IF
+        NIP _TC-UNLOCK EXIT
+    THEN DROP _TC-SLOT !
+    _TC-SLOT @ TC.REFS + DUP @ DUP 0= IF
+        2DROP _TC-UNLOCK TLS-CREDENTIAL-E-STATE EXIT
+    THEN
+    1- SWAP !
+    _TC-UNLOCK TLS-CREDENTIAL-OK ;
 
 : _TC-SIGN-RUN ( -- der-u ior )
     _TC-SLOT @ TC.PRIVATE + _TC-HASH @ _TC-DER-STAGE 72
@@ -7595,10 +7643,25 @@ VARIABLE TLS-HS-RBUF-ERROR
 \ Application receive calls may yield with either an incomplete TLS record,
 \ unread authenticated plaintext, or an incomplete post-handshake message.
 \ Those bytes are connection state, not scratch.  Give each context two fixed
-\ lanes: one maximum record and one maximum admitted handshake message.  The
-\ connection count later derives from this complete cost.
+\ lanes: one maximum record and one maximum admitted handshake message.
+\
+\ A server additionally retains the protocol-derived maximum ClientHello
+\ handshake message (uint16 cipher and extension vectors), one complete
+\ duplicate-extension bitmap, an immutable compact server-message ledger, and
+\ exact scalar metadata.  These are indexed by context so parsing/flight
+\ backpressure never borrows another connection's bytes or imposes a private
+\ suite/extension-count cap.  Connection count later derives from this full
+\ cost.
 16896 CONSTANT TLS-RX-RECORD-CAPACITY
-TLS-RX-RECORD-CAPACITY TLS-HS-RBUF-MAX + 7 + -8 AND
+TLS-HS-RBUF-MAX 7 + -8 AND CONSTANT TLS-RX-RETAINED-CAPACITY
+131146 CONSTANT TLS-SERVER-CH-CAPACITY
+TLS-SERVER-CH-CAPACITY 7 + -8 AND CONSTANT TLS-SERVER-CH-STRIDE
+8192 CONSTANT TLS-SERVER-EXT-BITMAP-CAPACITY
+512 CONSTANT TLS-SERVER-LEDGER-CAPACITY
+160 CONSTANT TLS-SERVER-META-CAPACITY
+TLS-RX-RECORD-CAPACITY TLS-RX-RETAINED-CAPACITY +
+TLS-SERVER-CH-STRIDE + TLS-SERVER-EXT-BITMAP-CAPACITY +
+TLS-SERVER-LEDGER-CAPACITY + TLS-SERVER-META-CAPACITY + 7 + -8 AND
 CONSTANT /TLS-RX-WORKSPACE
 VARIABLE TLS-RX-WORKSPACES  0 TLS-RX-WORKSPACES !
 
@@ -7619,6 +7682,50 @@ VARIABLE TLS-RX-WORKSPACES  0 TLS-RX-WORKSPACES !
 
 : TLS-RXW.RETAINED  ( ctx -- address )
     TLS-RXW@ TLS-RX-RECORD-CAPACITY + ;
+
+: TLS-RXW.SERVER-CH  ( ctx -- address )
+    TLS-RXW.RETAINED TLS-RX-RETAINED-CAPACITY + ;
+
+: TLS-RXW.SERVER-EXT-BITMAP  ( ctx -- address )
+    TLS-RXW.SERVER-CH TLS-SERVER-CH-STRIDE + ;
+
+: TLS-RXW.SERVER-LEDGER  ( ctx -- address )
+    TLS-RXW.SERVER-EXT-BITMAP TLS-SERVER-EXT-BITMAP-CAPACITY + ;
+
+: TLS-RXW.SERVER-META  ( ctx -- address )
+    TLS-RXW.SERVER-LEDGER TLS-SERVER-LEDGER-CAPACITY + ;
+
+0   CONSTANT TSM.FLAGS
+8   CONSTANT TSM.CH-LEN
+16  CONSTANT TSM.CH-FILLED
+24  CONSTANT TSM.CRED-H1
+32  CONSTANT TSM.CRED-GEN
+40  CONSTANT TSM.CHAIN-A
+48  CONSTANT TSM.CHAIN-U
+56  CONSTANT TSM.CERT-COUNT
+64  CONSTANT TSM.CRED-SCHEME
+72  CONSTANT TSM.WIRE-LIST-U
+80  CONSTANT TSM.FLIGHT-PHASE
+88  CONSTANT TSM.PHASE-OFF
+96  CONSTANT TSM.CHAIN-OFF
+104 CONSTANT TSM.CURRENT-CERT-U
+112 CONSTANT TSM.CERT-INDEX
+120 CONSTANT TSM.SH-LEN
+128 CONSTANT TSM.EE-LEN
+136 CONSTANT TSM.CV-LEN
+144 CONSTANT TSM.FIN-LEN
+152 CONSTANT TSM.TRANSCRIPT-PHASE
+
+0   CONSTANT TSL.SH
+122 CONSTANT TSL.EE
+390 CONSTANT TSL.CV
+470 CONSTANT TSL.FIN
+
+: TLS-SERVER-WORKSPACE-WIPE  ( ctx -- )
+    TLS-RXW.SERVER-CH
+    TLS-SERVER-CH-STRIDE TLS-SERVER-EXT-BITMAP-CAPACITY +
+    TLS-SERVER-LEDGER-CAPACITY + TLS-SERVER-META-CAPACITY +
+    0 FILL ;
 
 : TLS-RX-WIPE  ( ctx -- )
     DUP TLS-RXW@ /TLS-RX-WORKSPACE 0 FILL
@@ -7644,6 +7751,7 @@ CREATE TLS-VERIFY-DATA 32 ALLOT
 CREATE TLS-FINISHED-MSG 40 ALLOT
 CREATE _TLS-ZERO-SECRET 32 ALLOT
 _TLS-ZERO-SECRET 32 0 FILL
+CREATE _TLS-SUPPLIED-HASH 32 ALLOT
 
 : TLS-HANDSHAKE-SECRETS-WIPE ( ctx | 0 -- )
     ?DUP IF
@@ -7658,6 +7766,7 @@ _TLS-ZERO-SECRET 32 0 FILL
         TLS-CTX.S-AP-TRAFFIC 32 0 FILL
     THEN
     TLS-TEMP-SECRET 32 0 FILL TLS-TEMP-SECRET2 32 0 FILL
+    _TLS-SUPPLIED-HASH 32 0 FILL
     TLS-FINISHED-KEY 32 0 FILL TLS-VERIFY-DATA 32 0 FILL
     TLS-HS-HASH 32 0 FILL TLS-FINISHED-MSG 40 0 FILL
     X25519-PRIV 32 0 FILL X25519-SHARED 32 0 FILL
@@ -7921,16 +8030,31 @@ VARIABLE _TDS-CTX
 VARIABLE _TDS-SECRET
 VARIABLE _TDS-LABEL
 VARIABLE _TDS-LLEN
+VARIABLE _TDS-HASH
 VARIABLE _TDS-OUT
 
-: TLS-DERIVE-SECRET ( ctx secret label llen out -- status )
-    _TDS-OUT !  _TDS-LLEN !  _TDS-LABEL !  _TDS-SECRET ! _TDS-CTX !
-    \ Hash transcript → TLS-HS-HASH
+: (TLS-DERIVE-SECRET-HASH) ( ctx secret label llen hash out -- status )
+    _TDS-OUT ! _TDS-HASH ! _TDS-LLEN ! _TDS-LABEL !
+    _TDS-SECRET ! _TDS-CTX !
+    _TDS-CTX @ _TDS-SECRET @ _TDS-LABEL @ _TDS-LLEN @
+    _TDS-HASH @ 32 32 _TDS-OUT @ TLS-EXPAND-LABEL ;
+
+\ (TLS-DERIVE-SECRET-HASH)
+\   ( ctx secret label llen transcript-hash out -- status )
+\ Derive from one caller-supplied 32-byte transcript digest.  Server flight
+\ replay uses this form so a uint24 Certificate never needs to fit the legacy
+\ byte-log arena.
+: (TLS-DERIVE-SECRET) ( ctx secret label llen out -- status )
+    _TDS-OUT ! _TDS-LLEN ! _TDS-LABEL ! _TDS-SECRET ! _TDS-CTX !
+    \ Hash transcript → TLS-HS-HASH.
     _TDS-CTX @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
     DUP IF EXIT THEN DROP
-    \ HKDF-Expand-Label(secret, label, llen, hash, 32, 32, out)
     _TDS-CTX @ _TDS-SECRET @ _TDS-LABEL @ _TDS-LLEN @
-    TLS-HS-HASH 32 32 _TDS-OUT @ TLS-EXPAND-LABEL
+    TLS-HS-HASH _TDS-OUT @ (TLS-DERIVE-SECRET-HASH) ;
+
+: TLS-DERIVE-SECRET ( ctx secret label llen out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
+    (TLS-DERIVE-SECRET) _TLS-OWNER-RETURN
 ;
 
 \ --- Role-correct traffic-secret selection and epoch installation ---
@@ -8017,8 +8141,9 @@ VARIABLE _TKSH-CTX
     _TKSH-CTX @ DUP IF DUP TLS-RECORD-SECRETS-WIPE THEN
     TLS-HANDSHAKE-SECRETS-WIPE ;
 
-: (TLS-KS-HANDSHAKE) ( ctx -- status )
-    _TKSH-CTX !
+: (TLS-KS-HANDSHAKE-HASH) ( ctx transcript-hash -- status )
+    _TDS-HASH ! _TKSH-CTX !
+    _TDS-HASH @ _TLS-SUPPLIED-HASH 32 MOVE
     \ Reject an unsealed role/profile before touching traffic or schedule
     \ state.  Failures after admission wipe every partially derived epoch.
     _TKSH-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
@@ -8041,12 +8166,14 @@ VARIABLE _TKSH-CTX
     \ 4. c_hs_traffic = Derive-Secret(HS, "c hs traffic", Hash(CH||SH))
     _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.HS-SECRET
     TLS-L-C-HS-TR /TLS-L-C-HS-TR
-    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC  TLS-DERIVE-SECRET
+    _TLS-SUPPLIED-HASH _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
+    (TLS-DERIVE-SECRET-HASH)
     DUP IF _TKSH-FAIL EXIT THEN DROP
     \ 5. s_hs_traffic = Derive-Secret(HS, "s hs traffic", Hash(CH||SH))
     _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.HS-SECRET
     TLS-L-S-HS-TR /TLS-L-S-HS-TR
-    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC  TLS-DERIVE-SECRET
+    _TLS-SUPPLIED-HASH _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
+    (TLS-DERIVE-SECRET-HASH)
     DUP IF _TKSH-FAIL EXIT THEN DROP
     \ Install local-write and peer-read epochs from the endpoint role.
     _TKSH-CTX @ DUP _TLS-LOCAL-HS-TRAFFIC
@@ -8055,6 +8182,18 @@ VARIABLE _TKSH-CTX
     _TLS-INSTALL-RD-SECRET DUP IF _TKSH-FAIL EXIT THEN DROP
     TLS-E-OK
 ;
+
+: (TLS-KS-HANDSHAKE) ( ctx -- status )
+    _TKSH-CTX !
+    \ Preserve non-admitted failure atomicity: an invalid context/profile has
+    \ no schedule transaction to revoke.  Once admitted, any transcript hash
+    \ failure is terminal and receives the same cleanup as HKDF/install.
+    _TKSH-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ERROR @ TLS-E-OK <> IF DROP TLS-E-STATE EXIT THEN
+    TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF TLS-E-STATE EXIT THEN
+    _TKSH-CTX @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
+    DUP IF _TKSH-FAIL EXIT THEN DROP
+    _TKSH-CTX @ TLS-HS-HASH (TLS-KS-HANDSHAKE-HASH) ;
 
 : TLS-KS-HANDSHAKE ( ctx -- status )
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
@@ -8082,8 +8221,9 @@ VARIABLE _TKSA-CTX
         _TKSA-PENDING-WIPE
     THEN ;
 
-: (TLS-KS-APPLICATION-DERIVE) ( ctx -- status )
-    _TKSA-CTX !
+: (TLS-KS-APPLICATION-DERIVE-HASH) ( ctx transcript-hash -- status )
+    _TDS-HASH ! _TKSA-CTX !
+    _TDS-HASH @ _TLS-SUPPLIED-HASH 32 MOVE
     _TKSA-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
     DUP TLS-CTX.ERROR @ TLS-E-OK <> IF DROP TLS-E-STATE EXIT THEN
     TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF TLS-E-STATE EXIT THEN
@@ -8100,23 +8240,31 @@ VARIABLE _TKSA-CTX
     \ 3. c_ap_traffic = Derive-Secret(MS, "c ap traffic", Hash(full))
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.MS-SECRET
     TLS-L-C-AP-TR /TLS-L-C-AP-TR
-    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC  TLS-DERIVE-SECRET
+    _TLS-SUPPLIED-HASH _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
+    (TLS-DERIVE-SECRET-HASH)
     DUP IF _TKSA-FAIL EXIT THEN DROP
     \ 4. s_ap_traffic = Derive-Secret(MS, "s ap traffic", Hash(full))
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.MS-SECRET
     TLS-L-S-AP-TR /TLS-L-S-AP-TR
-    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC  TLS-DERIVE-SECRET
+    _TLS-SUPPLIED-HASH _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
+    (TLS-DERIVE-SECRET-HASH)
     DUP IF _TKSA-FAIL EXIT THEN DROP
     \ 5. exporter_master_secret = Derive-Secret(MS, "exp master", Hash(full))
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.MS-SECRET
     TLS-L-EXP-MASTER /TLS-L-EXP-MASTER
-    TLS-TEMP-SECRET2 TLS-DERIVE-SECRET
+    _TLS-SUPPLIED-HASH TLS-TEMP-SECRET2 (TLS-DERIVE-SECRET-HASH)
     DUP IF _TKSA-FAIL EXIT THEN DROP
     \ Stage the exporter only after every derivation succeeds.  Establishment
     \ remains a separate authenticated publication boundary.
     TLS-TEMP-SECRET2 _TKSA-CTX @ TLS-CTX.EXPORTER-MS 32 MOVE
     _TKSA-PENDING-WIPE
     TLS-E-OK ;
+
+: (TLS-KS-APPLICATION-DERIVE) ( ctx -- status )
+    _TKSA-CTX !
+    _TKSA-CTX @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
+    DUP IF _TKSA-FAIL EXIT THEN DROP
+    _TKSA-CTX @ TLS-HS-HASH (TLS-KS-APPLICATION-DERIVE-HASH) ;
 
 : (TLS-KS-APPLICATION-WRITE) ( ctx -- status )
     _TKSA-CTX !
@@ -8539,24 +8687,44 @@ VARIABLE _TPEE-ALPN-LEN
 \   Returns 0 if valid, -1 if not.
 VARIABLE _TVF-CTX
 VARIABLE _TVF-SECRET
+VARIABLE _TVF-HASH
 VARIABLE _TVF-VERIFY
 
-: TLS-VERIFY-FINISHED ( ctx traffic-secret verify-data -- flag )
-    _TVF-VERIFY !  _TVF-SECRET ! _TVF-CTX !
-    TLS-HS-TR-ERROR @ IF -1 EXIT THEN
+VARIABLE _TFM-CTX
+VARIABLE _TFM-SECRET
+VARIABLE _TFM-HASH
+VARIABLE _TFM-OUT
+
+: (TLS-FINISHED-MAC-HASH) ( ctx traffic-secret hash out -- status )
+    _TFM-OUT ! _TFM-HASH ! _TFM-SECRET ! _TFM-CTX !
+    _TFM-HASH @ _TLS-SUPPLIED-HASH 32 MOVE
     \ finished_key = HKDF-Expand-Label(secret, "finished", "", 32)
-    _TVF-CTX @ _TVF-SECRET @
+    _TFM-CTX @ _TFM-SECRET @
     TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
-    TLS-EXPAND-LABEL IF -1 EXIT THEN
-    \ Hash transcript → TLS-HS-HASH
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    \ verify_data = HMAC(finished_key, transcript_hash)
+    _TFM-CTX @ TLS-FINISHED-KEY 32
+    _TLS-SUPPLIED-HASH 32 _TFM-OUT @ TLS-HMAC ;
+
+: (TLS-VERIFY-FINISHED-HASH) ( ctx secret hash verify-data -- flag )
+    _TVF-VERIFY ! _TVF-HASH ! _TVF-SECRET ! _TVF-CTX !
+    _TVF-VERIFY @ TLS-FINISHED-MSG 32 MOVE
+    _TVF-CTX @ _TVF-SECRET @ _TVF-HASH @ TLS-VERIFY-DATA
+    (TLS-FINISHED-MAC-HASH) IF -1 EXIT THEN
+    TLS-VERIFY-DATA TLS-FINISHED-MSG 32 VERIFY ;
+
+: (TLS-VERIFY-FINISHED) ( ctx traffic-secret verify-data -- flag )
+    _TVF-VERIFY ! _TVF-SECRET ! _TVF-CTX !
+    TLS-HS-TR-ERROR @ IF -1 EXIT THEN
     _TVF-CTX @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
     IF -1 EXIT THEN
-    \ expected = HMAC(finished_key, transcript_hash)
-    _TVF-CTX @ TLS-FINISHED-KEY 32
-    TLS-HS-HASH 32 TLS-VERIFY-DATA TLS-HMAC
-    IF -1 EXIT THEN
-    \ Compare with received
-    TLS-VERIFY-DATA _TVF-VERIFY @ 32 VERIFY
+    _TVF-CTX @ _TVF-SECRET @ TLS-HS-HASH _TVF-VERIFY @
+    (TLS-VERIFY-FINISHED-HASH) ;
+
+: TLS-VERIFY-FINISHED ( ctx traffic-secret verify-data -- flag )
+    TLS-OWNER-TRY IF 2DROP DROP -1 EXIT THEN
+    (TLS-VERIFY-FINISHED)
+    >R TLS-OWNER-RELEASE R>
 ;
 
 VARIABLE _TVPF-CTX
@@ -8575,22 +8743,14 @@ VARIABLE _TVPF-VERIFY
 VARIABLE _TBF-CTX
 VARIABLE _TBF-REC
 VARIABLE _TBF-SECRET
+VARIABLE _TBF-HASH
 
-: TLS-BUILD-FINISHED ( ctx rec -- reclen )
-    _TBF-REC !  _TBF-CTX !
+: (TLS-BUILD-FINISHED-HASH) ( ctx hash rec -- reclen )
+    _TBF-REC ! _TBF-HASH ! _TBF-CTX !
     _TBF-CTX @ _TLS-LOCAL-HS-TRAFFIC DUP 0= IF DROP 0 EXIT THEN
     _TBF-SECRET !
-    \ finished_key = Expand-Label(local_hs_traffic, "finished", "", 32)
-    _TBF-CTX @ _TBF-SECRET @
-    TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
-    TLS-EXPAND-LABEL IF 0 EXIT THEN
-    \ Hash transcript → TLS-HS-HASH
-    _TBF-CTX @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
-    IF 0 EXIT THEN
-    \ verify_data = HMAC(finished_key, hash)
-    _TBF-CTX @ TLS-FINISHED-KEY 32
-    TLS-HS-HASH 32 TLS-VERIFY-DATA TLS-HMAC
-    IF 0 EXIT THEN
+    _TBF-CTX @ _TBF-SECRET @ _TBF-HASH @ TLS-VERIFY-DATA
+    (TLS-FINISHED-MAC-HASH) IF 0 EXIT THEN
     \ Build Finished handshake message (36 bytes)
     TLSHT-FINISHED  TLS-FINISHED-MSG C!
     0  TLS-FINISHED-MSG 1 + C!
@@ -8601,6 +8761,18 @@ VARIABLE _TBF-SECRET
     _TBF-CTX @ TLS-CT-HANDSHAKE TLS-FINISHED-MSG 36 _TBF-REC @
     TLS-ENCRYPT-RECORD
 ;
+
+: (TLS-BUILD-FINISHED) ( ctx rec -- reclen )
+    _TBF-REC ! _TBF-CTX !
+    TLS-HS-TR-ERROR @ IF 0 EXIT THEN
+    _TBF-CTX @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH TLS-HASH
+    IF 0 EXIT THEN
+    _TBF-CTX @ TLS-HS-HASH _TBF-REC @ (TLS-BUILD-FINISHED-HASH) ;
+
+: TLS-BUILD-FINISHED ( ctx rec -- reclen )
+    TLS-OWNER-TRY IF 2DROP 0 EXIT THEN
+    (TLS-BUILD-FINISHED)
+    >R TLS-OWNER-RELEASE R> ;
 
 \ --- Handshake Message Processor ---
 \ TLS-PROCESS-HS-MSG ( ctx msg mlen -- flag )
@@ -9931,7 +10103,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
 \    Logical cost = /TCB + /TLS-CTX + /TLS-RX-WORKSPACE
-\                 + 2×/SOCK = 97480 bytes per connection.
+\                 + 2×/SOCK = 237496 bytes per connection.
 \    XMEM normalizes each table allocation independently to 16 bytes, so
 \    capacity uses the exact aggregate rather than flooring this quotient.
 \

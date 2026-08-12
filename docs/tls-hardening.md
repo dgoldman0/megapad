@@ -490,24 +490,35 @@ in a short section beneath lock 10 and releases it before lower crypto. The
 resulting order is 10, optionally 11 and release, then KDOS HMAC/HKDF lock 9
 and checked BIOS crypto lock 8. Credential cancellation takes only lock 11 and
 does not call crypto while holding it.
+Credential `TC.REFS` is a checked natural-cell reference count rather than a
+binary signing bit. An internal server flight may pin immutable chain metadata
+under lock order 10 then 11; a nested lower signing call adds and removes a
+separate transient reference. Deletion remains blocked until both flight and
+signer references are gone, and reference saturation refuses pin or sign
+without mutation. Borrowed chain pointers never become public credential API
+output.
 Contention does not mutate shared TLS scratch; status-bearing operations return
 their documented busy status and void/backpressure operations remain inert.
 Internal handshake parsers and builders are covered by the owned blocking
 connection path and are not independent concurrent entry points.
 
 State that must survive an application receive call is not shared scratch.
-Each 968-byte `/TLS-CTX` indexes a 90,632-byte `/TLS-RX-WORKSPACE`: a
+Each 968-byte `/TLS-CTX` indexes a 230,648-byte `/TLS-RX-WORKSPACE`: a
 16,896-byte partial-record lane plus an aligned retained-data lane bounded for
-a 73,732-byte post-handshake message.  Incomplete encrypted records,
+a 73,732-byte post-handshake message, a protocol-derived 131,146-byte
+ClientHello lane, an 8,192-byte bitmap covering all uint16 extension types,
+and a 512-byte immutable server-message ledger with 160 bytes of exact flight
+metadata. Incomplete encrypted records,
 authenticated plaintext remainder, and fragmented post-handshake messages are
 therefore isolated by context.  The high-level application receive and
 owner-held blocking-handshake paths use the transient global plaintext buffer
 only while lock 10 is held and scrub its complete contents before releasing
 ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
 output and does not scrub that output.  With a 5,816-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 97,480 bytes per connection;
+descriptors, the logical network-table cost is 237,496 bytes per connection;
 the four XMEM table allocations are normalized independently, so one
-connection reserves 97,504 bytes and capacity uses the exact aggregate.
+connection reserves 237,520 bytes and two reserve 474,992; capacity uses the
+exact aggregate.
 
 Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
 use the interoperable public profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and

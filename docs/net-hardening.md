@@ -58,7 +58,7 @@ to a backlog of 5 for `listen()`.
 | `TCP-CLOSE` (LISTEN case) | Drain accept queue: close any pending TCBs before resetting listener. |
 | `SOCK-ACCEPT` | Dequeue from the accept queue instead of transplanting the listener TCB.  No re-open is needed.  Refuse a TLS-marked listener before removing a queued child. |
 | `LISTEN` (socket API) | Continue to open ordinary TCP listeners.  A TLS-marked descriptor now returns `-1` without allocating a listener TCB or changing its descriptor state/handle; secure accept remains unavailable until the authenticated server path exists. |
-| `NET-TABLES-INIT` | Budget the complete logical per-connection allocation: 5,816-byte `/TCB` + 968-byte `/TLS-CTX` + 90,632-byte `/TLS-RX-WORKSPACE` + two 32-byte socket descriptors = 97,480 bytes.  XMEM capacity uses the exact four independently normalized table allocations: one connection reserves 97,504 bytes, two reserve 194,960, and odd counts carry 24 bytes of aggregate padding. |
+| `NET-TABLES-INIT` | Budget the complete logical per-connection allocation: 5,816-byte `/TCB` + 968-byte `/TLS-CTX` + 230,648-byte `/TLS-RX-WORKSPACE` + two 32-byte socket descriptors = 237,496 bytes. The workspace adds a full 131,146-byte ClientHello lane, a 65,536-type duplicate-extension bitmap, and a 512-byte immutable server-flight ledger plus 160 bytes of exact metadata. XMEM capacity uses independently normalized table allocations: one connection reserves 237,520 bytes, two reserve 474,992, and odd counts carry 24 bytes of aggregate padding. |
 
 ### Unchanged words
 

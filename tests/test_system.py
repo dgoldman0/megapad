@@ -21799,6 +21799,37 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         text = self._run_kdos(lines)
         self.assertIn("VF=-1 ", text)      # rejected
 
+    def test_supplied_digest_cores_match_legacy_and_snapshot_aliases(self):
+        """Digest-fed derivation/Finished cores are exact and alias-stable."""
+        lines = self._TLS_KS_SETUP + [
+            "CREATE supplied-hash 32 ALLOT",
+            "CREATE supplied-secret 32 ALLOT",
+            "CREATE supplied-a 32 ALLOT",
+            "CREATE supplied-b 32 ALLOT",
+            "test-ctx @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ supplied-hash "
+            "TLS-HASH DROP",
+            "32 0 DO I 1+ supplied-secret I + C! LOOP",
+            "test-ctx @ supplied-secret TLS-L-C-HS-TR /TLS-L-C-HS-TR "
+            "supplied-hash supplied-a (TLS-DERIVE-SECRET-HASH) DROP",
+            "test-ctx @ supplied-secret TLS-L-C-HS-TR /TLS-L-C-HS-TR "
+            "supplied-b TLS-DERIVE-SECRET DROP",
+            '." DERIVE=" supplied-a supplied-b 32 _XC-BYTES= .',
+            "supplied-hash TLS-FINISHED-KEY 32 MOVE",
+            "test-ctx @ supplied-secret TLS-FINISHED-KEY supplied-a "
+            "(TLS-FINISHED-MAC-HASH) DROP",
+            "test-ctx @ supplied-secret supplied-hash supplied-b "
+            "(TLS-FINISHED-MAC-HASH) DROP",
+            '." FIN=" supplied-a supplied-b 32 _XC-BYTES= .',
+            "supplied-b TLS-VERIFY-DATA 32 MOVE",
+            "test-ctx @ supplied-secret supplied-hash TLS-VERIFY-DATA "
+            "(TLS-VERIFY-FINISHED-HASH)",
+            '." VERIFY-ALIAS=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DERIVE=-1 ", text)
+        self.assertIn("FIN=-1 ", text)
+        self.assertIn("VERIFY-ALIAS=0 ", text)
+
     def test_build_finished_format(self):
         """TLS-BUILD-FINISHED produces encrypted record with correct header."""
         lines = self._TLS_KS_SETUP + [
@@ -24215,6 +24246,75 @@ class TestKDOSTLSCredentials(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_credential_flight_pin_coexists_with_sign_and_blocks_delete(self):
+        """A flight ref survives transient signing and pins its DER chain."""
+        lines, der_chain = self._provision_lines()
+        lines += self._forth_bytes("tc-hash", self.SAMPLE_DIGEST)
+        lines += [
+            "CREATE tc-pin-der 72 ALLOT",
+            "VARIABLE tc-scheme",
+            "TLS-OWNER-TRY DROP",
+            "tc-slot @ tc-gen @ _TC-PIN-BORROW",
+            'tc-ior ! tc-scheme ! _TC-COUNT ! _TC-CHAIN-LEN ! '
+            '_TC-CHAIN-A !',
+            '." PIN=" tc-ior @ .',
+            '." PIN-A=" _TC-CHAIN-A @ tc-slot @ 1- _TC@ '
+            'TC.CHAIN-A + @ = .',
+            '." PIN-U=" _TC-CHAIN-LEN @ .',
+            '." PIN-COUNT=" _TC-COUNT @ .',
+            '." PIN-SCHEME=" tc-scheme @ .',
+            '." REFS1=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "tc-slot @ tc-gen @ tc-hash tc-pin-der 72 "
+            "TLS-CREDENTIAL-SIGN",
+            '." SIGN-IOR=" . ." SIGN-U=" .',
+            '." REFS2=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "TLS-OWNER-RELEASE",
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." BUSY-DELETE=" .',
+            "TLS-OWNER-TRY DROP",
+            'tc-slot @ tc-gen @ _TC-UNPIN ." UNPIN=" .',
+            '." REFS0=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "TLS-OWNER-RELEASE",
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("PIN=0 ", text)
+        self.assertIn("PIN-A=-1 ", text)
+        self.assertIn(f"PIN-U={len(der_chain)} ", text)
+        self.assertIn("PIN-COUNT=1 ", text)
+        self.assertIn("PIN-SCHEME=1027 ", text)
+        self.assertIn("REFS1=1 ", text)
+        self.assertIn("SIGN-IOR=0 SIGN-U=71 ", text)
+        self.assertIn("REFS2=1 ", text)
+        self.assertIn("BUSY-DELETE=-4329 ", text)
+        self.assertIn("UNPIN=0 ", text)
+        self.assertIn("REFS0=0 ", text)
+        self.assertIn("DELETE=0 ", text)
+
+    def test_credential_refcount_overflow_is_atomic(self):
+        """Natural-cell ref saturation refuses both pin and sign."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("tc-hash", self.SAMPLE_DIGEST)
+        lines += [
+            "CREATE tc-overflow-der 72 ALLOT tc-overflow-der 72 165 FILL",
+            "-1 tc-slot @ 1- _TC@ TC.REFS + !",
+            "TLS-OWNER-TRY DROP",
+            "tc-slot @ tc-gen @ _TC-PIN-BORROW",
+            '." PIN-IOR=" . 2DROP 2DROP',
+            "TLS-OWNER-RELEASE",
+            "tc-slot @ tc-gen @ tc-hash tc-overflow-der 72 "
+            "TLS-CREDENTIAL-SIGN",
+            '." SIGN-IOR=" . ." SIGN-U=" .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." ACTIVE-SIGN=" tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ .',
+            '." OUT=" tc-overflow-der C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("PIN-IOR=-4323 ", text)
+        self.assertIn("SIGN-IOR=-4323 SIGN-U=0 ", text)
+        self.assertIn("REFS=-1 ", text)
+        self.assertIn("ACTIVE-SIGN=0 ", text)
+        self.assertIn("OUT=165 ", text)
+
     def test_credential_source_has_protocol_not_fixture_limits(self):
         """Credential capacity derives from callers/TLS framing, not eight."""
         source = Path(NETWORKING_PATH).read_text(encoding="utf-8")
@@ -25855,20 +25955,43 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '."  PHYS1=" 1 NET-XMEM-TABLE-BYTES .',
             '."  PHYS2=" 2 NET-XMEM-TABLE-BYTES .',
             '."  PHYS3=" 3 NET-XMEM-TABLE-BYTES .',
-            '."  CAP0=" 97480 NET-XMEM-CAPACITY .',
-            '."  CAP1=" 97504 NET-XMEM-CAPACITY .',
-            '."  EDGE1=" 194959 NET-XMEM-CAPACITY .',
-            '."  CAP2=" 194960 NET-XMEM-CAPACITY .',
+            '."  CHCAP=" TLS-SERVER-CH-CAPACITY .',
+            '."  BITMAP=" TLS-SERVER-EXT-BITMAP-CAPACITY .',
+            '."  LEDGER=" TLS-SERVER-LEDGER-CAPACITY .',
+            '."  META=" TLS-SERVER-META-CAPACITY .',
+            '."  OFF-CH=" 0 TLS-CTX@ TLS-RXW.SERVER-CH '
+            '0 TLS-CTX@ TLS-RXW@ - .',
+            '."  OFF-BM=" 0 TLS-CTX@ TLS-RXW.SERVER-EXT-BITMAP '
+            '0 TLS-CTX@ TLS-RXW@ - .',
+            '."  OFF-LEDGER=" 0 TLS-CTX@ TLS-RXW.SERVER-LEDGER '
+            '0 TLS-CTX@ TLS-RXW@ - .',
+            '."  OFF-META=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
+            '0 TLS-CTX@ TLS-RXW@ - .',
+            '."  END=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
+            'TLS-SERVER-META-CAPACITY + 0 TLS-CTX@ TLS-RXW@ - .',
+            '."  CAP0=" 237496 NET-XMEM-CAPACITY .',
+            '."  CAP1=" 237520 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 474991 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 474992 NET-XMEM-CAPACITY .',
             '." MAX=" TLS-MAX-CTX .',
             '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
         ])
         self.assertIn("CTX=968 ", text)
-        self.assertIn("RX=90632 ", text)
-        self.assertIn("STRIDE=90632 ", text)
-        self.assertIn("COST=97480 ", text)
-        self.assertIn("PHYS1=97504 ", text)
-        self.assertIn("PHYS2=194960 ", text)
-        self.assertIn("PHYS3=292464 ", text)
+        self.assertIn("RX=230648 ", text)
+        self.assertIn("STRIDE=230648 ", text)
+        self.assertIn("COST=237496 ", text)
+        self.assertIn("PHYS1=237520 ", text)
+        self.assertIn("PHYS2=474992 ", text)
+        self.assertIn("PHYS3=712512 ", text)
+        self.assertIn("CHCAP=131146 ", text)
+        self.assertIn("BITMAP=8192 ", text)
+        self.assertIn("LEDGER=512 ", text)
+        self.assertIn("META=160 ", text)
+        self.assertIn("OFF-CH=90632 ", text)
+        self.assertIn("OFF-BM=221784 ", text)
+        self.assertIn("OFF-LEDGER=229976 ", text)
+        self.assertIn("OFF-META=230488 ", text)
+        self.assertIn("END=230648 ", text)
         self.assertIn("CAP0=0 ", text)
         self.assertIn("CAP1=1 ", text)
         self.assertIn("EDGE1=1 ", text)

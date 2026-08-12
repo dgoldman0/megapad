@@ -1633,10 +1633,10 @@ control, retransmit, and TIME_WAIT reaper (60 s 2×MSL) with automatic
 scavenge-on-alloc.  The standard networking loader requires XMEM.  A guarded
 one-connection Bank-0 allocation path remains for manually composed builds,
 but it is not a qualified deployment profile.  The logical table cost is
-97,480 bytes per connection; backing allocator alignment may round the
-physical reservation upward.  The exact XMEM total is 97,504 bytes for one
-connection and `n * 97,480 + 24` for odd `n`; even counts require exactly
-`n * 97,480`.
+237,496 bytes per connection; backing allocator alignment may round the
+physical reservation upward. The exact XMEM total is 237,520 bytes for one
+connection and `n * 237,496 + 24` for odd `n`; even counts require exactly
+`n * 237,496`.
 
 Each listener TCB has an embedded **accept queue** (8 slots).  Incoming
 SYNs allocate a fresh TCB — the listener stays in LISTEN and never
@@ -1810,9 +1810,12 @@ four-core emulator capstone has exercised a real full-batch signature and
 peer-core cancellation with atomic output and complete owner/metadata cleanup.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
-context is 968 bytes.  Each context also owns a 90,632-byte receive workspace:
+context is 968 bytes. Each context also owns a 230,648-byte receive/server
+workspace:
 a 16,896-byte partial-record lane and an aligned retained-data lane capable of
-holding the bounded 73,732-byte post-handshake message.  Incomplete encrypted
+holding the bounded 73,732-byte post-handshake message, plus a 131,146-byte
+ClientHello lane, 8,192-byte duplicate-extension bitmap, 512-byte immutable
+server-message ledger, and 160 bytes of exact flight metadata. Incomplete encrypted
 application records, authenticated plaintext left after a caller-sized read,
 and fragmented post-handshake messages therefore survive across calls without
 aliasing another context.  Cryptographic work and the transient global
@@ -1822,7 +1825,7 @@ into connection-owned or caller storage and scrub their complete global
 staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
 writes to its caller-selected output and does not scrub that output.  Together
 with the 5,816-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 97,480 bytes per connection,
+descriptors, the logical network-table cost is 237,496 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
 
