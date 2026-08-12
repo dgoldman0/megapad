@@ -22638,7 +22638,8 @@ class TestKDOSX509(_KDOSNetworkTestBase):
 
 class TestKDOSECDSA(_KDOSNetworkTestBase):
     """Tests for §16.7c P-256 ECDSA signature verification.
-    Note: EC scalar mul is computationally expensive. Tests use high step limits.
+    Legacy public verification tests retain their checked-in large limits;
+    private scalar and signer qualification use the ordinary 400M ceiling.
     """
 
     def _store_bytes(self, name, data: bytes) -> list[str]:
@@ -22961,6 +22962,472 @@ class TestKDOSECDSA(_KDOSNetworkTestBase):
         text = self._run_kdos(lines)
         self.assertIn("THROW=-4377 ", text)
         self.assertIn("WORKZERO=-1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
+    def test_rfc6979_state_matches_p256_sha256_candidates(self):
+        """RFC 6979 state advances through and beyond one four-trial batch."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+        candidates = [bytes.fromhex(value) for value in (
+            "a6e3c57dd01abe90086538398355dd4c"
+            "3b17aa873382b0f24d6129493d8aad60",
+            "8e83dc490bc5fc4d5992bd63cd87f254"
+            "adffcb930f8a8011702a88870f638fdb",
+            "7b8dc9ad8ce159abca1b9915fc1470e9"
+            "1d5ad2443b3032557e78f47e180ab702",
+            "0c2161730a70227da55c7d16df1b6e13"
+            "02e751bab0caf723ff830f7ba60a30ad",
+            "debb86c7cfe67ade22e77b9f14285f81"
+            "9c64d8b154f5ac778731b91e785caf7c",
+        )]
+        lines = self._store_bytes("eps-d", private_le)
+        lines += self._store_bytes("eps-h", digest)
+        for index, candidate in enumerate(candidates, 1):
+            lines += self._store_bytes(f"eps-k{index}", candidate)
+        lines.extend([
+            "CREATE eps-out 72 ALLOT",
+            "TLS-OWNER-TRY DROP",
+            "eps-d eps-h eps-out 72 _EPS-ARGS-STATUS DROP",
+            "_EPS-SETUP _EPS-PREPROCESS _EPS-RFC-INIT",
+        ])
+        for index in range(1, 6):
+            if index > 1:
+                lines.append("_EPS-RFC-REJECT")
+            lines.extend([
+                "_EPS-RFC-CANDIDATE",
+                f'." K{index}=" _EPS-V eps-k{index} 32 _XC-BYTES= .',
+            ])
+        lines.extend([
+            "_EPS-CLEANUP TLS-OWNER-RELEASE",
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        for index in range(1, 6):
+            self.assertIn(f"K{index}=-1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
+    def test_rfc6979_bits2octets_reduces_one_full_width_digest(self):
+        """bits2octets performs the required P-256 order reduction."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        reduced_le = bytes.fromhex(
+            "00000000ffffffff0000000000000000"
+            "4319055258e8617b0c46353d039cdaae"
+        )[::-1]
+        lines = self._store_bytes("eps-d", private_le)
+        lines += self._store_bytes("eps-h", bytes([0xFF]) * 32)
+        lines += self._store_bytes("eps-reduced", reduced_le)
+        lines.extend([
+            "CREATE eps-out 72 ALLOT",
+            "TLS-OWNER-TRY DROP",
+            "eps-d eps-h eps-out 72 _EPS-ARGS-STATUS DROP",
+            "_EPS-SETUP _EPS-PREPROCESS",
+            '." REDUCED=" _EPS-H1 eps-reduced 32 _XC-BYTES= .',
+            "_EPS-CLEANUP TLS-OWNER-RELEASE",
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("REDUCED=-1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
+    def test_rfc6979_signer_has_four_complete_unbounded_trials(self):
+        """The ordinary batch is fixed work; four is not a retry ceiling."""
+        init = self._forth_definition("_EPS-RFC-INIT")
+        candidate = self._forth_definition("_EPS-RFC-CANDIDATE")
+        reject = self._forth_definition("_EPS-RFC-REJECT")
+        private = self._forth_definition("_EPS-PRIVATE-SELECT")
+        qualify = self._forth_definition("_EPS-CANDIDATE-SELECT")
+        select = self._forth_definition("_EPS-SELECT-RS")
+        trial = self._forth_definition("_EPS-SIGN-TRIAL")
+        batch = self._forth_definition("_EPS-FOUR-TRIAL-BATCH")
+        core = self._forth_definition("_EPS-PRIVATE-CORE")
+        output = self._forth_definition("_EPS-OUTPUT-STATUS")
+        cleanup = self._forth_definition("_EPS-CLEANUP")
+        wrapper = self._forth_definition(
+            "_ECDSA-P256-SHA256-SIGN-CHECKED"
+        )
+
+        for word in (private, qualify, select):
+            for forbidden in ("IF", "ELSE", "THEN", "EXIT", "FCMOV"):
+                self.assertIsNone(
+                    re.search(
+                        rf"(?<![-A-Z0-9_]){forbidden}(?![-A-Z0-9_])",
+                        word,
+                    )
+                )
+        self.assertEqual(init.count("_EPS-HMAC-INTO"), 4)
+        self.assertEqual(candidate.count("_EPS-HMAC-INTO"), 1)
+        self.assertEqual(reject.count("_EPS-HMAC-INTO"), 2)
+        self.assertEqual(batch.count("_EPS-SIGN-TRIAL"), 4)
+        self.assertEqual(batch.count("_EPS-RFC-REJECT"), 3)
+        self.assertIn("_P256-SECRET-BASE-MUL-CHECKED", trial)
+        for operation in ("FADD", "FMUL", "FINV"):
+            self.assertIn(operation, trial)
+        self.assertIn("WHILE", core)
+        self.assertIn("_EPS-RFC-REJECT", core)
+        self.assertNotIn("_BN256-", "\n".join((qualify, select, trial)))
+        self.assertIn("_EPS-CAP @ _EPS-DER-LEN @ <", output)
+        self.assertNotIn("72 <", output)
+        self.assertLess(cleanup.index("_P256S-CLEANUP"),
+                        cleanup.index("_EPS-FIELD-CLEAR"))
+        self.assertLess(cleanup.index("_EPS-FIELD-CLEAR"),
+                        cleanup.index("_EPS-WORK-WIPE"))
+        self.assertIn("CATCH", wrapper)
+
+    def test_rfc6979_private_and_nonce_range_boundaries(self):
+        """Both fixed scans accept n-1 and reject zero and n exactly."""
+        n = int.from_bytes(bytes([
+            81, 37, 99, 252, 194, 202, 185, 243,
+            132, 158, 23, 167, 173, 250, 230, 188,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            0, 0, 0, 0, 255, 255, 255, 255,
+        ]), "little")
+        lines = self._store_bytes("eps-zero", bytes(32))
+        lines += self._store_bytes("eps-n", n.to_bytes(32, "little"))
+        lines += self._store_bytes("eps-nm1", (n - 1).to_bytes(32, "little"))
+        lines += self._store_bytes("eps-n-be", n.to_bytes(32, "big"))
+        lines += self._store_bytes("eps-nm1-be", (n - 1).to_bytes(32, "big"))
+        lines.extend([
+            "CREATE eps-h 32 ALLOT CREATE eps-out 72 ALLOT",
+            "TLS-OWNER-TRY DROP",
+            "eps-zero eps-h eps-out 72 _EPS-ARGS-STATUS DROP _EPS-SETUP",
+            "_EPS-PRIVATE-SELECT",
+            '." D0=" _EPS-KEY-VALID @ .',
+            "eps-n _EPS-KEY ! _EPS-PRIVATE-SELECT",
+            '." DN=" _EPS-KEY-VALID @ .',
+            "eps-nm1 _EPS-KEY ! _EPS-PRIVATE-SELECT",
+            '." DNM1=" _EPS-KEY-VALID @ .',
+            "_EPS-V 32 0 FILL _EPS-CANDIDATE-SELECT",
+            '." K0=" _EPS-CAND-VALID @ .',
+            "eps-n-be _EPS-V 32 MOVE _EPS-CANDIDATE-SELECT",
+            '." KN=" _EPS-CAND-VALID @ .',
+            "eps-nm1-be _EPS-V 32 MOVE _EPS-CANDIDATE-SELECT",
+            '." KNM1=" _EPS-CAND-VALID @ .',
+            "_EPS-CLEANUP TLS-OWNER-RELEASE",
+        ])
+        text = self._run_kdos(lines)
+        for marker in ("D0", "DN", "K0", "KN"):
+            self.assertIn(f"{marker}=0 ", text)
+        for marker in ("DNM1", "KNM1"):
+            self.assertIn(f"{marker}=1 ", text)
+
+    def test_rfc6979_der_trims_and_sign_pads_minimal_integers(self):
+        """DER strips high zero bytes and adds only the required sign pad."""
+        expected = bytes.fromhex("300702010102020080")
+        lines = self._store_bytes("eps-ex", expected)
+        lines.extend([
+            "_EPS-WORK-WIPE 1 _EPS-R C! 128 _EPS-S C!",
+            "_EPS-BUILD-DER",
+            '." LEN=" _EPS-DER-LEN @ .',
+            f'." DER=" _EPS-DER eps-ex {len(expected)} _XC-BYTES= .',
+            "_EPS-WORK-WIPE",
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn(f"LEN={len(expected)} ", text)
+        self.assertIn("DER=-1 ", text)
+
+    def test_rfc6979_first_valid_selector_covers_all_batch_positions(self):
+        """Arithmetic selection keeps the first valid result, including five."""
+        lines = [
+            "VARIABLE eps-want",
+            ": eps-selector-case ( position -- )",
+            "  eps-want ! _EPS-WORK-WIPE 0 _EPS-FOUND !",
+            "  4 0 DO",
+            "    _EPS-RC 32 I 1+ FILL _EPS-SC 32 I 17 + FILL",
+            "    eps-want @ I 1+ = IF 1 ELSE 0 THEN _EPS-CAND-VALID !",
+            "    _EPS-SELECT-RS",
+            "  LOOP",
+            "  eps-want @ 5 = IF",
+            "    _EPS-RC 32 5 FILL _EPS-SC 32 21 FILL",
+            "    1 _EPS-CAND-VALID ! _EPS-SELECT-RS",
+            "  THEN",
+            '  _EPS-R C@ . _EPS-S C@ . _EPS-FOUND @ . ;',
+            '." P1=" 1 eps-selector-case',
+            '." P2=" 2 eps-selector-case',
+            '." P3=" 3 eps-selector-case',
+            '." P4=" 4 eps-selector-case',
+            '." P5=" 5 eps-selector-case',
+            "_EPS-WORK-WIPE",
+        ]
+        text = self._run_kdos(lines)
+        for position in range(1, 6):
+            self.assertIn(
+                f"P{position}={position} {position + 16} 1 ", text
+            )
+
+    def test_rfc6979_sample_signs_to_exact_canonical_der(self):
+        """The RFC 6979 P-256/SHA-256 sample has exact r, s, and DER."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+        expected_der = bytes.fromhex(
+            "3046022100efd48b2aacb6a8fd1140dd9cd45e81d6"
+            "9d2c877b56aaf991c34d0ea84eaf3716022100f7cb"
+            "1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4"
+            "064dc4ab2f843acda8"
+        )
+        lines = self._store_bytes("eps-d", private_le)
+        lines += self._store_bytes("eps-h", digest)
+        lines += self._store_bytes("eps-der", expected_der)
+        lines.extend([
+            "CREATE eps-out 72 ALLOT eps-out 72 165 FILL",
+            "CREATE eps-zero 32 ALLOT CREATE eps-acc 32 ALLOT",
+            "CREATE eps-lo 32 ALLOT CREATE eps-hi 32 ALLOT",
+            "eps-zero 32 0 FILL",
+            "VARIABLE eps-len VARIABLE eps-ior VARIABLE eps-t0 VARIABLE eps-cyc",
+            "PERF-CYCLES eps-t0 !",
+            "eps-d eps-h eps-out 72 _ECDSA-P256-SHA256-SIGN-CHECKED",
+            "eps-ior ! eps-len !",
+            "PERF-CYCLES eps-t0 @ - eps-cyc !",
+            '." IOR=" eps-ior @ .',
+            '." LEN=" eps-len @ .',
+            '." CYC=" eps-cyc @ .',
+            f'." DER=" eps-out eps-der {len(expected_der)} _XC-BYTES= .',
+            ': eps-work-zero? ( -- flag ) TRUE /ECDSA-P256-SIGN-WORK 0 DO',
+            '  _ECDSA-P256-SIGN-WORK I + C@ 0= AND LOOP ;',
+            ': eps-p256-zero? ( -- flag ) TRUE /P256-SECRET-WORK 0 DO',
+            '  _P256-SECRET-WORK I + C@ 0= AND LOOP ;',
+            ': eps-hmac-zero? ( -- flag ) TRUE',
+            '  64 0 DO HMAC256-IPAD I + C@ 0= AND LOOP',
+            '  64 0 DO HMAC256-OPAD I + C@ 0= AND LOOP',
+            '  32 0 DO HMAC256-INNER I + C@ 0= AND LOOP',
+            '  32 0 DO HMAC256-KEY I + C@ 0= AND LOOP ;',
+            '." WORK=" eps-work-zero? .',
+            '." P256=" eps-p256-zero? .',
+            '." HMAC=" eps-hmac-zero? .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "eps-acc 32 90 FILL eps-acc GF-R@",
+            "eps-lo 32 90 FILL eps-hi 32 90 FILL",
+            "eps-zero eps-zero eps-lo eps-hi FMUL-ADD-RAW",
+            "eps-zero eps-acc _EC-T1 FCEQ",
+            '." ACC=" _EC-T1 C@ .',
+            "eps-zero eps-lo _EC-T1 FCEQ",
+            '." PREVLO=" _EC-T1 C@ .',
+            "eps-zero eps-hi _EC-T1 FCEQ",
+            '." PREVHI=" _EC-T1 C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("IOR=0 ", text)
+        self.assertIn(f"LEN={len(expected_der)} ", text)
+        self.assertIn("DER=-1 ", text)
+        self.assertIn("WORK=-1 ", text)
+        self.assertIn("P256=-1 ", text)
+        self.assertIn("HMAC=-1 ", text)
+        self.assertIn("OWNER=0 ", text)
+        for marker in ("ACC", "PREVLO", "PREVHI"):
+            self.assertIn(f"{marker}=1 ", text)
+
+    def test_rfc6979_test_vector_uses_its_exact_71_byte_capacity(self):
+        """Canonical DER accepts the actual bound; it does not require 72."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        digest = bytes.fromhex(
+            "9f86d081884c7d659a2feaa0c55ad015"
+            "a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        )
+        expected_der = bytes.fromhex(
+            "3045022100f1abb023518351cd71d881567b1ea663"
+            "ed3efcf6c5132b354f28d3b0b7d383670220019f"
+            "4113742a2b14bd25926b49c649155f267e60d3814"
+            "b4c0cc84250e46f0083"
+        )
+        lines = self._store_bytes("eps-d", private_le)
+        lines += self._store_bytes("eps-h", digest)
+        lines += self._store_bytes("eps-der", expected_der)
+        lines.extend([
+            f"CREATE eps-out {len(expected_der)} ALLOT",
+            f"eps-out {len(expected_der)} 165 FILL",
+            f"eps-d eps-h eps-out {len(expected_der)} "
+            "_ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." IOR=" . ." LEN=" .',
+            f'." DER=" eps-out eps-der {len(expected_der)} _XC-BYTES= .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("IOR=0 LEN=71 ", text)
+        self.assertIn("DER=-1 ", text)
+
+    def test_rfc6979_private_core_has_equal_architectural_cycles(self):
+        """Two ordinary first-batch signatures execute equal private cycles."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        sample_digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+        test_digest = bytes.fromhex(
+            "9f86d081884c7d659a2feaa0c55ad015"
+            "a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        )
+        def measure(digest: bytes) -> int:
+            lines = self._store_bytes("eps-d", private_le)
+            lines += self._store_bytes("eps-h", digest)
+            lines.extend([
+                "CREATE eps-out 72 ALLOT",
+                "VARIABLE eps-t0 VARIABLE eps-cyc",
+                "TLS-OWNER-TRY DROP",
+                "eps-d eps-h eps-out 72 _EPS-ARGS-STATUS DROP _EPS-SETUP",
+                "PERF-CYCLES eps-t0 ! _EPS-PRIVATE-CORE",
+                "PERF-CYCLES eps-t0 @ - eps-cyc !",
+                "_EPS-CLEANUP TLS-OWNER-RELEASE",
+                '." CYC=" eps-cyc @ .',
+                '." OWNER=" TLS-OWNER-DEPTH @ .',
+            ])
+            text = self._run_kdos(lines)
+            self.assertIn("OWNER=0 ", text)
+            return int(text.split("CYC=")[-1].split()[0])
+
+        # Each measurement begins from the same pristine networking snapshot;
+        # comparing back-to-back calls would include emulator timer/JIT phase.
+        self.assertEqual(measure(sample_digest), measure(test_digest))
+
+    def test_rfc6979_failures_are_atomic_and_capacity_is_exact(self):
+        """Invalid key, short capacity, and aliases never publish bytes."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+        alias_zone = private_le + bytes([0xA6]) * 40
+        lines = self._store_bytes("eps-d", private_le)
+        lines += self._store_bytes("eps-alias", alias_zone)
+        lines += self._store_bytes("eps-alias-copy", alias_zone)
+        lines += self._store_bytes("eps-h", digest)
+        lines.extend([
+            "CREATE eps-zero 32 ALLOT CREATE eps-out 72 ALLOT",
+            ': eps-reset eps-out 72 165 FILL ;',
+            ': eps-atomic? TRUE 72 0 DO eps-out I + C@ 165 = AND LOOP ;',
+            "eps-reset eps-zero eps-h eps-out 72",
+            "_ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." KEY-IOR=" . ." KEY-LEN=" .',
+            '." KEY-ATOMIC=" eps-atomic? .',
+            "eps-reset eps-d eps-h eps-out 71",
+            "_ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." CAP-IOR=" . ." CAP-LEN=" .',
+            '." CAP-ATOMIC=" eps-atomic? .',
+            "eps-alias eps-h eps-alias 72 _ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." ALIAS-IOR=" . ." ALIAS-LEN=" .',
+            '." ALIAS-PRESERVED=" eps-alias eps-alias-copy 72 _XC-BYTES= .',
+            "eps-d eps-h _P256-N-INV 72 _ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." NINV-IOR=" . ." NINV-LEN=" .',
+            ': eps-ninv-zero? TRUE 32 0 DO',
+            '  _P256-N-INV I + C@ 0= AND LOOP ;',
+            '." NINV-ZERO=" eps-ninv-zero? .',
+            "eps-reset TLS-OWNER-TRY DROP",
+            "eps-d eps-h eps-out 72 _ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." NEST-IOR=" . ." NEST-LEN=" .',
+            '." NEST-DEPTH=" TLS-OWNER-DEPTH @ .',
+            "TLS-OWNER-RELEASE",
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("KEY-IOR=-4313 KEY-LEN=0 ", text)
+        self.assertIn("KEY-ATOMIC=-1 ", text)
+        self.assertIn("CAP-IOR=-4314 CAP-LEN=0 ", text)
+        self.assertIn("CAP-ATOMIC=-1 ", text)
+        self.assertIn("ALIAS-IOR=-4312 ALIAS-LEN=0 ", text)
+        self.assertIn("ALIAS-PRESERVED=-1 ", text)
+        self.assertIn("NINV-IOR=-4312 NINV-LEN=0 ", text)
+        self.assertIn("NINV-ZERO=-1 ", text)
+        self.assertIn("NEST-IOR=0 NEST-LEN=72 ", text)
+        self.assertIn("NEST-DEPTH=1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
+    def test_rfc6979_busy_and_early_alias_paths_do_not_mutate_owner(self):
+        """Busy is non-mutating; internal input aliases fail after cleanup."""
+        private_le = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        digest = bytes.fromhex(
+            "af2bdbe1aa9b6ec1e2ade1d694f41fc7"
+            "1a831d0268e9891562113d8a62add1bf"
+        )
+        lines = self._store_bytes("eps-d", private_le)
+        lines += self._store_bytes("eps-h", digest)
+        lines.extend([
+            "CREATE eps-out 72 ALLOT eps-out 72 165 FILL",
+            ': eps-poison? TRUE /ECDSA-P256-SIGN-WORK 0 DO',
+            '  _ECDSA-P256-SIGN-WORK I + C@ 90 = AND LOOP ;',
+            ': eps-p256-poison? TRUE /P256-SECRET-WORK 0 DO',
+            '  _P256-SECRET-WORK I + C@ 91 = AND LOOP ;',
+            ': eps-zero? TRUE /ECDSA-P256-SIGN-WORK 0 DO',
+            '  _ECDSA-P256-SIGN-WORK I + C@ 0= AND LOOP ;',
+            ': eps-p256-zero? TRUE /P256-SECRET-WORK 0 DO',
+            '  _P256-SECRET-WORK I + C@ 0= AND LOOP ;',
+            ': eps-out-atomic? TRUE 72 0 DO',
+            '  eps-out I + C@ 165 = AND LOOP ;',
+            "TLS-OWNER-TRY DROP TASK-ID 1+ TLS-OWNER-TASK !",
+            "_ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 90 FILL",
+            "_P256-SECRET-WORK /P256-SECRET-WORK 91 FILL",
+            "eps-d eps-h eps-out 72 _ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." BUSY-IOR=" . ." BUSY-LEN=" .',
+            '." POISON=" eps-poison? .',
+            '." P256-POISON=" eps-p256-poison? .',
+            '." BUSY-ATOMIC=" eps-out-atomic? .',
+            '." HELD=" TLS-OWNER-DEPTH @ .',
+            "TASK-ID TLS-OWNER-TASK ! TLS-OWNER-RELEASE",
+            "eps-out 72 165 FILL",
+            "_ECDSA-P256-SIGN-WORK eps-h eps-out 72",
+            "_ECDSA-P256-SHA256-SIGN-CHECKED",
+            '." ALIAS-IOR=" . ." ALIAS-LEN=" .',
+            '." ZERO=" eps-zero? .',
+            '." P256-ZERO=" eps-p256-zero? .',
+            '." ALIAS-ATOMIC=" eps-out-atomic? .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("BUSY-IOR=-4206 BUSY-LEN=0 ", text)
+        self.assertIn("POISON=-1 ", text)
+        self.assertIn("P256-POISON=-1 ", text)
+        self.assertIn("BUSY-ATOMIC=-1 ", text)
+        self.assertIn("HELD=1 ", text)
+        self.assertIn("ALIAS-IOR=-4312 ALIAS-LEN=0 ", text)
+        self.assertIn("ZERO=-1 ", text)
+        self.assertIn("P256-ZERO=-1 ", text)
+        self.assertIn("ALIAS-ATOMIC=-1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
+    def test_rfc6979_unwind_rethrows_after_complete_cleanup(self):
+        """Unexpected Forth exceptions scrub both private lanes and unlock."""
+        lines = [
+            ': eps-work-zero? TRUE /ECDSA-P256-SIGN-WORK 0 DO',
+            '  _ECDSA-P256-SIGN-WORK I + C@ 0= AND LOOP ;',
+            ': eps-p256-zero? TRUE /P256-SECRET-WORK 0 DO',
+            '  _P256-SECRET-WORK I + C@ 0= AND LOOP ;',
+            ': eps-unwind-probe -4378 _EPS-UNWIND ;',
+            "TLS-OWNER-TRY DROP",
+            "_ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 90 FILL",
+            "_P256-SECRET-WORK /P256-SECRET-WORK 90 FILL",
+            "' eps-unwind-probe CATCH",
+            '." THROW=" .',
+            '." WORK=" eps-work-zero? .',
+            '." P256=" eps-p256-zero? .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("THROW=-4378 ", text)
+        self.assertIn("WORK=-1 ", text)
+        self.assertIn("P256=-1 ", text)
         self.assertIn("OWNER=0 ", text)
 
     def test_ecdsa_decode_sig_valid(self):

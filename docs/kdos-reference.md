@@ -1693,13 +1693,17 @@ handler wiring.
 | `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify using ECDSA-P256-SHA256 or RSA-PSS-RSAE-SHA256 according to the authenticated leaf key. |
 
 The public `EC-*` words above are the branch-bearing, public-data verification
-path. They are not suitable for private scalars. Server-signing development
-uses a distinct internal homogeneous-projective base-point operation with a
-fixed 256-round architectural schedule and a fully scrubbed 960-byte owned
-workspace. That underscore-prefixed operation is intentionally absent from
-the public word table; credential provisioning will expose a lower-owned key
-through an opaque generational handle rather than make raw private-key spans a
-general networking API.
+path. They are not suitable for private scalars. Server signing uses a distinct
+internal homogeneous-projective base-point operation with a fixed 256-round
+architectural schedule and a fully scrubbed 960-byte owned workspace. Its
+RFC 6979 ECDSA-P256-SHA256 composition uses a separate exact 856-byte lane,
+four complete signing trials per ordinary fixed-work batch, unbounded
+standards-correct batch continuation, and staged minimal DER publication by
+actual caller capacity. These underscore-prefixed operations are intentionally
+absent from the public word table; credential provisioning will expose a
+lower-owned key through an opaque generational handle rather than make raw
+private-key spans a general networking API. The fixed schedule is an
+architectural timing claim, not a physical DPA-resistance claim.
 
 ### §16.8–§16.11 TLS 1.3
 

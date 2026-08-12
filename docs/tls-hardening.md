@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, and per-context application RX implemented; server role gated on a qualified signer
+Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, per-context application RX, and a qualified internal P-256 signer implemented; server role gated on credential ownership and handshake integration
 Last updated: 2026-08-12
 
 ## Purpose
@@ -32,9 +32,9 @@ client handshake and reversing its traffic keys would omit the mandatory
 server proof of possession in `CertificateVerify`.  The following lower-level
 facts gate an authenticated server role:
 
-- P-256 `EC-MUL` branches on scalar bits and is qualified only for public
-  verification data.  It must not process a long-term signing key or an ECDSA
-  nonce.
+- P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
+  verification data. Private signing now uses the separate fixed-schedule
+  operation documented below; the two paths are not interchangeable.
 - The fixed RSA-2048 path implements the public exponent only.  There is no
   private RSA operation, PSS signing path, or blinding contract.
 - KDOS has no protected private-key store or TLS credential-handle lifecycle.
@@ -54,14 +54,14 @@ facts gate an authenticated server role:
   TLS execution remains unsupported until the remaining shared state becomes
   connection-owned.
 
-The first interoperable server signature profile should be
+The first interoperable server signature profile is
 `ecdsa_secp256r1_sha256`, which matches the existing certificate parser and
-client signature offer.  Closing that gate requires a native secret-scalar
-operation with an appropriate constant-work argument, deterministic RFC 6979
-nonce derivation, fixed-work scalar arithmetic, canonical DER output, owned
-credential storage, public-key matching, cancellation, and complete software
-and hardware scratch cleanup.  Reusing `EC-MUL`, injecting a host callback, or
-precomputing a fixture signature is test scaffolding rather than a server
+client signature offer. The native secret-scalar operation, deterministic
+RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
+and complete signer scratch cleanup are implemented. Closing the server gate
+still requires owned credential storage, public-key matching, cancellation,
+and handshake integration. Reusing `EC-MUL`, injecting a host callback, or
+precomputing a fixture signature remains test scaffolding rather than a server
 security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
@@ -167,6 +167,39 @@ nothing and leaves the current owner's workspace untouched. The raw internal
 entry is a qualification substrate, not the eventual credential API:
 long-term private keys remain lower-owned and will be addressed through opaque
 generational handles.
+
+The internal ECDSA-P256-SHA256 composition adds an exact 856-byte signing
+lane, for 1,816 bytes across the two newly composed private lanes while it
+invokes the 960-byte base-point operation. Existing lock-9 HMAC/SHA scratch is
+separately owned and accounted. It implements RFC 6979 `bits2octets`, K/V
+initialization, and deterministic candidates with public checked
+HMAC-SHA256. Candidate processing is arranged in unrolled four-trial batches:
+all four trials execute a real fixed-schedule base multiplication and complete
+`r`/`s` arithmetic, even after an earlier usable result. Four is not a retry
+cap. An exhausted batch performs candidate four's rejection transition and
+continues with another batch, so zero/out-of-range `k` and the required
+ECDSA-level `r=0` or `s=0` retry semantics are complete without a hidden
+attempt limit.
+
+Modulo-order arithmetic uses ordinary residues under the custom P-256 order
+with its deliberate zero Montgomery-selector buffer. The signer reduces the
+SHA-256 digest and affine x-coordinate, computes
+`s = k^-1 (h + r*d) mod n`, and selects the first complete result with
+arithmetic byte masks. Only then does it construct minimal positive ASN.1
+INTEGERs in a staged 72-byte DER lane. Publication checks the actual encoded
+length, so a 71-byte signature accepts an exact 71-byte caller capacity rather
+than imposing the mathematical 72-byte maximum as a blanket minimum. Low-S
+normalization is not applied; it is not required by TLS and would disagree
+with the RFC 6979 Appendix A vector.
+
+Invalid keys run the complete dummy-key private path but cannot publish.
+Range, capacity, and alias errors are atomic. Acquired-owner exits and caught
+Forth exceptions scrub both private lanes, clear the Field inversion/ACC/raw
+multiply state touched by signing, and restore exactly one recursive owner
+depth. Lower HMAC operations independently own and wipe their scratch. The
+qualification establishes an ordinary-case fixed architectural schedule, not
+physical power-analysis resistance, and Forth `CATCH` does not contain an
+architectural trap.
 
 ### Fixed RSA-2048
 
@@ -441,6 +474,15 @@ Native guest tests cover:
 
 - canonical DER signature integers and a real certificate signature;
 - valid, corrupt, and out-of-range ECDSA inputs;
+- RFC 6979 P-256/SHA-256 `sample` and `test` candidates, signatures, and exact
+  72-byte/71-byte DER encodings, plus fifth-candidate state continuation;
+- fixed four-complete-trial source structure with unbounded batch
+  continuation, every first-valid selection position, `bits2octets` and order
+  boundaries, equal fresh-snapshot private-core cycles, and minimal DER trim
+  and sign-padding edges;
+- signer invalid-key, exact-capacity, alias, busy, recursive-owner, and caught
+  exception atomicity, including complete private/HMAC workspace and touched
+  Field-state cleanup;
 - differential RSA Montgomery/public-operation vectors, widened multiply
   boundaries, and representative-range rejection;
 - exact PKCS#1 v1.5 and PSS padding failure axes, plus fixed real RSA
@@ -482,8 +524,9 @@ Native guest tests cover:
 - clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
-The test private scalars are deliberately trivial and never enter a product
-trust bundle.
+Signer qualification uses only standardized or synthetic test scalars,
+including the RFC 6979 Appendix A P-256 key. None enters a product trust bundle
+or lower credential slot.
 
 ## Remaining Release Blockers
 

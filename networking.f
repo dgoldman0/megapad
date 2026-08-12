@@ -6096,6 +6096,377 @@ VARIABLE _TAAS-NAME-LEN
     THEN
     _P256S-FINISH ;
 
+\ --- RFC 6979 ECDSA-P256-SHA256 signing substrate ---
+\
+\ This raw-key entry remains internal.  The credential layer below will keep
+\ private bytes in lower-owned storage and resolve only an opaque handle into
+\ this operation while lock 10 is held.  RFC 6979 generation is organized as
+\ fixed four-trial batches.  Every trial performs a real fixed-schedule base
+\ multiplication and complete r/s arithmetic, including trials after the
+\ first usable signature.  If all four fail the RFC range or ECDSA r/s tests,
+\ the exact rejection transition is retained and another four-trial batch is
+\ run.  Four is therefore a timing batch, never an attempt or functionality
+\ limit.
+\
+\ The private path has a fixed architectural instruction/Field schedule in
+\ the ordinary one-batch case.  It is not a physical DPA-resistance claim.
+\ Canonical DER construction follows only after r and s are accepted; its
+\ public output length and byte copies are intentionally not part of the
+\ private fixed-schedule claim.
+
+856 CONSTANT /ECDSA-P256-SIGN-WORK
+CREATE _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK ALLOT
+_ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL
+
+: _EPS-K          _ECDSA-P256-SIGN-WORK ;          \ RFC K, big-endian bytes
+: _EPS-V          _ECDSA-P256-SIGN-WORK 32 + ;     \ RFC V / candidate, BE
+: _EPS-HOUT       _ECDSA-P256-SIGN-WORK 64 + ;
+: _EPS-D          _ECDSA-P256-SIGN-WORK 96 + ;     \ selected private d, LE
+: _EPS-H1         _ECDSA-P256-SIGN-WORK 128 + ;    \ bits2octets(h1), LE
+: _EPS-NONCE      _ECDSA-P256-SIGN-WORK 160 + ;    \ selected/dummy k, LE
+: _EPS-X          _ECDSA-P256-SIGN-WORK 192 + ;
+: _EPS-Y          _ECDSA-P256-SIGN-WORK 224 + ;
+: _EPS-RC         _ECDSA-P256-SIGN-WORK 256 + ;
+: _EPS-SC         _ECDSA-P256-SIGN-WORK 288 + ;
+: _EPS-R          _ECDSA-P256-SIGN-WORK 320 + ;
+: _EPS-S          _ECDSA-P256-SIGN-WORK 352 + ;
+: _EPS-TMP        _ECDSA-P256-SIGN-WORK 384 + ;
+: _EPS-ZERO       _ECDSA-P256-SIGN-WORK 416 + ;
+: _EPS-ONE        _ECDSA-P256-SIGN-WORK 448 + ;
+: _EPS-MSG        _ECDSA-P256-SIGN-WORK 480 + ;    \ maximum HMAC message: 97
+\ Seven scrubbed alignment bytes follow the 97-byte message lane.
+: _EPS-DER        _ECDSA-P256-SIGN-WORK 584 + ;    \ exact P-256 DER max: 72
+: _EPS-KEY        _ECDSA-P256-SIGN-WORK 656 + ;
+: _EPS-HASH       _ECDSA-P256-SIGN-WORK 664 + ;
+: _EPS-OUT        _ECDSA-P256-SIGN-WORK 672 + ;
+: _EPS-CAP        _ECDSA-P256-SIGN-WORK 680 + ;
+: _EPS-KEY-VALID  _ECDSA-P256-SIGN-WORK 688 + ;
+: _EPS-BORROW     _ECDSA-P256-SIGN-WORK 696 + ;
+: _EPS-ACC        _ECDSA-P256-SIGN-WORK 704 + ;
+: _EPS-CAND-VALID _ECDSA-P256-SIGN-WORK 712 + ;
+: _EPS-FOUND      _ECDSA-P256-SIGN-WORK 720 + ;
+: _EPS-MASK       _ECDSA-P256-SIGN-WORK 728 + ;
+: _EPS-HMAC-IOR   _ECDSA-P256-SIGN-WORK 736 + ;
+: _EPS-DER-POS    _ECDSA-P256-SIGN-WORK 744 + ;
+: _EPS-DER-VLEN   _ECDSA-P256-SIGN-WORK 752 + ;
+: _EPS-DER-PAD    _ECDSA-P256-SIGN-WORK 760 + ;
+: _EPS-DER-SRC    _ECDSA-P256-SIGN-WORK 768 + ;
+: _EPS-DER-LEN    _ECDSA-P256-SIGN-WORK 776 + ;
+: _EPS-R-LEN      _ECDSA-P256-SIGN-WORK 784 + ;
+: _EPS-R-PAD      _ECDSA-P256-SIGN-WORK 792 + ;
+: _EPS-S-LEN      _ECDSA-P256-SIGN-WORK 800 + ;
+: _EPS-S-PAD      _ECDSA-P256-SIGN-WORK 808 + ;
+: _EPS-OV-A       _ECDSA-P256-SIGN-WORK 816 + ;
+: _EPS-OV-A-U     _ECDSA-P256-SIGN-WORK 824 + ;
+: _EPS-OV-B       _ECDSA-P256-SIGN-WORK 832 + ;
+: _EPS-OV-B-U     _ECDSA-P256-SIGN-WORK 840 + ;
+: _EPS-PHASE      _ECDSA-P256-SIGN-WORK 848 + ;
+\ The allocation ends at the last live cell.  Its two newly composed private
+\ lanes are this exact 856 bytes plus the separate 960-byte P-256 lane: 1,816
+\ bytes.  Existing lower HMAC/SHA scratch is separately owned and accounted.
+
+-4311 CONSTANT _EPS-E-RANGE
+-4312 CONSTANT _EPS-E-ALIAS
+-4313 CONSTANT _EPS-E-KEY
+-4314 CONSTANT _EPS-E-CAPACITY
+-4315 CONSTANT _EPS-E-CRYPTO
+-4316 CONSTANT _EPS-E-INTERNAL
+-4391 CONSTANT _EPS-X-HMAC
+-4392 CONSTANT _EPS-X-INTERNAL
+
+: _EPS-WORK-WIPE ( -- )
+    _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK 0 FILL ;
+
+: _EPS-SETUP ( -- )
+    \ Preserve the already-qualified call metadata across the exact wipe.
+    _EPS-KEY @ _EPS-HASH @ _EPS-OUT @ _EPS-CAP @
+    _EPS-WORK-WIPE
+    _EPS-CAP ! _EPS-OUT ! _EPS-HASH ! _EPS-KEY !
+    1 _EPS-ONE C! ;
+
+: _EPS-RANGES-OVERLAP? ( a a-u b b-u -- flag )
+    _EPS-OV-B-U ! _EPS-OV-B ! _EPS-OV-A-U ! _EPS-OV-A !
+    _EPS-OV-A @ _EPS-OV-B @ _EPS-OV-B-U @ + U<
+    _EPS-OV-B @ _EPS-OV-A @ _EPS-OV-A-U @ + U< AND ;
+
+: _EPS-INTERNAL-ALIAS? ( a a-u -- flag )
+    2DUP _ECDSA-P256-SIGN-WORK /ECDSA-P256-SIGN-WORK
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP _P256-SECRET-WORK /P256-SECRET-WORK
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP TLS-OWNER-CORE
+    TLS-OWNER-DEPTH 1 CELLS + TLS-OWNER-CORE -
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP P256-GX _EC-ONE 32 + P256-GX -
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP _P256-N-INV 32
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DUP HMAC256-IPAD
+    _HMAC256-MSG-LEN 1 CELLS + HMAC256-IPAD -
+    _EPS-RANGES-OVERLAP? IF 2DROP TRUE EXIT THEN
+    2DROP FALSE ;
+
+: _EPS-ARGS-STATUS ( d-le hash-be out cap -- ior )
+    _EPS-CAP ! _EPS-OUT ! _EPS-HASH ! _EPS-KEY !
+    _EPS-CAP @ 0< IF _EPS-E-RANGE EXIT THEN
+    _EPS-KEY @ 32 CALLER-SPAN-STATUS IF _EPS-E-RANGE EXIT THEN
+    _EPS-HASH @ 32 CALLER-SPAN-STATUS IF _EPS-E-RANGE EXIT THEN
+    TLS-E-OK ;
+
+: _EPS-INPUT-ALIAS? ( -- flag )
+    _EPS-KEY @ 32 _EPS-INTERNAL-ALIAS?
+    _EPS-HASH @ 32 _EPS-INTERNAL-ALIAS? OR ;
+
+: _EPS-OUTPUT-STATUS ( -- ior )
+    _EPS-CAP @ _EPS-DER-LEN @ < IF _EPS-E-CAPACITY EXIT THEN
+    _EPS-OUT @ _EPS-DER-LEN @ CALLER-SPAN-STATUS IF
+        _EPS-E-RANGE EXIT
+    THEN
+    _EPS-OUT @ _EPS-DER-LEN @ _EPS-INTERNAL-ALIAS? IF
+        _EPS-E-ALIAS EXIT
+    THEN
+    _EPS-OUT @ _EPS-DER-LEN @ _EPS-KEY @ 32
+    _EPS-RANGES-OVERLAP? IF _EPS-E-ALIAS EXIT THEN
+    _EPS-OUT @ _EPS-DER-LEN @ _EPS-HASH @ 32
+    _EPS-RANGES-OVERLAP? IF _EPS-E-ALIAS EXIT THEN
+    TLS-E-OK ;
+
+\ Validate d with a fixed 32-byte LE scan and select d or the safe dummy one
+\ arithmetically.  The invalid-key path completes the whole signing body but
+\ cannot publish its dummy signature.
+: _EPS-PRIVATE-SELECT ( -- )
+    0 _EPS-BORROW ! 0 _EPS-ACC !
+    32 0 DO
+        _EPS-KEY @ I + C@ DUP _EPS-ACC @ OR _EPS-ACC !
+        P256-N I + C@ - _EPS-BORROW @ -
+        63 RSHIFT 1 AND _EPS-BORROW !
+    LOOP
+    _EPS-ACC @ 0<> _EPS-BORROW @ AND
+    DUP _EPS-KEY-VALID ! 0 SWAP - _EPS-MASK !
+    32 0 DO
+        _EPS-KEY @ I + C@ _EPS-MASK @ AND
+        _EPS-ONE I + C@ _EPS-MASK @ INVERT AND OR
+        _EPS-D I + C!
+    LOOP ;
+
+: _EPS-HASH-REDUCE ( -- )
+    \ SHA-256 is big-endian; the Field engine is little-endian.  Since a
+    \ 256-bit digest is below 2n, ordinary custom reduction is one fixed call.
+    32 0 DO
+        _EPS-HASH @ I + C@ _EPS-H1 31 I - + C!
+    LOOP
+    ECDSA-MOD-N-INIT
+    _EPS-H1 _EPS-ZERO _EPS-H1 FADD ;
+
+: _EPS-PREPROCESS ( -- )
+    _EPS-PRIVATE-SELECT
+    _EPS-HASH-REDUCE ;
+
+: _EPS-HMAC-INTO ( key msg msg-u out -- )
+    HMAC-SHA256 DUP IF
+        _EPS-HMAC-IOR ! _EPS-X-HMAC THROW
+    THEN DROP ;
+
+: _EPS-RFC-MSG97 ( octet -- )
+    _EPS-PHASE !
+    _EPS-V _EPS-MSG 32 MOVE
+    _EPS-PHASE @ _EPS-MSG 32 + C!
+    32 0 DO
+        _EPS-D I + C@ _EPS-MSG 64 I - + C!
+        _EPS-H1 I + C@ _EPS-MSG 96 I - + C!
+    LOOP ;
+
+: _EPS-RFC-INIT ( -- )
+    _EPS-K 32 0 FILL
+    _EPS-V 32 1 FILL
+    0 _EPS-RFC-MSG97
+    _EPS-K 32 _EPS-MSG 97 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-K 32 MOVE
+    _EPS-K 32 _EPS-V 32 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-V 32 MOVE
+    1 _EPS-RFC-MSG97
+    _EPS-K 32 _EPS-MSG 97 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-K 32 MOVE
+    _EPS-K 32 _EPS-V 32 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-V 32 MOVE ;
+
+: _EPS-RFC-CANDIDATE ( -- )
+    _EPS-K 32 _EPS-V 32 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-V 32 MOVE ;
+
+: _EPS-RFC-REJECT ( -- )
+    _EPS-V _EPS-MSG 32 MOVE
+    0 _EPS-MSG 32 + C!
+    _EPS-K 32 _EPS-MSG 33 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-K 32 MOVE
+    _EPS-K 32 _EPS-V 32 _EPS-HOUT _EPS-HMAC-INTO
+    _EPS-HOUT _EPS-V 32 MOVE ;
+
+\ Interpret the RFC candidate as BE, qualify it against n with a fixed scan,
+\ and select it or dummy one into the LE scalar consumed by P-256.
+: _EPS-CANDIDATE-SELECT ( -- )
+    0 _EPS-BORROW ! 0 _EPS-ACC !
+    32 0 DO
+        _EPS-V 31 I - + C@ DUP _EPS-X I + C!
+        DUP _EPS-ACC @ OR _EPS-ACC !
+        P256-N I + C@ - _EPS-BORROW @ -
+        63 RSHIFT 1 AND _EPS-BORROW !
+    LOOP
+    _EPS-ACC @ 0<> _EPS-BORROW @ AND
+    DUP _EPS-CAND-VALID ! 0 SWAP - _EPS-MASK !
+    32 0 DO
+        _EPS-X I + C@ _EPS-MASK @ AND
+        _EPS-ONE I + C@ _EPS-MASK @ INVERT AND OR
+        _EPS-NONCE I + C!
+    LOOP ;
+
+\ Select the first completely valid r/s pair without a secret-dependent
+\ write-enable.  Later valid trials still perform the same arithmetic/copies.
+: _EPS-SELECT-RS ( -- )
+    _EPS-CAND-VALID @ _EPS-FOUND @ 0= AND
+    0 SWAP - DUP _EPS-MASK !
+    32 0 DO
+        _EPS-RC I + C@ _EPS-MASK @ AND
+        _EPS-R I + C@ _EPS-MASK @ INVERT AND OR
+        _EPS-R I + C!
+        _EPS-SC I + C@ _EPS-MASK @ AND
+        _EPS-S I + C@ _EPS-MASK @ INVERT AND OR
+        _EPS-S I + C!
+    LOOP
+    _EPS-CAND-VALID @ _EPS-FOUND @ OR _EPS-FOUND ! ;
+
+: _EPS-SIGN-TRIAL ( -- )
+    _EPS-RFC-CANDIDATE
+    _EPS-CANDIDATE-SELECT
+    _EPS-NONCE _EPS-X _EPS-Y _P256-SECRET-BASE-MUL-CHECKED
+    ?DUP IF _EPS-HMAC-IOR ! _EPS-X-INTERNAL THROW THEN
+    ECDSA-MOD-N-INIT
+    _EPS-X _EPS-ZERO _EPS-RC FADD
+    _EPS-RC _EPS-D _EPS-TMP FMUL
+    _EPS-H1 _EPS-TMP _EPS-TMP FADD
+    _EPS-NONCE _EPS-Y FINV
+    _EPS-Y _EPS-TMP _EPS-SC FMUL
+    0 _EPS-ACC !
+    32 0 DO _EPS-RC I + C@ _EPS-ACC @ OR _EPS-ACC ! LOOP
+    _EPS-CAND-VALID @ _EPS-ACC @ 0<> AND _EPS-CAND-VALID !
+    0 _EPS-ACC !
+    32 0 DO _EPS-SC I + C@ _EPS-ACC @ OR _EPS-ACC ! LOOP
+    _EPS-CAND-VALID @ _EPS-ACC @ 0<> AND _EPS-CAND-VALID !
+    _EPS-SELECT-RS ;
+
+\ Unrolled deliberately: the normal batch is four candidate HMACs, three
+\ rejection transitions, and four complete signing trials.  Together with
+\ initialization this is exactly fourteen HMAC-SHA256 operations.
+: _EPS-FOUR-TRIAL-BATCH ( -- )
+    0 _EPS-FOUND !
+    _EPS-SIGN-TRIAL
+    _EPS-RFC-REJECT
+    _EPS-SIGN-TRIAL
+    _EPS-RFC-REJECT
+    _EPS-SIGN-TRIAL
+    _EPS-RFC-REJECT
+    _EPS-SIGN-TRIAL ;
+
+: _EPS-DER-MEASURE ( src-le -- value-u pad )
+    _EPS-DER-SRC ! 32 _EPS-DER-VLEN !
+    BEGIN
+        _EPS-DER-VLEN @ 1 >
+    WHILE
+        _EPS-DER-SRC @ _EPS-DER-VLEN @ 1- + C@ 0= IF
+            -1 _EPS-DER-VLEN +!
+        ELSE
+            _EPS-DER-SRC @ _EPS-DER-VLEN @ 1- + C@ 128 AND 0<>
+            IF 1 ELSE 0 THEN _EPS-DER-PAD !
+            _EPS-DER-VLEN @ _EPS-DER-PAD @ EXIT
+        THEN
+    REPEAT
+    _EPS-DER-SRC @ C@ 128 AND 0<> IF 1 ELSE 0 THEN _EPS-DER-PAD !
+    _EPS-DER-VLEN @ _EPS-DER-PAD @ ;
+
+: _EPS-DER-C, ( byte -- )
+    _EPS-DER _EPS-DER-POS @ + C!
+    1 _EPS-DER-POS +! ;
+
+: _EPS-DER-EMIT-INT ( src-le value-u pad -- )
+    _EPS-DER-PAD ! _EPS-DER-VLEN ! _EPS-DER-SRC !
+    2 _EPS-DER-C,
+    _EPS-DER-VLEN @ _EPS-DER-PAD @ + _EPS-DER-C,
+    _EPS-DER-PAD @ IF 0 _EPS-DER-C, THEN
+    _EPS-DER-VLEN @ 0 DO
+        _EPS-DER-SRC @ _EPS-DER-VLEN @ 1- I - + C@
+        _EPS-DER-C,
+    LOOP ;
+
+: _EPS-BUILD-DER ( -- )
+    _EPS-R _EPS-DER-MEASURE _EPS-R-PAD ! _EPS-R-LEN !
+    _EPS-S _EPS-DER-MEASURE _EPS-S-PAD ! _EPS-S-LEN !
+    6 _EPS-R-LEN @ + _EPS-R-PAD @ +
+      _EPS-S-LEN @ + _EPS-S-PAD @ + _EPS-DER-LEN !
+    0 _EPS-DER-POS !
+    48 _EPS-DER-C,
+    _EPS-DER-LEN @ 2 - _EPS-DER-C,
+    _EPS-R _EPS-R-LEN @ _EPS-R-PAD @ _EPS-DER-EMIT-INT
+    _EPS-S _EPS-S-LEN @ _EPS-S-PAD @ _EPS-DER-EMIT-INT ;
+
+: _EPS-PRIVATE-CORE ( -- )
+    _EPS-PREPROCESS
+    _EPS-RFC-INIT
+    BEGIN
+        _EPS-FOUR-TRIAL-BATCH
+        _EPS-FOUND @ 0=
+    WHILE
+        \ Candidate four needs the same RFC rejection transition before the
+        \ next batch.  There is intentionally no total batch-count cap.
+        _EPS-RFC-REJECT
+    REPEAT ;
+
+: _EPS-BODY ( -- der-u ior )
+    _EPS-SETUP
+    _EPS-PRIVATE-CORE
+    _EPS-BUILD-DER
+    _EPS-KEY-VALID @ 0= IF 0 _EPS-E-KEY EXIT THEN
+    _EPS-OUTPUT-STATUS DUP IF 0 SWAP EXIT THEN DROP
+    _EPS-DER _EPS-OUT @ _EPS-DER-LEN @ MOVE
+    _EPS-DER-LEN @ TLS-E-OK ;
+
+: _EPS-FIELD-CLEAR ( -- )
+    \ Clear the custom-n inversion base/accumulator, ACC, and both persistent
+    \ raw-multiply previous halves.  The custom modulus and exponent are
+    \ public; leave the architectural selector back on P-256 afterward.
+    _EPS-ZERO 32 0 FILL
+    ECDSA-MOD-N-INIT
+    _EPS-ZERO _EPS-X FINV
+    _EPS-ZERO _EPS-ZERO _EPS-X _EPS-Y FMUL-RAW
+    PRIME-P256 ;
+
+: _EPS-CLEANUP ( -- )
+    \ This also covers a throw while the nested P-256 lane is live.
+    _P256S-CLEANUP
+    _EPS-FIELD-CLEAR
+    _EPS-WORK-WIPE ;
+
+: _EPS-FINISH ( der-u ior -- der-u ior )
+    >R >R _EPS-CLEANUP TLS-OWNER-RELEASE R> R> ;
+
+: _EPS-UNWIND ( throw -- )
+    >R _EPS-CLEANUP TLS-OWNER-RELEASE R> THROW ;
+
+: _ECDSA-P256-SHA256-SIGN-CHECKED ( d-le hash-be der-a der-cap -- der-u ior )
+    TLS-OWNER-TRY IF 2DROP 2DROP 0 TLS-E-BUSY EXIT THEN
+    _EPS-ARGS-STATUS DUP IF 0 SWAP _EPS-FINISH EXIT THEN DROP
+    _EPS-INPUT-ALIAS? IF 0 _EPS-E-ALIAS _EPS-FINISH EXIT THEN
+    ['] _EPS-BODY CATCH
+    DUP IF
+        DUP _EPS-X-HMAC = IF
+            DROP 0 _EPS-E-CRYPTO _EPS-FINISH EXIT
+        THEN
+        DUP _EPS-X-INTERNAL = IF
+            DROP 0 _EPS-E-INTERNAL _EPS-FINISH EXIT
+        THEN
+        _EPS-UNWIND
+    THEN DROP
+    _EPS-FINISH ;
+
 0  CONSTANT TLS-CONNECT-E-OK
 1  CONSTANT TLS-CONNECT-E-CONFIG
 2  CONSTANT TLS-CONNECT-E-ALLOC
