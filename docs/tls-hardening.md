@@ -85,6 +85,22 @@ touching output.  The machine-wide TLS owner described below serializes the
 AES selector and larger scratch arenas; this prevents cross-context corruption
 but does not make operations concurrent.
 
+Handshake and application traffic secrets retain their RFC endpoint names in
+the context (`c_*` and `s_*`), while record directions are selected from the
+immutable endpoint role.  Thus client write/server read use client traffic
+secrets and server write/client read use server traffic secrets.  The server
+application transition is intentionally split: after its Finished is protected
+and accepted it may derive the transcript-bound application/exporter secrets
+and install only the server application write epoch.  Its client-handshake read
+key and sequence remain live in `TLSH-CLIENT-FINISHED-PENDING`; only a verified
+and transcript-committed client Finished permits the client application read
+epoch and `TLSH-APPLICATION-READY`.  This prevents transport backpressure or a
+premature state publication from discarding the key needed to authenticate the
+peer's final handshake message.  Once an admitted key-schedule or epoch-install
+operation fails, the context records the exact terminal error while wiping all
+partial schedule and record secrets; neither the schedule nor the final server
+read cutover can be retried from cleared prerequisites.
+
 ## Security Invariant
 
 `TLS-SEND-DATA` is reachable only after all of the following succeed in order:
@@ -100,13 +116,17 @@ but does not make operations concurrent.
 8. The server `Finished` MAC.
 9. Exact ALPN byte selection when the caller configures a required protocol.
 
-Only step 7 sets `TLS-CTX.PEER-AUTH`. The application key schedule additionally
-requires `TLSH-SERVER-FINISHED`; it stages application keys and the exporter
-master secret in `TLSH-APPLICATION-READY` without publishing an established
-connection. Only after `TCP-SEND` accepts the complete local Finished record
-does `TLS-HANDSHAKE-PUBLISH` set `TLSS-ESTABLISHED`, expose exporter use, and
-wipe superseded schedule secrets. Starting a new ClientHello clears the
-retained leaf key, certificate status, authentication bit, and exporter state.
+For the client role, only step 7 sets `TLS-CTX.PEER-AUTH`. The application key
+schedule additionally requires `TLSH-SERVER-FINISHED`; it stages application
+keys and the exporter master secret in `TLSH-APPLICATION-READY` without
+publishing an established connection. For the server role the same bit means
+that the required peer handshake proof is complete: it remains clear while the
+server holds its client-handshake read epoch and is set only after client
+Finished verifies and the client application read epoch installs. Only after
+the complete local Finished boundary is accepted does `TLS-HANDSHAKE-PUBLISH`
+set `TLSS-ESTABLISHED`, expose exporter use, and wipe superseded schedule
+secrets. Starting a new ClientHello clears retained authentication and exporter
+state.
 
 ## Implemented Native Profile
 
@@ -429,8 +449,11 @@ registry for additional application protocols.
 After the transcript includes the authenticated server Finished,
 `TLS-KS-APPLICATION` derives `exporter_master_secret` with the TLS 1.3
 `"exp master"` label. It stages that value alongside the application record
-keys, but exporter access remains unavailable until the local Finished record
-has been accepted in full and `TLS-HANDSHAKE-PUBLISH` publishes the connection.
+keys. A client installs both role-correct directions. A server installs its
+application write direction only and retains its client-handshake read epoch
+until client Finished authentication cuts that direction over. Exporter access
+remains unavailable until `TLS-HANDSHAKE-PUBLISH` publishes the authenticated
+connection.
 The public `TLS-EXPORT` construction is:
 
 ```text

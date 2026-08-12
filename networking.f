@@ -5798,8 +5798,9 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 4 CONSTANT TLSH-CERT-RCVD
 5 CONSTANT TLSH-CV-RCVD
 6 CONSTANT TLSH-SERVER-FINISHED
-7 CONSTANT TLSH-APPLICATION-READY
-8 CONSTANT TLSH-CONNECTED
+7 CONSTANT TLSH-CLIENT-FINISHED-PENDING
+8 CONSTANT TLSH-APPLICATION-READY
+9 CONSTANT TLSH-CONNECTED
 
 0 CONSTANT TLS-E-OK
 -4201 CONSTANT TLS-E-PEER-ALERT
@@ -7932,58 +7933,127 @@ VARIABLE _TDS-OUT
     TLS-HS-HASH 32 32 _TDS-OUT @ TLS-EXPAND-LABEL
 ;
 
+\ --- Role-correct traffic-secret selection and epoch installation ---
+\ Traffic secrets retain their RFC endpoint names in the context.  Record
+\ directions are local: a client's write secret is c_* while a server's
+\ write secret is s_*.  Invalid/unsealed roles never select a secret.
+: _TLS-LOCAL-HS-TRAFFIC ( ctx -- secret | 0 )
+    DUP 0= IF EXIT THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-CLIENT = IF
+        TLS-CTX.C-HS-TRAFFIC EXIT
+    THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER = IF
+        TLS-CTX.S-HS-TRAFFIC EXIT
+    THEN
+    DROP 0 ;
+
+: _TLS-PEER-HS-TRAFFIC ( ctx -- secret | 0 )
+    DUP 0= IF EXIT THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-CLIENT = IF
+        TLS-CTX.S-HS-TRAFFIC EXIT
+    THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER = IF
+        TLS-CTX.C-HS-TRAFFIC EXIT
+    THEN
+    DROP 0 ;
+
+: _TLS-LOCAL-AP-TRAFFIC ( ctx -- secret | 0 )
+    DUP 0= IF EXIT THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-CLIENT = IF
+        TLS-CTX.C-AP-TRAFFIC EXIT
+    THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER = IF
+        TLS-CTX.S-AP-TRAFFIC EXIT
+    THEN
+    DROP 0 ;
+
+: _TLS-PEER-AP-TRAFFIC ( ctx -- secret | 0 )
+    DUP 0= IF EXIT THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-CLIENT = IF
+        TLS-CTX.S-AP-TRAFFIC EXIT
+    THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER = IF
+        TLS-CTX.C-AP-TRAFFIC EXIT
+    THEN
+    DROP 0 ;
+
+VARIABLE _TIS-CTX
+VARIABLE _TIS-SECRET
+
+: _TLS-INSTALL-WR-SECRET ( ctx secret -- status )
+    _TIS-SECRET ! _TIS-CTX !
+    _TIS-CTX @ 0= _TIS-SECRET @ 0= OR IF TLS-E-STATE EXIT THEN
+    _TIS-CTX @ _TIS-SECRET @
+    TLS-L-KEY /TLS-L-KEY 0 0 _TIS-CTX @ TLS-KEY-LEN
+    _TIS-CTX @ TLS-CTX.WR-KEY
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    _TIS-CTX @ _TIS-SECRET @
+    TLS-L-IV /TLS-L-IV 0 0 12 _TIS-CTX @ TLS-CTX.WR-IV
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    0 _TIS-CTX @ TLS-CTX.WR-SEQ !
+    TLS-E-OK ;
+
+: _TLS-INSTALL-RD-SECRET ( ctx secret -- status )
+    _TIS-SECRET ! _TIS-CTX !
+    _TIS-CTX @ 0= _TIS-SECRET @ 0= OR IF TLS-E-STATE EXIT THEN
+    _TIS-CTX @ _TIS-SECRET @
+    TLS-L-KEY /TLS-L-KEY 0 0 _TIS-CTX @ TLS-KEY-LEN
+    _TIS-CTX @ TLS-CTX.RD-KEY
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    _TIS-CTX @ _TIS-SECRET @
+    TLS-L-IV /TLS-L-IV 0 0 12 _TIS-CTX @ TLS-CTX.RD-IV
+    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
+    0 _TIS-CTX @ TLS-CTX.RD-SEQ !
+    TLS-E-OK ;
+
 \ --- Key Schedule Phase 1 ---
 \ TLS-KS-HANDSHAKE ( ctx -- status )
-\   Derive and install handshake traffic keys.
+\   Derive and install role-correct handshake traffic keys.
 \   Prerequisite: ctx.SHARED filled, transcript = CH||SH.
 VARIABLE _TKSH-CTX
 
+: _TKSH-FAIL ( ior -- ior )
+    DUP _TKSH-CTX @ TLS-CTX.ERROR !
+    _TKSH-CTX @ DUP IF DUP TLS-RECORD-SECRETS-WIPE THEN
+    TLS-HANDSHAKE-SECRETS-WIPE ;
+
 : (TLS-KS-HANDSHAKE) ( ctx -- status )
     _TKSH-CTX !
+    \ Reject an unsealed role/profile before touching traffic or schedule
+    \ state.  Failures after admission wipe every partially derived epoch.
+    _TKSH-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ERROR @ TLS-E-OK <> IF DROP TLS-E-STATE EXIT THEN
+    TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF TLS-E-STATE EXIT THEN
     \ Set AES key mode for negotiated suite
-    _TKSH-CTX @ TLS-SET-AES-MODE DUP IF EXIT THEN DROP
+    _TKSH-CTX @ TLS-SET-AES-MODE DUP IF _TKSH-FAIL EXIT THEN DROP
     \ 1. Early Secret = HKDF-Extract(0*32, 0*32)
     _TKSH-CTX @ 0 0  _TLS-ZERO-SECRET 32
     _TKSH-CTX @ TLS-CTX.EARLY TLS-HKDF-EXTRACT
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSH-FAIL EXIT THEN DROP
     \ 2. derived_es = Expand-Label(ES, "derived", empty_hash, 32)
     _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.EARLY
     TLS-TEMP-SECRET TLS-DERIVE-DERIVED
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSH-FAIL EXIT THEN DROP
     \ 3. HS = HKDF-Extract(derived_es, shared_secret)
     _TKSH-CTX @ TLS-TEMP-SECRET 32  _TKSH-CTX @ TLS-CTX.SHARED 32
     _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-HKDF-EXTRACT
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSH-FAIL EXIT THEN DROP
     \ 4. c_hs_traffic = Derive-Secret(HS, "c hs traffic", Hash(CH||SH))
     _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.HS-SECRET
     TLS-L-C-HS-TR /TLS-L-C-HS-TR
     _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC  TLS-DERIVE-SECRET
-    DUP IF EXIT THEN DROP
+    DUP IF _TKSH-FAIL EXIT THEN DROP
     \ 5. s_hs_traffic = Derive-Secret(HS, "s hs traffic", Hash(CH||SH))
     _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.HS-SECRET
     TLS-L-S-HS-TR /TLS-L-S-HS-TR
     _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC  TLS-DERIVE-SECRET
-    DUP IF EXIT THEN DROP
-    \ 6-7. Client HS key+IV → WR-KEY/WR-IV
-    _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
-    TLS-L-KEY /TLS-L-KEY  0 0  _TKSH-CTX @ TLS-KEY-LEN
-    _TKSH-CTX @ TLS-CTX.WR-KEY
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
-    _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
-    TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.WR-IV
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
-    \ 8-9. Server HS key+IV → RD-KEY/RD-IV
-    _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
-    TLS-L-KEY /TLS-L-KEY  0 0  _TKSH-CTX @ TLS-KEY-LEN
-    _TKSH-CTX @ TLS-CTX.RD-KEY
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
-    _TKSH-CTX @ _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
-    TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.RD-IV
-    TLS-EXPAND-LABEL DUP IF EXIT THEN DROP
-    \ 10. Zero sequence numbers
-    0 _TKSH-CTX @ TLS-CTX.WR-SEQ !
-    0 _TKSH-CTX @ TLS-CTX.RD-SEQ !
-    0
+    DUP IF _TKSH-FAIL EXIT THEN DROP
+    \ Install local-write and peer-read epochs from the endpoint role.
+    _TKSH-CTX @ DUP _TLS-LOCAL-HS-TRAFFIC
+    _TLS-INSTALL-WR-SECRET DUP IF _TKSH-FAIL EXIT THEN DROP
+    _TKSH-CTX @ DUP _TLS-PEER-HS-TRAFFIC
+    _TLS-INSTALL-RD-SECRET DUP IF _TKSH-FAIL EXIT THEN DROP
+    TLS-E-OK
 ;
 
 : TLS-KS-HANDSHAKE ( ctx -- status )
@@ -7992,8 +8062,11 @@ VARIABLE _TKSH-CTX
 
 \ --- Key Schedule Phase 2 ---
 \ TLS-KS-APPLICATION ( ctx -- status )
-\   Derive and install application traffic keys from master secret.
-\   Prerequisite: HS-SECRET set, transcript through server Finished.
+\   Complete the client-side application schedule after its Finished record
+\   has been protected.  The split internal operations below also let the
+\   server install only its write epoch after sending Server Finished, retain
+\   the client handshake read epoch, and install the peer application read
+\   epoch only after authenticating Client Finished.
 VARIABLE _TKSA-CTX
 
 : _TKSA-PENDING-WIPE ( -- )
@@ -8001,6 +8074,7 @@ VARIABLE _TKSA-CTX
 
 : _TKSA-FAIL ( ior -- ior )
     _TKSA-CTX @ ?DUP IF
+        OVER OVER TLS-CTX.ERROR !
         DUP TLS-EXPORTER-WIPE
         DUP TLS-RECORD-SECRETS-WIPE
         TLS-HANDSHAKE-SECRETS-WIPE
@@ -8008,24 +8082,13 @@ VARIABLE _TKSA-CTX
         _TKSA-PENDING-WIPE
     THEN ;
 
-: (TLS-KS-APPLICATION) ( ctx -- status )
+: (TLS-KS-APPLICATION-DERIVE) ( ctx -- status )
     _TKSA-CTX !
+    _TKSA-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ERROR @ TLS-E-OK <> IF DROP TLS-E-STATE EXIT THEN
+    TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF TLS-E-STATE EXIT THEN
     _TKSA-PENDING-WIPE
     _TKSA-CTX @ TLS-CTX.EXPORTER-MS 32 0 FILL
-    _TKSA-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
-    _TKSA-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR
-    IF TLS-E-STATE EXIT THEN
-    \ A configured protocol is required, exact, and not published until the
-    \ complete EncryptedExtensions message has passed validation.
-    _TKSA-CTX @ TLS-CTX.ALPN-NAME-LEN @ DUP 0> IF
-        _TKSA-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ <>
-        IF TLS-E-STATE EXIT THEN
-    ELSE
-        DROP
-        _TKSA-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ 0<> IF
-            TLS-E-STATE EXIT
-        THEN
-    THEN
     \ 1. derived_hs = Expand-Label(HS, "derived", empty_hash, 32)
     _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.HS-SECRET
     TLS-TEMP-SECRET TLS-DERIVE-DERIVED
@@ -8049,32 +8112,85 @@ VARIABLE _TKSA-CTX
     TLS-L-EXP-MASTER /TLS-L-EXP-MASTER
     TLS-TEMP-SECRET2 TLS-DERIVE-SECRET
     DUP IF _TKSA-FAIL EXIT THEN DROP
-    \ 6-7. Client app key+IV → WR-KEY/WR-IV
-    _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
-    TLS-L-KEY /TLS-L-KEY  0 0  _TKSA-CTX @ TLS-KEY-LEN
-    _TKSA-CTX @ TLS-CTX.WR-KEY
-    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
-    _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
-    TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.WR-IV
-    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
-    \ 8-9. Server app key+IV → RD-KEY/RD-IV
-    _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
-    TLS-L-KEY /TLS-L-KEY  0 0  _TKSA-CTX @ TLS-KEY-LEN
-    _TKSA-CTX @ TLS-CTX.RD-KEY
-    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
-    _TKSA-CTX @ _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
-    TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.RD-IV
-    TLS-EXPAND-LABEL DUP IF _TKSA-FAIL EXIT THEN DROP
-    \ 10. Zero sequence numbers
-    0 _TKSA-CTX @ TLS-CTX.WR-SEQ !
-    0 _TKSA-CTX @ TLS-CTX.RD-SEQ !
-    \ Publish the exporter secret only after every derivation succeeds.  The
-    \ connection remains in HANDSHAKE until TCP accepts the client Finished.
+    \ Stage the exporter only after every derivation succeeds.  Establishment
+    \ remains a separate authenticated publication boundary.
     TLS-TEMP-SECRET2 _TKSA-CTX @ TLS-CTX.EXPORTER-MS 32 MOVE
     _TKSA-PENDING-WIPE
-    TLSH-APPLICATION-READY _TKSA-CTX @ TLS-CTX.HS-STATE !
-    0
+    TLS-E-OK ;
+
+: (TLS-KS-APPLICATION-WRITE) ( ctx -- status )
+    _TKSA-CTX !
+    _TKSA-CTX @ DUP _TLS-LOCAL-AP-TRAFFIC
+    _TLS-INSTALL-WR-SECRET DUP IF _TKSA-FAIL EXIT THEN ;
+
+: (TLS-KS-APPLICATION-READ) ( ctx -- status )
+    _TKSA-CTX !
+    _TKSA-CTX @ DUP _TLS-PEER-AP-TRAFFIC
+    _TLS-INSTALL-RD-SECRET DUP IF _TKSA-FAIL EXIT THEN ;
+
+: (TLS-KS-APPLICATION) ( ctx -- status )
+    _TKSA-CTX !
+    \ Both roles derive from the transcript through Server Finished.  The
+    \ client has already authenticated that Finished; the server deliberately
+    \ has not authenticated its peer until Client Finished arrives.
+    _TKSA-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ERROR @ TLS-E-OK <> IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> IF
+        DROP TLS-E-STATE EXIT
+    THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-CLIENT = IF
+        TLS-CTX.PEER-AUTH @ 1 <> IF TLS-E-STATE EXIT THEN
+    ELSE
+        DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER <> IF
+            DROP TLS-E-STATE EXIT
+        THEN
+        TLS-CTX.PEER-AUTH @ 0<> IF TLS-E-STATE EXIT THEN
+    THEN
+    \ A configured protocol is required, exact, and not published until the
+    \ complete EncryptedExtensions message has passed validation.
+    _TKSA-CTX @ TLS-CTX.ALPN-NAME-LEN @ DUP 0> IF
+        _TKSA-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ <>
+        IF TLS-E-STATE EXIT THEN
+    ELSE
+        DROP
+        _TKSA-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ 0<> IF
+            TLS-E-STATE EXIT
+        THEN
+    THEN
+    _TKSA-CTX @ (TLS-KS-APPLICATION-DERIVE)
+    DUP IF EXIT THEN DROP
+    _TKSA-CTX @ (TLS-KS-APPLICATION-WRITE)
+    DUP IF EXIT THEN DROP
+    _TKSA-CTX @ TLS-CTX.ROLE @ TLS-ROLE-CLIENT = IF
+        _TKSA-CTX @ (TLS-KS-APPLICATION-READ)
+        DUP IF EXIT THEN DROP
+        TLSH-APPLICATION-READY _TKSA-CTX @ TLS-CTX.HS-STATE !
+    ELSE
+        \ Preserve the C-HS read key and its sequence until Client Finished
+        \ has been decrypted, verified, and appended by the server engine.
+        TLSH-CLIENT-FINISHED-PENDING _TKSA-CTX @ TLS-CTX.HS-STATE !
+    THEN
+    TLS-E-OK
 ;
+
+\ Internal server cutover.  The caller must have verified and appended Client
+\ Finished while RD still names the C-HS epoch.  Authentication is published
+\ only after the C-AP read epoch installs successfully.
+: (TLS-KS-SERVER-READ-APPLICATION) ( ctx -- status )
+    _TKSA-CTX !
+    _TKSA-CTX @ DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ERROR @ TLS-E-OK <> IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER <>
+    OVER TLS-CTX.HS-STATE @ TLSH-CLIENT-FINISHED-PENDING <> OR
+    OVER TLS-CTX.PEER-AUTH @ 0<> OR IF
+        DROP TLS-E-STATE EXIT
+    THEN DROP
+    _TKSA-CTX @ (TLS-KS-APPLICATION-READ)
+    DUP IF EXIT THEN DROP
+    1 _TKSA-CTX @ TLS-CTX.PEER-AUTH !
+    TLSH-APPLICATION-READY _TKSA-CTX @ TLS-CTX.HS-STATE !
+    TLS-E-OK ;
 
 : TLS-KS-APPLICATION ( ctx -- status )
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
@@ -8443,18 +8559,29 @@ VARIABLE _TVF-VERIFY
     TLS-VERIFY-DATA _TVF-VERIFY @ 32 VERIFY
 ;
 
-\ --- Client Finished Builder ---
+VARIABLE _TVPF-CTX
+VARIABLE _TVPF-VERIFY
+
+: TLS-VERIFY-PEER-FINISHED ( ctx verify-data -- flag )
+    _TVPF-VERIFY ! _TVPF-CTX !
+    _TVPF-CTX @ _TLS-PEER-HS-TRAFFIC DUP 0= IF DROP -1 EXIT THEN
+    _TVPF-CTX @ SWAP _TVPF-VERIFY @ TLS-VERIFY-FINISHED ;
+
+\ --- Role-correct Finished Builder ---
 \ TLS-BUILD-FINISHED ( ctx rec -- reclen )
-\   Build and encrypt client Finished message.
+\   Build and encrypt the local endpoint's Finished message.
 \   Does NOT append to transcript (caller manages for key derivation order).
 \   Returns encrypted record length.
 VARIABLE _TBF-CTX
 VARIABLE _TBF-REC
+VARIABLE _TBF-SECRET
 
 : TLS-BUILD-FINISHED ( ctx rec -- reclen )
     _TBF-REC !  _TBF-CTX !
-    \ finished_key = Expand-Label(c_hs_traffic, "finished", "", 32)
-    _TBF-CTX @ _TBF-CTX @ TLS-CTX.C-HS-TRAFFIC
+    _TBF-CTX @ _TLS-LOCAL-HS-TRAFFIC DUP 0= IF DROP 0 EXIT THEN
+    _TBF-SECRET !
+    \ finished_key = Expand-Label(local_hs_traffic, "finished", "", 32)
+    _TBF-CTX @ _TBF-SECRET @
     TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
     TLS-EXPAND-LABEL IF 0 EXIT THEN
     \ Hash transcript → TLS-HS-HASH
@@ -8566,9 +8693,7 @@ VARIABLE _TPHM-TYPE
         _TPHM-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF -1 EXIT THEN
         _TPHM-MLEN @ 36 <> IF -1 EXIT THEN
         \ Verify server Finished MAC (transcript without this Finished)
-        _TPHM-CTX @ _TPHM-CTX @ TLS-CTX.S-HS-TRAFFIC
-        _TPHM-MSG @ 4 +
-        TLS-VERIFY-FINISHED
+        _TPHM-CTX @ _TPHM-MSG @ 4 + TLS-VERIFY-PEER-FINISHED
         DUP 0<> IF
             0 _TPHM-CTX @ TLS-CTX.PEER-AUTH ! EXIT
         THEN DROP
@@ -8596,7 +8721,8 @@ VARIABLE _THC-REC
 
 : (TLS-HANDSHAKE-COMPLETE) ( ctx rec -- reclen )
     _THC-REC !  _THC-CTX !
-    _THC-CTX @ TLS-CTX.PEER-AUTH @ 1 <>
+    _THC-CTX @ TLS-CTX.ROLE @ TLS-ROLE-CLIENT <>
+    _THC-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR
     _THC-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR IF 0 EXIT THEN
     _THC-CTX @  _THC-REC @  TLS-BUILD-FINISHED
     DUP 0= IF EXIT THEN

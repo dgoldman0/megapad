@@ -1770,8 +1770,8 @@ hash family rather than synthesizing success:
 | `TLS-EXPAND-LABEL` | `( ctx secret label llen context clen olen out -- status )` | Build the TLS 1.3 HKDF label using the context's sealed hash profile. |
 | `TLS-DERIVE-DERIVED` | `( ctx secret out -- status )` | Derive the TLS 1.3 `"derived"` secret and return status. |
 | `TLS-DERIVE-SECRET` | `( ctx secret label llen out -- status )` | Hash the transcript under the context profile and derive a traffic secret. |
-| `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Stop at the first hash/HKDF failure; the handshake caller advances state only on zero. |
-| `TLS-KS-APPLICATION` | `( ctx -- status )` | Stage application traffic keys and the exporter master secret; leave the context in `TLSH-APPLICATION-READY`. |
+| `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Derive both endpoint handshake traffic secrets and install local-write/peer-read record keys from the sealed client/server role. Stop at the first hash/HKDF failure and wipe admitted partial schedule state. |
+| `TLS-KS-APPLICATION` | `( ctx -- status )` | Derive role-neutral application/exporter secrets. A client installs both record directions and enters `TLSH-APPLICATION-READY`; a server installs only its write direction and enters `TLSH-CLIENT-FINISHED-PENDING` while retaining its client-handshake read epoch. |
 | `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | After TCP accepts the complete local Finished record, publish `TLSS-ESTABLISHED` and wipe superseded schedule secrets. |
 | `TLS-EXPORT` | `( ctx label-a label-u context-a context-u out-a out-u -- ior )` | Derive 0..8160 authenticated exporter bytes into a non-aliasing caller span. Labels are printable 1..249-byte values; output is atomic and the exporter master is never exposed. |
 | `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |

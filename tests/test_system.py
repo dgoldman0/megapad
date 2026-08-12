@@ -21492,6 +21492,78 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         self.assertIn("R2=91 ", text)
         self.assertIn("R3=227 ", text)
 
+    def test_ks_handshake_server_inverts_record_directions(self):
+        """Server WR uses S-HS while RD retains the peer C-HS epoch."""
+        lines = self._TLS_KS_SETUP + [
+            "TLS-ROLE-SERVER test-ctx @ TLS-CTX.ROLE !",
+            "37 test-ctx @ TLS-CTX.WR-SEQ !",
+            "41 test-ctx @ TLS-CTX.RD-SEQ !",
+            'test-ctx @ TLS-KS-HANDSHAKE ." KS=" .',
+            '." W0=" test-ctx @ TLS-CTX.WR-KEY C@ .',
+            '." W3=" test-ctx @ TLS-CTX.WR-KEY 3 + C@ .',
+            '." R0=" test-ctx @ TLS-CTX.RD-KEY C@ .',
+            '." R3=" test-ctx @ TLS-CTX.RD-KEY 3 + C@ .',
+            '." WI0=" test-ctx @ TLS-CTX.WR-IV C@ .',
+            '." RI0=" test-ctx @ TLS-CTX.RD-IV C@ .',
+            '." WS=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." RS=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("KS=0 ", text)
+        self.assertIn("W0=127 ", text)
+        self.assertIn("W3=227 ", text)
+        self.assertIn("R0=245 ", text)
+        self.assertIn("R3=81 ", text)
+        self.assertIn("WI0=11 ", text)
+        self.assertIn("RI0=77 ", text)
+        self.assertIn("WS=0 ", text)
+        self.assertIn("RS=0 ", text)
+
+    def test_ks_handshake_unsealed_role_preserves_record_epoch(self):
+        """An invalid role is rejected before any record-key mutation."""
+        lines = self._TLS_KS_SETUP + [
+            "TLS-ROLE-NONE test-ctx @ TLS-CTX.ROLE !",
+            "test-ctx @ TLS-CTX.WR-KEY 32 90 FILL",
+            "test-ctx @ TLS-CTX.RD-KEY 32 91 FILL",
+            "17 test-ctx @ TLS-CTX.WR-SEQ !",
+            "19 test-ctx @ TLS-CTX.RD-SEQ !",
+            'test-ctx @ TLS-KS-HANDSHAKE ." KS=" .',
+            '." WR=" test-ctx @ TLS-CTX.WR-KEY C@ .',
+            '." RD=" test-ctx @ TLS-CTX.RD-KEY C@ .',
+            '." WS=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." RS=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("KS=-4204 ", text)
+        self.assertIn("WR=90 ", text)
+        self.assertIn("RD=91 ", text)
+        self.assertIn("WS=17 ", text)
+        self.assertIn("RS=19 ", text)
+
+    def test_ks_handshake_admitted_failure_is_not_retryable(self):
+        """An admitted schedule failure is terminal after secret cleanup."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ _TKSH-CTX !",
+            "test-ctx @ TLS-CTX.WR-KEY 32 90 FILL",
+            "test-ctx @ TLS-CTX.RD-KEY 32 91 FILL",
+            '-777 _TKSH-FAIL ." FAIL=" .',
+            ': zero32? 32 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN '
+            'LOOP DROP -1 ;',
+            '." ERROR=" test-ctx @ TLS-CTX.ERROR @ .',
+            '." WR=" test-ctx @ TLS-CTX.WR-KEY zero32? .',
+            '." RD=" test-ctx @ TLS-CTX.RD-KEY zero32? .',
+            "init-shared",
+            'test-ctx @ TLS-KS-HANDSHAKE ." RETRY=" .',
+            '." ERROR2=" test-ctx @ TLS-CTX.ERROR @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("FAIL=-777 ", text)
+        self.assertIn("ERROR=-777 ", text)
+        self.assertIn("WR=-1 ", text)
+        self.assertIn("RD=-1 ", text)
+        self.assertIn("RETRY=-4204 ", text)
+        self.assertIn("ERROR2=-777 ", text)
+
     def test_ks_handshake_wr_iv(self):
         """TLS-KS-HANDSHAKE derives correct client HS IV."""
         lines = self._TLS_KS_SETUP + [
@@ -21744,6 +21816,40 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         self.assertIn("RT=23 ", text)      # app_data outer type
         self.assertIn("RV0=3 ", text)      # 0x0303
         self.assertIn("RV1=3 ", text)
+
+    def test_build_finished_uses_server_handshake_write_secret(self):
+        """Server Finished encrypts and authenticates under S-HS."""
+        lines = self._TLS_KS_SETUP + [
+            "TLS-ROLE-SERVER test-ctx @ TLS-CTX.ROLE !",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
+            "CREATE srv-fin-rec 128 ALLOT",
+            "CREATE srv-fin-plain 64 ALLOT",
+            "VARIABLE peer-ctx 1 TLS-CTX@ peer-ctx !",
+            "peer-ctx @ /TLS-CTX 0 FILL",
+            "TLS-ROLE-CLIENT peer-ctx @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA3-256 peer-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-X25519-SHA3 peer-ctx @ TLS-CTX.SUITE !",
+            "test-ctx @ srv-fin-rec TLS-BUILD-FINISHED",
+            "VARIABLE srv-fin-len srv-fin-len !",
+            "test-ctx @ TLS-CTX.WR-KEY peer-ctx @ TLS-CTX.RD-KEY 32 MOVE",
+            "test-ctx @ TLS-CTX.WR-IV peer-ctx @ TLS-CTX.RD-IV 16 MOVE",
+            "peer-ctx @ srv-fin-rec srv-fin-len @ srv-fin-plain "
+            "TLS-DECRYPT-RECORD",
+            '." PL=" . ." CT=" .',
+            '." HT=" srv-fin-plain C@ .',
+            "test-ctx @ test-ctx @ TLS-CTX.S-HS-TRAFFIC "
+            "srv-fin-plain 4 + TLS-VERIFY-FINISHED",
+            '." GOOD=" .',
+            "test-ctx @ test-ctx @ TLS-CTX.C-HS-TRAFFIC "
+            "srv-fin-plain 4 + TLS-VERIFY-FINISHED",
+            '." WRONG=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=22 ", text)
+        self.assertIn("PL=36 ", text)
+        self.assertIn("HT=20 ", text)
+        self.assertIn("GOOD=0 ", text)
+        self.assertIn("WRONG=-1 ", text)
 
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
@@ -22406,13 +22512,73 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
         text = self._run_kdos(lines)
         self.assertIn("RECLEN=58 ", text)
         self.assertIn("PRE-STATE=1 ", text)
-        self.assertIn("PRE-HS=7 ", text)
+        self.assertIn("PRE-HS=8 ", text)
         self.assertIn("PRE-EXP=-1 ", text)
         self.assertIn("PUB=0 ", text)
         self.assertIn("POST-STATE=2 ", text)
-        self.assertIn("POST-HS=8 ", text)
+        self.assertIn("POST-HS=9 ", text)
         self.assertIn("POST-EXP=-1 ", text)
         self.assertIn("HS-WIPE=0 ", text)
+
+    def test_server_application_schedule_preserves_handshake_read_epoch(self):
+        """Server changes WR first, then RD only after authenticated Finished."""
+        lines = TestKDOSTLSHandshake._TLS_KS_SETUP + [
+            "TLS-ROLE-SERVER test-ctx @ TLS-CTX.ROLE !",
+            "test-ctx @ TLS-KS-HANDSHAKE DROP",
+            "CREATE saved-hs-rd 32 ALLOT",
+            "CREATE saved-hs-riv 16 ALLOT",
+            "CREATE expected-ap-wr 32 ALLOT",
+            "CREATE expected-ap-rd 32 ALLOT",
+            "test-ctx @ TLS-CTX.RD-KEY saved-hs-rd 32 MOVE",
+            "test-ctx @ TLS-CTX.RD-IV saved-hs-riv 16 MOVE",
+            "23 test-ctx @ TLS-CTX.RD-SEQ !",
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
+            "0 test-ctx @ TLS-CTX.PEER-AUTH !",
+            'test-ctx @ TLS-KS-APPLICATION ." KS=" .',
+            "test-ctx @ test-ctx @ TLS-CTX.S-AP-TRAFFIC "
+            "TLS-L-KEY /TLS-L-KEY 0 0 test-ctx @ TLS-KEY-LEN "
+            "expected-ap-wr TLS-EXPAND-LABEL DROP",
+            "test-ctx @ test-ctx @ TLS-CTX.C-AP-TRAFFIC "
+            "TLS-L-KEY /TLS-L-KEY 0 0 test-ctx @ TLS-KEY-LEN "
+            "expected-ap-rd TLS-EXPAND-LABEL DROP",
+            '." WR-AP=" test-ctx @ TLS-CTX.WR-KEY '
+            "expected-ap-wr 32 _XC-BYTES= .",
+            '." RD-HS=" test-ctx @ TLS-CTX.RD-KEY '
+            "saved-hs-rd 32 _XC-BYTES= .",
+            '." RIV-HS=" test-ctx @ TLS-CTX.RD-IV '
+            "saved-hs-riv 16 _XC-BYTES= .",
+            '." RS-PENDING=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." HS-PENDING=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            '." AUTH-PENDING=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            'test-ctx @ TLS-HANDSHAKE-PUBLISH ." PUB-EARLY=" .',
+            'test-ctx @ (TLS-KS-SERVER-READ-APPLICATION) ." CUT=" .',
+            '." RD-AP=" test-ctx @ TLS-CTX.RD-KEY '
+            "expected-ap-rd 32 _XC-BYTES= .",
+            '." RS-READY=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." HS-READY=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            '." AUTH-READY=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            'test-ctx @ TLS-HANDSHAKE-PUBLISH ." PUB=" .',
+            '." STATE=" test-ctx @ TLS-CTX.STATE @ .',
+            '." HS-DONE=" test-ctx @ TLS-CTX.HS-STATE @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("KS=0 ", text)
+        self.assertIn("WR-AP=-1 ", text)
+        self.assertIn("RD-HS=-1 ", text)
+        self.assertIn("RIV-HS=-1 ", text)
+        self.assertIn("RS-PENDING=23 ", text)
+        self.assertIn("HS-PENDING=7 ", text)
+        self.assertIn("AUTH-PENDING=0 ", text)
+        self.assertIn("PUB-EARLY=-4204 ", text)
+        self.assertIn("CUT=0 ", text)
+        self.assertIn("RD-AP=-1 ", text)
+        self.assertIn("RS-READY=0 ", text)
+        self.assertIn("HS-READY=8 ", text)
+        self.assertIn("AUTH-READY=1 ", text)
+        self.assertIn("PUB=0 ", text)
+        self.assertIn("STATE=2 ", text)
+        self.assertIn("HS-DONE=9 ", text)
 
     def test_application_schedule_failure_wipes_partial_secrets(self):
         """A failed admitted schedule cannot leave reusable partial keys."""
@@ -22434,6 +22600,15 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
             '."  HS=" test-ctx @ TLS-CTX.HS-SECRET zero32? .',
             '."  WSEQ=" test-ctx @ TLS-CTX.WR-SEQ @ .',
             '."  RSEQ=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '."  ERROR=" test-ctx @ TLS-CTX.ERROR @ .',
+            "1 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
+            'test-ctx @ TLS-KS-APPLICATION ."  RETRY=" .',
+            "TLS-ROLE-SERVER test-ctx @ TLS-CTX.ROLE !",
+            "0 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLSH-CLIENT-FINISHED-PENDING test-ctx @ TLS-CTX.HS-STATE !",
+            'test-ctx @ (TLS-KS-SERVER-READ-APPLICATION) ."  CUT=" .',
+            '."  AUTH2=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
         ]
         text = self._run_kdos(lines)
         self.assertIn("IOR=-777 ", text)
@@ -22443,6 +22618,10 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
         self.assertIn("HS=-1 ", text)
         self.assertIn("WSEQ=0 ", text)
         self.assertIn("RSEQ=0 ", text)
+        self.assertIn("ERROR=-777 ", text)
+        self.assertIn("RETRY=-4204 ", text)
+        self.assertIn("CUT=-4204 ", text)
+        self.assertIn("AUTH2=0 ", text)
 
     def test_local_fatal_alert_revokes_exporter_without_wire(self):
         """A local fatal decision revokes secrets even under backpressure."""
