@@ -65,6 +65,16 @@ not by themselves make a listening socket TLS-capable.  Evidence must keep
 emulator protocol correctness, RTL behavior, and physical entropy/side-channel
 claims separate.
 
+The negotiated crypto profile is now connection-owned.  A live context carries
+an immutable endpoint role and an exact cipher-suite/hash pair.  ServerHello
+publishes the hash identifier first and the suite last; the suite is the sealed
+marker.  Hash, HMAC, HKDF, Finished, key schedule, and each record operation
+reject an unset or mismatched pair instead of consulting a process-global mode
+bit.  Record operations also reselect the AES width from their context before
+touching output.  This closes cross-context algorithm confusion, but it does
+not yet make operations concurrent: the AES selector and the larger scratch
+arenas still require the owner described below.
+
 ## Security Invariant
 
 `TLS-SEND-DATA` is reachable only after all of the following succeed in order:
@@ -398,9 +408,10 @@ trust bundle.
 
 ### Concurrency
 
-ALPN result, traffic keys, authorization state, and connection errors are
-per-context. Handshake transcript, certificate descriptors, cryptographic
-scratch, record buffers, and hybrid key-exchange buffers remain global. The
+ALPN result, endpoint role, negotiated suite/hash, traffic keys, authorization
+state, and connection errors are per-context. Handshake transcript,
+certificate descriptors, cryptographic scratch, record buffers, and hybrid
+key-exchange buffers remain global. The
 current API does not yet enforce a machine-wide TLS/crypto owner, so callers
 must serialize all TLS and cryptographic use. RSA's core-0 phase gate protects
 only RSA scratch. The BIOS SHA-256 transaction now uses a complete private

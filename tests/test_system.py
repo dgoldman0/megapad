@@ -14932,14 +14932,14 @@ class TestBIOSSHA2(unittest.TestCase):
             source_lines = source_file.read().splitlines()
 
         dispatch_start = source_lines.index(
-            ": TLS-HASH ( addr len out -- status )"
+            ": TLS-CRYPTO-PROFILE ( ctx -- profile )"
         )
         dispatch_end = source_lines.index(
-            "\\ --- Scratch Buffers for Handshake ---",
+            ": (TLS-SET-AES-MODE) ( ctx -- ior )",
             dispatch_start,
         )
         derive_start = source_lines.index(
-            ": TLS-DERIVE-DERIVED ( secret out -- status )"
+            "VARIABLE _TDD-CTX"
         )
         derive_end = source_lines.index(
             "\\ --- TLS-DERIVE-SECRET ---",
@@ -14954,7 +14954,20 @@ class TestBIOSSHA2(unittest.TestCase):
             ]
 
         definitions = [
-            "VARIABLE TLS-USE-SHA256",
+            "4865 CONSTANT TLS-SUITE-AES128-SHA256",
+            "65281 CONSTANT TLS-SUITE-X25519-SHA3",
+            "1 CONSTANT TLS-ROLE-CLIENT",
+            "2 CONSTANT TLS-ROLE-SERVER",
+            "1 CONSTANT TLS-HASH-SHA256",
+            "2 CONSTANT TLS-HASH-SHA3-256",
+            "0 CONSTANT TLS-CRYPTO-NONE",
+            "1 CONSTANT TLS-CRYPTO-AES128-SHA256",
+            "2 CONSTANT TLS-CRYPTO-AES256-SHA3",
+            "0 CONSTANT TLS-E-OK",
+            "-4204 CONSTANT TLS-E-STATE",
+            ": TLS-CTX.ROLE ;",
+            ": TLS-CTX.SUITE 8 + ;",
+            ": TLS-CTX.HASH-ID 16 + ;",
             ": SHA256 2DROP DROP 21 ;",
             ": SHA3 2DROP DROP 31 ;",
             ": HMAC-SHA256 2DROP 2DROP DROP 22 ;",
@@ -14970,27 +14983,36 @@ class TestBIOSSHA2(unittest.TestCase):
             "CREATE TLS-EMPTY-HASH-SHA3 32 ALLOT",
             "CREATE TLS-EMPTY-HASH-SHA256 32 ALLOT",
             "VARIABLE TLS-EMPTY-HASH-SHA3-STATUS",
-            ": TLS-EMPTY-HASH TLS-USE-SHA256 @ IF"
+            ": TLS-EMPTY-HASH TLS-CRYPTO-PROFILE"
+            " TLS-CRYPTO-AES128-SHA256 = IF"
             " TLS-EMPTY-HASH-SHA256 ELSE TLS-EMPTY-HASH-SHA3 THEN ;",
             "CREATE TLS-L-DERIVED 7 ALLOT",
             "7 CONSTANT /TLS-L-DERIVED",
-            ": TLS-EXPAND-LABEL 2DROP 2DROP 2DROP DROP 77 ;",
+            ": TLS-EXPAND-LABEL 2DROP 2DROP 2DROP 2DROP 77 ;",
         ]
         definitions += executable_slice(derive_start, derive_end)
 
         text = self._run_sha2(definitions + [
+            "CREATE c3 24 ALLOT c3 24 0 FILL",
+            "TLS-ROLE-CLIENT c3 TLS-CTX.ROLE !",
+            "TLS-HASH-SHA3-256 c3 TLS-CTX.HASH-ID !",
+            "TLS-SUITE-X25519-SHA3 c3 TLS-CTX.SUITE !",
+            "CREATE c2 24 ALLOT c2 24 0 FILL",
+            "TLS-ROLE-CLIENT c2 TLS-CTX.ROLE !",
+            "TLS-HASH-SHA256 c2 TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 c2 TLS-CTX.SUITE !",
             "VARIABLE d0 DEPTH d0 !",
-            '0 TLS-USE-SHA256 ! ."  H3=" 1 2 3 TLS-HASH .',
-            '."  M3=" 1 2 3 4 5 TLS-HMAC .',
-            '."  E3=" 1 2 3 4 5 TLS-HKDF-EXTRACT .',
-            '."  X3=" 1 2 3 4 5 TLS-HKDF-EXPAND .',
-            '1 TLS-USE-SHA256 ! ."  H2=" 1 2 3 TLS-HASH .',
-            '."  M2=" 1 2 3 4 5 TLS-HMAC .',
-            '."  E2=" 1 2 3 4 5 TLS-HKDF-EXTRACT .',
-            '."  X2=" 1 2 3 4 5 TLS-HKDF-EXPAND .',
+            '."  H3=" c3 1 2 3 TLS-HASH .',
+            '."  M3=" c3 1 2 3 4 5 TLS-HMAC .',
+            '."  E3=" c3 1 2 3 4 5 TLS-HKDF-EXTRACT .',
+            '."  X3=" c3 1 2 3 4 5 TLS-HKDF-EXPAND .',
+            '."  H2=" c2 1 2 3 TLS-HASH .',
+            '."  M2=" c2 1 2 3 4 5 TLS-HMAC .',
+            '."  E2=" c2 1 2 3 4 5 TLS-HKDF-EXTRACT .',
+            '."  X2=" c2 1 2 3 4 5 TLS-HKDF-EXPAND .',
             "6 TLS-EMPTY-HASH-SHA3-STATUS !",
-            '0 TLS-USE-SHA256 ! ."  D3=" 1 2 TLS-DERIVE-DERIVED .',
-            '1 TLS-USE-SHA256 ! ."  D2=" 1 2 TLS-DERIVE-DERIVED .',
+            '."  D3=" c3 1 2 TLS-DERIVE-DERIVED .',
+            '."  D2=" c2 1 2 TLS-DERIVE-DERIVED .',
             '."  DEPTH-OK=" DEPTH d0 @ = .',
         ])
         for marker, status in (
@@ -15432,13 +15454,16 @@ class TestKDOSSHA256(_KDOSTestBase):
         self.assertIn("O3=37 ", text)
 
     def test_tls_dispatch_sha256_mode(self):
-        """TLS-HASH dispatches to SHA256 when TLS-USE-SHA256=1."""
+        """TLS-HASH dispatches from a sealed standard client context."""
         text = self._run_kdos_networking([
-            "1 TLS-USE-SHA256 !",
+            "VARIABLE dc 0 TLS-CTX@ dc !",
+            "TLS-ROLE-CLIENT dc @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA256 dc @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 dc @ TLS-CTX.SUITE !",
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf TLS-HASH DROP",
+            "dc @ msg 3 h-buf TLS-HASH DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
         ])
@@ -15446,13 +15471,16 @@ class TestKDOSSHA256(_KDOSTestBase):
         self.assertIn("H1=120 ", text)
 
     def test_tls_dispatch_sha3_mode(self):
-        """TLS-HASH dispatches to SHA3 when TLS-USE-SHA256=0."""
+        """TLS-HASH dispatches from a sealed private client context."""
         text = self._run_kdos_networking([
-            "0 TLS-USE-SHA256 !",
+            "VARIABLE dc 0 TLS-CTX@ dc !",
+            "TLS-ROLE-CLIENT dc @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA3-256 dc @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-X25519-SHA3 dc @ TLS-CTX.SUITE !",
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
-            "msg 3 h-buf TLS-HASH DROP",
+            "dc @ msg 3 h-buf TLS-HASH DROP",
             '."  H0=" h-buf C@ .',
             '."  H1=" h-buf 1 + C@ .',
         ])
@@ -15460,20 +15488,43 @@ class TestKDOSSHA256(_KDOSTestBase):
         self.assertIn("H1=152 ", text)
 
     def test_tls_key_len_sha256_mode(self):
-        """TLS-KEY-LEN returns 16 in SHA-256 mode (AES-128)."""
+        """TLS-KEY-LEN returns 16 for an exact 0x1301/SHA-256 pair."""
         text = self._run_kdos_networking([
-            '1 TLS-USE-SHA256 !',
-            '."  KL=" TLS-KEY-LEN .',
+            "VARIABLE dc 0 TLS-CTX@ dc !",
+            "TLS-ROLE-CLIENT dc @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA256 dc @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 dc @ TLS-CTX.SUITE !",
+            '."  KL=" dc @ TLS-KEY-LEN .',
         ])
         self.assertIn("KL=16 ", text)
 
     def test_tls_key_len_sha3_mode(self):
-        """TLS-KEY-LEN returns 32 in SHA3 mode (AES-256)."""
+        """TLS-KEY-LEN returns 32 for an exact private SHA3 pair."""
         text = self._run_kdos_networking([
-            '0 TLS-USE-SHA256 !',
-            '."  KL=" TLS-KEY-LEN .',
+            "VARIABLE dc 0 TLS-CTX@ dc !",
+            "TLS-ROLE-CLIENT dc @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA3-256 dc @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-X25519-SHA3 dc @ TLS-CTX.SUITE !",
+            '."  KL=" dc @ TLS-KEY-LEN .',
         ])
         self.assertIn("KL=32 ", text)
+
+    def test_tls_dispatch_rejects_unset_or_mismatched_profiles(self):
+        """No ambient default exists for an unset or mismatched context."""
+        text = self._run_kdos_networking([
+            "VARIABLE dc 0 TLS-CTX@ dc !",
+            "dc @ /TLS-CTX 0 FILL",
+            "TLS-ROLE-CLIENT dc @ TLS-CTX.ROLE !",
+            "CREATE msg 1 ALLOT CREATE h-buf 32 ALLOT",
+            '."  UNSET=" dc @ msg 1 h-buf TLS-HASH .',
+            "TLS-HASH-SHA3-256 dc @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 dc @ TLS-CTX.SUITE !",
+            '."  BAD=" dc @ msg 1 h-buf TLS-HASH .',
+            '."  KL=" dc @ TLS-KEY-LEN .',
+        ])
+        self.assertIn("UNSET=-4204 ", text)
+        self.assertIn("BAD=-4204 ", text)
+        self.assertIn("KL=0 ", text)
 
     def test_aes_128_mode_register(self):
         """AES-KEY-MODE! switches between AES-128 and AES-256."""
@@ -20657,6 +20708,9 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
         # Set up TLS context 0 with known key/IV for testing
         "0 TLS-CTX@",
         "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+        "TLS-HASH-SHA3-256 test-ctx @ TLS-CTX.HASH-ID !",
+        "TLS-SUITE-X25519-SHA3 test-ctx @ TLS-CTX.SUITE !",
         # Write key = 0x00..0x1F (32 bytes)
         ": init-wr-key 32 0 DO I test-ctx @ TLS-CTX.WR-KEY I + C! LOOP ;",
         "init-wr-key",
@@ -20834,6 +20888,34 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
         self.assertIn("last=90 ", text)
         self.assertIn("balanced=-1 ", text)
 
+    def test_tls_record_rejects_invalid_profile_without_mutation(self):
+        """An unset suite/hash pair cannot select an ambient record cipher."""
+        lines = self._TLS_CTX_SETUP + [
+            "0 test-ctx @ TLS-CTX.SUITE !",
+            "0 test-ctx @ TLS-CTX.HASH-ID !",
+            "CREATE tls-prof-msg 1 ALLOT 65 tls-prof-msg C!",
+            "CREATE tls-prof-rec 32 ALLOT tls-prof-rec 32 90 FILL",
+            "CREATE tls-prof-out 8 ALLOT tls-prof-out 8 91 FILL",
+            "7 test-ctx @ TLS-CTX.WR-SEQ !",
+            "9 test-ctx @ TLS-CTX.RD-SEQ !",
+            'test-ctx @ TLS-CT-APP-DATA tls-prof-msg 1 tls-prof-rec '
+            'TLS-ENCRYPT-RECORD ."  ENC=" .',
+            'test-ctx @ tls-prof-rec 22 tls-prof-out '
+            'TLS-DECRYPT-RECORD ."  DLEN=" . ."  DTYPE=" .',
+            '."  WRSEQ=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            '."  RDSEQ=" test-ctx @ TLS-CTX.RD-SEQ @ .',
+            '."  REC=" tls-prof-rec C@ .',
+            '."  OUT=" tls-prof-out C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("ENC=0 ", text)
+        self.assertIn("DLEN=0 ", text)
+        self.assertIn("DTYPE=-1 ", text)
+        self.assertIn("WRSEQ=7 ", text)
+        self.assertIn("RDSEQ=9 ", text)
+        self.assertIn("REC=90 ", text)
+        self.assertIn("OUT=91 ", text)
+
     def test_tls_encrypt_decrypt_roundtrip(self):
         """TLS-ENCRYPT-RECORD → TLS-DECRYPT-RECORD recovers plaintext."""
         lines = self._TLS_CTX_SETUP + [
@@ -20907,7 +20989,7 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=880 ", text)
+        self.assertIn("SZ=904 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -21098,6 +21180,9 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
 
     _TLS_KS_SETUP = [
         "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+        "TLS-HASH-SHA3-256 test-ctx @ TLS-CTX.HASH-ID !",
+        "TLS-SUITE-X25519-SHA3 test-ctx @ TLS-CTX.SUITE !",
         # Shared secret = 32 bytes of 0xAA
         ": init-shared 32 0 DO 170 test-ctx @ TLS-CTX.SHARED I + C! LOOP ;",
         "init-shared",
@@ -21111,11 +21196,11 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
 
     def test_empty_hash_constant(self):
         """TLS-EMPTY-HASH contains SHA3-256 of empty string."""
-        text = self._run_kdos([
-            '." H0=" TLS-EMPTY-HASH C@ .',
-            '." H1=" TLS-EMPTY-HASH 1 + C@ .',
-            '." H2=" TLS-EMPTY-HASH 2 + C@ .',
-            '." H3=" TLS-EMPTY-HASH 3 + C@ .',
+        text = self._run_kdos(self._TLS_KS_SETUP + [
+            '." H0=" test-ctx @ TLS-EMPTY-HASH C@ .',
+            '." H1=" test-ctx @ TLS-EMPTY-HASH 1 + C@ .',
+            '." H2=" test-ctx @ TLS-EMPTY-HASH 2 + C@ .',
+            '." H3=" test-ctx @ TLS-EMPTY-HASH 3 + C@ .',
         ])
         self.assertIn("H0=167 ", text)   # SHA3-256("") = a7ffc6f8...
         self.assertIn("H1=255 ", text)
@@ -21125,10 +21210,14 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_expand_label_key(self):
         """TLS-EXPAND-LABEL with 'key' label produces correct output."""
         lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA3-256 test-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-X25519-SHA3 test-ctx @ TLS-CTX.SUITE !",
             "CREATE el-prk 32 ALLOT",
             ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
             "CREATE el-out 32 ALLOT",
-            "el-prk TLS-L-KEY /TLS-L-KEY 0 0 32 el-out"
+            "test-ctx @ el-prk TLS-L-KEY /TLS-L-KEY 0 0 32 el-out"
             " TLS-EXPAND-LABEL DROP",
             '." K0=" el-out C@ .',
             '." K1=" el-out 1 + C@ .',
@@ -21144,10 +21233,14 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_expand_label_iv(self):
         """TLS-EXPAND-LABEL with 'iv' label produces 12-byte output."""
         lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA3-256 test-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-X25519-SHA3 test-ctx @ TLS-CTX.SUITE !",
             "CREATE el-prk 32 ALLOT",
             ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
             "CREATE el-out 12 ALLOT",
-            "el-prk TLS-L-IV /TLS-L-IV 0 0 12 el-out"
+            "test-ctx @ el-prk TLS-L-IV /TLS-L-IV 0 0 12 el-out"
             " TLS-EXPAND-LABEL DROP",
             '." V0=" el-out C@ .',
             '." V1=" el-out 1 + C@ .',
@@ -21309,6 +21402,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         # extensions: supported_versions(0x0304) + key_share(x25519, pubkey)
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+            "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "CREATE sh-buf 96 ALLOT",
             "sh-buf 96 0 FILL",
             # Handshake header
@@ -21340,6 +21435,23 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
             '." PK0=" test-ctx @ TLS-CTX.PEER-PUBKEY C@ .',
             '." PK1=" test-ctx @ TLS-CTX.PEER-PUBKEY 1 + C@ .',
             '." PK31=" test-ctx @ TLS-CTX.PEER-PUBKEY 31 + C@ .',
+            '." SUITE=" test-ctx @ TLS-CTX.SUITE @ .',
+            '." HASH=" test-ctx @ TLS-CTX.HASH-ID @ .',
+            "0 test-ctx @ TLS-CTX.SUITE !",
+            "0 test-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-HELLO-STANDARD test-ctx @ TLS-CTX.HELLO-PROFILE !",
+            "19 sh-buf 39 + C! 1 sh-buf 40 + C!",
+            "test-ctx @ sh-buf 90 TLS-PARSE-SERVER-HELLO",
+            '." STANDARD=" .',
+            '." SSUITE=" test-ctx @ TLS-CTX.SUITE @ .',
+            '." SHASH=" test-ctx @ TLS-CTX.HASH-ID @ .',
+            "0 test-ctx @ TLS-CTX.SUITE !",
+            "0 test-ctx @ TLS-CTX.HASH-ID !",
+            "87 sh-buf 3 + C! 47 sh-buf 43 + C!",
+            "test-ctx @ sh-buf 91 TLS-PARSE-SERVER-HELLO",
+            '." LATE=" .',
+            '." LSUITE=" test-ctx @ TLS-CTX.SUITE @ .',
+            '." LHASH=" test-ctx @ TLS-CTX.HASH-ID @ .',
         ]
         text = self._run_kdos(lines)
         self.assertIn("F=0 ", text)        # success
@@ -21347,11 +21459,21 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         self.assertIn("PK0=66 ", text)     # first pubkey byte
         self.assertIn("PK1=67 ", text)
         self.assertIn("PK31=97 ", text)    # last pubkey byte
+        self.assertIn("SUITE=65281 ", text)
+        self.assertIn("HASH=2 ", text)
+        self.assertIn("STANDARD=0 ", text)
+        self.assertIn("SSUITE=4865 ", text)
+        self.assertIn("SHASH=1 ", text)
+        self.assertIn("LATE=-1 ", text)
+        self.assertIn("LSUITE=0 ", text)
+        self.assertIn("LHASH=0 ", text)
 
     def test_parse_sh_bad_suite_rejected(self):
         """ServerHello with wrong cipher suite is rejected."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+            "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "CREATE sh-buf 96 ALLOT",
             "sh-buf 96 0 FILL",
             "2 sh-buf C!",
@@ -21394,7 +21516,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         for i, b in enumerate(s_verify):
             lines.append(f"{b} vd-buf {i} + C!")
         lines += [
-            "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
+            "test-ctx @ test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf"
+            " TLS-VERIFY-FINISHED",
             '." VF=" .',
         ]
         text = self._run_kdos(lines)
@@ -21406,7 +21529,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
             "test-ctx @ TLS-KS-HANDSHAKE DROP",
             # verify_data = all zeros (wrong)
             "CREATE vd-buf 32 ALLOT  vd-buf 32 0 FILL",
-            "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
+            "test-ctx @ test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf"
+            " TLS-VERIFY-FINISHED",
             '." VF=" .',
         ]
         text = self._run_kdos(lines)
@@ -21433,7 +21557,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=880 ", text)
+        self.assertIn("SZ=904 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -21702,6 +21826,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         # key_data = x25519_pub(32) || kyber_ct(768) = 800 bytes
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+            "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "CREATE sh-buf 900 ALLOT",
             "sh-buf 900 0 FILL",
             # Handshake header
@@ -21768,6 +21894,8 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         """ServerHello with unrecognized key_share group is rejected."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+            "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "CREATE sh-buf 96 ALLOT",
             "sh-buf 96 0 FILL",
             "2 sh-buf C!",
@@ -21796,6 +21924,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         """HelloRetryRequest and undersized ServerHello fail explicitly."""
         lines = [
             "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
             "CREATE sh-buf 44 ALLOT sh-buf 44 0 FILL",
             "2 sh-buf C! 40 sh-buf 3 + C!",
             "3 sh-buf 4 + C! 3 sh-buf 5 + C!",
@@ -22591,14 +22720,18 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
             "tv-mod _TLS-SERVER-PUBKEY 256 CMOVE",
             "256 _TLS-SERVER-PUBKEY-LEN !",
             "X509-ALG-RSA2048 _TLS-SERVER-PUBKEY-ALGO !",
-            "TLS-TR-RESET 1 TLS-USE-SHA256 !",
+            "VARIABLE tv-ctx 0 TLS-CTX@ tv-ctx !",
+            "TLS-ROLE-CLIENT tv-ctx @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA256 tv-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 tv-ctx @ TLS-CTX.SUITE !",
+            "TLS-TR-RESET",
             f"tv-tr {len(transcript)} TLS-TR-APPEND",
             "VARIABLE cv-depth  DEPTH cv-depth !",
-            f'0 TLS-CTX@ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." CV=" .',
+            f'tv-ctx @ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." CV=" .',
             'DEPTH cv-depth @ = ." CV-BALANCED=" .',
             "4 tv-cv 4 + C! 1 tv-cv 5 + C!",
             "VARIABLE badalg-depth  DEPTH badalg-depth !",
-            f'0 TLS-CTX@ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." BADALG=" .',
+            f'tv-ctx @ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." BADALG=" .',
             'DEPTH badalg-depth @ = ." BADALG-BALANCED=" .',
         ])
         text = self._run_kdos(lines, max_steps=900_000_000)
@@ -22951,8 +23084,10 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
             '." CERT=" .',
             "TLS-TR-RESET",
             f"tv-transcript {len(transcript)} TLS-TR-APPEND",
-            "1 TLS-USE-SHA256 !",
             "VARIABLE tv-ctx 0 TLS-CTX@ tv-ctx !",
+            "TLS-ROLE-CLIENT tv-ctx @ TLS-CTX.ROLE !",
+            "TLS-HASH-SHA256 tv-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 tv-ctx @ TLS-CTX.SUITE !",
             "TLSS-HANDSHAKE tv-ctx @ TLS-CTX.STATE !",
             "TLSH-CERT-RCVD tv-ctx @ TLS-CTX.HS-STATE !",
             f"tv-ctx @ tv-cv {len(cv_msg)} TLS-PROCESS-HS-MSG",
@@ -22981,6 +23116,9 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
 
     _TLS_ESTAB_SETUP = [
         "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
+        "TLS-HASH-SHA3-256 test-ctx @ TLS-CTX.HASH-ID !",
+        "TLS-SUITE-X25519-SHA3 test-ctx @ TLS-CTX.SUITE !",
         # Set up keys = 0..31 for both WR and RD (roundtrip test)
         ": init-key 32 0 DO I test-ctx @ TLS-CTX.WR-KEY I + C! LOOP ;",
         "init-key",

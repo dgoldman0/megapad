@@ -1699,13 +1699,13 @@ hash family rather than synthesizing success:
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TLS-HASH` | `( addr len out -- status )` | Dispatch to the negotiated transcript hash and return either SHA3 or SHA-256 status unchanged. |
-| `TLS-HMAC` | `( key klen msg mlen out -- status )` | Dispatch to the negotiated HMAC and return its status. |
-| `TLS-HKDF-EXTRACT` | `( salt slen ikm ilen out -- status )` | Dispatch HKDF-Extract and return its status. |
-| `TLS-HKDF-EXPAND` | `( prk info ilen len out -- status )` | Dispatch HKDF-Expand and return its status. |
-| `TLS-EXPAND-LABEL` | `( secret label llen context clen olen out -- status )` | Build the TLS 1.3 HKDF label and return the expand status. |
-| `TLS-DERIVE-DERIVED` | `( secret out -- status )` | Derive the TLS 1.3 `"derived"` secret and return status. |
-| `TLS-DERIVE-SECRET` | `( secret label llen out -- status )` | Hash the transcript and derive a traffic secret, stopping at the first failure. |
+| `TLS-HASH` | `( ctx addr len out -- status )` | Dispatch from the context's sealed suite/hash pair and return either SHA3 or SHA-256 status unchanged. |
+| `TLS-HMAC` | `( ctx key klen msg mlen out -- status )` | Dispatch to the context's negotiated HMAC and return its status. |
+| `TLS-HKDF-EXTRACT` | `( ctx salt slen ikm ilen out -- status )` | Dispatch context-owned HKDF-Extract and return its status. |
+| `TLS-HKDF-EXPAND` | `( ctx prk info ilen len out -- status )` | Dispatch context-owned HKDF-Expand and return its status. |
+| `TLS-EXPAND-LABEL` | `( ctx secret label llen context clen olen out -- status )` | Build the TLS 1.3 HKDF label using the context's sealed hash profile. |
+| `TLS-DERIVE-DERIVED` | `( ctx secret out -- status )` | Derive the TLS 1.3 `"derived"` secret and return status. |
+| `TLS-DERIVE-SECRET` | `( ctx secret label llen out -- status )` | Hash the transcript under the context profile and derive a traffic secret. |
 | `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Stop at the first hash/HKDF failure; the handshake caller advances state only on zero. |
 | `TLS-KS-APPLICATION` | `( ctx -- status )` | Stop at the first hash/HKDF failure and mark the connection established only on zero. |
 | `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |
