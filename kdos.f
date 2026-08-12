@@ -1244,6 +1244,26 @@ VARIABLE _AEAD-REM
 : _HMAC-HKDF-DROP-ARGS ( a b c d e -- )
     2DROP 2DROP DROP ;
 
+\ Execute one five-argument HMAC/HKDF core while lock 9 is owned.  CATCH
+\ restores all five original arguments on an exception, so discard that frame,
+\ abort the selected checked-hash transaction, and then erase KDOS scratch.  A
+\ failed lower cleanup retains lock 9 fail-closed and takes precedence over the
+\ original exception; otherwise release the lock and rethrow the exact code.
+: _HMAC-HKDF-GUARD ( a b c d e work-xt wipe-xt clear-xt -- status )
+    SWAP >R >R CATCH
+    ?DUP IF
+        >R _HMAC-HKDF-DROP-ARGS
+        R> R> R>
+        >R SWAP >R EXECUTE
+        R> R> EXECUTE
+        SWAP ?DUP IF SWAP DROP THROW THEN
+        _HMAC-HKDF-RELEASE
+        THROW
+    THEN
+    R> DROP
+    R> EXECUTE
+    _HMAC-HKDF-RELEASE ;
+
 136 CONSTANT HMAC-BLKSZ
 
 CREATE HMAC-IPAD 136 ALLOT
@@ -1271,9 +1291,6 @@ VARIABLE _VERIFY-ACC
     0 _HMAC-KEY-LEN !
     0 _HMAC-MSG-PTR !
     0 _HMAC-MSG-LEN ! ;
-
-: _HMAC-RETURN ( status -- status )
-    >R _HMAC-WIPE _HMAC-HKDF-RELEASE R> ;
 
 \ HMAC-PAD ( key-addr key-len pad-addr xor-byte -- )
 \   Zero pad, copy key into pad, XOR entire pad with xor-byte.
@@ -1351,7 +1368,8 @@ VARIABLE _VERIFY-ACC
     _HMAC-HKDF-TRY IF
         _HMAC-HKDF-DROP-ARGS CRYPTO-STATE EXIT
     THEN
-    _HMAC-NOLOCK _HMAC-RETURN ;
+    ['] _HMAC-NOLOCK ['] _HMAC-WIPE ['] SHA3-CLEAR
+    _HMAC-HKDF-GUARD ;
 
 \ ENCRYPT ( key iv src dst len -- tag-addr )  AES-256-GCM encrypt.
 : ENCRYPT  AES-ENCRYPT ;
@@ -1646,9 +1664,6 @@ VARIABLE _HKDF-COUNTER
     0 _HKDF-COUNTER !
     _HMAC-WIPE ;
 
-: _HKDF-RETURN ( status -- status )
-    >R _HKDF-WIPE _HMAC-HKDF-RELEASE R> ;
-
 : _HKDF-OUTPUT-ALIASES-INPUT? ( -- flag )
     _HKDF-REMAIN @ 0= IF FALSE EXIT THEN
     _HKDF-OUT-PTR @ _HKDF-PRK-PTR @ HKDF-HASHLEN + <
@@ -1678,7 +1693,8 @@ VARIABLE _HKDF-COUNTER
     _HMAC-HKDF-TRY IF
         _HMAC-HKDF-DROP-ARGS CRYPTO-STATE EXIT
     THEN
-    _HKDF-EXTRACT-NOLOCK _HKDF-RETURN ;
+    ['] _HKDF-EXTRACT-NOLOCK ['] _HKDF-WIPE ['] SHA3-CLEAR
+    _HMAC-HKDF-GUARD ;
 
 : _HKDF-EXPAND-NOLOCK ( prk info ilen len out -- status )
     _HKDF-OUT-PTR !
@@ -1734,7 +1750,8 @@ VARIABLE _HKDF-COUNTER
     _HMAC-HKDF-TRY IF
         _HMAC-HKDF-DROP-ARGS CRYPTO-STATE EXIT
     THEN
-    _HKDF-EXPAND-NOLOCK _HKDF-RETURN ;
+    ['] _HKDF-EXPAND-NOLOCK ['] _HKDF-WIPE ['] SHA3-CLEAR
+    _HMAC-HKDF-GUARD ;
 
 \ =====================================================================
 \  §1.9b  HMAC-SHA256 / HKDF-SHA256 (for standard TLS 1.3)
@@ -1772,9 +1789,6 @@ VARIABLE _HMAC256-MSG-LEN
     0 _HMAC256-KEY-LEN !
     0 _HMAC256-MSG-PTR !
     0 _HMAC256-MSG-LEN ! ;
-
-: _HMAC256-RETURN ( status -- status )
-    >R _HMAC256-WIPE _HMAC-HKDF-RELEASE R> ;
 
 : HMAC256-PAD ( key-addr key-len pad-addr xor-byte -- )
     _HMAC256-XBYTE !
@@ -1835,7 +1849,8 @@ VARIABLE _HMAC256-MSG-LEN
     _HMAC-HKDF-TRY IF
         _HMAC-HKDF-DROP-ARGS SHA256-STATE EXIT
     THEN
-    _HMAC256-NOLOCK _HMAC256-RETURN ;
+    ['] _HMAC256-NOLOCK ['] _HMAC256-WIPE ['] SHA256-CLEAR
+    _HMAC-HKDF-GUARD ;
 
 \ Scratch buffers for HKDF-SHA256
 CREATE _HKDF256-ZERO-SALT  32 ALLOT
@@ -1861,9 +1876,6 @@ VARIABLE _HKDF256-COUNTER
     0 _HKDF256-COUNTER !
     _HMAC256-WIPE ;
 
-: _HKDF256-RETURN ( status -- status )
-    >R _HKDF256-WIPE _HMAC-HKDF-RELEASE R> ;
-
 : _HKDF256-OUTPUT-ALIASES-INPUT? ( -- flag )
     _HKDF256-REMAIN @ 0= IF FALSE EXIT THEN
     _HKDF256-OUT-PTR @ _HKDF256-PRK-PTR @ 32 + <
@@ -1888,7 +1900,8 @@ VARIABLE _HKDF256-COUNTER
     _HMAC-HKDF-TRY IF
         _HMAC-HKDF-DROP-ARGS SHA256-STATE EXIT
     THEN
-    _HKDF256-EXTRACT-NOLOCK _HKDF256-RETURN ;
+    ['] _HKDF256-EXTRACT-NOLOCK ['] _HKDF256-WIPE ['] SHA256-CLEAR
+    _HMAC-HKDF-GUARD ;
 
 : _HKDF256-EXPAND-NOLOCK ( prk info ilen len out -- status )
     _HKDF256-OUT-PTR !
@@ -1934,7 +1947,8 @@ VARIABLE _HKDF256-COUNTER
     _HMAC-HKDF-TRY IF
         _HMAC-HKDF-DROP-ARGS SHA256-STATE EXIT
     THEN
-    _HKDF256-EXPAND-NOLOCK _HKDF256-RETURN ;
+    ['] _HKDF256-EXPAND-NOLOCK ['] _HKDF256-WIPE ['] SHA256-CLEAR
+    _HMAC-HKDF-GUARD ;
 
 \ PQ-DERIVE ( out -- status )
 \   Internal: HKDF-derive final 32-byte key from concatenated secrets.

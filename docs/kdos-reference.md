@@ -374,7 +374,14 @@ intermediate digests, HKDF state, and pointer/length metadata. These wrappers
 do not yield; lock 9 serializes every full and microcore, and SHA3 calls use the
 fixed lock order 9 then the BIOS-managed crypto lock 8. Applications must not
 acquire lock 9 around these words or call them while retaining an active
-`SHA3-BEGIN`/SHAKE transaction.
+`SHA3-BEGIN`/SHAKE or `SHA256-INIT` transaction. An unexpected Forth `THROW`
+from a private HMAC/HKDF stage is caught at the lock-9 boundary. The selected
+checked-hash transaction is aborted before the complete family scratch is wiped; after a
+successful abort, lock 9 is released and the exact exception is rethrown. If
+the lower abort fails, its cleanup status takes precedence and lock 9 remains
+held fail-closed after the family scratch is wiped. This boundary contains
+Forth exceptions, not architectural traps, and does not by itself release an
+outer owner such as the networking module's TLS lock 10.
 
 HKDF expansion preflights the complete output span and its fixed 32-byte PRK,
 then publishes one successful 32-byte-or-smaller block at a time. If a later

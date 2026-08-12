@@ -14833,6 +14833,14 @@ class TestBIOSSHA2(unittest.TestCase):
             "0 CONSTANT SHA256-OK",
             "0 CONSTANT SHA512-OK",
         )
+        # This deliberately narrow BIOS harness does not load KDOS's earlier
+        # exception section.  Supply the normal-completion half of its ABI so
+        # the exact guarded HMAC/HKDF slice can execute; exception cleanup is
+        # exercised against the complete KDOS image below.
+        definitions += [
+            ": CATCH EXECUTE 0 ;",
+            ": THROW DROP ;",
+        ]
         definitions += source_slice(
             "9 CONSTANT HMAC-HKDF-LOCK",
             "136 CONSTANT HMAC-BLKSZ",
@@ -15850,6 +15858,103 @@ class TestKDOSSHA3Checkpoint2(_KDOSTestBase):
         self.assertIn("FAILURE-OUT=165 ", failure_text)
         self.assertFalse(failure_sys.spinlock.locked[9])
         self.assertEqual(failure_sys.spinlock.owner[9], -1)
+
+    def test_hmac_hkdf_throw_cleanup_and_fail_closed_retention(self):
+        """A core THROW aborts its hash transaction before releasing lock 9."""
+        sha3_lines = self._scratch_probe_lines("sha3") + [
+            ": THROWING-H3-CORE ( a b c d e -- status )",
+            "  2DROP 2DROP DROP",
+            "  SHA3-256-MODE SHA3-BEGIN DROP -773 THROW ;",
+            ": RUN-GUARDED-H3-THROW ( -- )",
+            "  _HMAC-HKDF-TRY IF -778 THROW THEN",
+            "  1 2 3 4 5 ['] THROWING-H3-CORE",
+            "  ['] _HKDF-WIPE ['] SHA3-CLEAR _HMAC-HKDF-GUARD ;",
+            "POISON-H3-SCRATCH",
+            "VARIABLE H3-THROW-D0 DEPTH H3-THROW-D0 !",
+            '."  H3-THROW=" \' RUN-GUARDED-H3-THROW CATCH .',
+            '."  H3-DIRTY=" H3-SCRATCH-DIRTY? .',
+            '."  H3-DEPTH=" DEPTH H3-THROW-D0 @ = .',
+            '."  H3-STATUS=" SHA3-STATUS@ .',
+            '."  H3-REUSE=" SHA3-256-MODE SHA3-BEGIN . SHA3-CLEAR DROP',
+        ]
+        sha3_text, sha3_sys = self._run_kdos_inspected(sha3_lines)
+        self.assertIn("H3-THROW=-773 ", sha3_text)
+        self.assertIn("H3-DIRTY=0 ", sha3_text)
+        self.assertIn("H3-DEPTH=-1 ", sha3_text)
+        self.assertIn("H3-STATUS=0 ", sha3_text)
+        self.assertIn("H3-REUSE=0 ", sha3_text)
+        for lock in (8, 9):
+            self.assertFalse(sha3_sys.spinlock.locked[lock])
+            self.assertEqual(sha3_sys.spinlock.owner[lock], -1)
+
+        sha256_lines = self._scratch_probe_lines("sha256") + [
+            ": THROWING-H256-CORE ( a b c d e -- status )",
+            "  2DROP 2DROP DROP SHA256-INIT DROP -776 THROW ;",
+            ": RUN-GUARDED-H256-THROW ( -- )",
+            "  _HMAC-HKDF-TRY IF -778 THROW THEN",
+            "  1 2 3 4 5 ['] THROWING-H256-CORE",
+            "  ['] _HKDF256-WIPE ['] SHA256-CLEAR _HMAC-HKDF-GUARD ;",
+            "POISON-H256-SCRATCH",
+            "VARIABLE H256-THROW-D0 DEPTH H256-THROW-D0 !",
+            '."  H256-THROW=" \' RUN-GUARDED-H256-THROW CATCH .',
+            '."  H256-DIRTY=" H256-SCRATCH-DIRTY? .',
+            '."  H256-DEPTH=" DEPTH H256-THROW-D0 @ = .',
+            '."  H256-INACTIVE=" 0 0 SHA256-UPDATE .',
+            '."  H256-REUSE=" SHA256-INIT . SHA256-CLEAR DROP',
+        ]
+        sha256_text, sha256_sys = self._run_kdos_inspected(sha256_lines)
+        self.assertIn("H256-THROW=-776 ", sha256_text)
+        self.assertIn("H256-DIRTY=0 ", sha256_text)
+        self.assertIn("H256-DEPTH=-1 ", sha256_text)
+        self.assertIn("H256-INACTIVE=1 ", sha256_text)
+        self.assertIn("H256-REUSE=0 ", sha256_text)
+        for lock in (8, 9):
+            self.assertFalse(sha256_sys.spinlock.locked[lock])
+            self.assertEqual(sha256_sys.spinlock.owner[lock], -1)
+
+        fail_closed_lines = self._scratch_probe_lines("sha3") + [
+            ": THROWING-H3-UNCLEAR ( a b c d e -- status )",
+            "  2DROP 2DROP DROP",
+            "  SHA3-256-MODE SHA3-BEGIN DROP -779 THROW ;",
+            ": FAILING-H3-CLEAR ( -- status ) CRYPTO-HARDWARE ;",
+            ": RUN-GUARDED-H3-UNCLEAR ( -- )",
+            "  _HMAC-HKDF-TRY IF -778 THROW THEN",
+            "  1 2 3 4 5 ['] THROWING-H3-UNCLEAR",
+            "  ['] _HKDF-WIPE ['] FAILING-H3-CLEAR",
+            "  _HMAC-HKDF-GUARD ;",
+            "POISON-H3-SCRATCH",
+            "VARIABLE UNCLEAR-D0 DEPTH UNCLEAR-D0 !",
+            '."  UNCLEAR=" \' RUN-GUARDED-H3-UNCLEAR CATCH .',
+            '."  UNCLEAR-DIRTY=" H3-SCRATCH-DIRTY? .',
+            '."  UNCLEAR-DEPTH=" DEPTH UNCLEAR-D0 @ = .',
+        ]
+        unclear_text, unclear_sys = self._run_kdos_inspected(
+            fail_closed_lines)
+        self.assertIn("UNCLEAR=6 ", unclear_text)
+        self.assertIn("UNCLEAR-DIRTY=0 ", unclear_text)
+        self.assertIn("UNCLEAR-DEPTH=-1 ", unclear_text)
+        for lock in (8, 9):
+            self.assertTrue(unclear_sys.spinlock.locked[lock])
+            self.assertEqual(unclear_sys.spinlock.owner[lock], 0)
+
+        with open(KDOS_PATH) as source_file:
+            source = source_file.read()
+        guarded_cores = (
+            ("_HMAC-NOLOCK", "_HMAC-WIPE", "SHA3-CLEAR"),
+            ("_HKDF-EXTRACT-NOLOCK", "_HKDF-WIPE", "SHA3-CLEAR"),
+            ("_HKDF-EXPAND-NOLOCK", "_HKDF-WIPE", "SHA3-CLEAR"),
+            ("_HMAC256-NOLOCK", "_HMAC256-WIPE", "SHA256-CLEAR"),
+            ("_HKDF256-EXTRACT-NOLOCK", "_HKDF256-WIPE", "SHA256-CLEAR"),
+            ("_HKDF256-EXPAND-NOLOCK", "_HKDF256-WIPE", "SHA256-CLEAR"),
+        )
+        for work_word, wipe_word, clear_word in guarded_cores:
+            pattern = (
+                rf"\[']\s+{re.escape(work_word)}\s+"
+                rf"\[']\s+{re.escape(wipe_word)}\s+"
+                rf"\[']\s+{re.escape(clear_word)}\s+"
+                r"_HMAC-HKDF-GUARD"
+            )
+            self.assertRegex(source, pattern)
 
     def test_long_hmac_keys_match_sha3_and_sha256_known_answers(self):
         """Keys beyond each hash block size are normalized per HMAC."""
