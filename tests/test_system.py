@@ -24865,6 +24865,199 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_server_hello_phase_one_matches_rfc7748_and_wire_vectors(self):
+        """Staged X25519, exact hello bytes, and CH||SH hash agree."""
+        alice_public = bytes.fromhex(
+            "8520f0098930a754748b7ddcb43ef75a"
+            "0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        )
+        bob_private = bytes.fromhex(
+            "5dab087e624a8a4b79e17f8b83800ee6"
+            "6f3bb1292618b6fd1c2f8b27ff88e0eb"
+        )
+        bob_public = bytes.fromhex(
+            "de9edb7d7b7dc1b4d35b61c2ece43537"
+            "3f8343c85b78674dadfc7e146f882b4f"
+        )
+        shared = bytes.fromhex(
+            "4a5d9d5ba4ce2de1728e3bf480350f25"
+            "e07e21c947d19e3376f09b3c1e161742"
+        )
+        server_random = bytes(range(0x80, 0xA0))
+        session_id = bytes(range(0x20, 0x40))
+        hello = self._client_hello(shares=((29, alice_public),))
+        server_hello = (
+            b"\x02" + self._u24(118) + b"\x03\x03"
+            + server_random + b"\x20" + session_id
+            + b"\x13\x01\x00\x00\x2e"
+            + b"\x00\x2b\x00\x02\x03\x04"
+            + b"\x00\x33\x00\x24\x00\x1d\x00\x20"
+            + bob_public
+        )
+        encrypted_extensions = bytes.fromhex(
+            "08000011000f0010000b0009087261626269742f31"
+        )
+        phase_one_hash = hashlib.sha256(hello + server_hello).digest()
+        self.assertEqual(len(hello), 171)
+        self.assertEqual(len(server_hello), 122)
+        self.assertEqual(len(encrypted_extensions), 21)
+
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("server-random", server_random),
+            ("bob-private", bob_private),
+            ("bob-public", bob_public),
+            ("alice-public", alice_public),
+            ("shared-secret", shared),
+            ("client-hello", hello),
+            ("expected-sh", server_hello),
+            ("expected-ee", encrypted_extensions),
+            ("expected-phase-one", phase_one_hash),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." PARSE-IOR=" . ." PARSE-ALERT=" .',
+            'TLS-OWNER-TRY ." OWNER=" .',
+            "server-random server-ctx @ TLS-RXW.SERVER-LEDGER "
+            "TSL.SH 6 + + 32 MOVE",
+            "bob-private server-ctx @ TLS-CTX.MY-PRIVKEY 32 MOVE",
+            'server-ctx @ _TLS-SERVER-X25519 ." DH-ALERT=" .',
+            'server-ctx @ TLS-CTX.MY-PUBKEY bob-public 32 '
+            '_XC-BYTES= ." PUB=" .',
+            'server-ctx @ TLS-CTX.SHARED shared-secret 32 '
+            '_XC-BYTES= ." SHARED=" .',
+            "server-ctx @ _TLS-SERVER-BUILD-SERVER-HELLO DUP "
+            "server-ctx @ TLS-RXW.SERVER-META TSM.SH-LEN + !",
+            '." SH-U=" .',
+            "server-ctx @ _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS DUP "
+            "server-ctx @ TLS-RXW.SERVER-META TSM.EE-LEN + !",
+            '." EE-U=" .',
+            "server-ctx @ (_TLS-SERVER-HELLO-TRANSCRIPT-HASH)",
+            '." HASH-IOR=" .',
+            "TLS-OWNER-RELEASE",
+            '." SH=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'expected-sh 122 _XC-BYTES= .',
+            '." EE=" server-ctx @ TLS-RXW.SERVER-LEDGER TSL.EE + '
+            'expected-ee 21 _XC-BYTES= .',
+            '." HASH=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'expected-phase-one 32 '
+            '_XC-BYTES= .',
+            '." SH-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.SH-LEN + @ .',
+            '." EE-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.EE-LEN + @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            'SHA256-INIT ." SHA-REUSE=" . SHA256-CLEAR DROP',
+            "server-ctx @ TLS-CTX.TRANSCRIPT 32 165 FILL",
+            "0 server-ctx @ TLS-CTX.SUITE !",
+            'server-ctx @ (_TLS-SERVER-HELLO-TRANSCRIPT-HASH) '
+            '." PROFILE-IOR=" .',
+            '." PROFILE-ATOMIC=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'C@ .',
+            "TLS-SUITE-AES128-SHA256 server-ctx @ TLS-CTX.SUITE !",
+            "121 server-ctx @ TLS-RXW.SERVER-META TSM.SH-LEN + !",
+            'server-ctx @ (_TLS-SERVER-HELLO-TRANSCRIPT-HASH) '
+            '." FRAME-IOR=" .',
+            '." FRAME-ATOMIC=" server-ctx @ TLS-CTX.TRANSCRIPT C@ .',
+            "server-ctx @ TLS-CTX.PEER-PUBKEY 32 0 FILL",
+            "bob-private server-ctx @ TLS-CTX.MY-PRIVKEY 32 MOVE",
+            "server-ctx @ TLS-CTX.MY-PUBKEY 32 165 FILL",
+            "server-ctx @ TLS-CTX.SHARED 32 165 FILL",
+            'server-ctx @ _TLS-SERVER-X25519 ." ZERO-ALERT=" .',
+            '." ZERO-PRIVATE=" server-ctx @ TLS-CTX.MY-PRIVKEY '
+            '_BN256-ZERO? .',
+            '." ZERO-PUBLIC=" server-ctx @ TLS-CTX.MY-PUBKEY '
+            '_BN256-ZERO? .',
+            '." ZERO-SHARED=" server-ctx @ TLS-CTX.SHARED '
+            '_BN256-ZERO? .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FLIGHT1-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "PARSE-IOR=0 PARSE-ALERT=0 ", "OWNER=0 ",
+            "DH-ALERT=0 ", "PUB=-1 ", "SHARED=-1 ",
+            "SH-U=122 ", "EE-U=21 ", "HASH-IOR=0 ",
+            "SH=-1 ", "EE=-1 ", "HASH=-1 ",
+            "SH-LEN=122 ", "EE-LEN=21 ", "HS=11 ",
+            "SHA-REUSE=0 ", "PROFILE-IOR=-4204 ",
+            "PROFILE-ATOMIC=165 ", "FRAME-IOR=-4204 ",
+            "FRAME-ATOMIC=165 ",
+            "ZERO-ALERT=47 ", "ZERO-PRIVATE=-1 ",
+            "ZERO-PUBLIC=-1 ", "ZERO-SHARED=-1 ",
+            "FLIGHT1-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_hello_ledger_uses_exact_wire_maxima(self):
+        """Maximum and absent ALPN consume their exact ledger intervals."""
+        maximum_alpn = bytes(range(1, 256))
+        maximum_hello = self._client_hello(alpn=maximum_alpn)
+        no_alpn_hello = self._client_hello(alpn=None)
+        maximum_header = bytes.fromhex("080001080106001001020100ff")
+        no_alpn_ee = bytes.fromhex("080000020000")
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("maximum-alpn", maximum_alpn),
+            ("maximum-hello", maximum_hello),
+            ("no-alpn-hello", no_alpn_hello),
+            ("maximum-ee-header", maximum_header),
+            ("no-alpn-ee", no_alpn_ee),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ maximum-alpn 255 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ maximum-hello {len(maximum_hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER "
+            "TLS-SERVER-LEDGER-CAPACITY 165 FILL",
+            'server-ctx @ _TLS-SERVER-BUILD-SERVER-HELLO ." MAX-SH=" .',
+            'server-ctx @ _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS '
+            '." MAX-EE=" .',
+            '." MAX-HEADER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'TSL.EE + maximum-ee-header 13 _XC-BYTES= .',
+            '." MAX-NAME=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'TSL.EE 13 + + maximum-alpn 255 _XC-BYTES= .',
+            '." MAX-LAST=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            '389 + C@ .',
+            '." MAX-GUARD=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'TSL.CV + C@ .',
+            "90 server-ctx @ TLS-RXW.SERVER-LEDGER TSL.EE + C!",
+            "254 server-ctx @ TLS-CTX.ALPN-NAME-LEN !",
+            'server-ctx @ _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS '
+            '." MISMATCH-U=" .',
+            '." MISMATCH-BYTE=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'TSL.EE + C@ .',
+            "server-ctx @ TLS-ABORT DROP",
+            "server-ctx @ tc-slot @ tc-gen @ 0 0 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ no-alpn-hello {len(no_alpn_hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS '
+            '." NONE-EE=" .',
+            '." NONE-WIRE=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'TSL.EE + no-alpn-ee 6 _XC-BYTES= .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." GEOMETRY-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "MAX-SH=122 ", "MAX-EE=268 ", "MAX-HEADER=-1 ",
+            "MAX-NAME=-1 ", "MAX-LAST=255 ", "MAX-GUARD=165 ",
+            "MISMATCH-U=0 ", "MISMATCH-BYTE=90 ",
+            "NONE-EE=6 ", "NONE-WIRE=-1 ",
+            "GEOMETRY-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_certificate_signature_classifier_is_generic_and_sha1_explicit(self):
         """Shallow classification is broader than the local verifier profile."""
         null = self._der(5, b"")

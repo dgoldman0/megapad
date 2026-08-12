@@ -9164,6 +9164,165 @@ VARIABLE _TPCH-IOR
     (TLS-PARSE-CLIENT-HELLO)
     >R >R TLS-OWNER-RELEASE R> R> ;
 
+\ --- Deterministic server hello serialization and phase-1 transcript ---
+
+: _TLS-BE24!  ( u addr -- )
+    >R DUP 16 RSHIFT 255 AND R@ C!
+    DUP 8 RSHIFT 255 AND R@ 1+ C!
+    255 AND R> 2 + C! ;
+
+VARIABLE _TSBH-CTX
+VARIABLE _TSBH-META
+VARIABLE _TSBH-OUT
+VARIABLE _TSBH-CH
+VARIABLE _TSBH-SID-U
+VARIABLE _TSBH-P
+VARIABLE _TSBH-U
+
+\ Serialize one exact TLS 1.3 ServerHello from already staged random and
+\ X25519 public bytes.  Entropy and scalar multiplication are separate so
+\ deterministic vectors can qualify the wire encoding directly.
+: _TLS-SERVER-BUILD-SERVER-HELLO  ( ctx -- u )
+    DUP _TSBH-CTX ! TLS-RXW.SERVER-META _TSBH-META !
+    _TSBH-CTX @ TLS-RXW.SERVER-LEDGER TSL.SH + _TSBH-OUT !
+    _TSBH-CTX @ TLS-RXW.SERVER-CH DUP _TSBH-CH !
+    38 + C@ DUP _TSBH-SID-U !
+    90 + DUP TLS-SERVER-SH-MAX > IF DROP 0 EXIT THEN _TSBH-U !
+    TLSHT-SERVER-HELLO _TSBH-OUT @ C!
+    _TSBH-U @ 4 - _TSBH-OUT @ 1+ _TLS-BE24!
+    771 _TSBH-OUT @ 4 + NW16!
+    \ Bytes [6,38) already contain the staged server random.
+    _TSBH-SID-U @ _TSBH-OUT @ 38 + C!
+    _TSBH-CH @ 39 + _TSBH-OUT @ 39 + _TSBH-SID-U @ MOVE
+    _TSBH-OUT @ 39 + _TSBH-SID-U @ + _TSBH-P !
+    TLS-SUITE-AES128-SHA256 _TSBH-P @ NW16! 2 _TSBH-P +!
+    0 _TSBH-P @ C! 1 _TSBH-P +!
+    46 _TSBH-P @ NW16! 2 _TSBH-P +!
+    43 _TSBH-P @ NW16! 2 _TSBH-P +!
+    2 _TSBH-P @ NW16! 2 _TSBH-P +!
+    772 _TSBH-P @ NW16! 2 _TSBH-P +!
+    51 _TSBH-P @ NW16! 2 _TSBH-P +!
+    36 _TSBH-P @ NW16! 2 _TSBH-P +!
+    TLS-GROUP-X25519 _TSBH-P @ NW16! 2 _TSBH-P +!
+    32 _TSBH-P @ NW16! 2 _TSBH-P +!
+    _TSBH-CTX @ TLS-CTX.MY-PUBKEY _TSBH-P @ 32 MOVE
+    32 _TSBH-P +!
+    _TSBH-P @ _TSBH-OUT @ - _TSBH-U @ <> IF 0 EXIT THEN
+    _TSBH-U @ ;
+
+VARIABLE _TSBE-CTX
+VARIABLE _TSBE-OUT
+VARIABLE _TSBE-NAME-U
+
+: _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS  ( ctx -- u )
+    DUP _TSBE-CTX ! TLS-RXW.SERVER-LEDGER TSL.EE + _TSBE-OUT !
+    _TSBE-CTX @ TLS-CTX.ALPN-SELECTED-LEN @ DUP _TSBE-NAME-U !
+    DUP 0< OVER TLS-ALPN-NAME-MAX > OR IF DROP 0 EXIT THEN
+    DROP
+    _TSBE-NAME-U @ _TSBE-CTX @ TLS-CTX.ALPN-NAME-LEN @ <> IF
+        0 EXIT
+    THEN
+    _TSBE-OUT @ TLS-SERVER-EE-MAX 0 FILL
+    TLSHT-ENCRYPTED-EXT _TSBE-OUT @ C!
+    _TSBE-NAME-U @ 0= IF
+        2 _TSBE-OUT @ 1+ _TLS-BE24!
+        0 _TSBE-OUT @ 4 + NW16! 6 EXIT
+    THEN
+    _TSBE-NAME-U @ 9 + _TSBE-OUT @ 1+ _TLS-BE24!
+    _TSBE-NAME-U @ 7 + _TSBE-OUT @ 4 + NW16!
+    16 _TSBE-OUT @ 6 + NW16!
+    _TSBE-NAME-U @ 3 + _TSBE-OUT @ 8 + NW16!
+    _TSBE-NAME-U @ 1+ _TSBE-OUT @ 10 + NW16!
+    _TSBE-NAME-U @ _TSBE-OUT @ 12 + C!
+    _TSBE-CTX @ TLS-CTX.ALPN-NAME
+    _TSBE-OUT @ 13 + _TSBE-NAME-U @ MOVE
+    _TSBE-NAME-U @ 13 + ;
+
+VARIABLE _TSHX-CTX
+
+\ Compute the public share and shared secret from a context-owned staged
+\ private scalar.  X25519 clamps internally.  An all-zero shared secret is a
+\ peer key-share failure, not a local crypto failure.
+: _TLS-SERVER-X25519  ( ctx -- alert )
+    _TSHX-CTX !
+    _TSHX-CTX @ TLS-CTX.MY-PRIVKEY X25519-BASE
+    _TSHX-CTX @ TLS-CTX.MY-PUBKEY X25519
+    _TSHX-CTX @ TLS-CTX.MY-PRIVKEY
+    _TSHX-CTX @ TLS-CTX.PEER-PUBKEY
+    _TSHX-CTX @ TLS-CTX.SHARED X25519
+    _TSHX-CTX @ TLS-CTX.SHARED _BN256-ZERO?
+    IF
+        _TSHX-CTX @ TLS-CTX.MY-PRIVKEY 32 0 FILL
+        _TSHX-CTX @ TLS-CTX.MY-PUBKEY 32 0 FILL
+        _TSHX-CTX @ TLS-CTX.SHARED 32 0 FILL
+        TLS-AD-ILLEGAL-PARAMETER
+    ELSE
+        0
+    THEN ;
+
+VARIABLE _TSHH-CTX
+VARIABLE _TSHH-META
+VARIABLE _TSHH-OUT
+VARIABLE _TSHH-TOUCHED
+VARIABLE _TSHH-SH-U
+
+: _TSHH-WIPE  ( -- )
+    0 _TSHH-CTX ! 0 _TSHH-META ! 0 _TSHH-OUT !
+    0 _TSHH-TOUCHED ! 0 _TSHH-SH-U ! ;
+
+: _TSHH-CLEAR  ( -- status )
+    _TSHH-TOUCHED @ IF SHA256-CLEAR ELSE SHA256-OK THEN ;
+
+: _TSHH-BODY  ( ctx -- status )
+    DUP _TSHH-CTX ! TLS-RXW.SERVER-META _TSHH-META !
+    _TSHH-CTX @ TLS-CTX.TRANSCRIPT _TSHH-OUT !
+    _TSHH-CTX @ TLS-CTX.ROLE @ TLS-ROLE-SERVER <>
+    _TSHH-CTX @ TLS-CRYPTO-PROFILE
+    TLS-CRYPTO-AES128-SHA256 <> OR
+    _TSHH-META @ TSM.FLAGS + @ TSMF-CLIENT-HELLO-VALID AND 0= OR IF
+        TLS-E-STATE EXIT
+    THEN
+    _TSHH-META @ TSM.CH-LEN + @ DUP 4 <
+    OVER _TSHH-META @ TSM.CH-FILLED + @ <> OR
+    SWAP TLS-SERVER-CH-CAPACITY > OR IF TLS-E-STATE EXIT THEN
+    _TSHH-META @ TSM.SH-LEN + @ DUP _TSHH-SH-U !
+    DUP 90 < SWAP TLS-SERVER-SH-MAX > OR IF TLS-E-STATE EXIT THEN
+    _TSHH-SH-U @
+    _TSHH-CTX @ TLS-RXW.SERVER-CH 38 + C@ 90 + <> IF
+        TLS-E-STATE EXIT
+    THEN
+    _TSHH-CTX @ TLS-RXW.SERVER-LEDGER TSL.SH + DUP C@
+    TLSHT-SERVER-HELLO <> IF DROP TLS-E-STATE EXIT THEN
+    1+ _BE24@ 4 + _TSHH-SH-U @ <> IF TLS-E-STATE EXIT THEN
+    _TSHH-OUT @ 32 SHA2-SPAN-STATUS IF TLS-E-HANDSHAKE-PARAM EXIT THEN
+    -1 _TSHH-TOUCHED !
+    SHA256-INIT DUP IF EXIT THEN DROP
+    _TSHH-CTX @ TLS-RXW.SERVER-CH
+    _TSHH-META @ TSM.CH-LEN + @ SHA256-UPDATE DUP IF EXIT THEN DROP
+    _TSHH-CTX @ TLS-RXW.SERVER-LEDGER TSL.SH +
+    _TSHH-META @ TSM.SH-LEN + @ SHA256-UPDATE DUP IF EXIT THEN DROP
+    _TSHH-OUT @ SHA256-FINAL ;
+
+: _TSHH-UNWIND  ( ctx throw -- )
+    >R DROP _TSHH-CLEAR
+    ?DUP IF R> DROP _TSHH-WIPE THROW THEN
+    _TSHH-WIPE R> THROW ;
+
+: _TSHH-FINISH  ( body-status -- ior )
+    >R _TSHH-CLEAR
+    ?DUP IF DROP R> DROP _TSHH-WIPE TLS-E-HANDSHAKE-CRYPTO EXIT THEN
+    R> DUP 0> IF DROP TLS-E-HANDSHAKE-CRYPTO THEN
+    >R _TSHH-WIPE R> ;
+
+\ Hash exactly ClientHello || ServerHello while the caller owns lock 10.
+\ The checked SHA transaction is finalized and cleared before any HKDF/HMAC
+\ call may begin, so lower lock 8 never spans key-schedule work or a yield.
+: (_TLS-SERVER-HELLO-TRANSCRIPT-HASH)  ( ctx -- ior )
+    0 _TSHH-TOUCHED !
+    ['] _TSHH-BODY CATCH
+    DUP IF _TSHH-UNWIND THEN DROP
+    _TSHH-FINISH ;
+
 : TLS-PLAIN-WIPE  ( -- )
     TLS-PLAIN-BUF 16640 0 FILL ;
 \ The largest admitted hybrid ClientHello is 1525 bytes with maximum DNS SNI
