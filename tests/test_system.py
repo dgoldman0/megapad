@@ -24700,6 +24700,43 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
     def _provision_lines(cls) -> tuple[list[str], bytes]:
         return TestKDOSTLSCredentials._provision_lines()
 
+    @classmethod
+    def _certificate_transcript_phase(
+        cls,
+    ) -> tuple[bytes, bytes, bytes, bytes]:
+        alice_public = bytes.fromhex(
+            "8520f0098930a754748b7ddcb43ef75a"
+            "0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        )
+        bob_private = bytes.fromhex(
+            "5dab087e624a8a4b79e17f8b83800ee6"
+            "6f3bb1292618b6fd1c2f8b27ff88e0eb"
+        )
+        bob_public = bytes.fromhex(
+            "de9edb7d7b7dc1b4d35b61c2ece43537"
+            "3f8343c85b78674dadfc7e146f882b4f"
+        )
+        server_random = bytes(range(0x80, 0xA0))
+        session_id = bytes(range(0x20, 0x40))
+        hello = cls._client_hello(shares=((29, alice_public),))
+        server_hello = (
+            b"\x02" + cls._u24(118) + b"\x03\x03"
+            + server_random + b"\x20" + session_id
+            + b"\x13\x01\x00\x00\x2e"
+            + b"\x00\x2b\x00\x02\x03\x04"
+            + b"\x00\x33\x00\x24\x00\x1d\x00\x20"
+            + bob_public
+        )
+        encrypted_extensions = bytes.fromhex(
+            "08000011000f0010000b0009087261626269742f31"
+        )
+        return (
+            hello,
+            bob_private + server_random,
+            server_hello,
+            encrypted_extensions,
+        )
+
     def test_server_context_begin_pins_policy_and_close_releases_it(self):
         """Server setup is one transaction and no cleanup loses its lease."""
         lines, der_chain = self._provision_lines()
@@ -25305,6 +25342,167 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "RETRY-IOR=-4204 RETRY-ALERT=0 ",
             "RETRY-SH=-1 ", "RETRY-HS=12 ", "OWNER-DEPTH=0 ",
             "PREPARE-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_certificate_transcript_streams_exact_leaf_framing(self):
+        """The virtual Certificate hashes to the independent TLS oracle."""
+        hello, entropy, server_hello, encrypted_extensions = (
+            self._certificate_transcript_phase()
+        )
+        leaf = TestKDOSTLSCredentials._fixture("leaf")
+        entry = self._u24(len(leaf)) + leaf + b"\x00\x00"
+        certificate = (
+            b"\x0b" + self._u24(len(entry) + 4)
+            + b"\x00" + self._u24(len(entry)) + entry
+        )
+        expected = hashlib.sha256(
+            hello + server_hello + encrypted_extensions + certificate
+        ).digest()
+        self.assertEqual(
+            expected.hex(),
+            "2a3c8dddfd408a9c84ceca91d599e862"
+            "ee45657fb0cbf3be88fdcf2767abca58",
+        )
+
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("phase-entropy", entropy),
+            ("client-hello", hello),
+            ("expected-sh", server_hello),
+            ("expected-ee", encrypted_extensions),
+            ("expected-phase-one", hashlib.sha256(
+                hello + server_hello
+            ).digest()),
+            ("expected-certificate-hash", expected),
+            ("zero32", bytes(32)),
+            ("zero8", bytes(8)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'TLS-OWNER-TRY ." OWNER=" .',
+            'server-ctx @ _TSPH-BEGIN ." BEGIN-IOR=" . '
+            '." BEGIN-ALERT=" .',
+            "phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            '_TSPH-RUN-STAGED ." RUN-IOR=" . ." RUN-ALERT=" .',
+            "_TSPH-SCRATCH-WIPE",
+            'server-ctx @ (_TLS-SERVER-CERTIFICATE-TRANSCRIPT-HASH) '
+            '." CERT-IOR=" .',
+            "TLS-OWNER-RELEASE",
+            '." CERT-HASH=" _TLS-SERVER-TRANSCRIPT-STAGE '
+            'expected-certificate-hash 32 _XC-BYTES= .',
+            '." PHASE-ONE=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'expected-phase-one 32 _XC-BYTES= .',
+            '." SH=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'expected-sh 122 _XC-BYTES= .',
+            '." EE=" server-ctx @ TLS-RXW.SERVER-LEDGER TSL.EE + '
+            'expected-ee 21 _XC-BYTES= .',
+            '." COUNT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-COUNT + @ .',
+            '." WIRE=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.WIRE-LIST-U + @ .',
+            '." TSFT-CTX=" _TSFT-CTX @ .',
+            '." SCRATCH=" _TSFT-DIGEST zero32 32 _XC-BYTES= .',
+            '." FRAME-ZERO=" _TSFT-CERT-HEADER zero8 8 _XC-BYTES= .',
+            'SHA256-INIT ." SHA-REUSE=" . SHA256-CLEAR DROP',
+            "_TLS-SERVER-TRANSCRIPT-STAGE-WIPE",
+            '." RESULT-WIPED=" _TLS-SERVER-TRANSCRIPT-STAGE '
+            'zero32 32 _XC-BYTES= .',
+            '." OWNER-END=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." CERT-HASH-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "OWNER=0 ", "BEGIN-IOR=0 BEGIN-ALERT=0 ",
+            "RUN-IOR=0 RUN-ALERT=0 ", "CERT-IOR=0 ",
+            "CERT-HASH=-1 ", "PHASE-ONE=-1 ", "SH=-1 ", "EE=-1 ",
+            "COUNT=1 ", f"WIRE={len(entry)} ", "TSFT-CTX=0 ",
+            "SCRATCH=-1 ", "FRAME-ZERO=-1 ", "SHA-REUSE=0 ",
+            "RESULT-WIPED=-1 ", "OWNER-END=0 ",
+            "CERT-HASH-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_certificate_transcript_streams_chain_atomically(self):
+        """Multiple entries stream exactly and failed replays do not publish."""
+        hello, entropy, server_hello, encrypted_extensions = (
+            self._certificate_transcript_phase()
+        )
+        leaf = TestKDOSTLSCredentials._fixture("leaf")
+        opaque_intermediate = bytes.fromhex("30083000300003020000")
+        certs = [leaf, opaque_intermediate]
+        entries = b"".join(
+            self._u24(len(cert)) + cert + b"\x00\x00" for cert in certs
+        )
+        certificate = (
+            b"\x0b" + self._u24(len(entries) + 4)
+            + b"\x00" + self._u24(len(entries)) + entries
+        )
+        expected = hashlib.sha256(
+            hello + server_hello + encrypted_extensions + certificate
+        ).digest()
+        lines, _ = TestKDOSTLSCredentials._provision_lines(certs=certs)
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("phase-entropy", entropy),
+            ("client-hello", hello),
+            ("expected-chain-hash", expected),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx VARIABLE saved-wire",
+            "0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            "TLS-OWNER-TRY DROP",
+            "server-ctx @ _TSPH-BEGIN 2DROP",
+            "phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            'server-ctx @ (_TLS-SERVER-CERTIFICATE-TRANSCRIPT-HASH) '
+            '." GOOD-IOR=" .',
+            '." GOOD-HASH=" _TLS-SERVER-TRANSCRIPT-STAGE '
+            'expected-chain-hash 32 _XC-BYTES= .',
+            '." COUNT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-COUNT + @ .',
+            '." WIRE=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.WIRE-LIST-U + @ .',
+            "server-ctx @ TLS-RXW.SERVER-META TSM.WIRE-LIST-U + "
+            "DUP @ saved-wire ! 1 SWAP +!",
+            "_TLS-SERVER-TRANSCRIPT-STAGE 32 165 FILL",
+            'server-ctx @ (_TLS-SERVER-CERTIFICATE-TRANSCRIPT-HASH) '
+            '." BAD-IOR=" .',
+            '." BAD-ATOMIC=" _TLS-SERVER-TRANSCRIPT-STAGE C@ .',
+            "saved-wire @ server-ctx @ TLS-RXW.SERVER-META "
+            "TSM.WIRE-LIST-U + !",
+            ": _TSFT-TEST-THROW -778 THROW ;",
+            ": _TSFT-TEST-GUARD server-ctx @ "
+            "['] _TSFT-TEST-THROW _TSFT-GUARD DROP ;",
+            "0 _TSFT-TOUCHED !",
+            "' _TSFT-TEST-GUARD CATCH .\" THROW=\" .",
+            '." THROW-ATOMIC=" _TLS-SERVER-TRANSCRIPT-STAGE C@ .',
+            '." THROW-CTX=" _TSFT-CTX @ .',
+            '." THROW-OWNER=" TLS-OWNER-DEPTH @ .',
+            "TLS-OWNER-RELEASE",
+            'SHA256-INIT ." SHA-REUSE=" . SHA256-CLEAR DROP',
+            "server-ctx @ TLS-ABORT DROP",
+            '." CHAIN-HASH-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "GOOD-IOR=0 ", "GOOD-HASH=-1 ", "COUNT=2 ",
+            f"WIRE={len(entries)} ", "BAD-IOR=-4204 ",
+            "BAD-ATOMIC=165 ", "THROW=-778 ", "THROW-ATOMIC=165 ",
+            "THROW-CTX=0 ", "THROW-OWNER=1 ", "SHA-REUSE=0 ",
+            "CHAIN-HASH-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
