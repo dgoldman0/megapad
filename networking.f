@@ -2059,8 +2059,8 @@ VARIABLE _DNR-ULEN
 
 \ -- TCB table (dynamic, XMEM-backed) --
 \   Sized by NET-TABLES-INIT based on available XMEM.
-\   Each TCB is 5728 bytes; the table grows to fill up to 25% of XMEM
-\   (capped at 256 connections, floor of 16).
+\   Each TCB is 5816 bytes; the complete network-table set grows to fill
+\   up to 25% of XMEM (capped at 256 connections).
 VARIABLE TCP-TCBS   0 TCP-TCBS !
 
 : TCP-TCBS-SETUP  ( -- )
@@ -2068,7 +2068,7 @@ VARIABLE TCP-TCBS   0 TCP-TCBS !
     XMEM? IF
         XMEM-ALLOT                    ( addr — in ext RAM )
     ELSE
-        HERE OVER ALLOT               ( addr — in Bank 0 )
+        DUP ?DICT-ROOM HERE SWAP ALLOT ( addr — in Bank 0 )
     THEN
     DUP TCP-TCBS !
     /TCB /TCP-MAX-CONN * 0 FILL ;
@@ -5476,9 +5476,13 @@ VARIABLE _TPC-KEEP
 \  +888    SUITE          8     Negotiated cipher suite; zero until sealed
 \  +896    HASH-ID        8     Hash paired with the negotiated suite
 \  +904    EXPORTER-MS   32     TLS 1.3 exporter master secret
-\  Total: 936 bytes
+\  +936    RX-REC-LEN     8     Bytes retained in this context's record lane
+\  +944    RX-REC-ERROR   8     Sticky malformed-record indication
+\  +952    RX-HS-LEN      8     Post-handshake bytes retained by this context
+\  +960    RX-HS-ERROR    8     Sticky malformed post-handshake indication
+\  Total: 968 bytes
 
-936 CONSTANT /TLS-CTX
+968 CONSTANT /TLS-CTX
 16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -5517,13 +5521,17 @@ VARIABLE _TPC-KEEP
 : TLS-CTX.SUITE       ( ctx -- addr ) 888 + ;
 : TLS-CTX.HASH-ID     ( ctx -- addr ) 896 + ;
 : TLS-CTX.EXPORTER-MS ( ctx -- addr ) 904 + ;
+: TLS-CTX.RX-REC-LEN  ( ctx -- addr ) 936 + ;
+: TLS-CTX.RX-REC-ERROR ( ctx -- addr ) 944 + ;
+: TLS-CTX.RX-HS-LEN   ( ctx -- addr ) 952 + ;
+: TLS-CTX.RX-HS-ERROR ( ctx -- addr ) 960 + ;
 
 \ -- TLS context table (dynamic, XMEM-backed) --
 VARIABLE TLS-CTXS   0 TLS-CTXS !
 
 : TLS-CTXS-SETUP  ( -- )
     /TLS-CTX TLS-MAX-CTX *
-    XMEM? IF XMEM-ALLOT ELSE HERE OVER ALLOT THEN
+    XMEM? IF XMEM-ALLOT ELSE DUP ?DICT-ROOM HERE SWAP ALLOT THEN
     DUP TLS-CTXS !
     /TLS-CTX TLS-MAX-CTX * 0 FILL ;
 
@@ -6121,6 +6129,45 @@ TLS-HS-TR-MAX 4 + CONSTANT TLS-HS-RBUF-MAX
 TLS-HS-RBUF-MAX XBUF TLS-HS-RBUF
 VARIABLE TLS-HS-RBUF-LEN
 VARIABLE TLS-HS-RBUF-ERROR
+\ Application receive calls may yield with either an incomplete TLS record,
+\ unread authenticated plaintext, or an incomplete post-handshake message.
+\ Those bytes are connection state, not scratch.  Give each context two fixed
+\ lanes: one maximum record and one maximum admitted handshake message.  The
+\ connection count later derives from this complete cost.
+16896 CONSTANT TLS-RX-RECORD-CAPACITY
+TLS-RX-RECORD-CAPACITY TLS-HS-RBUF-MAX + 7 + -8 AND
+CONSTANT /TLS-RX-WORKSPACE
+VARIABLE TLS-RX-WORKSPACES  0 TLS-RX-WORKSPACES !
+
+: TLS-RX-WORKSPACES-SETUP  ( -- )
+    /TLS-RX-WORKSPACE TLS-MAX-CTX *
+    XMEM? IF XMEM-ALLOT ELSE DUP ?DICT-ROOM HERE SWAP ALLOT THEN
+    DUP TLS-RX-WORKSPACES !
+    /TLS-RX-WORKSPACE TLS-MAX-CTX * 0 FILL ;
+
+: _TLS-CTX>INDEX  ( ctx -- index )
+    TLS-CTXS @ - /TLS-CTX / ;
+
+: TLS-RXW@  ( ctx -- workspace )
+    _TLS-CTX>INDEX /TLS-RX-WORKSPACE * TLS-RX-WORKSPACES @ + ;
+
+: TLS-RXW.RECORD  ( ctx -- address )
+    TLS-RXW@ ;
+
+: TLS-RXW.RETAINED  ( ctx -- address )
+    TLS-RXW@ TLS-RX-RECORD-CAPACITY + ;
+
+: TLS-RX-WIPE  ( ctx -- )
+    DUP TLS-RXW@ /TLS-RX-WORKSPACE 0 FILL
+    DUP TLS-CTX.RX-REC-LEN 0 SWAP !
+    DUP TLS-CTX.RX-REC-ERROR 0 SWAP !
+    DUP TLS-CTX.RX-HS-LEN 0 SWAP !
+    DUP TLS-CTX.RX-HS-ERROR 0 SWAP !
+    DUP TLS-CTX.APP-OFF 0 SWAP !
+    TLS-CTX.APP-LEN 0 SWAP ! ;
+
+: TLS-PLAIN-WIPE  ( -- )
+    TLS-PLAIN-BUF 16640 0 FILL ;
 \ The largest admitted hybrid ClientHello is 1525 bytes with maximum DNS SNI
 \ and a maximum-width ALPN ProtocolName.  The builder measures the complete
 \ record against this arena before changing any handshake state.
@@ -6155,13 +6202,19 @@ _TLS-ZERO-SECRET 32 0 FILL
     _PQ-PRK 32 0 FILL _PQ-COIN 32 0 FILL
     TLS-HS-KYBER-SEED 64 0 FILL TLS-HS-KYBER-SK 1632 0 FILL ;
 
-: TLS-RECORD-SECRETS-WIPE ( ctx -- )
+: TLS-WRITE-SECRET-WIPE ( ctx -- )
     DUP TLS-CTX.WR-KEY 32 0 FILL
     DUP TLS-CTX.WR-IV 16 0 FILL
-    DUP TLS-CTX.WR-SEQ 0 SWAP !
+    TLS-CTX.WR-SEQ 0 SWAP ! ;
+
+: TLS-READ-SECRET-WIPE ( ctx -- )
     DUP TLS-CTX.RD-KEY 32 0 FILL
     DUP TLS-CTX.RD-IV 16 0 FILL
     TLS-CTX.RD-SEQ 0 SWAP ! ;
+
+: TLS-RECORD-SECRETS-WIPE ( ctx -- )
+    DUP TLS-WRITE-SECRET-WIPE
+    TLS-READ-SECRET-WIPE ;
 
 \ Pre-compute hash of empty string for both modes.
 CREATE TLS-EMPTY-HASH-SHA3 32 ALLOT
@@ -6350,9 +6403,11 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
 
 \ --- Transcript Management ---
 : TLS-TR-RESET ( -- )
+    TLS-HS-TRANSCRIPT TLS-HS-TR-MAX 0 FILL
     0 TLS-HS-TR-LEN ! 0 TLS-HS-TR-ERROR ! ;
 
 : TLS-HS-RBUF-RESET ( -- )
+    TLS-HS-RBUF TLS-HS-RBUF-MAX 0 FILL
     0 TLS-HS-RBUF-LEN ! 0 TLS-HS-RBUF-ERROR ! ;
 
 VARIABLE _TTA-SRC
@@ -7106,6 +7161,8 @@ VARIABLE _THC-REC
         DROP TLS-E-STATE EXIT
     THEN
     DUP TLS-HANDSHAKE-SECRETS-WIPE
+    DUP TLS-RX-WIPE
+    TLS-PLAIN-WIPE
     DUP TLSH-CONNECTED SWAP TLS-CTX.HS-STATE !
     TLSS-ESTABLISHED SWAP TLS-CTX.STATE !
     TLS-TR-RESET TLS-HS-RBUF-RESET TLS-E-OK
@@ -7175,6 +7232,8 @@ VARIABLE _TCM-CTX
     2DUP TLS-CTXS @ /TLS-CTX TLS-MAX-CTX * _TLS-RANGES-OVERLAP? IF
         2DROP -1 EXIT
     THEN
+    2DUP TLS-RX-WORKSPACES @ /TLS-RX-WORKSPACE TLS-MAX-CTX *
+    _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
     2DUP TLS-HKDF-LABEL TLS-HKDF-LABEL-CAPACITY
     _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
     2DUP TLS-EXPORT-INNER 32 _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
@@ -7316,6 +7375,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
 VARIABLE TLS-RBUF-ERROR \ sticky malformed-record indication
 
 : TLS-RBUF-RESET ( -- )
+    TLS-RECV-REC TLS-RX-RECORD-CAPACITY 0 FILL
     0 TLS-RBUF-LEN ! 0 TLS-RBUF-ERROR ! ;
 
 : TLS-RECORD-HEADER? ( rec -- flag )
@@ -7352,7 +7412,7 @@ VARIABLE _TCCS-RLEN
         TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
         OVER                                  \ tcb
         TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
-        16896 TLS-RBUF-LEN @ -                \ maxlen = bufsz - got
+        2 PICK TLS-RBUF-LEN @ -               \ read only current record bytes
         TCP-RECV
         DUP 0> IF
             TLS-RBUF-LEN +!
@@ -7366,16 +7426,18 @@ VARIABLE _TCCS-RLEN
 
 \ TLS-RBUF-CONSUME ( n -- )
 \   Remove the first n bytes, shift remainder to front.
+VARIABLE _TRBC-USED
+VARIABLE _TRBC-LEFT
+
 : TLS-RBUF-CONSUME ( n -- )
-    DUP TLS-RBUF-LEN @ >= IF
-        DROP 0 TLS-RBUF-LEN !
-    ELSE
-        TLS-RECV-REC OVER +          \ src = buf + n
-        TLS-RECV-REC                 \ dst = buf
-        TLS-RBUF-LEN @ 3 PICK -     \ remaining = total - n
-        CMOVE
-        NEGATE TLS-RBUF-LEN +!
-    THEN ;
+    _TRBC-USED !
+    TLS-RBUF-LEN @ _TRBC-USED @ - 0 MAX _TRBC-LEFT !
+    _TRBC-LEFT @ IF
+        TLS-RECV-REC _TRBC-USED @ + TLS-RECV-REC _TRBC-LEFT @ CMOVE
+    THEN
+    TLS-RECV-REC _TRBC-LEFT @ +
+    TLS-RX-RECORD-CAPACITY _TRBC-LEFT @ - 0 FILL
+    _TRBC-LEFT @ TLS-RBUF-LEN ! ;
 
 \ TLS-READ-RECORD ( tcb -- rlen | 0 )
 \   Read exactly one complete TLS record into TLS-RECV-REC.
@@ -7400,7 +7462,7 @@ VARIABLE _TCCS-RLEN
     TLS-RBUF-LEN @ OVER >= IF 2DROP -1 EXIT THEN
     OVER
     TLS-RECV-REC TLS-RBUF-LEN @ +
-    16896 TLS-RBUF-LEN @ -
+    2 PICK TLS-RBUF-LEN @ -
     TCP-RECV
     DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
     TLS-RBUF-LEN @ OVER >= IF 2DROP -1 ELSE 2DROP 0 THEN ;
@@ -7416,6 +7478,63 @@ VARIABLE _TCCS-RLEN
     THEN
     SWAP OVER TLS-RBUF-FILL-NB 0= IF DROP 0 EXIT THEN ;
 
+\ -- Connection-owned nonblocking receive path --
+\ The blocking compatibility handshake holds TLS owner lock 10 across its
+\ complete use of TLS-RECV-REC.  Application receive does not, so partial
+\ records must instead remain in the exact context that owns their TCP stream.
+\ Read only the bytes needed for the current record.  This also prevents an
+\ authenticated plaintext remainder from having to coexist with a prefetched
+\ following record in the same context workspace.
+VARIABLE _TARF-CTX
+VARIABLE _TARF-NEED
+
+: TLS-APP-RBUF-FILL-NB  ( ctx need -- flag )
+    _TARF-NEED ! _TARF-CTX !
+    _TARF-CTX @ TLS-CTX.RX-REC-LEN @ _TARF-NEED @ >= IF -1 EXIT THEN
+    _TARF-CTX @ TLS-CTX.TCB @ DUP 0= IF DROP 0 EXIT THEN
+    _TARF-CTX @ TLS-RXW.RECORD
+    _TARF-CTX @ TLS-CTX.RX-REC-LEN @ +
+    _TARF-NEED @ _TARF-CTX @ TLS-CTX.RX-REC-LEN @ -
+    TCP-RECV
+    DUP 0> IF
+        _TARF-CTX @ TLS-CTX.RX-REC-LEN +!
+    ELSE
+        DROP
+    THEN
+    _TARF-CTX @ TLS-CTX.RX-REC-LEN @ _TARF-NEED @ >= ;
+
+VARIABLE _TARR-CTX
+VARIABLE _TARR-TOTAL
+
+: TLS-APP-READ-RECORD-NB  ( ctx -- rlen | 0 )
+    _TARR-CTX !
+    _TARR-CTX @ 5 TLS-APP-RBUF-FILL-NB 0= IF 0 EXIT THEN
+    _TARR-CTX @ TLS-RXW.RECORD TLS-RECORD-HEADER? 0= IF
+        -1 _TARR-CTX @ TLS-CTX.RX-REC-ERROR ! 0 EXIT
+    THEN
+    _TARR-CTX @ TLS-RXW.RECORD 3 + _BE16@ 5 + DUP _TARR-TOTAL !
+    _TARR-CTX @ TLS-RXW.RECORD SWAP TLS-RECORD-SIZE? 0= IF
+        -1 _TARR-CTX @ TLS-CTX.RX-REC-ERROR ! 0 EXIT
+    THEN
+    _TARR-CTX @ _TARR-TOTAL @ TLS-APP-RBUF-FILL-NB 0= IF 0 EXIT THEN
+    _TARR-TOTAL @ ;
+
+VARIABLE _TARC-CTX
+VARIABLE _TARC-USED
+VARIABLE _TARC-LEFT
+
+: TLS-APP-RBUF-CONSUME  ( ctx used -- )
+    _TARC-USED ! _TARC-CTX !
+    _TARC-CTX @ TLS-CTX.RX-REC-LEN @ _TARC-USED @ -
+    0 MAX _TARC-LEFT !
+    _TARC-LEFT @ IF
+        _TARC-CTX @ TLS-RXW.RECORD _TARC-USED @ +
+        _TARC-CTX @ TLS-RXW.RECORD _TARC-LEFT @ CMOVE
+    THEN
+    _TARC-CTX @ TLS-RXW.RECORD _TARC-LEFT @ +
+    TLS-RX-RECORD-CAPACITY _TARC-LEFT @ - 0 FILL
+    _TARC-LEFT @ _TARC-CTX @ TLS-CTX.RX-REC-LEN ! ;
+
 \ --- TLS-RECV-DATA ---
 \ Receive TCP data, decrypt, and return plaintext.
 \ Returns actual bytes received, or -1 on decryption error, or 0 if nothing.
@@ -7424,6 +7543,31 @@ VARIABLE _TRD-DST
 VARIABLE _TRD-MAXLEN
 VARIABLE _TRD-RLEN
 VARIABLE _TRD-COPY
+VARIABLE _TRD-PLEN
+
+: _TLS-RECV-INTERNAL-OVERLAP? ( addr len -- flag )
+    DUP 0= IF 2DROP 0 EXIT THEN
+    2DUP _TEX-INTERNAL-OVERLAP? IF 2DROP -1 EXIT THEN
+    2DUP TLS-INNER-BUF /TLS-INNER-BUF _TLS-RANGES-OVERLAP? IF
+        2DROP -1 EXIT
+    THEN
+    2DUP TLS-CIPHER-BUF 1520 _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
+    2DUP TLS-PLAIN-BUF 16640 _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
+    2DUP TLS-HS-TRANSCRIPT TLS-HS-TR-MAX _TLS-RANGES-OVERLAP? IF
+        2DROP -1 EXIT
+    THEN
+    2DUP TLS-HS-RBUF TLS-HS-RBUF-MAX _TLS-RANGES-OVERLAP? IF
+        2DROP -1 EXIT
+    THEN
+    2DUP TLS-CH-BUF TLS-CH-BUF-CAPACITY _TLS-RANGES-OVERLAP? IF
+        2DROP -1 EXIT
+    THEN
+    2DUP TLS-SEND-REC 1600 _TLS-RANGES-OVERLAP? IF 2DROP -1 EXIT THEN
+    TLS-RECV-REC TLS-RX-RECORD-CAPACITY _TLS-RANGES-OVERLAP? ;
+
+: _TLS-RECV-DESTINATION? ( addr len -- flag )
+    2DUP CALLER-SPAN-STATUS IF 2DROP 0 EXIT THEN
+    _TLS-RECV-INTERNAL-OVERLAP? 0= ;
 
 VARIABLE _TAD-CTX
 VARIABLE _TAD-DST
@@ -7435,9 +7579,9 @@ VARIABLE _TAD-COPY
 \
 \ Resumption is not implemented, but public TLS 1.3 servers commonly send
 \ NewSessionTicket immediately before their first application-data record.
-\ Decode the complete bounded structure before discarding it.  The shared
-\ handshake reassembly buffer is empty once TLS-CONNECT succeeds, so it also
-\ provides bounded retention when a ticket spans protected records.
+\ Decode the complete bounded structure before discarding it.  The owning
+\ connection's retained lane provides bounded reassembly when a ticket spans
+\ protected records.
 604800 CONSTANT TLS-NST-MAX-LIFETIME
 42     CONSTANT TLS-EXT-EARLY-DATA
 
@@ -7509,32 +7653,48 @@ VARIABLE _TNST-SCAN
 VARIABLE _TPPH-PTR
 VARIABLE _TPPH-REM
 VARIABLE _TPPH-TOTAL
+VARIABLE _TPPH-CTX
+VARIABLE _TPPH-OLD
 
-: TLS-PROCESS-POST-HANDSHAKE ( plain plen -- ior )
-    _TPPH-REM ! _TPPH-PTR !
-    TLS-HS-RBUF-ERROR @ IF -1 EXIT THEN
+: TLS-PROCESS-POST-HANDSHAKE ( ctx plain plen -- ior )
+    _TPPH-REM ! _TPPH-PTR ! _TPPH-CTX !
+    _TPPH-CTX @ TLS-CTX.RX-HS-ERROR @ IF -1 EXIT THEN
     _TPPH-REM @ 0<
-    TLS-HS-RBUF-LEN @ _TPPH-REM @ + TLS-HS-RBUF-MAX > OR IF
-        -1 TLS-HS-RBUF-ERROR ! -1 EXIT
+    _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ _TPPH-REM @ +
+    TLS-HS-RBUF-MAX > OR IF
+        -1 _TPPH-CTX @ TLS-CTX.RX-HS-ERROR ! -1 EXIT
     THEN
-    _TPPH-PTR @ TLS-HS-RBUF TLS-HS-RBUF-LEN @ + _TPPH-REM @ CMOVE
-    _TPPH-REM @ TLS-HS-RBUF-LEN +!
+    _TPPH-PTR @ _TPPH-CTX @ TLS-RXW.RETAINED
+    _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ + _TPPH-REM @ CMOVE
+    _TPPH-REM @ _TPPH-CTX @ TLS-CTX.RX-HS-LEN +!
 
-    BEGIN TLS-HS-RBUF-LEN @ 4 >= WHILE
+    BEGIN _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ 4 >= WHILE
         \ Once the complete handshake header is authenticated, fail closed
         \ on KeyUpdate, CertificateRequest, and every unsupported type.
-        TLS-HS-RBUF C@ TLSHT-NEW-SESSION-TICKET <> IF
-            -1 TLS-HS-RBUF-ERROR ! -1 EXIT
+        _TPPH-CTX @ TLS-RXW.RETAINED C@ TLSHT-NEW-SESSION-TICKET <> IF
+            -1 _TPPH-CTX @ TLS-CTX.RX-HS-ERROR ! -1 EXIT
         THEN
-        TLS-HS-RBUF 1+ _BE24@ 4 + DUP _TPPH-TOTAL !
-        TLS-HS-RBUF-MAX > IF -1 TLS-HS-RBUF-ERROR ! -1 EXIT THEN
-        TLS-HS-RBUF-LEN @ _TPPH-TOTAL @ < IF 0 EXIT THEN
-        TLS-HS-RBUF _TPPH-TOTAL @ TLS-PARSE-NEW-SESSION-TICKET
-        0<> IF -1 TLS-HS-RBUF-ERROR ! -1 EXIT THEN
-        TLS-HS-RBUF _TPPH-TOTAL @ + TLS-HS-RBUF
-        TLS-HS-RBUF-LEN @ _TPPH-TOTAL @ - CMOVE
-        _TPPH-TOTAL @ NEGATE TLS-HS-RBUF-LEN +!
+        _TPPH-CTX @ TLS-RXW.RETAINED 1+ _BE24@ 4 + DUP _TPPH-TOTAL !
+        TLS-HS-RBUF-MAX > IF
+            -1 _TPPH-CTX @ TLS-CTX.RX-HS-ERROR ! -1 EXIT
+        THEN
+        _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ _TPPH-TOTAL @ < IF 0 EXIT THEN
+        _TPPH-CTX @ TLS-RXW.RETAINED _TPPH-TOTAL @
+        TLS-PARSE-NEW-SESSION-TICKET 0<> IF
+            -1 _TPPH-CTX @ TLS-CTX.RX-HS-ERROR ! -1 EXIT
+        THEN
+        _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ _TPPH-OLD !
+        _TPPH-CTX @ TLS-RXW.RETAINED _TPPH-TOTAL @ +
+        _TPPH-CTX @ TLS-RXW.RETAINED
+        _TPPH-OLD @ _TPPH-TOTAL @ - CMOVE
+        _TPPH-TOTAL @ NEGATE _TPPH-CTX @ TLS-CTX.RX-HS-LEN +!
+        _TPPH-CTX @ TLS-RXW.RETAINED
+        _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ +
+        _TPPH-OLD @ _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ - 0 FILL
     REPEAT
+    _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ 0= IF
+        _TPPH-CTX @ TLS-RXW.RETAINED TLS-HS-RBUF-MAX 0 FILL
+    THEN
     0 ;
 
 : _TLS-APP-DELIVER  ( ctx dst maxlen plaintext-len -- actual )
@@ -7542,61 +7702,80 @@ VARIABLE _TPPH-TOTAL
     _TAD-MAXLEN @ 0> 0= _TAD-PLEN @ 0> 0= OR IF 0 EXIT THEN
     _TAD-PLEN @ _TAD-MAXLEN @ MIN _TAD-COPY !
     _TAD-PLEN @ _TAD-COPY @ > IF
-        _TAD-COPY @ _TAD-CTX @ TLS-CTX.APP-OFF !
+        TLS-PLAIN-BUF _TAD-COPY @ +
+        _TAD-CTX @ TLS-RXW.RETAINED
+        _TAD-PLEN @ _TAD-COPY @ - CMOVE
+        0 _TAD-CTX @ TLS-CTX.APP-OFF !
         _TAD-PLEN @ _TAD-COPY @ - _TAD-CTX @ TLS-CTX.APP-LEN !
     ELSE
         0 _TAD-CTX @ TLS-CTX.APP-OFF !
         0 _TAD-CTX @ TLS-CTX.APP-LEN !
     THEN
     TLS-PLAIN-BUF _TAD-DST @ _TAD-COPY @ CMOVE
+    TLS-PLAIN-WIPE
     _TAD-COPY @ ;
 
 VARIABLE _TPA-CTX
 VARIABLE _TPA-DATA
 VARIABLE _TPA-LEN
 
+: _TLS-CONNECTION-REVOKE ( ctx -- )
+    0 OVER TLS-CTX.PEER-AUTH !
+    DUP TLS-EXPORTER-WIPE
+    DUP TLS-RECORD-SECRETS-WIPE
+    DUP TLS-HANDSHAKE-SECRETS-WIPE
+    TLS-PLAIN-WIPE
+    DUP TLS-RX-WIPE
+    TLSS-CLOSING SWAP TLS-CTX.STATE ! ;
+
 : TLS-PROCESS-ALERT ( ctx data len -- status )
     _TPA-LEN ! _TPA-DATA ! _TPA-CTX !
     _TPA-LEN @ 2 <> IF
         TLS-E-RECORD _TPA-CTX @ TLS-CTX.ERROR !
-        0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
-        _TPA-CTX @ TLS-EXPORTER-WIPE
-        TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 EXIT
+        _TPA-CTX @ _TLS-CONNECTION-REVOKE -1 EXIT
     THEN
     _TPA-DATA @ C@ DUP 1 <> SWAP 2 <> AND IF
         TLS-E-RECORD _TPA-CTX @ TLS-CTX.ERROR !
-        0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
-        _TPA-CTX @ TLS-EXPORTER-WIPE
-        TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 EXIT
+        _TPA-CTX @ _TLS-CONNECTION-REVOKE -1 EXIT
     THEN
     _TPA-DATA @ 1+ C@ 0= IF
         TLS-E-OK _TPA-CTX @ TLS-CTX.ERROR !
+        \ Retain the write epoch only long enough to send the required
+        \ close_notify response.  Application I/O and exporters are already
+        \ revoked by CLOSING/PEER-AUTH; the local response wipes the epoch.
         0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
         _TPA-CTX @ TLS-EXPORTER-WIPE
+        _TPA-CTX @ TLS-READ-SECRET-WIPE
+        _TPA-CTX @ TLS-RX-WIPE
         TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! 0 EXIT
     THEN
     TLS-E-PEER-ALERT _TPA-CTX @ TLS-CTX.ERROR !
-    0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
-    _TPA-CTX @ TLS-EXPORTER-WIPE
-    TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 ;
+    _TPA-CTX @ _TLS-CONNECTION-REVOKE -1 ;
+
+: _TLS-RECORD-FAIL ( ctx -- -1 )
+    TLS-E-RECORD OVER TLS-CTX.ERROR !
+    _TLS-CONNECTION-REVOKE -1 ;
 
 : _TLS-POST-HANDSHAKE-FAIL ( ctx -- -1 )
     TLS-E-POST-HANDSHAKE OVER TLS-CTX.ERROR !
-    0 OVER TLS-CTX.PEER-AUTH !
-    DUP TLS-EXPORTER-WIPE
-    TLSS-CLOSING SWAP TLS-CTX.STATE ! -1 ;
+    _TLS-CONNECTION-REVOKE -1 ;
 
 : (TLS-RECV-DATA) ( ctx addr maxlen -- actual | -1 )
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
+    _TRD-CTX @ TLS-CTX-MEMBER? 0= IF 0 EXIT THEN
     _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
     _TRD-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF 0 EXIT THEN
     _TRD-MAXLEN @ 0> 0= IF 0 EXIT THEN
+    _TRD-DST @ _TRD-MAXLEN @ _TLS-RECV-DESTINATION? 0= IF 0 EXIT THEN
     \ A decrypted record may be larger than the caller's receive slice.
     \ Drain its retained plaintext before reading or decrypting another record.
     _TRD-CTX @ TLS-CTX.APP-LEN @ 0> IF
         _TRD-CTX @ TLS-CTX.APP-LEN @ _TRD-MAXLEN @ MIN _TRD-COPY !
-        TLS-PLAIN-BUF _TRD-CTX @ TLS-CTX.APP-OFF @ +
+        _TRD-CTX @ TLS-RXW.RETAINED
+        _TRD-CTX @ TLS-CTX.APP-OFF @ +
         _TRD-DST @ _TRD-COPY @ CMOVE
+        _TRD-CTX @ TLS-RXW.RETAINED
+        _TRD-CTX @ TLS-CTX.APP-OFF @ + _TRD-COPY @ 0 FILL
         _TRD-COPY @ _TRD-CTX @ TLS-CTX.APP-OFF +!
         _TRD-COPY @ NEGATE _TRD-CTX @ TLS-CTX.APP-LEN +!
         _TRD-CTX @ TLS-CTX.APP-LEN @ 0= IF
@@ -7605,12 +7784,10 @@ VARIABLE _TPA-LEN
         _TRD-COPY @ EXIT
     THEN
     \ Non-blocking record read — caller polls via TCP-POLL NET-IDLE
-    _TRD-CTX @ TLS-CTX.TCB @  TLS-READ-RECORD-NB
+    _TRD-CTX @ TLS-APP-READ-RECORD-NB
     DUP 0= IF
-        DROP TLS-RBUF-ERROR @ IF
-            TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
-            0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
-            _TRD-CTX @ TLS-EXPORTER-WIPE -1
+        DROP _TRD-CTX @ TLS-CTX.RX-REC-ERROR @ IF
+            _TRD-CTX @ _TLS-RECORD-FAIL
         ELSE
             \ TCP EOF without an authenticated close_notify is TLS
             \ truncation, not a clean end-of-stream.  Retained plaintext was
@@ -7618,9 +7795,7 @@ VARIABLE _TPA-LEN
             _TRD-CTX @ TLS-CTX.TCB @ ?DUP IF
                 TCB.STATE @ TCPS-CLOSE-WAIT = IF
                     TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
-                    0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
-                    _TRD-CTX @ TLS-EXPORTER-WIPE
-                    TLSS-CLOSING _TRD-CTX @ TLS-CTX.STATE ! -1
+                    _TRD-CTX @ _TLS-CONNECTION-REVOKE -1
                 ELSE
                     0
                 THEN
@@ -7632,33 +7807,42 @@ VARIABLE _TPA-LEN
     THEN
     _TRD-RLEN !
     \ Decrypt
-    _TRD-CTX @  TLS-RECV-REC  _TRD-RLEN @  TLS-PLAIN-BUF
+    TLS-PLAIN-WIPE
+    _TRD-CTX @  _TRD-CTX @ TLS-RXW.RECORD
+    _TRD-RLEN @  TLS-PLAIN-BUF
     TLS-DECRYPT-RECORD
-    _TRD-RLEN @ TLS-RBUF-CONSUME
+    _TRD-CTX @ _TRD-RLEN @ TLS-APP-RBUF-CONSUME
     \ Stack: ctype plen  (or -1 0)
     DUP 0= IF
         OVER TLS-CT-HANDSHAKE = IF
-            2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
+            2DROP TLS-PLAIN-WIPE
+            _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
         THEN
-        2DROP TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
-        0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
-        _TRD-CTX @ TLS-EXPORTER-WIPE -1 EXIT
+        2DROP TLS-PLAIN-WIPE
+        _TRD-CTX @ _TLS-RECORD-FAIL EXIT
     THEN
     \ A fragmented NewSessionTicket must be completed by HANDSHAKE records;
     \ accepting application data or alerts here would silently abandon an
     \ authenticated but structurally incomplete post-handshake message.
-    TLS-HS-RBUF-LEN @ 0<> 2 PICK TLS-CT-HANDSHAKE <> AND IF
-        2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
+    _TRD-CTX @ TLS-CTX.RX-HS-LEN @ 0<>
+    2 PICK TLS-CT-HANDSHAKE <> AND IF
+        2DROP TLS-PLAIN-WIPE
+        _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
     THEN
     OVER TLS-CT-HANDSHAKE = IF
-        SWAP DROP TLS-PLAIN-BUF SWAP TLS-PROCESS-POST-HANDSHAKE
+        SWAP DROP DUP _TRD-PLEN !
+        _TRD-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-POST-HANDSHAKE
+        >R TLS-PLAIN-WIPE R>
         IF _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL ELSE 0 THEN EXIT
     THEN
     OVER TLS-CT-ALERT = IF
-        SWAP DROP _TRD-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-ALERT EXIT
+        SWAP DROP DUP _TRD-PLEN !
+        _TRD-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-ALERT
+        >R TLS-PLAIN-WIPE R> EXIT
     THEN
     OVER TLS-CT-APP-DATA <> IF
-        2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
+        2DROP TLS-PLAIN-WIPE
+        _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
     THEN
     SWAP DROP
     \ Copy one caller-sized slice and retain any remainder for later calls.
@@ -7673,13 +7857,18 @@ VARIABLE _TPA-LEN
 \ Send a TLS alert (e.g., close_notify = level=1, desc=0).
 CREATE TLS-ALERT-BUF 2 ALLOT
 VARIABLE _TSA-CTX
+VARIABLE _TSA-SENT
 
-: _TLS-LOCAL-FATAL-FINISH ( -- )
+: _TLS-LOCAL-ALERT-FINISH ( -- )
     TLS-ALERT-BUF C@ 2 = IF
         TLS-E-LOCAL-ALERT _TSA-CTX @ TLS-CTX.ERROR !
-        0 _TSA-CTX @ TLS-CTX.PEER-AUTH !
-        _TSA-CTX @ TLS-EXPORTER-WIPE
-        TLSS-CLOSING _TSA-CTX @ TLS-CTX.STATE !
+        _TSA-CTX @ _TLS-CONNECTION-REVOKE EXIT
+    THEN
+    _TSA-SENT @
+    TLS-ALERT-BUF C@ 1 = AND
+    TLS-ALERT-BUF 1+ C@ 0= AND IF
+        TLS-E-OK _TSA-CTX @ TLS-CTX.ERROR !
+        _TSA-CTX @ _TLS-CONNECTION-REVOKE
     THEN ;
 
 : _TLS-ALERT-WRITE-OPEN?  ( ctx -- flag )
@@ -7694,19 +7883,24 @@ VARIABLE _TSA-CTX
 : (TLS-SEND-ALERT) ( ctx level desc -- )
     TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
     _TSA-CTX !
+    0 _TSA-SENT !
     _TSA-CTX @ _TLS-ALERT-WRITE-OPEN? 0= IF
-        _TLS-LOCAL-FATAL-FINISH EXIT
+        _TLS-LOCAL-ALERT-FINISH EXIT
     THEN
     _TSA-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF
-        _TLS-LOCAL-FATAL-FINISH EXIT
+        _TLS-LOCAL-ALERT-FINISH EXIT
     THEN
     _TSA-CTX @  TLS-CT-ALERT  TLS-ALERT-BUF  2
     TLS-SEND-REC  TLS-ENCRYPT-RECORD
-    DUP 0= IF DROP _TLS-LOCAL-FATAL-FINISH EXIT THEN
+    DUP 0= IF DROP _TLS-LOCAL-ALERT-FINISH EXIT THEN
     \ Send via TCP
     _TSA-CTX @ TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND
-    0= IF -1 _TSA-CTX @ TLS-CTX.WR-SEQ +! THEN
-    _TLS-LOCAL-FATAL-FINISH
+    DUP 0= IF
+        DROP -1 _TSA-CTX @ TLS-CTX.WR-SEQ +!
+    ELSE
+        DROP -1 _TSA-SENT !
+    THEN
+    _TLS-LOCAL-ALERT-FINISH
 ;
 
 : TLS-SEND-ALERT-TRY ( ctx level desc -- ior )
@@ -7726,6 +7920,7 @@ VARIABLE _TCL-CTX
         _TCL-CTX @ 1 0 TLS-SEND-ALERT        \ close_notify
     THEN
     _TCL-CTX @ TLS-CTX.TCB @ ?DUP IF TCP-CLOSE THEN
+    _TCL-CTX @ TLS-RX-WIPE
     _TCL-CTX @ /TLS-CTX 0 FILL
 ;
 
@@ -7763,6 +7958,7 @@ VARIABLE _TLA-STATUS
             TLS-ABORT-S-LOCAL _TLA-STATUS !
         THEN
     THEN
+    _TLA-CTX @ TLS-RX-WIPE
     _TLA-CTX @ /TLS-CTX 0 FILL
     _TLA-STATUS @ ;
 
@@ -7842,8 +8038,10 @@ VARIABLE _TLSC-CH-LEN
 : _TLSC-FAIL ( -- 0 )
     _TLSC-TCB @ ?DUP IF TCP-CLOSE THEN
     _TLSC-CTX @ ?DUP IF
-        DUP TLS-HANDSHAKE-SECRETS-WIPE DUP /TLS-CTX 0 FILL DROP
+        DUP TLS-HANDSHAKE-SECRETS-WIPE
+        DUP TLS-RX-WIPE DUP /TLS-CTX 0 FILL DROP
     THEN
+    TLS-PLAIN-WIPE TLS-RBUF-RESET TLS-HS-RBUF-RESET TLS-TR-RESET
     0 _TLSC-TCB ! 0 _TLSC-CTX !
     0 _TLSC-CH-ADDR ! 0 _TLSC-CH-LEN ! 0 ;
 
@@ -7872,6 +8070,7 @@ VARIABLE _TLSC-CH-LEN
         R> R> R> 2DROP DROP EXIT
     THEN
     _TLSC-CTX !
+    _TLSC-CTX @ TLS-RX-WIPE
     _TLSC-CTX @ /TLS-CTX 0 FILL
     TLS-ROLE-CLIENT _TLSC-CTX @ TLS-CTX.ROLE !
     _TLSC-CTX @ _TLSC-NAME @ _TLSC-NAME-LEN @ TLS-ALPN-CONFIGURE IF
@@ -7968,24 +8167,25 @@ VARIABLE _TLSC-CH-LEN
                 _TLSC-FAIL EXIT
             THEN
             \ Decrypt record
+            TLS-PLAIN-WIPE
             _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
             TLS-DECRYPT-RECORD
             _TLSC-RLEN @ TLS-RBUF-CONSUME
             DUP 0= IF
                 TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
-                2DROP _TLSC-FAIL EXIT
+                2DROP TLS-PLAIN-WIPE _TLSC-FAIL EXIT
             THEN
             \ Stack: ctype plen — process all HS messages in plaintext
             OVER TLS-CT-HANDSHAKE <> IF
                 TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
-                2DROP _TLSC-FAIL EXIT
+                2DROP TLS-PLAIN-WIPE _TLSC-FAIL EXIT
             THEN
             SWAP DROP  \ drop ctype, keep plen
             _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSGS
             DUP 0<> IF
                 TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
-                DROP _TLSC-FAIL EXIT
-            THEN DROP
+                DROP TLS-PLAIN-WIPE _TLSC-FAIL EXIT
+            THEN DROP TLS-PLAIN-WIPE
         THEN
     REPEAT
     TLS-HS-RBUF-ERROR @ TLS-HS-RBUF-LEN @ 0<> OR IF
@@ -8008,6 +8208,7 @@ VARIABLE _TLSC-CH-LEN
         TLS-CONNECT-E-AUTH TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
     THEN
+    TLS-RBUF-RESET
     _TLSC-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
     _TLSC-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR IF
         TLS-CONNECT-E-AUTH TLS-CONNECT-LAST-ERROR !
@@ -8126,7 +8327,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 
 : SOCK-TABLE-SETUP  ( -- )
     /SOCK SOCK-MAX *
-    XMEM? IF XMEM-ALLOT ELSE HERE OVER ALLOT THEN
+    XMEM? IF XMEM-ALLOT ELSE DUP ?DICT-ROOM HERE SWAP ALLOT THEN
     DUP SOCK-TABLE !
     /SOCK SOCK-MAX * 0 FILL ;
 
@@ -8136,29 +8337,52 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \  NET-TABLES-INIT — compute connection limits from available XMEM
 \ =====================================================================
 \  Sizes /TCP-MAX-CONN dynamically so the network stack uses as much
-\  XMEM as is available (up to 256 connections).  Without XMEM the
-\  tables fall back to Bank 0 with a conservative floor of 16.
+\  XMEM as is available (up to 256 connections).  The standard loader
+\  requires XMEM; a manually loaded no-XMEM build must fit one complete
+\  table set in Bank 0 and is not a qualified deployment profile.
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
-\    Per-connection cost = /TCB + /TLS-CTX + 2×/SOCK = 6816 bytes
+\    Logical cost = /TCB + /TLS-CTX + /TLS-RX-WORKSPACE
+\                 + 2×/SOCK = 97480 bytes per connection.
+\    XMEM normalizes each table allocation independently to 16 bytes, so
+\    capacity uses the exact aggregate rather than flooring this quotient.
 \
-\  Called once at load time.  Safe to call again (idempotent if
-\  tables haven't been used yet).
+\  Called once at load time.
+
+/TCB /TLS-CTX + /TLS-RX-WORKSPACE + /SOCK 2 * +
+CONSTANT /NET-CONN-LOGICAL
+
+: NET-XMEM-TABLE-BYTES  ( connections -- bytes )
+    DUP /TCB * _XMEM-NORMALIZE-SIZE
+    OVER /TLS-CTX * _XMEM-NORMALIZE-SIZE +
+    OVER /TLS-RX-WORKSPACE * _XMEM-NORMALIZE-SIZE +
+    SWAP 2 * /SOCK * _XMEM-NORMALIZE-SIZE + ;
+
+: NET-XMEM-CAPACITY  ( budget -- connections )
+    DUP /NET-CONN-LOGICAL / 256 MIN
+    BEGIN
+        DUP NET-XMEM-TABLE-BYTES 2 PICK >
+    WHILE
+        1-
+    REPEAT
+    NIP ;
 
 : NET-TABLES-INIT  ( -- )
     XMEM? IF
         XMEM-FREE                      ( avail )
         4 /                            ( 25% of XMEM )
-        /TCB /TLS-CTX + /SOCK 2 * + /  ( max-conns we can afford )
-        256 MIN  16 MAX                ( clamp 16..256 )
+        NET-XMEM-CAPACITY
+        DUP 1 < ABORT" Insufficient XMEM for network tables"
     ELSE
-        8                              ( no XMEM: very conservative )
+        /NET-CONN-LOGICAL ?DICT-ROOM
+        1                              ( one complete Bank-0 workspace )
     THEN
     DUP  TO /TCP-MAX-CONN
     DUP  TO TLS-MAX-CTX
     2 *  TO SOCK-MAX                   ( 2× connections for listeners )
     TCP-TCBS-SETUP
     TLS-CTXS-SETUP
+    TLS-RX-WORKSPACES-SETUP
     SOCK-TABLE-SETUP
     TCP-INIT-ALL
     \ Protect network tables from XMEM-RESET
@@ -8199,6 +8423,11 @@ VARIABLE _SLSN-SD
 
 : LISTEN ( sd -- ior )
     _SLSN-SD !
+    \ A TLS-marked listener is not a plaintext listener with a copied flag.
+    \ Keep this surface unavailable until secure accept can attach and finish
+    \ an authenticated server context before publishing the child socket.
+    _SLSN-SD @ SOCK.STATE @ SOCKST-TCP <>
+    _SLSN-SD @ SOCK.FLAGS @ 1 AND 0<> OR IF -1 EXIT THEN
     _SLSN-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
     DUP 0= IF DROP -1 EXIT THEN
     _SLSN-SD @ SOCK.HANDLE !
@@ -8215,6 +8444,9 @@ VARIABLE _SACC-TCB
 : SOCK-ACCEPT ( sd -- new-sd | -1 )
     _SACC-SD !
     _SACC-SD @ SOCK.STATE @ SOCKST-LISTENING <> IF -1 EXIT THEN
+    \ Defense in depth for a descriptor whose flag was corrupted after a
+    \ valid TCP LISTEN.  Refuse before dequeuing or exposing its child TCB.
+    _SACC-SD @ SOCK.FLAGS @ 1 AND IF -1 EXIT THEN
     \ Dequeue from the listener's accept queue
     _SACC-SD @ SOCK.HANDLE @ AQ-POP
     DUP 0= IF DROP -1 EXIT THEN

@@ -20996,7 +20996,7 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=936 ", text)
+        self.assertIn("SZ=968 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -21567,7 +21567,7 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=936 ", text)
+        self.assertIn("SZ=968 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -22119,6 +22119,11 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
             "exp-ctx @ test-label 4 0 0 TLS-EXPORT-RESULT 32 TLS-EXPORT",
             '."  INTERNAL=" .',
             '."  INTERNAL-OUT=" TLS-EXPORT-RESULT C@ .',
+            "exp-ctx @ TLS-RXW.RECORD 32 90 FILL",
+            "exp-ctx @ test-label 4 0 0 exp-ctx @ TLS-RXW.RECORD 32 "
+            "TLS-EXPORT",
+            '."  RX-INTERNAL=" .',
+            '."  RX-INTERNAL-OUT=" exp-ctx @ TLS-RXW.RECORD C@ .',
             "exp-ctx @ test-label 4 0 0 sentinel 8161 TLS-EXPORT",
             '."  TOO-LONG=" .',
             "CREATE context-a 1 ALLOT 97 context-a C!",
@@ -22146,6 +22151,8 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
         self.assertIn("ALIAS-OUT=97 ", text)
         self.assertIn("INTERNAL=-4210 ", text)
         self.assertIn("INTERNAL-OUT=90 ", text)
+        self.assertIn("RX-INTERNAL=-4210 ", text)
+        self.assertIn("RX-INTERNAL-OUT=90 ", text)
         self.assertIn("TOO-LONG=-4208 ", text)
         self.assertIn("A=0 ", text)
         self.assertIn("B=0 ", text)
@@ -23417,6 +23424,26 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
     ]
 
+    _TLS_TWO_CTX_SETUP = ["TCP-INIT-ALL"] + _TLS_ESTAB_SETUP + [
+        "test-ctx @ TLS-RX-WIPE",
+        "VARIABLE test-ctx-b 1 TLS-CTX@ test-ctx-b !",
+        "test-ctx-b @ TLS-RX-WIPE",
+        "test-ctx-b @ /TLS-CTX 0 FILL",
+        "TLS-ROLE-CLIENT test-ctx-b @ TLS-CTX.ROLE !",
+        "TLS-HASH-SHA3-256 test-ctx-b @ TLS-CTX.HASH-ID !",
+        "TLS-SUITE-X25519-SHA3 test-ctx-b @ TLS-CTX.SUITE !",
+        "test-ctx @ TLS-CTX.WR-KEY test-ctx-b @ TLS-CTX.WR-KEY 32 CMOVE",
+        "test-ctx @ TLS-CTX.RD-KEY test-ctx-b @ TLS-CTX.RD-KEY 32 CMOVE",
+        "test-ctx @ TLS-CTX.WR-IV test-ctx-b @ TLS-CTX.WR-IV 12 CMOVE",
+        "test-ctx @ TLS-CTX.RD-IV test-ctx-b @ TLS-CTX.RD-IV 12 CMOVE",
+        "0 test-ctx-b @ TLS-CTX.WR-SEQ !",
+        "0 test-ctx-b @ TLS-CTX.RD-SEQ !",
+        "1 test-ctx-b @ TLS-CTX.PEER-AUTH !",
+        "TLSS-ESTABLISHED test-ctx-b @ TLS-CTX.STATE !",
+        "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+        "1 TCB-N test-ctx-b @ TLS-CTX.TCB !",
+    ]
+
     @staticmethod
     def _new_session_ticket(*, lifetime=86_400, age_add=0x01020304,
                             nonce=b"", ticket=b"ticket", extensions=()):
@@ -23459,19 +23486,53 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
                 f"VARIABLE ph-rlen{index} ph-rlen{index} !",
             ]
         lines += [
-            "TLS-RBUF-RESET TLS-HS-RBUF-RESET",
+            "test-ctx @ TLS-RX-WIPE",
             "VARIABLE ph-stream-len 0 ph-stream-len !",
         ]
         for index, _record in enumerate(records):
             lines += [
-                f"ph-rec{index} TLS-RECV-REC ph-stream-len @ + "
+                f"ph-rec{index} test-ctx @ TLS-RXW.RECORD "
+                f"ph-stream-len @ + "
                 f"ph-rlen{index} @ CMOVE",
                 f"ph-rlen{index} @ ph-stream-len +!",
             ]
         lines += [
-            "ph-stream-len @ TLS-RBUF-LEN !",
+            "ph-stream-len @ test-ctx @ TLS-CTX.RX-REC-LEN !",
             "0 test-ctx @ TLS-CTX.RD-SEQ !",
             "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
+        ]
+        return lines
+
+    def _encrypted_context_records(self, context, prefix, records):
+        """Build independent encrypted records without publishing a stream."""
+        lines = []
+        for index, (content_type, plaintext) in enumerate(records):
+            lines += self._forth_bytes(f"{prefix}_plain{index}", plaintext)
+            lines += [
+                f"CREATE {prefix}_rec{index} {len(plaintext) + 32} ALLOT",
+                f"{context} {content_type} {prefix}_plain{index} "
+                f"{len(plaintext)} {prefix}_rec{index} TLS-ENCRYPT-RECORD",
+                f"VARIABLE {prefix}_rlen{index} {prefix}_rlen{index} !",
+            ]
+        return lines
+
+    @staticmethod
+    def _preload_context_records(context, prefix, count):
+        """Publish complete fixture records in one context-owned RX lane."""
+        lines = [
+            f"{context} TLS-RX-WIPE",
+            f"VARIABLE {prefix}_stream_len 0 {prefix}_stream_len !",
+        ]
+        for index in range(count):
+            lines += [
+                f"{prefix}_rec{index} {context} TLS-RXW.RECORD "
+                f"{prefix}_stream_len @ + {prefix}_rlen{index} @ CMOVE",
+                f"{prefix}_rlen{index} @ {prefix}_stream_len +!",
+            ]
+        lines += [
+            f"{prefix}_stream_len @ {context} TLS-CTX.RX-REC-LEN !",
+            f"0 {context} TLS-CTX.RD-SEQ !",
+            f"TLS-E-OK {context} TLS-CTX.ERROR !",
         ]
         return lines
 
@@ -23559,7 +23620,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
 
     def test_tls_close_notify_can_reply_after_peer_close(self):
-        """Retained write keys can answer close_notify after the peer FIN."""
+        """The retained write epoch answers close_notify, then is wiped."""
         sent = []
         lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
             "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
@@ -23582,12 +23643,14 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "test-ctx @ 2 40 TLS-SEND-ALERT",
             "test-ctx @ 1 1 TLS-SEND-ALERT",
             'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            'test-ctx @ TLS-CTX.WR-KEY 31 + C@ ."  key=" .',
             '0 TCB-N TCB.SND-NXT @ ."  next=" .',
             '0 TCB-N TCB.STATE @ ."  state=" .',
         ]
         text = self._run_kdos(
             lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
-        self.assertIn("seq=1 ", text)
+        self.assertIn("seq=0 ", text)
+        self.assertIn("key=0 ", text)
         self.assertIn("next=124 ", text)
         self.assertIn("state=7 ", text)
         tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
@@ -23640,7 +23703,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
             'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
             'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
-            'TLS-HS-RBUF-LEN @ ."  held=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  held=" .',
             'test-ctx @ ph-out 8 TLS-RECV-DATA ."  app=" .',
             'ph-out C@ ."  first=" . ph-out 1+ C@ ."  second=" .',
         ]
@@ -23666,11 +23729,11 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         ]) + [
             "CREATE ph-out 8 ALLOT",
             'test-ctx @ ph-out 8 TLS-RECV-DATA ."  part1=" .',
-            'TLS-HS-RBUF-LEN @ ."  held1=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  held1=" .',
             'test-ctx @ ph-out 8 TLS-RECV-DATA ."  part2=" .',
-            'TLS-HS-RBUF-LEN @ ."  held2=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  held2=" .',
             'test-ctx @ ph-out 8 TLS-RECV-DATA ."  part3=" .',
-            'TLS-HS-RBUF-LEN @ ."  held3=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  held3=" .',
             'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
             'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
             'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
@@ -23689,6 +23752,34 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("error=0 ", text)
         self.assertIn("app=4 ", text)
         self.assertIn("NEXT", text)
+
+    def test_tls_ticket_compaction_and_plaintext_scratch_are_scrubbed(self):
+        """Consumed ticket tails and the complete global plaintext stage clear."""
+        ticket_a = self._new_session_ticket(ticket=b"first-ticket")
+        ticket_b = self._new_session_ticket(ticket=b"second-ticket")
+        lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+            ("TLS-CT-HANDSHAKE", ticket_a + ticket_b[:5]),
+            ("TLS-CT-HANDSHAKE", ticket_b[5:]),
+        ]) + [
+            "TLS-PLAIN-BUF 16640 90 FILL",
+            "CREATE scrub_out 8 ALLOT",
+            'test-ctx @ scrub_out 8 TLS-RECV-DATA ."  FIRST=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  HELD=" .',
+            'test-ctx @ TLS-RXW.RETAINED '
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ + C@ ."  TAIL=" .',
+            'TLS-PLAIN-BUF C@ ."  P0=" .',
+            'TLS-PLAIN-BUF 16639 + C@ ."  PLAST=" .',
+            'test-ctx @ scrub_out 8 TLS-RECV-DATA ."  SECOND=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  DONE=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("FIRST=0 ", text)
+        self.assertIn("HELD=5 ", text)
+        self.assertIn("TAIL=0 ", text)
+        self.assertIn("P0=0 ", text)
+        self.assertIn("PLAST=0 ", text)
+        self.assertIn("SECOND=0 ", text)
+        self.assertIn("DONE=0 ", text)
 
     def test_tls_recv_rejects_malformed_new_session_tickets(self):
         """Authenticated malformed tickets fail closed before application use."""
@@ -23845,6 +23936,342 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("C0=73 ", text)
         self.assertIn("C1=74 ", text)
 
+    def test_tls_partial_records_are_owned_by_their_exact_context(self):
+        """One context cannot append to or parse another context's fragment."""
+        lines = list(self._TLS_TWO_CTX_SETUP)
+        lines += self._encrypted_context_records(
+            "test-ctx @", "own_a", [("TLS-CT-APP-DATA", b"ALPHA")])
+        lines += self._encrypted_context_records(
+            "test-ctx-b @", "own_b", [("TLS-CT-APP-DATA", b"BRAVO")])
+        lines += [
+            "0 TCB-N own_a_rec0 3 TCP-RX-PUSH DROP",
+            "1 TCB-N own_b_rec0 own_b_rlen0 @ TCP-RX-PUSH DROP",
+            "CREATE own_a_out 8 ALLOT CREATE own_b_out 8 ALLOT",
+            'test-ctx @ own_a_out 8 TLS-RECV-DATA ."  AWAIT=" .',
+            'test-ctx @ TLS-CTX.RX-REC-LEN @ ."  AHELD=" .',
+            'test-ctx-b @ own_b_out 8 TLS-RECV-DATA ."  B=" .',
+            'own_b_out C@ ."  B0=" . own_b_out 4 + C@ ."  B4=" .',
+            'test-ctx @ TLS-CTX.RX-REC-LEN @ ."  ASTILL=" .',
+            "0 TCB-N own_a_rec0 3 + own_a_rlen0 @ 3 - TCP-RX-PUSH DROP",
+            'test-ctx @ own_a_out 8 TLS-RECV-DATA ."  A=" .',
+            'own_a_out C@ ."  A0=" . own_a_out 4 + C@ ."  A4=" .',
+            'test-ctx @ TLS-CTX.RD-SEQ @ ."  ASEQ=" .',
+            'test-ctx-b @ TLS-CTX.RD-SEQ @ ."  BSEQ=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("AWAIT=0 ", text)
+        self.assertIn("AHELD=3 ", text)
+        self.assertIn("B=5 ", text)
+        self.assertIn("B0=66 ", text)
+        self.assertIn("B4=79 ", text)
+        self.assertIn("ASTILL=3 ", text)
+        self.assertIn("A=5 ", text)
+        self.assertIn("A0=65 ", text)
+        self.assertIn("A4=65 ", text)
+        self.assertIn("ASEQ=1 ", text)
+        self.assertIn("BSEQ=1 ", text)
+
+    def test_blocking_record_reader_leaves_following_wire_record_in_tcp(self):
+        """Handshake reads stop exactly at the requested record boundary."""
+        lines = [
+            "TCP-INIT-ALL TLS-RBUF-RESET",
+            "CREATE exact-stream 12 ALLOT exact-stream 12 0 FILL",
+            "TLS-CT-HANDSHAKE exact-stream C!",
+            "3 exact-stream 1+ C! 3 exact-stream 2 + C!",
+            "0 exact-stream 3 + C! 1 exact-stream 4 + C!",
+            "65 exact-stream 5 + C!",
+            "TLS-CT-APP-DATA exact-stream 6 + C!",
+            "3 exact-stream 7 + C! 3 exact-stream 8 + C!",
+            "0 exact-stream 9 + C! 1 exact-stream 10 + C!",
+            "66 exact-stream 11 + C!",
+            "0 TCB-N exact-stream 12 TCP-RX-PUSH DROP",
+            '0 TCB-N TLS-READ-RECORD ."  FIRST=" .',
+            'TLS-RBUF-LEN @ ."  HELD1=" .',
+            '0 TCB-N TCB.RX-COUNT @ ."  TCP1=" .',
+            "6 TLS-RBUF-CONSUME",
+            '0 TCB-N TLS-READ-RECORD ."  SECOND=" .',
+            'TLS-RECV-REC 5 + C@ ."  BYTE=" .',
+            '0 TCB-N TCB.RX-COUNT @ ."  TCP2=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("FIRST=6 ", text)
+        self.assertIn("HELD1=6 ", text)
+        self.assertIn("TCP1=6 ", text)
+        self.assertIn("SECOND=6 ", text)
+        self.assertIn("BYTE=66 ", text)
+        self.assertIn("TCP2=0 ", text)
+
+    def test_tls_record_failure_isolated_from_peer_retained_plaintext(self):
+        """One malformed stream revokes only that connection's live state."""
+        lines = list(self._TLS_TWO_CTX_SETUP)
+        lines += self._encrypted_context_records(
+            "test-ctx-b @", "fail_b", [("TLS-CT-APP-DATA", b"BRAVO")])
+        lines += self._preload_context_records("test-ctx-b @", "fail_b", 1)
+        lines += [
+            "CREATE fail_b_head 2 ALLOT CREATE fail_b_tail 8 ALLOT",
+            'test-ctx-b @ fail_b_head 2 TLS-RECV-DATA ."  BHEAD=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BHELD=" .',
+            "CREATE fail_a_bad 5 ALLOT fail_a_bad 5 0 FILL",
+            "TLS-CT-APP-DATA fail_a_bad C!",
+            "3 fail_a_bad 1+ C! 2 fail_a_bad 2 + C!",
+            "0 TCB-N fail_a_bad 5 TCP-RX-PUSH DROP",
+            "CREATE fail_a_out 8 ALLOT",
+            'test-ctx @ fail_a_out 8 TLS-RECV-DATA ."  AFAIL=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  ASTATE=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  AAUTH=" .',
+            'test-ctx @ TLS-CTX.RD-KEY 31 + C@ ."  AKEY=" .',
+            'test-ctx-b @ TLS-CTX.STATE @ ."  BSTATE=" .',
+            'test-ctx-b @ TLS-CTX.PEER-AUTH @ ."  BAUTH=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BSTILL=" .',
+            'test-ctx-b @ fail_b_tail 8 TLS-RECV-DATA ."  BTAIL=" .',
+            'fail_b_tail C@ ."  BT0=" . fail_b_tail 2 + C@ ."  BT2=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("BHEAD=2 ", text)
+        self.assertIn("BHELD=3 ", text)
+        self.assertIn("AFAIL=-1 ", text)
+        self.assertIn("ASTATE=3 ", text)
+        self.assertIn("AAUTH=0 ", text)
+        self.assertIn("AKEY=0 ", text)
+        self.assertIn("BSTATE=2 ", text)
+        self.assertIn("BAUTH=1 ", text)
+        self.assertIn("BSTILL=3 ", text)
+        self.assertIn("BTAIL=3 ", text)
+        self.assertIn("BT0=65 ", text)   # A
+        self.assertIn("BT2=79 ", text)   # O
+
+    def test_tls_auth_failure_scrubs_candidate_plaintext_and_owned_rx(self):
+        """A bad tag erases decrypt output without disturbing a peer stream."""
+        lines = list(self._TLS_TWO_CTX_SETUP)
+        lines += self._encrypted_context_records(
+            "test-ctx @", "badtag_a", [
+                ("TLS-CT-APP-DATA", b"SECRET"),
+            ])
+        lines += self._encrypted_context_records(
+            "test-ctx-b @", "badtag_b", [
+                ("TLS-CT-APP-DATA", b"BRAVO"),
+            ])
+        lines += self._preload_context_records(
+            "test-ctx-b @", "badtag_b", 1)
+        lines += [
+            "CREATE badtag_b_head 2 ALLOT CREATE badtag_b_tail 8 ALLOT",
+            'test-ctx-b @ badtag_b_head 2 TLS-RECV-DATA ."  BHEAD=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BHELD=" .',
+            # Corrupt only the authentication tag so decryption reaches the
+            # candidate-plaintext path before authentication refuses it.
+            "badtag_a_rec0 badtag_a_rlen0 @ 1- + "
+            "DUP C@ 1 XOR SWAP C!",
+            "0 TCB-N badtag_a_rec0 badtag_a_rlen0 @ TCP-RX-PUSH DROP",
+            "TLS-PLAIN-BUF 16640 90 FILL",
+            ": badtag-plain-zero? 16640 0 DO "
+            "TLS-PLAIN-BUF I + C@ IF 0 UNLOOP EXIT THEN LOOP -1 ;",
+            ": badtag-rx-zero? /TLS-RX-WORKSPACE 0 DO "
+            "DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
+            "CREATE badtag_a_out 8 ALLOT",
+            'test-ctx @ badtag_a_out 8 TLS-RECV-DATA ."  AFAIL=" .',
+            'test-ctx @ TLS-CTX.ERROR @ ."  AERROR=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  ASTATE=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  AAUTH=" .',
+            'badtag-plain-zero? ."  PLAINZERO=" .',
+            'test-ctx @ TLS-RXW@ badtag-rx-zero? ."  ARXZERO=" .',
+            'test-ctx-b @ TLS-CTX.STATE @ ."  BSTATE=" .',
+            'test-ctx-b @ TLS-CTX.PEER-AUTH @ ."  BAUTH=" .',
+            'test-ctx-b @ TLS-CTX.RD-KEY 31 + C@ ."  BKEY=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BSTILL=" .',
+            'test-ctx-b @ badtag_b_tail 8 TLS-RECV-DATA ."  BTAIL=" .',
+            'badtag_b_tail C@ ."  BT0=" . '
+            'badtag_b_tail 2 + C@ ."  BT2=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("BHEAD=2 ", text)
+        self.assertIn("BHELD=3 ", text)
+        self.assertIn("AFAIL=-1 ", text)
+        self.assertIn("AERROR=-4203 ", text)
+        self.assertIn("ASTATE=3 ", text)
+        self.assertIn("AAUTH=0 ", text)
+        self.assertIn("PLAINZERO=-1 ", text)
+        self.assertIn("ARXZERO=-1 ", text)
+        self.assertIn("BSTATE=2 ", text)
+        self.assertIn("BAUTH=1 ", text)
+        self.assertIn("BKEY=31 ", text)
+        self.assertIn("BSTILL=3 ", text)
+        self.assertIn("BTAIL=3 ", text)
+        self.assertIn("BT0=65 ", text)   # A
+        self.assertIn("BT2=79 ", text)   # O
+
+    def test_tls_recv_rejects_internal_destination_without_consuming(self):
+        """Caller output cannot alias the connection's retained RX lane."""
+        lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+            ("TLS-CT-APP-DATA", b"SAFE"),
+        ]) + [
+            "CREATE alias_out 8 ALLOT",
+            'test-ctx @ test-ctx @ TLS-RXW.RETAINED 2 TLS-RECV-DATA '
+            '."  ALIAS=" .',
+            'test-ctx @ TLS-CTX.RX-REC-LEN @ ."  HELD=" .',
+            'test-ctx @ alias_out 8 TLS-RECV-DATA ."  OK=" .',
+            'alias_out C@ ."  O0=" . alias_out 3 + C@ ."  O3=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("ALIAS=0 ", text)
+        match = re.search(r"HELD=(\d+)", text)
+        self.assertIsNotNone(match, text)
+        self.assertGreater(int(match.group(1)), 0)
+        self.assertIn("OK=4 ", text)
+        self.assertIn("O0=83 ", text)
+        self.assertIn("O3=69 ", text)
+
+    def test_tls_plaintext_remainders_survive_cross_context_interleaving(self):
+        """Alternating small reads cannot expose another connection's bytes."""
+        lines = list(self._TLS_TWO_CTX_SETUP)
+        lines += self._encrypted_context_records(
+            "test-ctx @", "slice_a", [("TLS-CT-APP-DATA", b"ABCDEFGHIJ")])
+        lines += self._encrypted_context_records(
+            "test-ctx-b @", "slice_b", [("TLS-CT-APP-DATA", b"uvwxyz")])
+        lines += self._preload_context_records("test-ctx @", "slice_a", 1)
+        lines += self._preload_context_records("test-ctx-b @", "slice_b", 1)
+        lines += [
+            "CREATE slice_a_head 4 ALLOT CREATE slice_a_tail 8 ALLOT",
+            "CREATE slice_b_head 3 ALLOT CREATE slice_b_tail 8 ALLOT",
+            'test-ctx @ slice_a_head 4 TLS-RECV-DATA ."  AH=" .',
+            'test-ctx @ TLS-CTX.APP-LEN @ ."  AP=" .',
+            'test-ctx-b @ slice_b_head 3 TLS-RECV-DATA ."  BH=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BP=" .',
+            'test-ctx @ slice_a_tail 8 TLS-RECV-DATA ."  AT=" .',
+            'slice_a_tail C@ ."  AT0=" . slice_a_tail 5 + C@ ."  AT5=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BSTILL=" .',
+            'test-ctx-b @ slice_b_tail 8 TLS-RECV-DATA ."  BT=" .',
+            'slice_b_tail C@ ."  BT0=" . slice_b_tail 2 + C@ ."  BT2=" .',
+            'test-ctx @ TLS-CTX.APP-LEN @ ."  ADONE=" .',
+            'test-ctx-b @ TLS-CTX.APP-LEN @ ."  BDONE=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("AH=4 ", text)
+        self.assertIn("AP=6 ", text)
+        self.assertIn("BH=3 ", text)
+        self.assertIn("BP=3 ", text)
+        self.assertIn("AT=6 ", text)
+        self.assertIn("AT0=69 ", text)   # E
+        self.assertIn("AT5=74 ", text)   # J
+        self.assertIn("BSTILL=3 ", text)
+        self.assertIn("BT=3 ", text)
+        self.assertIn("BT0=120 ", text)  # x
+        self.assertIn("BT2=122 ", text)  # z
+        self.assertIn("ADONE=0 ", text)
+        self.assertIn("BDONE=0 ", text)
+
+    def test_tls_ticket_fragments_are_owned_by_their_exact_context(self):
+        """Authenticated post-handshake reassembly can alternate contexts."""
+        ticket_a = self._new_session_ticket(
+            nonce=b"a", ticket=b"ticket-a",
+            extensions=((0x1234, b"A"),))
+        ticket_b = self._new_session_ticket(
+            nonce=b"b", ticket=b"ticket-b",
+            extensions=((42, struct.pack(">I", 7)),))
+        split_a = len(ticket_a) // 2
+        split_b = len(ticket_b) // 2
+        lines = list(self._TLS_TWO_CTX_SETUP)
+        lines += self._encrypted_context_records(
+            "test-ctx @", "post_a", [
+                ("TLS-CT-HANDSHAKE", ticket_a[:split_a]),
+                ("TLS-CT-HANDSHAKE", ticket_a[split_a:]),
+                ("TLS-CT-APP-DATA", b"ONE"),
+            ])
+        lines += self._encrypted_context_records(
+            "test-ctx-b @", "post_b", [
+                ("TLS-CT-HANDSHAKE", ticket_b[:split_b]),
+                ("TLS-CT-HANDSHAKE", ticket_b[split_b:]),
+                ("TLS-CT-APP-DATA", b"TWO"),
+            ])
+        lines += self._preload_context_records("test-ctx @", "post_a", 3)
+        lines += self._preload_context_records("test-ctx-b @", "post_b", 3)
+        lines += [
+            "CREATE post_a_out 8 ALLOT CREATE post_b_out 8 ALLOT",
+            'test-ctx @ post_a_out 8 TLS-RECV-DATA ."  A1=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  AH1=" .',
+            'test-ctx-b @ post_b_out 8 TLS-RECV-DATA ."  B1=" .',
+            'test-ctx-b @ TLS-CTX.RX-HS-LEN @ ."  BH1=" .',
+            'test-ctx @ post_a_out 8 TLS-RECV-DATA ."  A2=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  AH2=" .',
+            'test-ctx-b @ post_b_out 8 TLS-RECV-DATA ."  B2=" .',
+            'test-ctx-b @ TLS-CTX.RX-HS-LEN @ ."  BH2=" .',
+            'test-ctx @ post_a_out 8 TLS-RECV-DATA ."  APP-A=" .',
+            'post_a_out C@ ."  AA0=" . post_a_out 2 + C@ ."  AA2=" .',
+            'test-ctx-b @ post_b_out 8 TLS-RECV-DATA ."  APP-B=" .',
+            'post_b_out C@ ."  BB0=" . post_b_out 2 + C@ ."  BB2=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("A1=0 ", text)
+        self.assertIn(f"AH1={split_a} ", text)
+        self.assertIn("B1=0 ", text)
+        self.assertIn(f"BH1={split_b} ", text)
+        self.assertIn("A2=0 ", text)
+        self.assertIn("AH2=0 ", text)
+        self.assertIn("B2=0 ", text)
+        self.assertIn("BH2=0 ", text)
+        self.assertIn("APP-A=3 ", text)
+        self.assertIn("AA0=79 ", text)   # O
+        self.assertIn("AA2=69 ", text)   # E
+        self.assertIn("APP-B=3 ", text)
+        self.assertIn("BB0=84 ", text)   # T
+        self.assertIn("BB2=79 ", text)   # O
+
+    def test_tls_abort_wipes_only_the_owned_rx_workspace(self):
+        """Context reclamation erases its full slice without touching a peer."""
+        lines = list(self._TLS_TWO_CTX_SETUP) + [
+            "0 test-ctx @ TLS-CTX.TCB ! 0 test-ctx-b @ TLS-CTX.TCB !",
+            "test-ctx @ TLS-RXW@ /TLS-RX-WORKSPACE 165 FILL",
+            "test-ctx-b @ TLS-RXW@ /TLS-RX-WORKSPACE 90 FILL",
+            ": rx-zero? /TLS-RX-WORKSPACE 0 DO "
+            "DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
+            'test-ctx @ TLS-ABORT ."  STATUS=" .',
+            'test-ctx @ TLS-RXW@ rx-zero? ."  AWIPED=" .',
+            'test-ctx-b @ TLS-RXW@ C@ ."  B0=" .',
+            'test-ctx-b @ TLS-RXW@ /TLS-RX-WORKSPACE 1- + C@ ."  BLAST=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  ASTATE=" .',
+            'test-ctx-b @ TLS-CTX.STATE @ ."  BSTATE=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("STATUS=0 ", text)
+        self.assertIn("AWIPED=-1 ", text)
+        self.assertIn("B0=90 ", text)
+        self.assertIn("BLAST=90 ", text)
+        self.assertIn("ASTATE=0 ", text)
+        self.assertIn("BSTATE=2 ", text)
+
+    def test_tls_rx_workspace_geometry_is_capacity_accounted(self):
+        """Every table slot maps to one disjoint, fully budgeted RX slice."""
+        text = self._run_kdos([
+            '." CTX=" /TLS-CTX .',
+            '." RX=" /TLS-RX-WORKSPACE .',
+            '." STRIDE=" 1 TLS-CTX@ TLS-RXW@ 0 TLS-CTX@ TLS-RXW@ - .',
+            '." COST=" /TCB /TLS-CTX + /TLS-RX-WORKSPACE + '
+            '/SOCK 2 * + .',
+            '."  PHYS1=" 1 NET-XMEM-TABLE-BYTES .',
+            '."  PHYS2=" 2 NET-XMEM-TABLE-BYTES .',
+            '."  PHYS3=" 3 NET-XMEM-TABLE-BYTES .',
+            '."  CAP0=" 97480 NET-XMEM-CAPACITY .',
+            '."  CAP1=" 97504 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 194959 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 194960 NET-XMEM-CAPACITY .',
+            '." MAX=" TLS-MAX-CTX .',
+            '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
+        ])
+        self.assertIn("CTX=968 ", text)
+        self.assertIn("RX=90632 ", text)
+        self.assertIn("STRIDE=90632 ", text)
+        self.assertIn("COST=97480 ", text)
+        self.assertIn("PHYS1=97504 ", text)
+        self.assertIn("PHYS2=194960 ", text)
+        self.assertIn("PHYS3=292464 ", text)
+        self.assertIn("CAP0=0 ", text)
+        self.assertIn("CAP1=1 ", text)
+        self.assertIn("EDGE1=1 ", text)
+        self.assertIn("CAP2=2 ", text)
+        self.assertIn("FIRST=-1 ", text)
+        match = re.search(r"MAX=(\d+)", text)
+        self.assertIsNotNone(match, text)
+        self.assertGreaterEqual(int(match.group(1)), 2)
+
     def test_tls_recv_reports_truncation_after_close_wait_drain(self):
         """Bare TCP FIN drains retained plaintext, then fails without close_notify."""
         lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
@@ -23853,7 +24280,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
             "3 test-ctx @ TLS-CTX.APP-LEN !",
             "0 test-ctx @ TLS-CTX.APP-OFF !",
-            "TLS-PLAIN-BUF 3 65 FILL",
+            "test-ctx @ TLS-RXW.RETAINED 3 65 FILL",
             "CREATE trunc-slice 2 ALLOT",
             'test-ctx @ trunc-slice 2 TLS-RECV-DATA ."  first=" .',
             'test-ctx @ trunc-slice 2 TLS-RECV-DATA ."  second=" .',
@@ -23995,6 +24422,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '." CLOSE=" .',
             '." CSTATE=" test-ctx @ TLS-CTX.STATE @ .',
             '." CAUTH=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." CRD=" test-ctx @ TLS-CTX.RD-KEY 31 + C@ .',
+            '." CWR=" test-ctx @ TLS-CTX.WR-KEY 31 + C@ .',
             "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
             "1 test-ctx @ TLS-CTX.PEER-AUTH !",
             "2 peer-alert C! 40 peer-alert 1+ C!",
@@ -24009,6 +24438,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("CLOSE=0 ", text)
         self.assertIn("CSTATE=3 ", text)
         self.assertIn("CAUTH=0 ", text)
+        self.assertIn("CRD=0 ", text)
+        self.assertIn("CWR=31 ", text)
         self.assertIn("FATAL=-1 ", text)
         self.assertIn("ERROR=-4201 ", text)
         self.assertIn("SHORT=-1 ", text)
@@ -24071,6 +24502,37 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
         ])
         self.assertIn("BI=0 ", text)     # success
         self.assertIn("LP=8080 ", text)
+
+    def test_tls_listen_fails_closed_before_plaintext_accept_exists(self):
+        """A TLS-marked listener cannot silently publish raw TCP children."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE tls-listener SOCK-TYPE-TLS SOCKET tls-listener !",
+            "tls-listener @ 8443 BIND DROP",
+            'tls-listener @ LISTEN ."  TLS-LISTEN=" .',
+            'tls-listener @ SOCK.STATE @ ."  TLS-STATE=" .',
+            'tls-listener @ SOCK.HANDLE @ ."  TLS-HANDLE=" .',
+            '8443 TCB-FIND-LPORT 0= ."  NO-TCB=" .',
+            "VARIABLE tcp-listener SOCK-TYPE-TCP SOCKET tcp-listener !",
+            "tcp-listener @ 8080 BIND DROP",
+            'tcp-listener @ LISTEN ."  TCP-LISTEN=" .',
+            'tcp-listener @ SOCK.STATE @ ."  TCP-STATE=" .',
+            'tcp-listener @ SOCK.HANDLE @ 0<> ."  TCP-HANDLE=" .',
+            "1 tcp-listener @ SOCK.FLAGS !",
+            "1 TCB-N tcp-listener @ SOCK.HANDLE @ TCB.AQ-SLOTS !",
+            "1 tcp-listener @ SOCK.HANDLE @ TCB.AQ-COUNT !",
+            'tcp-listener @ SOCK-ACCEPT ."  FORGED=" .',
+            'tcp-listener @ SOCK.HANDLE @ TCB.AQ-COUNT @ ."  QUEUED=" .',
+        ])
+        self.assertIn("TLS-LISTEN=-1 ", text)
+        self.assertIn("TLS-STATE=2 ", text)
+        self.assertIn("TLS-HANDLE=0 ", text)
+        self.assertIn("NO-TCB=-1 ", text)
+        self.assertIn("TCP-LISTEN=0 ", text)
+        self.assertIn("TCP-STATE=3 ", text)
+        self.assertIn("TCP-HANDLE=-1 ", text)
+        self.assertIn("FORGED=-1 ", text)
+        self.assertIn("QUEUED=1 ", text)
 
     def test_socket_close_resets(self):
         """CLOSE resets socket to FREE state."""
@@ -27055,13 +27517,13 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("20 ", text)
 
     def test_tcp_max_conn(self):
-        """/TCP-MAX-CONN should be >= 16 (dynamic, floor 16, cap 256)."""
+        """The capacity-derived connection count stays within 1..256."""
         text = self._run_kdos(["/TCP-MAX-CONN ."])
         import re
         m = re.search(r'(\d+)\s+ok', text)
         self.assertIsNotNone(m, f"no output: {text}")
         val = int(m.group(1))
-        self.assertGreaterEqual(val, 16)
+        self.assertGreaterEqual(val, 1)
         self.assertLessEqual(val, 256)
 
     def test_tcp_mss(self):

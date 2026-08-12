@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile, generic ALPN, exporters, and serialized TLS ownership implemented; server role gated on a qualified signer
+Status: authenticated bounded client profile, generic ALPN, exporters, serialized TLS crypto ownership, and per-context application RX implemented; server role gated on a qualified signer
 Last updated: 2026-08-12
 
 ## Purpose
@@ -45,10 +45,14 @@ facts gate an authenticated server role:
   RTL TRNG backend is deterministic development logic.  Emulator vectors can
   qualify protocol behavior; they cannot establish physical key-generation or
   ephemeral-secret entropy claims.
-- Transcript, certificate, record, plaintext, and several cryptographic
-  scratch arenas are module-global.  The lower module now serializes their
-  public use under one exact owner; independently progressing TLS connections
-  remain unsupported until that state becomes connection-owned.
+- Handshake transcript and certificate state, the blocking client-handshake
+  record buffer, transient plaintext, and several cryptographic scratch arenas
+  remain module-global.  The lower module serializes their public use under one
+  exact owner.  Application partial records, retained plaintext, and
+  post-handshake fragments are now connection-owned, so alternating receive
+  calls cannot overwrite another context's cross-call state.  True concurrent
+  TLS execution remains unsupported until the remaining shared state becomes
+  connection-owned.
 
 The first interoperable server signature profile should be
 `ecdsa_secp256r1_sha256`, which matches the existing certificate parser and
@@ -61,9 +65,12 @@ precomputing a fixture signature is test scaffolding rather than a server
 security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
-hash state, and enforced serialized scratch ownership are now implemented as
-independently useful client/server substrate.  They do not by themselves make
-a listening socket TLS-capable.  Evidence must keep
+hash state, per-context application RX state, and enforced serialized scratch
+ownership are now implemented as independently useful client/server substrate.
+They do not by themselves make a listening socket TLS-capable.  `LISTEN`
+therefore returns `-1` for a TLS-marked socket without allocating a listener
+TCB or changing the descriptor state/handle; `SOCK-ACCEPT` also refuses a
+TLS-marked listener before consuming its accept queue.  Evidence must keep
 emulator protocol correctness, RTL behavior, and physical entropy/side-channel
 claims separate.
 
@@ -279,9 +286,10 @@ The caller label is 1 through 249 printable ASCII bytes, the raw context is
 hashed without an application-specific interpretation, and the output bound
 is the TLS 1.3 HKDF limit of 8160 bytes for the implemented 32-byte hashes.
 All caller spans are checked before derivation. Input or output overlap with
-TLS contexts or exporter/HKDF scratch is rejected, as is output overlap with
-the caller label or context. Output is staged and copied once only after both
-expansions succeed; the exporter master secret is never returned. Fatal
+TLS contexts, their RX workspaces, or exporter/HKDF scratch is rejected, as is
+output overlap with the caller label or context. Output is staged and copied
+once only after both expansions succeed; the exporter master secret is never
+returned. Fatal
 records, alerts, close, abort, context reuse, and handshake failure make it
 unavailable and wipe the retained value.
 
@@ -301,6 +309,20 @@ Contention does not mutate shared TLS scratch; status-bearing operations return
 their documented busy status and void/backpressure operations remain inert.
 Internal handshake parsers and builders are covered by the owned blocking
 connection path and are not independent concurrent entry points.
+
+State that must survive an application receive call is not shared scratch.
+Each 968-byte `/TLS-CTX` indexes a 90,632-byte `/TLS-RX-WORKSPACE`: a
+16,896-byte partial-record lane plus an aligned retained-data lane bounded for
+a 73,732-byte post-handshake message.  Incomplete encrypted records,
+authenticated plaintext remainder, and fragmented post-handshake messages are
+therefore isolated by context.  The high-level application receive and
+owner-held blocking-handshake paths use the transient global plaintext buffer
+only while lock 10 is held and scrub its complete contents before releasing
+ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
+output and does not scrub that output.  With a 5,816-byte TCB and two 32-byte socket
+descriptors, the logical network-table cost is 97,480 bytes per connection;
+the four XMEM table allocations are normalized independently, so one
+connection reserves 97,504 bytes and capacity uses the exact aggregate.
 
 Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
 use the interoperable public profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and
@@ -336,10 +358,14 @@ This is deliberate backpressure for the present bounded stack, not a claim of
 multi-segment TCP throughput.
 
 Application receive preserves decrypted record data across caller-sized reads.
-If a TLS record exceeds the destination slice, the context records an offset
-and remaining length into the shared plaintext buffer and drains that data
-before decrypting another record. A small HTTP receive scratch buffer therefore
-cannot silently truncate large response bodies.
+It accumulates an incomplete encrypted record in the context's record lane.
+If authenticated plaintext exceeds the destination slice, the remainder and
+its offset are retained in that context's retained-data lane and drained before
+decrypting another record.  On this high-level receive path the module-global
+plaintext buffer is only transient staging under the TLS owner and its complete
+contents are scrubbed before release.  A small HTTP receive buffer therefore
+cannot silently truncate large response bodies
+or expose its remainder to another connection.
 
 `MS@` and `EPOCH@` reconstruct all eight RTC bytes. Certificate and token
 deadlines therefore use the full-width clock rather than a truncated timer.
@@ -348,7 +374,10 @@ Incoming records require legacy record version `0x0303` and are bounded
 separately for plaintext and protected records. A compatibility
 ChangeCipherSpec is ignored only when it has the exact one-byte `0x01` form
 permitted during the handshake. Incoming alerts clear peer authorization and
-distinguish clean `close_notify` from fatal or malformed records. Application
+distinguish clean `close_notify` from fatal or malformed records. A clean peer
+close retains only the write epoch needed for the answering `close_notify`;
+successful emission then wipes that epoch. Fatal, malformed, and truncated
+receive paths erase record secrets immediately. Application
 send and receive both require an established, authenticated context.
 Application-key derivation likewise returns `TLS-E-STATE` unless certificate
 authentication, the server-Finished state, and the exact configured ALPN bytes
@@ -357,10 +386,11 @@ staged, not that the connection was published; `TLS-HANDSHAKE-PUBLISH` is the
 separate establishment boundary after complete local-Finished acceptance.
 
 Session resumption is not implemented. Authenticated post-handshake
-`NewSessionTicket` messages are reassembled in the bounded handshake buffer,
-validated through every nested nonce, ticket, and extension length, and then
-discarded; lifetime is capped at seven days, every extension type must be
-unique, and `early_data` requires its exact four-byte payload. KeyUpdate,
+`NewSessionTicket` messages are reassembled in the bounded retained-data lane
+owned by their connection, validated through every nested nonce, ticket, and
+extension length, and then discarded; lifetime is capped at seven days, every
+extension type must be unique, and `early_data` requires its exact four-byte
+payload. KeyUpdate,
 CertificateRequest, other post-handshake
 messages, malformed tickets, and non-handshake records interleaved with a
 ticket fragment fail closed with `TLS-E-POST-HANDSHAKE`.
@@ -420,6 +450,10 @@ Native guest tests cover:
 - immediate established/readable TCP waits and record-fill completion;
 - TCP/TLS send backpressure without retransmission-buffer or sequence loss;
 - multi-read delivery of application records larger than the caller buffer;
+- alternating connections with isolated partial records, retained plaintext,
+  and fragmented post-handshake messages, including exact per-context wipe;
+- fail-closed refusal of TLS-marked `LISTEN` and `SOCK-ACCEPT` before a secure
+  accept path exists;
 - full-width `MS@` and `EPOCH@` reconstruction across byte boundaries;
 - handshake reassembly across arbitrary protected-record boundaries;
 - legacy record version, size-class, and compatibility CCS validation;
@@ -467,13 +501,17 @@ trust bundle.
 ### Concurrency
 
 ALPN result, endpoint role, negotiated suite/hash, traffic keys, exporter
-master, authorization state, and connection errors are per-context. Handshake
-transcript, certificate descriptors, cryptographic scratch, record buffers,
-and hybrid key-exchange buffers remain global. Public mutating and
-cryptographic TLS operations therefore acquire machine-wide lock 10 under an
-exact `(COREID,TASK-ID)` owner for the complete operation. A second connection
-receives nonblocking contention; it cannot progress concurrently. The enforced
-lock order is 10, then KDOS HMAC/HKDF lock 9, then checked BIOS crypto lock 8.
+master, authorization state, connection errors, application partial records,
+retained plaintext, and post-handshake fragments are per-context. Handshake
+transcript, certificate descriptors, cryptographic and transient plaintext
+scratch, the blocking client-handshake record buffer, and hybrid key-exchange
+buffers remain global. Public mutating and cryptographic TLS operations
+therefore acquire machine-wide lock 10 under an exact `(COREID,TASK-ID)` owner
+for the complete operation. A second connection receives nonblocking
+contention and cannot execute concurrently while that shared scratch is in
+use, but alternating application receive calls retain independent state. The
+enforced lock order is 10, then KDOS HMAC/HKDF lock 9, then checked BIOS crypto
+lock 8.
 
 RSA's core-0 phase gate remains an additional protection for RSA scratch. The
 BIOS SHA-256 transaction uses a complete private context per core, validates

@@ -1619,9 +1619,16 @@ TLS 1.3.
 
 ### §16.7 TCP
 
-Full TCP with 16–256 TCB slots (dynamic, scaled to 25% of XMEM), 3-way
-handshake, sliding window, congestion control, retransmit, and TIME_WAIT
-reaper (60 s 2×MSL) with automatic scavenge-on-alloc.
+Full TCP with 1–256 TCB slots (dynamic, scaled to 25% of XMEM against the
+complete TLS-capable table cost), 3-way handshake, sliding window, congestion
+control, retransmit, and TIME_WAIT reaper (60 s 2×MSL) with automatic
+scavenge-on-alloc.  The standard networking loader requires XMEM.  A guarded
+one-connection Bank-0 allocation path remains for manually composed builds,
+but it is not a qualified deployment profile.  The logical table cost is
+97,480 bytes per connection; backing allocator alignment may round the
+physical reservation upward.  The exact XMEM total is 97,504 bytes for one
+connection and `n * 97,480 + 24` for odd `n`; even counts require exactly
+`n * 97,480`.
 
 Each listener TCB has an embedded **accept queue** (8 slots).  Incoming
 SYNs allocate a fresh TCB — the listener stays in LISTEN and never
@@ -1686,9 +1693,10 @@ support:
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
 
-Includes record-layer framing with reassembly buffers, multi-message
-handshake processing, SNI (Server Name Indication), Change Cipher
-Spec tolerance, and bounded **server certificate verification** using
+Includes record-layer framing, bounded handshake reassembly, per-context
+application receive retention, multi-message handshake processing, SNI
+(Server Name Indication), Change Cipher Spec tolerance, and bounded
+**server certificate verification** using
 ECDSA-P256-SHA256 and RSA-2048/SHA-256 profiles. Public ClientHello messages
 offer `ecdsa_secp256r1_sha256` and `rsa_pss_rsae_sha256` for
 CertificateVerify, while `signature_algorithms_cert` separately permits
@@ -1737,7 +1745,21 @@ then checked BIOS crypto 8. Contention is nonblocking: connection setup records
 `TLS-CONNECT-E-BUSY`, exporters return `TLS-E-BUSY`, and transport operations
 make no scratch mutation. The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
-context is 936 bytes, reflected in the dynamic network-table budget.
+context is 968 bytes.  Each context also owns a 90,632-byte receive workspace:
+a 16,896-byte partial-record lane and an aligned retained-data lane capable of
+holding the bounded 73,732-byte post-handshake message.  Incomplete encrypted
+application records, authenticated plaintext left after a caller-sized read,
+and fragmented post-handshake messages therefore survive across calls without
+aliasing another context.  Cryptographic work and the transient global
+plaintext buffer remain serialized by lock 10.  The high-level application
+receive and owner-held blocking-handshake paths copy authenticated plaintext
+into connection-owned or caller storage and scrub their complete global
+staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
+writes to its caller-selected output and does not scrub that output.  Together
+with the 5,816-byte TCB and two 32-byte socket
+descriptors, the logical network-table cost is 97,480 bytes per connection,
+before backing-allocator rounding.  Capacity is derived from the exact four
+normalized table allocations rather than this logical quotient.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -1748,15 +1770,17 @@ context is 936 bytes, reflected in the dynamic network-table budget.
 | `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
 | `TLS-CLOSE-TRY` | `( tls -- ior )` | Nonblocking close attempt; return `TLS-E-BUSY` without mutation when another task owns TLS scratch. |
 | `TLS-CLOSE` | `( tls -- )` | Compatibility close that drops the `TLS-CLOSE-TRY` status; callers requiring retry visibility use the checked form. |
-| `TLS-SEND-ALERT-TRY` | `( ctx level desc -- ior )` | Nonblocking checked alert attempt; owner contention returns `TLS-E-BUSY` for caller retry. Once admitted, a local fatal alert revokes authorization and exporters even if transport backpressure prevents emission. |
+| `TLS-SEND-ALERT-TRY` | `( ctx level desc -- ior )` | Nonblocking checked alert attempt; owner contention returns `TLS-E-BUSY` for caller retry. Once admitted, a local fatal alert revokes authorization, exporters, and traffic secrets even if transport backpressure prevents emission. An accepted local `close_notify` moves the context to closing and erases the traffic epoch after emission. |
 | `TLS-SEND-ALERT` | `( ctx level desc -- )` | Compatibility wrapper for alerts such as warning-level `1 0` `close_notify`; it drops the checked attempt status. |
-| `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles record reassembly + decryption. |
+| `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles decryption plus per-context partial-record, retained-plaintext, and post-handshake-fragment state. An invalid or internal-alias destination returns zero without consuming connection state. |
 
 The raw `TLS-READ-RECORD[-NB]`, `TLS-PROCESS-HS-MSG[S]`,
 `TLS-RBUF-FILL[-NB]`, and `TLS-RBUF-CONSUME` words are internal building
 blocks used beneath the owner-guarded connection and application paths. Direct
 calls are reserved for sequential qualification fixtures; they are not
-independently concurrent public transport operations.
+independently concurrent public transport operations.  Those global raw-record
+helpers serve the owner-held blocking handshake path; application receive uses
+its context-owned RX workspace for all state retained across public calls.
 
 **Variables:** `TLS-SNI-HOST` (256-byte storage for a DNS name of at most 253 bytes),
 `TLS-SNI-LEN` (current SNI length).
@@ -1771,8 +1795,8 @@ BSD-style socket interface over TCP and TLS (§17 in `networking.f`).
 |------|-------------|-------------|
 | `SOCKET` | `( type -- sd \| -1 )` | Create a socket descriptor.  *type*: 0 = TCP, 1 = TLS. |
 | `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
-| `LISTEN` | `( sd -- ior )` | Open a passive TCP listener; returns 0 or -1. |
-| `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Dequeue a completed connection from a listener. |
+| `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1` without allocating a TCB or changing descriptor state/handle until authenticated secure accept exists. |
+| `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Dequeue a completed connection from an ordinary TCP listener. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
 | `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
