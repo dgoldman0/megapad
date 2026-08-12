@@ -24380,6 +24380,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         include_groups: bool = True,
         include_key_share: bool = True,
         signature_schemes: tuple[int, ...] = (0x0403, 0x0804),
+        cert_signature_schemes: tuple[int, ...] = (0x0403, 0x0401),
         groups: tuple[int, ...] = (29,),
         shares: tuple[tuple[int, bytes], ...] | None = None,
         duplicate_alpn: bool = False,
@@ -24410,10 +24411,13 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
                 cls._ext(13, cls._u16(len(schemes)) + schemes)
             )
         if include_sigalgs_cert:
+            cert_schemes = b"".join(
+                cls._u16(scheme) for scheme in cert_signature_schemes
+            )
             extensions.append(
                 cls._ext(
                     50,
-                    cls._u16(4) + cls._u16(0x0403) + cls._u16(0x0401),
+                    cls._u16(len(cert_schemes)) + cert_schemes,
                 )
             )
         if include_groups:
@@ -24451,6 +24455,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         include_groups: bool = True,
         include_key_share: bool = True,
         signature_schemes: tuple[int, ...] = (0x0403, 0x0804),
+        cert_signature_schemes: tuple[int, ...] = (0x0403, 0x0401),
         groups: tuple[int, ...] = (29,),
         shares: tuple[tuple[int, bytes], ...] | None = None,
         duplicate_alpn: bool = False,
@@ -24474,6 +24479,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             include_groups=include_groups,
             include_key_share=include_key_share,
             signature_schemes=signature_schemes,
+            cert_signature_schemes=cert_signature_schemes,
             groups=groups,
             shares=shares,
             duplicate_alpn=duplicate_alpn,
@@ -24767,6 +24773,62 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             f"CH-LEN={len(valid)} ", f"CH-FILLED={len(valid)} ",
             "OWNED=-1 ", "FLAGS=3 ", "BM0=0 ", "BMLAST=0 ",
             "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_client_hello_retains_distinct_signature_policy_views(self):
+        """Flight policy borrows exact ext 13/50 vectors with RFC fallback."""
+        handshake_schemes = (0x0804, 0x0503, 0x0403)
+        certificate_schemes = (0x0401, 0x0503)
+        distinct = self._client_hello(
+            signature_schemes=handshake_schemes,
+            cert_signature_schemes=certificate_schemes,
+        )
+        fallback = self._client_hello(
+            signature_schemes=handshake_schemes,
+            include_sigalgs_cert=False,
+        )
+        handshake_bytes = b"".join(self._u16(v) for v in handshake_schemes)
+        certificate_bytes = b"".join(
+            self._u16(v) for v in certificate_schemes
+        )
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += self._forth_bytes("ch-distinct", distinct)
+        lines += self._forth_bytes("ch-fallback", fallback)
+        lines += self._forth_bytes("expected-handshake", handshake_bytes)
+        lines += self._forth_bytes("expected-certificate", certificate_bytes)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ ch-distinct {len(distinct)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            "server-ctx @ _TLS-SERVER-SIGNATURE-ALGORITHMS",
+            '." HS-U=" . expected-handshake 6 _XC-BYTES= ." HS=" .',
+            "server-ctx @ _TLS-SERVER-CERT-SIGNATURE-ALGORITHMS",
+            '." CERT-U=" . expected-certificate 4 _XC-BYTES= '
+            '." CERT=" .',
+            '." CERT-META-U=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-SIGALGS-U + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ ch-fallback {len(fallback)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            "server-ctx @ _TLS-SERVER-CERT-SIGNATURE-ALGORITHMS",
+            '." FALLBACK-U=" . expected-handshake 6 _XC-BYTES= '
+            '." FALLBACK=" .',
+            '." FALLBACK-META-U=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-SIGALGS-U + @ .',
+            '." SIGALG-FINAL-DEPTH=" DEPTH .',
+            "server-ctx @ TLS-ABORT DROP",
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "HS-U=6 HS=-1 ", "CERT-U=4 CERT=-1 ",
+            "CERT-META-U=4 ", "FALLBACK-U=6 FALLBACK=-1 ",
+            "FALLBACK-META-U=0 ", "SIGALG-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
@@ -26694,29 +26756,29 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '0 TLS-CTX@ TLS-RXW@ - .',
             '."  END=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
             'TLS-SERVER-META-CAPACITY + 0 TLS-CTX@ TLS-RXW@ - .',
-            '."  CAP0=" 237504 NET-XMEM-CAPACITY .',
-            '."  CAP1=" 237520 NET-XMEM-CAPACITY .',
-            '."  EDGE1=" 475007 NET-XMEM-CAPACITY .',
-            '."  CAP2=" 475008 NET-XMEM-CAPACITY .',
+            '."  CAP0=" 237536 NET-XMEM-CAPACITY .',
+            '."  CAP1=" 237552 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 475071 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 475072 NET-XMEM-CAPACITY .',
             '." MAX=" TLS-MAX-CTX .',
             '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
         ])
         self.assertIn("CTX=968 ", text)
-        self.assertIn("RX=230656 ", text)
-        self.assertIn("STRIDE=230656 ", text)
-        self.assertIn("COST=237504 ", text)
-        self.assertIn("PHYS1=237520 ", text)
-        self.assertIn("PHYS2=475008 ", text)
-        self.assertIn("PHYS3=712528 ", text)
+        self.assertIn("RX=230688 ", text)
+        self.assertIn("STRIDE=230688 ", text)
+        self.assertIn("COST=237536 ", text)
+        self.assertIn("PHYS1=237552 ", text)
+        self.assertIn("PHYS2=475072 ", text)
+        self.assertIn("PHYS3=712624 ", text)
         self.assertIn("CHCAP=131146 ", text)
         self.assertIn("BITMAP=8192 ", text)
         self.assertIn("LEDGER=512 ", text)
-        self.assertIn("META=168 ", text)
+        self.assertIn("META=200 ", text)
         self.assertIn("OFF-CH=90632 ", text)
         self.assertIn("OFF-BM=221784 ", text)
         self.assertIn("OFF-LEDGER=229976 ", text)
         self.assertIn("OFF-META=230488 ", text)
-        self.assertIn("END=230656 ", text)
+        self.assertIn("END=230688 ", text)
         self.assertIn("CAP0=0 ", text)
         self.assertIn("CAP1=1 ", text)
         self.assertIn("EDGE1=1 ", text)
