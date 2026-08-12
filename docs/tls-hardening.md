@@ -142,9 +142,31 @@ little-endian representation, enforces canonical DER integers, checks
 `0 < r,s < n`, validates the public point against the P-256 curve, computes the
 two scalar products, rejects infinity, and compares `R.x mod n` with `r`.
 
-ECDSA verification operates only on public data. The scalar-multiplication
-routine is not a general constant-time private-key primitive and must not be
-reused for signing or secret scalar operations.
+ECDSA verification operates only on public data. Its Jacobian
+`EC-MUL`/`EC-ADD`/`EC-DOUBLE` path branches on scalar bits and exceptional
+points, so it is not a private-key primitive and must not be reused for
+signing.
+
+Server-signing work uses a separate internal P-256 base-point substrate. It
+uses complete homogeneous-projective formulas for `a=-3`, executes exactly
+256 MSB-first double/add/select rounds for every admitted scalar, and selects
+coordinates with Field arithmetic rather than `FCMOV`. Scalar range admission
+scans all 32 bytes; an invalid scalar still executes the full path with a
+dummy scalar and cannot publish either staged output. This gives a fixed
+architectural instruction schedule with respect to valid scalar contents. It
+does not claim physical power-analysis resistance or make caller-address
+qualification constant-cycle.
+
+The internal operation is serialized by the machine-wide TLS owner. Its
+single exact 960-byte workspace includes scalar, projective points, staged
+affine output, pointer metadata, and cleanup sinks. Success, rejection after
+owner acquisition, and caught Forth exceptions clear the inversion state used
+by the operation, clear Field ACC and raw-multiply previous-result halves,
+scrub the complete workspace, and release ownership. A busy return acquires
+nothing and leaves the current owner's workspace untouched. The raw internal
+entry is a qualification substrate, not the eventual credential API:
+long-term private keys remain lower-owned and will be addressed through opaque
+generational handles.
 
 ### Fixed RSA-2048
 

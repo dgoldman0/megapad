@@ -22647,6 +22647,322 @@ class TestKDOSECDSA(_KDOSNetworkTestBase):
             lines.append(f"{b} {name} {i} + C!")
         return lines
 
+    @staticmethod
+    def _forth_definition(name: str) -> str:
+        """Return one networking.f definition with comments removed."""
+        source = Path(NETWORKING_PATH).read_text(encoding="utf-8")
+        match = re.search(rf"(?m)^:\s+{re.escape(name)}(?:\s|$)", source)
+        if match is None:
+            raise AssertionError(f"missing Forth definition {name}")
+        body = []
+        for line in source[match.start():].splitlines():
+            code = line.split("\\", 1)[0]
+            body.append(code)
+            if ";" in code:
+                return "\n".join(body)
+        raise AssertionError(f"unterminated Forth definition {name}")
+
+    def _run_secret_scalar_case(
+        self, scalar: bytes, expected_x: bytes, expected_y: bytes
+    ) -> tuple[int, str]:
+        """Run one scalar KAT from a fresh snapshot and return its cycle cost."""
+        lines = self._store_bytes("pss-k", scalar)
+        lines += self._store_bytes("pss-ex", expected_x)
+        lines += self._store_bytes("pss-ey", expected_y)
+        lines.extend([
+            "CREATE pss-x 32 ALLOT",
+            "CREATE pss-y 32 ALLOT",
+            "VARIABLE pss-t0",
+            "VARIABLE pss-delta",
+            "VARIABLE pss-ior",
+            "PERF-CYCLES pss-t0 !",
+            "pss-k pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED pss-ior !",
+            "PERF-CYCLES pss-t0 @ - pss-delta !",
+            '." IOR=" pss-ior @ .',
+            '." CYC=" pss-delta @ .',
+            "PRIME-P256",
+            "pss-ex pss-x _EC-T1 FCEQ",
+            '." X=" _EC-T1 C@ .',
+            "pss-ey pss-y _EC-T1 FCEQ",
+            '." Y=" _EC-T1 C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("IOR=0 ", text)
+        self.assertIn("X=1 ", text)
+        self.assertIn("Y=1 ", text)
+        cycles = int(text.split("CYC=")[-1].split()[0])
+        return cycles, text
+
+    def test_p256_secret_schedule_is_fixed_and_separate(self):
+        """Secret-scalar words have fixed loops and avoid legacy EC branches."""
+        validate = self._forth_definition("_P256S-VALIDATE-SELECT")
+        bit_load = self._forth_definition("_P256S-LOAD-BIT")
+        double = self._forth_definition("_P256S-RCB-DOUBLE-A3")
+        mixed = self._forth_definition("_P256S-RCB-MIXED-ADD-G-A3")
+        select = self._forth_definition("_P256S-SELECT-R")
+        core = self._forth_definition("_P256S-SECRET-G-MUL")
+        wrapper = self._forth_definition("_P256-SECRET-BASE-MUL-CHECKED")
+        cleanup = self._forth_definition("_P256S-FIELD-CLEAR")
+
+        fixed_path = "\n".join((validate, bit_load, double, mixed, select, core))
+        for forbidden in ("IF", "ELSE", "THEN", "EXIT", "FCMOV",
+                          "EC-MUL", "EC-ADD", "EC-DOUBLE"):
+            self.assertIsNone(
+                re.search(rf"(?<![-A-Z0-9_]){re.escape(forbidden)}(?![-A-Z0-9_])",
+                          fixed_path),
+                f"secret scalar schedule must not use {forbidden}",
+            )
+        self.assertIn("32 0 DO", validate)
+        self.assertIn("256 0 DO", core)
+        self.assertEqual(core.count("_P256S-RCB-DOUBLE-A3"), 1)
+        self.assertEqual(core.count("_P256S-RCB-MIXED-ADD-G-A3"), 1)
+        self.assertEqual(core.count("_P256S-SELECT-R"), 1)
+        self.assertEqual(len(re.findall(r"\bFSQR\b", double)), 3)
+        self.assertEqual(len(re.findall(r"\bFMUL\b", double)), 10)
+        self.assertEqual(len(re.findall(r"\b(?:FADD|FSUB)\b", double)), 21)
+        self.assertEqual(len(re.findall(r"\bFMUL\b", mixed)), 13)
+        self.assertEqual(len(re.findall(r"\b(?:FADD|FSUB)\b", mixed)), 23)
+        self.assertEqual(len(re.findall(r"\bFMUL\b", select)), 3)
+        self.assertEqual(len(re.findall(r"\bFADD\b", select)), 3)
+        self.assertEqual(len(re.findall(r"\bFSUB\b", select)), 3)
+        self.assertIn("CATCH", wrapper)
+        self.assertIn("_P256S-UNWIND", wrapper)
+        self.assertLess(cleanup.index("FINV"), cleanup.index("FMUL-RAW"))
+
+    def test_p256_complete_formula_vectors(self):
+        """Complete homogeneous formulas cover doubling and exceptional add."""
+        two_g_x = bytes.fromhex(
+            "7cf27b188d034f7e8a52380304b51ac3"
+            "c08969e277f21b35a60b48fc47669978"
+        )[::-1]
+        two_g_y = bytes.fromhex(
+            "07775510db8ed040293d9ac69f7430db"
+            "ba7dade63ce982299e04b79d227873d1"
+        )[::-1]
+        neg_g_y = bytes.fromhex(
+            "b01cbd1c01e58065711814b583f061e9"
+            "d431cca994cea1313449bf97c840ae0a"
+        )[::-1]
+        lines = self._store_bytes("pss-2gx", two_g_x)
+        lines += self._store_bytes("pss-2gy", two_g_y)
+        lines += self._store_bytes("pss-ngy", neg_g_y)
+        lines.extend([
+            "_P256S-SETUP PRIME-P256",
+            "P256-GX _P256S-RX 32 MOVE",
+            "P256-GY _P256S-RY 32 MOVE",
+            "_P256S-ONE _P256S-RZ 32 MOVE",
+            "_P256S-RCB-DOUBLE-A3",
+            "pss-2gx _P256S-DZ _P256S-T4 FMUL",
+            "_P256S-DX _P256S-T4 _P256S-SEL-T FCEQ",
+            '." DBLX=" _P256S-SEL-T C@ .',
+            "pss-2gy _P256S-DZ _P256S-T4 FMUL",
+            "_P256S-DY _P256S-T4 _P256S-SEL-T FCEQ",
+            '." DBLY=" _P256S-SEL-T C@ .',
+            "P256-GX _P256S-DX 32 MOVE",
+            "P256-GY _P256S-DY 32 MOVE",
+            "_P256S-ONE _P256S-DZ 32 MOVE",
+            "_P256S-RCB-MIXED-ADD-G-A3",
+            "pss-2gx _P256S-AZ _P256S-T4 FMUL",
+            "_P256S-AX _P256S-T4 _P256S-SEL-T FCEQ",
+            '." ADDX=" _P256S-SEL-T C@ .',
+            "pss-2gy _P256S-AZ _P256S-T4 FMUL",
+            "_P256S-AY _P256S-T4 _P256S-SEL-T FCEQ",
+            '." ADDY=" _P256S-SEL-T C@ .',
+            "P256-GX _P256S-DX 32 MOVE",
+            "pss-ngy _P256S-DY 32 MOVE",
+            "_P256S-ONE _P256S-DZ 32 MOVE",
+            "_P256S-RCB-MIXED-ADD-G-A3",
+            "_P256S-AZ _P256S-ZERO _P256S-SEL-T FCEQ",
+            '." INVZ=" _P256S-SEL-T C@ .',
+            "_P256S-ZERO _P256S-RX 32 MOVE",
+            "_P256S-ONE _P256S-RY 32 MOVE",
+            "_P256S-ZERO _P256S-RZ 32 MOVE",
+            "_P256S-RCB-DOUBLE-A3",
+            "_P256S-DX _P256S-ZERO _P256S-SEL-T FCEQ",
+            '." OX=" _P256S-SEL-T C@ .',
+            "_P256S-DY _P256S-ONE _P256S-SEL-T FCEQ",
+            '." OY=" _P256S-SEL-T C@ .',
+            "_P256S-DZ _P256S-ZERO _P256S-SEL-T FCEQ",
+            '." OZ=" _P256S-SEL-T C@ .',
+            "_P256S-CLEANUP",
+        ])
+        text = self._run_kdos(lines)
+        for marker in ("DBLX", "DBLY", "ADDX", "ADDY", "INVZ",
+                       "OX", "OY", "OZ"):
+            self.assertIn(f"{marker}=1 ", text)
+
+    def test_p256_secret_scalar_vectors_have_equal_cycles(self):
+        """Different valid private scalars have the same architectural cost."""
+        generator_x = bytes.fromhex(
+            "6b17d1f2e12c4247f8bce6e563a440f2"
+            "77037d812deb33a0f4a13945d898c296"
+        )[::-1]
+        generator_y = bytes.fromhex(
+            "4fe342e2fe1a7f9b8ee7eb4a7c0f9e1"
+            "62bce33576b315ececbb6406837bf51f5"
+        )[::-1]
+        rfc_private = bytes.fromhex(
+            "c9afa9d845ba75166b5c215767b1d693"
+            "4e50c3db36e89b127b8a622b120f6721"
+        )[::-1]
+        rfc_public_x = bytes.fromhex(
+            "60fed4ba255a9d31c961eb74c6356d68"
+            "c049b8923b61fa6ce669622e60f29fb6"
+        )[::-1]
+        rfc_public_y = bytes.fromhex(
+            "7903fe1008b8bc99a41ae9e95628bc64"
+            "f2f1b20c2d7e9f5177a3c294d4462299"
+        )[::-1]
+        scalar_one = bytes([1]) + bytes(31)
+
+        one_cycles, _ = self._run_secret_scalar_case(
+            scalar_one, generator_x, generator_y
+        )
+        rfc_cycles, _ = self._run_secret_scalar_case(
+            rfc_private, rfc_public_x, rfc_public_y
+        )
+        self.assertEqual(one_cycles, rfc_cycles)
+
+    def test_p256_secret_failures_are_atomic_and_scrubbed(self):
+        """Invalid and aliased calls preserve outputs and clear owned state."""
+        scalar_one = bytes([1]) + bytes(31)
+        lines = self._store_bytes("pss-one", scalar_one)
+        lines.extend([
+            "CREATE pss-zero 32 ALLOT",
+            "CREATE pss-sentinel 32 ALLOT",
+            "CREATE pss-x 32 ALLOT",
+            "CREATE pss-y 32 ALLOT",
+            "CREATE pss-acc 32 ALLOT",
+            "CREATE pss-lo 32 ALLOT",
+            "CREATE pss-hi 32 ALLOT",
+            "CREATE pss-gx-copy 32 ALLOT",
+            "pss-zero 32 0 FILL",
+            "pss-sentinel 32 165 FILL",
+            "P256-GX pss-gx-copy 32 MOVE",
+            "11 _TRO-A ! 12 _TRO-A-U ! 13 _TRO-B ! 14 _TRO-B-U !",
+            ": pss-sentinel? ( a -- flag ) pss-sentinel _EC-T1 FCEQ _EC-T1 C@ 0<> ;",
+            ": pss-work-zero? ( -- flag ) TRUE /P256-SECRET-WORK 0 DO",
+            "  _P256-SECRET-WORK I + C@ 0= AND LOOP ;",
+            "pss-sentinel pss-x 32 MOVE pss-sentinel pss-y 32 MOVE",
+            "_P256-SECRET-WORK /P256-SECRET-WORK 90 FILL",
+            "pss-zero pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." ZERO=" .',
+            '." ZATOMIC=" pss-x pss-sentinel? pss-y pss-sentinel? AND .',
+            "pss-sentinel pss-x 32 MOVE pss-sentinel pss-y 32 MOVE",
+            "P256-N pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." N=" .',
+            '." NATOMIC=" pss-x pss-sentinel? pss-y pss-sentinel? AND .',
+            "pss-one pss-one pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." IOALIAS=" .',
+            "pss-one pss-x pss-x _P256-SECRET-BASE-MUL-CHECKED",
+            '." OOALIAS=" .',
+            "pss-one _P256-SECRET-WORK pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." WSALIAS=" .',
+            "TLS-OWNER-CORE pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." OWNERIN=" .',
+            "pss-one TLS-OWNER-CORE pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." OWNEROUT=" .',
+            "pss-one P256-GX pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." STATICOUT=" .',
+            '." WORKZERO=" pss-work-zero? .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            '." TRO=" _TRO-A @ 11 = _TRO-A-U @ 12 = AND _TRO-B @ 13 = AND _TRO-B-U @ 14 = AND .',
+            "pss-acc 32 90 FILL pss-acc GF-R@",
+            "pss-lo 32 90 FILL pss-hi 32 90 FILL",
+            "pss-zero pss-zero pss-lo pss-hi FMUL-ADD-RAW",
+            "P256-GX pss-gx-copy _EC-T1 FCEQ",
+            '." STATICOK=" _EC-T1 C@ .',
+            "pss-zero pss-acc _EC-T1 FCEQ",
+            '." ACC=" _EC-T1 C@ .',
+            "pss-zero pss-lo _EC-T1 FCEQ",
+            '." PREVLO=" _EC-T1 C@ .',
+            "pss-zero pss-hi _EC-T1 FCEQ",
+            '." PREVHI=" _EC-T1 C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("ZERO=-4303 ", text)
+        self.assertIn("N=-4303 ", text)
+        self.assertIn("IOALIAS=-4302 ", text)
+        self.assertIn("OOALIAS=-4302 ", text)
+        self.assertIn("WSALIAS=-4302 ", text)
+        self.assertIn("OWNERIN=-4302 ", text)
+        self.assertIn("OWNEROUT=-4302 ", text)
+        self.assertIn("STATICOUT=-4302 ", text)
+        for marker in ("ZATOMIC", "NATOMIC", "WORKZERO", "TRO"):
+            self.assertIn(f"{marker}=-1 ", text)
+        for marker in ("STATICOK", "ACC", "PREVLO", "PREVHI"):
+            self.assertIn(f"{marker}=1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
+    def test_p256_secret_busy_is_non_mutating(self):
+        """A foreign TLS owner gets busy without signer scratch mutation."""
+        lines = self._store_bytes("pss-one", bytes([1]) + bytes(31))
+        lines.extend([
+            "CREATE pss-sentinel 32 ALLOT",
+            "CREATE pss-x 32 ALLOT",
+            "CREATE pss-y 32 ALLOT",
+            "pss-sentinel 32 165 FILL",
+            "pss-sentinel pss-x 32 MOVE pss-sentinel pss-y 32 MOVE",
+            ": pss-sentinel? ( a -- flag ) pss-sentinel _EC-T1 FCEQ _EC-T1 C@ 0<> ;",
+            ": pss-work-poison? ( -- flag ) TRUE /P256-SECRET-WORK 0 DO",
+            "  _P256-SECRET-WORK I + C@ 90 = AND LOOP ;",
+            "TLS-OWNER-TRY DROP",
+            "TASK-ID 1+ TLS-OWNER-TASK !",
+            "_P256-SECRET-WORK /P256-SECRET-WORK 90 FILL",
+            "pss-one pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." BUSY=" .',
+            '." ATOMIC=" pss-x pss-sentinel? pss-y pss-sentinel? AND .',
+            '." WORK=" pss-work-poison? .',
+            '." HELD=" TLS-OWNER-DEPTH @ .',
+            "TASK-ID TLS-OWNER-TASK ! TLS-OWNER-RELEASE",
+            '." RELEASED=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("BUSY=-4206 ", text)
+        self.assertIn("ATOMIC=-1 ", text)
+        self.assertIn("WORK=-1 ", text)
+        self.assertIn("HELD=1 ", text)
+        self.assertIn("RELEASED=0 ", text)
+
+    def test_p256_secret_range_and_recursive_owner_paths(self):
+        """Range failures clean up, while nested ownership loses one depth."""
+        lines = self._store_bytes("pss-one", bytes([1]) + bytes(31))
+        lines.extend([
+            "CREATE pss-x 32 ALLOT CREATE pss-y 32 ALLOT",
+            "TLS-OWNER-TRY DROP",
+            '0 pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED ." RANGE=" .',
+            '." D1=" TLS-OWNER-DEPTH @ .',
+            "pss-one pss-x pss-y _P256-SECRET-BASE-MUL-CHECKED",
+            '." OK=" .',
+            '." D2=" TLS-OWNER-DEPTH @ .',
+            "TLS-OWNER-RELEASE",
+            '." D3=" TLS-OWNER-DEPTH @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("RANGE=-4301 ", text)
+        self.assertIn("D1=1 ", text)
+        self.assertIn("OK=0 ", text)
+        self.assertIn("D2=1 ", text)
+        self.assertIn("D3=0 ", text)
+
+    def test_p256_secret_unwind_rethrows_after_cleanup(self):
+        """The signer finally path scrubs and releases before exact rethrow."""
+        lines = [
+            ": pss-work-zero? ( -- flag ) TRUE /P256-SECRET-WORK 0 DO",
+            "  _P256-SECRET-WORK I + C@ 0= AND LOOP ;",
+            ": pss-unwind-probe ( -- ) -4377 _P256S-UNWIND ;",
+            "TLS-OWNER-TRY DROP",
+            "_P256-SECRET-WORK /P256-SECRET-WORK 90 FILL",
+            "' pss-unwind-probe CATCH",
+            '." THROW=" .',
+            '." WORKZERO=" pss-work-zero? .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("THROW=-4377 ", text)
+        self.assertIn("WORKZERO=-1 ", text)
+        self.assertIn("OWNER=0 ", text)
+
     def test_ecdsa_decode_sig_valid(self):
         """ECDSA-DECODE-SIG decodes a DER-encoded signature into r, s."""
         # Simple test: r=1, s=2

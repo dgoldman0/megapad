@@ -1692,6 +1692,15 @@ handler wiring.
 | `TLS-PARSE-CERTIFICATE` | `( msg mlen -- flag )` | Parse the bounded TLS Certificate message and authenticate its leaf through the configured path and hostname policy. |
 | `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify using ECDSA-P256-SHA256 or RSA-PSS-RSAE-SHA256 according to the authenticated leaf key. |
 
+The public `EC-*` words above are the branch-bearing, public-data verification
+path. They are not suitable for private scalars. Server-signing development
+uses a distinct internal homogeneous-projective base-point operation with a
+fixed 256-round architectural schedule and a fully scrubbed 960-byte owned
+workspace. That underscore-prefixed operation is intentionally absent from
+the public word table; credential provisioning will expose a lower-owned key
+through an opaque generational handle rather than make raw private-key spans a
+general networking API.
+
 ### §16.8–§16.11 TLS 1.3
 
 Authenticated bounded TLS 1.3 client profile with **dual-mode cipher suite**

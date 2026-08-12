@@ -4327,6 +4327,240 @@ CREATE _EC-ONE 32 ALLOT
 _EC-ONE 32 0 FILL
 1 _EC-ONE C!
 
+\ --- Secret-scalar P-256 base-point substrate ---
+\
+\ The verification path below uses public-data Jacobian arithmetic and is not
+\ suitable for signing.  This separate path uses the complete Renes-Costello-
+\ Batina formulas for a=-3 in homogeneous projective coordinates:
+\
+\     (X:Y:Z) -> (X/Z, Y/Z), infinity = (0:1:0)
+\
+\ Every admitted scalar executes 256 double/add/select rounds.  Selection is
+\ arithmetic rather than FCMOV because the current RTL FCMOV write-enable is
+\ conditional on the selected bit.  This is a fixed architectural schedule;
+\ it is not a claim of physical power-analysis resistance.
+
+960 CONSTANT /P256-SECRET-WORK
+CREATE _P256-SECRET-WORK /P256-SECRET-WORK ALLOT
+_P256-SECRET-WORK /P256-SECRET-WORK 0 FILL
+
+: _P256S-K          _P256-SECRET-WORK ;          \ owned scalar copy
+: _P256S-BIT        _P256-SECRET-WORK 32 + ;     \ 256-bit 0/1 selector
+: _P256S-ZERO       _P256-SECRET-WORK 64 + ;
+: _P256S-ONE        _P256-SECRET-WORK 96 + ;
+: _P256S-B          _P256-SECRET-WORK 128 + ;
+: _P256S-GX         _P256-SECRET-WORK 160 + ;
+: _P256S-GY         _P256-SECRET-WORK 192 + ;
+: _P256S-RX         _P256-SECRET-WORK 224 + ;
+: _P256S-RY         _P256-SECRET-WORK 256 + ;
+: _P256S-RZ         _P256-SECRET-WORK 288 + ;
+: _P256S-DX         _P256-SECRET-WORK 320 + ;
+: _P256S-DY         _P256-SECRET-WORK 352 + ;
+: _P256S-DZ         _P256-SECRET-WORK 384 + ;
+: _P256S-AX         _P256-SECRET-WORK 416 + ;
+: _P256S-AY         _P256-SECRET-WORK 448 + ;
+: _P256S-AZ         _P256-SECRET-WORK 480 + ;
+: _P256S-T0         _P256-SECRET-WORK 512 + ;
+: _P256S-T1         _P256-SECRET-WORK 544 + ;
+: _P256S-T2         _P256-SECRET-WORK 576 + ;
+: _P256S-T3         _P256-SECRET-WORK 608 + ;
+: _P256S-T4         _P256-SECRET-WORK 640 + ;
+: _P256S-SEL-T      _P256-SECRET-WORK 672 + ;
+: _P256S-ZINV       _P256-SECRET-WORK 704 + ;
+: _P256S-AFF-X      _P256-SECRET-WORK 736 + ;
+: _P256S-AFF-Y      _P256-SECRET-WORK 768 + ;
+: _P256S-RANGE-DIFF _P256-SECRET-WORK 800 + ;
+: _P256S-IN         _P256-SECRET-WORK 808 + ;
+: _P256S-OUT-X      _P256-SECRET-WORK 816 + ;
+: _P256S-OUT-Y      _P256-SECRET-WORK 824 + ;
+: _P256S-RANGE-ACC  _P256-SECRET-WORK 832 + ;
+: _P256S-OV-A       _P256-SECRET-WORK 832 + ;   \ pre-validation alias
+: _P256S-OV-A-U     _P256-SECRET-WORK 840 + ;   \ scratch shares this lane
+: _P256S-OV-B       _P256-SECRET-WORK 848 + ;
+: _P256S-OV-B-U     _P256-SECRET-WORK 856 + ;
+: _P256S-POW-SINK   _P256-SECRET-WORK 864 + ;
+: _P256S-HW-LO      _P256-SECRET-WORK 896 + ;
+: _P256S-HW-HI      _P256-SECRET-WORK 928 + ;
+\ The three pointer cells occupy padding in the range-difference lane.  The
+\ allocation ends exactly after the final 32-byte hardware cleanup sink; no
+\ unrelated reserve or product-capacity limit is hidden in this workspace.
+
+-4301 CONSTANT _P256S-E-RANGE
+-4302 CONSTANT _P256S-E-ALIAS
+-4303 CONSTANT _P256S-E-SCALAR
+
+: _P256S-METADATA-WIPE ( -- )
+    0 _P256S-IN ! 0 _P256S-OUT-X ! 0 _P256S-OUT-Y ! ;
+
+: _P256S-WORK-WIPE ( -- )
+    _P256-SECRET-WORK /P256-SECRET-WORK 0 FILL ;
+
+: _P256S-WIPE ( -- )
+    _P256S-WORK-WIPE
+    _P256S-METADATA-WIPE ;
+
+: _P256S-SETUP ( -- )
+    \ Preserve owner-qualified pointers while zeroing the single bounded
+    \ allocation that also contains their metadata lanes.
+    _P256S-IN @ _P256S-OUT-X @ _P256S-OUT-Y @
+    _P256S-WORK-WIPE
+    _P256S-OUT-Y ! _P256S-OUT-X ! _P256S-IN !
+    _EC-ONE _P256S-ONE 32 MOVE
+    P256-B  _P256S-B   32 MOVE
+    P256-GX _P256S-GX  32 MOVE
+    P256-GY _P256S-GY  32 MOVE ;
+
+\ Fixed 32-byte range qualification and copy.  The final borrow from k-n is
+\ one exactly when k<n.  An all-byte OR rejects zero.  Invalid scalar bytes
+\ are replaced arithmetically by the safe dummy scalar one so the expensive
+\ path can still run without a secret-dependent early exit.
+: _P256S-VALIDATE-SELECT ( scalar -- )
+    0 _P256S-RANGE-DIFF !
+    0 _P256S-RANGE-ACC !
+    32 0 DO
+        DUP I + C@ DUP _P256S-RANGE-ACC @ OR _P256S-RANGE-ACC !
+        P256-N I + C@ - _P256S-RANGE-DIFF @ -
+        63 RSHIFT 1 AND _P256S-RANGE-DIFF !
+    LOOP
+    _P256S-RANGE-ACC @ 0<> _P256S-RANGE-DIFF @ AND
+    DUP _P256S-RANGE-ACC !
+    0 SWAP -                         \ valid mask: all-zero or all-one
+    32 0 DO
+        OVER I + C@ OVER AND
+        _P256S-ONE I + C@ 2 PICK INVERT AND OR
+        _P256S-K I + C!
+    LOOP
+    2DROP ;
+
+\ RCB Algorithm 6, specialized to a=-3.  Input R and output D are disjoint.
+\ Fixed cost: 3 FSQR + 10 FMUL + 21 FADD/FSUB = 34 Field calls.
+: _P256S-RCB-DOUBLE-A3 ( -- )
+    _P256S-RX _P256S-T0 FSQR
+    _P256S-RY _P256S-T1 FSQR
+    _P256S-RZ _P256S-T2 FSQR
+    _P256S-RX _P256S-RY _P256S-T3 FMUL
+    _P256S-T3 _P256S-T3 _P256S-T3 FADD
+    _P256S-RX _P256S-RZ _P256S-DZ FMUL
+    _P256S-DZ _P256S-DZ _P256S-DZ FADD
+    _P256S-B _P256S-T2 _P256S-DY FMUL
+    _P256S-DY _P256S-DZ _P256S-DY FSUB
+    _P256S-DY _P256S-DY _P256S-DX FADD
+    _P256S-DX _P256S-DY _P256S-DY FADD
+    _P256S-T1 _P256S-DY _P256S-DX FSUB
+    _P256S-T1 _P256S-DY _P256S-DY FADD
+    _P256S-DX _P256S-DY _P256S-DY FMUL
+    _P256S-DX _P256S-T3 _P256S-DX FMUL
+    _P256S-T2 _P256S-T2 _P256S-T3 FADD
+    _P256S-T2 _P256S-T3 _P256S-T2 FADD
+    _P256S-B _P256S-DZ _P256S-DZ FMUL
+    _P256S-DZ _P256S-T2 _P256S-DZ FSUB
+    _P256S-DZ _P256S-T0 _P256S-DZ FSUB
+    _P256S-DZ _P256S-DZ _P256S-T3 FADD
+    _P256S-T3 _P256S-DZ _P256S-DZ FADD
+    _P256S-T0 _P256S-T0 _P256S-T3 FADD
+    _P256S-T3 _P256S-T0 _P256S-T0 FADD
+    _P256S-T0 _P256S-T2 _P256S-T0 FSUB
+    _P256S-T0 _P256S-DZ _P256S-T0 FMUL
+    _P256S-DY _P256S-T0 _P256S-DY FADD
+    _P256S-RY _P256S-RZ _P256S-T0 FMUL
+    _P256S-T0 _P256S-T0 _P256S-T0 FADD
+    _P256S-T0 _P256S-DZ _P256S-DZ FMUL
+    _P256S-DX _P256S-DZ _P256S-DX FSUB
+    _P256S-T0 _P256S-T1 _P256S-DZ FMUL
+    _P256S-DZ _P256S-DZ _P256S-DZ FADD
+    _P256S-DZ _P256S-DZ _P256S-DZ FADD ;
+
+\ RCB Algorithm 5, specialized to a=-3 and affine Q=G.  Input D and output A
+\ are disjoint.  Fixed cost: 13 FMUL + 23 FADD/FSUB = 36 Field calls.
+: _P256S-RCB-MIXED-ADD-G-A3 ( -- )
+    _P256S-DX _P256S-GX _P256S-T0 FMUL
+    _P256S-DY _P256S-GY _P256S-T1 FMUL
+    _P256S-GX _P256S-GY _P256S-T3 FADD
+    _P256S-DX _P256S-DY _P256S-T4 FADD
+    _P256S-T3 _P256S-T4 _P256S-T3 FMUL
+    _P256S-T0 _P256S-T1 _P256S-T4 FADD
+    _P256S-T3 _P256S-T4 _P256S-T3 FSUB
+    _P256S-GY _P256S-DZ _P256S-T4 FMUL
+    _P256S-T4 _P256S-DY _P256S-T4 FADD
+    _P256S-GX _P256S-DZ _P256S-AY FMUL
+    _P256S-AY _P256S-DX _P256S-AY FADD
+    _P256S-B _P256S-DZ _P256S-AZ FMUL
+    _P256S-AY _P256S-AZ _P256S-AX FSUB
+    _P256S-AX _P256S-AX _P256S-AZ FADD
+    _P256S-AX _P256S-AZ _P256S-AX FADD
+    _P256S-T1 _P256S-AX _P256S-AZ FSUB
+    _P256S-T1 _P256S-AX _P256S-AX FADD
+    _P256S-B _P256S-AY _P256S-AY FMUL
+    _P256S-DZ _P256S-DZ _P256S-T1 FADD
+    _P256S-T1 _P256S-DZ _P256S-T2 FADD
+    _P256S-AY _P256S-T2 _P256S-AY FSUB
+    _P256S-AY _P256S-T0 _P256S-AY FSUB
+    _P256S-AY _P256S-AY _P256S-T1 FADD
+    _P256S-T1 _P256S-AY _P256S-AY FADD
+    _P256S-T0 _P256S-T0 _P256S-T1 FADD
+    _P256S-T1 _P256S-T0 _P256S-T0 FADD
+    _P256S-T0 _P256S-T2 _P256S-T0 FSUB
+    _P256S-T4 _P256S-AY _P256S-T1 FMUL
+    _P256S-T0 _P256S-AY _P256S-T2 FMUL
+    _P256S-AX _P256S-AZ _P256S-AY FMUL
+    _P256S-AY _P256S-T2 _P256S-AY FADD
+    _P256S-T3 _P256S-AX _P256S-AX FMUL
+    _P256S-AX _P256S-T1 _P256S-AX FSUB
+    _P256S-T4 _P256S-AZ _P256S-AZ FMUL
+    _P256S-T3 _P256S-T0 _P256S-T1 FMUL
+    _P256S-AZ _P256S-T1 _P256S-AZ FADD ;
+
+: _P256S-LOAD-BIT ( round -- )
+    _P256S-BIT 32 0 FILL
+    DUP 3 RSHIFT 31 SWAP - _P256S-K + C@
+    SWAP 7 AND 7 SWAP - RSHIFT 1 AND
+    _P256S-BIT C! ;
+
+: _P256S-SELECT-R ( -- )
+    _P256S-AX _P256S-DX _P256S-SEL-T FSUB
+    _P256S-SEL-T _P256S-BIT _P256S-SEL-T FMUL
+    _P256S-DX _P256S-SEL-T _P256S-RX FADD
+    _P256S-AY _P256S-DY _P256S-SEL-T FSUB
+    _P256S-SEL-T _P256S-BIT _P256S-SEL-T FMUL
+    _P256S-DY _P256S-SEL-T _P256S-RY FADD
+    _P256S-AZ _P256S-DZ _P256S-SEL-T FSUB
+    _P256S-SEL-T _P256S-BIT _P256S-SEL-T FMUL
+    _P256S-DZ _P256S-SEL-T _P256S-RZ FADD ;
+
+: _P256S-SECRET-G-MUL ( -- )
+    PRIME-P256
+    _P256S-ZERO _P256S-RX 32 MOVE
+    _P256S-ONE  _P256S-RY 32 MOVE
+    _P256S-ZERO _P256S-RZ 32 MOVE
+    256 0 DO
+        _P256S-RCB-DOUBLE-A3
+        _P256S-RCB-MIXED-ADD-G-A3
+        I _P256S-LOAD-BIT
+        _P256S-SELECT-R
+    LOOP
+    _P256S-RZ _P256S-ZINV FINV
+    _P256S-RX _P256S-ZINV _P256S-AFF-X FMUL
+    _P256S-RY _P256S-ZINV _P256S-AFF-Y FMUL ;
+
+\ Clear only the Field state touched by this path.  FINV(0) overwrites the
+\ inversion engine's base/accumulator; FMUL-RAW(0,0) clears ACC and both
+\ persistent raw-multiply previous-result halves.  REDC/X25519 state is not
+\ touched and is intentionally outside this claim.
+: _P256S-FIELD-CLEAR ( -- )
+    _P256S-ZERO 32 0 FILL
+    PRIME-P256
+    _P256S-ZERO _P256S-POW-SINK FINV
+    _P256S-ZERO _P256S-ZERO _P256S-HW-LO _P256S-HW-HI FMUL-RAW ;
+
+: _P256S-CLEANUP ( -- )
+    _P256S-FIELD-CLEAR
+    _P256S-WIPE ;
+
+: _P256S-SECRET-RUN ( -- )
+    _P256S-SETUP
+    _P256S-IN @ _P256S-VALIDATE-SELECT
+    _P256S-SECRET-G-MUL ;
+
 \ EC-DOUBLE ( Px Py Pz Rx Ry Rz -- )
 \   Point doubling in Jacobian coordinates on P-256.
 \   If Py==0, result is point at infinity (0,1,0).
@@ -5800,6 +6034,67 @@ VARIABLE _TAAS-NAME-LEN
 : TLS-ALPN-ACCEPT-SELECTION ( ctx ext-a ext-u -- ior )
     TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
     (TLS-ALPN-ACCEPT-SELECTION) _TLS-OWNER-RETURN ;
+
+\ Owner-qualified entry to the secret-scalar substrate.  This remains an
+\ internal primitive: TLS credential provisioning will own private-key bytes
+\ and expose only an opaque generational handle.  Inputs and outputs are
+\ little-endian Field values.  Scalar contents with admitted, non-aliasing
+\ spans run the same full path; an invalid scalar runs that path with the
+\ dummy scalar one and leaves both output spans unchanged.
+: _P256S-ARGS-STATUS ( scalar out-x out-y -- ior )
+    _P256S-OUT-Y ! _P256S-OUT-X ! _P256S-IN !
+    _P256S-IN @ 32 CALLER-SPAN-STATUS IF _P256S-E-RANGE EXIT THEN
+    _P256S-OUT-X @ 32 CALLER-SPAN-STATUS IF _P256S-E-RANGE EXIT THEN
+    _P256S-OUT-Y @ 32 CALLER-SPAN-STATUS IF _P256S-E-RANGE EXIT THEN
+    TLS-E-OK ;
+
+: _P256S-RANGES-OVERLAP? ( a a-u b b-u -- flag )
+    _P256S-OV-B-U ! _P256S-OV-B !
+    _P256S-OV-A-U ! _P256S-OV-A !
+    _P256S-OV-A @ _P256S-OV-B @ _P256S-OV-B-U @ + U<
+    _P256S-OV-B @ _P256S-OV-A @ _P256S-OV-A-U @ + U< AND ;
+
+: _P256S-OUTPUT-STATIC-ALIAS? ( out -- flag )
+    32 P256-GX _EC-ONE 32 + P256-GX - _P256S-RANGES-OVERLAP? ;
+
+: _P256S-ARGS-ALIAS? ( -- flag )
+    _P256S-IN @ 32 _P256-SECRET-WORK /P256-SECRET-WORK
+    _P256S-RANGES-OVERLAP?
+    _P256S-OUT-X @ 32 _P256-SECRET-WORK /P256-SECRET-WORK
+    _P256S-RANGES-OVERLAP? OR
+    _P256S-OUT-Y @ 32 _P256-SECRET-WORK /P256-SECRET-WORK
+    _P256S-RANGES-OVERLAP? OR
+    _P256S-IN @ 32 _P256S-OUT-X @ 32 _P256S-RANGES-OVERLAP? OR
+    _P256S-IN @ 32 _P256S-OUT-Y @ 32 _P256S-RANGES-OVERLAP? OR
+    _P256S-OUT-X @ 32 _P256S-OUT-Y @ 32 _P256S-RANGES-OVERLAP? OR
+    _P256S-IN @ 32 TLS-OWNER-CORE
+    TLS-OWNER-DEPTH 1 CELLS + TLS-OWNER-CORE - _P256S-RANGES-OVERLAP? OR
+    _P256S-OUT-X @ 32 TLS-OWNER-CORE
+    TLS-OWNER-DEPTH 1 CELLS + TLS-OWNER-CORE - _P256S-RANGES-OVERLAP? OR
+    _P256S-OUT-Y @ 32 TLS-OWNER-CORE
+    TLS-OWNER-DEPTH 1 CELLS + TLS-OWNER-CORE - _P256S-RANGES-OVERLAP? OR
+    _P256S-OUT-X @ _P256S-OUTPUT-STATIC-ALIAS? OR
+    _P256S-OUT-Y @ _P256S-OUTPUT-STATIC-ALIAS? OR ;
+
+: _P256S-UNWIND ( throw -- )
+    >R _P256S-CLEANUP TLS-OWNER-RELEASE R> THROW ;
+
+: _P256S-FINISH ( ior -- ior )
+    >R _P256S-CLEANUP TLS-OWNER-RELEASE R> ;
+
+: _P256-SECRET-BASE-MUL-CHECKED ( scalar out-x out-y -- ior )
+    TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    _P256S-ARGS-STATUS DUP IF _P256S-FINISH EXIT THEN DROP
+    _P256S-ARGS-ALIAS? IF _P256S-E-ALIAS _P256S-FINISH EXIT THEN
+    ['] _P256S-SECRET-RUN CATCH DUP IF _P256S-UNWIND THEN DROP
+    _P256S-RANGE-ACC @ IF
+        _P256S-AFF-X _P256S-OUT-X @ 32 MOVE
+        _P256S-AFF-Y _P256S-OUT-Y @ 32 MOVE
+        TLS-E-OK
+    ELSE
+        _P256S-E-SCALAR
+    THEN
+    _P256S-FINISH ;
 
 0  CONSTANT TLS-CONNECT-E-OK
 1  CONSTANT TLS-CONNECT-E-CONFIG
