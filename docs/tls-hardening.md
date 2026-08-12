@@ -1,7 +1,7 @@
 # Native TLS Hardening
 
-Status: authenticated bounded P-256/RSA-2048 profile implemented; general WebPKI incomplete
-Last updated: 2026-07-14
+Status: authenticated bounded client profile implemented; server role gated on a qualified signer
+Last updated: 2026-08-12
 
 ## Purpose
 
@@ -15,6 +15,55 @@ The relevant standards are [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/r
 and [PKIX certificates (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280).
 The current implementation is a deliberately bounded profile of those
 standards, not a complete WebPKI implementation.
+
+## Server-Role Boundary and Readiness
+
+TLS server support belongs in the KDOS networking module.  KDOS already owns
+TCP, the TLS record layer, transcript and key scheduling, X.509 mechanics,
+alerts, and connection cleanup.  Higher layers should receive an authenticated
+secure byte stream and should not implement another TLS engine.  Listener
+policy, application protocol behavior, peer authorization, and service
+identity remain higher-layer responsibilities.
+
+The current implementation is not a TLS server.  In particular, copying the
+client handshake and reversing its traffic keys would omit the mandatory
+server proof of possession in `CertificateVerify`.  The following lower-level
+facts gate an authenticated server role:
+
+- P-256 `EC-MUL` branches on scalar bits and is qualified only for public
+  verification data.  It must not process a long-term signing key or an ECDSA
+  nonce.
+- The fixed RSA-2048 path implements the public exponent only.  There is no
+  private RSA operation, PSS signing path, or blinding contract.
+- KDOS has no protected private-key store or TLS credential-handle lifecycle.
+  A future opaque handle can prevent accidental exposure to higher layers, but
+  it cannot claim HSM-style isolation from arbitrary local supervisor code on
+  the current machine.
+- The checked `ENTROPY-FILL` BIOS interface fails atomically, but the checked-in
+  RTL TRNG backend is deterministic development logic.  Emulator vectors can
+  qualify protocol behavior; they cannot establish physical key-generation or
+  ephemeral-secret entropy claims.
+- Transcript, certificate, record, plaintext, and several cryptographic
+  scratch arenas are module-global.  The lower module must enforce one exact
+  owner or move retained state into connection-owned storage before concurrent
+  TLS connections are supported.
+
+The first interoperable server signature profile should be
+`ecdsa_secp256r1_sha256`, which matches the existing certificate parser and
+client signature offer.  Closing that gate requires a native secret-scalar
+operation with an appropriate constant-work argument, deterministic RFC 6979
+nonce derivation, fixed-work scalar arithmetic, canonical DER output, owned
+credential storage, public-key matching, cancellation, and complete software
+and hardware scratch cleanup.  Reusing `EC-MUL`, injecting a host callback, or
+precomputing a fixture signature is test scaffolding rather than a server
+security result.
+
+Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
+hash state, and enforced scratch ownership are independently useful client and
+server substrate.  They may be qualified before the signer exists, but they do
+not by themselves make a listening socket TLS-capable.  Evidence must keep
+emulator protocol correctness, RTL behavior, and physical entropy/side-channel
+claims separate.
 
 ## Security Invariant
 
