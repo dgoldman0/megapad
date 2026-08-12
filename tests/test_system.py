@@ -24518,6 +24518,39 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
     def _forth_bytes(name: str, data: bytes) -> list[str]:
         return TestKDOSTLSCredentials._forth_bytes(name, data)
 
+    @staticmethod
+    def _der(tag: int, value: bytes) -> bytes:
+        if len(value) < 128:
+            encoded_len = bytes([len(value)])
+        else:
+            raw_len = len(value).to_bytes(
+                (len(value).bit_length() + 7) // 8, "big"
+            )
+            encoded_len = bytes([0x80 | len(raw_len)]) + raw_len
+        return bytes([tag]) + encoded_len + value
+
+    @classmethod
+    def _algid(cls, oid_value: bytes, params: bytes | None = None) -> bytes:
+        body = cls._der(6, oid_value)
+        if params is not None:
+            body += params
+        return cls._der(0x30, body)
+
+    @classmethod
+    def _policy_certificate(
+        cls,
+        algorithm: bytes,
+        *,
+        tbs_algorithm: bytes | None = None,
+    ) -> bytes:
+        if tbs_algorithm is None:
+            tbs_algorithm = algorithm
+        tbs = cls._der(0x30, cls._der(2, b"\x01") + tbs_algorithm)
+        return cls._der(
+            0x30,
+            tbs + algorithm + cls._der(3, b"\x00\x00"),
+        )
+
     @classmethod
     def _provision_lines(cls) -> tuple[list[str], bytes]:
         return TestKDOSTLSCredentials._provision_lines()
@@ -24829,6 +24862,172 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "HS-U=6 HS=-1 ", "CERT-U=4 CERT=-1 ",
             "CERT-META-U=4 ", "FALLBACK-U=6 FALLBACK=-1 ",
             "FALLBACK-META-U=0 ", "SIGALG-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_certificate_signature_classifier_is_generic_and_sha1_explicit(self):
+        """Shallow classification is broader than the local verifier profile."""
+        null = self._der(5, b"")
+        rsa_prefix = bytes.fromhex("2a864886f70d0101")
+        ecdsa_prefix = bytes.fromhex("2a8648ce3d04")
+        hash_prefix = bytes.fromhex("6086480165030402")
+        mgf1 = rsa_prefix + b"\x08"
+        pss = rsa_prefix + b"\x0a"
+
+        rsa256 = self._algid(rsa_prefix + b"\x0b", null)
+        rsa256_absent = self._algid(rsa_prefix + b"\x0b")
+        rsa_sha1 = self._algid(rsa_prefix + b"\x05", null)
+        ecdsa256 = self._algid(ecdsa_prefix + b"\x03\x02")
+        ecdsa256_null = self._algid(ecdsa_prefix + b"\x03\x02", null)
+        unknown = self._algid(bytes.fromhex("2a0304"))
+
+        hash256 = self._algid(hash_prefix + b"\x01", null)
+        pss_params = self._der(
+            0x30,
+            self._der(0xA0, hash256)
+            + self._der(0xA1, self._algid(mgf1, hash256))
+            + self._der(0xA2, self._der(2, b"\x20")),
+        )
+        pss256 = self._algid(pss, pss_params)
+        pss_defaults = self._algid(pss, self._der(0x30, b""))
+
+        fixtures = {
+            "xcs-ecdsa256": self._policy_certificate(ecdsa256),
+            "xcs-rsa256": self._policy_certificate(rsa256),
+            "xcs-rsa256-absent": self._policy_certificate(rsa256_absent),
+            "xcs-sha1": self._policy_certificate(rsa_sha1),
+            "xcs-unknown": self._policy_certificate(unknown),
+            "xcs-pss256": self._policy_certificate(pss256),
+            "xcs-pss-defaults": self._policy_certificate(pss_defaults),
+            "xcs-bad-param": self._policy_certificate(ecdsa256_null),
+            "xcs-mismatch": self._policy_certificate(
+                ecdsa256,
+                tbs_algorithm=rsa256,
+            ),
+        }
+        lines: list[str] = []
+        for name, certificate in fixtures.items():
+            lines += self._forth_bytes(name, certificate)
+        for label, name in (
+            ("ECDSA256", "xcs-ecdsa256"),
+            ("RSA256", "xcs-rsa256"),
+            ("RSA256ABS", "xcs-rsa256-absent"),
+            ("SHA1", "xcs-sha1"),
+            ("UNKNOWN", "xcs-unknown"),
+            ("PSS256", "xcs-pss256"),
+            ("PSSDEFAULT", "xcs-pss-defaults"),
+            ("BADPARAM", "xcs-bad-param"),
+            ("MISMATCH", "xcs-mismatch"),
+        ):
+            length = len(fixtures[name])
+            lines += [
+                f"{name} {name} {length} + _X509-CERT-SIG-CLASSIFY",
+                f'." {label}-IOR=" . ." {label}-FLAGS=" . '
+                f'." {label}-SCHEME=" .',
+            ]
+        lines += ['." CLASSIFY-FINAL-DEPTH=" DEPTH .']
+        text = self._run_kdos(lines)
+        for token in (
+            "ECDSA256-IOR=0 ECDSA256-FLAGS=16 ECDSA256-SCHEME=1027 ",
+            "RSA256-IOR=0 RSA256-FLAGS=0 RSA256-SCHEME=1025 ",
+            "RSA256ABS-IOR=0 RSA256ABS-FLAGS=0 RSA256ABS-SCHEME=1025 ",
+            "SHA1-IOR=0 SHA1-FLAGS=1 SHA1-SCHEME=513 ",
+            "UNKNOWN-IOR=0 UNKNOWN-FLAGS=32 UNKNOWN-SCHEME=0 ",
+            "PSS256-IOR=0 PSS256-FLAGS=20 PSS256-SCHEME=2052 ",
+            "PSSDEFAULT-IOR=0 PSSDEFAULT-FLAGS=29 PSSDEFAULT-SCHEME=0 ",
+            "BADPARAM-IOR=-1 BADPARAM-FLAGS=0 BADPARAM-SCHEME=0 ",
+            "MISMATCH-IOR=-1 MISMATCH-FLAGS=0 MISMATCH-SCHEME=0 ",
+            "CLASSIFY-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_certificate_signature_policy_scans_complete_pinned_chain(self):
+        """Sole-chain fallback is explicit and SHA-1 needs an exact offer."""
+        leaf = TestKDOSTLSCredentials._fixture("leaf")
+        null = self._der(5, b"")
+        rsa_prefix = bytes.fromhex("2a864886f70d0101")
+        rsa384 = self._policy_certificate(
+            self._algid(rsa_prefix + b"\x0c", null)
+        )
+        rsa_sha1 = self._policy_certificate(
+            self._algid(rsa_prefix + b"\x05", null)
+        )
+        unknown = self._policy_certificate(
+            self._algid(bytes.fromhex("2a0304"))
+        )
+        private = TestKDOSTLSCredentials.PRIVATE_D3
+        chains = {
+            "tc-fallback-chain": leaf + rsa384,
+            "tc-sha1-chain": leaf + rsa384 + rsa_sha1,
+            "tc-unknown-chain": leaf + unknown,
+        }
+        lines: list[str] = []
+        for name, chain in chains.items():
+            lines += self._forth_bytes(name, chain)
+        lines += self._forth_bytes("tc-key", private)
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        hello_default = self._client_hello(cert_signature_schemes=(0x0403,))
+        hello_sha1 = self._client_hello(
+            cert_signature_schemes=(0x0403, 0x0201)
+        )
+        hello_unknown = self._client_hello(cert_signature_schemes=(0x0403,))
+        lines += self._forth_bytes("ch-default", hello_default)
+        lines += self._forth_bytes("ch-sha1", hello_sha1)
+        lines += self._forth_bytes("ch-unknown", hello_unknown)
+        lines += [
+            "3 TLS-CREDENTIAL-POOL-INIT DROP",
+            "VARIABLE fb-slot VARIABLE fb-gen VARIABLE fb-ior",
+            "VARIABLE sh-slot VARIABLE sh-gen VARIABLE sh-ior",
+            "VARIABLE un-slot VARIABLE un-gen VARIABLE un-ior",
+            f"tc-fallback-chain {len(chains['tc-fallback-chain'])} tc-key "
+            "TLS-CREDENTIAL-PROVISION fb-ior ! fb-gen ! fb-slot !",
+            f"tc-sha1-chain {len(chains['tc-sha1-chain'])} tc-key "
+            "TLS-CREDENTIAL-PROVISION sh-ior ! sh-gen ! sh-slot !",
+            f"tc-unknown-chain {len(chains['tc-unknown-chain'])} tc-key "
+            "TLS-CREDENTIAL-PROVISION un-ior ! un-gen ! un-slot !",
+            '." PROVISION=" fb-ior @ . sh-ior @ . un-ior @ .',
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ fb-slot @ fb-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ ch-default {len(hello_default)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." FALLBACK=" .',
+            '." FB-FLAGS=" server-ctx @ TLS-RXW.SERVER-META TSM.FLAGS + @ .',
+            '." FB-BITMAP=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP C@ .',
+            "server-ctx @ TLS-ABORT DROP",
+            "server-ctx @ sh-slot @ sh-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ ch-default {len(hello_default)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." SHA1-DENY=" .',
+            '." DENY-FLAGS=" server-ctx @ TLS-RXW.SERVER-META TSM.FLAGS + @ .',
+            '." DENY-BITMAP=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP C@ .',
+            "server-ctx @ TLS-ABORT DROP",
+            "server-ctx @ sh-slot @ sh-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ ch-sha1 {len(hello_sha1)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." SHA1-ALLOW=" .',
+            '." SHA1-FLAGS=" server-ctx @ TLS-RXW.SERVER-META TSM.FLAGS + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            "server-ctx @ un-slot @ un-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ ch-unknown {len(hello_unknown)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." UNKNOWN=" .',
+            '." UNKNOWN-FLAGS=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ .',
+            '." POLICY-FINAL-DEPTH=" DEPTH .',
+            "server-ctx @ TLS-ABORT DROP",
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "PROVISION=0 0 0 ",
+            "FALLBACK=0 ", "FB-FLAGS=11 ", "FB-BITMAP=0 ",
+            "SHA1-DENY=40 ", "DENY-FLAGS=3 ", "DENY-BITMAP=0 ",
+            "SHA1-ALLOW=0 ", "SHA1-FLAGS=27 ",
+            "UNKNOWN=80 ", "UNKNOWN-FLAGS=3 ",
+            "POLICY-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
