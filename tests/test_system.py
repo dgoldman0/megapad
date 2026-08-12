@@ -16314,6 +16314,96 @@ class TestBIOSEntropyFill(unittest.TestCase):
             bytes((self._GUARD,)) * self._LENGTH,
         )
 
+    def test_private_rand8_bus_fault_rejoins_unavailable_path(self):
+        """Only ENTROPY-FILL's RAND8 site converts a fault to status one."""
+        sys_obj, buf = self._boot_entropy()
+        self._guard_destination(sys_obj)
+        address_load = self._bios_labels["_entropy_fill_rand8_address"]
+        rand8_address = MMIO_START + 0x0800
+        reserved_address = MMIO_START + 0x0820
+        valid_load = assemble(f"ldi64 r11, {rand8_address}")
+        faulting_load = assemble(f"ldi64 r11, {reserved_address}")
+        self.assertEqual(len(faulting_load), len(valid_load))
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    address_load:address_load + len(valid_load)
+                ]
+            ),
+            valid_load,
+        )
+        for offset, value in enumerate(faulting_load):
+            sys_obj.cpu.mem_write8(address_load + offset, value)
+
+        initial_ie = sys_obj.cpu.flag_i
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            f'."  U=" {self._destination} {self._LENGTH} ENTROPY-FILL .',
+            '."  D=" DEPTH .',
+        ])
+        self.assertIn("U=1 ", text)
+        self.assertIn("D=0 ", text)
+        self.assertNotIn("BUS FAULT", text.upper())
+        self.assertEqual(sys_obj.cpu.flag_i, initial_ie)
+        self.assertEqual(
+            self._destination_bytes(sys_obj),
+            bytes((self._GUARD,)) * self._LENGTH,
+        )
+
+    def test_mid_fill_rand8_fault_wipes_the_complete_destination(self):
+        """A STATUS-to-RAND8 health race erases already published bytes."""
+        sys_obj, buf = self._boot_entropy()
+        self._guard_destination(sys_obj)
+        status_load_address = self._bios_labels[
+            "_entropy_fill_status_address"
+        ]
+        status_address = MMIO_START + 0x0810
+        fake_status_address = self._destination + self._LENGTH + 16
+        valid_load = assemble(f"ldi64 r11, {status_address}")
+        fake_load = assemble(f"ldi64 r11, {fake_status_address}")
+        self.assertEqual(len(fake_load), len(valid_load))
+        self.assertEqual(
+            bytes(
+                sys_obj.cpu.mem[
+                    status_load_address:status_load_address + len(valid_load)
+                ]
+            ),
+            valid_load,
+        )
+        sys_obj.cpu.mem_write8(fake_status_address, 1)
+        for offset, value in enumerate(fake_load):
+            sys_obj.cpu.mem_write8(status_load_address + offset, value)
+        state = sys_obj.cpu._cs
+        state._trng_test_health_loss_after(1)
+
+        initial_ie = sys_obj.cpu.flag_i
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            f'."  U=" {self._destination} {self._LENGTH} ENTROPY-FILL .',
+            '."  D=" DEPTH .',
+        ])
+        self.assertIn("U=1 ", text)
+        self.assertIn("D=0 ", text)
+        self.assertNotIn("BUS FAULT", text.upper())
+        self.assertEqual(sys_obj.cpu.flag_i, initial_ie)
+        self.assertEqual(self._destination_bytes(sys_obj), bytes(self._LENGTH))
+        self.assertEqual(
+            sys_obj.cpu.mem[self._destination - 1], self._GUARD
+        )
+        self.assertEqual(
+            sys_obj.cpu.mem[self._destination + self._LENGTH], self._GUARD
+        )
+        self.assertFalse(state.trng_usable())
+
+    def test_raw_random8_fault_remains_diagnostic(self):
+        """The entropy recovery PC does not consume a raw RANDOM8 fault."""
+        sys_obj, buf = self._boot_entropy()
+        sys_obj.cpu._cs._trng_test_health_loss_after(0)
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            "RANDOM8 .",
+            '."  RECOVERED"',
+        ])
+        self.assertIn("BUS FAULT", text.upper())
+        self.assertIn("RECOVERED", text)
+
     def test_mid_fill_and_final_byte_health_loss_wipe_full_span(self):
         """Every detected post-start failure erases the admitted output."""
         for successful_bytes in (5, self._LENGTH):
@@ -21384,6 +21474,61 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         "fake-ch 32 TLS-TR-APPEND",
         "fake-sh 32 TLS-TR-APPEND",
     ]
+
+    def test_tls_crypto_dispatch_guards_restore_or_retain_owner_depth(self):
+        """Ordinary throws unwind lock 10; failed lower cleanup retains it."""
+        lines = [
+            ": gd-zero? ( a u -- flag )",
+            "  0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP",
+            "  DROP -1 ;",
+            ": gd-negative ( -- status ) -776 THROW ;",
+            ": gd-tcd-negative ( -- )",
+            "  ['] gd-negative _TCD-GUARD DROP ;",
+            ": gd-tel-negative ( -- )",
+            "  ['] gd-negative _TEL-GUARD DROP ;",
+            "111 _TCD-CTX ! 222 _TCD-A ! 333 _TCD-CU !",
+            "TLS-OWNER-TRY DROP",
+            '." TCD-THROW=" \' gd-tcd-negative CATCH .',
+            '." TCD-DEPTH=" TLS-OWNER-DEPTH @ .',
+            '." TCD-WIPED=" _TCD-CTX @ _TCD-A @ OR _TCD-CU @ OR 0= .',
+            "TLS-HKDF-LABEL TLS-HKDF-LABEL-CAPACITY 165 FILL",
+            "111 _TEL-TLS-CTX ! 222 _TEL-SECRET ! 333 _TEL-OUT !",
+            "TLS-OWNER-TRY DROP",
+            '." TEL-THROW=" \' gd-tel-negative CATCH .',
+            '." TEL-DEPTH=" TLS-OWNER-DEPTH @ .',
+            '." TEL-META=" _TEL-TLS-CTX @ _TEL-SECRET @ OR '
+            '_TEL-OUT @ OR 0= .',
+            '." TEL-LABEL=" TLS-HKDF-LABEL '
+            'TLS-HKDF-LABEL-CAPACITY gd-zero? .',
+            ": gd-lower-throw ( a b c d e -- status )",
+            "  2DROP 2DROP DROP SHA256-INIT DROP -779 THROW ;",
+            ": gd-failing-clear ( -- status ) CRYPTO-HARDWARE ;",
+            ": gd-positive-core ( -- status )",
+            "  _HMAC-HKDF-TRY IF CRYPTO-STATE EXIT THEN",
+            "  1 2 3 4 5 ['] gd-lower-throw",
+            "  ['] _HKDF256-WIPE ['] gd-failing-clear",
+            "  _HMAC-HKDF-GUARD ;",
+            ": gd-positive-run ( -- )",
+            "  ['] gd-positive-core _TCD-GUARD DROP ;",
+            "TLS-OWNER-TRY DROP",
+            '." POSITIVE=" \' gd-positive-run CATCH .',
+            '." RETAINED=" TLS-OWNER-DEPTH @ .',
+            '." OWNER=" _TLS-OWNER? .',
+            '." LOWER-CLEAR=" SHA256-CLEAR .',
+            "_HMAC-HKDF-RELEASE TLS-OWNER-RELEASE",
+            '." RELEASED=" TLS-OWNER-DEPTH @ .',
+            '." REUSE=" SHA256-INIT . SHA256-CLEAR DROP',
+            '." GUARD-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "TCD-THROW=-776 ", "TCD-DEPTH=0 ", "TCD-WIPED=-1 ",
+            "TEL-THROW=-776 ", "TEL-DEPTH=0 ", "TEL-META=-1 ",
+            "TEL-LABEL=-1 ", "POSITIVE=6 ", "RETAINED=1 ",
+            "OWNER=-1 ", "LOWER-CLEAR=0 ", "RELEASED=0 ",
+            "REUSE=0 ", "GUARD-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
 
     def test_empty_hash_constant(self):
         """TLS-EMPTY-HASH contains SHA3-256 of empty string."""

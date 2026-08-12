@@ -845,12 +845,12 @@ unchanged; detected post-start unavailability wipes the complete admitted
 destination. A transition caused by a successfully delivered final byte is
 therefore a failure, not a published result.
 
-The global BIOS bus-fault handler cannot resume an interrupted Forth call. If
-usability changes in the narrow interval between a successful status read and
-the next data read, `RAND8` can fault before `ENTROPY-FILL` can return or wipe.
-This asynchronous race is deliberately documented instead of being presented
-as a recoverable status path; transitions observed after a successful data
-read do take the checked wipe path.
+The one `RAND8` instruction private to `ENTROPY-FILL` has a PC-scoped
+bus-fault recovery point. If usability changes in the narrow interval between
+a successful status read and that data read, the handler resumes the checked
+word with UNAVAILABLE so its ordinary complete-span wipe policy still runs.
+No mutable recovery flag is shared between cores, and every unrelated bus
+fault remains on the diagnostic path.
 
 ### Per-Core Infrastructure
 

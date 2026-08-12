@@ -1147,12 +1147,13 @@ is zeroed before returning UNAVAILABLE. The implementation keeps no
 caller-spanning transaction state. `ENTROPY-READY?` provides the same exact
 readiness check without exposing the MMIO register address to callers.
 
-A narrow hardware race remains explicit: the BIOS bus-fault handler abandons
-the interrupted Forth return chain, so loss of usability between a successful
-status read and its immediately following data read can fault rather than
-return a status, without a recoverable wipe. A health transition caused by a
-successfully returned data byte is detected by the next status read (or the
-mandatory final read) and does take the wipe path.
+The one data-read instruction private to `ENTROPY-FILL` has a PC-scoped
+bus-fault recovery point. Loss of usability between a successful status read
+and that immediately following `RAND8` therefore rejoins the same
+UNAVAILABLE path, including complete-span wipe after publication begins.
+Unrelated faults remain diagnostic, and a health transition caused by a
+successfully returned byte is still detected by the next status read (or the
+mandatory final read).
 
 ---
 

@@ -11282,12 +11282,13 @@ w_quit:
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
-    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers.  A fault
-    ; saves the architectural end-of-instruction PC, so recognize only the
-    ; instruction immediately following either helper access.  Returning
-    ; through the helper with R0=HARDWARE/PROTOCOL skips the faulting access
-    ; exactly once and leaves every unrelated bus fault on the diagnostic
-    ; path below.  No mutable recovery flag is shared between cores.
+    ; Checked SHA3/Keccak/WOTS accesses use two private byte helpers, and the
+    ; checked entropy publisher has one private RAND8 site.  A fault saves the
+    ; architectural end-of-instruction PC, so recognize only the instruction
+    ; immediately following one of those accesses.  Returning with a checked
+    ; status skips the faulting access exactly once and leaves every unrelated
+    ; bus fault on the diagnostic path below.  No mutable recovery flag is
+    ; shared between cores.
     ldn r0, r15                       ; saved end PC
     ldi64 r1, .sha3_mmio_read8_return
     cmp r0, r1
@@ -11295,6 +11296,9 @@ bus_fault_handler:
     ldi64 r1, .sha3_mmio_write8_return
     cmp r0, r1
     lbreq .bus_fault_checked_sha3
+    ldi64 r1, .entropy_fill_rand8_return
+    cmp r0, r1
+    lbreq .bus_fault_checked_entropy
 
     ; ---- Phase 9: capture diagnostics into stack before any calls ----
     ; Push order: addr (top), PSEL, T (bottom).  Print order: addr, PSEL, T.
@@ -11357,6 +11361,10 @@ bus_fault_handler:
 
 .bus_fault_checked_sha3:
     ldi r0, 6                         ; HARDWARE/PROTOCOL
+    rti
+
+.bus_fault_checked_entropy:
+    ldi r0, 1                         ; UNAVAILABLE
     rti
 
 ; =====================================================================
@@ -16224,12 +16232,12 @@ _entropy_fill_wipe:
 ; byte.  Detected unavailability after publication starts wipes the complete
 ; admitted destination.  A zero-length call is an unconditional no-op.
 ;
-; There is intentionally no caller-spanning BIOS state.  A bus fault caused
-; by the shared TRNG becoming unusable in the tiny interval between a
-; successful STATUS read and RAND8 cannot be converted by this word: the BIOS
-; bus-fault handler abandons the current Forth return chain.  Native health
-; transitions caused by a successful RAND8 are observable by the following
-; STATUS check and therefore do take the checked wipe path.
+; There is intentionally no caller-spanning BIOS state.  The private RAND8
+; instruction has one PC-scoped bus-fault recovery point, so a health loss in
+; the interval after the STATUS read is converted to UNAVAILABLE and rejoins
+; the same complete-span wipe path.  Every unrelated bus fault remains
+; diagnostic.  Native health transitions caused by a successful RAND8 are
+; observable by the following STATUS check and take the same checked path.
 w_entropy_fill:
     ldn r10, r14
     addi r14, 8
@@ -16246,13 +16254,19 @@ w_entropy_fill:
     ldi r12, 0
 .entropy_fill_loop:
     ; USABLE is an exact one-bit contract, not a permissive bit mask.
+_entropy_fill_status_address:
     ldi64 r11, 0xFFFF_FF00_0000_0810
     ld.b r1, r11
     cmpi r1, 1
     brne .entropy_fill_unavailable
 
+_entropy_fill_rand8_address:
     ldi64 r11, 0xFFFF_FF00_0000_0800
+    ldi r0, 0
     ld.b r1, r11
+.entropy_fill_rand8_return:
+    cmpi r0, 0
+    brne .entropy_fill_unavailable
     mov r7, r9
     add r7, r12
     st.b r7, r1

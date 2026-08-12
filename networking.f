@@ -7580,60 +7580,88 @@ VARIABLE _TCD-BU
 VARIABLE _TCD-C
 VARIABLE _TCD-CU
 
-: TLS-HASH ( ctx addr len out -- status )
-    TLS-OWNER-TRY IF 2DROP 2DROP TLS-E-BUSY EXIT THEN
-    _TCD-C ! _TCD-AU ! _TCD-A ! _TCD-CTX !
+: _TCD-WIPE  ( -- )
+    0 _TCD-CTX ! 0 _TCD-A ! 0 _TCD-AU ! 0 _TCD-B !
+    0 _TCD-BU ! 0 _TCD-C ! 0 _TCD-CU ! ;
+
+: _TCD-UNWIND  ( throw -- )
+    >R _TCD-WIPE R>
+    DUP 0> IF THROW THEN
+    >R TLS-OWNER-RELEASE R> THROW ;
+
+: _TCD-FINISH  ( status -- status )
+    >R _TCD-WIPE TLS-OWNER-RELEASE R> ;
+
+\ One no-argument dispatch core runs after its public arguments have been
+\ staged under lock 10.  Lower HMAC/HKDF guards release locks 8/9 before an
+\ ordinary rethrow; this matching guard erases pointer metadata and restores
+\ the recursive lock-10 depth before preserving that exact exception.
+: _TCD-GUARD  ( xt -- status )
+    CATCH DUP IF _TCD-UNWIND THEN DROP _TCD-FINISH ;
+
+: _TLS-HASH-DISPATCH  ( -- status )
     _TCD-CTX @ TLS-CRYPTO-PROFILE
     DUP TLS-CRYPTO-AES128-SHA256 = IF
         DROP _TCD-A @ _TCD-AU @ _TCD-C @ SHA256
-        _TLS-OWNER-RETURN EXIT
+        EXIT
     THEN
     TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-AU @ _TCD-C @ SHA3 _TLS-OWNER-RETURN EXIT
+        _TCD-A @ _TCD-AU @ _TCD-C @ SHA3 EXIT
     THEN
-    TLS-E-STATE _TLS-OWNER-RETURN ;
+    TLS-E-STATE ;
+
+: _TLS-HMAC-DISPATCH  ( -- status )
+    _TCD-CTX @ TLS-CRYPTO-PROFILE
+    DUP TLS-CRYPTO-AES128-SHA256 = IF
+        DROP _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @
+        HMAC-SHA256 EXIT
+    THEN
+    TLS-CRYPTO-AES256-SHA3 = IF
+        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HMAC EXIT
+    THEN
+    TLS-E-STATE ;
+
+: _TLS-HKDF-EXTRACT-DISPATCH  ( -- status )
+    _TCD-CTX @ TLS-CRYPTO-PROFILE
+    DUP TLS-CRYPTO-AES128-SHA256 = IF
+        DROP _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @
+        HKDF-SHA256-EXTRACT EXIT
+    THEN
+    TLS-CRYPTO-AES256-SHA3 = IF
+        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HKDF-EXTRACT EXIT
+    THEN
+    TLS-E-STATE ;
+
+: _TLS-HKDF-EXPAND-DISPATCH  ( -- status )
+    _TCD-CTX @ TLS-CRYPTO-PROFILE
+    DUP TLS-CRYPTO-AES128-SHA256 = IF
+        DROP _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @
+        HKDF-SHA256-EXPAND EXIT
+    THEN
+    TLS-CRYPTO-AES256-SHA3 = IF
+        _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @ HKDF-EXPAND EXIT
+    THEN
+    TLS-E-STATE ;
+
+: TLS-HASH ( ctx addr len out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP TLS-E-BUSY EXIT THEN
+    _TCD-C ! _TCD-AU ! _TCD-A ! _TCD-CTX !
+    ['] _TLS-HASH-DISPATCH _TCD-GUARD ;
 
 : TLS-HMAC ( ctx key klen msg mlen out -- status )
     TLS-OWNER-TRY IF 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-BU ! _TCD-B ! _TCD-AU ! _TCD-A ! _TCD-CTX !
-    _TCD-CTX @ TLS-CRYPTO-PROFILE
-    DUP TLS-CRYPTO-AES128-SHA256 = IF
-        DROP _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @
-        HMAC-SHA256 _TLS-OWNER-RETURN EXIT
-    THEN
-    TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HMAC
-        _TLS-OWNER-RETURN EXIT
-    THEN
-    TLS-E-STATE _TLS-OWNER-RETURN ;
+    ['] _TLS-HMAC-DISPATCH _TCD-GUARD ;
 
 : TLS-HKDF-EXTRACT ( ctx salt slen ikm ilen out -- status )
     TLS-OWNER-TRY IF 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-BU ! _TCD-B ! _TCD-AU ! _TCD-A ! _TCD-CTX !
-    _TCD-CTX @ TLS-CRYPTO-PROFILE
-    DUP TLS-CRYPTO-AES128-SHA256 = IF
-        DROP _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @
-        HKDF-SHA256-EXTRACT _TLS-OWNER-RETURN EXIT
-    THEN
-    TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-AU @ _TCD-B @ _TCD-BU @ _TCD-C @ HKDF-EXTRACT
-        _TLS-OWNER-RETURN EXIT
-    THEN
-    TLS-E-STATE _TLS-OWNER-RETURN ;
+    ['] _TLS-HKDF-EXTRACT-DISPATCH _TCD-GUARD ;
 
 : TLS-HKDF-EXPAND ( ctx prk info ilen len out -- status )
     TLS-OWNER-TRY IF 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
     _TCD-C ! _TCD-CU ! _TCD-BU ! _TCD-B ! _TCD-A ! _TCD-CTX !
-    _TCD-CTX @ TLS-CRYPTO-PROFILE
-    DUP TLS-CRYPTO-AES128-SHA256 = IF
-        DROP _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @
-        HKDF-SHA256-EXPAND _TLS-OWNER-RETURN EXIT
-    THEN
-    TLS-CRYPTO-AES256-SHA3 = IF
-        _TCD-A @ _TCD-B @ _TCD-BU @ _TCD-CU @ _TCD-C @ HKDF-EXPAND
-        _TLS-OWNER-RETURN EXIT
-    THEN
-    TLS-E-STATE _TLS-OWNER-RETURN ;
+    ['] _TLS-HKDF-EXPAND-DISPATCH _TCD-GUARD ;
 
 : TLS-KEY-LEN ( ctx -- n )
     TLS-OWNER-TRY IF DROP 0 EXIT THEN
@@ -9444,33 +9472,38 @@ VARIABLE _TEL-OUT
 : _TEL-RETURN ( ior -- ior )
     >R _TEL-WIPE TLS-OWNER-RELEASE R> ;
 
-: TLS-EXPAND-LABEL ( ctx secret label llen context clen olen out -- status )
-    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
-    _TEL-OUT !  _TEL-OLEN !  _TEL-CLEN !  _TEL-CTXP !
-    _TEL-LLEN !  _TEL-LABEL !  _TEL-SECRET ! _TEL-TLS-CTX !
+: _TEL-UNWIND  ( throw -- )
+    >R _TEL-WIPE R>
+    DUP 0> IF THROW THEN
+    >R TLS-OWNER-RELEASE R> THROW ;
+
+: _TEL-GUARD  ( xt -- status )
+    CATCH DUP IF _TEL-UNWIND THEN DROP _TEL-RETURN ;
+
+: _TLS-EXPAND-LABEL-DISPATCH  ( -- status )
     _TEL-TLS-CTX @ TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE = IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-LLEN @ DUP 1 < SWAP 249 > OR IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-CLEN @ DUP 0< SWAP 255 > OR IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-OLEN @ DUP 0< SWAP 8160 > OR IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-SECRET @ 32 CALLER-SPAN-STATUS IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-LABEL @ _TEL-LLEN @ CALLER-SPAN-STATUS IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-CTXP @ _TEL-CLEN @ CALLER-SPAN-STATUS IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     _TEL-OUT @ _TEL-OLEN @ CALLER-SPAN-STATUS IF
-        TLS-E-STATE _TEL-RETURN EXIT
+        TLS-E-STATE EXIT
     THEN
     \ [0-1] output length (big-endian)
     _TEL-OLEN @ 8 RSHIFT TLS-HKDF-LABEL C!
@@ -9497,8 +9530,13 @@ VARIABLE _TEL-OUT
     _TEL-TLS-CTX @ _TEL-SECRET @ TLS-HKDF-LABEL
     _TEL-LLEN @ 10 + _TEL-CLEN @ +
     _TEL-OLEN @ _TEL-OUT @ TLS-HKDF-EXPAND
-    _TEL-RETURN
 ;
+
+: TLS-EXPAND-LABEL ( ctx secret label llen context clen olen out -- status )
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP 2DROP TLS-E-BUSY EXIT THEN
+    _TEL-OUT !  _TEL-OLEN !  _TEL-CLEN !  _TEL-CTXP !
+    _TEL-LLEN !  _TEL-LABEL !  _TEL-SECRET ! _TEL-TLS-CTX !
+    ['] _TLS-EXPAND-LABEL-DISPATCH _TEL-GUARD ;
 
 \ TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
 \   Verify a TLS 1.3 CertificateVerify message.

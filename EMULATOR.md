@@ -601,12 +601,12 @@ Exact `USABLE == 1` is required before every byte and after completion. A
 detected post-start loss wipes the entire admitted destination; an initial
 loss writes nothing.
 
-There is no BIOS transaction state between calls. The BIOS bus-fault handler
-cannot resume an interrupted Forth return chain, so a health transition in
-the small interval between a successful status read and its following data
-read can still fault without a recoverable status/wipe. Health loss caused by
-a successfully delivered byte is caught by the following status check,
-including after the final byte.
+There is no BIOS transaction state between calls. The one data-read
+instruction private to `ENTROPY-FILL` has a PC-scoped bus-fault recovery
+point, so a health transition after the status check returns UNAVAILABLE and
+uses the same complete-span wipe path. Unrelated bus faults remain diagnostic.
+Health loss caused by a successfully delivered byte is caught by the
+following status check, including after the final byte.
 
 **Field ALU (GF(p) arithmetic)**
 `FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`

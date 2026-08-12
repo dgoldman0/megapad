@@ -777,17 +777,12 @@ prove allocation ownership; the caller must still supply a buffer it manages.
 `ENTROPY-FILL` requires `STATUS` to equal exactly one before every byte read
 and after the final byte. An initial unavailable result leaves the destination
 unchanged. A detected loss after one or more bytes erases the entire admitted
-span before returning UNAVAILABLE. It retains no operation state across the
-call. `ENTROPY-READY?` exposes the same exact readiness decision without
-requiring higher-level software to know the TRNG MMIO address.
-
-The BIOS bus-fault handler cannot resume an interrupted Forth return chain.
-Consequently, if a concurrent health transition occurs specifically after a
-successful `STATUS` read but before the corresponding `RAND8` read, that data
-read may bus-fault instead of returning a status and the word cannot promise
-its wipe path. Health transitions caused by a successfully delivered native
-data byte are caught by the following `STATUS` check, including a transition
-on the final byte.
+span before returning UNAVAILABLE. The word's one private `RAND8` instruction
+also has a PC-scoped bus-fault recovery point: a health loss after the status
+check rejoins that same UNAVAILABLE/wipe path, while unrelated bus faults stay
+diagnostic. It retains no operation state across the call. `ENTROPY-READY?`
+exposes the same exact readiness decision without requiring higher-level
+software to know the TRNG MMIO address.
 
 ### Caller-managed span qualification (1 append-only word)
 
