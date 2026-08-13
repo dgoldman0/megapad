@@ -1727,11 +1727,15 @@ handler wiring.
 | `TLS-SERVER-CONTEXT-BEGIN` | `( ctx slot+1 generation alpn-a alpn-u -- ior )` | Begin a server-role handshake with one pinned credential and an owned zero-or-one-name ALPN policy. Setup is atomic and the pin remains held until publish, abort, close, or another terminal path releases it. |
 | `TLS-PARSE-CLIENT-HELLO` | `( ctx msg-a msg-u -- alert ior )` | Retain and transactionally admit one complete TLS 1.3 ClientHello. Peer protocol failures return a wire alert with zero `ior`; local failures use zero alert and a negative status. |
 | `TLS-SERVER-PREPARE-HELLO` | `( ctx -- alert ior )` | From an admitted ClientHello, apply pinned-chain signature policy, obtain checked ephemeral/random entropy, build exact ServerHello and EncryptedExtensions bytes, derive X25519/SHA-256 handshake secrets, install server-write/client-read record epochs at sequence zero, and publish the prepared server-hello phase last. Failures erase all phase output while retaining the admitted ClientHello and credential pin for alert/abort cleanup. |
-| `TLS-SERVER-PREPARE-FLIGHT` | `( ctx -- ior )` | From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, and derive master/application/exporter secrets without installing application record epochs. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This constructs immutable handshake material but does not protect or transmit it. |
+| `TLS-SERVER-PREPARE-FLIGHT` | `( ctx -- ior )` | From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, derive master/application/exporter secrets without installing application record epochs, and initialize the post-ClientHello emitter union. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This word prepares immutable material but performs no transport callback. |
+| `TLS-SERVER-FLIGHT-STEP-WITH` | `( ctx send-xt -- progress ior )` | Offer at most one retained server-flight record through `send-xt ( ctx record-a record-u -- actual )` without lock 10. The record is borrowed and read-only for the callback. Zero retains byte-identical retry state and returns `TLS-E-WOULD-BLOCK`; retries of that retained record must use the identical `send-xt`. The exact length commits the sequence/cursors and returns `TLS-SERVER-EMIT-RECORD` or `TLS-SERVER-EMIT-COMPLETE`; any short nonzero result, callback exception, or callback lock-10 leak is terminal. This socket-independent entry requires `TLS-CTX.TCB` to be zero. |
 
 `TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
 and future secrets have published; it is not transport readiness or an
-established connection. Owner/signer contention returns `TLS-E-BUSY` (-4206),
+established connection. Emitter progress values are none (0), one committed
+record (1), and complete (2). Exact Finished admission installs only the S-AP
+write epoch and publishes `TLSH-CLIENT-FINISHED-PENDING`, retaining the C-HS
+read epoch and its sequence. Owner/signer contention returns `TLS-E-BUSY` (-4206),
 credential cancellation returns `TLS-E-HANDSHAKE-CANCELLED` (-4217), and an
 admitted signer/hash/key-schedule failure records terminal
 `TLS-E-HANDSHAKE-CRYPTO` (-4216).
@@ -1777,11 +1781,12 @@ capability generations, not durable rollback counters.
 ### §16.8–§16.11 TLS 1.3
 
 Authenticated bounded TLS 1.3 client profile plus a partially integrated
-standard-profile server role. The server admits ClientHello and constructs the
-complete signed handshake messages transactionally, but does not yet emit
-plaintext ServerHello followed by protected EncryptedExtensions through
-Finished, authenticate client Finished through its state machine, or accept
-TLS sockets. Cipher-suite support is:
+standard-profile server role. The server admits ClientHello, constructs the
+complete signed handshake transactionally, and socket-independently emits
+plaintext ServerHello followed by MSS-fitting protected records through
+Finished. It does not yet authenticate client Finished through its state
+machine, attach an incarnation-safe accepted TCB, reject offered early data,
+or accept TLS sockets. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1852,14 +1857,27 @@ TLS lock 10 may also nest the nonblocking network TX lock 12 for exact
 transport admission. Lock 12 never acquires TLS, credential, or crypto locks;
 it serializes shared Ethernet/IP/TCP staging and NIC descriptor ownership, not
 independently parallel receive or TLS progress.
+The server-flight callback is the inverse boundary: lock 10 is released before
+the borrowed record is offered. A per-context nonrecursive driver claim keeps
+the pending record and lifecycle exclusive while unlocked. Documented
+same-context record, schedule, ALPN-publication, alert, and post-handshake
+mutators refuse for the whole prepared/pending flight, and callbacks that
+return holding lock 10 are contained as terminal contract violations. A
+nonzero raw TCB pointer is rejected by the emitter's validity check; it is
+never accepted as authority, retained in emitter metadata, dereferenced, or
+aborted. Secure accept must later supply incarnation-safe exclusive attachment
+authority.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 968 bytes. Each context also owns a 230,688-byte receive/server
 workspace:
 a 16,896-byte partial-record lane and an aligned retained-data lane capable of
 holding the bounded 73,732-byte post-handshake message, plus a 131,146-byte
-ClientHello lane, 8,192-byte duplicate-extension bitmap, 512-byte immutable
-server-message ledger, and 200 bytes of exact flight metadata. Incomplete encrypted
+ClientHello lane, an 8,192-byte one-way phase union, a 512-byte immutable
+server-message ledger, and 200 bytes of exact flight metadata. The union is the
+complete duplicate-extension bitmap during ClientHello admission; after flight
+preparation its leading TCP-MSS-sized lane retains one exact pending TLS record
+and 136 bytes of emitter metadata without changing workspace geometry. Incomplete encrypted
 application records, authenticated plaintext left after a caller-sized read,
 and fragmented post-handshake messages therefore survive across calls without
 aliasing another context.  Cryptographic work and the transient global

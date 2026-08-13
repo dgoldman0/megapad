@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus transactionally constructed TLS 1.3 server messages through CertificateVerify and Finished; retained-data TCP delivery and cooperative neighbor/TX admission implemented; bounded server-flight emission, control replay/close, client-Finished authentication, and secure listener integration remain gated
+Status: authenticated bounded client profile plus transactionally constructed and socket-independently emitted TLS 1.3 server flight through Finished; retained-data TCP delivery and cooperative neighbor/TX admission implemented; authoritative accepted-TCB attachment, control replay/close, rejected-0-RTT handling, client-Finished authentication, and secure listener integration remain gated
 Last updated: 2026-08-13
 
 ## Purpose
@@ -35,12 +35,17 @@ ClientHello || ServerHello, and installs role-correct handshake epochs as one
 atomic phase. A second transaction streams the exact pinned Certificate chain
 into the transcript, signs the RFC 8446 server CertificateVerify context,
 constructs exact CertificateVerify and Finished messages, commits the final
-transcript digest, and derives master, application, and exporter secrets. It
-does not install application record epochs or claim transport progress. The
-remaining server work is bounded plaintext ServerHello then protected
-EncryptedExtensions-through-Finished replay, explicit rejected 0-RTT handling,
-client-Finished verification/cutover, and secure accept. The
-following lower-level facts continue to bound an authenticated server role:
+transcript digest, and derives master, application, and exporter secrets. A
+connection-owned emitter now retains one exact record across backpressure,
+emits plaintext ServerHello followed by MSS-fitting protected records through
+Finished, commits its sequence and cursors only after exact admission, and
+installs only the S-AP write epoch after Finished admission. Its transport
+callback is socket-independent; binding it to a TCP child remains deferred
+until secure accept can transfer incarnation-safe, exclusive TCB ownership.
+The remaining server work is explicit rejected-0-RTT handling,
+client-Finished verification/cutover, an independent peer journey, and secure
+accept. The following lower-level facts continue to bound an authenticated
+server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
   verification data. Private signing now uses the separate fixed-schedule
@@ -70,11 +75,11 @@ client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
-the server gate still requires bounded outbound flight replay, rejected 0-RTT
-handling, client-Finished verification, the cooperative transport
-surface, and secure listener/accept integration. Reusing `EC-MUL`, injecting a host
-callback, or precomputing a fixture signature remains test scaffolding rather
-than a server security result.
+the server gate still requires authoritative accepted-TCB attachment behind
+the qualified outbound callback contract, rejected 0-RTT handling,
+client-Finished verification, retained TCP control/close, and secure
+listener/accept integration. Reusing `EC-MUL` or precomputing a fixture
+signature remains test scaffolding rather than a server security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
 hash state, per-context application RX state, and enforced serialized scratch
@@ -282,9 +287,10 @@ The protocol bound is the synthesized wire sum `sum(DER length + 5) <=
 initially empty per-entry extension vector, within the TLS uint24 Certificate
 body after its empty request context and list header. Server transcript
 construction already synthesizes that exact framing while streaming the chain
-through SHA-256. The pending protected emitter must reuse the same framing
-rules without forcing a large admitted chain through the fixed transcript
-arena.
+through SHA-256. The protected emitter reuses those framing words while
+streaming the same chain without forcing a large admitted chain through the
+fixed transcript arena. Ordinary multi-record coverage exists; the
+uint24-maximum emitted Certificate remains a release capstone.
 
 The leaf must have an uncompressed P-256 public key, must not be a CA, and,
 when present, KeyUsage must allow digital signatures and EKU must allow server
@@ -443,7 +449,7 @@ Handshake messages are reassembled across protected records in a bounded
 must be the only plaintext handshake message before encrypted traffic begins.
 Transcript and reassembly overflow are sticky fatal failures.
 
-The server construction path is intentionally separate from wire progress.
+Server construction is deliberately committed before wire progress.
 `TLS-SERVER-PREPARE-HELLO` publishes exact ServerHello and
 EncryptedExtensions ledger bytes plus the role-correct handshake epochs.
 `TLS-SERVER-PREPARE-FLIGHT` then streams the owned ClientHello, ledger, and
@@ -453,11 +459,33 @@ secrets. Busy and cancelled signing leave the first phase retryable. An
 admitted signer/crypto failure is terminal and wipes derived secrets without
 orphaning the credential pin needed by abort cleanup.
 
-This is deterministic message construction, not an emitted handshake. The
-reserved flight cursors do not yet protect or transmit those bytes, the server
-does not yet consume client Finished through its state machine, and no
-independent TLS peer has completed the profile. Those distinctions are release
-gates rather than documentation caveats.
+`TLS-SERVER-FLIGHT-STEP-WITH` advances that immutable flight through a
+socket-independent all-or-none callback. After flight preparation, the dead
+8192-byte duplicate-extension bitmap becomes a one-way phase union containing
+one exact TCP-MSS-sized pending TLS record and emitter metadata; workspace
+geometry does not grow. Plaintext ServerHello is emitted first without
+consuming a protected-record sequence. EncryptedExtensions, the streamed
+Certificate framing and DER, CertificateVerify, and Finished are then packed
+into protected records whose complete wire images fit one TCP MSS.
+
+The callback receives a borrowed read-only record only while it is executing,
+and lock 10 is not held across that call. Zero means backpressure and retains
+the exact record, nonce, sequence, and logical cursors. The exact record length
+means the callback synchronously accepted or independently retained every
+byte, after which sequence and cursors commit. A retained retry must use the
+same callback execution token; changing adapters is refused without offering
+or mutating the record. A short nonzero result, callback exception, or callback
+return while owning lock 10 is terminal. Same-context
+public record, key-schedule, ALPN-publication, alert, and post-handshake
+mutators refuse throughout the pending-flight lifetime. Abort remains possible
+between callback invocations and wipes the union and releases the credential.
+
+After exact Finished admission, the emitter installs only the prederived S-AP
+write epoch, preserves the C-HS read epoch and its sequence, and publishes
+client-Finished-pending. It intentionally has no raw-TCB adapter: this phase
+requires an unbound context until secure accept can transfer exclusive,
+incarnation-safe transport ownership. Rejected early data, client Finished,
+and an independent complete TLS peer journey remain release gates.
 
 `TLS-ALPN-CONFIGURE` copies zero or one exact ProtocolName into connection-owned
 storage before the handshake.  A nonempty name is bounded by ALPN's one-byte
@@ -704,6 +732,14 @@ Native guest tests cover:
 - exact server CertificateVerify, Finished, final transcript, master,
   application, and exporter derivation, including busy/cancel retry and
   terminal signer/THROW rollback;
+- exact socket-independent ServerHello and protected-flight record lengths and
+  SHA-256 oracles, byte-identical zero-result retry, commit-only sequence and
+  cursor advance, and final S-AP-write/C-HS-read cutover;
+- MSS fragmentation of a multi-certificate chain with decrypted plaintext
+  reconstruction, including retry of the first full Certificate record;
+- short-send, callback-THROW, staging-THROW, callback-owner-leak, durable-result
+  contention, stale-finalizer, pending-lifetime mutation, cancellation, secret
+  wipe, credential-reference, and driver-owner adversarial cases;
 - stale-key clearing on every failed Certificate message;
 - a real CertificateVerify signature from the fixture leaf key;
 - rejection of early Finished and unauthenticated application-key derivation;
@@ -734,9 +770,11 @@ Native guest tests cover:
 - clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
-These tests prove deterministic construction and failure atomicity. They do
-not yet prove outbound server-flight emission, client-Finished processing,
-secure socket acceptance, or interoperability with an independent TLS stack.
+These tests prove deterministic construction plus bounded socket-independent
+server-flight emission and failure atomicity. They do not yet prove an
+incarnation-safe accepted-TCB adapter, the uint24-maximum emitted Certificate,
+rejected-0-RTT handling, client-Finished processing, secure socket acceptance,
+or interoperability with an independent TLS stack.
 
 Signer and credential fixtures use only standardized or synthetic test
 scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
@@ -749,18 +787,14 @@ credential. None enters a product trust bundle or production credential slot.
 - Complete retained control ownership and replay for SYN, SYN-ACK, and FIN;
   harden active/passive admission; reserve or reclaim half-open children; and
   replace compatibility close with retained close-notify-before-FIN progress.
-- Enforce one TCB/one TLS-context attachment and a single nonblocking progress
-  driver per context. Add a bounded server step that first emits plaintext
-  ServerHello without consuming a TLS sequence, then emits at most one
-  MSS-fitting protected record for EncryptedExtensions through Finished.
-- Retain a never-accepted protected record in a connection-owned pending lane.
-  The server transport adapter is all-or-none: zero retries those exact bytes,
-  the exact record length commits the TLS sequence/flight cursor and transfers
-  retransmission ownership to the TCB, and a short nonzero result is a terminal
-  contract violation. Lock 10 must not span transport or neighbor-resolution
-  waits.
-- Stream the exact Certificate chain through that emitter and run the
-  approval-gated uint24-maximum Certificate capstone.
+- Introduce an incarnation/generation-safe accepted-child authority, enforce
+  one TCB/one TLS-context attachment, and bind its nonblocking exact-admission
+  adapter to the qualified `TLS-SERVER-FLIGHT-STEP-WITH` callback contract.
+  The socket-independent emitter must not acquire authority from a raw TCB
+  pointer.
+- Run the approval-gated uint24-maximum Certificate through the existing
+  streamed emitter and verify exact framing, record boundaries, retry, and
+  transcript/application-secret agreement.
 - Reject offered 0-RTT under a caller- or configuration-budgeted discard
   policy with exact exhaustion behavior; do not add an arbitrary hidden byte
   cap or an unbounded discard loop.

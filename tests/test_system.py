@@ -15080,6 +15080,11 @@ class TestBIOSSHA2(unittest.TestCase):
             ": TLS-OWNER-TRY 0 ;",
             ": TLS-OWNER-RELEASE ;",
             ": _TLS-OWNER-RETURN ;",
+            # This source-slice harness intentionally omits the BIOS exception
+            # vocabulary.  Supply its normal-completion ABI; complete-image
+            # tests separately exercise THROW cleanup and rethrow behavior.
+            ": CATCH EXECUTE 0 ;",
+            ": THROW DROP ;",
             ": SHA256 2DROP DROP 21 ;",
             ": SHA3 2DROP DROP 31 ;",
             ": HMAC-SHA256 2DROP 2DROP DROP 22 ;",
@@ -24872,8 +24877,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         )
 
     @classmethod
-    def _provision_lines(cls) -> tuple[list[str], bytes]:
-        return TestKDOSTLSCredentials._provision_lines()
+    def _provision_lines(cls, **kwargs) -> tuple[list[str], bytes]:
+        return TestKDOSTLSCredentials._provision_lines(**kwargs)
 
     @classmethod
     def _certificate_transcript_phase(
@@ -24913,12 +24918,14 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         )
 
     @classmethod
-    def _server_phase_one_lines(cls) -> tuple[list[str], bytes]:
+    def _server_phase_one_lines(
+        cls, *, certs: list[bytes] | None = None
+    ) -> tuple[list[str], bytes]:
         """Build one deterministic server context through published SH/EE."""
         hello, entropy, server_hello, encrypted_extensions = (
             cls._certificate_transcript_phase()
         )
-        lines, _ = cls._provision_lines()
+        lines, _ = cls._provision_lines(certs=certs)
         for name, data in (
             ("server-alpn", cls.ALPN),
             ("client-hello", hello),
@@ -25884,6 +25891,852 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "OWNER=0 ", "RETRY-IOR=-4204 ", "RETRY-CTX=-1 ",
             "RETRY-LEDGER=-1 ", "RETRY-META=-1 ", "RETRY-NEXT=1 ",
             "REFS-END=0 ", "FLIGHT-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_retries_owned_bytes_and_cuts_over_write_epoch(self):
+        """The socket-independent driver emits each record exactly once."""
+        expected_hashes = b"".join(bytes.fromhex(value) for value in (
+            "f4c91bd6d8ba40eb7ae4404ac7cf2de0be6c7e3237e9458c022c8b61f731abd6",
+            "c691aaeb90548131d6404bc558a2e8525f5e5e365399a4c48d9320f70965b035",
+            "c7ec40ef6f594a1bb295c1bebcc757a6d4e8476e04602d4eb5b5e9ff8dbc175d",
+            "cd92dd4579370d423e9e35834107c34f6c9c495a4124c21b4b744fa90bcc4379",
+            "6c0ae11654ed9f02249319980defb847dccb34157fca29783005c8943d949f63",
+        ))
+        expected_app_key = bytes.fromhex(
+            "fc25bd47441882cf1134624368e3e98a"
+        )
+        expected_app_iv = bytes.fromhex("9bc413c4866cbcdc862207b1")
+        lines, _ = self._server_phase_one_lines()
+        lines += self._forth_bytes("expected-record-hashes", expected_hashes)
+        lines += self._forth_bytes("expected-app-key", expected_app_key)
+        lines += self._forth_bytes("expected-app-iv", expected_app_iv)
+        lines += [
+            "CREATE expected-record-lens 127 , 43 , 43 , 43 , 503 , 101 , 58 ,",
+            "CREATE emitter-hash 32 ALLOT",
+            "CREATE emitter-retry TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "CREATE emitter-rd-epoch 44 ALLOT",
+            "VARIABLE emitter-call VARIABLE emitter-a VARIABLE emitter-u",
+            "VARIABLE emitter-result VARIABLE emitter-hashes-ok",
+            "VARIABLE emitter-lens-ok VARIABLE emitter-retries-ok",
+            "VARIABLE emitter-owner-ok",
+            "-1 emitter-hashes-ok ! -1 emitter-lens-ok !",
+            "-1 emitter-retries-ok ! -1 emitter-owner-ok !",
+            ": emitter-send ( ctx record-a record-u -- actual )",
+            "  emitter-u ! emitter-a ! DROP",
+            "  TLS-OWNER-DEPTH @ IF 0 emitter-owner-ok ! THEN",
+            "  emitter-u @ emitter-call @ CELLS expected-record-lens + @",
+            "  <> IF 0 emitter-lens-ok ! THEN",
+            "  emitter-a @ emitter-u @ emitter-hash SHA256",
+            "  IF 0 emitter-hashes-ok ! THEN",
+            "  emitter-call @ DUP 0= IF DROP 0 ELSE",
+            "    DUP 4 < IF DROP 1 ELSE 2 - THEN THEN",
+            "  32 * expected-record-hashes + emitter-hash 32 _XC-BYTES=",
+            "  0= IF 0 emitter-hashes-ok ! THEN",
+            "  emitter-call @ 1 = IF",
+            "    emitter-a @ emitter-retry emitter-u @ MOVE THEN",
+            "  emitter-call @ DUP 2 = SWAP 3 = OR IF",
+            "    emitter-a @ emitter-retry emitter-u @ _XC-BYTES= 0=",
+            "    IF 0 emitter-retries-ok ! THEN THEN",
+            "  emitter-call @ DUP 1 >= SWAP 3 < AND",
+            "  IF 0 ELSE emitter-u @ THEN emitter-result !",
+            "  1 emitter-call +! emitter-result @ ;",
+            ": emitter-step ( -- progress ior )",
+            "  server-ctx @ ['] emitter-send TLS-SERVER-FLIGHT-STEP-WITH ;",
+            ": pending-zero? TLS-SERVER-PENDING-CAPACITY 0 DO",
+            "  DUP I + C@ IF DROP 0 UNLOOP EXIT THEN",
+            "  LOOP DROP -1 ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            '." EMIT-VALID=" server-ctx @ _TSSE-CONTEXT-VALID? .',
+            '." EMIT-MEMBER=" server-ctx @ _TLS-PURE-CTX-MEMBER? .',
+            '." EMIT-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." EMIT-FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." EMIT-TR=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.TRANSCRIPT-PHASE + @ .',
+            "server-ctx @ TLS-CTX.RD-KEY emitter-rd-epoch 44 MOVE",
+            "emitter-step",
+            '." S0-IOR=" . ." S0-PROGRESS=" .',
+            '." S0-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." S0-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            "emitter-step",
+            '." E0-IOR=" . ." E0-PROGRESS=" .',
+            '." E0-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." E0-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." E0-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            "TLS-SEND-REC 1600 165 FILL",
+            "emitter-step",
+            '." E1-IOR=" . ." E1-PROGRESS=" .',
+            '." E1-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            "emitter-step",
+            '." E2-IOR=" . ." E2-PROGRESS=" .',
+            '." E2-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." E2-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            "emitter-step",
+            '." CERT-IOR=" . ." CERT-PROGRESS=" .',
+            '." CERT-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." CERT-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            "emitter-step",
+            '." CV-IOR=" . ." CV-PROGRESS=" .',
+            '." CV-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            "emitter-step",
+            '." FIN-IOR=" . ." FIN-PROGRESS=" .',
+            '." FIN-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." FIN-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." WR-KEY=" server-ctx @ TLS-CTX.WR-KEY '
+            'expected-app-key 16 _XC-BYTES= .',
+            '." WR-IV=" server-ctx @ TLS-CTX.WR-IV '
+            'expected-app-iv 12 _XC-BYTES= .',
+            '." RD-EPOCH=" server-ctx @ TLS-CTX.RD-KEY '
+            'emitter-rd-epoch 44 _XC-BYTES= .',
+            '." HASHES=" emitter-hashes-ok @ .',
+            '." LENS=" emitter-lens-ok @ .',
+            '." RETRIES=" emitter-retries-ok @ .',
+            '." CALLBACK-OWNER=" emitter-owner-ok @ .',
+            '." CALLS=" emitter-call @ .',
+            '." PENDING-ZERO=" server-ctx @ TLS-RXW.SERVER-PENDING '
+            'pending-zero? .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'server-ctx @ 0 TLS-SERVER-FLIGHT-STEP-WITH '
+            '." NULL-IOR=" . ." NULL-PROGRESS=" .',
+            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ",
+            "EMIT-VALID=-1 ", "EMIT-MEMBER=-1 ", "EMIT-PIN=-1 ",
+            "EMIT-FLIGHT=2 ", "EMIT-TR=2 ",
+            "S0-IOR=0 S0-PROGRESS=1 ", "S0-SEQ=0 ", "S0-PHASE=2 ",
+            "E0-IOR=-4219 E0-PROGRESS=0 ", "E0-SEQ=0 ",
+            "E0-PHASE=2 ", "E0-PENDING=1 ",
+            "E1-IOR=-4219 E1-PROGRESS=0 ", "E1-SEQ=0 ",
+            "E2-IOR=0 E2-PROGRESS=1 ", "E2-SEQ=1 ",
+            "E2-PHASE=3 ",
+            "CERT-IOR=0 CERT-PROGRESS=1 ", "CERT-SEQ=2 ",
+            "CERT-PHASE=7 ",
+            "CV-IOR=0 CV-PROGRESS=1 ", "CV-SEQ=3 ",
+            "FIN-IOR=0 FIN-PROGRESS=2 ", "FIN-SEQ=0 ",
+            "FIN-PHASE=10 ", "HS=7 ", "STATE=1 ", "ERROR=0 ",
+            "AUTH=0 ", "WR-KEY=-1 ", "WR-IV=-1 ", "RD-EPOCH=-1 ",
+            "HASHES=-1 ", "LENS=-1 ", "RETRIES=-1 ",
+            "CALLBACK-OWNER=-1 ", "CALLS=7 ", "PENDING-ZERO=-1 ",
+            "DRIVER=0 ", "REFS=1 ",
+            "NULL-IOR=-4204 NULL-PROGRESS=0 ", "ABORT=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_guards_unlocked_lifecycle(self):
+        """The retained record cannot be revoked or recursively offered."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "CREATE lifecycle-copy TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "CREATE lifecycle-record TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "CREATE lifecycle-plain TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "CREATE lifecycle-epoch 112 ALLOT",
+            "VARIABLE lifecycle-ctx VARIABLE lifecycle-u",
+            "VARIABLE lifecycle-inner-calls VARIABLE lifecycle-owner",
+            "VARIABLE lifecycle-status VARIABLE lifecycle-close",
+            "VARIABLE lifecycle-abort VARIABLE lifecycle-pin",
+            "VARIABLE lifecycle-encrypt VARIABLE lifecycle-decrypt-type",
+            "VARIABLE lifecycle-decrypt-u VARIABLE lifecycle-ks-hs",
+            "VARIABLE lifecycle-ks-app VARIABLE lifecycle-alpn",
+            "VARIABLE lifecycle-ee VARIABLE lifecycle-alert",
+            "VARIABLE lifecycle-send-alert VARIABLE lifecycle-epoch-ok",
+            "VARIABLE lifecycle-nested-progress VARIABLE lifecycle-nested-ior",
+            "VARIABLE lifecycle-bytes-ok VARIABLE lifecycle-state-ok",
+            ": lifecycle-inner ( ctx record-a record-u -- actual )",
+            "  2DROP DROP 1 lifecycle-inner-calls +! 0 ;",
+            ": lifecycle-send ( ctx record-a record-u -- actual )",
+            "  lifecycle-u ! DROP lifecycle-ctx !",
+            "  TLS-OWNER-DEPTH @ lifecycle-owner !",
+            "  lifecycle-ctx @ TLS-RXW.SERVER-PENDING lifecycle-copy",
+            "  lifecycle-u @ MOVE",
+            "  lifecycle-ctx @ TLS-IO-STATUS lifecycle-status !",
+            "  lifecycle-ctx @ TLS-CLOSE-TRY lifecycle-close !",
+            "  lifecycle-ctx @ TLS-ABORT lifecycle-abort !",
+            "  lifecycle-ctx @ _TLS-SERVER-PIN-RELEASE lifecycle-pin !",
+            "  lifecycle-ctx @ TLS-CT-HANDSHAKE lifecycle-copy 1",
+            "  lifecycle-record TLS-ENCRYPT-RECORD lifecycle-encrypt !",
+            "  lifecycle-ctx @ lifecycle-copy lifecycle-u @ lifecycle-plain",
+            "  TLS-DECRYPT-RECORD",
+            "  lifecycle-decrypt-u ! lifecycle-decrypt-type !",
+            "  lifecycle-ctx @ TLS-KS-HANDSHAKE lifecycle-ks-hs !",
+            "  lifecycle-ctx @ TLS-KS-APPLICATION lifecycle-ks-app !",
+            "  lifecycle-ctx @ lifecycle-copy 1",
+            "  TLS-ALPN-ACCEPT-SELECTION lifecycle-alpn !",
+            "  lifecycle-ctx @ lifecycle-copy lifecycle-u @",
+            "  TLS-PARSE-ENCRYPTED-EXT lifecycle-ee !",
+            "  lifecycle-ctx @ lifecycle-copy 2",
+            "  TLS-PROCESS-ALERT lifecycle-alert !",
+            "  lifecycle-ctx @ 2 80",
+            "  TLS-SEND-ALERT-TRY lifecycle-send-alert !",
+            "  lifecycle-ctx @ ['] lifecycle-inner",
+            "  TLS-SERVER-FLIGHT-STEP-WITH",
+            "  lifecycle-nested-ior ! lifecycle-nested-progress !",
+            "  lifecycle-ctx @ TLS-SERVER-WORKSPACE-WIPE",
+            "  lifecycle-ctx @ TLS-RX-WIPE",
+            "  lifecycle-ctx @ _TLS-SERVER-PHASE-WIPE",
+            "  lifecycle-ctx @ _TLS-CONNECTION-REVOKE",
+            "  lifecycle-ctx @ TLS-CTX.WR-KEY lifecycle-epoch 112",
+            "  _XC-BYTES= lifecycle-epoch-ok !",
+            "  lifecycle-ctx @ TLS-RXW.SERVER-PENDING lifecycle-copy",
+            "  lifecycle-u @ _XC-BYTES= lifecycle-bytes-ok !",
+            "  lifecycle-ctx @ TLS-CTX.STATE @ TLSS-HANDSHAKE =",
+            "  lifecycle-ctx @ _TLS-SERVER-PINNED? AND",
+            "  lifecycle-ctx @ TLS-RXW.SERVER-EMIT-META",
+            "  TSE.DRIVER-CLAIMED + @ 0<> AND lifecycle-state-ok !",
+            "  lifecycle-u @ ;",
+            ": lifecycle-step ( -- progress ior )",
+            "  server-ctx @ ['] lifecycle-send",
+            "  TLS-SERVER-FLIGHT-STEP-WITH ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "server-ctx @ TLS-CTX.WR-KEY lifecycle-epoch 112 MOVE",
+            "TLS-OWNER-TRY DROP lifecycle-step",
+            '." OUTER-HELD-IOR=" . ." OUTER-HELD-PROGRESS=" .',
+            '." OUTER-HELD-DEPTH=" TLS-OWNER-DEPTH @ .',
+            "TLS-OWNER-RELEASE",
+            "lifecycle-step",
+            '." STEP-IOR=" . ." STEP-PROGRESS=" .',
+            '." CALLBACK-OWNER=" lifecycle-owner @ .',
+            '." STATUS=" lifecycle-status @ .',
+            '." CLOSE=" lifecycle-close @ .',
+            '." ABORT=" lifecycle-abort @ .',
+            '." PIN=" lifecycle-pin @ .',
+            '." ENCRYPT=" lifecycle-encrypt @ .',
+            '." DECRYPT-TYPE=" lifecycle-decrypt-type @ .',
+            '." DECRYPT-U=" lifecycle-decrypt-u @ .',
+            '." KS-HS=" lifecycle-ks-hs @ .',
+            '." KS-APP=" lifecycle-ks-app @ .',
+            '." ALPN=" lifecycle-alpn @ .',
+            '." EE=" lifecycle-ee @ .',
+            '." ALERT=" lifecycle-alert @ .',
+            '." SEND-ALERT=" lifecycle-send-alert @ .',
+            '." EPOCH=" lifecycle-epoch-ok @ .',
+            '." NESTED-IOR=" lifecycle-nested-ior @ .',
+            '." NESTED-PROGRESS=" lifecycle-nested-progress @ .',
+            '." INNER-CALLS=" lifecycle-inner-calls @ .',
+            '." BYTES=" lifecycle-bytes-ok @ .',
+            '." ACTIVE-STATE=" lifecycle-state-ok @ .',
+            '." PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." FINAL-OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ",
+            "OUTER-HELD-IOR=-4206 OUTER-HELD-PROGRESS=0 ",
+            "OUTER-HELD-DEPTH=1 ",
+            "STEP-IOR=0 STEP-PROGRESS=1 ", "CALLBACK-OWNER=0 ",
+            "STATUS=-4206 ", "CLOSE=-4206 ", "ABORT=3 ",
+            "PIN=-4329 ", "NESTED-IOR=-4206 ",
+            "ENCRYPT=0 ", "DECRYPT-TYPE=-1 ", "DECRYPT-U=0 ",
+            "KS-HS=-4206 ", "KS-APP=-4206 ", "ALPN=-4206 ",
+            "EE=-1 ", "ALERT=-4206 ", "SEND-ALERT=-4206 ",
+            "EPOCH=-1 ",
+            "NESTED-PROGRESS=0 ", "INNER-CALLS=0 ",
+            "BYTES=-1 ", "ACTIVE-STATE=-1 ", "PHASE=2 ",
+            "DRIVER=0 ", "REFS=1 ", "STATE=1 ", "ERROR=0 ",
+            "FINAL-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_guards_pending_lifetime_and_can_abort(self):
+        """A retained retry seals its epoch but remains explicitly cancellable."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "CREATE pending-record TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "CREATE pending-copy TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "CREATE pending-emeta /TLS-SERVER-EMIT-META ALLOT",
+            "CREATE pending-fmeta TLS-SERVER-META-CAPACITY ALLOT",
+            "CREATE pending-epoch 112 ALLOT",
+            "VARIABLE pending-u VARIABLE pending-calls",
+            "VARIABLE pending-other-calls VARIABLE pending-same",
+            "VARIABLE pending-encrypt VARIABLE pending-ks",
+            ": pending-send ( ctx record-a record-u -- actual )",
+            "  pending-u ! 2DROP 1 pending-calls +! 0 ;",
+            ": pending-other ( ctx record-a record-u -- actual )",
+            "  2DROP DROP 1 pending-other-calls +! 0 ;",
+            ": pending-step ( -- progress ior )",
+            "  server-ctx @ ['] pending-send",
+            "  TLS-SERVER-FLIGHT-STEP-WITH ;",
+            ": pending-zero? ( a u -- flag )",
+            "  0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN",
+            "  LOOP DROP -1 ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "pending-step",
+            '." STEP-IOR=" . ." STEP-PROGRESS=" .',
+            '." CALLS=" pending-calls @ .',
+            '." PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            "server-ctx @ TLS-RXW.SERVER-PENDING pending-copy",
+            "pending-u @ MOVE",
+            "server-ctx @ TLS-RXW.SERVER-EMIT-META pending-emeta",
+            "/TLS-SERVER-EMIT-META MOVE",
+            "server-ctx @ TLS-RXW.SERVER-META pending-fmeta",
+            "TLS-SERVER-META-CAPACITY MOVE",
+            "server-ctx @ TLS-CTX.WR-KEY pending-epoch 112 MOVE",
+            "server-ctx @ ' pending-other TLS-SERVER-FLIGHT-STEP-WITH",
+            '." OTHER-IOR=" . ." OTHER-PROGRESS=" .',
+            '." OTHER-CALLS=" pending-other-calls @ .',
+            "server-ctx @ TLS-RXW.SERVER-PENDING pending-copy",
+            "pending-u @ _XC-BYTES= pending-same !",
+            '." OTHER-SAME=" pending-same @ .',
+            '." OTHER-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            "server-ctx @ TLS-CT-HANDSHAKE server-alpn 1",
+            "pending-record TLS-ENCRYPT-RECORD pending-encrypt !",
+            "server-ctx @ TLS-KS-HANDSHAKE pending-ks !",
+            '." ENCRYPT=" pending-encrypt @ .',
+            '." KS=" pending-ks @ .',
+            '." SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." SEALED-BYTES=" server-ctx @ TLS-RXW.SERVER-PENDING '
+            'pending-copy pending-u @ _XC-BYTES= .',
+            '." SEALED-EMETA=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'pending-emeta /TLS-SERVER-EMIT-META _XC-BYTES= .',
+            '." SEALED-FMETA=" server-ctx @ TLS-RXW.SERVER-META '
+            'pending-fmeta TLS-SERVER-META-CAPACITY _XC-BYTES= .',
+            '." SEALED-EPOCH=" server-ctx @ TLS-CTX.WR-KEY '
+            'pending-epoch 112 _XC-BYTES= .',
+            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." UNION-ZERO=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP '
+            'TLS-SERVER-EXT-BITMAP-CAPACITY pending-zero? .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "STEP-IOR=-4219 STEP-PROGRESS=0 ",
+            "CALLS=1 ", "PENDING=1 ", "DRIVER=0 ",
+            "OTHER-IOR=-4204 OTHER-PROGRESS=0 ", "OTHER-CALLS=0 ",
+            "OTHER-SAME=-1 ", "OTHER-PENDING=1 ",
+            "ENCRYPT=0 ", "KS=-4206 ", "SEQ=0 ", "ABORT=0 ",
+            "SEALED-BYTES=-1 ", "SEALED-EMETA=-1 ",
+            "SEALED-FMETA=-1 ", "SEALED-EPOCH=-1 ",
+            "STATE=0 ", "UNION-ZERO=-1 ", "REFS=0 ",
+            "OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_rejects_raw_tcb_without_authority(self):
+        """A raw TCB pointer cannot authorize socket-independent emission."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "CREATE raw-epoch 112 ALLOT",
+            "VARIABLE raw-calls VARIABLE raw-phase VARIABLE raw-off",
+            "VARIABLE raw-chain VARIABLE raw-cert-u VARIABLE raw-index",
+            "VARIABLE raw-pending VARIABLE raw-seq VARIABLE raw-refs",
+            "VARIABLE raw-u",
+            ": raw-send ( ctx record-a record-u -- actual )",
+            "  raw-u ! DROP",
+            "  0 TCB-N SWAP TLS-CTX.TCB !",
+            "  1 raw-calls +! raw-u @ ;",
+            ": raw-zero? ( a u -- flag )",
+            "  0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN",
+            "  LOOP DROP -1 ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "server-ctx @ TLS-RXW.SERVER-EMIT-META TSE.PHASE + @ raw-phase !",
+            "server-ctx @ TLS-RXW.SERVER-META TSM.PHASE-OFF + @ raw-off !",
+            "server-ctx @ TLS-RXW.SERVER-META TSM.CHAIN-OFF + @ raw-chain !",
+            "server-ctx @ TLS-RXW.SERVER-META TSM.CURRENT-CERT-U + @ raw-cert-u !",
+            "server-ctx @ TLS-RXW.SERVER-META TSM.CERT-INDEX + @ raw-index !",
+            "server-ctx @ TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + @ raw-pending !",
+            "server-ctx @ TLS-CTX.WR-SEQ @ raw-seq !",
+            "server-ctx @ TLS-CTX.WR-KEY raw-epoch 112 MOVE",
+            "tc-slot @ 1- _TC@ TC.REFS + @ raw-refs !",
+            "0 TCB-N TCB-INIT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "1234 0 TCB-N TCB.SND-NXT !",
+            "0 TCB-N server-ctx @ TLS-CTX.TCB !",
+            "server-ctx @ ' raw-send TLS-SERVER-FLIGHT-STEP-WITH",
+            '." STEP-IOR=" . ." STEP-PROGRESS=" .',
+            '." CALLS=" raw-calls @ .',
+            '." PHASE-SAME=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ raw-phase @ = .',
+            '." OFF-SAME=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.PHASE-OFF + @ raw-off @ = .',
+            '." CHAIN-SAME=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-OFF + @ raw-chain @ = .',
+            '." CERT-U-SAME=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CURRENT-CERT-U + @ raw-cert-u @ = .',
+            '." INDEX-SAME=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-INDEX + @ raw-index @ = .',
+            '." PENDING-SAME=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ raw-pending @ = .',
+            '." SEQ-SAME=" server-ctx @ TLS-CTX.WR-SEQ @ raw-seq @ = .',
+            '." REFS-SAME=" tc-slot @ 1- _TC@ TC.REFS + @ raw-refs @ = .',
+            '." EPOCH-SAME=" server-ctx @ TLS-CTX.WR-KEY '
+            'raw-epoch 112 _XC-BYTES= .',
+            '." CTX-TCB-SAME=" server-ctx @ TLS-CTX.TCB @ '
+            '0 TCB-N = .',
+            '." TCB-STATE=" 0 TCB-N TCB.STATE @ .',
+            '." TCB-NEXT=" 0 TCB-N TCB.SND-NXT @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            "0 server-ctx @ TLS-CTX.TCB !",
+            "server-ctx @ ' raw-send TLS-SERVER-FLIGHT-STEP-WITH",
+            '." INJECT-IOR=" . ." INJECT-PROGRESS=" .',
+            '." INJECT-CALLS=" raw-calls @ .',
+            '." INJECT-CTX-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." INJECT-TCB-STATE=" 0 TCB-N TCB.STATE @ .',
+            '." INJECT-TCB-NEXT=" 0 TCB-N TCB.SND-NXT @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." UNION-ZERO=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP '
+            'TLS-SERVER-EXT-BITMAP-CAPACITY raw-zero? .',
+            '." EPOCH-ZERO=" server-ctx @ TLS-CTX.WR-KEY '
+            '112 raw-zero? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "STEP-IOR=-4204 STEP-PROGRESS=0 ",
+            "CALLS=0 ", "PHASE-SAME=-1 ", "OFF-SAME=-1 ",
+            "CHAIN-SAME=-1 ", "CERT-U-SAME=-1 ", "INDEX-SAME=-1 ",
+            "PENDING-SAME=-1 ", "SEQ-SAME=-1 ", "REFS-SAME=-1 ",
+            "EPOCH-SAME=-1 ", "CTX-TCB-SAME=-1 ",
+            "TCB-STATE=4 ", "TCB-NEXT=1234 ", "DRIVER=0 ",
+            "INJECT-IOR=-4218 INJECT-PROGRESS=0 ", "INJECT-CALLS=1 ",
+            "INJECT-CTX-TCB=0 ", "INJECT-TCB-STATE=4 ",
+            "INJECT-TCB-NEXT=1234 ", "STATE=3 ", "ERROR=-4218 ",
+            "UNION-ZERO=-1 ", "EPOCH-ZERO=-1 ",
+            "REFS-END=0 ", "OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_recovers_published_result_after_contention(self):
+        """An exact callback result remains durable if lock reacquisition loses."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "VARIABLE result-u VARIABLE result-calls",
+            ": result-send ( ctx record-a record-u -- actual )",
+            "  result-u ! 2DROP",
+            "  1 result-calls +!",
+            "  result-calls @ 2 = IF",
+            "    TLS-OWNER-LOCK SPIN@ DROP",
+            "    COREID TLS-OWNER-CORE !",
+            "    TASK-ID 1+ TLS-OWNER-TASK !",
+            "    1 TLS-OWNER-DEPTH !",
+            "  THEN",
+            "  result-u @ ;",
+            ": result-step ( -- progress ior )",
+            "  server-ctx @ ['] result-send",
+            "  TLS-SERVER-FLIGHT-STEP-WITH ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "result-step",
+            '." SH-IOR=" . ." SH-PROGRESS=" .',
+            "result-step",
+            '." FIRST-IOR=" . ." FIRST-PROGRESS=" .',
+            '." RESULT=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." FIRST-DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." FIRST-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." FIRST-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." FIRST-CALLS=" result-calls @ .',
+            '." CONTENDED-DEPTH=" TLS-OWNER-DEPTH @ .',
+            "TASK-ID TLS-OWNER-TASK ! TLS-OWNER-RELEASE",
+            "result-step",
+            '." RETRY-IOR=" . ." RETRY-PROGRESS=" .',
+            '." RETRY-STATE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." RETRY-DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." RETRY-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." RETRY-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." RETRY-CALLS=" result-calls @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "SH-IOR=0 SH-PROGRESS=1 ",
+            "FIRST-IOR=-4206 FIRST-PROGRESS=0 ",
+            "RESULT=2 ", "FIRST-DRIVER=-1 ", "FIRST-PHASE=2 ",
+            "FIRST-SEQ=0 ", "FIRST-CALLS=2 ", "CONTENDED-DEPTH=1 ",
+            "RETRY-IOR=0 RETRY-PROGRESS=1 ", "RETRY-STATE=0 ",
+            "RETRY-DRIVER=0 ", "RETRY-PHASE=3 ", "RETRY-SEQ=1 ",
+            "RETRY-CALLS=2 ",
+            "OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_stale_finalizer_is_nonmutating(self):
+        """A task that lost the driver cannot tear down a later lifecycle."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "VARIABLE stale-u",
+            ": stale-send ( ctx record-a record-u -- actual )",
+            "  stale-u ! 2DROP stale-u @ ;",
+            ": stale-stage ( -- action progress ior )",
+            "  server-ctx @ ['] stale-send _TSSE-PREPARE-GUARD ;",
+            ": stale-call ( -- ctx actual )",
+            "  server-ctx @ ['] stale-send _TSSE-CALL ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "TLS-OWNER-TRY DROP",
+            "stale-stage",
+            '." STAGE-IOR=" . ." STAGE-PROGRESS=" .',
+            "DROP",
+            "TLS-OWNER-RELEASE",
+            "stale-call",
+            "_TSSE-PUBLISH-RESULT DROP",
+            "TLS-OWNER-TRY DROP",
+            "COREID 1+ server-ctx @ TLS-RXW.SERVER-EMIT-META",
+            "TSE.DRIVER-CORE + !",
+            "TLSS-NONE server-ctx @ TLS-CTX.STATE !",
+            "77 server-ctx @ TLS-CTX.ERROR !",
+            "server-ctx @ _TSSE-FINALIZE-GUARD",
+            '." FINAL-IOR=" . ." FINAL-PROGRESS=" .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "COREID server-ctx @ TLS-RXW.SERVER-EMIT-META",
+            "TSE.DRIVER-CORE + !",
+            "server-ctx @ _TSSE-DRIVER-CLEAR",
+            "TLS-OWNER-RELEASE",
+            "server-ctx @ TLS-ABORT DROP",
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "STAGE-IOR=0 STAGE-PROGRESS=0 ",
+            "FINAL-IOR=-4206 FINAL-PROGRESS=0 ",
+            "STATE=0 ", "ERROR=77 ", "PENDING=2 ",
+            "DRIVER=-1 ", "REFS=1 ", "OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def _assert_server_flight_transport_failure(self, send_definition):
+        """Exercise terminal emitter cleanup with the requested send callback."""
+        phase_lines, _ = self._server_phase_one_lines()
+        lines = phase_lines + [
+            "VARIABLE terminal-calls",
+            send_definition,
+            ": terminal-step ( -- progress ior )",
+            "  server-ctx @ ['] terminal-send",
+            "  TLS-SERVER-FLIGHT-STEP-WITH ;",
+            ": terminal-zero? ( a u -- flag )",
+            "  0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN",
+            "  LOOP DROP -1 ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "terminal-step",
+            '." SH-IOR=" . ." SH-PROGRESS=" .',
+            "terminal-step",
+            '." FAIL-IOR=" . ." FAIL-PROGRESS=" .',
+            '." FAIL-CALLS=" terminal-calls @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." CTX-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." UNION-ZERO=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP '
+            'TLS-SERVER-EXT-BITMAP-CAPACITY terminal-zero? .',
+            '." WR-ZERO=" server-ctx @ TLS-CTX.WR-KEY 112 '
+            'terminal-zero? .',
+            '." TR-ZERO=" server-ctx @ TLS-CTX.TRANSCRIPT 32 '
+            'terminal-zero? .',
+            '." HS-ZERO=" server-ctx @ TLS-CTX.HS-SECRET 64 '
+            'terminal-zero? .',
+            '." PRIV-ZERO=" server-ctx @ TLS-CTX.MY-PRIVKEY 32 '
+            'terminal-zero? .',
+            '." SHARED-ZERO=" server-ctx @ TLS-CTX.SHARED 32 '
+            'terminal-zero? .',
+            '." TRAFFIC-ZERO=" server-ctx @ TLS-CTX.EARLY 160 '
+            'terminal-zero? .',
+            '." EXPORT-ZERO=" server-ctx @ TLS-CTX.EXPORTER-MS 32 '
+            'terminal-zero? .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "terminal-step",
+            '." LATER-IOR=" . ." LATER-PROGRESS=" .',
+            '." LATER-CALLS=" terminal-calls @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "SH-IOR=0 SH-PROGRESS=1 ",
+            "FAIL-IOR=-4218 FAIL-PROGRESS=0 ", "FAIL-CALLS=2 ",
+            "STATE=3 ", "HS=13 ", "ERROR=-4218 ", "CTX-TCB=0 ",
+            "PHASE=0 ", "DRIVER=0 ",
+            "UNION-ZERO=-1 ", "WR-ZERO=-1 ", "TR-ZERO=-1 ",
+            "HS-ZERO=-1 ", "PRIV-ZERO=-1 ", "SHARED-ZERO=-1 ",
+            "TRAFFIC-ZERO=-1 ", "EXPORT-ZERO=-1 ", "REFS=0 ",
+            "LATER-IOR=-4204 LATER-PROGRESS=0 ", "LATER-CALLS=2 ",
+            "OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_short_send_is_terminal(self):
+        """A nonzero short write cannot be retried as if no bytes moved."""
+        self._assert_server_flight_transport_failure(
+            ": terminal-send ( ctx record-a record-u -- actual ) "
+            "1 terminal-calls +! NIP NIP "
+            "terminal-calls @ 1 = IF EXIT THEN 1- ;"
+        )
+
+    def test_server_flight_emitter_contains_callback_throw(self):
+        """A transport exception is contained and revokes the TLS epoch."""
+        self._assert_server_flight_transport_failure(
+            ": terminal-send ( ctx record-a record-u -- actual ) "
+            "1 terminal-calls +! NIP NIP "
+            "terminal-calls @ 1 = IF EXIT THEN DROP -777 THROW ;"
+        )
+
+    def test_server_flight_emitter_contains_callback_owner_leak(self):
+        """A callback cannot return while retaining machine-wide TLS ownership."""
+        self._assert_server_flight_transport_failure(
+            ": terminal-send ( ctx record-a record-u -- actual ) "
+            "1 terminal-calls +! NIP NIP "
+            "terminal-calls @ 1 = IF EXIT THEN "
+            "TLS-OWNER-TRY DROP TLS-OWNER-TRY DROP ;"
+        )
+
+    def test_server_flight_emitter_unwinds_staging_throw(self):
+        """A nested crypto throw cannot strand TLS ownership or a driver."""
+        phase_lines, _ = self._server_phase_one_lines()
+        lines = phase_lines + [
+            "VARIABLE stage-calls",
+            ": stage-send ( ctx record-a record-u -- actual )",
+            "  1 stage-calls +! NIP NIP ;",
+            ": stage-step ( -- progress ior )",
+            "  server-ctx @ ['] stage-send",
+            "  TLS-SERVER-FLIGHT-STEP-WITH ;",
+            ": stage-throw-mode ( ctx -- ior )",
+            "  DROP TLS-OWNER-TRY DROP -777 THROW ;",
+            ": stage-zero? ( a u -- flag )",
+            "  0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN",
+            "  LOOP DROP -1 ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "stage-step",
+            '." SH-IOR=" . ." SH-PROGRESS=" .',
+            "' stage-throw-mode IS TLS-SET-AES-MODE",
+            "stage-step",
+            '." FAIL-IOR=" . ." FAIL-PROGRESS=" .',
+            '." CALLS=" stage-calls @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." CTX-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." UNION-ZERO=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP '
+            'TLS-SERVER-EXT-BITMAP-CAPACITY stage-zero? .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "SH-IOR=0 SH-PROGRESS=1 ",
+            "FAIL-IOR=-4216 FAIL-PROGRESS=0 ", "CALLS=1 ",
+            "STATE=3 ", "ERROR=-4216 ", "CTX-TCB=0 ",
+            "DRIVER=0 ", "UNION-ZERO=-1 ",
+            "REFS=0 ", "OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_flight_emitter_fragments_long_certificate_exactly(self):
+        """Certificate cursors commit only after each MSS-sized record."""
+        certs = [
+            TestKDOSTLSCredentials._fixture("leaf"),
+            TestKDOSTLSCredentials._fixture("intermediate"),
+            TestKDOSTLSCredentials._fixture("root"),
+            TestKDOSTLSCredentials._fixture("root"),
+        ]
+        entries = b"".join(
+            self._u24(len(cert)) + cert + b"\x00\x00" for cert in certs
+        )
+        certificate_body = b"\x00" + self._u24(len(entries)) + entries
+        expected_certificate = (
+            b"\x0b" + self._u24(len(certificate_body)) + certificate_body
+        )
+        self.assertEqual(len(expected_certificate), 1707)
+
+        lines, _ = self._server_phase_one_lines(certs=certs)
+        lines += self._forth_bytes("fragment-expected", expected_certificate)
+        lines += [
+            "CREATE fragment-record-lens "
+            "127 , 43 , 1460 , 1460 , 291 , 100 , 58 ,",
+            "CREATE fragment-plain-lens "
+            "0 , 21 , 0 , 1438 , 269 , 78 , 36 ,",
+            "CREATE fragment-output 1707 ALLOT",
+            "CREATE fragment-retry TLS-SERVER-PENDING-CAPACITY ALLOT",
+            "VARIABLE fragment-peer 1 TLS-CTX@ fragment-peer !",
+            "VARIABLE fragment-call VARIABLE fragment-a VARIABLE fragment-u",
+            "VARIABLE fragment-type VARIABLE fragment-plen",
+            "VARIABLE fragment-off VARIABLE fragment-lens-ok",
+            "VARIABLE fragment-types-ok VARIABLE fragment-plains-ok",
+            "VARIABLE fragment-retry-ok",
+            "-1 fragment-lens-ok ! -1 fragment-types-ok !",
+            "-1 fragment-plains-ok ! -1 fragment-retry-ok !",
+            "fragment-peer @ /TLS-CTX 0 FILL",
+            "TLS-ROLE-CLIENT fragment-peer @ TLS-CTX.ROLE !",
+            "server-ctx @ TLS-CTX.SUITE @",
+            "fragment-peer @ TLS-CTX.SUITE !",
+            "server-ctx @ TLS-CTX.HASH-ID @",
+            "fragment-peer @ TLS-CTX.HASH-ID !",
+            ": fragment-send ( ctx record-a record-u -- actual )",
+            "  fragment-u ! fragment-a ! DROP",
+            "  fragment-u @ fragment-call @ CELLS fragment-record-lens + @",
+            "  <> IF 0 fragment-lens-ok ! THEN",
+            "  fragment-call @ 0= IF",
+            "    fragment-u @",
+            "  ELSE fragment-call @ 2 = IF",
+            "    fragment-a @ fragment-retry fragment-u @ MOVE",
+            "    0",
+            "  ELSE",
+            "    fragment-call @ 3 = IF",
+            "      fragment-a @ fragment-retry fragment-u @ _XC-BYTES= 0=",
+            "      IF 0 fragment-retry-ok ! THEN",
+            "    THEN",
+            "    fragment-peer @ fragment-a @ fragment-u @ TLS-PLAIN-BUF",
+            "    TLS-DECRYPT-RECORD",
+            "    fragment-plen ! fragment-type !",
+            "    fragment-type @ TLS-CT-HANDSHAKE <> IF",
+            "      0 fragment-types-ok ! THEN",
+            "    fragment-plen @ fragment-call @ CELLS",
+            "    fragment-plain-lens + @ <> IF 0 fragment-plains-ok ! THEN",
+            "    fragment-call @ DUP 3 = SWAP 4 = OR IF",
+            "      TLS-PLAIN-BUF fragment-output fragment-off @ +",
+            "      fragment-plen @ MOVE",
+            "      fragment-plen @ fragment-off +!",
+            "    THEN",
+            "    fragment-u @",
+            "  THEN THEN",
+            "  1 fragment-call +! ;",
+            ": fragment-step ( -- progress ior )",
+            "  server-ctx @ ['] fragment-send",
+            "  TLS-SERVER-FLIGHT-STEP-WITH ;",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            "server-ctx @ TLS-CTX.WR-KEY",
+            "fragment-peer @ TLS-CTX.RD-KEY 32 MOVE",
+            "server-ctx @ TLS-CTX.WR-IV",
+            "fragment-peer @ TLS-CTX.RD-IV 12 MOVE",
+            "server-ctx @ TLS-CTX.WR-SEQ @",
+            "fragment-peer @ TLS-CTX.RD-SEQ !",
+            "fragment-step",
+            '." SH-IOR=" . ." SH-PROGRESS=" .',
+            "fragment-step",
+            '." EE-IOR=" . ." EE-PROGRESS=" .',
+            "fragment-step",
+            '." C0-IOR=" . ." C0-PROGRESS=" .',
+            '." C0-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." C0-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." C0-PHASE-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.PHASE-OFF + @ .',
+            '." C0-CHAIN-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-OFF + @ .',
+            '." C0-INDEX=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-INDEX + @ .',
+            '." C0-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            "fragment-step",
+            '." C1-IOR=" . ." C1-PROGRESS=" .',
+            '." C1-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." C1-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." C1-PHASE-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.PHASE-OFF + @ .',
+            '." C1-CHAIN-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-OFF + @ .',
+            '." C1-CERT-U=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CURRENT-CERT-U + @ .',
+            '." C1-INDEX=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-INDEX + @ .',
+            "fragment-step",
+            '." C2-IOR=" . ." C2-PROGRESS=" .',
+            '." C2-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." C2-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." C2-PHASE-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.PHASE-OFF + @ .',
+            '." C2-CHAIN-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-OFF + @ .',
+            '." C2-CERT-U=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CURRENT-CERT-U + @ .',
+            '." C2-INDEX=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-INDEX + @ .',
+            "fragment-step",
+            '." CV-IOR=" . ." CV-PROGRESS=" .',
+            "fragment-step",
+            '." FIN-IOR=" . ." FIN-PROGRESS=" .',
+            '." CERT-BYTES=" fragment-output fragment-expected 1707 '
+            '_XC-BYTES= .',
+            '." CERT-U=" fragment-off @ .',
+            '." LENS=" fragment-lens-ok @ .',
+            '." TYPES=" fragment-types-ok @ .',
+            '." PLAINS=" fragment-plains-ok @ .',
+            '." RETRY=" fragment-retry-ok @ .',
+            '." CALLS=" fragment-call @ .',
+            '." PEER-SEQ=" fragment-peer @ TLS-CTX.RD-SEQ @ .',
+            '." SERVER-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." FINAL-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." DRIVER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "PREP=0 ", "SH-IOR=0 SH-PROGRESS=1 ",
+            "EE-IOR=0 EE-PROGRESS=1 ",
+            "C0-IOR=-4219 C0-PROGRESS=0 ", "C0-SEQ=1 ",
+            "C0-PHASE=3 ", "C0-PHASE-OFF=0 ",
+            "C0-CHAIN-OFF=0 ", "C0-INDEX=0 ", "C0-PENDING=1 ",
+            "C1-IOR=0 C1-PROGRESS=1 ", "C1-SEQ=2 ",
+            "C1-PHASE=5 ", "C1-PHASE-OFF=134 ",
+            "C1-CHAIN-OFF=1278 ", "C1-CERT-U=401 ", "C1-INDEX=3 ",
+            "C2-IOR=0 C2-PROGRESS=1 ", "C2-SEQ=3 ",
+            "C2-PHASE=7 ", "C2-PHASE-OFF=0 ",
+            "C2-CHAIN-OFF=1679 ", "C2-CERT-U=0 ", "C2-INDEX=4 ",
+            "CV-IOR=0 CV-PROGRESS=1 ",
+            "FIN-IOR=0 FIN-PROGRESS=2 ", "CERT-BYTES=-1 ",
+            "CERT-U=1707 ", "LENS=-1 ", "TYPES=-1 ", "PLAINS=-1 ",
+            "RETRY=-1 ", "CALLS=7 ", "PEER-SEQ=5 ", "SERVER-SEQ=0 ",
+            "FINAL-PHASE=10 ", "HS=7 ", "DRIVER=0 ", "OWNER=0 ",
+            "FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
