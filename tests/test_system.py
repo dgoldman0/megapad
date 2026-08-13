@@ -42,6 +42,7 @@ All tests must be run via the Makefile.
 import base64
 import copy
 import hashlib
+import hmac
 import os
 import random
 import re
@@ -24919,12 +24920,17 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
 
     @classmethod
     def _server_phase_one_lines(
-        cls, *, certs: list[bytes] | None = None
+        cls,
+        *,
+        certs: list[bytes] | None = None,
+        hello: bytes | None = None,
     ) -> tuple[list[str], bytes]:
         """Build one deterministic server context through published SH/EE."""
-        hello, entropy, server_hello, encrypted_extensions = (
+        fixture_hello, entropy, server_hello, encrypted_extensions = (
             cls._certificate_transcript_phase()
         )
+        if hello is None:
+            hello = fixture_hello
         lines, _ = cls._provision_lines(certs=certs)
         for name, data in (
             ("server-alpn", cls.ALPN),
@@ -24947,6 +24953,183 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TLS-OWNER-RELEASE",
         ]
         return lines, hello
+
+    @staticmethod
+    def _server_ingress_support_lines() -> list[str]:
+        """Forth helpers for driving the socket-independent server ingress."""
+        return [
+            "VARIABLE ingress-emit-progress VARIABLE ingress-emit-ior",
+            "VARIABLE ingress-consumed VARIABLE ingress-progress",
+            "VARIABLE ingress-alert VARIABLE ingress-ior",
+            "VARIABLE ingress-prep-ior VARIABLE ingress-begin-ior",
+            "VARIABLE ingress-budget",
+            ": ingress-send ( ctx record-a record-u -- actual )",
+            "  >R 2DROP R> ;",
+            ": ingress-emit-one ( -- )",
+            "  server-ctx @ ['] ingress-send TLS-SERVER-FLIGHT-STEP-WITH",
+            "  ingress-emit-ior ! ingress-emit-progress ! ;",
+            ": ingress-emit-all ( -- ) 5 0 DO ingress-emit-one LOOP ;",
+            ": ingress-prepare-emit ( -- )",
+            "  server-ctx @ TLS-SERVER-PREPARE-FLIGHT ingress-prep-ior !",
+            "  ingress-emit-all ;",
+            ": ingress-begin ( early-wire-budget -- )",
+            "  server-ctx @ SWAP TLS-SERVER-CLIENT-FLIGHT-BEGIN",
+            "  ingress-begin-ior ! ;",
+            ": ingress-enter ( early-wire-budget -- )",
+            "  ingress-budget ! ingress-prepare-emit",
+            "  ingress-budget @ ingress-begin ;",
+            ": ingress-feed ( bytes-a bytes-u -- )",
+            "  server-ctx @ -ROT TLS-SERVER-CLIENT-FLIGHT-FEED",
+            "  ingress-ior ! ingress-alert ! ingress-progress !",
+            "  ingress-consumed ! ;",
+            ": ingress-preflight ( bytes-a bytes-u -- ior )",
+            "  server-ctx @ -ROT _TSCF-PUBLIC-PREFLIGHT ;",
+            ": ingress-restart ( hello-a hello-u early-wire-budget -- )",
+            "  ingress-budget ! server-ctx @ TLS-ABORT DROP",
+            "  server-ctx @ tc-slot @ tc-gen @ server-alpn 8",
+            "  TLS-SERVER-CONTEXT-BEGIN DROP",
+            "  server-ctx @ -ROT TLS-PARSE-CLIENT-HELLO 2DROP",
+            "  TLS-OWNER-TRY DROP server-ctx @ _TSPH-BEGIN 2DROP",
+            "  phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "  _TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            "  TLS-OWNER-RELEASE ingress-budget @ ingress-enter ;",
+        ]
+
+    @staticmethod
+    def _hkdf_expand_sha256(prk: bytes, info: bytes, length: int) -> bytes:
+        """Small stdlib oracle for the RFC 5869 expand operation."""
+        result = bytearray()
+        block = b""
+        counter = 1
+        while len(result) < length:
+            block = hmac.new(
+                prk, block + info + bytes([counter]), hashlib.sha256
+            ).digest()
+            result.extend(block)
+            counter += 1
+        return bytes(result[:length])
+
+    @classmethod
+    def _tls13_expand_label(
+        cls, secret: bytes, label: bytes, context: bytes, length: int
+    ) -> bytes:
+        full_label = b"tls13 " + label
+        info = (
+            cls._u16(length)
+            + bytes([len(full_label)]) + full_label
+            + bytes([len(context)]) + context
+        )
+        return cls._hkdf_expand_sha256(secret, info, length)
+
+    @classmethod
+    def _client_finished_reference(
+        cls,
+    ) -> tuple[bytes, bytes, bytes, bytes, bytes, bytes, bytes, bytes]:
+        """Build the client-Finished values without using the KDOS TLS code."""
+        hello, _, server_hello, encrypted_extensions = (
+            cls._certificate_transcript_phase()
+        )
+        leaf = TestKDOSTLSCredentials._fixture("leaf")
+        entries = cls._u24(len(leaf)) + leaf + b"\x00\x00"
+        certificate_body = b"\x00" + cls._u24(len(entries)) + entries
+        certificate = (
+            b"\x0b" + cls._u24(len(certificate_body)) + certificate_body
+        )
+        certificate_verify = bytes.fromhex(
+            "0f00004b04030047"
+            "3045022100ee04c71a733ed1ab56d25314532165a20cd9a61a47620261"
+            "ceb3cc258c9e5cad0220716340fb3c7b86b793fc200741ec49c12f56f7f"
+            "e201978765f76d4504970a60f"
+        )
+        server_finished = bytes.fromhex(
+            "140000201400e6576cad7d3e3f9b4ed490a058d17dd019564cac43826db9"
+            "e0710187c5c4"
+        )
+        server_transcript = (
+            hello + server_hello + encrypted_extensions + certificate
+            + certificate_verify + server_finished
+        )
+        server_hash = hashlib.sha256(server_transcript).digest()
+
+        # RFC 7748 section 6.1 Alice-private/Bob-public shared secret.  Keeping
+        # the ECDH result as a published reference value avoids making this
+        # emulator test depend on a third-party Python cryptography package.
+        shared = bytes.fromhex(
+            "4a5d9d5ba4ce2de1728e3bf480350f25"
+            "e07e21c947d19e3376f09b3c1e161742"
+        )
+        zeros = bytes(32)
+        empty_hash = hashlib.sha256(b"").digest()
+        early_secret = hmac.new(zeros, zeros, hashlib.sha256).digest()
+        derived_early = cls._tls13_expand_label(
+            early_secret, b"derived", empty_hash, 32
+        )
+        handshake_secret = hmac.new(
+            derived_early, shared, hashlib.sha256
+        ).digest()
+        hello_hash = hashlib.sha256(hello + server_hello).digest()
+        client_hs = cls._tls13_expand_label(
+            handshake_secret, b"c hs traffic", hello_hash, 32
+        )
+        client_hs_key = cls._tls13_expand_label(
+            client_hs, b"key", b"", 16
+        )
+        client_hs_iv = cls._tls13_expand_label(
+            client_hs, b"iv", b"", 12
+        )
+        finished_key = cls._tls13_expand_label(
+            client_hs, b"finished", b"", 32
+        )
+        verify_data = hmac.new(
+            finished_key, server_hash, hashlib.sha256
+        ).digest()
+        client_finished = b"\x14\x00\x00\x20" + verify_data
+
+        # AES-128-GCM(client_hs_key, client_hs_iv, seq=0), generated with an
+        # external reference implementation.  The server must independently
+        # authenticate this complete TLSCiphertext and recover client_finished.
+        client_record = bytes.fromhex(
+            "1703030035de4a5ff64b354480a575ef8001fdc3a129fc64ee79971c5f"
+            "efd24c8f3a54890dd08ae438d53a82fc5cad9b5c61d9906f9e7a84ae07"
+        )
+        full_hash = hashlib.sha256(
+            server_transcript + client_finished
+        ).digest()
+        derived_hs = cls._tls13_expand_label(
+            handshake_secret, b"derived", empty_hash, 32
+        )
+        master_secret = hmac.new(derived_hs, zeros, hashlib.sha256).digest()
+        client_ap = cls._tls13_expand_label(
+            master_secret, b"c ap traffic", server_hash, 32
+        )
+        client_ap_key = cls._tls13_expand_label(
+            client_ap, b"key", b"", 16
+        )
+        client_ap_iv = cls._tls13_expand_label(
+            client_ap, b"iv", b"", 12
+        )
+        exporter_master = cls._tls13_expand_label(
+            master_secret, b"exp master", server_hash, 32
+        )
+        exporter_intermediate = cls._tls13_expand_label(
+            exporter_master, b"server-handshake", empty_hash, 32
+        )
+        exporter_output = cls._tls13_expand_label(
+            exporter_intermediate,
+            b"exporter",
+            hashlib.sha256(b"independent-peer").digest(),
+            32,
+        )
+        return (
+            client_record,
+            client_finished,
+            server_hash,
+            full_hash,
+            client_hs_key,
+            client_ap_key,
+            client_ap_iv,
+            exporter_output,
+        )
 
     def test_server_context_begin_pins_policy_and_close_releases_it(self):
         """Server setup is one transaction and no cleanup loses its lease."""
@@ -26036,6 +26219,781 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "DRIVER=0 ", "REFS=1 ",
             "NULL-IOR=-4204 NULL-PROGRESS=0 ", "ABORT=0 ",
             "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_authenticates_independent_client_finished(self):
+        """A fragmented reference peer flight reaches explicit publication."""
+        (
+            client_record,
+            client_finished,
+            server_hash,
+            full_hash,
+            client_hs_key,
+            client_ap_key,
+            client_ap_iv,
+            exporter_output,
+        ) = self._client_finished_reference()
+        self.assertEqual(
+            server_hash.hex(),
+            "483fc221d812cc30382b65f9903cb89b"
+            "e31b48f89d9bda2275c7cb6e9b0a42b3",
+        )
+        self.assertEqual(
+            client_finished.hex(),
+            "14000020ba521ba1d3faae36f033e2f0d5df0520"
+            "e83e41510902afd48283a4efa9034d49",
+        )
+        self.assertEqual(
+            client_hs_key.hex(), "dba4834fb151c14fd263a63d7fa8b57f"
+        )
+        self.assertEqual(len(client_record), 58)
+
+        lines, _ = self._server_phase_one_lines()
+        for name, data in (
+            ("client-finished-record", client_record),
+            ("expected-client-finished", client_finished),
+            ("expected-full-hash", full_hash),
+            ("expected-client-hs-key", client_hs_key),
+            ("expected-client-ap-key", client_ap_key),
+            ("expected-client-ap-iv", client_ap_iv),
+            ("export-label", b"server-handshake"),
+            ("export-context", b"independent-peer"),
+            ("expected-export", exporter_output),
+            ("zero32", bytes(32)),
+            ("ingress-byte", b"x"),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            "ingress-prepare-emit",
+            '." PREP=" ingress-prep-ior @ .',
+            '." EMIT-IOR=" ingress-emit-ior @ .',
+            '." EMIT-PROGRESS=" ingress-emit-progress @ .',
+            '." PENDING-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." PENDING-RD=" server-ctx @ TLS-CTX.RD-KEY '
+            'expected-client-hs-key 16 _XC-BYTES= .',
+            "CREATE ingress-gate-record 64 ALLOT",
+            "server-ctx @ TLS-CT-HANDSHAKE ingress-byte 1",
+            'ingress-gate-record TLS-ENCRYPT-RECORD ." PREBEGIN-ENC=" .',
+            'server-ctx @ TLS-KS-HANDSHAKE ." PREBEGIN-HS=" .',
+            '." PREBEGIN-RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." PREBEGIN-WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            "0 ingress-begin",
+            '." BEGIN=" ingress-begin-ior @ .',
+            '." BEGIN-POINTERS=" _TSCFI-CTX @ _TSCFI-BUDGET @ OR .',
+            '_TCM-CTX 1 ingress-preflight ." ALIAS-TCM=" .',
+            '_VERIFY-ACC 1 ingress-preflight ." ALIAS-VERIFY=" .',
+            '_TRSV-REC 1 ingress-preflight ." ALIAS-RECORD-META=" .',
+            '_DB-A 1 ingress-preflight ." ALIAS-STATIC-FIRST=" .',
+            '_TLS-INGRESS-STATIC-END 1- 1 ingress-preflight '
+            '." ALIAS-STATIC-LAST=" .',
+            '_TLS-INGRESS-STATIC-END 1 ingress-preflight '
+            '." ALIAS-STATIC-AFTER=" .',
+            'AES-BLK-IN 1 ingress-preflight ." ALIAS-KDOS-FIRST=" .',
+            '_HKDF256-COUNTER 1 CELLS + 1- 1 ingress-preflight '
+            '." ALIAS-KDOS-LAST=" .',
+            'AES-BLK-IN 1- 1 ingress-preflight ." ALIAS-KDOS-BEFORE=" .',
+            'server-ctx @ 1 ingress-preflight ." ALIAS-CTX=" .',
+            'server-ctx @ TLS-RXW@ 1 ingress-preflight '
+            '." ALIAS-WORK=" .',
+            'TLS-CREDENTIALS @ 1 ingress-preflight ." ALIAS-CRED=" .',
+            "TLS-PLAIN-BUF 1 ingress-feed",
+            '." ALIAS-C=" ingress-consumed @ .',
+            '." ALIAS-P=" ingress-progress @ .',
+            '." ALIAS-A=" ingress-alert @ .',
+            '." ALIAS-I=" ingress-ior @ .',
+            "server-ctx @ TLS-CT-HANDSHAKE ingress-byte 1",
+            'ingress-gate-record TLS-ENCRYPT-RECORD ." GATE-ENC=" .',
+            "server-ctx @ client-finished-record 58 TLS-PLAIN-BUF",
+            'TLS-DECRYPT-RECORD ." GATE-DEC-U=" . ." GATE-DEC-T=" .',
+            'server-ctx @ TLS-KS-HANDSHAKE ." GATE-HS=" .',
+            'server-ctx @ TLS-KS-APPLICATION ." GATE-APP=" .',
+            'server-ctx @ ingress-byte 1 TLS-PROCESS-POST-HANDSHAKE '
+            '." GATE-POST=" .',
+            'server-ctx @ ingress-byte 1 TLS-PROCESS-ALERT '
+            '." GATE-ALERT=" .',
+            'server-ctx @ ingress-byte 1 TLS-PARSE-ENCRYPTED-EXT '
+            '." GATE-EE=" .',
+            'server-ctx @ ingress-byte 1 TLS-ALPN-ACCEPT-SELECTION '
+            '." GATE-ALPN=" .',
+            'server-ctx @ ingress-byte 1 TLS-PROCESS-HS-MSG '
+            '." GATE-HS-MSG=" .',
+            "server-ctx @ TLS-SERVER-WORKSPACE-WIPE",
+            "server-ctx @ TLS-RX-WIPE",
+            "server-ctx @ _TLS-SERVER-PHASE-WIPE",
+            "server-ctx @ _TLS-CONNECTION-REVOKE",
+            '." GATE-RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." GATE-WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." GATE-STATE=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." GATE-OWNER=" TLS-OWNER-DEPTH @ .',
+            "client-finished-record 2 ingress-feed",
+            '." F0-C=" ingress-consumed @ .',
+            '." F0-P=" ingress-progress @ .',
+            '." F0-A=" ingress-alert @ .',
+            '." F0-I=" ingress-ior @ .',
+            '." F0-RLEN=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "client-finished-record 2 + 7 ingress-feed",
+            '." F1-C=" ingress-consumed @ .',
+            '." F1-P=" ingress-progress @ .',
+            '." F1-A=" ingress-alert @ .',
+            '." F1-I=" ingress-ior @ .',
+            '." F1-RLEN=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "client-finished-record 9 + 49 ingress-feed",
+            '." F2-C=" ingress-consumed @ .',
+            '." F2-P=" ingress-progress @ .',
+            '." F2-A=" ingress-alert @ .',
+            '." F2-I=" ingress-ior @ .',
+            '." F2-POINTERS=" _TSCF-CTX @ _TDR-CTX @ OR '
+            '_VERIFY-ACC @ OR _XCB-A @ OR _TCM-CTX @ OR '
+            '_TSPR-CTX @ OR _TC-SLOT @ OR _TC-GENERATION @ OR '
+            '_TC-H1 @ OR .',
+            '." F2-RLEN=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." F2-HLEN=" server-ctx @ TLS-CTX.RX-HS-LEN @ .',
+            '." AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." READY-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." READY-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." READY-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." READY-INGRESS=" server-ctx @ TLS-RXW.SERVER-INGRESS-META '
+            'TSI.STATE + @ .',
+            '." FULL-HASH=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'expected-full-hash 32 _XC-BYTES= .',
+            '." APP-RD-KEY=" server-ctx @ TLS-CTX.RD-KEY '
+            'expected-client-ap-key 16 _XC-BYTES= .',
+            '." APP-RD-IV=" server-ctx @ TLS-CTX.RD-IV '
+            'expected-client-ap-iv 12 _XC-BYTES= .',
+            '." APP-RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            "server-ctx @ TLS-CT-HANDSHAKE ingress-byte 1",
+            'ingress-gate-record TLS-ENCRYPT-RECORD ." COMPLETE-ENC=" .',
+            "server-ctx @ client-finished-record 58 TLS-PLAIN-BUF",
+            'TLS-DECRYPT-RECORD ." COMPLETE-DEC-U=" . '
+            '." COMPLETE-DEC-T=" .',
+            'server-ctx @ TLS-KS-HANDSHAKE ." COMPLETE-HS-GATE=" .',
+            'server-ctx @ TLS-KS-APPLICATION ." COMPLETE-APP-GATE=" .',
+            '." COMPLETE-RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." COMPLETE-WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." REFS-BEFORE=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'server-ctx @ TLS-HANDSHAKE-PUBLISH ." PUBLISH=" .',
+            '." CONNECTED-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." CONNECTED-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." CONNECTED-AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." REFS-AFTER=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." SELECTED-U=" server-ctx @ TLS-ALPN-SELECTED '
+            'DUP . server-alpn 8 _XC-SLICE= .',
+            "CREATE peer-export 32 ALLOT peer-export 32 165 FILL",
+            "server-ctx @ export-label 16 export-context 16 "
+            "peer-export 32 TLS-EXPORT",
+            '." EXPORT-IOR=" .',
+            '." EXPORT=" peer-export expected-export 32 _XC-BYTES= .',
+            '." TRANSCRIPT-WIPED=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'zero32 32 _XC-BYTES= .',
+            '." INGRESS-WIPED=" server-ctx @ TLS-RXW.SERVER-INGRESS-META '
+            'TSI.STATE + @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "PREP=0 ", "EMIT-IOR=0 ", "EMIT-PROGRESS=2 ",
+            "PENDING-HS=7 ", "PENDING-RD=-1 ", "BEGIN=0 ",
+            "BEGIN-POINTERS=0 ",
+            "PREBEGIN-ENC=0 ", "PREBEGIN-HS=-4206 ",
+            "PREBEGIN-RD-SEQ=0 ", "PREBEGIN-WR-SEQ=0 ",
+            "ALIAS-TCM=-4213 ", "ALIAS-VERIFY=-4213 ",
+            "ALIAS-RECORD-META=-4213 ", "ALIAS-STATIC-FIRST=-4213 ",
+            "ALIAS-STATIC-LAST=-4213 ", "ALIAS-STATIC-AFTER=0 ",
+            "ALIAS-KDOS-FIRST=-4213 ", "ALIAS-KDOS-LAST=-4213 ",
+            "ALIAS-KDOS-BEFORE=0 ", "ALIAS-CTX=-4213 ",
+            "ALIAS-WORK=-4213 ", "ALIAS-CRED=-4213 ",
+            "ALIAS-C=0 ", "ALIAS-P=0 ", "ALIAS-A=0 ",
+            "ALIAS-I=-4213 ", "GATE-ENC=0 ",
+            "GATE-DEC-U=0 GATE-DEC-T=-1 ",
+            "GATE-HS=-4206 ", "GATE-APP=-4206 ",
+            "GATE-POST=-4206 ", "GATE-ALERT=-4206 ",
+            "GATE-EE=-1 ", "GATE-ALPN=-4206 ",
+            "GATE-HS-MSG=-1 ",
+            "GATE-RD-SEQ=0 ", "GATE-WR-SEQ=0 ",
+            "GATE-STATE=7 ", "GATE-OWNER=0 ",
+            "F0-C=2 ", "F0-P=0 ", "F0-A=0 ", "F0-I=-4219 ",
+            "F0-RLEN=2 ",
+            "F1-C=7 ", "F1-P=0 ", "F1-A=0 ", "F1-I=-4219 ",
+            "F1-RLEN=9 ",
+            "F2-C=49 ", "F2-P=2 ", "F2-A=0 ", "F2-I=0 ",
+            "F2-POINTERS=0 ",
+            "F2-RLEN=0 ", "F2-HLEN=0 ", "AUTH=1 ",
+            "READY-HS=8 ", "READY-STATE=1 ", "READY-ERROR=0 ",
+            "READY-INGRESS=2 ", "FULL-HASH=-1 ",
+            "APP-RD-KEY=-1 ", "APP-RD-IV=-1 ", "APP-RD-SEQ=0 ",
+            "COMPLETE-ENC=0 ",
+            "COMPLETE-DEC-U=0 COMPLETE-DEC-T=-1 ",
+            "COMPLETE-HS-GATE=-4206 ", "COMPLETE-APP-GATE=-4206 ",
+            "COMPLETE-RD-SEQ=0 ", "COMPLETE-WR-SEQ=0 ",
+            "REFS-BEFORE=1 ", "PUBLISH=0 ", "CONNECTED-HS=9 ",
+            "CONNECTED-STATE=2 ", "CONNECTED-AUTH=1 ",
+            "REFS-AFTER=0 ", "TRANSCRIPT-WIPED=-1 ",
+            "SELECTED-U=8 -1 ", "EXPORT-IOR=0 ", "EXPORT=-1 ",
+            "INGRESS-WIPED=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_reassembles_finished_across_records(self):
+        """Client Finished may cross authenticated record boundaries."""
+        _, _, _, full_hash, _, client_ap_key, client_ap_iv, _ = (
+            self._client_finished_reference()
+        )
+        first_record = bytes.fromhex(
+            "1703030015de4a5ff6e72000106aae9a70be640b06d3b1d6ae97"
+        )
+        second_record = bytes.fromhex(
+            "1703030031d3c008c11cc4024ac35fea6e6a4818589f49377cc1c594"
+            "d54a18dfde1c9f35615df2813d29f1822caea606cd0559705eeb"
+        )
+        self.assertEqual((len(first_record), len(second_record)), (26, 54))
+
+        lines, _ = self._server_phase_one_lines()
+        for name, data in (
+            ("fragment-first", first_record),
+            ("fragment-second", second_record),
+            ("fragment-full-hash", full_hash),
+            ("fragment-app-key", client_ap_key),
+            ("fragment-app-iv", client_ap_iv),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            "0 ingress-enter",
+            "fragment-first 26 ingress-feed",
+            '." FRAG0-C=" ingress-consumed @ .',
+            '." FRAG0-P=" ingress-progress @ .',
+            '." FRAG0-A=" ingress-alert @ .',
+            '." FRAG0-I=" ingress-ior @ .',
+            '." FRAG0-HLEN=" server-ctx @ TLS-CTX.RX-HS-LEN @ .',
+            '." FRAG0-RSEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." FRAG0-EARLY=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-OPEN + @ .',
+            "fragment-second 54 ingress-feed",
+            '." FRAG1-C=" ingress-consumed @ .',
+            '." FRAG1-P=" ingress-progress @ .',
+            '." FRAG1-A=" ingress-alert @ .',
+            '." FRAG1-I=" ingress-ior @ .',
+            '." FRAG1-HLEN=" server-ctx @ TLS-CTX.RX-HS-LEN @ .',
+            '." FRAG1-RSEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." FRAG1-AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." FRAG1-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." FRAG1-INGRESS=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." FRAG1-HASH=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'fragment-full-hash 32 _XC-BYTES= .',
+            '." FRAG1-KEY=" server-ctx @ TLS-CTX.RD-KEY '
+            'fragment-app-key 16 _XC-BYTES= .',
+            '." FRAG1-IV=" server-ctx @ TLS-CTX.RD-IV '
+            'fragment-app-iv 12 _XC-BYTES= .',
+            'server-ctx @ TLS-ABORT ." FRAG-ABORT=" .',
+            '." FRAG-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FRAG-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." FRAG-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "FRAG0-C=26 ", "FRAG0-P=1 ", "FRAG0-A=0 ",
+            "FRAG0-I=0 ", "FRAG0-HLEN=4 ", "FRAG0-RSEQ=1 ",
+            "FRAG0-EARLY=0 ", "FRAG1-C=54 ", "FRAG1-P=2 ",
+            "FRAG1-A=0 ", "FRAG1-I=0 ", "FRAG1-HLEN=0 ",
+            "FRAG1-RSEQ=0 ", "FRAG1-AUTH=1 ", "FRAG1-HS=8 ",
+            "FRAG1-INGRESS=2 ", "FRAG1-HASH=-1 ",
+            "FRAG1-KEY=-1 ", "FRAG1-IV=-1 ", "FRAG-ABORT=0 ",
+            "FRAG-REFS=0 ", "FRAG-OWNER=0 ",
+            "FRAG-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_bounds_rejected_early_data(self):
+        """Only an early-data offer admits bounded failed trial decryptions."""
+        compat_ccs = bytes.fromhex("140303000101")
+        short_record = bytes.fromhex(
+            "170303001000000000000000000000000000000000"
+        )
+        bad_record = bytes.fromhex(
+            "17030300110000000000000000000000000000000000"
+        )
+        early_finished_fragment = bytes.fromhex(
+            "1703030015cec7a3e48ff5ed29ecdfd00b69a4eee7621cfcb748"
+        )
+        self.assertEqual((len(compat_ccs), len(short_record)), (6, 21))
+        self.assertEqual(len(early_finished_fragment), 26)
+        early_hello = self._client_hello(
+            psk=self._offered_psk(),
+            psk_modes=b"\x01\x02",
+            early_data=True,
+        )
+        lines, ordinary_hello = self._server_phase_one_lines()
+        for name, data in (
+            ("ordinary-hello", ordinary_hello),
+            ("early-hello", early_hello),
+            ("compat-ccs", compat_ccs),
+            ("short-record", short_record),
+            ("bad-record", bad_record),
+            ("early-finished-fragment", early_finished_fragment),
+            ("two-bad-records", bad_record + bad_record),
+            ("zero-write-epoch", bytes(48)),
+            ("zero-read-epoch", bytes(48)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            ": ingress-write-live? ( -- flag )",
+            "  server-ctx @ TLS-CTX.WR-KEY zero-write-epoch 48",
+            "  _XC-BYTES= 0= ;",
+            ": ingress-read-zero? ( -- flag )",
+            "  server-ctx @ TLS-CTX.RD-KEY zero-read-epoch 48",
+            "  _XC-BYTES= ;",
+            "0 ingress-enter",
+            "short-record 21 ingress-feed",
+            '." ORD-C=" ingress-consumed @ .',
+            '." ORD-P=" ingress-progress @ .',
+            '." ORD-A=" ingress-alert @ .',
+            '." ORD-I=" ingress-ior @ .',
+            '." ORD-FATAL=" server-ctx @ TLS-RXW.SERVER-INGRESS-META '
+            'TSI.STATE + @ .',
+            '." ORD-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ORD-WR=" ingress-write-live? .',
+            '." ORD-RD=" ingress-read-zero? .',
+            '." ORD-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "bad-record 22 ingress-feed",
+            '." ORD-REPEAT-C=" ingress-consumed @ .',
+            '." ORD-REPEAT-A=" ingress-alert @ .',
+            '." ORD-REPEAT-I=" ingress-ior @ .',
+            f"early-hello {len(early_hello)} 22 ingress-restart",
+            '." EARLY-RESTART=" ingress-begin-ior @ .',
+            "compat-ccs 6 ingress-feed",
+            '." CCS-C=" ingress-consumed @ .',
+            '." CCS-P=" ingress-progress @ .',
+            '." CCS-A=" ingress-alert @ .',
+            '." CCS-I=" ingress-ior @ .',
+            '." CCS-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            '." CCS-OPEN=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-OPEN + @ .',
+            '." CCS-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            "two-bad-records 44 ingress-feed",
+            '." EARLY0-C=" ingress-consumed @ .',
+            '." EARLY0-P=" ingress-progress @ .',
+            '." EARLY0-A=" ingress-alert @ .',
+            '." EARLY0-I=" ingress-ior @ .',
+            '." EARLY0-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            '." EARLY0-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            "two-bad-records 22 + 22 ingress-feed",
+            '." EARLY1-C=" ingress-consumed @ .',
+            '." EARLY1-P=" ingress-progress @ .',
+            '." EARLY1-A=" ingress-alert @ .',
+            '." EARLY1-I=" ingress-ior @ .',
+            '." EARLY1-FATAL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." EARLY1-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            '." EARLY1-WR=" ingress-write-live? .',
+            '." EARLY1-RD=" ingress-read-zero? .',
+            '." EARLY1-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "bad-record 22 ingress-feed",
+            '." EARLY-REPEAT-C=" ingress-consumed @ .',
+            '." EARLY-REPEAT-A=" ingress-alert @ .',
+            '." EARLY-REPEAT-I=" ingress-ior @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            f"early-hello {len(early_hello)} 44 ingress-restart",
+            "bad-record 22 ingress-feed",
+            '." CLOSE0-C=" ingress-consumed @ .',
+            '." CLOSE0-P=" ingress-progress @ .',
+            '." CLOSE0-I=" ingress-ior @ .',
+            '." CLOSE0-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            '." CLOSE0-OPEN=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-OPEN + @ .',
+            '." CLOSE0-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            "early-finished-fragment 26 ingress-feed",
+            '." CLOSE1-C=" ingress-consumed @ .',
+            '." CLOSE1-P=" ingress-progress @ .',
+            '." CLOSE1-I=" ingress-ior @ .',
+            '." CLOSE1-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            '." CLOSE1-OPEN=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-OPEN + @ .',
+            '." CLOSE1-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." CLOSE1-HLEN=" server-ctx @ TLS-CTX.RX-HS-LEN @ .',
+            "bad-record 22 ingress-feed",
+            '." CLOSE2-C=" ingress-consumed @ .',
+            '." CLOSE2-P=" ingress-progress @ .',
+            '." CLOSE2-A=" ingress-alert @ .',
+            '." CLOSE2-I=" ingress-ior @ .',
+            '." CLOSE2-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            'server-ctx @ TLS-ABORT ." EARLY-ABORT=" .',
+            '." EARLY-WR-WIPED=" server-ctx @ TLS-CTX.WR-KEY '
+            'zero-write-epoch 48 _XC-BYTES= .',
+            '." EARLY-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." EARLY-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "ORD-C=21 ", "ORD-P=3 ", "ORD-A=20 ", "ORD-I=-4203 ",
+            "ORD-FATAL=3 ", "ORD-STATE=3 ", "ORD-WR=-1 ",
+            "ORD-RD=-1 ", "ORD-REFS=0 ", "ORD-REPEAT-C=0 ",
+            "ORD-REPEAT-A=20 ", "ORD-REPEAT-I=-4203 ",
+            "EARLY-RESTART=0 ",
+            "CCS-C=6 ", "CCS-P=1 ", "CCS-A=0 ", "CCS-I=0 ",
+            "CCS-USED=0 ", "CCS-OPEN=-1 ", "CCS-SEQ=0 ",
+            "EARLY0-C=22 ", "EARLY0-P=1 ",
+            "EARLY0-A=0 ", "EARLY0-I=0 ", "EARLY0-USED=22 ",
+            "EARLY0-SEQ=0 ", "EARLY1-C=22 ", "EARLY1-P=3 ",
+            "EARLY1-A=10 ", "EARLY1-I=-4220 ",
+            "EARLY1-FATAL=3 ", "EARLY1-USED=22 ",
+            "EARLY1-WR=-1 ", "EARLY1-RD=-1 ", "EARLY1-REFS=0 ",
+            "EARLY-REPEAT-C=0 ", "EARLY-REPEAT-A=10 ",
+            "EARLY-REPEAT-I=-4220 ",
+            "CLOSE0-C=22 ", "CLOSE0-P=1 ", "CLOSE0-I=0 ",
+            "CLOSE0-USED=22 ", "CLOSE0-OPEN=-1 ", "CLOSE0-SEQ=0 ",
+            "CLOSE1-C=26 ", "CLOSE1-P=1 ", "CLOSE1-I=0 ",
+            "CLOSE1-USED=22 ", "CLOSE1-OPEN=0 ", "CLOSE1-SEQ=1 ",
+            "CLOSE1-HLEN=4 ",
+            "CLOSE2-C=22 ", "CLOSE2-P=3 ", "CLOSE2-A=20 ",
+            "CLOSE2-I=-4203 ", "CLOSE2-USED=22 ",
+            "EARLY-ABORT=0 ",
+            "EARLY-WR-WIPED=-1 ", "EARLY-OWNER=0 ",
+            "EARLY-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_rejects_authenticated_non_finished(self):
+        """Authenticated client-flight records must contain exact Finished."""
+        wrong_finished = bytes.fromhex(
+            "1703030035de4a5ff64b354480a575ef8001fdc3a129fc64ee79971c5f"
+            "efd24c8f3a54890dd08ae439d51bb2684829bb32c0dd00ae2a1174ca27"
+        )
+        premature_app = bytes.fromhex(
+            "1703030012b25d3626cc93e607bd9a0fb55a40c2ab355d"
+        )
+        lines, ordinary_hello = self._server_phase_one_lines()
+        for name, data in (
+            ("ordinary-hello", ordinary_hello),
+            ("wrong-finished", wrong_finished),
+            ("premature-app", premature_app),
+            ("zero-write-epoch", bytes(48)),
+            ("zero-read-epoch", bytes(48)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            ": ingress-write-live? ( -- flag )",
+            "  server-ctx @ TLS-CTX.WR-KEY zero-write-epoch 48",
+            "  _XC-BYTES= 0= ;",
+            ": ingress-read-zero? ( -- flag )",
+            "  server-ctx @ TLS-CTX.RD-KEY zero-read-epoch 48",
+            "  _XC-BYTES= ;",
+            "0 ingress-enter",
+            "wrong-finished 58 ingress-feed",
+            '." BADFIN-C=" ingress-consumed @ .',
+            '." BADFIN-P=" ingress-progress @ .',
+            '." BADFIN-A=" ingress-alert @ .',
+            '." BADFIN-I=" ingress-ior @ .',
+            '." BADFIN-FATAL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." BADFIN-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." BADFIN-AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." BADFIN-WR=" ingress-write-live? .',
+            '." BADFIN-RD=" ingress-read-zero? .',
+            '." BADFIN-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            f"ordinary-hello {len(ordinary_hello)} 0 ingress-restart",
+            "premature-app 23 ingress-feed",
+            '." APP-C=" ingress-consumed @ .',
+            '." APP-P=" ingress-progress @ .',
+            '." APP-A=" ingress-alert @ .',
+            '." APP-I=" ingress-ior @ .',
+            '." APP-FATAL=" server-ctx @ TLS-RXW.SERVER-INGRESS-META '
+            'TSI.STATE + @ .',
+            '." APP-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." APP-WR=" ingress-write-live? .',
+            '." APP-RD=" ingress-read-zero? .',
+            '." APP-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'server-ctx @ TLS-ABORT ." APP-ABORT=" .',
+            '." APP-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." APP-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "BADFIN-C=58 ", "BADFIN-P=3 ", "BADFIN-A=51 ",
+            "BADFIN-I=-4221 ", "BADFIN-FATAL=3 ",
+            "BADFIN-ERROR=-4221 ", "BADFIN-AUTH=0 ",
+            "BADFIN-WR=-1 ", "BADFIN-RD=-1 ", "BADFIN-REFS=0 ",
+            "APP-C=23 ", "APP-P=3 ", "APP-A=10 ",
+            "APP-I=-4221 ", "APP-FATAL=3 ", "APP-ERROR=-4221 ",
+            "APP-WR=-1 ", "APP-RD=-1 ", "APP-REFS=0 ",
+            "APP-ABORT=0 ", "APP-OWNER=0 ", "APP-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_classifies_empty_handshake_and_peer_alert(self):
+        """Authenticated malformed handshake and peer Alert close cleanly."""
+        malformed_ccs = bytes.fromhex("140303000102")
+        empty_handshake = bytes.fromhex(
+            "1703030011dc3386da407db58b51ce0a33a582ff40d5"
+        )
+        peer_alert = bytes.fromhex(
+            "1703030013c8624a81d55c9b8ab7b612b6f98bdfd96291e0"
+        )
+        close_notify = bytes.fromhex(
+            "1703030013cb4a4ad46d9926c892b1ce516bbafc1c3cffa5"
+        )
+        lines, ordinary_hello = self._server_phase_one_lines()
+        for name, data in (
+            ("ordinary-hello", ordinary_hello),
+            ("malformed-ccs", malformed_ccs),
+            ("empty-handshake", empty_handshake),
+            ("peer-alert", peer_alert),
+            ("peer-close", close_notify),
+            ("zero-write-epoch", bytes(48)),
+            ("zero-read-epoch", bytes(48)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            ": ingress-write-live? ( -- flag )",
+            "  server-ctx @ TLS-CTX.WR-KEY zero-write-epoch 48",
+            "  _XC-BYTES= 0= ;",
+            ": ingress-read-zero? ( -- flag )",
+            "  server-ctx @ TLS-CTX.RD-KEY zero-read-epoch 48",
+            "  _XC-BYTES= ;",
+            "0 ingress-enter",
+            "empty-handshake 22 ingress-feed",
+            '." EMPTY-C=" ingress-consumed @ .',
+            '." EMPTY-P=" ingress-progress @ .',
+            '." EMPTY-A=" ingress-alert @ .',
+            '." EMPTY-I=" ingress-ior @ .',
+            '." EMPTY-FATAL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." EMPTY-WR=" ingress-write-live? .',
+            '." EMPTY-RD=" ingress-read-zero? .',
+            f"ordinary-hello {len(ordinary_hello)} 0 ingress-restart",
+            "malformed-ccs 6 ingress-feed",
+            '." BADCCS-C=" ingress-consumed @ .',
+            '." BADCCS-P=" ingress-progress @ .',
+            '." BADCCS-A=" ingress-alert @ .',
+            '." BADCCS-I=" ingress-ior @ .',
+            f"ordinary-hello {len(ordinary_hello)} 0 ingress-restart",
+            "peer-alert 24 ingress-feed",
+            '." PEER-C=" ingress-consumed @ .',
+            '." PEER-P=" ingress-progress @ .',
+            '." PEER-A=" ingress-alert @ .',
+            '." PEER-I=" ingress-ior @ .',
+            '." PEER-FATAL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." PEER-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." PEER-LEVEL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.PEER-ALERT-LEVEL + @ .',
+            '." PEER-WR=" ingress-write-live? .',
+            '." PEER-RD=" ingress-read-zero? .',
+            '." PEER-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "peer-alert 24 ingress-feed",
+            '." PEER-REPEAT-C=" ingress-consumed @ .',
+            '." PEER-REPEAT-A=" ingress-alert @ .',
+            '." PEER-REPEAT-I=" ingress-ior @ .',
+            f"ordinary-hello {len(ordinary_hello)} 0 ingress-restart",
+            "peer-close 24 ingress-feed",
+            '." CLOSE-C=" ingress-consumed @ .',
+            '." CLOSE-P=" ingress-progress @ .',
+            '." CLOSE-A=" ingress-alert @ .',
+            '." CLOSE-I=" ingress-ior @ .',
+            '." CLOSE-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." CLOSE-LEVEL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.PEER-ALERT-LEVEL + @ .',
+            '." CLOSE-WR=" ingress-write-live? .',
+            '." CLOSE-RD=" ingress-read-zero? .',
+            '." CLOSE-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "peer-close 24 ingress-feed",
+            '." CLOSE-REPEAT-C=" ingress-consumed @ .',
+            '." CLOSE-REPEAT-P=" ingress-progress @ .',
+            '." CLOSE-REPEAT-A=" ingress-alert @ .',
+            '." CLOSE-REPEAT-I=" ingress-ior @ .',
+            'server-ctx @ TLS-ABORT ." PEER-ABORT=" .',
+            '." PEER-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." PEER-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "EMPTY-C=22 ", "EMPTY-P=3 ", "EMPTY-A=10 ",
+            "EMPTY-I=-4221 ", "EMPTY-FATAL=3 ", "EMPTY-WR=-1 ",
+            "EMPTY-RD=-1 ",
+            "BADCCS-C=6 ", "BADCCS-P=3 ", "BADCCS-A=10 ",
+            "BADCCS-I=-4203 ",
+            "PEER-C=24 ", "PEER-P=5 ",
+            "PEER-A=40 ", "PEER-I=-4201 ", "PEER-FATAL=3 ",
+            "PEER-ERROR=-4201 ", "PEER-LEVEL=2 ",
+            "PEER-WR=-1 ", "PEER-RD=-1 ",
+            "PEER-REFS=0 ", "PEER-REPEAT-C=0 ",
+            "PEER-REPEAT-A=40 ", "PEER-REPEAT-I=-4201 ",
+            "CLOSE-C=24 ", "CLOSE-P=4 ", "CLOSE-A=0 ",
+            "CLOSE-I=-4201 ", "CLOSE-STATE=3 ", "CLOSE-LEVEL=1 ",
+            "CLOSE-WR=-1 ", "CLOSE-RD=-1 ", "CLOSE-REFS=0 ",
+            "CLOSE-REPEAT-C=0 ", "CLOSE-REPEAT-P=4 ",
+            "CLOSE-REPEAT-A=0 ", "CLOSE-REPEAT-I=-4201 ",
+            "PEER-ABORT=0 ", "PEER-OWNER=0 ",
+            "PEER-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_rejects_record_overflow_from_header(self):
+        """An oversized TLSInnerPlaintext is terminal after five wire bytes."""
+        overflow_header = bytes.fromhex("1703034012")
+        lines, _ = self._server_phase_one_lines()
+        for name, data in (
+            ("overflow-header", overflow_header),
+            ("zero-write-epoch", bytes(48)),
+            ("zero-read-epoch", bytes(48)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            ": ingress-write-live? ( -- flag )",
+            "  server-ctx @ TLS-CTX.WR-KEY zero-write-epoch 48",
+            "  _XC-BYTES= 0= ;",
+            ": ingress-read-zero? ( -- flag )",
+            "  server-ctx @ TLS-CTX.RD-KEY zero-read-epoch 48",
+            "  _XC-BYTES= ;",
+            "0 ingress-enter",
+            "overflow-header 5 ingress-feed",
+            '." OVER-C=" ingress-consumed @ .',
+            '." OVER-P=" ingress-progress @ .',
+            '." OVER-A=" ingress-alert @ .',
+            '." OVER-I=" ingress-ior @ .',
+            '." OVER-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." OVER-RLEN=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." OVER-WR=" ingress-write-live? .',
+            '." OVER-RD=" ingress-read-zero? .',
+            '." OVER-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "overflow-header 5 ingress-feed",
+            '." OVER-REPEAT-C=" ingress-consumed @ .',
+            '." OVER-REPEAT-P=" ingress-progress @ .',
+            '." OVER-REPEAT-A=" ingress-alert @ .',
+            '." OVER-REPEAT-I=" ingress-ior @ .',
+            'server-ctx @ TLS-ABORT ." OVER-ABORT=" .',
+            '." OVER-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." OVER-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "OVER-C=5 ", "OVER-P=3 ", "OVER-A=22 ",
+            "OVER-I=-4203 ", "OVER-STATE=3 ", "OVER-RLEN=0 ",
+            "OVER-WR=-1 ", "OVER-RD=-1 ", "OVER-REFS=0 ",
+            "OVER-REPEAT-C=0 ", "OVER-REPEAT-P=3 ",
+            "OVER-REPEAT-A=22 ", "OVER-REPEAT-I=-4203 ",
+            "OVER-ABORT=0 ", "OVER-OWNER=0 ",
+            "OVER-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_ingress_contains_crypto_faults_and_owner_recursion(self):
+        """Thrown and reported crypto faults cannot leak locks or mimic 0-RTT."""
+        client_record, *_ = self._client_finished_reference()
+        wrong_finished = bytes.fromhex(
+            "1703030035de4a5ff64b354480a575ef8001fdc3a129fc64ee79971c5f"
+            "efd24c8f3a54890dd08ae439d51bb2684829bb32c0dd00ae2a1174ca27"
+        )
+        early_hello = self._client_hello(
+            psk=self._offered_psk(),
+            psk_modes=b"\x01\x02",
+            early_data=True,
+        )
+        lines, ordinary_hello = self._server_phase_one_lines()
+        for name, data in (
+            ("fault-client-record", client_record),
+            ("fault-wrong-finished", wrong_finished),
+            ("fault-ordinary-hello", ordinary_hello),
+            ("fault-early-hello", early_hello),
+            ("zero-write-epoch", bytes(48)),
+            ("zero-read-epoch", bytes(48)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += self._server_ingress_support_lines()
+        lines += [
+            ": ingress-write-live? ( -- flag )",
+            "  server-ctx @ TLS-CTX.WR-KEY zero-write-epoch 48",
+            "  _XC-BYTES= 0= ;",
+            ": ingress-read-zero? ( -- flag )",
+            "  server-ctx @ TLS-CTX.RD-KEY zero-read-epoch 48",
+            "  _XC-BYTES= ;",
+            ": ingress-throw-mode ( ctx -- ior )",
+            "  DROP TLS-OWNER-TRY DROP -777 THROW ;",
+            ": ingress-fail-mode ( ctx -- ior ) DROP 6 ;",
+            "TLS-OWNER-TRY DROP TLS-OWNER-TRY DROP",
+            "_TSSE-OWNER-TO-ONE",
+            '." NORMALIZE-OWNER=" TLS-OWNER-DEPTH @ .',
+            "TLS-OWNER-RELEASE",
+            "0 ingress-enter",
+            "' ingress-throw-mode IS TLS-SET-AES-MODE",
+            "fault-client-record 58 ingress-feed",
+            "' (TLS-SET-AES-MODE) IS TLS-SET-AES-MODE",
+            '." THROW-C=" ingress-consumed @ .',
+            '." THROW-P=" ingress-progress @ .',
+            '." THROW-A=" ingress-alert @ .',
+            '." THROW-I=" ingress-ior @ .',
+            '." THROW-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." THROW-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." THROW-WR=" ingress-write-live? .',
+            '." THROW-RD=" ingress-read-zero? .',
+            '." THROW-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." THROW-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." THROW-POINTERS=" _TSCF-CTX @ _TDR-CTX @ OR '
+            '_TCD-CTX @ OR _TEL-TLS-CTX @ OR _TRO-A @ OR .',
+            f"fault-early-hello {len(early_hello)} 116 ingress-restart",
+            "' ingress-fail-mode IS TLS-SET-AES-MODE",
+            "fault-client-record 58 ingress-feed",
+            "' (TLS-SET-AES-MODE) IS TLS-SET-AES-MODE",
+            '." FAIL-C=" ingress-consumed @ .',
+            '." FAIL-P=" ingress-progress @ .',
+            '." FAIL-A=" ingress-alert @ .',
+            '." FAIL-I=" ingress-ior @ .',
+            '." FAIL-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." FAIL-USED=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.EARLY-USED + @ .',
+            '." FAIL-WR=" ingress-write-live? .',
+            '." FAIL-RD=" ingress-read-zero? .',
+            '." FAIL-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FAIL-OWNER=" TLS-OWNER-DEPTH @ .',
+            'server-ctx @ TLS-ABORT ." FAIL-ABORT=" .',
+            f"fault-ordinary-hello {len(ordinary_hello)} 0 ingress-restart",
+            '_TC-LOCK-TRY ." UNPIN-LOCK=" .',
+            "fault-wrong-finished 58 ingress-feed",
+            '." UNPIN-C=" ingress-consumed @ .',
+            '." UNPIN-P=" ingress-progress @ .',
+            '." UNPIN-A=" ingress-alert @ .',
+            '." UNPIN-I=" ingress-ior @ .',
+            '." UNPIN-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." UNPIN-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." UNPIN-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "_TC-UNLOCK",
+            'server-ctx @ TLS-ABORT ." UNPIN-ABORT=" .',
+            '." UNPIN-REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FAULT-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, max_steps=250_000_000)
+        for token in (
+            "NORMALIZE-OWNER=1 ",
+            "THROW-C=0 ", "THROW-P=3 ", "THROW-A=80 ",
+            "THROW-I=-4216 ", "THROW-STATE=3 ",
+            "THROW-ERROR=-4216 ", "THROW-WR=-1 ", "THROW-RD=-1 ",
+            "THROW-REFS=0 ", "THROW-OWNER=0 ", "THROW-POINTERS=0 ",
+            "FAIL-C=58 ", "FAIL-P=3 ", "FAIL-A=80 ",
+            "FAIL-I=-4216 ", "FAIL-STATE=3 ", "FAIL-USED=0 ",
+            "FAIL-WR=-1 ", "FAIL-RD=-1 ", "FAIL-REFS=0 ",
+            "FAIL-OWNER=0 ", "FAIL-ABORT=0 ",
+            "UNPIN-LOCK=0 ", "UNPIN-C=58 ", "UNPIN-P=3 ",
+            "UNPIN-A=80 ", "UNPIN-I=-4216 ", "UNPIN-STATE=3 ",
+            "UNPIN-PIN=-1 ", "UNPIN-REFS=1 ", "UNPIN-ABORT=0 ",
+            "UNPIN-REFS-END=0 ",
+            "FAULT-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 

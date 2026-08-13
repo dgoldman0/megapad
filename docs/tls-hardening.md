@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus transactionally constructed and socket-independently emitted TLS 1.3 server flight through Finished; retained-data TCP delivery and cooperative neighbor/TX admission implemented; authoritative accepted-TCB attachment, control replay/close, rejected-0-RTT handling, client-Finished authentication, and secure listener integration remain gated
+Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake through client Finished, explicit publication, ALPN, and exporter; retained-data TCP delivery and cooperative neighbor/TX admission implemented; authoritative accepted-TCB attachment, control replay/close, secure listener integration, and external-stack socket interoperability remain gated
 Last updated: 2026-08-13
 
 ## Purpose
@@ -42,10 +42,19 @@ Finished, commits its sequence and cursors only after exact admission, and
 installs only the S-AP write epoch after Finished admission. Its transport
 callback is socket-independent; binding it to a TCP child remains deferred
 until secure accept can transfer incarnation-safe, exclusive TCB ownership.
-The remaining server work is explicit rejected-0-RTT handling,
-client-Finished verification/cutover, an independent peer journey, and secure
-accept. The following lower-level facts continue to bound an authenticated
-server role:
+The bounded inbound engine now rejects offered 0-RTT under a sealed caller
+wire-byte budget, authenticates and reassembles the exact client Finished,
+commits the transcript through that message, installs C-AP read, and leaves
+establishment behind the existing explicit publication boundary. A
+socket-independent composition test uses a Python-standard-library
+SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
+client-Finished record, reaches publication, and agrees on ALPN and an
+independently derived exporter output. This qualifies the byte-level protocol
+boundary; it is not live interoperability with an independent TLS stack.
+The remaining server work is authoritative TCP attachment, retained control
+and graceful close, secure accept, and interoperability over that socket path
+with an independent TLS implementation. The following lower-level facts
+continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
   verification data. Private signing now uses the separate fixed-schedule
@@ -76,10 +85,10 @@ RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
 the server gate still requires authoritative accepted-TCB attachment behind
-the qualified outbound callback contract, rejected 0-RTT handling,
-client-Finished verification, retained TCP control/close, and secure
-listener/accept integration. Reusing `EC-MUL` or precomputing a fixture
-signature remains test scaffolding rather than a server security result.
+the qualified outbound callback and inbound feed contracts, retained TCP
+control/close, secure listener/accept integration, and external-stack socket
+interoperability. Reusing `EC-MUL` or precomputing a fixture signature remains
+test scaffolding rather than a server security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
 hash state, per-context application RX state, and enforced serialized scratch
@@ -462,8 +471,11 @@ orphaning the credential pin needed by abort cleanup.
 `TLS-SERVER-FLIGHT-STEP-WITH` advances that immutable flight through a
 socket-independent all-or-none callback. After flight preparation, the dead
 8192-byte duplicate-extension bitmap becomes a one-way phase union containing
-one exact TCP-MSS-sized pending TLS record and emitter metadata; workspace
-geometry does not grow. Plaintext ServerHello is emitted first without
+one exact TCP-MSS-sized pending TLS record, 136 bytes of emitter metadata, and
+64 bytes of ingress metadata; workspace geometry does not grow. Client-flight
+partial records later reuse the existing 16,896-byte record lane, while at most
+36 fragmented Finished bytes use the per-context retained lane. Plaintext
+ServerHello is emitted first without
 consuming a protected-record sequence. EncryptedExtensions, the streamed
 Certificate framing and DER, CertificateVerify, and Finished are then packed
 into protected records whose complete wire images fit one TCP MSS.
@@ -484,8 +496,40 @@ After exact Finished admission, the emitter installs only the prederived S-AP
 write epoch, preserves the C-HS read epoch and its sequence, and publishes
 client-Finished-pending. It intentionally has no raw-TCB adapter: this phase
 requires an unbound context until secure accept can transfer exclusive,
-incarnation-safe transport ownership. Rejected early data, client Finished,
-and an independent complete TLS peer journey remain release gates.
+incarnation-safe transport ownership.
+
+`TLS-SERVER-CLIENT-FLIGHT-BEGIN` then seals a nonnegative caller-provided
+wire-byte budget. Failed trial C-HS decryption can be discarded only when the
+owned ClientHello offered `early_data`, the budget admits the complete record,
+and no protected client-handshake record has authenticated. Discard does not
+advance the read sequence. Exact compatibility CCS is ignored without spending
+the budget or closing the window. The first authenticated record closes the
+window permanently; a later tag failure is `bad_record_mac`, even if budget
+remains.
+
+`TLS-SERVER-CLIENT-FLIGHT-FEED` copies at most one record per call into
+connection-owned storage and retains partial headers, bodies, and the exact
+36-byte client Finished across calls and protected-record boundaries. It
+accepts only handshake or alert content before authentication. Finished is
+verified under the retained C-HS secret against the transcript through server
+Finished; only then is the transcript replayed through client Finished and the
+prederived C-AP read epoch installed. The completed context is authenticated
+and `TLSH-APPLICATION-READY`, but remains `TLSS-HANDSHAKE` until
+`TLS-HANDSHAKE-PUBLISH` releases the credential pin, wipes handshake-only
+state, and publishes the secure application stream.
+
+Feed progress distinguishes an ordinary consumed record, verified Finished,
+an outbound fatal-alert disposition, an outbound close-notify disposition, and
+a terminal peer alert. Terminal disposition is sticky across repeated calls.
+Terminal cleanup wipes read, transcript, schedule, exporter, and fragment
+state, normally releases credential ownership, and retains only S-AP write
+state needed by the later authoritative adapter to encode a protected response.
+If credential unpin is contended or fails, its generational handle remains for
+`TLS-ABORT` retry and the disposition becomes `internal_error` with
+`TLS-E-HANDSHAKE-CRYPTO`. The feed does not claim to send that response.
+Protocol mutation remains excluded from emitter
+completion through publish, close, or abort, and no raw TCB value grants input
+or output authority.
 
 `TLS-ALPN-CONFIGURE` copies zero or one exact ProtocolName into connection-owned
 storage before the handshake.  A nonempty name is bounded by ALPN's one-byte
@@ -565,9 +609,11 @@ State that must survive an application receive call is not shared scratch.
 Each 968-byte `/TLS-CTX` indexes a 230,688-byte `/TLS-RX-WORKSPACE`: a
 16,896-byte partial-record lane plus an aligned retained-data lane bounded for
 a 73,732-byte post-handshake message, a protocol-derived 131,146-byte
-ClientHello lane, an 8,192-byte bitmap covering all uint16 extension types,
-and a 512-byte immutable server-message ledger with 200 bytes of exact flight
-metadata. Incomplete encrypted records,
+ClientHello lane, an 8,192-byte one-way phase union that begins as the complete
+uint16 extension bitmap and later holds a TCP-MSS pending record plus 136-byte
+emitter and 64-byte ingress metadata, and a 512-byte immutable server-message
+ledger with 200 bytes of exact flight metadata. Client-flight fragments reuse
+the per-context record and retained lanes. Incomplete encrypted records,
 authenticated plaintext remainder, and fragmented post-handshake messages are
 therefore isolated by context.  The high-level application receive and
 owner-held blocking-handshake paths use the transient global plaintext buffer
@@ -735,6 +781,20 @@ Native guest tests cover:
 - exact socket-independent ServerHello and protected-flight record lengths and
   SHA-256 oracles, byte-identical zero-result retry, commit-only sequence and
   cursor advance, and final S-AP-write/C-HS-read cutover;
+- a socket-independent composition through publication using independent
+  SHA-256/HMAC/HKDF calculations, a fixed externally generated AES-GCM client
+  Finished, and independently checked traffic-key, transcript, ALPN, and
+  exporter values;
+- one-record bounded ingress with fragmented record and Finished reassembly,
+  exact CCS handling, no-offer tag failure, wrong Finished, premature
+  application data, record overflow, protected peer alert, and sticky terminal
+  disposition;
+- rejected-0-RTT accounting in complete wire bytes, no sequence advance on
+  discard, exact budget exhaustion, and permanent closure after the first
+  authenticated handshake fragment;
+- owner-recursion and crypto-fault containment, conservative mutable-arena
+  alias refusal, pointer/scratch cleanup, and credential-unpin retry through
+  abort;
 - MSS fragmentation of a multi-certificate chain with decrypted plaintext
   reconstruction, including retry of the first full Certificate record;
 - short-send, callback-THROW, staging-THROW, callback-owner-leak, durable-result
@@ -771,10 +831,11 @@ Native guest tests cover:
 - the surrounding record, handshake, and application-data regressions.
 
 These tests prove deterministic construction plus bounded socket-independent
-server-flight emission and failure atomicity. They do not yet prove an
-incarnation-safe accepted-TCB adapter, the uint24-maximum emitted Certificate,
-rejected-0-RTT handling, client-Finished processing, secure socket acceptance,
-or interoperability with an independent TLS stack.
+server-flight emission, rejected-0RTT handling, client-Finished
+authentication/C-AP cutover, explicit publication, ALPN, exporter agreement,
+and failure atomicity. They do not yet prove an incarnation-safe accepted-TCB
+adapter, the uint24-maximum emitted Certificate, secure socket acceptance, or
+interoperability over sockets with an independent TLS stack.
 
 Signer and credential fixtures use only standardized or synthetic test
 scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
@@ -795,20 +856,13 @@ credential. None enters a product trust bundle or production credential slot.
 - Run the approval-gated uint24-maximum Certificate through the existing
   streamed emitter and verify exact framing, record boundaries, retry, and
   transcript/application-secret agreement.
-- Reject offered 0-RTT under a caller- or configuration-budgeted discard
-  policy with exact exhaustion behavior; do not add an arbitrary hidden byte
-  cap or an unbounded discard loop.
-- After Server Finished acceptance, install only the prederived S-AP write
-  epoch. Reassemble and verify client Finished under retained C-HS, atomically
-  install the prederived C-AP read epoch, and publish authentication/application
-  readiness. Cover invalid Finished, premature application data, partial
-  ingress, cancellation, peer close/reset, and context reuse.
-- Complete a socket-independent journey against a reproducible independent
-  generator and peer, then repair half-open admission/overflow cleanup and
-  attach accepted TCBs without exposing plaintext. Prove credential-pin/reference
-  cleanup on every failure and qualify socket lifecycle, application bytes,
-  exporter equality, and close-notify against an independent TLS 1.3
-  implementation.
+- Preserve the qualified socket-independent rejected-0RTT/client-Finished
+  boundary while adapting it to authoritative nonblocking TCP input and
+  protected terminal-alert output.
+- Repair half-open admission/overflow cleanup and attach accepted TCBs without
+  exposing plaintext. Prove credential-pin/reference cleanup on every failure
+  and qualify socket lifecycle, application bytes, exporter equality, and
+  close-notify against an independent TLS 1.3 implementation.
 
 ### Trust lifecycle
 
