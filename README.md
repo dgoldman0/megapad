@@ -50,10 +50,13 @@ with IPI, spinlocks, barriers, and **3 MiB HBW math RAM**,
 NTT, ML-KEM-512, hybrid PQ exchange).
 
 Transport is still under active qualification. The current TCP sender is a
-one-outstanding-segment profile with open data/control/admission defects, and
-the TLS server has transactionally constructed its signed handshake messages
-but has not emitted plaintext ServerHello plus the protected remainder,
-authenticated client Finished, or enabled secure listen/accept. See
+one-outstanding-segment profile: retained data now has strict cumulative-ACK
+accounting, bounded replay/failure, peer/congestion-window admission, durable
+ACK intent, and nonblocking neighbor recovery. Retained SYN/SYN-ACK/FIN replay,
+half-open admission, and graceful TLS close remain open. The TLS server has
+transactionally constructed its signed handshake messages but has not emitted
+plaintext ServerHello plus the protected remainder, authenticated client
+Finished, or enabled secure listen/accept. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

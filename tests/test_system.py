@@ -27766,6 +27766,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "tls-no-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
             "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "CREATE tls-failed-msg 4 ALLOT  tls-failed-msg 4 65 FILL",
             'test-ctx @ tls-failed-msg 4 TLS-SEND-DATA ."  actual=" .',
@@ -27777,8 +27778,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("actual=0 ", text)
         self.assertIn("seq=0 ", text)
         self.assertIn("next=100 ", text)
-        self.assertGreaterEqual(len(sent), 1)
-        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+        self.assertEqual(sent, [])
 
     def test_tls_send_alert_failure_preserves_record_sequence(self):
         """Alert emission observes the same TCP acceptance boundary."""
@@ -27791,6 +27791,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "alert-no-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
             "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "test-ctx @ 1 0 TLS-SEND-ALERT",
             'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
@@ -27800,8 +27801,32 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
         self.assertIn("seq=0 ", text)
         self.assertIn("next=100 ", text)
-        self.assertGreaterEqual(len(sent), 1)
-        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+        self.assertEqual(sent, [])
+
+    def test_tls_transport_exhaustion_revokes_on_owner_observation(self):
+        """Terminal TCP delivery failure becomes sticky TLS status and cleanup."""
+        sent = []
+        lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
+            "TCPS-FAILED 0 TCB-N TCB.STATE !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "CREATE exhausted-msg 4 ALLOT  exhausted-msg 4 65 FILL",
+            'test-ctx @ exhausted-msg 4 TLS-SEND-DATA ."  actual=" .',
+            'test-ctx @ TLS-IO-STATUS ."  status=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  ctx-state=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+            'test-ctx @ TLS-CTX.TCB @ ."  ctx-tcb=" .',
+            'test-ctx @ TLS-CTX.WR-KEY 31 + C@ ."  key=" .',
+            '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            'TCB-USAGE DROP ."  used=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in (
+            "actual=0 ", "status=-4218 ", "ctx-state=3 ", "auth=0 ",
+            "ctx-tcb=0 ", "key=0 ", "tcb-state=0 ", "used=0 ",
+        ):
+            self.assertIn(token, text)
+        self.assertEqual(sent, [])
 
     def test_tls_close_notify_can_reply_after_peer_close(self):
         """The retained write epoch answers close_notify, then is wiped."""
@@ -27817,6 +27842,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "alert-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
             "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "TLSS-CLOSING test-ctx @ TLS-CTX.STATE !",
             "0 test-ctx @ TLS-CTX.PEER-AUTH !",
@@ -27846,10 +27872,17 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
 
     def test_tls_send_data_preserves_sequence_under_tcp_backpressure(self):
         """A pending TCP record must defer TLS encryption and sequence use."""
-        lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
+        lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE pending-peer 4 ALLOT  10 0 0 77 pending-peer IP!",
+            "CREATE pending-mac 6 ALLOT  pending-mac 6 170 FILL",
+            "pending-peer pending-mac ARP-INSERT",
             "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "pending-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !",
             "105 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
             "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "CREATE pending-msg 4 ALLOT  pending-msg 4 65 FILL",
             'test-ctx @ pending-msg 4 TLS-SEND-DATA ."  sent=" .',
@@ -28447,20 +28480,20 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '0 TLS-CTX@ TLS-RXW@ - .',
             '."  END=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
             'TLS-SERVER-META-CAPACITY + 0 TLS-CTX@ TLS-RXW@ - .',
-            '."  CAP0=" 237536 NET-XMEM-CAPACITY .',
-            '."  CAP1=" 237552 NET-XMEM-CAPACITY .',
-            '."  EDGE1=" 475071 NET-XMEM-CAPACITY .',
-            '."  CAP2=" 475072 NET-XMEM-CAPACITY .',
+            '."  CAP0=" 237567 NET-XMEM-CAPACITY .',
+            '."  CAP1=" 237568 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 475103 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 475104 NET-XMEM-CAPACITY .',
             '." MAX=" TLS-MAX-CTX .',
             '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
         ])
         self.assertIn("CTX=968 ", text)
         self.assertIn("RX=230688 ", text)
         self.assertIn("STRIDE=230688 ", text)
-        self.assertIn("COST=237536 ", text)
-        self.assertIn("PHYS1=237552 ", text)
-        self.assertIn("PHYS2=475072 ", text)
-        self.assertIn("PHYS3=712624 ", text)
+        self.assertIn("COST=237552 ", text)
+        self.assertIn("PHYS1=237568 ", text)
+        self.assertIn("PHYS2=475104 ", text)
+        self.assertIn("PHYS3=712672 ", text)
         self.assertIn("CHCAP=131146 ", text)
         self.assertIn("BITMAP=8192 ", text)
         self.assertIn("LEDGER=512 ", text)
@@ -28504,8 +28537,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("state=3 ", text)
         self.assertIn("auth=0 ", text)
 
-    def test_tls_close_state(self):
-        """TLS-CLOSE transitions to CLOSING state."""
+    def test_tls_close_inactive_context_remains_reset(self):
+        """TLS-CLOSE leaves an inactive context reset."""
         # TLS-CLOSE needs a TCB, so we test on bare context without TCP
         lines = self._TLS_ESTAB_SETUP + [
             # Can't fully close without TCP, but check state guard
@@ -29380,7 +29413,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "ARP-MAX-ENTRIES .",
             "/ARP-PKT .",
         ])
-        self.assertIn("16 ", text)
+        self.assertIn("32 ", text)
         self.assertIn("8 ", text)
         self.assertIn("28 ", text)
 
@@ -29443,6 +29476,67 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "aip4 ARP-LOOKUP .",
         ])
         self.assertIn("0 ", text)
+
+    def test_arp_ensure_and_missing_neighbor_state_are_stack_exact(self):
+        """Neighbor allocation and a miss each return exactly one result."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "CREATE depth-ip 4 ALLOT  10 0 0 77 depth-ip IP!",
+            'DEPTH ."  before=" .',
+            "depth-ip ARP-ENSURE DROP",
+            'DEPTH ."  after-ensure=" .',
+            "ARP-CLEAR",
+            "depth-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            '0 TCB-N TCP-NEIGHBOR-STATE ."  state=" .',
+            'DEPTH ."  after-state=" .',
+        ])
+        for token in (
+            "before=0 ", "after-ensure=0 ", "state=0 ", "after-state=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_arp_maintenance_probes_on_wire_budget_then_fails(self):
+        """Only admitted probes consume the bounded neighbor retry budget."""
+        sent = []
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE probe-ip 4 ALLOT  10 0 0 77 probe-ip IP!",
+            "VARIABLE probe-entry  probe-ip ARP-ENSURE probe-entry !",
+            'probe-entry @ 100 ARP-MAINT-STEP ."  p0=" .',
+            "NET-TX-ACQUIRE-IDLE NET-TX-RELEASE",
+            'probe-entry @ 1099 ARP-MAINT-STEP ."  early=" .',
+            'probe-entry @ 1100 ARP-MAINT-STEP ."  p1=" .',
+            "NET-TX-ACQUIRE-IDLE NET-TX-RELEASE",
+            'probe-entry @ 2100 ARP-MAINT-STEP ."  p2=" .',
+            "NET-TX-ACQUIRE-IDLE NET-TX-RELEASE",
+            'probe-entry @ 3100 ARP-MAINT-STEP ."  failed=" .',
+            'probe-entry @ ARP-E.PROBES @ ."  probes=" .',
+            'probe-entry @ ARP-E.STATE W@ ."  state=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in (
+            "p0=-1 ", "early=0 ", "p1=-1 ", "p2=-1 ",
+            "failed=-1 ", "probes=3 ", "state=3 ",
+        ):
+            self.assertIn(token, text)
+        self.assertEqual(len(sent), 3)
+        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+
+    def test_arp_full_reachable_cache_evicts_without_overwriting_work(self):
+        """A new neighbor can replace cache data but not active discovery state."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE cache-ip 4 ALLOT  CREATE cache-mac 6 ALLOT",
+            "cache-mac 6 170 FILL",
+            ": fill-cache 8 0 DO 10 0 0 I 1+ cache-ip IP! "
+            "cache-ip cache-mac ARP-INSERT LOOP ;",
+            "fill-cache  10 0 0 99 cache-ip IP!",
+            'cache-ip ARP-ENSURE DUP 0<> ."  allocated=" .',
+            'DUP ARP-E.STATE W@ ."  state=" .',
+            'ARP-E.IP 3 + C@ ."  last=" .',
+        ])
+        self.assertIn("allocated=-1 ", text)
+        self.assertIn("state=1 ", text)
+        self.assertIn("last=99 ", text)
 
     def test_ip_set_and_my_ip(self):
         """IP-SET should configure MY-IP."""
@@ -31810,7 +31904,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertEqual(sent, [])
 
     def test_tcp_state_constants(self):
-        """TCP state constants should be enumerated 0..10."""
+        """TCP states include an owner-visible terminal delivery failure."""
         text = self._run_kdos([
             "TCPS-CLOSED .\"  c=\" .",
             "TCPS-LISTEN .\"  l=\" .",
@@ -31823,6 +31917,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "TCPS-CLOSING .\"  cl=\" .",
             "TCPS-LAST-ACK .\"  la=\" .",
             "TCPS-TIME-WAIT .\"  tw=\" .",
+            "TCPS-FAILED .\"  failed=\" .",
         ])
         self.assertIn("c=0 ", text)
         self.assertIn("l=1 ", text)
@@ -31835,13 +31930,14 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("cl=8 ", text)
         self.assertIn("la=9 ", text)
         self.assertIn("tw=10 ", text)
+        self.assertIn("failed=11 ", text)
 
     # -- 16.7b: TCB data structure --
 
     def test_tcb_size(self):
-        """/TCB should be 5816."""
+        """/TCB should include durable intent and exact failure fields."""
         text = self._run_kdos(["/TCB ."])
-        self.assertIn("5816 ", text)
+        self.assertIn("5832 ", text)
 
     def test_tcb_n_indexing(self):
         """TCB-N should return different addresses for different indices."""
@@ -31850,7 +31946,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "1 TCB-N .\"  b=\" .",
             "1 TCB-N 0 TCB-N - .\"  diff=\" .",
         ])
-        self.assertIn("diff=5816 ", text)
+        self.assertIn("diff=5832 ", text)
 
     def test_tcb_init_sets_closed(self):
         """TCB-INIT should set state to TCPS-CLOSED (0)."""
@@ -32431,7 +32527,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("0 ", text)
 
     def test_tcp_send_failure_does_not_accept_or_advance(self):
-        """Failed ARP/IP emission leaves sequence and retransmit state intact."""
+        """A cold neighbor queues discovery without accepting or advancing data."""
         sent = []
         text = self._run_kdos([
             "TCP-INIT-ALL  ARP-CLEAR",
@@ -32442,8 +32538,9 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "80 0 TCB-N TCB.REMOTE-PORT !",
             "no-data-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
-            "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
-            "77 0 TCB-N TCB.RTO-TIMER !  33 0 TCB-N TCB.TX-LEN !",
+            "4096 0 TCB-N TCB.RCV-WND !  4096 0 TCB-N TCB.SND-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !  25 0 TCB-N TCB.RTO-VALUE !",
+            "77 0 TCB-N TCB.RTO-TIMER !  0 0 TCB-N TCB.TX-LEN !",
             "90 0 TCB-N TCB.TX-BUF C!",
             "CREATE failed-data 4 ALLOT  failed-data 4 65 FILL",
             '0 TCB-N failed-data 4 TCP-SEND ."  actual=" .',
@@ -32453,19 +32550,22 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             '0 TCB-N TCB.TX-LEN @ ."  txlen=" .',
             '0 TCB-N TCB.TX-BUF C@ ."  txbyte=" .',
             '0 TCB-N TCB.STATE @ ."  state=" .',
+            '0 TCB-N TCB.FLAGS @ ."  flags=" .',
+            'no-data-peer ARP-FIND ARP-E.STATE W@ ."  neighbor=" .',
         ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
         self.assertIn("actual=0 ", text)
         self.assertIn("next=100 ", text)
         self.assertIn("una=100 ", text)
         self.assertIn("timer=77 ", text)
-        self.assertIn("txlen=33 ", text)
+        self.assertIn("txlen=0 ", text)
         self.assertIn("txbyte=90 ", text)
         self.assertIn("state=4 ", text)
-        self.assertGreaterEqual(len(sent), 1)
-        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+        self.assertIn("flags=0 ", text)
+        self.assertIn("neighbor=1 ", text)
+        self.assertEqual(sent, [], "cache-only TCP send must not start ARP")
 
-    def test_tcp_cold_arp_retransmit_copy_uses_owned_payload(self):
-        """Nested ARP receive cannot corrupt the accepted retransmit bytes."""
+    def test_tcp_cold_neighbor_does_not_consume_queued_arp_reply(self):
+        """A send attempt neither waits for nor consumes a queued ARP reply."""
         my_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
         my_ip = [10, 0, 0, 2]
@@ -32481,41 +32581,520 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "40000 0 TCB-N TCB.LOCAL-PORT !  80 0 TCB-N TCB.REMOTE-PORT !",
             "cold-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
-            "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
+            "4096 0 TCB-N TCB.RCV-WND !  4096 0 TCB-N TCB.SND-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !  25 0 TCB-N TCB.RTO-VALUE !",
             "17 ETH-RX-BUF C!  34 ETH-RX-BUF 1+ C!",
             "51 ETH-RX-BUF 2 + C!  68 ETH-RX-BUF 3 + C!",
             '0 TCB-N ETH-RX-BUF 4 TCP-SEND ."  actual=" .',
-            '0 TCB-N TCB.TX-BUF C@ ."  b0=" .',
-            '0 TCB-N TCB.TX-BUF 1+ C@ ."  b1=" .',
-            '0 TCB-N TCB.TX-BUF 2 + C@ ."  b2=" .',
-            '0 TCB-N TCB.TX-BUF 3 + C@ ."  b3=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  held=" .',
+            'ETH-RX-BUF C@ ."  caller0=" .',
+            'ETH-RECV ."  queued=" .',
         ], nic_frames=[arp_reply],
             nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
-        self.assertIn("actual=4 ", text)
-        self.assertIn("b0=17 ", text)
-        self.assertIn("b1=34 ", text)
-        self.assertIn("b2=51 ", text)
-        self.assertIn("b3=68 ", text)
-        tcp = [self._parse_tcp_frame(frame) for frame in sent]
-        tcp = [parsed for parsed in tcp if parsed is not None and parsed['payload']]
-        self.assertEqual(len(tcp), 1)
-        self.assertEqual(tcp[0]['payload'], bytes((17, 34, 51, 68)))
+        self.assertIn("actual=0 ", text)
+        self.assertIn("next=100 ", text)
+        self.assertIn("held=0 ", text)
+        self.assertIn("caller0=17 ", text)
+        self.assertIn(f"queued={len(arp_reply)} ", text)
+        self.assertEqual(sent, [])
 
     def test_tcp_send_backpressures_with_unacknowledged_data(self):
         """TCP-SEND must not overwrite its sole retransmit buffer."""
         text = self._run_kdos([
-            "TCP-INIT-ALL",
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE held-peer 4 ALLOT  10 0 0 77 held-peer IP!",
+            "CREATE held-mac 6 ALLOT  held-mac 6 170 FILL",
+            "held-peer held-mac ARP-INSERT",
             "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "held-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !",
             "105 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
+            "5 0 TCB-N TCB.TX-LEN !",
+            "67 0 TCB-N TCB.TX-BUF C!",
+            "71 0 TCB-N TCB.TX-BUF 4 + C!",
             "CREATE MSG3 4 ALLOT  MSG3 4 65 FILL",
             '0 TCB-N MSG3 4 TCP-SEND ."  sent=" .',
             '0 TCB-N TCB.SND-NXT @ ."  next=" .',
             '0 TCB-N TCB.TX-LEN @ ."  buffered=" .',
+            '0 TCB-N TCB.TX-BUF C@ ."  first=" .',
+            '0 TCB-N TCB.TX-BUF 4 + C@ ."  last=" .',
         ])
         self.assertIn("sent=0 ", text)
         self.assertIn("next=105 ", text)
-        self.assertIn("buffered=0 ", text)
+        self.assertIn("buffered=5 ", text)
+        self.assertIn("first=67 ", text)
+        self.assertIn("last=71 ", text)
+
+    def test_tcp_ack_classification_and_full_release(self):
+        """Duplicate/future ACKs retain data; a full ACK releases it exactly."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 77]
+        my_ip = [10, 0, 0, 2]
+        duplicate = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 100, self.TCP_ACK, 4096)
+        future = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 106, self.TCP_ACK, 2048)
+        complete = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 105, self.TCP_ACK, 8192)
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE ack-peer 4 ALLOT  10 0 0 77 ack-peer IP!",
+            "CREATE ack-mac 6 ALLOT  ack-mac 6 170 FILL",
+            "ack-peer ack-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "ack-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  105 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
+            "65535 0 TCB-N TCB.SSTHRESH !  5 0 TCB-N TCB.TX-LEN !",
+            "72 0 TCB-N TCB.TX-BUF C!  101 0 TCB-N TCB.TX-BUF 1+ C!",
+            "108 0 TCB-N TCB.TX-BUF 2 + C!  108 0 TCB-N TCB.TX-BUF 3 + C!",
+            "111 0 TCB-N TCB.TX-BUF 4 + C!",
+            "2 0 TCB-N TCB.RETRIES !  TCP-RTO-MAX 0 TCB-N TCB.RTO-VALUE !",
+            "MS@ 0 TCB-N TCB.RTO-TIMER !",
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  D-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  D-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  D-LEN=" .',
+            '0 TCB-N TCB.DUP-ACKS @ ."  D-DUPS=" .',
+            '0 TCB-N TCB.RETRIES @ ."  D-RETRIES=" .',
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  F-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  F-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  F-LEN=" .',
+            '0 TCB-N TCB.DUP-ACKS @ ."  F-DUPS=" .',
+            '0 TCB-N TCB.SND-WND @ ."  F-WND=" .',
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  A-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  A-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  A-LEN=" .',
+            '0 TCB-N TCB.DUP-ACKS @ ."  A-DUPS=" .',
+            '0 TCB-N TCB.RETRIES @ ."  A-RETRIES=" .',
+            '0 TCB-N TCB.RTO-TIMER @ ."  A-TIMER=" .',
+            '0 TCB-N TCP-SEND-READY? ."  A-READY=" .',
+        ], nic_frames=[duplicate, future, complete])
+        self.assertIn("D-UNA=100 ", text)
+        self.assertIn("D-NEXT=105 ", text)
+        self.assertIn("D-LEN=5 ", text)
+        self.assertIn("D-DUPS=1 ", text)
+        self.assertIn("D-RETRIES=2 ", text)
+        self.assertIn("F-UNA=100 ", text)
+        self.assertIn("F-NEXT=105 ", text)
+        self.assertIn("F-LEN=5 ", text)
+        self.assertIn("F-DUPS=1 ", text)
+        self.assertIn("F-WND=4096 ", text)
+        self.assertIn("A-UNA=105 ", text)
+        self.assertIn("A-NEXT=105 ", text)
+        self.assertIn("A-LEN=0 ", text)
+        self.assertIn("A-DUPS=0 ", text)
+        self.assertIn("A-RETRIES=0 ", text)
+        self.assertIn("A-TIMER=0 ", text)
+        self.assertIn("A-READY=-1 ", text)
+
+    def test_tcp_partial_ack_trims_suffix_across_wrap(self):
+        """Repeated cumulative ACKs trim the retained suffix across uint32 wrap."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 77]
+        my_ip = [10, 0, 0, 2]
+        acks = [
+            self._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, my_ip,
+                443, 40000, 200, ack, self.TCP_ACK, 4096)
+            for ack in (0xFFFF_FFFE, 1, 4)
+        ]
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE wrap-peer 4 ALLOT  10 0 0 77 wrap-peer IP!",
+            "CREATE wrap-mac 6 ALLOT  wrap-mac 6 170 FILL",
+            "wrap-peer wrap-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "wrap-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "4294967292 0 TCB-N TCB.SND-UNA !  4 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
+            "65535 0 TCB-N TCB.SSTHRESH !  8 0 TCB-N TCB.TX-LEN !",
+            ": fill-wrap 8 0 DO I 1+ 10 * 0 TCB-N TCB.TX-BUF I + C! LOOP ;",
+            "fill-wrap  TCP-RTO-MAX 0 TCB-N TCB.RTO-VALUE !",
+            "MS@ 0 TCB-N TCB.RTO-TIMER !",
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  P1-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  P1-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  P1-LEN=" .',
+            '0 TCB-N TCB.TX-BUF C@ ."  P1-B0=" .',
+            '0 TCB-N TCB.TX-BUF 5 + C@ ."  P1-B5=" .',
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  P2-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  P2-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  P2-LEN=" .',
+            '0 TCB-N TCB.TX-BUF C@ ."  P2-B0=" .',
+            '0 TCB-N TCB.TX-BUF 2 + C@ ."  P2-B2=" .',
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  P3-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  P3-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  P3-LEN=" .',
+            '0 TCB-N TCP-SEND-READY? ."  P3-READY=" .',
+        ], nic_frames=acks)
+        for token in (
+            "P1-UNA=4294967294 ", "P1-NEXT=4 ", "P1-LEN=6 ",
+            "P1-B0=30 ", "P1-B5=80 ", "P2-UNA=1 ", "P2-NEXT=4 ",
+            "P2-LEN=3 ", "P2-B0=60 ", "P2-B2=80 ", "P3-UNA=4 ",
+            "P3-NEXT=4 ", "P3-LEN=0 ", "P3-READY=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tcp_fast_retransmit_replays_retained_suffix_at_una(self):
+        """Three duplicate ACKs replay only the unacknowledged suffix at UNA."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 77]
+        my_ip = [10, 0, 0, 2]
+        frames = [
+            self._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, my_ip,
+                443, 40000, 200, ack, self.TCP_ACK, 4096)
+            for ack in (102, 102, 102, 102)
+        ]
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE fast-peer 4 ALLOT  10 0 0 77 fast-peer IP!",
+            "CREATE fast-mac 6 ALLOT  fast-mac 6 170 FILL",
+            "fast-peer fast-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "fast-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  105 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  4096 0 TCB-N TCB.CWND !",
+            "65535 0 TCB-N TCB.SSTHRESH !  5 0 TCB-N TCB.TX-LEN !",
+            "65 0 TCB-N TCB.TX-BUF C!  66 0 TCB-N TCB.TX-BUF 1+ C!",
+            "67 0 TCB-N TCB.TX-BUF 2 + C!  68 0 TCB-N TCB.TX-BUF 3 + C!",
+            "69 0 TCB-N TCB.TX-BUF 4 + C!",
+            "TCP-RTO-MAX 0 TCB-N TCB.RTO-VALUE !",
+            "MS@ 0 TCB-N TCB.RTO-TIMER !",
+            "TCP-POLL TCP-POLL TCP-POLL TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  LEN=" .',
+            '0 TCB-N TCB.DUP-ACKS @ ."  DUPS=" .',
+            '0 TCB-N TCB.STATE @ ."  STATE=" .',
+        ], nic_frames=frames,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in ("UNA=102 ", "NEXT=105 ", "LEN=3 ",
+                      "DUPS=3 ", "STATE=4 "):
+            self.assertIn(token, text)
+        tcp = [self._parse_tcp_frame(frame) for frame in sent]
+        tcp = [parsed for parsed in tcp if parsed is not None]
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]['seq'], 102)
+        self.assertEqual(tcp[0]['payload'], b'CDE')
+        self.assertEqual(tcp[0]['flags'], self.TCP_PSH | self.TCP_ACK)
+
+    def test_tcp_send_honors_peer_and_congestion_windows(self):
+        """Admission is bounded by peer/CWND and exact sends never go short."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE win-peer 4 ALLOT  10 0 0 77 win-peer IP!",
+            "CREATE win-mac 6 ALLOT  win-mac 6 170 FILL",
+            "win-peer win-mac ARP-INSERT",
+            "CREATE win-msg 5 ALLOT  65 win-msg C!  66 win-msg 1+ C!",
+            "67 win-msg 2 + C!  68 win-msg 3 + C!  69 win-msg 4 + C!",
+            ": init-win-tcb",
+            "  0 TCB-N /TCB 0 FILL",
+            "  TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "  40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "  win-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "  100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "  200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND ! ;",
+            "init-win-tcb  0 0 TCB-N TCB.SND-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !",
+            '0 TCB-N win-msg 5 TCP-SEND ."  ZERO=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  Z-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  Z-LEN=" .',
+            "init-win-tcb  3 0 TCB-N TCB.SND-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !",
+            '0 TCB-N win-msg 5 TCP-SEND-EXACT ."  SMALL-EXACT=" .',
+            '0 TCB-N win-msg 5 TCP-SEND ."  SMALL=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  S-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  S-LEN=" .',
+            "init-win-tcb  4096 0 TCB-N TCB.SND-WND !",
+            "2 0 TCB-N TCB.CWND !",
+            '0 TCB-N win-msg 5 TCP-SEND ."  CWND=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  C-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  C-LEN=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in (
+            "ZERO=0 ", "Z-NEXT=100 ", "Z-LEN=0 ", "SMALL-EXACT=0 ",
+            "SMALL=3 ", "S-NEXT=103 ", "S-LEN=3 ", "CWND=2 ",
+            "C-NEXT=102 ", "C-LEN=2 ",
+        ):
+            self.assertIn(token, text)
+        tcp = [self._parse_tcp_frame(frame) for frame in sent]
+        tcp = [parsed for parsed in tcp if parsed is not None]
+        self.assertEqual([frame['payload'] for frame in tcp], [b'ABC', b'AB'])
+
+    def test_tcp_poll_services_due_data_rto_without_input(self):
+        """An empty poll replays one due retained segment from SND-UNA."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE rto-peer 4 ALLOT  10 0 0 77 rto-peer IP!",
+            "CREATE rto-mac 6 ALLOT  rto-mac 6 170 FILL",
+            "rto-peer rto-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "rto-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  103 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  4096 0 TCB-N TCB.CWND !",
+            "65535 0 TCB-N TCB.SSTHRESH !  3 0 TCB-N TCB.TX-LEN !",
+            "88 0 TCB-N TCB.TX-BUF C!  89 0 TCB-N TCB.TX-BUF 1+ C!",
+            "90 0 TCB-N TCB.TX-BUF 2 + C!",
+            "TCP-RTO-INITIAL 0 TCB-N TCB.RTO-VALUE !",
+            "MS@ TCP-RTO-INITIAL - 1- 0 TCB-N TCB.RTO-TIMER !",
+            "TCP-POLL",
+            '0 TCB-N TCB.SND-UNA @ ."  R-UNA=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  R-NEXT=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  R-LEN=" .',
+            '0 TCB-N TCB.RETRIES @ ."  R-RETRIES=" .',
+            '0 TCB-N TCB.RTO-VALUE @ ."  R-RTO=" .',
+            '0 TCB-N TCB.STATE @ ."  R-STATE=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in ("R-UNA=100 ", "R-NEXT=103 ", "R-LEN=3 ",
+                      "R-RETRIES=1 ", "R-RTO=2000 ", "R-STATE=4 "):
+            self.assertIn(token, text)
+        tcp = [self._parse_tcp_frame(frame) for frame in sent]
+        tcp = [parsed for parsed in tcp if parsed is not None]
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]['seq'], 100)
+        self.assertEqual(tcp[0]['payload'], b'XYZ')
+        self.assertEqual(tcp[0]['flags'], self.TCP_PSH | self.TCP_ACK)
+
+    def test_tcp_data_rto_exhaustion_is_terminal_until_owner_abort(self):
+        """Retry exhaustion is observable and cannot recycle an owned TCB."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 77]
+        my_ip = [10, 0, 0, 2]
+        late_rst = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 0, self.TCP_RST, 4096)
+        late_syn = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 0, self.TCP_SYN, 4096)
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE failed-peer 4 ALLOT  10 0 0 77 failed-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "failed-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  103 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !",
+            "3 0 TCB-N TCB.TX-LEN !  0 TCB-N TCB.TX-BUF 3 90 FILL",
+            "TCP-MAX-RETRIES 0 TCB-N TCB.RETRIES !",
+            "1 0 TCB-N TCB.RTO-VALUE !  MS@ 1- 0 TCB-N TCB.RTO-TIMER !",
+            "TCP-RTO-SERVICE",
+            '0 TCB-N TCB.STATE @ ."  FAILED-STATE=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  FAILED-LEN=" .',
+            '0 TCB-N TCB.RETRIES @ ."  FAILED-RETRIES=" .',
+            '0 TCB-N TCB.FAILURE @ ."  FAILED-REASON=" .',
+            'TCB-USAGE DROP ."  FAILED-USED=" .',
+            "TCP-POLL TCP-POLL",
+            '0 TCB-N TCB.STATE @ ."  LATE-STATE=" .',
+            'TCB-USAGE DROP ."  LATE-USED=" .',
+            '0 TCB-N TCP-ABORT ."  ABORT=" .',
+            '0 TCB-N TCB.STATE @ ."  CLOSED-STATE=" .',
+            'TCB-USAGE DROP ."  CLOSED-USED=" .',
+        ], nic_frames=[late_rst, late_syn],
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in ("FAILED-STATE=11 ", "FAILED-LEN=0 ",
+                      "FAILED-RETRIES=5 ", "FAILED-REASON=1001 ",
+                      "FAILED-USED=1 ", "LATE-STATE=11 ", "LATE-USED=1 ",
+                      "ABORT=0 ", "CLOSED-STATE=0 ", "CLOSED-USED=0 "):
+            self.assertIn(token, text)
+        self.assertEqual(sent, [])
+
+    def test_tcp_data_rto_cache_loss_queues_neighbor_resolution(self):
+        """A lost replay route preserves data and coalesces neighbor recovery."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR  0 NET-MAINT-CURSOR !",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE lost-peer 4 ALLOT  10 0 0 77 lost-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "lost-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  103 0 TCB-N TCB.SND-NXT !",
+            "3 0 TCB-N TCB.TX-LEN !  0 TCB-N TCB.TX-BUF 3 90 FILL",
+            "2 0 TCB-N TCB.RETRIES !",
+            "1 0 TCB-N TCB.RTO-VALUE !  MS@ 1- 0 TCB-N TCB.RTO-TIMER !",
+            "TCP-POLL",
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  held=" .',
+            '0 TCB-N TCB.RETRIES @ ."  retries=" .',
+            '0 TCB-N TCB.FLAGS @ ."  flags=" .',
+            '0 TCB-N TCB.FAILURE @ ."  failure=" .',
+            'lost-peer ARP-FIND ARP-E.STATE W@ ."  neighbor=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("state=4 ", text)
+        self.assertIn("held=3 ", text)
+        self.assertIn("retries=2 ", text)
+        self.assertIn("flags=2 ", text)
+        self.assertIn("failure=0 ", text)
+        self.assertIn("neighbor=1 ", text)
+        self.assertEqual(sent, [])
+
+    def test_tcp_deferred_ack_replays_after_neighbor_learning(self):
+        """An owed ACK survives a cold cache and clears only after NIC admission."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE ack-intent-ip 4 ALLOT  10 0 0 77 ack-intent-ip IP!",
+            "CREATE ack-intent-mac 6 ALLOT  ack-intent-mac 6 170 FILL",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "ack-intent-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            '0 TCB-N TCP-ACK-TRY ."  first=" .',
+            '0 TCB-N TCB.FLAGS @ ."  held-flags=" .',
+            'ack-intent-ip ARP-FIND ARP-E.STATE W@ ."  neighbor=" .',
+            "ack-intent-ip ack-intent-mac ARP-INSERT",
+            "ARP-MAX-ENTRIES NET-MAINT-CURSOR !",
+            "TCP-RTO-SERVICE",
+            "NET-TX-ACQUIRE-IDLE NET-TX-RELEASE",
+            '0 TCB-N TCB.FLAGS @ ."  final-flags=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in (
+            "first=-1 ", "held-flags=3 ", "neighbor=1 ", "final-flags=0 ",
+        ):
+            self.assertIn(token, text)
+        tcp = [self._parse_tcp_frame(frame) for frame in sent]
+        tcp = [parsed for parsed in tcp if parsed is not None]
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]['flags'], self.TCP_ACK)
+        self.assertEqual(tcp[0]['ack'], 200)
+
+    def test_tcp_shared_failed_gateway_publishes_one_owner_then_late_reply_rescues(self):
+        """Shared neighbor failure is observable per owner and remains recoverable."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE remote-a 4 ALLOT  20 0 0 1 remote-a IP!",
+            "CREATE remote-b 4 ALLOT  30 0 0 1 remote-b IP!",
+            "CREATE gateway-mac 6 ALLOT  gateway-mac 6 187 FILL",
+            "VARIABLE gateway-entry  GW-IP ARP-ENSURE gateway-entry !",
+            "ARPS-FAILED gateway-entry @ ARP-E.STATE W!",
+            "0 gateway-entry @ ARP-E.STAMP !",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TCPS-ESTABLISHED 1 TCB-N TCB.STATE !",
+            "remote-a 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "remote-b 1 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "TCP-F-ARP-PENDING 0 TCB-N TCB.FLAGS !",
+            "TCP-F-ARP-PENDING 1 TCB-N TCB.FLAGS !",
+            '0 TCB-N 2000 TCP-MAINT-STEP ."  first-claimed=" .',
+            '0 TCB-N TCB.STATE @ ."  first-state=" .',
+            '0 TCB-N TCB.FAILURE @ ."  first-reason=" .',
+            '1 TCB-N TCB.STATE @ ."  second-held=" .',
+            "GW-IP gateway-mac ARP-INSERT",
+            '1 TCB-N 2000 TCP-MAINT-STEP ."  rescue-claimed=" .',
+            '1 TCB-N TCB.STATE @ ."  second-state=" .',
+            '1 TCB-N TCB.FLAGS @ ."  second-flags=" .',
+        ])
+        for token in (
+            "first-claimed=-1 ", "first-state=11 ", "first-reason=1004 ",
+            "second-held=4 ", "rescue-claimed=0 ", "second-state=4 ",
+            "second-flags=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tcp_service_holds_shared_failure_until_each_owner_can_observe(self):
+        """Round-robin service fails one waiter and preserves rescue for another."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE service-a 4 ALLOT  20 0 0 1 service-a IP!",
+            "CREATE service-b 4 ALLOT  30 0 0 1 service-b IP!",
+            "CREATE service-mac 6 ALLOT  service-mac 6 204 FILL",
+            "VARIABLE service-entry  GW-IP ARP-ENSURE service-entry !",
+            "ARPS-FAILED service-entry @ ARP-E.STATE W!",
+            "100 service-entry @ ARP-E.STAMP !",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TCPS-ESTABLISHED 1 TCB-N TCB.STATE !",
+            "service-a 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "service-b 1 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "TCP-F-ARP-PENDING 0 TCB-N TCB.FLAGS !",
+            "TCP-F-ARP-PENDING 1 TCB-N TCB.FLAGS !",
+            "ARP-MAX-ENTRIES NET-MAINT-CURSOR !",
+            "TCP-RTO-SERVICE",
+            '0 TCB-N TCB.STATE @ ."  first-state=" .',
+            '1 TCB-N TCB.STATE @ ."  second-held=" .',
+            'service-entry @ 1100 ARP-MAINT-STEP ."  held-claim=" .',
+            'service-entry @ ARP-E.STATE W@ ."  held-neighbor=" .',
+            "GW-IP service-mac ARP-INSERT",
+            "TCP-RTO-SERVICE",
+            '1 TCB-N TCB.STATE @ ."  second-state=" .',
+            '1 TCB-N TCB.FLAGS @ ."  second-flags=" .',
+            'NET-MAINT-CURSOR @ ."  cursor=" .',
+        ])
+        for token in (
+            "first-state=11 ", "second-held=4 ", "held-claim=0 ",
+            "held-neighbor=3 ", "second-state=4 ", "second-flags=0 ",
+        ):
+            self.assertIn(token, text)
+        cursor = re.search(r"cursor=(\d+)", text)
+        self.assertIsNotNone(cursor, text)
+        self.assertNotEqual(int(cursor.group(1)), 8)
+
+    def test_arp_failed_entry_holds_then_returns_to_discovery_capacity(self):
+        """A published neighbor failure is held briefly, then safely reusable."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "CREATE held-fail-ip 4 ALLOT  10 0 0 77 held-fail-ip IP!",
+            "VARIABLE held-fail-entry",
+            "held-fail-ip ARP-ENSURE held-fail-entry !",
+            "ARPS-FAILED held-fail-entry @ ARP-E.STATE W!",
+            "100 held-fail-entry @ ARP-E.STAMP !",
+            'held-fail-entry @ 1099 ARP-MAINT-STEP ."  early=" .',
+            'held-fail-entry @ ARP-E.STATE W@ ."  held-state=" .',
+            'held-fail-entry @ 1100 ARP-MAINT-STEP ."  expired=" .',
+            'held-fail-entry @ ARP-E.STATE W@ ."  free-state=" .',
+            "held-fail-ip ARP-ENSURE",
+            'DUP held-fail-entry @ = ."  same-slot=" .',
+            'ARP-E.STATE W@ ."  retry-state=" .',
+        ])
+        for token in (
+            "early=0 ", "held-state=3 ", "expired=-1 ", "free-state=0 ",
+            "same-slot=-1 ", "retry-state=1 ",
+        ):
+            self.assertIn(token, text)
 
     # -- 16.7j: TCP receive data --
 
@@ -32629,8 +33208,8 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
 
     # -- 16.7l: TCP RST handling --
 
-    def test_tcp_rst_resets_connection(self):
-        """Receiving RST should move connection to CLOSED."""
+    def test_tcp_rst_publishes_owner_visible_failure(self):
+        """An in-window RST remains owned until its caller observes failure."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
         peer_ip = [10, 0, 0, 1]
@@ -32673,8 +33252,12 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "VARIABLE _RST-TCB  DUP _RST-TCB !",
             "10 TCP-POLL-WAIT",
             "_RST-TCB @ TCB.STATE @ .\"  st=\" .",
+            "_RST-TCB @ TCB.FAILURE @ .\"  reason=\" .",
+            "TCB-USAGE DROP .\"  used=\" .",
         ], nic_tx_callback=tcp_peer_rst)
-        self.assertIn("st=0 ", text)  # TCPS-CLOSED = 0
+        self.assertIn("st=11 ", text)
+        self.assertIn("reason=1002 ", text)
+        self.assertIn("used=1 ", text)
 
     def test_tcp_rst_sent_for_unmatched(self):
         """An incoming segment for no TCB should elicit a RST."""
@@ -32771,6 +33354,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "close-wait-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
             "CREATE close-wait-msg 3 ALLOT  close-wait-msg 3 65 FILL",
             '0 TCB-N TCP-SEND-READY? ."  ready=" .',
             '0 TCB-N close-wait-msg 3 TCP-SEND ."  sent=" .',

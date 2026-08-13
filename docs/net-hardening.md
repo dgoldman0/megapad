@@ -1,7 +1,9 @@
 # TCP Accept-Queue Hardening
 
-**Status:** Completed-child queue mechanics implemented; half-open admission and overflow cleanup incomplete, with fixed backlog policy provisional
-**Date:** 2026-08-12 review
+**Status:** Completed-child queue mechanics implemented; retained-data TCP
+delivery repaired; half-open admission and overflow cleanup incomplete, with
+fixed backlog policy provisional
+**Date:** 2026-08-13 review
 
 ## Problem
 
@@ -21,13 +23,17 @@ This means:
 
 ### Design
 
-- Expand `/TCB` from 5728 → 5816 bytes (+88 bytes) to embed a small
+- The accept-queue stage expanded `/TCB` from 5728 → 5816 bytes (+88 bytes) to
+  embed a small
   accept queue directly in each TCB:
   - `+5724  AQ-HEAD    1 cell`  — circular-queue read index
   - `+5732  AQ-TAIL    1 cell`  — circular-queue write index
   - `+5740  AQ-COUNT   1 cell`  — entries currently queued
   - `+5748  AQ-SLOTS   8 cells` — 8 pointers to completed TCBs (64 bytes)
   - `+5812  (pad to 5816)`
+
+  Retained-data hardening subsequently added `FLAGS` and `FAILURE` cells at
+  +5816 and +5824, making the current `/TCB` 5832 bytes.
 
 - Non-listener TCBs pay 88 bytes of unused space.  At 256 max connections
   this is ~22 KB — well within XMEM budget.
@@ -52,7 +58,7 @@ does not replace the immediate requirement for exact safe overload behavior.
 
 | Word | Change |
 |------|--------|
-| `/TCB` | 5728 → 5816 |
+| `/TCB` | 5728 → 5816 for the queue; now 5832 with transport intent/failure fields |
 | `TCB.AQ-HEAD` | New accessor (+5724) |
 | `TCB.AQ-TAIL` | New accessor (+5732) |
 | `TCB.AQ-COUNT` | New accessor (+5740) |
@@ -66,30 +72,37 @@ does not replace the immediate requirement for exact safe overload behavior.
 | `TCP-CLOSE` (LISTEN case) | Drain accept queue: close any pending TCBs before resetting listener. |
 | `SOCK-ACCEPT` | Dequeue from the accept queue instead of transplanting the listener TCB.  No re-open is needed.  Refuse a TLS-marked listener before removing a queued child. |
 | `LISTEN` (socket API) | Continue to open ordinary TCP listeners.  A TLS-marked descriptor now returns `-1` without allocating a listener TCB or changing its descriptor state/handle; secure accept remains unavailable until the authenticated server path exists. |
-| `NET-TABLES-INIT` | Budget the complete logical per-connection allocation: 5,816-byte `/TCB` + 968-byte `/TLS-CTX` + 230,688-byte `/TLS-RX-WORKSPACE` + two 32-byte socket descriptors = 237,536 bytes. The workspace adds a full 131,146-byte ClientHello lane, an 8,192-byte bitmap covering all 65,536 extension types, and a 512-byte immutable server-flight ledger plus 200 bytes of exact metadata. XMEM capacity uses independently normalized table allocations: one connection reserves 237,552 bytes, two reserve 475,072, and odd counts carry 16 bytes of aggregate padding. |
+| `NET-TABLES-INIT` | Budget the complete logical per-connection allocation: 5,832-byte `/TCB` + 968-byte `/TLS-CTX` + 230,688-byte `/TLS-RX-WORKSPACE` + two 32-byte socket descriptors = 237,552 bytes. The workspace adds a full 131,146-byte ClientHello lane, an 8,192-byte bitmap covering all 65,536 extension types, and a 512-byte immutable server-flight ledger plus 200 bytes of exact metadata. XMEM capacity uses independently normalized table allocations: one connection reserves 237,568 bytes, two reserve 475,104, and three reserve 712,672 bytes. |
 
 ### Unchanged words
 
 - `TCB-ALLOC`, `TCB-INIT`, `TCB-FIND`, `TCB-FIND-LPORT` — no changes needed.
-- `TCP-CONNECT`, `TCP-SEND`, `TCP-RECV` — unaffected.
+- `TCP-CONNECT` and `TCP-RECV` retain their queue-era contracts. `TCP-SEND`
+  now has exact retained-data admission and replay semantics described below.
 - `TCP-LISTEN` remains the ordinary TCP passive-open primitive; the socket API
   calls it only for a TCP-marked descriptor.
 - Ring buffer (§18) — not used; accept queue is self-contained inline.
 
 ### Related TCP qualification boundary
 
-Keeping a listener in LISTEN and retaining one accepted child queue does not
-qualify the data-delivery path. The current one-outstanding-segment sender has
-open ACK-range, partial-ACK retained-suffix, retransmission-sequence,
-RTO-service, and advertised-window defects; send admission can block in ARP resolution, and passive control/FIN
-replay and active-open state validation are incomplete. Those require a narrow
-focused repair before outbound TLS server replay relies on the TCB's retained
-ciphertext.
+The one-outstanding-segment data path now advances only strict wrap-safe ACKs,
+trims partial-ACK prefixes, replays the retained suffix from `SND-UNA`, respects
+the peer and congestion windows, and publishes exact terminal failure after
+bounded wire retries. Cache loss starts neighbor-owned bounded ARP discovery;
+accepted bytes and ACK intent survive backpressure, and only an admitted wire
+replay consumes a TCP retry. A flat round-robin maintenance scan performs at
+most one wire attempt or terminal publication per poll. Data admission is
+cache-only and all-or-none for exact sends.
+
+This does not qualify the control plane. Retained SYN/SYN-ACK/FIN replay,
+active/passive-open hardening, half-open reservation/overflow cleanup, and a
+close-notify-before-FIN lifecycle remain required before the secure server is
+complete. The shared TX/RX workspaces are serialized by network lock 12; one
+network progress driver remains the supported execution model.
 
 ### Qualification inventory
 
-- `/TCB` size assertion (5728 → 5816).
-- `TCB-N` diff assertion (5728 → 5816).
+- `/TCB` size and `TCB-N` stride assertions now require 5832.
 - `test_socket_listen_accept` exercises the full SYN → SYN-ACK → ACK → ACCEPT
   path.
 - `test_aq_push_pop` verifies AQ-PUSH/AQ-POP semantics.

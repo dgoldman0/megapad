@@ -1092,10 +1092,10 @@ KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
 The 16 hardware locks have one machine-wide allocation: 0 dictionary, 1 UART,
 2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application runtime
 concurrency (including Akashic `EVT-LOCK`), 7 IPI messaging, 8 the checked BIOS
-crypto guard, 9 KDOS HMAC/HKDF scratch, 10 the KDOS TLS workspace owner, and
-11 the short TLS credential-registry/cancellation lock. Locks 12 through 15
-are currently unassigned. Subsystems must not privately reuse a number from
-this map.
+crypto guard, 9 KDOS HMAC/HKDF scratch, 10 the KDOS TLS workspace owner, 11
+the short TLS credential-registry/cancellation lock, and 12 the KDOS network
+packet-workspace/NIC-descriptor owner. Locks 13 through 15 are currently
+unassigned. Subsystems must not privately reuse a number from this map.
 
 ### Parallel Pipeline Execution
 
@@ -1585,8 +1585,9 @@ limits stated below.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `ARP-LOOKUP` | `( ip -- mac flag )` | Look up MAC address for IP.  *flag* = -1 if found. |
-| `ARP-INSERT` | `( ip mac -- )` | Insert/update ARP table entry. |
+| `ARP-LOOKUP` | `( ip -- mac \| 0 )` | Return the MAC address for a reachable neighbor, or zero. |
+| `ARP-INSERT` | `( ip mac -- )` | Publish/update a reachable neighbor; a late reply can rescue the same incomplete or failed entry. |
+| `ARP-ENSURE` | `( ip -- entry \| 0 )` | Coalesce a neighbor-owned nonblocking discovery intent without transmitting. |
 | `ARP-RESOLVE` | `( ip -- mac )` | Resolve IP to MAC via ARP request.  Blocks until reply. |
 | `ARP-HANDLE` | `( -- flag )` | Validate and handle the frame in `ETH-RX-BUF`; sender L2/L3 identities must agree. |
 
@@ -1634,21 +1635,25 @@ derived from 25% of XMEM. The 256 ceiling is an implementation policy limit,
 not a wire or architectural requirement. The standard networking loader
 requires XMEM. A guarded one-connection Bank-0 allocation path remains for
 manually composed builds, but it is not a qualified deployment profile. The
-logical TLS-capable table cost is 237,536 bytes per connection; backing
-allocator alignment may round the physical reservation upward. The exact XMEM
-total is 237,552 bytes for one connection and `n * 237,536 + 16` for odd `n`;
-even counts require exactly `n * 237,536`.
+logical TLS-capable table cost is 237,552 bytes per connection; backing
+allocator alignment rounds the four allocations independently. Exact XMEM
+totals are 237,568, 475,104, and 712,672 bytes for one through three
+connections.
 
-Do not read the current fields as a qualified sliding window or complete
-congestion-controlled retransmission engine. ACK equality/range handling,
-partial cumulative-ACK retained-suffix accounting, fast-retransmit sequence
-selection, timer-driven replay, and peer-window admission have confirmed
-defects. `TCP-SEND` may also block in ARP resolution;
-SYN-SENT accepts a bare SYN as established, SYN-RCVD accepts any ACK, and
-retransmitted SYN handling plus SYN/SYN-ACK/FIN replay are incomplete. Until
-the narrow one-segment repair is qualified, loss can strand accepted data, a
-bounded TLS step cannot rely on readiness alone, and `TCP-SEND` can admit data
-against an unusable advertised window.
+Do not read the current fields as a general sliding window. The qualified data
+profile retains one segment, admits against the peer/congestion windows,
+advances only strict wrap-safe cumulative ACKs, trims an acknowledged prefix,
+and replays the retained suffix from `SND-UNA` through bounded exponential RTO.
+Fast retransmit and pure/window ACKs use the same retained intent model. Cache
+loss is local backpressure: neighbor-owned ARP probing proceeds cooperatively,
+TCP retry budget changes only after a replay reaches the NIC, and terminal
+failure remains owner-visible until explicit cleanup.
+
+Control transport remains incomplete. SYN-SENT accepts a bare SYN as
+established, SYN-RCVD accepts any ACK, and retransmitted SYN handling plus
+retained SYN/SYN-ACK/FIN replay are not yet qualified. Graceful TLS close also
+needs retained close-notify and FIN state rather than the compatibility close
+word below.
 
 Each listener TCB has an embedded **accept queue** (8 slots). Incoming SYNs
 allocate a fresh TCB and the listener stays in LISTEN. Completed handshakes are
@@ -1664,13 +1669,14 @@ production capacity work outside the immediate TLS integration path.
 |------|-------------|-------------|
 | `TCP-CONNECT` | `( ip remote-port local-port -- tcb \| 0 )` | Start an active open and return its SYN-SENT TCB. If the SYN cannot be emitted, reclaim the TCB and return 0. |
 | `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN.  Initialises accept queue. |
-| `TCP-SEND-READY?` | `( tcb -- flag )` | True only for an established/close-wait TCB whose `SND-NXT` equals `SND-UNA`; it does not presently prove a usable advertised window. |
-| `TCP-SEND` | `( tcb buf len -- actual )` | Accept up to one 1460-byte segment on an established connection with no outstanding bytes. Return 0 without advancing sequence/retransmit state when emission fails. The current implementation does not yet enforce the usable peer/congestion window and may block while resolving ARP. |
+| `TCP-SEND-READY?` | `( tcb -- flag )` | Nonblocking readiness: established/close-wait, no retained flight, positive peer/congestion capacity, reachable neighbor, and idle NIC. A cache miss coalesces discovery but accepts no bytes. |
+| `TCP-SEND` | `( tcb buf len -- actual )` | Accept at most one 1460-byte segment and the usable peer/congestion capacity. The cache-only send returns zero without advancing or overwriting retained state on neighbor/NIC backpressure. |
+| `TCP-SEND-EXACT` | `( tcb buf len -- actual )` | All-or-none variant for an MSS-fitting protected record: zero or the exact requested length. |
 | `TCP-RECV` | `( tcb buf maxlen -- len )` | Receive data.  Returns bytes read. |
-| `TCP-POLL` | `( -- )` | Process at most one incoming IP frame. It does not presently service data RTO/retry state when no frame arrives. |
+| `TCP-POLL` | `( -- )` | Process at most one incoming IP frame, then perform at most one round-robin neighbor/TCP wire attempt or terminal publication. |
 | `TCP-CLOSE` | `( tcb -- )` | Begin graceful close only after the FIN is emitted; a failed send leaves state and sequence unchanged. Drains accept queues for listeners. |
-| `TCP-STATUS` | `( tcb -- state )` | Read connection state (11-state enum). |
 | `.TCP` | `( -- )` | Print all active TCB connections. |
+| `TCP-ABORT` | `( tcb -- status )` | Explicitly reclaim an owned connection and make one cache-only RST attempt when synchronized. |
 | `TCB-USAGE` | `( -- used total )` | Count active (non-CLOSED) TCBs and pool size. |
 | `TCB-REAP-TW` | `( -- )` | Reclaim TCBs stuck in TIME_WAIT past 2×MSL (60 s). |
 | `TCB-FLUSH-TIMEWAIT` | `( -- )` | Force-reclaim all TIME_WAIT TCBs (test/debug). |
@@ -1842,6 +1848,10 @@ Same-core cancellation while lock 10 is active returns credential busy;
 different-core cancellation remains the concurrent path. A sequentially run
 four-core emulator capstone has exercised a real full-batch signature and
 peer-core cancellation with atomic output and complete owner/metadata cleanup.
+TLS lock 10 may also nest the nonblocking network TX lock 12 for exact
+transport admission. Lock 12 never acquires TLS, credential, or crypto locks;
+it serializes shared Ethernet/IP/TCP staging and NIC descriptor ownership, not
+independently parallel receive or TLS progress.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 968 bytes. Each context also owns a 230,688-byte receive/server
@@ -1858,8 +1868,8 @@ receive and owner-held blocking-handshake paths copy authenticated plaintext
 into connection-owned or caller storage and scrub their complete global
 staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
 writes to its caller-selected output and does not scrub that output.  Together
-with the 5,816-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 237,536 bytes per connection,
+with the 5,832-byte TCB and two 32-byte socket
+descriptors, the logical network-table cost is 237,552 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
 
@@ -1878,12 +1888,14 @@ a machine without XMEM its underlying bulk-reset action remains a no-op.
 | `TLS-CONNECT` | `( rip rport lport -- tls \| 0 )` | TLS handshake over TCP without ALPN: ClientHello → authenticated key schedule → Finished. |
 | `TLS-CONNECT-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | As above, requiring one exact caller-provided ALPN ProtocolName. |
 | `TLS-CONNECT-HYBRID-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | Explicit private-hybrid ClientHello with the same generic ALPN contract. |
-| `TLS-SEND` | `( tls buf len -- actual )` | Encrypt and send application data. |
+| `TLS-SEND` | `( tls buf len -- actual )` | Encrypt and use exact TCP admission; zero/backpressure does not consume the write sequence. |
 | `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
-| `TLS-CLOSE-TRY` | `( tls -- ior )` | Nonblocking close attempt; return `TLS-E-BUSY` without mutation when another task owns TLS scratch. |
+| `TLS-CLOSE-TRY` | `( tls -- ior )` | Owner-checked compatibility teardown. `TLS-E-BUSY` is retryable owner contention, but bounded retained close-notify/FIN completion remains unqualified. |
 | `TLS-CLOSE` | `( tls -- )` | Compatibility close that drops the `TLS-CLOSE-TRY` status; callers requiring retry visibility use the checked form. |
-| `TLS-SEND-ALERT-TRY` | `( ctx level desc -- ior )` | Nonblocking checked alert attempt; owner contention returns `TLS-E-BUSY` for caller retry. Once admitted, a local fatal alert revokes authorization, exporters, and traffic secrets even if transport backpressure prevents emission. An accepted local `close_notify` moves the context to closing and erases the traffic epoch after emission. |
+| `TLS-SEND-ALERT-TRY` | `( ctx level desc -- ior )` | Checked exact-send alert attempt. It reports `TLS-E-BUSY` on owner contention, `TLS-E-WOULD-BLOCK` when transport accepts nothing, and `TLS-E-TRANSPORT` after terminal TCP failure. A local fatal alert revokes authorization even when unsent; an accepted `close_notify` closes the TLS epoch. |
 | `TLS-SEND-ALERT` | `( ctx level desc -- )` | Compatibility wrapper for alerts such as warning-level `1 0` `close_notify`; it drops the checked attempt status. |
+| `TLS-IO-STATUS` | `( ctx -- ior )` | Return sticky TLS I/O status; first observation of terminal TCP failure revokes the epoch and reclaims its TCB. |
+| `TLS-ABORT` | `( ctx -- status )` | Explicitly reclaim the associated TCB and wipe the complete context without attempting graceful close. |
 | `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles decryption plus per-context partial-record, retained-plaintext, and post-handshake-fragment state. An invalid or internal-alias destination returns zero without consuming connection state. |
 
 The raw `TLS-READ-RECORD[-NB]`, `TLS-PROCESS-HS-MSG[S]`,

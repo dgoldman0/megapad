@@ -1,7 +1,7 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus transactionally constructed TLS 1.3 server messages through CertificateVerify and Finished; bounded plaintext/protected emission, client-Finished authentication, honest TCP replay, and secure listener integration remain gated
-Last updated: 2026-08-12
+Status: authenticated bounded client profile plus transactionally constructed TLS 1.3 server messages through CertificateVerify and Finished; retained-data TCP delivery and cooperative neighbor/TX admission implemented; bounded server-flight emission, control replay/close, client-Finished authentication, and secure listener integration remain gated
+Last updated: 2026-08-13
 
 ## Purpose
 
@@ -545,11 +545,11 @@ therefore isolated by context.  The high-level application receive and
 owner-held blocking-handshake paths use the transient global plaintext buffer
 only while lock 10 is held and scrub its complete contents before releasing
 ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
-output and does not scrub that output.  With a 5,816-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 237,536 bytes per connection;
-the four XMEM table allocations are normalized independently, so one
-connection reserves 237,552 bytes and two reserve 475,072; capacity uses the
-exact aggregate.
+output and does not scrub that output. With a 5,832-byte TCB and two 32-byte
+socket descriptors, the logical network-table cost is 237,552 bytes per
+connection. The four XMEM table allocations are normalized independently, so
+one, two, and three connections reserve 237,568, 475,104, and 712,672 bytes;
+capacity uses the exact aggregate.
 
 Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
 use the interoperable public profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and
@@ -584,28 +584,31 @@ retry neither overwrites pending ciphertext nor advances the record sequence.
 This is deliberate backpressure for the present bounded stack, not a claim of
 multi-segment TCP throughput.
 
-That acceptance boundary is useful but not yet reliable delivery. The current
-ACK path treats an ACK equal to `SND-UNA` as advancing, accepts ACKs beyond
-`SND-NXT`, and fast-retransmits retained bytes using the ordinary serializer's
-`SND-NXT` sequence. A valid partial cumulative ACK advances `SND-UNA` without
-trimming the acknowledged prefix from the retained payload, so replaying the
-full buffer at the new sequence would duplicate bytes. `TCP-POLL` does not service a data retransmission timeout,
-and `TCP-SEND` does not bound acceptance by the peer window or congestion
-window. `TCP-SEND` can also enter blocking ARP resolution, so readiness alone
-does not create a bounded TLS step. SYN-SENT accepts a bare SYN as established,
-SYN-RCVD accepts any ACK, retransmitted SYN handling and SYN/SYN-ACK/FIN replay
-are incomplete, and half-open children are not reserved against the completed
-accept queue; a later failed `AQ-PUSH` can orphan an established TCB.
+`TLS-SEND-ALERT-TRY` reports `TLS-E-WOULD-BLOCK` when exact transport
+admission accepts nothing and `TLS-E-TRANSPORT` when the owned TCB has reached
+terminal failure. `TLS-IO-STATUS` makes that terminal observation sticky,
+revokes the traffic epoch, and explicitly reclaims the failed TCB.
 
-Outbound server replay therefore depends first on a narrow one-segment repair:
-strict wrap-safe in-range ACK advancement, retransmission at `SND-UNA`, bounded
-partial-ACK prefix trimming and suffix replay (including sequence wrap),
-timestamp-driven data and passive-control retry/exhaustion, exact peer-window
-backpressure, and a pre-resolved or genuinely nonblocking send attempt. Secure
-accept additionally requires half-open admission/cleanup that cannot orphan a
-child. Graceful close must retain accepted close-notify bytes through
-acknowledgement before bounded FIN completion. This is not a requirement to
-implement a general sliding window.
+The retained-data boundary is now reliable within this deliberately bounded
+profile. Admission is at most `min(SND-WND, CWND, MSS)`, and
+`TCP-SEND-EXACT` gives protected records an all-or-none result. Zero admission
+does not advance sequence or overwrite retained state. ACKs advance only on a
+strict wrap-safe in-flight increase; stale/future ACKs cannot release data,
+partial ACKs trim the retained prefix, and fast/RTO replay emits the suffix
+from `SND-UNA`. Empty `TCP-POLL` calls advance bounded exponential RTO,
+neighbor discovery, and durable ACK intent. Only a replay admitted to the NIC
+consumes TCP retry state; exact terminal failures remain owner-visible until
+the TLS/socket owner observes and reclaims them. Lock 12 serializes shared
+Ethernet/IP/TCP construction and the asynchronous NIC descriptor lifetime.
+
+Control transport remains open. SYN-SENT still accepts a bare SYN as
+established, SYN-RCVD accepts any ACK, retransmitted SYN handling and retained
+SYN/SYN-ACK/FIN replay are incomplete, and half-open children are not reserved
+against the completed accept queue; a later failed `AQ-PUSH` can orphan an
+established TCB. Secure accept therefore still requires exact setup/control
+admission and cleanup. Graceful close must retain accepted close-notify bytes
+through acknowledgement before bounded FIN completion. None of this requires
+a general sliding window.
 
 Application receive preserves decrypted record data across caller-sized reads.
 It accumulates an incomplete encrypted record in the context's record lane.
@@ -717,6 +720,9 @@ Native guest tests cover:
 - standard-only and explicit private-hybrid ClientHello wire layouts;
 - immediate established/readable TCP waits and record-fill completion;
 - TCP/TLS send backpressure without retransmission-buffer or sequence loss;
+- strict stale/future/duplicate/partial-wrap ACK handling, retained-suffix
+  fast/RTO replay from `SND-UNA`, peer/CWND and exact-send admission, terminal
+  owner observation, and cooperative neighbor/durable-ACK recovery;
 - multi-read delivery of application records larger than the caller buffer;
 - alternating connections with isolated partial records, retained plaintext,
   and fragmented post-handshake messages, including exact per-context wipe;
@@ -740,10 +746,9 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Qualify the narrow one-outstanding-segment TCP repair before outbound TLS
-  relies on retained ciphertext for delivery, including data ACK/window/RTO
-  behavior, partial-ACK suffix retention, passive control replay, and
-  nonblocking neighbor/send admission.
+- Complete retained control ownership and replay for SYN, SYN-ACK, and FIN;
+  harden active/passive admission; reserve or reclaim half-open children; and
+  replace compatibility close with retained close-notify-before-FIN progress.
 - Enforce one TCB/one TLS-context attachment and a single nonblocking progress
   driver per context. Add a bounded server step that first emits plaintext
   ServerHello without consuming a TLS sequence, then emits at most one
@@ -835,6 +840,11 @@ not yield with an open `SHA256-INIT` transaction and permit another task on the
 same core to reinitialize it. The TLS owner prevents that situation on the
 networking paths covered above. True parallel TLS progress still requires
 moving the remaining module-global state into connection-owned workspaces.
+
+TLS lock 10 may nest the nonblocking network TX lock 12. Lock 12 never
+acquires TLS, credential, or crypto locks; the crypto hierarchy remains
+10 → optional 11 (released) → 9 → 8. Lock 12 protects shared packet staging
+and NIC descriptor ownership, not independently parallel receive/TLS progress.
 
 ## Acceptance Before Remote API Secrets
 

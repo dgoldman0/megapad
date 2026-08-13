@@ -61,6 +61,73 @@ CREATE MAC-BCAST  255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
 CREATE MY-MAC  6 ALLOT
 : MAC-INIT  ( -- )   NET-MAC@ MY-MAC 6 CMOVE ;
 
+\ -- Shared network transmit-workspace owner --
+\ TCP, IP, ARP, UDP, and Ethernet serialize through module-global staging
+\ buffers.  Hardware spinlocks are reentrant only by physical core and carry
+\ no recursion depth, so lock 12 is paired with an exact core/task owner and
+\ software depth.  TLS/credential callers acquire locks 10/11 before this
+\ lower lock; the network layer never acquires either upper lock.
+12 CONSTANT NET-TX-LOCK
+VARIABLE NET-TX-OWNER-CORE
+VARIABLE NET-TX-OWNER-TASK
+VARIABLE NET-TX-OWNER-DEPTH
+
+: _NET-TX-OWNER-CLEAR  ( -- )
+    -1 NET-TX-OWNER-CORE !
+    -1 NET-TX-OWNER-TASK !
+    0 NET-TX-OWNER-DEPTH ! ;
+
+: _NET-TX-OWNER?  ( -- flag )
+    COREID NET-TX-OWNER-CORE @ =
+    TASK-ID NET-TX-OWNER-TASK @ = AND ;
+
+: NET-TX-TRY  ( -- ior )
+    NET-TX-OWNER-DEPTH @ 0> IF
+        _NET-TX-OWNER? 0= IF -1 EXIT THEN
+        NET-TX-OWNER-DEPTH @ 1+ DUP 0> 0= IF DROP -1 EXIT THEN
+        NET-TX-OWNER-DEPTH ! 0 EXIT
+    THEN
+    NET-TX-LOCK SPIN@ IF -1 EXIT THEN
+    COREID NET-TX-OWNER-CORE !
+    TASK-ID NET-TX-OWNER-TASK !
+    1 NET-TX-OWNER-DEPTH !
+    0 ;
+
+: NET-TX-ACQUIRE  ( -- )
+    BEGIN NET-TX-TRY DUP WHILE DROP YIELD? REPEAT DROP ;
+
+: NET-TX-RELEASE  ( -- )
+    NET-TX-OWNER-DEPTH @ 0= IF EXIT THEN
+    _NET-TX-OWNER? 0= IF EXIT THEN
+    NET-TX-OWNER-DEPTH @ 1- DUP NET-TX-OWNER-DEPTH ! IF EXIT THEN
+    -1 NET-TX-OWNER-TASK !
+    -1 NET-TX-OWNER-CORE !
+    NET-TX-LOCK SPIN! ;
+
+: (_NET-TX-WAIT-IDLE)  ( -- )
+    BEGIN NET-STATUS 1 AND WHILE YIELD? REPEAT ;
+
+: NET-TX-ACQUIRE-IDLE  ( -- )
+    NET-TX-ACQUIRE
+    ['] (_NET-TX-WAIT-IDLE) CATCH DUP IF
+        >R NET-TX-RELEASE R> THROW
+    THEN DROP ;
+
+: (_NET-TX-BUSY?)  ( -- flag )
+    NET-STATUS 1 AND 0<> ;
+
+: NET-TX-ADMIT-TRY  ( -- ior )
+    NET-TX-TRY DUP IF EXIT THEN DROP
+    ['] (_NET-TX-BUSY?) CATCH DUP IF
+        >R NET-TX-RELEASE R> THROW
+    THEN DROP
+    IF NET-TX-RELEASE -1 ELSE 0 THEN ;
+
+: _NET-TX-CATCH-RETURN  ( throw-code -- )
+    >R NET-TX-RELEASE R> ?DUP IF THROW THEN ;
+
+_NET-TX-OWNER-CLEAR
+
 \ -- Ethernet TX frame buffer (maximum no-FCS frame) --
 CREATE ETH-TX-BUF  ETH-MTU ALLOT
 
@@ -142,23 +209,66 @@ VARIABLE ETH-RX-LEN   0 ETH-RX-LEN !   \ last received frame length
 \ -- ETH-SEND: transmit an Ethernet frame via NIC DMA --
 \   ( frame len -- )
 \   Uses NET-SEND BIOS primitive (sets DMA addr + len, issues SEND cmd).
+: (ETH-SEND)  ( frame len -- )
+    NET-SEND
+    (_NET-TX-WAIT-IDLE) ;
+
 : ETH-SEND  ( frame len -- )
     DUP /ETH-HDR < OVER ETH-MTU > OR IF 2DROP EXIT THEN
-    NET-SEND ;
+    NET-TX-ACQUIRE-IDLE
+    ['] (ETH-SEND) CATCH _NET-TX-CATCH-RETURN ;
 
 \ -- ETH-SEND-TX: build and send in one step --
-\   ( dst etype payload paylen -- )
-: ETH-SEND-TX  ( dst etype payload paylen -- )
+\   The private body requires NET-TX ownership.  The public compatibility word
+\   waits for both the shared workspace and the asynchronous NIC DMA buffer.
+: (ETH-SEND-TX)  ( dst etype payload paylen -- )
+    (_NET-TX-WAIT-IDLE)
     ETH-BUILD-TX                    \ ( total-len )
     DUP 0= IF DROP EXIT THEN
     ETH-TX-BUF SWAP NET-SEND ;     \ send from ETH-TX-BUF
 
+: ETH-SEND-TX  ( dst etype payload paylen -- )
+    NET-TX-ACQUIRE-IDLE
+    ['] (ETH-SEND-TX) CATCH _NET-TX-CATCH-RETURN ;
+
+\ -- ETH-SEND-TX-TRY: nonblocking, ownership-safe shared-buffer send --
+\   ( dst etype payload paylen -- ior )
+\   STATUS bit 0 owns the asynchronous RTL TX DMA.  Check it before touching
+\   ETH-TX-BUF so neither a rejected command nor a new frame can overwrite
+\   bytes still being fetched for the preceding transmission.
+: (ETH-SEND-TX-TRY-PUBLIC)  ( dst etype payload paylen -- ior )
+    ETH-BUILD-TX
+    DUP 0= IF DROP -1 EXIT THEN
+    ETH-TX-BUF SWAP NET-SEND
+    0 ;
+
+: ETH-SEND-TX-TRY  ( dst etype payload paylen -- ior )
+    NET-TX-ADMIT-TRY IF 2DROP 2DROP -1 EXIT THEN
+    ['] (ETH-SEND-TX-TRY-PUBLIC) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Private nonblocking emitter for callers that already own NET-TX.  Keeping
+\ the reentrant depth unchanged lets a TCP caller retain ownership through its
+\ replay-buffer copy and sequence-state commit after NET-SEND returns.
+: (ETH-SEND-TX-TRY)  ( dst etype payload paylen -- ior )
+    NET-STATUS 1 AND IF 2DROP 2DROP -1 EXIT THEN
+    ETH-BUILD-TX
+    DUP 0= IF DROP -1 EXIT THEN
+    ETH-TX-BUF SWAP NET-SEND 0 ;
+
 \ -- Transmit statistics --
 VARIABLE ETH-TX-COUNT   0 ETH-TX-COUNT !
 
+: (ETH-SEND-COUNTED)  ( frame len -- )
+    NET-SEND
+    (_NET-TX-WAIT-IDLE)
+    1 ETH-TX-COUNT +! ;
+
 : ETH-SEND-COUNTED  ( frame len -- )
     DUP /ETH-HDR < OVER ETH-MTU > OR IF 2DROP EXIT THEN
-    NET-SEND  1 ETH-TX-COUNT +! ;
+    NET-TX-ACQUIRE-IDLE
+    ['] (ETH-SEND-COUNTED) CATCH _NET-TX-CATCH-RETURN ;
 
 \ -- ETH-RECV: receive an Ethernet frame from NIC into ETH-RX-BUF --
 \   ( -- len | 0 )
@@ -166,7 +276,7 @@ VARIABLE ETH-TX-COUNT   0 ETH-TX-COUNT !
 \   Stores the length in ETH-RX-LEN for ETH-FRAME-PAYLEN.
 VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
 
-: ETH-RECV  ( -- len )
+: (ETH-RECV)  ( -- len )
     NET-RX? 0= IF 0 ETH-RX-LEN ! 0 EXIT THEN  \ no frame waiting
     ETH-RX-BUF NET-RECV             \ receive into ETH-RX-BUF
     \ Do not expose runts or impossible lengths to header accessors.
@@ -175,6 +285,12 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
     THEN
     DUP ETH-RX-LEN !               \ save length
     DUP 0<> IF 1 ETH-RX-COUNT +! THEN ;
+
+: ETH-RECV  ( -- len )
+    NET-TX-ADMIT-TRY IF 0 ETH-RX-LEN ! 0 EXIT THEN
+    ['] (ETH-RECV) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- NET-IDLE: yield to host for network I/O --
 \   Burns CPU cycles in a busy loop to give the emulator's host-side
@@ -215,11 +331,12 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
 \  ARP maps IPv4 addresses to MAC addresses.  We maintain a small
 \  static table (8 entries) and support request/reply for resolution.
 \
-\  ARP table entry layout (16 bytes):
+\  ARP table entry layout (32 bytes):
 \    +0   4 bytes   IPv4 address (network byte order)
 \    +4   6 bytes   MAC address
-\    +10  2 bytes   flags: bit0 = valid
-\    +12  4 bytes   (reserved/padding)
+\    +10  2 bytes   state: free / incomplete / reachable / failed
+\    +16  8 bytes   monotonic ms at last accepted probe
+\    +24  8 bytes   accepted probe count
 \
 \  ARP packet layout (28 bytes, inside Ethernet payload):
 \    +0   2 bytes   HTYPE (0x0001 = Ethernet)
@@ -233,11 +350,18 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
 \    +24  4 bytes   TPA   (target protocol address)
 
 \ -- ARP constants --
-16 CONSTANT /ARP-ENTRY
+32 CONSTANT /ARP-ENTRY
 8  CONSTANT ARP-MAX-ENTRIES
 28 CONSTANT /ARP-PKT
+0 CONSTANT ARPS-FREE
+1 CONSTANT ARPS-INCOMPLETE
+2 CONSTANT ARPS-REACHABLE
+3 CONSTANT ARPS-FAILED
+1000 CONSTANT ARP-PROBE-INTERVAL   \ milliseconds between accepted probes
+3 CONSTANT ARP-MAX-PROBES          \ accepted probes before failure
+1000 CONSTANT ARP-FAILED-HOLD-MS    \ retain failure for all current waiters
 
-\ -- ARP table (8 entries × 16 bytes = 128 bytes) --
+\ -- ARP table (8 entries × 32 bytes = 256 bytes) --
 CREATE ARP-TABLE  ARP-MAX-ENTRIES /ARP-ENTRY * ALLOT
 ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL
 
@@ -256,8 +380,13 @@ CREATE NET-MASK  4 ALLOT
 : ARP-ENTRY  ( idx -- addr )    /ARP-ENTRY * ARP-TABLE + ;
 : ARP-E.IP   ( entry -- addr )  ;          \ +0
 : ARP-E.MAC  ( entry -- addr )  4 + ;      \ +4
-: ARP-E.FLAG ( entry -- addr )  10 + ;     \ +10
-: ARP-E.VALID? ( entry -- flag ) ARP-E.FLAG W@ 1 AND 0<> ;
+: ARP-E.STATE ( entry -- addr ) 10 + ;      \ +10
+: ARP-E.FLAGS ( entry -- addr ) 12 + ;      \ +12
+: ARP-E.STAMP ( entry -- addr ) 16 + ;      \ +16
+: ARP-E.PROBES ( entry -- addr ) 24 + ;     \ +24
+: ARP-E.VALID? ( entry -- flag ) ARP-E.STATE W@ ARPS-REACHABLE = ;
+1 CONSTANT ARP-F-REPLY-PENDING
+VARIABLE ARP-EVICT-CURSOR  0 ARP-EVICT-CURSOR !
 
 \ -- IPv4 address comparison (4 bytes) --
 : IP=  ( addr1 addr2 -- flag )   4 SAMESTR? ;
@@ -323,33 +452,96 @@ CREATE NET-MASK  4 ALLOT
     LOOP
     DROP 0 ;
 
+\ -- ARP-FIND: find any owned neighbor entry, regardless of state --
+: ARP-FIND  ( ip -- entry | 0 )
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.STATE W@ ARPS-FREE <> IF
+            DUP ARP-E.IP 2 PICK IP= IF NIP UNLOOP EXIT THEN
+        THEN
+        DROP
+    LOOP
+    DROP 0 ;
+
 \ -- ARP-INSERT: add or update an entry in the ARP table --
 \   ( ip-addr mac-addr -- )
 \   If ip already exists, update MAC.  Otherwise use first free slot.
 VARIABLE _ARP-SLOT
-: ARP-INSERT  ( ip mac -- )
-    -1 _ARP-SLOT !
-    \ First pass: look for existing entry with same IP
+VARIABLE _ARP-CAND
+VARIABLE _ARP-EXISTING
+VARIABLE _ARP-KEEP-FLAGS
+
+\ Choose capacity for a new neighbor.  A free slot wins; otherwise evict one
+\ reachable cache entry in round-robin order.  INCOMPLETE and FAILED entries
+\ carry live discovery/failure publication and are never overwritten.
+: ARP-SELECT-SLOT  ( -- idx | -1 )
     ARP-MAX-ENTRIES 0 DO
-        I ARP-ENTRY DUP ARP-E.VALID? IF
-            ARP-E.IP 2 PICK IP= IF
-                I _ARP-SLOT !  LEAVE
-            THEN
-        ELSE
-            DROP
-            _ARP-SLOT @ -1 = IF I _ARP-SLOT ! THEN  \ remember first free
+        I ARP-ENTRY ARP-E.STATE W@ ARPS-FREE = IF I UNLOOP EXIT THEN
+    LOOP
+    ARP-MAX-ENTRIES 0 DO
+        ARP-EVICT-CURSOR @ I + ARP-MAX-ENTRIES MOD DUP _ARP-CAND !
+        ARP-ENTRY
+        DUP ARP-E.STATE W@ ARPS-REACHABLE =
+        SWAP ARP-E.FLAGS W@ ARP-F-REPLY-PENDING AND 0= AND IF
+            _ARP-CAND @ 1+ ARP-MAX-ENTRIES MOD ARP-EVICT-CURSOR !
+            _ARP-CAND @ UNLOOP EXIT
         THEN
     LOOP
+    -1 ;
+
+: ARP-INSERT  ( ip mac -- )
+    -1 _ARP-SLOT !
+    0 _ARP-EXISTING !
+    \ A reachable reply atomically supersedes an in-progress or failed probe
+    \ for the same neighbor.  Unrelated discovery/failure entries remain.
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.STATE W@ ARPS-FREE <> IF
+            ARP-E.IP 2 PICK IP= IF
+                I _ARP-SLOT !  -1 _ARP-EXISTING !  LEAVE
+            THEN
+        ELSE DROP THEN
+    LOOP
+    _ARP-SLOT @ -1 = IF ARP-SELECT-SLOT _ARP-SLOT ! THEN
     _ARP-SLOT @ -1 = IF 2DROP EXIT THEN  \ table full
     _ARP-SLOT @ ARP-ENTRY >R
+    _ARP-EXISTING @ IF
+        R@ ARP-E.FLAGS W@ ARP-F-REPLY-PENDING AND
+    ELSE 0 THEN
+    _ARP-KEEP-FLAGS !
+    0 R@ ARP-E.STATE W!                  \ invalidate during publication
     OVER R@ ARP-E.IP 4 CMOVE            \ copy IP
     R@ ARP-E.MAC 6 CMOVE                \ copy MAC
     DROP                                 \ drop ip-addr
-    1 R> ARP-E.FLAG W! ;                 \ mark valid
+    _ARP-KEEP-FLAGS @ R@ ARP-E.FLAGS W!
+    0 R@ ARP-E.STAMP !
+    0 R@ ARP-E.PROBES !
+    ARPS-REACHABLE R> ARP-E.STATE W! ;  \ state is the final publication
+
+\ -- ARP-ENSURE: coalesce one pending neighbor-resolution intent --
+\   Returns the existing or newly reserved entry, or 0 when the bounded table
+\   has no reclaimable slot.  It does not transmit.
+VARIABLE _ARPE-IP
+VARIABLE _ARPE-SLOT
+: ARP-ENSURE  ( ip -- entry | 0 )
+    _ARPE-IP !
+    -1 _ARPE-SLOT !
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.STATE W@ ARPS-FREE <> IF
+            DUP ARP-E.IP _ARPE-IP @ IP= IF UNLOOP EXIT THEN
+        THEN
+        DROP
+    LOOP
+    ARP-SELECT-SLOT _ARPE-SLOT !
+    _ARPE-SLOT @ -1 = IF 0 EXIT THEN
+    _ARPE-SLOT @ ARP-ENTRY >R
+    R@ /ARP-ENTRY 0 FILL
+    _ARPE-IP @ R@ ARP-E.IP 4 CMOVE
+    ARPS-INCOMPLETE R@ ARP-E.STATE W!
+    R> ;
 
 \ -- ARP-CLEAR: clear the ARP table --
 : ARP-CLEAR  ( -- )
-    ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL ;
+    ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL
+    0 ARP-EVICT-CURSOR ! ;
 
 \ -- .ARP: print the ARP table --
 : .ARP  ( -- )
@@ -432,13 +624,54 @@ CREATE ARP-PKT-BUF  /ARP-PKT ALLOT   \ 28-byte scratch for building ARP
     ARP-F.SPA ARP-PKT-BUF ARP-F.TPA 4 CMOVE
     ARP-PKT-BUF /ARP-PKT ;
 
+\ -- ARP-BUILD-REPLY-TO: rebuild a deferred reply from neighbor ownership --
+: ARP-BUILD-REPLY-TO  ( entry -- buf len )
+    ARP-PKT-BUF ARP-FILL-HDR
+    ARP-OP-REPLY ARP-PKT-BUF ARP-SET-OPER
+    MY-MAC ARP-PKT-BUF ARP-F.SHA 6 CMOVE
+    MY-IP ARP-PKT-BUF ARP-F.SPA 4 CMOVE
+    DUP ARP-E.MAC ARP-PKT-BUF ARP-F.THA 6 CMOVE
+    ARP-E.IP ARP-PKT-BUF ARP-F.TPA 4 CMOVE
+    ARP-PKT-BUF /ARP-PKT ;
+
 \ -- ARP-SEND-REQUEST: broadcast ARP request for target IP --
 \ ( target-ip -- )
-: ARP-SEND-REQUEST
+: (ARP-SEND-REQUEST)
     ARP-BUILD-REQUEST               \ ( buf len )
     >R >R                           \ save buf,len on R
     MAC-BCAST ETYPE-ARP R> R>       \ ( dst etype buf len )
-    ETH-SEND-TX ;
+    (ETH-SEND-TX) ;
+
+: ARP-SEND-REQUEST
+    NET-TX-ACQUIRE-IDLE
+    ['] (ARP-SEND-REQUEST) CATCH _NET-TX-CATCH-RETURN ;
+
+\ Nonblocking ARP probe used by cooperative TCP maintenance.  It never waits
+\ for NIC ownership or a reply, and reports success only after the request is
+\ admitted to the NIC.
+: (ARP-SEND-REQUEST-TRY)  ( target-ip -- ior )
+    ARP-BUILD-REQUEST
+    >R >R MAC-BCAST ETYPE-ARP R> R>
+    (ETH-SEND-TX-TRY) ;
+
+: ARP-SEND-REQUEST-TRY  ( target-ip -- ior )
+    NET-TX-ADMIT-TRY IF DROP -1 EXIT THEN
+    ['] (ARP-SEND-REQUEST-TRY) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+VARIABLE _ASREP-ENTRY
+: (ARP-SEND-REPLY-TRY)  ( entry -- ior )
+    DUP _ASREP-ENTRY !
+    ARP-BUILD-REPLY-TO
+    >R >R _ASREP-ENTRY @ ARP-E.MAC ETYPE-ARP R> R>
+    (ETH-SEND-TX-TRY) ;
+
+: ARP-SEND-REPLY-TRY  ( entry -- ior )
+    NET-TX-ADMIT-TRY IF DROP -1 EXIT THEN
+    ['] (ARP-SEND-REPLY-TRY) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- ARP-PARSE-REPLY: extract sender MAC+IP from ARP reply into table --
 \ ( arp-buf -- )  feeds ARP-INSERT with sender info
@@ -500,6 +733,7 @@ VARIABLE _ARP-RES-SEEN  \ unrelated frames consumed while waiting
     THEN
     DROP                      \ drop the 0
     DUP _ARP-RES-IP 4 CMOVE   \ save before ETH-RX-BUF can be reused
+    DUP ARP-ENSURE DROP       \ let async reply learning publish this neighbor
     ARP-SEND-REQUEST           \ broadcast request (consumes ip)
     \ Bound both quiet waits and noisy-link work.  Received broadcast
     \ traffic must not consume the whole reply window before our reply.
@@ -528,24 +762,37 @@ VARIABLE _ARP-RES-SEEN  \ unrelated frames consumed while waiting
     UNTIL
     0 ;        \ timeout — no reply
 
-\ -- 10c: ARP auto-responder --
-\ Handles an incoming Ethernet frame if it is an ARP request for us.
-\ Sends an ARP reply and records the requester in the ARP table.
-\ Returns: -1 if handled, 0 if not an ARP request for us.
+\ -- 10c: ARP auto-responder / reply learner --
+\ A validated reply addressed to this host is learned even when it belongs to
+\ a cooperative, nonblocking probe.  Requests are learned and answered.
+\ Returns: -1 if a valid local ARP packet was consumed, 0 otherwise.
 
 : ARP-HANDLE  ( -- flag )
     \ Assumes a frame is already in ETH-RX-BUF
     ARP-FRAME-VALID? 0= IF 0 EXIT THEN
     ETH-RX-BUF ETH-FOR-US? 0= IF 0 EXIT THEN
+    ETH-RX-BUF ETH-PLD DUP ARP-IS-REPLY? IF
+        ETH-RX-BUF ETH-DST MY-MAC MAC= 0= IF DROP 0 EXIT THEN
+        DUP ARP-F.TPA MY-IP IP= 0= IF DROP 0 EXIT THEN
+        DUP ARP-F.THA MY-MAC MAC= 0= IF DROP 0 EXIT THEN
+        ARP-PARSE-REPLY -1 EXIT
+    THEN
+    DROP
     ETH-RX-BUF ETH-PLD ARP-IS-REQUEST? 0= IF 0 EXIT THEN
     ETH-RX-BUF ETH-PLD ARP-FOR-US? 0= IF 0 EXIT THEN
     \ It's an ARP request for us — learn the sender
     ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY   \ record sender MAC+IP
-    \ Build and send reply
-    ETH-RX-BUF ETH-PLD ARP-BUILD-REPLY   \ ( buf len )
-    >R >R
-    ETH-RX-BUF ETH-SRC ETYPE-ARP R> R>   \ ( dst etype buf len )
-    ETH-SEND-TX
+    \ The learned entry owns the reply after ETH-RX-BUF is reused.  Make one
+    \ nonblocking attempt now and leave the intent queued on backpressure.
+    ETH-RX-BUF ETH-PLD ARP-F.SPA ARP-FIND DUP IF
+        DUP ARP-E.FLAGS W@ ARP-F-REPLY-PENDING OR
+        OVER ARP-E.FLAGS W!
+        DUP ARP-SEND-REPLY-TRY 0= IF
+            DUP ARP-E.FLAGS W@ ARP-F-REPLY-PENDING INVERT AND
+            OVER ARP-E.FLAGS W!
+        THEN
+    THEN
+    DROP
     -1 ;    \ handled
 
 \ -- ARP-POLL: receive one frame; auto-reply if ARP request for us --
@@ -752,7 +999,7 @@ CREATE _IPS-NEXT 4 ALLOT
 \   ( proto dst-ip payload paylen -- ior )
 \   ior = 0 on success, -1 if ARP resolution failed
 \   Uses NEXT-HOP to route via gateway when dst is off-subnet.
-: IP-SEND  ( proto dst-ip payload paylen -- ior )
+: (IP-SEND)  ( proto dst-ip payload paylen -- ior )
     _IPS-PLEN !  _IPS-PAY !  _IPS-DST !  _IPS-PROTO !
     \ Validate before ARP resolution or packet construction: an invalid
     \ request neither transmits a resolution frame nor writes a prefix.
@@ -770,8 +1017,43 @@ CREATE _IPS-NEXT 4 ALLOT
     _IPS-BUF @ _IPS-TLEN @
     >R >R                              \ R: total-len buf
     ETYPE-IP4 R> R>                    \ stack: mac etype buf total-len
-    ETH-SEND-TX
+    (ETH-SEND-TX)
     0 ;                                \ success
+
+: IP-SEND  ( proto dst-ip payload paylen -- ior )
+    NET-TX-ACQUIRE-IDLE
+    ['] (IP-SEND) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ -- IP-SEND-CACHED: one nonblocking send attempt using only ARP cache --
+\   ( proto dst-ip payload paylen -- ior )
+\   ior = 0 on success, -1 if the request is invalid, the next-hop MAC is not
+\   already known, or the local TX engine is busy.  It never sends an ARP
+\   request, receives a frame, waits, or calls NET-IDLE.  A cooperative owner
+\   can therefore progress discovery and TX backpressure outside its lock.
+VARIABLE _IPSC-PROTO
+VARIABLE _IPSC-DST
+VARIABLE _IPSC-PAY
+VARIABLE _IPSC-PLEN
+VARIABLE _IPSC-BUF
+VARIABLE _IPSC-TLEN
+VARIABLE _IPSC-MAC
+: (IP-SEND-CACHED)  ( proto dst-ip payload paylen -- ior )
+    _IPSC-PLEN !  _IPSC-PAY !  _IPSC-DST !  _IPSC-PROTO !
+    _IPSC-PLEN @ 0< _IPSC-PLEN @ IP-PAYLOAD-MAX > OR IF -1 EXIT THEN
+    _IPSC-DST @ NEXT-HOP ARP-LOOKUP DUP 0= IF DROP -1 EXIT THEN
+    _IPSC-MAC !
+    _IPSC-PROTO @ _IPSC-DST @ _IPSC-PAY @ _IPSC-PLEN @ IP-BUILD
+    DUP 0= IF 2DROP -1 EXIT THEN
+    _IPSC-TLEN !  _IPSC-BUF !
+    _IPSC-MAC @ ETYPE-IP4 _IPSC-BUF @ _IPSC-TLEN @ (ETH-SEND-TX-TRY) ;
+
+: IP-SEND-CACHED  ( proto dst-ip payload paylen -- ior )
+    NET-TX-TRY IF 2DROP 2DROP -1 EXIT THEN
+    ['] (IP-SEND-CACHED) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- 11c: IP-RECV — demux incoming Ethernet frames by EtherType --
 
@@ -1182,7 +1464,7 @@ VARIABLE _UDS-DPORT
 VARIABLE _UDS-SPORT
 VARIABLE _UDS-PAY
 VARIABLE _UDS-PLEN
-: UDP-SEND  ( dst-ip dport sport payload paylen -- ior )
+: (UDP-SEND)  ( dst-ip dport sport payload paylen -- ior )
     _UDS-PLEN !  _UDS-PAY !  _UDS-SPORT !  _UDS-DPORT !  _UDS-DST !
     _UDS-PLEN @ 0< _UDS-PLEN @ UDP-PAYLOAD-MAX > OR IF -1 EXIT THEN
     \ Build UDP datagram
@@ -1197,6 +1479,12 @@ VARIABLE _UDS-PLEN
     >R >R
     IP-PROTO-UDP _UDS-DST @ R> R>      \ ( proto dst buf len )
     IP-SEND ;
+
+: UDP-SEND  ( dst-ip dport sport payload paylen -- ior )
+    NET-TX-ACQUIRE-IDLE
+    ['] (UDP-SEND) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- UDP-RECV: receive a UDP datagram from the network --
 \   Receives an IP frame, checks for UDP, verifies checksum.
@@ -1923,15 +2211,15 @@ VARIABLE _DNR-ULEN
 \ =====================================================================
 \  §16.7  TCP — Transmission Control Protocol (RFC 793/9293)
 \ =====================================================================
-\ Full TCP implementation: 3-way handshake, data transfer with
-\ segmentation, sliding window, fast retransmit, congestion control
-\ (slow start + congestion avoidance), and graceful teardown.
+\ Bounded TCP implementation: 3-way handshake, one retained data segment,
+\ a receive ring, fast/RTO retransmit, and graceful teardown.  This is a
+\ deliberately stop-and-wait sender, not a general sliding-window engine.
 \
 \ Design:
 \   - 16–256 TCB (Transmission Control Block) slots (dynamic, XMEM-scaled)
-\   - Each TCB owns a 1460-byte TX ring and 4096-byte RX ring
+\   - Each TCB owns one retained 1460-byte TX segment and a 4096-byte RX ring
 \   - TIME_WAIT reaper (60 s 2×MSL) with scavenge-on-alloc
-\   - Retransmit timer per TCB (RTO = 1s initial, doubles on timeout)
+\   - Data RTO = 1 s initial, bounded exponential backoff and retry count
 \   - ISN via RANDOM32 for security
 \   - MSS = 1460 (Ethernet MTU − IP − TCP headers)
 
@@ -1941,6 +2229,15 @@ VARIABLE _DNR-ULEN
 1460 CONSTANT TCP-MSS             \ Max Segment Size (1500-20-20)
 4096 CONSTANT /TCP-RXBUF          \ per-connection RX ring buffer
 1460 CONSTANT /TCP-TXBUF          \ per-connection TX buffer (1 MSS)
+1000 CONSTANT TCP-RTO-INITIAL     \ initial data retransmit timeout (ms)
+60000 CONSTANT TCP-RTO-MAX        \ maximum data retransmit timeout (ms)
+5 CONSTANT TCP-MAX-RETRIES        \ retransmissions before terminal failure
+1001 CONSTANT TCP-FAIL-RETRY-EXHAUSTED
+1002 CONSTANT TCP-FAIL-PEER-RESET
+1003 CONSTANT TCP-FAIL-PROTOCOL
+1004 CONSTANT TCP-FAIL-NEIGHBOR-UNREACHABLE
+1 CONSTANT TCP-F-ACK-PENDING      \ cumulative/window ACK still owed
+2 CONSTANT TCP-F-ARP-PENDING      \ retained replay awaits neighbor discovery
 -4214 CONSTANT NET-E-TABLES-INITIALIZED
 -4215 CONSTANT NET-E-TABLES-LIVE
 
@@ -1964,6 +2261,7 @@ VARIABLE _DNR-ULEN
 8  CONSTANT TCPS-CLOSING
 9  CONSTANT TCPS-LAST-ACK
 10 CONSTANT TCPS-TIME-WAIT
+11 CONSTANT TCPS-FAILED            \ owner-visible terminal failure; owner reclaims
 
 \ =====================================================================
 \  TCB — Transmission Control Block
@@ -1980,8 +2278,8 @@ VARIABLE _DNR-ULEN
 \  +64   RCV-WND     1 cell    our receive window
 \  +72   ISS         1 cell    initial send seq
 \  +80   IRS         1 cell    initial recv seq (peer's ISN)
-\  +88   RTO-TIMER   1 cell    retransmit timeout counter (ticks)
-\  +96   RTO-VALUE   1 cell    current RTO in ticks (starts ~100)
+\  +88   RTO-TIMER   1 cell    monotonic ms at last retained-data attempt
+\  +96   RTO-VALUE   1 cell    current data RTO in milliseconds
 \ +104   RETRIES     1 cell    retransmit attempt count
 \ +112   TX-BUF      1460B     outgoing data (1 MSS)
 \ +1572  TX-LEN      1 cell    bytes in TX-BUF
@@ -1997,7 +2295,9 @@ VARIABLE _DNR-ULEN
 \ +5740  AQ-COUNT    1 cell    accept-queue entries queued
 \ +5748  AQ-SLOTS    64 bytes  8 TCB-pointer slots (8×8)
 \ +5812  (pad to 5816)
-5816 CONSTANT /TCB               \ size of one TCB
+\ +5816  FLAGS        1 cell    durable maintenance intents
+\ +5824  FAILURE      1 cell    exact terminal TCP-FAIL-* reason
+5832 CONSTANT /TCB               \ size of one TCB
 
 \ -- TCB field accessors (add to TCB base) --
 : TCB.STATE       ( tcb -- addr )          ;
@@ -2027,6 +2327,8 @@ VARIABLE _DNR-ULEN
 : TCB.AQ-TAIL     ( tcb -- addr ) 5732 + ;
 : TCB.AQ-COUNT    ( tcb -- addr ) 5740 + ;
 : TCB.AQ-SLOTS    ( tcb -- addr ) 5748 + ;
+: TCB.FLAGS       ( tcb -- addr ) 5816 + ;
+: TCB.FAILURE     ( tcb -- addr ) 5824 + ;
 
 \ -- Accept-queue constants --
 8 CONSTANT /AQ-CAP                \ max completed connections per listener
@@ -2061,7 +2363,7 @@ VARIABLE _DNR-ULEN
 
 \ -- TCB table (dynamic, XMEM-backed) --
 \   Sized by NET-TABLES-INIT based on available XMEM.
-\   Each TCB is 5816 bytes; the complete network-table set grows to fill
+\   Each TCB is 5832 bytes; the complete network-table set grows to fill
 \   up to 25% of XMEM (capped at 256 connections).
 VARIABLE TCP-TCBS   0 TCP-TCBS !
 
@@ -2179,6 +2481,20 @@ VARIABLE _TCF-RIP
         DROP
     LOOP DROP 0 ;
 
+\ -- TCP uint32 sequence helpers --
+\   Native cells are 64-bit, so every TCP sequence result must be explicitly
+\   reduced modulo 2^32.  Legitimate flights are at most one MSS and therefore
+\   never approach the serial-number half-space ambiguity.
+: SEQ32  ( u -- u32 )  0xFFFFFFFF AND ;
+: SEQ+  ( seq delta -- seq' )  + SEQ32 ;
+: SEQ-DIST  ( seq base -- u32 )  - SEQ32 ;
+: SEQ<  ( a b -- flag )  - SEQ32 0x80000000 AND 0<> ;
+: SEQ>=  ( a b -- flag )  SEQ< 0= ;
+: SEQ>  ( a b -- flag )  SWAP SEQ< ;
+
+: TCP-FLIGHT  ( tcb -- u )
+    DUP TCB.SND-NXT @ SWAP TCB.SND-UNA @ SEQ-DIST ;
+
 \ =====================================================================
 \  TCP header build / parse
 \ =====================================================================
@@ -2226,11 +2542,12 @@ CREATE TCP-TX-PKT  /IP-HDR /TCP-HDR + TCP-MSS + ALLOT
 \   ( tcb flags payload paylen -- buf total-len )
 \   Builds in TCP-TX-PKT (IP header filled by IP-SEND later).
 VARIABLE _TB-TCB
+VARIABLE _TB-SEQ
 VARIABLE _TB-FLAGS
 VARIABLE _TB-PLD
 VARIABLE _TB-PLEN
-: TCP-BUILD  ( tcb flags payload paylen -- buf total-len )
-    _TB-PLEN !  _TB-PLD !  _TB-FLAGS !  _TB-TCB !
+: TCP-BUILD-AT  ( tcb seq flags payload paylen -- buf total-len )
+    _TB-PLEN !  _TB-PLD !  _TB-FLAGS !  _TB-SEQ !  _TB-TCB !
     _TB-PLEN @ 0< _TB-PLEN @ TCP-MSS > OR IF 0 0 EXIT THEN
     \ Zero header area
     TCP-TX-PKT /TCP-HDR 0 FILL
@@ -2239,7 +2556,7 @@ VARIABLE _TB-PLEN
     \ Dest port
     _TB-TCB @ TCB.REMOTE-PORT @ TCP-TX-PKT TCP-H.DPORT NW16!
     \ Sequence number
-    _TB-TCB @ TCB.SND-NXT @ TCP-TX-PKT TCP-H.SEQ NW32!
+    _TB-SEQ @ SEQ32 TCP-TX-PKT TCP-H.SEQ NW32!
     \ ACK number (only if ACK flag set)
     _TB-FLAGS @ TCP-ACK AND IF
         _TB-TCB @ TCB.RCV-NXT @ TCP-TX-PKT TCP-H.ACK NW32!
@@ -2257,6 +2574,11 @@ VARIABLE _TB-PLEN
     \ Checksum = 0 for now; filled by TCP-FILL-CKSUM
     0 TCP-TX-PKT TCP-H.CKSUM NW16!
     TCP-TX-PKT  /TCP-HDR _TB-PLEN @ + ;
+
+: TCP-BUILD  ( tcb flags payload paylen -- buf total-len )
+    >R >R >R
+    DUP TCB.SND-NXT @
+    R> R> R> TCP-BUILD-AT ;
 
 \ -- TCP-CHECKSUM: compute TCP checksum with pseudo-header --
 \   Exactly like UDP-CHECKSUM but proto=6 instead of 17.
@@ -2329,17 +2651,23 @@ VARIABLE _TP-HLEN
 \  TCP segment send / receive
 \ =====================================================================
 
-\ -- TCP-SEND-SEG: build, checksum, send a TCP segment via IP --
-\   ( tcb flags payload paylen -- ior )
+\ -- TCP segment emission --
+\   Explicit-sequence variants let retransmission serialize at SND-UNA
+\   without temporarily corrupting SND-NXT.  The cached variant is a single
+\   nonblocking attempt; the compatibility variant retains blocking IP-SEND
+\   for control paths until their cooperative replay conversion.
 VARIABLE _TSS-TCB
+VARIABLE _TSS-SEQ
 VARIABLE _TSS-FLAGS
 VARIABLE _TSS-PAY
 VARIABLE _TSS-LEN
-: TCP-SEND-SEG  ( tcb flags payload paylen -- ior )
-    _TSS-LEN !  _TSS-PAY !  _TSS-FLAGS !  _TSS-TCB !
+VARIABLE _TSS-CACHED
+: (TCP-SEND-SEG-AT)  ( tcb seq flags payload paylen cached? -- ior )
+    _TSS-CACHED !
+    _TSS-LEN !  _TSS-PAY !  _TSS-FLAGS !  _TSS-SEQ !  _TSS-TCB !
     _TSS-LEN @ 0< _TSS-LEN @ TCP-MSS > OR IF -1 EXIT THEN
-    _TSS-TCB @ _TSS-FLAGS @ _TSS-PAY @ _TSS-LEN @
-    TCP-BUILD                           \ ( buf seg-len )
+    _TSS-TCB @ _TSS-SEQ @ _TSS-FLAGS @ _TSS-PAY @ _TSS-LEN @
+    TCP-BUILD-AT                        \ ( buf seg-len )
     DUP 0= IF 2DROP -1 EXIT THEN
     \ Fill checksum: need MY-IP and remote-ip
     2DUP >R >R
@@ -2348,19 +2676,99 @@ VARIABLE _TSS-LEN
     \ Send via IP-SEND
     >R >R
     IP-PROTO-TCP _TSS-TCB @ TCB.REMOTE-IP R> R>  \ ( proto dst buf len )
-    IP-SEND ;
+    _TSS-CACHED @ IF IP-SEND-CACHED ELSE IP-SEND THEN ;
+
+: TCP-SEND-SEG-AT  ( tcb seq flags payload paylen -- ior )
+    NET-TX-ACQUIRE-IDLE
+    0 ['] (TCP-SEND-SEG-AT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: TCP-SEND-SEG-CACHED-AT  ( tcb seq flags payload paylen -- ior )
+    NET-TX-ADMIT-TRY IF 2DROP 2DROP DROP -1 EXIT THEN
+    -1 ['] (TCP-SEND-SEG-AT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: TCP-SEND-SEG  ( tcb flags payload paylen -- ior )
+    >R >R >R
+    DUP TCB.SND-NXT @
+    R> R> R> TCP-SEND-SEG-AT ;
+
+: TCP-SEND-SEG-CACHED  ( tcb flags payload paylen -- ior )
+    >R >R >R
+    DUP TCB.SND-NXT @
+    R> R> R> TCP-SEND-SEG-CACHED-AT ;
 
 \ -- TCP-SEND-CTL: send a control segment (no payload) --
 \   ( tcb flags -- ior )
 : TCP-SEND-CTL  ( tcb flags -- ior )
     0 0 TCP-SEND-SEG ;
 
+: TCP-SEND-CTL-CACHED  ( tcb flags -- ior )
+    0 0 TCP-SEND-SEG-CACHED ;
+
+\ -- Durable cumulative/window ACK intent --
+\ Mark before attempting emission and clear only after the NIC accepts a
+\ current ACK.  This makes a zero-window reopen survive NIC or ARP
+\ backpressure instead of depending on a one-shot side effect of TCP-RECV.
+: TCP-ACK-PENDING?  ( tcb -- flag )
+    TCB.FLAGS @ TCP-F-ACK-PENDING AND 0<> ;
+
+: TCP-MARK-ACK-PENDING  ( tcb -- )
+    DUP TCB.FLAGS @ TCP-F-ACK-PENDING OR SWAP TCB.FLAGS ! ;
+
+: TCP-CLEAR-ACK-PENDING  ( tcb -- )
+    DUP TCB.FLAGS @ TCP-F-ACK-PENDING INVERT AND SWAP TCB.FLAGS ! ;
+
+VARIABLE _TACK-TCB
+: (TCP-ACK-TRY)  ( tcb -- ior )
+    _TACK-TCB !
+    _TACK-TCB @ TCP-ACK TCP-SEND-CTL-CACHED
+    DUP 0= IF
+        _TACK-TCB @ TCP-CLEAR-ACK-PENDING
+        _TACK-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
+        _TACK-TCB @ TCB.FLAGS !
+    ELSE
+        _TACK-TCB @ TCB.REMOTE-IP NEXT-HOP ARP-LOOKUP 0= IF
+            _TACK-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING OR
+            _TACK-TCB @ TCB.FLAGS !
+            _TACK-TCB @ TCB.REMOTE-IP NEXT-HOP ARP-ENSURE DROP
+        THEN
+    THEN ;
+
+: TCP-ACK-TRY  ( tcb -- ior )
+    DUP TCP-MARK-ACK-PENDING
+    NET-TX-TRY IF DROP -1 EXIT THEN
+    ['] (TCP-ACK-TRY) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ -- TCP-RETRANSMIT-DATA: replay the retained suffix at SND-UNA --
+\   This is a cache-only one-shot attempt and never advances SND-NXT.
+VARIABLE _TRD-TCB
+: (TCP-RETRANSMIT-DATA)  ( tcb -- ior )
+    DUP _TRD-TCB !
+    TCB.TX-LEN @ 0> 0= IF -1 EXIT THEN
+    _TRD-TCB @
+    _TRD-TCB @ TCB.SND-UNA @
+    TCP-ACK TCP-PSH OR
+    _TRD-TCB @ TCB.TX-BUF
+    _TRD-TCB @ TCB.TX-LEN @
+    TCP-SEND-SEG-CACHED-AT ;
+
+: TCP-RETRANSMIT-DATA  ( tcb -- ior )
+    NET-TX-TRY IF DROP -1 EXIT THEN
+    ['] (TCP-RETRANSMIT-DATA) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
 \ -- TCP-SEND-RST: send a RST in response to unexpected segment --
 \   ( remote-ip rport lport seq -- )
 \   Builds a raw RST without a TCB.
 VARIABLE _TR-RIPVAR
 CREATE _TR-PSEUDO-TCB  /TCB ALLOT
-: TCP-SEND-RST  ( remote-ip rport lport seq -- )
+: (TCP-SEND-RST)  ( remote-ip rport lport seq -- )
     >R                                 \ save seq
     _TR-PSEUDO-TCB /TCB 0 FILL
     _TR-PSEUDO-TCB TCB.LOCAL-PORT !
@@ -2371,6 +2779,10 @@ CREATE _TR-PSEUDO-TCB  /TCB ALLOT
     0 _TR-PSEUDO-TCB TCB.RCV-NXT !
     0 _TR-PSEUDO-TCB TCB.RCV-WND !
     _TR-PSEUDO-TCB TCP-RST TCP-ACK OR TCP-SEND-CTL DROP ;
+
+: TCP-SEND-RST  ( remote-ip rport lport seq -- )
+    NET-TX-ACQUIRE-IDLE
+    ['] (TCP-SEND-RST) CATCH _NET-TX-CATCH-RETURN ;
 
 \ =====================================================================
 \  TCP RX ring buffer operations
@@ -2423,7 +2835,11 @@ VARIABLE _TRPOP-ACTUAL
     _TRPOP-ACTUAL @ NEGATE _TRPOP-TCB @ TCB.RX-COUNT +!
     \ Recalculate receive window and send window-update ACK (RFC 793)
     /TCP-RXBUF _TRPOP-TCB @ TCB.RX-COUNT @ - _TRPOP-TCB @ TCB.RCV-WND !
-    _TRPOP-TCB @ TCP-ACK TCP-SEND-CTL DROP
+    \ Terminal owners may drain already-buffered bytes, but cannot emit more
+    \ protocol traffic.  Every live window update is durable until accepted.
+    _TRPOP-TCB @ TCB.STATE @ TCPS-FAILED <> IF
+        _TRPOP-TCB @ TCP-ACK-TRY DROP
+    THEN
     _TRPOP-ACTUAL @ ;
 
 \ =====================================================================
@@ -2432,16 +2848,6 @@ VARIABLE _TRPOP-ACTUAL
 
 \ Helper: generate initial sequence number
 : TCP-GEN-ISN  ( -- isn )  RANDOM32 ;
-
-\ Helper: TCP sequence-number comparison (handles 32-bit wrap)
-\   SEQ< returns true if a < b (mod 2^32)
-: SEQ<  ( a b -- flag )
-    - DUP 0< IF DROP -1 ELSE
-      DUP 0= IF DROP 0 ELSE
-      DROP 0 THEN THEN ;
-
-\ Helper: SEQ>=
-: SEQ>=  ( a b -- flag )  SEQ< 0= ;
 
 \ -- TCP-INPUT: process a received TCP segment --
 \   Called with the IP header pointer and total IP length.
@@ -2462,8 +2868,127 @@ VARIABLE _TI-DPORT
 VARIABLE _TI-DATA
 VARIABLE _TI-HLEN
 
-\ Helper: SEQ> (strictly greater)
-: SEQ>  ( a b -- flag )  SWAP SEQ< ;
+\ -- Strict cumulative ACK processing for the retained-segment profile --
+VARIABLE _TAT-TCB
+VARIABLE _TAT-DELTA
+VARIABLE _TAT-OLD-LEN
+VARIABLE _TAT-ACKED
+VARIABLE _TAT-NEW-LEN
+: TCP-TX-TRIM  ( tcb delta -- acknowledged-data )
+    _TAT-DELTA !  _TAT-TCB !
+    _TAT-TCB @ TCB.TX-LEN @ _TAT-OLD-LEN !
+    _TAT-DELTA @ _TAT-OLD-LEN @ MIN _TAT-ACKED !
+    _TAT-OLD-LEN @ _TAT-ACKED @ - _TAT-NEW-LEN !
+    _TAT-NEW-LEN @ 0> IF
+        _TAT-TCB @ TCB.TX-BUF _TAT-ACKED @ +
+        _TAT-TCB @ TCB.TX-BUF
+        _TAT-NEW-LEN @ CMOVE
+    THEN
+    \ Erase the vacated tail so a complete ACK cannot leave replayable data.
+    _TAT-TCB @ TCB.TX-BUF _TAT-NEW-LEN @ +
+    _TAT-ACKED @ 0 FILL
+    _TAT-NEW-LEN @ _TAT-TCB @ TCB.TX-LEN !
+    _TAT-ACKED @ ;
+
+VARIABLE _TCWA-TCB
+VARIABLE _TCWA-BYTES
+: TCP-CWND-ACK  ( tcb acknowledged-data -- )
+    _TCWA-BYTES !  _TCWA-TCB !
+    _TCWA-BYTES @ 0> 0= IF EXIT THEN
+    _TCWA-TCB @ TCB.CWND @ DUP 0= IF
+        DROP TCP-MSS _TCWA-TCB @ TCB.CWND ! EXIT
+    THEN
+    _TCWA-TCB @ TCB.SSTHRESH @ < IF
+        _TCWA-BYTES @ _TCWA-TCB @ TCB.CWND +!
+    ELSE
+        TCP-MSS _TCWA-BYTES @ * _TCWA-TCB @ TCB.CWND @ /
+        1 MAX _TCWA-TCB @ TCB.CWND +!
+    THEN ;
+
+VARIABLE _TAP-TCB
+VARIABLE _TAP-DELTA
+VARIABLE _TAP-FLIGHT
+VARIABLE _TAP-ACKED
+: TCP-ACK-ADVANCE  ( tcb delta -- )
+    _TAP-DELTA !  _TAP-TCB !
+    _TAP-TCB @ _TAP-DELTA @ TCP-TX-TRIM _TAP-ACKED !
+    _TI-ACK @ SEQ32 _TAP-TCB @ TCB.SND-UNA !
+    _TI-WIN @ _TAP-TCB @ TCB.SND-WND !
+    0 _TAP-TCB @ TCB.RETRIES !
+    0 _TAP-TCB @ TCB.DUP-ACKS !
+    TCP-RTO-INITIAL _TAP-TCB @ TCB.RTO-VALUE !
+    _TAP-TCB @ TCB.TX-LEN @ 0> IF
+        MS@ _TAP-TCB @ TCB.RTO-TIMER !
+    ELSE
+        0 _TAP-TCB @ TCB.RTO-TIMER !
+        _TAP-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
+        _TAP-TCB @ TCB.FLAGS !
+    THEN
+    _TAP-TCB @ _TAP-ACKED @ TCP-CWND-ACK ;
+
+: TCP-DUP-ACK?  ( tcb -- flag )
+    DUP TCB.TX-LEN @ 0> 0= IF DROP 0 EXIT THEN
+    DUP TCB.SND-WND @ _TI-WIN @ <> IF DROP 0 EXIT THEN
+    DROP
+    _TI-DATALEN @ 0=
+    _TI-FLAGS @ TCP-ACK = AND ;
+
+VARIABLE _TDA-TCB
+: TCP-DUP-ACK  ( tcb -- )
+    DUP _TDA-TCB !
+    1 SWAP TCB.DUP-ACKS +!
+    _TDA-TCB @ TCB.DUP-ACKS @ 3 = IF
+        _TDA-TCB @ TCB.CWND @ 2 / TCP-MSS MAX
+        DUP _TDA-TCB @ TCB.SSTHRESH !
+        _TDA-TCB @ TCB.CWND !
+        \ A cache miss is backpressure, not a retransmission.  Leave the
+        \ original timer running so cooperative maintenance can resolve it.
+        _TDA-TCB @ TCP-RETRANSMIT-DATA 0= IF
+            MS@ _TDA-TCB @ TCB.RTO-TIMER !
+            _TDA-TCB @ TCP-CLEAR-ACK-PENDING
+            _TDA-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
+            _TDA-TCB @ TCB.FLAGS !
+        ELSE
+            _TDA-TCB @ TCB.REMOTE-IP NEXT-HOP ARP-LOOKUP 0= IF
+                _TDA-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING OR
+                _TDA-TCB @ TCB.FLAGS !
+                _TDA-TCB @ TCB.REMOTE-IP NEXT-HOP ARP-ENSURE DROP
+            THEN
+        THEN
+    THEN ;
+
+\ Terminal peer events must remain owner-visible just like retry exhaustion;
+\ immediate TCB-INIT would let the allocator attach a different connection to
+\ a still-authenticated TLS context's raw pointer.  FAILURE carries the exact
+\ terminal reason while RETRIES remains an honest wire-retransmission count.
+: TCP-FAIL  ( tcb reason -- )
+    OVER TCB.TX-BUF TCP-MSS 0 FILL
+    0 2 PICK TCB.TX-LEN !
+    0 2 PICK TCB.RTO-TIMER !
+    0 2 PICK TCB.DUP-ACKS !
+    0 2 PICK TCB.FLAGS !
+    OVER TCB.FAILURE !
+    TCPS-FAILED SWAP TCB.STATE ! ;
+
+VARIABLE _TAPROC-TCB
+: TCP-ACK-PROCESS  ( tcb -- advanced? )
+    DUP _TAPROC-TCB !
+    _TI-ACK @ OVER TCB.SND-UNA @ SEQ-DIST _TAP-DELTA !
+    TCP-FLIGHT _TAP-FLIGHT !
+    _TAP-DELTA @ 0= IF
+        _TI-WIN @ _TAPROC-TCB @ TCB.SND-WND @ <> IF
+            _TI-WIN @ _TAPROC-TCB @ TCB.SND-WND !
+            0 _TAPROC-TCB @ TCB.DUP-ACKS !
+        ELSE
+            _TAPROC-TCB @ TCP-DUP-ACK? IF
+                _TAPROC-TCB @ TCP-DUP-ACK
+            THEN
+        THEN
+        0 EXIT
+    THEN
+    _TAP-FLIGHT @ 0= _TAP-DELTA @ _TAP-FLIGHT @ > OR IF 0 EXIT THEN
+    _TAPROC-TCB @ _TAP-DELTA @ TCP-ACK-ADVANCE
+    -1 ;
 
 \ -- TCP-INPUT-LISTEN: handle SYN on a listening TCB --
 \   Allocates a FRESH TCB for the new connection.  The listener
@@ -2484,7 +3009,7 @@ VARIABLE _TI-HLEN
     \ Set up connection state in the new TCB
     _TI-HDR @ IP-H.SRC R@ TCB.REMOTE-IP 4 CMOVE
     _TI-SPORT @ R@ TCB.REMOTE-PORT !
-    _TI-SEQ @ 1+ R@ TCB.RCV-NXT !         \ SYN consumes 1 seq
+    _TI-SEQ @ 1 SEQ+ R@ TCB.RCV-NXT !      \ SYN consumes 1 seq
     _TI-SEQ @ R@ TCB.IRS !
     TCP-GEN-ISN DUP R@ TCB.ISS !
     DUP R@ TCB.SND-NXT !
@@ -2493,14 +3018,14 @@ VARIABLE _TI-HLEN
     /TCP-RXBUF R@ TCB.RCV-WND !
     TCP-MSS R@ TCB.CWND !
     65535 R@ TCB.SSTHRESH !
-    100 R@ TCB.RTO-VALUE !                 \ ~1s at 100 ticks
+    TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
     \ Send SYN+ACK
     R@ TCP-SYN TCP-ACK OR TCP-SEND-CTL IF
         R> TCB-INIT EXIT
     THEN
     TCPS-SYN-RCVD R@ TCB.STATE !
     \ SYN consumes 1 seq number — advance SND-NXT past it
-    R@ TCB.ISS @ 1+ R> TCB.SND-NXT ! ;
+    R@ TCB.ISS @ 1 SEQ+ R> TCB.SND-NXT ! ;
 
 \ -- TCP-INPUT-SYN-SENT: handle segment in SYN-SENT state --
 \   Expecting SYN+ACK from peer (active open).
@@ -2509,7 +3034,7 @@ VARIABLE _TI-HLEN
     \ Must have ACK
     _TI-FLAGS @ TCP-ACK AND IF
         \ Verify ACK covers our SYN
-        _TI-ACK @ R@ TCB.ISS @ 1+ <> IF
+        _TI-ACK @ R@ TCB.ISS @ 1 SEQ+ <> IF
             R> DROP EXIT               \ bad ACK — ignore
         THEN
     THEN
@@ -2517,11 +3042,11 @@ VARIABLE _TI-HLEN
     _TI-FLAGS @ TCP-SYN AND 0= IF R> DROP EXIT THEN
     \ Accept connection
     _TI-SEQ @ R@ TCB.IRS !
-    _TI-SEQ @ 1+ R@ TCB.RCV-NXT !
+    _TI-SEQ @ 1 SEQ+ R@ TCB.RCV-NXT !
     _TI-ACK @ R@ TCB.SND-UNA !
     _TI-WIN @ R@ TCB.SND-WND !
     \ Advance SND-NXT past our SYN
-    R@ TCB.ISS @ 1+ R@ TCB.SND-NXT !
+    R@ TCB.ISS @ 1 SEQ+ R@ TCB.SND-NXT !
     TCPS-ESTABLISHED R@ TCB.STATE !
     \ Send ACK
     R> TCP-ACK TCP-SEND-CTL DROP ;
@@ -2532,56 +3057,29 @@ VARIABLE _TI-HLEN
     >R
     \ --- Check RST ---
     _TI-FLAGS @ TCP-RST AND IF
-        TCPS-CLOSED R@ TCB.STATE !
-        R> TCB-INIT EXIT
+        \ A matching tuple alone is not enough to authorize teardown.
+        _TI-SEQ @ R@ TCB.RCV-NXT @ <> IF R> DROP EXIT THEN
+        R> TCP-FAIL-PEER-RESET TCP-FAIL EXIT
     THEN
-    \ --- Check SYN (unexpected → RST) ---
+    \ --- Check SYN ---
+    \ A four-tuple alone does not authorize teardown.  Ignore an unacceptable
+    \ sequence; challenge an in-window unexpected SYN with a durable ACK.
     _TI-FLAGS @ TCP-SYN AND IF
-        TCPS-CLOSED R@ TCB.STATE !
-        R> TCB-INIT EXIT
+        _TI-SEQ @ R@ TCB.RCV-NXT @ = IF R@ TCP-ACK-TRY DROP THEN
+        R> DROP EXIT
     THEN
     \ --- Process ACK ---
-    _TI-FLAGS @ TCP-ACK AND IF
-        R@ TCB.STATE @ TCPS-SYN-RCVD = IF
+    _TI-FLAGS @ TCP-ACK AND
+    _TI-SEQ @ R@ TCB.RCV-NXT @ = AND IF
+        R@ TCP-ACK-PROCESS DROP
+        R@ TCB.STATE @ TCPS-SYN-RCVD =
+        R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = AND IF
             \ Transition to ESTABLISHED
             TCPS-ESTABLISHED R@ TCB.STATE !
             \ Enqueue into listener's accept queue (if any)
             R@ TCB.LOCAL-PORT @ TCB-FIND-LPORT
             DUP 0<> IF  R@ SWAP AQ-PUSH DROP  ELSE  DROP  THEN
         THEN
-        \ Update SND-UNA if ACK advances it
-        _TI-ACK @ R@ TCB.SND-UNA @ SEQ>= IF
-            _TI-ACK @ R@ TCB.SND-UNA !
-            \ Reset retransmit state
-            0 R@ TCB.RETRIES !
-            100 R@ TCB.RTO-VALUE !
-            0 R@ TCB.DUP-ACKS !
-            \ Congestion control: grow CWND
-            R@ TCB.CWND @ R@ TCB.SSTHRESH @ < IF
-                \ Slow start: CWND += MSS
-                TCP-MSS R@ TCB.CWND +!
-            ELSE
-                \ Congestion avoidance: CWND += MSS*MSS/CWND
-                TCP-MSS TCP-MSS * R@ TCB.CWND @ /
-                1 MAX R@ TCB.CWND +!
-            THEN
-        ELSE
-            \ Duplicate ACK handling (fast retransmit)
-            1 R@ TCB.DUP-ACKS +!
-            R@ TCB.DUP-ACKS @ 3 = IF
-                \ Fast retransmit: halve CWND, retransmit
-                R@ TCB.CWND @ 2 / TCP-MSS MAX R@ TCB.SSTHRESH !
-                R@ TCB.SSTHRESH @ R@ TCB.CWND !
-                \ Retransmit unACKed data from TX-BUF
-                R@ TCB.TX-LEN @ 0 > IF
-                    R@ TCP-ACK TCP-PSH OR
-                    R@ TCB.TX-BUF R@ TCB.TX-LEN @
-                    TCP-SEND-SEG DROP
-                THEN
-            THEN
-        THEN
-        \ Update send window
-        _TI-WIN @ R@ TCB.SND-WND !
         \ Handle FIN-WAIT-1 → FIN-WAIT-2 if all data ACKed
         R@ TCB.STATE @ TCPS-FIN-WAIT-1 = IF
             R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = IF
@@ -2589,7 +3087,8 @@ VARIABLE _TI-HLEN
             THEN
         THEN
         \ Handle CLOSING → TIME-WAIT (stamp entry time for reaper)
-        R@ TCB.STATE @ TCPS-CLOSING = IF
+        R@ TCB.STATE @ TCPS-CLOSING =
+        R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = AND IF
             TCPS-TIME-WAIT R@ TCB.STATE !
             EPOCH@ R@ TCB.RTO-TIMER !
         THEN
@@ -2612,36 +3111,36 @@ VARIABLE _TI-HLEN
             _TI-SEQ @ R@ TCB.RCV-NXT @ = IF
                 \ Push data into RX ring
                 R@ _TI-DATA @ _TI-DATALEN @ TCP-RX-PUSH
-                R@ TCB.RCV-NXT +!     \ advance RCV-NXT by actual bytes consumed
+                R@ TCB.RCV-NXT @ SWAP SEQ+ R@ TCB.RCV-NXT !
                 \ Update receive window
                 /TCP-RXBUF R@ TCB.RX-COUNT @ - R@ TCB.RCV-WND !
-                \ Send ACK
-                R@ TCP-ACK TCP-SEND-CTL DROP
+                \ Send or durably queue the cumulative ACK.
+                R@ TCP-ACK-TRY DROP
             ELSE
-                \ Out-of-order: send duplicate ACK
-                R@ TCP-ACK TCP-SEND-CTL DROP
+                \ Out-of-order: send or durably queue a duplicate ACK.
+                R@ TCP-ACK-TRY DROP
             THEN
         THEN
     THEN
     \ --- Process FIN ---
     _TI-FLAGS @ TCP-FIN AND IF
-        _TI-SEQ @ _TI-DATALEN @ + R@ TCB.RCV-NXT @ = IF
+        _TI-SEQ @ _TI-DATALEN @ SEQ+ R@ TCB.RCV-NXT @ = IF
             \ Advance RCV-NXT past FIN
-            R@ TCB.RCV-NXT @ 1+ R@ TCB.RCV-NXT !
+            R@ TCB.RCV-NXT @ 1 SEQ+ R@ TCB.RCV-NXT !
             R@ TCB.STATE @
             CASE
                 TCPS-ESTABLISHED OF
                     TCPS-CLOSE-WAIT R@ TCB.STATE !
-                    R@ TCP-ACK TCP-SEND-CTL DROP
+                    R@ TCP-ACK-TRY DROP
                 ENDOF
                 TCPS-FIN-WAIT-1 OF
                     TCPS-CLOSING R@ TCB.STATE !
-                    R@ TCP-ACK TCP-SEND-CTL DROP
+                    R@ TCP-ACK-TRY DROP
                 ENDOF
                 TCPS-FIN-WAIT-2 OF
                     TCPS-TIME-WAIT R@ TCB.STATE !
                     EPOCH@ R@ TCB.RTO-TIMER !
-                    R@ TCP-ACK TCP-SEND-CTL DROP
+                    R@ TCP-ACK-TRY DROP
                 ENDOF
             ENDCASE
         THEN
@@ -2691,7 +3190,7 @@ VARIABLE _TI-HLEN
         \ No matching TCB — send RST (unless incoming is RST)
         _TI-FLAGS @ TCP-RST AND 0= IF
             _TI-HDR @ IP-H.SRC _TI-SPORT @ _TI-DPORT @
-            _TI-SEQ @ _TI-DATALEN @ + TCP-SEND-RST
+            _TI-SEQ @ _TI-DATALEN @ SEQ+ TCP-SEND-RST
         THEN
         DROP EXIT
     THEN
@@ -2701,6 +3200,10 @@ VARIABLE _TI-HLEN
     CASE
         TCPS-LISTEN   OF  _TI-TCB @ TCP-INPUT-LISTEN   ENDOF
         TCPS-SYN-SENT OF  _TI-TCB @ TCP-INPUT-SYN-SENT ENDOF
+        \ Delivery failure is owner-observable terminal state.  A late RST,
+        \ SYN, or ACK cannot recycle or rewrite the TCB before that owner has
+        \ reported the failure and explicitly closed or aborted it.
+        TCPS-FAILED   OF                                  ENDOF
         \ All other states use a common handler
         _TI-TCB @ TCP-INPUT-ESTABLISHED-ETC
     ENDCASE ;
@@ -2728,7 +3231,7 @@ VARIABLE _TC-LPORT
     /TCP-RXBUF R@ TCB.RCV-WND !
     TCP-MSS R@ TCB.CWND !
     65535 R@ TCB.SSTHRESH !
-    100 R@ TCB.RTO-VALUE !
+    TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
     \ Send SYN
     R@ TCP-SYN TCP-SEND-CTL IF
         R> TCB-INIT 0 EXIT
@@ -2758,50 +3261,121 @@ VARIABLE _TC-LPORT
 VARIABLE _TSND-TCB
 VARIABLE _TSND-SRC
 VARIABLE _TSND-LEN
+VARIABLE _TSND-CAP
 
-: TCP-SEND-READY?  ( tcb -- flag )
+: TCP-NEIGHBOR-READY?  ( tcb -- flag )
+    DUP TCB.REMOTE-IP NEXT-HOP
+    DUP ARP-LOOKUP 0<> IF 2DROP -1 EXIT THEN
+    DUP ARP-ENSURE DROP
+    DROP
+    DROP 0 ;
+
+: TCP-EMIT-READY?  ( -- flag )  NET-STATUS 1 AND 0= ;
+
+: TCP-SEND-CAPACITY  ( tcb -- u )
     DUP TCB.STATE @ DUP TCPS-ESTABLISHED =
     SWAP TCPS-CLOSE-WAIT = OR 0= IF DROP 0 EXIT THEN
-    DUP TCB.SND-NXT @ SWAP TCB.SND-UNA @ = ;
+    DUP TCB.TX-LEN @ 0<> IF DROP 0 EXIT THEN
+    DUP TCP-FLIGHT 0<> IF DROP 0 EXIT THEN
+    DUP TCB.SND-WND @
+    SWAP TCB.CWND @ MIN
+    TCP-MSS MIN
+    0 MAX ;
 
-: TCP-SEND  ( tcb addr len -- actual )
+: (TCP-SEND-READY?)  ( tcb -- flag )
+    DUP TCP-SEND-CAPACITY 0= IF DROP 0 EXIT THEN
+    TCP-NEIGHBOR-READY? 0= IF 0 EXIT THEN
+    TCP-EMIT-READY? ;
+
+: TCP-SEND-READY?  ( tcb -- flag )
+    NET-TX-TRY IF DROP 0 EXIT THEN
+    ['] (TCP-SEND-READY?) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ TCP-SEND-ACCEPT performs the single emission-and-commit operation after its
+\ caller has made an admission decision.  It either commits all LEN bytes or
+\ leaves every sequence/replay field unchanged; it can never accept a prefix.
+: (TCP-SEND-ACCEPT)  ( tcb addr len -- actual )
     _TSND-LEN !  _TSND-SRC !  _TSND-TCB !
-    _TSND-LEN @ 0> 0= IF 0 EXIT THEN
-    _TSND-TCB @ TCP-SEND-READY? 0= IF 0 EXIT THEN
-    _TSND-LEN @ TCP-MSS MIN  _TSND-LEN !
-    \ Build and send from the caller's buffer first.  A failed ARP/IP send
-    \ has accepted no bytes and must not alter retransmit or sequence state.
+    \ The data path is cache-only.  Cache miss or local emission failure
+    \ accepts no bytes and leaves retransmit/sequence state unchanged.
     _TSND-TCB @ TCP-ACK TCP-PSH OR
-    _TSND-SRC @ _TSND-LEN @ TCP-SEND-SEG IF 0 EXIT THEN
+    _TSND-SRC @ _TSND-LEN @ TCP-SEND-SEG-CACHED IF 0 EXIT THEN
     \ Retain only successfully emitted data for retransmission.
     TCP-TX-PKT TCP-H.DATA _TSND-TCB @ TCB.TX-BUF _TSND-LEN @ CMOVE
     _TSND-LEN @ _TSND-TCB @ TCB.TX-LEN !
-    \ Advance SND-NXT
-    _TSND-LEN @ _TSND-TCB @ TCB.SND-NXT +!
-    \ Start retransmit timer
-    _TSND-TCB @ TCB.RTO-VALUE @ _TSND-TCB @ TCB.RTO-TIMER !
+    _TSND-TCB @ TCB.SND-NXT @ _TSND-LEN @ SEQ+
+    _TSND-TCB @ TCB.SND-NXT !
+    0 _TSND-TCB @ TCB.RETRIES !
+    0 _TSND-TCB @ TCB.DUP-ACKS !
+    0 _TSND-TCB @ TCB.FAILURE !
+    _TSND-TCB @ TCB.FLAGS @
+    TCP-F-ACK-PENDING TCP-F-ARP-PENDING OR INVERT AND
+    _TSND-TCB @ TCB.FLAGS !
+    TCP-RTO-INITIAL _TSND-TCB @ TCB.RTO-VALUE !
+    MS@ _TSND-TCB @ TCB.RTO-TIMER !
     _TSND-LEN @ ;
+
+: TCP-SEND-ACCEPT  ( tcb addr len -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (TCP-SEND-ACCEPT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-SEND)  ( tcb addr len -- actual )
+    _TSND-LEN !  _TSND-SRC !  _TSND-TCB !
+    _TSND-LEN @ 0> 0= IF 0 EXIT THEN
+    _TSND-TCB @ (TCP-SEND-READY?) 0= IF 0 EXIT THEN
+    _TSND-TCB @ TCP-SEND-CAPACITY _TSND-CAP !
+    _TSND-LEN @ _TSND-CAP @ MIN _TSND-LEN !
+    _TSND-TCB @ _TSND-SRC @ _TSND-LEN @ (TCP-SEND-ACCEPT) ;
+
+: TCP-SEND  ( tcb addr len -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (TCP-SEND) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ -- TCP-SEND-EXACT: all-or-none wrapper for protected protocol records --
+VARIABLE _TSE-TCB
+VARIABLE _TSE-SRC
+VARIABLE _TSE-LEN
+: (TCP-SEND-EXACT)  ( tcb addr len -- actual )
+    _TSE-LEN !  _TSE-SRC !  _TSE-TCB !
+    _TSE-LEN @ 0> 0= IF 0 EXIT THEN
+    _TSE-TCB @ TCP-SEND-CAPACITY _TSE-LEN @ < IF 0 EXIT THEN
+    _TSE-TCB @ (TCP-SEND-READY?) 0= IF 0 EXIT THEN
+    _TSE-TCB @ _TSE-SRC @ _TSE-LEN @ (TCP-SEND-ACCEPT) ;
+
+: TCP-SEND-EXACT  ( tcb addr len -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (TCP-SEND-EXACT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- TCP-RECV: read received data from RX ring --
 \   ( tcb addr maxlen -- actual )
 : TCP-RECV  ( tcb addr maxlen -- actual )
     TCP-RX-POP ;
 
-\ -- TCP-CLOSE: initiate graceful close --
-\   ( tcb -- )
+\ -- TCP-CLOSE: compatibility graceful-close initiation --
+\ Full retained FIN/control replay and owner-safe completion remain a later
+\ control-plane boundary.  This word preserves the existing blocking contract
+\ without claiming cooperative/idempotent shutdown.
 : TCP-CLOSE  ( tcb -- )
     DUP TCB.STATE @
     CASE
         TCPS-ESTABLISHED OF
             DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL 0= IF
                 TCPS-FIN-WAIT-1 OVER TCB.STATE !
-                1 SWAP TCB.SND-NXT +!    \ FIN consumes 1 seq number
+                DUP TCB.SND-NXT @ 1 SEQ+ SWAP TCB.SND-NXT !
             ELSE DROP THEN
         ENDOF
         TCPS-CLOSE-WAIT OF
             DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL 0= IF
                 TCPS-LAST-ACK OVER TCB.STATE !
-                1 SWAP TCB.SND-NXT +!    \ FIN consumes 1 seq number
+                DUP TCB.SND-NXT @ 1 SEQ+ SWAP TCB.SND-NXT !
             ELSE DROP THEN
         ENDOF
         TCPS-LISTEN OF
@@ -2810,7 +3384,7 @@ VARIABLE _TSND-LEN
             TCB-INIT
         ENDOF
         TCPS-SYN-SENT OF  TCB-INIT  ENDOF
-        \ other states: just reset
+        \ Other states retain the preexisting synchronous reset behavior.
         SWAP TCB-INIT
     ENDCASE ;
 
@@ -2828,28 +3402,10 @@ VARIABLE _TSND-LEN
 : _TCP-ABORT-SYNCHRONIZED?  ( state -- flag )
     DUP TCPS-SYN-RCVD >= SWAP TCPS-LAST-ACK <= AND ;
 
-VARIABLE _TAR-TCB
-VARIABLE _TAR-MAC
-VARIABLE _TAR-IP-BUF
-VARIABLE _TAR-IP-LEN
-
 : _TCP-ABORT-RST?  ( tcb -- flag )
-    \ A cache lookup is deliberately the only L2 operation before send.
-    DUP TCB.REMOTE-IP NEXT-HOP ARP-LOOKUP
-    DUP 0= IF 2DROP 0 EXIT THEN
-    _TAR-MAC ! _TAR-TCB !
-
-    _TAR-TCB @ TCP-RST TCP-ACK OR 0 0 TCP-BUILD
-    DUP 0= IF 2DROP 0 EXIT THEN
-    2DUP >R >R
-    MY-IP _TAR-TCB @ TCB.REMOTE-IP R> R> TCP-FILL-CKSUM
-
-    >R >R
-    IP-PROTO-TCP _TAR-TCB @ TCB.REMOTE-IP R> R> IP-BUILD
-    DUP 0= IF 2DROP 0 EXIT THEN
-    _TAR-IP-LEN ! _TAR-IP-BUF !
-    _TAR-MAC @ ETYPE-IP4 _TAR-IP-BUF @ _TAR-IP-LEN @ ETH-SEND-TX
-    -1 ;
+    \ The cached segment path is the only L2 operation: abort never starts
+    \ discovery, waits for the NIC, or mutates shared packet scratch unlocked.
+    TCP-RST TCP-ACK OR TCP-SEND-CTL-CACHED 0= ;
 
 : _TCP-ABORT-DRAIN-AQ  ( listener -- )
     BEGIN
@@ -2889,27 +3445,228 @@ VARIABLE _TCA-STATUS
     _TCA-TCB @ TCB-INIT
     _TCA-STATUS @ ;
 
+\ -- Data retransmission timer service --
+\   One due TCB is serviced per TCP-POLL call.  TCPS-FAILED is deliberately
+\   not allocator-visible; the owning socket/TLS context must observe and
+\   explicitly reclaim a terminal delivery failure.
+VARIABLE _TRTO-TCB
+VARIABLE _TRTO-NOW
+: TCP-DATA-RTO-DUE-AT?  ( tcb now -- flag )
+    _TRTO-NOW !  _TRTO-TCB !
+    _TRTO-TCB @ TCB.TX-LEN @ 0> 0= IF 0 EXIT THEN
+    _TRTO-TCB @ TCB.STATE @ DUP TCPS-ESTABLISHED < IF DROP 0 EXIT THEN
+    TCPS-LAST-ACK > IF 0 EXIT THEN
+    _TRTO-TCB @ TCB.RTO-VALUE @ 0> 0= IF 0 EXIT THEN
+    _TRTO-NOW @ _TRTO-TCB @ TCB.RTO-TIMER @ -
+    _TRTO-TCB @ TCB.RTO-VALUE @ >= ;
+
+: TCP-DATA-RTO-DUE?  ( tcb now -- flag )
+    TCP-DATA-RTO-DUE-AT? ;
+
+: TCP-DATA-RTO-FAIL  ( tcb -- )
+    TCP-FAIL-RETRY-EXHAUSTED TCP-FAIL ;
+
+VARIABLE _TRS-TCB
+: TCP-DATA-RTO-STEP  ( tcb -- )
+    DUP _TRS-TCB !
+    TCB.RETRIES @ TCP-MAX-RETRIES >= IF
+        _TRS-TCB @ TCP-DATA-RTO-FAIL EXIT
+    THEN
+    \ ARP cache loss is recoverable local state.  Coalesce neighbor discovery
+    \ and leave data, retry budget, congestion state, and RTO stamp unchanged.
+    _TRS-TCB @ TCP-NEIGHBOR-READY? 0= IF
+        _TRS-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING OR
+        _TRS-TCB @ TCB.FLAGS !
+        _TRS-TCB @ TCB.REMOTE-IP NEXT-HOP ARP-ENSURE DROP
+        EXIT
+    THEN
+    TCP-EMIT-READY? 0= IF EXIT THEN
+    _TRS-TCB @ TCP-RETRANSMIT-DATA IF EXIT THEN
+    \ Congestion and retry state change only after a replay reaches the NIC.
+    _TRS-TCB @ TCB.CWND @ 2 / TCP-MSS MAX
+    _TRS-TCB @ TCB.SSTHRESH !
+    TCP-MSS _TRS-TCB @ TCB.CWND !
+    1 _TRS-TCB @ TCB.RETRIES +!
+    _TRS-TCB @ TCP-CLEAR-ACK-PENDING
+    _TRS-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
+    _TRS-TCB @ TCB.FLAGS !
+    MS@ _TRS-TCB @ TCB.RTO-TIMER !
+    _TRS-TCB @ TCB.RTO-VALUE @ 2 * TCP-RTO-MAX MIN
+    TCP-RTO-INITIAL MAX _TRS-TCB @ TCB.RTO-VALUE ! ;
+
+\ -- Cooperative network maintenance --
+\ One flat round-robin scan covers neighbor probes/replies and every TCB.
+\ Each poll performs at most one wire attempt or terminal publication, while
+\ a cache-miss coalescing step may continue scanning to reach its ARP entry.
+VARIABLE NET-MAINT-CURSOR  0 NET-MAINT-CURSOR !
+VARIABLE _NMS-TOTAL
+VARIABLE _NMS-INDEX
+VARIABLE _NMS-ENTRY
+VARIABLE _NMS-TCB
+VARIABLE _NMS-NOW
+VARIABLE _AFR-ENTRY
+
+: ARP-FAILED-REFERENCED?  ( entry -- flag )
+    _AFR-ENTRY !
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.FLAGS @ TCP-F-ARP-PENDING AND IF
+            TCB.REMOTE-IP NEXT-HOP
+            _AFR-ENTRY @ ARP-E.IP IP= IF -1 UNLOOP EXIT THEN
+        ELSE
+            DROP
+        THEN
+    LOOP
+    0 ;
+
+: ARP-MAINT-STEP  ( entry now -- claimed? )
+    _NMS-NOW ! _NMS-ENTRY !
+    _NMS-ENTRY @ ARP-E.FLAGS W@ ARP-F-REPLY-PENDING AND IF
+        _NMS-ENTRY @ ARP-SEND-REPLY-TRY DUP 0= IF
+            _NMS-ENTRY @ ARP-E.FLAGS W@
+            ARP-F-REPLY-PENDING INVERT AND
+            _NMS-ENTRY @ ARP-E.FLAGS W!
+        THEN
+        DROP -1 EXIT
+    THEN
+    _NMS-ENTRY @ ARP-E.STATE W@ ARPS-FAILED = IF
+        _NMS-NOW @ _NMS-ENTRY @ ARP-E.STAMP @ -
+        ARP-FAILED-HOLD-MS < IF 0 EXIT THEN
+        _NMS-ENTRY @ ARP-FAILED-REFERENCED? IF 0 EXIT THEN
+        _NMS-ENTRY @ /ARP-ENTRY 0 FILL
+        -1 EXIT
+    THEN
+    _NMS-ENTRY @ ARP-E.STATE W@ ARPS-INCOMPLETE <> IF 0 EXIT THEN
+    _NMS-ENTRY @ ARP-E.PROBES @ 0> IF
+        _NMS-NOW @ _NMS-ENTRY @ ARP-E.STAMP @ -
+        ARP-PROBE-INTERVAL < IF 0 EXIT THEN
+    THEN
+    _NMS-ENTRY @ ARP-E.PROBES @ ARP-MAX-PROBES >= IF
+        _NMS-NOW @ _NMS-ENTRY @ ARP-E.STAMP !
+        ARPS-FAILED _NMS-ENTRY @ ARP-E.STATE W!
+        -1 EXIT
+    THEN
+    _NMS-ENTRY @ ARP-E.IP ARP-SEND-REQUEST-TRY 0= IF
+        1 _NMS-ENTRY @ ARP-E.PROBES +!
+        _NMS-NOW @ _NMS-ENTRY @ ARP-E.STAMP !
+    THEN
+    -1 ;
+
+: TCP-NEIGHBOR-STATE  ( tcb -- state )
+    TCB.REMOTE-IP NEXT-HOP ARP-FIND DUP 0= IF DROP ARPS-FREE EXIT THEN
+    ARP-E.STATE W@ ;
+
+: TCP-MAINT-STEP  ( tcb now -- claimed? )
+    _NMS-NOW ! DUP _NMS-TCB !
+    TCB.STATE @ TCPS-FAILED = IF 0 EXIT THEN
+    _NMS-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING AND IF
+        _NMS-TCB @ TCP-NEIGHBOR-STATE DUP ARPS-FAILED = IF
+            DROP
+            _NMS-TCB @ TCB.STATE @ TCPS-TIME-WAIT = IF
+                _NMS-TCB @ TCB.FLAGS @
+                TCP-F-ACK-PENDING TCP-F-ARP-PENDING OR INVERT AND
+                _NMS-TCB @ TCB.FLAGS !
+            ELSE
+                _NMS-TCB @ TCP-FAIL-NEIGHBOR-UNREACHABLE TCP-FAIL
+            THEN
+            -1 EXIT
+        THEN
+        ARPS-REACHABLE = IF
+            _NMS-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
+            _NMS-TCB @ TCB.FLAGS !
+        THEN
+    THEN
+    _NMS-TCB @ _NMS-NOW @ TCP-DATA-RTO-DUE-AT? IF
+        _NMS-TCB @ TCP-DATA-RTO-STEP -1 EXIT
+    THEN
+    _NMS-TCB @ TCP-ACK-PENDING? IF
+        _NMS-TCB @ TCP-ACK-TRY DROP -1 EXIT
+    THEN
+    0 ;
+
+: (TCP-RTO-SERVICE)  ( -- )
+    MS@ _NMS-NOW !
+    ARP-MAX-ENTRIES /TCP-MAX-CONN + _NMS-TOTAL !
+    _NMS-TOTAL @ 0= IF EXIT THEN
+    NET-MAINT-CURSOR @ _NMS-TOTAL @ MOD NET-MAINT-CURSOR !
+    _NMS-TOTAL @ 0 DO
+        NET-MAINT-CURSOR @ I + _NMS-TOTAL @ MOD DUP _NMS-INDEX !
+        ARP-MAX-ENTRIES < IF
+            _NMS-INDEX @ ARP-ENTRY _NMS-NOW @ ARP-MAINT-STEP
+        ELSE
+            _NMS-INDEX @ ARP-MAX-ENTRIES - TCB-N
+            _NMS-NOW @ TCP-MAINT-STEP
+        THEN
+        IF
+            _NMS-INDEX @ 1+ _NMS-TOTAL @ MOD NET-MAINT-CURSOR !
+            UNLOOP EXIT
+        THEN
+    LOOP ;
+
+: TCP-RTO-SERVICE  ( -- )
+    NET-TX-TRY IF EXIT THEN
+    ['] (TCP-RTO-SERVICE) CATCH _NET-TX-CATCH-RETURN ;
+
 \ -- TCP-POLL: poll network for incoming TCP segments --
 \   Receives one IP frame; if TCP, processes it.
 \   ( -- )
 VARIABLE _TPL-HDR
 VARIABLE _TPL-LEN
-: TCP-POLL  ( -- )
-    IP-RECV DUP 0= IF 2DROP EXIT THEN
+: (TCP-POLL)  ( -- )
+    IP-RECV DUP 0= IF 2DROP TCP-RTO-SERVICE EXIT THEN
     _TPL-LEN !  _TPL-HDR !
     \ Handle ICMP pings transparently
     _TPL-HDR @ IP-H.PROTO C@ IP-PROTO-ICMP = IF
-        _TPL-HDR @ _TPL-LEN @ ICMP-HANDLE DROP EXIT
+        _TPL-HDR @ _TPL-LEN @ ICMP-HANDLE DROP
+        TCP-RTO-SERVICE EXIT
     THEN
     \ If TCP, process
     _TPL-HDR @ IP-H.PROTO C@ IP-PROTO-TCP = IF
-        _TPL-HDR @ _TPL-LEN @ TCP-INPUT EXIT
-    THEN ;
+        _TPL-HDR @ _TPL-LEN @ TCP-INPUT
+    THEN
+    \ Give an already-queued ACK first chance to retire retained data, then
+    \ service at most one timer.  Empty polls still advance retransmission.
+    TCP-RTO-SERVICE ;
+
+: TCP-POLL  ( -- )
+    NET-TX-TRY IF EXIT THEN
+    ['] (TCP-POLL) CATCH _NET-TX-CATCH-RETURN ;
 
 \ -- TCP-POLL-WAIT: blocking TCP poll with timeout --
 \   ( max-attempts -- )
 : TCP-POLL-WAIT  ( n -- )
     0 DO TCP-POLL NET-IDLE LOOP ;
+
+100 CONSTANT TCP-EXACT-WAIT-POLLS
+VARIABLE _TSEW-TCB
+VARIABLE _TSEW-SRC
+VARIABLE _TSEW-LEN
+
+\ Blocking compatibility helper for the existing client handshake.  Unlike
+\ TCP-SEND-EXACT itself, this pumps ingress and idles between bounded attempts
+\ so an asynchronous final ACK can release NIC ownership before ClientHello
+\ or Finished is admitted.  Cooperative server/application paths do not use
+\ this helper.
+: TCP-SEND-EXACT-WAIT  ( tcb addr len attempts -- actual )
+    >R _TSEW-LEN ! _TSEW-SRC ! _TSEW-TCB ! R>
+    0 ?DO
+        _TSEW-TCB @ _TSEW-SRC @ _TSEW-LEN @ TCP-SEND-EXACT
+        DUP _TSEW-LEN @ = IF UNLOOP EXIT THEN
+        DROP TCP-POLL
+        _TSEW-TCB @ TCB.STATE @ DUP TCPS-FAILED =
+        SWAP TCPS-CLOSED = OR IF 0 UNLOOP EXIT THEN
+        _TSEW-TCB @ TCP-NEIGHBOR-READY? 0= IF 0 UNLOOP EXIT THEN
+        _TSEW-TCB @ TCP-SEND-READY? 0= IF
+            \ TX completion has no guaranteed wake IRQ.  Poll that bounded
+            \ hardware ownership interval; use IDL only when progress really
+            \ depends on an inbound ACK/window update.
+            TCP-EMIT-READY? 0= IF
+                BEGIN TCP-EMIT-READY? 0= WHILE REPEAT
+            ELSE
+                NET-IDLE
+            THEN
+        THEN
+    LOOP
+    0 ;
 
 \ TCP-WAIT-ESTABLISHED ( tcb max-attempts -- flag )
 \   Poll until this active-open TCB reaches ESTABLISHED. Unlike the generic
@@ -5835,6 +6592,8 @@ VARIABLE _TCM-CTX
 -4213 CONSTANT TLS-E-HANDSHAKE-PARAM
 -4216 CONSTANT TLS-E-HANDSHAKE-CRYPTO
 -4217 CONSTANT TLS-E-HANDSHAKE-CANCELLED
+-4218 CONSTANT TLS-E-TRANSPORT
+-4219 CONSTANT TLS-E-WOULD-BLOCK
 
 \ Fatal TLS alert descriptions returned by peer-input parsers.  Positive
 \ values are wire descriptions; negative values remain local KDOS statuses.
@@ -11360,6 +12119,43 @@ VARIABLE _TEX-OLEN
     TLS-EXPORT-RESULT _TEX-OUT @ _TEX-OLEN @ MOVE
     TLS-E-OK _TEX-RETURN ;
 
+: _TLS-CONNECTION-REVOKE ( ctx -- )
+    0 OVER TLS-CTX.PEER-AUTH !
+    DUP TLS-EXPORTER-WIPE
+    DUP TLS-RECORD-SECRETS-WIPE
+    DUP TLS-HANDSHAKE-SECRETS-WIPE
+    DUP TLS-CTX.TRANSCRIPT 32 0 FILL
+    TLS-PLAIN-WIPE
+    DUP _TLS-SERVER-PIN-RELEASE DROP
+    DUP TLS-RX-WIPE
+    TLSS-CLOSING SWAP TLS-CTX.STATE ! ;
+
+\ Transport retry exhaustion is distinct from ordinary write backpressure.
+\ Surface it through the context's sticky status, erase the live traffic
+\ secrets, and reclaim the terminal TCB only after its TLS owner observes it.
+: _TLS-TRANSPORT-FAILED? ( ctx -- flag )
+    DUP TLS-CTX.TCB @ ?DUP IF
+        TCB.STATE @ TCPS-FAILED = IF
+            DUP TLS-E-TRANSPORT SWAP TLS-CTX.ERROR !
+            DUP _TLS-CONNECTION-REVOKE
+            DUP TLS-CTX.TCB @ ?DUP IF TCP-ABORT DROP THEN
+            0 OVER TLS-CTX.TCB !
+            DROP -1 EXIT
+        THEN
+    THEN
+    DROP 0 ;
+
+: (TLS-IO-STATUS) ( ctx -- ior )
+    DUP TLS-CTX-MEMBER? 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP _TLS-TRANSPORT-FAILED? IF DROP TLS-E-TRANSPORT EXIT THEN
+    TLS-CTX.ERROR @ ;
+
+\ Public sticky I/O status.  A first observation of transport exhaustion
+\ revokes the TLS epoch and reclaims its terminal TCB under the TLS owner.
+: TLS-IO-STATUS ( ctx -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    (TLS-IO-STATUS) >R TLS-OWNER-RELEASE R> ;
+
 \ =====================================================================
 \  §16.10  TLS 1.3 Application Data (RFC 8446 §5.1)
 \ =====================================================================
@@ -11384,6 +12180,7 @@ VARIABLE _TSD-LEN
 : (TLS-SEND-DATA) ( ctx addr len -- actual )
     _TSD-LEN !  _TSD-SRC !  _TSD-CTX !
     _TSD-LEN @ 0> 0= IF 0 EXIT THEN
+    _TSD-CTX @ _TLS-TRANSPORT-FAILED? IF 0 EXIT THEN
     _TSD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
     _TSD-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF 0 EXIT THEN
     \ The TCP implementation owns one retransmit buffer.  Do not encrypt or
@@ -11396,7 +12193,7 @@ VARIABLE _TSD-LEN
     TLS-SEND-REC  TLS-ENCRYPT-RECORD
     DUP 0= IF DROP 0 EXIT THEN
     \ Send via TCP
-    _TSD-CTX @ TLS-CTX.TCB @   TLS-SEND-REC  ROT  TCP-SEND
+    _TSD-CTX @ TLS-CTX.TCB @   TLS-SEND-REC  ROT  TCP-SEND-EXACT
     DUP 0> IF
         DROP _TSD-LEN @
     ELSE
@@ -11763,17 +12560,6 @@ VARIABLE _TPA-CTX
 VARIABLE _TPA-DATA
 VARIABLE _TPA-LEN
 
-: _TLS-CONNECTION-REVOKE ( ctx -- )
-    0 OVER TLS-CTX.PEER-AUTH !
-    DUP TLS-EXPORTER-WIPE
-    DUP TLS-RECORD-SECRETS-WIPE
-    DUP TLS-HANDSHAKE-SECRETS-WIPE
-    DUP TLS-CTX.TRANSCRIPT 32 0 FILL
-    TLS-PLAIN-WIPE
-    DUP _TLS-SERVER-PIN-RELEASE DROP
-    DUP TLS-RX-WIPE
-    TLSS-CLOSING SWAP TLS-CTX.STATE ! ;
-
 : TLS-PROCESS-ALERT ( ctx data len -- status )
     _TPA-LEN ! _TPA-DATA ! _TPA-CTX !
     _TPA-LEN @ 2 <> IF
@@ -11810,6 +12596,7 @@ VARIABLE _TPA-LEN
 : (TLS-RECV-DATA) ( ctx addr maxlen -- actual | -1 )
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
     _TRD-CTX @ TLS-CTX-MEMBER? 0= IF 0 EXIT THEN
+    _TRD-CTX @ _TLS-TRANSPORT-FAILED? IF -1 EXIT THEN
     _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
     _TRD-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF 0 EXIT THEN
     _TRD-MAXLEN @ 0> 0= IF 0 EXIT THEN
@@ -11918,6 +12705,14 @@ VARIABLE _TSA-SENT
         _TSA-CTX @ _TLS-CONNECTION-REVOKE
     THEN ;
 
+: _TLS-ALERT-UNSENT ( -- ior )
+    _TLS-LOCAL-ALERT-FINISH
+    TLS-ALERT-BUF C@ 2 = IF
+        TLS-E-LOCAL-ALERT
+    ELSE
+        TLS-E-WOULD-BLOCK
+    THEN ;
+
 : _TLS-ALERT-WRITE-OPEN?  ( ctx -- flag )
     DUP TLS-CTX.STATE @ TLSS-ESTABLISHED =
     OVER TLS-CTX.PEER-AUTH @ 1 = AND
@@ -11927,32 +12722,35 @@ VARIABLE _TSA-SENT
     TLS-ALERT-BUF 1+ C@ 0= AND OR
     SWAP DROP ;
 
-: (TLS-SEND-ALERT) ( ctx level desc -- )
+: (TLS-SEND-ALERT) ( ctx level desc -- ior )
     TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
     _TSA-CTX !
     0 _TSA-SENT !
+    _TSA-CTX @ _TLS-TRANSPORT-FAILED? IF TLS-E-TRANSPORT EXIT THEN
     _TSA-CTX @ _TLS-ALERT-WRITE-OPEN? 0= IF
-        _TLS-LOCAL-ALERT-FINISH EXIT
+        _TLS-ALERT-UNSENT EXIT
     THEN
     _TSA-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF
-        _TLS-LOCAL-ALERT-FINISH EXIT
+        _TLS-ALERT-UNSENT EXIT
     THEN
     _TSA-CTX @  TLS-CT-ALERT  TLS-ALERT-BUF  2
     TLS-SEND-REC  TLS-ENCRYPT-RECORD
-    DUP 0= IF DROP _TLS-LOCAL-ALERT-FINISH EXIT THEN
+    DUP 0= IF DROP _TLS-ALERT-UNSENT EXIT THEN
     \ Send via TCP
-    _TSA-CTX @ TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND
+    _TSA-CTX @ TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND-EXACT
     DUP 0= IF
         DROP -1 _TSA-CTX @ TLS-CTX.WR-SEQ +!
+        _TLS-ALERT-UNSENT EXIT
     ELSE
         DROP -1 _TSA-SENT !
     THEN
     _TLS-LOCAL-ALERT-FINISH
+    TLS-E-OK
 ;
 
 : TLS-SEND-ALERT-TRY ( ctx level desc -- ior )
     TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
-    (TLS-SEND-ALERT) TLS-OWNER-RELEASE TLS-E-OK ;
+    (TLS-SEND-ALERT) >R TLS-OWNER-RELEASE R> ;
 
 : TLS-SEND-ALERT ( ctx level desc -- )
     TLS-SEND-ALERT-TRY DROP ;
@@ -12092,7 +12890,10 @@ VARIABLE _TLSC-CH-ADDR
 VARIABLE _TLSC-CH-LEN
 
 : _TLSC-FAIL ( -- 0 )
-    _TLSC-TCB @ ?DUP IF TCP-CLOSE THEN
+    \ A failed authenticated handshake is terminal, not graceful shutdown.
+    \ Reclaim immediately so retained ClientHello/Finished data cannot lose
+    \ its owner and later strand a TCPS-FAILED slot.
+    _TLSC-TCB @ ?DUP IF TCP-ABORT DROP THEN
     _TLSC-CTX @ ?DUP IF
         DUP TLS-HANDSHAKE-SECRETS-WIPE
         DUP TLS-RX-WIPE DUP /TLS-CTX 0 FILL DROP
@@ -12157,7 +12958,8 @@ VARIABLE _TLSC-CH-LEN
         _TLSC-FAIL EXIT
     THEN
     \ 5. Send the prepared ClientHello immediately.
-    _TLSC-TCB @ _TLSC-CH-ADDR @ _TLSC-CH-LEN @ TCP-SEND
+    _TLSC-TCB @ _TLSC-CH-ADDR @ _TLSC-CH-LEN @
+    TCP-EXACT-WAIT-POLLS TCP-SEND-EXACT-WAIT
     _TLSC-CH-LEN @ <> IF
         TLS-CONNECT-E-CLIENT-SEND TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
@@ -12255,7 +13057,8 @@ VARIABLE _TLSC-CH-LEN
         DROP _TLSC-FAIL EXIT
     THEN
     DUP _TLSC-RLEN !
-    _TLSC-TCB @  TLS-SEND-REC  ROT  TCP-SEND
+    _TLSC-TCB @  TLS-SEND-REC  ROT
+    TCP-EXACT-WAIT-POLLS TCP-SEND-EXACT-WAIT
     _TLSC-RLEN @ <> IF
         TLS-CONNECT-E-FINISHED TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
@@ -12400,7 +13203,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
 \    Logical cost = /TCB + /TLS-CTX + /TLS-RX-WORKSPACE
-\                 + 2×/SOCK = 237536 bytes per connection.
+\                 + 2×/SOCK = 237552 bytes per connection.
 \    XMEM normalizes each table allocation independently to 16 bytes, so
 \    capacity uses the exact aggregate rather than flooring this quotient.
 \
