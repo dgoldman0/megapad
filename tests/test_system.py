@@ -20126,6 +20126,77 @@ class TestKDOSMulticore(unittest.TestCase):
         attempts = int(text.split("ATTEMPTS=")[-1].split()[0])
         self.assertGreaterEqual(attempts, 1)
 
+    def test_tls_server_flight_cross_core_cancel_is_retryable(self):
+        """A peer-core signer cancellation preserves phase one for retry."""
+        lines, _ = TestKDOSTLSServerClientHello._server_phase_one_lines()
+        lines += [
+            "VARIABLE tfc-flight-ior VARIABLE tfc-cancel-ior",
+            "VARIABLE tfc-attempts VARIABLE tfc-ready VARIABLE tfc-done",
+            "CREATE tfc-context /TLS-CTX ALLOT",
+            "CREATE tfc-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "CREATE tfc-meta TLS-SERVER-META-CAPACITY ALLOT",
+            "CREATE tfc-zero80 80 ALLOT tfc-zero80 80 0 FILL",
+            "server-ctx @ tfc-context /TLS-CTX MOVE",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER tfc-ledger "
+            "TLS-SERVER-LEDGER-CAPACITY MOVE",
+            "server-ctx @ TLS-RXW.SERVER-META tfc-meta "
+            "TLS-SERVER-META-CAPACITY MOVE",
+            ": tfc-cancel-worker",
+            "  -1 tfc-ready !",
+            "  BEGIN",
+            "    tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ 0<>",
+            "    tfc-done @ OR",
+            "  UNTIL",
+            "  tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ 0= IF",
+            "    TLS-CREDENTIAL-E-NO-ACTIVE tfc-cancel-ior ! EXIT",
+            "  THEN",
+            "  BEGIN",
+            "    1 tfc-attempts +!",
+            "    tc-slot @ tc-gen @ TLS-CREDENTIAL-SIGN-CANCEL",
+            "    DUP TLS-CREDENTIAL-E-BUSY =",
+            "  WHILE DROP REPEAT",
+            "  tfc-cancel-ior ! ;",
+            "' tfc-cancel-worker 1 CORE-RUN",
+            "BEGIN tfc-ready @ UNTIL",
+            "server-ctx @ TLS-SERVER-PREPARE-FLIGHT tfc-flight-ior !",
+            "-1 tfc-done ! 1 CORE-WAIT",
+            '." FLIGHT-IOR=" tfc-flight-ior @ .',
+            '." CANCEL-IOR=" tfc-cancel-ior @ .',
+            '." ATTEMPTS=" tfc-attempts @ .',
+            '." CONTEXT=" server-ctx @ tfc-context /TLS-CTX '
+            '_XC-BYTES= .',
+            '." LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'tfc-ledger TLS-SERVER-LEDGER-CAPACITY _XC-BYTES= .',
+            '." META=" server-ctx @ TLS-RXW.SERVER-META tfc-meta '
+            'TLS-SERVER-META-CAPACITY _XC-BYTES= .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." NEXT=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            '." ACTIVE=" tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ .',
+            '." CANCEL=" tc-slot @ 1- _TC@ TC.CANCEL-SIGN + @ .',
+            '." SCRATCH=" _TSPF-CV-STAGE tfc-zero80 80 _XC-BYTES= .',
+            '." TLS-DEPTH=" TLS-OWNER-DEPTH @ .',
+            '." TLS-OWNER=" TLS-OWNER-CORE @ .',
+            '." CRED-OWNER=" _TC-LOCK-OWNER-CORE @ .',
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." RETRY-IOR=" .',
+            '." RETRY-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." RETRY-NEXT=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_mc(lines, max_steps=400_000_000)
+        for token in (
+            "FLIGHT-IOR=-4217 ", "CANCEL-IOR=0 ",
+            "CONTEXT=-1 ", "LEDGER=-1 ", "META=-1 ", "REFS=1 ",
+            "NEXT=1 ", "ACTIVE=0 ", "CANCEL=0 ", "SCRATCH=-1 ",
+            "TLS-DEPTH=0 ", "TLS-OWNER=-1 ", "CRED-OWNER=-1 ",
+            "RETRY-IOR=0 ", "RETRY-HS=13 ", "RETRY-NEXT=2 ",
+            "REFS-END=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        attempts = int(text.split("ATTEMPTS=")[-1].split()[0])
+        self.assertGreaterEqual(attempts, 1)
+
     def test_rsa_public_scratch_is_rejected_off_core_zero(self):
         """Every public RSA scratch entry rejects a physical worker core."""
         text = self._run_mc([
@@ -23622,6 +23693,7 @@ class TestKDOSECDSA(_KDOSNetworkTestBase):
             "PERF-CYCLES eps-t0 !",
             "eps-d eps-h eps-out 72 _ECDSA-P256-SHA256-SIGN-CHECKED",
             "eps-ior ! eps-len !",
+            '." SIGN-DEPTH=" DEPTH .',
             "PERF-CYCLES eps-t0 @ - eps-cyc !",
             '." IOR=" eps-ior @ .',
             '." LEN=" eps-len @ .',
@@ -23653,6 +23725,7 @@ class TestKDOSECDSA(_KDOSNetworkTestBase):
         text = self._run_kdos(lines)
         self.assertIn("IOR=0 ", text)
         self.assertIn(f"LEN={len(expected_der)} ", text)
+        self.assertIn("SIGN-DEPTH=0 ", text)
         self.assertIn("DER=-1 ", text)
         self.assertIn("WORK=-1 ", text)
         self.assertIn("P256=-1 ", text)
@@ -24098,6 +24171,7 @@ class TestKDOSTLSCredentials(_KDOSNetworkTestBase):
             "CREATE tc-der 71 ALLOT tc-der 71 165 FILL",
             "tc-slot @ tc-gen @ tc-hash tc-der 71 TLS-CREDENTIAL-SIGN",
             '." SIGN-IOR=" . ." SIGN-U=" .',
+            '." SIGN-DEPTH=" DEPTH .',
             '." DER=" tc-der tc-der-ex 71 _XC-BYTES= .',
             '." ACTIVE=" TLS-CREDENTIAL-ACTIVE @ .',
         ]
@@ -24108,7 +24182,8 @@ class TestKDOSTLSCredentials(_KDOSNetworkTestBase):
             "CERT-ALLOC=472 ",
             "PUB-IOR=0 COUNT=1 ", "PUB=-1 ", "SCHEME=1027 ",
             f"CHAIN-IOR=0 CHAIN-U={len(der_chain)} ", "CHAIN=-1 ",
-            "SIGN-IOR=0 SIGN-U=71 ", "DER=-1 ", "ACTIVE=1 ",
+            "SIGN-IOR=0 SIGN-U=71 ", "SIGN-DEPTH=0 ",
+            "DER=-1 ", "ACTIVE=1 ",
         ):
             self.assertIn(token, text)
 
@@ -24736,6 +24811,35 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             server_hello,
             encrypted_extensions,
         )
+
+    @classmethod
+    def _server_phase_one_lines(cls) -> tuple[list[str], bytes]:
+        """Build one deterministic server context through published SH/EE."""
+        hello, entropy, server_hello, encrypted_extensions = (
+            cls._certificate_transcript_phase()
+        )
+        lines, _ = cls._provision_lines()
+        for name, data in (
+            ("server-alpn", cls.ALPN),
+            ("client-hello", hello),
+            ("phase-entropy", entropy),
+            ("expected-sh", server_hello),
+            ("expected-ee", encrypted_extensions),
+        ):
+            lines += cls._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            "TLS-OWNER-TRY DROP",
+            "server-ctx @ _TSPH-BEGIN 2DROP",
+            "phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            "TLS-OWNER-RELEASE",
+        ]
+        return lines, hello
 
     def test_server_context_begin_pins_policy_and_close_releases_it(self):
         """Server setup is one transaction and no cleanup loses its lease."""
@@ -25503,6 +25607,357 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "BAD-ATOMIC=165 ", "THROW=-778 ", "THROW-ATOMIC=165 ",
             "THROW-CTX=0 ", "THROW-OWNER=1 ", "SHA-REUSE=0 ",
             "CHAIN-HASH-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_flight_publishes_exact_signed_messages(self):
+        """The complete immutable flight matches independent RFC oracles."""
+        hello, entropy, server_hello, encrypted_extensions = (
+            self._certificate_transcript_phase()
+        )
+        certificate_verify = bytes.fromhex(
+            "0f00004b04030047"
+            "3045022100ee04c71a733ed1ab56d25314532165a20cd9a61a47620261"
+            "ceb3cc258c9e5cad0220716340fb3c7b86b793fc200741ec49c12f56f7f"
+            "e201978765f76d4504970a60f"
+        )
+        finished = bytes.fromhex(
+            "140000201400e6576cad7d3e3f9b4ed490a058d17dd019564cac43826db9"
+            "e0710187c5c4"
+        )
+        final_hash = bytes.fromhex(
+            "483fc221d812cc30382b65f9903cb89b"
+            "e31b48f89d9bda2275c7cb6e9b0a42b3"
+        )
+        master = bytes.fromhex(
+            "34f6eb660fafe5471a480c287f29ec6f"
+            "688153423a8c35ad4c15e072c576875a"
+        )
+        client_ap = bytes.fromhex(
+            "65993ef0be4551e301fb24c4c960896f"
+            "7546162cbd887074a7da2fd1618cbe8d"
+        )
+        server_ap = bytes.fromhex(
+            "1823a7b3aee88758b5d684662ca3fc98"
+            "a2f0c2147117f1c348ee9bc09618b775"
+        )
+        exporter = bytes.fromhex(
+            "5dcd2e58172e5c2db5a4f0f609efbffe"
+            "c02e4953c78d58d532aba78df6a41c80"
+        )
+        client_hs_key = bytes.fromhex(
+            "dba4834fb151c14fd263a63d7fa8b57f"
+        )
+        server_hs_key = bytes.fromhex(
+            "96d25dfc2d7c5c7c7bc2c47267fa5df4"
+        )
+        client_hs_iv = bytes.fromhex("9688dcabe198c4da2d695f37")
+        server_hs_iv = bytes.fromhex("e6ba01ee3d9df6814fe6d8a8")
+
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("phase-entropy", entropy),
+            ("client-hello", hello),
+            ("expected-cv", certificate_verify),
+            ("expected-fin", finished),
+            ("expected-final-hash", final_hash),
+            ("expected-master", master),
+            ("expected-c-ap", client_ap),
+            ("expected-s-ap", server_ap),
+            ("expected-exporter", exporter),
+            ("expected-rd-key", client_hs_key),
+            ("expected-wr-key", server_hs_key),
+            ("expected-rd-iv", client_hs_iv),
+            ("expected-wr-iv", server_hs_iv),
+            ("zero32", bytes(32)),
+            ("zero40", bytes(40)),
+            ("zero80", bytes(80)),
+            ("zero130", bytes(130)),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "CREATE context-copy /TLS-CTX ALLOT",
+            "CREATE ledger-copy TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "CREATE meta-copy TLS-SERVER-META-CAPACITY ALLOT",
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            f"server-ctx @ client-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO 2DROP",
+            "TLS-OWNER-TRY DROP",
+            "server-ctx @ _TSPH-BEGIN 2DROP",
+            "phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            "TLS-OWNER-RELEASE",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." IOR=" .',
+            '." PREPARE-DEPTH=" DEPTH .',
+            '." CV=" server-ctx @ TLS-RXW.SERVER-LEDGER TSL.CV + '
+            'expected-cv 79 _XC-BYTES= .',
+            '." FIN=" server-ctx @ TLS-RXW.SERVER-LEDGER TSL.FIN + '
+            'expected-fin 36 _XC-BYTES= .',
+            '." CV-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CV-LEN + @ .',
+            '." FIN-LEN=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FIN-LEN + @ .',
+            '." TRANSCRIPT=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'expected-final-hash 32 _XC-BYTES= .',
+            '." MASTER=" server-ctx @ TLS-CTX.MS-SECRET '
+            'expected-master 32 _XC-BYTES= .',
+            '." C-AP=" server-ctx @ TLS-CTX.C-AP-TRAFFIC '
+            'expected-c-ap 32 _XC-BYTES= .',
+            '." S-AP=" server-ctx @ TLS-CTX.S-AP-TRAFFIC '
+            'expected-s-ap 32 _XC-BYTES= .',
+            '." EXPORTER=" server-ctx @ TLS-CTX.EXPORTER-MS '
+            'expected-exporter 32 _XC-BYTES= .',
+            '." WR-KEY=" server-ctx @ TLS-CTX.WR-KEY '
+            'expected-wr-key 16 _XC-BYTES= .',
+            '." RD-KEY=" server-ctx @ TLS-CTX.RD-KEY '
+            'expected-rd-key 16 _XC-BYTES= .',
+            '." WR-IV=" server-ctx @ TLS-CTX.WR-IV '
+            'expected-wr-iv 12 _XC-BYTES= .',
+            '." RD-IV=" server-ctx @ TLS-CTX.RD-IV '
+            'expected-rd-iv 12 _XC-BYTES= .',
+            '." WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." TR-PHASE=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.TRANSCRIPT-PHASE + @ .',
+            '." PHASE-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.PHASE-OFF + @ .',
+            '." CHAIN-OFF=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CHAIN-OFF + @ .',
+            '." CERT-INDEX=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CERT-INDEX + @ .',
+            '." CURRENT-CERT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CURRENT-CERT-U + @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." NEXT-SIGN=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            '." ACTIVE-SIGN=" tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ .',
+            '." CANCEL-SIGN=" tc-slot @ 1- _TC@ TC.CANCEL-SIGN + @ .',
+            '." CV-SCRATCH=" _TSPF-CV-STAGE zero80 80 _XC-BYTES= .',
+            '." FIN-SCRATCH=" _TSPF-FIN-STAGE zero40 40 _XC-BYTES= .',
+            '." CONTENT-SCRATCH=" _TSPF-CONTENT zero130 130 '
+            '_XC-BYTES= .',
+            '." DIGEST-SCRATCH=" _TSPF-CERT-HASH zero32 32 '
+            '_XC-BYTES= .',
+            '." TRANSCRIPT-SCRATCH=" _TLS-SERVER-TRANSCRIPT-STAGE '
+            'zero32 32 _XC-BYTES= .',
+            '." FINISHED-KEY-ZERO=" TLS-FINISHED-KEY zero32 32 '
+            '_XC-BYTES= .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ context-copy /TLS-CTX MOVE",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER ledger-copy "
+            "TLS-SERVER-LEDGER-CAPACITY MOVE",
+            "server-ctx @ TLS-RXW.SERVER-META meta-copy "
+            "TLS-SERVER-META-CAPACITY MOVE",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." RETRY-IOR=" .',
+            '." RETRY-CTX=" server-ctx @ context-copy /TLS-CTX '
+            '_XC-BYTES= .',
+            '." RETRY-LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'ledger-copy TLS-SERVER-LEDGER-CAPACITY _XC-BYTES= .',
+            '." RETRY-META=" server-ctx @ TLS-RXW.SERVER-META '
+            'meta-copy TLS-SERVER-META-CAPACITY _XC-BYTES= .',
+            '." RETRY-NEXT=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FLIGHT-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "IOR=0 ", "PREPARE-DEPTH=0 ", "CV=-1 ", "FIN=-1 ",
+            "FIN-LEN=36 ", "TRANSCRIPT=-1 ", "MASTER=-1 ",
+            "C-AP=-1 ", "S-AP=-1 ", "EXPORTER=-1 ",
+            "WR-KEY=-1 ", "RD-KEY=-1 ", "WR-IV=-1 ", "RD-IV=-1 ",
+            "WR-SEQ=0 ", "RD-SEQ=0 ", "STATE=1 ", "HS=13 ",
+            "ERROR=0 ", "FLIGHT=2 ", "TR-PHASE=2 ",
+            "PHASE-OFF=0 ", "CHAIN-OFF=0 ", "CERT-INDEX=0 ",
+            "CURRENT-CERT=0 ", "REFS=1 ", "NEXT-SIGN=1 ",
+            "ACTIVE-SIGN=0 ", "CANCEL-SIGN=0 ",
+            "CV-SCRATCH=-1 ", "FIN-SCRATCH=-1 ",
+            "CONTENT-SCRATCH=-1 ", "DIGEST-SCRATCH=-1 ",
+            "TRANSCRIPT-SCRATCH=-1 ", "FINISHED-KEY-ZERO=-1 ",
+            "OWNER=0 ", "RETRY-IOR=-4204 ", "RETRY-CTX=-1 ",
+            "RETRY-LEDGER=-1 ", "RETRY-META=-1 ", "RETRY-NEXT=1 ",
+            "REFS-END=0 ", "FLIGHT-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_flight_busy_is_retryable_and_atomic(self):
+        """Credential-lock contention preserves the complete phase-one state."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "CREATE busy-context /TLS-CTX ALLOT",
+            "CREATE busy-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "CREATE busy-meta TLS-SERVER-META-CAPACITY ALLOT",
+            "server-ctx @ busy-context /TLS-CTX MOVE",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER busy-ledger "
+            "TLS-SERVER-LEDGER-CAPACITY MOVE",
+            "server-ctx @ TLS-RXW.SERVER-META busy-meta "
+            "TLS-SERVER-META-CAPACITY MOVE",
+            '_TC-LOCK-TRY ." LOCK-IOR=" .',
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." BUSY-IOR=" .',
+            '." BUSY-CONTEXT=" server-ctx @ busy-context /TLS-CTX '
+            '_XC-BYTES= .',
+            '." BUSY-LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'busy-ledger TLS-SERVER-LEDGER-CAPACITY _XC-BYTES= .',
+            '." BUSY-META=" server-ctx @ TLS-RXW.SERVER-META '
+            'busy-meta TLS-SERVER-META-CAPACITY _XC-BYTES= .',
+            '." BUSY-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." BUSY-NEXT=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            '." BUSY-ACTIVE=" tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ .',
+            '." BUSY-CANCEL=" tc-slot @ 1- _TC@ TC.CANCEL-SIGN + @ .',
+            '." BUSY-OWNER=" TLS-OWNER-DEPTH @ .',
+            "_TC-UNLOCK",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." RETRY-IOR=" .',
+            '." RETRY-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." RETRY-FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." RETRY-NEXT=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." BUSY-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "LOCK-IOR=0 ", "BUSY-IOR=-4206 ",
+            "BUSY-CONTEXT=-1 ", "BUSY-LEDGER=-1 ", "BUSY-META=-1 ",
+            "BUSY-REFS=1 ", "BUSY-NEXT=0 ", "BUSY-ACTIVE=0 ",
+            "BUSY-CANCEL=0 ", "BUSY-OWNER=0 ", "RETRY-IOR=0 ",
+            "RETRY-HS=13 ", "RETRY-FLIGHT=2 ", "RETRY-NEXT=1 ",
+            "REFS-END=0 ", "BUSY-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_flight_signer_failure_is_terminal(self):
+        """An admitted signer failure wipes secrets but retains the pin."""
+        lines, hello = self._server_phase_one_lines()
+        lines += [
+            "CREATE terminal-zero32 32 ALLOT terminal-zero32 32 0 FILL",
+            "CREATE terminal-zero-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "terminal-zero-ledger TLS-SERVER-LEDGER-CAPACITY 0 FILL",
+            "-1 tc-slot @ 1- _TC@ TC.NEXT-SIGN + !",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." IOR=" .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." CH=" server-ctx @ TLS-RXW.SERVER-CH client-hello '
+            f'{len(hello)} _XC-BYTES= .',
+            '." LEDGER-ZERO=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'terminal-zero-ledger TLS-SERVER-LEDGER-CAPACITY _XC-BYTES= .',
+            '." TRANSCRIPT-ZERO=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." PRIVATE-ZERO=" server-ctx @ TLS-CTX.MY-PRIVKEY '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." SHARED-ZERO=" server-ctx @ TLS-CTX.SHARED '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." HS-ZERO=" server-ctx @ TLS-CTX.HS-SECRET '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." C-HS-ZERO=" server-ctx @ TLS-CTX.C-HS-TRAFFIC '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." S-HS-ZERO=" server-ctx @ TLS-CTX.S-HS-TRAFFIC '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." MASTER-ZERO=" server-ctx @ TLS-CTX.MS-SECRET '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." C-AP-ZERO=" server-ctx @ TLS-CTX.C-AP-TRAFFIC '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." S-AP-ZERO=" server-ctx @ TLS-CTX.S-AP-TRAFFIC '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." EXPORTER-ZERO=" server-ctx @ TLS-CTX.EXPORTER-MS '
+            'terminal-zero32 32 _XC-BYTES= .',
+            '." WR-ZERO=" server-ctx @ TLS-CTX.WR-KEY '
+            'terminal-zero32 16 _XC-BYTES= .',
+            '." RD-ZERO=" server-ctx @ TLS-CTX.RD-KEY '
+            'terminal-zero32 16 _XC-BYTES= .',
+            '." FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." TR-PHASE=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.TRANSCRIPT-PHASE + @ .',
+            '." PIN-H1=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CRED-H1 + @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." NEXT=" tc-slot @ 1- _TC@ TC.NEXT-SIGN + @ .',
+            '." ACTIVE=" tc-slot @ 1- _TC@ TC.ACTIVE-SIGN + @ .',
+            '." CANCEL=" tc-slot @ 1- _TC@ TC.CANCEL-SIGN + @ .',
+            "CREATE terminal-context /TLS-CTX ALLOT",
+            "CREATE terminal-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "CREATE terminal-meta TLS-SERVER-META-CAPACITY ALLOT",
+            "server-ctx @ terminal-context /TLS-CTX MOVE",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER terminal-ledger "
+            "TLS-SERVER-LEDGER-CAPACITY MOVE",
+            "server-ctx @ TLS-RXW.SERVER-META terminal-meta "
+            "TLS-SERVER-META-CAPACITY MOVE",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." RETRY-IOR=" .',
+            '." RETRY-CONTEXT=" server-ctx @ terminal-context /TLS-CTX '
+            '_XC-BYTES= .',
+            '." RETRY-LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'terminal-ledger TLS-SERVER-LEDGER-CAPACITY _XC-BYTES= .',
+            '." RETRY-META=" server-ctx @ TLS-RXW.SERVER-META '
+            'terminal-meta TLS-SERVER-META-CAPACITY _XC-BYTES= .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." TERMINAL-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "IOR=-4216 ", "STATE=1 ", "HS=12 ", "ERROR=-4216 ",
+            "CH=-1 ", "LEDGER-ZERO=-1 ", "TRANSCRIPT-ZERO=-1 ",
+            "PRIVATE-ZERO=-1 ", "SHARED-ZERO=-1 ", "HS-ZERO=-1 ",
+            "C-HS-ZERO=-1 ", "S-HS-ZERO=-1 ", "MASTER-ZERO=-1 ",
+            "C-AP-ZERO=-1 ", "S-AP-ZERO=-1 ", "EXPORTER-ZERO=-1 ",
+            "WR-ZERO=-1 ", "RD-ZERO=-1 ", "FLIGHT=0 ",
+            "TR-PHASE=0 ", "PIN-H1=1 ", "REFS=1 ", "NEXT=-1 ",
+            "ACTIVE=0 ", "CANCEL=0 ", "RETRY-IOR=-4204 ",
+            "RETRY-CONTEXT=-1 ", "RETRY-LEDGER=-1 ", "RETRY-META=-1 ",
+            "REFS-END=0 ", "TERMINAL-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_prepare_flight_unwind_rethrows_after_terminal_wipe(self):
+        """An unexpected admitted THROW scrubs and releases before rethrow."""
+        lines, hello = self._server_phase_one_lines()
+        lines += [
+            "CREATE unwind-zero32 32 ALLOT unwind-zero32 32 0 FILL",
+            "CREATE unwind-zero-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "unwind-zero-ledger TLS-SERVER-LEDGER-CAPACITY 0 FILL",
+            ": flight-throw-body",
+            "  _TSPF-BEGIN DUP IF EXIT THEN DROP -779 THROW ;",
+            ": flight-throw-run",
+            "  TLS-OWNER-TRY DROP",
+            "  server-ctx @ ['] flight-throw-body _TSPF-GUARD DROP ;",
+            "' flight-throw-run CATCH",
+            '." THROW=" .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." CH=" server-ctx @ TLS-RXW.SERVER-CH client-hello '
+            f'{len(hello)} _XC-BYTES= .',
+            '." LEDGER-ZERO=" server-ctx @ TLS-RXW.SERVER-LEDGER '
+            'unwind-zero-ledger TLS-SERVER-LEDGER-CAPACITY _XC-BYTES= .',
+            '." TRANSCRIPT-ZERO=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'unwind-zero32 32 _XC-BYTES= .',
+            '." HS-ZERO=" server-ctx @ TLS-CTX.HS-SECRET '
+            'unwind-zero32 32 _XC-BYTES= .',
+            '." WR-ZERO=" server-ctx @ TLS-CTX.WR-KEY '
+            'unwind-zero32 16 _XC-BYTES= .',
+            '." FLIGHT=" server-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." SCRATCH=" _TSPF-CV-STAGE unwind-zero32 32 '
+            '_XC-BYTES= .',
+            '." OWNER=" TLS-OWNER-DEPTH @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." UNWIND-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "THROW=-779 ", "ERROR=-4216 ", "CH=-1 ",
+            "LEDGER-ZERO=-1 ", "TRANSCRIPT-ZERO=-1 ", "HS-ZERO=-1 ",
+            "WR-ZERO=-1 ", "FLIGHT=0 ", "REFS=1 ", "SCRATCH=-1 ",
+            "OWNER=0 ", "REFS-END=0 ", "UNWIND-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
