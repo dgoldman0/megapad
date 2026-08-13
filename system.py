@@ -1361,7 +1361,10 @@ class MegapadSystem:
         # Retain the Python NIC for backend lifecycle and status. Native
         # execution and Python continuations probe the SystemState singleton
         # before reaching this bus entry.
-        self.bus.register(self.nic)
+        # The shared native NIC owns guest-visible DMA time.  The Python
+        # compatibility facade has a tick hook for standalone DeviceBus use,
+        # but must not become a second clocked NIC in a full system.
+        self.bus.register(self.nic, externally_clocked=True)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
         self.bus.register(self.ntt)

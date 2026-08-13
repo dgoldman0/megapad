@@ -1970,7 +1970,7 @@ class SystemInfo(Device):
 #                           bit 1: RX frame available
 #                           bit 2: link up
 #                           bit 3: error (sticky until RESET)
-#                           bit 4: RX DMA busy (always clear in native model)
+#                           bit 4: RX DMA busy (native strict-cycle path)
 #                           bit 7: present
 #   0x02..0x09  DMA_ADDR (RW)  — 64-bit DMA address in RAM
 #   0x0A..0x0B  FRAME_LEN (RW) — 16-bit frame length (for TX, set before SEND;
@@ -2019,6 +2019,15 @@ class NetworkDevice(Device):
         self.irq_ctrl: int = 0
         self.irq_status: int = 0
         self.error: bool = False
+        # The production guest path uses the native NIC's cycle-resumable DMA.
+        # This compatibility model retains the same observable ownership
+        # boundary at transaction granularity: SEND latches its descriptor,
+        # STATUS reports busy, and a later device tick publishes completion.
+        self.tx_busy: bool = False
+        self._tx_dma_addr: int = 0
+        self._tx_frame_len: int = 0
+        self._tx_ticks_remaining: int = 0
+        self._tx_generation: int = 0
         self.link_up: bool = True
         self.tx_count: int = 0
         self._dma_push_ctr: int = 0   # byte-push counter (0-7)
@@ -2165,6 +2174,8 @@ class NetworkDevice(Device):
             return 0
         elif offset == 0x01:    # STATUS
             s = 0x80            # present
+            if self.tx_busy:
+                s |= 0x01       # TX DMA / backend send owns the frame
             if self.rx_queue:
                 s |= 0x02       # RX available
             if self.link_up:
@@ -2230,26 +2241,21 @@ class NetworkDevice(Device):
     def _execute_cmd(self, cmd: int):
         self._dma_push_ctr = 0  # reset byte-push on any command
         if cmd == 0x01:         # SEND — transmit frame
-            frame = self._read_tx_frame()
-            if frame:
-                self.tx_queue.append(frame)
-                self.tx_count = (self.tx_count + 1) & 0xFFFF
-                if self.on_tx_frame:
-                    self.on_tx_frame(frame)
-                # Backend TX (real networking)
-                if self._backend:
-                    if not self._backend.send(frame):
-                        self.error = True
-                # UDP passthrough (legacy)
-                elif self._sock and self._passthrough_peer_port:
-                    try:
-                        self._sock.sendto(
-                            frame,
-                            (self._passthrough_host, self._passthrough_peer_port)
-                        )
-                    except OSError:
-                        self.error = True
-                self.irq_status |= 2
+            if self.tx_busy:
+                self.error = True
+                return
+            if (
+                self.frame_len <= 0
+                or self.frame_len > NIC_MAX_FRAME
+                or self._mem_read is None
+            ):
+                self.error = True
+                return
+            self._tx_dma_addr = self.dma_addr
+            self._tx_frame_len = self.frame_len
+            self._tx_ticks_remaining = 1
+            self._tx_generation += 1
+            self.tx_busy = True
         elif cmd == 0x02:       # RECV — receive next frame
             if self.rx_queue:
                 frame = self.rx_queue.popleft()
@@ -2260,6 +2266,11 @@ class NetworkDevice(Device):
         elif cmd == 0x03:       # STATUS (no-op, just read STATUS reg)
             pass
         elif cmd == 0x04:       # RESET
+            self._tx_generation += 1
+            self.tx_busy = False
+            self._tx_dma_addr = 0
+            self._tx_frame_len = 0
+            self._tx_ticks_remaining = 0
             self.tx_queue.clear()
             self.rx_queue.clear()
             self._data_window = bytearray(NIC_DATA_WINDOW_SIZE)
@@ -2270,19 +2281,74 @@ class NetworkDevice(Device):
             self.tx_count = 0
             self.rx_count = 0
 
-    def _read_tx_frame(self) -> Optional[bytes]:
-        """Read frame_len bytes from the programmed DMA address."""
-        nbytes = self.frame_len
-        if nbytes <= 0 or nbytes > NIC_MAX_FRAME:
+    def tick(self, cycles: int):
+        """Advance a pending compatibility-model TX transaction.
+
+        This intentionally models the native/RTL ownership boundary rather
+        than every DMA bus beat.  One or more elapsed cycles complete the
+        latched transfer; no result is visible in the issuing command.
+        """
+        if cycles <= 0 or not self.tx_busy:
+            return
+        self._tx_ticks_remaining -= cycles
+        if self._tx_ticks_remaining > 0:
+            return
+
+        dma_addr = self._tx_dma_addr
+        frame_len = self._tx_frame_len
+        generation = self._tx_generation
+        completion_published = False
+        try:
+            frame = self._read_tx_frame(dma_addr, frame_len)
+            if frame is None:
+                return
+            self.tx_queue.append(frame)
+            self.tx_count = (self.tx_count + 1) & 0xFFFF
+            completion_published = True
+            if self.on_tx_frame:
+                self.on_tx_frame(frame)
+            if self._tx_generation != generation:
+                return
+            # Backend TX (real networking)
+            if self._backend:
+                if not self._backend.send(frame):
+                    self.error = True
+            # UDP passthrough (legacy)
+            elif self._sock and self._passthrough_peer_port:
+                try:
+                    self._sock.sendto(
+                        frame,
+                        (self._passthrough_host,
+                         self._passthrough_peer_port)
+                    )
+                except OSError:
+                    self.error = True
+        except Exception:
+            # A host callback or memory/backend adapter must not strand guest
+            # ownership indefinitely.  The device reports a sticky TX error.
+            self.error = True
+        finally:
+            if completion_published and self._tx_generation == generation:
+                self.irq_status |= 2
+            if self._tx_generation == generation:
+                self.tx_busy = False
+                self._tx_dma_addr = 0
+                self._tx_frame_len = 0
+                self._tx_ticks_remaining = 0
+
+    def _read_tx_frame(
+        self,
+        dma_addr: int,
+        frame_len: int,
+    ) -> Optional[bytes]:
+        """Read a latched TX descriptor from the DMA source."""
+        if frame_len <= 0 or frame_len > NIC_MAX_FRAME or self._mem_read is None:
             self.error = True
             return None
-        if self._mem_read:
-            data = bytearray()
-            for i in range(nbytes):
-                data.append(self._mem_read(self.dma_addr + i))
-            return bytes(data)
-        self.error = True
-        return None
+        data = bytearray()
+        for i in range(frame_len):
+            data.append(self._mem_read(dma_addr + i))
+        return bytes(data)
 
     def _write_rx_frame(self, frame: bytes):
         """Write a received frame to the programmed DMA address."""

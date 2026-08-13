@@ -516,6 +516,20 @@ class TestNIC(unittest.TestCase):
         self.assertTrue(status & 0x04)   # link up
         self.assertFalse(status & 0x02)  # no RX pending
 
+    def test_status_reports_transient_tx_busy(self):
+        """Compatibility STATUS owns TX until a later device tick."""
+        nic = NetworkDevice()
+        nic._mem_read = lambda _addr: 0xA5
+        nic.frame_len = 1
+        nic._execute_cmd(0x01)
+        self.assertTrue(nic.read8(0x01) & 0x01)
+        self.assertEqual(nic.tx_count, 0)
+        self.assertEqual(nic.read8(0x0D) & 0x02, 0)
+        nic.tick(1)
+        self.assertFalse(nic.read8(0x01) & 0x01)
+        self.assertEqual(nic.tx_count, 1)
+        self.assertEqual(nic.read8(0x0D) & 0x02, 0x02)
+
     def test_mac_address(self):
         mac = b'\x02\x4D\x50\x36\x34\x00'
         nic = NetworkDevice(mac=mac)
@@ -571,6 +585,9 @@ class TestNIC(unittest.TestCase):
         nic.write8(0x0A, len(msg) & 0xFF)
         nic.write8(0x0B, 0)
         nic._execute_cmd(0x01)
+        self.assertTrue(nic.tx_busy)
+        self.assertEqual(sent, [])
+        nic.tick(1)
         self.assertEqual(sent[0], msg)
 
     def test_rx_via_dma(self):
@@ -611,6 +628,7 @@ class TestNIC(unittest.TestCase):
             current[0] = 0x41 + i
             nic.frame_len = 1
             nic._execute_cmd(0x01)
+            nic.tick(1)
         self.assertEqual(nic.tx_count, 2)
         # Read counters via register
         self.assertEqual(nic.read8(0x14), 2)  # TX_COUNT_LO
@@ -662,6 +680,85 @@ class TestNIC(unittest.TestCase):
         status = bus.read8(NIC_BASE + 0x01)
         self.assertTrue(status & 0x80)  # present
 
+        sent = []
+        nic._mem_read = lambda _addr: 0x5A
+        nic.on_tx_frame = sent.append
+        nic.frame_len = 1
+        bus.write8(NIC_BASE, 0x01)
+        self.assertTrue(bus.read8(NIC_BASE + 0x01) & 0x01)
+        self.assertEqual(sent, [])
+        bus.tick(1)
+        self.assertFalse(bus.read8(NIC_BASE + 0x01) & 0x01)
+        self.assertEqual(sent, [b'Z'])
+
+    def test_tx_latches_descriptor_and_rejects_duplicate_send(self):
+        """Live descriptor rewrites cannot replace an owned transaction."""
+        nic = NetworkDevice()
+        ram = bytearray(64)
+        ram[4:7] = b'old'
+        ram[16:20] = b'next'
+        nic._mem_read = lambda addr: ram[addr]
+        sent = []
+        nic.on_tx_frame = sent.append
+        nic.dma_addr = 4
+        nic.frame_len = 3
+
+        nic._execute_cmd(0x01)
+        nic.dma_addr = 16
+        nic.frame_len = 4
+        nic._execute_cmd(0x01)
+
+        self.assertTrue(nic.tx_busy)
+        self.assertTrue(nic.error)
+        self.assertEqual(sent, [])
+        nic.tick(1)
+        self.assertEqual(sent, [b'old'])
+        self.assertEqual(nic.tx_count, 1)
+        self.assertEqual(nic.dma_addr, 16)
+        self.assertEqual(nic.frame_len, 4)
+
+    def test_reset_cancels_pending_tx_and_preserves_configuration(self):
+        """RESET revokes TX ownership without publishing a late completion."""
+        nic = NetworkDevice()
+        sent = []
+        nic.on_tx_frame = sent.append
+        nic._mem_read = lambda _addr: 0xA5
+        nic.dma_addr = 0x1234
+        nic.frame_len = 1
+        nic.irq_ctrl = 0x02
+        nic._execute_cmd(0x01)
+        self.assertTrue(nic.tx_busy)
+
+        nic._execute_cmd(0x04)
+        nic.tick(100)
+
+        self.assertFalse(nic.tx_busy)
+        self.assertEqual(sent, [])
+        self.assertEqual(nic.tx_count, 0)
+        self.assertEqual(nic.irq_status, 0)
+        self.assertEqual(nic.dma_addr, 0x1234)
+        self.assertEqual(nic.irq_ctrl, 0x02)
+        self.assertEqual(nic.frame_len, 0)
+
+    def test_tx_callback_failure_releases_busy_and_reports_completion(self):
+        """A broken host observer cannot strand completed guest ownership."""
+        nic = NetworkDevice()
+        nic._mem_read = lambda _addr: 0xA5
+        nic.frame_len = 1
+
+        def fail_callback(_frame):
+            raise RuntimeError("host observer failed")
+
+        nic.on_tx_frame = fail_callback
+        nic._execute_cmd(0x01)
+        nic.tick(1)
+
+        self.assertFalse(nic.tx_busy)
+        self.assertTrue(nic.error)
+        self.assertEqual(nic.tx_count, 1)
+        self.assertEqual(list(nic.tx_queue), [b'\xA5'])
+        self.assertEqual(nic.irq_status & 0x02, 0x02)
+
     def test_frame_limit_rejects_without_truncation(self):
         nic = NetworkDevice()
         big_frame = bytes(2000)
@@ -692,6 +789,7 @@ class TestNIC(unittest.TestCase):
         nic._mem_read = lambda _addr: ord('x')
         nic.frame_len = 1
         nic._execute_cmd(0x01)
+        nic.tick(1)
         self.assertTrue(nic.read8(0x01) & 0x08)
         nic._execute_cmd(0x04)
         self.assertFalse(nic.read8(0x01) & 0x08)
@@ -739,6 +837,8 @@ class TestNIC(unittest.TestCase):
         nic.frame_len = 1
         nic.write8(0x0C, 0x00)
         nic._execute_cmd(0x01)
+        self.assertEqual(nic.read8(0x0D) & 0x02, 0)
+        nic.tick(1)
         self.assertEqual(nic.read8(0x0D) & 0x02, 0x02)
         self.assertFalse(nic.irq_pending)
         nic.write8(0x0C, 0x02)

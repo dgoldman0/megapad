@@ -95,6 +95,7 @@ class TestNICBackends(unittest.TestCase):
         nic._mem_read = lambda addr: frame[addr]
         nic.frame_len = len(frame)
         nic._execute_cmd(0x01)  # SEND
+        nic.tick(1)
 
         time.sleep(0.5)
         nic.stop()
@@ -197,6 +198,9 @@ class TestBackwardCompat(unittest.TestCase):
         nic._mem_read = lambda addr: frame[addr]
         nic.frame_len = len(frame)
         nic._execute_cmd(0x01)
+        self.assertTrue(nic.tx_busy)
+        self.assertEqual(captured, [])
+        nic.tick(1)
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], frame)
 
