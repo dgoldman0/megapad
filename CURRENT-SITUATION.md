@@ -4,6 +4,11 @@
 > including the since-retired WOTS prototype. Current crypto behavior and
 > checkpoint status are defined by
 > [`docs/crypto-interface-contract.md`](docs/crypto-interface-contract.md).
+> Current TCP/TLS claims are defined by
+> [`docs/tls-hardening.md`](docs/tls-hardening.md); the active implementation
+> order and evidence ledger live in
+> `MEGAPAD_SECURE_SERVER_TRANSPORT_HANDOFF.md` at the workspace root outside
+> this repository.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  
@@ -111,7 +116,8 @@ DNS/network tests requiring live internet are skipped in CI.
 The standard disk boot compiles `kdos.f` into Bank 0.  KDOS then runs
 `autoexec.f`, which enters the XMEM userland dictionary, loads
 `networking.f` with its batched `REQUIRE` path, configures the link, and loads
-`tools.f`.
+`tools.f`. The inventory below is part of this dated snapshot; do not use its
+line or test counts as current qualification evidence.
 
 | Layer | File(s) | Lines |
 |-------|---------|-------|

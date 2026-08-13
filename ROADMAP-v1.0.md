@@ -5,13 +5,15 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Last audited: 2026-03-07** (425 commits, 140K total lines, 165 tracked files)
+**Snapshot audited: 2026-03-07** (425 commits, 140K total lines, 165 tracked files)
 
-**Current state:** Nearly everything is done.  Layers 0–3 and 5–6 are
-fully shipped.  The remaining open items are a handful of application-level
-features (editor, remote REPL, SCROLL network fetcher) and a few
-speculative/optional items (USB controller, CSR_CORE_TYPE, bitfield ALU,
-FPGA bitstream).  The project is functionally a complete system.
+**Current correction (2026-08-12):** The counts below remain a historical
+snapshot. Layer 2 is not complete: the one-segment TCP data/control path has
+open ACK/retransmission/RTO/window/admission defects, and TLS server work has
+constructed but not emitted its signed handshake messages or completed secure
+accept. Current transport status is maintained in `docs/tls-hardening.md` and
+the secure-server transport handoff at the workspace root. Application
+features are not the only remaining v1.0 work.
 
 ---
 
@@ -83,9 +85,9 @@ FPGA bitstream).  The project is functionally a complete system.
 7. ✅ **KDOS crypto words** — `HASH`, `HMAC`, `ENCRYPT`, `DECRYPT`, `VERIFY`
 8. ✅ **Filesystem encryption** — `FENCRYPT`, `FDECRYPT`, `FS-KEY!`
 
-### Layer 2: Network Stack (Items 9–18) — ✅ DONE
+### Layer 2: Network Stack (Items 9–18) — 🔄 ACTIVE HARDENING
 
-Full L2–L7 network stack, bottom-up:
+Implemented network components, bottom-up:
 
 9. ✅ **Ethernet framing** — MAC address, EtherType, `ETH-BUILD`/`ETH-PARSE`/`ETH-SEND`
 10. ✅ **ARP** — table, request/reply, auto-responder
@@ -94,13 +96,16 @@ Full L2–L7 network stack, bottom-up:
 13. ✅ **UDP** — header, checksum, `UDP-SEND`/`UDP-RECV`, port demux
 14. ✅ **DHCP** — full state machine, auto-configure on boot
 15. ✅ **DNS** — A-record client, `DNS-RESOLVE`
-16. ✅ **TCP** — 11-state machine, 3-way handshake, sliding window,
-    congestion control, retransmit, TIME_WAIT reaper (37 tests)
-17. ✅ **TLS 1.3** — HKDF, record layer, handshake, app data,
-    AES-256-GCM + SHA-3 HMAC, **server certificate verification**
-    (DER/X.509/ECDSA-P256), hostname SAN matching (57 tests)
-18. ✅ **Socket API** — `SOCKET`, `BIND`, `LISTEN`, `ACCEPT`, `CONNECT`,
-    `SEND`, `RECV`, `CLOSE` (TCP + UDP)
+16. ⚠️ **TCP** — 11-state machine, 3-way handshake, receive ring,
+    one-outstanding-segment sender, passive accept, and TIME_WAIT reaper;
+    honest ACK/window/retransmission repair remains
+17. 🔄 **TLS 1.3** — authenticated bounded client profile, record/application
+    data, X.509 verification, generic ALPN/exporters, native server credential,
+    and deterministic signed server messages; bounded outbound replay, client Finished,
+    secure accept, and independent interoperability remain
+18. 🔄 **Socket API** — ordinary TCP connect/listen/accept and TLS client
+    connect exist; TLS-marked listen/accept fail closed until secure accepted
+    children are implemented
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 
@@ -265,6 +270,7 @@ CURRENT-SITUATION.
 
 | # | Item | Effort | Priority |
 |---|------|--------|----------|
+| 16–18 | **Secure transport closure** — narrow one-segment TCP repair, bounded TLS server replay/client Finished, secure accept, independent interop | staged; see active handoff | Critical |
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
@@ -283,22 +289,27 @@ CURRENT-SITUATION.
 
 ### Shortest path to "v1.0 done"
 
-SCROLL is the highest-value remaining feature — it turns the network
-stack into a practical tool (fetch Forth source from a server, load
-packages over LAN, browse docs).  After SCROLL, the system is
-genuinely self-sufficient: it boots, auto-configures networking,
-can fetch and evaluate remote code, has a TUI, a filesystem, crypto,
-and a full Forth development environment.
+Secure transport closure is the first release path because SCROLL, a remote
+REPL, and later network services otherwise rest on overstated TCP reliability
+or an incomplete server surface. Preserve the qualified TLS crypto/message
+substrate: repair the bounded TCP profile, complete cooperative server replay
+and client Finished, attach secure accepted children, then qualify an
+independent TLS peer and application/close journey.
+
+After that, SCROLL is the highest-value remaining application feature — it
+turns the network stack into a practical tool for fetching Forth source,
+loading packages over LAN, and browsing docs.
 
 The editor and remote REPL are polish items that round out the
 interactive experience.  Everything else is post-v1.0 optimization
 or hardware extension.
 
 **Proposed order:**
-1. SCROLL (§45) — network fetcher + SCROLL-LOAD
-2. Editor (§28) — on-device line editor
-3. Remote REPL (§30) — TCP session
-4. Tag v1.0
+1. Secure transport closure (items 16–18; active handoff)
+2. SCROLL (§45) — network fetcher + SCROLL-LOAD
+3. Editor (§28) — on-device line editor
+4. Remote REPL (§30) — TCP session
+5. Tag v1.0
 
 ---
 
@@ -307,7 +318,7 @@ or hardware extension.
 ```
 Layer 0  Items  1– 4  Foundation                              ✅ DONE
 Layer 1  Items  5– 8  Crypto Stack                            ✅ DONE
-Layer 2  Items  9–18  Network Stack (L2–L7, TLS 1.3, Sockets) ✅ DONE
+Layer 2  Items  9–18  Network Stack transport hardening        🔄 ACTIVE
 Layer 3  Items 19–24  Multi-Core OS                           ✅ DONE
 Layer 4  Items 25–30  Application-Level                       🔄 3 of 6 open
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto          ✅ DONE
@@ -318,7 +329,7 @@ Memory   Items 47–48  Hardening + Arenas                      ✅ DONE
 Compiler Item 49      STC Compiler Checks                     ✅ DONE
 ```
 
-**6 of 7 layers complete.  Layer 4 needs 3 items (SCROLL, editor, remote REPL).**
+**Layer 2 transport closure and three Layer 4 application items remain.**
 
 ---
 

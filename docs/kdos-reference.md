@@ -1567,10 +1567,11 @@ HELP                     \ reference
 
 ## §16 Network Stack
 
-Full TCP/IP network stack built on the NIC hardware (§16–§16.11 in
-`networking.f`).  The standard autoexec loads it after entering userland.
-Bottom-up: Ethernet → ARP → IPv4 → ICMP → UDP → DHCP → DNS → TCP →
-TLS 1.3.
+TCP/IP stack components built on the NIC hardware (§16–§16.11 in
+`networking.f`). The standard autoexec loads them after entering userland.
+Bottom-up: Ethernet → ARP → IPv4 → ICMP → UDP → DHCP → DNS → bounded TCP →
+TLS 1.3. The feature inventory does not supersede the TCP and TLS qualification
+limits stated below.
 
 ### §16 Ethernet Framing
 
@@ -1627,28 +1628,46 @@ TLS 1.3.
 
 ### §16.7 TCP
 
-Full TCP with 1–256 TCB slots (dynamic, scaled to 25% of XMEM against the
-complete TLS-capable table cost), 3-way handshake, sliding window, congestion
-control, retransmit, and TIME_WAIT reaper (60 s 2×MSL) with automatic
-scavenge-on-alloc.  The standard networking loader requires XMEM.  A guarded
-one-connection Bank-0 allocation path remains for manually composed builds,
-but it is not a qualified deployment profile.  The logical table cost is
-237,536 bytes per connection; backing allocator alignment may round the
-physical reservation upward. The exact XMEM total is 237,552 bytes for one
-connection and `n * 237,536 + 16` for odd `n`; even counts require exactly
-`n * 237,536`.
+TCP has a bounded one-outstanding-segment send path, a 3-way handshake, receive
+ring, passive open, TIME_WAIT reaper (60 s 2×MSL), and 1–256 TCB slots currently
+derived from 25% of XMEM. The 256 ceiling is an implementation policy limit,
+not a wire or architectural requirement. The standard networking loader
+requires XMEM. A guarded one-connection Bank-0 allocation path remains for
+manually composed builds, but it is not a qualified deployment profile. The
+logical TLS-capable table cost is 237,536 bytes per connection; backing
+allocator alignment may round the physical reservation upward. The exact XMEM
+total is 237,552 bytes for one connection and `n * 237,536 + 16` for odd `n`;
+even counts require exactly `n * 237,536`.
 
-Each listener TCB has an embedded **accept queue** (8 slots).  Incoming
-SYNs allocate a fresh TCB — the listener stays in LISTEN and never
-misses a connection.  Completed handshakes are enqueued and dequeued
-by `SOCK-ACCEPT`.
+Do not read the current fields as a qualified sliding window or complete
+congestion-controlled retransmission engine. ACK equality/range handling,
+partial cumulative-ACK retained-suffix accounting, fast-retransmit sequence
+selection, timer-driven replay, and peer-window admission have confirmed
+defects. `TCP-SEND` may also block in ARP resolution;
+SYN-SENT accepts a bare SYN as established, SYN-RCVD accepts any ACK, and
+retransmitted SYN handling plus SYN/SYN-ACK/FIN replay are incomplete. Until
+the narrow one-segment repair is qualified, loss can strand accepted data, a
+bounded TLS step cannot rely on readiness alone, and `TCP-SEND` can admit data
+against an unusable advertised window.
+
+Each listener TCB has an embedded **accept queue** (8 slots). Incoming SYNs
+allocate a fresh TCB and the listener stays in LISTEN. Completed handshakes are
+enqueued and dequeued by `SOCK-ACCEPT`. The current capacity check counts only
+completed children: several SYN-RCVD children can bypass it, and a later failed
+`AQ-PUSH` is ignored, leaving an orphan established TCB. Secure-accept work must
+reserve half-open admission or reclaim on overflow and prove no orphan or
+plaintext child. Eight is the current implementation backlog, not a universal
+capacity claim; making backlog storage caller/configuration-derived is tracked
+production capacity work outside the immediate TLS integration path.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TCP-CONNECT` | `( ip remote-port local-port -- tcb \| 0 )` | Start an active open and return its SYN-SENT TCB. If the SYN cannot be emitted, reclaim the TCB and return 0. |
 | `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN.  Initialises accept queue. |
-| `TCP-SEND` | `( tcb buf len -- actual )` | Accept up to one 1460-byte segment on an established, ready connection. Return 0 without advancing sequence/retransmit state when emission fails. |
+| `TCP-SEND-READY?` | `( tcb -- flag )` | True only for an established/close-wait TCB whose `SND-NXT` equals `SND-UNA`; it does not presently prove a usable advertised window. |
+| `TCP-SEND` | `( tcb buf len -- actual )` | Accept up to one 1460-byte segment on an established connection with no outstanding bytes. Return 0 without advancing sequence/retransmit state when emission fails. The current implementation does not yet enforce the usable peer/congestion window and may block while resolving ARP. |
 | `TCP-RECV` | `( tcb buf maxlen -- len )` | Receive data.  Returns bytes read. |
+| `TCP-POLL` | `( -- )` | Process at most one incoming IP frame. It does not presently service data RTO/retry state when no frame arrives. |
 | `TCP-CLOSE` | `( tcb -- )` | Begin graceful close only after the FIN is emitted; a failed send leaves state and sequence unchanged. Drains accept queues for listeners. |
 | `TCP-STATUS` | `( tcb -- state )` | Read connection state (11-state enum). |
 | `.TCP` | `( -- )` | Print all active TCB connections. |
@@ -1702,6 +1721,14 @@ handler wiring.
 | `TLS-SERVER-CONTEXT-BEGIN` | `( ctx slot+1 generation alpn-a alpn-u -- ior )` | Begin a server-role handshake with one pinned credential and an owned zero-or-one-name ALPN policy. Setup is atomic and the pin remains held until publish, abort, close, or another terminal path releases it. |
 | `TLS-PARSE-CLIENT-HELLO` | `( ctx msg-a msg-u -- alert ior )` | Retain and transactionally admit one complete TLS 1.3 ClientHello. Peer protocol failures return a wire alert with zero `ior`; local failures use zero alert and a negative status. |
 | `TLS-SERVER-PREPARE-HELLO` | `( ctx -- alert ior )` | From an admitted ClientHello, apply pinned-chain signature policy, obtain checked ephemeral/random entropy, build exact ServerHello and EncryptedExtensions bytes, derive X25519/SHA-256 handshake secrets, install server-write/client-read record epochs at sequence zero, and publish the prepared server-hello phase last. Failures erase all phase output while retaining the admitted ClientHello and credential pin for alert/abort cleanup. |
+| `TLS-SERVER-PREPARE-FLIGHT` | `( ctx -- ior )` | From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, and derive master/application/exporter secrets without installing application record epochs. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This constructs immutable handshake material but does not protect or transmit it. |
+
+`TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
+and future secrets have published; it is not transport readiness or an
+established connection. Owner/signer contention returns `TLS-E-BUSY` (-4206),
+credential cancellation returns `TLS-E-HANDSHAKE-CANCELLED` (-4217), and an
+admitted signer/hash/key-schedule failure records terminal
+`TLS-E-HANDSHAKE-CRYPTO` (-4216).
 
 The public `EC-*` words above are the branch-bearing, public-data verification
 path. They are not suitable for private scalars. Server signing uses a distinct
@@ -1743,8 +1770,12 @@ capability generations, not durable rollback counters.
 
 ### §16.8–§16.11 TLS 1.3
 
-Authenticated bounded TLS 1.3 client profile with **dual-mode cipher suite**
-support:
+Authenticated bounded TLS 1.3 client profile plus a partially integrated
+standard-profile server role. The server admits ClientHello and constructs the
+complete signed handshake messages transactionally, but does not yet emit
+plaintext ServerHello followed by protected EncryptedExtensions through
+Finished, authenticate client Finished through its state machine, or accept
+TLS sockets. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1775,7 +1806,7 @@ hash family rather than synthesizing success:
 | `TLS-DERIVE-SECRET` | `( ctx secret label llen out -- status )` | Hash the transcript under the context profile and derive a traffic secret. |
 | `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Derive both endpoint handshake traffic secrets and install local-write/peer-read record keys from the sealed client/server role. Stop at the first hash/HKDF failure and wipe admitted partial schedule state. |
 | `TLS-KS-APPLICATION` | `( ctx -- status )` | Derive role-neutral application/exporter secrets. A client installs both record directions and enters `TLSH-APPLICATION-READY`; a server installs only its write direction and enters `TLSH-CLIENT-FINISHED-PENDING` while retaining its client-handshake read epoch. |
-| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | After TCP accepts the complete local Finished record, publish `TLSS-ESTABLISHED` and wipe superseded schedule secrets. |
+| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | Publish `TLSS-ESTABLISHED` only from authenticated `TLSH-APPLICATION-READY`, after the caller's exact local-Finished acceptance boundary. A server must also have verified client Finished and completed C-AP cutover. Superseded schedule secrets are wiped. |
 | `TLS-EXPORT` | `( ctx label-a label-u context-a context-u out-a out-u -- ior )` | Derive 0..8160 authenticated exporter bytes into a non-aliasing caller span. Labels are printable 1..249-byte values; output is atomic and the exporter master is never exposed. |
 | `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |
 | `TLS-ALPN-CONFIGURED` | `( ctx -- name-a name-u )` | Return the context-owned configured ProtocolName. |

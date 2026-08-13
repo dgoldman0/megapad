@@ -1,7 +1,7 @@
 # TCP Accept-Queue Hardening
 
-**Status:** Complete
-**Date:** 2026-03-06
+**Status:** Completed-child queue mechanics implemented; half-open admission and overflow cleanup incomplete, with fixed backlog policy provisional
+**Date:** 2026-08-12 review
 
 ## Problem
 
@@ -31,14 +31,22 @@ This means:
 
 - Non-listener TCBs pay 88 bytes of unused space.  At 256 max connections
   this is ~22 KB — well within XMEM budget.
-- No dynamic allocation, no leak on listener close.
+- Completed-queue storage is inline. Listener close drains queued children;
+  half-open child cleanup remains incomplete as described below.
 
 ### Accept-queue capacity: 8 entries
 
-8 slots covers all practical scenarios.  If the queue is full when a new
-SYN arrives, the SYN is silently dropped; the client retries per TCP
-spec (exponential backoff).  This is standard behaviour — Linux defaults
-to a backlog of 5 for `listen()`.
+Eight slots is the current inline implementation capacity. If the queue is
+full when a new SYN reaches the listener, the SYN is ignored before a child
+TCB is allocated and the peer must recover through its retry behavior. However,
+the check counts only completed children. More than eight SYN-RCVD children can
+exist concurrently; when their ACKs arrive, failed `AQ-PUSH` results are
+discarded and can leave orphan established TCBs. Secure accept must reserve
+half-open admission or reclaim on overflow and test that case explicitly.
+
+This document does not claim that eight covers every deployment. A caller- or
+configuration-derived backlog remains tracked production capacity work, but it
+does not replace the immediate requirement for exact safe overload behavior.
 
 ### Changed words
 
@@ -68,14 +76,26 @@ to a backlog of 5 for `listen()`.
   calls it only for a TCP-marked descriptor.
 - Ring buffer (§18) — not used; accept queue is self-contained inline.
 
-### Test plan
+### Related TCP qualification boundary
 
-- Update `/TCB` size assertion (5728 → 5816).
-- Update `TCB-N` diff assertion (5728 → 5816).
-- Existing `test_socket_listen_accept` — should pass unchanged (exercises
-  full SYN → SYN-ACK → ACK → ACCEPT path).
-- New: `test_accept_queue_basics` — verify AQ-PUSH/AQ-POP semantics.
-- New: `test_listener_stays_listening` — after SYN processing, listener
+Keeping a listener in LISTEN and retaining one accepted child queue does not
+qualify the data-delivery path. The current one-outstanding-segment sender has
+open ACK-range, partial-ACK retained-suffix, retransmission-sequence,
+RTO-service, and advertised-window defects; send admission can block in ARP resolution, and passive control/FIN
+replay and active-open state validation are incomplete. Those require a narrow
+focused repair before outbound TLS server replay relies on the TCB's retained
+ciphertext.
+
+### Qualification inventory
+
+- `/TCB` size assertion (5728 → 5816).
+- `TCB-N` diff assertion (5728 → 5816).
+- `test_socket_listen_accept` exercises the full SYN → SYN-ACK → ACK → ACCEPT
+  path.
+- `test_aq_push_pop` verifies AQ-PUSH/AQ-POP semantics.
+- `test_listener_stays_listening` verifies that after SYN processing, listener
   TCB remains in TCPS-LISTEN state.
-- New: `test_accept_queue_full_drops_syn` — 8 rapid SYNs fill the queue,
-  9th is silently dropped.
+- `test_aq_full_rejects` verifies that a ninth direct `AQ-PUSH` is rejected.
+- A wire-level test with more than eight half-open children that subsequently
+  ACK remains part of the secure-accept qualification plan; it must prove
+  overflow cleanup and absence of orphan TCBs.

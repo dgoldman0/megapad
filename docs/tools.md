@@ -1,6 +1,6 @@
 # Megapad-64 Tools Reference
 
-This document covers the four main host-side tools that make up the
+This document covers the five main host-side tools that make up the
 Megapad-64 development environment:
 
 1. **CLI & Debug Monitor** (`cli.py`) — boot, run, and inspect the system
@@ -442,23 +442,27 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **1,687 passing tests**
-that cover every layer of the system.
+The project has a broad test suite across host, guest, RTL, and live-network
+layers. Numeric counts in this older inventory are a snapshot rather than a
+current qualification claim; collect the selected tests or inspect their
+source before citing totals. Heavyweight, worker-spawning, multicore capstone,
+and live/TAP runs remain approval-gated by `AGENTS.md`.
 
 ### Test Files
 
-| File | Tests | What It Covers |
-|------|-------|----------------|
-| `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | 1,316 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto, PQC, network stack, privilege, framebuffer, ext mem, userland |
-| `test_networking.py` | 48 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, TCP, IP stack integration, hardening, end-to-end |
-| `test_tacc_isa.py` | — | Locked encodings, ownership, formats, arithmetic, image, and fault oracle |
-| `test_full_core_tile_engine.py` | — | Four private full-core engines and three cluster-shared domains |
-| `test_tacc_cycle_api.py` | — | Exact lifecycle, arithmetic, transfer, cancellation, and counter timing |
-| `test_tile_engine_memory_arbitration.py` | — | Seven-source memory-port and shared image-stage arbitration |
-| `test_native_tacc_external_phy.py` | — | Native 64-bit external-PHY serialization and fault semantics |
-| `test_timed_tacc_external_phy.py` | — | Strict-cycle external response, timeout, reset, and recovery behavior |
-| `test_tacc_contention.py` | — | Approval-gated exact 1/2/4-worker contention comparison |
+| File | What It Covers |
+|------|----------------|
+| `test_megapad64.py` | CPU instruction set and integration programs |
+| `test_system.py` | Devices, BIOS/KDOS, filesystem, multicore, crypto, networking, privilege, framebuffer, external memory, and userland |
+| `test_networking.py` | NIC backends and deterministic network integration |
+| `test_live_net.py` | Approval-gated TAP/internet journeys |
+| `test_tacc_isa.py` | Locked encodings, ownership, formats, arithmetic, image, and fault oracle |
+| `test_full_core_tile_engine.py` | Four private full-core engines and three cluster-shared domains |
+| `test_tacc_cycle_api.py` | Exact lifecycle, arithmetic, transfer, cancellation, and counter timing |
+| `test_tile_engine_memory_arbitration.py` | Seven-source memory-port and shared image-stage arbitration |
+| `test_native_tacc_external_phy.py` | Native 64-bit external-PHY serialization and fault semantics |
+| `test_timed_tacc_external_phy.py` | Strict-cycle external response, timeout, reset, and recovery behavior |
+| `test_tacc_contention.py` | Approval-gated exact 1/2/4-worker contention comparison |
 
 ### Test Classes in `test_system.py`
 
@@ -493,7 +497,11 @@ that cover every layer of the system.
 | `TestKDOSTRNG` | RANDOM, RANDOM8, SEED-RNG, RANDOM32, RANDOM16, RAND-RANGE |
 | `TestKDOSHKDF` | HKDF-Extract, HKDF-Expand, SHA-3 HMAC key derivation |
 | `TestKDOSTLSRecord` | TLS 1.3 record layer: content type, length, AES-GCM encrypt/decrypt |
+| `TestKDOSTLSGenericALPN` | Generic caller-provided ALPN configuration, encoding, selection, and refusal |
 | `TestKDOSTLSHandshake` | TLS 1.3 handshake: ClientHello, ServerHello, key schedule, Finished |
+| `TestKDOSTLSExporter` | TLS 1.3 exporter schedule/publication, RFC 9266 tuple, bounds, and wipe |
+| `TestKDOSTLSCredentials` | Lower-owned server credentials, opaque handles, signer lifecycle, cancellation, and cleanup |
+| `TestKDOSTLSServerClientHello` | Full-width server ClientHello admission, server flight construction, transcript/signature/Finished vectors, and rollback |
 | `TestKDOSTLSAppData` | TLS 1.3 application data: TLS-SEND, TLS-RECV, TLS-CLOSE |
 | `TestKDOSSocket` | Socket API: SOCKET, BIND, LISTEN, ACCEPT, CONNECT, SEND, RECV, CLOSE |
 | `TestFieldALU` | Field ALU: FADD–FPOW, MUL_RAW, edge cases, X25519 compatibility |
@@ -526,25 +534,25 @@ that cover every layer of the system.
 | `TestToolsModule` | tools.f: HTTP, HTTPS, FTP, Gopher, DNS-LOOKUP |
 | `TestKDOSUserland` | Userland memory isolation: per-process dictionary, HERE/ALLOT |
 
-### Test Classes in `test_networking.py`
+### Networking Test Classes
 
-| Class | Coverage Area |
-|-------|---------------|
-| `TestNICBackends` | Backend lifecycle, loopback/UDP/TAP roundtrip, graceful shutdown |
-| `TestBackwardCompat` | Default NIC (no backend), inject/drain, legacy passthrough |
-| `TestRealNetBIOS` | NET-STATUS and NET-MAC@ over real TAP device |
-| `TestRealNetARP` | ARP-RESOLVE gateway, ARP table, ARP-HANDLE |
-| `TestRealNetICMP` | ICMP ping host, respond to ping from host |
-| `TestRealNetUDP` | UDP send to host, UDP receive from host |
-| `TestRealNetIntegration` | Full IP stack init, status display, backend stats tracking |
-| `TestRealNetTCP` | TCP over TAP: SYN/ACK, data transfer, FIN close |
-| `TestRealNetHardening` | Network hardening over TAP: malformed frames, floods, MTU edge cases |
-| `TestRealNetEndToEnd` | End-to-end: ARP + ICMP + UDP + TCP full-stack over TAP |
+| File | Class | Coverage Area |
+|------|-------|---------------|
+| `test_networking.py` | `TestNICBackends` | Backend lifecycle, loopback/UDP/TAP roundtrip, and graceful shutdown |
+| `test_networking.py` | `TestBackwardCompat` | Default NIC, inject/drain, and legacy passthrough |
+| `test_live_net.py` | `TestLiveBIOS` | NET status and MAC access over a real TAP device |
+| `test_live_net.py` | `TestLiveARP` | Gateway resolution, ARP table, and request handling |
+| `test_live_net.py` | `TestLiveICMP` | Outbound and inbound ping journeys |
+| `test_live_net.py` | `TestLiveUDP` | UDP send/receive through the host |
+| `test_live_net.py` | `TestLiveIntegration` | Link initialization, status, and backend statistics |
+| `test_live_net.py` | `TestLiveHardening` | TAP noise, runt/flood handling, and composed traffic |
+| `test_live_net.py` | `TestLiveEndToEnd` | Gateway, DNS, SCROLL, and outbound TLS-client journeys |
+| `test_live_net.py` | `TestLiveTAPBackend` | TAP backend lifecycle and frame transmission |
 
 ### Running Tests
 
 ```bash
-# C++ accelerator (recommended — 63× faster than PyPy)
+# Optional C++ accelerator
 make accel                                                 # build C++ extension
 make test                                                  # full suite, background
 make test-status                                           # check progress
@@ -567,39 +575,27 @@ MP64_RUNTIME_NAMESPACE=megapad-full-tacc \
 native worker-backed systems. Obtain resource approval and run each by itself;
 do not overlap either with another test suite.
 
-### Fast Tests with C++ Accelerator (recommended)
+### Accelerated and Focused Tests
 
-The optional C++ accelerator reimplements the CPU step loop in pybind11
-C++, delivering a **63× speedup** over PyPy.  `system.py` imports it
-automatically when the shared library is present; otherwise it falls
-back to pure Python.
+The optional C++ accelerator reimplements the CPU step loop in pybind11.
+`system.py` imports it automatically when the shared library is present;
+otherwise it falls back to pure Python. The Makefile's current foreground
+qualification path is sequential.
 
 ```bash
-python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
+python -m venv .venv && .venv/bin/pip install pybind11 pytest
 make accel                   # build the C++ extension
-make test-accel              # ~23 s for all 1,687 tests
-make bench                   # raw CPU speed comparison
+make test-sequential TEST_PATH=tests/test_system.py K=TestKDOSTLSServerClientHello
+make test-one K=test_name     # isolated monitored selection
+make test-quick               # small BIOS/CPU smoke
+make test                     # broad sequential background suite
+make bench                    # raw CPU speed comparison
 ```
 
-### Fast Tests with PyPy + xdist
-
-The pure-Python CPU loop benefits from PyPy's JIT compiler (~5× speedup).
-pytest-xdist adds parallel execution across multiple workers.
-
-```bash
-make setup-pypy          # one-time: downloads PyPy 3.10, installs pytest + xdist
-make test                # PyPy + 8 parallel workers  (~24 min)
-make test-seq            # PyPy sequential
-make test-cpython        # CPython fallback           (~40 min)
-make test-quick          # PyPy, BIOS + CPU only      (~6 sec)
-make test-one K=test_coreid_word   # single test with PyPy
-```
-
-| Runner | Parallelism | Approximate Time | Speedup |
-|--------|-------------|-------------------|---------|
-| CPython | sequential | ~40 min | 1× |
-| PyPy + xdist -n 8 | 8 workers | ~24 min | 1.7× |
-| **CPython + C++ accel -n 8** | **8 workers** | **~23 s** | **104×** |
+Obtain approval before worker-spawning, unusually large-budget,
+greater-than-4-GiB, or broad resource-heavy runs. Never overlap test suites.
+Live TAP/internet qualification uses `make test-net` and is not ordinary unit
+evidence.
 
 ### Test Infrastructure
 
@@ -621,29 +617,24 @@ the boot cost; subsequent tests restore from the cached snapshot.
 
 ## Project File Summary
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `megapad64.py` | ~2,868 | CPU + tile engine emulator |
-| `accel/mp64_accel.cpp` | ~1,930 | C++ CPU core (pybind11) — 63× speedup |
-| `accel_wrapper.py` | ~829 | Drop-in wrapper for C++ CPU core |
-| `system.py` | ~994 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
-| `cli.py` | ~1,347 | CLI, boot modes, debug monitor, headless terminal server |
-| `asm.py` | ~788 | Two-pass assembler (with listing output) |
-| `devices.py` | ~1,875 | MMIO device models, facades, and C++-backed proxies |
-| `nic_backends.py` | ~399 | Pluggable NIC backends (Loopback, UDP tunnel, Linux TAP) |
-| `data_sources.py` | ~697 | Simulated data sources for NIC |
-| `diskutil.py` | ~1,162 | MP64FS disk utility and image builder |
-| `bios.asm` | ~14,524 | Forth BIOS (360 dictionary words, crypto, PQC, SHA-256, hardened, multicore) |
-| `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | ~8,100 | Bank 0 KDOS core (compute, storage, scheduler, UI, crypto, modules, PQC, multicore) |
-| `networking.f` | ~7,500 | Userland Ethernet-to-TLS stack, sockets, and UDP data-port transport |
-| `tools.f` | ~990 | Network tools (HTTP/HTTPS/FTP/Gopher client, DNS-LOOKUP) |
-| `graphics.f` | ~150 | Framebuffer / tile-engine graphics module |
-| `autoexec.f` | ~55 | Boot chain script (enters userland, loads networking, configures it, then loads tools) |
-| `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
-| `test_system.py` | ~19,216 | Integration test suite (1,316 tests, 69 classes) |
-| `test_networking.py` | ~1,239 | Real-networking tests (48 tests, 9 classes) |
-| `setup_accel.py` | ~35 | pybind11 build configuration |
-| `bench_accel.py` | ~139 | C++ vs Python speed comparison |
-| `Makefile` | 190 | Build, test, & accel targets |
-| `conftest.py` | 197 | Test fixtures, snapshot caching, live status |
+| File | Purpose |
+|------|---------|
+| `megapad64.py` | CPU and tile-engine emulator |
+| `accel/mp64_accel.cpp` | Optional pybind11 CPU fast path |
+| `accel_wrapper.py` | Drop-in wrapper for the C++ CPU core |
+| `system.py` | SoC/device/memory integration and batched execution |
+| `cli.py` | Boot modes, debug monitor, and headless terminal server |
+| `asm.py` | Two-pass assembler and listing output |
+| `devices.py` | MMIO device models and accelerator facades |
+| `nic_backends.py` | Loopback, UDP-tunnel, and Linux TAP backends |
+| `data_sources.py` | Simulated network data sources |
+| `diskutil.py` | MP64FS image utility |
+| `bios.asm` / `bios.rom` | Forth BIOS source and assembled image |
+| `kdos.f` | Bank 0 KDOS core |
+| `networking.f` | Loadable Ethernet-through-TLS and socket module |
+| `tools.f` / `graphics.f` | Optional network-tool and graphics modules |
+| `autoexec.f` | Userland/network/module boot chain |
+| `tests/` | Host, guest, integration, resource-gated, and live-network tests |
+| `setup_accel.py` / `bench_accel.py` | Accelerator build and benchmark drivers |
+| `Makefile` | Current build, sequential test, monitoring, sanitizer, and live-network targets |
+| `tests/conftest.py` | Shared fixtures, snapshot caching, and live status |

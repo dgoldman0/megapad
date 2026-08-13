@@ -25611,7 +25611,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             self.assertIn(token, text)
 
     def test_server_prepare_flight_publishes_exact_signed_messages(self):
-        """The complete immutable flight matches independent RFC oracles."""
+        """The immutable signed messages match precomputed reference vectors."""
         hello, entropy, server_hello, encrypted_extensions = (
             self._certificate_transcript_phase()
         )

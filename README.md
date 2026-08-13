@@ -2,9 +2,9 @@
 
 ### A Tile-Oriented Fantasy Computer with a Forth BIOS and Operating System
 
-Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
+Megapad-64 is a computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 1,731 tests.
+— all running inside a Python emulator and covered by a broad automated suite.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -30,17 +30,17 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 360 Forth dictionary words, 14,524 lines ASM, ~28 KB binary |
+| **BIOS** | Subroutine-threaded Forth, device words, checked crypto, and boot loader |
 | **KDOS** | Bank 0 core in `kdos.f`; loadable networking in userland `networking.f` |
-| **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 3,002+991 lines Python |
-| **C++ Accelerator** | Optional pybind11 CPU core (3,229 lines) — 63× speedup over PyPy |
-| **Tests** | 2,000+ passing checks across CPU, BIOS, KDOS, FS, devices, assembler, multicore, HBW, tile, audio, crypto, networking, and PQC; environment/capacity gates are reported separately |
+| **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM |
+| **C++ Accelerator** | Optional pybind11 CPU fast path |
+| **Tests** | Host, guest, RTL, multicore, and live-network coverage; resource and environment gates are reported separately |
 | **Filesystem** | MP64FS — capacity-derived geometry through 4 MiB, 128 entries, two extents |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **Devices** | 20 emulator MMIO peripherals, including UART, Timer, Storage, NIC, one-shot PCM Audio, crypto accelerators, Mailbox, Spinlock, SysInfo, and Port I/O Bridge |
 | **FPGA RTL** | 36 Verilog modules + 32 testbenches + 12 target overrides (~430 HW tests), Genesys 2 + VU095 targets |
 
-All core subsystems are **functionally complete**: BIOS Forth, the KDOS
+Core subsystems are broadly implemented: BIOS Forth, the KDOS
 core, tile engine, filesystem, scheduler, pipelines, the loadable network
 stack (L2–L7 through TLS 1.3 + socket API), disk I/O, auto-boot from
 disk, interactive TUI, built-in documentation browser, **16-core
@@ -48,6 +48,14 @@ heterogeneous SoC** (4 full cores + 3 micro-clusters of 4 cores each)
 with IPI, spinlocks, barriers, and **3 MiB HBW math RAM**,
 **core-type-aware scheduling**, and **post-quantum crypto** (Field ALU,
 NTT, ML-KEM-512, hybrid PQ exchange).
+
+Transport is still under active qualification. The current TCP sender is a
+one-outstanding-segment profile with open data/control/admission defects, and
+the TLS server has transactionally constructed its signed handshake messages
+but has not emitted plaintext ServerHello plus the protected remainder,
+authenticated client Finished, or enabled secure listen/accept. See
+[`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
+nonclaims.
 
 ---
 
@@ -189,6 +197,8 @@ external memory, so it does not re-enter the BIOS boot loader's live buffer.
 Its temporary transfer allocation, relative-directory state, and provisional
 `PROVIDED` mark are all unwound when source evaluation throws, allowing an
 incomplete module to be corrected and retried.
+The feature inventory is not a completion claim: current TCP/TLS qualification
+boundaries are recorded in `docs/tls-hardening.md`.
 
 ---
 
@@ -218,9 +228,6 @@ python cli.py --bios bios.asm --storage sample.img
 
 # Without disk (development mode — KDOS core only, no FS or networking module)
 python cli.py --bios bios.asm --forth kdos.f
-
-# ~5× faster under PyPy (see 'make setup-pypy')
-.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
 ```
 
 ### Headless Mode (TCP Terminal Server)
@@ -296,24 +303,27 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 ### Run the Tests
 
 ```bash
-# C++ accelerator (recommended — 63× faster than PyPy)
-python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
-make accel                         # build C++ extension
-make test-accel                    # ~23 s, all 1,731 tests
+# Optional C++ accelerator
+python -m venv .venv && .venv/bin/pip install pybind11 pytest
+make accel
 
-# PyPy + xdist (no C++ compiler needed)
-make setup-pypy                    # one-time
-make test                          # ~24 min
+# Focused foreground qualification
+make test-sequential TEST_PATH=tests/test_system.py K=TestKDOSTLSServerClientHello
+make test-one K=test_name           # isolated monitored selection
+make test-quick                     # small BIOS/CPU smoke
 
-# CPython fallback (no setup required)
-make test                              # background, ~40 min on CPython
+# Broad sequential suite (background + status dashboard)
+make test
 ```
 
 > **Note:** Always run tests via the Makefile (`make test`, `make test-one`, etc.).
+> Under `AGENTS.md`, worker-spawning, unusually large, and broad resource-heavy
+> runs require approval and test suites must remain sequential with respect to
+> one another.
 
-All 1,731 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
-assembler, disk utility, devices, multicore, networking (simulated +
-real TAP), crypto, post-quantum crypto, and extended tile engine.
+The suite covers the CPU, BIOS, KDOS, filesystem, assembler, disk utility,
+devices, multicore, simulated networking, crypto, post-quantum crypto, and the
+extended tile engine.
 
 For real-network tests against a Linux TAP device:
 
@@ -321,42 +331,33 @@ For real-network tests against a Linux TAP device:
 make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 ```
 
-| Runner | Time | Speedup |
-|--------|------|---------|
-| CPython (pure Python) | ~40 min | 1× |
-| PyPy + xdist -n 8 | ~24 min | 1.7× |
-| **CPython + C++ accel -n 8** | **~23 s** | **104×** |
-
 ---
 
 ## Project Files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `megapad64.py` | 3,315 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
-| `accel/mp64_accel.cpp` | 3,280 | C++ CPU core (pybind11) — 63× speedup |
-| `accel_wrapper.py` | 897 | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | 1,018 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 14,957 | Forth BIOS in assembly (363 words, multicore, crypto, hardened) |
-| `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | ~8,100 | Bank 0 KDOS core: compute, storage, scheduler, UI, modules, crypto, multicore |
-| `networking.f` | ~7,500 | Userland network module: Ethernet through TLS, sockets, and UDP data-port transport |
-| `cli.py` | 1,557 | CLI, boot modes, headless TCP server, interactive debug monitor |
-| `asm.py` | 909 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 3,197 | MMIO device models, including deterministic one-shot PCM capture and optional playback sinks |
-| `audio_sinks.py` | 147 | Explicit opt-in pygame PCM16 playback adapter |
-| `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
-| `data_sources.py` | 697 | Simulated network data sources |
-| `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
-| `tests/test_megapad64.py` | 2,647 | 25 CPU + tile engine tests |
-| `tests/test_system.py` | 24,761 | 1,634 integration tests (77 classes, incl. multicore, tile, crypto, FS, PQC, port I/O bridge, bus timeout) |
-| `tests/test_networking.py` | 187 | 13 real-networking tests |
-| `Makefile` | 190 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
-| `setup_accel.py` | 35 | pybind11 build configuration |
-| `bench_accel.py` | 139 | C++ vs Python speed comparison script |
-| `tests/conftest.py` | 176 | Test fixtures, snapshot caching, live status reporting |
-| `rtl/` | ~16,200 | 36 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
-| `rtl/sim/` | ~13,200 | 32 Verilog testbenches (~430 hardware assertions) |
+| File | Purpose |
+|------|---------|
+| `megapad64.py` | CPU and tile-engine emulator, including extended operations and FP16/BF16 |
+| `accel/mp64_accel.cpp` | Optional pybind11 CPU fast path |
+| `accel_wrapper.py` | Drop-in Python wrapper for the C++ CPU core |
+| `system.py` | SoC integration and batched execution |
+| `bios.asm` | Forth BIOS in assembly: boot, devices, multicore, and checked crypto |
+| `bios.rom` | Pre-assembled BIOS binary |
+| `kdos.f` | Bank 0 KDOS core: compute, storage, scheduler, UI, modules, crypto, and multicore |
+| `networking.f` | Userland Ethernet-through-TLS module, sockets, and UDP data-port transport |
+| `cli.py` | CLI, boot modes, headless TCP terminal, and debug monitor |
+| `asm.py` | Two-pass assembler with listing output |
+| `devices.py` | MMIO device models |
+| `audio_sinks.py` | Explicit opt-in audio playback adapters |
+| `nic_backends.py` | Loopback, UDP-tunnel, and Linux TAP NIC backends |
+| `data_sources.py` | Simulated network data sources |
+| `diskutil.py` | MP64FS image utility |
+| `tests/` | Host, guest, integration, resource-gated, and live-network tests |
+| `Makefile` | Current build, focused sequential test, monitoring, sanitizer, and live-network targets |
+| `setup_accel.py` | pybind11 extension build configuration |
+| `bench_accel.py` | CPU-path benchmark driver |
+| `rtl/` | Portable RTL plus target overrides |
+| `rtl/sim/` | RTL testbenches |
 
 ---
 

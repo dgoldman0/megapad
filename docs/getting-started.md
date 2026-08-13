@@ -356,7 +356,8 @@ Type `help` at the `MP64>` prompt for the full command list.
 
 ## Running the Test Suite
 
-The project has a comprehensive test suite (1,687 tests):
+The project has broad host, guest, RTL, multicore, and networking coverage.
+Use the current Makefile targets rather than relying on hand-maintained counts:
 
 ```bash
 # Full test suite (background — runs via conftest guard)
@@ -367,27 +368,24 @@ make test-status                         # check progress
 make test-one K=TestKDOS                 # just KDOS tests
 
 # CPU unit tests only
-make test-one K=TestCPU
+make test-sequential TEST_PATH=tests/test_megapad64.py
 ```
 
-### Fast Tests with PyPy + xdist
+### Accelerated Foreground Tests
 
-The CPU emulator is pure Python and benefits enormously from PyPy's JIT
-compiler.  Combined with pytest-xdist for parallel execution, the full
-suite runs **~10× faster** (4 min vs 40 min under CPython):
+The optional pybind11 accelerator is built automatically by test targets. For
+an explicit build or a focused foreground run:
 
 ```bash
-make setup-pypy   # one-time: downloads PyPy 3.10, installs pytest + xdist
-make test          # PyPy + 8 parallel workers (~4 min)
-make test-seq      # PyPy sequential (~8 min, good for debugging)
-make test-quick    # BIOS + CPU only (~6 sec)
+python -m venv .venv && .venv/bin/pip install pybind11 pytest
+make accel
+make test-sequential TEST_PATH=tests/test_system.py K=TestKDOSTLSServerClientHello
+make test-quick
 ```
 
-PyPy also speeds up interactive use of the emulator:
-
-```bash
-.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
-```
+Obtain approval before worker-spawning, unusually large-budget,
+greater-than-4-GiB, or broad resource-heavy runs, and never overlap test
+suites. Live TAP/internet qualification uses `make test-net`.
 
 ---
 
