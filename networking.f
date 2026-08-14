@@ -3922,9 +3922,17 @@ VARIABLE _TCPIO-LEN
         0
     THEN ;
 
+: _TCPIO-SEND-LIVE?  ( -- flag )
+    _TCPIO-TCB @ TCB.STATE @ DUP TCPS-ESTABLISHED =
+    SWAP TCPS-CLOSE-WAIT = OR ;
+
+: _TCPIO-RECV-LIVE?  ( -- flag )
+    _TCPIO-TCB @ TCB.STATE @ TCPS-ESTABLISHED = ;
+
 : (TCP-OWNER-SEND)  ( tcb gen owner addr len -- actual ior )
     _TCPIO-LEN ! _TCPIO-BUF ! _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
     _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-SEND-LIVE? 0= IF 0 TCP-ACCEPT-E-STATE EXIT THEN
     _TCPIO-TCB @ _TCPIO-BUF @ _TCPIO-LEN @ (TCP-SEND) 0 ;
 
 : TCP-OWNER-SEND  ( tcb gen owner addr len -- actual ior )
@@ -3936,6 +3944,7 @@ VARIABLE _TCPIO-LEN
 : (TCP-OWNER-SEND-EXACT)  ( tcb gen owner addr len -- actual ior )
     _TCPIO-LEN ! _TCPIO-BUF ! _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
     _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-SEND-LIVE? 0= IF 0 TCP-ACCEPT-E-STATE EXIT THEN
     _TCPIO-TCB @ _TCPIO-BUF @ _TCPIO-LEN @ (TCP-SEND-EXACT) 0 ;
 
 : TCP-OWNER-SEND-EXACT  ( tcb gen owner addr len -- actual ior )
@@ -3947,6 +3956,7 @@ VARIABLE _TCPIO-LEN
 : (TCP-OWNER-SEND-READY?)  ( tcb gen owner -- ready? ior )
     _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
     _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-SEND-LIVE? 0= IF 0 TCP-ACCEPT-E-STATE EXIT THEN
     _TCPIO-TCB @ (TCP-SEND-READY?) 0 ;
 
 : TCP-OWNER-SEND-READY?  ( tcb gen owner -- ready? ior )
@@ -3958,6 +3968,9 @@ VARIABLE _TCPIO-LEN
 : (TCP-OWNER-RECV)  ( tcb gen owner addr maxlen -- actual ior )
     _TCPIO-LEN ! _TCPIO-BUF ! _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
     _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-TCB @ TCB.RX-COUNT @ 0= _TCPIO-RECV-LIVE? 0= AND IF
+        0 TCP-ACCEPT-E-STATE EXIT
+    THEN
     _TCPIO-TCB @ _TCPIO-BUF @ _TCPIO-LEN @ (TCP-RX-POP) 0 ;
 
 : TCP-OWNER-RECV  ( tcb gen owner addr maxlen -- actual ior )

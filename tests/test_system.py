@@ -34945,6 +34945,56 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_owner_io_distinguishes_backpressure_from_dead_transport(self):
+        """Exact authority does not turn terminal transport state into retry."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE live-tcb VARIABLE live-gen VARIABLE live-ior",
+            "VARIABLE live-owner CREATE live-data 4 ALLOT CREATE live-out 4 ALLOT",
+            "TCB-ALLOC DROP 0 TCB-N live-tcb !",
+            "TCPS-ESTABLISHED live-tcb @ TCB.STATE !",
+            "0 live-tcb @ TCB.SND-WND ! TCP-MSS live-tcb @ TCB.CWND !",
+            "live-data 4 65 FILL",
+            "live-tcb @ live-owner TCP-ATTACH live-ior ! live-gen !",
+            "live-tcb @ live-gen @ live-owner live-data 4 "
+            "TCP-OWNER-SEND-EXACT",
+            '."  live-send-ior=" . ."  live-send-actual=" .',
+            "TCPS-CLOSE-WAIT live-tcb @ TCB.STATE !",
+            "live-tcb @ live-gen @ live-owner live-data 4 "
+            "TCP-OWNER-SEND-EXACT",
+            '."  close-wait-send-ior=" . DROP',
+            "live-tcb @ live-data 4 (TCP-RX-PUSH) DROP",
+            "live-tcb @ live-gen @ live-owner live-out 4 TCP-OWNER-RECV",
+            '."  retained-ior=" . ."  retained-actual=" .',
+            "live-tcb @ live-gen @ live-owner live-out 4 TCP-OWNER-RECV",
+            '."  eof-ior=" . ."  eof-actual=" .',
+            "TCPS-FAILED live-tcb @ TCB.STATE !",
+            "live-tcb @ live-gen @ live-owner live-data 4 "
+            "TCP-OWNER-SEND-EXACT",
+            '."  dead-send-ior=" . ."  dead-send-actual=" .',
+            "live-tcb @ live-gen @ live-owner TCP-OWNER-SEND-READY?",
+            '."  dead-ready-ior=" . ."  dead-ready=" .',
+            "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "live-tcb @ live-gen @ live-owner live-out 4 TCP-OWNER-RECV",
+            '."  busy-ior=" . ."  busy-actual=" .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            "live-tcb @ live-gen @ 1+ live-owner live-out 4 TCP-OWNER-RECV",
+            '."  stale-ior=" . ."  stale-actual=" .',
+            '."  owner-io-depth=" DEPTH .',
+        ])
+        for token in (
+            "live-send-ior=0 ", "live-send-actual=0 ",
+            "close-wait-send-ior=0 ",
+            "retained-ior=0 ", "retained-actual=4 ",
+            "eof-ior=-4233 ", "eof-actual=0 ",
+            "dead-send-ior=-4233 ", "dead-send-actual=0 ",
+            "dead-ready-ior=-4233 ", "dead-ready=0 ",
+            "busy-ior=-4230 ", "busy-actual=0 ",
+            "stale-ior=-4232 ", "stale-actual=0 ",
+            "owner-io-depth=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_raw_emitters_validate_pointer_before_dereference(self):
         """Invalid generationless emitters fail without touching address zero."""
         text = self._run_kdos([
