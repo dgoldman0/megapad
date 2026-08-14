@@ -83,10 +83,12 @@ waits retryably without context churn, attaches exactly one queued child, and
 drives the initial ClientHello across arbitrary TCP/TLS-record fragmentation.
 Fatal peer alerts and the attach-time deadline remain sticky until disposition
 or abort, and abort reclaims the complete authority chain without publishing a
-socket. Its current `STEP` boundary stops at `PREPARE_HELLO`; the immediate
-release path is to extend that same operation through the already-qualified
-handshake, disposition, and socket-publication steps, then prove one independent TLS peer
-exchange, application I/O, and graceful cleanup. See
+socket. One following step prepares immutable ServerHello and
+EncryptedExtensions plus the handshake epochs without transport I/O. The
+current `STEP` boundary stops at `PREPARE_FLIGHT`; the immediate release path is
+to extend that same operation through the already-qualified signed-flight,
+transport, disposition, and socket-publication steps, then prove one
+independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

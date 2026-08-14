@@ -25235,8 +25235,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
-    def test_server_accept_op_reassembles_attached_client_hello(self):
-        """One bounded operation drives fragmented ClientHello ingress."""
+    def test_server_accept_op_reassembles_and_prepares_phase_one(self):
+        """One bounded operation drives ingress and prepares immutable phase one."""
         hello = self._client_hello()
         first_record = self._tls_plaintext(hello[:2], version=0x0301)
         second_record = self._tls_plaintext(hello[2:], version=0x0303)
@@ -25367,6 +25367,30 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'opi-live-sockets 1 = AND opi-sd @ '
             'SOCK.TLS-ACTIVE-OPS @ 1 = AND .',
             '." OPI-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-PREP-IOR=" . ." OPI-PREP-ALERT=" . '
+            '." OPI-PREP-PROGRESS=" . ." OPI-PREP-SD=" .',
+            '." OPI-PREP-STATE=" op-ingress TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PREPARE-FLIGHT = .',
+            '." OPI-PREP-CTX=" opi-ctx @ TLS-CTX.STATE @ '
+            'TLSS-HANDSHAKE = opi-ctx @ TLS-CTX.HS-STATE @ '
+            'TLSH-SERVER-HELLO = AND opi-ctx @ TLS-CTX.ERROR @ 0= AND .',
+            '." OPI-PREP-LENS=" opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.SH-LEN + @ . opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.EE-LEN + @ .',
+            '." OPI-PREP-PHASES=" opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLIGHT-PHASE + @ . opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.TRANSCRIPT-PHASE + @ . opi-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.PHASE + @ .',
+            '." OPI-PREP-TRANSPORT=" opi-child @ TCB.RX-COUNT @ '
+            f'{len(following_record)} = opi-child @ TCB.SND-NXT @ '
+            '1000 = AND .',
+            '." OPI-PREP-AUTH=" opi-ctx @ _TLS-SERVER-PINNED? '
+            'opi-child @ opi-child-gen @ opi-ctx @ '
+            'TCB-ATTACHED-TO? AND opi-sd @ SOCK.TLS-ACTIVE-OPS @ '
+            '1 = AND tc-slot @ 1- _TC@ TC.REFS + @ 2 = AND .',
+            '." OPI-PREP-NO-PUBLISH=" opi-ctx @ '
+            'TLS-CTX.SOCKET-OWNER @ 0= opi-live-sockets 1 = AND .',
             "op-ingress TLS-SERVER-ACCEPT-ABORT",
             '." OPI-ABORT-IOR=" . ." OPI-ABORT-ALERT=" . '
             '." OPI-ABORT-PROGRESS=" .',
@@ -25374,6 +25398,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." OPI-ABORT-CHILD=" opi-child @ TCB.STATE @ '
             'TCPS-CLOSED = .',
             '." OPI-ABORT-CTX=" opi-ctx @ TLS-CTX-CLAIMED? .',
+            '." OPI-ABORT-SECRETS=" opi-ctx @ TLS-CTX.HS-SECRET '
+            '_BN256-ZERO? opi-ctx @ TLS-CTX.WR-KEY _BN256-ZERO? AND '
+            'opi-ctx @ TLS-CTX.RD-KEY _BN256-ZERO? AND .',
             '." OPI-ABORT-ACTIVE=" opi-sd @ '
             'SOCK.TLS-ACTIVE-OPS @ .',
             '." OPI-ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
@@ -25422,9 +25449,16 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             f"OPI-RCV-NXT={2000 + sum(map(len, segments))} ",
             "OPI-FINAL-AUTH=-1 ", "OPI-NO-PUBLISH=-1 ",
             "OPI-REFS=2 ",
+            "OPI-PREP-IOR=0 OPI-PREP-ALERT=0 ",
+            "OPI-PREP-PROGRESS=1 OPI-PREP-SD=0 ",
+            "OPI-PREP-STATE=-1 ", "OPI-PREP-CTX=-1 ",
+            "OPI-PREP-LENS=122 21 ", "OPI-PREP-PHASES=1 1 0 ",
+            "OPI-PREP-TRANSPORT=-1 ", "OPI-PREP-AUTH=-1 ",
+            "OPI-PREP-NO-PUBLISH=-1 ",
             "OPI-ABORT-IOR=0 OPI-ABORT-ALERT=0 ",
             "OPI-ABORT-PROGRESS=7 ", "OPI-ABORT-STATE=0 ",
             "OPI-ABORT-CHILD=-1 ", "OPI-ABORT-CTX=0 ",
+            "OPI-ABORT-SECRETS=-1 ",
             "OPI-ABORT-ACTIVE=0 ", "OPI-ABORT-REFS=1 ",
             "OPI-ABORT-LISTENER=-1 ", "OPI-CLOSE=0 ",
             "OPI-DELETE=0 ", "OPI-OWNERS=-1 ", "OPI-DEPTH=0 ",

@@ -15,8 +15,9 @@ terminal dispositions, generation-exact TLS socket publication, and atomic
 policy-bearing `TLS-LISTEN`. A caller-owned bounded operation now leases the
 exact listener, creates one prepared context, waits retryably, attaches one
 exact queued child, drives fragmented ClientHello ingress, and aborts without
-publishing plaintext. It remains incomplete because that operation stops at
-its `PREPARE_HELLO` phase rather
+publishing plaintext. It also prepares immutable ServerHello and
+EncryptedExtensions plus handshake epochs without emitting them. It remains
+incomplete because that operation stops at its `PREPARE_FLIGHT` phase rather
 than driving the qualified handshake and publication transactions, and the
 resulting socket lifecycle has not completed an independent peer
 application-I/O and cleanup journey.
@@ -117,14 +118,16 @@ Implemented network components, bottom-up:
     atomic credential-pinned listener policy. The bounded accept operation now
     owns initialization, exact listener/context authority, retryable queue wait,
     exact child attachment, bounded fragmented ClientHello ingress, sticky
-    early failure/deadline results, and abort; its remaining handshake phases
+    early failure/deadline results, phase-one hello/epoch preparation, and
+    abort; its remaining handshake phases
     and one independent interoperability journey remain
 18. 🔄 **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
     and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
     remains fail closed for TLS descriptors, while secure listeners use the
     caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
     operation currently owns each child through exact ClientHello admission
-    and abort but does not yet publish the authenticated socket
+    and phase-one preparation, and can abort, but does not yet publish the
+    authenticated socket
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 
