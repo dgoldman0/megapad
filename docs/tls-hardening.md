@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake through client Finished, explicit publication, ALPN, and exporter; retained-data TCP delivery and cooperative neighbor/TX admission implemented; authoritative accepted-TCB attachment, control replay/close, secure listener integration, and external-stack socket interoperability remain gated
+Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake composition through client Finished, explicit publication, ALPN, and exporter; retained-data TCP delivery and cooperative neighbor/TX admission implemented; authoritative accepted-TCB attachment, control replay/close, secure listener integration, and external-stack socket interoperability remain gated
 Last updated: 2026-08-13
 
 ## Purpose
@@ -48,7 +48,7 @@ commits the transcript through that message, installs C-AP read, and leaves
 establishment behind the existing explicit publication boundary. A
 socket-independent composition test uses a Python-standard-library
 SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
-client-Finished record, reaches publication, and agrees on ALPN and an
+client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
 The remaining server work is authoritative TCP attachment, retained control
