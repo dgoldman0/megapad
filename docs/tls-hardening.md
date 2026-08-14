@@ -1,6 +1,6 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake composition through client Finished, explicit publication, ALPN, and exporter; incarnation-safe TCB/TLS/socket ownership, bounded active and passive control transport, retained data, close-notify ordering, and FIN completion implemented; the accepted-child TLS adapter, secure listener integration, and external-stack socket interoperability remain gated
+Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake composition through client Finished, explicit publication, ALPN, and exporter; incarnation-safe TCB/TLS/socket ownership, bounded active and passive control transport, retained data, close-notify ordering, FIN completion, and atomic accepted-child transfer into a prepared server context implemented; the attached handshake driver, secure listener/socket integration, and external-stack interoperability remain gated
 Last updated: 2026-08-14
 
 ## Purpose
@@ -40,9 +40,11 @@ connection-owned emitter now retains one exact record across backpressure,
 emits plaintext ServerHello followed by MSS-fitting protected records through
 Finished, commits its sequence and cursors only after exact admission, and
 installs only the S-AP write epoch after Finished admission. Its transport
-callback is socket-independent; binding it to a TCP child remains deferred
-until the secure-accept adapter uses the now-available incarnation-safe,
-exclusive TCB ownership transfer.
+callback is socket-independent. `TLS-SERVER-ACCEPT-ATTACH` now consumes one
+generation-qualified queued child and publishes reciprocal context/TCB
+authority in one TLS-to-NET transaction. Binding the emitter and ingress
+engines to that authority remains deferred until callback continuity,
+terminal transport cleanup, and protected disposition output are qualified.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,
 commits the transcript through that message, installs C-AP read, and leaves
@@ -52,9 +54,9 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is the accepted-child TLS adapter, secure accept,
-and interoperability over that socket path with an independent TLS
-implementation. The following lower-level facts
+The remaining server work is the attached handshake driver, secure socket
+accept/publication, and interoperability over that path with an independent
+TLS implementation. The following lower-level facts
 continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
@@ -85,9 +87,10 @@ client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
-the server gate still requires composing the generation/owner-qualified child
-claim with the qualified outbound callback and inbound feed contracts, secure
-listener/accept integration, and external-stack socket interoperability.
+the server gate still requires composing the now-atomic
+generation/owner-qualified child transfer with the qualified outbound callback
+and inbound feed contracts, secure listener/accept integration, and
+external-stack socket interoperability.
 Reusing `EC-MUL` or precomputing a fixture signature remains
 test scaffolding rather than a server security result.
 
@@ -507,9 +510,10 @@ between callback invocations and wipes the union and releases the credential.
 After exact Finished admission, the emitter installs only the prederived S-AP
 write epoch, preserves the C-HS read epoch and its sequence, and publishes
 client-Finished-pending. It intentionally has no raw-TCB adapter: this phase
-still requires an unbound context. The transport now provides exclusive,
-incarnation-safe accepted-child ownership, but a later adapter must claim that
-child into the TLS context and drive this qualified boundary.
+still requires an unbound context. The new secure-accept transaction can bind
+an exact child before ClientHello parsing, but the emitter remains gated until
+its unlocked callback seals and revalidates the same transport incarnation and
+its terminal path can reclaim that authority without orphaning the TCB.
 
 `TLS-SERVER-CLIENT-FLIGHT-BEGIN` then seals a nonnegative caller-provided
 wire-byte budget. Failed trial C-HS decryption can be discarded only when the
@@ -900,7 +904,7 @@ Native guest tests cover:
 - the surrounding record, handshake, and application-data regressions.
 
 Final affected sequential source-mode qualification passed 39/39 TLS
-application-data, 25/25 socket/readiness, 28/28 tools, and 42/42 complete
+application-data, 25/25 socket/readiness, 28/28 tools, and 43/43 complete
 server-handshake tests. The preceding unchanged lower baseline passed 279/279
 network-stack and 65/65 adjacent hardening/source-selection tests. The
 corrected four-core credential and server-flight cancellation capstones passed
@@ -916,9 +920,12 @@ damage.
 These tests prove deterministic construction plus bounded socket-independent
 server-flight emission, rejected-0RTT handling, client-Finished
 authentication/C-AP cutover, explicit publication, ALPN, exporter agreement,
-and failure atomicity. They do not yet prove the accepted-child TLS adapter,
-the uint24-maximum emitted Certificate, secure socket acceptance, or
-interoperability over sockets with an independent TLS stack.
+and failure atomicity. Focused secure-accept evidence additionally proves
+empty-queue retry, pre-consumption rejection, stale-child reclamation, exact
+reciprocal context/TCB publication, continued ClientHello parsing, and abort
+cleanup without disturbing the listener. They do not yet prove the attached
+handshake driver, the uint24-maximum emitted Certificate, secure socket
+acceptance, or interoperability over sockets with an independent TLS stack.
 
 Signer and credential fixtures use only standardized or synthetic test
 scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
@@ -928,10 +935,11 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Bind the existing generation/owner-qualified accepted-child claim to a
-  prepared server TLS context and the nonblocking exact-admission
-  `TLS-SERVER-FLIGHT-STEP-WITH` callback contract. The socket-independent
-  emitter must not acquire authority from a raw TCB pointer.
+- Compose the atomic generation/owner-qualified `TLS-SERVER-ACCEPT-ATTACH`
+  boundary with the nonblocking exact-admission
+  `TLS-SERVER-FLIGHT-STEP-WITH` callback contract. Seal the attached transport
+  incarnation across the unlocked callback and exact-abort it on terminal
+  failure; the emitter must not acquire authority from a raw TCB pointer.
 - Adapt authoritative nonblocking TCP input to the qualified
   rejected-0RTT/client-Finished boundary, including protected terminal-alert
   output, without exposing a plaintext accepted child.

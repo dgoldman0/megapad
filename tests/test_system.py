@@ -6591,7 +6591,7 @@ def _build_kdos_network_snapshot():
         ]
 
     sys_obj = make_system(ram_kib=1024, ext_mem_mib=KDOS_TEST_EXT_MEM_MIB)
-    capture_uart(sys_obj)
+    buf = capture_uart(sys_obj)
     sys_obj.cpu.mem[:len(bank0_bytes)] = bank0_bytes
     sys_obj._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
     _KDOSTestBase._restore_cpu_state(sys_obj.cpu, cpu_state)
@@ -6602,12 +6602,15 @@ def _build_kdos_network_snapshot():
     payload = "\n".join(
         ["JIT-ON", "ENTER-USERLAND"]
         + _kdos_network_lines
-        + ["JIT-OFF"]
+        + [
+            "JIT-OFF",
+            "CHAR < EMIT CHAR N EMIT CHAR E EMIT CHAR T EMIT CHAR > EMIT",
+        ]
     ) + "\n"
     data = payload.encode()
     pos = 0
     steps = 0
-    max_steps = 400_000_000
+    max_steps = 450_000_000
     while steps < max_steps:
         if sys_obj.cpu.halted:
             break
@@ -6621,6 +6624,41 @@ def _build_kdos_network_snapshot():
             continue
         batch = sys_obj.run_batch(min(100_000, max_steps - steps))
         steps += max(batch, 1)
+
+    source_text = uart_text(buf)
+    complete = (
+        pos == len(data)
+        and sys_obj.cpu.idle
+        and not sys_obj.cpu.halted
+        and "<NET>" in source_text
+    )
+    if not complete:
+        raise AssertionError(
+            "networking source load exhausted its "
+            f"{max_steps:,}-step infrastructure budget before a verified "
+            f"REPL idle (fed {pos}/{len(data)} bytes, "
+            f"idle={sys_obj.cpu.idle}, halted={sys_obj.cpu.halted})"
+        )
+    if " ? (not found)" in source_text:
+        raise AssertionError("networking source load reported '? (not found)'")
+    output_lines = {line.strip() for line in source_text.splitlines()}
+    for diagnostic in (
+        "Dictionary full",
+        "dictionary overflow",
+        "Stack underflow",
+        "Stack overflow",
+        "Return stack overflow",
+        "nested definition",
+    ):
+        if diagnostic in output_lines:
+            raise AssertionError(
+                f"networking source load reported {diagnostic!r}"
+            )
+    if any(
+        line.startswith(("*** BUS FAULT", "*** PRIVILEGE FAULT"))
+        for line in output_lines
+    ):
+        raise AssertionError("networking source load reported a machine fault")
 
     _kdos_network_shared_snapshot = (
         bytes(sys_obj.cpu.mem),
@@ -25337,6 +25375,128 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "REBEGIN=0 ", "CTX-GEN2=2 ", "REFS2=1 ",
             "REABORT=0 ", "REFS-REABORT=0 ", "DELETE=0 ",
             "BEGIN-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_accept_attach_is_atomic_retryable_and_exact(self):
+        """A prepared server context consumes only one exact queued child."""
+        hello = self._client_hello()
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += self._forth_bytes("accept-hello", hello)
+        lines += [
+            "VARIABLE saa-listener VARIABLE saa-child",
+            "VARIABLE saa-lgen VARIABLE saa-cgen VARIABLE saa-ior",
+            "VARIABLE saa-listener-owner",
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "TCP-INIT-ALL",
+            "TCB-ALLOC DROP 0 TCB-N saa-listener !",
+            "TCPS-LISTEN saa-listener @ TCB.STATE !",
+            "saa-listener @ saa-listener-owner TCP-ATTACH "
+            "saa-ior ! saa-lgen !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN=" .',
+            'NET-TX-TRY ." PRENET=" .',
+            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." INVERT=" .',
+            '." INVERT-NET=" NET-TX-OWNER-DEPTH @ .',
+            "NET-TX-RELEASE",
+            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." EMPTY=" .',
+            '." EMPTY-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." EMPTY-GEN=" server-ctx @ TLS-CTX.TCB-GENERATION @ .',
+            '." EMPTY-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "TCB-ALLOC DROP 1 TCB-N saa-child !",
+            "TCPS-ESTABLISHED saa-child @ TCB.STATE !",
+            "saa-listener @ TCB-HANDLE@",
+            "saa-child @ TCB.PARENT-GEN !",
+            "saa-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN saa-child @ TCB.AUTH-STATE !",
+            "saa-listener @ AQ-RESERVE DROP",
+            "saa-child @ saa-listener @ AQ-PUSH DROP",
+            "TLSH-SERVER-CLIENT-HELLO server-ctx @ TLS-CTX.HS-STATE !",
+            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." BAD-CTX=" .',
+            '." BAD-CTX-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
+            '." BAD-CTX-OWNER=" saa-child @ TCB.OWNER @ .',
+            "TLSH-SERVER-WAIT-CLIENT-HELLO "
+            "server-ctx @ TLS-CTX.HS-STATE !",
+            "server-ctx @ saa-listener @ saa-lgen @ 1+ "
+            "saa-listener-owner TLS-SERVER-ACCEPT-ATTACH",
+            '." STALE=" .',
+            '." STALE-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
+            '." STALE-OWNER=" saa-child @ TCB.OWNER @ .',
+            "0 saa-child @ TCB.PARENT-GEN !",
+            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." BAD-CHILD=" .',
+            '." BAD-CHILD-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
+            '." BAD-CHILD-RESERVED=" '
+            'saa-listener @ TCB.AQ-RESERVED @ .',
+            '." BAD-CHILD-STATE=" saa-child @ TCB.STATE @ .',
+            '." BAD-CHILD-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." BAD-CHILD-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "TCB-ALLOC DROP 1 TCB-N saa-child !",
+            "TCPS-ESTABLISHED saa-child @ TCB.STATE !",
+            "saa-listener @ TCB-HANDLE@",
+            "saa-child @ TCB.PARENT-GEN !",
+            "saa-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN saa-child @ TCB.AUTH-STATE !",
+            "saa-listener @ AQ-RESERVE DROP",
+            "saa-child @ saa-listener @ AQ-PUSH DROP",
+            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            "saa-ior !",
+            "server-ctx @ TLS-CTX.TCB-GENERATION @ saa-cgen !",
+            '." ATTACH=" saa-ior @ .',
+            '." EXACT=" server-ctx @ _TLS-CTX>TCB saa-child @ = .',
+            '." RECIPROCAL=" saa-child @ saa-cgen @ server-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            '." COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
+            '." RESERVED=" saa-listener @ TCB.AQ-RESERVED @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            f"server-ctx @ accept-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." PARSE-IOR=" . ." PARSE-ALERT=" .',
+            '." PARSE-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." AGAIN=" .',
+            '." ABORT=" server-ctx @ TLS-ABORT .',
+            '." CHILD-STATE=" saa-child @ TCB.STATE @ .',
+            '." LISTENER=" saa-listener @ saa-lgen @ saa-listener-owner '
+            'TCB-ATTACHED-TO? .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." SCRATCH=" _TSAA-CTX @ _TSAA-LISTENER @ OR '
+            '_TSAA-TCB @ OR .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." ACCEPT-FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "INIT=0 ", "PROVISION-DEPTH=0 ", "BEGIN=0 ",
+            "PRENET=0 ", "INVERT=-4206 ", "INVERT-NET=1 ",
+            "EMPTY=-4219 ", "EMPTY-TCB=0 ", "EMPTY-GEN=0 ",
+            "EMPTY-REFS=1 ", "BAD-CTX=-4204 ",
+            "BAD-CTX-COUNT=1 ", "BAD-CTX-OWNER=0 ",
+            "STALE=-4218 ", "STALE-COUNT=1 ", "STALE-OWNER=0 ",
+            "BAD-CHILD=-4218 ", "BAD-CHILD-COUNT=0 ",
+            "BAD-CHILD-RESERVED=0 ", "BAD-CHILD-STATE=0 ",
+            "BAD-CHILD-TCB=0 ", "BAD-CHILD-REFS=1 ",
+            "ATTACH=0 ", "EXACT=-1 ", "RECIPROCAL=-1 ",
+            "COUNT=0 ", "RESERVED=0 ", "STATE=1 ", "HS=10 ",
+            "PARSE-IOR=0 PARSE-ALERT=0 ", "PARSE-HS=11 ",
+            "AGAIN=-4204 ", "ABORT=0 ", "CHILD-STATE=0 ",
+            "LISTENER=-1 ", "REFS=0 ", "SCRATCH=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "DELETE=0 ",
+            "ACCEPT-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
