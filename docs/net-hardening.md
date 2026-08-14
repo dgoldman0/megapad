@@ -145,17 +145,25 @@ descriptor was released, while nonzero preserves retry authority.
 The one-segment retained-data profile is unchanged: exact TLS records are
 all-or-none, cumulative ACKs are wrap-safe, partial ACKs trim the retained
 prefix, and data failure remains owner-visible until explicit cleanup.
+Authenticated plaintext already retained by TLS is delivered before a later
+terminal TCP failure is published. Raw and descriptor status, readiness, and
+send probes therefore cannot wipe `APP-LEN`; after the final retained byte is
+drained, the next observation publishes the sticky transport error and
+reclaims the exact failed TCB.
 
 ## Qualification
 
-Final sequential source-mode evidence for this milestone is 277/277
-`TestKDOSNetStack`, 38/38 `TestKDOSTLSAppData`, 21/21 `TestKDOSSocket`,
-161/161 `TestKDOSTLS`, 28/28 `TestToolsModule`, and 65/65 adjacent
-hardening/source-selection tests. The four-core server-flight and credential
-cancellation capstones passed separately in 701.122 and 520.361 seconds. Their
-snapshot fixture proves complete KDOS and networking source loads before
-saving state; networking has a measured 450,000,000-step construction ceiling,
-while each capstone retains its independent 400,000,000-step execution ceiling.
+Final affected sequential source-mode evidence for this milestone is 39/39
+`TestKDOSTLSAppData`, 25/25 socket/readiness, 28/28 `TestToolsModule`, and
+42/42 complete server-handshake tests. The preceding unchanged lower baseline
+passed 279/279 `TestKDOSNetStack` and 65/65 adjacent
+hardening/source-selection tests. The four-core credential and server-flight
+cancellation capstones passed together, 2/2 in 665.79 seconds. Their snapshot
+fixture proves complete KDOS and networking source loads before saving state,
+and their body runner proves a terminal marker executed instead of accepting a
+fed-but-unprocessed tail. Networking has a measured 450,000,000-step
+construction ceiling, while each capstone retains its independent
+400,000,000-step execution ceiling.
 
 ## Remaining secure-server boundary
 

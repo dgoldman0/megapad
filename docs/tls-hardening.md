@@ -111,6 +111,13 @@ touching output.  The machine-wide TLS owner described below serializes the
 AES selector and larger scratch arenas; this prevents cross-context corruption
 but does not make operations concurrent.
 
+The public `TLS-BUILD-FINISHED` builder is a raw-context operation. It rejects
+socket-owned contexts and contexts retained by either half of the server
+flight/ingress protocol, returning zero without changing the destination,
+transcript, write sequence, or owner depth. Owner-held handshake code enters
+the parenthesized builder only after its own lifecycle admission. This keeps a
+reusable context address from bypassing descriptor or server-driver authority.
+
 Handshake and application traffic secrets retain their RFC endpoint names in
 the context (`c_*` and `s_*`), while record directions are selected from the
 immutable endpoint role.  Thus client write/server read use client traffic
@@ -682,7 +689,12 @@ multi-segment TCP throughput.
 `TLS-SEND-ALERT-TRY` reports `TLS-E-WOULD-BLOCK` when exact transport
 admission accepts nothing and `TLS-E-TRANSPORT` when the owned TCB has reached
 terminal failure. `TLS-IO-STATUS` makes that terminal observation sticky,
-revokes the traffic epoch, and explicitly reclaims the failed TCB.
+revokes the traffic epoch, and explicitly reclaims the failed TCB. A later
+terminal TCP disposition is stream-ordered behind plaintext that has already
+authenticated into the context: status, readiness, and send probes defer the
+destructive observation while `APP-LEN` is nonzero, receive drains the retained
+bytes first, and the first observation after the remainder reaches zero
+publishes `TLS-E-TRANSPORT` and performs exact reclamation.
 
 The retained-data boundary is now reliable within this deliberately bounded
 profile. Admission is at most `min(SND-WND, CWND, MSS)`, and
@@ -887,14 +899,19 @@ Native guest tests cover:
 - clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
-Final sequential source-mode qualification for the lower lifecycle milestone
-passed 277/277 network-stack, 38/38 TLS application-data, 21/21 socket,
-161/161 TLS, 28/28 tools, and 65/65 adjacent hardening/source-selection tests.
-The corrected four-core server-flight and credential cancellation capstones
-passed separately in 701.122 and 520.361 seconds after proving complete KDOS
-and networking source loads. The 450,000,000-step allowance applies only to
-networking snapshot construction; each capstone retains its independent
-400,000,000-step execution ceiling.
+Final affected sequential source-mode qualification passed 39/39 TLS
+application-data, 25/25 socket/readiness, 28/28 tools, and 42/42 complete
+server-handshake tests. The preceding unchanged lower baseline passed 279/279
+network-stack and 65/65 adjacent hardening/source-selection tests. The
+corrected four-core credential and server-flight cancellation capstones passed
+together, 2/2 in 665.79 seconds, after proving complete KDOS and networking
+source loads and execution of a terminal body marker. The 450,000,000-step
+allowance applies only to networking snapshot construction; each capstone
+retains its independent 400,000,000-step execution ceiling. A dedicated
+post-server-phase regression also proves that later `VARIABLE`, `CREATE`, and
+`ALLOT` definitions remain reachable, so the capstone's comparison storage can
+be prepared before the concurrency transition without hiding dictionary
+damage.
 
 These tests prove deterministic construction plus bounded socket-independent
 server-flight emission, rejected-0RTT handling, client-Finished
