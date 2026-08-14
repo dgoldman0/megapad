@@ -9,9 +9,9 @@ cohesive as a v1.0 release.
 
 **Current correction (2026-08-14):** The counts below remain a historical
 snapshot. The bounded one-segment TCP data/control/close profile is qualified.
-Layer 2 remains incomplete because only initial ClientHello ingress and
-plaintext ServerHello emission are connected to the attached TCP child; the
-protected flight, authenticated publication, and public socket API are not.
+Layer 2 remains incomplete because initial ClientHello ingress and the complete
+ACK-paced server flight are connected to the attached TCP child, but protected
+client ingress, authenticated publication, and the public socket API are not.
 Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
 root. Application features must not preempt that vertical closure.
@@ -274,7 +274,7 @@ CURRENT-SITUATION.
 
 | # | Item | Effort | Priority |
 |---|------|--------|----------|
-| 16–18 | **Secure server closure** — ACK-paced flight, attached protected ingress/coordinator, protected terminal output, authenticated TLS socket publication, independent interop | active vertical; see handoff | Critical |
+| 16–18 | **Secure server closure** — attached protected ingress/coordinator, protected terminal output, authenticated TLS socket publication, independent interop | active vertical; see handoff | Critical |
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
@@ -296,10 +296,10 @@ CURRENT-SITUATION.
 Secure server closure is the active release path because a remote REPL and
 later listening services otherwise rest on an incomplete server surface.
 Preserve the completed bounded TCP and TLS crypto/message substrate.
-Initial ClientHello ingress over the exact child is complete. The remaining
-order is strict: drive the ACK-paced protected server-flight remainder through
-Finished, feed client Finished over that same authority, deliver protected terminal
-dispositions, publish no socket before authenticated client Finished, prove
+Initial ClientHello ingress and the ACK-paced complete server flight over the
+exact child are complete. The remaining order is strict: feed client Finished
+over that same authority, deliver protected terminal dispositions, publish no
+socket before authenticated client Finished, prove
 application I/O and cleanup, and then qualify one independent TLS peer.
 Protocol-maximum capstones, new algorithms, broader TCP, and concurrency work
 are maturity work and must not interrupt this vertical.

@@ -3,10 +3,10 @@
 Status: no usable listening TLS server yet; the bounded client profile,
 socket-independent server handshake through client Finished, exact lower
 transport ownership/close, and atomic queued-child attachment are qualified,
-and attached initial ClientHello ingress plus the ServerHello exact-send
-boundary are now qualified. ACK-paced protected-flight completion, attached
-protected ingress, protected dispositions, and authenticated accepted-socket
-publication are the single active critical path.
+and attached initial ClientHello ingress plus the complete ACK-paced server
+flight are now qualified. Attached protected ingress, protected dispositions,
+and authenticated accepted-socket publication are the single active critical
+path.
 Last updated: 2026-08-14
 
 ## Purpose
@@ -73,9 +73,8 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is ACK-paced completion of the protected outbound
-flight, attached client-flight ingress, protected terminal output, secure
-socket accept/publication, and
+The remaining server work is attached client-flight ingress, protected terminal
+output, secure socket accept/publication, and
 interoperability over that path with an independent TLS implementation. The
 following lower-level facts
 continue to bound an authenticated server role:
@@ -982,9 +981,11 @@ isolation, and exception-fallback authority retention. The subsequent 5/5
 focused attached-initial-ingress tests prove real Ethernet/IP/TCP and
 multi-record reassembly, explicit nonfinal-record progress, exact no-overread,
 fatal input latching, terminal EOF cleanup, and stale-incarnation isolation.
-They do not yet prove ACK-paced protected-flight completion, attached
-protected ingress, secure socket acceptance, terminal-alert transmission, or
-interoperability over sockets with an independent TLS stack.
+An additional exact-child test ACKs ServerHello and every protected record in
+order, verifies all five expected payload hashes and lengths, reaches
+client-Finished-pending, and drains the final retained TCP segment. Attached
+protected ingress, secure socket acceptance, terminal-alert transmission, and
+interoperability over sockets with an independent TLS stack remain unproved.
 The uint24-maximum Certificate capstone is separate maturity evidence and must
 not delay this vertical closure.
 
@@ -996,8 +997,7 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Drive the ACK-paced protected server-flight remainder, then adapt
-  authoritative nonblocking TCP input to the qualified
+- Adapt authoritative nonblocking TCP input to the qualified
   rejected-0RTT/client-Finished boundary, including protected terminal-alert
   output, without exposing a plaintext accepted child.
 - Publish a TLS accepted socket only after client Finished authentication and

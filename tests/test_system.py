@@ -27113,6 +27113,183 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             (443, 50000, 1000, server_hello_record),
         )
 
+    def test_server_flight_step_completes_over_ack_paced_child(self):
+        """The existing attached step needs only TCP ACKs to finish flight."""
+        hello, entropy, _, _ = self._certificate_transcript_phase()
+        hello_record = self._tls_plaintext(hello)
+        record_lengths = (127, 43, 503, 101, 58)
+        expected_hashes = tuple(bytes.fromhex(value) for value in (
+            "f4c91bd6d8ba40eb7ae4404ac7cf2de0be6c7e3237e9458c022c8b61f731abd6",
+            "c691aaeb90548131d6404bc558a2e8525f5e5e365399a4c48d9320f70965b035",
+            "c7ec40ef6f594a1bb295c1bebcc757a6d4e8476e04602d4eb5b5e9ff8dbc175d",
+            "cd92dd4579370d423e9e35834107c34f6c9c495a4124c21b4b744fa90bcc4379",
+            "6c0ae11654ed9f02249319980defb847dccb34157fca29783005c8943d949f63",
+        ))
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        acknowledged = 1000
+        ack_frames = []
+        for record_length in record_lengths:
+            acknowledged += record_length
+            ack_frames.append(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, 2000, acknowledged,
+                TestKDOSNetStack.TCP_ACK, 4096, b"",
+            ))
+
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("paced-hello-record", hello_record),
+            ("paced-entropy", entropy),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "VARIABLE paced-listener VARIABLE paced-child",
+            "VARIABLE paced-lgen VARIABLE paced-cgen VARIABLE paced-ior",
+            "VARIABLE paced-ctx-gen VARIABLE paced-listener-owner",
+            "CREATE paced-peer-ip 4 ALLOT CREATE paced-peer-mac 6 ALLOT",
+            "10 0 0 2 IP-SET 10 0 0 1 paced-peer-ip IP!",
+            "paced-peer-mac 6 170 FILL paced-peer-ip paced-peer-mac ARP-INSERT",
+            "TCP-INIT-ALL",
+            "TCB-ALLOC DROP 0 TCB-N paced-listener !",
+            "TCPS-LISTEN paced-listener @ TCB.STATE !",
+            "443 paced-listener @ TCB.LOCAL-PORT !",
+            "paced-listener @ paced-listener-owner TCP-ATTACH",
+            "paced-ior ! paced-lgen !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN-IOR=" . paced-ctx-gen !',
+            "TCB-ALLOC DROP 1 TCB-N paced-child !",
+            "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
+            "443 paced-child @ TCB.LOCAL-PORT !",
+            "50000 paced-child @ TCB.REMOTE-PORT !",
+            "paced-peer-ip paced-child @ TCB.REMOTE-IP 4 CMOVE",
+            "1000 paced-child @ TCB.SND-UNA !",
+            "1000 paced-child @ TCB.SND-NXT !",
+            "2000 paced-child @ TCB.RCV-NXT !",
+            "4096 paced-child @ TCB.SND-WND !",
+            "4096 paced-child @ TCB.RCV-WND !",
+            "TCP-MSS paced-child @ TCB.CWND !",
+            "paced-listener @ TCB-HANDLE@",
+            "paced-child @ TCB.PARENT-GEN !",
+            "paced-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN paced-child @ TCB.AUTH-STATE !",
+            "paced-listener @ AQ-RESERVE DROP",
+            "paced-child @ paced-listener @ AQ-PUSH DROP",
+            "server-ctx @ paced-ctx-gen @ paced-listener @ paced-lgen @ "
+            "paced-listener-owner TLS-SERVER-ACCEPT-ATTACH",
+            '." ATTACH=" .',
+            "server-ctx @ TLS-CTX.TCB-GENERATION @ paced-cgen !",
+            f"paced-child @ paced-hello-record {len(hello_record)} "
+            "(TCP-RX-PUSH) DROP",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." HELLO-IOR=" . ." HELLO-ALERT=" . '
+            '." HELLO-PROGRESS=" .',
+            "TLS-OWNER-TRY DROP",
+            "server-ctx @ _TSPH-BEGIN 2DROP",
+            "paced-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            "TLS-OWNER-RELEASE",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+        ]
+        acknowledged = 1000
+        for index, record_length in enumerate(record_lengths):
+            acknowledged += record_length
+            lines += [
+                "server-ctx @ paced-ctx-gen @ TLS-SERVER-FLIGHT-STEP",
+                f'." STEP{index}-IOR=" . ." STEP{index}-PROGRESS=" .',
+                f'." STEP{index}-TX=" paced-child @ TCB.TX-LEN @ .',
+                f'." STEP{index}-NXT=" paced-child @ TCB.SND-NXT @ .',
+            ]
+            if index < len(record_lengths) - 1:
+                lines += [
+                    "server-ctx @ paced-ctx-gen @ TLS-SERVER-FLIGHT-STEP",
+                    f'." BLOCK{index}-IOR=" . '
+                    f'." BLOCK{index}-PROGRESS=" .',
+                    f'." BLOCK{index}-TX=" paced-child @ TCB.TX-LEN @ .',
+                ]
+            lines += [
+                "TCP-POLL",
+                f'." ACK{index}-UNA=" paced-child @ TCB.SND-UNA @ .',
+                f'." ACK{index}-TX=" paced-child @ TCB.TX-LEN @ .',
+            ]
+        lines += [
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." EXACT=" paced-child @ paced-cgen @ server-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            '." PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." ABORT=" server-ctx @ TLS-ABORT .',
+            '." CHILD-END=" paced-child @ TCB.STATE @ .',
+            '." LISTENER-END=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=ack_frames,
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN-IOR=0 ", "ATTACH=0 ",
+            "HELLO-IOR=0 HELLO-ALERT=0 HELLO-PROGRESS=2 ",
+            "PREP=0 ",
+            "HS=7 ", "PHASE=10 ", "WR-SEQ=0 ", "RD-SEQ=0 ",
+            "EXACT=-1 ", "PIN=-1 ", "ABORT=1 ",
+            "CHILD-END=0 ", "LISTENER-END=-1 ", "REFS-END=0 ",
+            "DELETE=0 ", "TLS-OWNER=0 ", "NET-OWNER=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        acknowledged = 1000
+        for index, record_length in enumerate(record_lengths):
+            acknowledged += record_length
+            progress = 2 if index == len(record_lengths) - 1 else 1
+            for token in (
+                f"STEP{index}-IOR=0 STEP{index}-PROGRESS={progress} ",
+                f"STEP{index}-TX={record_length} ",
+                f"STEP{index}-NXT={acknowledged} ",
+                f"ACK{index}-UNA={acknowledged} ",
+                f"ACK{index}-TX=0 ",
+            ):
+                self.assertIn(token, text)
+            if index < len(record_lengths) - 1:
+                self.assertIn(
+                    f"BLOCK{index}-IOR=-4219 BLOCK{index}-PROGRESS=0 ",
+                    text,
+                )
+                self.assertIn(
+                    f"BLOCK{index}-TX={record_length} ",
+                    text,
+                )
+        payload_frames = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None and frame["payload"]
+        ]
+        self.assertEqual(
+            [len(frame["payload"]) for frame in payload_frames],
+            list(record_lengths),
+        )
+        self.assertEqual(
+            [hashlib.sha256(frame["payload"]).digest()
+             for frame in payload_frames],
+            list(expected_hashes),
+        )
+
     def test_server_flight_terminal_paths_preserve_exact_authority(self):
         """Stale and exceptional cleanup retain the right incarnation."""
         lines, _ = self._provision_lines()

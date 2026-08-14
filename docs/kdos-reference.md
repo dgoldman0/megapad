@@ -1844,9 +1844,9 @@ rejected 0-RTT TLSCiphertext, reassembles and authenticates client Finished
 under C-HS, commits the transcript through that message, installs C-AP read,
 and supports explicit establishment publication. It can atomically attach one
 incarnation-safe accepted child to a prepared server TLS context, ingest the
-initial ClientHello through owner-qualified TCP, and emit ServerHello through
-the same authority. It does not yet complete the ACK-paced protected flight,
-adapt protected client-flight ingress, accept TLS sockets, transmit terminal
+initial ClientHello through owner-qualified TCP, and emit the complete
+ACK-paced server flight through the same authority. It does not yet adapt
+protected client-flight ingress, accept TLS sockets, transmit terminal
 dispositions, or demonstrate live socket interoperability with an independent
 TLS implementation. Cipher-suite support is:
 
@@ -1935,9 +1935,10 @@ local pair, revalidates reciprocal generation authority inside the fixed NET
 operation, and performs generation-safe terminal cleanup. Initial attached
 ClientHello ingress uses the same TLS-to-NET order, retains partial record and
 handshake bytes per context, and refuses the raw parser once transport
-authority exists. Attached protected client-flight ingress and ACK-paced
-protected-flight qualification are now the active incompatibilities, not a
-reason for further TCP or crypto expansion.
+authority exists. The attached emitter is qualified through every ACK-paced
+protected record and server Finished. Attached protected client-flight ingress
+is now the active transport incompatibility, not a reason for further TCP or
+crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at

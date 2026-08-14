@@ -7,9 +7,10 @@ server-flight step now admits the exact ServerHello over that child, preserves
 retry state, reclaims a dead exact child, and leaves a reused incarnation
 untouched while clearing stale local authority. Initial ClientHello ingress now
 reassembles arbitrary TCP and TLSPlaintext-record fragmentation through that
-same exact child without overreading the following record. ACK-paced
-protected-flight qualification, attached protected ingress, and authenticated
-TLS socket publication are not implemented.
+same exact child without overreading the following record. The existing
+attached emitter is qualified through all ACK-paced protected records and
+server Finished. Attached protected ingress and authenticated TLS socket
+publication are not implemented.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -188,7 +189,6 @@ The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
 and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
 critical path is:
 
-- drive the protected server-flight remainder through TCP ACK/backpressure;
 - adapt client-flight ingress to the same exact child without exposing
   plaintext;
 - transmit protected fatal/close dispositions rather than retaining only a

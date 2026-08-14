@@ -501,7 +501,7 @@ and live/TAP runs remain approval-gated by `AGENTS.md`.
 | `TestKDOSTLSHandshake` | TLS 1.3 handshake: ClientHello, ServerHello, key schedule, Finished |
 | `TestKDOSTLSExporter` | TLS 1.3 exporter schedule/publication, RFC 9266 tuple, bounds, and wipe |
 | `TestKDOSTLSCredentials` | Lower-owned server credentials, opaque handles, signer lifecycle, cancellation, and cleanup |
-| `TestKDOSTLSServerClientHello` | Full-width raw and exact-child ClientHello admission, real TCP/TLSPlaintext reassembly, server-flight construction/emission, bounded rejected 0-RTT, client-Finished authentication/cutover, independent-oracle composition, and rollback |
+| `TestKDOSTLSServerClientHello` | Full-width raw and exact-child ClientHello admission, real TCP/TLSPlaintext reassembly, complete ACK-paced attached server-flight emission, bounded rejected 0-RTT, client-Finished authentication/cutover, independent-oracle composition, and rollback |
 | `TestKDOSTLSAppData` | TLS 1.3 application data: TLS-SEND, TLS-RECV, TLS-CLOSE |
 | `TestKDOSSocket` | TCP listen/accept, TLS client sockets, exact ownership/close, and fail-closed TLS-listener coverage |
 | `TestFieldALU` | Field ALU: FADD–FPOW, MUL_RAW, edge cases, X25519 compatibility |
