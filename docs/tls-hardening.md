@@ -10,7 +10,8 @@ qualified. `TLS-LISTEN` now atomically copies ALPN/early-data/deadline policy,
 pins the exact credential, publishes the TCP listener, and owns exact setup
 rollback plus listener close/unpin cleanup. The active critical path is
 now to extend the caller-owned bounded accept operation beyond its completed
-exact listener/context lease, retryable wait, child attachment, and abort
+exact listener/context lease, retryable wait, child attachment, fragmented
+ClientHello admission, sticky early failure/deadline classification, and abort
 boundary, then prove independent socket interoperability.
 Last updated: 2026-08-14
 
@@ -103,9 +104,11 @@ independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
 The initial bounded secure-accept lifecycle is now present: caller storage owns
 the exact listener lease and prepared context across empty-queue retries,
-attaches one exact child, and can abort without socket publication. The
-remaining server work is to drive that same operation from `CLIENT_HELLO`
-through the qualified handshake/disposition/publication transactions and then
+attaches one exact child, drives fragmented ClientHello ingress one lower step
+per call, and can abort without socket publication. Fatal peer alerts and the
+attach-time deadline are sticky operation results. The remaining server work
+is to drive that same operation from `PREPARE_HELLO` through the qualified
+handshake/disposition/publication transactions and then
 prove interoperability over the resulting socket with an independent TLS
 implementation. The following lower-level facts
 continue to bound an authenticated server role:
@@ -1059,8 +1062,9 @@ the replacement. The secure-listener regression proves stale-policy rollback,
 copied ALPN, exact listener authority, credential lifetime, and close cleanup.
 Public secure acceptance and interoperability over sockets with an independent
 TLS stack remain unproved. The bounded accept operation currently proves its
-listener/context lease, retryable wait, exact attach, and abort lifecycle but
-stops before ClientHello ingress. The disposition
+listener/context lease, retryable wait, exact attach, fragmented ClientHello
+ingress, sticky fatal/deadline results, and abort lifecycle but stops at
+`PREPARE_HELLO`. The disposition
 affected selector passed 19/19 sequentially under the ordinary checked
 source-mode limits; the final publication-focused and adjoining affected
 selector passed 15/15 sequentially under ordinary checked limits.

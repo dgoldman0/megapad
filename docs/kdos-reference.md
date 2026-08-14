@@ -1863,8 +1863,8 @@ publishes copied listener policy and an exact credential pin atomically;
 the generic `LISTEN` entry remains fail closed for TLS descriptors, and
 `SOCK-ACCEPT` remains fail closed for secure listeners. The separate bounded
 accept operation now owns the exact listener/context lease, retryable queue
-wait, exact child attachment, and abort, but its `STEP` dispatcher stops at
-`CLIENT_HELLO`. Live socket interoperability
+wait, exact child attachment, fragmented ClientHello admission, and abort, but
+its `STEP` dispatcher stops at `PREPARE_HELLO`. Live socket interoperability
 with an independent TLS implementation is also unproved. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
@@ -2050,9 +2050,9 @@ points reject a socket-owned context.
 | `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
 | `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1`; use `TLS-LISTEN` so no plaintext or unconfigured listener state is published. |
 | `TLS-LISTEN` | `( sd cred-h1 cred-gen alpn-a alpn-u early-wire-budget timeout-ms -- ior )` | Atomically pin the exact server credential, copy the protocol-bounded ALPN and bounded-ingress/deadline values for the accept operation, create and attach the TCP listener, and publish the secure listener last. Ordinary failure rolls the TCB and credential reference back; secure-listener close reclaims queued/half-open children and releases the exact policy pin. |
-| `TLS-SERVER-ACCEPT-OP-INIT` | `( op -- ior )` | Initialize an 8-byte-aligned caller-owned `/TLS-SERVER-ACCEPT-OP` span. The current interface size is 128 bytes; initialization refuses overlapping internal mutable storage or reinitialization while the operation owns live authority. |
+| `TLS-SERVER-ACCEPT-OP-INIT` | `( op -- ior )` | Initialize an 8-byte-aligned caller-owned `/TLS-SERVER-ACCEPT-OP` span. The current interface size is 144 bytes, including durable terminal alert/status and future result-descriptor cells; initialization refuses overlapping internal mutable storage or reinitialization while the operation owns live authority. |
 | `TLS-SERVER-ACCEPT-BEGIN` | `( listener-sd op -- ior )` | Lease the exact configured TLS-listener incarnation, copy its bounded policy into one newly pinned prepared server context, and enter retryable child wait. The lease makes listener close retryably busy until publication or abort releases it. |
-| `TLS-SERVER-ACCEPT-STEP` | `( op -- sd progress alert ior )` | Advance at most one lower phase without polling internally. An empty queue returns `0 TLS-SERVER-ACCEPT-WAIT-CHILD 0 TLS-E-WOULD-BLOCK` without context churn; exact attachment currently returns `0 TLS-SERVER-ACCEPT-PROGRESSED 0 0` and enters `CLIENT_HELLO`. At this checkpoint later handshake phases and descriptor publication are not yet dispatched. |
+| `TLS-SERVER-ACCEPT-STEP` | `( op -- sd progress alert ior )` | Advance at most one lower phase without polling internally. An empty queue returns `0 TLS-SERVER-ACCEPT-WAIT-CHILD 0 TLS-E-WOULD-BLOCK` without context churn; exact attachment returns `0 TLS-SERVER-ACCEPT-PROGRESSED 0 0` and enters `CLIENT_HELLO`. Subsequent calls retain arbitrary TCP/TLS-record fragmentation, report `WAIT_READ`, `BUSY`, or one committed record, and enter `PREPARE_HELLO` only after exact ClientHello admission without consuming a following record. Fatal peer alerts and attach-time deadline expiry are sticky until abort. Later handshake phases and descriptor publication are not yet dispatched. |
 | `TLS-SERVER-ACCEPT-ABORT` | `( op -- progress alert ior )` | Cancel and generation-exactly retire any attached child/prepared context before releasing the exact listener lease. Cleanup is retryable under contention and idempotent after the operation reaches idle. |
 | `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Reserve a descriptor, validate the exact listener and queued child tokens, and transfer the child owner before publishing an ordinary TCP socket. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |

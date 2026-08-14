@@ -25235,6 +25235,407 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_server_accept_op_reassembles_attached_client_hello(self):
+        """One bounded operation drives fragmented ClientHello ingress."""
+        hello = self._client_hello()
+        first_record = self._tls_plaintext(hello[:2], version=0x0301)
+        second_record = self._tls_plaintext(hello[2:], version=0x0303)
+        following_record = b"\x15\x03\x03\x00\x02\x01\x00"
+        segments = (
+            first_record[:2],
+            first_record[2:] + second_record[:3],
+            second_record[3:] + following_record,
+        )
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        seq = 2000
+        frames = []
+        for segment in segments:
+            frames.append(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, seq, 1000,
+                TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+                4096, segment,
+            ))
+            seq += len(segment)
+
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("op-ingress-alpn", self.ALPN)
+        lines += self._forth_bytes("op-segmented-hello", hello)
+        lines += [
+            "TCP-INIT-ALL ARP-CLEAR",
+            "CREATE op-ingress-raw /TLS-SERVER-ACCEPT-OP 7 + ALLOT",
+            ": op-ingress op-ingress-raw 7 + -8 AND ;",
+            "VARIABLE opi-sd VARIABLE opi-listener VARIABLE opi-lgen",
+            "VARIABLE opi-child VARIABLE opi-child-gen",
+            "VARIABLE opi-ctx VARIABLE opi-ctx-gen",
+            "CREATE opi-peer-ip 4 ALLOT CREATE opi-peer-mac 6 ALLOT",
+            ": opi-live-sockets 0 SOCK-MAX 0 DO "
+            "I SOCK-N SOCK.STATE @ SOCKST-FREE <> IF 1+ THEN LOOP ;",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "10 0 0 1 opi-peer-ip IP! opi-peer-mac 6 170 FILL",
+            "opi-peer-ip opi-peer-mac ARP-INSERT",
+            'op-ingress TLS-SERVER-ACCEPT-OP-INIT ." OPI-INIT=" .',
+            "SOCK-TYPE-TLS SOCKET opi-sd !",
+            "opi-sd @ 443 BIND DROP",
+            "opi-sd @ tc-slot @ tc-gen @ op-ingress-alpn 8 37 2500 "
+            "TLS-LISTEN",
+            '." OPI-LISTEN=" .',
+            "opi-sd @ SOCK-TCB@ opi-listener !",
+            "opi-sd @ SOCK.HANDLE-GEN @ opi-lgen !",
+            "opi-sd @ op-ingress TLS-SERVER-ACCEPT-BEGIN",
+            '." OPI-BEGIN=" .',
+            "op-ingress TSAO.CTX @ opi-ctx !",
+            "op-ingress TSAO.CTX-GEN @ opi-ctx-gen !",
+            "TCB-ALLOC DROP 1 TCB-N opi-child !",
+            "TCPS-ESTABLISHED opi-child @ TCB.STATE !",
+            "443 opi-child @ TCB.LOCAL-PORT !",
+            "50000 opi-child @ TCB.REMOTE-PORT !",
+            "opi-peer-ip opi-child @ TCB.REMOTE-IP 4 CMOVE",
+            "1000 opi-child @ TCB.SND-UNA !",
+            "1000 opi-child @ TCB.SND-NXT !",
+            "2000 opi-child @ TCB.RCV-NXT !",
+            "4096 opi-child @ TCB.SND-WND !",
+            "4096 opi-child @ TCB.RCV-WND !",
+            "TCP-MSS opi-child @ TCB.CWND !",
+            "opi-listener @ TCB-HANDLE@",
+            "opi-child @ TCB.PARENT-GEN !",
+            "opi-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN opi-child @ TCB.AUTH-STATE !",
+            "opi-listener @ AQ-RESERVE DROP",
+            "opi-child @ opi-listener @ AQ-PUSH DROP",
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-ATTACH-IOR=" . ." OPI-ATTACH-ALERT=" . '
+            '." OPI-ATTACH-PROGRESS=" . ." OPI-ATTACH-SD=" .',
+            "opi-ctx @ TLS-CTX.TCB-GENERATION @ opi-child-gen !",
+            '." OPI-ATTACH-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-ATTACH-EXACT=" opi-child @ opi-child-gen @ '
+            'opi-ctx @ TCB-ATTACHED-TO? .',
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-EMPTY-IOR=" . ." OPI-EMPTY-ALERT=" . '
+            '." OPI-EMPTY-PROGRESS=" . ." OPI-EMPTY-SD=" .',
+            '." OPI-EMPTY-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-EMPTY-RX=" opi-child @ TCB.RX-COUNT @ .',
+            "TCP-POLL",
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-HEAD-IOR=" . ." OPI-HEAD-ALERT=" . '
+            '." OPI-HEAD-PROGRESS=" . ." OPI-HEAD-SD=" .',
+            '." OPI-HEAD-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-HEAD-REC=" opi-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." OPI-HEAD-RX=" opi-child @ TCB.RX-COUNT @ .',
+            "TCP-POLL",
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-RECORD-IOR=" . ." OPI-RECORD-ALERT=" . '
+            '." OPI-RECORD-PROGRESS=" . ." OPI-RECORD-SD=" .',
+            '." OPI-RECORD-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-RECORD-FILLED=" opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-FILLED + @ .',
+            '." OPI-RECORD-EXPECTED=" opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-LEN + @ .',
+            '." OPI-RECORD-REC=" opi-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." OPI-RECORD-RX=" opi-child @ TCB.RX-COUNT @ .',
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-RECORD-HEAD-IOR=" . '
+            '." OPI-RECORD-HEAD-ALERT=" . '
+            '." OPI-RECORD-HEAD-PROGRESS=" . '
+            '." OPI-RECORD-HEAD-SD=" .',
+            '." OPI-RECORD-HEAD-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-RECORD-HEAD-REC=" '
+            'opi-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." OPI-RECORD-HEAD-RX=" opi-child @ TCB.RX-COUNT @ .',
+            "TCP-POLL",
+            "op-ingress TLS-SERVER-ACCEPT-STEP",
+            '." OPI-FINAL-IOR=" . ." OPI-FINAL-ALERT=" . '
+            '." OPI-FINAL-PROGRESS=" . ." OPI-FINAL-SD=" .',
+            '." OPI-FINAL-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-FINAL-HS=" opi-ctx @ TLS-CTX.HS-STATE @ .',
+            '." OPI-FINAL-LEN=" opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-LEN + @ .',
+            '." OPI-FINAL-FILLED=" opi-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-FILLED + @ .',
+            f'." OPI-FINAL-BYTES=" opi-ctx @ TLS-RXW.SERVER-CH '
+            f'op-segmented-hello {len(hello)} _XC-BYTES= .',
+            '." OPI-FOLLOWING=" opi-child @ TCB.RX-COUNT @ .',
+            '." OPI-RCV-NXT=" opi-child @ TCB.RCV-NXT @ .',
+            '." OPI-FINAL-AUTH=" opi-ctx @ _TLS-SERVER-PINNED? '
+            'opi-child @ opi-child-gen @ opi-ctx @ '
+            'TCB-ATTACHED-TO? AND .',
+            '." OPI-NO-PUBLISH=" opi-ctx @ TLS-CTX.SOCKET-OWNER @ 0= '
+            'opi-live-sockets 1 = AND opi-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ 1 = AND .',
+            '." OPI-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "op-ingress TLS-SERVER-ACCEPT-ABORT",
+            '." OPI-ABORT-IOR=" . ." OPI-ABORT-ALERT=" . '
+            '." OPI-ABORT-PROGRESS=" .',
+            '." OPI-ABORT-STATE=" op-ingress TSAO.STATE @ .',
+            '." OPI-ABORT-CHILD=" opi-child @ TCB.STATE @ '
+            'TCPS-CLOSED = .',
+            '." OPI-ABORT-CTX=" opi-ctx @ TLS-CTX-CLAIMED? .',
+            '." OPI-ABORT-ACTIVE=" opi-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ .',
+            '." OPI-ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." OPI-ABORT-LISTENER=" opi-listener @ opi-lgen @ '
+            'opi-sd @ TCB-ATTACHED-TO? opi-sd @ SOCK.STATE @ '
+            'SOCKST-LISTENING = AND opi-sd @ SOCK.TLS-POLICY-STATE @ '
+            'SOCK-TLS-POLICY-LIVE = AND .',
+            'opi-sd @ CLOSE-TRY ." OPI-CLOSE=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." OPI-DELETE=" .',
+            '." OPI-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            '_TC-LOCK-OWNER-CORE @ -1 = AND '
+            'NET-TX-OWNER-DEPTH @ 0= AND '
+            '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
+            'DEPTH ." OPI-DEPTH=" .',
+        ]
+        text = self._run_kdos(lines, nic_frames=frames)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "OPI-INIT=0 ", "OPI-LISTEN=0 ", "OPI-BEGIN=0 ",
+            "OPI-ATTACH-IOR=0 OPI-ATTACH-ALERT=0 ",
+            "OPI-ATTACH-PROGRESS=1 OPI-ATTACH-SD=0 ",
+            "OPI-ATTACH-STATE=4 ", "OPI-ATTACH-EXACT=-1 ",
+            "OPI-EMPTY-IOR=-4219 OPI-EMPTY-ALERT=0 ",
+            "OPI-EMPTY-PROGRESS=2 OPI-EMPTY-SD=0 ",
+            "OPI-EMPTY-STATE=4 ", "OPI-EMPTY-RX=0 ",
+            "OPI-HEAD-IOR=-4219 OPI-HEAD-ALERT=0 ",
+            "OPI-HEAD-PROGRESS=2 OPI-HEAD-SD=0 ",
+            "OPI-HEAD-STATE=4 ", "OPI-HEAD-REC=2 ",
+            "OPI-HEAD-RX=0 ",
+            "OPI-RECORD-IOR=0 OPI-RECORD-ALERT=0 ",
+            "OPI-RECORD-PROGRESS=1 OPI-RECORD-SD=0 ",
+            "OPI-RECORD-STATE=4 ", "OPI-RECORD-FILLED=2 ",
+            "OPI-RECORD-EXPECTED=0 ", "OPI-RECORD-REC=0 ",
+            "OPI-RECORD-RX=3 ",
+            "OPI-RECORD-HEAD-IOR=-4219 OPI-RECORD-HEAD-ALERT=0 ",
+            "OPI-RECORD-HEAD-PROGRESS=2 OPI-RECORD-HEAD-SD=0 ",
+            "OPI-RECORD-HEAD-STATE=4 ", "OPI-RECORD-HEAD-REC=3 ",
+            "OPI-RECORD-HEAD-RX=0 ",
+            "OPI-FINAL-IOR=0 OPI-FINAL-ALERT=0 ",
+            "OPI-FINAL-PROGRESS=1 OPI-FINAL-SD=0 ",
+            "OPI-FINAL-STATE=10 ", "OPI-FINAL-HS=11 ",
+            f"OPI-FINAL-LEN={len(hello)} ",
+            f"OPI-FINAL-FILLED={len(hello)} ",
+            "OPI-FINAL-BYTES=-1 ",
+            f"OPI-FOLLOWING={len(following_record)} ",
+            f"OPI-RCV-NXT={2000 + sum(map(len, segments))} ",
+            "OPI-FINAL-AUTH=-1 ", "OPI-NO-PUBLISH=-1 ",
+            "OPI-REFS=2 ",
+            "OPI-ABORT-IOR=0 OPI-ABORT-ALERT=0 ",
+            "OPI-ABORT-PROGRESS=7 ", "OPI-ABORT-STATE=0 ",
+            "OPI-ABORT-CHILD=-1 ", "OPI-ABORT-CTX=0 ",
+            "OPI-ABORT-ACTIVE=0 ", "OPI-ABORT-REFS=1 ",
+            "OPI-ABORT-LISTENER=-1 ", "OPI-CLOSE=0 ",
+            "OPI-DELETE=0 ", "OPI-OWNERS=-1 ", "OPI-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_accept_op_preserves_client_hello_failures(self):
+        """Fatal alerts and attach-time deadlines remain sticky until abort."""
+        fatal_record = b"\x15\x03\x03\x00\x02\x01\x00"
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("opf-alpn", self.ALPN)
+        lines += self._forth_bytes("opf-fatal-record", fatal_record)
+        lines += [
+            "TCP-INIT-ALL",
+            "CREATE opf-raw /TLS-SERVER-ACCEPT-OP 7 + ALLOT",
+            ": opf-op opf-raw 7 + -8 AND ;",
+            "VARIABLE opf-sd VARIABLE opf-listener VARIABLE opf-lgen",
+            "VARIABLE opf-child VARIABLE opf-ctx VARIABLE opf-rx-before",
+            "VARIABLE opf-epoch",
+            ": opf-queue-child TCB-ALLOC DROP 1 TCB-N opf-child ! "
+            "TCPS-ESTABLISHED opf-child @ TCB.STATE ! "
+            "opf-listener @ TCB-HANDLE@ "
+            "opf-child @ TCB.PARENT-GEN ! "
+            "opf-child @ TCB.PARENT-H1 ! "
+            "TCP-AUTH-HALF-OPEN opf-child @ TCB.AUTH-STATE ! "
+            "opf-listener @ AQ-RESERVE DROP "
+            "opf-child @ opf-listener @ AQ-PUSH DROP ;",
+            'opf-op TLS-SERVER-ACCEPT-OP-INIT ." OPF-INIT=" .',
+            "SOCK-TYPE-TLS SOCKET opf-sd !",
+            "opf-sd @ 8443 BIND DROP",
+            "opf-sd @ tc-slot @ tc-gen @ opf-alpn 8 37 2500 TLS-LISTEN",
+            '." OPF-LISTEN=" .',
+            "opf-sd @ SOCK-TCB@ opf-listener !",
+            "opf-sd @ SOCK.HANDLE-GEN @ opf-lgen !",
+            "opf-sd @ opf-op TLS-SERVER-ACCEPT-BEGIN",
+            '." OPF-FATAL-BEGIN=" .',
+            "opf-op TSAO.CTX @ opf-ctx ! opf-queue-child",
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-FATAL-ATTACH-IOR=" . '
+            '." OPF-FATAL-ATTACH-ALERT=" . '
+            '." OPF-FATAL-ATTACH-PROGRESS=" . '
+            '." OPF-FATAL-ATTACH-SD=" .',
+            f"opf-child @ opf-fatal-record {len(fatal_record)} "
+            "(TCP-RX-PUSH)",
+            '." OPF-FATAL-PUSH=" .',
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-FATAL-IOR=" . ." OPF-FATAL-ALERT=" . '
+            '." OPF-FATAL-PROGRESS=" . ." OPF-FATAL-SD=" .',
+            '." OPF-FATAL-STATE=" opf-op TSAO.STATE @ .',
+            '." OPF-FATAL-RESULT=" opf-op TSAO.RESULT-ALERT @ . '
+            'opf-op TSAO.RESULT-IOR @ .',
+            '." OPF-FATAL-AUTH=" opf-ctx @ TLS-CTX-CLAIMED? '
+            'opf-child @ TCB.STATE @ TCPS-ESTABLISHED = AND .',
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-FATAL-AGAIN-IOR=" . '
+            '." OPF-FATAL-AGAIN-ALERT=" . '
+            '." OPF-FATAL-AGAIN-PROGRESS=" . '
+            '." OPF-FATAL-AGAIN-SD=" .',
+            "opf-op TLS-SERVER-ACCEPT-ABORT",
+            '." OPF-FATAL-ABORT-IOR=" . '
+            '." OPF-FATAL-ABORT-ALERT=" . '
+            '." OPF-FATAL-ABORT-PROGRESS=" .',
+            '." OPF-FATAL-IDLE=" opf-op TSAO.STATE @ .',
+            '." OPF-FATAL-ACTIVE=" opf-sd @ SOCK.TLS-ACTIVE-OPS @ .',
+            "opf-sd @ opf-op TLS-SERVER-ACCEPT-BEGIN",
+            '." OPF-TIMEOUT-BEGIN=" .',
+            "opf-op TSAO.CTX @ opf-ctx ! opf-queue-child",
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-TIMEOUT-ATTACH-IOR=" . '
+            '." OPF-TIMEOUT-ATTACH-ALERT=" . '
+            '." OPF-TIMEOUT-ATTACH-PROGRESS=" . '
+            '." OPF-TIMEOUT-ATTACH-SD=" .',
+            f"opf-child @ opf-fatal-record {len(fatal_record)} "
+            "(TCP-RX-PUSH)",
+            '." OPF-TIMEOUT-PUSH=" .',
+            "opf-child @ TCB.RX-COUNT @ opf-rx-before !",
+            "0 opf-op TSAO.START-MS ! 1 opf-op TSAO.TIMEOUT-MS !",
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-TIMEOUT-IOR=" . ." OPF-TIMEOUT-ALERT=" . '
+            '." OPF-TIMEOUT-PROGRESS=" . ." OPF-TIMEOUT-SD=" .',
+            '." OPF-TIMEOUT-STATE=" opf-op TSAO.STATE @ .',
+            '." OPF-TIMEOUT-RESULT=" opf-op TSAO.RESULT-ALERT @ . '
+            'opf-op TSAO.RESULT-IOR @ .',
+            '." OPF-TIMEOUT-RX=" opf-child @ TCB.RX-COUNT @ '
+            'opf-rx-before @ = .',
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-TIMEOUT-AGAIN-IOR=" . '
+            '." OPF-TIMEOUT-AGAIN-ALERT=" . '
+            '." OPF-TIMEOUT-AGAIN-PROGRESS=" . '
+            '." OPF-TIMEOUT-AGAIN-SD=" .',
+            "opf-op TLS-SERVER-ACCEPT-ABORT",
+            '." OPF-TIMEOUT-ABORT-IOR=" . '
+            '." OPF-TIMEOUT-ABORT-ALERT=" . '
+            '." OPF-TIMEOUT-ABORT-PROGRESS=" .',
+            '." OPF-TIMEOUT-IDLE=" opf-op TSAO.STATE @ .',
+            '." OPF-TIMEOUT-CHILD=" opf-child @ TCB.STATE @ '
+            'TCPS-CLOSED = .',
+            '." OPF-TIMEOUT-ACTIVE=" opf-sd @ SOCK.TLS-ACTIVE-OPS @ .',
+            "opf-sd @ opf-op TLS-SERVER-ACCEPT-BEGIN",
+            '." OPF-CANCEL-BEGIN=" .',
+            "opf-op TSAO.CTX @ opf-ctx ! opf-queue-child",
+            "opf-op TLS-SERVER-ACCEPT-STEP",
+            '." OPF-CANCEL-ATTACH-IOR=" . '
+            '." OPF-CANCEL-ATTACH-ALERT=" . '
+            '." OPF-CANCEL-ATTACH-PROGRESS=" . '
+            '." OPF-CANCEL-ATTACH-SD=" .',
+            "opf-op _TSAO-STEP-CLAIM",
+            '." OPF-CANCEL-CLAIM-IOR=" . '
+            '." OPF-CANCEL-CLAIM-ALERT=" . '
+            '." OPF-CANCEL-CLAIM-PROGRESS=" . '
+            '." OPF-CANCEL-CLAIM-ACTION=" . '
+            'DUP opf-epoch ! ." OPF-CANCEL-CLAIM-EPOCH=" . '
+            '." OPF-CANCEL-CLAIM-OP=" opf-op = .',
+            '." OPF-CANCEL-ACTIVE=" opf-op TSAO.STATE @ .',
+            "opf-op TLS-SERVER-ACCEPT-ABORT",
+            '." OPF-CANCEL-RACE-IOR=" . '
+            '." OPF-CANCEL-RACE-ALERT=" . '
+            '." OPF-CANCEL-RACE-PROGRESS=" .',
+            '." OPF-CANCEL-FLAG=" opf-op TSAO.CANCEL @ .',
+            "opf-op TLS-SERVER-CLIENT-HELLO-NONE 0 "
+            "TLS-E-WOULD-BLOCK opf-epoch @ _TSAO-CLIENT-HELLO-PUBLISH",
+            '." OPF-CANCEL-PUBLISH-IOR=" . '
+            '." OPF-CANCEL-PUBLISH-ALERT=" . '
+            '." OPF-CANCEL-PUBLISH-PROGRESS=" . '
+            '." OPF-CANCEL-PUBLISH-SD=" .',
+            '." OPF-CANCEL-STATE=" opf-op TSAO.STATE @ .',
+            '." OPF-CANCEL-RESULT=" opf-op TSAO.RESULT-ALERT @ . '
+            'opf-op TSAO.RESULT-IOR @ .',
+            "opf-op TLS-SERVER-ACCEPT-ABORT",
+            '." OPF-CANCEL-ABORT-IOR=" . '
+            '." OPF-CANCEL-ABORT-ALERT=" . '
+            '." OPF-CANCEL-ABORT-PROGRESS=" .',
+            '." OPF-CANCEL-IDLE=" opf-op TSAO.STATE @ .',
+            "opf-sd @ opf-op TLS-SERVER-ACCEPT-BEGIN",
+            '." OPF-MALFORMED-BEGIN=" .',
+            "opf-op TSAO.CTX @ opf-ctx ! opf-queue-child",
+            "opf-op TLS-SERVER-ACCEPT-STEP 2DROP 2DROP",
+            "opf-op _TSAO-STEP-CLAIM",
+            'DROP DROP DROP DROP DUP opf-epoch ! 2DROP',
+            "opf-op TLS-SERVER-CLIENT-HELLO-NONE 0 1 "
+            "opf-epoch @ _TSAO-CLIENT-HELLO-PUBLISH",
+            '." OPF-MALFORMED-IOR=" . '
+            '." OPF-MALFORMED-ALERT=" . '
+            '." OPF-MALFORMED-PROGRESS=" . '
+            '." OPF-MALFORMED-SD=" .',
+            '." OPF-MALFORMED-STATE=" opf-op TSAO.STATE @ .',
+            '." OPF-MALFORMED-RESULT=" opf-op TSAO.RESULT-ALERT @ . '
+            'opf-op TSAO.RESULT-IOR @ .',
+            "opf-op TLS-SERVER-ACCEPT-ABORT 2DROP DROP",
+            '." OPF-MALFORMED-IDLE=" opf-op TSAO.STATE @ .',
+            'opf-sd @ CLOSE-TRY ." OPF-CLOSE=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." OPF-DELETE=" .',
+            '." OPF-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            '_TC-LOCK-OWNER-CORE @ -1 = AND '
+            'NET-TX-OWNER-DEPTH @ 0= AND '
+            '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
+            'DEPTH ." OPF-DEPTH=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "OPF-INIT=0 ", "OPF-LISTEN=0 ", "OPF-FATAL-BEGIN=0 ",
+            "OPF-FATAL-ATTACH-IOR=0 OPF-FATAL-ATTACH-ALERT=0 ",
+            "OPF-FATAL-ATTACH-PROGRESS=1 OPF-FATAL-ATTACH-SD=0 ",
+            f"OPF-FATAL-PUSH={len(fatal_record)} ",
+            "OPF-FATAL-IOR=0 OPF-FATAL-ALERT=10 ",
+            "OPF-FATAL-PROGRESS=5 OPF-FATAL-SD=0 ",
+            "OPF-FATAL-STATE=11 ", "OPF-FATAL-RESULT=10 0 ",
+            "OPF-FATAL-AUTH=-1 ",
+            "OPF-FATAL-AGAIN-IOR=0 OPF-FATAL-AGAIN-ALERT=10 ",
+            "OPF-FATAL-AGAIN-PROGRESS=5 OPF-FATAL-AGAIN-SD=0 ",
+            "OPF-FATAL-ABORT-IOR=0 OPF-FATAL-ABORT-ALERT=0 ",
+            "OPF-FATAL-ABORT-PROGRESS=7 ", "OPF-FATAL-IDLE=0 ",
+            "OPF-FATAL-ACTIVE=0 ", "OPF-TIMEOUT-BEGIN=0 ",
+            "OPF-TIMEOUT-ATTACH-IOR=0 OPF-TIMEOUT-ATTACH-ALERT=0 ",
+            "OPF-TIMEOUT-ATTACH-PROGRESS=1 OPF-TIMEOUT-ATTACH-SD=0 ",
+            f"OPF-TIMEOUT-PUSH={len(fatal_record)} ",
+            "OPF-TIMEOUT-IOR=-4222 OPF-TIMEOUT-ALERT=0 ",
+            "OPF-TIMEOUT-PROGRESS=5 OPF-TIMEOUT-SD=0 ",
+            "OPF-TIMEOUT-STATE=5 ", "OPF-TIMEOUT-RESULT=0 -4222 ",
+            "OPF-TIMEOUT-RX=-1 ",
+            "OPF-TIMEOUT-AGAIN-IOR=-4222 OPF-TIMEOUT-AGAIN-ALERT=0 ",
+            "OPF-TIMEOUT-AGAIN-PROGRESS=5 OPF-TIMEOUT-AGAIN-SD=0 ",
+            "OPF-TIMEOUT-ABORT-IOR=0 OPF-TIMEOUT-ABORT-ALERT=0 ",
+            "OPF-TIMEOUT-ABORT-PROGRESS=7 ", "OPF-TIMEOUT-IDLE=0 ",
+            "OPF-TIMEOUT-CHILD=-1 ", "OPF-TIMEOUT-ACTIVE=0 ",
+            "OPF-CANCEL-BEGIN=0 ",
+            "OPF-CANCEL-ATTACH-IOR=0 OPF-CANCEL-ATTACH-ALERT=0 ",
+            "OPF-CANCEL-ATTACH-PROGRESS=1 OPF-CANCEL-ATTACH-SD=0 ",
+            "OPF-CANCEL-CLAIM-IOR=0 OPF-CANCEL-CLAIM-ALERT=0 ",
+            "OPF-CANCEL-CLAIM-PROGRESS=7 OPF-CANCEL-CLAIM-ACTION=4 ",
+            "OPF-CANCEL-CLAIM-EPOCH=3 OPF-CANCEL-CLAIM-OP=-1 ",
+            "OPF-CANCEL-ACTIVE=9 ",
+            "OPF-CANCEL-RACE-IOR=-4206 OPF-CANCEL-RACE-ALERT=0 ",
+            "OPF-CANCEL-RACE-PROGRESS=5 ", "OPF-CANCEL-FLAG=-1 ",
+            "OPF-CANCEL-PUBLISH-IOR=-4217 OPF-CANCEL-PUBLISH-ALERT=0 ",
+            "OPF-CANCEL-PUBLISH-PROGRESS=5 OPF-CANCEL-PUBLISH-SD=0 ",
+            "OPF-CANCEL-STATE=5 ", "OPF-CANCEL-RESULT=0 -4217 ",
+            "OPF-CANCEL-ABORT-IOR=0 OPF-CANCEL-ABORT-ALERT=0 ",
+            "OPF-CANCEL-ABORT-PROGRESS=7 ", "OPF-CANCEL-IDLE=0 ",
+            "OPF-MALFORMED-BEGIN=0 ",
+            "OPF-MALFORMED-IOR=-4218 OPF-MALFORMED-ALERT=0 ",
+            "OPF-MALFORMED-PROGRESS=5 OPF-MALFORMED-SD=0 ",
+            "OPF-MALFORMED-STATE=5 ",
+            "OPF-MALFORMED-RESULT=0 -4218 ",
+            "OPF-MALFORMED-IDLE=0 ",
+            "OPF-CLOSE=0 ", "OPF-DELETE=0 ", "OPF-OWNERS=-1 ",
+            "OPF-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     @classmethod
     def _certificate_transcript_phase(
         cls,

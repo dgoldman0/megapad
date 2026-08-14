@@ -17,7 +17,8 @@ alert-ACK-before-FIN ordering. Exact authenticated TLS socket publication and
 atomic credential-pinned listener policy publication are implemented; the
 caller-owned bounded secure-accept operation now owns initialization, exact
 listener/context authority, retryable empty-queue waits, exact child
-attachment, and abort. Its phased handshake driver and socket-result
+attachment, fragmented ClientHello ingress, sticky early failure/deadline
+classification, and abort. Its remaining handshake phases and socket-result
 publication are not yet complete.
 **Date:** 2026-08-14 qualification
 
@@ -232,10 +233,12 @@ fail-closed for TLS descriptors, and `SOCK-ACCEPT` fails closed before consuming
 a secure child because secure acceptance uses the separate caller-owned
 operation. That operation now holds the exact listener lease and prepared
 context across retryable empty waits, attaches one exact child, and can abort
-the complete chain without publication. The remaining critical path is:
+the complete chain without publication. It also dispatches one bounded
+ClientHello ingress step per call, preserves a following TLS record, and stops
+at `PREPARE_HELLO` after exact admission. The remaining critical path is:
 
-- extend its `STEP` dispatcher from the current `CLIENT_HELLO` boundary through
-  the qualified ingress, flight, protected client ingress, disposition, and
+- extend its `STEP` dispatcher from the current `PREPARE_HELLO` boundary through
+  the qualified preparation, flight, protected client ingress, disposition, and
   socket-publication transactions; and
 - qualify the complete socket lifecycle and close against an independent TLS
   1.3 implementation.
