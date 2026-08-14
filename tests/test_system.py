@@ -25013,6 +25013,77 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
     def _provision_lines(cls, **kwargs) -> tuple[list[str], bytes]:
         return TestKDOSTLSCredentials._provision_lines(**kwargs)
 
+    def test_tls_listen_publishes_policy_atomically_and_close_unpins(self):
+        """A secure listener owns one copied policy and one exact cred pin."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("listen-alpn", self.ALPN)
+        lines += [
+            "TCP-INIT-ALL",
+            "VARIABLE listen-sd VARIABLE listen-tcb",
+            "TLS-OWNER-TRY DROP _TC-LOCK-TRY DROP",
+            "tc-slot @ tc-gen @ _TC-PIN-BORROW",
+            '." BORROW-BUSY=" . 2DROP 2DROP',
+            "_TC-UNLOCK TLS-OWNER-RELEASE",
+            '." BORROW-DEPTH=" DEPTH .',
+            "SOCK-TYPE-TLS SOCKET listen-sd !",
+            "listen-sd @ 8443 BIND DROP",
+            "listen-sd @ tc-slot @ tc-gen @ 1+ listen-alpn 8 37 2500 "
+            "TLS-LISTEN",
+            '." STALE=" .',
+            '." ROLLED-STATE=" listen-sd @ SOCK.STATE @ .',
+            '." ROLLED-HANDLE=" listen-sd @ SOCK.HANDLE @ .',
+            '." ROLLED-POLICY=" listen-sd @ SOCK.TLS-POLICY-STATE @ .',
+            '." ROLLED-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." ROLLED-TCB=" 8443 TCB-FIND-LPORT 0= .',
+            "listen-sd @ tc-slot @ tc-gen @ listen-alpn 8 37 2500 "
+            "TLS-LISTEN",
+            '." LISTEN=" .',
+            "listen-sd @ SOCK-TCB@ listen-tcb !",
+            "88 listen-alpn C!",
+            '." STATE=" listen-sd @ SOCK.STATE @ .',
+            '." POLICY=" listen-sd @ SOCK.TLS-POLICY-STATE @ .',
+            '." TCB=" listen-tcb @ 0<> .',
+            '." ATTACHED=" listen-tcb @ listen-sd @ SOCK.HANDLE-GEN @ '
+            'listen-sd @ TCB-ATTACHED-TO? .',
+            '." TCB-STATE=" listen-tcb @ TCB.STATE @ TCPS-LISTEN = .',
+            '." PORT=" listen-tcb @ TCB.LOCAL-PORT @ .',
+            '." CRED=" listen-sd @ SOCK.TLS-CRED-H1 @ tc-slot @ = '
+            'listen-sd @ SOCK.TLS-CRED-GEN @ tc-gen @ = AND .',
+            '." CALLER-ALPN=" listen-alpn C@ .',
+            '." COPIED-ALPN=" listen-sd @ SOCK.TLS-ALPN C@ .',
+            '." ALPN-LEN=" listen-sd @ SOCK.TLS-ALPN-LEN @ .',
+            '." EARLY=" listen-sd @ SOCK.TLS-EARLY-BUDGET @ .',
+            '." TIMEOUT=" listen-sd @ SOCK.TLS-TIMEOUT-MS @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE-BUSY=" .',
+            'listen-sd @ SOCK-PLAIN-CLOSE-TRY ." PLAIN-CLOSE=" .',
+            '." REFS-AFTER-PLAIN=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'listen-sd @ CLOSE-TRY ." CLOSE=" .',
+            '." FREE=" listen-sd @ SOCK.STATE @ .',
+            '." TCB-FREE=" listen-tcb @ TCB.STATE @ TCPS-CLOSED = .',
+            '." POLICY-FREE=" listen-sd @ SOCK.TLS-POLICY-STATE @ .',
+            '." REFS-FREE=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." OWNERS=" TLS-OWNER-DEPTH @ 0= _TC-LOCK-OWNER-CORE @ -1 = '
+            'AND NET-TX-OWNER-DEPTH @ 0= AND .',
+            'DEPTH ." DEPTH=" .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "BORROW-BUSY=-4329 ", "BORROW-DEPTH=0 ",
+            "STALE=-4204 ", "ROLLED-STATE=2 ", "ROLLED-HANDLE=0 ",
+            "ROLLED-POLICY=0 ", "ROLLED-REFS=0 ", "ROLLED-TCB=-1 ",
+            "LISTEN=0 ", "STATE=3 ", "POLICY=1 ", "TCB=-1 ",
+            "ATTACHED=-1 ", "TCB-STATE=-1 ", "PORT=8443 ",
+            "CRED=-1 ", "CALLER-ALPN=88 ", "COPIED-ALPN=114 ",
+            "ALPN-LEN=8 ", "EARLY=37 ", "TIMEOUT=2500 ",
+            "REFS=1 ", "DELETE-BUSY=-4329 ", "PLAIN-CLOSE=-4233 ",
+            "REFS-AFTER-PLAIN=1 ", "CLOSE=0 ",
+            "FREE=0 ", "TCB-FREE=-1 ", "POLICY-FREE=0 ",
+            "REFS-FREE=0 ", "DELETE=0 ", "OWNERS=-1 ", "DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     @classmethod
     def _certificate_transcript_phase(
         cls,
@@ -32884,20 +32955,20 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '0 TLS-CTX@ TLS-RXW@ - .',
             '."  END=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
             'TLS-SERVER-META-CAPACITY + 0 TLS-CTX@ TLS-RXW@ - .',
-            '."  CAP0=" 237727 NET-XMEM-CAPACITY .',
-            '."  CAP1=" 237728 NET-XMEM-CAPACITY .',
-            '."  EDGE1=" 475439 NET-XMEM-CAPACITY .',
-            '."  CAP2=" 475440 NET-XMEM-CAPACITY .',
+            '."  CAP0=" 238351 NET-XMEM-CAPACITY .',
+            '."  CAP1=" 238352 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 476687 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 476688 NET-XMEM-CAPACITY .',
             '." MAX=" TLS-MAX-CTX .',
             '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
         ])
         self.assertIn("CTX=1000 ", text)
         self.assertIn("RX=230688 ", text)
         self.assertIn("STRIDE=230688 ", text)
-        self.assertIn("COST=237720 ", text)
-        self.assertIn("PHYS1=237728 ", text)
-        self.assertIn("PHYS2=475440 ", text)
-        self.assertIn("PHYS3=713168 ", text)
+        self.assertIn("COST=238344 ", text)
+        self.assertIn("PHYS1=238352 ", text)
+        self.assertIn("PHYS2=476688 ", text)
+        self.assertIn("PHYS3=715040 ", text)
         self.assertIn("CHCAP=131146 ", text)
         self.assertIn("BITMAP=8192 ", text)
         self.assertIn("LEDGER=512 ", text)
@@ -33335,7 +33406,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '." SZ=" /SOCK .',
             '." SM=" SOCK-MAX .',
         ])
-        self.assertIn("SZ=40 ", text)
+        self.assertIn("SZ=352 ", text)
         # SOCK-MAX is dynamic (2× /TCP-MAX-CONN); just verify it's ≥ 8
         import re
         m = re.search(r'SM=(\d+)', text)

@@ -13,8 +13,9 @@ server Finished. Attached protected ingress now authenticates client Finished
 through the exact child and preserves a following TCP record. Attached
 terminal disposition now emits an exact protected fatal/close response or no
 response for a non-close peer alert, with retry-stable ciphertext and
-alert-ACK-before-FIN ordering. Exact authenticated TLS socket publication is
-implemented; the production TLS listener/accept coordinator is not.
+alert-ACK-before-FIN ordering. Exact authenticated TLS socket publication and
+atomic credential-pinned listener policy publication are implemented; the
+caller-owned bounded secure-accept operation is not.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -70,11 +71,13 @@ slots; the authority fields added after retained transport state are:
 its own nonzero incarnation at +976, the reciprocal socket owner at +984, and
 the slot/close lifecycle at +992. `TLS-CLOSE-FREE` marks a released slot while
 preserving its last generation, so one successful claim creates one live
-incarnation. `/SOCK` is 40 bytes and carries either the
-plain TCB generation or TLS-context generation at +32. With the 230,688-byte
-TLS receive/server workspace, the logical table cost is 237,720 bytes per
-connection. Independently normalized XMEM allocations consume 237,728,
-475,440, and 713,168 bytes for one, two, and three connections.
+incarnation. `/SOCK` is 352 bytes: its common header carries either the plain
+TCB generation or TLS-context generation at +32, and its protocol-bounded tail
+holds one copied secure-listener policy, including at most one 255-byte ALPN
+ProtocolName. With the 230,688-byte TLS receive/server workspace, the logical
+table cost is 238,344 bytes per connection. Independently normalized XMEM
+allocations consume 238,352, 476,688, and 715,040 bytes for one, two, and three
+connections.
 
 ## Incarnation and ownership rules
 
@@ -220,11 +223,12 @@ ordinary checked limits.
 ## Remaining secure-server boundary
 
 The authority substrate now includes the exact authenticated socket-publication
-boundary, but it is not yet a public secure TLS accept API. TLS-marked `LISTEN`
-and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
-critical path is:
+boundary and `TLS-LISTEN`, which copies policy, pins the exact credential, and
+publishes its passive TCB atomically. The generic `LISTEN` entry remains
+fail-closed for TLS descriptors, and `SOCK-ACCEPT` fails closed before consuming
+a secure child. The remaining critical path is:
 
 - drive the qualified attachment, handshake, disposition, and publication
-  steps from one minimal listener policy and bounded coordinator; and
+  steps from one caller-owned bounded accept operation; and
 - qualify the complete socket lifecycle and close against an independent TLS
   1.3 implementation.

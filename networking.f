@@ -7533,6 +7533,7 @@ DEFER _TLS-OWNER-HELD?
 -4219 CONSTANT TLS-E-WOULD-BLOCK
 -4220 CONSTANT TLS-E-EARLY-DATA-LIMIT
 -4221 CONSTANT TLS-E-PEER-FINISHED
+-4222 CONSTANT TLS-E-HANDSHAKE-TIMEOUT
 
 VARIABLE _TLS-TCB-CTX
 VARIABLE _TLS-TCB-TCB
@@ -9054,28 +9055,37 @@ CREATE _TC-STATIC-END
     0 _TC-SLOT @ TC.CANCEL-SIGN + !
     _TC-UNLOCK R> ;
 
-\ Internal server-flight credential lease.  The exact current TLS owner may
-\ pin immutable chain metadata under lock order 10 -> 11.  No pointer escapes
-\ the lower TLS engine, and delete cannot reclaim the allocation while any
-\ flight/sign reference remains.
-: _TC-PIN-BORROW ( slot+1 gen -- chain-a chain-u cert-count scheme ior )
-    _TLS-OWNER? 0= IF 2DROP 0 0 0 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+\ Internal server-flight credential lease.  The locked body also supports the
+\ atomic secure-listener transaction, which must retain lock 11 until its NET
+\ publication or rollback is complete.
+: _TC-PIN-BORROW-LOCKED
+    ( slot+1 gen -- chain-a chain-u cert-count scheme ior )
+    _TLS-OWNER? 0= _TC-LOCK-OWNER? 0= OR IF
+        2DROP 0 0 0 0 TLS-CREDENTIAL-E-BUSY EXIT
+    THEN
     _TC-GENERATION ! _TC-H1 !
-    _TC-LOCK-TRY DUP IF >R 0 0 0 0 R> EXIT THEN DROP
     _TC-H1 @ _TC-GENERATION @ _TC-HANDLE-RESOLVE DUP IF
-        NIP >R _TC-UNLOCK 0 0 0 0 R> EXIT
+        NIP >R 0 0 0 0 R> EXIT
     THEN DROP _TC-SLOT !
     _TC-SLOT @ TC.REFS + @ 1+ DUP 0= IF
-        DROP _TC-UNLOCK 0 0 0 0 TLS-CREDENTIAL-E-CAPACITY EXIT
+        DROP 0 0 0 0 TLS-CREDENTIAL-E-CAPACITY EXIT
     THEN
     _TC-SLOT @ TC.REFS + !
     _TC-SLOT @ TC.CHAIN-A + @ _TC-PIN-CHAIN-A !
     _TC-SLOT @ TC.CHAIN-U + @ _TC-PIN-CHAIN-U !
     _TC-SLOT @ TC.CERT-COUNT + @ _TC-PIN-COUNT !
     _TC-SLOT @ TC.SCHEME + @ _TC-PIN-SCHEME !
-    _TC-UNLOCK
     _TC-PIN-CHAIN-A @ _TC-PIN-CHAIN-U @ _TC-PIN-COUNT @
     _TC-PIN-SCHEME @ TLS-CREDENTIAL-OK ;
+
+\ The ordinary context-begin path borrows and releases lock 11 internally.
+\ No pointer escapes the lower TLS engine, and delete cannot reclaim the
+\ allocation while any flight/sign reference remains.
+: _TC-PIN-BORROW ( slot+1 gen -- chain-a chain-u cert-count scheme ior )
+    _TLS-OWNER? 0= IF 2DROP 0 0 0 0 TLS-CREDENTIAL-E-BUSY EXIT THEN
+    _TC-LOCK-TRY DUP IF >R 2DROP 0 0 0 0 R> EXIT THEN DROP
+    _TC-PIN-BORROW-LOCKED
+    >R >R >R >R >R _TC-UNLOCK R> R> R> R> R> ;
 
 \ Publication already owns TLS -> credential -> NET.  This body performs the
 \ exact reference decrement without recursively acquiring depthless lock 11.
@@ -10154,6 +10164,95 @@ VARIABLE _TSCB-IOR
     (TLS-SERVER-CONTEXT-BEGIN) >R
     R@ IF 0 ELSE _TSCB-CTX @ TLS-CTX.GENERATION @ THEN
     TLS-OWNER-RELEASE R> ;
+
+VARIABLE _TSCBA-H1
+VARIABLE _TSCBA-GEN
+VARIABLE _TSCBA-ALPN
+VARIABLE _TSCBA-ALPN-U
+VARIABLE _TSCBA-CTX
+VARIABLE _TSCBA-IOR
+VARIABLE _TSCBA-THROW
+
+: _TSCBA-WIPE  ( -- )
+    0 _TSCBA-H1 ! 0 _TSCBA-GEN !
+    0 _TSCBA-ALPN ! 0 _TSCBA-ALPN-U !
+    0 _TSCBA-CTX ! 0 _TSCBA-IOR ! 0 _TSCBA-THROW ! ;
+
+: _TSCBA-PUBLIC-PREFLIGHT  ( alpn-a alpn-u -- ior )
+    2DUP _TSCB-PUBLIC-PREFLIGHT DUP IF
+        >R 2DROP R> EXIT
+    THEN DROP
+    DUP 0> IF
+        2DUP _TSCBA-H1 _TSCBA-THROW 1 CELLS + _TSCBA-H1 -
+        _TLS-PURE-RANGES-OVERLAP? IF
+            2DROP TLS-E-ALPN-CONFIG EXIT
+        THEN
+    THEN
+    2DROP TLS-E-OK ;
+
+: _TLS-SERVER-CONTEXT-FREE?  ( ctx -- flag )
+    DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX-CLAIMED? 0=
+    OVER TLS-CTX.STATE @ TLSS-NONE = AND
+    OVER TLS-CTX.ROLE @ TLS-ROLE-NONE = AND
+    OVER TLS-CTX.TCB @ 0= AND
+    OVER TLS-CTX.TCB-GENERATION @ 0= AND
+    OVER TLS-CTX.SOCKET-OWNER @ 0= AND
+    SWAP _TLS-PURE-SERVER-PINNED? 0= AND ;
+
+: _TLS-SERVER-CONTEXT-FREE@  ( -- ctx | 0 )
+    TLS-MAX-CTX 0 DO
+        I TLS-CTX@ DUP _TLS-SERVER-CONTEXT-FREE? IF UNLOOP EXIT THEN
+        DROP
+    LOOP 0 ;
+
+: _TSCBA-BEGIN-BODY  ( -- )
+    _TSCBA-CTX @ _TSCBA-H1 @ _TSCBA-GEN @
+    _TSCBA-ALPN @ _TSCBA-ALPN-U @
+    (TLS-SERVER-CONTEXT-BEGIN) _TSCBA-IOR ! ;
+
+\ Select and initialize one free server context while TLS ownership prevents
+\ slot reuse between selection and claim.  The coordinator uses this atomic
+\ allocator instead of rediscovering a reusable context address outside the
+\ lifetime transaction.
+: _TLS-SERVER-CONTEXT-BEGIN-FREE
+    ( credential-h1 credential-gen alpn-a alpn-u -- ctx ctx-generation ior )
+    2DUP _TSCBA-PUBLIC-PREFLIGHT DUP IF
+        >R 2DROP 2DROP 0 0 R> EXIT
+    THEN DROP
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP 2DROP 0 0 TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP 2DROP 0 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP 2DROP 0 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP 2DROP 0 0 TLS-E-BUSY EXIT THEN
+    _TSCBA-ALPN-U ! _TSCBA-ALPN ! _TSCBA-GEN ! _TSCBA-H1 !
+    _TLS-SERVER-CONTEXT-FREE@ DUP 0= IF
+        DROP _TSCBA-WIPE TLS-OWNER-RELEASE 0 0 TLS-E-BUSY EXIT
+    THEN
+    DUP _TSCBA-CTX !
+    ['] _TSCBA-BEGIN-BODY CATCH DUP _TSCBA-THROW ! IF
+        \ The selected incarnation is now explicit caller authority even if
+        \ an unexpected throw crossed the lower initializer after claim.
+        \ Returning its exact generation lets the coordinator retire it; no
+        \ lock or anonymous claimed slot is stranded here.
+        _TSCBA-CTX @ TLS-CTX-CLAIMED? IF
+            TLS-E-HANDSHAKE-CRYPTO _TSCBA-IOR !
+        ELSE
+            0 _TSCBA-CTX ! TLS-E-HANDSHAKE-CRYPTO _TSCBA-IOR !
+        THEN
+    THEN
+    _TSCBA-IOR @ IF
+        _TSCBA-IOR @ >R
+        _TSCBA-CTX @ DUP IF
+            DUP TLS-CTX.GENERATION @
+        ELSE
+            DROP 0 0
+        THEN
+        >R >R _TSCBA-WIPE TLS-OWNER-RELEASE R> R> R> EXIT
+    THEN
+    _TSCBA-CTX @ DUP TLS-CTX.GENERATION @ TLS-E-OK
+    >R >R >R _TSCBA-WIPE TLS-OWNER-RELEASE R> R> R> ;
 
 VARIABLE _TSAA-CTX
 VARIABLE _TSAA-CTX-GEN
@@ -12214,6 +12313,28 @@ VARIABLE _TSPH-EE-U
     THEN
     ['] _TSPH-BODY _TSPH-GUARD ;
 
+\ Coordinator-only incarnation guard.  Context addresses are reusable, so a
+\ persistent accept operation must prove its saved generation under the same
+\ TLS transaction that begins phase-one preparation.
+: _TLS-SERVER-PREPARE-HELLO-EXACT  ( ctx generation -- alert ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP 0 TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    DUP 2 PICK TLS-CTX.GENERATION @ <>
+    2 PICK TLS-CTX-CLAIMED? 0= OR IF
+        2DROP TLS-OWNER-RELEASE 0 TLS-E-STATE EXIT
+    THEN
+    DROP
+    DUP _TLS-SERVER-DRIVER-ACTIVE? IF
+        DROP TLS-OWNER-RELEASE 0 TLS-E-BUSY EXIT
+    THEN
+    ['] _TSPH-BODY _TSPH-GUARD ;
+
 \ --- Streamed server Certificate transcript substrate ---
 \
 \ The credential owns concatenated DER, not TLS framing, and its complete
@@ -13280,6 +13401,27 @@ VARIABLE _TSPF-ADMITTED
 : TLS-SERVER-PREPARE-FLIGHT  ( ctx -- ior )
     DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP TLS-E-STATE EXIT THEN
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    DUP _TLS-SERVER-DRIVER-ACTIVE? IF
+        DROP TLS-E-BUSY _TLS-OWNER-RETURN EXIT
+    THEN
+    ['] _TSPF-BODY _TSPF-GUARD ;
+
+\ As above, but for the signing/flight preparation transaction.  Validation
+\ and mutation are indivisible with respect to slot release and reuse.
+: _TLS-SERVER-PREPARE-FLIGHT-EXACT  ( ctx generation -- ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP TLS-E-STATE EXIT THEN
+    DUP 0= IF 2DROP TLS-E-STATE EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP TLS-E-BUSY EXIT THEN
+    DUP 2 PICK TLS-CTX.GENERATION @ <>
+    2 PICK TLS-CTX-CLAIMED? 0= OR IF
+        2DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
+    DROP
     DUP _TLS-SERVER-DRIVER-ACTIVE? IF
         DROP TLS-E-BUSY _TLS-OWNER-RETURN EXIT
     THEN
@@ -16766,6 +16908,83 @@ VARIABLE _TLA-STATUS
     THEN
     (TLS-ABORT) >R TLS-OWNER-RELEASE R> ;
 
+\ Persistent server accept operations carry an address plus generation.  A
+\ terminal lower step may already have revoked and released that incarnation,
+\ so cleanup treats a generation mismatch as "the old operation is retired"
+\ and must never run a generationless close/abort against the replacement.
+VARIABLE _TLSX-CTX
+VARIABLE _TLSX-GEN
+VARIABLE _TLSX-RETIRED
+VARIABLE _TLSX-IOR
+
+: _TLSX-WIPE  ( -- )
+    0 _TLSX-CTX ! 0 _TLSX-GEN ! 0 _TLSX-RETIRED ! 0 _TLSX-IOR ! ;
+
+: _TLSX-CURRENT?  ( -- flag )
+    _TLSX-CTX @ DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX-CLAIMED?
+    SWAP TLS-CTX.GENERATION @ _TLSX-GEN @ = AND ;
+
+: _TLSX-CLOSE-BODY  ( -- )
+    _TLSX-CURRENT? 0= IF
+        -1 _TLSX-RETIRED ! TLS-E-OK _TLSX-IOR ! EXIT
+    THEN
+    _TLSX-CTX @ TLS-CTX-RAW-CALL? 0= IF
+        TLS-E-STATE _TLSX-IOR ! EXIT
+    THEN
+    _TLSX-CTX @ (TLS-CLOSE) DUP _TLSX-IOR !
+    0= IF -1 _TLSX-RETIRED ! THEN ;
+
+: _TLSX-ABORT-BODY  ( -- )
+    _TLSX-CURRENT? 0= IF
+        -1 _TLSX-RETIRED ! TLS-E-OK _TLSX-IOR ! EXIT
+    THEN
+    _TLSX-CTX @ TLS-CTX-RAW-CALL? 0= IF
+        TLS-E-STATE _TLSX-IOR ! EXIT
+    THEN
+    _TLSX-CTX @ (TLS-ABORT)
+    TLS-ABORT-S-BUSY = IF
+        TLS-E-BUSY _TLSX-IOR !
+    ELSE
+        -1 _TLSX-RETIRED ! TLS-E-OK _TLSX-IOR !
+    THEN ;
+
+: _TLSX-RETURN  ( -- retired? ior )
+    _TLSX-RETIRED @ _TLSX-IOR @ >R >R
+    _TLSX-WIPE TLS-OWNER-RELEASE R> R> ;
+
+: _TLS-SERVER-CLOSE-EXACT-TRY  ( ctx generation -- retired? ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP 0 TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    _TLSX-GEN ! _TLSX-CTX !
+    ['] _TLSX-CLOSE-BODY CATCH ?DUP IF
+        DROP _TSSE-OWNER-TO-ONE
+        0 _TLSX-RETIRED ! TLS-E-TRANSPORT _TLSX-IOR !
+    THEN
+    _TLSX-RETURN ;
+
+: _TLS-SERVER-ABORT-EXACT  ( ctx generation -- retired? ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP 0 TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    _TLSX-GEN ! _TLSX-CTX !
+    ['] _TLSX-ABORT-BODY CATCH ?DUP IF
+        DROP _TSSE-OWNER-TO-ONE
+        0 _TLSX-RETIRED ! TLS-E-TRANSPORT _TLSX-IOR !
+    THEN
+    _TLSX-RETURN ;
+
 VARIABLE _TLCF-CTX
 
 : (TLS-CLOSE-FINAL)  ( ctx -- ior )
@@ -17171,18 +17390,30 @@ VARIABLE _TLSCP-HELLO
 \  BSD-style socket abstraction over TCP and TLS.
 \
 \  Socket descriptor table: 2× /TCP-MAX-CONN slots (dynamic).
-\  Each socket is 40 bytes:
+\  Each socket is 352 bytes.  The common authority header is followed by one
+\  protocol-bounded secure-listener policy; ordinary descriptors leave that
+\  tail zero.  Keeping policy beside its listener avoids a hidden fixed pool.
 \    +0   STATE      8    0=FREE 1=TCP 2=TLS 3=LISTENING 4=ACCEPTED
 \                          5=CONNECTING (private in-progress reservation)
 \    +8   TCB/CTX    8    TCB pointer (TCP) or TLS-CTX pointer (TLS)
 \    +16  LOCAL-PORT 8    Local port number
 \    +24  FLAGS      8    Bit0: TLS mode
 \    +32  HANDLE-GEN 8    exact TCB or TLS-context generation for HANDLE
+\    +40  POLICY-STATE 8  secure-listener policy lifecycle
+\    +48  CRED-H1      8  pinned credential handle
+\    +56  CRED-GEN     8  exact credential generation
+\    +64  EARLY-BUDGET 8  rejected-0RTT wire budget
+\    +72  TIMEOUT-MS   8  handshake and terminal-progress deadline
+\    +80  ACTIVE-OPS   8  caller-owned accept operations using this listener
+\    +88  ALPN-LEN     8  copied ProtocolName length (0..255)
+\    +96  ALPN       256  copied ProtocolName plus one zero pad byte
 \
 \  API:
 \    SOCKET     ( type -- sd | -1 )   type: 0=TCP, 1=TLS
 \    BIND       ( sd port -- ior )
 \    LISTEN     ( sd -- ior )
+\    TLS-LISTEN ( sd cred-h1 cred-gen alpn-a alpn-u early-budget timeout-ms
+\                 -- ior )
 \    SOCK-ACCEPT ( sd -- new-sd | -1 )
 \    CONNECT    ( sd rip rport -- ior )
 \    SEND       ( sd addr len -- actual )
@@ -17190,7 +17421,7 @@ VARIABLE _TLSCP-HELLO
 \    CLOSE      ( sd -- ior )
 
 \ --- Socket Constants ---
-40 CONSTANT /SOCK
+352 CONSTANT /SOCK
 32 VALUE SOCK-MAX                 \ set by NET-TABLES-INIT (2× /TCP-MAX-CONN)
 
 0 CONSTANT SOCKST-FREE
@@ -17202,6 +17433,10 @@ VARIABLE _TLSCP-HELLO
 
 0 CONSTANT SOCK-TYPE-TCP
 1 CONSTANT SOCK-TYPE-TLS
+
+0 CONSTANT SOCK-TLS-POLICY-NONE
+1 CONSTANT SOCK-TLS-POLICY-LIVE
+2 CONSTANT SOCK-TLS-POLICY-CLOSING
 
 \ --- Socket Descriptor Table (dynamic, XMEM-backed) ---
 VARIABLE SOCK-TABLE   0 SOCK-TABLE !
@@ -17225,7 +17460,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
 \    Logical cost = /TCB + /TLS-CTX + /TLS-RX-WORKSPACE
-\                 + 2×/SOCK = 237720 bytes per connection.
+\                 + 2×/SOCK = 238344 bytes per connection.
 \    XMEM normalizes each table allocation independently to 16 bytes, so
 \    capacity uses the exact aggregate rather than flooring this quotient.
 \
@@ -17282,6 +17517,14 @@ NET-TABLES-INIT
 : SOCK.LOCAL-PORT ( sd -- addr )   16 + ;
 : SOCK.FLAGS      ( sd -- addr )   24 + ;
 : SOCK.HANDLE-GEN ( sd -- addr )   32 + ;
+: SOCK.TLS-POLICY-STATE ( sd -- addr ) 40 + ;
+: SOCK.TLS-CRED-H1      ( sd -- addr ) 48 + ;
+: SOCK.TLS-CRED-GEN     ( sd -- addr ) 56 + ;
+: SOCK.TLS-EARLY-BUDGET ( sd -- addr ) 64 + ;
+: SOCK.TLS-TIMEOUT-MS   ( sd -- addr ) 72 + ;
+: SOCK.TLS-ACTIVE-OPS   ( sd -- addr ) 80 + ;
+: SOCK.TLS-ALPN-LEN     ( sd -- addr ) 88 + ;
+: SOCK.TLS-ALPN         ( sd -- addr ) 96 + ;
 
 : SOCK-MEMBER?  ( sd -- flag )
     SOCK-TABLE @ DUP 0= IF 2DROP 0 EXIT THEN
@@ -17376,8 +17619,8 @@ VARIABLE _SLSN-GEN
     _SLSN-SD !
     _SLSN-SD @ SOCK-MEMBER? 0= IF -1 EXIT THEN
     \ A TLS-marked listener is not a plaintext listener with a copied flag.
-    \ Keep this surface unavailable until one policy-bearing production accept
-    \ coordinator owns every path through exact authenticated publication.
+    \ Secure listeners are configured only through TLS-LISTEN; this generic
+    \ entry deliberately remains TCP-only.
     _SLSN-SD @ SOCK.STATE @ SOCKST-TCP <>
     _SLSN-SD @ SOCK.FLAGS @ 1 AND 0<> OR IF -1 EXIT THEN
     _SLSN-SD @ SOCK.HANDLE @ 0<>
@@ -17513,6 +17756,22 @@ VARIABLE _SCON-PUB-GEN
 : SOCK-TLS?  ( sd -- flag )
     NET-TX-TRY IF DROP 0 EXIT THEN
     ['] (SOCK-TLS?) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-TLS-LISTENER?)  ( sd -- flag )
+    DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP SOCK.STATE @ SOCKST-LISTENING =
+    OVER SOCK.FLAGS @ 1 AND 0<> AND
+    SWAP SOCK.TLS-POLICY-STATE @ DUP SOCK-TLS-POLICY-LIVE =
+    SWAP SOCK-TLS-POLICY-CLOSING = OR AND ;
+
+: SOCK-TLS-LISTENER?  ( sd -- flag )
+    \ Lifecycle dispatch requires a truthful kind snapshot: reporting false
+    \ merely because NET is busy could route a secure listener through the
+    \ plain teardown path and strand its credential pin.
+    NET-TX-ACQUIRE
+    ['] (SOCK-TLS-LISTENER?) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
 
@@ -17777,6 +18036,192 @@ VARIABLE _TSSP-QUARANTINED-SD
     ['] _TSSP-BODY CATCH ?DUP IF _TSSP-RECOVER THEN
     _TSSP-RETURN ;
 
+\ ---------------------------------------------------------------------
+\  Atomic secure listener policy
+\ ---------------------------------------------------------------------
+\
+\ TLS-LISTEN copies every setting needed by later caller-owned accept
+\ operations and pins the exact credential for the listener lifetime.  The
+\ ordinary LISTEN entry remains TCP-only: there is no interval in which a TLS
+\ descriptor is an unconfigured plaintext listener.
+VARIABLE _TLSL-SD
+VARIABLE _TLSL-CRED-H1
+VARIABLE _TLSL-CRED-GEN
+VARIABLE _TLSL-ALPN
+VARIABLE _TLSL-ALPN-U
+VARIABLE _TLSL-EARLY-BUDGET
+VARIABLE _TLSL-TIMEOUT-MS
+VARIABLE _TLSL-TCB
+VARIABLE _TLSL-TCB-GEN
+VARIABLE _TLSL-IOR
+VARIABLE _TLSL-CRED-HELD
+VARIABLE _TLSL-NET-HELD
+VARIABLE _TLSL-PINNED
+VARIABLE _TLSL-COMMITTED
+
+: _TLSL-WIPE  ( -- )
+    0 _TLSL-SD ! 0 _TLSL-CRED-H1 ! 0 _TLSL-CRED-GEN !
+    0 _TLSL-ALPN ! 0 _TLSL-ALPN-U ! 0 _TLSL-EARLY-BUDGET !
+    0 _TLSL-TIMEOUT-MS ! 0 _TLSL-TCB ! 0 _TLSL-TCB-GEN !
+    0 _TLSL-IOR ! 0 _TLSL-CRED-HELD ! 0 _TLSL-NET-HELD !
+    0 _TLSL-PINNED ! 0 _TLSL-COMMITTED ! ;
+
+: _TLSL-ALPN-PREFLIGHT  ( alpn-a alpn-u -- ior )
+    DUP 0< OVER TLS-ALPN-NAME-MAX > OR IF
+        2DROP TLS-E-ALPN-CONFIG EXIT
+    THEN
+    DUP 0= IF 2DROP TLS-E-OK EXIT THEN
+    OVER 0= IF 2DROP TLS-E-ALPN-CONFIG EXIT THEN
+    2DUP CALLER-SPAN-STATUS IF 2DROP TLS-E-ALPN-CONFIG EXIT THEN
+    2DUP _TLSL-SD _TLSL-COMMITTED 1 CELLS + _TLSL-SD -
+    _TLS-PURE-RANGES-OVERLAP? IF 2DROP TLS-E-ALPN-CONFIG EXIT THEN
+    2DUP _TSCF-INPUT-ALIASES-MUTABLE? IF
+        2DROP TLS-E-ALPN-CONFIG EXIT
+    THEN
+    2DUP TCP-TCBS @ /TCB /TCP-MAX-CONN *
+    _TLS-PURE-RANGES-OVERLAP? IF 2DROP TLS-E-ALPN-CONFIG EXIT THEN
+    SOCK-TABLE @ DUP IF
+        >R 2DUP R> /SOCK SOCK-MAX * _TLS-PURE-RANGES-OVERLAP? IF
+            2DROP TLS-E-ALPN-CONFIG EXIT
+        THEN
+    ELSE
+        DROP
+    THEN
+    2DROP TLS-E-OK ;
+
+: _TLSL-DESCRIPTOR-READY?  ( -- flag )
+    _TLSL-SD @ DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP SOCK.STATE @ SOCKST-TLS =
+    OVER SOCK.FLAGS @ 1 AND 0<> AND
+    OVER SOCK.HANDLE @ 0= AND
+    OVER SOCK.HANDLE-GEN @ 0= AND
+    OVER SOCK.TLS-POLICY-STATE @ SOCK-TLS-POLICY-NONE = AND
+    OVER SOCK.TLS-CRED-H1 @ 0= AND
+    OVER SOCK.TLS-CRED-GEN @ 0= AND
+    OVER SOCK.TLS-ACTIVE-OPS @ 0= AND
+    OVER SOCK.TLS-ALPN-LEN @ 0= AND
+    OVER SOCK.LOCAL-PORT @ 0> AND
+    SWAP SOCK.LOCAL-PORT @ 65535 <= AND ;
+
+: _TLSL-DESCRIPTOR-CLEAR  ( -- )
+    _TLSL-SD @ DUP SOCK-MEMBER? 0= IF DROP EXIT THEN
+    DUP SOCK.STATE @ SOCKST-LISTENING =
+    OVER SOCK.STATE @ SOCKST-TLS = OR 0= IF DROP EXIT THEN
+    0 OVER SOCK.HANDLE ! 0 OVER SOCK.HANDLE-GEN !
+    DUP 40 + /SOCK 40 - 0 FILL
+    SOCKST-TLS SWAP SOCK.STATE ! ;
+
+: _TLSL-TCB-ROLLBACK  ( -- )
+    _TLSL-TCB @ DUP 0= IF DROP EXIT THEN
+    DUP TCB-MEMBER? 0= IF DROP 0 _TLSL-TCB ! EXIT THEN
+    _TLSL-TCB-GEN @ IF
+        DROP
+        _TLSL-TCB @ _TLSL-TCB-GEN @ _TLSL-SD @ (TCP-OWNER-ABORT)
+        DUP IF
+            DUP TCP-ACCEPT-E-STALE <> IF TLS-E-TRANSPORT _TLSL-IOR ! THEN
+        THEN
+        2DROP
+    ELSE
+        (TCP-ABORT) DROP
+    THEN
+    0 _TLSL-TCB ! 0 _TLSL-TCB-GEN !
+    _TLSL-DESCRIPTOR-CLEAR ;
+
+: _TLSL-PIN-ROLLBACK  ( -- )
+    _TLSL-PINNED @ 0= IF EXIT THEN
+    _TLSL-CRED-H1 @ _TLSL-CRED-GEN @ _TC-UNPIN-LOCKED
+    DUP IF
+        _TLS-CREDENTIAL-IOR>TLS _TLSL-IOR !
+        \ Preserve the exact pin as descriptor-owned quarantine.  This path
+        \ is an internal invariant failure, but it must still be retryable.
+        _TLSL-NET-HELD @ IF
+            _TLSL-SD @ DUP SOCK-MEMBER? IF
+                DUP 40 + /SOCK 40 - 0 FILL
+                _TLSL-CRED-H1 @ OVER SOCK.TLS-CRED-H1 !
+                _TLSL-CRED-GEN @ OVER SOCK.TLS-CRED-GEN !
+                SOCK-TLS-POLICY-CLOSING OVER SOCK.TLS-POLICY-STATE !
+                SOCKST-LISTENING SWAP SOCK.STATE !
+                0 _TLSL-PINNED !
+            ELSE
+                DROP
+            THEN
+        THEN
+        EXIT
+    THEN
+    DROP 0 _TLSL-PINNED ! ;
+
+: _TLSL-ROLLBACK  ( -- )
+    _TLSL-NET-HELD @ IF _TLSL-TCB-ROLLBACK THEN
+    _TLSL-PIN-ROLLBACK ;
+
+: _TLSL-PUBLISH  ( -- )
+    _TLSL-TCB @ _TLSL-SD @ SOCK.HANDLE !
+    _TLSL-TCB-GEN @ _TLSL-SD @ SOCK.HANDLE-GEN !
+    _TLSL-CRED-H1 @ _TLSL-SD @ SOCK.TLS-CRED-H1 !
+    _TLSL-CRED-GEN @ _TLSL-SD @ SOCK.TLS-CRED-GEN !
+    _TLSL-EARLY-BUDGET @ _TLSL-SD @ SOCK.TLS-EARLY-BUDGET !
+    _TLSL-TIMEOUT-MS @ _TLSL-SD @ SOCK.TLS-TIMEOUT-MS !
+    0 _TLSL-SD @ SOCK.TLS-ACTIVE-OPS !
+    _TLSL-ALPN-U @ _TLSL-SD @ SOCK.TLS-ALPN-LEN !
+    _TLSL-SD @ SOCK.TLS-ALPN 256 0 FILL
+    _TLSL-ALPN-U @ IF
+        _TLSL-ALPN @ _TLSL-SD @ SOCK.TLS-ALPN _TLSL-ALPN-U @ MOVE
+    THEN
+    SOCK-TLS-POLICY-LIVE _TLSL-SD @ SOCK.TLS-POLICY-STATE !
+    SOCKST-LISTENING _TLSL-SD @ SOCK.STATE !
+    -1 _TLSL-COMMITTED ! 0 _TLSL-PINNED !
+    0 _TLSL-TCB ! 0 _TLSL-TCB-GEN ! ;
+
+: _TLSL-BODY  ( -- )
+    TLS-E-OK _TLSL-IOR !
+    _TC-LOCK-TRY DUP IF
+        _TLS-CREDENTIAL-IOR>TLS _TLSL-IOR ! EXIT
+    THEN DROP -1 _TLSL-CRED-HELD !
+    _TLSL-CRED-H1 @ _TLSL-CRED-GEN @ _TC-PIN-BORROW-LOCKED
+    DUP IF
+        _TLS-CREDENTIAL-IOR>TLS _TLSL-IOR ! 2DROP 2DROP EXIT
+    THEN
+    DROP 2DROP 2DROP -1 _TLSL-PINNED !
+    NET-TX-TRY IF TLS-E-BUSY _TLSL-IOR ! EXIT THEN
+    -1 _TLSL-NET-HELD !
+    _TLSL-DESCRIPTOR-READY? 0= IF TLS-E-STATE _TLSL-IOR ! EXIT THEN
+    _TLSL-SD @ SOCK.LOCAL-PORT @ (TCP-LISTEN)
+    DUP 0= IF DROP TLS-E-BUSY _TLSL-IOR ! EXIT THEN
+    DUP _TLSL-TCB !
+    _TLSL-SD @ (TCP-ATTACH) DUP IF
+        >R DROP R> DROP TLS-E-TRANSPORT _TLSL-IOR ! EXIT
+    THEN
+    DROP _TLSL-TCB-GEN !
+    _TLSL-PUBLISH ;
+
+: _TLSL-RETURN  ( -- ior )
+    _TLSL-COMMITTED @ 0= IF _TLSL-ROLLBACK THEN
+    _TLSL-IOR @ >R
+    _TLSL-NET-HELD @ IF 0 _TLSL-NET-HELD ! NET-TX-RELEASE THEN
+    _TLSL-CRED-HELD @ IF 0 _TLSL-CRED-HELD ! _TC-UNLOCK THEN
+    _TLSL-WIPE TLS-OWNER-RELEASE R> ;
+
+: TLS-LISTEN
+    ( sd cred-h1 cred-gen alpn-a alpn-u early-wire-budget timeout-ms -- ior )
+    DUP 0> 0= IF 2DROP 2DROP 2DROP DROP TLS-E-HANDSHAKE-PARAM EXIT THEN
+    OVER 0< IF 2DROP 2DROP 2DROP DROP TLS-E-HANDSHAKE-PARAM EXIT THEN
+    3 PICK 3 PICK _TLSL-ALPN-PREFLIGHT DUP IF
+        >R 2DROP 2DROP 2DROP DROP R> EXIT
+    THEN DROP
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
+    _TLSL-TIMEOUT-MS ! _TLSL-EARLY-BUDGET !
+    _TLSL-ALPN-U ! _TLSL-ALPN ! _TLSL-CRED-GEN !
+    _TLSL-CRED-H1 ! _TLSL-SD !
+    ['] _TLSL-BODY CATCH ?DUP IF
+        DROP TLS-E-TRANSPORT _TLSL-IOR !
+    THEN
+    _TLSL-RETURN ;
+
 \ Publication failure is unreachable while CONNECTING remains reserved, but
 \ defensive cleanup must still reclaim the exact client transport before the
 \ descriptor becomes reusable.  Exact preflight prevents retrying a stale ctx.
@@ -17935,6 +18380,7 @@ VARIABLE _SPC-GEN
     _SPC-SD @ SOCK.STATE @ DUP SOCKST-TCP =
     OVER SOCKST-ACCEPTED = OR
     SWAP SOCKST-LISTENING = OR 0= IF TCP-ACCEPT-E-STATE EXIT THEN
+    _SPC-SD @ SOCK.FLAGS @ 1 AND IF TCP-ACCEPT-E-STATE EXIT THEN
     _SPC-SD @ SOCK.HANDLE @ 0= IF
         _SPC-SD @ SOCK.HANDLE-GEN @ 0= IF
             _SPC-SD @ SOCK-RELEASE 0 EXIT
@@ -17959,6 +18405,100 @@ VARIABLE _SPC-GEN
     ['] (SOCK-PLAIN-CLOSE-TRY) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
+
+\ Secure-listener close owns the listener TCB and the policy credential pin.
+\ It snapshots only routing data under NET, then performs the mutating
+\ transaction in the global TLS -> credential -> NET order.  Active
+\ caller-owned accept operations make close retryable BUSY rather than
+\ invalidating authority underneath a handshake.
+VARIABLE _STLL-SD
+VARIABLE _STLL-CRED-H1
+VARIABLE _STLL-CRED-GEN
+VARIABLE _STLL-TCB
+VARIABLE _STLL-TCB-GEN
+VARIABLE _STLL-IOR
+VARIABLE _STLL-CRED-HELD
+VARIABLE _STLL-NET-HELD
+
+: _STLL-WIPE  ( -- )
+    0 _STLL-SD ! 0 _STLL-CRED-H1 ! 0 _STLL-CRED-GEN !
+    0 _STLL-TCB ! 0 _STLL-TCB-GEN ! 0 _STLL-IOR !
+    0 _STLL-CRED-HELD ! 0 _STLL-NET-HELD ! ;
+
+: _STLL-SNAPSHOT  ( -- ior )
+    _STLL-SD @ (SOCK-TLS-LISTENER?) 0= IF TLS-E-STATE EXIT THEN
+    _STLL-SD @ SOCK.TLS-CRED-H1 @ DUP 0= IF
+        DROP TLS-E-STATE EXIT
+    THEN _STLL-CRED-H1 !
+    _STLL-SD @ SOCK.TLS-CRED-GEN @ DUP 0= IF
+        DROP TLS-E-STATE EXIT
+    THEN _STLL-CRED-GEN !
+    TLS-E-OK ;
+
+: _STLL-EXACT?  ( -- flag )
+    _STLL-SD @ DUP (SOCK-TLS-LISTENER?) 0= IF DROP 0 EXIT THEN
+    DUP SOCK.TLS-CRED-H1 @ _STLL-CRED-H1 @ =
+    OVER SOCK.TLS-CRED-GEN @ _STLL-CRED-GEN @ = AND
+    SWAP SOCK.TLS-ACTIVE-OPS @ 0= AND ;
+
+: _STLL-ABORT-TCB  ( -- ior )
+    _STLL-SD @ SOCK.HANDLE @ DUP 0= IF
+        DROP _STLL-SD @ SOCK.HANDLE-GEN @ 0= IF TLS-E-OK ELSE TLS-E-STATE THEN
+        EXIT
+    THEN _STLL-TCB !
+    _STLL-SD @ SOCK.HANDLE-GEN @ DUP 0= IF
+        DROP TLS-E-STATE EXIT
+    THEN _STLL-TCB-GEN !
+    _STLL-TCB @ _STLL-TCB-GEN @ _STLL-SD @ (TCP-OWNER-ABORT)
+    DUP IF
+        DUP TCP-ACCEPT-E-STALE = IF
+            2DROP
+        ELSE
+            2DROP TLS-E-TRANSPORT EXIT
+        THEN
+    ELSE
+        2DROP
+    THEN
+    0 _STLL-SD @ SOCK.HANDLE !
+    0 _STLL-SD @ SOCK.HANDLE-GEN !
+    TLS-E-OK ;
+
+: _STLL-BODY  ( -- )
+    TLS-E-OK _STLL-IOR !
+    NET-TX-TRY IF TLS-E-BUSY _STLL-IOR ! EXIT THEN
+    -1 _STLL-NET-HELD !
+    _STLL-SNAPSHOT DUP _STLL-IOR !
+    0 _STLL-NET-HELD ! NET-TX-RELEASE DROP
+    _STLL-IOR @ IF EXIT THEN
+    _TC-LOCK-TRY DUP IF
+        _TLS-CREDENTIAL-IOR>TLS _STLL-IOR ! EXIT
+    THEN DROP -1 _STLL-CRED-HELD !
+    NET-TX-TRY IF TLS-E-BUSY _STLL-IOR ! EXIT THEN
+    -1 _STLL-NET-HELD !
+    _STLL-EXACT? 0= IF TLS-E-BUSY _STLL-IOR ! EXIT THEN
+    SOCK-TLS-POLICY-CLOSING _STLL-SD @ SOCK.TLS-POLICY-STATE !
+    _STLL-ABORT-TCB DUP IF _STLL-IOR ! EXIT THEN DROP
+    _STLL-CRED-H1 @ _STLL-CRED-GEN @ _TC-UNPIN-LOCKED
+    DUP IF _TLS-CREDENTIAL-IOR>TLS _STLL-IOR ! EXIT THEN DROP
+    _STLL-SD @ SOCK-RELEASE ;
+
+: _STLL-RETURN  ( -- ior )
+    _STLL-IOR @ >R
+    _STLL-NET-HELD @ IF 0 _STLL-NET-HELD ! NET-TX-RELEASE THEN
+    _STLL-CRED-HELD @ IF 0 _STLL-CRED-HELD ! _TC-UNLOCK THEN
+    _STLL-WIPE TLS-OWNER-RELEASE R> ;
+
+: SOCK-TLS-LISTENER-CLOSE-TRY  ( sd -- ior )
+    DUP SOCK-MEMBER? 0= IF DROP TLS-E-STATE EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF DROP TLS-E-BUSY EXIT THEN
+    _TC-LOCK-OWNER? IF DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    _STLL-SD !
+    ['] _STLL-BODY CATCH ?DUP IF
+        DROP TLS-E-TRANSPORT _STLL-IOR !
+    THEN
+    _STLL-RETURN ;
 
 VARIABLE _STLR-SD
 VARIABLE _STLR-CTX
@@ -18049,6 +18589,14 @@ VARIABLE _STLR-GEN
     R> ?DUP IF THROW THEN ;
 
 : SOCK-ABORT  ( sd -- status ior )
+    DUP SOCK-TLS-LISTENER? IF
+        SOCK-TLS-LISTENER-CLOSE-TRY DUP IF
+            TLS-ABORT-S-BUSY SWAP
+        ELSE
+            TLS-ABORT-S-LOCAL SWAP
+        THEN
+        EXIT
+    THEN
     DUP SOCK-CLOSE-TLS? IF SOCK-TLS-ABORT EXIT THEN
     NET-TX-ACQUIRE
     DUP SOCK-MEMBER? 0= IF
@@ -18058,6 +18606,10 @@ VARIABLE _STLR-GEN
     DUP SOCK.STATE @ DUP SOCKST-TCP =
     OVER SOCKST-ACCEPTED = OR
     SWAP SOCKST-LISTENING = OR 0= IF
+        DROP NET-TX-RELEASE TCP-ABORT-S-LOCAL
+        TCP-ACCEPT-E-STATE EXIT
+    THEN
+    DUP SOCK.FLAGS @ 1 AND IF
         DROP NET-TX-RELEASE TCP-ABORT-S-LOCAL
         TCP-ACCEPT-E-STATE EXIT
     THEN
@@ -18082,11 +18634,13 @@ VARIABLE _STLR-GEN
 \ revalidates complete authority inside its own transaction.
 \ --- CLOSE ( sd -- ior ) ---
 : CLOSE-TRY  ( sd -- ior )
-    DUP SOCK-CLOSE-TLS? IF
+    DUP SOCK-TLS-LISTENER? IF
+        SOCK-TLS-LISTENER-CLOSE-TRY
+    ELSE DUP SOCK-CLOSE-TLS? IF
         SOCK-TLS-CLOSE-TRY
     ELSE
         SOCK-PLAIN-CLOSE-TRY
-    THEN
+    THEN THEN
 ;
 
 : CLOSE ( sd -- ior )  CLOSE-TRY ;

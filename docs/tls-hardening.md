@@ -1,13 +1,16 @@
 # Native TLS Hardening
 
-Status: no usable listening TLS server yet; the bounded client profile,
+Status: secure listener policy publication is now usable; the bounded client profile,
 socket-independent server handshake through client Finished, exact lower
 transport ownership/close, and atomic queued-child attachment are qualified,
 and attached initial ClientHello ingress plus the complete ACK-paced server
 flight, protected client-Finished ingress, and protected terminal disposition
 are now qualified. Exact authenticated accepted-socket publication is also
-qualified. The active critical path is now the minimal production listener and
-handshake coordinator followed by independent socket interoperability.
+qualified. `TLS-LISTEN` now atomically copies ALPN/early-data/deadline policy,
+pins the exact credential, publishes the TCP listener, and owns exact setup
+rollback plus listener close/unpin cleanup. The active critical path is
+now the caller-owned bounded accept operation followed by independent socket
+interoperability.
 Last updated: 2026-08-14
 
 ## Purpose
@@ -97,7 +100,7 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is a minimal secure-listener policy/coordinator and
+The remaining server work is a caller-owned bounded secure-accept operation and
 interoperability over the resulting socket with an independent TLS
 implementation. The following lower-level facts
 continue to bound an authenticated server role:
@@ -130,9 +133,8 @@ client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
-the server gate still requires composing the now-atomic
-generation/owner-qualified child transfer with the qualified outbound callback
-and inbound feed contracts, secure listener/accept integration, and
+the server gate still requires composing the qualified exact-child stages
+through `TLS-LISTEN` and the caller-owned accept operation, followed by
 external-stack socket interoperability.
 Reusing `EC-MUL` or precomputing a fixture signature remains
 test scaffolding rather than a server security result.
@@ -140,10 +142,11 @@ test scaffolding rather than a server security result.
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
 hash state, per-context application RX state, and enforced serialized scratch
 ownership are now implemented as independently useful client/server substrate.
-They do not by themselves make a listening socket TLS-capable.  `LISTEN`
-therefore returns `-1` for a TLS-marked socket without allocating a listener
-TCB or changing the descriptor state/handle; `SOCK-ACCEPT` also refuses a
-TLS-marked listener before consuming its accept queue.  Evidence must keep
+`TLS-LISTEN` is the explicit policy-bearing listener entry: it pins the exact
+credential, copies one protocol-bounded ALPN plus rejected-0RTT/deadline values,
+attaches the passive TCB, and publishes listener state last. The generic
+`LISTEN` entry remains fail-closed for TLS descriptors, and `SOCK-ACCEPT`
+refuses a secure listener before consuming its queue. Evidence must keep
 emulator protocol correctness, RTL behavior, and physical entropy/side-channel
 claims separate.
 
@@ -736,10 +739,10 @@ therefore isolated by context.  The high-level application receive and
 owner-held blocking-handshake paths use the transient global plaintext buffer
 only while lock 10 is held and scrub its complete contents before releasing
 ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
-output and does not scrub that output. With a 5,952-byte TCB and two 40-byte
-socket descriptors, the logical network-table cost is 237,720 bytes per
+output and does not scrub that output. With a 5,952-byte TCB and two 352-byte
+socket descriptors, the logical network-table cost is 238,344 bytes per
 connection. The four XMEM table allocations are normalized independently, so
-one, two, and three connections reserve 237,728, 475,440, and 713,168 bytes;
+one, two, and three connections reserve 238,352, 476,688, and 715,040 bytes;
 capacity uses the exact aggregate.
 
 The context generation protects the socket-published path. A TLS descriptor
@@ -996,8 +999,8 @@ Native guest tests cover:
 - multi-read delivery of application records larger than the caller buffer;
 - alternating connections with isolated partial records, retained plaintext,
   and fragmented post-handshake messages, including exact per-context wipe;
-- fail-closed refusal of TLS-marked `LISTEN` and `SOCK-ACCEPT` until a
-  policy-bearing production TLS accept coordinator owns every terminal path;
+- fail-closed refusal of generic TLS-marked `LISTEN` and `SOCK-ACCEPT`, plus
+  atomic `TLS-LISTEN` policy copy, credential pin, rollback, and close/unpin;
 - exact attached server-socket publication, including generationless raw
   refusal, TLS/credential/NET contention, dynamic descriptor exhaustion,
   close-wait publication, reciprocal resolution, descriptor-owned teardown,
@@ -1047,8 +1050,10 @@ close-notify ACK before FIN, peer-alert no-response, and reused-child isolation.
 The publication matrix proves reciprocal socket authority and teardown, exact
 failure atomicity under lock/capacity pressure, retained-seal raw-publication
 refusal after abort/unpin contention, and stale-child cleanup without touching
-the replacement. Public secure-listener acceptance and interoperability
-over sockets with an independent TLS stack remain unproved. The disposition
+the replacement. The secure-listener regression proves stale-policy rollback,
+copied ALPN, exact listener authority, credential lifetime, and close cleanup.
+Public secure acceptance and interoperability over sockets with an independent
+TLS stack remain unproved. The disposition
 affected selector passed 19/19 sequentially under the ordinary checked
 source-mode limits; the final publication-focused and adjoining affected
 selector passed 15/15 sequentially under ordinary checked limits.
@@ -1064,10 +1069,10 @@ credential. None enters a product trust bundle or production credential slot.
 ### Secure server transport
 
 - Drive the qualified exact-child handshake and authenticated socket
-  publication from one bounded production coordinator with caller-provided
-  credential, ALPN, and rejected-0RTT policy. Keep TLS-marked public
-  `LISTEN`/`SOCK-ACCEPT` fail-closed until that coordinator owns every terminal
-  disposition and deadline.
+  publication from copied `TLS-LISTEN` policy through one caller-owned bounded
+  accept operation. Keep generic `LISTEN` fail-closed for TLS descriptors and
+  `SOCK-ACCEPT` fail-closed for secure listeners until that operation owns every
+  terminal disposition and deadline.
 - Qualify socket lifecycle, application bytes, exporter equality, and
   close-notify/FIN completion against an independent TLS 1.3 implementation.
 

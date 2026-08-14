@@ -1635,9 +1635,9 @@ derived from 25% of XMEM. The 256 ceiling is an implementation policy limit,
 not a wire or architectural requirement. The standard networking loader
 requires XMEM. A guarded one-connection Bank-0 allocation path remains for
 manually composed builds, but it is not a qualified deployment profile. The
-logical TLS-capable table cost is 237,720 bytes per connection; backing
+logical TLS-capable table cost is 238,344 bytes per connection; backing
 allocator alignment rounds the four allocations independently. Exact XMEM
-totals are 237,728, 475,440, and 713,168 bytes for one through three
+totals are 238,352, 476,688, and 715,040 bytes for one through three
 connections.
 
 Do not read the current fields as a general sliding window. The qualified data
@@ -1677,10 +1677,12 @@ Attached transport authority is `(TCB address, generation, owner)`. A
 1,000-byte TLS context stores the TCB generation at +968, its own incarnation
 at +976, its reciprocal socket owner at +984, and slot/close lifecycle at
 +992. `TLS-CLOSE-FREE` marks a released slot while preserving its last
-generation, so one claim creates exactly one live incarnation. A 40-byte socket
-descriptor stores at +32 either its plain TCB generation or its TLS-context
-generation. A TLS socket is valid only when descriptor and context name each
-other and the context and TCB also form an exact reciprocal pair. Graceful TLS
+generation, so one claim creates exactly one live incarnation. A 352-byte
+socket descriptor stores the common generation at +32; its +40...+351 tail is
+used only by secure listeners for copied credential/policy state, including the
+protocol-defined 255-byte ALPN maximum. A TLS socket is valid only when
+descriptor and context name each other and the context and TCB also form an
+exact reciprocal pair. Graceful TLS
 close retains the exact protected `close_notify` record until ACK and refuses
 FIN while it remains in flight. FIN-WAIT-1, CLOSING, and LAST-ACK replay FIN
 with bounded exponential RTO; FIN-WAIT-2 terminates after 60 seconds.
@@ -1856,10 +1858,12 @@ ACK-paced server flight through the same authority. It now reads the protected
 client flight through that sealed child, authenticates Finished, preserves a
 following TCP record, and publishes an exact reciprocal TLS descriptor. Sticky
 terminal ingress can now admit one exact protected fatal/close response or
-complete without a response for a non-close peer alert. Public TLS-marked
-listen/accept still fails closed until a production coordinator supplies
-listener policy and drives every step; live socket interoperability with an
-independent TLS implementation is also unproved. Cipher-suite support is:
+complete without a response for a non-close peer alert. `TLS-LISTEN` now
+publishes copied listener policy and an exact credential pin atomically;
+the generic `LISTEN` entry remains fail closed for TLS descriptors, and
+`SOCK-ACCEPT` remains fail closed for secure listeners until the bounded accept
+operation drives every handshake step. Live socket interoperability
+with an independent TLS implementation is also unproved. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1952,8 +1956,9 @@ uses the same exact pair and record engine through client Finished. Attached
 terminal disposition reuses that pair and the completed emitter's pending lane
 through exact protected alert admission. Exact authenticated socket publication
 now consumes that same generational authority and is no longer a transport
-incompatibility. The active gap is the bounded listener/coordinator that drives
-the qualified steps, not a reason for further TCP or crypto expansion.
+incompatibility. `TLS-LISTEN` now owns atomic listener-policy publication; the
+active gap is the bounded caller-owned accept operation that drives the
+qualified steps, not a reason for further TCP or crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at
@@ -1980,8 +1985,8 @@ receive and owner-held blocking-handshake paths copy authenticated plaintext
 into connection-owned or caller storage and scrub their complete global
 staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
 writes to its caller-selected output and does not scrub that output.  Together
-with the 5,952-byte TCB and two 40-byte socket
-descriptors, the logical network-table cost is 237,720 bytes per connection,
+with the 5,952-byte TCB and two 352-byte socket
+descriptors, the logical network-table cost is 238,344 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
 
@@ -2027,7 +2032,7 @@ its context-owned RX workspace for all state retained across public calls.
 ## §17 Socket API
 
 BSD-style socket interface over TCP and TLS (§17 in `networking.f`). Each
-40-byte descriptor stores its handle generation at +32: a TCB generation for
+352-byte descriptor stores its handle generation at +32: a TCB generation for
 plain sockets or a TLS-context generation for TLS sockets. Plain operations
 resolve reciprocal `(TCB, generation, descriptor-owner)` authority. TLS
 operations first resolve reciprocal `(context, generation, descriptor-owner)`
@@ -2038,13 +2043,14 @@ points reject a socket-owned context.
 |------|-------------|-------------|
 | `SOCKET` | `( type -- sd \| -1 )` | Create a socket descriptor.  *type*: 0 = TCP, 1 = TLS. |
 | `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
-| `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1` without allocating a TCB or changing descriptor state/handle until a policy-bearing production TLS accept coordinator owns every terminal path. |
+| `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1`; use `TLS-LISTEN` so no plaintext or unconfigured listener state is published. |
+| `TLS-LISTEN` | `( sd cred-h1 cred-gen alpn-a alpn-u early-wire-budget timeout-ms -- ior )` | Atomically pin the exact server credential, copy the protocol-bounded ALPN and bounded-ingress/deadline values for the accept operation, create and attach the TCP listener, and publish the secure listener last. Ordinary failure rolls the TCB and credential reference back; secure-listener close reclaims queued/half-open children and releases the exact policy pin. |
 | `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Reserve a descriptor, validate the exact listener and queued child tokens, and transfer the child owner before publishing an ordinary TCP socket. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
 | `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
 | `SOCKET-READY?` | `( sd -- flag )` | Level-ready for retained data or a terminal disposition. For TLS, authenticated `APP-LEN` remains ready and drains before a later transport failure is published. |
 | `SOCK-TLS-IO-STATUS` | `( sd -- ior )` | Resolve exact reciprocal TLS descriptor authority and return sticky status. A fresh terminal transport result remains deferred while authenticated plaintext is retained. |
-| `CLOSE-TRY` | `( sd -- ior )` | Close through the descriptor's exact authority; preserve the descriptor and handle on stale authority, backpressure, or contention. |
+| `CLOSE-TRY` | `( sd -- ior )` | Close through the descriptor's exact authority; preserve the descriptor and handle on stale authority, backpressure, or contention. For a secure listener, drain the exact passive TCB lineage, release the credential pin, and wipe/release the descriptor; active accept operations make close retryable-busy. |
 | `CLOSE` | `( sd -- ior )` | Checked alias of `CLOSE-TRY`; zero means the descriptor has been released, while nonzero preserves retry authority. |
-| `SOCK-ABORT` | `( sd -- status ior )` | Immediately reclaim the descriptor's exact plain-TCB or reciprocal TLS-context authority. `status` reports the transport disposition; nonzero `ior` leaves stale, busy, or wrong-state authority visible instead of releasing an unrelated descriptor. |
+| `SOCK-ABORT` | `( sd -- status ior )` | Immediately reclaim the descriptor's exact plain-TCB, reciprocal TLS-context, or secure-listener authority. A secure-listener abort drains its passive lineage, releases the credential pin, and wipes/releases the descriptor; active accept operations return retryable-busy. `status` reports the transport disposition; nonzero `ior` leaves stale, busy, or wrong-state authority visible instead of releasing an unrelated descriptor. |

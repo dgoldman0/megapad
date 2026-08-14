@@ -11,10 +11,10 @@ cohesive as a v1.0 release.
 snapshot. The bounded one-segment TCP data/control/close profile is qualified.
 Layer 2 now has exact attached-child ClientHello ingress, the complete
 ACK-paced server flight, authenticated client-Finished ingress, protected
-terminal dispositions, and generation-exact TLS socket publication. It remains
-incomplete because the public TLS listener/accept surface has no policy-bearing
-coordinator, and the resulting socket lifecycle has not completed an
-independent peer application-I/O and cleanup journey.
+terminal dispositions, generation-exact TLS socket publication, and atomic
+policy-bearing `TLS-LISTEN`. It remains incomplete because no caller-owned
+bounded operation drives secure accept, and the resulting socket lifecycle has
+not completed an independent peer application-I/O and cleanup journey.
 Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
 root. Application features must not preempt that vertical closure.
@@ -108,12 +108,14 @@ Implemented network components, bottom-up:
     data, X.509 verification, generic ALPN/exporters, native server credential,
     deterministic signed server messages, bounded outbound replay, client
     Finished authentication, exact TCP-child attachment, attached handshake
-    driving, terminal dispositions, and authenticated socket publication; a
-    production accept coordinator and one independent interoperability journey
-    remain
-18. 🔄 **Socket API** — ordinary TCP connect/listen/accept and TLS client
-    connect exist; TLS-marked listen/accept fail closed until secure accepted
-    children are owned end to end by the policy-bearing accept coordinator
+    driving, terminal dispositions, authenticated socket publication, and an
+    atomic credential-pinned listener policy; a bounded accept operation and
+    one independent interoperability journey remain
+18. 🔄 **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
+    and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
+    remains fail closed for TLS descriptors; `SOCK-ACCEPT` remains fail closed
+    for secure listeners until the bounded accept operation owns each child end
+    to end
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 
@@ -278,7 +280,7 @@ CURRENT-SITUATION.
 
 | # | Item | Effort | Priority |
 |---|------|--------|----------|
-| 16–18 | **Secure server closure** — policy-bearing TLS accept coordinator, independent socket application I/O and cleanup, independent peer interop | active vertical; see handoff | Critical |
+| 16–18 | **Secure server closure** — caller-owned bounded TLS accept operation, independent socket application I/O and cleanup, independent peer interop | active vertical; see handoff | Critical |
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
@@ -301,11 +303,12 @@ Secure server closure is the active release path because a remote REPL and
 later listening services otherwise rest on an incomplete server surface.
 Preserve the completed bounded TCP and TLS crypto/message substrate.
 Exact attached-child ingress, the ACK-paced complete server flight, client
-Finished authentication, protected terminal disposition, and atomic TLS socket
-publication are complete. The remaining order is strict: compose those proven
-transactions behind one bounded policy-bearing TLS listener/accept coordinator,
-prove application I/O and cleanup through the published socket, and then
-qualify one independent TLS peer.
+Finished authentication, protected terminal disposition, atomic TLS socket
+publication, and policy-bearing `TLS-LISTEN` are complete. The remaining order
+is strict: drive those proven transactions from the copied listener policy
+through one caller-owned bounded accept operation, prove application I/O and
+cleanup through the published socket, and then qualify one independent TLS
+peer.
 Protocol-maximum capstones, new algorithms, broader TCP, and concurrency work
 are maturity work and must not interrupt this vertical.
 
