@@ -19897,30 +19897,89 @@ class TestKDOSMulticore(unittest.TestCase):
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
 
-        payload = "\n".join(
-            cls._kdos_lines
-            + ["JIT-ON", "ENTER-USERLAND"]
-            + cls._network_lines
-            + ["JIT-OFF"]
-        ) + "\n"
-        data = payload.encode()
-        pos = 0
-        max_steps = 400_000_000
-        total = 0
+        def load_phase(lines, phase, marker_line, marker_output,
+                       max_steps=400_000_000):
+            """Load one source phase and prove it reached a clean REPL idle."""
+            payload = "\n".join(lines + [marker_line]) + "\n"
+            data = payload.encode()
+            output_start = len(buf)
+            pos = 0
+            total = 0
 
-        while total < max_steps:
-            if sys_obj.cpu.halted:
-                break
-            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                if pos < len(data):
-                    chunk = _next_line_chunk(data, pos)
-                    sys_obj.uart.inject_input(chunk)
-                    pos += len(chunk)
-                else:
+            while total < max_steps:
+                if sys_obj.cpu.halted:
                     break
-                continue
-            batch = sys_obj.run_batch(min(100_000, max_steps - total))
-            total += max(batch, 1)
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    if pos < len(data):
+                        chunk = _next_line_chunk(data, pos)
+                        sys_obj.uart.inject_input(chunk)
+                        pos += len(chunk)
+                    else:
+                        break
+                    continue
+                batch = sys_obj.run_batch(min(100_000, max_steps - total))
+                total += max(batch, 1)
+
+            phase_text = uart_text(buf[output_start:])
+            complete = (
+                pos == len(data)
+                and sys_obj.cpu.idle
+                and not sys_obj.cpu.halted
+                and marker_output in phase_text
+            )
+            if not complete:
+                raise AssertionError(
+                    f"multicore {phase} source load exhausted its "
+                    f"{max_steps:,}-step infrastructure budget before a "
+                    f"verified REPL idle (fed {pos}/{len(data)} bytes, "
+                    f"idle={sys_obj.cpu.idle}, halted={sys_obj.cpu.halted})"
+                )
+            if " ? (not found)" in phase_text:
+                raise AssertionError(
+                    f"multicore {phase} source load reported "
+                    "'? (not found)'"
+                )
+            output_lines = {line.strip() for line in phase_text.splitlines()}
+            for diagnostic in (
+                "Dictionary full",
+                "dictionary overflow",
+                "Stack underflow",
+                "Stack overflow",
+                "Return stack overflow",
+                "nested definition",
+            ):
+                if diagnostic in output_lines:
+                    raise AssertionError(
+                        f"multicore {phase} source load reported "
+                        f"{diagnostic!r}"
+                    )
+            if any(
+                line.startswith(("*** BUS FAULT", "*** PRIVILEGE FAULT"))
+                for line in output_lines
+            ):
+                raise AssertionError(
+                    f"multicore {phase} source load reported a machine fault"
+                )
+
+        # KDOS and networking are independent source-load phases, matching
+        # the ordinary networking fixture.  A single unchecked combined
+        # ceiling can otherwise snapshot a partially interpreted dictionary
+        # as these sources grow, making later capstone failures meaningless.
+        load_phase(
+            cls._kdos_lines,
+            "KDOS",
+            "CHAR < EMIT CHAR M EMIT CHAR C EMIT CHAR 1 EMIT CHAR > EMIT",
+            "<MC1>",
+        )
+        load_phase(
+            ["JIT-ON", "ENTER-USERLAND"]
+            + cls._network_lines
+            + ["JIT-OFF"],
+            "networking",
+            "CHAR < EMIT CHAR M EMIT CHAR C EMIT CHAR 2 EMIT CHAR > EMIT",
+            "<MC2>",
+            max_steps=450_000_000,
+        )
 
         # Save snapshot: raw memory + core 0 CPU state + per-core states
         cls._mc_snapshot = (
@@ -19956,8 +20015,18 @@ class TestKDOSMulticore(unittest.TestCase):
         if r19 and r19 < len(mem_bytes):
             sys.uart._tx_ring_base = r19
 
-        # Feed extra commands to core 0
-        payload = "\n".join(extra_lines) + "\nBYE\n"
+        # Feed extra commands to core 0.  A fed byte count alone does not
+        # prove that the interpreter executed the tail before its body budget
+        # expired, so publish a marker immediately before the terminal BYE.
+        marker = "<MC-RUN-COMPLETE>"
+        marker_line = (
+            "CHAR < EMIT CHAR M EMIT CHAR C EMIT CHAR - EMIT "
+            "CHAR R EMIT CHAR U EMIT CHAR N EMIT CHAR - EMIT "
+            "CHAR C EMIT CHAR O EMIT CHAR M EMIT CHAR P EMIT "
+            "CHAR L EMIT CHAR E EMIT CHAR T EMIT CHAR E EMIT "
+            "CHAR > EMIT"
+        )
+        payload = "\n".join(extra_lines + [marker_line, "BYE"]) + "\n"
         data = payload.encode()
         pos = 0
         steps = 0
@@ -19976,7 +20045,20 @@ class TestKDOSMulticore(unittest.TestCase):
             batch = sys.run_batch(min(100_000, max_steps - steps))
             steps += max(batch, 1)
 
-        return uart_text(buf)
+        text = uart_text(buf)
+        complete = (
+            pos == len(data)
+            and sys.cpu.halted
+            and marker in text
+        )
+        if not complete:
+            raise AssertionError(
+                "multicore body exhausted its "
+                f"{max_steps:,}-step budget before its terminal marker "
+                f"(fed {pos}/{len(data)} bytes, idle={sys.cpu.idle}, "
+                f"halted={sys.cpu.halted})"
+            )
+        return text
 
     # --- Banner & version ---
 
@@ -20234,19 +20316,15 @@ class TestKDOSMulticore(unittest.TestCase):
 
     def test_tls_server_flight_cross_core_cancel_is_retryable(self):
         """A peer-core signer cancellation preserves phase one for retry."""
-        lines, _ = TestKDOSTLSServerClientHello._server_phase_one_lines()
-        lines += [
+        phase_lines, _ = TestKDOSTLSServerClientHello._server_phase_one_lines()
+        lines = phase_lines[:-8] + [
+            phase_lines[-8],
             "VARIABLE tfc-flight-ior VARIABLE tfc-cancel-ior",
             "VARIABLE tfc-attempts VARIABLE tfc-ready VARIABLE tfc-done",
             "CREATE tfc-context /TLS-CTX ALLOT",
             "CREATE tfc-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
             "CREATE tfc-meta TLS-SERVER-META-CAPACITY ALLOT",
             "CREATE tfc-zero80 80 ALLOT tfc-zero80 80 0 FILL",
-            "server-ctx @ tfc-context /TLS-CTX MOVE",
-            "server-ctx @ TLS-RXW.SERVER-LEDGER tfc-ledger "
-            "TLS-SERVER-LEDGER-CAPACITY MOVE",
-            "server-ctx @ TLS-RXW.SERVER-META tfc-meta "
-            "TLS-SERVER-META-CAPACITY MOVE",
             ": tfc-cancel-worker",
             "  -1 tfc-ready !",
             "  BEGIN",
@@ -20262,6 +20340,14 @@ class TestKDOSMulticore(unittest.TestCase):
             "    DUP TLS-CREDENTIAL-E-BUSY =",
             "  WHILE DROP REPEAT",
             "  tfc-cancel-ior ! ;",
+        ]
+        lines += phase_lines[-7:]
+        lines += [
+            "server-ctx @ tfc-context /TLS-CTX MOVE",
+            "server-ctx @ TLS-RXW.SERVER-LEDGER tfc-ledger "
+            "TLS-SERVER-LEDGER-CAPACITY MOVE",
+            "server-ctx @ TLS-RXW.SERVER-META tfc-meta "
+            "TLS-SERVER-META-CAPACITY MOVE",
             "' tfc-cancel-worker 1 CORE-RUN",
             "BEGIN tfc-ready @ UNTIL",
             "server-ctx @ TLS-SERVER-PREPARE-FLIGHT tfc-flight-ior !",
@@ -21444,7 +21530,7 @@ class TestKDOSTLSRecord(_KDOSNetworkTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=968 ", text)
+        self.assertIn("SZ=1000 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -22205,9 +22291,9 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
         self.assertIn("WRONG=-1 ", text)
 
     def test_ctx_size_updated(self):
-        """TLS context includes an explicit peer-authentication gate."""
+        """TLS context includes transport and socket incarnation authority."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=968 ", text)
+        self.assertIn("SZ=1000 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -22675,7 +22761,7 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
     def _established_context():
         return [
             "VARIABLE exp-ctx 0 TLS-CTX@ exp-ctx !",
-            "exp-ctx @ /TLS-CTX 0 FILL",
+            "exp-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
             "TLS-ROLE-CLIENT exp-ctx @ TLS-CTX.ROLE !",
             "TLS-HASH-SHA256 exp-ctx @ TLS-CTX.HASH-ID !",
             "TLS-SUITE-AES128-SHA256 exp-ctx @ TLS-CTX.SUITE !",
@@ -22986,7 +23072,10 @@ class TestKDOSTLSExporter(_KDOSNetworkTestBase):
         lines += self._forth_bytes("local-label", b"test")
         lines += [
             "local-exp-master exp-ctx @ TLS-CTX.EXPORTER-MS 32 MOVE",
-            "0 TCB-N exp-ctx @ TLS-CTX.TCB !",
+            "0 TCB-N TCB-CLAIM TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "exp-ctx @ 0 TCB-N _TLS-ATTACH-TCB "
+            ">R TLS-OWNER-RELEASE R> ?DUP IF THROW THEN",
             "1 0 TCB-N TCB.SND-NXT ! 0 0 TCB-N TCB.SND-UNA !",
             "exp-ctx @ 2 40 TLS-SEND-ALERT",
             ': local-zero? 32 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN '
@@ -24954,6 +25043,29 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         return lines, hello
 
+    def test_server_phase_leaves_dictionary_allocations_reachable(self):
+        """Server preparation cannot strand later cold-cache definitions."""
+        lines, _ = self._server_phase_one_lines()
+        lines += [
+            "VARIABLE tfc-flight-ior VARIABLE tfc-cancel-ior",
+            "VARIABLE tfc-attempts VARIABLE tfc-ready VARIABLE tfc-done",
+            "VARIABLE tfc-here-before VARIABLE tfc-here-after",
+            "HERE tfc-here-before !",
+            "CREATE tfc-context /TLS-CTX ALLOT",
+            "CREATE tfc-ledger TLS-SERVER-LEDGER-CAPACITY ALLOT",
+            "CREATE tfc-meta TLS-SERVER-META-CAPACITY ALLOT",
+            "CREATE tfc-zero80 80 ALLOT",
+            "HERE tfc-here-after !",
+            'tfc-here-after @ tfc-here-before @ - '
+            '/TLS-CTX TLS-SERVER-LEDGER-CAPACITY + '
+            'TLS-SERVER-META-CAPACITY + 80 + >= ." DICT-ALLOC=" .',
+            '." DICT-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn(" ? (not found)", text)
+        self.assertIn("DICT-ALLOC=-1 ", text)
+        self.assertIn("DICT-DEPTH=0 ", text)
+
     @staticmethod
     def _server_ingress_support_lines() -> list[str]:
         """Forth helpers for driving the socket-independent server ingress."""
@@ -25135,6 +25247,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         """Server setup is one transaction and no cleanup loses its lease."""
         lines, der_chain = self._provision_lines()
         lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += self._forth_bytes("server-alpn-reuse", self.ALPN)
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ 0 1 "
@@ -25144,6 +25257,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
             "TLS-SERVER-CONTEXT-BEGIN",
             '." BEGIN-IOR=" .',
+            '." CTX-GEN1=" server-ctx @ TLS-CTX.GENERATION @ .',
             "server-alpn 8 120 FILL",
             '." ROLE=" server-ctx @ TLS-CTX.ROLE @ .',
             '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
@@ -25191,8 +25305,15 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." CLOSE=" .',
             '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             '." STATE-END=" server-ctx @ TLS-CTX.STATE @ .',
+            '." CTX-GEN-CLOSED=" server-ctx @ TLS-CTX.GENERATION @ .',
             '." META-END=" server-ctx @ TLS-RXW.SERVER-META '
             'TSM.FLAGS + @ .',
+            'server-ctx @ tc-slot @ tc-gen @ server-alpn-reuse 8 '
+            'TLS-SERVER-CONTEXT-BEGIN ." REBEGIN=" .',
+            '." CTX-GEN2=" server-ctx @ TLS-CTX.GENERATION @ .',
+            '." REFS2=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'server-ctx @ TLS-ABORT ." REABORT=" .',
+            '." REFS-REABORT=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             "tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE",
             '." DELETE=" .',
             '." BEGIN-FINAL-DEPTH=" DEPTH .',
@@ -25200,7 +25321,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         text = self._run_kdos(lines)
         for token in (
             "INIT=0 ", "NULL-IOR=-4205 ", "REFS0=0 ",
-            "BEGIN-IOR=0 ", "ROLE=2 ", "STATE=1 ", "HS=10 ",
+            "BEGIN-IOR=0 ", "CTX-GEN1=1 ",
+            "ROLE=2 ", "STATE=1 ", "HS=10 ",
             "CFG=rabbit/1", "H1=1 ", "GEN=1 ", "CHAIN-A=-1 ",
             f"CHAIN-U={len(der_chain)} ", "COUNT=1 ", "SCHEME=1027 ",
             f"WIRE={len(der_chain) + 5} ", "FLAGS=1 ", "REFS1=1 ",
@@ -25211,7 +25333,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "LOCK-IOR=0 ", "BUSY-CLOSE=-4206 ", "REFS-BUSY=1 ",
             "FLAGS-BUSY=1 ", "H1-BUSY=1 ",
             "CLOSE=0 ", "REFS-END=0 ", "STATE-END=0 ",
-            "META-END=0 ", "DELETE=0 ",
+            "CTX-GEN-CLOSED=1 ", "META-END=0 ",
+            "REBEGIN=0 ", "CTX-GEN2=2 ", "REFS2=1 ",
+            "REABORT=0 ", "REFS-REABORT=0 ", "DELETE=0 ",
             "BEGIN-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
@@ -26274,6 +26398,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." PENDING-RD=" server-ctx @ TLS-CTX.RD-KEY '
             'expected-client-hs-key 16 _XC-BYTES= .',
             "CREATE ingress-gate-record 64 ALLOT",
+            "CREATE ingress-gate-finished 64 ALLOT",
+            "ingress-gate-finished 64 165 FILL",
             "server-ctx @ TLS-CT-HANDSHAKE ingress-byte 1",
             'ingress-gate-record TLS-ENCRYPT-RECORD ." PREBEGIN-ENC=" .',
             'server-ctx @ TLS-KS-HANDSHAKE ." PREBEGIN-HS=" .',
@@ -26282,6 +26408,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "0 ingress-begin",
             '." BEGIN=" ingress-begin-ior @ .',
             '." BEGIN-POINTERS=" _TSCFI-CTX @ _TSCFI-BUDGET @ OR .',
+            'server-ctx @ ingress-gate-finished TLS-BUILD-FINISHED '
+            '." GATE-FIN=" .',
+            'ingress-gate-finished C@ ." GATE-FIN-FIRST=" .',
             '_TCM-CTX 1 ingress-preflight ." ALIAS-TCM=" .',
             '_VERIFY-ACC 1 ingress-preflight ." ALIAS-VERIFY=" .',
             '_TRSV-REC 1 ingress-preflight ." ALIAS-RECORD-META=" .',
@@ -26396,6 +26525,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "PREP=0 ", "EMIT-IOR=0 ", "EMIT-PROGRESS=2 ",
             "PENDING-HS=7 ", "PENDING-RD=-1 ", "BEGIN=0 ",
             "BEGIN-POINTERS=0 ",
+            "GATE-FIN=0 ", "GATE-FIN-FIRST=165 ",
             "PREBEGIN-ENC=0 ", "PREBEGIN-HS=-4206 ",
             "PREBEGIN-RD-SEQ=0 ", "PREBEGIN-WR-SEQ=0 ",
             "ALIAS-TCM=-4213 ", "ALIAS-VERIFY=-4213 ",
@@ -27013,6 +27143,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "VARIABLE lifecycle-decrypt-u VARIABLE lifecycle-ks-hs",
             "VARIABLE lifecycle-ks-app VARIABLE lifecycle-alpn",
             "VARIABLE lifecycle-ee VARIABLE lifecycle-alert",
+            "VARIABLE lifecycle-finished",
             "VARIABLE lifecycle-send-alert VARIABLE lifecycle-epoch-ok",
             "VARIABLE lifecycle-nested-progress VARIABLE lifecycle-nested-ior",
             "VARIABLE lifecycle-bytes-ok VARIABLE lifecycle-state-ok",
@@ -27029,6 +27160,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "  lifecycle-ctx @ _TLS-SERVER-PIN-RELEASE lifecycle-pin !",
             "  lifecycle-ctx @ TLS-CT-HANDSHAKE lifecycle-copy 1",
             "  lifecycle-record TLS-ENCRYPT-RECORD lifecycle-encrypt !",
+            "  lifecycle-ctx @ lifecycle-record TLS-BUILD-FINISHED",
+            "  lifecycle-finished !",
             "  lifecycle-ctx @ lifecycle-copy lifecycle-u @ lifecycle-plain",
             "  TLS-DECRYPT-RECORD",
             "  lifecycle-decrypt-u ! lifecycle-decrypt-type !",
@@ -27062,6 +27195,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "  server-ctx @ ['] lifecycle-send",
             "  TLS-SERVER-FLIGHT-STEP-WITH ;",
             'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            'server-ctx @ lifecycle-record TLS-BUILD-FINISHED '
+            '." FLIGHT-FINISHED=" .',
             "server-ctx @ TLS-CTX.WR-KEY lifecycle-epoch 112 MOVE",
             "TLS-OWNER-TRY DROP lifecycle-step",
             '." OUTER-HELD-IOR=" . ." OUTER-HELD-PROGRESS=" .',
@@ -27075,6 +27210,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." ABORT=" lifecycle-abort @ .',
             '." PIN=" lifecycle-pin @ .',
             '." ENCRYPT=" lifecycle-encrypt @ .',
+            '." FINISHED=" lifecycle-finished @ .',
             '." DECRYPT-TYPE=" lifecycle-decrypt-type @ .',
             '." DECRYPT-U=" lifecycle-decrypt-u @ .',
             '." KS-HS=" lifecycle-ks-hs @ .',
@@ -27102,13 +27238,14 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines, max_steps=250_000_000)
         for token in (
-            "PREP=0 ",
+            "PREP=0 ", "FLIGHT-FINISHED=0 ",
             "OUTER-HELD-IOR=-4206 OUTER-HELD-PROGRESS=0 ",
             "OUTER-HELD-DEPTH=1 ",
             "STEP-IOR=0 STEP-PROGRESS=1 ", "CALLBACK-OWNER=0 ",
             "STATUS=-4206 ", "CLOSE=-4206 ", "ABORT=3 ",
             "PIN=-4329 ", "NESTED-IOR=-4206 ",
-            "ENCRYPT=0 ", "DECRYPT-TYPE=-1 ", "DECRYPT-U=0 ",
+            "ENCRYPT=0 ", "FINISHED=0 ",
+            "DECRYPT-TYPE=-1 ", "DECRYPT-U=0 ",
             "KS-HS=-4206 ", "KS-APP=-4206 ", "ALPN=-4206 ",
             "EE=-1 ", "ALERT=-4206 ", "SEND-ALERT=-4206 ",
             "EPOCH=-1 ",
@@ -29399,8 +29536,16 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
     """Tests for §16.10/§16.11 TLS app data, TLS-SEND-DATA, TLS-RECV-DATA,
     TLS-CLOSE, and TLS-SEND-ALERT."""
 
-    _TLS_ESTAB_SETUP = [
+    _TLS_TCB_FIXTURE = [
+        ": tls-test-attach ( ctx tcb state -- )"
+        " >R DUP TCB-CLAIM R> OVER TCB.STATE !"
+        " TLS-OWNER-TRY ?DUP IF THROW THEN"
+        " _TLS-ATTACH-TCB >R TLS-OWNER-RELEASE R> ?DUP IF THROW THEN ;",
+    ]
+
+    _TLS_ESTAB_SETUP = _TLS_TCB_FIXTURE + [
         "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        "test-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
         "TLS-ROLE-CLIENT test-ctx @ TLS-CTX.ROLE !",
         "TLS-HASH-SHA3-256 test-ctx @ TLS-CTX.HASH-ID !",
         "TLS-SUITE-X25519-SHA3 test-ctx @ TLS-CTX.SUITE !",
@@ -29422,8 +29567,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
     _TLS_TWO_CTX_SETUP = ["TCP-INIT-ALL"] + _TLS_ESTAB_SETUP + [
         "test-ctx @ TLS-RX-WIPE",
         "VARIABLE test-ctx-b 1 TLS-CTX@ test-ctx-b !",
+        "test-ctx-b @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
         "test-ctx-b @ TLS-RX-WIPE",
-        "test-ctx-b @ /TLS-CTX 0 FILL",
         "TLS-ROLE-CLIENT test-ctx-b @ TLS-CTX.ROLE !",
         "TLS-HASH-SHA3-256 test-ctx-b @ TLS-CTX.HASH-ID !",
         "TLS-SUITE-X25519-SHA3 test-ctx-b @ TLS-CTX.SUITE !",
@@ -29435,8 +29580,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         "0 test-ctx-b @ TLS-CTX.RD-SEQ !",
         "1 test-ctx-b @ TLS-CTX.PEER-AUTH !",
         "TLSS-ESTABLISHED test-ctx-b @ TLS-CTX.STATE !",
-        "0 TCB-N test-ctx @ TLS-CTX.TCB !",
-        "1 TCB-N test-ctx-b @ TLS-CTX.TCB !",
+        "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
+        "test-ctx-b @ 1 TCB-N TCPS-ESTABLISHED tls-test-attach",
     ]
 
     @staticmethod
@@ -29545,9 +29690,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         """A user send with no data is a side-effect-free no-op."""
         sent = []
         lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "CREATE tls-empty-msg 1 ALLOT  65 tls-empty-msg C!",
             "90 TLS-SEND-REC C!",
             "VARIABLE tls-send-depth  DEPTH tls-send-depth !",
@@ -29572,13 +29716,12 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
             "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
             "CREATE tls-no-peer 4 ALLOT  10 0 0 77 tls-no-peer IP!",
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
             "tls-no-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
             "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "CREATE tls-failed-msg 4 ALLOT  tls-failed-msg 4 65 FILL",
             'test-ctx @ tls-failed-msg 4 TLS-SEND-DATA ."  actual=" .',
             'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
@@ -29597,13 +29740,12 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
             "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
             "CREATE alert-no-peer 4 ALLOT  10 0 0 77 alert-no-peer IP!",
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
             "alert-no-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "4096 0 TCB-N TCB.RCV-WND !",
             "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "test-ctx @ 1 0 TLS-SEND-ALERT",
             'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
             '0 TCB-N TCB.SND-NXT @ ."  next=" .',
@@ -29618,8 +29760,8 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         """Terminal TCP delivery failure becomes sticky TLS status and cleanup."""
         sent = []
         lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "TCPS-FAILED 0 TCB-N TCB.STATE !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "CREATE exhausted-msg 4 ALLOT  exhausted-msg 4 65 FILL",
             'test-ctx @ exhausted-msg 4 TLS-SEND-DATA ."  actual=" .',
             'test-ctx @ TLS-IO-STATUS ."  status=" .',
@@ -29648,29 +29790,31 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "CREATE alert-peer 4 ALLOT  10 0 0 77 alert-peer IP!",
             "CREATE alert-mac 6 ALLOT  alert-mac 6 170 FILL",
             "alert-peer alert-mac ARP-INSERT",
-            "TCPS-CLOSE-WAIT 0 TCB-N TCB.STATE !",
+            "test-ctx @ 0 TCB-N TCPS-CLOSE-WAIT tls-test-attach",
             "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
             "alert-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
             "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
             "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "TLSS-CLOSING test-ctx @ TLS-CTX.STATE !",
             "0 test-ctx @ TLS-CTX.PEER-AUTH !",
             "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
-            "test-ctx @ 1 0 TLS-SEND-ALERT",
+            'test-ctx @ TLS-CLOSE-TRY ."  close=" .',
             # The closing-state exception is deliberately limited to the
             # warning close_notify tuple; no other alert may consume keys.
             "test-ctx @ 2 40 TLS-SEND-ALERT",
             "test-ctx @ 1 1 TLS-SEND-ALERT",
             'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            'test-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
             'test-ctx @ TLS-CTX.WR-KEY 31 + C@ ."  key=" .',
             '0 TCB-N TCB.SND-NXT @ ."  next=" .',
             '0 TCB-N TCB.STATE @ ."  state=" .',
         ]
         text = self._run_kdos(
             lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("close=-4219 ", text)
         self.assertIn("seq=0 ", text)
+        self.assertIn("phase=1 ", text)
         self.assertIn("key=0 ", text)
         self.assertIn("next=124 ", text)
         self.assertIn("state=7 ", text)
@@ -29689,12 +29833,11 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "CREATE pending-peer 4 ALLOT  10 0 0 77 pending-peer IP!",
             "CREATE pending-mac 6 ALLOT  pending-mac 6 170 FILL",
             "pending-peer pending-mac ARP-INSERT",
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "pending-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "100 0 TCB-N TCB.SND-UNA !",
             "105 0 TCB-N TCB.SND-NXT !",
             "4096 0 TCB-N TCB.SND-WND !  TCP-MSS 0 TCB-N TCB.CWND !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
             "CREATE pending-msg 4 ALLOT  pending-msg 4 65 FILL",
             'test-ctx @ pending-msg 4 TLS-SEND-DATA ."  sent=" .',
             'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
@@ -29744,6 +29887,37 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("app=2 ", text)
         self.assertIn("first=79 ", text)
         self.assertIn("second=75 ", text)
+
+    def test_tls_socket_recv_processes_post_handshake_under_descriptor_owner(self):
+        """Socket receive uses the owner-held post-handshake core, not the raw gate."""
+        ticket = self._new_session_ticket(
+            nonce=b"socket", ticket=b"published-ticket")
+        lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP
+        lines += self._encrypted_record_stream([
+            ("TLS-CT-HANDSHAKE", ticket),
+        ])
+        lines += [
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
+            "VARIABLE ph-sd SOCK-TYPE-TLS SOCKET ph-sd !",
+            "ph-sd @ SOCK-CONNECT-CLAIM DROP",
+            "TLS-OWNER-TRY DROP",
+            "ph-sd @ test-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            "CREATE ph-socket-out 8 ALLOT",
+            'ph-sd @ ph-socket-out 8 RECV ."  result=" .',
+            'test-ctx @ TLS-CTX.RX-HS-LEN @ ."  held=" .',
+            'test-ctx @ TLS-CTX.RD-SEQ @ ."  seq=" .',
+            'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+            'test-ctx @ TLS-CTX.SOCKET-OWNER @ ph-sd @ = ."  owned=" .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "result=0 ", "held=0 ", "seq=1 ", "error=0 ",
+            "state=2 ", "auth=1 ", "owned=-1 ",
+        ):
+            self.assertIn(token, text)
 
     def test_tls_recv_reassembles_fragmented_new_session_ticket(self):
         """An authenticated ticket may span headers and protected records."""
@@ -29972,15 +30146,15 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         lines += self._encrypted_context_records(
             "test-ctx-b @", "own_b", [("TLS-CT-APP-DATA", b"BRAVO")])
         lines += [
-            "0 TCB-N own_a_rec0 3 TCP-RX-PUSH DROP",
-            "1 TCB-N own_b_rec0 own_b_rlen0 @ TCP-RX-PUSH DROP",
+            "0 TCB-N own_a_rec0 3 (TCP-RX-PUSH) DROP",
+            "1 TCB-N own_b_rec0 own_b_rlen0 @ (TCP-RX-PUSH) DROP",
             "CREATE own_a_out 8 ALLOT CREATE own_b_out 8 ALLOT",
             'test-ctx @ own_a_out 8 TLS-RECV-DATA ."  AWAIT=" .',
             'test-ctx @ TLS-CTX.RX-REC-LEN @ ."  AHELD=" .',
             'test-ctx-b @ own_b_out 8 TLS-RECV-DATA ."  B=" .',
             'own_b_out C@ ."  B0=" . own_b_out 4 + C@ ."  B4=" .',
             'test-ctx @ TLS-CTX.RX-REC-LEN @ ."  ASTILL=" .',
-            "0 TCB-N own_a_rec0 3 + own_a_rlen0 @ 3 - TCP-RX-PUSH DROP",
+            "0 TCB-N own_a_rec0 3 + own_a_rlen0 @ 3 - (TCP-RX-PUSH) DROP",
             'test-ctx @ own_a_out 8 TLS-RECV-DATA ."  A=" .',
             'own_a_out C@ ."  A0=" . own_a_out 4 + C@ ."  A4=" .',
             'test-ctx @ TLS-CTX.RD-SEQ @ ."  ASEQ=" .',
@@ -30012,7 +30186,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "3 exact-stream 7 + C! 3 exact-stream 8 + C!",
             "0 exact-stream 9 + C! 1 exact-stream 10 + C!",
             "66 exact-stream 11 + C!",
-            "0 TCB-N exact-stream 12 TCP-RX-PUSH DROP",
+            "0 TCB-N exact-stream 12 (TCP-RX-PUSH) DROP",
             '0 TCB-N TLS-READ-RECORD ."  FIRST=" .',
             'TLS-RBUF-LEN @ ."  HELD1=" .',
             '0 TCB-N TCB.RX-COUNT @ ."  TCP1=" .',
@@ -30042,7 +30216,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             "CREATE fail_a_bad 5 ALLOT fail_a_bad 5 0 FILL",
             "TLS-CT-APP-DATA fail_a_bad C!",
             "3 fail_a_bad 1+ C! 2 fail_a_bad 2 + C!",
-            "0 TCB-N fail_a_bad 5 TCP-RX-PUSH DROP",
+            "0 TCB-N fail_a_bad 5 (TCP-RX-PUSH) DROP",
             "CREATE fail_a_out 8 ALLOT",
             'test-ctx @ fail_a_out 8 TLS-RECV-DATA ."  AFAIL=" .',
             'test-ctx @ TLS-CTX.STATE @ ."  ASTATE=" .',
@@ -30089,7 +30263,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             # candidate-plaintext path before authentication refuses it.
             "badtag_a_rec0 badtag_a_rlen0 @ 1- + "
             "DUP C@ 1 XOR SWAP C!",
-            "0 TCB-N badtag_a_rec0 badtag_a_rlen0 @ TCP-RX-PUSH DROP",
+            "0 TCB-N badtag_a_rec0 badtag_a_rlen0 @ (TCP-RX-PUSH) DROP",
             "TLS-PLAIN-BUF 16640 90 FILL",
             ": badtag-plain-zero? 16640 0 DO "
             "TLS-PLAIN-BUF I + C@ IF 0 UNLOOP EXIT THEN LOOP -1 ;",
@@ -30246,7 +30420,6 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
     def test_tls_abort_wipes_only_the_owned_rx_workspace(self):
         """Context reclamation erases its full slice without touching a peer."""
         lines = list(self._TLS_TWO_CTX_SETUP) + [
-            "0 test-ctx @ TLS-CTX.TCB ! 0 test-ctx-b @ TLS-CTX.TCB !",
             "test-ctx @ TLS-RXW@ /TLS-RX-WORKSPACE 165 FILL",
             "test-ctx-b @ TLS-RXW@ /TLS-RX-WORKSPACE 90 FILL",
             ": rx-zero? /TLS-RX-WORKSPACE 0 DO "
@@ -30291,20 +30464,20 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
             '0 TLS-CTX@ TLS-RXW@ - .',
             '."  END=" 0 TLS-CTX@ TLS-RXW.SERVER-META '
             'TLS-SERVER-META-CAPACITY + 0 TLS-CTX@ TLS-RXW@ - .',
-            '."  CAP0=" 237567 NET-XMEM-CAPACITY .',
-            '."  CAP1=" 237568 NET-XMEM-CAPACITY .',
-            '."  EDGE1=" 475103 NET-XMEM-CAPACITY .',
-            '."  CAP2=" 475104 NET-XMEM-CAPACITY .',
+            '."  CAP0=" 237727 NET-XMEM-CAPACITY .',
+            '."  CAP1=" 237728 NET-XMEM-CAPACITY .',
+            '."  EDGE1=" 475439 NET-XMEM-CAPACITY .',
+            '."  CAP2=" 475440 NET-XMEM-CAPACITY .',
             '." MAX=" TLS-MAX-CTX .',
             '." FIRST=" 0 TLS-CTX@ TLS-RXW@ TLS-RX-WORKSPACES @ = .',
         ])
-        self.assertIn("CTX=968 ", text)
+        self.assertIn("CTX=1000 ", text)
         self.assertIn("RX=230688 ", text)
         self.assertIn("STRIDE=230688 ", text)
-        self.assertIn("COST=237552 ", text)
-        self.assertIn("PHYS1=237568 ", text)
-        self.assertIn("PHYS2=475104 ", text)
-        self.assertIn("PHYS3=712672 ", text)
+        self.assertIn("COST=237720 ", text)
+        self.assertIn("PHYS1=237728 ", text)
+        self.assertIn("PHYS2=475440 ", text)
+        self.assertIn("PHYS3=713168 ", text)
         self.assertIn("CHCAP=131146 ", text)
         self.assertIn("BITMAP=8192 ", text)
         self.assertIn("LEDGER=512 ", text)
@@ -30326,8 +30499,7 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
     def test_tls_recv_reports_truncation_after_close_wait_drain(self):
         """Bare TCP FIN drains retained plaintext, then fails without close_notify."""
         lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
-            "TCPS-CLOSE-WAIT 0 TCB-N TCB.STATE !",
-            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "test-ctx @ 0 TCB-N TCPS-CLOSE-WAIT tls-test-attach",
             "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
             "3 test-ctx @ TLS-CTX.APP-LEN !",
             "0 test-ctx @ TLS-CTX.APP-OFF !",
@@ -30354,74 +30526,208 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         lines = self._TLS_ESTAB_SETUP + [
             # Can't fully close without TCP, but check state guard
             "TLSS-NONE test-ctx @ TLS-CTX.STATE !",
-            "test-ctx @ TLS-CLOSE",
+            'test-ctx @ TLS-CLOSE ." IOR=" .',
             '." S=" test-ctx @ TLS-CTX.STATE @ .',   # should remain NONE
         ]
         text = self._run_kdos(lines)
+        self.assertIn("IOR=0 ", text)
         self.assertIn("S=0 ", text)   # NONE — guard prevents close
 
     def test_tls_close_preserves_graceful_tcp_teardown(self):
-        """TLS-CLOSE should still initiate FIN teardown, not abort its TCB."""
+        """TLS close retains close_notify until ACK, then starts TCP FIN."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 77]
         sent = []
-        lines = [
-            "TCP-INIT-ALL ARP-CLEAR",
+        record_acked = False
+
+        def acknowledge_close_notify(nic, frame):
+            nonlocal record_acked
+            raw = bytes(frame)
+            sent.append(raw)
+            parsed = TestKDOSNetStack._parse_tcp_frame(raw)
+            if parsed is None or not parsed['payload'] or record_acked:
+                return
+            record_acked = True
+            ack = TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                443, 40000, parsed['ack'],
+                (parsed['seq'] + len(parsed['payload'])) & 0xFFFFFFFF,
+                TestKDOSNetStack.TCP_ACK, 4096)
+            nic.inject_frame(ack)
+
+        lines = ["TCP-INIT-ALL ARP-CLEAR"] + list(self._TLS_ESTAB_SETUP) + [
             "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
             "0 0 0 0 GW-IP IP!",
             "CREATE tls-close-ip 4 ALLOT  10 0 0 77 tls-close-ip IP!",
             "CREATE tls-close-mac 6 ALLOT  tls-close-mac 6 170 FILL",
             "tls-close-ip tls-close-mac ARP-INSERT",
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "VARIABLE tls-close-ctx  test-ctx @ tls-close-ctx !",
+            "tls-close-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
             "tls-close-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
-            "1234 0 TCB-N TCB.SND-NXT !  5678 0 TCB-N TCB.RCV-NXT !",
-            "4096 0 TCB-N TCB.RCV-WND !",
-            "VARIABLE tls-close-ctx  0 TLS-CTX@ tls-close-ctx !",
-            "tls-close-ctx @ /TLS-CTX 0 FILL",
-            "TLSS-HANDSHAKE tls-close-ctx @ TLS-CTX.STATE !",
-            "0 TCB-N tls-close-ctx @ TLS-CTX.TCB !",
-            "tls-close-ctx @ TLS-CLOSE",
+            "1234 0 TCB-N TCB.SND-UNA !  1234 0 TCB-N TCB.SND-NXT !",
+            "5678 0 TCB-N TCB.RCV-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !  4096 0 TCB-N TCB.SND-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !",
+            'tls-close-ctx @ TLS-CLOSE-TRY ."  first=" .',
+            '0 TCB-N TCB.STATE @ ."  retained-state=" .',
+            'tls-close-ctx @ TLS-CTX.STATE @ ."  closing-state=" .',
+            '0 TCB-N TCB.TX-LEN @ 0> ."  retained=" .',
+            "5 TCP-POLL-WAIT",
+            'tls-close-ctx @ TLS-CLOSE-TRY ."  second=" .',
             '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
             'tls-close-ctx @ TLS-CTX.STATE @ ."  ctx-state=" .',
         ]
-        text = self._run_kdos(
-            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        text = self._run_kdos(lines, nic_tx_callback=acknowledge_close_notify)
+        self.assertIn("first=-4219 ", text)  # close_notify is in flight
+        self.assertIn("retained-state=4 ", text)  # still ESTABLISHED
+        self.assertIn("closing-state=3 ", text)  # TLS write epoch revoked
+        self.assertIn("retained=-1 ", text)
+        self.assertIn("second=0 ", text)
         self.assertIn("tcb-state=5 ", text)  # FIN-WAIT-1
         self.assertIn("ctx-state=0 ", text)  # context wiped
         tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
         tcp_frames = [f for f in tcp_frames if f is not None]
-        self.assertEqual(len(tcp_frames), 1)
+        self.assertEqual(len(tcp_frames), 2)
         self.assertEqual(tcp_frames[0]['flags'],
+                         TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK)
+        self.assertGreater(len(tcp_frames[0]['payload']), 0)
+        self.assertEqual(tcp_frames[1]['flags'],
                          TestKDOSNetStack.TCP_FIN | TestKDOSNetStack.TCP_ACK)
+        self.assertEqual(tcp_frames[1]['payload'], b'')
+
+    def test_tls_close_final_completes_acknowledged_graceful_close(self):
+        """Terminal cleanup drives retained close_notify through ACK and FIN."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 77]
+        sent = []
+        record_acked = False
+
+        def acknowledge_close_notify(nic, frame):
+            nonlocal record_acked
+            raw = bytes(frame)
+            sent.append(raw)
+            parsed = TestKDOSNetStack._parse_tcp_frame(raw)
+            if parsed is None or not parsed['payload'] or record_acked:
+                return
+            record_acked = True
+            nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                443, 40000, parsed['ack'],
+                (parsed['seq'] + len(parsed['payload'])) & 0xFFFFFFFF,
+                TestKDOSNetStack.TCP_ACK, 4096))
+
+        lines = ["TCP-INIT-ALL ARP-CLEAR"] + list(self._TLS_ESTAB_SETUP) + [
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE final-ip 4 ALLOT 10 0 0 77 final-ip IP!",
+            "CREATE final-mac 6 ALLOT final-mac 6 170 FILL",
+            "final-ip final-mac ARP-INSERT",
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
+            "40000 0 TCB-N TCB.LOCAL-PORT ! 443 0 TCB-N TCB.REMOTE-PORT !",
+            "final-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "1234 0 TCB-N TCB.SND-UNA ! 1234 0 TCB-N TCB.SND-NXT !",
+            "5678 0 TCB-N TCB.RCV-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND ! 4096 0 TCB-N TCB.SND-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !",
+            "VARIABLE final-depth DEPTH final-depth !",
+            'test-ctx @ TLS-CLOSE-FINAL ."  ior=" .',
+            'DEPTH final-depth @ = ."  balanced=" .',
+            '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            'test-ctx @ TLS-CTX-CLAIMED? ."  ctx-live=" .',
+            'test-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
+        ]
+        text = self._run_kdos(lines, nic_tx_callback=acknowledge_close_notify)
+        for token in (
+            "ior=0 ", "balanced=-1 ", "tcb-state=5 ", "ctx-live=0 ",
+            "phase=-1 ",
+        ):
+            self.assertIn(token, text)
+        tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertEqual([f['flags'] for f in tcp_frames], [
+            TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+            TestKDOSNetStack.TCP_FIN | TestKDOSNetStack.TCP_ACK,
+        ])
+
+    def test_tls_close_final_forces_exact_abort_when_peer_never_acks(self):
+        """Terminal cleanup never discards a still-live unacknowledged context."""
+        sent = []
+        lines = ["TCP-INIT-ALL ARP-CLEAR"] + list(self._TLS_ESTAB_SETUP) + [
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE fallback-ip 4 ALLOT 10 0 0 77 fallback-ip IP!",
+            "CREATE fallback-mac 6 ALLOT fallback-mac 6 187 FILL",
+            "fallback-ip fallback-mac ARP-INSERT",
+            "test-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
+            "40000 0 TCB-N TCB.LOCAL-PORT ! 443 0 TCB-N TCB.REMOTE-PORT !",
+            "fallback-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA ! 100 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT ! 4096 0 TCB-N TCB.RCV-WND !",
+            "4096 0 TCB-N TCB.SND-WND ! TCP-MSS 0 TCB-N TCB.CWND !",
+            "VARIABLE fallback-depth DEPTH fallback-depth !",
+            'test-ctx @ TLS-CLOSE-FINAL ."  ior=" .',
+            'DEPTH fallback-depth @ = ."  balanced=" .',
+            '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            'test-ctx @ TLS-CTX-CLAIMED? ."  ctx-live=" .',
+            'test-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        for token in (
+            "ior=0 ", "balanced=-1 ", "tcb-state=0 ", "ctx-live=0 ",
+            "phase=-1 ",
+        ):
+            self.assertIn(token, text)
+        tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertGreaterEqual(len(tcp_frames), 2)
+        self.assertEqual(tcp_frames[0]['flags'],
+                         TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK)
+        self.assertEqual(tcp_frames[-1]['flags'],
+                         TestKDOSNetStack.TCP_RST | TestKDOSNetStack.TCP_ACK)
 
     def test_tls_abort_reclaims_tcb_notifies_and_wipes_context(self):
         """TLS-ABORT should pass through cached-route RST and erase secrets."""
         sent = []
-        lines = [
+        lines = list(self._TLS_TCB_FIXTURE) + [
             "TCP-INIT-ALL ARP-CLEAR",
             "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
             "0 0 0 0 GW-IP IP!",
             "CREATE tls-abort-ip 4 ALLOT  10 0 0 77 tls-abort-ip IP!",
             "CREATE tls-abort-mac 6 ALLOT  tls-abort-mac 6 187 FILL",
             "tls-abort-ip tls-abort-mac ARP-INSERT",
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "VARIABLE tls-abort-ctx  0 TLS-CTX@ tls-abort-ctx !",
+            "tls-abort-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "tls-abort-ctx @ 976 90 FILL",
+            "0 tls-abort-ctx @ TLS-CTX.TCB !",
+            "0 tls-abort-ctx @ TLS-CTX.TCB-GENERATION !",
+            "TLS-ROLE-CLIENT tls-abort-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED tls-abort-ctx @ TLS-CTX.STATE !",
+            "tls-abort-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
             "tls-abort-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
             "1111 0 TCB-N TCB.SND-NXT !  2222 0 TCB-N TCB.RCV-NXT !",
             "4096 0 TCB-N TCB.RCV-WND !",
-            "VARIABLE tls-abort-ctx  0 TLS-CTX@ tls-abort-ctx !",
-            "tls-abort-ctx @ /TLS-CTX 90 FILL",
-            "TLSS-ESTABLISHED tls-abort-ctx @ TLS-CTX.STATE !",
-            "0 TCB-N tls-abort-ctx @ TLS-CTX.TCB !",
-            ": tls-abort-zero? /TLS-CTX 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
+            ": tls-abort-zero? 976 0 DO "
+            "DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
             'tls-abort-ctx @ TLS-ABORT ."  status=" .',
             '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
             'tls-abort-ctx @ tls-abort-zero? ."  wiped=" .',
+            'tls-abort-ctx @ TLS-CTX-CLAIMED? ."  claimed=" .',
+            'tls-abort-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
         ]
         text = self._run_kdos(
             lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
         self.assertIn("status=1 ", text)     # TLS-ABORT-S-RST-SENT
         self.assertIn("tcb-state=0 ", text)
         self.assertIn("wiped=-1 ", text)
+        self.assertIn("claimed=0 ", text)
+        self.assertIn("phase=-1 ", text)
         tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
         tcp_frames = [f for f in tcp_frames if f is not None]
         self.assertEqual(len(tcp_frames), 1)
@@ -30432,28 +30738,35 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         """An active TLS context without a TCB is still synchronously wiped."""
         lines = [
             "VARIABLE tls-local-ctx  0 TLS-CTX@ tls-local-ctx !",
-            "tls-local-ctx @ /TLS-CTX 165 FILL",
+            "tls-local-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "tls-local-ctx @ 976 165 FILL",
             "TLSS-HANDSHAKE tls-local-ctx @ TLS-CTX.STATE !",
             "0 tls-local-ctx @ TLS-CTX.TCB !",
-            ": tls-local-zero? /TLS-CTX 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
+            "0 tls-local-ctx @ TLS-CTX.TCB-GENERATION !",
+            ": tls-local-zero? 976 0 DO "
+            "DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
             'tls-local-ctx @ TLS-ABORT ."  first=" .',
             'tls-local-ctx @ tls-local-zero? ."  wiped=" .',
+            'tls-local-ctx @ TLS-CTX-CLAIMED? ."  claimed=" .',
+            'tls-local-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
             'tls-local-ctx @ TLS-ABORT ."  second=" .',
         ]
         text = self._run_kdos(lines)
         self.assertIn("first=0 ", text)      # TLS-ABORT-S-LOCAL
         self.assertIn("wiped=-1 ", text)
+        self.assertIn("claimed=0 ", text)
+        self.assertIn("phase=-1 ", text)
         self.assertIn("second=2 ", text)     # TLS-ABORT-S-NONE
 
     def test_tls_abort_none_state_still_reclaims_attached_tcb(self):
         """TCB ownership remains authoritative for a partial TLS context."""
         sent = []
-        lines = [
+        lines = list(self._TLS_TCB_FIXTURE) + [
             "TCP-INIT-ALL ARP-CLEAR",
-            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
             "VARIABLE tls-partial-ctx  0 TLS-CTX@ tls-partial-ctx !",
-            "tls-partial-ctx @ /TLS-CTX 0 FILL",
-            "0 TCB-N tls-partial-ctx @ TLS-CTX.TCB !",
+            "tls-partial-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT tls-partial-ctx @ TLS-CTX.ROLE !",
+            "tls-partial-ctx @ 0 TCB-N TCPS-ESTABLISHED tls-test-attach",
             'tls-partial-ctx @ TLS-ABORT ."  status=" .',
             '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
             'tls-partial-ctx @ TLS-CTX.TCB @ ."  ctx-tcb=" .',
@@ -30464,6 +30777,106 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("tcb-state=0 ", text)
         self.assertIn("ctx-tcb=0 ", text)
         self.assertEqual(sent, [])
+
+    def test_tls_attach_detach_requires_owner_and_publishes_reciprocally(self):
+        """TLS/TCB authority changes only inside one TLS-to-NET transaction."""
+        lines = [
+            "TCP-INIT-ALL",
+            "VARIABLE bind-ctx VARIABLE bind-tcb",
+            "0 TLS-CTX@ bind-ctx ! 0 TCB-N bind-tcb !",
+            "bind-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT bind-ctx @ TLS-CTX.ROLE !",
+            "bind-tcb @ TCB-CLAIM TCPS-ESTABLISHED bind-tcb @ TCB.STATE !",
+            "123 _TLS-TCB-CTX ! 456 _TLS-TCB-TCB !",
+            'bind-ctx @ bind-tcb @ _TLS-ATTACH-TCB ."  unlocked=" .',
+            '_TLS-TCB-CTX @ 123 = _TLS-TCB-TCB @ 456 = AND '
+            '."  scratch-retained=" .',
+            'bind-ctx @ TLS-CTX.TCB @ ."  ctx-before=" .',
+            'bind-tcb @ TCB.OWNER @ ."  tcb-before=" .',
+            "TLS-OWNER-TRY DROP",
+            'bind-ctx @ bind-tcb @ _TLS-ATTACH-TCB ."  attached=" .',
+            "TLS-OWNER-RELEASE",
+            'bind-ctx @ TLS-CTX.TCB @ bind-tcb @ = ."  ctx-exact=" .',
+            'bind-tcb @ TCB.OWNER @ bind-ctx @ = ."  tcb-exact=" .',
+            'bind-ctx @ _TLS-DETACH-TCB 0= ."  detach-unlocked=" .',
+            'bind-ctx @ TLS-CTX.TCB @ bind-tcb @ = ."  retained=" .',
+            "TLS-OWNER-TRY DROP",
+            'bind-ctx @ _TLS-DETACH-TCB bind-tcb @ = ."  detached=" .',
+            "TLS-OWNER-RELEASE",
+            'bind-ctx @ TLS-CTX.TCB @ ."  ctx-after=" .',
+            'bind-tcb @ TCB.OWNER @ ."  tcb-after=" .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "unlocked=-4206 ", "scratch-retained=-1 ",
+            "ctx-before=0 ", "tcb-before=0 ",
+            "attached=0 ", "ctx-exact=-1 ", "tcb-exact=-1 ",
+            "detach-unlocked=-1 ", "retained=-1 ", "detached=-1 ",
+            "ctx-after=0 ", "tcb-after=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_released_tls_context_refuses_status_and_alert_mutation(self):
+        """A free slot is not a live raw TLS connection despite its generation."""
+        lines = [
+            "VARIABLE free-ctx VARIABLE free-gen CREATE free-alert 2 ALLOT",
+            "1 free-alert C! 0 free-alert 1+ C!",
+            "0 TLS-CTX@ free-ctx !",
+            "free-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "free-ctx @ TLS-CTX.GENERATION @ free-gen !",
+            'free-ctx @ TLS-CTX-RELEASE ."  release=" .',
+            'free-ctx @ TLS-IO-STATUS ."  status=" .',
+            'free-ctx @ free-alert 2 TLS-PROCESS-ALERT ."  alert=" .',
+            'free-ctx @ free-alert 1 TLS-PROCESS-POST-HANDSHAKE '
+            '."  post=" .',
+            'free-ctx @ TLS-CTX.RX-HS-LEN @ ."  held=" .',
+            'free-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'free-ctx @ TLS-CTX.ROLE @ ."  role=" .',
+            'free-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+            'free-ctx @ TLS-CTX.GENERATION @ free-gen @ = ."  generation=" .',
+            'free-ctx @ TLS-CTX-CLAIMED? ."  claimed=" .',
+            'free-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
+        ]
+        text = self._run_kdos(lines)
+        for token in (
+            "release=0 ", "status=-4204 ", "alert=-4204 ",
+            "post=-4204 ", "held=0 ", "state=0 ", "role=0 ",
+            "error=0 ", "generation=-1 ", "claimed=0 ", "phase=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_context_claim_is_single_live_incarnation_and_retires(self):
+        """Claim/release distinguishes a free slot without reusing a generation."""
+        text = self._run_kdos([
+            "VARIABLE life-ctx VARIABLE life-old",
+            "0 TLS-CTX@ life-ctx !",
+            'life-ctx @ TLS-CTX-CLAIM ."  first=" .',
+            "life-ctx @ TLS-CTX.GENERATION @ life-old !",
+            'life-ctx @ TLS-CTX-CLAIM ."  duplicate=" .',
+            'life-ctx @ TLS-CTX.GENERATION @ life-old @ = '
+            '."  unchanged=" .',
+            "life-ctx @ TLS-CTX-RELEASE ?DUP IF THROW THEN",
+            'life-ctx @ TLS-CTX-CLAIMED? ."  free=" .',
+            'life-ctx @ TLS-CTX-CLAIM ."  reclaimed=" .',
+            'life-ctx @ TLS-CTX.GENERATION @ life-old @ > '
+            '."  advanced=" .',
+            "life-ctx @ TLS-CTX-RELEASE ?DUP IF THROW THEN",
+            "TLS-CTX-GENERATION-LAST 1- life-ctx @ TLS-CTX.GENERATION !",
+            'life-ctx @ TLS-CTX-CLAIM ."  final=" .',
+            'life-ctx @ TLS-CTX.GENERATION @ TLS-CTX-GENERATION-LAST = '
+            '."  last=" .',
+            "life-ctx @ TLS-CTX-RELEASE ?DUP IF THROW THEN",
+            'life-ctx @ TLS-CTX-CLAIM ."  retired=" .',
+            'life-ctx @ TLS-CTX-CLAIMED? ."  retired-free=" .',
+            'life-ctx @ TLS-CTX.GENERATION @ TLS-CTX-GENERATION-LAST = '
+            '."  retained=" .',
+        ])
+        for token in (
+            "first=-1 ", "duplicate=0 ", "unchanged=-1 ", "free=0 ",
+            "reclaimed=-1 ", "advanced=-1 ", "final=-1 ", "last=-1 ",
+            "retired=0 ", "retired-free=0 ", "retained=-1 ",
+        ):
+            self.assertIn(token, text)
 
     def test_incoming_alerts_close_and_report(self):
         lines = self._TLS_ESTAB_SETUP + [
@@ -30497,12 +30910,12 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         self.assertIn("RECORD=-4203 ", text)
 
     def test_alert_buf_layout(self):
-        """TLS-ALERT-BUF stores level and description bytes."""
+        """Socket descriptors include an exact TCB-generation handle."""
         text = self._run_kdos([
             '." SZ=" /SOCK .',
             '." SM=" SOCK-MAX .',
         ])
-        self.assertIn("SZ=32 ", text)
+        self.assertIn("SZ=40 ", text)
         # SOCK-MAX is dynamic (2× /TCP-MAX-CONN); just verify it's ≥ 8
         import re
         m = re.search(r'SM=(\d+)', text)
@@ -30554,6 +30967,424 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
         self.assertIn("BI=0 ", text)     # success
         self.assertIn("LP=8080 ", text)
 
+    def test_connect_reservation_refuses_close_until_rollback(self):
+        """CONNECTING is private authority, not a reusable/free descriptor."""
+        text = self._run_kdos([
+            "VARIABLE reserve-sd VARIABLE reserve-state",
+            "SOCK-TYPE-TCP SOCKET reserve-sd !",
+            "reserve-sd @ SOCK-CONNECT-CLAIM reserve-state !",
+            'reserve-state @ ."  original=" .',
+            'reserve-sd @ SOCK.STATE @ ."  claimed=" .',
+            'reserve-sd @ CLOSE-TRY ."  close=" .',
+            'reserve-sd @ SOCK.STATE @ ."  retained=" .',
+            "reserve-sd @ reserve-state @ SOCK-CONNECT-ROLLBACK",
+            'reserve-sd @ SOCK.STATE @ ."  rolled=" .',
+        ])
+        self.assertIn("original=1 ", text)
+        self.assertIn("claimed=5 ", text)
+        self.assertIn("close=-4233 ", text)
+        self.assertIn("retained=5 ", text)
+        self.assertIn("rolled=1 ", text)
+
+    def test_plain_socket_recv_and_attached_close_are_stack_balanced(self):
+        """Owner-qualified socket I/O returns actual, then closes the exact TCB."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE io-sd VARIABLE io-tcb VARIABLE io-gen VARIABLE io-ior",
+            "SOCK-TYPE-TCP SOCKET io-sd !",
+            "TCB-ALLOC DROP 0 TCB-N io-tcb !",
+            "TCPS-ESTABLISHED io-tcb @ TCB.STATE !",
+            "io-tcb @ io-sd @ TCP-ATTACH io-ior ! io-gen !",
+            "io-tcb @ io-sd @ SOCK.HANDLE !",
+            "io-gen @ io-sd @ SOCK.HANDLE-GEN !",
+            "CREATE io-src 65 C, 66 C, 67 C, CREATE io-out 3 ALLOT",
+            "io-tcb @ io-src 3 (TCP-RX-PUSH) DROP",
+            "TCPS-FAILED io-tcb @ TCB.STATE !",
+            ": socket-io-exercise",
+            '  io-sd @ io-out 3 RECV ." actual=" .',
+            '  io-sd @ CLOSE-TRY ." close=" .',
+            '  ." depth=" DEPTH . ;',
+            "socket-io-exercise",
+            'io-out C@ ."  first=" . io-out 2 + C@ ."  last=" .',
+            'io-sd @ SOCK.STATE @ ."  state=" .',
+            'io-tcb @ TCB.STATE @ ."  tcb=" .',
+        ])
+        self.assertIn("actual=3 ", text)
+        self.assertIn("close=0 ", text)
+        self.assertIn("depth=0 ", text)
+        self.assertIn("first=65 ", text)
+        self.assertIn("last=67 ", text)
+        self.assertIn("state=0 ", text)
+        self.assertIn("tcb=0 ", text)
+
+    def test_plain_socket_abort_is_stack_balanced_and_exact(self):
+        """Immediate socket teardown reclaims exactly its attached TCB."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE abort-sd VARIABLE abort-tcb VARIABLE abort-gen",
+            "VARIABLE abort-ior",
+            "SOCK-TYPE-TCP SOCKET abort-sd !",
+            "TCB-ALLOC DROP 0 TCB-N abort-tcb !",
+            "TCPS-ESTABLISHED abort-tcb @ TCB.STATE !",
+            "abort-tcb @ abort-sd @ TCP-ATTACH abort-ior ! abort-gen !",
+            "abort-tcb @ abort-sd @ SOCK.HANDLE !",
+            "abort-gen @ abort-sd @ SOCK.HANDLE-GEN !",
+            ": abort-plain-exercise",
+            '  123456 abort-sd @ SOCK-ABORT ."  ior=" .',
+            '."  status=" . ."  sentinel=" . ."  depth=" DEPTH . ;',
+            "abort-plain-exercise",
+            'abort-sd @ SOCK.STATE @ ."  sd-state=" .',
+            'abort-tcb @ TCB.STATE @ ."  tcb-state=" .',
+        ])
+        for token in (
+            "ior=0 ", "status=0 ", "sentinel=123456 ", "depth=0 ",
+            "sd-state=0 ", "tcb-state=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_plain_socket_abort_rejects_stale_generation_without_release(self):
+        """A stale descriptor cannot abort or free a different TCB incarnation."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE stale-abort-sd VARIABLE stale-abort-tcb",
+            "VARIABLE stale-abort-gen VARIABLE stale-abort-ior",
+            "SOCK-TYPE-TCP SOCKET stale-abort-sd !",
+            "TCB-ALLOC DROP 0 TCB-N stale-abort-tcb !",
+            "TCPS-ESTABLISHED stale-abort-tcb @ TCB.STATE !",
+            "stale-abort-tcb @ stale-abort-sd @ TCP-ATTACH",
+            "stale-abort-ior ! stale-abort-gen !",
+            "stale-abort-tcb @ stale-abort-sd @ SOCK.HANDLE !",
+            "stale-abort-gen @ 1+ stale-abort-sd @ SOCK.HANDLE-GEN !",
+            ": abort-stale-exercise",
+            '  654321 stale-abort-sd @ SOCK-ABORT ."  ior=" .',
+            '."  status=" . ."  sentinel=" . ."  depth=" DEPTH . ;',
+            "abort-stale-exercise",
+            'stale-abort-sd @ SOCK.STATE @ ."  sd-state=" .',
+            'stale-abort-tcb @ TCB.STATE @ ."  tcb-state=" .',
+            'stale-abort-tcb @ stale-abort-gen @ stale-abort-sd @ '
+            'TCB-ATTACHED-TO? ."  retained=" .',
+            "stale-abort-gen @ stale-abort-sd @ SOCK.HANDLE-GEN !",
+            "stale-abort-sd @ SOCK-ABORT 2DROP",
+        ])
+        for token in (
+            "ior=-4232 ", "status=0 ", "sentinel=654321 ", "depth=0 ",
+            "sd-state=1 ", "tcb-state=4 ", "retained=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_abort_reclaims_context_tcb_and_descriptor(self):
+        """TLS socket abort tears down reciprocal authority as one operation."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE tsa-sd VARIABLE tsa-ctx VARIABLE tsa-tcb",
+            "VARIABLE tsa-ior",
+            "SOCK-TYPE-TLS SOCKET tsa-sd !",
+            "tsa-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ tsa-ctx !",
+            "tsa-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT tsa-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED tsa-ctx @ TLS-CTX.STATE !",
+            "1 tsa-ctx @ TLS-CTX.PEER-AUTH !",
+            "TCB-ALLOC DROP 0 TCB-N tsa-tcb !",
+            "TCPS-ESTABLISHED tsa-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "tsa-ctx @ tsa-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "tsa-sd @ tsa-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            ": abort-tls-exercise",
+            '  777777 tsa-sd @ SOCK-ABORT ."  ior=" .',
+            '."  status=" . ."  sentinel=" . ."  depth=" DEPTH . ;',
+            "abort-tls-exercise",
+            'tsa-sd @ SOCK.STATE @ ."  sd-state=" .',
+            'tsa-tcb @ TCB.STATE @ ."  tcb-state=" .',
+            'tsa-ctx @ TLS-CTX-CLAIMED? ."  ctx-live=" .',
+            'tsa-ctx @ TLS-CTX.CLOSE-PHASE @ ."  ctx-phase=" .',
+        ])
+        for token in (
+            "ior=0 ", "status=0 ", "sentinel=777777 ", "depth=0 ",
+            "sd-state=0 ", "tcb-state=0 ", "ctx-live=0 ",
+            "ctx-phase=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_unconnected_tls_socket_abort_is_idempotent_local_release(self):
+        """An empty TLS descriptor is freed without fabricating transport work."""
+        text = self._run_kdos([
+            "VARIABLE empty-tls-sd SOCK-TYPE-TLS SOCKET empty-tls-sd !",
+            ": abort-empty-tls",
+            '  888888 empty-tls-sd @ SOCK-ABORT ."  ior=" .',
+            '."  status=" . ."  sentinel=" . ."  depth=" DEPTH . ;',
+            "abort-empty-tls",
+            'empty-tls-sd @ SOCK.STATE @ ."  state=" .',
+        ])
+        for token in (
+            "ior=0 ", "status=2 ", "sentinel=888888 ", "depth=0 ",
+            "state=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_publication_is_exact_and_blocks_raw_teardown(self):
+        """TLS socket publication binds descriptor, context generation, and owner."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE pub-sd VARIABLE pub-ctx VARIABLE pub-tcb",
+            "SOCK-TYPE-TLS SOCKET pub-sd !",
+            "pub-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ pub-ctx !",
+            "pub-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT pub-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED pub-ctx @ TLS-CTX.STATE !",
+            "1 pub-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLS-HASH-SHA256 pub-ctx @ TLS-CTX.HASH-ID !",
+            "TLS-SUITE-AES128-SHA256 pub-ctx @ TLS-CTX.SUITE !",
+            "pub-ctx @ TLS-CTX.C-HS-TRAFFIC 32 1 FILL",
+            "TLS-TR-RESET S\" socket-finished\" TLS-TR-APPEND",
+            "TCB-ALLOC DROP 0 TCB-N pub-tcb !",
+            "TCPS-ESTABLISHED pub-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "pub-ctx @ pub-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "TLS-OWNER-RELEASE",
+            "TLS-OWNER-TRY DROP",
+            'pub-sd @ pub-ctx @ SOCK-TLS-PUBLISH ."  published=" .',
+            'pub-sd @ SOCK-TLS-RESOLVE ."  generation=" .',
+            'pub-ctx @ = ."  matched=" .',
+            "TLS-OWNER-RELEASE",
+            "CREATE pub-plain 1 ALLOT 65 pub-plain C!",
+            "CREATE pub-record 32 ALLOT pub-record 32 0 FILL",
+            "CREATE pub-finished 64 ALLOT pub-finished 64 90 FILL",
+            'pub-ctx @ TLS-CT-APP-DATA pub-plain 1 pub-record '
+            'TLS-ENCRYPT-RECORD ."  raw-encrypt=" .',
+            'pub-ctx @ pub-record 22 pub-plain TLS-DECRYPT-RECORD '
+            '."  raw-dec-len=" . ."  raw-dec-type=" .',
+            'pub-ctx @ pub-finished TLS-BUILD-FINISHED '
+            '."  raw-finished=" .',
+            'pub-finished C@ ."  finished-first=" .',
+            'pub-ctx @ TLS-CTX.WR-SEQ @ ."  wr-seq=" .',
+            'pub-ctx @ TLS-CTX.RD-SEQ @ ."  rd-seq=" .',
+            'pub-ctx @ TLS-ABORT ."  raw-abort=" .',
+            'pub-ctx @ TLS-IO-STATUS ."  raw-status=" .',
+            'pub-sd @ SOCK-TLS-IO-STATUS ."  socket-status=" .',
+            "CREATE pub-alert 2 ALLOT 1 pub-alert C! 0 pub-alert 1+ C!",
+            'pub-ctx @ pub-alert 2 TLS-PROCESS-ALERT ."  raw-alert=" .',
+            'pub-ctx @ pub-alert 1 TLS-PROCESS-POST-HANDSHAKE '
+            '."  raw-post=" .',
+            'pub-ctx @ TLS-CTX.RX-HS-LEN @ ."  held=" .',
+            'pub-ctx @ TLS-CTX-RELEASE ."  raw-release=" .',
+            'pub-sd @ SOCK.STATE @ ."  state=" .',
+            'pub-ctx @ TLS-CTX.STATE @ ."  ctx-state=" .',
+            'pub-ctx @ TLS-CTX.SOCKET-OWNER @ pub-sd @ = ."  owner=" .',
+        ])
+        self.assertIn("published=-1 ", text)
+        self.assertRegex(text, r"generation=[1-9][0-9]* ")
+        self.assertIn("matched=-1 ", text)
+        self.assertIn("raw-encrypt=0 ", text)
+        self.assertIn("raw-dec-len=0 ", text)
+        self.assertIn("raw-dec-type=-1 ", text)
+        self.assertIn("raw-finished=0 ", text)
+        self.assertIn("finished-first=90 ", text)
+        self.assertIn("wr-seq=0 ", text)
+        self.assertIn("rd-seq=0 ", text)
+        self.assertIn("raw-abort=3 ", text)
+        self.assertIn("raw-status=-4204 ", text)
+        self.assertIn("socket-status=0 ", text)
+        self.assertIn("raw-alert=-4204 ", text)
+        self.assertIn("raw-post=-4204 ", text)
+        self.assertIn("held=0 ", text)
+        self.assertIn("raw-release=-4204 ", text)
+        self.assertIn("state=2 ", text)
+        self.assertIn("ctx-state=2 ", text)
+        self.assertIn("owner=-1 ", text)
+
+    def test_tls_socket_close_notify_is_level_ready_clean_eof(self):
+        """Authenticated close_notify remains a level-triggered zero-status EOF."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE eof-sd VARIABLE eof-ctx VARIABLE eof-tcb",
+            "SOCK-TYPE-TLS SOCKET eof-sd ! eof-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ eof-ctx !",
+            "eof-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT eof-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED eof-ctx @ TLS-CTX.STATE !",
+            "1 eof-ctx @ TLS-CTX.PEER-AUTH !",
+            "TCB-ALLOC DROP 0 TCB-N eof-tcb !",
+            "TCPS-ESTABLISHED eof-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "eof-ctx @ eof-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "eof-sd @ eof-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            "CREATE eof-alert 2 ALLOT 1 eof-alert C! 0 eof-alert 1+ C!",
+            "TLS-OWNER-TRY DROP",
+            'eof-ctx @ eof-alert 2 (TLS-PROCESS-ALERT) ."  alert=" .',
+            "TLS-OWNER-RELEASE",
+            'eof-sd @ SOCKET-READY? ."  ready1=" .',
+            'eof-sd @ SOCK-TLS-IO-STATUS ."  status=" .',
+            "CREATE eof-out 1 ALLOT",
+            'eof-sd @ eof-out 1 RECV ."  recv=" .',
+            'eof-sd @ SOCKET-READY? ."  ready2=" .',
+            'eof-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'DEPTH ."  depth=" .',
+            "eof-sd @ SOCK-ABORT 2DROP",
+        ])
+        for token in (
+            "alert=0 ", "ready1=-1 ", "status=0 ", "recv=0 ",
+            "ready2=-1 ", "state=3 ", "depth=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_bare_fin_wakes_and_publishes_truncation(self):
+        """An empty CLOSE-WAIT wakes polling, then RECV makes truncation sticky."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE trunc-sd VARIABLE trunc-ctx VARIABLE trunc-tcb",
+            "SOCK-TYPE-TLS SOCKET trunc-sd ! trunc-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ trunc-ctx !",
+            "trunc-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT trunc-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED trunc-ctx @ TLS-CTX.STATE !",
+            "1 trunc-ctx @ TLS-CTX.PEER-AUTH !",
+            "TCB-ALLOC DROP 0 TCB-N trunc-tcb !",
+            "TCPS-CLOSE-WAIT trunc-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "trunc-ctx @ trunc-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "trunc-sd @ trunc-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            'trunc-sd @ SOCKET-READY? ."  ready1=" .',
+            'trunc-sd @ SOCK-TLS-IO-STATUS ."  before=" .',
+            "CREATE trunc-out 1 ALLOT",
+            'trunc-sd @ trunc-out 1 RECV ."  recv=" .',
+            'trunc-sd @ SOCK-TLS-IO-STATUS ."  after=" .',
+            'trunc-sd @ SOCKET-READY? ."  ready2=" .',
+            'trunc-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'DEPTH ."  depth=" .',
+            "trunc-sd @ SOCK-ABORT 2DROP",
+        ])
+        for token in (
+            "ready1=-1 ", "before=0 ", "recv=-1 ", "after=-4203 ",
+            "ready2=-1 ", "state=3 ", "depth=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_transport_failure_wakes_status_and_reclaims_tcb(self):
+        """Descriptor status revokes secrets and reclaims an exact failed TCB."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE fail-sd VARIABLE fail-ctx VARIABLE fail-tcb",
+            "SOCK-TYPE-TLS SOCKET fail-sd ! fail-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ fail-ctx !",
+            "fail-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT fail-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED fail-ctx @ TLS-CTX.STATE !",
+            "1 fail-ctx @ TLS-CTX.PEER-AUTH !",
+            "90 fail-ctx @ TLS-CTX.WR-KEY 31 + C!",
+            "TCB-ALLOC DROP 0 TCB-N fail-tcb !",
+            "TCPS-ESTABLISHED fail-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "fail-ctx @ fail-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "fail-sd @ fail-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            "TCPS-FAILED fail-tcb @ TCB.STATE !",
+            "TCP-FAIL-RETRY-EXHAUSTED fail-tcb @ TCB.FAILURE !",
+            'fail-sd @ SOCKET-READY? ."  ready=" .',
+            'fail-sd @ SOCK-TLS-IO-STATUS ."  status=" .',
+            'fail-tcb @ TCB.STATE @ ."  tcb=" .',
+            'fail-ctx @ TLS-CTX.TCB @ ."  binding=" .',
+            'fail-ctx @ TLS-CTX.WR-KEY 31 + C@ ."  key=" .',
+            'fail-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'DEPTH ."  depth=" .',
+            "fail-sd @ SOCK-ABORT 2DROP",
+        ])
+        for token in (
+            "ready=-1 ", "status=-4218 ", "tcb=0 ", "binding=0 ",
+            "key=0 ", "state=3 ", "depth=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_drains_retained_plaintext_before_transport_failure(self):
+        """Authenticated plaintext drains before failed transport revocation."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE drain-sd VARIABLE drain-ctx VARIABLE drain-tcb",
+            "SOCK-TYPE-TLS SOCKET drain-sd !",
+            "drain-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ drain-ctx !",
+            "drain-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT drain-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED drain-ctx @ TLS-CTX.STATE !",
+            "1 drain-ctx @ TLS-CTX.PEER-AUTH !",
+            "90 drain-ctx @ TLS-CTX.WR-KEY 31 + C!",
+            "TCB-ALLOC DROP 0 TCB-N drain-tcb !",
+            "TCPS-ESTABLISHED drain-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "drain-ctx @ drain-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "drain-sd @ drain-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            ": drain-plain 8 0 DO 65 I + TLS-PLAIN-BUF I + C! LOOP ;",
+            "CREATE drain-prefix 2 ALLOT CREATE drain-a 3 ALLOT",
+            "CREATE drain-b 3 ALLOT",
+            "TLS-OWNER-TRY DROP drain-plain",
+            'drain-ctx @ drain-prefix 2 8 _TLS-APP-DELIVER ."  first=" .',
+            "TLS-OWNER-RELEASE",
+            "TCPS-FAILED drain-tcb @ TCB.STATE !",
+            "TCP-FAIL-RETRY-EXHAUSTED drain-tcb @ TCB.FAILURE !",
+            'drain-sd @ drain-prefix 1 SEND ."  send=" .',
+            'drain-sd @ SOCK-TLS-IO-STATUS ."  status0=" .',
+            'drain-sd @ SOCKET-READY? ."  ready0=" .',
+            'drain-ctx @ TLS-CTX.APP-LEN @ ."  held0=" .',
+            'drain-ctx @ TLS-CTX.TCB @ 0<> ."  bound0=" .',
+            'drain-sd @ drain-a 3 RECV ."  recv-a=" .',
+            'drain-a C@ ."  a0=" . drain-a 2 + C@ ."  a2=" .',
+            'drain-sd @ SOCK-TLS-IO-STATUS ."  status1=" .',
+            'drain-ctx @ TLS-CTX.APP-LEN @ ."  held1=" .',
+            'drain-sd @ drain-b 3 RECV ."  recv-b=" .',
+            'drain-b C@ ."  b0=" . drain-b 2 + C@ ."  b2=" .',
+            'drain-ctx @ TLS-CTX.APP-LEN @ ."  held2=" .',
+            'drain-ctx @ TLS-CTX.TCB @ 0<> ."  bound1=" .',
+            'drain-sd @ SOCK-TLS-IO-STATUS ."  status2=" .',
+            'drain-ctx @ TLS-CTX.TCB @ ."  binding=" .',
+            'drain-ctx @ TLS-CTX.WR-KEY 31 + C@ ."  key=" .',
+            'drain-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'DEPTH ."  depth=" .',
+            "drain-sd @ SOCK-ABORT 2DROP",
+        ])
+        for token in (
+            "first=2 ", "send=0 ", "status0=0 ", "ready0=-1 ",
+            "held0=6 ",
+            "bound0=-1 ", "recv-a=3 ", "a0=67 ", "a2=69 ",
+            "status1=0 ", "held1=3 ", "recv-b=3 ", "b0=70 ",
+            "b2=72 ", "held2=0 ", "bound1=-1 ",
+            "status2=-4218 ", "binding=0 ", "key=0 ",
+            "state=3 ", "depth=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_stale_generation_cannot_rebind_reused_context(self):
+        """A descriptor captured before context reuse cannot resolve the new slot."""
+        text = self._run_kdos([
+            "VARIABLE stale-sd VARIABLE stale-ctx VARIABLE stale-old",
+            "SOCK-TYPE-TLS SOCKET stale-sd ! 0 TLS-CTX@ stale-ctx !",
+            "stale-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "stale-ctx @ TLS-CTX.GENERATION @ stale-old !",
+            "stale-ctx @ stale-sd @ SOCK.HANDLE !",
+            "stale-old @ stale-sd @ SOCK.HANDLE-GEN !",
+            "stale-ctx @ TLS-CTX-RELEASE ?DUP IF THROW THEN",
+            "stale-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLSS-HANDSHAKE stale-ctx @ TLS-CTX.STATE !",
+            "TLS-OWNER-TRY DROP",
+            'stale-sd @ SOCK-TLS-RESOLVE OR 0= ."  rejected=" .',
+            "TLS-OWNER-RELEASE",
+            'stale-sd @ SOCKET-READY? ."  ready=" .',
+            'stale-sd @ SOCK-TLS-IO-STATUS ."  status=" .',
+            'stale-sd @ CLOSE-TRY ."  close=" .',
+            'stale-ctx @ TLS-CTX.GENERATION @ stale-old @ > ."  advanced=" .',
+            'stale-ctx @ TLS-CTX.STATE @ ."  new-state=" .',
+        ])
+        self.assertIn("rejected=-1 ", text)
+        self.assertIn("ready=0 ", text)
+        self.assertIn("status=-4204 ", text)
+        self.assertIn("close=-4232 ", text)
+        self.assertIn("advanced=-1 ", text)
+        self.assertIn("new-state=1 ", text)
+
     def test_tls_listen_fails_closed_before_plaintext_accept_exists(self):
         """A TLS-marked listener cannot silently publish raw TCP children."""
         text = self._run_kdos([
@@ -30590,7 +31421,7 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
         text = self._run_kdos([
             'SOCK-TYPE-TCP SOCKET',
             'DUP 8080 BIND DROP',
-            'DUP CLOSE',
+            'DUP CLOSE DROP',
             # That socket slot should now be free again
             '0 SOCK-N SOCK.STATE @ ." ST=" .',
         ])
@@ -30601,16 +31432,18 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
         text = self._run_kdos([
             "VARIABLE busy-sd SOCK-TYPE-TLS SOCKET busy-sd !",
             "VARIABLE busy-ctx 0 TLS-CTX@ busy-ctx !",
-            "busy-ctx @ /TLS-CTX 0 FILL",
+            "busy-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
             "TLSS-HANDSHAKE busy-ctx @ TLS-CTX.STATE !",
+            "busy-sd @ busy-ctx @ TLS-CTX.SOCKET-OWNER !",
             "busy-ctx @ busy-sd @ SOCK.HANDLE !",
+            "busy-ctx @ TLS-CTX.GENERATION @ busy-sd @ SOCK.HANDLE-GEN !",
             "TLS-OWNER-TRY DROP",
             "TASK-ID 1+ TLS-OWNER-TASK !",
-            "busy-sd @ CLOSE",
+            "busy-sd @ CLOSE DROP",
             '."  HELD-STATE=" busy-sd @ SOCK.STATE @ .',
             '."  HELD-HANDLE=" busy-sd @ SOCK.HANDLE @ 0<> .',
             "TASK-ID TLS-OWNER-TASK ! TLS-OWNER-RELEASE",
-            "busy-sd @ CLOSE",
+            "busy-sd @ CLOSE DROP",
             '."  FREE=" busy-sd @ SOCK.STATE @ .',
             '."  WIPED=" busy-ctx @ TLS-CTX.STATE @ .',
         ])
@@ -30724,7 +31557,7 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
             '." B0=" RBF C@ .',
             '." B1=" RBF 1+ C@ .',
             # Close
-            "sd @ CLOSE",
+            "sd @ CLOSE DROP",
         ], nic_tx_callback=tcp_echo)
         self.assertIn("CN=0 ", text)       # connect success
         self.assertIn("EW=-1 ", text)      # already established: no extra idle
@@ -33715,7 +34548,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertEqual(sent, [])
 
     def test_tcp_state_constants(self):
-        """TCP states include an owner-visible terminal delivery failure."""
+        """TCP states include terminal failure and allocator reservation."""
         text = self._run_kdos([
             "TCPS-CLOSED .\"  c=\" .",
             "TCPS-LISTEN .\"  l=\" .",
@@ -33729,6 +34562,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "TCPS-LAST-ACK .\"  la=\" .",
             "TCPS-TIME-WAIT .\"  tw=\" .",
             "TCPS-FAILED .\"  failed=\" .",
+            "TCPS-RESERVED .\"  reserved=\" .",
         ])
         self.assertIn("c=0 ", text)
         self.assertIn("l=1 ", text)
@@ -33742,13 +34576,14 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("la=9 ", text)
         self.assertIn("tw=10 ", text)
         self.assertIn("failed=11 ", text)
+        self.assertIn("reserved=12 ", text)
 
     # -- 16.7b: TCB data structure --
 
     def test_tcb_size(self):
-        """/TCB should include durable intent and exact failure fields."""
+        """/TCB includes transport ownership and accept-generation fields."""
         text = self._run_kdos(["/TCB ."])
-        self.assertIn("5832 ", text)
+        self.assertIn("5952 ", text)
 
     def test_tcb_n_indexing(self):
         """TCB-N should return different addresses for different indices."""
@@ -33757,7 +34592,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "1 TCB-N .\"  b=\" .",
             "1 TCB-N 0 TCB-N - .\"  diff=\" .",
         ])
-        self.assertIn("diff=5832 ", text)
+        self.assertIn("diff=5952 ", text)
 
     def test_tcb_init_sets_closed(self):
         """TCB-INIT should set state to TCPS-CLOSED (0)."""
@@ -33782,6 +34617,30 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("s2=0 ", text)
         self.assertIn("s3=0 ", text)
 
+    def test_tcp_init_all_refuses_live_plain_socket_authority(self):
+        """The reset utility cannot orphan an attached listener descriptor."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE reset-sd SOCK-TYPE-TCP SOCKET reset-sd !",
+            "reset-sd @ 8443 BIND DROP reset-sd @ LISTEN DROP",
+            "VARIABLE reset-ior ' TCP-INIT-ALL CATCH reset-ior !",
+            'reset-ior @ ."  refused=" .',
+            'reset-sd @ SOCK.STATE @ ."  sd-state=" .',
+            'reset-sd @ SOCK-TCB@ DUP 0<> ."  resolved=" .',
+            'DUP IF TCB.STATE @ ELSE DROP -1 THEN ."  tcb-state=" .',
+            'TLS-OWNER-DEPTH @ ."  tls-depth=" .',
+            'NET-TX-OWNER-DEPTH @ ."  net-depth=" .',
+            'reset-sd @ CLOSE-TRY ."  close=" .',
+            "' TCP-INIT-ALL CATCH",
+            '."  empty-reset=" .',
+        ])
+        for token in (
+            "refused=-4215 ", "sd-state=3 ", "resolved=-1 ",
+            "tcb-state=1 ", "tls-depth=0 ", "net-depth=0 ",
+            "close=0 ", "empty-reset=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_tcb_alloc_returns_index(self):
         """TCB-ALLOC should return a valid index (0..3)."""
         text = self._run_kdos([
@@ -33794,6 +34653,262 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertTrue(len(nums) >= 1, f"no alloc output: {text}")
         idx = int(nums[-1])
         self.assertTrue(0 <= idx < 64, f"TCB index out of range: {idx}")
+
+    def test_tcb_generation_rejects_reclaimed_and_reused_handles(self):
+        """A slot address cannot authorize a later TCB incarnation."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE gen-idx VARIABLE gen-tcb",
+            "VARIABLE gen-h1 VARIABLE gen-old VARIABLE gen-new",
+            "TCB-ALLOC gen-idx ! gen-idx @ TCB-N gen-tcb !",
+            "gen-tcb @ TCB-HANDLE@ gen-old ! gen-h1 !",
+            'gen-tcb @ TCB.STATE @ ."  reserved=" .',
+            "gen-tcb @ TCB-INIT",
+            'gen-h1 @ gen-old @ TCB-HANDLE-RESOLVE 0= ."  reclaimed=" .',
+            "TCB-ALLOC DROP",
+            "gen-tcb @ TCB.GENERATION @ gen-new !",
+            'gen-h1 @ gen-old @ TCB-HANDLE-RESOLVE 0= ."  stale=" .',
+            "TCPS-ESTABLISHED gen-tcb @ TCB.STATE !",
+            'gen-h1 @ gen-new @ TCB-HANDLE-RESOLVE gen-tcb @ = '
+            '."  current=" .',
+            'gen-old @ gen-new @ <> ."  advanced=" .',
+        ])
+        self.assertIn("reserved=12 ", text)
+        self.assertIn("reclaimed=-1 ", text)
+        self.assertIn("stale=-1 ", text)
+        self.assertIn("current=-1 ", text)
+        self.assertIn("advanced=-1 ", text)
+
+    def test_tcb_generation_exhaustion_retires_slot_without_wrap(self):
+        """The final usable incarnation is never followed by zero or reuse."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL VARIABLE retired-tcb",
+            "0 TCB-N retired-tcb !",
+            "TCB-GENERATION-LAST 1- retired-tcb @ TCB.GENERATION !",
+            "retired-tcb @ TCB-CLAIM",
+            'retired-tcb @ TCB.GENERATION @ TCB-GENERATION-LAST = '
+            '."  final=" .',
+            "retired-tcb @ TCB-INIT",
+            'retired-tcb @ TCB.GENERATION @ ."  retired-gen=" .',
+            'retired-tcb @ TCB.STATE @ ."  retired-state=" .',
+            "retired-tcb @ TCB-CLAIM",
+            'retired-tcb @ TCB.GENERATION @ ."  after-gen=" .',
+            'retired-tcb @ TCB.STATE @ ."  after-state=" .',
+        ])
+        self.assertIn("final=-1 ", text)
+        self.assertIn("retired-gen=-1 ", text)
+        self.assertIn("retired-state=0 ", text)
+        self.assertIn("after-gen=-1 ", text)
+        self.assertIn("after-state=0 ", text)
+
+    def test_tcp_attach_detach_requires_exact_reciprocal_owner(self):
+        """Attach is unique and detach refuses the wrong generation/owner."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE auth-tcb VARIABLE auth-gen VARIABLE auth-ior",
+            "VARIABLE auth-owner VARIABLE other-owner",
+            "TCB-ALLOC DROP 0 TCB-N auth-tcb !",
+            "TCPS-ESTABLISHED auth-tcb @ TCB.STATE !",
+            "auth-tcb @ auth-owner TCP-ATTACH auth-ior ! auth-gen !",
+            'auth-ior @ ."  attach=" .',
+            'auth-tcb @ auth-gen @ auth-owner TCB-ATTACHED-TO? '
+            '."  exact=" .',
+            'auth-tcb @ auth-owner TCP-ATTACH ."  again=" . DROP',
+            'auth-tcb @ auth-gen @ 1+ auth-owner TCP-DETACH '
+            '."  wrong-gen=" .',
+            'auth-tcb @ auth-gen @ other-owner TCP-DETACH '
+            '."  wrong-owner=" .',
+            'auth-tcb @ auth-gen @ auth-owner TCP-DETACH '
+            '."  detach=" .',
+            'auth-tcb @ TCB.OWNER @ ."  owner=" .',
+            'auth-tcb @ TCB.AUTH-STATE @ ."  auth=" .',
+        ])
+        self.assertIn("attach=0 ", text)
+        self.assertIn("exact=-1 ", text)
+        self.assertIn("again=-4234 ", text)
+        self.assertIn("wrong-gen=-4232 ", text)
+        self.assertIn("wrong-owner=-4232 ", text)
+        self.assertIn("detach=0 ", text)
+        self.assertIn("owner=0 ", text)
+        self.assertIn("auth=0 ", text)
+
+    def test_attached_tcb_refuses_generationless_raw_io(self):
+        """Only an exact owner token may send, drain, or emit for an attached TCB."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE raw-tcb VARIABLE raw-gen VARIABLE raw-ior",
+            "VARIABLE raw-owner CREATE raw-data 4 ALLOT CREATE raw-out 4 ALLOT",
+            "TCB-ALLOC DROP 0 TCB-N raw-tcb !",
+            "TCPS-ESTABLISHED raw-tcb @ TCB.STATE !",
+            "4096 raw-tcb @ TCB.SND-WND ! TCP-MSS raw-tcb @ TCB.CWND !",
+            "raw-data 4 65 FILL raw-tcb @ raw-data 4 (TCP-RX-PUSH) DROP",
+            "raw-tcb @ raw-owner TCP-ATTACH raw-ior ! raw-gen !",
+            "raw-data raw-tcb @ TCB.TX-BUF 4 CMOVE",
+            "4 raw-tcb @ TCB.TX-LEN !",
+            "VARIABLE raw-depth DEPTH raw-depth !",
+            'raw-tcb @ raw-out 4 TCP-RECV ."  raw-recv=" .',
+            'raw-tcb @ raw-data 4 TCP-RX-PUSH ."  raw-push=" .',
+            'raw-tcb @ TCP-SEND-READY? ."  raw-ready=" .',
+            'raw-tcb @ raw-data 4 TCP-SEND ."  raw-send=" .',
+            'raw-tcb @ raw-data 4 TCP-SEND-EXACT ."  raw-exact=" .',
+            'raw-tcb @ 100 TCP-ACK raw-data 4 TCP-SEND-SEG-AT '
+            '."  raw-seg-at=" .',
+            'raw-tcb @ 100 TCP-ACK raw-data 4 TCP-SEND-SEG-CACHED-AT '
+            '."  raw-cached-at=" .',
+            'raw-tcb @ TCP-ACK raw-data 4 TCP-SEND-SEG '
+            '."  raw-seg=" .',
+            'raw-tcb @ TCP-ACK raw-data 4 TCP-SEND-SEG-CACHED '
+            '."  raw-cached=" .',
+            'raw-tcb @ TCP-ACK TCP-SEND-CTL ."  raw-ctl=" .',
+            'raw-tcb @ TCP-ACK TCP-SEND-CTL-CACHED '
+            '."  raw-ctl-cached=" .',
+            'raw-tcb @ TCP-ACK-TRY ."  raw-ack=" .',
+            'raw-tcb @ TCP-RETRANSMIT-DATA ."  raw-retransmit=" .',
+            'raw-tcb @ TCB.FLAGS @ ."  flags=" .',
+            'raw-tcb @ TCB.TX-LEN @ ."  retained=" .',
+            'raw-tcb @ TCB.RX-COUNT @ ."  held=" .',
+            "raw-tcb @ raw-gen @ raw-owner raw-out 4 TCP-OWNER-RECV",
+            '."  owner-ior=" . ."  owner-actual=" .',
+            'raw-tcb @ TCB.RX-COUNT @ ."  drained=" .',
+            'DEPTH raw-depth @ = ."  balanced=" .',
+        ])
+        for token in (
+            "raw-recv=0 ", "raw-push=0 ", "raw-ready=0 ",
+            "raw-send=0 ", "raw-exact=0 ",
+            "raw-seg-at=-1 ", "raw-cached-at=-1 ",
+            "raw-seg=-1 ", "raw-cached=-1 ",
+            "raw-ctl=-1 ", "raw-ctl-cached=-1 ",
+            "raw-ack=-1 ", "raw-retransmit=-1 ",
+            "flags=0 ", "retained=4 ", "held=4 ",
+            "owner-ior=0 ", "owner-actual=4 ", "drained=0 ",
+            "balanced=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_raw_emitters_validate_pointer_before_dereference(self):
+        """Invalid generationless emitters fail without touching address zero."""
+        text = self._run_kdos([
+            "VARIABLE null-depth DEPTH null-depth !",
+            '0 0 TCP-ACK 0 0 TCP-SEND-SEG-AT ."  at=" .',
+            '0 0 TCP-ACK 0 0 TCP-SEND-SEG-CACHED-AT ."  cat=" .',
+            '0 TCP-ACK 0 0 TCP-SEND-SEG ."  seg=" .',
+            '0 TCP-ACK 0 0 TCP-SEND-SEG-CACHED ."  cached=" .',
+            '0 TCP-ACK TCP-SEND-CTL ."  ctl=" .',
+            '0 TCP-ACK TCP-SEND-CTL-CACHED ."  cctl=" .',
+            '0 TCP-ACK-TRY ."  ack=" .',
+            '0 TCP-RETRANSMIT-DATA ."  retransmit=" .',
+            'DEPTH null-depth @ = ."  balanced=" .',
+        ])
+        for token in (
+            "at=-1 ", "cat=-1 ", "seg=-1 ", "cached=-1 ",
+            "ctl=-1 ", "cctl=-1 ", "ack=-1 ", "retransmit=-1 ",
+            "balanced=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_ack_intent_is_validated_and_marked_only_under_net_owner(self):
+        """A failed lock admission or invalid pointer cannot mutate FLAGS."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL TCB-ALLOC DROP",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+            '0 TCB-N TCP-ACK-TRY ."  busy=" .',
+            '0 TCB-N TCB.FLAGS @ ."  flags=" .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            '0 TCP-ACK-TRY ."  invalid=" .',
+            '0 TCB-N TCB.FLAGS @ ."  unchanged=" .',
+        ])
+        self.assertIn("busy=-1 ", text)
+        self.assertIn("flags=0 ", text)
+        self.assertIn("invalid=-1 ", text)
+        self.assertIn("unchanged=0 ", text)
+
+    def test_attached_authority_rejects_zero_owner(self):
+        """Generation alone is never an owner capability."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL TCB-ALLOC DROP",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TCP-AUTH-ATTACHED 0 TCB-N TCB.AUTH-STATE !",
+            "0 0 TCB-N TCB.OWNER !",
+            '0 TCB-N 0 TCB-N TCB.GENERATION @ 0 TCB-ATTACHED-TO? '
+            '."  zero=" .',
+        ])
+        self.assertIn("zero=0 ", text)
+
+    def test_tcp_attach_rejects_one_owner_on_two_tcbs(self):
+        """One socket/context address cannot own two live TCBs."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL VARIABLE unique-owner",
+            "TCB-ALLOC DROP TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TCB-ALLOC DROP TCPS-ESTABLISHED 1 TCB-N TCB.STATE !",
+            '0 TCB-N unique-owner TCP-ATTACH ."  first=" . DROP',
+            '1 TCB-N unique-owner TCP-ATTACH ."  second=" . DROP',
+            '1 TCB-N TCB.OWNER @ ."  owner2=" .',
+        ])
+        self.assertIn("first=0 ", text)
+        self.assertIn("second=-4234 ", text)
+        self.assertIn("owner2=0 ", text)
+
+    def test_tcp_owner_close_preserves_busy_binding_then_releases_listener(self):
+        """Qualified close neither drops a busy owner nor leaks a closed one."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE close-tcb VARIABLE close-gen VARIABLE close-ior",
+            "VARIABLE close-owner",
+            "TCB-ALLOC DROP 0 TCB-N close-tcb !",
+            "TCPS-ESTABLISHED close-tcb @ TCB.STATE !",
+            "close-tcb @ close-owner TCP-ATTACH close-ior ! close-gen !",
+            "1 close-tcb @ TCB.TX-LEN !",
+            'close-tcb @ close-gen @ close-owner TCP-OWNER-CLOSE '
+            '."  busy=" .',
+            'close-tcb @ close-gen @ close-owner TCB-ATTACHED-TO? '
+            '."  retained=" .',
+            'close-tcb @ TCB.STATE @ ."  live=" .',
+            "0 close-tcb @ TCB.TX-LEN !",
+            "TCPS-LISTEN close-tcb @ TCB.STATE !",
+            'close-tcb @ close-gen @ close-owner TCP-OWNER-CLOSE '
+            '."  closed=" .',
+            'close-tcb @ TCB.STATE @ ."  state=" .',
+            'close-tcb @ TCB.OWNER @ ."  owner=" .',
+            'close-tcb @ TCB.AUTH-STATE @ ."  auth=" .',
+            'close-tcb @ TCB>H1 close-gen @ TCB-HANDLE-RESOLVE 0= '
+            '."  stale=" .',
+        ])
+        self.assertIn("busy=-4230 ", text)
+        self.assertIn("retained=-1 ", text)
+        self.assertIn("live=4 ", text)
+        self.assertIn("closed=0 ", text)
+        self.assertIn("state=0 ", text)
+        self.assertIn("owner=0 ", text)
+        self.assertIn("auth=0 ", text)
+        self.assertIn("stale=-1 ", text)
+
+    def test_tcp_owner_abort_rejects_stale_generation_then_reclaims(self):
+        """Qualified abort acts only on the exact attached incarnation."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE abort-tcb VARIABLE abort-gen VARIABLE abort-ior",
+            "VARIABLE abort-owner",
+            "TCB-ALLOC DROP 0 TCB-N abort-tcb !",
+            "TCPS-SYN-SENT abort-tcb @ TCB.STATE !",
+            "abort-tcb @ abort-owner TCP-ATTACH abort-ior ! abort-gen !",
+            'abort-tcb @ abort-gen @ 1+ abort-owner TCP-OWNER-ABORT '
+            '."  wrong-ior=" . ."  wrong-status=" .',
+            'abort-tcb @ abort-gen @ abort-owner TCB-ATTACHED-TO? '
+            '."  held=" .',
+            'abort-tcb @ abort-gen @ abort-owner TCP-OWNER-ABORT '
+            '."  exact-ior=" . ."  exact-status=" .',
+            'abort-tcb @ TCB.STATE @ ."  state=" .',
+            'abort-tcb @ TCB>H1 abort-gen @ TCB-HANDLE-RESOLVE 0= '
+            '."  stale=" .',
+        ])
+        self.assertIn("wrong-ior=-4232 ", text)
+        self.assertIn("wrong-status=0 ", text)
+        self.assertIn("held=-1 ", text)
+        self.assertIn("exact-ior=0 ", text)
+        self.assertIn("exact-status=0 ", text)
+        self.assertIn("state=0 ", text)
+        self.assertIn("stale=-1 ", text)
 
     def test_tcb_alloc_exhaustion(self):
         """TCB-ALLOC should return -1 when all slots are in use."""
@@ -33854,21 +34969,35 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("8 ", text)
 
     def test_aq_push_pop(self):
-        """AQ-PUSH then AQ-POP should round-trip a TCB pointer."""
+        """AQ-PUSH/POP round-trip one reserved child incarnation."""
         text = self._run_kdos([
             "TCP-INIT-ALL",
-            # Set up TCB 0 as a listener
+            "0 TCB-N TCB-CLAIM",
             "TCPS-LISTEN 0 TCB-N TCB.STATE !",
             "8080 0 TCB-N TCB.LOCAL-PORT !",
-            # Push TCB 1's address into TCB 0's accept queue
+            "1 TCB-N TCB-CLAIM",
+            "TCPS-ESTABLISHED 1 TCB-N TCB.STATE !",
+            "0 TCB-N TCB-HANDLE@",
+            "1 TCB-N TCB.PARENT-GEN !",
+            "1 TCB-N TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN 1 TCB-N TCB.AUTH-STATE !",
+            '0 TCB-N AQ-RESERVE ." RS=" .',
             '1 TCB-N 0 TCB-N AQ-PUSH ." PU=" .',
             '0 TCB-N TCB.AQ-COUNT @ ." CNT=" .',
-            # Pop it back
-            '0 TCB-N AQ-POP ." PO=" .',
+            '0 TCB-N TCB.AQ-RESERVED @ ." RSV1=" .',
+            '1 TCB-N TCB.AUTH-STATE @ ." AUTH=" .',
+            '0 TCB-N AQ-POP TCB-HANDLE-RESOLVE ." PO=" .',
             '1 TCB-N ." EXP=" .',
+            '0 TCB-N TCB.AQ-COUNT @ ." CNT2=" .',
+            '0 TCB-N TCB.AQ-RESERVED @ ." RSV2=" .',
         ])
+        self.assertIn("RS=-1 ", text)
         self.assertIn("PU=-1 ", text)   # push success
         self.assertIn("CNT=1 ", text)
+        self.assertIn("RSV1=1 ", text)
+        self.assertIn("AUTH=2 ", text)  # TCP-AUTH-QUEUED
+        self.assertIn("CNT2=0 ", text)
+        self.assertIn("RSV2=0 ", text)
         # PO value should equal EXP value (1 TCB-N address)
         import re
         m_po = re.search(r'PO=(\d+)', text)
@@ -33878,27 +35007,467 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertEqual(m_po.group(1), m_exp.group(1))
 
     def test_aq_pop_empty(self):
-        """AQ-POP on empty queue should return 0."""
+        """AQ-POP on an empty queue should return a zero token pair."""
         text = self._run_kdos([
             "TCP-INIT-ALL",
-            "0 TCB-N AQ-POP .",
+            '0 TCB-N AQ-POP ." GEN=" . ." H1=" .',
         ])
-        self.assertIn("0 ", text)
+        self.assertIn("GEN=0 ", text)
+        self.assertIn("H1=0 ", text)
 
     def test_aq_full_rejects(self):
-        """AQ-PUSH should return 0 (failure) when queue is full."""
+        """Backlog reservation should reject admission beyond /AQ-CAP."""
         text = self._run_kdos([
             "TCP-INIT-ALL",
+            "0 TCB-N TCB-CLAIM",
             "TCPS-LISTEN 0 TCB-N TCB.STATE !",
-            # Fill 8 slots (using TCB 1's address repeatedly)
-            ": fill-aq 8 0 DO 1 TCB-N 0 TCB-N AQ-PUSH DROP LOOP ;",
+            ": fill-aq /AQ-CAP 0 DO 0 TCB-N AQ-RESERVE DROP LOOP ;",
             "fill-aq",
             '0 TCB-N TCB.AQ-COUNT @ ." CNT=" .',
-            # 9th push should fail
-            '1 TCB-N 0 TCB-N AQ-PUSH ." OVER=" .',
+            '0 TCB-N TCB.AQ-RESERVED @ ." RSV=" .',
+            '0 TCB-N AQ-FULL? ." FULL=" .',
+            '0 TCB-N AQ-RESERVE ." OVER=" .',
         ])
-        self.assertIn("CNT=8 ", text)
-        self.assertIn("OVER=0 ", text)  # push rejected
+        self.assertIn("CNT=0 ", text)
+        self.assertIn("RSV=8 ", text)
+        self.assertIn("FULL=-1 ", text)
+        self.assertIn("OVER=0 ", text)
+
+    def test_tcp_accept_claim_validates_listener_and_transfers_owner(self):
+        """Accept consumes a token only through the exact attached listener."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE claim-listener VARIABLE claim-child",
+            "VARIABLE claim-lgen VARIABLE claim-cgen VARIABLE claim-ior",
+            "VARIABLE claim-listener-owner VARIABLE claim-child-owner",
+            "TCB-ALLOC DROP 0 TCB-N claim-listener !",
+            "TCPS-LISTEN claim-listener @ TCB.STATE !",
+            "claim-listener @ claim-listener-owner TCP-ATTACH "
+            "claim-ior ! claim-lgen !",
+            "TCB-ALLOC DROP 1 TCB-N claim-child !",
+            "TCPS-ESTABLISHED claim-child @ TCB.STATE !",
+            "claim-listener @ TCB-HANDLE@",
+            "claim-child @ TCB.PARENT-GEN !",
+            "claim-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN claim-child @ TCB.AUTH-STATE !",
+            "claim-listener @ AQ-RESERVE DROP",
+            "claim-child @ claim-listener @ AQ-PUSH DROP",
+            "claim-listener @ claim-lgen @ 1+ claim-listener-owner "
+            "claim-child-owner TCP-ACCEPT-CLAIM "
+            '."  stale=" . 2DROP',
+            'claim-listener @ TCB.AQ-COUNT @ ."  held=" .',
+            "claim-listener @ claim-lgen @ claim-listener-owner "
+            "claim-child-owner TCP-ACCEPT-CLAIM "
+            "claim-ior ! claim-cgen ! claim-child !",
+            'claim-ior @ ."  accepted=" .',
+            'claim-child @ claim-cgen @ claim-child-owner TCB-ATTACHED-TO? '
+            '."  owned=" .',
+            'claim-listener @ TCB.AQ-COUNT @ ."  count=" .',
+            'claim-listener @ TCB.AQ-RESERVED @ ."  reserved=" .',
+        ])
+        self.assertIn("stale=-4232 ", text)
+        self.assertIn("held=1 ", text)
+        self.assertIn("accepted=0 ", text)
+        self.assertIn("owned=-1 ", text)
+        self.assertIn("count=0 ", text)
+        self.assertIn("reserved=0 ", text)
+
+    def test_tcp_accept_duplicate_owner_does_not_consume_queue(self):
+        """A child owner already in use is rejected before dequeuing anything."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE do-listener VARIABLE do-child VARIABLE do-other",
+            "VARIABLE do-lgen VARIABLE do-ogen VARIABLE do-gen VARIABLE do-ior",
+            "VARIABLE do-listener-owner VARIABLE do-owner VARIABLE do-fresh-owner",
+            "TCB-ALLOC DROP 0 TCB-N do-listener !",
+            "TCPS-LISTEN do-listener @ TCB.STATE !",
+            "do-listener @ do-listener-owner TCP-ATTACH do-ior ! do-lgen !",
+            "TCB-ALLOC DROP 1 TCB-N do-child !",
+            "TCPS-ESTABLISHED do-child @ TCB.STATE !",
+            "do-listener @ TCB-HANDLE@",
+            "do-child @ TCB.PARENT-GEN ! do-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN do-child @ TCB.AUTH-STATE !",
+            "do-listener @ AQ-RESERVE DROP",
+            "do-child @ do-listener @ AQ-PUSH DROP",
+            "TCB-ALLOC DROP 2 TCB-N do-other !",
+            "TCPS-ESTABLISHED do-other @ TCB.STATE !",
+            "do-other @ do-owner TCP-ATTACH do-ior ! do-ogen !",
+            "do-listener @ do-lgen @ do-listener-owner do-owner "
+            "TCP-ACCEPT-CLAIM .\"  rejected=\" . 2DROP",
+            'do-listener @ TCB.AQ-COUNT @ ."  count1=" .',
+            'do-listener @ TCB.AQ-RESERVED @ ."  reserved1=" .',
+            'do-listener @ AQ-PEEK TCB-HANDLE-RESOLVE do-child @ = '
+            '."  head-held=" .',
+            'do-child @ TCB.AUTH-STATE @ ."  child-auth=" .',
+            'do-child @ TCB.OWNER @ ."  child-owner=" .',
+            'do-other @ do-ogen @ do-owner TCB-ATTACHED-TO? '
+            '."  other-held=" .',
+            "do-listener @ do-lgen @ do-listener-owner do-fresh-owner "
+            "TCP-ACCEPT-CLAIM do-ior ! do-gen ! do-child !",
+            'do-ior @ ."  accepted=" .',
+            'do-listener @ TCB.AQ-COUNT @ ."  count2=" .',
+            'do-child @ do-gen @ do-fresh-owner TCB-ATTACHED-TO? '
+            '."  fresh-held=" .',
+        ])
+        for token in (
+            "rejected=-4234 ", "count1=1 ", "reserved1=1 ",
+            "head-held=-1 ", "child-auth=2 ", "child-owner=0 ",
+            "other-held=-1 ", "accepted=0 ", "count2=0 ",
+            "fresh-held=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tcp_accept_corrupt_cross_listener_token_preserves_real_child(self):
+        """A forged queue token cannot reclaim another live listener's child."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE xa VARIABLE xb VARIABLE xc",
+            "VARIABLE xa-gen VARIABLE xb-gen VARIABLE xc-gen VARIABLE xa-ior",
+            "VARIABLE xa-owner VARIABLE xb-owner VARIABLE xc-owner",
+            "TCB-ALLOC DROP 0 TCB-N xa ! TCPS-LISTEN xa @ TCB.STATE !",
+            "xa @ xa-owner TCP-ATTACH xa-ior ! xa-gen !",
+            "TCB-ALLOC DROP 1 TCB-N xb ! TCPS-LISTEN xb @ TCB.STATE !",
+            "xb @ xb-owner TCP-ATTACH xa-ior ! xb-gen !",
+            "TCB-ALLOC DROP 2 TCB-N xc ! TCPS-ESTABLISHED xc @ TCB.STATE !",
+            "xb @ TCB-HANDLE@ xc @ TCB.PARENT-GEN ! xc @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN xc @ TCB.AUTH-STATE !",
+            "xb @ AQ-RESERVE DROP xc @ xb @ AQ-PUSH DROP",
+            "xa @ AQ-RESERVE DROP",
+            "xc @ TCB>H1 xa @ TCB.AQ-SLOTS !",
+            "xc @ TCB.GENERATION @ xa @ TCB.AQ-GENS !",
+            "1 xa @ TCB.AQ-COUNT ! 1 xa @ TCB.AQ-TAIL !",
+            "xa @ xa-gen @ xa-owner xc-owner TCP-ACCEPT-CLAIM",
+            '."  forged-ior=" . 2DROP',
+            'xa @ TCB.AQ-COUNT @ ."  a-count=" .',
+            'xa @ TCB.AQ-RESERVED @ ."  a-reserved=" .',
+            'xb @ TCB.AQ-COUNT @ ."  b-count=" .',
+            'xb @ TCB.AQ-RESERVED @ ."  b-reserved=" .',
+            'xc @ TCB.STATE @ ."  child-state=" .',
+            'xc @ TCB.AUTH-STATE @ ."  child-auth=" .',
+            'xb @ AQ-PEEK TCB-HANDLE-RESOLVE xc @ = ."  b-head=" .',
+            "xb @ xb-gen @ xb-owner xc-owner TCP-ACCEPT-CLAIM",
+            "xa-ior ! xc-gen ! xc !",
+            'xa-ior @ ."  accepted=" .',
+            'xc @ xc-gen @ xc-owner TCB-ATTACHED-TO? ."  exact=" .',
+        ])
+        for token in (
+            "forged-ior=-4232 ", "a-count=0 ", "a-reserved=0 ",
+            "b-count=1 ", "b-reserved=1 ", "child-state=4 ",
+            "child-auth=2 ", "b-head=-1 ", "accepted=0 ", "exact=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tcp_accept_claim_reclaims_invalid_queued_child(self):
+        """A bad queued token cannot consume backlog and strand its child."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE bad-listener VARIABLE bad-child VARIABLE bad-lgen",
+            "VARIABLE bad-ior VARIABLE bad-listener-owner VARIABLE bad-owner",
+            "TCB-ALLOC DROP 0 TCB-N bad-listener !",
+            "TCPS-LISTEN bad-listener @ TCB.STATE !",
+            "bad-listener @ bad-listener-owner TCP-ATTACH "
+            "bad-ior ! bad-lgen !",
+            "TCB-ALLOC DROP 1 TCB-N bad-child !",
+            "TCPS-ESTABLISHED bad-child @ TCB.STATE !",
+            "bad-listener @ TCB-HANDLE@",
+            "bad-child @ TCB.PARENT-GEN !",
+            "bad-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN bad-child @ TCB.AUTH-STATE !",
+            "bad-listener @ AQ-RESERVE DROP",
+            "bad-child @ bad-listener @ AQ-PUSH DROP",
+            "0 bad-child @ TCB.PARENT-GEN !",
+            "bad-listener @ bad-lgen @ bad-listener-owner bad-owner "
+            "TCP-ACCEPT-CLAIM "
+            '."  ior=" . 2DROP',
+            'bad-child @ TCB.STATE @ ."  child=" .',
+            'bad-listener @ TCB.AQ-COUNT @ ."  count=" .',
+            'bad-listener @ TCB.AQ-RESERVED @ ."  reserved=" .',
+        ])
+        self.assertIn("ior=-4232 ", text)
+        self.assertIn("child=0 ", text)
+        self.assertIn("count=0 ", text)
+        self.assertIn("reserved=0 ", text)
+
+    def test_half_open_retry_exhaustion_releases_backlog_once(self):
+        """An unanswered SYN cannot reserve a backlog entry forever."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCB-ALLOC DROP TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "TCB-ALLOC DROP TCPS-SYN-RCVD 1 TCB-N TCB.STATE !",
+            "0 TCB-N TCB-HANDLE@",
+            "1 TCB-N TCB.PARENT-GEN !",
+            "1 TCB-N TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN 1 TCB-N TCB.AUTH-STATE !",
+            "TCP-RTO-INITIAL 1 TCB-N TCB.RTO-VALUE !",
+            "TCP-MAX-RETRIES 1 TCB-N TCB.RETRIES !",
+            "0 TCB-N AQ-RESERVE DROP",
+            '0 TCB-N TCB.AQ-RESERVED @ ."  before=" .',
+            "1 TCB-N TCP-HALF-OPEN-RTO-STEP",
+            '1 TCB-N TCB.STATE @ ."  child=" .',
+            '0 TCB-N TCB.AQ-RESERVED @ ."  after=" .',
+            "1 TCB-N TCP-HALF-OPEN-RTO-STEP",
+            '0 TCB-N TCB.AQ-RESERVED @ ."  again=" .',
+        ])
+        self.assertIn("before=1 ", text)
+        self.assertIn("child=0 ", text)
+        self.assertIn("after=0 ", text)
+        self.assertIn("again=0 ", text)
+
+    def test_owner_close_replays_fin_then_expires_unanswered_teardown(self):
+        """Released graceful close cannot leak an ownerless TCB forever."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE fin-ip 4 ALLOT 10 0 0 77 fin-ip IP!",
+            "CREATE fin-mac 6 ALLOT fin-mac 6 170 FILL",
+            "fin-ip fin-mac ARP-INSERT",
+            "VARIABLE fin-tcb VARIABLE fin-gen VARIABLE fin-ior",
+            "VARIABLE fin-owner",
+            "TCB-ALLOC DROP 0 TCB-N fin-tcb !",
+            "TCPS-ESTABLISHED fin-tcb @ TCB.STATE !",
+            "100 fin-tcb @ TCB.SND-UNA ! 100 fin-tcb @ TCB.SND-NXT !",
+            "40000 fin-tcb @ TCB.LOCAL-PORT !",
+            "443 fin-tcb @ TCB.REMOTE-PORT !",
+            "fin-ip fin-tcb @ TCB.REMOTE-IP 4 CMOVE",
+            "200 fin-tcb @ TCB.RCV-NXT !",
+            "4096 fin-tcb @ TCB.RCV-WND !",
+            "fin-tcb @ fin-owner TCP-ATTACH fin-ior ! fin-gen !",
+            "fin-tcb @ fin-gen @ fin-owner TCP-OWNER-CLOSE fin-ior !",
+            'fin-ior @ ."  close=" .',
+            'fin-tcb @ TCB.STATE @ ."  closing=" .',
+            'fin-tcb @ TCB.OWNER @ ."  owner=" .',
+            "fin-tcb @ TCP-FIN-RTO-STEP",
+            'fin-tcb @ TCB.RETRIES @ ."  retried=" .',
+            "TCP-MAX-RETRIES fin-tcb @ TCB.RETRIES !",
+            "fin-tcb @ TCP-FIN-RTO-STEP",
+            'fin-tcb @ TCB.STATE @ ."  expired=" .',
+        ])
+        self.assertIn("close=0 ", text)
+        self.assertIn("closing=5 ", text)
+        self.assertIn("owner=0 ", text)
+        self.assertIn("retried=1 ", text)
+        self.assertIn("expired=0 ", text)
+
+    def test_fin_replay_backpressure_does_not_consume_retry_budget(self):
+        """Neighbor/TX backpressure is not a wire retransmission attempt."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "CREATE blocked-fin-ip 4 ALLOT 10 0 0 77 blocked-fin-ip IP!",
+            "TCB-ALLOC DROP",
+            "TCPS-FIN-WAIT-1 0 TCB-N TCB.STATE !",
+            "100 0 TCB-N TCB.SND-UNA ! 101 0 TCB-N TCB.SND-NXT !",
+            "40000 0 TCB-N TCB.LOCAL-PORT ! 443 0 TCB-N TCB.REMOTE-PORT !",
+            "blocked-fin-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "VARIABLE blocked-fin-stamp",
+            "2 0 TCB-N TCB.RETRIES !",
+            "MS@ 500 - DUP blocked-fin-stamp ! 0 TCB-N TCB.RTO-TIMER !",
+            "0 TCB-N TCP-FIN-RTO-STEP",
+            '0 TCB-N TCB.RETRIES @ ."  retries=" .',
+            '0 TCB-N TCB.RTO-TIMER @ blocked-fin-stamp @ = ."  timer=" .',
+            '0 TCB-N TCB.FLAGS @ ."  flags=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+        ])
+        self.assertIn("retries=2 ", text)
+        self.assertIn("timer=-1 ", text)
+        self.assertIn("flags=6 ", text)
+        self.assertIn("state=5 ", text)
+
+    def test_control_admission_stall_expires_each_owned_lifecycle(self):
+        """Local non-admission is bounded without inventing wire retries."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "VARIABLE stall-owner VARIABLE stall-gen VARIABLE stall-ior",
+            # A half-open child releases its listener reservation exactly once.
+            "0 TCB-N TCB-CLAIM TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "1 TCB-N TCB-CLAIM TCPS-SYN-RCVD 1 TCB-N TCB.STATE !",
+            "0 TCB-N TCB-HANDLE@",
+            "1 TCB-N TCB.PARENT-GEN ! 1 TCB-N TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN 1 TCB-N TCB.AUTH-STATE !",
+            "TCP-RTO-INITIAL 1 TCB-N TCB.RTO-VALUE !",
+            "2 1 TCB-N TCB.RETRIES ! 0 TCB-N AQ-RESERVE DROP",
+            "TCP-F-CONTROL-STALLED 1 TCB-N TCB.FLAGS !",
+            "MS@ TCP-RTO-MAX - 1 TCB-N TCB.CONTROL-STALL !",
+            "1 TCB-N TCP-HALF-OPEN-RTO-STEP",
+            '1 TCB-N TCB.STATE @ ."  half-open=" .',
+            '0 TCB-N TCB.AQ-RESERVED @ ."  reserved=" .',
+            # An attached active open publishes failure for its exact owner.
+            "2 TCB-N TCB-CLAIM TCPS-SYN-SENT 2 TCB-N TCB.STATE !",
+            "2 TCB-N stall-owner TCP-ATTACH stall-ior ! stall-gen !",
+            "TCP-RTO-INITIAL 2 TCB-N TCB.RTO-VALUE !",
+            "2 2 TCB-N TCB.RETRIES !",
+            "TCP-F-CONTROL-STALLED 2 TCB-N TCB.FLAGS !",
+            "MS@ TCP-RTO-MAX - 2 TCB-N TCB.CONTROL-STALL !",
+            "2 TCB-N TCP-ACTIVE-OPEN-RTO-STEP",
+            'stall-ior @ ."  attach=" .',
+            '2 TCB-N TCB.STATE @ ."  active=" .',
+            '2 TCB-N TCB.FAILURE @ ."  reason=" .',
+            '2 TCB-N TCB.RETRIES @ ."  active-retries=" .',
+            '2 TCB-N stall-gen @ stall-owner TCB-ATTACHED-TO? '
+            '."  retained=" .',
+            # An ownerless FIN teardown is reclaimed rather than stranded.
+            "3 TCB-N TCB-CLAIM TCPS-FIN-WAIT-1 3 TCB-N TCB.STATE !",
+            "100 3 TCB-N TCB.SND-UNA ! 101 3 TCB-N TCB.SND-NXT !",
+            "TCP-RTO-INITIAL 3 TCB-N TCB.RTO-VALUE !",
+            "2 3 TCB-N TCB.RETRIES !",
+            "TCP-F-CONTROL-STALLED 3 TCB-N TCB.FLAGS !",
+            "MS@ TCP-RTO-MAX - 3 TCB-N TCB.CONTROL-STALL !",
+            "3 TCB-N TCP-FIN-RTO-STEP",
+            '3 TCB-N TCB.STATE @ ."  fin=" .',
+        ])
+        for token in (
+            "half-open=0 ", "reserved=0 ", "attach=0 ",
+            "active=11 ", "reason=1005 ", "active-retries=2 ",
+            "retained=-1 ", "fin=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_control_cold_neighbor_stall_starts_and_expires_via_maintenance(self):
+        """A due cold-route replay retains its wire state, then terminates."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "CREATE cold-control-ip 4 ALLOT 10 0 0 77 cold-control-ip IP!",
+            "VARIABLE cold-control-stamp",
+            "0 TCB-N TCB-CLAIM TCPS-FIN-WAIT-1 0 TCB-N TCB.STATE !",
+            "100 0 TCB-N TCB.SND-UNA ! 101 0 TCB-N TCB.SND-NXT !",
+            "cold-control-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "TCP-RTO-INITIAL 0 TCB-N TCB.RTO-VALUE !",
+            "2 0 TCB-N TCB.RETRIES !",
+            "MS@ TCP-RTO-INITIAL - DUP cold-control-stamp !",
+            "0 TCB-N TCB.RTO-TIMER !",
+            "ARP-MAX-ENTRIES NET-MAINT-CURSOR ! TCP-RTO-SERVICE",
+            '0 TCB-N TCB.STATE @ ."  retained=" .',
+            '0 TCB-N TCB.RETRIES @ ."  retries=" .',
+            '0 TCB-N TCB.RTO-TIMER @ cold-control-stamp @ = ."  timer=" .',
+            '0 TCB-N TCB.FLAGS @ ."  flags=" .',
+            'cold-control-ip ARP-FIND ARP-E.STATE W@ ."  neighbor=" .',
+            "MS@ TCP-RTO-MAX - 0 TCB-N TCB.CONTROL-STALL !",
+            "ARP-MAX-ENTRIES NET-MAINT-CURSOR ! TCP-RTO-SERVICE",
+            '0 TCB-N TCB.STATE @ ."  expired=" .',
+        ])
+        for token in (
+            "retained=5 ", "retries=2 ", "timer=-1 ", "flags=6 ",
+            "neighbor=1 ", "expired=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_control_warm_neighbor_local_stall_preserves_wire_budget(self):
+        """Local non-admission on a warm route preserves the wire budget."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "CREATE nic-stall-ip 4 ALLOT 10 0 0 77 nic-stall-ip IP!",
+            "CREATE nic-stall-mac 6 ALLOT nic-stall-mac 6 170 FILL",
+            "nic-stall-ip nic-stall-mac ARP-INSERT",
+            "VARIABLE nic-stall-stamp",
+            "0 TCB-N TCB-CLAIM TCPS-FIN-WAIT-1 0 TCB-N TCB.STATE !",
+            "100 0 TCB-N TCB.SND-UNA ! 101 0 TCB-N TCB.SND-NXT !",
+            "nic-stall-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "TCP-RTO-INITIAL 0 TCB-N TCB.RTO-VALUE !",
+            "2 0 TCB-N TCB.RETRIES !",
+            "MS@ TCP-RTO-INITIAL - DUP nic-stall-stamp !",
+            "0 TCB-N TCB.RTO-TIMER !",
+            '0 TCB-N TCP-NEIGHBOR-READY? ."  warm=" .',
+            '0 TCB-N TCP-CONTROL-STALL-WAIT ."  expired=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+            '0 TCB-N TCB.RETRIES @ ."  retries=" .',
+            '0 TCB-N TCB.RTO-TIMER @ nic-stall-stamp @ = ."  timer=" .',
+            '0 TCB-N TCB.FLAGS @ ."  flags=" .',
+            '0 TCB-N TCB.CONTROL-STALL @ 0<> ."  stamp=" .',
+        ])
+        for token in (
+            "warm=-1 ", "expired=0 ", "state=5 ", "retries=2 ",
+            "timer=-1 ", "flags=4 ", "stamp=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_active_handshake_completion_retires_control_stall_lifetime(self):
+        """An old SYN admission stall cannot expire the first later FIN stall."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "CREATE active-life-ip 4 ALLOT 10 0 0 77 active-life-ip IP!",
+            "VARIABLE active-old-stall",
+            "0 TCB-N TCB-CLAIM TCPS-SYN-SENT 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !",
+            "443 0 TCB-N TCB.REMOTE-PORT !",
+            "active-life-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.ISS ! 100 0 TCB-N TCB.SND-UNA !",
+            "101 0 TCB-N TCB.SND-NXT ! 4096 0 TCB-N TCB.RCV-WND !",
+            "TCP-RTO-INITIAL 0 TCB-N TCB.RTO-VALUE !",
+            "TCP-F-CONTROL-STALLED TCP-F-ARP-PENDING OR "
+            "0 TCB-N TCB.FLAGS !",
+            "MS@ TCP-RTO-MAX - DUP active-old-stall ! "
+            "0 TCB-N TCB.CONTROL-STALL !",
+            "TCP-SYN TCP-ACK OR _TI-FLAGS ! 0 _TI-DATALEN !",
+            "101 _TI-ACK ! 700 _TI-SEQ ! 4096 _TI-WIN !",
+            "0 TCB-N TCP-INPUT-SYN-SENT",
+            '0 TCB-N TCB.STATE @ ."  established=" .',
+            '0 TCB-N TCB.FLAGS @ TCP-F-CONTROL-STALLED AND 0= '
+            '."  handshake-clear=" .',
+            '0 TCB-N TCB.CONTROL-STALL @ ."  handshake-stamp=" .',
+            "TCPS-FIN-WAIT-1 0 TCB-N TCB.STATE !",
+            "200 0 TCB-N TCB.SND-UNA ! 201 0 TCB-N TCB.SND-NXT !",
+            "2 0 TCB-N TCB.RETRIES !",
+            "0 TCB-N TCP-FIN-RTO-STEP",
+            '0 TCB-N TCB.STATE @ ."  fin-state=" .',
+            '0 TCB-N TCB.RETRIES @ ."  fin-retries=" .',
+            '0 TCB-N TCB.CONTROL-STALL @ active-old-stall @ <> '
+            '."  fresh-stamp=" .',
+        ])
+        for token in (
+            "established=4 ", "handshake-clear=-1 ",
+            "handshake-stamp=0 ", "fin-state=5 ", "fin-retries=2 ",
+            "fresh-stamp=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_passive_handshake_completion_retires_control_stall_lifetime(self):
+        """Queued passive children discard stale SYN+ACK admission state."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "CREATE passive-life-ip 4 ALLOT 10 0 0 77 passive-life-ip IP!",
+            "VARIABLE passive-old-stall",
+            "0 TCB-N TCB-CLAIM TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "8080 0 TCB-N TCB.LOCAL-PORT ! 0 TCB-N AQ-RESERVE DROP",
+            "1 TCB-N TCB-CLAIM TCPS-SYN-RCVD 1 TCB-N TCB.STATE !",
+            "0 TCB-N TCB-HANDLE@",
+            "1 TCB-N TCB.PARENT-GEN ! 1 TCB-N TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN 1 TCB-N TCB.AUTH-STATE !",
+            "passive-life-ip 1 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 1 TCB-N TCB.ISS ! 100 1 TCB-N TCB.SND-UNA !",
+            "101 1 TCB-N TCB.SND-NXT ! 700 1 TCB-N TCB.RCV-NXT !",
+            "TCP-RTO-INITIAL 1 TCB-N TCB.RTO-VALUE !",
+            "TCP-F-CONTROL-STALLED TCP-F-ARP-PENDING OR "
+            "1 TCB-N TCB.FLAGS !",
+            "MS@ TCP-RTO-MAX - DUP passive-old-stall ! "
+            "1 TCB-N TCB.CONTROL-STALL !",
+            "TCP-ACK _TI-FLAGS ! 0 _TI-DATALEN !",
+            "101 _TI-ACK ! 700 _TI-SEQ ! 4096 _TI-WIN !",
+            "1 TCB-N TCP-INPUT-ESTABLISHED-ETC",
+            '1 TCB-N TCB.STATE @ ."  established=" .',
+            '1 TCB-N TCB.AUTH-STATE @ ."  authority=" .',
+            '0 TCB-N TCB.AQ-COUNT @ ."  queued=" .',
+            '1 TCB-N TCB.FLAGS @ ."  handshake-flags=" .',
+            '1 TCB-N TCB.CONTROL-STALL @ ."  handshake-stamp=" .',
+            "TCPS-FIN-WAIT-1 1 TCB-N TCB.STATE !",
+            "200 1 TCB-N TCB.SND-UNA ! 201 1 TCB-N TCB.SND-NXT !",
+            "2 1 TCB-N TCB.RETRIES !",
+            "1 TCB-N TCP-FIN-RTO-STEP",
+            '1 TCB-N TCB.STATE @ ."  fin-state=" .',
+            '1 TCB-N TCB.RETRIES @ ."  fin-retries=" .',
+            '1 TCB-N TCB.CONTROL-STALL @ passive-old-stall @ <> '
+            '."  fresh-stamp=" .',
+        ])
+        for token in (
+            "established=4 ", "authority=2 ", "queued=1 ",
+            "handshake-flags=0 ", "handshake-stamp=0 ",
+            "fin-state=5 ", "fin-retries=2 ", "fresh-stamp=-1 ",
+        ):
+            self.assertIn(token, text)
 
     def test_listener_stays_listening(self):
         """After SYN processing, the listener TCB should remain in LISTEN."""
@@ -34143,6 +35712,45 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertGreaterEqual(len(sent), 1)  # ARP resolution was attempted.
         self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
 
+    def test_tcp_active_open_retry_commits_only_emitted_syn(self):
+        """Local backpressure does not consume SYN wire retry authority."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE ar-ip 4 ALLOT 10 0 0 77 ar-ip IP!",
+            "CREATE ar-mac 6 ALLOT ar-mac 6 170 FILL",
+            "VARIABLE ar-tcb TCB-ALLOC DROP 0 TCB-N ar-tcb !",
+            "TCPS-SYN-SENT ar-tcb @ TCB.STATE !",
+            "40000 ar-tcb @ TCB.LOCAL-PORT ! 443 ar-tcb @ TCB.REMOTE-PORT !",
+            "ar-ip ar-tcb @ TCB.REMOTE-IP 4 CMOVE",
+            "100 ar-tcb @ TCB.ISS ! 100 ar-tcb @ TCB.SND-UNA !",
+            "101 ar-tcb @ TCB.SND-NXT ! 4096 ar-tcb @ TCB.RCV-WND !",
+            "TCP-RTO-INITIAL ar-tcb @ TCB.RTO-VALUE !",
+            "12345 ar-tcb @ TCB.RTO-TIMER !",
+            "ar-tcb @ TCP-ACTIVE-OPEN-RTO-STEP",
+            'ar-tcb @ TCB.RETRIES @ ."  cold-retries=" .',
+            'ar-tcb @ TCB.RTO-TIMER @ ."  cold-stamp=" .',
+            "ar-ip ar-mac ARP-INSERT",
+            "ar-tcb @ TCP-ACTIVE-OPEN-RTO-STEP",
+            'ar-tcb @ TCB.RETRIES @ ."  warm-retries=" .',
+            'ar-tcb @ TCB.SND-NXT @ ."  next=" .',
+            "TCP-MAX-RETRIES ar-tcb @ TCB.RETRIES !",
+            "ar-tcb @ TCP-ACTIVE-OPEN-RTO-STEP",
+            'ar-tcb @ TCB.STATE @ ."  exhausted=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("cold-retries=0 ", text)
+        self.assertIn("cold-stamp=12345 ", text)
+        self.assertIn("warm-retries=1 ", text)
+        self.assertIn("next=101 ", text)
+        self.assertIn("exhausted=0 ", text)
+        tcp = [self._parse_tcp_frame(f) for f in sent]
+        tcp = [p for p in tcp if p is not None]
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]['flags'], self.TCP_SYN)
+        self.assertEqual(tcp[0]['seq'], 100)
+
     # -- 16.7f: TCP-LISTEN (passive open) --
 
     def test_tcp_listen_sets_state(self):
@@ -34212,6 +35820,62 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("alloc=-1 ", text)
         self.assertIn("st=4 ", text)  # TCPS-ESTABLISHED = 4
 
+    def test_tcp_active_open_requires_exact_synack_and_reacks_duplicate(self):
+        """Only a bare exact SYN+ACK establishes, and its duplicate is re-ACKed."""
+        sent = []
+        injected = {'done': False}
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip, my_ip = [10, 0, 0, 1], [192, 168, 1, 100]
+
+        def peer(nic, frame):
+            sent.append(bytes(frame))
+            parsed = self._parse_tcp_frame(frame)
+            if (parsed is None or injected['done']
+                    or parsed['flags'] != self.TCP_SYN):
+                return
+            injected['done'] = True
+            args = (nic_mac, peer_mac, peer_ip, my_ip, 80, 12345,
+                    5000, parsed['seq'] + 1)
+            nic.inject_frame(self._build_tcp_frame(
+                *args, self.TCP_SYN | self.TCP_ACK | self.TCP_FIN, 8192))
+            nic.inject_frame(self._build_tcp_frame(
+                *args, self.TCP_SYN | self.TCP_ACK, 8192, b'X'))
+            good = self._build_tcp_frame(
+                *args, self.TCP_SYN | self.TCP_ACK, 8192)
+            nic.inject_frame(good)
+            nic.inject_frame(good)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET TCP-INIT-ALL",
+            "CREATE sx-mac 6 ALLOT 170 sx-mac C! 187 sx-mac 1+ C!"
+            " 204 sx-mac 2 + C! 221 sx-mac 3 + C! 238 sx-mac 4 + C!"
+            " 1 sx-mac 5 + C!",
+            "CREATE sx-ip 4 ALLOT 10 0 0 1 sx-ip IP! sx-ip sx-mac ARP-INSERT",
+            "VARIABLE sx-tcb sx-ip 80 12345 TCP-CONNECT sx-tcb !",
+            "2 sx-tcb @ TCB.RETRIES ! 12345 sx-tcb @ TCB.RTO-TIMER !",
+            '1 TCP-POLL-WAIT sx-tcb @ TCB.STATE @ ."  bad-flags=" .',
+            '1 TCP-POLL-WAIT sx-tcb @ TCB.STATE @ ."  bad-data=" .',
+            '1 TCP-POLL-WAIT sx-tcb @ TCB.STATE @ ."  exact=" .',
+            '1 TCP-POLL-WAIT sx-tcb @ TCB.STATE @ ."  duplicate=" .',
+            'sx-tcb @ TCB.IRS @ ."  irs=" .',
+            'sx-tcb @ TCB.RCV-NXT @ ."  rcv-next=" .',
+            'sx-tcb @ TCB.RETRIES @ ."  retries=" .',
+            'sx-tcb @ TCB.RTO-TIMER @ ."  timer=" .',
+        ], nic_tx_callback=peer)
+        self.assertIn("bad-flags=2 ", text)
+        self.assertIn("bad-data=2 ", text)
+        self.assertIn("exact=4 ", text)
+        self.assertIn("duplicate=4 ", text)
+        self.assertIn("irs=5000 ", text)
+        self.assertIn("rcv-next=5001 ", text)
+        self.assertIn("retries=0 ", text)
+        self.assertIn("timer=0 ", text)
+        tcp = [self._parse_tcp_frame(f) for f in sent]
+        acks = [p for p in tcp if p is not None and p['flags'] == self.TCP_ACK]
+        self.assertEqual(len(acks), 2)
+        self.assertTrue(all(p['ack'] == 5001 for p in acks))
+
     # -- 16.7h: TCP 3-way handshake (passive open — server) --
 
     def test_tcp_handshake_passive_open(self):
@@ -34262,7 +35926,8 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "10 TCP-POLL-WAIT",
             # Listener stays in LISTEN; accepted conn is in accept queue
             "_HP-TCB @ TCB.STATE @ .\"  lst=\" .",
-            "_HP-TCB @ AQ-POP DUP 0<> IF TCB.STATE @ .\"  st=\" . ELSE .\"  st=none \" THEN",
+            "_HP-TCB @ AQ-POP TCB-HANDLE-RESOLVE "
+            "DUP 0<> IF TCB.STATE @ .\"  st=\" . ELSE .\"  st=none \" THEN",
         ], nic_frames=[syn_frame], nic_tx_callback=tcp_peer_passive)
         self.assertIn("listen=-1 ", text)
         self.assertIn("lst=1 ", text)   # listener stays TCPS-LISTEN
@@ -35070,8 +36735,8 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertIn("reason=1002 ", text)
         self.assertIn("used=1 ", text)
 
-    def test_tcp_rst_sent_for_unmatched(self):
-        """An incoming segment for no TCB should elicit a RST."""
+    def test_tcp_rst_sent_for_unmatched_uses_wire_sequence_rules(self):
+        """Unmatched ACK and non-ACK segments receive RFC-valid resets."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
         sent_frames = []
@@ -35079,11 +36744,26 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         def capture_rst(nic, frame_bytes):
             sent_frames.append(bytes(frame_bytes))
 
-        # Build an unexpected SYN to a port nobody is listening on
+        # ACK-bearing input receives a bare RST at SEG.ACK.  Non-ACK input
+        # receives RST|ACK for its complete sequence space, including data,
+        # SYN, and FIN consumption.
+        ack_frame = self._build_tcp_frame(
+            nic_mac, peer_mac,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            54320, 9998, 1000, 7777, self.TCP_ACK, 8192)
+        listen_ack = self._build_tcp_frame(
+            nic_mac, peer_mac,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            54322, 8888, 3000, 8888, self.TCP_ACK, 8192)
         syn_frame = self._build_tcp_frame(
             nic_mac, peer_mac,
             [10, 0, 0, 1], [192, 168, 1, 100],
-            54321, 9999, 1000, 0, 0x02, 8192)
+            54321, 9999, 2000, 0, self.TCP_SYN | self.TCP_FIN, 8192,
+            payload=b"xy")
+        broadcast_syn = self._build_tcp_frame(
+            [0xFF] * 6, peer_mac,
+            [10, 0, 0, 1], [255, 255, 255, 255],
+            54323, 9997, 4000, 0, self.TCP_SYN, 8192)
 
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
@@ -35092,15 +36772,30 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
             "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
             "PIP PMAC ARP-INSERT",
+            "8888 TCP-LISTEN DROP",
             "5 TCP-POLL-WAIT",
             '.\"  done\"',
-        ], nic_frames=[syn_frame], nic_tx_callback=capture_rst)
+        ], nic_frames=[ack_frame, listen_ack, syn_frame, broadcast_syn],
+            nic_tx_callback=capture_rst)
         self.assertIn("done", text)
-        # Should have sent a RST
         tcp_out = [self._parse_tcp_frame(f) for f in sent_frames]
         tcp_out = [f for f in tcp_out if f is not None]
         rst_frames = [f for f in tcp_out if f['flags'] & 0x04]
-        self.assertGreaterEqual(len(rst_frames), 1, "should send RST for unmatched segment")
+        self.assertEqual(len(rst_frames), 3)
+        by_dport = {frame['dport']: frame for frame in rst_frames}
+        ack_rst = by_dport[54320]
+        self.assertEqual(ack_rst['flags'], self.TCP_RST)
+        self.assertEqual(ack_rst['seq'], 7777)
+        self.assertEqual(ack_rst['ack'], 0)
+        non_ack_rst = by_dport[54321]
+        self.assertEqual(non_ack_rst['flags'], self.TCP_RST | self.TCP_ACK)
+        self.assertEqual(non_ack_rst['seq'], 0)
+        self.assertEqual(non_ack_rst['ack'], 2004)
+        listen_rst = by_dport[54322]
+        self.assertEqual(listen_rst['flags'], self.TCP_RST)
+        self.assertEqual(listen_rst['seq'], 8888)
+        self.assertEqual(listen_rst['ack'], 0)
+        self.assertNotIn(54323, by_dport)
 
     # -- 16.7m: TCP graceful close --
 
@@ -35292,6 +36987,45 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         # After receiving peer's FIN+ACK we should be in TIME-WAIT
         self.assertIn("st=10 ", text)  # TCPS-TIME-WAIT = 10
 
+    def test_tcp_duplicate_fin_reacks_and_restarts_time_wait(self):
+        """A retransmitted FIN is re-ACKed without consuming sequence twice."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip, my_ip = [10, 0, 0, 77], [10, 0, 0, 2]
+        duplicate_fin = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 100, self.TCP_FIN | self.TCP_ACK, 4096)
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE tw-ip 4 ALLOT 10 0 0 77 tw-ip IP!",
+            "CREATE tw-mac 6 ALLOT tw-mac 6 170 FILL tw-ip tw-mac ARP-INSERT",
+            "TCB-ALLOC DROP VARIABLE tw-tcb 0 TCB-N tw-tcb !",
+            "TCPS-TIME-WAIT tw-tcb @ TCB.STATE !",
+            "40000 tw-tcb @ TCB.LOCAL-PORT ! 443 tw-tcb @ TCB.REMOTE-PORT !",
+            "tw-ip tw-tcb @ TCB.REMOTE-IP 4 CMOVE",
+            "100 tw-tcb @ TCB.SND-UNA ! 100 tw-tcb @ TCB.SND-NXT !",
+            "201 tw-tcb @ TCB.RCV-NXT ! 4096 tw-tcb @ TCB.RCV-WND !",
+            "VARIABLE tw-old",
+            "EPOCH@ TCP-2MSL - DUP tw-old ! tw-tcb @ TCB.RTO-TIMER !",
+            "1 TCP-POLL-WAIT",
+            'tw-tcb @ TCB.RTO-TIMER @ tw-old @ > ."  restarted=" .',
+            "TCB-REAP-TW",
+            'tw-tcb @ TCB.STATE @ ."  retained=" .',
+            'tw-tcb @ TCB.RCV-NXT @ ."  rcv-next=" .',
+        ], nic_frames=[duplicate_fin],
+           nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("restarted=-1 ", text)
+        self.assertIn("retained=10 ", text)
+        self.assertIn("rcv-next=201 ", text)
+        tcp = [self._parse_tcp_frame(f) for f in sent]
+        tcp = [p for p in tcp if p is not None]
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]['flags'], self.TCP_ACK)
+        self.assertEqual(tcp[0]['ack'], 201)
+
     def test_tcp_close_listen(self):
         """TCP-CLOSE on a LISTEN TCB should reset it to CLOSED."""
         text = self._run_kdos([
@@ -35390,18 +37124,29 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         """Aborting a listener must not orphan its completed accept queue."""
         text = self._run_kdos([
             "TCP-INIT-ALL ARP-CLEAR",
+            "0 TCB-N TCB-CLAIM",
             "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "1 TCB-N TCB-CLAIM",
             "TCPS-ESTABLISHED 1 TCB-N TCB.STATE !",
+            "0 TCB-N TCB-HANDLE@",
+            "1 TCB-N TCB.PARENT-GEN !",
+            "1 TCB-N TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN 1 TCB-N TCB.AUTH-STATE !",
+            "0 TCB-N AQ-RESERVE DROP",
             "1 TCB-N 0 TCB-N AQ-PUSH DROP",
             "VARIABLE listener-abort-depth  DEPTH listener-abort-depth !",
             '0 TCB-N TCP-ABORT ."  status=" .',
             '0 TCB-N TCB.STATE @ ."  listener=" .',
             '1 TCB-N TCB.STATE @ ."  child=" .',
+            '0 TCB-N TCB.AQ-COUNT @ ."  queued=" .',
+            '0 TCB-N TCB.AQ-RESERVED @ ."  reserved=" .',
             'DEPTH listener-abort-depth @ = ."  balanced=" .',
         ])
         self.assertIn("status=0 ", text)
         self.assertIn("listener=0 ", text)
         self.assertIn("child=0 ", text)
+        self.assertIn("queued=0 ", text)
+        self.assertIn("reserved=0 ", text)
         self.assertIn("balanced=-1 ", text)
 
     # -- 16.7n: TCP-POLL --
@@ -40142,6 +41887,65 @@ class TestToolsModule(_KDOSNetworkTestBase):
             self.assertIn("tools.f loaded", text)
             self.assertIn("ED", text)
             self.assertIn("SCROLL", text)
+        finally:
+            os.unlink(img)
+
+    def test_ftp_cleanup_tracks_tls_and_plain_control_authority(self):
+        """FTPS cleanup releases both globals and retains either on busy."""
+        img = self._make_tools_image()
+        try:
+            disposed_text = self._run_kdos([
+                "LOAD tools.f",
+                "TCP-INIT-ALL ARP-CLEAR",
+                "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+                "CREATE ftp-clean-ip 4 ALLOT 10 0 0 77 ftp-clean-ip IP!",
+                "CREATE ftp-clean-mac 6 ALLOT ftp-clean-mac 6 170 FILL",
+                "ftp-clean-ip ftp-clean-mac ARP-INSERT",
+                "VARIABLE ftp-clean-ctx 0 TLS-CTX@ ftp-clean-ctx !",
+                "ftp-clean-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+                "TLS-ROLE-CLIENT ftp-clean-ctx @ TLS-CTX.ROLE !",
+                "TLSS-HANDSHAKE ftp-clean-ctx @ TLS-CTX.STATE !",
+                "ftp-clean-ctx @ _FTP-TLS !",
+                "0 TCB-N TCB-CLAIM TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+                "40000 0 TCB-N TCB.LOCAL-PORT !",
+                "443 0 TCB-N TCB.REMOTE-PORT !",
+                "ftp-clean-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+                "100 0 TCB-N TCB.SND-UNA ! 100 0 TCB-N TCB.SND-NXT !",
+                "200 0 TCB-N TCB.RCV-NXT ! 4096 0 TCB-N TCB.RCV-WND !",
+                "0 TCB-N _FTP-TCB !",
+                '_FTP-CLOSE ."  close=" .',
+                '_FTP-TLS @ ."  tls-global=" .',
+                '_FTP-TCB @ ."  tcb-global=" .',
+                'ftp-clean-ctx @ TLS-CTX-CLAIMED? ."  tls-live=" .',
+                'ftp-clean-ctx @ TLS-CTX.CLOSE-PHASE @ ."  phase=" .',
+                '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            for token in (
+                "close=0 ", "tls-global=0 ", "tcb-global=0 ",
+                "tls-live=0 ", "phase=-1 ", "tcb-state=5 ",
+            ):
+                self.assertIn(token, disposed_text)
+
+            # Loading networking.f and tools.f consumes most of this fixture's
+            # checked-in source-mode budget.  Exercise the independent busy
+            # disposition in a fresh bounded run rather than inflating that
+            # budget or allowing the second scenario to be silently truncated.
+            busy_text = self._run_kdos([
+                "LOAD tools.f",
+                "TCP-INIT-ALL ARP-CLEAR",
+                "0 TCB-N TCB-CLAIM TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+                "0 TCB-N _FTP-TCB ! 0 _FTP-TLS !",
+                "1 NET-TX-OWNER-DEPTH ! -1 NET-TX-OWNER-CORE !",
+                "-1 NET-TX-OWNER-TASK !",
+                '_FTP-CLOSE 0<> ."  busy=" .',
+                "_NET-TX-OWNER-CLEAR",
+                '_FTP-TCB @ 0 TCB-N = ."  retained=" .',
+                '0 TCB-N TCB.STATE @ ."  retained-state=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            for token in (
+                "busy=-1 ", "retained=-1 ", "retained-state=4 ",
+            ):
+                self.assertIn(token, busy_text)
         finally:
             os.unlink(img)
 

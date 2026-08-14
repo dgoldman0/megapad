@@ -1635,9 +1635,9 @@ derived from 25% of XMEM. The 256 ceiling is an implementation policy limit,
 not a wire or architectural requirement. The standard networking loader
 requires XMEM. A guarded one-connection Bank-0 allocation path remains for
 manually composed builds, but it is not a qualified deployment profile. The
-logical TLS-capable table cost is 237,552 bytes per connection; backing
+logical TLS-capable table cost is 237,720 bytes per connection; backing
 allocator alignment rounds the four allocations independently. Exact XMEM
-totals are 237,568, 475,104, and 712,672 bytes for one through three
+totals are 237,728, 475,440, and 713,168 bytes for one through three
 connections.
 
 Do not read the current fields as a general sliding window. The qualified data
@@ -1649,41 +1649,71 @@ loss is local backpressure: neighbor-owned ARP probing proceeds cooperatively,
 TCP retry budget changes only after a replay reaches the NIC, and terminal
 failure remains owner-visible until explicit cleanup.
 
-Control transport remains incomplete. SYN-SENT accepts a bare SYN as
-established, SYN-RCVD accepts any ACK, and retransmitted SYN handling plus
-retained SYN/SYN-ACK/FIN replay are not yet qualified. Graceful TLS close also
-needs retained close-notify and FIN state rather than the compatibility close
-word below.
+Active open retains and replays its SYN from the original ISS. `SYN-SENT`
+admits only an exact payload-free SYN+ACK acknowledging `ISS+1`; a bare SYN is
+ignored because simultaneous open is outside this profile. Establishment
+durably schedules the final ACK, and an exact duplicate SYN+ACK caused by a
+lost final ACK is re-ACKed without disturbing established state. Passive open
+admits only a bare SYN with no payload, reserves backlog before allocating a
+child, records the exact listener incarnation, requires the expected sequence
+and an ACK covering its SYN, and replays SYN+ACK with bounded exponential RTO.
+Wire retry counts advance only after NIC admission; a separate bounded local
+control-admission stall covers unresolved neighbors and NIC backpressure.
+Retry or stall exhaustion reclaims the half-open child and releases its
+reservation.
 
-Each listener TCB has an embedded **accept queue** (8 slots). Incoming SYNs
-allocate a fresh TCB and the listener stays in LISTEN. Completed handshakes are
-enqueued and dequeued by `SOCK-ACCEPT`. The current capacity check counts only
-completed children: several SYN-RCVD children can bypass it, and a later failed
-`AQ-PUSH` is ignored, leaving an orphan established TCB. Secure-accept work must
-reserve half-open admission or reclaim on overflow and prove no orphan or
-plaintext child. Eight is the current implementation backlog, not a universal
-capacity claim; making backlog storage caller/configuration-derived is tracked
-production capacity work outside the immediate TLS integration path.
+Each 5,952-byte TCB has an embedded **accept queue** (8 slots) plus exact
+incarnation and authority state. `AQ-RESERVED` covers both half-open and queued
+children, so the combined passive backlog cannot exceed eight. Queue slots
+store `(slot+1, generation)`, not reusable pointers. `TCP-ACCEPT-CLAIM`
+validates the exact attached listener, the child's generation and parent token,
+and its queued/unowned state before transferring it to the new descriptor
+owner. Listener teardown reclaims both half-open and queued children by exact
+parent generation. Eight is the current safe implementation backlog, not a
+universal capacity claim; making it caller/configuration-derived remains later
+capacity work.
+
+Attached transport authority is `(TCB address, generation, owner)`. A
+1,000-byte TLS context stores the TCB generation at +968, its own incarnation
+at +976, its reciprocal socket owner at +984, and slot/close lifecycle at
++992. `TLS-CLOSE-FREE` marks a released slot while preserving its last
+generation, so one claim creates exactly one live incarnation. A 40-byte socket
+descriptor stores at +32 either its plain TCB generation or its TLS-context
+generation. A TLS socket is valid only when descriptor and context name each
+other and the context and TCB also form an exact reciprocal pair. Graceful TLS
+close retains the exact protected `close_notify` record until ACK and refuses
+FIN while it remains in flight. FIN-WAIT-1, CLOSING, and LAST-ACK replay FIN
+with bounded exponential RTO; FIN-WAIT-2 terminates after 60 seconds.
+TIME-WAIT re-ACKs an exact duplicate FIN and restarts its 2MSL quarantine.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TCP-CONNECT` | `( ip remote-port local-port -- tcb \| 0 )` | Start an active open and return its SYN-SENT TCB. If the SYN cannot be emitted, reclaim the TCB and return 0. |
+| `TCP-CONNECT-ATTACH` | `( ip remote-port local-port owner -- tcb generation ior )` | Atomically start an active open and attach its exact incarnation to one nonzero owner; reclaim the TCB if attachment fails. |
 | `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN.  Initialises accept queue. |
+| `TCB-HANDLE@` | `( tcb -- slot+1 generation )` | Return the exact incarnation token for a TCB. |
+| `TCB-HANDLE-RESOLVE` | `( slot+1 generation -- tcb \| 0 )` | Resolve only a live, non-reserved exact incarnation. |
+| `TCP-ATTACH` | `( tcb owner -- generation ior )` | Exclusively attach an eligible live TCB to a nonzero owner; one owner cannot attach to two TCBs. |
+| `TCP-DETACH` | `( tcb generation owner -- ior )` | Remove only an exact reciprocal attachment. |
+| `TCP-ACCEPT-CLAIM` | `( listener listener-generation listener-owner child-owner -- child child-generation ior )` | Validate the listener and queued child tokens, dequeue, and transfer the child to its new owner atomically. |
 | `TCP-SEND-READY?` | `( tcb -- flag )` | Nonblocking readiness: established/close-wait, no retained flight, positive peer/congestion capacity, reachable neighbor, and idle NIC. A cache miss coalesces discovery but accepts no bytes. |
 | `TCP-SEND` | `( tcb buf len -- actual )` | Accept at most one 1460-byte segment and the usable peer/congestion capacity. The cache-only send returns zero without advancing or overwriting retained state on neighbor/NIC backpressure. |
 | `TCP-SEND-EXACT` | `( tcb buf len -- actual )` | All-or-none variant for an MSS-fitting protected record: zero or the exact requested length. |
 | `TCP-RECV` | `( tcb buf maxlen -- len )` | Receive data.  Returns bytes read. |
 | `TCP-POLL` | `( -- )` | Process at most one incoming IP frame, then perform at most one round-robin neighbor/TCP wire attempt or terminal publication. |
-| `TCP-CLOSE` | `( tcb -- )` | Begin graceful close only after the FIN is emitted; a failed send leaves state and sequence unchanged. Drains accept queues for listeners. |
+| `TCP-CLOSE-TRY` | `( unowned-tcb -- ior )` | Begin graceful close for an unattached TCB; reject attached authority and preserve state on failed FIN admission. |
+| `TCP-CLOSE` | `( unowned-tcb -- )` | Compatibility wrapper that drops `TCP-CLOSE-TRY` status. |
+| `TCP-OWNER-CLOSE` | `( tcb generation owner -- ior )` | Validate exact attached authority, begin graceful close, and detach only after success. Unacknowledged retained bytes return busy before FIN. |
 | `.TCP` | `( -- )` | Print all active TCB connections. |
-| `TCP-ABORT` | `( tcb -- status )` | Explicitly reclaim an owned connection and make one cache-only RST attempt when synchronized. |
+| `TCP-ABORT` | `( unowned-tcb -- status )` | Compatibility abort for an unattached connection; make one cache-only RST attempt when synchronized. |
+| `TCP-OWNER-ABORT` | `( tcb generation owner -- status ior )` | Validate exact attached authority, optionally attempt one cached-route RST, and reclaim synchronously. |
 | `TCB-USAGE` | `( -- used total )` | Count active (non-CLOSED) TCBs and pool size. |
 | `TCB-REAP-TW` | `( -- )` | Reclaim TCBs stuck in TIME_WAIT past 2×MSL (60 s). |
 | `TCB-FLUSH-TIMEWAIT` | `( -- )` | Force-reclaim all TIME_WAIT TCBs (test/debug). |
 | `TCP-2MSL` | `( -- ms )` | TIME_WAIT duration constant (60 000 ms). |
 | `/AQ-CAP` | `( -- n )` | Accept-queue capacity per listener (8). |
-| `AQ-PUSH` | `( new-tcb listener -- flag )` | Enqueue completed TCB; -1 ok, 0 full. |
-| `AQ-POP` | `( listener -- tcb \| 0 )` | Dequeue oldest completed TCB; 0 if empty. |
+| `AQ-PUSH` | `( new-tcb listener -- flag )` | Validate passive lineage and enqueue the child's slot+1 and generation; -1 ok, 0 rejected. |
+| `AQ-POP` | `( listener -- slot+1 generation \| 0 0 )` | Dequeue the oldest generation-bearing child token and release its backlog reservation. |
 
 ### §16.7a–§16.7d Certificate Verification
 
@@ -1806,9 +1836,10 @@ transactionally constructs and emits its signed flight, bounds and discards
 rejected 0-RTT TLSCiphertext, reassembles and authenticates client Finished
 under C-HS, commits the transcript through that message, installs C-AP read,
 and supports explicit establishment publication. It does not yet attach an
-incarnation-safe accepted TCB, accept TLS sockets, transmit ingress terminal
-dispositions, or demonstrate live socket interoperability with an independent
-TLS implementation. Cipher-suite support is:
+incarnation-safe accepted child to a server TLS context, accept TLS sockets,
+transmit ingress terminal dispositions, or demonstrate live socket
+interoperability with an independent TLS implementation. Cipher-suite support
+is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1889,11 +1920,17 @@ return holding lock 10 are contained as terminal contract violations. Ingress
 instead retains lock 10 while it copies caller bytes, authenticates at most one
 record, and clears transient pointers before returning. Both boundaries require
 an unbound context. A nonzero raw TCB pointer is rejected; it is never accepted
-as authority, retained in phase metadata, dereferenced, or aborted. Secure
-accept must later supply incarnation-safe exclusive attachment authority.
+as authority, retained in phase metadata, dereferenced, or aborted. TCP now
+supplies incarnation-safe exclusive attachment and accepted-child transfer;
+secure accept must still adapt that authority to these TLS boundaries.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
-context is 968 bytes. Each context also owns a 230,688-byte receive/server
+context is 1,000 bytes: attached TCB generation at +968, context generation at
++976, reciprocal socket owner at +984, and slot/close lifecycle at +992.
+`TLS-CLOSE-FREE` distinguishes a released slot while retaining its generation;
+the next successful claim increments that generation and creates one live
+incarnation.
+Each context also owns a 230,688-byte receive/server
 workspace:
 a 16,896-byte partial-record lane and an aligned retained-data lane capable of
 holding the bounded 73,732-byte post-handshake message, plus a 131,146-byte
@@ -1912,8 +1949,8 @@ receive and owner-held blocking-handshake paths copy authenticated plaintext
 into connection-owned or caller storage and scrub their complete global
 staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
 writes to its caller-selected output and does not scrub that output.  Together
-with the 5,832-byte TCB and two 32-byte socket
-descriptors, the logical network-table cost is 237,552 bytes per connection,
+with the 5,952-byte TCB and two 40-byte socket
+descriptors, the logical network-table cost is 237,720 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
 
@@ -1934,12 +1971,13 @@ a machine without XMEM its underlying bulk-reset action remains a no-op.
 | `TLS-CONNECT-HYBRID-NAMED` | `( rip rport lport name-a name-u -- tls \| 0 )` | Explicit private-hybrid ClientHello with the same generic ALPN contract. |
 | `TLS-SEND` | `( tls buf len -- actual )` | Encrypt and use exact TCP admission; zero/backpressure does not consume the write sequence. |
 | `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
-| `TLS-CLOSE-TRY` | `( tls -- ior )` | Owner-checked compatibility teardown. `TLS-E-BUSY` is retryable owner contention, but bounded retained close-notify/FIN completion remains unqualified. |
-| `TLS-CLOSE` | `( tls -- )` | Compatibility close that drops the `TLS-CLOSE-TRY` status; callers requiring retry visibility use the checked form. |
+| `TLS-CLOSE-TRY` | `( tls -- ior )` | Under the TLS owner, admit one exact protected `close_notify`, retain it through TCP acknowledgement, and only then begin owner-qualified FIN close. Backpressure or unacknowledged retained bytes return retryable status without wiping the context. |
+| `TLS-CLOSE` | `( tls -- ior )` | Checked alias of `TLS-CLOSE-TRY`; zero means the TLS context is disposed, while nonzero retains retry authority. Raw calls reject socket-owned contexts. |
+| `TLS-CLOSE-FINAL` | `( tls -- ior )` | Terminal raw-context cleanup: spend the bounded graceful-progress budget, then fall back to exact abort. Zero means the context is disposed; nonzero retains the context token for retry, although abort may already have reclaimed its transport before credential unpin reported busy. |
 | `TLS-SEND-ALERT-TRY` | `( ctx level desc -- ior )` | Checked exact-send alert attempt. It reports `TLS-E-BUSY` on owner contention, `TLS-E-WOULD-BLOCK` when transport accepts nothing, and `TLS-E-TRANSPORT` after terminal TCP failure. A local fatal alert revokes authorization even when unsent; an accepted `close_notify` closes the TLS epoch. |
 | `TLS-SEND-ALERT` | `( ctx level desc -- )` | Compatibility wrapper for alerts such as warning-level `1 0` `close_notify`; it drops the checked attempt status. |
 | `TLS-IO-STATUS` | `( ctx -- ior )` | Return sticky TLS I/O status; first observation of terminal TCP failure revokes the epoch and reclaims its TCB. |
-| `TLS-ABORT` | `( ctx -- status )` | Explicitly reclaim the associated TCB and wipe the complete context without attempting graceful close. |
+| `TLS-ABORT` | `( ctx -- status )` | Immediately abort an exact raw-context TCB-generation/owner binding, then wipe and release the context without `close_notify`, ARP, polling, or waiting. Status is local, cached-route RST sent, no live transport, or busy. Busy retains the claimed context for retry; when credential unpin contends after transport reclamation, the TCB binding is already clear but the pin metadata remains exact. Socket-owned contexts use `SOCK-ABORT`. |
 | `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles decryption plus per-context partial-record, retained-plaintext, and post-handshake-fragment state. An invalid or internal-alias destination returns zero without consuming connection state. |
 
 The raw `TLS-READ-RECORD[-NB]`, `TLS-PROCESS-HS-MSG[S]`,
@@ -1957,15 +1995,23 @@ its context-owned RX workspace for all state retained across public calls.
 
 ## §17 Socket API
 
-BSD-style socket interface over TCP and TLS (§17 in `networking.f`).
+BSD-style socket interface over TCP and TLS (§17 in `networking.f`). Each
+40-byte descriptor stores its handle generation at +32: a TCB generation for
+plain sockets or a TLS-context generation for TLS sockets. Plain operations
+resolve reciprocal `(TCB, generation, descriptor-owner)` authority. TLS
+operations first resolve reciprocal `(context, generation, descriptor-owner)`
+authority and then the context's reciprocal TCB binding. Raw TLS-context entry
+points reject a socket-owned context.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `SOCKET` | `( type -- sd \| -1 )` | Create a socket descriptor.  *type*: 0 = TCP, 1 = TLS. |
 | `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
 | `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1` without allocating a TCB or changing descriptor state/handle until authenticated secure accept exists. |
-| `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Dequeue a completed connection from an ordinary TCP listener. Refuse a TLS-marked listener before consuming its accept queue. |
+| `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Reserve a descriptor, validate the exact listener and queued child tokens, and transfer the child owner before publishing an ordinary TCP socket. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
 | `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
-| `CLOSE` | `( sd -- )` | Close socket and release resources. A contended TLS close preserves the descriptor and handle so a later call can retry. |
+| `CLOSE-TRY` | `( sd -- ior )` | Close through the descriptor's exact authority; preserve the descriptor and handle on stale authority, backpressure, or contention. |
+| `CLOSE` | `( sd -- ior )` | Checked alias of `CLOSE-TRY`; zero means the descriptor has been released, while nonzero preserves retry authority. |
+| `SOCK-ABORT` | `( sd -- status ior )` | Immediately reclaim the descriptor's exact plain-TCB or reciprocal TLS-context authority. `status` reports the transport disposition; nonzero `ior` leaves stale, busy, or wrong-state authority visible instead of releasing an unrelated descriptor. |

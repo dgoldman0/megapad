@@ -271,18 +271,24 @@ def main():
     if mode in ("https", "both"):
         # Minimal diagnostic: just try TLS-CONNECT
         text = run_with_tap(snapshot, [
+            'VARIABLE TLS-DIAG-CTX 0 TLS-DIAG-CTX !',
             '." [1]START " CR',
             '_SC-HOST-LEN @ 0 _SC-HOST-LEN !',
             'S" example.com" DUP _SC-HOST-LEN ! _SC-HOST SWAP CMOVE',
             '_SC-HOST _SC-HOST-LEN @ DNS-RESOLVE DUP 0= IF ." [DNS-FAIL]" CR ELSE ." [2]DNS-OK ip=" DUP . CR _SC-IP ! THEN',
             '_SC-HOST-LEN @ 63 MIN DUP TLS-SNI-LEN ! _SC-HOST TLS-SNI-HOST ROT CMOVE',
-            '." [3]TLS-CONNECT " CR _SC-IP @ 443 12345 TLS-CONNECT DUP ." [4]TLS-RESULT=" . CR',
-            'DUP 0<> IF ." [5]TLS-OK " TLS-CLOSE ELSE DROP ." [5]TLS-FAIL" THEN CR',
+            '." [3]TLS-CONNECT " CR _SC-IP @ 443 12345 TLS-CONNECT '
+            'DUP TLS-DIAG-CTX ! ." [4]TLS-RESULT=" . CR',
+            'TLS-DIAG-CTX @ 0<> IF ." [5]TLS-OK " '
+            'TLS-DIAG-CTX @ TLS-CLOSE-FINAL DUP ." [6]TLS-CLOSE=" . '
+            '0= IF 0 TLS-DIAG-CTX ! THEN ELSE ." [5]TLS-FAIL" THEN CR',
         ], label="HTTPS diagnostic: TLS-CONNECT only",
            max_steps=100_000_000)
 
         if "[4]TLS-RESULT=" in text:
             print("[INFO] TLS-CONNECT returned a result")
+            if "[5]TLS-OK" in text and "[6]TLS-CLOSE=0" not in text:
+                print("[FAIL] TLS terminal cleanup retained its context")
         elif "[3]TLS-CONNECT" in text:
             print("[INFO] Hung inside TLS-CONNECT")
         elif "[2]DNS-OK" in text:

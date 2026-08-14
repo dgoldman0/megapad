@@ -436,7 +436,7 @@ fs.save("myimage.img")
 | `demo-bundle` | Bundle | Demo pipeline bundle (load with `BUNDLE-LOAD`) |
 | `autoexec.f` | Forth | Enters userland, loads networking, configures the link, then loads `tools.f` |
 | `graphics.f` | Forth | Framebuffer / tile-engine graphics module, available for explicit loading |
-| `tools.f` | Forth | Network tools: HTTP/HTTPS/FTP/FTPS/Gopher client, DNS-LOOKUP |
+| `tools.f` | Forth | Network tools: HTTP/HTTPS/FTP/Gopher client, provisional non-interoperable FTPS helper, DNS-LOOKUP |
 
 ---
 

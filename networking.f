@@ -2236,8 +2236,10 @@ VARIABLE _DNR-ULEN
 1002 CONSTANT TCP-FAIL-PEER-RESET
 1003 CONSTANT TCP-FAIL-PROTOCOL
 1004 CONSTANT TCP-FAIL-NEIGHBOR-UNREACHABLE
+1005 CONSTANT TCP-FAIL-ADMISSION-TIMEOUT
 1 CONSTANT TCP-F-ACK-PENDING      \ cumulative/window ACK still owed
 2 CONSTANT TCP-F-ARP-PENDING      \ retained replay awaits neighbor discovery
+4 CONSTANT TCP-F-CONTROL-STALLED  \ due control replay not locally admitted
 -4214 CONSTANT NET-E-TABLES-INITIALIZED
 -4215 CONSTANT NET-E-TABLES-LIVE
 
@@ -2262,6 +2264,7 @@ VARIABLE _DNR-ULEN
 9  CONSTANT TCPS-LAST-ACK
 10 CONSTANT TCPS-TIME-WAIT
 11 CONSTANT TCPS-FAILED            \ owner-visible terminal failure; owner reclaims
+12 CONSTANT TCPS-RESERVED          \ allocator-owned, not yet protocol-visible
 
 \ =====================================================================
 \  TCB — Transmission Control Block
@@ -2297,7 +2300,18 @@ VARIABLE _DNR-ULEN
 \ +5812  (pad to 5816)
 \ +5816  FLAGS        1 cell    durable maintenance intents
 \ +5824  FAILURE      1 cell    exact terminal TCP-FAIL-* reason
-5832 CONSTANT /TCB               \ size of one TCB
+\ +5832  GENERATION   1 cell    nonzero slot incarnation; never reused
+\ +5840  PARENT-H1    1 cell    passive listener slot+1 while unclaimed
+\ +5848  PARENT-GEN   1 cell    exact passive listener incarnation
+\ +5856  OWNER        1 cell    exact attached socket/context address
+\ +5864  AUTH-STATE   1 cell    passive/queued/attached ownership state
+\ +5872  AQ-RESERVED  1 cell    half-open plus completed backlog reservations
+\ +5880  AQ-GENS      64 bytes  generation paired with each AQ-SLOTS token
+\ +5944  CONTROL-STALL 1 cell    first due control non-admission timestamp
+5952 CONSTANT /TCB               \ size of one TCB
+
+\ -- TCB table (dynamic, XMEM-backed) --
+VARIABLE TCP-TCBS   0 TCP-TCBS !
 
 \ -- TCB field accessors (add to TCB base) --
 : TCB.STATE       ( tcb -- addr )          ;
@@ -2329,44 +2343,99 @@ VARIABLE _DNR-ULEN
 : TCB.AQ-SLOTS    ( tcb -- addr ) 5748 + ;
 : TCB.FLAGS       ( tcb -- addr ) 5816 + ;
 : TCB.FAILURE     ( tcb -- addr ) 5824 + ;
+: TCB.GENERATION  ( tcb -- addr ) 5832 + ;
+: TCB.PARENT-H1   ( tcb -- addr ) 5840 + ;
+: TCB.PARENT-GEN  ( tcb -- addr ) 5848 + ;
+: TCB.OWNER       ( tcb -- addr ) 5856 + ;
+: TCB.AUTH-STATE  ( tcb -- addr ) 5864 + ;
+: TCB.AQ-RESERVED ( tcb -- addr ) 5872 + ;
+: TCB.AQ-GENS     ( tcb -- addr ) 5880 + ;
+: TCB.CONTROL-STALL ( tcb -- addr ) 5944 + ;
+
+0 CONSTANT TCP-AUTH-NONE
+1 CONSTANT TCP-AUTH-HALF-OPEN
+2 CONSTANT TCP-AUTH-QUEUED
+3 CONSTANT TCP-AUTH-ATTACHED
 
 \ -- Accept-queue constants --
 8 CONSTANT /AQ-CAP                \ max completed connections per listener
 
 \ -- AQ-FULL? ( tcb -- flag ) --
-: AQ-FULL?  ( tcb -- flag )  TCB.AQ-COUNT @ /AQ-CAP >= ;
+: AQ-FULL?  ( tcb -- flag )
+    DUP TCB.AQ-COUNT @ /AQ-CAP >=
+    SWAP TCB.AQ-RESERVED @ /AQ-CAP >= OR ;
+
+: AQ-RESERVE  ( listener -- flag )
+    DUP TCB.STATE @ TCPS-LISTEN <> IF DROP 0 EXIT THEN
+    DUP AQ-FULL? IF DROP 0 EXIT THEN
+    1 SWAP TCB.AQ-RESERVED +!
+    -1 ;
+
+: AQ-RELEASE  ( listener -- )
+    DUP TCB.AQ-RESERVED @ 0> IF
+        -1 SWAP TCB.AQ-RESERVED +!
+    ELSE
+        DROP
+    THEN ;
 
 \ -- AQ-PUSH: enqueue a completed TCB pointer into listener's accept queue --
 \   ( new-tcb listener-tcb -- flag )  flag: -1 ok, 0 full
+VARIABLE _AQP-CHILD
+VARIABLE _AQP-LISTENER
+
 : AQ-PUSH  ( new-tcb listener -- flag )
-    DUP AQ-FULL? IF 2DROP 0 EXIT THEN
-    >R
-    \ slot-addr = AQ-SLOTS + tail × 8
-    R@ TCB.AQ-TAIL @ 8 * R@ TCB.AQ-SLOTS +  !
-    \ tail = (tail + 1) % /AQ-CAP
-    R@ TCB.AQ-TAIL @ 1+ /AQ-CAP MOD R@ TCB.AQ-TAIL !
-    \ count++
-    1 R> TCB.AQ-COUNT +!
+    _AQP-LISTENER ! _AQP-CHILD !
+    _AQP-LISTENER @ TCB.STATE @ TCPS-LISTEN <> IF 0 EXIT THEN
+    _AQP-LISTENER @ TCB.AQ-COUNT @ /AQ-CAP >= IF 0 EXIT THEN
+    _AQP-LISTENER @ TCB.AQ-RESERVED @
+    _AQP-LISTENER @ TCB.AQ-COUNT @ <= IF 0 EXIT THEN
+    _AQP-CHILD @ TCB.AUTH-STATE @ TCP-AUTH-HALF-OPEN <> IF 0 EXIT THEN
+    _AQP-CHILD @ TCB.PARENT-H1 @
+    _AQP-LISTENER @ TCP-TCBS @ - /TCB / 1+ <> IF 0 EXIT THEN
+    _AQP-CHILD @ TCB.PARENT-GEN @
+    _AQP-LISTENER @ TCB.GENERATION @ <> IF 0 EXIT THEN
+    _AQP-LISTENER @ TCB.AQ-TAIL @ 8 *
+    DUP _AQP-LISTENER @ TCB.AQ-SLOTS +
+    _AQP-CHILD @ TCP-TCBS @ - /TCB / 1+ SWAP !
+    _AQP-LISTENER @ TCB.AQ-GENS +
+    _AQP-CHILD @ TCB.GENERATION @ SWAP !
+    _AQP-LISTENER @ TCB.AQ-TAIL @ 1+ /AQ-CAP MOD
+    _AQP-LISTENER @ TCB.AQ-TAIL !
+    1 _AQP-LISTENER @ TCB.AQ-COUNT +!
+    TCP-AUTH-QUEUED _AQP-CHILD @ TCB.AUTH-STATE !
     -1 ;
 
-\ -- AQ-POP: dequeue oldest completed TCB pointer --
-\   ( listener-tcb -- new-tcb | 0 )  0 means empty
-: AQ-POP  ( listener -- tcb | 0 )
-    DUP TCB.AQ-COUNT @ 0= IF DROP 0 EXIT THEN
-    >R
-    \ slot-addr = AQ-SLOTS + head × 8
-    R@ TCB.AQ-HEAD @ 8 * R@ TCB.AQ-SLOTS +  @
-    \ head = (head + 1) % /AQ-CAP
-    R@ TCB.AQ-HEAD @ 1+ /AQ-CAP MOD R@ TCB.AQ-HEAD !
-    \ count--
-    -1 R> TCB.AQ-COUNT +! ;
+\ -- AQ-POP: dequeue the oldest generation-bearing child token --
+\   ( listener-tcb -- slot+1 generation | 0 0 )
+VARIABLE _AQPOP-LISTENER
+VARIABLE _AQPOP-OFF
+VARIABLE _AQPOP-H1
+VARIABLE _AQPOP-GEN
 
-\ -- TCB table (dynamic, XMEM-backed) --
+: AQ-POP  ( listener -- h1 generation | 0 0 )
+    DUP TCB.AQ-COUNT @ 0= IF DROP 0 0 EXIT THEN
+    DUP _AQPOP-LISTENER !
+    TCB.AQ-HEAD @ 8 * _AQPOP-OFF !
+    _AQPOP-LISTENER @ TCB.AQ-SLOTS _AQPOP-OFF @ +
+    DUP @ _AQPOP-H1 ! 0 SWAP !
+    _AQPOP-LISTENER @ TCB.AQ-GENS _AQPOP-OFF @ +
+    DUP @ _AQPOP-GEN ! 0 SWAP !
+    _AQPOP-LISTENER @ TCB.AQ-HEAD @ 1+ /AQ-CAP MOD
+    _AQPOP-LISTENER @ TCB.AQ-HEAD !
+    -1 _AQPOP-LISTENER @ TCB.AQ-COUNT +!
+    _AQPOP-LISTENER @ AQ-RELEASE
+    _AQPOP-H1 @ _AQPOP-GEN @ ;
+
+: AQ-PEEK  ( listener -- h1 generation | 0 0 )
+    DUP TCB.AQ-COUNT @ 0= IF DROP 0 0 EXIT THEN
+    DUP TCB.AQ-HEAD @ 8 *
+    2DUP SWAP TCB.AQ-SLOTS + @
+    >R SWAP TCB.AQ-GENS + @ R> SWAP ;
+
+\ -- TCB table allocation --
 \   Sized by NET-TABLES-INIT based on available XMEM.
-\   Each TCB is 5832 bytes; the complete network-table set grows to fill
+\   Each TCB is 5952 bytes; the complete network-table set grows to fill
 \   up to 25% of XMEM (capped at 256 connections).
-VARIABLE TCP-TCBS   0 TCP-TCBS !
-
 : TCP-TCBS-SETUP  ( -- )
     TCP-TCBS @ IF NET-E-TABLES-INITIALIZED THROW THEN
     /TCB /TCP-MAX-CONN *             ( size )
@@ -2383,10 +2452,63 @@ VARIABLE TCP-TCBS   0 TCP-TCBS !
 \ -- TCB-N: get TCB pointer for connection index 0..N-1 --
 : TCB-N  ( n -- tcb )  /TCB * TCP-TCBS @ + ;
 
+: TCB-MEMBER?  ( tcb -- flag )
+    TCP-TCBS @ DUP 0= IF 2DROP 0 EXIT THEN
+    2DUP U< IF 2DROP 0 EXIT THEN
+    - DUP /TCB MOD 0= SWAP /TCB /TCP-MAX-CONN * U< AND ;
+
+: TCB>H1  ( tcb -- slot+1 )  TCP-TCBS @ - /TCB / 1+ ;
+
+: TCB-HANDLE@  ( tcb -- slot+1 generation )
+    DUP TCB>H1 SWAP TCB.GENERATION @ ;
+
+: TCB-HANDLE-RESOLVE  ( slot+1 generation -- tcb | 0 )
+    DUP 0= IF 2DROP 0 EXIT THEN
+    OVER DUP 1 < SWAP /TCP-MAX-CONN > OR IF 2DROP 0 EXIT THEN
+    SWAP 1- TCB-N SWAP
+    OVER TCB.GENERATION @ OVER <> IF 2DROP 0 EXIT THEN
+    DROP
+    DUP TCB.STATE @ DUP TCPS-CLOSED = SWAP TCPS-RESERVED = OR IF
+        DROP 0
+    THEN ;
+
+: TCB-ATTACHED-TO?  ( tcb generation owner -- flag )
+    >R
+    OVER TCB-MEMBER? 0= IF 2DROP R> DROP 0 EXIT THEN
+    DUP 0= R@ 0= OR IF 2DROP R> DROP 0 EXIT THEN
+    OVER TCB.GENERATION @ =
+    OVER TCB.AUTH-STATE @ TCP-AUTH-ATTACHED = AND
+    SWAP TCB.OWNER @ R> = AND ;
+
+\ Generationless compatibility I/O is valid only while no higher-layer
+\ owner has attached the TCB.  Socket and TLS paths use the exact
+\ owner-qualified operations below instead of this raw authority lane.
+: TCB-RAW-CALL?  ( tcb -- flag )
+    DUP TCB-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TCB.OWNER @ 0=
+    SWAP TCB.AUTH-STATE @ TCP-AUTH-NONE = AND ;
+
 \ -- TCB-INIT: initialise a TCB to CLOSED --
+0x7FFFFFFFFFFFFFFF CONSTANT TCB-GENERATION-LAST
+
 : TCB-INIT  ( tcb -- )
-    DUP /TCB 0 FILL
+    DUP TCB.GENERATION @
+    DUP TCB-GENERATION-LAST = IF DROP -1 THEN
+    OVER /TCB 0 FILL
+    OVER TCB.GENERATION !
     TCPS-CLOSED SWAP TCB.STATE !  ;
+
+: TCB-CLAIM  ( tcb -- )
+    DUP TCB.GENERATION @ DUP TCB-GENERATION-LAST U< 0= IF
+        DROP
+        DUP /TCB 0 FILL
+        -1 OVER TCB.GENERATION !
+        TCPS-CLOSED SWAP TCB.STATE ! EXIT
+    THEN
+    1+
+    OVER /TCB 0 FILL
+    OVER TCB.GENERATION !
+    TCPS-RESERVED SWAP TCB.STATE ! ;
 
 \ -- TCP-INIT-ALL: zero all TCBs --
 : (TCP-INIT-ALL)  ( -- )
@@ -2438,19 +2560,29 @@ VARIABLE TCP-TCBS   0 TCP-TCBS !
 
 \ -- TCB-ALLOC: find a free (CLOSED) TCB, return index or -1 --
 \   On failure, runs the TIME_WAIT reaper once and retries.
-: TCB-ALLOC  ( -- idx | -1 )
+: (TCB-ALLOC)  ( -- idx | -1 )
     /TCP-MAX-CONN 0 DO
-        I TCB-N TCB.STATE @ TCPS-CLOSED = IF
-            I UNLOOP EXIT
+        I TCB-N DUP TCB.STATE @ TCPS-CLOSED =
+        OVER TCB.GENERATION @ TCB-GENERATION-LAST U< AND IF
+            TCB-CLAIM I UNLOOP EXIT
         THEN
+        DROP
     LOOP
     \ No free slot — reap expired TIME_WAIT and retry
     TCB-REAP-TW
     /TCP-MAX-CONN 0 DO
-        I TCB-N TCB.STATE @ TCPS-CLOSED = IF
-            I UNLOOP EXIT
+        I TCB-N DUP TCB.STATE @ TCPS-CLOSED =
+        OVER TCB.GENERATION @ TCB-GENERATION-LAST U< AND IF
+            TCB-CLAIM I UNLOOP EXIT
         THEN
+        DROP
     LOOP -1 ;
+
+: TCB-ALLOC  ( -- idx | -1 )
+    NET-TX-TRY IF -1 EXIT THEN
+    ['] (TCB-ALLOC) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- TCB-FIND: find TCB matching local-port + remote-port + remote-ip --
 \   ( lport rport rip -- tcb | 0 )
@@ -2460,7 +2592,8 @@ VARIABLE _TCF-RIP
 : TCB-FIND  ( lport rport rip -- tcb | 0 )
     _TCF-RIP !  _TCF-RP !  _TCF-LP !
     /TCP-MAX-CONN 0 DO
-        I TCB-N DUP TCB.STATE @ TCPS-CLOSED <> IF
+        I TCB-N DUP TCB.STATE @ DUP TCPS-CLOSED <>
+        SWAP TCPS-RESERVED <> AND IF
             DUP TCB.LOCAL-PORT @ _TCF-LP @ = IF
             DUP TCB.REMOTE-PORT @ _TCF-RP @ = IF
             DUP TCB.REMOTE-IP 4 _TCF-RIP @ 4 COMPARE 0= IF
@@ -2469,6 +2602,184 @@ VARIABLE _TCF-RIP
         THEN
         DROP
     LOOP 0 ;
+
+: TCB-PARENT-RESOLVE  ( child -- listener | 0 )
+    DUP TCB.PARENT-H1 @ SWAP TCB.PARENT-GEN @ TCB-HANDLE-RESOLVE
+    DUP IF
+        DUP TCB.STATE @ TCPS-LISTEN <> IF DROP 0 THEN
+    THEN ;
+
+: TCP-PASSIVE-RELEASE  ( half-open-child -- )
+    DUP TCB.AUTH-STATE @ TCP-AUTH-HALF-OPEN <> IF DROP EXIT THEN
+    DUP TCB-PARENT-RESOLVE ?DUP IF AQ-RELEASE THEN
+    TCB-INIT ;
+
+VARIABLE _TLR-H1
+VARIABLE _TLR-GEN
+
+: TCP-LISTENER-RECLAIM-CHILDREN  ( listener -- )
+    DUP TCB-HANDLE@ _TLR-GEN ! _TLR-H1 !
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.AUTH-STATE @ DUP TCP-AUTH-HALF-OPEN =
+        SWAP TCP-AUTH-QUEUED = OR IF
+            DUP TCB.PARENT-H1 @ _TLR-H1 @ =
+            OVER TCB.PARENT-GEN @ _TLR-GEN @ = AND IF
+                TCB-INIT
+            ELSE
+                DROP
+            THEN
+        ELSE
+            DROP
+        THEN
+    LOOP
+    DUP TCB.AQ-SLOTS /AQ-CAP 8 * 0 FILL
+    DUP TCB.AQ-GENS /AQ-CAP 8 * 0 FILL
+    0 OVER TCB.AQ-HEAD !
+    0 OVER TCB.AQ-TAIL !
+    0 OVER TCB.AQ-COUNT !
+    0 SWAP TCB.AQ-RESERVED ! ;
+
+-4230 CONSTANT TCP-ACCEPT-E-BUSY
+-4231 CONSTANT TCP-ACCEPT-E-EMPTY
+-4232 CONSTANT TCP-ACCEPT-E-STALE
+-4233 CONSTANT TCP-ACCEPT-E-STATE
+-4234 CONSTANT TCP-ACCEPT-E-OWNED
+
+VARIABLE _TCPAC-LISTENER
+VARIABLE _TCPAC-LISTENER-GEN
+VARIABLE _TCPAC-LISTENER-OWNER
+VARIABLE _TCPAC-OWNER
+VARIABLE _TCPAC-H1
+VARIABLE _TCPAC-GEN
+VARIABLE _TCPAC-TCB
+VARIABLE _TCPAT-TCB
+VARIABLE _TCPAT-GEN
+VARIABLE _TCPAT-OWNER
+
+: TCB-OWNER-IN-USE?  ( owner -- flag )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.AUTH-STATE @ TCP-AUTH-ATTACHED = IF
+            TCB.OWNER @ OVER = IF DROP -1 UNLOOP EXIT THEN
+        ELSE
+            DROP
+        THEN
+    LOOP
+    DROP 0 ;
+
+: _TCPAC-PARENT-MATCH?  ( -- flag )
+    _TCPAC-TCB @ TCB.PARENT-H1 @ _TCPAC-LISTENER @ TCB>H1 =
+    _TCPAC-TCB @ TCB.PARENT-GEN @
+    _TCPAC-LISTENER-GEN @ = AND
+    _TCPAC-TCB @ TCB.AUTH-STATE @ TCP-AUTH-QUEUED = AND ;
+
+: _TCPAC-RECLAIM-POPPED  ( -- )
+    TCP-AUTH-NONE _TCPAC-TCB @ TCB.AUTH-STATE !
+    _TCPAC-TCB @ TCB-INIT ;
+
+: _TCPAC-DISCARD-PEEKED  ( -- )
+    \ A corrupt queue token must never authorize reclaiming a live TCB whose
+    \ exact passive lineage does not name this listener.  Removing the local
+    \ token releases only this listener's reservation.  An unowned queued
+    \ child with no live parent is an orphan and can be reclaimed; a child
+    \ naming another live listener must be preserved with that reservation.
+    _TCPAC-LISTENER @ AQ-POP 2DROP
+    _TCPAC-TCB @ TCB-MEMBER? IF
+        _TCPAC-TCB @ TCB.AUTH-STATE @ TCP-AUTH-QUEUED =
+        _TCPAC-TCB @ TCB.OWNER @ 0= AND IF
+            _TCPAC-TCB @ TCB-PARENT-RESOLVE 0= IF
+                _TCPAC-TCB @ TCB-INIT
+            THEN
+        THEN
+    THEN ;
+
+: (TCP-ACCEPT-CLAIM)  ( listener listener-gen listener-owner child-owner -- tcb child-gen ior )
+    _TCPAC-OWNER ! _TCPAC-LISTENER-OWNER !
+    _TCPAC-LISTENER-GEN ! _TCPAC-LISTENER !
+    _TCPAC-OWNER @ 0= _TCPAC-LISTENER-OWNER @ 0= OR IF
+        0 0 TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    _TCPAC-LISTENER @ TCB-MEMBER? 0= IF
+        0 0 TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _TCPAC-LISTENER @ _TCPAC-LISTENER-GEN @
+    _TCPAC-LISTENER-OWNER @ TCB-ATTACHED-TO? 0= IF
+        0 0 TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _TCPAC-LISTENER @ TCB.STATE @ TCPS-LISTEN <> IF
+        0 0 TCP-ACCEPT-E-STATE EXIT
+    THEN
+    _TCPAC-OWNER @ TCB-OWNER-IN-USE? IF
+        0 0 TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    _TCPAC-LISTENER @ AQ-PEEK _TCPAC-GEN ! _TCPAC-H1 !
+    _TCPAC-H1 @ 0= IF 0 0 TCP-ACCEPT-E-EMPTY EXIT THEN
+    _TCPAC-H1 @ _TCPAC-GEN @ TCB-HANDLE-RESOLVE DUP 0= IF
+        DROP _TCPAC-LISTENER @ AQ-POP 2DROP
+        0 0 TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _TCPAC-TCB !
+    _TCPAC-PARENT-MATCH? 0= IF
+        _TCPAC-DISCARD-PEEKED 0 0 TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _TCPAC-TCB @ TCB.OWNER @ 0<> IF
+        _TCPAC-DISCARD-PEEKED 0 0 TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    _TCPAC-TCB @ TCB.STATE @ DUP TCPS-ESTABLISHED =
+    SWAP TCPS-CLOSE-WAIT = OR 0= IF
+        _TCPAC-LISTENER @ AQ-POP 2DROP
+        _TCPAC-RECLAIM-POPPED
+        0 0 TCP-ACCEPT-E-STATE EXIT
+    THEN
+    _TCPAC-LISTENER @ AQ-POP 2DROP
+    _TCPAC-OWNER @ _TCPAC-TCB @ TCB.OWNER !
+    TCP-AUTH-ATTACHED _TCPAC-TCB @ TCB.AUTH-STATE !
+    _TCPAC-TCB @ _TCPAC-GEN @ 0 ;
+
+: TCP-ACCEPT-CLAIM  ( listener listener-gen listener-owner child-owner -- tcb child-gen ior )
+    NET-TX-TRY IF 2DROP 2DROP 0 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-ACCEPT-CLAIM) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-ATTACH)  ( tcb owner -- generation ior )
+    _TCPAT-OWNER ! _TCPAT-TCB !
+    _TCPAT-OWNER @ 0= IF 0 TCP-ACCEPT-E-OWNED EXIT THEN
+    _TCPAT-TCB @ TCB-MEMBER? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPAT-TCB @ TCB.GENERATION @ 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPAT-TCB @ TCB.STATE @ DUP TCPS-LISTEN =
+    OVER TCPS-SYN-SENT = OR
+    OVER TCPS-ESTABLISHED = OR
+    SWAP TCPS-CLOSE-WAIT = OR 0= IF 0 TCP-ACCEPT-E-STATE EXIT THEN
+    _TCPAT-TCB @ TCB.OWNER @ 0<>
+    _TCPAT-TCB @ TCB.AUTH-STATE @ TCP-AUTH-NONE <> OR IF
+        0 TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    _TCPAT-OWNER @ TCB-OWNER-IN-USE? IF 0 TCP-ACCEPT-E-OWNED EXIT THEN
+    _TCPAT-OWNER @ _TCPAT-TCB @ TCB.OWNER !
+    TCP-AUTH-ATTACHED _TCPAT-TCB @ TCB.AUTH-STATE !
+    _TCPAT-TCB @ TCB.GENERATION @ 0 ;
+
+: TCP-ATTACH  ( tcb owner -- generation ior )
+    NET-TX-TRY IF 2DROP 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-ATTACH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-DETACH)  ( tcb generation owner -- ior )
+    _TCPAT-OWNER ! _TCPAT-GEN ! _TCPAT-TCB !
+    _TCPAT-TCB @ TCB-MEMBER? 0= IF TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPAT-TCB @ _TCPAT-GEN @ _TCPAT-OWNER @ TCB-ATTACHED-TO? 0= IF
+        TCP-ACCEPT-E-STALE EXIT
+    THEN
+    0 _TCPAT-TCB @ TCB.OWNER !
+    TCP-AUTH-NONE _TCPAT-TCB @ TCB.AUTH-STATE !
+    0 ;
+
+: TCP-DETACH  ( tcb generation owner -- ior )
+    NET-TX-TRY IF 2DROP DROP TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-DETACH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- TCB-FIND-LPORT: find TCB in LISTEN state on local port --
 : TCB-FIND-LPORT  ( lport -- tcb | 0 )
@@ -2680,25 +2991,55 @@ VARIABLE _TSS-CACHED
 
 : TCP-SEND-SEG-AT  ( tcb seq flags payload paylen -- ior )
     NET-TX-ACQUIRE-IDLE
+    4 PICK TCB-RAW-CALL? 0= IF
+        2DROP 2DROP DROP NET-TX-RELEASE -1 EXIT
+    THEN
     0 ['] (TCP-SEND-SEG-AT) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
 
 : TCP-SEND-SEG-CACHED-AT  ( tcb seq flags payload paylen -- ior )
     NET-TX-ADMIT-TRY IF 2DROP 2DROP DROP -1 EXIT THEN
+    4 PICK TCB-RAW-CALL? 0= IF
+        2DROP 2DROP DROP NET-TX-RELEASE -1 EXIT
+    THEN
     -1 ['] (TCP-SEND-SEG-AT) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
 
-: TCP-SEND-SEG  ( tcb flags payload paylen -- ior )
+: (TCP-SEND-SEG)  ( tcb flags payload paylen -- ior )
     >R >R >R
     DUP TCB.SND-NXT @
-    R> R> R> TCP-SEND-SEG-AT ;
+    R> R> R> 0 (TCP-SEND-SEG-AT) ;
+
+: (TCP-SEND-SEG-CACHED)  ( tcb flags payload paylen -- ior )
+    >R >R >R
+    DUP TCB.SND-NXT @
+    R> R> R> -1 (TCP-SEND-SEG-AT) ;
+
+: TCP-SEND-SEG  ( tcb flags payload paylen -- ior )
+    NET-TX-ACQUIRE-IDLE
+    3 PICK TCB-RAW-CALL? 0= IF
+        2DROP 2DROP NET-TX-RELEASE -1 EXIT
+    THEN
+    ['] (TCP-SEND-SEG) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 : TCP-SEND-SEG-CACHED  ( tcb flags payload paylen -- ior )
-    >R >R >R
-    DUP TCB.SND-NXT @
-    R> R> R> TCP-SEND-SEG-CACHED-AT ;
+    NET-TX-ADMIT-TRY IF 2DROP 2DROP -1 EXIT THEN
+    3 PICK TCB-RAW-CALL? 0= IF
+        2DROP 2DROP NET-TX-RELEASE -1 EXIT
+    THEN
+    ['] (TCP-SEND-SEG-CACHED) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-SEND-CTL)  ( tcb flags -- ior )
+    0 0 (TCP-SEND-SEG) ;
+
+: (TCP-SEND-CTL-CACHED)  ( tcb flags -- ior )
+    0 0 (TCP-SEND-SEG-CACHED) ;
 
 \ -- TCP-SEND-CTL: send a control segment (no payload) --
 \   ( tcb flags -- ior )
@@ -2724,7 +3065,9 @@ VARIABLE _TSS-CACHED
 VARIABLE _TACK-TCB
 : (TCP-ACK-TRY)  ( tcb -- ior )
     _TACK-TCB !
-    _TACK-TCB @ TCP-ACK TCP-SEND-CTL-CACHED
+    _TACK-TCB @ TCB-MEMBER? 0= IF -1 EXIT THEN
+    _TACK-TCB @ TCP-MARK-ACK-PENDING
+    _TACK-TCB @ TCP-ACK (TCP-SEND-CTL-CACHED)
     DUP 0= IF
         _TACK-TCB @ TCP-CLEAR-ACK-PENDING
         _TACK-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
@@ -2738,8 +3081,8 @@ VARIABLE _TACK-TCB
     THEN ;
 
 : TCP-ACK-TRY  ( tcb -- ior )
-    DUP TCP-MARK-ACK-PENDING
     NET-TX-TRY IF DROP -1 EXIT THEN
+    DUP TCB-RAW-CALL? 0= IF DROP NET-TX-RELEASE -1 EXIT THEN
     ['] (TCP-ACK-TRY) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
@@ -2755,32 +3098,36 @@ VARIABLE _TRD-TCB
     TCP-ACK TCP-PSH OR
     _TRD-TCB @ TCB.TX-BUF
     _TRD-TCB @ TCB.TX-LEN @
-    TCP-SEND-SEG-CACHED-AT ;
+    -1 (TCP-SEND-SEG-AT) ;
 
 : TCP-RETRANSMIT-DATA  ( tcb -- ior )
     NET-TX-TRY IF DROP -1 EXIT THEN
+    DUP TCB-RAW-CALL? 0= IF DROP NET-TX-RELEASE -1 EXIT THEN
     ['] (TCP-RETRANSMIT-DATA) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
 
 \ -- TCP-SEND-RST: send a RST in response to unexpected segment --
-\   ( remote-ip rport lport seq -- )
+\   ( remote-ip rport lport seq ack flags -- )
 \   Builds a raw RST without a TCB.
 VARIABLE _TR-RIPVAR
+VARIABLE _TR-SEQ
+VARIABLE _TR-ACK
+VARIABLE _TR-FLAGS
 CREATE _TR-PSEUDO-TCB  /TCB ALLOT
-: (TCP-SEND-RST)  ( remote-ip rport lport seq -- )
-    >R                                 \ save seq
+: (TCP-SEND-RST)  ( remote-ip rport lport seq ack flags -- )
+    _TR-FLAGS ! _TR-ACK ! _TR-SEQ !
     _TR-PSEUDO-TCB /TCB 0 FILL
     _TR-PSEUDO-TCB TCB.LOCAL-PORT !
     _TR-PSEUDO-TCB TCB.REMOTE-PORT !
     _TR-RIPVAR !
     _TR-RIPVAR @ _TR-PSEUDO-TCB TCB.REMOTE-IP 4 CMOVE
-    R> _TR-PSEUDO-TCB TCB.SND-NXT !
-    0 _TR-PSEUDO-TCB TCB.RCV-NXT !
+    _TR-SEQ @ _TR-PSEUDO-TCB TCB.SND-NXT !
+    _TR-ACK @ _TR-PSEUDO-TCB TCB.RCV-NXT !
     0 _TR-PSEUDO-TCB TCB.RCV-WND !
-    _TR-PSEUDO-TCB TCP-RST TCP-ACK OR TCP-SEND-CTL DROP ;
+    _TR-PSEUDO-TCB _TR-FLAGS @ (TCP-SEND-CTL) DROP ;
 
-: TCP-SEND-RST  ( remote-ip rport lport seq -- )
+: TCP-SEND-RST  ( remote-ip rport lport seq ack flags -- )
     NET-TX-ACQUIRE-IDLE
     ['] (TCP-SEND-RST) CATCH _NET-TX-CATCH-RETURN ;
 
@@ -2795,7 +3142,7 @@ VARIABLE _TRP-TCB
 VARIABLE _TRP-SRC
 VARIABLE _TRP-LEN
 VARIABLE _TRP-ACTUAL
-: TCP-RX-PUSH  ( tcb addr len -- actual )
+: (TCP-RX-PUSH)  ( tcb addr len -- actual )
     _TRP-LEN !  _TRP-SRC !  _TRP-TCB !
     _TRP-LEN @ 0< IF 0 EXIT THEN
     \ Available space = RXBUF size - current count
@@ -2813,13 +3160,20 @@ VARIABLE _TRP-ACTUAL
     _TRP-ACTUAL @ _TRP-TCB @ TCB.RX-COUNT +!
     _TRP-ACTUAL @ ;
 
+: TCP-RX-PUSH  ( tcb addr len -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TCB-RAW-CALL? 0= IF 2DROP DROP NET-TX-RELEASE 0 EXIT THEN
+    ['] (TCP-RX-PUSH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
 \ -- TCP-RX-POP: read data from a TCB's RX ring buffer --
 \   ( tcb addr maxlen -- actual )
 VARIABLE _TRPOP-TCB
 VARIABLE _TRPOP-DST
 VARIABLE _TRPOP-MAX
 VARIABLE _TRPOP-ACTUAL
-: TCP-RX-POP  ( tcb addr maxlen -- actual )
+: (TCP-RX-POP)  ( tcb addr maxlen -- actual )
     _TRPOP-MAX !  _TRPOP-DST !  _TRPOP-TCB !
     _TRPOP-MAX @ 0< IF 0 EXIT THEN
     _TRPOP-TCB @ TCB.RX-COUNT @
@@ -2838,9 +3192,16 @@ VARIABLE _TRPOP-ACTUAL
     \ Terminal owners may drain already-buffered bytes, but cannot emit more
     \ protocol traffic.  Every live window update is durable until accepted.
     _TRPOP-TCB @ TCB.STATE @ TCPS-FAILED <> IF
-        _TRPOP-TCB @ TCP-ACK-TRY DROP
+        _TRPOP-TCB @ (TCP-ACK-TRY) DROP
     THEN
     _TRPOP-ACTUAL @ ;
+
+: TCP-RX-POP  ( tcb addr maxlen -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TCB-RAW-CALL? 0= IF 2DROP DROP NET-TX-RELEASE 0 EXIT THEN
+    ['] (TCP-RX-POP) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ =====================================================================
 \  TCP state machine — input processing (RFC 793 §3.9)
@@ -2867,6 +3228,31 @@ VARIABLE _TI-SPORT
 VARIABLE _TI-DPORT
 VARIABLE _TI-DATA
 VARIABLE _TI-HLEN
+VARIABLE _TI-RST-ACK
+
+\ TCP never answers traffic addressed to the limited broadcast address.
+\ IP admits that destination for UDP/DHCP, so reset suppression belongs at
+\ this transport boundary rather than in the shared IPv4 validator.
+: TCP-RESET-ELIGIBLE?  ( -- flag )
+    _TI-HDR @ IP-H.DST IP-LIMITED-BCAST? 0= ;
+
+: TCP-RESET-FOR-INPUT  ( -- )
+    TCP-RESET-ELIGIBLE? 0= IF EXIT THEN
+    _TI-FLAGS @ TCP-ACK AND IF
+        \ ACK-bearing refusals use SEG.ACK as the sequence and do not set ACK
+        \ in the response (RFC 9293 reset generation).
+        _TI-HDR @ IP-H.SRC _TI-SPORT @ _TI-DPORT @
+        _TI-ACK @ 0 TCP-RST (TCP-SEND-RST)
+    ELSE
+        \ Otherwise acknowledge the complete segment sequence space,
+        \ including payload and the control bytes consumed by SYN and FIN.
+        _TI-SEQ @ _TI-DATALEN @ SEQ+
+        _TI-FLAGS @ TCP-SYN AND IF 1 SEQ+ THEN
+        _TI-FLAGS @ TCP-FIN AND IF 1 SEQ+ THEN
+        _TI-RST-ACK !
+        _TI-HDR @ IP-H.SRC _TI-SPORT @ _TI-DPORT @
+        0 _TI-RST-ACK @ TCP-RST TCP-ACK OR (TCP-SEND-RST)
+    THEN ;
 
 \ -- Strict cumulative ACK processing for the retained-segment profile --
 VARIABLE _TAT-TCB
@@ -2943,7 +3329,7 @@ VARIABLE _TDA-TCB
         _TDA-TCB @ TCB.CWND !
         \ A cache miss is backpressure, not a retransmission.  Leave the
         \ original timer running so cooperative maintenance can resolve it.
-        _TDA-TCB @ TCP-RETRANSMIT-DATA 0= IF
+        _TDA-TCB @ (TCP-RETRANSMIT-DATA) 0= IF
             MS@ _TDA-TCB @ TCB.RTO-TIMER !
             _TDA-TCB @ TCP-CLEAR-ACK-PENDING
             _TDA-TCB @ TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND
@@ -2961,7 +3347,22 @@ VARIABLE _TDA-TCB
 \ immediate TCB-INIT would let the allocator attach a different connection to
 \ a still-authenticated TLS context's raw pointer.  FAILURE carries the exact
 \ terminal reason while RETRIES remains an honest wire-retransmission count.
+: TCP-UNOWNED-TEARDOWN?  ( tcb -- flag )
+    DUP TCB.OWNER @ 0=
+    OVER TCB.AUTH-STATE @ TCP-AUTH-NONE = AND
+    OVER TCB.STATE @ DUP TCPS-SYN-SENT =
+    OVER TCPS-FIN-WAIT-1 = OR
+    OVER TCPS-FIN-WAIT-2 = OR
+    OVER TCPS-CLOSING = OR
+    OVER TCPS-LAST-ACK = OR
+    SWAP TCPS-TIME-WAIT = OR AND
+    SWAP DROP ;
+
 : TCP-FAIL  ( tcb reason -- )
+    OVER TCB.AUTH-STATE @ TCP-AUTH-HALF-OPEN = IF
+        DROP TCP-PASSIVE-RELEASE EXIT
+    THEN
+    OVER TCP-UNOWNED-TEARDOWN? IF DROP TCB-INIT EXIT THEN
     OVER TCB.TX-BUF TCP-MSS 0 FILL
     0 2 PICK TCB.TX-LEN !
     0 2 PICK TCB.RTO-TIMER !
@@ -2995,17 +3396,28 @@ VARIABLE _TAPROC-TCB
 \   stays in LISTEN state so no SYNs are lost between accept calls.
 \   ( listener-tcb -- )
 : TCP-INPUT-LISTEN  ( tcb -- )
-    \ If not SYN, ignore
-    _TI-FLAGS @ TCP-SYN AND 0= IF DROP EXIT THEN
-    \ Check accept-queue capacity before allocating
-    DUP AQ-FULL? IF DROP EXIT THEN
+    \ LISTEN ignores resets, but every ACK is unacceptable and receives the
+    \ same bare reset as an unmatched four-tuple.  This check precedes the
+    \ bounded bare-SYN profile so an ACK is never silently discarded.
+    _TI-FLAGS @ TCP-RST AND IF DROP EXIT THEN
+    _TI-FLAGS @ TCP-ACK AND IF TCP-RESET-FOR-INPUT DROP EXIT THEN
+    \ This bounded passive profile admits only an initial bare SYN with no
+    \ payload.  Ambiguous control combinations never allocate a child.
+    _TI-FLAGS @ TCP-SYN <>
+    _TI-DATALEN @ 0<> OR IF DROP EXIT THEN
+    \ Reserve backlog across both half-open and completed children.
+    DUP AQ-RESERVE 0= IF DROP EXIT THEN
     \ Allocate a fresh TCB for this connection
-    TCB-ALLOC DUP -1 = IF DROP DROP EXIT THEN
+    TCB-ALLOC DUP -1 = IF
+        DROP DUP AQ-RELEASE DROP EXIT
+    THEN
     TCB-N >R                               ( listener  R: new-tcb )
-    R@ /TCB 0 FILL
     \ Copy listener's local port to new TCB
     DUP TCB.LOCAL-PORT @ R@ TCB.LOCAL-PORT !
+    DUP TCB>H1 R@ TCB.PARENT-H1 !
+    DUP TCB.GENERATION @ R@ TCB.PARENT-GEN !
     DROP                                   ( R: new-tcb )
+    TCP-AUTH-HALF-OPEN R@ TCB.AUTH-STATE !
     \ Set up connection state in the new TCB
     _TI-HDR @ IP-H.SRC R@ TCB.REMOTE-IP 4 CMOVE
     _TI-SPORT @ R@ TCB.REMOTE-PORT !
@@ -3020,26 +3432,44 @@ VARIABLE _TAPROC-TCB
     65535 R@ TCB.SSTHRESH !
     TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
     \ Send SYN+ACK
-    R@ TCP-SYN TCP-ACK OR TCP-SEND-CTL IF
-        R> TCB-INIT EXIT
+    R@ TCP-SYN TCP-ACK OR 0 0 (TCP-SEND-SEG) IF
+        R> TCP-PASSIVE-RELEASE EXIT
     THEN
     TCPS-SYN-RCVD R@ TCB.STATE !
     \ SYN consumes 1 seq number — advance SND-NXT past it
-    R@ TCB.ISS @ 1 SEQ+ R> TCB.SND-NXT ! ;
+    R@ TCB.ISS @ 1 SEQ+ R@ TCB.SND-NXT !
+    0 R@ TCB.RETRIES !
+    TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
+    MS@ R> TCB.RTO-TIMER ! ;
+
+\ A local ARP/NIC admission stall belongs to one control lifecycle.  Clear it
+\ when that lifecycle completes or before a newly admitted control segment
+\ starts another one, so an old SYN/SYN+ACK stall cannot age a later FIN.
+: TCP-CONTROL-STALL-CLEAR  ( tcb -- )
+    0 OVER TCB.CONTROL-STALL !
+    DUP TCB.FLAGS @
+    TCP-F-CONTROL-STALLED TCP-F-ARP-PENDING OR INVERT AND
+    SWAP TCB.FLAGS ! ;
 
 \ -- TCP-INPUT-SYN-SENT: handle segment in SYN-SENT state --
 \   Expecting SYN+ACK from peer (active open).
 : TCP-INPUT-SYN-SENT  ( tcb -- )
     >R
-    \ Must have ACK
-    _TI-FLAGS @ TCP-ACK AND IF
-        \ Verify ACK covers our SYN
-        _TI-ACK @ R@ TCB.ISS @ 1 SEQ+ <> IF
-            R> DROP EXIT               \ bad ACK — ignore
+    \ A reset is authoritative only when it acknowledges this exact SYN.
+    _TI-FLAGS @ TCP-RST AND IF
+        _TI-FLAGS @ TCP-ACK AND
+        _TI-ACK @ R@ TCB.ISS @ 1 SEQ+ = AND IF
+            R> TCP-FAIL-PEER-RESET TCP-FAIL
+        ELSE
+            R> DROP
         THEN
+        EXIT
     THEN
-    \ Must have SYN
-    _TI-FLAGS @ TCP-SYN AND 0= IF R> DROP EXIT THEN
+    \ This profile does not implement simultaneous open.  Admit only a bare
+    \ SYN+ACK whose acknowledgment covers this exact active-open SYN.
+    _TI-FLAGS @ TCP-SYN TCP-ACK OR <>
+    _TI-DATALEN @ 0<> OR
+    _TI-ACK @ R@ TCB.ISS @ 1 SEQ+ <> OR IF R> DROP EXIT THEN
     \ Accept connection
     _TI-SEQ @ R@ TCB.IRS !
     _TI-SEQ @ 1 SEQ+ R@ TCB.RCV-NXT !
@@ -3047,9 +3477,13 @@ VARIABLE _TAPROC-TCB
     _TI-WIN @ R@ TCB.SND-WND !
     \ Advance SND-NXT past our SYN
     R@ TCB.ISS @ 1 SEQ+ R@ TCB.SND-NXT !
+    0 R@ TCB.RETRIES !
+    0 R@ TCB.RTO-TIMER !
+    TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
+    R@ TCP-CONTROL-STALL-CLEAR
     TCPS-ESTABLISHED R@ TCB.STATE !
-    \ Send ACK
-    R> TCP-ACK TCP-SEND-CTL DROP ;
+    \ The final ACK is durable across NIC and neighbor backpressure.
+    R> (TCP-ACK-TRY) DROP ;
 
 \ -- TCP-INPUT-ESTABLISHED-ETC: common handler for states 4-10 --
 \   Handles data delivery, ACK processing, FIN processing.
@@ -3057,6 +3491,9 @@ VARIABLE _TAPROC-TCB
     >R
     \ --- Check RST ---
     _TI-FLAGS @ TCP-RST AND IF
+        \ TIME_WAIT protects the retired four-tuple; an in-window reset does
+        \ not shorten that quarantine.
+        R@ TCB.STATE @ TCPS-TIME-WAIT = IF R> DROP EXIT THEN
         \ A matching tuple alone is not enough to authorize teardown.
         _TI-SEQ @ R@ TCB.RCV-NXT @ <> IF R> DROP EXIT THEN
         R> TCP-FAIL-PEER-RESET TCP-FAIL EXIT
@@ -3065,7 +3502,16 @@ VARIABLE _TAPROC-TCB
     \ A four-tuple alone does not authorize teardown.  Ignore an unacceptable
     \ sequence; challenge an in-window unexpected SYN with a durable ACK.
     _TI-FLAGS @ TCP-SYN AND IF
-        _TI-SEQ @ R@ TCB.RCV-NXT @ = IF R@ TCP-ACK-TRY DROP THEN
+        \ A lost final ACK makes the peer replay its exact SYN+ACK.  Re-ACK it
+        \ without treating it as a fresh SYN or disturbing established state.
+        R@ TCB.STATE @ TCPS-ESTABLISHED =
+        _TI-FLAGS @ TCP-SYN TCP-ACK OR = AND
+        _TI-DATALEN @ 0= AND
+        _TI-SEQ @ R@ TCB.IRS @ = AND
+        _TI-ACK @ R@ TCB.ISS @ 1 SEQ+ = AND IF
+            R@ (TCP-ACK-TRY) DROP R> DROP EXIT
+        THEN
+        _TI-SEQ @ R@ TCB.RCV-NXT @ = IF R@ (TCP-ACK-TRY) DROP THEN
         R> DROP EXIT
     THEN
     \ --- Process ACK ---
@@ -3074,21 +3520,32 @@ VARIABLE _TAPROC-TCB
         R@ TCP-ACK-PROCESS DROP
         R@ TCB.STATE @ TCPS-SYN-RCVD =
         R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = AND IF
-            \ Transition to ESTABLISHED
+            \ Publish only through the exact listener incarnation that
+            \ reserved this child.  Failure reclaims the reservation and TCB.
+            R@ TCP-CONTROL-STALL-CLEAR
             TCPS-ESTABLISHED R@ TCB.STATE !
-            \ Enqueue into listener's accept queue (if any)
-            R@ TCB.LOCAL-PORT @ TCB-FIND-LPORT
-            DUP 0<> IF  R@ SWAP AQ-PUSH DROP  ELSE  DROP  THEN
+            R@ TCB-PARENT-RESOLVE DUP IF
+                R@ SWAP AQ-PUSH 0= IF
+                    R@ TCP-PASSIVE-RELEASE
+                    R> DROP EXIT
+                THEN
+            ELSE
+                DROP R@ TCP-PASSIVE-RELEASE
+                R> DROP EXIT
+            THEN
         THEN
         \ Handle FIN-WAIT-1 → FIN-WAIT-2 if all data ACKed
         R@ TCB.STATE @ TCPS-FIN-WAIT-1 = IF
             R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = IF
+                R@ TCP-CONTROL-STALL-CLEAR
                 TCPS-FIN-WAIT-2 R@ TCB.STATE !
+                MS@ R@ TCB.RTO-TIMER !
             THEN
         THEN
         \ Handle CLOSING → TIME-WAIT (stamp entry time for reaper)
         R@ TCB.STATE @ TCPS-CLOSING =
         R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = AND IF
+            R@ TCP-CONTROL-STALL-CLEAR
             TCPS-TIME-WAIT R@ TCB.STATE !
             EPOCH@ R@ TCB.RTO-TIMER !
         THEN
@@ -3110,39 +3567,56 @@ VARIABLE _TAPROC-TCB
             \ Check sequence number matches expected
             _TI-SEQ @ R@ TCB.RCV-NXT @ = IF
                 \ Push data into RX ring
-                R@ _TI-DATA @ _TI-DATALEN @ TCP-RX-PUSH
+                R@ _TI-DATA @ _TI-DATALEN @ (TCP-RX-PUSH)
                 R@ TCB.RCV-NXT @ SWAP SEQ+ R@ TCB.RCV-NXT !
                 \ Update receive window
                 /TCP-RXBUF R@ TCB.RX-COUNT @ - R@ TCB.RCV-WND !
                 \ Send or durably queue the cumulative ACK.
-                R@ TCP-ACK-TRY DROP
+                R@ (TCP-ACK-TRY) DROP
             ELSE
                 \ Out-of-order: send or durably queue a duplicate ACK.
-                R@ TCP-ACK-TRY DROP
+                R@ (TCP-ACK-TRY) DROP
             THEN
         THEN
     THEN
     \ --- Process FIN ---
     _TI-FLAGS @ TCP-FIN AND IF
         _TI-SEQ @ _TI-DATALEN @ SEQ+ R@ TCB.RCV-NXT @ = IF
-            \ Advance RCV-NXT past FIN
-            R@ TCB.RCV-NXT @ 1 SEQ+ R@ TCB.RCV-NXT !
-            R@ TCB.STATE @
-            CASE
-                TCPS-ESTABLISHED OF
-                    TCPS-CLOSE-WAIT R@ TCB.STATE !
-                    R@ TCP-ACK-TRY DROP
-                ENDOF
-                TCPS-FIN-WAIT-1 OF
-                    TCPS-CLOSING R@ TCB.STATE !
-                    R@ TCP-ACK-TRY DROP
-                ENDOF
-                TCPS-FIN-WAIT-2 OF
-                    TCPS-TIME-WAIT R@ TCB.STATE !
+            \ Consume a new FIN only in states whose receive side is open.
+            \ Other states challenge it with the current cumulative ACK.
+            R@ TCB.STATE @ DUP TCPS-ESTABLISHED =
+            OVER TCPS-FIN-WAIT-1 = OR
+            SWAP TCPS-FIN-WAIT-2 = OR IF
+                R@ TCB.RCV-NXT @ 1 SEQ+ R@ TCB.RCV-NXT !
+                R@ TCB.STATE @
+                CASE
+                    TCPS-ESTABLISHED OF
+                        TCPS-CLOSE-WAIT R@ TCB.STATE !
+                        R@ (TCP-ACK-TRY) DROP
+                    ENDOF
+                    TCPS-FIN-WAIT-1 OF
+                        TCPS-CLOSING R@ TCB.STATE !
+                        R@ (TCP-ACK-TRY) DROP
+                    ENDOF
+                    TCPS-FIN-WAIT-2 OF
+                        TCPS-TIME-WAIT R@ TCB.STATE !
+                        EPOCH@ R@ TCB.RTO-TIMER !
+                        R@ (TCP-ACK-TRY) DROP
+                    ENDOF
+                ENDCASE
+            ELSE
+                R@ (TCP-ACK-TRY) DROP
+            THEN
+        ELSE
+            \ Re-ACK an already consumed FIN.  TIME_WAIT also restarts 2MSL
+            \ so a lost final ACK cannot let an old incarnation reappear.
+            _TI-SEQ @ _TI-DATALEN @ SEQ+ 1 SEQ+
+            R@ TCB.RCV-NXT @ = IF
+                R@ TCB.STATE @ TCPS-TIME-WAIT = IF
                     EPOCH@ R@ TCB.RTO-TIMER !
-                    R@ TCP-ACK-TRY DROP
-                ENDOF
-            ENDCASE
+                THEN
+                R@ (TCP-ACK-TRY) DROP
+            THEN
         THEN
     THEN
     R> DROP ;
@@ -3189,8 +3663,7 @@ VARIABLE _TAPROC-TCB
     DUP 0= IF
         \ No matching TCB — send RST (unless incoming is RST)
         _TI-FLAGS @ TCP-RST AND 0= IF
-            _TI-HDR @ IP-H.SRC _TI-SPORT @ _TI-DPORT @
-            _TI-SEQ @ _TI-DATALEN @ SEQ+ TCP-SEND-RST
+            TCP-RESET-FOR-INPUT
         THEN
         DROP EXIT
     THEN
@@ -3217,42 +3690,115 @@ VARIABLE _TAPROC-TCB
 VARIABLE _TC-RIP
 VARIABLE _TC-RPORT
 VARIABLE _TC-LPORT
-: TCP-CONNECT  ( rip rport lport -- tcb | 0 )
+
+49152 CONSTANT TCP-EPHEMERAL-FIRST
+65535 CONSTANT TCP-EPHEMERAL-LAST
+VARIABLE TCP-EPHEMERAL-NEXT
+TCP-EPHEMERAL-FIRST TCP-EPHEMERAL-NEXT !
+VARIABLE _TEP-RIP
+VARIABLE _TEP-RPORT
+
+: TCP-EPHEMERAL-PORT  ( rip rport -- lport | 0 )
+    _TEP-RPORT ! _TEP-RIP !
+    TCP-EPHEMERAL-LAST TCP-EPHEMERAL-FIRST - 1+ 0 DO
+        TCP-EPHEMERAL-NEXT @ DUP
+        DUP TCP-EPHEMERAL-LAST = IF
+            DROP TCP-EPHEMERAL-FIRST
+        ELSE
+            1+
+        THEN
+        TCP-EPHEMERAL-NEXT !
+        DUP TCB-FIND-LPORT 0= IF
+            DUP _TEP-RPORT @ _TEP-RIP @ TCB-FIND 0= IF UNLOOP EXIT THEN
+        THEN
+        DROP
+    LOOP
+    0 ;
+
+: (TCP-CONNECT)  ( rip rport lport -- tcb | 0 )
     _TC-LPORT !  _TC-RPORT !  _TC-RIP !
-    TCB-ALLOC DUP -1 = IF DROP 0 EXIT THEN
+    _TC-LPORT @ 0= IF
+        _TC-RIP @ _TC-RPORT @ TCP-EPHEMERAL-PORT DUP 0= IF EXIT THEN
+        _TC-LPORT !
+    THEN
+    \ Without SO_REUSE semantics, an active open cannot borrow a listener's
+    \ local port even though exact-tuple demultiplexing would find it first.
+    _TC-LPORT @ TCB-FIND-LPORT IF 0 EXIT THEN
+    _TC-LPORT @ _TC-RPORT @ _TC-RIP @ TCB-FIND IF 0 EXIT THEN
+    (TCB-ALLOC) DUP -1 = IF DROP 0 EXIT THEN
     TCB-N >R
-    R@ /TCB 0 FILL
     _TC-LPORT @ R@ TCB.LOCAL-PORT !
     _TC-RPORT @ R@ TCB.REMOTE-PORT !
     _TC-RIP @ R@ TCB.REMOTE-IP 4 CMOVE
     TCP-GEN-ISN DUP R@ TCB.ISS !
-    R@ TCB.SND-NXT !
-    0 R@ TCB.SND-UNA !
+    DUP R@ TCB.SND-NXT !
+    R@ TCB.SND-UNA !
     /TCP-RXBUF R@ TCB.RCV-WND !
     TCP-MSS R@ TCB.CWND !
     65535 R@ TCB.SSTHRESH !
     TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
+    TCPS-SYN-SENT R@ TCB.STATE !
     \ Send SYN
-    R@ TCP-SYN TCP-SEND-CTL IF
+    R@ TCP-SYN 0 0 (TCP-SEND-SEG) IF
         R> TCB-INIT 0 EXIT
     THEN
-    TCPS-SYN-SENT R@ TCB.STATE !
+    0 R@ TCB.RETRIES !
+    TCP-RTO-INITIAL R@ TCB.RTO-VALUE !
+    MS@ R@ TCB.RTO-TIMER !
+    R@ TCB.ISS @ 1 SEQ+ R@ TCB.SND-NXT !
     R> ;
+
+: TCP-CONNECT  ( rip rport lport -- tcb | 0 )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (TCP-CONNECT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+VARIABLE _TCOA-RIP
+VARIABLE _TCOA-RPORT
+VARIABLE _TCOA-LPORT
+VARIABLE _TCOA-OWNER
+VARIABLE _TCOA-TCB
+
+: (TCP-CONNECT-ATTACH)  ( rip rport lport owner -- tcb generation ior )
+    _TCOA-OWNER ! _TCOA-LPORT ! _TCOA-RPORT ! _TCOA-RIP !
+    _TCOA-OWNER @ 0= IF 0 0 TCP-ACCEPT-E-OWNED EXIT THEN
+    _TCOA-OWNER @ TCB-OWNER-IN-USE? IF 0 0 TCP-ACCEPT-E-OWNED EXIT THEN
+    _TCOA-RIP @ _TCOA-RPORT @ _TCOA-LPORT @ (TCP-CONNECT)
+    DUP 0= IF DROP 0 0 TCP-ACCEPT-E-STATE EXIT THEN
+    DUP _TCOA-TCB ! _TCOA-OWNER @ (TCP-ATTACH)
+    DUP IF
+        DROP DROP _TCOA-TCB @ TCB-INIT
+        0 0 TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    DROP _TCOA-TCB @ SWAP 0 ;
+
+: TCP-CONNECT-ATTACH  ( rip rport lport owner -- tcb generation ior )
+    NET-TX-TRY IF 2DROP 2DROP 0 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-CONNECT-ATTACH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- TCP-LISTEN: passive open (server) --
 \   ( local-port -- tcb | 0 )
 \   Initialises the accept queue (head=0, tail=0, count=0) so
 \   completed connections can be enqueued by TCP-INPUT-ESTABLISHED-ETC.
-: TCP-LISTEN  ( lport -- tcb | 0 )
-    TCB-ALLOC DUP -1 = IF DROP 0 EXIT THEN
+: (TCP-LISTEN)  ( lport -- tcb | 0 )
+    DUP TCB-FIND-LPORT 0<> IF DROP 0 EXIT THEN
+    (TCB-ALLOC) DUP -1 = IF DROP 0 EXIT THEN
     TCB-N >R
-    R@ /TCB 0 FILL                     \ zeroes everything incl. AQ-*
     R@ TCB.LOCAL-PORT !
     /TCP-RXBUF R@ TCB.RCV-WND !
     TCP-MSS R@ TCB.CWND !
     65535 R@ TCB.SSTHRESH !
     TCPS-LISTEN R@ TCB.STATE !
     R> ;
+
+: TCP-LISTEN  ( lport -- tcb | 0 )
+    NET-TX-TRY IF DROP 0 EXIT THEN
+    ['] (TCP-LISTEN) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- TCP-SEND: queue data for transmission --
 \   ( tcb addr len -- actual )
@@ -3289,6 +3835,7 @@ VARIABLE _TSND-CAP
 
 : TCP-SEND-READY?  ( tcb -- flag )
     NET-TX-TRY IF DROP 0 EXIT THEN
+    DUP TCB-RAW-CALL? 0= IF DROP NET-TX-RELEASE 0 EXIT THEN
     ['] (TCP-SEND-READY?) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
@@ -3301,7 +3848,7 @@ VARIABLE _TSND-CAP
     \ The data path is cache-only.  Cache miss or local emission failure
     \ accepts no bytes and leaves retransmit/sequence state unchanged.
     _TSND-TCB @ TCP-ACK TCP-PSH OR
-    _TSND-SRC @ _TSND-LEN @ TCP-SEND-SEG-CACHED IF 0 EXIT THEN
+    _TSND-SRC @ _TSND-LEN @ (TCP-SEND-SEG-CACHED) IF 0 EXIT THEN
     \ Retain only successfully emitted data for retransmission.
     TCP-TX-PKT TCP-H.DATA _TSND-TCB @ TCB.TX-BUF _TSND-LEN @ CMOVE
     _TSND-LEN @ _TSND-TCB @ TCB.TX-LEN !
@@ -3319,6 +3866,7 @@ VARIABLE _TSND-CAP
 
 : TCP-SEND-ACCEPT  ( tcb addr len -- actual )
     NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TCB-RAW-CALL? 0= IF 2DROP DROP NET-TX-RELEASE 0 EXIT THEN
     ['] (TCP-SEND-ACCEPT) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
@@ -3333,6 +3881,7 @@ VARIABLE _TSND-CAP
 
 : TCP-SEND  ( tcb addr len -- actual )
     NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TCB-RAW-CALL? 0= IF 2DROP DROP NET-TX-RELEASE 0 EXIT THEN
     ['] (TCP-SEND) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
@@ -3350,6 +3899,7 @@ VARIABLE _TSE-LEN
 
 : TCP-SEND-EXACT  ( tcb addr len -- actual )
     NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TCB-RAW-CALL? 0= IF 2DROP DROP NET-TX-RELEASE 0 EXIT THEN
     ['] (TCP-SEND-EXACT) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
@@ -3359,34 +3909,147 @@ VARIABLE _TSE-LEN
 : TCP-RECV  ( tcb addr maxlen -- actual )
     TCP-RX-POP ;
 
-\ -- TCP-CLOSE: compatibility graceful-close initiation --
-\ Full retained FIN/control replay and owner-safe completion remain a later
-\ control-plane boundary.  This word preserves the existing blocking contract
-\ without claiming cooperative/idempotent shutdown.
-: TCP-CLOSE  ( tcb -- )
-    DUP TCB.STATE @
+VARIABLE _TCPIO-TCB
+VARIABLE _TCPIO-GEN
+VARIABLE _TCPIO-OWNER
+VARIABLE _TCPIO-BUF
+VARIABLE _TCPIO-LEN
+
+: _TCPIO-AUTHORIZED?  ( -- flag )
+    _TCPIO-TCB @ TCB-MEMBER? IF
+        _TCPIO-TCB @ _TCPIO-GEN @ _TCPIO-OWNER @ TCB-ATTACHED-TO?
+    ELSE
+        0
+    THEN ;
+
+: (TCP-OWNER-SEND)  ( tcb gen owner addr len -- actual ior )
+    _TCPIO-LEN ! _TCPIO-BUF ! _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
+    _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-TCB @ _TCPIO-BUF @ _TCPIO-LEN @ (TCP-SEND) 0 ;
+
+: TCP-OWNER-SEND  ( tcb gen owner addr len -- actual ior )
+    NET-TX-TRY IF 2DROP 2DROP DROP 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-OWNER-SEND) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-OWNER-SEND-EXACT)  ( tcb gen owner addr len -- actual ior )
+    _TCPIO-LEN ! _TCPIO-BUF ! _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
+    _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-TCB @ _TCPIO-BUF @ _TCPIO-LEN @ (TCP-SEND-EXACT) 0 ;
+
+: TCP-OWNER-SEND-EXACT  ( tcb gen owner addr len -- actual ior )
+    NET-TX-TRY IF 2DROP 2DROP DROP 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-OWNER-SEND-EXACT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-OWNER-SEND-READY?)  ( tcb gen owner -- ready? ior )
+    _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
+    _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-TCB @ (TCP-SEND-READY?) 0 ;
+
+: TCP-OWNER-SEND-READY?  ( tcb gen owner -- ready? ior )
+    NET-TX-TRY IF 2DROP DROP 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-OWNER-SEND-READY?) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (TCP-OWNER-RECV)  ( tcb gen owner addr maxlen -- actual ior )
+    _TCPIO-LEN ! _TCPIO-BUF ! _TCPIO-OWNER ! _TCPIO-GEN ! _TCPIO-TCB !
+    _TCPIO-AUTHORIZED? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _TCPIO-TCB @ _TCPIO-BUF @ _TCPIO-LEN @ (TCP-RX-POP) 0 ;
+
+: TCP-OWNER-RECV  ( tcb gen owner addr maxlen -- actual ior )
+    NET-TX-TRY IF 2DROP 2DROP DROP 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-OWNER-RECV) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ -- TCP close/abort lifecycle --
+\ Owner-qualified callers validate and perform the protocol transition under
+\ one NET transaction.  A failed FIN admission preserves both owner and TCB.
+VARIABLE _TCC-TCB
+
+: (TCP-CLOSE-TRY)  ( tcb -- ior )
+    DUP _TCC-TCB ! TCB.STATE @
     CASE
         TCPS-ESTABLISHED OF
-            DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL 0= IF
-                TCPS-FIN-WAIT-1 OVER TCB.STATE !
-                DUP TCB.SND-NXT @ 1 SEQ+ SWAP TCB.SND-NXT !
-            ELSE DROP THEN
+            _TCC-TCB @ TCB.TX-LEN @ 0<>
+            _TCC-TCB @ TCP-FLIGHT 0<> OR IF TCP-ACCEPT-E-BUSY EXIT THEN
+            _TCC-TCB @ TCP-FIN TCP-ACK OR 0 0 (TCP-SEND-SEG) DUP IF EXIT THEN DROP
+            _TCC-TCB @ TCP-CONTROL-STALL-CLEAR
+            TCPS-FIN-WAIT-1 _TCC-TCB @ TCB.STATE !
+            _TCC-TCB @ TCB.SND-NXT @ 1 SEQ+
+            _TCC-TCB @ TCB.SND-NXT !
+            0 _TCC-TCB @ TCB.RETRIES !
+            TCP-RTO-INITIAL _TCC-TCB @ TCB.RTO-VALUE !
+            MS@ _TCC-TCB @ TCB.RTO-TIMER !
+            0
         ENDOF
         TCPS-CLOSE-WAIT OF
-            DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL 0= IF
-                TCPS-LAST-ACK OVER TCB.STATE !
-                DUP TCB.SND-NXT @ 1 SEQ+ SWAP TCB.SND-NXT !
-            ELSE DROP THEN
+            _TCC-TCB @ TCB.TX-LEN @ 0<>
+            _TCC-TCB @ TCP-FLIGHT 0<> OR IF TCP-ACCEPT-E-BUSY EXIT THEN
+            _TCC-TCB @ TCP-FIN TCP-ACK OR 0 0 (TCP-SEND-SEG) DUP IF EXIT THEN DROP
+            _TCC-TCB @ TCP-CONTROL-STALL-CLEAR
+            TCPS-LAST-ACK _TCC-TCB @ TCB.STATE !
+            _TCC-TCB @ TCB.SND-NXT @ 1 SEQ+
+            _TCC-TCB @ TCB.SND-NXT !
+            0 _TCC-TCB @ TCB.RETRIES !
+            TCP-RTO-INITIAL _TCC-TCB @ TCB.RTO-VALUE !
+            MS@ _TCC-TCB @ TCB.RTO-TIMER !
+            0
         ENDOF
         TCPS-LISTEN OF
-            \ Drain accept queue — close any pending TCBs
-            BEGIN DUP AQ-POP DUP 0<> WHILE TCB-INIT REPEAT DROP
-            TCB-INIT
+            _TCC-TCB @ TCP-LISTENER-RECLAIM-CHILDREN
+            _TCC-TCB @ TCB-INIT 0
         ENDOF
-        TCPS-SYN-SENT OF  TCB-INIT  ENDOF
-        \ Other states retain the preexisting synchronous reset behavior.
-        SWAP TCB-INIT
+        TCPS-SYN-SENT OF _TCC-TCB @ TCB-INIT 0 ENDOF
+        TCPS-FAILED OF _TCC-TCB @ TCB-INIT 0 ENDOF
+        TCPS-FIN-WAIT-1 OF 0 ENDOF
+        TCPS-FIN-WAIT-2 OF 0 ENDOF
+        TCPS-CLOSING OF 0 ENDOF
+        TCPS-LAST-ACK OF 0 ENDOF
+        TCPS-TIME-WAIT OF 0 ENDOF
+        TCP-ACCEPT-E-STATE SWAP
     ENDCASE ;
+
+: TCP-CLOSE-TRY  ( unowned-tcb -- ior )
+    NET-TX-TRY IF DROP TCP-ACCEPT-E-BUSY EXIT THEN
+    DUP TCB-MEMBER? 0= IF DROP NET-TX-RELEASE TCP-ACCEPT-E-STALE EXIT THEN
+    DUP TCB.OWNER @ 0<>
+    OVER TCB.AUTH-STATE @ TCP-AUTH-NONE <> OR IF
+        DROP NET-TX-RELEASE TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    ['] (TCP-CLOSE-TRY) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: TCP-CLOSE  ( unowned-tcb -- )  TCP-CLOSE-TRY DROP ;
+
+VARIABLE _TCO-TCB
+VARIABLE _TCO-GEN
+VARIABLE _TCO-OWNER
+
+: (TCP-OWNER-CLOSE)  ( tcb generation owner -- ior )
+    _TCO-OWNER ! _TCO-GEN ! _TCO-TCB !
+    _TCO-TCB @ _TCO-GEN @ _TCO-OWNER @ TCB-ATTACHED-TO? 0= IF
+        TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _TCO-TCB @ (TCP-CLOSE-TRY) DUP IF EXIT THEN DROP
+    0 _TCO-TCB @ TCB.OWNER !
+    TCP-AUTH-NONE _TCO-TCB @ TCB.AUTH-STATE !
+    0 ;
+
+: TCP-OWNER-CLOSE  ( tcb generation owner -- ior )
+    NET-TX-TRY IF 2DROP DROP TCP-ACCEPT-E-BUSY EXIT THEN
+    2 PICK TCB-MEMBER? 0= IF
+        2DROP DROP
+        NET-TX-RELEASE TCP-ACCEPT-E-STALE EXIT
+    THEN
+    ['] (TCP-OWNER-CLOSE) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- TCP-ABORT: synchronously abandon and reclaim a connection --
 \   ( tcb -- status )
@@ -3405,23 +4068,17 @@ VARIABLE _TSE-LEN
 : _TCP-ABORT-RST?  ( tcb -- flag )
     \ The cached segment path is the only L2 operation: abort never starts
     \ discovery, waits for the NIC, or mutates shared packet scratch unlocked.
-    TCP-RST TCP-ACK OR TCP-SEND-CTL-CACHED 0= ;
+    TCP-RST TCP-ACK OR (TCP-SEND-CTL-CACHED) 0= ;
 
 : _TCP-ABORT-DRAIN-AQ  ( listener -- )
-    BEGIN
-        DUP AQ-POP DUP 0<>
-    WHILE
-        DUP TCB.STATE @ _TCP-ABORT-SYNCHRONIZED? IF
-            DUP _TCP-ABORT-RST? DROP
-        THEN
-        TCB-INIT
-    REPEAT
-    2DROP ;
+    \ Exact parent generations let listener teardown reclaim both half-open
+    \ and completed children without trusting queue pointers.
+    TCP-LISTENER-RECLAIM-CHILDREN ;
 
 VARIABLE _TCA-TCB
 VARIABLE _TCA-STATUS
 
-: TCP-ABORT  ( tcb -- status )
+: (TCP-ABORT)  ( tcb -- status )
     DUP _TCA-TCB !
     TCB.STATE @ DUP TCPS-CLOSED = IF
         DROP TCP-ABORT-S-ALREADY-CLOSED EXIT
@@ -3444,6 +4101,54 @@ VARIABLE _TCA-STATUS
     _TCA-STATUS !
     _TCA-TCB @ TCB-INIT
     _TCA-STATUS @ ;
+
+: TCP-ABORT-TRY  ( unowned-tcb -- status ior )
+    NET-TX-TRY IF DROP TCP-ABORT-S-LOCAL TCP-ACCEPT-E-BUSY EXIT THEN
+    DUP TCB-MEMBER? 0= IF
+        DROP NET-TX-RELEASE
+        TCP-ABORT-S-ALREADY-CLOSED TCP-ACCEPT-E-STALE EXIT
+    THEN
+    DUP TCB.OWNER @ 0<>
+    OVER TCB.AUTH-STATE @ TCP-AUTH-NONE <> OR IF
+        DROP NET-TX-RELEASE TCP-ABORT-S-LOCAL TCP-ACCEPT-E-OWNED EXIT
+    THEN
+    ['] (TCP-ABORT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN
+    0 ;
+
+: TCP-ABORT  ( unowned-tcb -- status )
+    TCP-ABORT-TRY DROP ;
+
+VARIABLE _TCAO-TCB
+VARIABLE _TCAO-GEN
+VARIABLE _TCAO-OWNER
+
+: (TCP-OWNER-ABORT)  ( tcb generation owner -- status ior )
+    _TCAO-OWNER ! _TCAO-GEN ! _TCAO-TCB !
+    _TCAO-TCB @ _TCAO-GEN @ _TCAO-OWNER @ TCB-ATTACHED-TO? 0= IF
+        TCP-ABORT-S-LOCAL TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _TCAO-TCB @ (TCP-ABORT) 0 ;
+
+: TCP-OWNER-ABORT  ( tcb generation owner -- status ior )
+    NET-TX-TRY IF 2DROP DROP TCP-ABORT-S-LOCAL TCP-ACCEPT-E-BUSY EXIT THEN
+    2 PICK TCB-MEMBER? 0= IF
+        2DROP DROP
+        NET-TX-RELEASE TCP-ABORT-S-LOCAL TCP-ACCEPT-E-STALE EXIT
+    THEN
+    ['] (TCP-OWNER-ABORT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Blocking lifecycle cleanup for an operation that already owns higher-level
+\ authority.  Arguments remain on the data stack until NET is acquired, so no
+\ task can overwrite the shared internal scratch while this caller waits.
+: TCP-OWNER-ABORT-ACQUIRE  ( tcb generation owner -- status ior )
+    NET-TX-ACQUIRE
+    ['] (TCP-OWNER-ABORT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ -- Data retransmission timer service --
 \   One due TCB is serviced per TCP-POLL call.  TCPS-FAILED is deliberately
@@ -3481,7 +4186,7 @@ VARIABLE _TRS-TCB
         EXIT
     THEN
     TCP-EMIT-READY? 0= IF EXIT THEN
-    _TRS-TCB @ TCP-RETRANSMIT-DATA IF EXIT THEN
+    _TRS-TCB @ (TCP-RETRANSMIT-DATA) IF EXIT THEN
     \ Congestion and retry state change only after a replay reaches the NIC.
     _TRS-TCB @ TCB.CWND @ 2 / TCP-MSS MAX
     _TRS-TCB @ TCB.SSTHRESH !
@@ -3493,6 +4198,155 @@ VARIABLE _TRS-TCB
     MS@ _TRS-TCB @ TCB.RTO-TIMER !
     _TRS-TCB @ TCB.RTO-VALUE @ 2 * TCP-RTO-MAX MIN
     TCP-RTO-INITIAL MAX _TRS-TCB @ TCB.RTO-VALUE ! ;
+
+VARIABLE _THO-TCB
+VARIABLE _THO-NOW
+
+60000 CONSTANT TCP-FIN-WAIT-2-TIMEOUT
+
+\ RETRIES counts only segments admitted to the wire.  CONTROL-STALL separately
+\ timestamps the first due replay that ARP/NIC backpressure did not admit.  A
+\ later wire admission or the exact transition completing that control
+\ lifecycle clears it, so ordinary exponential RTO wait is never confused with
+\ local non-admission and the timestamp cannot leak into a later lifecycle.
+: TCP-CONTROL-STALL-START  ( tcb -- )
+    DUP TCB.FLAGS @ TCP-F-CONTROL-STALLED AND IF DROP EXIT THEN
+    MS@ OVER TCB.CONTROL-STALL !
+    DUP TCB.FLAGS @ TCP-F-CONTROL-STALLED OR SWAP TCB.FLAGS ! ;
+
+: TCP-CONTROL-STALL-EXPIRED?  ( tcb -- flag )
+    DUP TCB.FLAGS @ TCP-F-CONTROL-STALLED AND 0= IF DROP 0 EXIT THEN
+    DUP TCB.CONTROL-STALL @ MS@ SWAP - TCP-RTO-MAX >= SWAP DROP ;
+
+: TCP-CONTROL-STALL-WAIT  ( tcb -- expired? )
+    DUP TCP-CONTROL-STALL-START TCP-CONTROL-STALL-EXPIRED? ;
+
+: TCP-CONTROL-STALL-FAIL  ( tcb -- )
+    TCP-FAIL-ADMISSION-TIMEOUT TCP-FAIL ;
+
+: TCP-CONTROL-NEIGHBOR-WAIT  ( tcb -- )
+    DUP TCB.FLAGS @ TCP-F-ARP-PENDING OR OVER TCB.FLAGS !
+    TCB.REMOTE-IP NEXT-HOP ARP-ENSURE DROP ;
+
+: TCP-CONTROL-RETRY-ADMITTED  ( tcb -- )
+    DUP TCP-CONTROL-STALL-CLEAR
+    DUP TCB.RETRIES 1 SWAP +!
+    DUP TCB.FLAGS @ TCP-F-ARP-PENDING INVERT AND OVER TCB.FLAGS !
+    DUP MS@ SWAP TCB.RTO-TIMER !
+    DUP TCB.RTO-VALUE @ 2 * TCP-RTO-MAX MIN
+    TCP-RTO-INITIAL MAX SWAP TCB.RTO-VALUE ! ;
+
+: TCP-ACTIVE-OPEN-RTO-DUE-AT?  ( tcb now -- flag )
+    _THO-NOW ! _THO-TCB !
+    _THO-TCB @ TCB.STATE @ TCPS-SYN-SENT =
+    _THO-TCB @ TCB.RTO-VALUE @ 0> AND
+    _THO-NOW @ _THO-TCB @ TCB.RTO-TIMER @ -
+    _THO-TCB @ TCB.RTO-VALUE @ >= AND ;
+
+: TCP-ACTIVE-OPEN-RTO-STEP  ( tcb -- )
+    DUP _THO-TCB ! TCB.STATE @ TCPS-SYN-SENT <> IF EXIT THEN
+    _THO-TCB @ TCB.RETRIES @ TCP-MAX-RETRIES >= IF
+        _THO-TCB @ TCP-DATA-RTO-FAIL
+        EXIT
+    THEN
+    _THO-TCB @ TCP-NEIGHBOR-READY? 0= IF
+        _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-CONTROL-STALL-FAIL EXIT
+        THEN
+        _THO-TCB @ TCP-CONTROL-NEIGHBOR-WAIT EXIT
+    THEN
+    TCP-EMIT-READY? 0= IF
+        _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-CONTROL-STALL-FAIL
+        THEN EXIT
+    THEN
+    _THO-TCB @ _THO-TCB @ TCB.ISS @
+    TCP-SYN 0 0 -1 (TCP-SEND-SEG-AT) DUP IF
+        DROP _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-CONTROL-STALL-FAIL
+        THEN EXIT
+    THEN DROP
+    _THO-TCB @ TCP-CONTROL-RETRY-ADMITTED ;
+
+: TCP-FIN-RTO-DUE-AT?  ( tcb now -- flag )
+    _THO-NOW ! _THO-TCB !
+    _THO-TCB @ TCB.STATE @ DUP TCPS-FIN-WAIT-1 =
+    OVER TCPS-CLOSING = OR
+    SWAP TCPS-LAST-ACK = OR
+    _THO-TCB @ TCP-FLIGHT 1 = AND
+    _THO-TCB @ TCB.RTO-VALUE @ 0> AND
+    _THO-NOW @ _THO-TCB @ TCB.RTO-TIMER @ -
+    _THO-TCB @ TCB.RTO-VALUE @ >= AND ;
+
+: TCP-FIN-RTO-STEP  ( tcb -- )
+    DUP _THO-TCB !
+    DUP TCB.STATE @ DUP TCPS-FIN-WAIT-1 =
+    OVER TCPS-CLOSING = OR
+    SWAP TCPS-LAST-ACK = OR
+    SWAP TCP-FLIGHT 1 = AND 0= IF EXIT THEN
+    _THO-TCB @ TCB.RETRIES @ TCP-MAX-RETRIES >= IF
+        _THO-TCB @ TCP-DATA-RTO-FAIL EXIT
+    THEN
+    _THO-TCB @ TCP-NEIGHBOR-READY? 0= IF
+        _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-CONTROL-STALL-FAIL EXIT
+        THEN
+        _THO-TCB @ TCP-CONTROL-NEIGHBOR-WAIT EXIT
+    THEN
+    TCP-EMIT-READY? 0= IF
+        _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-CONTROL-STALL-FAIL
+        THEN EXIT
+    THEN
+    _THO-TCB @ _THO-TCB @ TCB.SND-UNA @
+    TCP-FIN TCP-ACK OR 0 0 -1 (TCP-SEND-SEG-AT) DUP IF
+        DROP _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-CONTROL-STALL-FAIL
+        THEN EXIT
+    THEN DROP
+    _THO-TCB @ TCP-CONTROL-RETRY-ADMITTED ;
+
+: TCP-FIN-WAIT-2-DUE-AT?  ( tcb now -- flag )
+    _THO-NOW ! _THO-TCB !
+    _THO-TCB @ TCB.STATE @ TCPS-FIN-WAIT-2 =
+    _THO-NOW @ _THO-TCB @ TCB.RTO-TIMER @ -
+    TCP-FIN-WAIT-2-TIMEOUT >= AND ;
+
+: TCP-HALF-OPEN-RTO-DUE-AT?  ( tcb now -- flag )
+    _THO-NOW ! _THO-TCB !
+    _THO-TCB @ TCB.STATE @ TCPS-SYN-RCVD =
+    _THO-TCB @ TCB.AUTH-STATE @ TCP-AUTH-HALF-OPEN = AND
+    _THO-TCB @ TCB.OWNER @ 0= AND
+    _THO-TCB @ TCB.RTO-VALUE @ 0> AND
+    _THO-NOW @ _THO-TCB @ TCB.RTO-TIMER @ -
+    _THO-TCB @ TCB.RTO-VALUE @ >= AND ;
+
+: TCP-HALF-OPEN-RTO-STEP  ( tcb -- )
+    DUP _THO-TCB !
+    DUP TCB.STATE @ TCPS-SYN-RCVD =
+    OVER TCB.AUTH-STATE @ TCP-AUTH-HALF-OPEN = AND
+    SWAP TCB.OWNER @ 0= AND 0= IF EXIT THEN
+    _THO-TCB @ TCB.RETRIES @ TCP-MAX-RETRIES >= IF
+        _THO-TCB @ TCP-PASSIVE-RELEASE EXIT
+    THEN
+    _THO-TCB @ TCP-NEIGHBOR-READY? 0= IF
+        _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-PASSIVE-RELEASE EXIT
+        THEN
+        _THO-TCB @ TCP-CONTROL-NEIGHBOR-WAIT EXIT
+    THEN
+    TCP-EMIT-READY? 0= IF
+        _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-PASSIVE-RELEASE
+        THEN EXIT
+    THEN
+    _THO-TCB @ _THO-TCB @ TCB.ISS @
+    TCP-SYN TCP-ACK OR 0 0 -1 (TCP-SEND-SEG-AT) DUP IF
+        DROP _THO-TCB @ TCP-CONTROL-STALL-WAIT IF
+            _THO-TCB @ TCP-PASSIVE-RELEASE
+        THEN EXIT
+    THEN DROP
+    _THO-TCB @ TCP-CONTROL-RETRY-ADMITTED ;
 
 \ -- Cooperative network maintenance --
 \ One flat round-robin scan covers neighbor probes/replies and every TCB.
@@ -3575,11 +4429,23 @@ VARIABLE _AFR-ENTRY
             _NMS-TCB @ TCB.FLAGS !
         THEN
     THEN
+    _NMS-TCB @ _NMS-NOW @ TCP-HALF-OPEN-RTO-DUE-AT? IF
+        _NMS-TCB @ TCP-HALF-OPEN-RTO-STEP -1 EXIT
+    THEN
+    _NMS-TCB @ _NMS-NOW @ TCP-ACTIVE-OPEN-RTO-DUE-AT? IF
+        _NMS-TCB @ TCP-ACTIVE-OPEN-RTO-STEP -1 EXIT
+    THEN
+    _NMS-TCB @ _NMS-NOW @ TCP-FIN-RTO-DUE-AT? IF
+        _NMS-TCB @ TCP-FIN-RTO-STEP -1 EXIT
+    THEN
+    _NMS-TCB @ _NMS-NOW @ TCP-FIN-WAIT-2-DUE-AT? IF
+        _NMS-TCB @ TCP-DATA-RTO-FAIL -1 EXIT
+    THEN
     _NMS-TCB @ _NMS-NOW @ TCP-DATA-RTO-DUE-AT? IF
         _NMS-TCB @ TCP-DATA-RTO-STEP -1 EXIT
     THEN
     _NMS-TCB @ TCP-ACK-PENDING? IF
-        _NMS-TCB @ TCP-ACK-TRY DROP -1 EXIT
+        _NMS-TCB @ (TCP-ACK-TRY) DROP -1 EXIT
     THEN
     0 ;
 
@@ -6430,7 +7296,8 @@ VARIABLE _TPC-KEEP
 20 CONSTANT TLS-CT-CCS
 
 \ --- TLS Context Structure ---
-\  Per-connection TLS state.  4 contexts, one per TCB slot.
+\  Per-connection TLS state.  The capacity-derived context table has one
+\  context per configured TCB slot.
 \
 \  Offset  Field          Size  Description
 \  +0      STATE          8     0=NONE 1=HS 2=ESTABLISHED 3=CLOSING
@@ -6476,9 +7343,13 @@ VARIABLE _TPC-KEEP
 \  +944    RX-REC-ERROR   8     Sticky malformed-record indication
 \  +952    RX-HS-LEN      8     Post-handshake bytes retained by this context
 \  +960    RX-HS-ERROR    8     Sticky malformed post-handshake indication
-\  Total: 968 bytes
+\  +968    TCB-GENERATION 8     Exact reciprocal transport incarnation
+\  +976    GENERATION     8     Nonzero TLS context incarnation
+\  +984    SOCKET-OWNER   8     Exact owning TLS socket descriptor or zero
+\  +992    CLOSE-PHASE    8     Slot lifecycle and close_notify/FIN phase
+\  Total: 1000 bytes
 
-968 CONSTANT /TLS-CTX
+1000 CONSTANT /TLS-CTX
 16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -6521,6 +7392,14 @@ VARIABLE _TPC-KEEP
 : TLS-CTX.RX-REC-ERROR ( ctx -- addr ) 944 + ;
 : TLS-CTX.RX-HS-LEN   ( ctx -- addr ) 952 + ;
 : TLS-CTX.RX-HS-ERROR ( ctx -- addr ) 960 + ;
+: TLS-CTX.TCB-GENERATION ( ctx -- addr ) 968 + ;
+: TLS-CTX.GENERATION ( ctx -- addr ) 976 + ;
+: TLS-CTX.SOCKET-OWNER ( ctx -- addr ) 984 + ;
+: TLS-CTX.CLOSE-PHASE ( ctx -- addr ) 992 + ;
+
+-1 CONSTANT TLS-CLOSE-FREE
+0 CONSTANT TLS-CLOSE-NONE
+1 CONSTANT TLS-CLOSE-ALERT-SENT
 
 \ -- TLS context table (dynamic, XMEM-backed) --
 VARIABLE TLS-CTXS   0 TLS-CTXS !
@@ -6538,14 +7417,59 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 : TLS-CTX@ ( idx -- ctx )
     /TLS-CTX * TLS-CTXS @ + ;
 
+\ Retained as owned TLS parser scratch and part of explicit alias rejection;
+\ membership itself is stack-only so public preflight cannot race through it.
 VARIABLE _TCM-CTX
 
 : TLS-CTX-MEMBER? ( ctx -- flag )
-    _TCM-CTX !
-    TLS-CTXS @ DUP 0= IF DROP 0 EXIT THEN
-    _TCM-CTX @ OVER U< IF DROP 0 EXIT THEN
-    _TCM-CTX @ SWAP -
+    TLS-CTXS @ DUP 0= IF 2DROP 0 EXIT THEN
+    2DUP U< IF 2DROP 0 EXIT THEN
+    -
     DUP /TLS-CTX MOD 0= SWAP /TLS-CTX TLS-MAX-CTX * U< AND ;
+
+0x7FFFFFFFFFFFFFFF CONSTANT TLS-CTX-GENERATION-LAST
+
+: TLS-CTX-CLAIMED?  ( ctx -- flag )
+    DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX.GENERATION @
+    DUP 0<> SWAP TLS-CTX-GENERATION-LAST U> 0= AND
+    SWAP TLS-CTX.CLOSE-PHASE @ TLS-CLOSE-FREE <> AND ;
+
+: (TLS-CTX-CLAIM)  ( ctx -- flag )
+    DUP TLS-CTX-CLAIMED? IF DROP 0 EXIT THEN
+    DUP TLS-CTX.GENERATION @ DUP TLS-CTX-GENERATION-LAST U< 0= IF
+        2DROP 0 EXIT
+    THEN
+    1+ >R
+    DUP /TLS-CTX 0 FILL
+    R> SWAP TLS-CTX.GENERATION ! -1 ;
+
+: (TLS-CTX-RELEASE)  ( ctx -- )
+    DUP TLS-CTX-CLAIMED? 0= IF DROP EXIT THEN
+    DUP TLS-CTX.GENERATION @
+    >R DUP /TLS-CTX 0 FILL
+    R> OVER TLS-CTX.GENERATION !
+    TLS-CLOSE-FREE SWAP TLS-CTX.CLOSE-PHASE ! ;
+
+: TLS-CTX-ATTACHED-TO?  ( ctx generation owner -- flag )
+    >R
+    OVER TLS-CTX-MEMBER? 0= IF 2DROP R> DROP 0 EXIT THEN
+    DUP 0= R@ 0= OR IF 2DROP R> DROP 0 EXIT THEN
+    OVER TLS-CTX.GENERATION @ =
+    SWAP TLS-CTX.SOCKET-OWNER @ R> = AND ;
+
+\ Raw context APIs and socket-owned context APIs are deliberately disjoint.
+\ Once a descriptor publishes reciprocal ownership, only socket wrappers may
+\ enter the parenthesized TLS operations while retaining the TLS owner.
+: TLS-CTX-RAW-CALL?  ( ctx -- flag )
+    DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    TLS-CTX.SOCKET-OWNER @ 0= ;
+
+\ TLS lifecycle and transport bindings use a deferred owner gate because the
+\ context layout precedes the lock implementation in this source module.
+DEFER _TLS-OWNER-HELD?
+: _TLS-OWNER-NOT-YET?  ( -- flag )  0 ;
+' _TLS-OWNER-NOT-YET? IS _TLS-OWNER-HELD?
 
 \ --- TLS State Constants ---
 0 CONSTANT TLSS-NONE
@@ -6597,6 +7521,124 @@ VARIABLE _TCM-CTX
 -4220 CONSTANT TLS-E-EARLY-DATA-LIMIT
 -4221 CONSTANT TLS-E-PEER-FINISHED
 
+VARIABLE _TLS-TCB-CTX
+VARIABLE _TLS-TCB-TCB
+
+: _TLS-CTX>TCB  ( ctx -- tcb | 0 )
+    DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP _TLS-TCB-CTX ! TLS-CTX.TCB @ DUP _TLS-TCB-TCB !
+    DUP 0= IF EXIT THEN
+    DUP TCB-MEMBER? 0= IF DROP 0 EXIT THEN
+    _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION @
+    _TLS-TCB-CTX @ TCB-ATTACHED-TO? 0= IF 0 EXIT THEN
+    _TLS-TCB-TCB @ ;
+
+: _TLS-ATTACH-TCB  ( ctx tcb -- ior )
+    \ Shared TLS/TCB scratch belongs to the TLS owner.  Refuse an unlocked
+    \ caller before publishing either argument so it cannot corrupt an
+    \ in-flight exact attachment transaction.
+    _TLS-OWNER-HELD? 0= IF 2DROP TLS-E-BUSY EXIT THEN
+    _TLS-TCB-TCB ! _TLS-TCB-CTX !
+    _TLS-TCB-CTX @ TLS-CTX-MEMBER? 0= IF TLS-E-STATE EXIT THEN
+    _TLS-TCB-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-E-STATE EXIT THEN
+    _TLS-TCB-CTX @ TLS-CTX.ROLE @ DUP TLS-ROLE-CLIENT =
+    SWAP TLS-ROLE-SERVER = OR 0= IF TLS-E-STATE EXIT THEN
+    _TLS-TCB-CTX @ TLS-CTX.TCB @ 0<>
+    _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION @ 0<> OR IF
+        TLS-E-STATE EXIT
+    THEN
+    NET-TX-ACQUIRE
+    _TLS-TCB-TCB @ _TLS-TCB-CTX @ (TCP-ATTACH) DUP IF
+        2DROP NET-TX-RELEASE TLS-E-TRANSPORT EXIT
+    THEN
+    DROP
+    _TLS-TCB-TCB @ _TLS-TCB-CTX @ TLS-CTX.TCB !
+    _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION !
+    NET-TX-RELEASE
+    TLS-E-OK ;
+
+: _TLS-DETACH-TCB  ( ctx -- tcb | 0 )
+    _TLS-OWNER-HELD? 0= IF DROP 0 EXIT THEN
+    NET-TX-ACQUIRE
+    DUP _TLS-TCB-CTX ! _TLS-CTX>TCB
+    DUP 0= IF NET-TX-RELEASE EXIT THEN
+    DUP _TLS-TCB-TCB !
+    _TLS-TCB-TCB @ _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION @
+    _TLS-TCB-CTX @ (TCP-DETACH) IF
+        DROP NET-TX-RELEASE 0 EXIT
+    THEN
+    0 _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION !
+    0 _TLS-TCB-CTX @ TLS-CTX.TCB !
+    NET-TX-RELEASE
+    ;
+
+: _TLS-OWNER-CLOSE-TCB  ( ctx -- ior )
+    _TLS-TCB-CTX !
+    _TLS-TCB-CTX @ TLS-CTX.TCB @
+    _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION @
+    _TLS-TCB-CTX @ TCP-OWNER-CLOSE DUP 0= IF
+        0 _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION !
+        0 _TLS-TCB-CTX @ TLS-CTX.TCB !
+    THEN ;
+
+: _TLS-OWNER-ABORT-TCB  ( ctx -- status ior )
+    _TLS-TCB-CTX !
+    _TLS-TCB-CTX @ TLS-CTX.TCB @
+    _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION @
+    _TLS-TCB-CTX @ TCP-OWNER-ABORT DUP 0= IF
+        0 _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION !
+        0 _TLS-TCB-CTX @ TLS-CTX.TCB !
+    THEN ;
+
+: _TLS-OWNER-ABORT-TCB-WAIT  ( ctx -- status ior )
+    _TLS-TCB-CTX !
+    _TLS-TCB-CTX @ TLS-CTX.TCB @
+    _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION @
+    _TLS-TCB-CTX @ TCP-OWNER-ABORT-ACQUIRE DUP 0= IF
+        0 _TLS-TCB-CTX @ TLS-CTX.TCB-GENERATION !
+        0 _TLS-TCB-CTX @ TLS-CTX.TCB !
+    THEN ;
+
+: _TLS-TCP-AUTHORITY  ( ctx -- tcb generation ctx )
+    DUP TLS-CTX.TCB @ SWAP
+    DUP TLS-CTX.TCB-GENERATION @ SWAP ;
+
+: _TLS-OWNER-SEND-READY?  ( ctx -- ready? ior )
+    _TLS-TCP-AUTHORITY TCP-OWNER-SEND-READY? ;
+
+: _TLS-OWNER-SEND-EXACT  ( ctx addr len -- actual ior )
+    >R >R _TLS-TCP-AUTHORITY R> R> TCP-OWNER-SEND-EXACT ;
+
+: _TLS-OWNER-RECV  ( ctx addr maxlen -- actual ior )
+    >R >R _TLS-TCP-AUTHORITY R> R> TCP-OWNER-RECV ;
+
+VARIABLE _TLSOW-CTX
+VARIABLE _TLSOW-SRC
+VARIABLE _TLSOW-LEN
+
+: _TLS-OWNER-SEND-EXACT-WAIT  ( ctx addr len attempts -- actual )
+    >R _TLSOW-LEN ! _TLSOW-SRC ! _TLSOW-CTX ! R>
+    0 ?DO
+        _TLSOW-CTX @ _TLSOW-SRC @ _TLSOW-LEN @
+        _TLS-OWNER-SEND-EXACT
+        DUP IF 2DROP 0 UNLOOP EXIT THEN DROP
+        DUP _TLSOW-LEN @ = IF UNLOOP EXIT THEN
+        DROP TCP-POLL
+        _TLSOW-CTX @ _TLS-CTX>TCB DUP 0= IF DROP 0 UNLOOP EXIT THEN
+        TCB.STATE @ DUP TCPS-FAILED = SWAP TCPS-CLOSED = OR IF
+            0 UNLOOP EXIT
+        THEN
+        _TLSOW-CTX @ _TLS-OWNER-SEND-READY?
+        DUP IF 2DROP 0 UNLOOP EXIT THEN DROP 0= IF
+            TCP-EMIT-READY? 0= IF
+                BEGIN TCP-EMIT-READY? 0= WHILE REPEAT
+            ELSE
+                NET-IDLE
+            THEN
+        THEN
+    LOOP
+    0 ;
+
 \ Fatal TLS alert descriptions returned by peer-input parsers.  Positive
 \ values are wire descriptions; negative values remain local KDOS statuses.
 10  CONSTANT TLS-AD-UNEXPECTED-MESSAGE
@@ -6630,6 +7672,8 @@ VARIABLE TLS-OWNER-DEPTH
     COREID TLS-OWNER-CORE @ =
     TASK-ID TLS-OWNER-TASK @ = AND ;
 
+' _TLS-OWNER? IS _TLS-OWNER-HELD?
+
 : TLS-OWNER-TRY ( -- ior )
     TLS-OWNER-DEPTH @ 0> IF
         _TLS-OWNER? 0= IF TLS-E-BUSY EXIT THEN
@@ -6640,12 +7684,54 @@ VARIABLE TLS-OWNER-DEPTH
     COREID TLS-OWNER-CORE ! TASK-ID TLS-OWNER-TASK !
     1 TLS-OWNER-DEPTH ! TLS-E-OK ;
 
+: TLS-OWNER-ACQUIRE ( -- )
+    BEGIN TLS-OWNER-TRY DUP WHILE DROP YIELD? REPEAT DROP ;
+
 : TLS-OWNER-RELEASE ( -- )
     TLS-OWNER-DEPTH @ 0= IF EXIT THEN
     _TLS-OWNER? 0= IF EXIT THEN
     TLS-OWNER-DEPTH @ 1- DUP TLS-OWNER-DEPTH ! IF EXIT THEN
     -1 TLS-OWNER-CORE ! -1 TLS-OWNER-TASK !
     TLS-OWNER-LOCK SPIN! ;
+
+\ Public lifetime operations serialize reuse through the same TLS owner as
+\ every context mutator.  Internal code that already holds the owner uses the
+\ parenthesized bodies so an incarnation cannot be claimed or wiped twice.
+: TLS-CTX-CLAIM  ( ctx -- flag )
+    TLS-OWNER-TRY IF DROP 0 EXIT THEN
+    DUP TLS-CTX-MEMBER? 0= IF DROP TLS-OWNER-RELEASE 0 EXIT THEN
+    DUP TLS-CTX.STATE @ TLSS-NONE =
+    OVER TLS-CTX.ROLE @ TLS-ROLE-NONE = AND
+    OVER TLS-CTX.TCB @ 0= AND
+    OVER TLS-CTX.TCB-GENERATION @ 0= AND
+    OVER TLS-CTX.SOCKET-OWNER @ 0= AND 0= IF
+        DROP TLS-OWNER-RELEASE 0 EXIT
+    THEN
+    (TLS-CTX-CLAIM) >R TLS-OWNER-RELEASE R> ;
+
+: TLS-CTX-RELEASE  ( ctx -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    DUP TLS-CTX-MEMBER? 0= IF
+        DROP TLS-OWNER-RELEASE TLS-E-STATE EXIT
+    THEN
+    DUP TLS-CTX-CLAIMED? 0= IF
+        DROP TLS-OWNER-RELEASE TLS-E-STATE EXIT
+    THEN
+    DUP TLS-CTX-RAW-CALL? 0= IF
+        DROP TLS-OWNER-RELEASE TLS-E-STATE EXIT
+    THEN
+    \ Public release is only a quiescent raw-lifetime operation.  Live roles,
+    \ transport bindings, and socket ownership are dismantled by the exact
+    \ close/abort paths, which call the parenthesized body while owning TLS.
+    DUP TLS-CTX.STATE @ TLSS-NONE <>
+    OVER TLS-CTX.ROLE @ TLS-ROLE-NONE <> OR
+    OVER TLS-CTX.TCB @ 0<> OR
+    OVER TLS-CTX.TCB-GENERATION @ 0<> OR
+    OVER TLS-CTX.SOCKET-OWNER @ 0<> OR IF
+        DROP TLS-OWNER-RELEASE TLS-E-STATE EXIT
+    THEN
+    (TLS-CTX-RELEASE)
+    TLS-OWNER-RELEASE TLS-E-OK ;
 
 : _TLS-OWNER-RETURN ( ior -- ior )
     >R TLS-OWNER-RELEASE R> ;
@@ -8239,6 +9325,9 @@ DEFER TLS-SET-AES-MODE
 
 : TLS-ENCRYPT-RECORD ( ctx ctype pt plen rec -- reclen )
     TLS-OWNER-TRY IF 2DROP 2DROP DROP 0 EXIT THEN
+    4 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP 2DROP DROP TLS-OWNER-RELEASE 0 EXIT
+    THEN
     4 PICK DUP _TLS-SERVER-FLIGHT-ACTIVE?
     SWAP _TLS-SERVER-INGRESS-ACTIVE? OR IF
         2DROP 2DROP DROP TLS-OWNER-RELEASE 0 EXIT
@@ -8312,6 +9401,9 @@ VARIABLE _TDR-CLEN
 
 : TLS-DECRYPT-RECORD ( ctx rec rlen plain -- ctype plen | -1 0 )
     TLS-OWNER-TRY IF 2DROP 2DROP -1 0 EXIT THEN
+    3 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP 2DROP TLS-OWNER-RELEASE -1 0 EXIT
+    THEN
     3 PICK DUP _TLS-SERVER-FLIGHT-ACTIVE?
     SWAP _TLS-SERVER-INGRESS-ACTIVE? OR IF
         2DROP 2DROP TLS-OWNER-RELEASE -1 0 EXIT
@@ -8745,20 +9837,45 @@ CONSTANT TLS-SERVER-PENDING-STRIDE
     TLS-MAX-CTX 0 DO
         I TLS-CTX@ DUP TLS-CTX.STATE @ TLSS-NONE <>
         OVER TLS-CTX.TCB @ 0<> OR
+        OVER TLS-CTX.TCB-GENERATION @ 0<> OR
+        OVER TLS-CTX.SOCKET-OWNER @ 0<> OR
         SWAP _TLS-SERVER-PINNED? OR IF -1 UNLOOP EXIT THEN
     LOOP 0 ;
 
-\ This remains a test/load utility, but it may not orphan a live TLS
-\ transport or the only metadata for a pinned server credential.  Hold the
-\ same owner as begin/connect while scanning and resetting, so publication
-\ cannot race between those two operations.
+\ A reset must not sever a plain descriptor, passive reservation, or queued
+\ child from its only transport incarnation.  Generations intentionally
+\ survive TCB-INIT and therefore do not by themselves make a slot live.
+: _TCP-ANY-TCB-LIVE?  ( -- flag )
+    TCP-TCBS @ 0= IF 0 EXIT THEN
+    /TCP-MAX-CONN 0 DO
+        I TCB-N
+        DUP TCB.STATE @ TCPS-CLOSED <>
+        OVER TCB.OWNER @ 0<> OR
+        OVER TCB.AUTH-STATE @ TCP-AUTH-NONE <> OR
+        OVER TCB.PARENT-H1 @ 0<> OR
+        OVER TCB.PARENT-GEN @ 0<> OR
+        OVER TCB.AQ-COUNT @ 0<> OR
+        OVER TCB.AQ-RESERVED @ 0<> OR
+        SWAP DROP IF -1 UNLOOP EXIT THEN
+    LOOP 0 ;
+
+\ This remains a test/load utility, but it may not orphan a live TCP/TLS
+\ transport or the only metadata for a pinned server credential.  Hold TLS
+\ and then NET while checking both tables and keep NET through the reset, so
+\ no plain or protected publication can race between admission and erasure.
+: (TCP-INIT-ALL-CHECKED)  ( -- )
+    _TLS-ANY-CONTEXT-LIVE? _TCP-ANY-TCB-LIVE? OR IF
+        NET-E-TABLES-LIVE THROW
+    THEN
+    (TCP-INIT-ALL) ;
+
 : TCP-INIT-ALL  ( -- )
     TLS-OWNER-TRY DUP IF THROW THEN DROP
-    _TLS-ANY-CONTEXT-LIVE? IF
-        TLS-OWNER-RELEASE NET-E-TABLES-LIVE THROW
-    THEN
-    (TCP-INIT-ALL)
-    TLS-OWNER-RELEASE ;
+    NET-TX-ACQUIRE
+    ['] (TCP-INIT-ALL-CHECKED) CATCH >R
+    NET-TX-RELEASE
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 : TLS-SERVER-WORKSPACE-WIPE  ( ctx -- )
     DUP _TLS-SERVER-PROTOCOL-OWNED? IF DROP EXIT THEN
@@ -8897,6 +10014,8 @@ VARIABLE _TSCB-IOR
     _TSCB-CTX @ TLS-CTX.STATE @ TLSS-NONE <>
     _TSCB-CTX @ TLS-CTX.ROLE @ TLS-ROLE-NONE <> OR
     _TSCB-CTX @ TLS-CTX.TCB @ 0<> OR
+    _TSCB-CTX @ TLS-CTX.TCB-GENERATION @ 0<> OR
+    _TSCB-CTX @ TLS-CTX.SOCKET-OWNER @ 0<> OR
     _TSCB-CTX @ _TLS-SERVER-PINNED? OR IF TLS-E-STATE EXIT THEN
     _TSCB-ALPN-U @ DUP 0< SWAP TLS-ALPN-NAME-MAX > OR IF
         TLS-E-ALPN-CONFIG EXIT
@@ -8921,7 +10040,7 @@ VARIABLE _TSCB-IOR
 
 : _TLS-SERVER-BEGIN-FAIL  ( ior -- ior )
     >R _TSCB-CTX @ (TLS-RX-WIPE)
-    _TSCB-CTX @ /TLS-CTX 0 FILL R> ;
+    _TSCB-CTX @ (TLS-CTX-RELEASE) R> ;
 
 \ Initialize one unbound server-role context for deterministic handshake
 \ work.  Checkpoint 4 will compose this transaction with accepted-TCB
@@ -8931,7 +10050,7 @@ VARIABLE _TSCB-IOR
     _TSCB-ALPN-U ! _TSCB-ALPN ! _TSCB-GEN ! _TSCB-H1 ! _TSCB-CTX !
     _TLS-SERVER-BEGIN-VALIDATE DUP IF EXIT THEN DROP
     _TSCB-CTX @ (TLS-RX-WIPE)
-    _TSCB-CTX @ /TLS-CTX 0 FILL
+    _TSCB-CTX @ TLS-CTX-CLAIM 0= IF TLS-E-STATE EXIT THEN
     _TSCB-CTX @ _TSCB-ALPN @ _TSCB-ALPN-U @
     (TLS-ALPN-CONFIGURE) DUP IF _TLS-SERVER-BEGIN-FAIL EXIT THEN DROP
     _TSCB-H1 @ _TSCB-GEN @ _TC-PIN-BORROW
@@ -8967,6 +10086,12 @@ VARIABLE _TSCB-IOR
         2DROP 2DROP DROP TLS-E-STATE EXIT
     THEN
     4 PICK TLS-CTX.TCB @ 0<> IF
+        2DROP 2DROP DROP TLS-E-STATE EXIT
+    THEN
+    4 PICK TLS-CTX.TCB-GENERATION @ 0<> IF
+        2DROP 2DROP DROP TLS-E-STATE EXIT
+    THEN
+    4 PICK TLS-CTX.SOCKET-OWNER @ 0<> IF
         2DROP 2DROP DROP TLS-E-STATE EXIT
     THEN
     4 PICK _TLS-PURE-SERVER-PINNED? IF
@@ -12086,7 +13211,7 @@ VARIABLE _TBF-HASH
     TLS-VERIFY-DATA TLS-FINISHED-MSG 4 + 32 CMOVE
     \ Encrypt: TLS-ENCRYPT-RECORD(ctx, HANDSHAKE, msg, 36, rec)
     _TBF-CTX @ TLS-CT-HANDSHAKE TLS-FINISHED-MSG 36 _TBF-REC @
-    TLS-ENCRYPT-RECORD
+    (TLS-ENCRYPT-RECORD)
 ;
 
 : (TLS-BUILD-FINISHED) ( ctx rec -- reclen )
@@ -12098,6 +13223,12 @@ VARIABLE _TBF-HASH
 
 : TLS-BUILD-FINISHED ( ctx rec -- reclen )
     TLS-OWNER-TRY IF 2DROP 0 EXIT THEN
+    OVER TLS-CTX-RAW-CALL? 0= IF
+        2DROP TLS-OWNER-RELEASE 0 EXIT
+    THEN
+    OVER _TLS-SERVER-PROTOCOL-OWNED? IF
+        2DROP TLS-OWNER-RELEASE 0 EXIT
+    THEN
     (TLS-BUILD-FINISHED)
     >R TLS-OWNER-RELEASE R> ;
 
@@ -12224,7 +13355,7 @@ VARIABLE _THC-REC
     _THC-CTX @ TLS-CTX.ROLE @ TLS-ROLE-CLIENT <>
     _THC-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR
     _THC-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <> OR IF 0 EXIT THEN
-    _THC-CTX @  _THC-REC @  TLS-BUILD-FINISHED
+    _THC-CTX @  _THC-REC @  (TLS-BUILD-FINISHED)
     DUP 0= IF EXIT THEN
     >R
     _THC-CTX @ TLS-KS-APPLICATION IF R> DROP 0 EXIT THEN
@@ -12335,6 +13466,8 @@ VARIABLE _TEX-OLEN
 
 : _TEX-VALIDATE ( -- ior )
     _TEX-CTX @ TLS-CTX-MEMBER? 0= IF TLS-E-EXPORT-STATE EXIT THEN
+    _TEX-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-E-EXPORT-STATE EXIT THEN
+    _TEX-CTX @ TLS-CTX-RAW-CALL? 0= IF TLS-E-EXPORT-STATE EXIT THEN
     _TEX-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
     _TEX-CTX @ TLS-CTX.HS-STATE @ TLSH-CONNECTED <> OR
     _TEX-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR
@@ -12417,19 +13550,35 @@ VARIABLE _TEX-OLEN
 \ secrets, and reclaim the terminal TCB only after its TLS owner observes it.
 : _TLS-TRANSPORT-FAILED? ( ctx -- flag )
     DUP _TLS-SERVER-PROTOCOL-OWNED? IF DROP 0 EXIT THEN
-    DUP TLS-CTX.TCB @ ?DUP IF
-        TCB.STATE @ TCPS-FAILED = IF
+    \ Already-authenticated application plaintext outranks a later terminal
+    \ transport disposition.  Keep the epoch and exact TCB binding until the
+    \ caller drains every retained byte; the first later observation publishes
+    \ the sticky failure, revokes secrets, and reclaims the failed transport.
+    DUP TLS-CTX.APP-LEN @ 0> IF DROP 0 EXIT THEN
+    DUP _TLS-CTX>TCB DUP 0= IF
+        DROP
+        DUP TLS-CTX.TCB @ 0<>
+        OVER TLS-CTX.TCB-GENERATION @ 0<> OR IF
             DUP TLS-E-TRANSPORT SWAP TLS-CTX.ERROR !
             DUP _TLS-CONNECTION-REVOKE
-            DUP TLS-CTX.TCB @ ?DUP IF TCP-ABORT DROP THEN
-            0 OVER TLS-CTX.TCB !
             DROP -1 EXIT
         THEN
+        DROP 0 EXIT
+    THEN
+    TCB.STATE @ TCPS-FAILED = IF
+        DUP TLS-E-TRANSPORT SWAP TLS-CTX.ERROR !
+        DUP _TLS-CONNECTION-REVOKE
+        DUP _TLS-OWNER-ABORT-TCB 2DROP
+        DROP -1 EXIT
     THEN
     DROP 0 ;
 
 : (TLS-IO-STATUS) ( ctx -- ior )
     DUP TLS-CTX-MEMBER? 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX-CLAIMED? 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.ROLE @ DUP TLS-ROLE-CLIENT =
+    SWAP TLS-ROLE-SERVER = OR 0= IF DROP TLS-E-STATE EXIT THEN
+    DUP TLS-CTX.STATE @ TLSS-NONE = IF DROP TLS-E-STATE EXIT THEN
     DUP _TLS-SERVER-PROTOCOL-OWNED? IF DROP TLS-E-BUSY EXIT THEN
     DUP _TLS-TRANSPORT-FAILED? IF DROP TLS-E-TRANSPORT EXIT THEN
     TLS-CTX.ERROR @ ;
@@ -12438,6 +13587,9 @@ VARIABLE _TEX-OLEN
 \ revokes the TLS epoch and reclaims its terminal TCB under the TLS owner.
 : TLS-IO-STATUS ( ctx -- ior )
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    DUP TLS-CTX-RAW-CALL? 0= IF
+        DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
     (TLS-IO-STATUS) >R TLS-OWNER-RELEASE R> ;
 
 \ =====================================================================
@@ -12597,6 +13749,7 @@ VARIABLE _TSSE-GUARD-IOR
     DUP TLS-CTX.STATE @ TLSS-HANDSHAKE =
     OVER TLS-CTX.ROLE @ TLS-ROLE-SERVER = AND
     OVER TLS-CTX.TCB @ 0= AND
+    OVER TLS-CTX.TCB-GENERATION @ 0= AND
     OVER TLS-CTX.ERROR @ TLS-E-OK = AND
     OVER _TLS-SERVER-PINNED? AND
     OVER TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + @
@@ -12846,6 +13999,7 @@ VARIABLE _TSSE-GUARD-IOR
     _TSSE-IOR @ _TSSE-CTX @ TLS-CTX.ERROR !
     _TSSE-CTX @ _TSSE-DRIVER-CLEAR
     _TSSE-CTX @ _TLS-SERVER-EMIT-UNION-WIPE
+    0 _TSSE-CTX @ TLS-CTX.TCB-GENERATION !
     0 _TSSE-CTX @ TLS-CTX.TCB !
     _TSSE-CTX @ _TLS-CONNECTION-REVOKE
     _TSSE-IOR @ >R _TSSE-RECORD-SCRATCH-WIPE
@@ -13102,7 +14256,7 @@ VARIABLE _TSSE-GUARD-IOR
 \  TLS-SEND-DATA  ( ctx addr len -- actual )
 \  TLS-RECV-DATA  ( ctx addr maxlen -- actual | -1 )
 \  TLS-SEND-ALERT ( ctx level desc -- )
-\  TLS-CLOSE      ( ctx -- )
+\  TLS-CLOSE      ( ctx -- ior )
 
 1600 XBUF TLS-SEND-REC
 16896 XBUF TLS-RECV-REC
@@ -13112,9 +14266,12 @@ VARIABLE _TSSE-GUARD-IOR
 VARIABLE _TSD-CTX
 VARIABLE _TSD-SRC
 VARIABLE _TSD-LEN
+VARIABLE _TSD-TCB
 
 : (TLS-SEND-DATA) ( ctx addr len -- actual )
     _TSD-LEN !  _TSD-SRC !  _TSD-CTX !
+    _TSD-CTX @ TLS-CTX-MEMBER? 0= IF 0 EXIT THEN
+    _TSD-CTX @ TLS-CTX-CLAIMED? 0= IF 0 EXIT THEN
     _TSD-LEN @ 0> 0= IF 0 EXIT THEN
     _TSD-CTX @ _TLS-SERVER-PROTOCOL-OWNED? IF 0 EXIT THEN
     _TSD-CTX @ _TLS-TRANSPORT-FAILED? IF 0 EXIT THEN
@@ -13123,14 +14280,18 @@ VARIABLE _TSD-LEN
     \ The TCP implementation owns one retransmit buffer.  Do not encrypt or
     \ overwrite it until the preceding record (including client Finished) is
     \ acknowledged; cooperative callers interpret zero as backpressure.
-    _TSD-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF 0 EXIT THEN
+    _TSD-CTX @ _TLS-OWNER-SEND-READY?
+    DUP IF 2DROP 0 EXIT THEN DROP 0= IF 0 EXIT THEN
     _TSD-LEN @ 1400 MIN _TSD-LEN !
     \ Encrypt
     _TSD-CTX @  TLS-CT-APP-DATA  _TSD-SRC @  _TSD-LEN @
-    TLS-SEND-REC  TLS-ENCRYPT-RECORD
+    TLS-SEND-REC  (TLS-ENCRYPT-RECORD)
     DUP 0= IF DROP 0 EXIT THEN
     \ Send via TCP
-    _TSD-CTX @ TLS-CTX.TCB @   TLS-SEND-REC  ROT  TCP-SEND-EXACT
+    _TSD-CTX @ TLS-SEND-REC ROT _TLS-OWNER-SEND-EXACT
+    DUP IF
+        2DROP -1 _TSD-CTX @ TLS-CTX.WR-SEQ +! 0 EXIT
+    THEN DROP
     DUP 0> IF
         DROP _TSD-LEN @
     ELSE
@@ -13141,6 +14302,9 @@ VARIABLE _TSD-LEN
 
 : TLS-SEND-DATA ( ctx addr len -- actual )
     TLS-OWNER-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP DROP TLS-OWNER-RELEASE 0 EXIT
+    THEN
     (TLS-SEND-DATA) >R TLS-OWNER-RELEASE R> ;
 
 \ -- TLS record reassembly --
@@ -13234,6 +14398,35 @@ VARIABLE _TRBC-LEFT
     \ Fill to complete record
     SWAP OVER TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN ;
 
+: TLS-OWNER-RBUF-FILL  ( ctx need -- flag )
+    2000 0 DO
+        TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
+        OVER
+        TLS-RECV-REC TLS-RBUF-LEN @ +
+        2 PICK TLS-RBUF-LEN @ -
+        _TLS-OWNER-RECV
+        DUP IF 2DROP 2DROP 0 UNLOOP EXIT THEN DROP
+        DUP 0> IF
+            TLS-RBUF-LEN +!
+            TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
+        ELSE
+            DROP
+        THEN
+        TCP-POLL NET-IDLE
+    LOOP
+    2DROP 0 ;
+
+: TLS-OWNER-READ-RECORD  ( ctx -- rlen | 0 )
+    DUP 5 TLS-OWNER-RBUF-FILL 0= IF DROP 0 EXIT THEN
+    TLS-RECV-REC TLS-RECORD-HEADER? 0= IF
+        DROP -1 TLS-RBUF-ERROR ! 0 EXIT
+    THEN
+    TLS-RECV-REC 3 + C@ 8 LSHIFT TLS-RECV-REC 4 + C@ OR 5 +
+    DUP TLS-RECV-REC SWAP TLS-RECORD-SIZE? 0= IF
+        2DROP -1 TLS-RBUF-ERROR ! 0 EXIT
+    THEN
+    SWAP OVER TLS-OWNER-RBUF-FILL 0= IF DROP 0 EXIT THEN ;
+
 \ --- Non-blocking variants for application-data path ---
 \ Single TCP-RECV attempt, no NET-IDLE loop.  Caller polls.
 : TLS-RBUF-FILL-NB ( tcb need -- flag )
@@ -13265,15 +14458,17 @@ VARIABLE _TRBC-LEFT
 \ following record in the same context workspace.
 VARIABLE _TARF-CTX
 VARIABLE _TARF-NEED
+VARIABLE _TARF-TCB
 
 : TLS-APP-RBUF-FILL-NB  ( ctx need -- flag )
     _TARF-NEED ! _TARF-CTX !
     _TARF-CTX @ TLS-CTX.RX-REC-LEN @ _TARF-NEED @ >= IF -1 EXIT THEN
-    _TARF-CTX @ TLS-CTX.TCB @ DUP 0= IF DROP 0 EXIT THEN
+    _TARF-CTX @
     _TARF-CTX @ TLS-RXW.RECORD
     _TARF-CTX @ TLS-CTX.RX-REC-LEN @ +
     _TARF-NEED @ _TARF-CTX @ TLS-CTX.RX-REC-LEN @ -
-    TCP-RECV
+    _TLS-OWNER-RECV
+    DUP IF 2DROP 0 EXIT THEN DROP
     DUP 0> IF
         _TARF-CTX @ TLS-CTX.RX-REC-LEN +!
     ELSE
@@ -13389,6 +14584,7 @@ VARIABLE _TSCFI-BUDGET
     OVER TLS-CTX.ERROR @ TLS-E-OK = AND
     OVER TLS-CTX.PEER-AUTH @ 0= AND
     OVER TLS-CTX.TCB @ 0= AND
+    OVER TLS-CTX.TCB-GENERATION @ 0= AND
     OVER TLS-CTX.RD-SEQ @ 0= AND
     OVER _TLS-SERVER-PINNED? AND
     OVER TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + @
@@ -13732,6 +14928,7 @@ HERE CONSTANT _TLS-INGRESS-STATIC-END
     OVER TLS-CTX.ERROR @ TLS-E-OK = AND
     OVER TLS-CTX.PEER-AUTH @ 0= AND
     OVER TLS-CTX.TCB @ 0= AND
+    OVER TLS-CTX.TCB-GENERATION @ 0= AND
     OVER _TLS-SERVER-PINNED? AND
     OVER TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + @
     TLS-SERVER-FLIGHT-COMPLETE = AND
@@ -13970,6 +15167,10 @@ VARIABLE _TPPH-OLD
 
 : (TLS-PROCESS-POST-HANDSHAKE) ( ctx plain plen -- ior )
     _TPPH-REM ! _TPPH-PTR ! _TPPH-CTX !
+    _TPPH-CTX @ TLS-CTX-MEMBER? 0= IF TLS-E-STATE EXIT THEN
+    _TPPH-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-E-STATE EXIT THEN
+    _TPPH-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
+    _TPPH-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR IF TLS-E-STATE EXIT THEN
     _TPPH-CTX @ TLS-CTX.RX-HS-ERROR @ IF -1 EXIT THEN
     _TPPH-REM @ 0<
     _TPPH-CTX @ TLS-CTX.RX-HS-LEN @ _TPPH-REM @ +
@@ -14011,6 +15212,9 @@ VARIABLE _TPPH-OLD
 
 : TLS-PROCESS-POST-HANDSHAKE ( ctx plain plen -- ior )
     TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    2 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
     2 PICK _TLS-SERVER-PROTOCOL-OWNED? IF
         2DROP DROP TLS-E-BUSY _TLS-OWNER-RETURN EXIT
     THEN
@@ -14040,6 +15244,10 @@ VARIABLE _TPA-LEN
 
 : (TLS-PROCESS-ALERT) ( ctx data len -- status )
     _TPA-LEN ! _TPA-DATA ! _TPA-CTX !
+    _TPA-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-E-STATE EXIT THEN
+    _TPA-CTX @ TLS-CTX.STATE @ DUP TLSS-HANDSHAKE =
+    OVER TLSS-ESTABLISHED = OR
+    SWAP TLSS-CLOSING = OR 0= IF TLS-E-STATE EXIT THEN
     _TPA-LEN @ 2 <> IF
         TLS-E-RECORD _TPA-CTX @ TLS-CTX.ERROR !
         _TPA-CTX @ _TLS-CONNECTION-REVOKE -1 EXIT
@@ -14065,6 +15273,9 @@ VARIABLE _TPA-LEN
 
 : TLS-PROCESS-ALERT ( ctx data len -- status )
     TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    2 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
     2 PICK _TLS-SERVER-PROTOCOL-OWNED? IF
         2DROP DROP TLS-E-BUSY _TLS-OWNER-RETURN EXIT
     THEN
@@ -14112,7 +15323,7 @@ VARIABLE _TPA-LEN
             \ TCP EOF without an authenticated close_notify is TLS
             \ truncation, not a clean end-of-stream.  Retained plaintext was
             \ drained above before this transport-state check.
-            _TRD-CTX @ TLS-CTX.TCB @ ?DUP IF
+            _TRD-CTX @ _TLS-CTX>TCB ?DUP IF
                 TCB.STATE @ TCPS-CLOSE-WAIT = IF
                     TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
                     _TRD-CTX @ _TLS-CONNECTION-REVOKE -1
@@ -14130,7 +15341,7 @@ VARIABLE _TPA-LEN
     TLS-PLAIN-WIPE
     _TRD-CTX @  _TRD-CTX @ TLS-RXW.RECORD
     _TRD-RLEN @  TLS-PLAIN-BUF
-    TLS-DECRYPT-RECORD
+    (TLS-DECRYPT-RECORD)
     _TRD-CTX @ _TRD-RLEN @ TLS-APP-RBUF-CONSUME
     \ Stack: ctype plen  (or -1 0)
     DUP 0= IF
@@ -14151,13 +15362,15 @@ VARIABLE _TPA-LEN
     THEN
     OVER TLS-CT-HANDSHAKE = IF
         SWAP DROP DUP _TRD-PLEN !
-        _TRD-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-POST-HANDSHAKE
+        _TRD-CTX @ TLS-PLAIN-BUF ROT (TLS-PROCESS-POST-HANDSHAKE)
         >R TLS-PLAIN-WIPE R>
         IF _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL ELSE 0 THEN EXIT
     THEN
     OVER TLS-CT-ALERT = IF
         SWAP DROP DUP _TRD-PLEN !
-        _TRD-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-ALERT
+        \ The receive entry already retains TLS ownership.  Enter the internal
+        \ alert transition so socket-owned contexts do not cross the raw API.
+        _TRD-CTX @ TLS-PLAIN-BUF ROT (TLS-PROCESS-ALERT)
         >R TLS-PLAIN-WIPE R> EXIT
     THEN
     OVER TLS-CT-APP-DATA <> IF
@@ -14171,6 +15384,9 @@ VARIABLE _TPA-LEN
 
 : TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
     TLS-OWNER-TRY IF 2DROP DROP 0 EXIT THEN
+    2 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP DROP TLS-OWNER-RELEASE 0 EXIT
+    THEN
     (TLS-RECV-DATA) >R TLS-OWNER-RELEASE R> ;
 
 \ --- TLS-SEND-ALERT ---
@@ -14178,6 +15394,7 @@ VARIABLE _TPA-LEN
 CREATE TLS-ALERT-BUF 2 ALLOT
 VARIABLE _TSA-CTX
 VARIABLE _TSA-SENT
+VARIABLE _TSA-TCB
 
 : _TLS-LOCAL-ALERT-FINISH ( -- )
     TLS-ALERT-BUF C@ 2 = IF
@@ -14209,6 +15426,8 @@ VARIABLE _TSA-SENT
     SWAP DROP ;
 
 : (TLS-SEND-ALERT) ( ctx level desc -- ior )
+    2 PICK TLS-CTX-MEMBER? 0= IF 2DROP DROP TLS-E-STATE EXIT THEN
+    2 PICK TLS-CTX-CLAIMED? 0= IF 2DROP DROP TLS-E-STATE EXIT THEN
     2 PICK _TLS-SERVER-PROTOCOL-OWNED? IF
         2DROP DROP TLS-E-BUSY EXIT
     THEN
@@ -14219,19 +15438,28 @@ VARIABLE _TSA-SENT
     _TSA-CTX @ _TLS-ALERT-WRITE-OPEN? 0= IF
         _TLS-ALERT-UNSENT EXIT
     THEN
-    _TSA-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF
+    _TSA-CTX @ _TLS-OWNER-SEND-READY?
+    DUP IF 2DROP _TLS-ALERT-UNSENT EXIT THEN DROP 0= IF
         _TLS-ALERT-UNSENT EXIT
     THEN
     _TSA-CTX @  TLS-CT-ALERT  TLS-ALERT-BUF  2
-    TLS-SEND-REC  TLS-ENCRYPT-RECORD
+    TLS-SEND-REC  (TLS-ENCRYPT-RECORD)
     DUP 0= IF DROP _TLS-ALERT-UNSENT EXIT THEN
     \ Send via TCP
-    _TSA-CTX @ TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND-EXACT
+    _TSA-CTX @ TLS-SEND-REC ROT _TLS-OWNER-SEND-EXACT
+    DUP IF
+        2DROP -1 _TSA-CTX @ TLS-CTX.WR-SEQ +!
+        _TLS-ALERT-UNSENT EXIT
+    THEN DROP
     DUP 0= IF
         DROP -1 _TSA-CTX @ TLS-CTX.WR-SEQ +!
         _TLS-ALERT-UNSENT EXIT
     ELSE
         DROP -1 _TSA-SENT !
+    THEN
+    TLS-ALERT-BUF C@ 1 =
+    TLS-ALERT-BUF 1+ C@ 0= AND IF
+        TLS-CLOSE-ALERT-SENT _TSA-CTX @ TLS-CTX.CLOSE-PHASE !
     THEN
     _TLS-LOCAL-ALERT-FINISH
     TLS-E-OK
@@ -14239,6 +15467,9 @@ VARIABLE _TSA-SENT
 
 : TLS-SEND-ALERT-TRY ( ctx level desc -- ior )
     TLS-OWNER-TRY IF 2DROP DROP TLS-E-BUSY EXIT THEN
+    2 PICK TLS-CTX-RAW-CALL? 0= IF
+        2DROP DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
     (TLS-SEND-ALERT) >R TLS-OWNER-RELEASE R> ;
 
 : TLS-SEND-ALERT ( ctx level desc -- )
@@ -14250,26 +15481,42 @@ VARIABLE _TCL-CTX
 
 : (TLS-CLOSE) ( ctx -- ior )
     _TCL-CTX !
+    _TCL-CTX @ TLS-CTX-MEMBER? 0= IF TLS-E-STATE EXIT THEN
+    _TCL-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-E-STATE EXIT THEN
     _TCL-CTX @ _TLS-SERVER-DRIVER-ACTIVE? IF TLS-E-BUSY EXIT THEN
+    _TCL-CTX @ TLS-CTX.CLOSE-PHASE @ TLS-CLOSE-NONE = IF
+        _TCL-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED =
+        _TCL-CTX @ TLS-CTX.PEER-AUTH @ 1 = AND
+        _TCL-CTX @ TLS-CTX.STATE @ TLSS-CLOSING =
+        _TCL-CTX @ TLS-CTX.ERROR @ TLS-E-OK = AND OR IF
+            _TCL-CTX @ 1 0 (TLS-SEND-ALERT) DUP IF EXIT THEN DROP
+        THEN
+    THEN
+    _TCL-CTX @ TLS-CTX.TCB @ 0<>
+    _TCL-CTX @ TLS-CTX.TCB-GENERATION @ 0<> OR IF
+        _TCL-CTX @ _TLS-CTX>TCB 0= IF TLS-E-TRANSPORT EXIT THEN
+        _TCL-CTX @ _TLS-OWNER-CLOSE-TCB DUP IF
+            TCP-ACCEPT-E-BUSY = IF TLS-E-WOULD-BLOCK ELSE TLS-E-TRANSPORT THEN
+            EXIT
+        THEN DROP
+    THEN
     _TCL-CTX @ _TLS-SERVER-PIN-RELEASE DUP IF
         _TLS-CREDENTIAL-IOR>TLS EXIT
     THEN DROP
-    _TCL-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED = IF
-        _TCL-CTX @ 1 0 TLS-SEND-ALERT        \ close_notify
-    THEN
-    _TCL-CTX @ TLS-CTX.TCB @ ?DUP IF TCP-CLOSE THEN
     _TCL-CTX @ _TLS-SERVER-EMIT-UNION-WIPE
     _TCL-CTX @ _TLS-RX-WIPE-RAW
-    _TCL-CTX @ /TLS-CTX 0 FILL
+    _TCL-CTX @ (TLS-CTX-RELEASE)
     TLS-E-OK
 ;
 
 : TLS-CLOSE-TRY ( ctx -- ior )
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    DUP TLS-CTX-RAW-CALL? 0= IF
+        DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
     (TLS-CLOSE) _TLS-OWNER-RETURN ;
 
-: TLS-CLOSE ( ctx -- )
-    TLS-CLOSE-TRY DROP ;
+: TLS-CLOSE ( ctx -- ior )  TLS-CLOSE-TRY ;
 
 \ --- TLS-ABORT ---
 \ Reclaim the associated TCB immediately and wipe the complete context.
@@ -14285,31 +15532,79 @@ VARIABLE _TLA-STATUS
 
 : (TLS-ABORT)  ( ctx -- status )
     _TLA-CTX !
+    _TLA-CTX @ TLS-CTX-MEMBER? 0= IF TLS-ABORT-S-BUSY EXIT THEN
+    _TLA-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-ABORT-S-NONE EXIT THEN
     _TLA-CTX @ _TLS-SERVER-DRIVER-ACTIVE? IF TLS-ABORT-S-BUSY EXIT THEN
-    _TLA-CTX @ _TLS-SERVER-PIN-RELEASE IF
-        TLS-ABORT-S-BUSY EXIT
-    THEN
     TLS-ABORT-S-NONE _TLA-STATUS !
     _TLA-CTX @ TLS-CTX.STATE @ TLSS-NONE <> IF
         TLS-ABORT-S-LOCAL _TLA-STATUS !
     THEN
-    \ TCB presence is authoritative even if the TLS state was only partly
-    \ initialized or was corrupted back to NONE.
-    _TLA-CTX @ TLS-CTX.TCB @ ?DUP IF
-        TCP-ABORT TCP-ABORT-S-RST-SENT = IF
+    \ TCB authority is exact even if TLS state is only partly initialized.
+    _TLA-CTX @ TLS-CTX.TCB @ 0<>
+    _TLA-CTX @ TLS-CTX.TCB-GENERATION @ 0<> OR IF
+        _TLA-CTX @ _TLS-CTX>TCB 0= IF TLS-ABORT-S-BUSY EXIT THEN
+        _TLA-CTX @ _TLS-OWNER-ABORT-TCB DUP IF
+            2DROP TLS-ABORT-S-BUSY EXIT
+        THEN
+        DROP TCP-ABORT-S-RST-SENT = IF
             TLS-ABORT-S-RST-SENT _TLA-STATUS !
         ELSE
             TLS-ABORT-S-LOCAL _TLA-STATUS !
         THEN
     THEN
+    \ Credential ownership is dismantled only after exact transport authority
+    \ has been reclaimed: credentials must not disappear beneath a live peer.
+    \ If unpin is busy, the context token and pin metadata remain retryable,
+    \ although the exact TCB binding may already have been reclaimed above.
+    _TLA-CTX @ _TLS-SERVER-PIN-RELEASE IF
+        TLS-ABORT-S-BUSY EXIT
+    THEN
     _TLA-CTX @ _TLS-SERVER-EMIT-UNION-WIPE
     _TLA-CTX @ _TLS-RX-WIPE-RAW
-    _TLA-CTX @ /TLS-CTX 0 FILL
+    _TLA-CTX @ (TLS-CTX-RELEASE)
     _TLA-STATUS @ ;
 
 : TLS-ABORT ( ctx -- status )
     TLS-OWNER-TRY IF DROP TLS-ABORT-S-BUSY EXIT THEN
+    DUP TLS-CTX-RAW-CALL? 0= IF
+        DROP TLS-ABORT-S-BUSY TLS-OWNER-RELEASE EXIT
+    THEN
     (TLS-ABORT) >R TLS-OWNER-RELEASE R> ;
+
+VARIABLE _TLCF-CTX
+
+: (TLS-CLOSE-FINAL)  ( ctx -- ior )
+    _TLCF-CTX !
+    _TLCF-CTX @ TLS-CTX-CLAIMED? 0= IF TLS-E-OK EXIT THEN
+    TCP-EXACT-WAIT-POLLS 0 DO
+        _TLCF-CTX @ (TLS-CLOSE)
+        DUP 0= IF UNLOOP EXIT THEN
+        TLS-E-WOULD-BLOCK <> IF LEAVE THEN
+        TCP-POLL NET-IDLE
+    LOOP
+    \ This API is for terminal ownership paths: if graceful progress cannot
+    \ complete inside its existing bounded poll budget, reclaim rather than
+    \ returning a live context that the caller is about to discard.
+    TCP-EXACT-WAIT-POLLS 0 DO
+        _TLCF-CTX @ (TLS-ABORT) DUP TLS-ABORT-S-BUSY <> IF
+            DROP TLS-E-OK UNLOOP EXIT
+        THEN
+        DROP YIELD?
+    LOOP
+    TLS-E-BUSY ;
+
+: TLS-CLOSE-FINAL  ( ctx -- ior )
+    \ Terminal cleanup waits for the upper owner.  Zero has one meaning:
+    \ graceful close or the abort fallback has disposed of the context.
+    \ A nonzero return retains the context token for retry; abort fallback may
+    \ already have reclaimed its transport before credential unpin reported busy.
+    TLS-OWNER-ACQUIRE
+    DUP TLS-CTX-RAW-CALL? 0= IF
+        DROP TLS-OWNER-RELEASE TLS-E-STATE EXIT
+    THEN
+    ['] (TLS-CLOSE-FINAL) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ =====================================================================
 \  §16.11  TLS 1.3 Connection API
@@ -14332,14 +15627,22 @@ VARIABLE _TLA-STATUS
 \    Receive and decrypt application data.  (Alias for TLS-RECV-DATA.)
 
 \ -- TLS context allocator --
-: TLS-CTX-ALLOC ( -- ctx | 0 )
+: (TLS-CTX-ALLOC) ( -- ctx | 0 )
     TLS-MAX-CTX 0 DO
         I TLS-CTX@ DUP TLS-CTX.STATE @ TLSS-NONE =
+        OVER TLS-CTX.ROLE @ TLS-ROLE-NONE = AND
+        OVER TLS-CTX.TCB @ 0= AND
+        OVER TLS-CTX.TCB-GENERATION @ 0= AND
+        OVER TLS-CTX.SOCKET-OWNER @ 0= AND
         OVER _TLS-SERVER-PINNED? 0= AND IF
-            UNLOOP EXIT
+            DUP (TLS-CTX-CLAIM) IF UNLOOP EXIT THEN
         THEN
         DROP
     LOOP 0 ;
+
+: TLS-CTX-ALLOC ( -- ctx | 0 )
+    TLS-OWNER-TRY IF 0 EXIT THEN
+    (TLS-CTX-ALLOC) >R TLS-OWNER-RELEASE R> ;
 
 \ -- Process multiple HS messages from one decrypted record --
 \   A single encrypted record may contain EncryptedExtensions,
@@ -14382,14 +15685,41 @@ VARIABLE _TLSC-HELLO
 VARIABLE _TLSC-CH-ADDR
 VARIABLE _TLSC-CH-LEN
 
+: _TLSC-ABORT-TCB  ( -- flag )
+    _TLSC-CTX @ ?DUP IF
+        DUP TLS-CTX.TCB @ 0<>
+        OVER TLS-CTX.TCB-GENERATION @ 0<> OR IF
+            \ Handshake failure is terminal.  TLS already owns the upper lock,
+            \ so wait for NET rather than losing the only live authority to a
+            \ transient lock collision.
+            _TLS-OWNER-ABORT-TCB-WAIT DUP IF
+                DUP TCP-ACCEPT-E-STALE = IF
+                    \ No reciprocal transport incarnation remains owned by
+                    \ this context; clear only the stale local token.
+                    2DROP
+                    0 _TLSC-CTX @ TLS-CTX.TCB-GENERATION !
+                    0 _TLSC-CTX @ TLS-CTX.TCB ! -1 EXIT
+                THEN
+                2DROP 0 EXIT
+            THEN
+            2DROP -1 EXIT
+        THEN
+        DROP
+    THEN
+    _TLSC-TCB @ ?DUP IF
+        TCP-ABORT-TRY DUP IF 2DROP 0 EXIT THEN 2DROP
+    THEN
+    -1 ;
+
 : _TLSC-FAIL ( -- 0 )
     \ A failed authenticated handshake is terminal, not graceful shutdown.
     \ Reclaim immediately so retained ClientHello/Finished data cannot lose
     \ its owner and later strand a TCPS-FAILED slot.
-    _TLSC-TCB @ ?DUP IF TCP-ABORT DROP THEN
-    _TLSC-CTX @ ?DUP IF
-        DUP TLS-HANDSHAKE-SECRETS-WIPE
-        DUP TLS-RX-WIPE DUP /TLS-CTX 0 FILL DROP
+    _TLSC-ABORT-TCB IF
+        _TLSC-CTX @ ?DUP IF
+            DUP TLS-HANDSHAKE-SECRETS-WIPE
+            DUP TLS-RX-WIPE (TLS-CTX-RELEASE)
+        THEN
     THEN
     TLS-PLAIN-WIPE TLS-RBUF-RESET TLS-HS-RBUF-RESET TLS-TR-RESET
     0 _TLSC-TCB ! 0 _TLSC-CTX !
@@ -14421,7 +15751,6 @@ VARIABLE _TLSC-CH-LEN
     THEN
     _TLSC-CTX !
     _TLSC-CTX @ TLS-RX-WIPE
-    _TLSC-CTX @ /TLS-CTX 0 FILL
     TLS-ROLE-CLIENT _TLSC-CTX @ TLS-CTX.ROLE !
     _TLSC-CTX @ _TLSC-NAME @ _TLSC-NAME-LEN @ TLS-ALPN-CONFIGURE IF
         TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
@@ -14437,22 +15766,24 @@ VARIABLE _TLSC-CH-LEN
         TLS-CONNECT-E-CLIENT-HELLO TLS-CONNECT-LAST-ERROR !
         R> R> R> 2DROP DROP _TLSC-FAIL EXIT
     THEN
-    \ 3. TCP connect
-    R> R> R> TCP-CONNECT
-    DUP 0= IF
+    \ 3. Open and attach TCP as one network transaction.  A failed lock
+    \ admission cannot strand an ownerless SYN-SENT TCB.
+    R> R> R> _TLSC-CTX @ TCP-CONNECT-ATTACH
+    DUP IF
         TLS-CONNECT-E-TCP-OPEN TLS-CONNECT-LAST-ERROR !
-        DROP _TLSC-FAIL EXIT
+        DROP 2DROP _TLSC-FAIL EXIT
     THEN
-    _TLSC-TCB !
-    _TLSC-TCB @ _TLSC-CTX @ TLS-CTX.TCB !
+    DROP
+    _TLSC-CTX @ TLS-CTX.TCB-GENERATION !
+    DUP _TLSC-TCB ! _TLSC-CTX @ TLS-CTX.TCB !
     \ 4. Wait for TCP established
     _TLSC-TCB @ 50 TCP-WAIT-ESTABLISHED 0= IF
         TLS-CONNECT-E-TCP-ESTABLISH TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
     THEN
     \ 5. Send the prepared ClientHello immediately.
-    _TLSC-TCB @ _TLSC-CH-ADDR @ _TLSC-CH-LEN @
-    TCP-EXACT-WAIT-POLLS TCP-SEND-EXACT-WAIT
+    _TLSC-CTX @ _TLSC-CH-ADDR @ _TLSC-CH-LEN @
+    TCP-EXACT-WAIT-POLLS _TLS-OWNER-SEND-EXACT-WAIT
     _TLSC-CH-LEN @ <> IF
         TLS-CONNECT-E-CLIENT-SEND TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
@@ -14467,7 +15798,7 @@ VARIABLE _TLSC-CH-LEN
     BEGIN
         _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-CLIENT-HELLO-SENT =
     WHILE
-        _TLSC-TCB @ TLS-READ-RECORD
+        _TLSC-CTX @ TLS-OWNER-READ-RECORD
         DUP 0= IF
             TLS-CONNECT-E-SERVER-RECORD TLS-CONNECT-LAST-ERROR !
             DROP _TLSC-FAIL EXIT
@@ -14499,7 +15830,7 @@ VARIABLE _TLSC-CH-LEN
             TLS-CONNECT-E-HANDSHAKE-WAIT TLS-CONNECT-LAST-ERROR !
             _TLSC-FAIL EXIT
         THEN
-        _TLSC-TCB @ TLS-READ-RECORD
+        _TLSC-CTX @ TLS-OWNER-READ-RECORD
         DUP 0= IF
             TLS-CONNECT-E-HANDSHAKE-RECORD TLS-CONNECT-LAST-ERROR !
             DROP _TLSC-FAIL EXIT
@@ -14520,7 +15851,7 @@ VARIABLE _TLSC-CH-LEN
             \ Decrypt record
             TLS-PLAIN-WIPE
             _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
-            TLS-DECRYPT-RECORD
+            (TLS-DECRYPT-RECORD)
             _TLSC-RLEN @ TLS-RBUF-CONSUME
             DUP 0= IF
                 TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
@@ -14550,8 +15881,8 @@ VARIABLE _TLSC-CH-LEN
         DROP _TLSC-FAIL EXIT
     THEN
     DUP _TLSC-RLEN !
-    _TLSC-TCB @  TLS-SEND-REC  ROT
-    TCP-EXACT-WAIT-POLLS TCP-SEND-EXACT-WAIT
+    _TLSC-CTX @  TLS-SEND-REC  ROT
+    TCP-EXACT-WAIT-POLLS _TLS-OWNER-SEND-EXACT-WAIT
     _TLSC-RLEN @ <> IF
         TLS-CONNECT-E-FINISHED TLS-CONNECT-LAST-ERROR !
         _TLSC-FAIL EXIT
@@ -14645,11 +15976,13 @@ VARIABLE _TLSCP-HELLO
 \  BSD-style socket abstraction over TCP and TLS.
 \
 \  Socket descriptor table: 2× /TCP-MAX-CONN slots (dynamic).
-\  Each socket is 32 bytes:
+\  Each socket is 40 bytes:
 \    +0   STATE      8    0=FREE 1=TCP 2=TLS 3=LISTENING 4=ACCEPTED
+\                          5=CONNECTING (private in-progress reservation)
 \    +8   TCB/CTX    8    TCB pointer (TCP) or TLS-CTX pointer (TLS)
 \    +16  LOCAL-PORT 8    Local port number
 \    +24  FLAGS      8    Bit0: TLS mode
+\    +32  HANDLE-GEN 8    exact TCB or TLS-context generation for HANDLE
 \
 \  API:
 \    SOCKET     ( type -- sd | -1 )   type: 0=TCP, 1=TLS
@@ -14659,10 +15992,10 @@ VARIABLE _TLSCP-HELLO
 \    CONNECT    ( sd rip rport -- ior )
 \    SEND       ( sd addr len -- actual )
 \    RECV       ( sd addr maxlen -- actual )
-\    CLOSE      ( sd -- )
+\    CLOSE      ( sd -- ior )
 
 \ --- Socket Constants ---
-32 CONSTANT /SOCK
+40 CONSTANT /SOCK
 32 VALUE SOCK-MAX                 \ set by NET-TABLES-INIT (2× /TCP-MAX-CONN)
 
 0 CONSTANT SOCKST-FREE
@@ -14670,6 +16003,7 @@ VARIABLE _TLSCP-HELLO
 2 CONSTANT SOCKST-TLS
 3 CONSTANT SOCKST-LISTENING
 4 CONSTANT SOCKST-ACCEPTED
+5 CONSTANT SOCKST-CONNECTING
 
 0 CONSTANT SOCK-TYPE-TCP
 1 CONSTANT SOCK-TYPE-TLS
@@ -14696,7 +16030,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
 \    Logical cost = /TCB + /TLS-CTX + /TLS-RX-WORKSPACE
-\                 + 2×/SOCK = 237552 bytes per connection.
+\                 + 2×/SOCK = 237720 bytes per connection.
 \    XMEM normalizes each table allocation independently to 16 bytes, so
 \    capacity uses the exact aggregate rather than flooring this quotient.
 \
@@ -14752,12 +16086,54 @@ NET-TABLES-INIT
 : SOCK.HANDLE     ( sd -- addr )   8  + ;
 : SOCK.LOCAL-PORT ( sd -- addr )   16 + ;
 : SOCK.FLAGS      ( sd -- addr )   24 + ;
+: SOCK.HANDLE-GEN ( sd -- addr )   32 + ;
+
+: SOCK-MEMBER?  ( sd -- flag )
+    SOCK-TABLE @ DUP 0= IF 2DROP 0 EXIT THEN
+    2DUP U< IF 2DROP 0 EXIT THEN
+    - DUP /SOCK MOD 0= SWAP /SOCK SOCK-MAX * U< AND ;
+
+\ Clear descriptor payload first and publish FREE last.  Allocation can never
+\ observe a reusable slot while an earlier lifecycle operation is wiping it.
+: SOCK-RELEASE  ( sd -- )
+    DUP 8 + /SOCK 8 - 0 FILL
+    SOCKST-FREE SWAP SOCK.STATE ! ;
+
+: SOCK-TCB@  ( sd -- tcb | 0 )
+    DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP SOCK.HANDLE @ DUP 0= IF NIP EXIT THEN
+    DUP TCB-MEMBER? 0= IF 2DROP 0 EXIT THEN
+    DUP 2 PICK SOCK.HANDLE-GEN @ 3 PICK TCB-ATTACHED-TO? 0= IF
+        2DROP 0 EXIT
+    THEN
+    NIP ;
+
+VARIABLE _STOR-TCB
+VARIABLE _STOR-GEN
+VARIABLE _STOR-OWNER
+
+: (TCP-OWNER-RX-READY?)  ( tcb generation owner -- flag ior )
+    _STOR-OWNER ! _STOR-GEN ! _STOR-TCB !
+    _STOR-TCB @ TCB-MEMBER? 0= IF 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _STOR-TCB @ _STOR-GEN @ _STOR-OWNER @ TCB-ATTACHED-TO? 0= IF
+        0 TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _STOR-TCB @ TCB.RX-COUNT @ 0>
+    _STOR-TCB @ TCB.STATE @ DUP TCPS-CLOSE-WAIT =
+    SWAP TCPS-FAILED = OR OR
+    0 ;
+
+: TCP-OWNER-RX-READY?  ( tcb generation owner -- flag ior )
+    NET-TX-TRY IF 2DROP DROP 0 TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (TCP-OWNER-RX-READY?) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ --- SOCKET ( type -- sd | -1 ) ---
 \ Allocate a new socket descriptor.
 VARIABLE _SOK-TYPE
 
-: SOCKET ( type -- sd | -1 )
+: (SOCKET)  ( type -- sd | -1 )
     _SOK-TYPE !
     SOCK-MAX 0 DO
         I SOCK-N SOCK.STATE @ SOCKST-FREE = IF
@@ -14769,133 +16145,624 @@ VARIABLE _SOK-TYPE
         THEN
     LOOP -1 ;
 
+: SOCKET  ( type -- sd | -1 )
+    NET-TX-TRY IF DROP -1 EXIT THEN
+    ['] (SOCKET) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
 \ --- BIND ( sd port -- ior ) ---
+VARIABLE _SBIND-SD
+VARIABLE _SBIND-PORT
+
+: (BIND) ( sd port -- ior )
+    _SBIND-PORT ! _SBIND-SD !
+    _SBIND-SD @ SOCK-MEMBER? 0= IF -1 EXIT THEN
+    _SBIND-SD @ SOCK.STATE @ DUP SOCKST-TCP = SWAP SOCKST-TLS = OR 0= IF
+        -1 EXIT
+    THEN
+    _SBIND-SD @ SOCK.HANDLE @ 0<>
+    _SBIND-SD @ SOCK.HANDLE-GEN @ 0<> OR IF -1 EXIT THEN
+    _SBIND-PORT @ _SBIND-SD @ SOCK.LOCAL-PORT ! 0 ;
+
 : BIND ( sd port -- ior )
-    SWAP SOCK.LOCAL-PORT ! 0 ;
+    NET-TX-TRY IF 2DROP -1 EXIT THEN
+    ['] (BIND) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ --- LISTEN ( sd -- ior ) ---
 \ Move to LISTENING state, open TCP passive listener.
 VARIABLE _SLSN-SD
+VARIABLE _SLSN-TCB
+VARIABLE _SLSN-GEN
 
-: LISTEN ( sd -- ior )
+: (LISTEN) ( sd -- ior )
     _SLSN-SD !
+    _SLSN-SD @ SOCK-MEMBER? 0= IF -1 EXIT THEN
     \ A TLS-marked listener is not a plaintext listener with a copied flag.
     \ Keep this surface unavailable until secure accept can attach and finish
     \ an authenticated server context before publishing the child socket.
     _SLSN-SD @ SOCK.STATE @ SOCKST-TCP <>
     _SLSN-SD @ SOCK.FLAGS @ 1 AND 0<> OR IF -1 EXIT THEN
-    _SLSN-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
+    _SLSN-SD @ SOCK.HANDLE @ 0<>
+    _SLSN-SD @ SOCK.HANDLE-GEN @ 0<> OR IF -1 EXIT THEN
+    _SLSN-SD @ SOCK.LOCAL-PORT @ (TCP-LISTEN)
     DUP 0= IF DROP -1 EXIT THEN
-    _SLSN-SD @ SOCK.HANDLE !
+    DUP _SLSN-TCB !
+    _SLSN-SD @ (TCP-ATTACH) DUP IF
+        2DROP _SLSN-TCB @ (TCP-ABORT) DROP -1 EXIT
+    THEN
+    DROP _SLSN-GEN !
+    _SLSN-TCB @ _SLSN-SD @ SOCK.HANDLE !
+    _SLSN-GEN @ _SLSN-SD @ SOCK.HANDLE-GEN !
     SOCKST-LISTENING _SLSN-SD @ SOCK.STATE !
     0
 ;
+
+: LISTEN ( sd -- ior )
+    NET-TX-TRY IF DROP -1 EXIT THEN
+    ['] (LISTEN) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
 
 \ --- SOCK-ACCEPT ( sd -- new-sd | -1 ) ---
 \ Dequeue a completed connection from the listener's accept queue.
 \ The listener TCB stays in LISTEN — no re-open needed.
 VARIABLE _SACC-SD
 VARIABLE _SACC-TCB
+VARIABLE _SACC-GEN
+VARIABLE _SACC-NEW-SD
 
-: SOCK-ACCEPT ( sd -- new-sd | -1 )
+: (SOCK-ACCEPT) ( sd -- new-sd | -1 )
     _SACC-SD !
+    _SACC-SD @ SOCK-MEMBER? 0= IF -1 EXIT THEN
     _SACC-SD @ SOCK.STATE @ SOCKST-LISTENING <> IF -1 EXIT THEN
     \ Defense in depth for a descriptor whose flag was corrupted after a
     \ valid TCP LISTEN.  Refuse before dequeuing or exposing its child TCB.
     _SACC-SD @ SOCK.FLAGS @ 1 AND IF -1 EXIT THEN
-    \ Dequeue from the listener's accept queue
-    _SACC-SD @ SOCK.HANDLE @ AQ-POP
-    DUP 0= IF DROP -1 EXIT THEN
+    _SACC-SD @ SOCK-TCB@ DUP 0= IF DROP -1 EXIT THEN
     _SACC-TCB !
-    \ Allocate new socket for the accepted connection
-    _SACC-SD @ SOCK.FLAGS @ 1 AND SOCKET
-    DUP -1 = IF EXIT THEN
-    DUP >R
-    _SACC-TCB @ R@ SOCK.HANDLE !
-    SOCKST-ACCEPTED R@ SOCK.STATE !
-    _SACC-SD @ SOCK.LOCAL-PORT @ R@ SOCK.LOCAL-PORT !
-    R>
+    \ Reserve the descriptor before consuming the queue head.
+    _SACC-SD @ SOCK.FLAGS @ 1 AND (SOCKET)
+    DUP -1 = IF EXIT THEN _SACC-NEW-SD !
+    _SACC-TCB @ _SACC-SD @ SOCK.HANDLE-GEN @ _SACC-SD @
+    _SACC-NEW-SD @ (TCP-ACCEPT-CLAIM)
+    DUP IF
+        DROP 2DROP _SACC-NEW-SD @ SOCK-RELEASE -1 EXIT
+    THEN
+    DROP _SACC-GEN ! _SACC-TCB !
+    _SACC-TCB @ _SACC-NEW-SD @ SOCK.HANDLE !
+    _SACC-GEN @ _SACC-NEW-SD @ SOCK.HANDLE-GEN !
+    SOCKST-ACCEPTED _SACC-NEW-SD @ SOCK.STATE !
+    _SACC-SD @ SOCK.LOCAL-PORT @ _SACC-NEW-SD @ SOCK.LOCAL-PORT !
+    _SACC-NEW-SD @
 ;
+
+: SOCK-ACCEPT ( sd -- new-sd | -1 )
+    NET-TX-TRY IF DROP -1 EXIT THEN
+    ['] (SOCK-ACCEPT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-CONNECT-CLAIM)  ( sd -- original-state | -1 )
+    DUP SOCK-MEMBER? 0= IF DROP -1 EXIT THEN
+    DUP SOCK.HANDLE @ 0<>
+    OVER SOCK.HANDLE-GEN @ 0<> OR IF DROP -1 EXIT THEN
+    DUP SOCK.STATE @ DUP SOCKST-TCP = SWAP SOCKST-TLS = OR 0= IF
+        DROP -1 EXIT
+    THEN
+    DUP SOCK.STATE @ SWAP SOCKST-CONNECTING SWAP SOCK.STATE ! ;
+
+: SOCK-CONNECT-CLAIM  ( sd -- original-state | -1 )
+    NET-TX-TRY IF DROP -1 EXIT THEN
+    ['] (SOCK-CONNECT-CLAIM) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+VARIABLE _SCON-RB-SD
+VARIABLE _SCON-RB-STATE
+
+: (SOCK-CONNECT-ROLLBACK)  ( sd original-state -- )
+    _SCON-RB-STATE ! _SCON-RB-SD !
+    _SCON-RB-SD @ SOCK.STATE @ SOCKST-CONNECTING = IF
+        _SCON-RB-STATE @ _SCON-RB-SD @ SOCK.STATE !
+    THEN ;
+
+: SOCK-CONNECT-ROLLBACK  ( sd original-state -- )
+    NET-TX-ACQUIRE
+    ['] (SOCK-CONNECT-ROLLBACK) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+VARIABLE _SCON-PUB-SD
+VARIABLE _SCON-PUB-STATE
+VARIABLE _SCON-PUB-HANDLE
+VARIABLE _SCON-PUB-GEN
+
+: (SOCK-CONNECT-PUBLISH)  ( sd original-state handle generation -- flag )
+    _SCON-PUB-GEN ! _SCON-PUB-HANDLE !
+    _SCON-PUB-STATE ! _SCON-PUB-SD !
+    _SCON-PUB-SD @ SOCK-MEMBER? 0= IF 0 EXIT THEN
+    _SCON-PUB-STATE @ SOCKST-TCP <> IF 0 EXIT THEN
+    _SCON-PUB-HANDLE @ TCB-MEMBER? 0= IF 0 EXIT THEN
+    _SCON-PUB-SD @ SOCK.STATE @ SOCKST-CONNECTING =
+    _SCON-PUB-SD @ SOCK.FLAGS @ 1 AND 0= AND
+    _SCON-PUB-SD @ SOCK.HANDLE @ 0= AND
+    _SCON-PUB-SD @ SOCK.HANDLE-GEN @ 0= AND
+    _SCON-PUB-HANDLE @ _SCON-PUB-GEN @ _SCON-PUB-SD @
+    TCB-ATTACHED-TO? AND IF
+        _SCON-PUB-HANDLE @ _SCON-PUB-SD @ SOCK.HANDLE !
+        _SCON-PUB-GEN @ _SCON-PUB-SD @ SOCK.HANDLE-GEN !
+        _SCON-PUB-HANDLE @ TCB.LOCAL-PORT @
+        _SCON-PUB-SD @ SOCK.LOCAL-PORT !
+        _SCON-PUB-STATE @ _SCON-PUB-SD @ SOCK.STATE ! -1
+    ELSE
+        0
+    THEN ;
+
+: SOCK-CONNECT-PUBLISH  ( sd original-state handle generation -- flag )
+    NET-TX-ACQUIRE
+    ['] (SOCK-CONNECT-PUBLISH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Descriptor kind is sampled under NET only for dispatch.  Each selected path
+\ resolves and validates the descriptor again inside its complete authority
+\ transaction, so this snapshot never authorizes I/O by itself.
+: (SOCK-TLS?)  ( sd -- flag )
+    DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP SOCK.STATE @ SOCKST-TLS =
+    SWAP SOCK.FLAGS @ 1 AND 0<> AND ;
+
+: SOCK-TLS?  ( sd -- flag )
+    NET-TX-TRY IF DROP 0 EXIT THEN
+    ['] (SOCK-TLS?) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+VARIABLE _STLS-SD
+VARIABLE _STLS-CTX
+VARIABLE _STLS-GEN
+VARIABLE _STLS-A
+VARIABLE _STLS-U
+
+\ Requires TLS owner and NET owner.  A TLS descriptor is authority only when
+\ both tables name the same nonzero context incarnation and socket owner.
+: (SOCK-TLS-RESOLVE)  ( sd -- ctx generation | 0 0 )
+    _STLS-SD !
+    _STLS-SD @ SOCK-MEMBER? 0= IF 0 0 EXIT THEN
+    _STLS-SD @ SOCK.STATE @ SOCKST-TLS <>
+    _STLS-SD @ SOCK.FLAGS @ 1 AND 0= OR IF 0 0 EXIT THEN
+    _STLS-SD @ SOCK.HANDLE @ DUP TLS-CTX-MEMBER? 0= IF DROP 0 0 EXIT THEN
+    _STLS-CTX !
+    _STLS-SD @ SOCK.HANDLE-GEN @ DUP 0= IF DROP 0 0 EXIT THEN
+    _STLS-GEN !
+    _STLS-CTX @ _STLS-GEN @ _STLS-SD @ TLS-CTX-ATTACHED-TO? 0= IF
+        0 0 EXIT
+    THEN
+    _STLS-CTX @ _STLS-GEN @ ;
+
+: SOCK-TLS-RESOLVE  ( sd -- ctx generation | 0 0 )
+    _TLS-OWNER? 0= IF DROP 0 0 EXIT THEN
+    NET-TX-ACQUIRE
+    ['] (SOCK-TLS-RESOLVE) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Readiness and status probes may not block behind an unrelated network-table
+\ owner.  TLS ownership still stabilizes the context/socket edge while this
+\ brief NET transaction validates the reciprocal descriptor generation.
+: _SOCK-TLS-RESOLVE-TRY  ( sd -- ctx generation ior )
+    _TLS-OWNER? 0= IF DROP 0 0 TLS-E-BUSY EXIT THEN
+    NET-TX-TRY IF DROP 0 0 TLS-E-BUSY EXIT THEN
+    ['] (SOCK-TLS-RESOLVE) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN
+    0 ;
+
+\ Publish reciprocal TLS/socket authority as one TLS->NET transaction.  The
+\ descriptor remains CONNECTING until every pointer and generation is durable.
+: (SOCK-TLS-PUBLISH)  ( sd ctx -- flag )
+    _STLS-CTX ! _STLS-SD !
+    _STLS-SD @ SOCK-MEMBER? 0= IF 0 EXIT THEN
+    _STLS-SD @ SOCK.STATE @ SOCKST-CONNECTING <>
+    _STLS-SD @ SOCK.FLAGS @ 1 AND 0= OR IF 0 EXIT THEN
+    _STLS-SD @ SOCK.HANDLE @ 0<>
+    _STLS-SD @ SOCK.HANDLE-GEN @ 0<> OR IF 0 EXIT THEN
+    _STLS-CTX @ TLS-CTX-MEMBER? 0= IF 0 EXIT THEN
+    _STLS-CTX @ TLS-CTX.GENERATION @ DUP 0= IF DROP 0 EXIT THEN
+    _STLS-GEN !
+    _STLS-CTX @ TLS-CTX.SOCKET-OWNER @ 0<> IF 0 EXIT THEN
+    _STLS-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
+    _STLS-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR IF 0 EXIT THEN
+    _STLS-CTX @ _TLS-CTX>TCB DUP 0= IF DROP 0 EXIT THEN
+    TCB.LOCAL-PORT @ _STLS-SD @ SOCK.LOCAL-PORT !
+    _STLS-SD @ _STLS-CTX @ TLS-CTX.SOCKET-OWNER !
+    _STLS-CTX @ _STLS-SD @ SOCK.HANDLE !
+    _STLS-GEN @ _STLS-SD @ SOCK.HANDLE-GEN !
+    SOCKST-TLS _STLS-SD @ SOCK.STATE !
+    -1 ;
+
+: SOCK-TLS-PUBLISH  ( sd ctx -- flag )
+    _TLS-OWNER? 0= IF 2DROP 0 EXIT THEN
+    NET-TX-ACQUIRE
+    ['] (SOCK-TLS-PUBLISH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Publication failure is unreachable while CONNECTING remains reserved, but
+\ defensive cleanup must still reclaim the exact client transport before the
+\ descriptor becomes reusable.  Exact preflight prevents retrying a stale ctx.
+: SOCK-TLS-CONNECT-ABORT  ( ctx -- flag )
+    DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    \ CONNECT owns TLS and the context is not socket-published yet.  Wait for
+    \ the lower lock once; permanent stale authority is not retryable BUSY.
+    DUP TLS-CTX.TCB @ 0<>
+    OVER TLS-CTX.TCB-GENERATION @ 0<> OR IF
+        DUP _TLS-CTX>TCB 0= IF DROP 0 EXIT THEN
+        DUP _TLS-OWNER-ABORT-TCB-WAIT DUP IF
+            2DROP DROP 0 EXIT
+        THEN
+        2DROP
+    THEN
+    DUP _TLS-SERVER-PIN-RELEASE IF DROP 0 EXIT THEN
+    DUP _TLS-SERVER-EMIT-UNION-WIPE
+    DUP _TLS-RX-WIPE-RAW
+    (TLS-CTX-RELEASE) -1 ;
+
+: SOCK-CONNECT-ABORT-ROLLBACK  ( sd original-state tcb generation -- -1 )
+    2DUP 5 PICK TCP-OWNER-ABORT-ACQUIRE
+    DUP IF
+        DUP TCP-ACCEPT-E-STALE = IF
+            \ Blocking acquisition removes BUSY.  STALE means this exact TCB
+            \ authority is already gone, so restoring the still-empty
+            \ descriptor cannot orphan transport state.
+            2DROP 2DROP
+            2DUP SOCK-CONNECT-ROLLBACK 2DROP -1 EXIT
+        THEN
+        2DROP 2DROP 2DROP -1 EXIT
+    THEN
+    2DROP 2DROP
+    2DUP SOCK-CONNECT-ROLLBACK 2DROP -1 ;
 
 : CONNECT ( sd rip rport -- ior )
-    ROT DUP SOCK.FLAGS @ 1 AND IF       \ rip rport sd
-        \ TLS socket
-        DUP >R SOCK.LOCAL-PORT @        \ rip rport lport; R: sd
-        TLS-CONNECT
-        DUP 0= IF DROP R> DROP -1 EXIT THEN
-        R@ SOCK.HANDLE !
-        SOCKST-TLS R> SOCK.STATE !
-        0
+    ROT DUP SOCK-MEMBER? 0= IF 2DROP DROP -1 EXIT THEN
+    DUP SOCK-CONNECT-CLAIM DUP -1 = IF 2DROP 2DROP -1 EXIT THEN
+    2SWAP                              \ sd original-state rip rport
+    2 PICK SOCKST-TLS = IF
+        TLS-OWNER-TRY IF
+            2DROP 2DUP SOCK-CONNECT-ROLLBACK 2DROP -1 EXIT
+        THEN
+        3 PICK SOCK.LOCAL-PORT @ TLS-CONNECT
+        DUP 0= IF
+            DROP 2DUP SOCK-CONNECT-ROLLBACK 2DROP
+            TLS-OWNER-RELEASE -1 EXIT
+        THEN
+        2 PICK OVER SOCK-TLS-PUBLISH IF
+            2DROP DROP TLS-OWNER-RELEASE 0
+        ELSE
+            DUP SOCK-TLS-CONNECT-ABORT IF
+                DROP 2DUP SOCK-CONNECT-ROLLBACK 2DROP
+            ELSE
+                DROP 2DROP
+            THEN
+            TLS-OWNER-RELEASE -1
+        THEN
     ELSE
-        \ Plain TCP
-        DUP >R SOCK.LOCAL-PORT @        \ rip rport lport; R: sd
-        TCP-CONNECT
-        DUP 0= IF DROP R> DROP -1 EXIT THEN
-        DUP R@ SOCK.HANDLE !
-        50 TCP-WAIT-ESTABLISHED IF
-            SOCKST-TCP R> SOCK.STATE !
-            0
-        ELSE R> DROP -1 THEN
+        3 PICK SOCK.LOCAL-PORT @ 4 PICK TCP-CONNECT-ATTACH
+        IF
+            2DROP 2DUP SOCK-CONNECT-ROLLBACK 2DROP -1 EXIT
+        THEN
+        OVER 50 TCP-WAIT-ESTABLISHED IF
+            2OVER 2OVER SOCK-CONNECT-PUBLISH IF
+                2DROP 2DROP 0
+            ELSE
+                SOCK-CONNECT-ABORT-ROLLBACK
+            THEN
+        ELSE
+            SOCK-CONNECT-ABORT-ROLLBACK
+        THEN
     THEN
 ;
 
-\ --- SEND ( sd addr len -- actual ) ---
+VARIABLE _SSIO-SD
+VARIABLE _SSIO-A
+VARIABLE _SSIO-U
+
+: (SOCK-TCP-SEND)  ( sd addr len -- actual )
+    _SSIO-U ! _SSIO-A ! _SSIO-SD !
+    _SSIO-SD @ SOCK-MEMBER? 0= IF 0 EXIT THEN
+    _SSIO-SD @ SOCK.STATE @ DUP SOCKST-TCP =
+    SWAP SOCKST-ACCEPTED = OR 0= IF 0 EXIT THEN
+    _SSIO-SD @ SOCK.HANDLE @
+    _SSIO-SD @ SOCK.HANDLE-GEN @
+    _SSIO-SD @ _SSIO-A @ _SSIO-U @ (TCP-OWNER-SEND) DROP ;
+
+: SOCK-TCP-SEND  ( sd addr len -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (SOCK-TCP-SEND) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-TCP-RECV)  ( sd addr len -- actual )
+    _SSIO-U ! _SSIO-A ! _SSIO-SD !
+    _SSIO-SD @ SOCK-MEMBER? 0= IF 0 EXIT THEN
+    _SSIO-SD @ SOCK.STATE @ DUP SOCKST-TCP =
+    SWAP SOCKST-ACCEPTED = OR 0= IF 0 EXIT THEN
+    _SSIO-SD @ SOCK.HANDLE @
+    _SSIO-SD @ SOCK.HANDLE-GEN @
+    _SSIO-SD @ _SSIO-A @ _SSIO-U @ (TCP-OWNER-RECV) DROP ;
+
+: SOCK-TCP-RECV  ( sd addr len -- actual )
+    NET-TX-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (SOCK-TCP-RECV) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-TLS-SEND)  ( sd addr len -- actual )
+    _STLS-U ! _STLS-A ! _STLS-SD !
+    _STLS-SD @ SOCK-TLS-RESOLVE _STLS-GEN ! _STLS-CTX !
+    _STLS-CTX @ 0= IF 0 EXIT THEN
+    _STLS-CTX @ _STLS-A @ _STLS-U @ (TLS-SEND-DATA) ;
+
+: SOCK-TLS-SEND  ( sd addr len -- actual )
+    TLS-OWNER-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (SOCK-TLS-SEND) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-TLS-RECV)  ( sd addr maxlen -- actual | -1 )
+    _STLS-U ! _STLS-A ! _STLS-SD !
+    _STLS-SD @ SOCK-TLS-RESOLVE _STLS-GEN ! _STLS-CTX !
+    _STLS-CTX @ 0= IF 0 EXIT THEN
+    _STLS-CTX @ _STLS-A @ _STLS-U @ (TLS-RECV-DATA) ;
+
+: SOCK-TLS-RECV  ( sd addr maxlen -- actual | -1 )
+    TLS-OWNER-TRY IF 2DROP DROP 0 EXIT THEN
+    ['] (SOCK-TLS-RECV) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ --- SEND/RECV ---
 : SEND ( sd addr len -- actual )
-    ROT DUP SOCK.STATE @ CASE
-        SOCKST-TCP OF SOCK.HANDLE @  -ROT  TCP-SEND  ENDOF
-        SOCKST-TLS OF SOCK.HANDLE @  -ROT  TLS-SEND  ENDOF
-        SOCKST-ACCEPTED OF SOCK.HANDLE @  -ROT  TCP-SEND  ENDOF
-        >R 2DROP DROP 0 R>
-    ENDCASE
-;
-
-\ --- RECV ( sd addr maxlen -- actual ) ---
-: RECV ( sd addr maxlen -- actual )
-    ROT DUP SOCK.STATE @ CASE
-        SOCKST-TCP OF SOCK.HANDLE @  -ROT  TCP-RECV  ENDOF
-        SOCKST-TLS OF SOCK.HANDLE @  -ROT  TLS-RECV  ENDOF
-        SOCKST-ACCEPTED OF SOCK.HANDLE @  -ROT  TCP-RECV  ENDOF
-        >R 2DROP DROP 0 R>
-    ENDCASE
-;
-
-\ --- CLOSE ( sd -- ) ---
-: CLOSE ( sd -- )
-    DUP SOCK.HANDLE @ 0<> IF
-        DUP SOCK.STATE @ CASE
-            SOCKST-TCP OF
-                DUP SOCK.HANDLE @ TCP-CLOSE
-            ENDOF
-            SOCKST-TLS OF
-                DUP SOCK.HANDLE @ TLS-CLOSE-TRY
-                IF DROP EXIT THEN
-            ENDOF
-            SOCKST-ACCEPTED OF
-                DUP SOCK.HANDLE @ TCP-CLOSE
-            ENDOF
-            SOCKST-LISTENING OF
-                DUP SOCK.HANDLE @ TCB-INIT
-            ENDOF
-        ENDCASE
-    THEN
-    /SOCK 0 FILL   \ reset slot to FREE
-;
-
-\ SOCKET-READY? ( sd -- flag )  Non-blocking readiness check.
-\ Returns -1 if data is available to read, 0 otherwise.
-: SOCKET-READY?  ( sd -- flag )
-    SOCK-N
-    DUP SOCK.STATE @
-    DUP SOCKST-TCP = OVER SOCKST-ACCEPTED = OR IF
-        DROP  SOCK.HANDLE @
-        DUP 0<> IF TCB.RX-COUNT @ 0>
-        ELSE DROP 0 THEN
+    2 PICK SOCK-TLS? IF
+        SOCK-TLS-SEND
     ELSE
-        2DROP 0
+        SOCK-TCP-SEND
+    THEN ;
+
+: RECV ( sd addr maxlen -- actual )
+    2 PICK SOCK-TLS? IF
+        SOCK-TLS-RECV
+    ELSE
+        SOCK-TCP-RECV
+    THEN ;
+
+VARIABLE _SPC-SD
+VARIABLE _SPC-TCB
+VARIABLE _SPC-GEN
+
+: (SOCK-PLAIN-CLOSE-TRY)  ( sd -- ior )
+    _SPC-SD !
+    _SPC-SD @ SOCK-MEMBER? 0= IF TCP-ACCEPT-E-STALE EXIT THEN
+    _SPC-SD @ SOCK.STATE @ DUP SOCKST-TCP =
+    OVER SOCKST-ACCEPTED = OR
+    SWAP SOCKST-LISTENING = OR 0= IF TCP-ACCEPT-E-STATE EXIT THEN
+    _SPC-SD @ SOCK.HANDLE @ 0= IF
+        _SPC-SD @ SOCK.HANDLE-GEN @ 0= IF
+            _SPC-SD @ SOCK-RELEASE 0 EXIT
+        THEN
+        TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _SPC-SD @ SOCK-TCB@ DUP 0= IF DROP TCP-ACCEPT-E-STALE EXIT THEN
+    _SPC-TCB !
+    _SPC-SD @ SOCK.HANDLE-GEN @ _SPC-GEN !
+    _SPC-SD @ SOCK.STATE @ SOCKST-LISTENING = IF
+        _SPC-TCB @ _SPC-GEN @ _SPC-SD @ (TCP-OWNER-ABORT)
+        DUP IF NIP EXIT THEN
+        2DROP
+    ELSE
+        _SPC-TCB @ _SPC-GEN @ _SPC-SD @ (TCP-OWNER-CLOSE)
+        DUP IF EXIT THEN DROP
+    THEN
+    _SPC-SD @ SOCK-RELEASE 0 ;
+
+: SOCK-PLAIN-CLOSE-TRY  ( sd -- ior )
+    NET-TX-TRY IF DROP TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (SOCK-PLAIN-CLOSE-TRY) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+VARIABLE _STLR-SD
+VARIABLE _STLR-CTX
+VARIABLE _STLR-GEN
+
+: (SOCK-TLS-CLOSE-RESOLVE)  ( sd -- ctx generation ior )
+    _STLS-SD !
+    _STLS-SD @ SOCK-MEMBER? 0= IF 0 0 TCP-ACCEPT-E-STALE EXIT THEN
+    _STLS-SD @ SOCK.STATE @ SOCKST-TLS <>
+    _STLS-SD @ SOCK.FLAGS @ 1 AND 0= OR IF
+        0 0 TCP-ACCEPT-E-STATE EXIT
+    THEN
+    _STLS-SD @ SOCK.HANDLE @ 0= IF
+        _STLS-SD @ SOCK.HANDLE-GEN @ 0= IF
+            _STLS-SD @ SOCK-RELEASE 0 0 0 EXIT
+        THEN
+        0 0 TCP-ACCEPT-E-STALE EXIT
+    THEN
+    _STLS-SD @ (SOCK-TLS-RESOLVE)
+    2DUP OR 0= IF 2DROP 0 0 TCP-ACCEPT-E-STALE ELSE 0 THEN ;
+
+: SOCK-TLS-CLOSE-RESOLVE  ( sd -- ctx generation ior )
+    _TLS-OWNER? 0= IF DROP 0 0 TLS-E-BUSY EXIT THEN
+    NET-TX-ACQUIRE
+    ['] (SOCK-TLS-CLOSE-RESOLVE) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-TLS-RELEASE-EXACT)  ( sd ctx generation -- flag )
+    _STLR-GEN ! _STLR-CTX ! _STLR-SD !
+    _STLR-SD @ SOCK-MEMBER? 0= IF 0 EXIT THEN
+    _STLR-SD @ SOCK.STATE @ SOCKST-TLS <>
+    _STLR-SD @ SOCK.FLAGS @ 1 AND 0= OR IF 0 EXIT THEN
+    _STLR-SD @ SOCK.HANDLE @ _STLR-CTX @ <>
+    _STLR-SD @ SOCK.HANDLE-GEN @ _STLR-GEN @ <> OR IF 0 EXIT THEN
+    _STLR-SD @ SOCK-RELEASE -1 ;
+
+: SOCK-TLS-RELEASE-EXACT  ( sd ctx generation -- flag )
+    _TLS-OWNER? 0= IF 2DROP DROP 0 EXIT THEN
+    NET-TX-ACQUIRE
+    ['] (SOCK-TLS-RELEASE-EXACT) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: (SOCK-TLS-CLOSE-TRY)  ( sd -- ior )
+    _STLS-SD !
+    _STLS-SD @ SOCK-TLS-CLOSE-RESOLVE
+    DUP IF >R 2DROP R> EXIT THEN DROP
+    _STLS-GEN ! _STLS-CTX !
+    _STLS-CTX @ 0= IF 0 EXIT THEN
+    _STLS-CTX @ (TLS-CLOSE) DUP IF EXIT THEN DROP
+    _STLS-SD @ _STLS-CTX @ _STLS-GEN @ SOCK-TLS-RELEASE-EXACT
+    IF 0 ELSE TCP-ACCEPT-E-STALE THEN ;
+
+: SOCK-TLS-CLOSE-TRY  ( sd -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    ['] (SOCK-TLS-CLOSE-TRY) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Immediate exact teardown for callers that cannot continue graceful close.
+\ Returns TLS abort status plus ior; an empty unconnected descriptor reports
+\ TLS-ABORT-S-NONE/0 and is released locally.
+: (SOCK-TLS-ABORT)  ( sd -- status ior )
+    _STLS-SD !
+    _STLS-SD @ SOCK-TLS-CLOSE-RESOLVE
+    DUP IF >R 2DROP TLS-ABORT-S-BUSY R> EXIT THEN DROP
+    _STLS-GEN ! _STLS-CTX !
+    _STLS-CTX @ 0= IF TLS-ABORT-S-NONE 0 EXIT THEN
+    _STLS-CTX @ (TLS-ABORT) DUP TLS-ABORT-S-BUSY = IF
+        TCP-ACCEPT-E-BUSY EXIT
+    THEN
+    _STLS-SD @ _STLS-CTX @ _STLS-GEN @ SOCK-TLS-RELEASE-EXACT 0= IF
+        TCP-ACCEPT-E-STALE EXIT
+    THEN
+    0 ;
+
+: SOCK-TLS-ABORT  ( sd -- status ior )
+    TLS-OWNER-TRY IF DROP TLS-ABORT-S-BUSY TLS-E-BUSY EXIT THEN
+    ['] (SOCK-TLS-ABORT) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: SOCK-CLOSE-TLS?  ( sd -- flag )
+    NET-TX-ACQUIRE
+    ['] (SOCK-TLS?) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: SOCK-ABORT  ( sd -- status ior )
+    DUP SOCK-CLOSE-TLS? IF SOCK-TLS-ABORT EXIT THEN
+    NET-TX-ACQUIRE
+    DUP SOCK-MEMBER? 0= IF
+        DROP NET-TX-RELEASE TCP-ABORT-S-ALREADY-CLOSED
+        TCP-ACCEPT-E-STALE EXIT
+    THEN
+    DUP SOCK.STATE @ DUP SOCKST-TCP =
+    OVER SOCKST-ACCEPTED = OR
+    SWAP SOCKST-LISTENING = OR 0= IF
+        DROP NET-TX-RELEASE TCP-ABORT-S-LOCAL
+        TCP-ACCEPT-E-STATE EXIT
+    THEN
+    DUP SOCK.HANDLE @ 0= IF
+        DUP SOCK.HANDLE-GEN @ 0= IF
+            SOCK-RELEASE NET-TX-RELEASE TCP-ABORT-S-ALREADY-CLOSED 0 EXIT
+        THEN
+        DROP NET-TX-RELEASE TCP-ABORT-S-LOCAL TCP-ACCEPT-E-STALE EXIT
+    THEN
+    DUP SOCK-TCB@ DUP 0= IF
+        2DROP NET-TX-RELEASE TCP-ABORT-S-LOCAL TCP-ACCEPT-E-STALE EXIT
+    THEN
+    \ Retain only sd beneath the exact `(tcb generation owner)` call.
+    OVER SOCK.HANDLE-GEN @ 2 PICK (TCP-OWNER-ABORT)
+    DUP IF
+        >R NIP NET-TX-RELEASE R> EXIT
+    THEN
+    DROP >R SOCK-RELEASE NET-TX-RELEASE R> 0 ;
+
+\ A checked close uses a blocking kind snapshot so transient NET ownership is
+\ not misreported as a terminal wrong-kind error.  The selected closer still
+\ revalidates complete authority inside its own transaction.
+\ --- CLOSE ( sd -- ior ) ---
+: CLOSE-TRY  ( sd -- ior )
+    DUP SOCK-CLOSE-TLS? IF
+        SOCK-TLS-CLOSE-TRY
+    ELSE
+        SOCK-PLAIN-CLOSE-TRY
+    THEN
+;
+
+: CLOSE ( sd -- ior )  CLOSE-TRY ;
+
+\ SOCKET-READY? ( sd -- flag )  Non-blocking read-event check.
+\ Returns -1 for buffered data, orderly EOF, truncation, or terminal failure.
+\ A caller drains data first; a ready zero-length TLS read paired with a zero
+\ SOCK-TLS-IO-STATUS is authenticated close_notify rather than backpressure.
+: (SOCKET-READY?)  ( sd -- flag )
+    DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP SOCK.STATE @ DUP SOCKST-TCP = SWAP SOCKST-ACCEPTED = OR 0= IF
+        DROP 0 EXIT
+    THEN
+    DUP SOCK.HANDLE @ OVER SOCK.HANDLE-GEN @ ROT
+    (TCP-OWNER-RX-READY?) DROP ;
+
+: (SOCK-TLS-READY?)  ( sd -- flag )
+    _STLS-SD !
+    _STLS-SD @ _SOCK-TLS-RESOLVE-TRY
+    DUP IF 2DROP DROP 0 EXIT THEN DROP
+    _STLS-GEN ! _STLS-CTX !
+    _STLS-CTX @ 0= IF 0 EXIT THEN
+    _STLS-CTX @ (TLS-IO-STATUS)
+    DUP TLS-E-BUSY = IF DROP 0 EXIT THEN
+    TLS-E-OK <> IF -1 EXIT THEN
+    _STLS-CTX @ TLS-CTX.STATE @ TLSS-CLOSING = IF -1 EXIT THEN
+    _STLS-CTX @ TLS-CTX.APP-LEN @ 0> IF -1 EXIT THEN
+    _STLS-CTX @ _TLS-TCP-AUTHORITY TCP-OWNER-RX-READY? DROP ;
+
+: SOCK-TLS-READY?  ( sd -- flag )
+    TLS-OWNER-TRY IF DROP 0 EXIT THEN
+    ['] (SOCK-TLS-READY?) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+\ Sticky TLS disposition through reciprocal descriptor authority.  Raw
+\ TLS-IO-STATUS remains unavailable after socket publication; this is the
+\ only descriptor path that may observe/reclaim a failed protected transport.
+: (SOCK-TLS-IO-STATUS)  ( sd -- ior )
+    _SOCK-TLS-RESOLVE-TRY
+    DUP IF >R 2DROP R> EXIT THEN DROP
+    DROP
+    DUP 0= IF DROP TLS-E-STATE EXIT THEN
+    (TLS-IO-STATUS) ;
+
+: SOCK-TLS-IO-STATUS  ( sd -- ior )
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    ['] (SOCK-TLS-IO-STATUS) CATCH >R
+    TLS-OWNER-RELEASE
+    R> ?DUP IF THROW THEN ;
+
+: SOCKET-READY?  ( sd -- flag )
+    DUP SOCK-TLS? IF SOCK-TLS-READY? ELSE
+        NET-TX-TRY IF DROP 0 EXIT THEN
+        ['] (SOCKET-READY?) CATCH >R
+        NET-TX-RELEASE
+        R> ?DUP IF THROW THEN
     THEN ;
 
 \ .SOCKET ( sd -- )  Print socket status.
 : .SOCKET ( sd -- )
+    DUP SOCK-MEMBER? 0= IF DROP ."  socket: invalid" CR EXIT THEN
     DUP SOCK.STATE @
     DUP SOCKST-FREE = IF DROP ."  socket: free" CR ELSE
     DUP SOCKST-TCP  = IF DROP ."  socket: TCP connected" CR ELSE

@@ -809,7 +809,7 @@ class TestLiveEndToEnd(LiveNetBase):
             '  443 12345 TLS-CONNECT',
             '  DUP 0= IF ." [TLS-FAIL]" CR EXIT THEN',
             '  ." [TLS-OK] ctx=" DUP . CR',
-            '  TLS-CLOSE',
+            '  TLS-CLOSE-FINAL ." [TLS-CLOSE]=" . CR',
             '; DO-TLS-DIAG',
         ], max_steps=800_000_000, idle_timeout_s=15.0)
         if "DNS-FAIL" in text:
@@ -818,6 +818,8 @@ class TestLiveEndToEnd(LiveNetBase):
         tls_returned = "[TLS-OK]" in text or "[TLS-FAIL]" in text
         self.assertTrue(tls_returned, f"TLS-CONNECT hung.\n{text[-500:]}")
         self.assertIn("[TLS-OK]", text, f"TLS-CONNECT failed.\n{text[-500:]}")
+        self.assertIn("[TLS-CLOSE]=0", text,
+                      f"TLS terminal cleanup failed.\n{text[-500:]}")
 
     def test_url_parse_https_port(self):
         text = self._run([

@@ -1,7 +1,7 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake composition through client Finished, explicit publication, ALPN, and exporter; retained-data TCP delivery and cooperative neighbor/TX admission implemented; authoritative accepted-TCB attachment, control replay/close, secure listener integration, and external-stack socket interoperability remain gated
-Last updated: 2026-08-13
+Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake composition through client Finished, explicit publication, ALPN, and exporter; incarnation-safe TCB/TLS/socket ownership, bounded active and passive control transport, retained data, close-notify ordering, and FIN completion implemented; the accepted-child TLS adapter, secure listener integration, and external-stack socket interoperability remain gated
+Last updated: 2026-08-14
 
 ## Purpose
 
@@ -41,7 +41,8 @@ emits plaintext ServerHello followed by MSS-fitting protected records through
 Finished, commits its sequence and cursors only after exact admission, and
 installs only the S-AP write epoch after Finished admission. Its transport
 callback is socket-independent; binding it to a TCP child remains deferred
-until secure accept can transfer incarnation-safe, exclusive TCB ownership.
+until the secure-accept adapter uses the now-available incarnation-safe,
+exclusive TCB ownership transfer.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,
 commits the transcript through that message, installs C-AP read, and leaves
@@ -51,9 +52,9 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is authoritative TCP attachment, retained control
-and graceful close, secure accept, and interoperability over that socket path
-with an independent TLS implementation. The following lower-level facts
+The remaining server work is the accepted-child TLS adapter, secure accept,
+and interoperability over that socket path with an independent TLS
+implementation. The following lower-level facts
 continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
@@ -84,10 +85,10 @@ client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
-the server gate still requires authoritative accepted-TCB attachment behind
-the qualified outbound callback and inbound feed contracts, retained TCP
-control/close, secure listener/accept integration, and external-stack socket
-interoperability. Reusing `EC-MUL` or precomputing a fixture signature remains
+the server gate still requires composing the generation/owner-qualified child
+claim with the qualified outbound callback and inbound feed contracts, secure
+listener/accept integration, and external-stack socket interoperability.
+Reusing `EC-MUL` or precomputing a fixture signature remains
 test scaffolding rather than a server security result.
 
 Generic ALPN bytes, the TLS 1.3 exporter construction, per-context negotiated
@@ -299,7 +300,11 @@ construction already synthesizes that exact framing while streaming the chain
 through SHA-256. The protected emitter reuses those framing words while
 streaming the same chain without forcing a large admitted chain through the
 fixed transcript arena. Ordinary multi-record coverage exists; the
-uint24-maximum emitted Certificate remains a release capstone.
+uint24-maximum emitted Certificate remains release evidence, but no maximum-
+chain generator or executable capstone is currently checked in. That evidence
+still requires a reproducible generator, an independently derived framing,
+transcript, and application-secret oracle, and an explicit checked execution
+limit.
 
 The leaf must have an uncompressed P-256 public key, must not be a CA, and,
 when present, KeyUsage must allow digital signatures and EKU must allow server
@@ -495,8 +500,9 @@ between callback invocations and wipes the union and releases the credential.
 After exact Finished admission, the emitter installs only the prederived S-AP
 write epoch, preserves the C-HS read epoch and its sequence, and publishes
 client-Finished-pending. It intentionally has no raw-TCB adapter: this phase
-requires an unbound context until secure accept can transfer exclusive,
-incarnation-safe transport ownership.
+still requires an unbound context. The transport now provides exclusive,
+incarnation-safe accepted-child ownership, but a later adapter must claim that
+child into the TLS context and drive this qualified boundary.
 
 `TLS-SERVER-CLIENT-FLIGHT-BEGIN` then seals a nonnegative caller-provided
 wire-byte budget. Failed trial C-HS decryption can be discarded only when the
@@ -606,7 +612,12 @@ Internal handshake parsers and builders are covered by the owned blocking
 connection path and are not independent concurrent entry points.
 
 State that must survive an application receive call is not shared scratch.
-Each 968-byte `/TLS-CTX` indexes a 230,688-byte `/TLS-RX-WORKSPACE`: a
+Each 1,000-byte `/TLS-CTX` stores the exact attached TCB generation at +968,
+its own nonzero incarnation at +976, its reciprocal socket owner at +984, and
+the slot/close lifecycle at +992. `TLS-CLOSE-FREE` marks a released slot while
+preserving its last generation; one successful claim increments that value and
+creates exactly one live incarnation. The context indexes a 230,688-byte
+`/TLS-RX-WORKSPACE`: a
 16,896-byte partial-record lane plus an aligned retained-data lane bounded for
 a 73,732-byte post-handshake message, a protocol-derived 131,146-byte
 ClientHello lane, an 8,192-byte one-way phase union that begins as the complete
@@ -619,11 +630,21 @@ therefore isolated by context.  The high-level application receive and
 owner-held blocking-handshake paths use the transient global plaintext buffer
 only while lock 10 is held and scrub its complete contents before releasing
 ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
-output and does not scrub that output. With a 5,832-byte TCB and two 32-byte
-socket descriptors, the logical network-table cost is 237,552 bytes per
+output and does not scrub that output. With a 5,952-byte TCB and two 40-byte
+socket descriptors, the logical network-table cost is 237,720 bytes per
 connection. The four XMEM table allocations are normalized independently, so
-one, two, and three connections reserve 237,568, 475,104, and 712,672 bytes;
+one, two, and three connections reserve 237,728, 475,440, and 713,168 bytes;
 capacity uses the exact aggregate.
+
+The context generation protects the socket-published path. A TLS descriptor
+stores `(context, context-generation)` while the context stores that descriptor
+as `SOCKET-OWNER`; the context separately stores `(TCB, TCB-generation)` while
+the TCB stores the context as owner. Publication and teardown update each
+reciprocal pair under TLS-then-network lock order, and socket operations resolve
+both pairs before entering TLS or TCP. Raw context operations are deliberately
+disjoint and reject socket-owned contexts. A bare raw context pointer is still
+a lifetime-scoped interface rather than an opaque generational handle; the
+public descriptor pointer is likewise a caller-held lifetime token.
 
 Ordinary `TLS-CONNECT`, `TLS-CONNECT-NAMED`, and the HTTP compatibility wrapper
 use the interoperable public profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and
@@ -675,14 +696,47 @@ consumes TCP retry state; exact terminal failures remain owner-visible until
 the TLS/socket owner observes and reclaims them. Lock 12 serializes shared
 Ethernet/IP/TCP construction and the asynchronous NIC descriptor lifetime.
 
-Control transport remains open. SYN-SENT still accepts a bare SYN as
-established, SYN-RCVD accepts any ACK, retransmitted SYN handling and retained
-SYN/SYN-ACK/FIN replay are incomplete, and half-open children are not reserved
-against the completed accept queue; a later failed `AQ-PUSH` can orphan an
-established TCB. Secure accept therefore still requires exact setup/control
-admission and cleanup. Graceful close must retain accepted close-notify bytes
-through acknowledgement before bounded FIN completion. None of this requires
-a general sliding window.
+The active, passive, and graceful-close control boundary is now bounded.
+Active open retains and replays its SYN at the original ISS. `SYN-SENT` accepts
+only an exact payload-free SYN+ACK acknowledging `ISS+1`; it ignores a bare SYN
+rather than treating it as simultaneous open. Establishment durably schedules
+the final ACK, and an exact duplicate SYN+ACK caused by a lost final ACK is
+re-ACKed without perturbing established state. A listener
+reserves capacity across half-open and queued children before allocation,
+admits only a bare SYN, records the exact listener generation, and publishes a
+child only after the expected sequence and ACK cover its SYN. SYN+ACK replay
+has bounded exponential retry and releases the reservation on expiry. Queue
+entries carry child generations, and accept transfers ownership only after the
+listener, parent token, child state, and both generations validate.
+
+Control retry counts advance only when a SYN, SYN+ACK, or FIN replay reaches
+the NIC. An independent bounded local-admission stall timestamp covers
+unresolved neighbors and persistent NIC backpressure, preventing a control
+state from living forever merely because no retry reached the wire.
+
+Graceful TLS close admits one exact protected `close_notify` into retained TCP
+state. Owner close refuses FIN while that record remains unacknowledged, so a
+retry can emit FIN only after the close-notify ACK. FIN-WAIT-1, CLOSING, and
+LAST-ACK replay the retained FIN with bounded exponential retry; FIN-WAIT-2
+has a separate 60-second terminal timeout. TIME-WAIT re-ACKs an exact duplicate
+FIN and restarts its 2MSL quarantine. Exact generation/owner checks guard TLS
+and socket close/abort throughout. Secure server socket completion does not
+require a general sliding window.
+
+`TLS-CLOSE-TRY` and `TLS-CLOSE` are checked `(ctx -- ior)` operations and
+retain authority on retryable failure. `TLS-CLOSE-FINAL` uses a bounded
+graceful-progress budget followed by exact abort fallback; zero means the TLS
+context has been disposed, while nonzero retains its context token for retry.
+Abort fallback may already have reclaimed the transport before a contended
+credential unpin returns busy; the exact pin metadata remains with the claimed
+context.
+`TLS-ABORT` performs immediate raw-context teardown without `close_notify` and
+reports whether reclamation was local, emitted a cached-route RST, found no
+live transport, or was busy. Socket-owned contexts are instead torn down by
+`SOCK-ABORT (sd -- status ior)`, which validates both reciprocal generations
+before releasing the descriptor. Socket `CLOSE-TRY` and `CLOSE` are both
+checked `(sd -- ior)` operations: zero means the descriptor was released,
+while nonzero preserves retry authority.
 
 Application receive preserves decrypted record data across caller-sized reads.
 It accumulates an incomplete encrypted record in the context's record lane.
@@ -819,6 +873,9 @@ Native guest tests cover:
 - strict stale/future/duplicate/partial-wrap ACK handling, retained-suffix
   fast/RTO replay from `SND-UNA`, peer/CWND and exact-send admission, terminal
   owner observation, and cooperative neighbor/durable-ACK recovery;
+- exact active-open SYN replay/SYN+ACK admission and lost-final-ACK recovery,
+  bounded active/passive/FIN local-admission stalls, retained FIN replay,
+  FIN-WAIT-2 expiry, and TIME-WAIT duplicate-FIN re-ACK/quarantine restart;
 - multi-read delivery of application records larger than the caller buffer;
 - alternating connections with isolated partial records, retained plaintext,
   and fragmented post-handshake messages, including exact per-context wipe;
@@ -830,11 +887,20 @@ Native guest tests cover:
 - clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
+Final sequential source-mode qualification for the lower lifecycle milestone
+passed 277/277 network-stack, 38/38 TLS application-data, 21/21 socket,
+161/161 TLS, 28/28 tools, and 65/65 adjacent hardening/source-selection tests.
+The corrected four-core server-flight and credential cancellation capstones
+passed separately in 701.122 and 520.361 seconds after proving complete KDOS
+and networking source loads. The 450,000,000-step allowance applies only to
+networking snapshot construction; each capstone retains its independent
+400,000,000-step execution ceiling.
+
 These tests prove deterministic construction plus bounded socket-independent
 server-flight emission, rejected-0RTT handling, client-Finished
 authentication/C-AP cutover, explicit publication, ALPN, exporter agreement,
-and failure atomicity. They do not yet prove an incarnation-safe accepted-TCB
-adapter, the uint24-maximum emitted Certificate, secure socket acceptance, or
+and failure atomicity. They do not yet prove the accepted-child TLS adapter,
+the uint24-maximum emitted Certificate, secure socket acceptance, or
 interoperability over sockets with an independent TLS stack.
 
 Signer and credential fixtures use only standardized or synthetic test
@@ -845,24 +911,22 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Complete retained control ownership and replay for SYN, SYN-ACK, and FIN;
-  harden active/passive admission; reserve or reclaim half-open children; and
-  replace compatibility close with retained close-notify-before-FIN progress.
-- Introduce an incarnation/generation-safe accepted-child authority, enforce
-  one TCB/one TLS-context attachment, and bind its nonblocking exact-admission
-  adapter to the qualified `TLS-SERVER-FLIGHT-STEP-WITH` callback contract.
-  The socket-independent emitter must not acquire authority from a raw TCB
-  pointer.
-- Run the approval-gated uint24-maximum Certificate through the existing
-  streamed emitter and verify exact framing, record boundaries, retry, and
-  transcript/application-secret agreement.
-- Preserve the qualified socket-independent rejected-0RTT/client-Finished
-  boundary while adapting it to authoritative nonblocking TCP input and
-  protected terminal-alert output.
-- Repair half-open admission/overflow cleanup and attach accepted TCBs without
-  exposing plaintext. Prove credential-pin/reference cleanup on every failure
-  and qualify socket lifecycle, application bytes, exporter equality, and
-  close-notify against an independent TLS 1.3 implementation.
+- Bind the existing generation/owner-qualified accepted-child claim to a
+  prepared server TLS context and the nonblocking exact-admission
+  `TLS-SERVER-FLIGHT-STEP-WITH` callback contract. The socket-independent
+  emitter must not acquire authority from a raw TCB pointer.
+- Adapt authoritative nonblocking TCP input to the qualified
+  rejected-0RTT/client-Finished boundary, including protected terminal-alert
+  output, without exposing a plaintext accepted child.
+- Publish a TLS accepted socket only after client Finished authentication and
+  explicit handshake publication. Prove credential-pin/reference and exact
+  TCB-owner cleanup on every failure.
+- Implement and then run a reproducible uint24-maximum Certificate capstone
+  through the existing streamed emitter, with an independent oracle for exact
+  framing, record boundaries, retry, transcript, and application-secret
+  agreement.
+- Qualify socket lifecycle, application bytes, exporter equality, and
+  close-notify/FIN completion against an independent TLS 1.3 implementation.
 
 ### Trust lifecycle
 
@@ -881,8 +945,11 @@ credential. None enters a product trust bundle or production credential slot.
   precise timeout statuses. The existing blocking client remains a qualified
   compatibility path for this milestone; converging it onto the cooperative
   engine is tracked maturity work, not a prerequisite to secure-server closure.
-- Finish graceful close draining and distinguish EOF, retryable I/O, timeout,
-  and protocol failure throughout the public connection API.
+- Finish the public EOF/retry/timeout/protocol-failure status surface and
+  independently qualify the checked close/abort lifecycle over live sockets.
+- Either keep the reusable raw-context interface internal or replace its bare
+  pointer lifetime with an opaque generational handle. Socket-owned TLS
+  contexts already use reciprocal generations; raw pointers do not.
 - Add bounded `KeyUpdate` support before long-lived streaming connections are
   considered production-ready; it is currently rejected fail-closed.
 - Run credential-free live interoperability against every intended endpoint

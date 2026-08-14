@@ -687,7 +687,14 @@ VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
 
 VARIABLE _HGS-CTX
 VARIABLE _HGS-EMPTY
+
+: _HGS-CLOSE  ( -- ior )
+    _HGS-CTX @ ?DUP 0= IF 0 EXIT THEN
+    TLS-CLOSE-FINAL DUP 0= IF 0 _HGS-CTX ! THEN ;
+
 : HTTPS-GET  ( -- ior )
+    \ Do not overwrite authority retained by an earlier interrupted cleanup.
+    _HGS-CLOSE IF -1 EXIT THEN
     \ Set SNI hostname from URL parser state
     _SC-HOST-LEN @ 63 MIN DUP TLS-SNI-LEN !
     _SC-HOST TLS-SNI-HOST ROT CMOVE
@@ -710,7 +717,7 @@ VARIABLE _HGS-EMPTY
             0 _HGS-EMPTY !
         ELSE DUP -1 = IF
             DROP ."  TLS decrypt error" CR
-            _HGS-CTX @ TLS-CLOSE -1 EXIT
+            _HGS-CLOSE DROP -1 EXIT
         ELSE
             DROP
             SCROLL-LEN @ 0> IF
@@ -719,7 +726,7 @@ VARIABLE _HGS-EMPTY
             THEN
         THEN THEN
     LOOP
-    _HGS-CTX @ TLS-CLOSE
+    _HGS-CLOSE IF -1 EXIT THEN
     \ Parse headers to find body — same as HTTP-GET
     SCROLL-BUF SCROLL-LEN @ _HTTP-FIND-HEND
     _HTTP-HEND @ 0= IF
@@ -740,13 +747,29 @@ VARIABLE _HGS-EMPTY
 \ ── FTP Client (minimal RETR) ──────────────────────────────────────
 \
 \  Simplified FTP: connect, login anonymous, PASV, RETR file.
-\  FTPS wraps the control channel in TLS.
+\  The current FTPS helper is provisional: after AUTH TLS it opens a second
+\  TLS connection instead of upgrading the existing control transport in
+\  place, so it is not protocol-correct explicit FTPS interoperability.
 
 VARIABLE _FTP-TCB
 VARIABLE _FTP-DATA-TCB
 VARIABLE _FTP-TLS             \ 0 = plain, ctx = FTPS
 CREATE _FTP-LINEBUF 256 ALLOT
 VARIABLE _FTP-LLEN
+
+: _FTP-TLS-CLOSE  ( -- ior )
+    _FTP-TLS @ ?DUP 0= IF 0 EXIT THEN
+    TLS-CLOSE-FINAL DUP 0= IF 0 _FTP-TLS ! THEN ;
+
+: _FTP-TCB-CLOSE  ( -- ior )
+    _FTP-TCB @ ?DUP 0= IF 0 EXIT THEN
+    TCP-CLOSE-TRY DUP 0= IF 0 _FTP-TCB ! THEN ;
+
+: _FTP-CLOSE  ( -- ior )
+    \ TLS and the pre-upgrade plain control transport are independent in this
+    \ client.  Preserve both globals until each terminal close is accepted.
+    _FTP-TLS-CLOSE ?DUP IF EXIT THEN
+    _FTP-TCB-CLOSE ;
 
 \ Read one FTP response line from control channel
 : _FTP-RECV-LINE  ( -- )
@@ -788,17 +811,21 @@ CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
     _FTP-RECV-LINE ;
 
 : FTP-GET  ( -- ior )
+    \ Preserve and finish all prior control authority before reusing globals.
+    _FTP-CLOSE IF -1 EXIT THEN
     \ Connect control channel
     _SC-IP @ _SC-PORT @ 12347 TCP-CONNECT
     DUP 0= IF ."  FTP connect failed" CR -1 EXIT THEN
     _FTP-TCB !  0 _FTP-TLS !
     200 0 DO TCP-POLL NET-IDLE LOOP
     _FTP-RECV-LINE              \ read banner
-    \ For FTPS, upgrade to TLS now
+    \ Provisional FTPS path; this does not yet perform an in-place upgrade.
     _SC-PROTO @ PROTO-FTPS = IF
         S" AUTH TLS" _FTP-CMD   \ request TLS
         _SC-IP @ _SC-PORT @ 12348 TLS-CONNECT
-        DUP 0= IF ."  FTPS TLS failed" CR -1 EXIT THEN
+        DUP 0= IF
+            ."  FTPS TLS failed" CR _FTP-CLOSE DROP -1 EXIT
+        THEN
         _FTP-TLS !
     THEN
     \ Login anonymous
@@ -829,8 +856,7 @@ CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
     LOOP
     \ Quit
     S" QUIT" _FTP-CMD
-    _FTP-TLS @ 0<> IF _FTP-TLS @ TLS-CLOSE THEN
-    _FTP-TCB @ TCP-CLOSE
+    _FTP-CLOSE IF -1 EXIT THEN
     SCROLL-LEN @ 0> IF 0 ELSE -1 THEN ;
 
 \ ── TFTP Client ─────────────────────────────────────────────────────
