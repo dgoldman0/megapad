@@ -46,13 +46,15 @@ emits plaintext ServerHello followed by MSS-fitting protected records through
 Finished, commits its sequence and cursors only after exact admission, and
 installs only the S-AP write epoch after Finished admission. Its transport
 callback qualification remains socket-independent.
-`TLS-SERVER-ACCEPT-ATTACH` now consumes one
+`TLS-SERVER-CONTEXT-BEGIN` returns its newly claimed context generation, and
+`TLS-SERVER-ACCEPT-ATTACH` requires that carried token before it consumes one
 generation-qualified queued child and publishes reciprocal context/TCB
-authority in one TLS-to-NET transaction. `TLS-SERVER-FLIGHT-STEP` seals that
-exact pair during flight preparation, uses a dedicated owner-qualified TCP
-adapter, and retains byte-identical backpressure. It exact-aborts a dead current
-child; stale lower authority clears only the old TLS binding and cannot reclaim
-a reused TCB incarnation. Ingress and protected disposition output are not yet
+authority in one TLS-to-NET transaction. Thus stale context authority is
+rejected before queue mutation. `TLS-SERVER-FLIGHT-STEP` seals that exact pair
+during flight preparation, uses a dedicated owner-qualified TCP adapter, and
+retains byte-identical backpressure. It exact-aborts a dead current child;
+stale lower authority clears only the old TLS binding and cannot reclaim a
+reused TCB incarnation. Ingress and protected disposition output are not yet
 bound to the child.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,

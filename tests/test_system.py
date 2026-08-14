@@ -25070,7 +25070,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "TLS-OWNER-TRY DROP",
@@ -25137,7 +25137,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             ": ingress-restart ( hello-a hello-u early-wire-budget -- )",
             "  ingress-budget ! server-ctx @ TLS-ABORT DROP",
             "  server-ctx @ tc-slot @ tc-gen @ server-alpn 8",
-            "  TLS-SERVER-CONTEXT-BEGIN DROP",
+            "  TLS-SERVER-CONTEXT-BEGIN 2DROP",
             "  server-ctx @ -ROT TLS-PARSE-CLIENT-HELLO 2DROP",
             "  TLS-OWNER-TRY DROP server-ctx @ _TSPH-BEGIN 2DROP",
             "  phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
@@ -25287,14 +25287,16 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += self._forth_bytes("server-alpn", self.ALPN)
         lines += self._forth_bytes("server-alpn-reuse", self.ALPN)
         lines += [
-            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "VARIABLE server-ctx VARIABLE server-ctx-generation",
+            "0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ 0 1 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." NULL-IOR=" .',
+            '." NULL-IOR=" . ." NULL-GEN=" .',
             '." REFS0=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." BEGIN-IOR=" .',
+            '." BEGIN-IOR=" . DUP server-ctx-generation ! '
+            '." BEGIN-GEN=" .',
             '." CTX-GEN1=" server-ctx @ TLS-CTX.GENERATION @ .',
             "server-alpn 8 120 FILL",
             '." ROLE=" server-ctx @ TLS-CTX.ROLE @ .',
@@ -25320,7 +25322,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." REFS1=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             "server-ctx @ tc-slot @ tc-gen @ S\" rabbit/1\" "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." LIVE-IOR=" .',
+            '." LIVE-IOR=" . ." LIVE-GEN=" .',
             '." REFS-LIVE=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             "tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE",
             '." BUSY-DELETE=" .',
@@ -25347,7 +25349,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." META-END=" server-ctx @ TLS-RXW.SERVER-META '
             'TSM.FLAGS + @ .',
             'server-ctx @ tc-slot @ tc-gen @ server-alpn-reuse 8 '
-            'TLS-SERVER-CONTEXT-BEGIN ." REBEGIN=" .',
+            'TLS-SERVER-CONTEXT-BEGIN ." REBEGIN=" . '
+            'DUP server-ctx-generation ! ." REBEGIN-GEN=" .',
             '." CTX-GEN2=" server-ctx @ TLS-CTX.GENERATION @ .',
             '." REFS2=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             'server-ctx @ TLS-ABORT ." REABORT=" .',
@@ -25358,13 +25361,13 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines)
         for token in (
-            "INIT=0 ", "NULL-IOR=-4205 ", "REFS0=0 ",
-            "BEGIN-IOR=0 ", "CTX-GEN1=1 ",
+            "INIT=0 ", "NULL-IOR=-4205 NULL-GEN=0 ", "REFS0=0 ",
+            "BEGIN-IOR=0 BEGIN-GEN=1 ", "CTX-GEN1=1 ",
             "ROLE=2 ", "STATE=1 ", "HS=10 ",
             "CFG=rabbit/1", "H1=1 ", "GEN=1 ", "CHAIN-A=-1 ",
             f"CHAIN-U={len(der_chain)} ", "COUNT=1 ", "SCHEME=1027 ",
             f"WIRE={len(der_chain) + 5} ", "FLAGS=1 ", "REFS1=1 ",
-            "LIVE-IOR=-4204 ", "REFS-LIVE=1 ",
+            "LIVE-IOR=-4204 LIVE-GEN=0 ", "REFS-LIVE=1 ",
             "BUSY-DELETE=-4329 ", "REFS-TABLES=1 ", "REFS-TCP=1 ",
             "TABLES-IOR=-4214 ",
             "TCP-INIT-IOR=-4215 ",
@@ -25372,7 +25375,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "FLAGS-BUSY=1 ", "H1-BUSY=1 ",
             "CLOSE=0 ", "REFS-END=0 ", "STATE-END=0 ",
             "CTX-GEN-CLOSED=1 ", "META-END=0 ",
-            "REBEGIN=0 ", "CTX-GEN2=2 ", "REFS2=1 ",
+            "REBEGIN=0 REBEGIN-GEN=2 ", "CTX-GEN2=2 ", "REFS2=1 ",
             "REABORT=0 ", "REFS-REABORT=0 ", "DELETE=0 ",
             "BEGIN-FINAL-DEPTH=0 ",
         ):
@@ -25387,6 +25390,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE saa-listener VARIABLE saa-child",
             "VARIABLE saa-lgen VARIABLE saa-cgen VARIABLE saa-ior",
+            "VARIABLE saa-ctx-gen VARIABLE saa-old-ctx-gen",
+            "VARIABLE saa-head VARIABLE saa-tail VARIABLE saa-reserved",
+            "VARIABLE saa-queued-h1 VARIABLE saa-queued-gen",
             "VARIABLE saa-listener-owner",
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "TCP-INIT-ALL",
@@ -25396,14 +25402,20 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "saa-ior ! saa-lgen !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." BEGIN=" .',
+            '." BEGIN=" . DUP saa-old-ctx-gen ! ." BEGIN-GEN=" .',
+            'server-ctx @ TLS-ABORT ." FIRST-ABORT=" .',
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." REBEGIN=" . DUP saa-ctx-gen ! ." REBEGIN-GEN=" .',
             'NET-TX-TRY ." PRENET=" .',
-            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             '." INVERT=" .',
             '." INVERT-NET=" NET-TX-OWNER-DEPTH @ .',
             "NET-TX-RELEASE",
-            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             '." EMPTY=" .',
             '." EMPTY-TCB=" server-ctx @ TLS-CTX.TCB @ .',
@@ -25417,21 +25429,44 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TCP-AUTH-HALF-OPEN saa-child @ TCB.AUTH-STATE !",
             "saa-listener @ AQ-RESERVE DROP",
             "saa-child @ saa-listener @ AQ-PUSH DROP",
+            "saa-listener @ TCB.AQ-HEAD @ saa-head !",
+            "saa-listener @ TCB.AQ-TAIL @ saa-tail !",
+            "saa-listener @ TCB.AQ-RESERVED @ saa-reserved !",
+            "saa-listener @ AQ-PEEK saa-queued-gen ! saa-queued-h1 !",
+            "server-ctx @ saa-old-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner TLS-SERVER-ACCEPT-ATTACH",
+            '." STALE-CTX=" .',
+            '." STALE-CTX-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
+            '." STALE-CTX-OWNER=" saa-child @ TCB.OWNER @ .',
+            '." STALE-CTX-HEAD=" saa-listener @ TCB.AQ-HEAD @ '
+            'saa-head @ = .',
+            '." STALE-CTX-TAIL=" saa-listener @ TCB.AQ-TAIL @ '
+            'saa-tail @ = .',
+            '." STALE-CTX-RESERVED=" saa-listener @ TCB.AQ-RESERVED @ '
+            'saa-reserved @ = .',
+            '." STALE-CTX-TOKEN=" saa-listener @ AQ-PEEK '
+            'saa-queued-gen @ = SWAP saa-queued-h1 @ = AND .',
+            '." STALE-CTX-AUTH=" saa-child @ TCB.AUTH-STATE @ '
+            'TCP-AUTH-QUEUED = .',
+            '." STALE-CTX-BINDING=" server-ctx @ TLS-CTX.TCB @ 0= '
+            'server-ctx @ TLS-CTX.TCB-GENERATION @ 0= AND .',
             "TLSH-SERVER-CLIENT-HELLO server-ctx @ TLS-CTX.HS-STATE !",
-            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             '." BAD-CTX=" .',
             '." BAD-CTX-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
             '." BAD-CTX-OWNER=" saa-child @ TCB.OWNER @ .',
             "TLSH-SERVER-WAIT-CLIENT-HELLO "
             "server-ctx @ TLS-CTX.HS-STATE !",
-            "server-ctx @ saa-listener @ saa-lgen @ 1+ "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ 1+ "
             "saa-listener-owner TLS-SERVER-ACCEPT-ATTACH",
             '." STALE=" .',
             '." STALE-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
             '." STALE-OWNER=" saa-child @ TCB.OWNER @ .',
             "0 saa-child @ TCB.PARENT-GEN !",
-            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             '." BAD-CHILD=" .',
             '." BAD-CHILD-COUNT=" saa-listener @ TCB.AQ-COUNT @ .',
@@ -25448,7 +25483,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TCP-AUTH-HALF-OPEN saa-child @ TCB.AUTH-STATE !",
             "saa-listener @ AQ-RESERVE DROP",
             "saa-child @ saa-listener @ AQ-PUSH DROP",
-            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             "saa-ior !",
             "server-ctx @ TLS-CTX.TCB-GENERATION @ saa-cgen !",
@@ -25464,7 +25500,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TLS-PARSE-CLIENT-HELLO",
             '." PARSE-IOR=" . ." PARSE-ALERT=" .',
             '." PARSE-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
-            "server-ctx @ saa-listener @ saa-lgen @ saa-listener-owner "
+            "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
+            "saa-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             '." AGAIN=" .',
             '." ABORT=" server-ctx @ TLS-ABORT .',
@@ -25472,8 +25509,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." LISTENER=" saa-listener @ saa-lgen @ saa-listener-owner '
             'TCB-ATTACHED-TO? .',
             '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
-            '." SCRATCH=" _TSAA-CTX @ _TSAA-LISTENER @ OR '
-            '_TSAA-TCB @ OR .',
+            '." SCRATCH=" _TSAA-CTX @ _TSAA-CTX-GEN @ OR '
+            '_TSAA-LISTENER @ OR _TSAA-TCB @ OR .',
             '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
             '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
             'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
@@ -25481,10 +25518,17 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines)
         for token in (
-            "INIT=0 ", "PROVISION-DEPTH=0 ", "BEGIN=0 ",
+            "INIT=0 ", "PROVISION-DEPTH=0 ",
+            "BEGIN=0 BEGIN-GEN=1 ", "FIRST-ABORT=0 ",
+            "REBEGIN=0 REBEGIN-GEN=2 ",
             "PRENET=0 ", "INVERT=-4206 ", "INVERT-NET=1 ",
             "EMPTY=-4219 ", "EMPTY-TCB=0 ", "EMPTY-GEN=0 ",
-            "EMPTY-REFS=1 ", "BAD-CTX=-4204 ",
+            "EMPTY-REFS=1 ",
+            "STALE-CTX=-4204 ", "STALE-CTX-COUNT=1 ",
+            "STALE-CTX-OWNER=0 ", "BAD-CTX=-4204 ",
+            "STALE-CTX-HEAD=-1 ", "STALE-CTX-TAIL=-1 ",
+            "STALE-CTX-RESERVED=-1 ", "STALE-CTX-TOKEN=-1 ",
+            "STALE-CTX-AUTH=-1 ", "STALE-CTX-BINDING=-1 ",
             "BAD-CTX-COUNT=1 ", "BAD-CTX-OWNER=0 ",
             "STALE=-4218 ", "STALE-COUNT=1 ", "STALE-OWNER=0 ",
             "BAD-CHILD=-4218 ", "BAD-CHILD-COUNT=0 ",
@@ -25507,7 +25551,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             'server-ctx @ TLS-ABORT ." ABORT=" .',
             '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
@@ -25532,7 +25576,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             "TLS-SUITE-AES128-SHA256 server-ctx @ TLS-CTX.SUITE !",
             "TLS-HASH-SHA256 server-ctx @ TLS-CTX.HASH-ID !",
             "TLSH-APPLICATION-READY server-ctx @ TLS-CTX.HS-STATE !",
@@ -25544,7 +25588,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." PUBLISH-STATE=" server-ctx @ TLS-CTX.STATE @ .',
             "server-ctx @ TLS-ABORT DROP",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             "TLS-OWNER-TRY DROP",
             'server-ctx @ fatal-alert 1 TLS-PROCESS-ALERT ." FATAL=" .',
             "TLS-OWNER-RELEASE",
@@ -25554,7 +25598,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." FATAL-STATE=" server-ctx @ TLS-CTX.STATE @ .',
             "server-ctx @ TLS-CLOSE-TRY DROP",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             "TLS-OWNER-TRY DROP",
             'server-ctx @ close-alert 2 TLS-PROCESS-ALERT ." PEER-CLOSE=" .',
             "TLS-OWNER-RELEASE",
@@ -25603,7 +25647,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
         ]
         for label, name, message in (
             ("MISMATCH", "ch-mismatch", mismatch),
@@ -25694,7 +25738,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ ch-distinct {len(distinct)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "server-ctx @ _TLS-SERVER-SIGNATURE-ALGORITHMS",
@@ -25706,7 +25750,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'TSM.CERT-SIGALGS-U + @ .',
             "server-ctx @ TLS-ABORT DROP",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ ch-fallback {len(fallback)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "server-ctx @ _TLS-SERVER-CERT-SIGNATURE-ALGORITHMS",
@@ -25779,7 +25823,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO",
             '." PARSE-IOR=" . ." PARSE-ALERT=" .',
@@ -25923,7 +25967,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'TLS-OWNER-TRY ." OWNER=" .',
@@ -26061,7 +26105,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'TLS-OWNER-TRY ." OWNER=" .',
@@ -26138,7 +26182,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "VARIABLE server-ctx VARIABLE saved-wire",
             "0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "TLS-OWNER-TRY DROP",
@@ -26256,7 +26300,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "CREATE meta-copy TLS-SERVER-META-CAPACITY ALLOT",
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "TLS-OWNER-TRY DROP",
@@ -26525,6 +26569,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "VARIABLE ae-listener VARIABLE ae-child",
             "VARIABLE ae-lgen VARIABLE ae-cgen VARIABLE ae-ior",
+            "VARIABLE ae-ctx-gen",
             "VARIABLE ae-listener-owner VARIABLE ae-generic-calls",
             "CREATE ae-peer-ip 4 ALLOT CREATE ae-peer-mac 6 ALLOT",
             "10 0 0 2 IP-SET 10 0 0 1 ae-peer-ip IP!",
@@ -26537,7 +26582,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "ae-ior ! ae-lgen !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." BEGIN=" .',
+            '." BEGIN=" . ae-ctx-gen !',
             "TCB-ALLOC DROP 1 TCB-N ae-child !",
             "TCPS-ESTABLISHED ae-child @ TCB.STATE !",
             "443 ae-child @ TCB.LOCAL-PORT !",
@@ -26555,7 +26600,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TCP-AUTH-HALF-OPEN ae-child @ TCB.AUTH-STATE !",
             "ae-listener @ AQ-RESERVE DROP",
             "ae-child @ ae-listener @ AQ-PUSH DROP",
-            "server-ctx @ ae-listener @ ae-lgen @ ae-listener-owner "
+            "server-ctx @ ae-ctx-gen @ ae-listener @ ae-lgen @ "
+            "ae-listener-owner "
             "TLS-SERVER-ACCEPT-ATTACH",
             '." ATTACH=" .',
             "server-ctx @ TLS-CTX.TCB-GENERATION @ ae-cgen !",
@@ -26578,7 +26624,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "server-ctx @ ' ae-generic TLS-SERVER-FLIGHT-STEP-WITH",
             '." GENERIC-IOR=" . ." GENERIC-PROGRESS=" .',
             '." GENERIC-CALLS=" ae-generic-calls @ .',
-            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ 1+ "
+            "server-ctx @ ae-ctx-gen @ 1+ "
             "TLS-SERVER-FLIGHT-STEP",
             '." STALE-IOR=" . ." STALE-PROGRESS=" .',
             '." STALE-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
@@ -26590,7 +26636,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." STALE-TX=" ae-child @ TCB.TX-LEN @ .',
             '." STALE-NXT=" ae-child @ TCB.SND-NXT @ .',
             'NET-TX-TRY ." INVERT-ACQUIRE=" .',
-            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "server-ctx @ ae-ctx-gen @ "
             "TLS-SERVER-FLIGHT-STEP",
             '." INVERT-IOR=" . ." INVERT-PROGRESS=" .',
             '." INVERT-NET=" NET-TX-OWNER-DEPTH @ .',
@@ -26598,7 +26644,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'TSE.PENDING-STATE + @ .',
             "NET-TX-RELEASE",
             "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
-            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "server-ctx @ ae-ctx-gen @ "
             "TLS-SERVER-FLIGHT-STEP",
             '." BUSY-IOR=" . ." BUSY-PROGRESS=" .',
             '." BUSY-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
@@ -26611,7 +26657,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." BUSY-TX=" ae-child @ TCB.TX-LEN @ .',
             '." BUSY-NXT=" ae-child @ TCB.SND-NXT @ .',
             "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
-            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "server-ctx @ ae-ctx-gen @ "
             "TLS-SERVER-FLIGHT-STEP",
             '." BLOCK-IOR=" . ." BLOCK-PROGRESS=" .',
             '." BLOCK-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
@@ -26626,7 +26672,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." BLOCK-TX=" ae-child @ TCB.TX-LEN @ .',
             '." BLOCK-NXT=" ae-child @ TCB.SND-NXT @ .',
             "4096 ae-child @ TCB.SND-WND !",
-            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "server-ctx @ ae-ctx-gen @ "
             "TLS-SERVER-FLIGHT-STEP",
             '." STEP-IOR=" . ." STEP-PROGRESS=" .',
             '." EXACT=" server-ctx @ _TLS-CTX>TCB ae-child @ = .',
@@ -26643,7 +26689,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
             '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
             "TCPS-FAILED ae-child @ TCB.STATE !",
-            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "server-ctx @ ae-ctx-gen @ "
             "TLS-SERVER-FLIGHT-STEP",
             '." TERM-IOR=" . ." TERM-PROGRESS=" .',
             '." TERM-STATE=" server-ctx @ TLS-CTX.STATE @ .',
@@ -26722,14 +26768,16 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE stale-ctx 0 TLS-CTX@ stale-ctx !",
             "VARIABLE stale-tcb VARIABLE stale-old-gen",
+            "VARIABLE stale-ctx-gen",
             "VARIABLE stale-new-gen VARIABLE stale-new-owner",
             "VARIABLE stale-ior",
             "VARIABLE recovery-ctx 1 TLS-CTX@ recovery-ctx !",
             "VARIABLE recovery-tcb VARIABLE recovery-gen",
+            "VARIABLE recovery-ctx-gen",
             "TCP-INIT-ALL",
             "stale-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." BEGIN=" .',
+            '." BEGIN=" . stale-ctx-gen !',
             "TCB-ALLOC DUP TCB-N stale-tcb ! DROP",
             "TCPS-ESTABLISHED stale-tcb @ TCB.STATE !",
             "TLS-OWNER-TRY DROP",
@@ -26755,7 +26803,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "stale-ior ! stale-new-gen !",
             '." REATTACH=" stale-ior @ .',
             '." REUSED=" stale-new-gen @ stale-old-gen @ <> .',
-            "stale-ctx @ stale-ctx @ TLS-CTX.GENERATION @ "
+            "stale-ctx @ stale-ctx-gen @ "
             "TLS-SERVER-FLIGHT-STEP",
             '." STEP-IOR=" . ." STEP-PROGRESS=" .',
             '." CTX-STATE=" stale-ctx @ TLS-CTX.STATE @ .',
@@ -26776,7 +26824,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             # token so the ordinary abort path can finish cleanup later.
             "recovery-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." REC-BEGIN=" .',
+            '." REC-BEGIN=" . recovery-ctx-gen !',
             "TCB-ALLOC DUP TCB-N recovery-tcb ! DROP",
             "TCPS-ESTABLISHED recovery-tcb @ TCB.STATE !",
             "TLS-OWNER-TRY DROP",
@@ -28517,7 +28565,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ TLS-SERVER-PREPARE-HELLO '
@@ -28582,7 +28630,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ TLS-SERVER-PREPARE-HELLO '
@@ -28655,7 +28703,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ zero-share-hello {len(zero_share_hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ TLS-SERVER-PREPARE-HELLO '
@@ -28757,7 +28805,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ maximum-alpn 255 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ maximum-hello {len(maximum_hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "server-ctx @ TLS-RXW.SERVER-LEDGER "
@@ -28781,7 +28829,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'TSL.EE + C@ .',
             "server-ctx @ TLS-ABORT DROP",
             "server-ctx @ tc-slot @ tc-gen @ 0 0 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ no-alpn-hello {len(no_alpn_hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ _TLS-SERVER-BUILD-ENCRYPTED-EXTENSIONS '
@@ -28924,7 +28972,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." PROVISION=" fb-ior @ . sh-ior @ . un-ior @ .',
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ fb-slot @ fb-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ ch-default {len(hello_default)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." FALLBACK=" .',
@@ -28932,7 +28980,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." FB-BITMAP=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP C@ .',
             "server-ctx @ TLS-ABORT DROP",
             "server-ctx @ sh-slot @ sh-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ ch-default {len(hello_default)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." SHA1-DENY=" .',
@@ -28940,14 +28988,14 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." DENY-BITMAP=" server-ctx @ TLS-RXW.SERVER-EXT-BITMAP C@ .',
             "server-ctx @ TLS-ABORT DROP",
             "server-ctx @ sh-slot @ sh-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ ch-sha1 {len(hello_sha1)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." SHA1-ALLOW=" .',
             '." SHA1-FLAGS=" server-ctx @ TLS-RXW.SERVER-META TSM.FLAGS + @ .',
             "server-ctx @ TLS-ABORT DROP",
             "server-ctx @ un-slot @ un-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             f"server-ctx @ ch-unknown {len(hello_unknown)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             'server-ctx @ _TLS-SERVER-CERTIFICATE-POLICY ." UNKNOWN=" .',
@@ -29001,7 +29049,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
         ]
         for label, message, _ in cases:
             lines += [
@@ -29105,7 +29153,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
         ]
         for label, message, _ in failures:
             lines += [
@@ -29147,19 +29195,20 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ oversize-alpn 256 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." OVERSIZE-BEGIN=" .',
+            '." OVERSIZE-BEGIN=" . ." OVERSIZE-BEGIN-GEN=" .',
             '90 _TSCB-ALPN C!',
             "server-ctx @ tc-slot @ tc-gen @ _TSCB-ALPN 1 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." ALIAS-BEGIN=" . ." ALIAS-BEGIN-BYTE=" _TSCB-ALPN C@ .',
+            '." ALIAS-BEGIN=" . ." ALIAS-BEGIN-GEN=" . '
+            '." ALIAS-BEGIN-BYTE=" _TSCB-ALPN C@ .',
             '90 _TCM-CTX C!',
             "server-ctx @ tc-slot @ tc-gen @ _TCM-CTX 1 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." MEMBER-ALIAS-BEGIN=" . '
+            '." MEMBER-ALIAS-BEGIN=" . ." MEMBER-ALIAS-BEGIN-GEN=" . '
             '." MEMBER-ALIAS-BYTE=" _TCM-CTX C@ .',
             "server-ctx @ tc-slot @ tc-gen @ max-alpn 255 "
             "TLS-SERVER-CONTEXT-BEGIN",
-            '." MAX-BEGIN=" .',
+            '." MAX-BEGIN=" . ." MAX-BEGIN-GEN=" .',
             "max-alpn 255 120 FILL",
             '." CONFIG-U=" server-ctx @ TLS-ALPN-CONFIGURED '
             'DUP . DROP expected-alpn 255 _XC-BYTES= '
@@ -29189,10 +29238,13 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines)
         for token in (
-            "OVERSIZE-BEGIN=-4205 ",
-            "ALIAS-BEGIN=-4205 ALIAS-BEGIN-BYTE=90 ",
-            "MEMBER-ALIAS-BEGIN=-4205 MEMBER-ALIAS-BYTE=90 ",
-            "MAX-BEGIN=0 ", "CONFIG-U=255 CONFIG-COPIED=-1 ",
+            "OVERSIZE-BEGIN=-4205 OVERSIZE-BEGIN-GEN=0 ",
+            "ALIAS-BEGIN=-4205 ALIAS-BEGIN-GEN=0 "
+            "ALIAS-BEGIN-BYTE=90 ",
+            "MEMBER-ALIAS-BEGIN=-4205 MEMBER-ALIAS-BEGIN-GEN=0 "
+            "MEMBER-ALIAS-BYTE=90 ",
+            "MAX-BEGIN=0 MAX-BEGIN-GEN=1 ",
+            "CONFIG-U=255 CONFIG-COPIED=-1 ",
             "OVERCAP-IOR=-4213 OVERCAP-ALERT=0 ",
             "NULL-IOR=-4213 NULL-ALERT=0 ",
             "CTXALIAS-IOR=-4213 CTXALIAS-ALERT=0 ",
@@ -29214,7 +29266,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN DROP",
+            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
             "VARIABLE max-ch TLS-SERVER-CH-CAPACITY XMEM-ALLOT max-ch !",
             "max-ch @ TLS-SERVER-CH-CAPACITY 0 FILL",
             "1 max-ch @ C! 2 max-ch @ 1+ C! 0 max-ch @ 2 + C! "

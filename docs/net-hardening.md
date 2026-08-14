@@ -18,10 +18,13 @@ address: allocation, passive lineage, queueing, attachment, close, and abort
 are now checked against an exact TCB generation and owner.
 
 This milestone supplies the transport authority needed by secure accept, and
-`TLS-SERVER-ACCEPT-ATTACH` now transfers one exact queued child into a prepared
-TLS server context. `TLS-SERVER-FLIGHT-STEP` consumes that sealed authority for
-outbound records without exposing a caller callback. It does not yet ingest
-the handshake over that attachment or publish an authenticated TLS socket.
+`TLS-SERVER-CONTEXT-BEGIN` now returns the newly claimed context generation,
+and `TLS-SERVER-ACCEPT-ATTACH` requires that carried token before it transfers
+one exact queued child into the prepared TLS server context. A stale context
+incarnation is rejected before accept-queue mutation. `TLS-SERVER-FLIGHT-STEP`
+consumes that sealed authority for outbound records without exposing a caller
+callback. It does not yet ingest the handshake over that attachment or publish
+an authenticated TLS socket.
 
 ## TCB and table geometry
 
