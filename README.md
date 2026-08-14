@@ -58,12 +58,14 @@ construct and emit its complete flight in a socket-independent composition,
 authenticate client Finished, and attach one exact queued TCP child to a
 prepared server context. A sealed attached-flight step now carries retained
 server records over that exact child with truthful backpressure and terminal
-cleanup; its plaintext ServerHello/exact-send boundary is qualified. Initial
-ClientHello record ingress, ACK-paced protected-flight qualification, attached
-client-flight ingress, protected dispositions, and authenticated socket
-publication are still missing, so TLS listen/accept remains fail-closed. The
-immediate release path is only that remaining vertical slice, one independent
-TLS peer exchange, application I/O, and graceful cleanup. See
+cleanup; its plaintext ServerHello/exact-send boundary is qualified. The
+initial ClientHello now enters through the same exact child across arbitrary
+TCP and TLSPlaintext-record fragmentation, with explicit record progress and
+exact following-record retention. ACK-paced protected-flight qualification,
+attached client-flight ingress, protected dispositions, and authenticated
+socket publication are still missing, so TLS listen/accept remains fail-closed.
+The immediate release path is only that remaining vertical slice, one
+independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

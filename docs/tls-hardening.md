@@ -3,9 +3,10 @@
 Status: no usable listening TLS server yet; the bounded client profile,
 socket-independent server handshake through client Finished, exact lower
 transport ownership/close, and atomic queued-child attachment are qualified,
-and the attached ServerHello exact-send boundary is now qualified. ACK-paced
-protected-flight completion, attached ingress, protected dispositions, and
-authenticated accepted-socket publication are the single active critical path
+and attached initial ClientHello ingress plus the ServerHello exact-send
+boundary are now qualified. ACK-paced protected-flight completion, attached
+protected ingress, protected dispositions, and authenticated accepted-socket
+publication are the single active critical path.
 Last updated: 2026-08-14
 
 ## Purpose
@@ -54,8 +55,15 @@ rejected before queue mutation. `TLS-SERVER-FLIGHT-STEP` seals that exact pair
 during flight preparation, uses a dedicated owner-qualified TCP adapter, and
 retains byte-identical backpressure. It exact-aborts a dead current child;
 stale lower authority clears only the old TLS binding and cannot reclaim a
-reused TCB incarnation. Ingress and protected disposition output are not yet
-bound to the child.
+reused TCB incarnation. `TLS-SERVER-CLIENT-HELLO-STEP` now reads the initial
+handshake through that same pair. It reassembles arbitrary TCP segmentation
+and multiple nonempty TLSPlaintext records; each ClientHello-fragment record
+may use legacy version `0x0301` or `0x0303`. It consumes at most one record per
+call. Fatal
+peer input latches a closing disposition while preserving the binding and pin;
+dead or stale transport follows the same exact-incarnation cleanup rule.
+Protected client-flight ingress and disposition output are not yet bound to
+the child.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,
 commits the transcript through that message, installs C-AP read, and leaves
@@ -65,9 +73,9 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is initial ingress over the attachment, ACK-paced
-completion of its protected outbound flight, attached client-flight ingress,
-protected terminal output, secure socket accept/publication, and
+The remaining server work is ACK-paced completion of the protected outbound
+flight, attached client-flight ingress, protected terminal output, secure
+socket accept/publication, and
 interoperability over that path with an independent TLS implementation. The
 following lower-level facts
 continue to bound an authenticated server role:
@@ -532,6 +540,21 @@ possible reused TCB untouched. If cleanup itself throws, pending wire bytes are
 wiped but the seal, binding, and credential pin remain available to
 `TLS-ABORT`.
 
+`TLS-SERVER-CLIENT-HELLO-STEP` is the attached inbound counterpart before
+flight preparation. The raw memory parser is refused as soon as TCB authority
+exists. The step retains a partial TLSPlaintext record in the context record
+lane and appends complete nonempty handshake fragments to the full-width
+ClientHello lane. It derives the exact message bound from the uint24 handshake
+header, rejects coalesced/trailing bytes, and never reads beyond the current
+record. `TLS-SERVER-CLIENT-HELLO-RECORD` tells an edge-triggered coordinator to
+step again immediately after a complete nonfinal record;
+`TLS-SERVER-CLIENT-HELLO-COMPLETE` means the parser committed the exact
+message. No or partial record progress returns `NONE` with
+`TLS-E-WOULD-BLOCK`. Every reachable retained record is a strict prefix, so
+the owner-qualified receive necessarily revalidates reciprocal authority before
+append or parser commit. Unexpected lower throws release the TLS owner and
+preserve the exact binding and credential pin for `TLS-ABORT`.
+
 After exact Finished admission, the emitter installs only the prederived S-AP
 write epoch, preserves the C-HS read epoch and its sequence, and publishes
 client-Finished-pending. The caller-selected callback entry intentionally has
@@ -790,8 +813,10 @@ or expose its remainder to another connection.
 `MS@` and `EPOCH@` reconstruct all eight RTC bytes. Certificate and token
 deadlines therefore use the full-width clock rather than a truncated timer.
 
-Incoming records require legacy record version `0x0303` and are bounded
-separately for plaintext and protected records. A compatibility
+Generic and protected incoming records require legacy record version `0x0303`;
+the initial attached ClientHello boundary separately accepts the interoperable
+`0x0301` or `0x0303` TLSPlaintext versions. Plaintext and protected records are
+bounded separately. A compatibility
 ChangeCipherSpec is ignored only when it has the exact one-byte `0x01` form
 permitted during the handshake. Incoming alerts clear peer authorization and
 distinguish clean `close_notify` from fatal or malformed records. A clean peer
@@ -866,6 +891,10 @@ Native guest tests cover:
 - full-width server ClientHello admission, complete-chain signature-policy
   classification, exact ServerHello/EncryptedExtensions construction, direct
   X25519, and `ClientHello || ServerHello` transcript vectors;
+- attached initial ClientHello ingress over real Ethernet/IP/TCP segmentation,
+  including `0x0301`/`0x0303` TLSPlaintext fragmentation, explicit record
+  progress, exact following-record retention, fatal-alert latching, EOF
+  reclamation, raw-parser exclusion, and stale-TCB reuse isolation;
 - streamed one- and multi-certificate server transcript framing with no copied
   Certificate message or certificate-count cap;
 - exact server CertificateVerify, Finished, final transcript, master,
@@ -949,9 +978,13 @@ reciprocal context/TCB publication, continued ClientHello parsing, and abort
 cleanup without disturbing the listener. Focused attached-emitter evidence now
 also proves exact ServerHello TCP bytes, retained zero-window retry, generic
 callback exclusion, exact child reclamation on dead transport, reused-TCB
-isolation, and exception-fallback authority retention. It does not yet prove
-ACK-paced protected-flight completion, attached ingress, secure socket
-acceptance, or interoperability over sockets with an independent TLS stack.
+isolation, and exception-fallback authority retention. The subsequent 5/5
+focused attached-initial-ingress tests prove real Ethernet/IP/TCP and
+multi-record reassembly, explicit nonfinal-record progress, exact no-overread,
+fatal input latching, terminal EOF cleanup, and stale-incarnation isolation.
+They do not yet prove ACK-paced protected-flight completion, attached
+protected ingress, secure socket acceptance, terminal-alert transmission, or
+interoperability over sockets with an independent TLS stack.
 The uint24-maximum Certificate capstone is separate maturity evidence and must
 not delay this vertical closure.
 
@@ -963,11 +996,10 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Frame and admit initial ClientHello records, then drive the ACK-paced
-  protected server-flight remainder and adapt authoritative nonblocking TCP
-  input to the qualified rejected-0RTT/client-Finished boundary, including
-  protected terminal-alert output, without exposing a plaintext accepted
-  child.
+- Drive the ACK-paced protected server-flight remainder, then adapt
+  authoritative nonblocking TCP input to the qualified
+  rejected-0RTT/client-Finished boundary, including protected terminal-alert
+  output, without exposing a plaintext accepted child.
 - Publish a TLS accepted socket only after client Finished authentication and
   explicit handshake publication. Prove credential-pin/reference and exact
   TCB-owner cleanup on every failure.

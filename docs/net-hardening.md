@@ -5,9 +5,11 @@ passive control transport, retained FIN completion, and atomic queued-child
 attachment to a prepared TLS server context are implemented. A sealed
 server-flight step now admits the exact ServerHello over that child, preserves
 retry state, reclaims a dead exact child, and leaves a reused incarnation
-untouched while clearing stale local authority. ACK-paced protected-flight
-qualification, attached ingress, and authenticated TLS socket publication are
-not implemented.
+untouched while clearing stale local authority. Initial ClientHello ingress now
+reassembles arbitrary TCP and TLSPlaintext-record fragmentation through that
+same exact child without overreading the following record. ACK-paced
+protected-flight qualification, attached protected ingress, and authenticated
+TLS socket publication are not implemented.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -23,8 +25,11 @@ and `TLS-SERVER-ACCEPT-ATTACH` requires that carried token before it transfers
 one exact queued child into the prepared TLS server context. A stale context
 incarnation is rejected before accept-queue mutation. `TLS-SERVER-FLIGHT-STEP`
 consumes that sealed authority for outbound records without exposing a caller
-callback. It does not yet ingest the handshake over that attachment or publish
-an authenticated TLS socket.
+callback. `TLS-SERVER-CLIENT-HELLO-STEP` consumes the same attached authority
+for bounded initial ingress; each ClientHello-fragment record may use legacy
+version `0x0301` or `0x0303`. It retains incomplete record/message prefixes per
+context and admits exactly one complete ClientHello. It does not yet ingest the
+protected client flight or publish an authenticated TLS socket.
 
 ## TCB and table geometry
 
@@ -171,6 +176,11 @@ incarnation isolation, exception-fallback authority retention, listener
 preservation, and the unchanged socket-independent Finished path. Broader
 lower baselines and four-core credential/server-flight cancellation capstones
 remain regression inventory rather than prerequisites for each narrow commit.
+The subsequent initial-ingress slice passes 5/5 focused tests covering raw
+parser exclusion after attachment, real Ethernet/IP/TCP segmentation,
+TLSPlaintext fragmentation across `0x0301` and `0x0303` records, exact
+following-record retention, fatal framing/handshake alerts, EOF reclamation,
+and stale-incarnation isolation.
 
 ## Remaining secure-server boundary
 
@@ -178,9 +188,9 @@ The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
 and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
 critical path is:
 
-- frame and admit the initial ClientHello through the same attached authority;
-- drive the protected server-flight remainder through TCP ACK/backpressure and
-  then adapt client-flight ingress without exposing plaintext;
+- drive the protected server-flight remainder through TCP ACK/backpressure;
+- adapt client-flight ingress to the same exact child without exposing
+  plaintext;
 - transmit protected fatal/close dispositions rather than retaining only a
   terminal classification;
 - publish an accepted socket only after client Finished authentication and

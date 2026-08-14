@@ -11357,6 +11357,13 @@ VARIABLE _TPCH-IOR
 
 : _TPCH-INPUT-VALIDATE  ( -- ior )
     _TPCH-CTX @ _TPCH-CONTEXT-READY? 0= IF TLS-E-STATE EXIT THEN
+    \ An attached server must ingest through its exact reciprocal TCB.  The
+    \ raw copy/parser remains useful only before transport authority exists.
+    _TPCH-CTX @ TLS-CTX.TCB @ 0<>
+    _TPCH-CTX @ TLS-CTX.TCB-GENERATION @ 0<> OR
+    _TPCH-CTX @ TLS-CTX.SOCKET-OWNER @ 0<> OR IF
+        TLS-E-STATE EXIT
+    THEN
     _TPCH-IN-U @ DUP 0< SWAP TLS-SERVER-CH-CAPACITY > OR IF
         TLS-E-HANDSHAKE-PARAM EXIT
     THEN
@@ -13686,6 +13693,332 @@ VARIABLE _TEX-OLEN
         DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
     THEN
     (TLS-IO-STATUS) >R TLS-OWNER-RELEASE R> ;
+
+\ --- Attached initial TLSPlaintext ClientHello ingress ---
+\ The first production-facing server reader reassembles one complete
+\ ClientHello across TLSPlaintext records and arbitrary TCP segmentation.  A
+\ call completes at most one current record, so backpressure stays visible and
+\ a following TCP record remains in the exact accepted child's receive ring.
+\ The handshake header supplies the protocol-derived bound; trailing or
+\ coalesced handshake bytes are rejected instead of silently consumed.
+\ Progress distinguishes a committed nonfinal record from true backpressure,
+\ so an edge-triggered coordinator knows when to step again immediately.
+16384 CONSTANT TLS-PLAINTEXT-FRAGMENT-MAX
+0 CONSTANT TLS-SERVER-CLIENT-HELLO-NONE
+1 CONSTANT TLS-SERVER-CLIENT-HELLO-RECORD
+2 CONSTANT TLS-SERVER-CLIENT-HELLO-COMPLETE
+
+VARIABLE _TSCH-CTX
+VARIABLE _TSCH-CTX-GEN
+VARIABLE _TSCH-META
+VARIABLE _TSCH-TOTAL
+VARIABLE _TSCH-NEED
+VARIABLE _TSCH-MISSING
+VARIABLE _TSCH-ACTUAL
+VARIABLE _TSCH-TCP-IOR
+VARIABLE _TSCH-TCB
+VARIABLE _TSCH-TCB-GEN
+VARIABLE _TSCH-FRAGMENT
+VARIABLE _TSCH-FILLED
+VARIABLE _TSCH-EXPECTED
+VARIABLE _TSCH-NEXT-FILLED
+VARIABLE _TSCH-PROGRESS
+VARIABLE _TSCH-ALERT
+VARIABLE _TSCH-IOR
+
+: _TSCH-SCRATCH-WIPE  ( -- )
+    0 _TSCH-CTX ! 0 _TSCH-CTX-GEN ! 0 _TSCH-META ! 0 _TSCH-TOTAL !
+    0 _TSCH-NEED ! 0 _TSCH-MISSING ! 0 _TSCH-ACTUAL !
+    0 _TSCH-TCP-IOR ! 0 _TSCH-TCB ! 0 _TSCH-TCB-GEN !
+    0 _TSCH-FRAGMENT ! 0 _TSCH-FILLED ! 0 _TSCH-EXPECTED !
+    0 _TSCH-NEXT-FILLED !
+    0 _TSCH-PROGRESS ! 0 _TSCH-ALERT ! 0 _TSCH-IOR ! ;
+
+: _TSCH-PARTIAL-VALID?  ( -- flag )
+    _TSCH-CTX @ TLS-RXW.SERVER-META DUP _TSCH-META !
+    TSM.CH-FILLED + @ DUP 0< IF DROP 0 EXIT THEN
+    DUP TLS-SERVER-CH-CAPACITY > IF DROP 0 EXIT THEN
+    _TSCH-FILLED !
+    _TSCH-META @ TSM.CH-LEN + @ DUP 0< IF DROP 0 EXIT THEN
+    DUP TLS-SERVER-CH-CAPACITY > IF DROP 0 EXIT THEN
+    _TSCH-EXPECTED !
+    _TSCH-FILLED @ 0= IF _TSCH-EXPECTED @ 0= EXIT THEN
+    _TSCH-CTX @ TLS-RXW.SERVER-CH C@ TLSHT-CLIENT-HELLO <> IF
+        0 EXIT
+    THEN
+    _TSCH-FILLED @ 4 < IF _TSCH-EXPECTED @ 0= EXIT THEN
+    _TSCH-CTX @ TLS-RXW.SERVER-CH 1+ _BE24@ 4 +
+    _TSCH-EXPECTED @ <> IF 0 EXIT THEN
+    \ Exact completion is consumed by the parser before the owner is released;
+    \ only a strict prefix is a valid state between public calls.
+    _TSCH-FILLED @ _TSCH-EXPECTED @ < ;
+
+: _TSCH-CONTEXT-VALID?  ( ctx -- flag )
+    DUP _TPCH-CONTEXT-READY?
+    OVER TLS-CTX-CLAIMED? AND
+    OVER TLS-CTX.HELLO-PROFILE @ TLS-HELLO-STANDARD = AND
+    OVER TLS-CTX.SOCKET-OWNER @ 0= AND
+    OVER TLS-CTX.CLOSE-PHASE @ TLS-CLOSE-NONE = AND
+    OVER TLS-CTX.TCB @ 0<> AND
+    OVER TLS-CTX.TCB-GENERATION @ 0<> AND
+    OVER TLS-CTX.PEER-AUTH @ 0= AND
+    OVER TLS-CTX.WR-SEQ @ 0= AND
+    OVER TLS-CTX.RD-SEQ @ 0= AND
+    OVER TLS-CTX.APP-OFF @ 0= AND
+    OVER TLS-CTX.APP-LEN @ 0= AND
+    OVER TLS-CTX.RX-REC-LEN @ DUP 0>=
+    SWAP TLS-RX-RECORD-CAPACITY <= AND AND
+    OVER TLS-CTX.RX-REC-ERROR @ 0= AND
+    OVER TLS-CTX.RX-HS-LEN @ 0= AND
+    OVER TLS-CTX.RX-HS-ERROR @ 0= AND
+    OVER TLS-RXW.SERVER-META TSM.FLAGS + @
+    TSMF-CRED-PINNED = AND
+    OVER _TLS-SERVER-PROTOCOL-OWNED? 0= AND
+    SWAP DROP
+    _TSCH-PARTIAL-VALID? AND ;
+
+: _TSCH-RECORD-CLEAR  ( -- )
+    _TSCH-CTX @ TLS-CTX.RX-REC-LEN @ DUP 0> IF
+        _TSCH-CTX @ TLS-RXW.RECORD SWAP 0 FILL
+    ELSE
+        DROP
+    THEN
+    0 _TSCH-CTX @ TLS-CTX.RX-REC-LEN ! ;
+
+: _TSCH-RECORD-WIPE  ( -- )
+    _TSCH-CTX @ TLS-RXW.RECORD TLS-RX-RECORD-CAPACITY 0 FILL
+    0 _TSCH-CTX @ TLS-CTX.RX-REC-LEN ! ;
+
+: _TSCH-CLIENT-HELLO-CLEAR  ( -- )
+    _TSCH-CTX @ TLS-RXW.SERVER-CH TLS-SERVER-CH-STRIDE 0 FILL
+    0 _TSCH-CTX @ TLS-RXW.SERVER-META TSM.CH-LEN + !
+    0 _TSCH-CTX @ TLS-RXW.SERVER-META TSM.CH-FILLED + ! ;
+
+: _TSCH-BINDING-CLEAR  ( -- )
+    0 _TSCH-CTX @ TLS-CTX.TCB-GENERATION !
+    0 _TSCH-CTX @ TLS-CTX.TCB ! ;
+
+\ Abort only the incarnation retained by this TLS context.  A stale lower
+\ token means that incarnation was already disposed; clear local authority
+\ without touching the replacement occupying the same TCB address.
+: _TSCH-EXACT-ABORT  ( -- ior )
+    _TSCH-CTX @ TLS-CTX.TCB @ _TSCH-TCB !
+    _TSCH-CTX @ TLS-CTX.TCB-GENERATION @ _TSCH-TCB-GEN !
+    _TSCH-TCB @ _TSCH-TCB-GEN @ OR 0= IF TLS-E-OK EXIT THEN
+    _TSCH-TCB @ 0= _TSCH-TCB-GEN @ 0= OR IF
+        TLS-E-TRANSPORT EXIT
+    THEN
+    _TSCH-TCB @ _TSCH-TCB-GEN @ _TSCH-CTX @
+    TCP-OWNER-ABORT-ACQUIRE
+    DUP 0= IF 2DROP _TSCH-BINDING-CLEAR TLS-E-OK EXIT THEN
+    DUP TCP-ACCEPT-E-STALE = IF
+        2DROP _TSCH-BINDING-CLEAR TLS-E-OK EXIT
+    THEN
+    NIP ;
+
+: _TSCH-TRANSPORT-TERMINAL  ( -- )
+    0 _TSCH-ALERT ! TLS-E-TRANSPORT _TSCH-IOR !
+    TLS-E-TRANSPORT _TSCH-CTX @ TLS-CTX.ERROR !
+    _TSCH-RECORD-WIPE _TSCH-CLIENT-HELLO-CLEAR
+    _TSCH-EXACT-ABORT DUP IF
+        DROP TLSS-CLOSING _TSCH-CTX @ TLS-CTX.STATE ! EXIT
+    THEN DROP
+    _TSCH-CTX @ _TLS-CONNECTION-REVOKE ;
+
+: _TSCH-PROTOCOL-FAIL  ( alert -- )
+    _TSCH-ALERT ! TLS-E-OK _TSCH-IOR !
+    _TSCH-RECORD-CLEAR _TSCH-CLIENT-HELLO-CLEAR
+    \ The returned wire alert is fatal.  Retain the reciprocal transport and
+    \ credential pin for a later alert sender or TLS-ABORT, but never admit a
+    \ second ClientHello after the caller has observed this peer failure.
+    TLS-E-RECORD _TSCH-CTX @ TLS-CTX.ERROR !
+    0 _TSCH-CTX @ TLS-CTX.PEER-AUTH !
+    TLSS-CLOSING _TSCH-CTX @ TLS-CTX.STATE ! ;
+
+: _TSCH-HEADER-ALERT  ( -- alert )
+    _TSCH-CTX @ TLS-RXW.RECORD C@ TLS-CT-HANDSHAKE <> IF
+        TLS-AD-UNEXPECTED-MESSAGE EXIT
+    THEN
+    _TSCH-CTX @ TLS-RXW.RECORD 1+ C@ 3 <> IF
+        TLS-AD-PROTOCOL-VERSION EXIT
+    THEN
+    _TSCH-CTX @ TLS-RXW.RECORD 2 + C@
+    DUP 1 = SWAP 3 = OR 0= IF TLS-AD-PROTOCOL-VERSION EXIT THEN
+    _TSCH-CTX @ TLS-RXW.RECORD 3 + _BE16@
+    DUP 0= IF DROP TLS-AD-DECODE-ERROR EXIT THEN
+    TLS-PLAINTEXT-FRAGMENT-MAX > IF TLS-AD-RECORD-OVERFLOW EXIT THEN
+    0 ;
+
+\ Make one owner-qualified receive attempt toward NEED.  Positive partial
+\ progress is retained but still reported as WOULD-BLOCK.  NET contention is
+\ separately retryable; every stale/dead/malformed transport result is
+\ terminal for this exact TLS attachment.
+: _TSCH-READ-TO  ( need -- ior )
+    _TSCH-NEED !
+    _TSCH-NEED @ DUP 0< SWAP TLS-RX-RECORD-CAPACITY > OR IF
+        TLS-E-STATE EXIT
+    THEN
+    _TSCH-CTX @ TLS-CTX.RX-REC-LEN @ _TSCH-NEED @ >= IF
+        TLS-E-OK EXIT
+    THEN
+    _TSCH-NEED @ _TSCH-CTX @ TLS-CTX.RX-REC-LEN @ -
+    DUP _TSCH-MISSING !
+    _TSCH-CTX @ _TSCH-CTX @ TLS-RXW.RECORD
+    _TSCH-CTX @ TLS-CTX.RX-REC-LEN @ + ROT
+    _TLS-OWNER-RECV
+    _TSCH-TCP-IOR ! _TSCH-ACTUAL !
+    _TSCH-TCP-IOR @ DUP IF
+        TCP-ACCEPT-E-BUSY = IF TLS-E-BUSY ELSE TLS-E-TRANSPORT THEN
+        EXIT
+    THEN DROP
+    _TSCH-ACTUAL @ DUP 0< IF DROP TLS-E-TRANSPORT EXIT THEN
+    DUP _TSCH-MISSING @ > IF DROP TLS-E-TRANSPORT EXIT THEN
+    _TSCH-CTX @ TLS-CTX.RX-REC-LEN +!
+    _TSCH-CTX @ TLS-CTX.RX-REC-LEN @ _TSCH-NEED @ >= IF
+        TLS-E-OK
+    ELSE
+        TLS-E-WOULD-BLOCK
+    THEN ;
+
+: _TSCH-READ-FAIL  ( ior -- )
+    DUP TLS-E-TRANSPORT = IF
+        DROP _TSCH-TRANSPORT-TERMINAL
+    ELSE
+        _TSCH-IOR !
+    THEN ;
+
+: _TSCH-RESULT  ( -- progress alert ior )
+    _TSCH-PROGRESS @ _TSCH-ALERT @ _TSCH-IOR @ ;
+
+: _TSCH-APPEND-FRAGMENT  ( -- alert )
+    _TSCH-CTX @ TLS-RXW.SERVER-META DUP _TSCH-META !
+    TSM.CH-FILLED + @ _TSCH-FILLED !
+    _TSCH-META @ TSM.CH-LEN + @ _TSCH-EXPECTED !
+    _TSCH-CTX @ TLS-RXW.RECORD 3 + _BE16@ _TSCH-FRAGMENT !
+    _TSCH-FILLED @ 0= IF
+        _TSCH-CTX @ TLS-RXW.RECORD 5 + C@
+        TLSHT-CLIENT-HELLO <> IF TLS-AD-UNEXPECTED-MESSAGE EXIT THEN
+    THEN
+    _TSCH-FILLED @ _TSCH-FRAGMENT @ + DUP _TSCH-NEXT-FILLED !
+    TLS-SERVER-CH-CAPACITY > IF TLS-AD-DECODE-ERROR EXIT THEN
+    _TSCH-EXPECTED @ IF
+        _TSCH-NEXT-FILLED @ _TSCH-EXPECTED @ > IF
+            TLS-AD-DECODE-ERROR EXIT
+        THEN
+    THEN
+    _TSCH-CTX @ TLS-RXW.RECORD 5 +
+    _TSCH-CTX @ TLS-RXW.SERVER-CH _TSCH-FILLED @ +
+    _TSCH-FRAGMENT @ MOVE
+    _TSCH-NEXT-FILLED @ _TSCH-META @ TSM.CH-FILLED + !
+    _TSCH-NEXT-FILLED @ 4 >= _TSCH-EXPECTED @ 0= AND IF
+        _TSCH-CTX @ TLS-RXW.SERVER-CH 1+ _BE24@ 4 +
+        DUP _TSCH-EXPECTED !
+        TLS-SERVER-CH-CAPACITY > IF TLS-AD-DECODE-ERROR EXIT THEN
+        _TSCH-EXPECTED @ _TSCH-META @ TSM.CH-LEN + !
+    THEN
+    _TSCH-EXPECTED @ IF
+        _TSCH-NEXT-FILLED @ _TSCH-EXPECTED @ > IF
+            TLS-AD-DECODE-ERROR EXIT
+        THEN
+    THEN
+    0 ;
+
+: _TSCH-PROCESS-RECORD  ( -- )
+    _TSCH-APPEND-FRAGMENT DUP IF
+        _TSCH-PROTOCOL-FAIL EXIT
+    THEN DROP
+    _TSCH-RECORD-CLEAR
+    _TSCH-EXPECTED @ 0=
+    _TSCH-NEXT-FILLED @ _TSCH-EXPECTED @ < OR IF
+        TLS-SERVER-CLIENT-HELLO-RECORD _TSCH-PROGRESS ! EXIT
+    THEN
+    _TSCH-CTX @ _TSCH-EXPECTED @
+    (TLS-PARSE-RETAINED-CLIENT-HELLO)
+    DUP IF
+        _TSCH-PROTOCOL-FAIL
+    ELSE
+        DROP TLS-SERVER-CLIENT-HELLO-COMPLETE _TSCH-PROGRESS !
+    THEN ;
+
+: (TLS-SERVER-CLIENT-HELLO-STEP)  ( -- progress alert ior )
+    TLS-SERVER-CLIENT-HELLO-NONE _TSCH-PROGRESS !
+    0 _TSCH-ALERT ! TLS-E-OK _TSCH-IOR ! 0 _TSCH-TOTAL !
+    5 _TSCH-READ-TO DUP IF
+        _TSCH-READ-FAIL _TSCH-RESULT EXIT
+    THEN DROP
+    _TSCH-HEADER-ALERT ?DUP IF
+        _TSCH-PROTOCOL-FAIL _TSCH-RESULT EXIT
+    THEN
+    _TSCH-CTX @ TLS-RXW.RECORD 3 + _BE16@ 5 +
+    _TSCH-TOTAL !
+    _TSCH-CTX @ TLS-CTX.RX-REC-LEN @ _TSCH-TOTAL @ > IF
+        TLS-E-STATE _TSCH-IOR ! _TSCH-RESULT EXIT
+    THEN
+    _TSCH-TOTAL @ _TSCH-READ-TO DUP IF
+        _TSCH-READ-FAIL _TSCH-RESULT EXIT
+    THEN DROP
+    _TSCH-PROCESS-RECORD
+    _TSCH-RESULT ;
+
+: _TSCH-RELEASE  ( progress alert ior -- progress alert ior )
+    >R >R >R _TSCH-SCRATCH-WIPE TLS-OWNER-RELEASE R> R> R> ;
+
+: _TSCH-OWNER-TO-ONE  ( -- )
+    BEGIN
+        TLS-OWNER-DEPTH @ 1 > _TLS-OWNER? AND
+    WHILE
+        TLS-OWNER-RELEASE
+    REPEAT ;
+
+: _TSCH-STEP-BODY  ( -- )
+    (TLS-SERVER-CLIENT-HELLO-STEP)
+    _TSCH-IOR ! _TSCH-ALERT ! _TSCH-PROGRESS ! ;
+
+\ A lower invariant throw has already crossed a boundary whose exact
+\ disposition is unknown.  Do no further lower I/O here: erase retained peer
+\ bytes, publish a terminal status, and preserve authority for TLS-ABORT.
+: _TSCH-RECOVERY-FALLBACK  ( -- )
+    TLS-SERVER-CLIENT-HELLO-NONE _TSCH-PROGRESS !
+    0 _TSCH-ALERT ! TLS-E-TRANSPORT _TSCH-IOR !
+    _TSCH-CTX @ DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP EXIT THEN
+    DUP TLS-CTX-CLAIMED? 0= IF DROP EXIT THEN
+    TLS-E-TRANSPORT OVER TLS-CTX.ERROR !
+    0 OVER TLS-CTX.PEER-AUTH !
+    DROP
+    \ A lower receive may have copied bytes before throwing from its ACK path,
+    \ so the published length is not a sufficient wipe bound here.
+    _TSCH-RECORD-WIPE _TSCH-CLIENT-HELLO-CLEAR
+    TLSS-CLOSING _TSCH-CTX @ TLS-CTX.STATE ! ;
+
+: TLS-SERVER-CLIENT-HELLO-STEP
+    ( ctx ctx-generation -- progress alert ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF
+        2DROP TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-STATE EXIT
+    THEN
+    DUP 0= IF
+        2DROP TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-STATE EXIT
+    THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-BUSY EXIT
+    THEN
+    TLS-OWNER-DEPTH @ IF
+        2DROP TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-BUSY EXIT
+    THEN
+    TLS-OWNER-TRY IF
+        2DROP TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-BUSY EXIT
+    THEN
+    _TSCH-CTX-GEN ! _TSCH-CTX !
+    _TSCH-CTX @ TLS-CTX.GENERATION @ _TSCH-CTX-GEN @ <>
+    _TSCH-CTX @ TLS-CTX-CLAIMED? 0= OR IF
+        TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-STATE _TSCH-RELEASE EXIT
+    THEN
+    _TSCH-CTX @ _TSCH-CONTEXT-VALID? 0= IF
+        TLS-SERVER-CLIENT-HELLO-NONE 0 TLS-E-STATE _TSCH-RELEASE EXIT
+    THEN
+    ['] _TSCH-STEP-BODY CATCH ?DUP IF
+        DROP _TSCH-OWNER-TO-ONE _TSCH-RECOVERY-FALLBACK
+    THEN
+    _TSCH-OWNER-TO-ONE _TSCH-RESULT _TSCH-RELEASE ;
 
 \ =====================================================================
 \  §16.9b  TLS 1.3 Server Flight Emission

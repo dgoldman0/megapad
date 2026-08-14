@@ -1756,7 +1756,8 @@ handler wiring.
 | `TLS-CREDENTIAL-DELETE` | `( slot+1 generation -- ior )` | On core 0, synchronously revoke a non-referenced credential, wipe its key/record and complete allocated DER-chain payload, free the payload, and stale the old handle. |
 | `TLS-SERVER-CONTEXT-BEGIN` | `( ctx slot+1 credential-generation alpn-a alpn-u -- ctx-generation ior )` | Begin a server-role handshake with one pinned credential and an owned zero-or-one-name ALPN policy. Success returns the newly claimed nonzero context generation; every failure returns generation zero. Setup is atomic and the pin remains held until publish, abort, close, or another terminal path releases it. Callers must carry the returned generation rather than recover authority by rereading a reusable context slot. |
 | `TLS-SERVER-ACCEPT-ATTACH` | `( ctx ctx-generation listener listener-generation listener-owner -- ior )` | Under TLS-to-NET lock order, validate the exact context incarnation, then consume at most one exact queued child into that prepared, pinned raw server context and publish reciprocal context/TCB generation authority atomically. A stale context generation is rejected before accept-queue mutation. An empty queue returns `TLS-E-WOULD-BLOCK` without mutation; other invalid context state is rejected before queue consumption, while a stale or malformed queued transport token follows the transport's bounded discard/reclaim rules. This is the lower attachment boundary, not yet a secure socket accept or handshake driver. |
-| `TLS-PARSE-CLIENT-HELLO` | `( ctx msg-a msg-u -- alert ior )` | Retain and transactionally admit one complete TLS 1.3 ClientHello. Peer protocol failures return a wire alert with zero `ior`; local failures use zero alert and a negative status. |
+| `TLS-SERVER-CLIENT-HELLO-STEP` | `( ctx ctx-generation -- progress alert ior )` | Make one bounded initial-handshake ingress step on the exact accepted child. It reassembles one ClientHello across arbitrary TCP segmentation and one or more nonempty TLSPlaintext handshake records; each ClientHello-fragment record may use legacy version `0x0301` or `0x0303`. A call completes at most one record and never consumes bytes from the following record. `NONE` plus `TLS-E-WOULD-BLOCK` means no complete record; `RECORD` plus zero `ior` means a nonfinal record committed and the coordinator should step again; `COMPLETE` plus zero `ior` means ClientHello admission committed. NET contention returns `NONE`/`TLS-E-BUSY`; peer framing/parser failure returns a fatal wire alert with zero `ior` and latches `CLOSING` while retaining the child and credential pin for alert/abort disposition. Dead exact transport is reclaimed; stale lower authority clears only the old binding and cannot touch a reused TCB incarnation. |
+| `TLS-PARSE-CLIENT-HELLO` | `( ctx msg-a msg-u -- alert ior )` | Retain and transactionally admit one complete TLS 1.3 ClientHello on an unbound raw server context. Once TCB or socket authority is present, callers must use the attached ingress step. Peer protocol failures return a wire alert with zero `ior`; local failures use zero alert and a negative status. |
 | `TLS-SERVER-PREPARE-HELLO` | `( ctx -- alert ior )` | From an admitted ClientHello, apply pinned-chain signature policy, obtain checked ephemeral/random entropy, build exact ServerHello and EncryptedExtensions bytes, derive X25519/SHA-256 handshake secrets, install server-write/client-read record epochs at sequence zero, and publish the prepared server-hello phase last. Failures erase all phase output while retaining the admitted ClientHello and credential pin for alert/abort cleanup. |
 | `TLS-SERVER-PREPARE-FLIGHT` | `( ctx -- ior )` | From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, derive master/application/exporter secrets without installing application record epochs, and initialize the post-ClientHello emitter union. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This word prepares immutable material but performs no transport callback. |
 | `TLS-SERVER-FLIGHT-STEP-WITH` | `( ctx send-xt -- progress ior )` | Offer at most one retained server-flight record through `send-xt ( ctx record-a record-u -- actual )` without lock 10. The record is borrowed and read-only for the callback. Zero retains byte-identical retry state and returns `TLS-E-WOULD-BLOCK`; retries of that retained record must use the identical `send-xt`. The exact length commits the sequence/cursors and returns `TLS-SERVER-EMIT-RECORD` or `TLS-SERVER-EMIT-COMPLETE`; any short nonzero result, callback exception, or callback lock-10 leak is terminal. This socket-independent entry requires `TLS-CTX.TCB` to be zero. |
@@ -1766,7 +1767,11 @@ handler wiring.
 
 `TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
 and future secrets have published; it is not transport readiness or an
-established connection. Emitter progress values are none (0), one committed
+established connection. Initial ClientHello progress values are
+`TLS-SERVER-CLIENT-HELLO-NONE` (0),
+`TLS-SERVER-CLIENT-HELLO-RECORD` (1), and
+`TLS-SERVER-CLIENT-HELLO-COMPLETE` (2).
+Emitter progress values are none (0), one committed
 record (1), and complete (2). Exact Finished admission installs only the S-AP
 write epoch and publishes `TLSH-CLIENT-FINISHED-PENDING`, retaining the C-HS
 read epoch and its sequence. Ingress progress is
@@ -1832,17 +1837,18 @@ capability generations, not durable rollback counters.
 
 ### §16.8–§16.11 TLS 1.3
 
-Authenticated bounded TLS 1.3 client profile plus a socket-independent
+Authenticated bounded TLS 1.3 client profile plus a partially attached
 standard-profile server handshake boundary. The server admits ClientHello,
 transactionally constructs and emits its signed flight, bounds and discards
 rejected 0-RTT TLSCiphertext, reassembles and authenticates client Finished
 under C-HS, commits the transcript through that message, installs C-AP read,
 and supports explicit establishment publication. It can atomically attach one
-incarnation-safe accepted child to a prepared server TLS context, but the
-existing phase APIs still reject that attached context. It does not yet drive
-the handshake through owner-qualified TCP, accept TLS sockets, transmit ingress
-terminal dispositions, or demonstrate live socket interoperability with an
-independent TLS implementation. Cipher-suite support is:
+incarnation-safe accepted child to a prepared server TLS context, ingest the
+initial ClientHello through owner-qualified TCP, and emit ServerHello through
+the same authority. It does not yet complete the ACK-paced protected flight,
+adapt protected client-flight ingress, accept TLS sockets, transmit terminal
+dispositions, or demonstrate live socket interoperability with an independent
+TLS implementation. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1926,9 +1932,12 @@ record, and clears transient pointers before returning. The generic emitter and
 client-flight feed still require an unbound context. A nonzero raw TCB pointer
 never authorizes the generic callback; the separate attached emitter seals the
 local pair, revalidates reciprocal generation authority inside the fixed NET
-operation, and performs generation-safe terminal cleanup. Attached ingress and
-ACK-paced protected-flight qualification are now the active incompatibilities,
-not a reason for further TCP or crypto expansion.
+operation, and performs generation-safe terminal cleanup. Initial attached
+ClientHello ingress uses the same TLS-to-NET order, retains partial record and
+handshake bytes per context, and refuses the raw parser once transport
+authority exists. Attached protected client-flight ingress and ACK-paced
+protected-flight qualification are now the active incompatibilities, not a
+reason for further TCP or crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at

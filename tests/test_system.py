@@ -24959,6 +24959,11 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         return bytes([handshake_type]) + cls._u24(len(body)) + body
 
     @classmethod
+    def _tls_plaintext(cls, fragment: bytes, version: int = 0x0301) -> bytes:
+        """Wrap one initial-handshake fragment in a TLSPlaintext record."""
+        return b"\x16" + cls._u16(version) + cls._u16(len(fragment)) + fragment
+
+    @classmethod
     def _offered_psk(cls, identity: bytes = b"i", binder: bytes = bytes(32)) -> bytes:
         identity_entry = cls._u16(len(identity)) + identity + bytes(4)
         binder_entry = bytes([len(binder)]) + binder
@@ -25384,9 +25389,10 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
     def test_server_accept_attach_is_atomic_retryable_and_exact(self):
         """A prepared server context consumes only one exact queued child."""
         hello = self._client_hello()
+        hello_record = self._tls_plaintext(hello)
         lines, _ = self._provision_lines()
         lines += self._forth_bytes("server-alpn", self.ALPN)
-        lines += self._forth_bytes("accept-hello", hello)
+        lines += self._forth_bytes("accept-hello-record", hello_record)
         lines += [
             "VARIABLE saa-listener VARIABLE saa-child",
             "VARIABLE saa-lgen VARIABLE saa-cgen VARIABLE saa-ior",
@@ -25496,9 +25502,15 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." RESERVED=" saa-listener @ TCB.AQ-RESERVED @ .',
             '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
             '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
-            f"server-ctx @ accept-hello {len(hello)} "
+            f"server-ctx @ accept-hello-record 5 + {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO",
-            '." PARSE-IOR=" . ." PARSE-ALERT=" .',
+            '." RAW-IOR=" . ." RAW-ALERT=" .',
+            f"saa-child @ accept-hello-record {len(hello_record)} "
+            "(TCP-RX-PUSH)",
+            '." PUSH=" .',
+            "server-ctx @ saa-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." PARSE-IOR=" . ." PARSE-ALERT=" . '
+            '." PARSE-PROGRESS=" .',
             '." PARSE-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
             "server-ctx @ saa-ctx-gen @ saa-listener @ saa-lgen @ "
             "saa-listener-owner "
@@ -25536,11 +25548,347 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "BAD-CHILD-TCB=0 ", "BAD-CHILD-REFS=1 ",
             "ATTACH=0 ", "EXACT=-1 ", "RECIPROCAL=-1 ",
             "COUNT=0 ", "RESERVED=0 ", "STATE=1 ", "HS=10 ",
-            "PARSE-IOR=0 PARSE-ALERT=0 ", "PARSE-HS=11 ",
+            "RAW-IOR=-4204 RAW-ALERT=0 ",
+            f"PUSH={len(hello_record)} ",
+            "PARSE-IOR=0 PARSE-ALERT=0 PARSE-PROGRESS=2 ",
+            "PARSE-HS=11 ",
             "AGAIN=-4204 ", "ABORT=0 ", "CHILD-STATE=0 ",
             "LISTENER=-1 ", "REFS=0 ", "SCRATCH=0 ",
             "TLS-OWNER=0 ", "NET-OWNER=0 ", "DELETE=0 ",
             "ACCEPT-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_client_hello_step_reassembles_exact_tcp_ingress(self):
+        """Initial ClientHello crosses TCP and TLS-record boundaries exactly."""
+        hello = self._client_hello()
+        first_record = self._tls_plaintext(hello[:2], version=0x0301)
+        second_record = self._tls_plaintext(hello[2:], version=0x0303)
+        following_record = b"\x15\x03\x03\x00\x02\x01\x00"
+        segments = (
+            first_record[:2],
+            first_record[2:] + second_record[:3],
+            second_record[3:] + following_record,
+        )
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        seq = 2000
+        frames = []
+        for segment in segments:
+            frames.append(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, seq, 1000,
+                TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+                4096, segment,
+            ))
+            seq += len(segment)
+
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += self._forth_bytes("segmented-hello", hello)
+        lines += [
+            "VARIABLE tsch-ctx 0 TLS-CTX@ tsch-ctx !",
+            "VARIABLE tsch-ctx-gen VARIABLE tsch-listener",
+            "VARIABLE tsch-listener-gen VARIABLE tsch-listener-owner",
+            "VARIABLE tsch-child VARIABLE tsch-child-gen VARIABLE tsch-ior",
+            "CREATE tsch-peer-ip 4 ALLOT CREATE tsch-peer-mac 6 ALLOT",
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "10 0 0 1 tsch-peer-ip IP! tsch-peer-mac 6 170 FILL",
+            "tsch-peer-ip tsch-peer-mac ARP-INSERT",
+            "TCB-ALLOC DROP 0 TCB-N tsch-listener !",
+            "TCPS-LISTEN tsch-listener @ TCB.STATE !",
+            "443 tsch-listener @ TCB.LOCAL-PORT !",
+            "tsch-listener @ tsch-listener-owner TCP-ATTACH",
+            "tsch-ior ! tsch-listener-gen !",
+            "tsch-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN-IOR=" . tsch-ctx-gen !',
+            "TCB-ALLOC DROP 1 TCB-N tsch-child !",
+            "TCPS-ESTABLISHED tsch-child @ TCB.STATE !",
+            "443 tsch-child @ TCB.LOCAL-PORT !",
+            "50000 tsch-child @ TCB.REMOTE-PORT !",
+            "tsch-peer-ip tsch-child @ TCB.REMOTE-IP 4 CMOVE",
+            "1000 tsch-child @ TCB.SND-UNA !",
+            "1000 tsch-child @ TCB.SND-NXT !",
+            "2000 tsch-child @ TCB.RCV-NXT !",
+            "4096 tsch-child @ TCB.SND-WND !",
+            "4096 tsch-child @ TCB.RCV-WND !",
+            "TCP-MSS tsch-child @ TCB.CWND !",
+            "tsch-listener @ TCB-HANDLE@",
+            "tsch-child @ TCB.PARENT-GEN !",
+            "tsch-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN tsch-child @ TCB.AUTH-STATE !",
+            "tsch-listener @ AQ-RESERVE DROP",
+            "tsch-child @ tsch-listener @ AQ-PUSH DROP",
+            "tsch-ctx @ tsch-ctx-gen @ tsch-listener @ "
+            "tsch-listener-gen @ tsch-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." ATTACH=" .',
+            "tsch-ctx @ TLS-CTX.TCB-GENERATION @ tsch-child-gen !",
+            "TCP-POLL",
+            '." FRAME0-RX=" tsch-child @ TCB.RX-COUNT @ .',
+            "tsch-ctx @ tsch-ctx-gen @ 1+ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." STALE-IOR=" . ." STALE-ALERT=" . '
+            '." STALE-PROGRESS=" .',
+            '." STALE-RX=" tsch-child @ TCB.RX-COUNT @ .',
+            '." STALE-REC=" tsch-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            'NET-TX-TRY ." PRENET=" .',
+            "tsch-ctx @ tsch-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." INVERT-IOR=" . ." INVERT-ALERT=" . '
+            '." INVERT-PROGRESS=" .',
+            '." INVERT-NET=" NET-TX-OWNER-DEPTH @ .',
+            "NET-TX-RELEASE",
+            "tsch-ctx @ tsch-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." HEAD-IOR=" . ." HEAD-ALERT=" . '
+            '." HEAD-PROGRESS=" .',
+            '." HEAD-REC=" tsch-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." HEAD-TCP=" tsch-child @ TCB.RX-COUNT @ .',
+            "TCP-POLL",
+            "tsch-ctx @ tsch-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." RECORD1-IOR=" . ." RECORD1-ALERT=" . '
+            '." RECORD1-PROGRESS=" .',
+            '." RECORD1-FILLED=" tsch-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-FILLED + @ .',
+            '." RECORD1-EXPECTED=" tsch-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-LEN + @ .',
+            '." RECORD1-REC=" tsch-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." RECORD1-TCP=" tsch-child @ TCB.RX-COUNT @ .',
+            "tsch-ctx @ tsch-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." RECORD2-HEAD-IOR=" . ." RECORD2-HEAD-ALERT=" . '
+            '." RECORD2-HEAD-PROGRESS=" .',
+            '." RECORD2-HEAD-REC=" tsch-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "TCP-POLL",
+            "tsch-ctx @ tsch-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." FINAL-IOR=" . ." FINAL-ALERT=" . '
+            '." FINAL-PROGRESS=" .',
+            '." FINAL-HS=" tsch-ctx @ TLS-CTX.HS-STATE @ .',
+            '." FINAL-LEN=" tsch-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-LEN + @ .',
+            '." FINAL-FILLED=" tsch-ctx @ TLS-RXW.SERVER-META '
+            'TSM.CH-FILLED + @ .',
+            f'." FINAL-BYTES=" tsch-ctx @ TLS-RXW.SERVER-CH '
+            f'segmented-hello {len(hello)} _XC-BYTES= .',
+            f'." FOLLOWING=" tsch-child @ TCB.RX-COUNT @ .',
+            f'." RCV-NXT=" tsch-child @ TCB.RCV-NXT @ .',
+            '." PIN=" tsch-ctx @ _TLS-SERVER-PINNED? .',
+            '." RECIPROCAL=" tsch-child @ tsch-child-gen @ tsch-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            "tsch-ctx @ tsch-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." AGAIN-IOR=" . ." AGAIN-ALERT=" . '
+            '." AGAIN-PROGRESS=" .',
+            '." AGAIN-TCP=" tsch-child @ TCB.RX-COUNT @ .',
+            '." ABORT=" tsch-ctx @ TLS-ABORT .',
+            '." CHILD-END=" tsch-child @ TCB.STATE @ .',
+            '." LISTENER-END=" tsch-listener @ tsch-listener-gen @ '
+            'tsch-listener-owner TCB-ATTACHED-TO? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines, nic_frames=frames)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN-IOR=0 ", "ATTACH=0 ", "FRAME0-RX=2 ",
+            "STALE-IOR=-4204 STALE-ALERT=0 STALE-PROGRESS=0 ",
+            "STALE-RX=2 ", "STALE-REC=0 ",
+            "PRENET=0 ",
+            "INVERT-IOR=-4206 INVERT-ALERT=0 INVERT-PROGRESS=0 ",
+            "INVERT-NET=1 ",
+            "HEAD-IOR=-4219 HEAD-ALERT=0 HEAD-PROGRESS=0 ",
+            "HEAD-REC=2 ", "HEAD-TCP=0 ",
+            "RECORD1-IOR=0 RECORD1-ALERT=0 RECORD1-PROGRESS=1 ",
+            "RECORD1-FILLED=2 ", "RECORD1-EXPECTED=0 ",
+            "RECORD1-REC=0 ", "RECORD1-TCP=3 ",
+            "RECORD2-HEAD-IOR=-4219 RECORD2-HEAD-ALERT=0 "
+            "RECORD2-HEAD-PROGRESS=0 ",
+            "RECORD2-HEAD-REC=3 ",
+            "FINAL-IOR=0 FINAL-ALERT=0 FINAL-PROGRESS=2 ",
+            "FINAL-HS=11 ",
+            f"FINAL-LEN={len(hello)} ", f"FINAL-FILLED={len(hello)} ",
+            "FINAL-BYTES=-1 ", f"FOLLOWING={len(following_record)} ",
+            f"RCV-NXT={2000 + sum(map(len, segments))} ",
+            "PIN=-1 ", "RECIPROCAL=-1 ",
+            "AGAIN-IOR=-4204 AGAIN-ALERT=0 AGAIN-PROGRESS=0 ",
+            f"AGAIN-TCP={len(following_record)} ",
+            "ABORT=1 ", "CHILD-END=0 ", "LISTENER-END=-1 ",
+            "REFS-END=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_client_hello_step_latches_fatal_peer_alerts(self):
+        """Initial record and handshake failures cannot be retried as a new CH."""
+        hello = self._client_hello()
+        cases = (
+            ("CONTENT", b"\x17\x03\x01\x00\x01\x00", 10),
+            ("VERSION", self._tls_plaintext(b"\x01", 0x0302), 70),
+            ("OVERFLOW", b"\x16\x03\x01\x40\x01", 22),
+            ("EMPTY", b"\x16\x03\x01\x00\x00", 50),
+            ("TRAILING", self._tls_plaintext(hello + b"\x00"), 50),
+        )
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("edge-alpn", self.ALPN)
+        for label, record, _ in cases:
+            lines += self._forth_bytes(f"edge-{label.lower()}", record)
+        lines += [
+            "VARIABLE edge-ctx 0 TLS-CTX@ edge-ctx !",
+            "VARIABLE edge-ctx-gen VARIABLE edge-tcb VARIABLE edge-tcb-gen",
+            "VARIABLE edge-begin-ior VARIABLE edge-attach-ior",
+            ": edge-open",
+            "  edge-ctx @ tc-slot @ tc-gen @ edge-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            "  edge-begin-ior ! edge-ctx-gen !",
+            "  TCB-ALLOC DROP 0 TCB-N edge-tcb !",
+            "  TCPS-ESTABLISHED edge-tcb @ TCB.STATE !",
+            "  4096 edge-tcb @ TCB.RCV-WND !",
+            "  TLS-OWNER-TRY DROP",
+            "  edge-ctx @ edge-tcb @ _TLS-ATTACH-TCB edge-attach-ior !",
+            "  TLS-OWNER-RELEASE",
+            "  edge-ctx @ TLS-CTX.TCB-GENERATION @ edge-tcb-gen ! ;",
+            "TCP-INIT-ALL",
+        ]
+        for label, record, alert in cases:
+            lower = label.lower()
+            lines += [
+                "edge-open",
+                f'." {label}-OPEN=" edge-begin-ior @ . '
+                'edge-attach-ior @ .',
+                f"edge-tcb @ edge-{lower} {len(record)} (TCP-RX-PUSH) DROP",
+                "edge-ctx @ edge-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+                f'." {label}-IOR=" . ." {label}-ALERT=" . '
+                f'." {label}-PROGRESS=" .',
+                f'." {label}-STATE=" edge-ctx @ TLS-CTX.STATE @ .',
+                f'." {label}-ERROR=" edge-ctx @ TLS-CTX.ERROR @ .',
+                f'." {label}-EXACT=" edge-tcb @ edge-tcb-gen @ '
+                'edge-ctx @ TCB-ATTACHED-TO? .',
+                f'." {label}-PIN=" edge-ctx @ _TLS-SERVER-PINNED? .',
+                f'." {label}-REC=" edge-ctx @ TLS-CTX.RX-REC-LEN @ .',
+                f'." {label}-CH=" edge-ctx @ TLS-RXW.SERVER-META '
+                'TSM.CH-FILLED + @ .',
+                "edge-ctx @ edge-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+                f'." {label}-AGAIN-IOR=" . '
+                f'." {label}-AGAIN-ALERT=" . '
+                f'." {label}-AGAIN-PROGRESS=" .',
+                f'." {label}-ABORT=" edge-ctx @ TLS-ABORT .',
+            ]
+        lines += [
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for label, _, alert in cases:
+            for token in (
+                f"{label}-OPEN=0 0 ",
+                f"{label}-IOR=0 {label}-ALERT={alert} "
+                f"{label}-PROGRESS=0 ",
+                f"{label}-STATE=3 ", f"{label}-ERROR=-4203 ",
+                f"{label}-EXACT=-1 ", f"{label}-PIN=-1 ",
+                f"{label}-REC=0 ", f"{label}-CH=0 ",
+                f"{label}-AGAIN-IOR=-4204 {label}-AGAIN-ALERT=0 "
+                f"{label}-AGAIN-PROGRESS=0 ",
+                f"{label}-ABORT=0 ",
+            ):
+                self.assertIn(token, text)
+        for token in (
+            "DELETE=0 ", "REFS=0 ", "TLS-OWNER=0 ",
+            "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_client_hello_step_reclaims_only_terminal_incarnation(self):
+        """EOF and stale lower authority terminate without touching reuse."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("terminal-alpn", self.ALPN)
+        lines += self._forth_bytes("terminal-prefix", b"\x16\x03")
+        lines += [
+            "VARIABLE term-ctx 0 TLS-CTX@ term-ctx !",
+            "VARIABLE term-ctx-gen VARIABLE term-tcb VARIABLE term-old-gen",
+            "VARIABLE term-begin-ior VARIABLE term-attach-ior",
+            "VARIABLE replacement-gen VARIABLE replacement-owner",
+            "VARIABLE replacement-ior",
+            ": term-open",
+            "  term-ctx @ tc-slot @ tc-gen @ terminal-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            "  term-begin-ior ! term-ctx-gen !",
+            "  TCB-ALLOC DROP 0 TCB-N term-tcb !",
+            "  TCPS-ESTABLISHED term-tcb @ TCB.STATE !",
+            "  4096 term-tcb @ TCB.RCV-WND !",
+            "  TLS-OWNER-TRY DROP",
+            "  term-ctx @ term-tcb @ _TLS-ATTACH-TCB term-attach-ior !",
+            "  TLS-OWNER-RELEASE",
+            "  term-ctx @ TLS-CTX.TCB-GENERATION @ term-old-gen ! ;",
+            "TCP-INIT-ALL",
+            "term-open",
+            'term-tcb @ terminal-prefix 2 (TCP-RX-PUSH) DROP',
+            "term-ctx @ term-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." PART-IOR=" . ." PART-ALERT=" . '
+            '." PART-PROGRESS=" .',
+            '." PART-REC=" term-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "TCPS-CLOSE-WAIT term-tcb @ TCB.STATE !",
+            "term-ctx @ term-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." EOF-IOR=" . ." EOF-ALERT=" . '
+            '." EOF-PROGRESS=" .',
+            '." EOF-STATE=" term-ctx @ TLS-CTX.STATE @ .',
+            '." EOF-ERROR=" term-ctx @ TLS-CTX.ERROR @ .',
+            '." EOF-TCB=" term-ctx @ TLS-CTX.TCB @ .',
+            '." EOF-GEN=" term-ctx @ TLS-CTX.TCB-GENERATION @ .',
+            '." EOF-CHILD=" term-tcb @ TCB.STATE @ .',
+            '." EOF-PIN=" term-ctx @ _TLS-SERVER-PINNED? .',
+            '." EOF-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'term-ctx @ TLS-ABORT ." EOF-ABORT=" .',
+            "term-open",
+            "NET-TX-ACQUIRE term-tcb @ TCB-INIT term-tcb @ TCB-CLAIM",
+            "TCPS-ESTABLISHED term-tcb @ TCB.STATE ! NET-TX-RELEASE",
+            "term-tcb @ replacement-owner TCP-ATTACH",
+            "replacement-ior ! replacement-gen !",
+            '." REPLACEMENT=" replacement-ior @ .',
+            '." REUSED=" replacement-gen @ term-old-gen @ <> .',
+            "term-ctx @ term-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." STALE-IOR=" . ." STALE-ALERT=" . '
+            '." STALE-PROGRESS=" .',
+            '." STALE-STATE=" term-ctx @ TLS-CTX.STATE @ .',
+            '." STALE-ERROR=" term-ctx @ TLS-CTX.ERROR @ .',
+            '." STALE-TCB=" term-ctx @ TLS-CTX.TCB @ .',
+            '." STALE-GEN=" term-ctx @ TLS-CTX.TCB-GENERATION @ .',
+            '." NEW-LIVE=" term-tcb @ replacement-gen @ replacement-owner '
+            'TCB-ATTACHED-TO? .',
+            '." NEW-STATE=" term-tcb @ TCB.STATE @ .',
+            '." STALE-PIN=" term-ctx @ _TLS-SERVER-PINNED? .',
+            '." STALE-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'term-ctx @ TLS-ABORT ." STALE-ABORT=" .',
+            "term-tcb @ replacement-gen @ replacement-owner "
+            "TCP-OWNER-ABORT 2DROP",
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "PART-IOR=-4219 PART-ALERT=0 PART-PROGRESS=0 ",
+            "PART-REC=2 ",
+            "EOF-IOR=-4218 EOF-ALERT=0 EOF-PROGRESS=0 ",
+            "EOF-STATE=3 ",
+            "EOF-ERROR=-4218 ", "EOF-TCB=0 ", "EOF-GEN=0 ",
+            "EOF-CHILD=0 ", "EOF-PIN=0 ", "EOF-REFS=0 ",
+            "EOF-ABORT=0 ", "REPLACEMENT=0 ", "REUSED=-1 ",
+            "STALE-IOR=-4218 STALE-ALERT=0 STALE-PROGRESS=0 ",
+            "STALE-STATE=3 ",
+            "STALE-ERROR=-4218 ", "STALE-TCB=0 ", "STALE-GEN=0 ",
+            "NEW-LIVE=-1 ", "NEW-STATE=4 ", "STALE-PIN=0 ",
+            "STALE-REFS=0 ", "STALE-ABORT=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
@@ -26553,6 +26901,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
     def test_server_flight_step_emits_on_exact_accepted_child(self):
         """The attached driver admits ServerHello on its sealed child only."""
         hello, entropy, server_hello, _ = self._certificate_transcript_phase()
+        hello_record = self._tls_plaintext(hello)
         server_hello_record = (
             b"\x16\x03\x03" + self._u16(len(server_hello)) + server_hello
         )
@@ -26560,7 +26909,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         lines, _ = self._provision_lines()
         for name, data in (
             ("server-alpn", self.ALPN),
-            ("attached-hello", hello),
+            ("attached-hello-record", hello_record),
             ("attached-entropy", entropy),
             ("attached-sh-record", server_hello_record),
         ):
@@ -26605,9 +26954,11 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TLS-SERVER-ACCEPT-ATTACH",
             '." ATTACH=" .',
             "server-ctx @ TLS-CTX.TCB-GENERATION @ ae-cgen !",
-            f"server-ctx @ attached-hello {len(hello)} "
-            "TLS-PARSE-CLIENT-HELLO",
-            '." PARSE-IOR=" . ." PARSE-ALERT=" .',
+            f"ae-child @ attached-hello-record {len(hello_record)} "
+            "(TCP-RX-PUSH) DROP",
+            "server-ctx @ ae-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." PARSE-IOR=" . ." PARSE-ALERT=" . '
+            '." PARSE-PROGRESS=" .',
             "TLS-OWNER-TRY DROP",
             "server-ctx @ _TSPH-BEGIN 2DROP",
             "attached-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
@@ -26714,7 +27065,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         self.assertNotIn("Stack underflow", text)
         for token in (
             "BEGIN=0 ", "ATTACH=0 ",
-            "PARSE-IOR=0 PARSE-ALERT=0 ", "PREP=0 ",
+            "PARSE-IOR=0 PARSE-ALERT=0 PARSE-PROGRESS=2 ",
+            "PREP=0 ",
             "SEAL-TCB=-1 ", "SEAL-GEN=-1 ", "SEAL-ZERO=0 ",
             "GENERIC-IOR=-4204 GENERIC-PROGRESS=0 ",
             "GENERIC-CALLS=0 ",
