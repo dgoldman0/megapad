@@ -1836,11 +1836,12 @@ standard-profile server handshake boundary. The server admits ClientHello,
 transactionally constructs and emits its signed flight, bounds and discards
 rejected 0-RTT TLSCiphertext, reassembles and authenticates client Finished
 under C-HS, commits the transcript through that message, installs C-AP read,
-and supports explicit establishment publication. It does not yet attach an
-incarnation-safe accepted child to a server TLS context, accept TLS sockets,
-transmit ingress terminal dispositions, or demonstrate live socket
-interoperability with an independent TLS implementation. Cipher-suite support
-is:
+and supports explicit establishment publication. It can atomically attach one
+incarnation-safe accepted child to a prepared server TLS context, but the
+existing phase APIs still reject that attached context. It does not yet drive
+the handshake through owner-qualified TCP, accept TLS sockets, transmit ingress
+terminal dispositions, or demonstrate live socket interoperability with an
+independent TLS implementation. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1920,11 +1921,13 @@ and lifecycle mutators refuse from prepared emission through ingress completion
 or terminal disposition until explicit publish, close, or abort. Callbacks that
 return holding lock 10 are contained as terminal contract violations. Ingress
 instead retains lock 10 while it copies caller bytes, authenticates at most one
-record, and clears transient pointers before returning. Both boundaries require
-an unbound context. A nonzero raw TCB pointer is rejected; it is never accepted
-as authority, retained in phase metadata, dereferenced, or aborted. TCP now
-supplies incarnation-safe exclusive attachment and accepted-child transfer;
-secure accept must still adapt that authority to these TLS boundaries.
+record, and clears transient pointers before returning. Both phase APIs still
+require an unbound context. A nonzero raw TCB pointer is rejected; it is never
+accepted as authority, retained in phase metadata, dereferenced, or aborted.
+TCP now supplies incarnation-safe exclusive attachment and accepted-child
+transfer, but no attached driver yet adapts that authority to the emitter and
+ingress boundaries. This incompatibility is the active secure-server critical
+path, not a reason for further TCP or crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at

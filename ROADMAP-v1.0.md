@@ -7,13 +7,13 @@ cohesive as a v1.0 release.
 
 **Snapshot audited: 2026-03-07** (425 commits, 140K total lines, 165 tracked files)
 
-**Current correction (2026-08-12):** The counts below remain a historical
-snapshot. Layer 2 is not complete: the one-segment TCP data/control path has
-open ACK/retransmission/RTO/window/admission defects, and TLS server work has
-constructed but not emitted its signed handshake messages or completed secure
-accept. Current transport status is maintained in `docs/tls-hardening.md` and
-the secure-server transport handoff at the workspace root. Application
-features are not the only remaining v1.0 work.
+**Current correction (2026-08-14):** The counts below remain a historical
+snapshot. The bounded one-segment TCP data/control/close profile is qualified.
+Layer 2 remains incomplete because the individually qualified server TLS
+phases are not yet connected to the attached TCP child and public socket API.
+Current transport status and the narrow ordering authority are maintained in
+`docs/tls-hardening.md` and the secure-server transport handoff at the workspace
+root. Application features must not preempt that vertical closure.
 
 ---
 
@@ -96,13 +96,16 @@ Implemented network components, bottom-up:
 13. ✅ **UDP** — header, checksum, `UDP-SEND`/`UDP-RECV`, port demux
 14. ✅ **DHCP** — full state machine, auto-configure on boot
 15. ✅ **DNS** — A-record client, `DNS-RESOLVE`
-16. ⚠️ **TCP** — 11-state machine, 3-way handshake, receive ring,
-    one-outstanding-segment sender, passive accept, and TIME_WAIT reaper;
-    honest ACK/window/retransmission repair remains
+16. ✅ **TCP bounded profile** — 11-state machine, receive ring,
+    one-outstanding-segment sender, strict ACK/window admission, retained
+    data/control replay, passive backlog, exact accepted-child transfer,
+    bounded close, and TIME_WAIT quarantine
 17. 🔄 **TLS 1.3** — authenticated bounded client profile, record/application
     data, X.509 verification, generic ALPN/exporters, native server credential,
-    and deterministic signed server messages; bounded outbound replay, client Finished,
-    secure accept, and independent interoperability remain
+    deterministic signed server messages, bounded outbound replay, client
+    Finished authentication, and exact TCP-child attachment; the attached
+    handshake driver, authenticated socket publication, and one independent
+    interoperability journey remain
 18. 🔄 **Socket API** — ordinary TCP connect/listen/accept and TLS client
     connect exist; TLS-marked listen/accept fail closed until secure accepted
     children are implemented
@@ -270,7 +273,7 @@ CURRENT-SITUATION.
 
 | # | Item | Effort | Priority |
 |---|------|--------|----------|
-| 16–18 | **Secure transport closure** — narrow one-segment TCP repair, bounded TLS server replay/client Finished, secure accept, independent interop | staged; see active handoff | Critical |
+| 16–18 | **Secure server closure** — attached handshake driver, protected terminal output, authenticated TLS socket publication, independent interop | active vertical; see handoff | Critical |
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
@@ -289,16 +292,20 @@ CURRENT-SITUATION.
 
 ### Shortest path to "v1.0 done"
 
-Secure transport closure is the first release path because SCROLL, a remote
-REPL, and later network services otherwise rest on overstated TCP reliability
-or an incomplete server surface. Preserve the qualified TLS crypto/message
-substrate: repair the bounded TCP profile, complete cooperative server replay
-and client Finished, attach secure accepted children, then qualify an
-independent TLS peer and application/close journey.
+Secure server closure is the active release path because a remote REPL and
+later listening services otherwise rest on an incomplete server surface.
+Preserve the completed bounded TCP and TLS crypto/message substrate.
+The remaining order is strict: adapt the existing emitter and ingress to one
+exact attached child, publish no socket before authenticated client Finished,
+prove application I/O and cleanup, and then qualify one independent TLS peer.
+Protocol-maximum capstones, new algorithms, broader TCP, and concurrency work
+are maturity work and must not interrupt this vertical.
 
-After that, SCROLL is the highest-value remaining application feature — it
-turns the network stack into a practical tool for fetching Forth source,
-loading packages over LAN, and browsing docs.
+SCROLL is an independent client-side track now that the bounded client
+TCP/TLS profile is qualified; it does not depend on server accept. It remains a
+high-value application feature for fetching Forth source, loading packages over
+LAN, and browsing docs, but work on it must be explicitly scheduled rather than
+silently expanding the active secure-server milestone.
 
 The editor and remote REPL are polish items that round out the
 interactive experience.  Everything else is post-v1.0 optimization

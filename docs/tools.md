@@ -503,7 +503,7 @@ and live/TAP runs remain approval-gated by `AGENTS.md`.
 | `TestKDOSTLSCredentials` | Lower-owned server credentials, opaque handles, signer lifecycle, cancellation, and cleanup |
 | `TestKDOSTLSServerClientHello` | Full-width server ClientHello admission, server-flight construction/emission, bounded rejected 0-RTT, client-Finished authentication/cutover, independent-oracle composition, and rollback |
 | `TestKDOSTLSAppData` | TLS 1.3 application data: TLS-SEND, TLS-RECV, TLS-CLOSE |
-| `TestKDOSSocket` | Socket API: SOCKET, BIND, LISTEN, ACCEPT, CONNECT, SEND, RECV, CLOSE |
+| `TestKDOSSocket` | TCP listen/accept, TLS client sockets, exact ownership/close, and fail-closed TLS-listener coverage |
 | `TestFieldALU` | Field ALU: FADD–FPOW, MUL_RAW, edge cases, X25519 compatibility |
 | `TestFieldALUSecp256k1` | Field ALU with secp256k1 prime |
 | `TestFieldALUP256` | Field ALU with P-256 prime |

@@ -1,6 +1,10 @@
 # Native TLS Hardening
 
-Status: authenticated bounded client profile plus a complete socket-independent TLS 1.3 server handshake composition through client Finished, explicit publication, ALPN, and exporter; incarnation-safe TCB/TLS/socket ownership, bounded active and passive control transport, retained data, close-notify ordering, FIN completion, and atomic accepted-child transfer into a prepared server context implemented; the attached handshake driver, secure listener/socket integration, and external-stack interoperability remain gated
+Status: no usable listening TLS server yet; the bounded client profile,
+socket-independent server handshake through client Finished, exact lower
+transport ownership/close, and atomic queued-child attachment are qualified,
+but the attached driver and authenticated accepted-socket publication are the
+single active critical path
 Last updated: 2026-08-14
 
 ## Purpose
@@ -924,14 +928,15 @@ and failure atomicity. Focused secure-accept evidence additionally proves
 empty-queue retry, pre-consumption rejection, stale-child reclamation, exact
 reciprocal context/TCB publication, continued ClientHello parsing, and abort
 cleanup without disturbing the listener. They do not yet prove the attached
-handshake driver, the uint24-maximum emitted Certificate, secure socket
-acceptance, or interoperability over sockets with an independent TLS stack.
+handshake driver, secure socket acceptance, or interoperability over sockets
+with an independent TLS stack. The uint24-maximum Certificate capstone is
+separate maturity evidence and must not delay this vertical closure.
 
 Signer and credential fixtures use only standardized or synthetic test
 scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
 credential. None enters a product trust bundle or production credential slot.
 
-## Remaining Release Blockers
+## Active Transport Closure and Deferred Maturity
 
 ### Secure server transport
 
@@ -946,14 +951,13 @@ credential. None enters a product trust bundle or production credential slot.
 - Publish a TLS accepted socket only after client Finished authentication and
   explicit handshake publication. Prove credential-pin/reference and exact
   TCB-owner cleanup on every failure.
-- Implement and then run a reproducible uint24-maximum Certificate capstone
-  through the existing streamed emitter, with an independent oracle for exact
-  framing, record boundaries, retry, transcript, and application-secret
-  agreement.
 - Qualify socket lifecycle, application bytes, exporter equality, and
   close-notify/FIN completion against an independent TLS 1.3 implementation.
+- Return exact backpressure and terminal statuses from the attached driver.
+  Keep deadlines caller-owned unless the live journey demonstrates a missing
+  lower timeout requirement.
 
-### Trust lifecycle
+### Post-closure trust lifecycle
 
 - Define a signed native trust-bundle update format and immutable bootstrap
   verification key or reviewed physical provisioning ceremony.
@@ -964,14 +968,8 @@ credential. None enters a product trust bundle or production credential slot.
 - Decide whether revocation is supported through stapled OCSP, short-lived
   scoped anchors, or another bounded policy.
 
-### Protocol correctness
+### Post-closure protocol maturity
 
-- Complete the bounded cooperative server state machine with cancellation and
-  precise timeout statuses. The existing blocking client remains a qualified
-  compatibility path for this milestone; converging it onto the cooperative
-  engine is tracked maturity work, not a prerequisite to secure-server closure.
-- Finish the public EOF/retry/timeout/protocol-failure status surface and
-  independently qualify the checked close/abort lifecycle over live sockets.
 - Either keep the reusable raw-context interface internal or replace its bare
   pointer lifetime with an opaque generational handle. Socket-owned TLS
   contexts already use reciprocal generations; raw pointers do not.
@@ -981,6 +979,12 @@ credential. None enters a product trust bundle or production credential slot.
   after provisioning a reviewed scoped trust bundle.
 - Keep the public and private ClientHello profiles separate; do not assign
   experimental wire formats to registered NamedGroup values.
+
+### Deferred maturity evidence
+
+- Implement and run a reproducible uint24-maximum Certificate capstone through
+  the existing streamed emitter, with an independent oracle for exact framing,
+  record boundaries, retry, transcript, and application-secret agreement.
 
 ### Algorithm coverage
 

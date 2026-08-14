@@ -95,7 +95,8 @@
 - **Crypto**: SHA3-512, SHA-256 accelerator, AES-128 mode, CRC
   ISA migration (MMIO removed), AES-GCM partial block masking.
 - **TLS 1.3**: Dual cipher suites (0xFF01, 0x1301), record framing, SNI.
-- **Network tools**: HTTP/HTTPS, FTP/FTPS, Gopher, DNS-LOOKUP.
+- **Network tools**: HTTP/HTTPS, FTP and a provisional non-interoperable FTPS
+  helper, Gopher, DNS-LOOKUP.
 - **System**: Userland memory isolation, headless mode, ext mem,
   micro-cluster fix, NET-IDLE, autoexec.f boot chain.
 

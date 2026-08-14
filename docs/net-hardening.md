@@ -1,8 +1,9 @@
 # TCP Accept-Queue and Authority Hardening
 
 **Status:** Incarnation-safe TCB/TLS/socket ownership, bounded active and
-passive control transport, and retained FIN completion are implemented; the
-accepted-child TLS adapter and secure TLS socket accept are not implemented
+passive control transport, retained FIN completion, and atomic queued-child
+attachment to a prepared TLS server context are implemented; the attached
+handshake driver and authenticated TLS socket publication are not implemented
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -12,9 +13,10 @@ fresh child TCB. The child is not public authority merely because code has its
 address: allocation, passive lineage, queueing, attachment, close, and abort
 are now checked against an exact TCB generation and owner.
 
-This milestone supplies the transport authority needed by secure accept. It
-does not yet attach a queued child to a server TLS context or publish an
-authenticated TLS socket.
+This milestone supplies the transport authority needed by secure accept, and
+`TLS-SERVER-ACCEPT-ATTACH` now transfers one exact queued child into a prepared
+TLS server context. It does not yet drive the handshake over that attachment or
+publish an authenticated TLS socket.
 
 ## TCB and table geometry
 
@@ -155,7 +157,7 @@ reclaims the exact failed TCB.
 
 Final affected sequential source-mode evidence for this milestone is 39/39
 `TestKDOSTLSAppData`, 25/25 socket/readiness, 28/28 `TestToolsModule`, and
-42/42 complete server-handshake tests. The preceding unchanged lower baseline
+43/43 server-component tests. The preceding unchanged lower baseline
 passed 279/279 `TestKDOSNetStack` and 65/65 adjacent
 hardening/source-selection tests. The four-core credential and server-flight
 cancellation capstones passed together, 2/2 in 665.79 seconds. Their snapshot
@@ -168,12 +170,14 @@ construction ceiling, while each capstone retains its independent
 ## Remaining secure-server boundary
 
 The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
-and `SOCK-ACCEPT` still fail closed before consuming a child. Remaining work
-includes:
+and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
+critical path is:
 
-- claim a queued child directly into a prepared server TLS context;
 - adapt the qualified server-flight emitter and client-flight ingress to the
   exact attached TCB without exposing plaintext;
+- frame and admit the initial ClientHello through the same attached authority;
+- transmit protected fatal/close dispositions rather than retaining only a
+  terminal classification;
 - publish an accepted socket only after client Finished authentication and
   explicit TLS establishment;
 - qualify the complete socket lifecycle and close against an independent TLS

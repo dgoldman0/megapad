@@ -52,11 +52,14 @@ NTT, ML-KEM-512, hybrid PQ exchange).
 Transport is still under active qualification. The current TCP sender is a
 one-outstanding-segment profile: retained data now has strict cumulative-ACK
 accounting, bounded replay/failure, peer/congestion-window admission, durable
-ACK intent, and nonblocking neighbor recovery. Retained SYN/SYN-ACK/FIN replay,
-half-open admission, and graceful TLS close remain open. The TLS server has
-transactionally constructed its signed handshake messages but has not emitted
-plaintext ServerHello plus the protected remainder, authenticated client
-Finished, or enabled secure listen/accept. See
+ACK intent, nonblocking neighbor recovery, bounded SYN/SYN-ACK/FIN replay,
+half-open admission, and close-notify-before-FIN teardown. The TLS server can
+construct and emit its complete flight in a socket-independent composition,
+authenticate client Finished, and attach one exact queued TCP child to a
+prepared server context. It does not yet have an attached handshake driver or
+publish an authenticated accepted socket, so TLS listen/accept remains
+fail-closed. The immediate release path is only that attached vertical slice,
+one independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 
