@@ -9747,7 +9747,9 @@ CONSTANT TLS-SERVER-PENDING-STRIDE
 112 CONSTANT TSE.NEXT-CHAIN-OFF
 120 CONSTANT TSE.NEXT-CURRENT-CERT-U
 128 CONSTANT TSE.NEXT-CERT-INDEX
-136 CONSTANT /TLS-SERVER-EMIT-META
+136 CONSTANT TSE.TCB-SEAL
+144 CONSTANT TSE.TCB-GEN-SEAL
+152 CONSTANT /TLS-SERVER-EMIT-META
 
 \ Inbound client-flight state follows the emitter metadata in the same
 \ one-way post-ClientHello phase union.  Keeping it outside the emitter's
@@ -9803,6 +9805,8 @@ CONSTANT TLS-SERVER-PENDING-STRIDE
 1 CONSTANT TLS-SERVER-EMIT-RECORD
 2 CONSTANT TLS-SERVER-EMIT-COMPLETE
 
+-2 CONSTANT _TSSE-RESULT-BUSY
+
 1 CONSTANT TSMF-CRED-PINNED
 2 CONSTANT TSMF-CLIENT-HELLO-VALID
 4 CONSTANT TSMF-EARLY-DATA-OFFERED
@@ -9814,8 +9818,10 @@ CONSTANT TLS-SERVER-PENDING-STRIDE
 
 : _TLS-SERVER-EMIT-INIT  ( ctx -- )
     DUP _TLS-SERVER-EMIT-UNION-WIPE
-    TLS-SERVER-EMIT-PHASE-SH
-    SWAP TLS-RXW.SERVER-EMIT-META TSE.PHASE + ! ;
+    DUP TLS-RXW.SERVER-EMIT-META >R
+    DUP TLS-CTX.TCB @ R@ TSE.TCB-SEAL + !
+    TLS-CTX.TCB-GENERATION @ R@ TSE.TCB-GEN-SEAL + !
+    TLS-SERVER-EMIT-PHASE-SH R> TSE.PHASE + ! ;
 
 0   CONSTANT TSL.SH
 122 CONSTANT TSL.EE
@@ -13687,10 +13693,12 @@ VARIABLE _TEX-OLEN
 \   accepted or independently retained every byte; any other result is
 \   terminal.  The callback must return without owning TLS lock 10.
 \
-\ The TCP adapter is intentionally deferred until secure accept can transfer
-\ an accepted TCB to exactly one TLS context with incarnation-safe ownership.
-\ A raw TCB pointer is not that authority and must not masquerade as one here;
-\ this socket-independent checkpoint therefore requires TLS-CTX.TCB to be 0.
+\ This generic callback boundary remains socket-independent and requires an
+\ exact zero transport seal.  TLS-SERVER-FLIGHT-STEP is the separate attached
+\ entry: it uses only the accepted child's sealed reciprocal authority and
+\ never grants a caller-selected callback access to that transport token.
+\ Its `( ctx ctx-generation -- progress ior )` handle also rejects a stale
+\ context incarnation before any retained record or TCP state can mutate.
 \
 \ Plaintext ServerHello has an ordinary TLSPlaintext header and consumes no
 \ protected-record sequence.  Later handshake messages are encrypted exactly
@@ -13719,6 +13727,8 @@ VARIABLE _TSSE-SEQ
 VARIABLE _TSSE-REC-U
 VARIABLE _TSSE-IOR
 VARIABLE _TSSE-SEND-XT
+VARIABLE _TSSE-SEALED-TCB
+VARIABLE _TSSE-SEALED-GEN
 
 VARIABLE _TSSE-GUARD-CTX
 VARIABLE _TSSE-GUARD-XT
@@ -13743,12 +13753,13 @@ VARIABLE _TSSE-GUARD-IOR
     0 _TSSE-CERT-INDEX ! 0 _TSSE-SRC ! 0 _TSSE-U !
     0 _TSSE-OUT-U ! 0 _TSSE-LEFT ! 0 _TSSE-STOP !
     0 _TSSE-SEQ ! 0 _TSSE-REC-U ! 0 _TSSE-IOR ! 0 _TSSE-SEND-XT !
+    0 _TSSE-SEALED-TCB ! 0 _TSSE-SEALED-GEN !
     0 _TSSE-CTX ! ;
 
 : _TSSE-PENDING-WIPE  ( ctx -- )
     DUP TLS-RXW.SERVER-PENDING TLS-SERVER-PENDING-STRIDE 0 FILL
     TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE +
-    /TLS-SERVER-EMIT-META TSE.PENDING-STATE - 0 FILL ;
+    TSE.TCB-SEAL TSE.PENDING-STATE - 0 FILL ;
 
 : _TSSE-DRIVER-OURS?  ( ctx -- flag )
     TLS-RXW.SERVER-EMIT-META
@@ -13827,12 +13838,34 @@ VARIABLE _TSSE-GUARD-IOR
     _TSSE-META @ TSM.CURRENT-CERT-U + @ _TSSE-CERT-U !
     _TSSE-META @ TSM.CERT-INDEX + @ _TSSE-CERT-INDEX ! ;
 
-: _TSSE-CONTEXT-VALID?  ( ctx -- flag )
+: _TSSE-SEAL@  ( ctx -- tcb generation )
+    TLS-RXW.SERVER-EMIT-META
+    DUP TSE.TCB-SEAL + @ SWAP TSE.TCB-GEN-SEAL + @ ;
+
+: _TSSE-SEAL-ZERO?  ( ctx -- flag )
+    _TSSE-SEAL@ OR 0= ;
+
+: _TSSE-SEAL-CURRENT?  ( ctx -- flag )
+    DUP _TSSE-SEAL@
+    2 PICK TLS-CTX.TCB-GENERATION @ = >R
+    SWAP TLS-CTX.TCB @ = R> AND ;
+
+: _TSSE-SEAL-BOUND?  ( ctx -- flag )
+    DUP _TSSE-SEAL@ SWAP 0<> SWAP 0<> AND
+    SWAP _TSSE-SEAL-CURRENT? AND ;
+
+: _TSSE-CONTINUITY-VALID?  ( ctx -- flag )
+    DUP _TSSE-SEAL-ZERO? IF
+        DUP TLS-CTX.TCB @ 0=
+        SWAP TLS-CTX.TCB-GENERATION @ 0= AND
+    ELSE
+        _TSSE-SEAL-BOUND?
+    THEN ;
+
+: _TSSE-PROTOCOL-VALID?  ( ctx -- flag )
     DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
     DUP TLS-CTX.STATE @ TLSS-HANDSHAKE =
     OVER TLS-CTX.ROLE @ TLS-ROLE-SERVER = AND
-    OVER TLS-CTX.TCB @ 0= AND
-    OVER TLS-CTX.TCB-GENERATION @ 0= AND
     OVER TLS-CTX.ERROR @ TLS-E-OK = AND
     OVER _TLS-SERVER-PINNED? AND
     OVER TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + @
@@ -13849,6 +13882,10 @@ VARIABLE _TSSE-GUARD-IOR
         OVER TLS-CTX.HS-STATE @ TLSH-SERVER-FLIGHT-READY = AND
     THEN
     SWAP DROP ;
+
+: _TSSE-CONTEXT-VALID?  ( ctx -- flag )
+    DUP _TSSE-PROTOCOL-VALID? 0= IF DROP 0 EXIT THEN
+    _TSSE-CONTINUITY-VALID? ;
 
 : _TSSE-PLAINTEXT-HEADER!  ( len out -- )
     >R
@@ -14076,10 +14113,28 @@ VARIABLE _TSSE-GUARD-IOR
     DUP TSE.NEXT-CURRENT-CERT-U + @ R@ TSM.CURRENT-CERT-U + !
     TSE.NEXT-CERT-INDEX + @ R> TSM.CERT-INDEX + ! ;
 
+: _TSSE-SEALED-ABORT  ( ctx -- ior )
+    DUP _TSSE-SEAL@ _TSSE-SEALED-GEN ! _TSSE-SEALED-TCB !
+    _TSSE-SEALED-TCB @ _TSSE-SEALED-GEN @ OR 0= IF DROP TLS-E-OK EXIT THEN
+    _TSSE-SEALED-TCB @ 0= _TSSE-SEALED-GEN @ 0= OR IF
+        DROP TLS-E-TRANSPORT EXIT
+    THEN
+    _TSSE-SEALED-TCB @ _TSSE-SEALED-GEN @ ROT
+    TCP-OWNER-ABORT-ACQUIRE
+    DUP 0= IF 2DROP TLS-E-OK EXIT THEN
+    DUP TCP-ACCEPT-E-STALE = IF 2DROP TLS-E-OK EXIT THEN
+    NIP ;
+
 : _TSSE-TERMINAL  ( ctx ior -- progress ior )
     DUP 0= IF DROP TLS-E-TRANSPORT THEN _TSSE-IOR !
     _TSSE-CTX !
     _TSSE-IOR @ _TSSE-CTX @ TLS-CTX.ERROR !
+    _TSSE-CTX @ _TSSE-SEALED-ABORT DUP IF
+        DROP
+        _TSSE-CTX @ _TSSE-DRIVER-CLEAR
+        _TSSE-IOR @ >R _TSSE-RECORD-SCRATCH-WIPE
+        TLS-SERVER-EMIT-NONE R> EXIT
+    THEN DROP
     _TSSE-CTX @ _TSSE-DRIVER-CLEAR
     _TSSE-CTX @ _TLS-SERVER-EMIT-UNION-WIPE
     0 _TSSE-CTX @ TLS-CTX.TCB-GENERATION !
@@ -14104,6 +14159,16 @@ VARIABLE _TSSE-GUARD-IOR
     _TSSE-EMETA @ TSE.THROW + @ IF
         TLS-E-TRANSPORT _TSSE-TERMINAL EXIT
     THEN
+    _TSSE-EMETA @ TSE.RESULT + @ DUP _TSSE-RESULT-BUSY = IF
+        DROP
+        DUP _TSSE-SEAL-BOUND? 0= IF
+            TLS-E-TRANSPORT _TSSE-TERMINAL EXIT
+        THEN
+        TLS-SERVER-PENDING-READY _TSSE-EMETA @ TSE.PENDING-STATE + !
+        0 _TSSE-EMETA @ TSE.RESULT + !
+        DUP _TSSE-DRIVER-CLEAR DROP
+        TLS-SERVER-EMIT-NONE TLS-E-BUSY EXIT
+    THEN DROP
     _TSSE-EMETA @ TSE.RESULT + @ DUP 0= IF
         DROP
         TLS-SERVER-PENDING-READY _TSSE-EMETA @ TSE.PENDING-STATE + !
@@ -14216,7 +14281,12 @@ VARIABLE _TSSE-GUARD-IOR
 : _TSSE-RECOVERY-FALLBACK  ( -- )
     _TSSE-GUARD-CTX @ DUP TLS-CTX-MEMBER? 0= IF DROP EXIT THEN
     DUP _TSSE-DRIVER-CLEAR
-    DUP _TLS-SERVER-EMIT-UNION-WIPE
+    \ Terminal cleanup itself threw, so the exact transport disposition is
+    \ unknown.  Erase retained wire bytes and callback state, but preserve the
+    \ emitter phase/seal plus the reciprocal TLS fields and credential pin.
+    \ TLS-ABORT can then retry exact reclaim; wiping the union here would lose
+    \ the only sealed incarnation token while a child may still be attached.
+    DUP _TSSE-PENDING-WIPE
     _TSSE-GUARD-IOR @ OVER TLS-CTX.ERROR !
     0 OVER TLS-CTX.PEER-AUTH !
     DUP TLS-EXPORTER-WIPE
@@ -14327,7 +14397,45 @@ VARIABLE _TSSE-GUARD-IOR
     TLS-OWNER-TRY IF
         2DROP TLS-SERVER-EMIT-NONE TLS-E-BUSY EXIT
     THEN
+    OVER _TSSE-SEAL-ZERO? 0= IF
+        2DROP TLS-OWNER-RELEASE
+        TLS-SERVER-EMIT-NONE TLS-E-STATE EXIT
+    THEN
     _TSSE-STEP-OWNED ;
+
+: _TLS-SERVER-FLIGHT-TCP-SEND  ( ctx record-a record-u -- actual )
+    >R >R
+    DUP _TSSE-SEAL@ 2 PICK R> R> TCP-OWNER-SEND-EXACT
+    DUP 0= IF DROP NIP EXIT THEN
+    TCP-ACCEPT-E-BUSY = IF
+        2DROP _TSSE-RESULT-BUSY
+    ELSE
+        2DROP -1
+    THEN ;
+
+: TLS-SERVER-FLIGHT-STEP  ( ctx ctx-generation -- progress ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF
+        2DROP TLS-SERVER-EMIT-NONE TLS-E-STATE EXIT
+    THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP TLS-SERVER-EMIT-NONE TLS-E-BUSY EXIT
+    THEN
+    TLS-OWNER-DEPTH @ IF
+        2DROP TLS-SERVER-EMIT-NONE TLS-E-BUSY EXIT
+    THEN
+    TLS-OWNER-TRY IF
+        2DROP TLS-SERVER-EMIT-NONE TLS-E-BUSY EXIT
+    THEN
+    DUP 0= 2 PICK TLS-CTX.GENERATION @ 2 PICK <> OR
+    2 PICK TLS-CTX-CLAIMED? 0= OR IF
+        2DROP TLS-OWNER-RELEASE
+        TLS-SERVER-EMIT-NONE TLS-E-STATE EXIT
+    THEN
+    OVER _TSSE-SEAL-BOUND? 0= IF
+        2DROP TLS-OWNER-RELEASE
+        TLS-SERVER-EMIT-NONE TLS-E-STATE EXIT
+    THEN
+    DROP ['] _TLS-SERVER-FLIGHT-TCP-SEND _TSSE-STEP-OWNED ;
 
 \ =====================================================================
 \  §16.10  TLS 1.3 Application Data (RFC 8446 §5.1)

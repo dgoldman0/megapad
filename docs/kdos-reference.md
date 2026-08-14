@@ -1760,6 +1760,7 @@ handler wiring.
 | `TLS-SERVER-PREPARE-HELLO` | `( ctx -- alert ior )` | From an admitted ClientHello, apply pinned-chain signature policy, obtain checked ephemeral/random entropy, build exact ServerHello and EncryptedExtensions bytes, derive X25519/SHA-256 handshake secrets, install server-write/client-read record epochs at sequence zero, and publish the prepared server-hello phase last. Failures erase all phase output while retaining the admitted ClientHello and credential pin for alert/abort cleanup. |
 | `TLS-SERVER-PREPARE-FLIGHT` | `( ctx -- ior )` | From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, derive master/application/exporter secrets without installing application record epochs, and initialize the post-ClientHello emitter union. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This word prepares immutable material but performs no transport callback. |
 | `TLS-SERVER-FLIGHT-STEP-WITH` | `( ctx send-xt -- progress ior )` | Offer at most one retained server-flight record through `send-xt ( ctx record-a record-u -- actual )` without lock 10. The record is borrowed and read-only for the callback. Zero retains byte-identical retry state and returns `TLS-E-WOULD-BLOCK`; retries of that retained record must use the identical `send-xt`. The exact length commits the sequence/cursors and returns `TLS-SERVER-EMIT-RECORD` or `TLS-SERVER-EMIT-COMPLETE`; any short nonzero result, callback exception, or callback lock-10 leak is terminal. This socket-independent entry requires `TLS-CTX.TCB` to be zero. |
+| `TLS-SERVER-FLIGHT-STEP` | `( ctx ctx-generation -- progress ior )` | Advance at most one retained server-flight record over the accepted-child pair sealed by flight preparation. The fixed adapter checks reciprocal authority inside its owner-qualified NET transaction and uses all-or-none TCP admission: NET contention returns `TLS-E-BUSY`, live zero-byte backpressure returns `TLS-E-WOULD-BLOCK`, and both retain the record and seal. A dead still-exact child is aborted before TLS binding and secrets are erased; stale lower authority is treated as already disposed, so only the old TLS binding is cleared and a reused TCB incarnation is untouched. Same-task NET ownership, caller-selected callbacks, and stale context incarnations cannot enter this attached path. |
 | `TLS-SERVER-CLIENT-FLIGHT-BEGIN` | `( ctx early-wire-budget -- ior )` | From a completely emitted, unbound (`TLS-CTX.TCB == 0`) server flight in `TLSH-CLIENT-FINISHED-PENDING` with read sequence zero, seal a nonnegative complete-wire-byte budget for discarding rejected 0-RTT records. Zero is valid. The budget is usable only when the owned ClientHello offered `early_data`; no hidden default is imposed. |
 | `TLS-SERVER-CLIENT-FLIGHT-FEED` | `( ctx bytes-a bytes-u -- consumed progress alert-desc ior )` | Copy at most through one complete client-flight record, retaining a partial header/body or Finished fragment per context; the caller retains and resubmits any unconsumed tail. Incomplete input returns the consumed count, `TLS-SERVER-INGRESS-NONE`, zero alert, and `TLS-E-WOULD-BLOCK`. Exact compatibility CCS is ignored. Failed C-HS trial decryption consumes the sealed 0-RTT budget without advancing sequence only until the first authenticated record. Successful exact client-Finished verification commits its transcript, installs C-AP read, and returns `TLS-SERVER-INGRESS-FINISHED`. Terminal progress returns an outbound alert description or the preserved peer alert description but does not claim wire transmission. |
 
@@ -1921,13 +1922,13 @@ and lifecycle mutators refuse from prepared emission through ingress completion
 or terminal disposition until explicit publish, close, or abort. Callbacks that
 return holding lock 10 are contained as terminal contract violations. Ingress
 instead retains lock 10 while it copies caller bytes, authenticates at most one
-record, and clears transient pointers before returning. Both phase APIs still
-require an unbound context. A nonzero raw TCB pointer is rejected; it is never
-accepted as authority, retained in phase metadata, dereferenced, or aborted.
-TCP now supplies incarnation-safe exclusive attachment and accepted-child
-transfer, but no attached driver yet adapts that authority to the emitter and
-ingress boundaries. This incompatibility is the active secure-server critical
-path, not a reason for further TCP or crypto expansion.
+record, and clears transient pointers before returning. The generic emitter and
+client-flight feed still require an unbound context. A nonzero raw TCB pointer
+never authorizes the generic callback; the separate attached emitter seals the
+local pair, revalidates reciprocal generation authority inside the fixed NET
+operation, and performs generation-safe terminal cleanup. Attached ingress and
+ACK-paced protected-flight qualification are now the active incompatibilities,
+not a reason for further TCP or crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at
@@ -1942,7 +1943,7 @@ holding the bounded 73,732-byte post-handshake message, plus a 131,146-byte
 ClientHello lane, an 8,192-byte one-way phase union, a 512-byte immutable
 server-message ledger, and 200 bytes of exact flight metadata. The union is the
 complete duplicate-extension bitmap during ClientHello admission; after flight
-preparation it contains the leading TCP-MSS-sized pending-record lane, 136
+preparation it contains the leading TCP-MSS-sized pending-record lane, 152
 bytes of emitter metadata, and 64 bytes of ingress metadata without changing
 workspace geometry. Client-flight partial records use the existing 16,896-byte
 record lane, and up to 36 fragmented Finished bytes use the per-context retained

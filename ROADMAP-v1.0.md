@@ -273,7 +273,7 @@ CURRENT-SITUATION.
 
 | # | Item | Effort | Priority |
 |---|------|--------|----------|
-| 16–18 | **Secure server closure** — attached handshake driver, protected terminal output, authenticated TLS socket publication, independent interop | active vertical; see handoff | Critical |
+| 16–18 | **Secure server closure** — attached ingress/coordinator, protected terminal output, authenticated TLS socket publication, independent interop | active vertical; see handoff | Critical |
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
@@ -295,9 +295,11 @@ CURRENT-SITUATION.
 Secure server closure is the active release path because a remote REPL and
 later listening services otherwise rest on an incomplete server surface.
 Preserve the completed bounded TCP and TLS crypto/message substrate.
-The remaining order is strict: adapt the existing emitter and ingress to one
-exact attached child, publish no socket before authenticated client Finished,
-prove application I/O and cleanup, and then qualify one independent TLS peer.
+The remaining order is strict: feed initial ClientHello over the exact child,
+drive the ACK-paced protected server-flight remainder through Finished, feed
+client Finished over that same authority, deliver protected terminal
+dispositions, publish no socket before authenticated client Finished, prove
+application I/O and cleanup, and then qualify one independent TLS peer.
 Protocol-maximum capstones, new algorithms, broader TCP, and concurrency work
 are maturity work and must not interrupt this vertical.
 

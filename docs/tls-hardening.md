@@ -3,8 +3,9 @@
 Status: no usable listening TLS server yet; the bounded client profile,
 socket-independent server handshake through client Finished, exact lower
 transport ownership/close, and atomic queued-child attachment are qualified,
-but the attached driver and authenticated accepted-socket publication are the
-single active critical path
+and the attached ServerHello exact-send boundary is now qualified. ACK-paced
+protected-flight completion, attached ingress, protected dispositions, and
+authenticated accepted-socket publication are the single active critical path
 Last updated: 2026-08-14
 
 ## Purpose
@@ -44,11 +45,15 @@ connection-owned emitter now retains one exact record across backpressure,
 emits plaintext ServerHello followed by MSS-fitting protected records through
 Finished, commits its sequence and cursors only after exact admission, and
 installs only the S-AP write epoch after Finished admission. Its transport
-callback is socket-independent. `TLS-SERVER-ACCEPT-ATTACH` now consumes one
+callback qualification remains socket-independent.
+`TLS-SERVER-ACCEPT-ATTACH` now consumes one
 generation-qualified queued child and publishes reciprocal context/TCB
-authority in one TLS-to-NET transaction. Binding the emitter and ingress
-engines to that authority remains deferred until callback continuity,
-terminal transport cleanup, and protected disposition output are qualified.
+authority in one TLS-to-NET transaction. `TLS-SERVER-FLIGHT-STEP` seals that
+exact pair during flight preparation, uses a dedicated owner-qualified TCP
+adapter, and retains byte-identical backpressure. It exact-aborts a dead current
+child; stale lower authority clears only the old TLS binding and cannot reclaim
+a reused TCB incarnation. Ingress and protected disposition output are not yet
+bound to the child.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,
 commits the transcript through that message, installs C-AP read, and leaves
@@ -58,9 +63,11 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is the attached handshake driver, secure socket
-accept/publication, and interoperability over that path with an independent
-TLS implementation. The following lower-level facts
+The remaining server work is initial ingress over the attachment, ACK-paced
+completion of its protected outbound flight, attached client-flight ingress,
+protected terminal output, secure socket accept/publication, and
+interoperability over that path with an independent TLS implementation. The
+following lower-level facts
 continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
@@ -490,7 +497,7 @@ orphaning the credential pin needed by abort cleanup.
 `TLS-SERVER-FLIGHT-STEP-WITH` advances that immutable flight through a
 socket-independent all-or-none callback. After flight preparation, the dead
 8192-byte duplicate-extension bitmap becomes a one-way phase union containing
-one exact TCP-MSS-sized pending TLS record, 136 bytes of emitter metadata, and
+one exact TCP-MSS-sized pending TLS record, 152 bytes of emitter metadata, and
 64 bytes of ingress metadata; workspace geometry does not grow. Client-flight
 partial records later reuse the existing 16,896-byte record lane, while at most
 36 fragmented Finished bytes use the per-context retained lane. Plaintext
@@ -511,13 +518,23 @@ public record, key-schedule, ALPN-publication, alert, and post-handshake
 mutators refuse throughout the pending-flight lifetime. Abort remains possible
 between callback invocations and wipes the union and releases the credential.
 
+`TLS-SERVER-FLIGHT-STEP` is the attached counterpart. Flight preparation seals
+either the exact reciprocal `(TCB, generation)` or the socket-independent zero
+pair. The attached entry accepts only the former and invokes a fixed
+owner-qualified exact-send adapter; the generic callback entry accepts only
+the latter. Local seal/binding agreement is checked under TLS ownership, while
+reciprocal TCB authority and liveness are checked inside the fixed NET
+transaction. A terminal result exact-aborts a dead current child before local
+erasure; stale authority instead erases only the old TLS binding and leaves a
+possible reused TCB untouched. If cleanup itself throws, pending wire bytes are
+wiped but the seal, binding, and credential pin remain available to
+`TLS-ABORT`.
+
 After exact Finished admission, the emitter installs only the prederived S-AP
 write epoch, preserves the C-HS read epoch and its sequence, and publishes
-client-Finished-pending. It intentionally has no raw-TCB adapter: this phase
-still requires an unbound context. The new secure-accept transaction can bind
-an exact child before ClientHello parsing, but the emitter remains gated until
-its unlocked callback seals and revalidates the same transport incarnation and
-its terminal path can reclaim that authority without orphaning the TCB.
+client-Finished-pending. The caller-selected callback entry intentionally has
+no raw-TCB authority; attached emission is available only through the fixed
+sealed adapter.
 
 `TLS-SERVER-CLIENT-FLIGHT-BEGIN` then seals a nonnegative caller-provided
 wire-byte budget. Failed trial C-HS decryption can be discarded only when the
@@ -927,10 +944,14 @@ authentication/C-AP cutover, explicit publication, ALPN, exporter agreement,
 and failure atomicity. Focused secure-accept evidence additionally proves
 empty-queue retry, pre-consumption rejection, stale-child reclamation, exact
 reciprocal context/TCB publication, continued ClientHello parsing, and abort
-cleanup without disturbing the listener. They do not yet prove the attached
-handshake driver, secure socket acceptance, or interoperability over sockets
-with an independent TLS stack. The uint24-maximum Certificate capstone is
-separate maturity evidence and must not delay this vertical closure.
+cleanup without disturbing the listener. Focused attached-emitter evidence now
+also proves exact ServerHello TCP bytes, retained zero-window retry, generic
+callback exclusion, exact child reclamation on dead transport, reused-TCB
+isolation, and exception-fallback authority retention. It does not yet prove
+ACK-paced protected-flight completion, attached ingress, secure socket
+acceptance, or interoperability over sockets with an independent TLS stack.
+The uint24-maximum Certificate capstone is separate maturity evidence and must
+not delay this vertical closure.
 
 Signer and credential fixtures use only standardized or synthetic test
 scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
@@ -940,22 +961,16 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Compose the atomic generation/owner-qualified `TLS-SERVER-ACCEPT-ATTACH`
-  boundary with the nonblocking exact-admission
-  `TLS-SERVER-FLIGHT-STEP-WITH` callback contract. Seal the attached transport
-  incarnation across the unlocked callback and exact-abort it on terminal
-  failure; the emitter must not acquire authority from a raw TCB pointer.
-- Adapt authoritative nonblocking TCP input to the qualified
-  rejected-0RTT/client-Finished boundary, including protected terminal-alert
-  output, without exposing a plaintext accepted child.
+- Frame and admit initial ClientHello records, then drive the ACK-paced
+  protected server-flight remainder and adapt authoritative nonblocking TCP
+  input to the qualified rejected-0RTT/client-Finished boundary, including
+  protected terminal-alert output, without exposing a plaintext accepted
+  child.
 - Publish a TLS accepted socket only after client Finished authentication and
   explicit handshake publication. Prove credential-pin/reference and exact
   TCB-owner cleanup on every failure.
 - Qualify socket lifecycle, application bytes, exporter equality, and
   close-notify/FIN completion against an independent TLS 1.3 implementation.
-- Return exact backpressure and terminal statuses from the attached driver.
-  Keep deadlines caller-owned unless the live journey demonstrates a missing
-  lower timeout requirement.
 
 ### Post-closure trust lifecycle
 

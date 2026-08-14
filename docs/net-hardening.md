@@ -2,8 +2,12 @@
 
 **Status:** Incarnation-safe TCB/TLS/socket ownership, bounded active and
 passive control transport, retained FIN completion, and atomic queued-child
-attachment to a prepared TLS server context are implemented; the attached
-handshake driver and authenticated TLS socket publication are not implemented
+attachment to a prepared TLS server context are implemented. A sealed
+server-flight step now admits the exact ServerHello over that child, preserves
+retry state, reclaims a dead exact child, and leaves a reused incarnation
+untouched while clearing stale local authority. ACK-paced protected-flight
+qualification, attached ingress, and authenticated TLS socket publication are
+not implemented.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -15,8 +19,9 @@ are now checked against an exact TCB generation and owner.
 
 This milestone supplies the transport authority needed by secure accept, and
 `TLS-SERVER-ACCEPT-ATTACH` now transfers one exact queued child into a prepared
-TLS server context. It does not yet drive the handshake over that attachment or
-publish an authenticated TLS socket.
+TLS server context. `TLS-SERVER-FLIGHT-STEP` consumes that sealed authority for
+outbound records without exposing a caller callback. It does not yet ingest
+the handshake over that attachment or publish an authenticated TLS socket.
 
 ## TCB and table geometry
 
@@ -155,17 +160,14 @@ reclaims the exact failed TCB.
 
 ## Qualification
 
-Final affected sequential source-mode evidence for this milestone is 39/39
-`TestKDOSTLSAppData`, 25/25 socket/readiness, 28/28 `TestToolsModule`, and
-43/43 server-component tests. The preceding unchanged lower baseline
-passed 279/279 `TestKDOSNetStack` and 65/65 adjacent
-hardening/source-selection tests. The four-core credential and server-flight
-cancellation capstones passed together, 2/2 in 665.79 seconds. Their snapshot
-fixture proves complete KDOS and networking source loads before saving state,
-and their body runner proves a terminal marker executed instead of accepting a
-fed-but-unprocessed tail. Networking has a measured 450,000,000-step
-construction ceiling, while each capstone retains its independent
-400,000,000-step execution ceiling.
+Focused sequential source-mode evidence for this delta is 8/8 adjacent
+accept/emitter/ingress tests plus 4/4 owner-I/O lifecycle tests. It covers exact
+ServerHello bytes, retained zero-window retry, dead-versus-backpressure
+classification, generic callback exclusion, exact child reclamation, reused
+incarnation isolation, exception-fallback authority retention, listener
+preservation, and the unchanged socket-independent Finished path. Broader
+lower baselines and four-core credential/server-flight cancellation capstones
+remain regression inventory rather than prerequisites for each narrow commit.
 
 ## Remaining secure-server boundary
 
@@ -173,9 +175,9 @@ The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
 and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
 critical path is:
 
-- adapt the qualified server-flight emitter and client-flight ingress to the
-  exact attached TCB without exposing plaintext;
 - frame and admit the initial ClientHello through the same attached authority;
+- drive the protected server-flight remainder through TCP ACK/backpressure and
+  then adapt client-flight ingress without exposing plaintext;
 - transmit protected fatal/close dispositions rather than retaining only a
   terminal classification;
 - publish an accepted socket only after client Finished authentication and

@@ -26506,6 +26506,342 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_server_flight_step_emits_on_exact_accepted_child(self):
+        """The attached driver admits ServerHello on its sealed child only."""
+        hello, entropy, server_hello, _ = self._certificate_transcript_phase()
+        server_hello_record = (
+            b"\x16\x03\x03" + self._u16(len(server_hello)) + server_hello
+        )
+        sent: list[bytes] = []
+        lines, _ = self._provision_lines()
+        for name, data in (
+            ("server-alpn", self.ALPN),
+            ("attached-hello", hello),
+            ("attached-entropy", entropy),
+            ("attached-sh-record", server_hello_record),
+        ):
+            lines += self._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "VARIABLE ae-listener VARIABLE ae-child",
+            "VARIABLE ae-lgen VARIABLE ae-cgen VARIABLE ae-ior",
+            "VARIABLE ae-listener-owner VARIABLE ae-generic-calls",
+            "CREATE ae-peer-ip 4 ALLOT CREATE ae-peer-mac 6 ALLOT",
+            "10 0 0 2 IP-SET 10 0 0 1 ae-peer-ip IP!",
+            "ae-peer-mac 6 170 FILL ae-peer-ip ae-peer-mac ARP-INSERT",
+            "TCP-INIT-ALL",
+            "TCB-ALLOC DROP 0 TCB-N ae-listener !",
+            "TCPS-LISTEN ae-listener @ TCB.STATE !",
+            "443 ae-listener @ TCB.LOCAL-PORT !",
+            "ae-listener @ ae-listener-owner TCP-ATTACH "
+            "ae-ior ! ae-lgen !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN=" .',
+            "TCB-ALLOC DROP 1 TCB-N ae-child !",
+            "TCPS-ESTABLISHED ae-child @ TCB.STATE !",
+            "443 ae-child @ TCB.LOCAL-PORT !",
+            "50000 ae-child @ TCB.REMOTE-PORT !",
+            "ae-peer-ip ae-child @ TCB.REMOTE-IP 4 CMOVE",
+            "1000 ae-child @ TCB.SND-UNA !",
+            "1000 ae-child @ TCB.SND-NXT !",
+            "2000 ae-child @ TCB.RCV-NXT !",
+            "0 ae-child @ TCB.SND-WND !",
+            "TCP-MSS ae-child @ TCB.CWND !",
+            "4096 ae-child @ TCB.RCV-WND !",
+            "ae-listener @ TCB-HANDLE@",
+            "ae-child @ TCB.PARENT-GEN !",
+            "ae-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN ae-child @ TCB.AUTH-STATE !",
+            "ae-listener @ AQ-RESERVE DROP",
+            "ae-child @ ae-listener @ AQ-PUSH DROP",
+            "server-ctx @ ae-listener @ ae-lgen @ ae-listener-owner "
+            "TLS-SERVER-ACCEPT-ATTACH",
+            '." ATTACH=" .',
+            "server-ctx @ TLS-CTX.TCB-GENERATION @ ae-cgen !",
+            f"server-ctx @ attached-hello {len(hello)} "
+            "TLS-PARSE-CLIENT-HELLO",
+            '." PARSE-IOR=" . ." PARSE-ALERT=" .',
+            "TLS-OWNER-TRY DROP",
+            "server-ctx @ _TSPH-BEGIN 2DROP",
+            "attached-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            "TLS-OWNER-RELEASE",
+            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
+            '." SEAL-TCB=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.TCB-SEAL + @ ae-child @ = .',
+            '." SEAL-GEN=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.TCB-GEN-SEAL + @ ae-cgen @ = .',
+            '." SEAL-ZERO=" server-ctx @ _TSSE-SEAL-ZERO? .',
+            ': ae-generic ( ctx record-a record-u -- actual )',
+            '  2DROP DROP 1 ae-generic-calls +! 0 ;',
+            "server-ctx @ ' ae-generic TLS-SERVER-FLIGHT-STEP-WITH",
+            '." GENERIC-IOR=" . ." GENERIC-PROGRESS=" .',
+            '." GENERIC-CALLS=" ae-generic-calls @ .',
+            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ 1+ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." STALE-IOR=" . ." STALE-PROGRESS=" .',
+            '." STALE-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." STALE-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." STALE-SEAL=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.TCB-SEAL + @ ae-child @ = .',
+            '." STALE-TX=" ae-child @ TCB.TX-LEN @ .',
+            '." STALE-NXT=" ae-child @ TCB.SND-NXT @ .',
+            'NET-TX-TRY ." INVERT-ACQUIRE=" .',
+            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." INVERT-IOR=" . ." INVERT-PROGRESS=" .',
+            '." INVERT-NET=" NET-TX-OWNER-DEPTH @ .',
+            '." INVERT-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            "NET-TX-RELEASE",
+            "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." BUSY-IOR=" . ." BUSY-PROGRESS=" .',
+            '." BUSY-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            f'." BUSY-BYTES=" server-ctx @ TLS-RXW.SERVER-PENDING '
+            f'{len(server_hello_record)} attached-sh-record '
+            f'{len(server_hello_record)} COMPARE 0= .',
+            '." BUSY-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." BUSY-TX=" ae-child @ TCB.TX-LEN @ .',
+            '." BUSY-NXT=" ae-child @ TCB.SND-NXT @ .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." BLOCK-IOR=" . ." BLOCK-PROGRESS=" .',
+            '." BLOCK-PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." BLOCK-SEAL=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.TCB-SEAL + @ ae-child @ = .',
+            f'." BLOCK-BYTES=" server-ctx @ TLS-RXW.SERVER-PENDING '
+            f'{len(server_hello_record)} attached-sh-record '
+            f'{len(server_hello_record)} COMPARE 0= .',
+            '." BLOCK-PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." BLOCK-TX=" ae-child @ TCB.TX-LEN @ .',
+            '." BLOCK-NXT=" ae-child @ TCB.SND-NXT @ .',
+            "4096 ae-child @ TCB.SND-WND !",
+            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." STEP-IOR=" . ." STEP-PROGRESS=" .',
+            '." EXACT=" server-ctx @ _TLS-CTX>TCB ae-child @ = .',
+            '." RECIPROCAL=" ae-child @ ae-cgen @ server-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            '." PHASE=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PHASE + @ .',
+            '." PENDING=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." SEAL-AFTER=" server-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.TCB-SEAL + @ ae-child @ = .',
+            '." TX-LEN=" ae-child @ TCB.TX-LEN @ .',
+            '." SND-NXT=" ae-child @ TCB.SND-NXT @ .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            "TCPS-FAILED ae-child @ TCB.STATE !",
+            "server-ctx @ server-ctx @ TLS-CTX.GENERATION @ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." TERM-IOR=" . ." TERM-PROGRESS=" .',
+            '." TERM-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." TERM-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." TERM-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." TERM-TCB-GEN=" server-ctx @ '
+            'TLS-CTX.TCB-GENERATION @ .',
+            '." CHILD-END=" ae-child @ TCB.STATE @ .',
+            '." CHILD-OWNER=" ae-child @ TCB.OWNER @ .',
+            '." CHILD-AUTH=" ae-child @ TCB.AUTH-STATE @ .',
+            '." LISTENER-END=" ae-listener @ ae-lgen @ '
+            'ae-listener-owner TCB-ATTACHED-TO? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "server-ctx @ TLS-ABORT DROP",
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(
+            lines,
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN=0 ", "ATTACH=0 ",
+            "PARSE-IOR=0 PARSE-ALERT=0 ", "PREP=0 ",
+            "SEAL-TCB=-1 ", "SEAL-GEN=-1 ", "SEAL-ZERO=0 ",
+            "GENERIC-IOR=-4204 GENERIC-PROGRESS=0 ",
+            "GENERIC-CALLS=0 ",
+            "STALE-IOR=-4204 STALE-PROGRESS=0 ",
+            "STALE-PENDING=0 ", "STALE-PHASE=1 ",
+            "STALE-SEAL=-1 ", "STALE-TX=0 ", "STALE-NXT=1000 ",
+            "INVERT-ACQUIRE=0 ",
+            "INVERT-IOR=-4206 INVERT-PROGRESS=0 ",
+            "INVERT-NET=1 ", "INVERT-PENDING=0 ",
+            "BUSY-IOR=-4206 BUSY-PROGRESS=0 ", "BUSY-PENDING=1 ",
+            "BUSY-BYTES=-1 ", "BUSY-PHASE=1 ",
+            "BUSY-TX=0 ", "BUSY-NXT=1000 ",
+            "BLOCK-IOR=-4219 BLOCK-PROGRESS=0 ",
+            "BLOCK-PENDING=1 ", "BLOCK-SEAL=-1 ",
+            "BLOCK-BYTES=-1 ", "BLOCK-PHASE=1 ",
+            "BLOCK-TX=0 ", "BLOCK-NXT=1000 ",
+            "STEP-IOR=0 STEP-PROGRESS=1 ",
+            "EXACT=-1 ", "RECIPROCAL=-1 ",
+            "PHASE=2 ", "PENDING=0 ", "SEAL-AFTER=-1 ",
+            f"TX-LEN={len(server_hello_record)} ",
+            f"SND-NXT={1000 + len(server_hello_record)} ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ",
+            "TERM-IOR=-4218 ", "TERM-PROGRESS=0 ",
+            "TERM-STATE=3 ", "TERM-ERROR=-4218 ",
+            "TERM-TCB=0 ", "TERM-TCB-GEN=0 ",
+            "CHILD-END=0 ", "CHILD-OWNER=0 ", "CHILD-AUTH=0 ",
+            "LISTENER-END=-1 ", "REFS-END=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        tcp_frames = [
+            TestKDOSNetStack._parse_tcp_frame(frame) for frame in sent
+        ]
+        payload_frames = [
+            frame for frame in tcp_frames
+            if frame is not None and frame["payload"]
+        ]
+        self.assertEqual(len(payload_frames), 1)
+        self.assertEqual(
+            (
+                payload_frames[0]["sport"], payload_frames[0]["dport"],
+                payload_frames[0]["seq"], payload_frames[0]["payload"],
+            ),
+            (443, 50000, 1000, server_hello_record),
+        )
+
+    def test_server_flight_terminal_paths_preserve_exact_authority(self):
+        """Stale and exceptional cleanup retain the right incarnation."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += [
+            "VARIABLE stale-ctx 0 TLS-CTX@ stale-ctx !",
+            "VARIABLE stale-tcb VARIABLE stale-old-gen",
+            "VARIABLE stale-new-gen VARIABLE stale-new-owner",
+            "VARIABLE stale-ior",
+            "VARIABLE recovery-ctx 1 TLS-CTX@ recovery-ctx !",
+            "VARIABLE recovery-tcb VARIABLE recovery-gen",
+            "TCP-INIT-ALL",
+            "stale-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN=" .',
+            "TCB-ALLOC DUP TCB-N stale-tcb ! DROP",
+            "TCPS-ESTABLISHED stale-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "stale-ctx @ stale-tcb @ _TLS-ATTACH-TCB",
+            '." ATTACH=" .',
+            "stale-ctx @ TLS-CTX.TCB-GENERATION @ stale-old-gen !",
+            "TLS-SERVER-FLIGHT-COMPLETE stale-ctx @ "
+            "TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + !",
+            "TLS-SERVER-TRANSCRIPT-SERVER-FINISHED stale-ctx @ "
+            "TLS-RXW.SERVER-META TSM.TRANSCRIPT-PHASE + !",
+            "90 stale-ctx @ TLS-RXW.SERVER-META TSM.SH-LEN + !",
+            "TLSH-SERVER-FLIGHT-READY stale-ctx @ TLS-CTX.HS-STATE !",
+            "stale-ctx @ _TLS-SERVER-EMIT-INIT",
+            "TLS-OWNER-RELEASE",
+            '." OLD-SEAL=" stale-ctx @ _TSSE-SEAL@ stale-old-gen @ = '
+            'SWAP stale-tcb @ = AND .',
+            # Model lower disposal plus immediate slot reuse while the old TLS
+            # context still holds only its stale incarnation token.
+            "NET-TX-ACQUIRE stale-tcb @ TCB-INIT "
+            "stale-tcb @ TCB-CLAIM",
+            "TCPS-ESTABLISHED stale-tcb @ TCB.STATE ! NET-TX-RELEASE",
+            "stale-tcb @ stale-new-owner TCP-ATTACH "
+            "stale-ior ! stale-new-gen !",
+            '." REATTACH=" stale-ior @ .',
+            '." REUSED=" stale-new-gen @ stale-old-gen @ <> .',
+            "stale-ctx @ stale-ctx @ TLS-CTX.GENERATION @ "
+            "TLS-SERVER-FLIGHT-STEP",
+            '." STEP-IOR=" . ." STEP-PROGRESS=" .',
+            '." CTX-STATE=" stale-ctx @ TLS-CTX.STATE @ .',
+            '." CTX-ERROR=" stale-ctx @ TLS-CTX.ERROR @ .',
+            '." CTX-TCB=" stale-ctx @ TLS-CTX.TCB @ .',
+            '." CTX-TCB-GEN=" stale-ctx @ '
+            'TLS-CTX.TCB-GENERATION @ .',
+            '." NEW-LIVE=" stale-tcb @ stale-new-gen @ '
+            'stale-new-owner TCB-ATTACHED-TO? .',
+            '." NEW-STATE=" stale-tcb @ TCB.STATE @ .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "stale-ctx @ TLS-ABORT DROP",
+            "stale-tcb @ stale-new-gen @ stale-new-owner "
+            "TCP-OWNER-ABORT 2DROP",
+            '." CLEAN=" stale-tcb @ TCB.STATE @ .',
+            # Exercise the last-resort exception fallback directly: it must
+            # erase pending wire material but retain every exact lifecycle
+            # token so the ordinary abort path can finish cleanup later.
+            "recovery-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." REC-BEGIN=" .',
+            "TCB-ALLOC DUP TCB-N recovery-tcb ! DROP",
+            "TCPS-ESTABLISHED recovery-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "recovery-ctx @ recovery-tcb @ _TLS-ATTACH-TCB",
+            '." REC-ATTACH=" .',
+            "recovery-ctx @ TLS-CTX.TCB-GENERATION @ recovery-gen !",
+            "TLS-SERVER-FLIGHT-COMPLETE recovery-ctx @ "
+            "TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + !",
+            "recovery-ctx @ _TLS-SERVER-EMIT-INIT",
+            "recovery-ctx @ TLS-RXW.SERVER-PENDING "
+            "TLS-SERVER-PENDING-CAPACITY 165 FILL",
+            "TLS-SERVER-PENDING-READY recovery-ctx @ "
+            "TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + !",
+            "127 recovery-ctx @ TLS-RXW.SERVER-EMIT-META "
+            "TSE.PENDING-LEN + !",
+            "recovery-ctx @ _TSSE-DRIVER-CLAIM DROP",
+            "recovery-ctx @ _TSSE-GUARD-CTX !",
+            "TLS-E-HANDSHAKE-CRYPTO _TSSE-GUARD-IOR !",
+            "_TSSE-RECOVERY-FALLBACK",
+            "TLS-OWNER-RELEASE",
+            '." REC-STATE=" recovery-ctx @ TLS-CTX.STATE @ .',
+            '." REC-ERROR=" recovery-ctx @ TLS-CTX.ERROR @ '
+            'TLS-E-HANDSHAKE-CRYPTO = .',
+            '." REC-SEAL=" recovery-ctx @ _TSSE-SEAL@ recovery-gen @ = '
+            'SWAP recovery-tcb @ = AND .',
+            '." REC-BOUND=" recovery-ctx @ _TSSE-SEAL-BOUND? .',
+            '." REC-LIVE=" recovery-tcb @ recovery-gen @ recovery-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            '." REC-PENDING=" recovery-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.PENDING-STATE + @ .',
+            '." REC-BYTES=" recovery-ctx @ TLS-RXW.SERVER-PENDING C@ '
+            '0= recovery-ctx @ TLS-RXW.SERVER-PENDING '
+            'TLS-SERVER-PENDING-CAPACITY 1- + C@ 0= AND .',
+            '." REC-DRIVER=" recovery-ctx @ TLS-RXW.SERVER-EMIT-META '
+            'TSE.DRIVER-CLAIMED + @ .',
+            '." REC-PIN=" recovery-ctx @ TLS-RXW.SERVER-META '
+            'TSM.FLAGS + @ TSMF-CRED-PINNED AND 0<> .',
+            '." REC-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "_TSSE-GUARD-CLEAR",
+            'recovery-ctx @ TLS-ABORT ." REC-ABORT=" .',
+            '." REC-TCB-END=" recovery-tcb @ TCB.STATE @ .',
+            '." REC-REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." REC-CLAIMED=" recovery-ctx @ TLS-CTX-CLAIMED? .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN=0 ", "ATTACH=0 ", "OLD-SEAL=-1 ",
+            "REATTACH=0 ", "REUSED=-1 ",
+            "STEP-IOR=-4218 STEP-PROGRESS=0 ",
+            "CTX-STATE=3 ", "CTX-ERROR=-4218 ",
+            "CTX-TCB=0 ", "CTX-TCB-GEN=0 ",
+            "NEW-LIVE=-1 ", "NEW-STATE=4 ", "REFS=0 ",
+            "CLEAN=0 ",
+            "REC-BEGIN=0 ", "REC-ATTACH=0 ",
+            "REC-STATE=3 ", "REC-ERROR=-1 ",
+            "REC-SEAL=-1 ", "REC-BOUND=-1 ", "REC-LIVE=-1 ",
+            "REC-PENDING=0 ", "REC-BYTES=-1 ", "REC-DRIVER=0 ",
+            "REC-PIN=-1 ", "REC-REFS=1 ", "REC-ABORT=0 ",
+            "REC-TCB-END=0 ", "REC-REFS-END=0 ", "REC-CLAIMED=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_server_ingress_authenticates_independent_client_finished(self):
         """A fragmented reference peer flight reaches explicit publication."""
         (
