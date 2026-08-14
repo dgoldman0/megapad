@@ -76,10 +76,15 @@ capacity failures leave the raw context unchanged; stale child authority stays
 abortable without touching a replacement. `TLS-LISTEN` now copies the listener
 policy, pins the exact credential, atomically publishes the passive TCB, and
 owns listener close/unpin cleanup. The generic `LISTEN` entry remains
-fail-closed for TLS descriptors; `SOCK-ACCEPT` remains fail-closed for secure
-listeners until the caller-owned bounded accept operation drives the qualified
-exact-child steps. The immediate release path is that operation plus one
-independent TLS peer exchange, application I/O, and graceful cleanup. See
+fail-closed for TLS descriptors, and `SOCK-ACCEPT` remains deliberately
+fail-closed for secure listeners. The caller-owned bounded accept operation now
+leases one exact listener incarnation, creates and pins one server context,
+waits retryably without context churn, attaches exactly one queued child, and
+can abort that complete authority chain without publishing a socket. Its
+current `STEP` boundary stops at `CLIENT_HELLO`; the immediate release path is
+to extend that same operation through the already-qualified handshake,
+disposition, and socket-publication steps, then prove one independent TLS peer
+exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

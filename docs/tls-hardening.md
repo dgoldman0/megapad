@@ -9,8 +9,9 @@ are now qualified. Exact authenticated accepted-socket publication is also
 qualified. `TLS-LISTEN` now atomically copies ALPN/early-data/deadline policy,
 pins the exact credential, publishes the TCP listener, and owns exact setup
 rollback plus listener close/unpin cleanup. The active critical path is
-now the caller-owned bounded accept operation followed by independent socket
-interoperability.
+now to extend the caller-owned bounded accept operation beyond its completed
+exact listener/context lease, retryable wait, child attachment, and abort
+boundary, then prove independent socket interoperability.
 Last updated: 2026-08-14
 
 ## Purpose
@@ -100,8 +101,12 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is a caller-owned bounded secure-accept operation and
-interoperability over the resulting socket with an independent TLS
+The initial bounded secure-accept lifecycle is now present: caller storage owns
+the exact listener lease and prepared context across empty-queue retries,
+attaches one exact child, and can abort without socket publication. The
+remaining server work is to drive that same operation from `CLIENT_HELLO`
+through the qualified handshake/disposition/publication transactions and then
+prove interoperability over the resulting socket with an independent TLS
 implementation. The following lower-level facts
 continue to bound an authenticated server role:
 
@@ -134,8 +139,8 @@ RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
 the server gate still requires composing the qualified exact-child stages
-through `TLS-LISTEN` and the caller-owned accept operation, followed by
-external-stack socket interoperability.
+through the remaining phases of the existing caller-owned accept operation,
+followed by external-stack socket interoperability.
 Reusing `EC-MUL` or precomputing a fixture signature remains
 test scaffolding rather than a server security result.
 
@@ -1053,7 +1058,9 @@ refusal after abort/unpin contention, and stale-child cleanup without touching
 the replacement. The secure-listener regression proves stale-policy rollback,
 copied ALPN, exact listener authority, credential lifetime, and close cleanup.
 Public secure acceptance and interoperability over sockets with an independent
-TLS stack remain unproved. The disposition
+TLS stack remain unproved. The bounded accept operation currently proves its
+listener/context lease, retryable wait, exact attach, and abort lifecycle but
+stops before ClientHello ingress. The disposition
 affected selector passed 19/19 sequentially under the ordinary checked
 source-mode limits; the final publication-focused and adjoining affected
 selector passed 15/15 sequentially under ordinary checked limits.
@@ -1068,11 +1075,12 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Drive the qualified exact-child handshake and authenticated socket
-  publication from copied `TLS-LISTEN` policy through one caller-owned bounded
-  accept operation. Keep generic `LISTEN` fail-closed for TLS descriptors and
-  `SOCK-ACCEPT` fail-closed for secure listeners until that operation owns every
-  terminal disposition and deadline.
+- Extend the existing caller-owned bounded operation from its exact
+  listener/context lease and child-attachment boundary through the qualified
+  exact-child handshake, terminal disposition, deadline, and authenticated
+  socket-publication phases. Keep generic `LISTEN` fail-closed for TLS
+  descriptors and route secure listeners only through this operation rather
+  than `SOCK-ACCEPT`.
 - Qualify socket lifecycle, application bytes, exporter equality, and
   close-notify/FIN completion against an independent TLS 1.3 implementation.
 

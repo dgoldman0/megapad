@@ -15,7 +15,10 @@ terminal disposition now emits an exact protected fatal/close response or no
 response for a non-close peer alert, with retry-stable ciphertext and
 alert-ACK-before-FIN ordering. Exact authenticated TLS socket publication and
 atomic credential-pinned listener policy publication are implemented; the
-caller-owned bounded secure-accept operation is not.
+caller-owned bounded secure-accept operation now owns initialization, exact
+listener/context authority, retryable empty-queue waits, exact child
+attachment, and abort. Its phased handshake driver and socket-result
+publication are not yet complete.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -226,9 +229,13 @@ The authority substrate now includes the exact authenticated socket-publication
 boundary and `TLS-LISTEN`, which copies policy, pins the exact credential, and
 publishes its passive TCB atomically. The generic `LISTEN` entry remains
 fail-closed for TLS descriptors, and `SOCK-ACCEPT` fails closed before consuming
-a secure child. The remaining critical path is:
+a secure child because secure acceptance uses the separate caller-owned
+operation. That operation now holds the exact listener lease and prepared
+context across retryable empty waits, attaches one exact child, and can abort
+the complete chain without publication. The remaining critical path is:
 
-- drive the qualified attachment, handshake, disposition, and publication
-  steps from one caller-owned bounded accept operation; and
+- extend its `STEP` dispatcher from the current `CLIENT_HELLO` boundary through
+  the qualified ingress, flight, protected client ingress, disposition, and
+  socket-publication transactions; and
 - qualify the complete socket lifecycle and close against an independent TLS
   1.3 implementation.

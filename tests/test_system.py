@@ -6610,7 +6610,9 @@ def _build_kdos_network_snapshot():
     data = payload.encode()
     pos = 0
     steps = 0
-    max_steps = 450_000_000
+    # Source-mode qualification compiles the complete production networking
+    # module; this is emulator headroom, not a networking capacity bound.
+    max_steps = 475_000_000
     while steps < max_steps:
         if sys_obj.cpu.halted:
             break
@@ -25081,6 +25083,155 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "REFS-AFTER-PLAIN=1 ", "CLOSE=0 ",
             "FREE=0 ", "TCB-FREE=-1 ", "POLICY-FREE=0 ",
             "REFS-FREE=0 ", "DELETE=0 ", "OWNERS=-1 ", "DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_accept_op_attaches_exact_child_and_aborts_without_publication(self):
+        """The caller-owned accept operation waits, attaches, and retires."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("accept-op-alpn", self.ALPN)
+        lines += [
+            "TCP-INIT-ALL",
+            "CREATE accept-op-raw /TLS-SERVER-ACCEPT-OP 7 + ALLOT",
+            ": accept-op accept-op-raw 7 + -8 AND ;",
+            "VARIABLE accept-sd VARIABLE accept-listener-tcb",
+            "VARIABLE accept-listener-gen VARIABLE accept-child",
+            "VARIABLE accept-child-index VARIABLE accept-child-gen",
+            "VARIABLE accept-ctx VARIABLE accept-ctx-gen",
+            ": accept-live-sockets 0 SOCK-MAX 0 DO "
+            "I SOCK-N SOCK.STATE @ SOCKST-FREE <> IF 1+ THEN LOOP ;",
+            "accept-op /TLS-SERVER-ACCEPT-OP 165 FILL",
+            'accept-op TLS-SERVER-ACCEPT-OP-INIT ." OP-INIT=" .',
+            '." OP-INIT-STATE=" accept-op TSAO.STATE @ .',
+            '." OP-INIT-AUTH=" accept-op TSAO.LEASE-HELD @ '
+            'accept-op TSAO.CTX @ OR accept-op TSAO.CTX-GEN @ OR .',
+            "SOCK-TYPE-TLS SOCKET accept-sd !",
+            "accept-sd @ 8443 BIND DROP",
+            "accept-sd @ tc-slot @ tc-gen @ accept-op-alpn 8 37 2500 "
+            "TLS-LISTEN",
+            '." OP-LISTEN=" .',
+            "accept-sd @ SOCK-TCB@ accept-listener-tcb !",
+            "accept-sd @ SOCK.HANDLE-GEN @ accept-listener-gen !",
+            "accept-sd @ accept-op TLS-SERVER-ACCEPT-BEGIN",
+            '." OP-BEGIN=" .',
+            "accept-op TSAO.CTX @ accept-ctx !",
+            "accept-op TSAO.CTX-GEN @ accept-ctx-gen !",
+            '." OP-WAIT-STATE=" accept-op TSAO.STATE @ .',
+            '." OP-CTX=" accept-ctx @ 0<> accept-ctx-gen @ 0<> AND .',
+            '." OP-CLAIMED=" accept-ctx @ TLS-CTX-CLAIMED? .',
+            '." OP-ACTIVE=" accept-sd @ SOCK.TLS-ACTIVE-OPS @ .',
+            '." OP-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "accept-op TLS-SERVER-ACCEPT-STEP",
+            '." OP-EMPTY1-IOR=" . ." OP-EMPTY1-ALERT=" . '
+            '." OP-EMPTY1-PROGRESS=" . ." OP-EMPTY1-SD=" .',
+            '." OP-EMPTY1-IDENTITY=" accept-op TSAO.CTX @ accept-ctx @ = '
+            'accept-op TSAO.CTX-GEN @ accept-ctx-gen @ = AND .',
+            "accept-op TLS-SERVER-ACCEPT-STEP",
+            '." OP-EMPTY2-IOR=" . ." OP-EMPTY2-ALERT=" . '
+            '." OP-EMPTY2-PROGRESS=" . ." OP-EMPTY2-SD=" .',
+            '." OP-EMPTY2-IDENTITY=" accept-op TSAO.CTX @ accept-ctx @ = '
+            'accept-op TSAO.CTX-GEN @ accept-ctx-gen @ = AND .',
+            '." OP-EMPTY-QUEUE=" accept-listener-tcb @ TCB.AQ-COUNT @ '
+            'accept-listener-tcb @ TCB.AQ-RESERVED @ OR .',
+            '." OP-NO-PUBLISH=" accept-ctx @ TLS-CTX.SOCKET-OWNER @ 0= '
+            'accept-live-sockets 1 = AND .',
+            'accept-sd @ CLOSE-TRY ." OP-CLOSE-BUSY=" .',
+            '." OP-CLOSE-INTACT=" accept-sd @ SOCK.STATE @ '
+            'SOCKST-LISTENING = accept-sd @ SOCK.TLS-POLICY-STATE @ '
+            'SOCK-TLS-POLICY-LIVE = AND accept-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ 1 = AND .',
+            "TCB-ALLOC DUP accept-child-index ! TCB-N accept-child !",
+            "TCPS-ESTABLISHED accept-child @ TCB.STATE !",
+            "accept-listener-tcb @ TCB-HANDLE@",
+            "accept-child @ TCB.PARENT-GEN !",
+            "accept-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN accept-child @ TCB.AUTH-STATE !",
+            'accept-listener-tcb @ AQ-RESERVE ." OP-RESERVE=" .',
+            'accept-child @ accept-listener-tcb @ AQ-PUSH '
+            '." OP-QUEUE=" .',
+            '." OP-QUEUED=" accept-listener-tcb @ TCB.AQ-COUNT @ 1 = '
+            'accept-listener-tcb @ TCB.AQ-RESERVED @ 1 = AND .',
+            "accept-op TLS-SERVER-ACCEPT-STEP",
+            '." OP-ATTACH-IOR=" . ." OP-ATTACH-ALERT=" . '
+            '." OP-ATTACH-PROGRESS=" . ." OP-ATTACH-SD=" .',
+            "accept-ctx @ TLS-CTX.TCB-GENERATION @ accept-child-gen !",
+            '." OP-ATTACH-STATE=" accept-op TSAO.STATE @ .',
+            '." OP-ATTACH-EXACT=" accept-ctx @ _TLS-CTX>TCB '
+            'accept-child @ = accept-child @ accept-child-gen @ '
+            'accept-ctx @ TCB-ATTACHED-TO? AND .',
+            '." OP-ATTACH-QUEUE=" accept-listener-tcb @ TCB.AQ-COUNT @ '
+            'accept-listener-tcb @ TCB.AQ-RESERVED @ OR .',
+            '." OP-ATTACH-NO-PUBLISH=" accept-ctx @ '
+            'TLS-CTX.SOCKET-OWNER @ 0= accept-live-sockets 1 = AND .',
+            '." OP-ATTACH-LISTENER=" accept-listener-tcb @ '
+            'accept-listener-gen @ accept-sd @ TCB-ATTACHED-TO? '
+            'accept-sd @ SOCK.TLS-ACTIVE-OPS @ 1 = AND .',
+            "accept-op TLS-SERVER-ACCEPT-ABORT",
+            '." OP-ABORT1-IOR=" . ." OP-ABORT1-ALERT=" . '
+            '." OP-ABORT1-PROGRESS=" .',
+            '." OP-ABORT1-STATE=" accept-op TSAO.STATE @ .',
+            '." OP-ABORT1-AUTH=" accept-op TSAO.LEASE-HELD @ '
+            'accept-op TSAO.CTX @ OR accept-op TSAO.CTX-GEN @ OR .',
+            '." OP-ABORT1-CHILD=" accept-child @ TCB.STATE @ '
+            'TCPS-CLOSED = .',
+            '." OP-ABORT1-CTX=" accept-ctx @ TLS-CTX-CLAIMED? .',
+            '." OP-ABORT1-ACTIVE=" accept-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ .',
+            '." OP-ABORT1-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." OP-ABORT1-LISTENER=" accept-listener-tcb @ '
+            'accept-listener-gen @ accept-sd @ TCB-ATTACHED-TO? '
+            'accept-sd @ SOCK.STATE @ SOCKST-LISTENING = AND .',
+            "accept-op TLS-SERVER-ACCEPT-ABORT",
+            '." OP-ABORT2-IOR=" . ." OP-ABORT2-ALERT=" . '
+            '." OP-ABORT2-PROGRESS=" .',
+            '." OP-ABORT2-STABLE=" accept-sd @ SOCK.TLS-ACTIVE-OPS @ 0= '
+            'tc-slot @ 1- _TC@ TC.REFS + @ 1 = AND .',
+            'accept-sd @ CLOSE-TRY ." OP-CLOSE=" .',
+            '." OP-FREE=" accept-sd @ SOCK.STATE @ .',
+            '." OP-LISTENER-CLOSED=" accept-listener-tcb @ TCB.STATE @ '
+            'TCPS-CLOSED = .',
+            '." OP-REFS-FREE=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." OP-DELETE=" .',
+            '_TSAO-LOCK-TRY DUP ." OP-LOCK=" . 0= IF '
+            '_TSAO-LOCK-RELEASE THEN',
+            '." OP-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            '_TC-LOCK-OWNER-CORE @ -1 = AND '
+            'NET-TX-OWNER-DEPTH @ 0= AND '
+            '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
+            'DEPTH ." OP-DEPTH=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "OP-INIT=0 ", "OP-INIT-STATE=0 ", "OP-INIT-AUTH=0 ",
+            "OP-LISTEN=0 ", "OP-BEGIN=0 ", "OP-WAIT-STATE=2 ",
+            "OP-CTX=-1 ", "OP-CLAIMED=-1 ", "OP-ACTIVE=1 ",
+            "OP-REFS=2 ",
+            "OP-EMPTY1-IOR=-4219 ", "OP-EMPTY1-ALERT=0 ",
+            "OP-EMPTY1-PROGRESS=0 ", "OP-EMPTY1-SD=0 ",
+            "OP-EMPTY1-IDENTITY=-1 ",
+            "OP-EMPTY2-IOR=-4219 ", "OP-EMPTY2-ALERT=0 ",
+            "OP-EMPTY2-PROGRESS=0 ", "OP-EMPTY2-SD=0 ",
+            "OP-EMPTY2-IDENTITY=-1 ", "OP-EMPTY-QUEUE=0 ",
+            "OP-NO-PUBLISH=-1 ", "OP-CLOSE-BUSY=-4206 ",
+            "OP-CLOSE-INTACT=-1 ", "OP-RESERVE=-1 ",
+            "OP-QUEUE=-1 ", "OP-QUEUED=-1 ",
+            "OP-ATTACH-IOR=0 ", "OP-ATTACH-ALERT=0 ",
+            "OP-ATTACH-PROGRESS=1 ", "OP-ATTACH-SD=0 ",
+            "OP-ATTACH-STATE=4 ", "OP-ATTACH-EXACT=-1 ",
+            "OP-ATTACH-QUEUE=0 ", "OP-ATTACH-NO-PUBLISH=-1 ",
+            "OP-ATTACH-LISTENER=-1 ",
+            "OP-ABORT1-IOR=0 ", "OP-ABORT1-ALERT=0 ",
+            "OP-ABORT1-PROGRESS=7 ", "OP-ABORT1-STATE=0 ",
+            "OP-ABORT1-AUTH=0 ", "OP-ABORT1-CHILD=-1 ",
+            "OP-ABORT1-CTX=0 ", "OP-ABORT1-ACTIVE=0 ",
+            "OP-ABORT1-REFS=1 ", "OP-ABORT1-LISTENER=-1 ",
+            "OP-ABORT2-IOR=0 ", "OP-ABORT2-ALERT=0 ",
+            "OP-ABORT2-PROGRESS=7 ", "OP-ABORT2-STABLE=-1 ",
+            "OP-CLOSE=0 ", "OP-FREE=0 ",
+            "OP-LISTENER-CLOSED=-1 ", "OP-REFS-FREE=0 ",
+            "OP-DELETE=0 ", "OP-LOCK=0 ", "OP-OWNERS=-1 ",
+            "OP-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
