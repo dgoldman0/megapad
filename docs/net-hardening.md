@@ -10,8 +10,10 @@ reassembles arbitrary TCP and TLSPlaintext-record fragmentation through that
 same exact child without overreading the following record. The existing
 attached emitter is qualified through all ACK-paced protected records and
 server Finished. Attached protected ingress now authenticates client Finished
-through the exact child and preserves a following TCP record. Protected
-disposition output and authenticated TLS socket publication are not
+through the exact child and preserves a following TCP record. Attached
+terminal disposition now emits an exact protected fatal/close response or no
+response for a non-close peer alert, with retry-stable ciphertext and
+alert-ACK-before-FIN ordering. Authenticated TLS socket publication is not
 implemented.
 **Date:** 2026-08-14 qualification
 
@@ -34,8 +36,12 @@ version `0x0301` or `0x0303`. It retains incomplete record/message prefixes per
 context and admits exactly one complete ClientHello.
 `TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED` and
 `TLS-SERVER-CLIENT-FLIGHT-STEP` then retain that seal while authenticating at
-most one protected record per step. They do not yet transmit terminal
-dispositions or publish an authenticated TLS socket.
+most one protected record per step.
+`TLS-SERVER-INGRESS-DISPOSITION-STEP` then consumes only the sticky terminal
+classification and exact context generation. Its protected response reuses
+the completed emitter's pending lane across TCP/NET backpressure; a peer alert
+that is not close_notify intentionally produces no TLS record. It does not
+publish an authenticated TLS socket.
 
 ## TCB and table geometry
 
@@ -191,6 +197,11 @@ The attached protected-ingress slice adds segmented independent Finished,
 raw/stale authority exclusion, exact following-record retention, explicit TLS
 publication, and partial-record EOF reclamation. A final sequential 11-test
 affected selector passed under the ordinary checked source-mode limits.
+The attached disposition slice adds independent protected fatal/close wire
+oracles, byte-identical retry, close-alert ACK before FIN, peer-alert
+no-response, and exact reused-child isolation. Its final affected selector,
+including ordinary sealed-emitter and TLS-abort paths, passed 19/19
+sequentially under the checked source-mode limits.
 
 ## Remaining secure-server boundary
 
@@ -198,8 +209,6 @@ The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
 and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
 critical path is:
 
-- transmit protected fatal/close dispositions rather than retaining only a
-  terminal classification;
 - publish an accepted socket only after client Finished authentication and
   explicit TLS establishment;
 - qualify the complete socket lifecycle and close against an independent TLS

@@ -1766,6 +1766,7 @@ handler wiring.
 | `TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED` | `( ctx ctx-generation early-wire-budget -- ior )` | Begin the same client-flight protocol state only when the caller carries the exact live server-context generation and the completed server flight retains a nonzero seal equal to the reciprocal accepted-child binding. Raw and stale authority are rejected before ingress state changes. |
 | `TLS-SERVER-CLIENT-FLIGHT-FEED` | `( ctx bytes-a bytes-u -- consumed progress alert-desc ior )` | On the socket-independent zero-seal surface, copy at most through one complete client-flight record, retaining a partial header/body or Finished fragment per context; the caller retains and resubmits any unconsumed tail. Incomplete input returns the consumed count, `TLS-SERVER-INGRESS-NONE`, zero alert, and `TLS-E-WOULD-BLOCK`. Exact compatibility CCS is ignored. Failed C-HS trial decryption consumes the sealed 0-RTT budget without advancing sequence only until the first authenticated record. Successful exact client-Finished verification commits its transcript, installs C-AP read, and returns `TLS-SERVER-INGRESS-FINISHED`. Terminal progress returns an outbound alert description or the preserved peer alert description but does not claim wire transmission. |
 | `TLS-SERVER-CLIENT-FLIGHT-STEP` | `( ctx ctx-generation -- progress alert-desc ior )` | Read and process at most one protected client-flight record over the completed flight's sealed accepted child. Each owner-qualified receive asks only for the missing header or exact declared record bound, so arbitrary TCP segmentation returns `NONE`/`TLS-E-WOULD-BLOCK`, a committed nonfinal record returns `RECORD`, and verified Finished returns `FINISHED` without consuming a following TCP record. NET contention is retryable. Known dead/stale transport is generation-exactly reclaimed; a receive throw wipes the complete retained lanes but preserves unresolved authority for `TLS-ABORT`. Protocol terminal results retain the S-AP write epoch for later protected disposition transmission. |
+| `TLS-SERVER-INGRESS-DISPOSITION-STEP` | `( ctx ctx-generation -- progress ior )` | Consume the attached client flight's sticky terminal classification without accepting caller-provided alert bytes or a transport callback. `SEND-FATAL` emits protected level 2 plus the classified description; `SEND-CLOSE` emits protected warning `close_notify`; a non-close `PEER-ALERT` emits nothing. One 24-byte ciphertext remains connection-owned and byte-identical across send-window backpressure or NET contention, with S-AP sequence commit only after exact TCP admission. `TLS-SERVER-DISPOSITION-COMPLETE` means response admission or intentional no-response, not ACK or FIN. Pending disposition blocks `TLS-CLOSE-TRY`; after completion, close waits for any retained alert ACK before FIN. Dead/stale authority is generation-exactly reclaimed and cannot touch a replacement TCB incarnation. |
 
 `TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
 and future secrets have published; it is not transport readiness or an
@@ -1784,7 +1785,8 @@ read epoch and its sequence. Ingress progress is
 description the future adapter must transmit; `SEND-CLOSE` returns
 `close_notify`; `PEER-ALERT` preserves the peer description and requires no
 response. Terminal and completed results are sticky and consume no further
-input. Successful Finished leaves the context
+input. Disposition progress is `TLS-SERVER-DISPOSITION-NONE` (0) or
+`TLS-SERVER-DISPOSITION-COMPLETE` (1). Successful Finished leaves the context
 authenticated in `TLSH-APPLICATION-READY`; `TLS-HANDSHAKE-PUBLISH` remains the
 explicit establishment boundary. Budget overrun while the rejection window
 remains open returns `TLS-E-EARLY-DATA-LIMIT` (-4220). Authenticated content
@@ -1849,10 +1851,11 @@ incarnation-safe accepted child to a prepared server TLS context, ingest the
 initial ClientHello through owner-qualified TCP, and emit the complete
 ACK-paced server flight through the same authority. It now reads the protected
 client flight through that sealed child, authenticates Finished, preserves a
-following TCP record, and reaches explicit establishment publication. It does
-not yet accept TLS sockets, transmit terminal dispositions, or demonstrate live
-socket interoperability with an independent TLS implementation. Cipher-suite
-support is:
+following TCP record, and reaches explicit establishment publication. Sticky
+terminal ingress can now admit one exact protected fatal/close response or
+complete without a response for a non-close peer alert. It does not yet accept
+TLS sockets or demonstrate live socket interoperability with an independent
+TLS implementation. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1941,10 +1944,11 @@ ClientHello ingress uses the same TLS-to-NET order, retains partial record and
 handshake bytes per context, and refuses the raw parser once transport
 authority exists. The attached emitter is qualified through every ACK-paced
 protected record and server Finished. Attached protected client-flight ingress
-uses the same exact pair and record engine through client Finished. Protected
-disposition transmission and authenticated socket publication are now the
-active transport incompatibilities, not reasons for further TCP or crypto
-expansion.
+uses the same exact pair and record engine through client Finished. Attached
+terminal disposition reuses that pair and the completed emitter's pending lane
+through exact protected alert admission. Authenticated socket publication is
+now the active transport incompatibility, not a reason for further TCP or
+crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at

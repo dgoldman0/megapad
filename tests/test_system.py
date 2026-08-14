@@ -25167,6 +25167,50 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         return lines, ack_frames, record_lengths
 
+    @classmethod
+    def _attached_server_terminal_setup_lines(
+        cls,
+        record_name: str,
+        record: bytes,
+    ) -> tuple[list[str], list[bytes], int, int]:
+        """Drive one real accepted child to a sticky terminal ingress."""
+        lines, ack_frames, record_lengths = (
+            cls._attached_server_flight_setup_lines()
+        )
+        lines += cls._forth_bytes(record_name, record)
+        server_next = 1000 + sum(record_lengths)
+        client_next = 2000 + len(record)
+        terminal_frame = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            2000,
+            server_next,
+            TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+            4096,
+            record,
+        )
+        for _ in record_lengths:
+            lines += [
+                "server-ctx @ paced-ctx-gen @ TLS-SERVER-FLIGHT-STEP 2DROP",
+                "TCP-POLL",
+            ]
+        lines += [
+            "server-ctx @ paced-ctx-gen @ 0 "
+            "TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED",
+            '." TERM-BEGIN=" .',
+            "TCP-POLL",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." TERM-IOR=" . ." TERM-ALERT=" . '
+            '." TERM-PROGRESS=" .',
+            '." TERM-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+        ]
+        return lines, ack_frames + [terminal_frame], server_next, client_next
+
     def test_server_phase_leaves_dictionary_allocations_reachable(self):
         """Server preparation cannot strand later cold-cache definitions."""
         lines, _ = self._server_phase_one_lines()
@@ -25464,6 +25508,39 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "REBEGIN=0 REBEGIN-GEN=2 ", "CTX-GEN2=2 ", "REFS2=1 ",
             "REABORT=0 ", "REFS-REABORT=0 ", "DELETE=0 ",
             "BEGIN-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_close_ignores_preflight_union_disposition_collision(self):
+        """Pre-ingress union bytes cannot impersonate terminal ingress."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("server-alpn", self.ALPN)
+        lines += [
+            "VARIABLE server-ctx VARIABLE collision-ctx-gen",
+            "0 TLS-CTX@ server-ctx !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN-IOR=" . collision-ctx-gen !',
+            "TLS-SERVER-INGRESS-TERMINAL-PENDING server-ctx @ "
+            "TLS-RXW.SERVER-INGRESS-META TSI.STATE + !",
+            '." COLLISION=" server-ctx @ TLS-RXW.SERVER-INGRESS-META '
+            'TSI.STATE + @ .',
+            '." INGRESS-ACTIVE=" server-ctx @ '
+            '_TLS-SERVER-INGRESS-ACTIVE? .',
+            'server-ctx @ TLS-CLOSE-TRY ." CLOSE=" .',
+            '." CLAIMED=" server-ctx @ TLS-CTX-CLAIMED? .',
+            '." REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN-IOR=0 ", "COLLISION=3 ", "INGRESS-ACTIVE=0 ",
+            "CLOSE=0 ", "CLAIMED=0 ", "REFS=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
@@ -27471,6 +27548,615 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_server_terminal_disposition_fatal_is_exact_and_retry_safe(self):
+        """A sticky fatal owns one protected record across backpressure."""
+        wrong_finished = bytes.fromhex(
+            "1703030035de4a5ff64b354480a575ef8001fdc3a129fc64ee79971c5f"
+            "efd24c8f3a54890dd08ae439d51bb2684829bb32c0dd00ae2a1174ca27"
+        )
+        expected_alert = bytes.fromhex(
+            "1703030013f5f07412b52bd80b733ee38fcb7212866b6919"
+        )
+        lines, frames, server_next, _ = (
+            self._attached_server_terminal_setup_lines(
+                "terminal-wrong-finished", wrong_finished
+            )
+        )
+        lines += self._forth_bytes("expected-fatal-alert", expected_alert)
+        lines += self._forth_bytes("terminal-zero-write", bytes(48))
+        lines += [
+            "CREATE fatal-pending-copy 24 ALLOT",
+            'server-ctx @ TLS-CLOSE-TRY ." CLOSE-PENDING=" .',
+            "server-ctx @ paced-ctx-gen @ 1+ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." STALE-IOR=" . ." STALE-PROGRESS=" .',
+            '." STALE-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." STALE-PENDING=" server-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + @ .',
+            "0 paced-child @ TCB.SND-WND !",
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." BLOCK1-IOR=" . ." BLOCK1-PROGRESS=" .',
+            '." BLOCK1-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." BLOCK1-PENDING=" server-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + @ .',
+            '." BLOCK1-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." BLOCK1-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." BLOCK1-NXT=" paced-child @ TCB.SND-NXT @ .',
+            "server-ctx @ TLS-RXW.SERVER-PENDING "
+            "fatal-pending-copy 24 MOVE",
+            '." BLOCK1-ORACLE=" fatal-pending-copy '
+            'expected-fatal-alert 24 _XC-BYTES= .',
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." BLOCK2-IOR=" . ." BLOCK2-PROGRESS=" .',
+            '." BLOCK2-SAME=" server-ctx @ TLS-RXW.SERVER-PENDING '
+            'fatal-pending-copy 24 _XC-BYTES= .',
+            'NET-TX-TRY ." NET-ACQUIRE=" .',
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." NET-IOR=" . ." NET-PROGRESS=" .',
+            '." NET-DEPTH=" NET-TX-OWNER-DEPTH @ .',
+            "NET-TX-RELEASE",
+            '." NET-SAME=" server-ctx @ TLS-RXW.SERVER-PENDING '
+            'fatal-pending-copy 24 _XC-BYTES= .',
+            # Make the lower NET lock genuinely foreign so the public
+            # preflight succeeds and the exact TCP send itself reports BUSY.
+            "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." LOWER-NET-IOR=" . ." LOWER-NET-PROGRESS=" .',
+            '." LOWER-NET-DEPTH=" NET-TX-OWNER-DEPTH @ .',
+            '." LOWER-NET-SAME=" server-ctx @ '
+            'TLS-RXW.SERVER-PENDING fatal-pending-copy 24 _XC-BYTES= .',
+            '." LOWER-NET-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            "4096 paced-child @ TCB.SND-WND !",
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." SEND-IOR=" . ." SEND-PROGRESS=" .',
+            '." SEND-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." SEND-PENDING=" server-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + @ .',
+            '." SEND-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." SEND-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." SEND-ORACLE=" paced-child @ TCB.TX-BUF '
+            'expected-fatal-alert 24 _XC-BYTES= .',
+            '." SEND-WR-WIPED=" server-ctx @ TLS-CTX.WR-KEY '
+            'terminal-zero-write 48 _XC-BYTES= .',
+            '." SEND-WR-SEQ=" server-ctx @ TLS-CTX.WR-SEQ @ .',
+            '." SEND-CLOSE-PHASE=" server-ctx @ '
+            'TLS-CTX.CLOSE-PHASE @ .',
+            '." SEND-SOCKET=" server-ctx @ TLS-CTX.SOCKET-OWNER @ .',
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." AGAIN-IOR=" . ." AGAIN-PROGRESS=" .',
+            '." AGAIN-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." AGAIN-NXT=" paced-child @ TCB.SND-NXT @ .',
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." INGRESS-IOR=" . ." INGRESS-ALERT=" . '
+            '." INGRESS-PROGRESS=" .',
+            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            '." CHILD-END=" paced-child @ TCB.STATE @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "TERM-BEGIN=0 ",
+            "TERM-IOR=-4221 TERM-ALERT=51 TERM-PROGRESS=3 ",
+            "TERM-STATE=3 ", "CLOSE-PENDING=-4206 ",
+            "STALE-IOR=-4204 STALE-PROGRESS=0 ",
+            "STALE-STATE=3 ", "STALE-PENDING=0 ",
+            "BLOCK1-IOR=-4219 BLOCK1-PROGRESS=0 ",
+            "BLOCK1-STATE=3 ", "BLOCK1-PENDING=1 ",
+            "BLOCK1-SEQ=0 ", "BLOCK1-TX=0 ",
+            f"BLOCK1-NXT={server_next} ", "BLOCK1-ORACLE=-1 ",
+            "BLOCK2-IOR=-4219 BLOCK2-PROGRESS=0 ",
+            "BLOCK2-SAME=-1 ", "NET-ACQUIRE=0 ",
+            "NET-IOR=-4206 NET-PROGRESS=0 ", "NET-DEPTH=1 ",
+            "NET-SAME=-1 ",
+            "LOWER-NET-IOR=-4206 LOWER-NET-PROGRESS=0 ",
+            "LOWER-NET-DEPTH=1 ", "LOWER-NET-SAME=-1 ",
+            "LOWER-NET-SEQ=0 ", "SEND-IOR=0 SEND-PROGRESS=1 ",
+            "SEND-STATE=4 ", "SEND-PENDING=0 ", "SEND-TX=24 ",
+            f"SEND-NXT={server_next + 24} ", "SEND-ORACLE=-1 ",
+            "SEND-WR-WIPED=-1 ", "SEND-WR-SEQ=0 ",
+            "SEND-CLOSE-PHASE=0 ", "SEND-SOCKET=0 ",
+            "AGAIN-IOR=0 AGAIN-PROGRESS=1 ", "AGAIN-TX=24 ",
+            f"AGAIN-NXT={server_next + 24} ",
+            "INGRESS-IOR=-4221 INGRESS-ALERT=51 INGRESS-PROGRESS=3 ",
+            "ABORT=1 ", "CHILD-END=0 ", "LISTENER-LIVE=-1 ",
+            "REFS-END=0 ", "DELETE=0 ", "TLS-OWNER=0 ",
+            "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        payload_frames = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None and frame["payload"]
+        ]
+        self.assertEqual(len(payload_frames), 6)
+        self.assertEqual(
+            (
+                payload_frames[-1]["sport"], payload_frames[-1]["dport"],
+                payload_frames[-1]["seq"], payload_frames[-1]["payload"],
+            ),
+            (443, 50000, server_next, expected_alert),
+        )
+
+    def test_server_terminal_disposition_answers_close_before_fin(self):
+        """Peer close_notify is answered and ACKed before the server FIN."""
+        peer_close = bytes.fromhex(
+            "1703030013cb4a4ad46d9926c892b1ce516bbafc1c3cffa5"
+        )
+        expected_alert = bytes.fromhex(
+            "1703030013f6c37453011cb94c2b80333e18cf7f69d71529"
+        )
+        lines, frames, server_next, client_next = (
+            self._attached_server_terminal_setup_lines(
+                "terminal-peer-close", peer_close
+            )
+        )
+        alert_ack = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            client_next,
+            server_next + len(expected_alert),
+            TestKDOSNetStack.TCP_ACK,
+            4096,
+            b"",
+        )
+        lines += self._forth_bytes("expected-close-alert", expected_alert)
+        lines += [
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." DISP-IOR=" . ." DISP-PROGRESS=" .',
+            '." DISP-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." DISP-CLOSE-PHASE=" server-ctx @ '
+            'TLS-CTX.CLOSE-PHASE @ .',
+            '." DISP-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." DISP-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." DISP-ORACLE=" paced-child @ TCB.TX-BUF '
+            'expected-close-alert 24 _XC-BYTES= .',
+            'server-ctx @ TLS-CLOSE-TRY ." CLOSE1=" .',
+            '." CLOSE1-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." CLOSE1-STATE=" paced-child @ TCB.STATE @ .',
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." AGAIN-IOR=" . ." AGAIN-PROGRESS=" .',
+            '." AGAIN-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." AGAIN-NXT=" paced-child @ TCB.SND-NXT @ .',
+            "TCP-POLL",
+            '." ACK-UNA=" paced-child @ TCB.SND-UNA @ .',
+            '." ACK-TX=" paced-child @ TCB.TX-LEN @ .',
+            'server-ctx @ TLS-CLOSE-TRY ." CLOSE2=" .',
+            '." CLOSE2-CTX=" server-ctx @ TLS-CTX-CLAIMED? .',
+            '." CLOSE2-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." CLOSE2-STATE=" paced-child @ TCB.STATE @ .',
+            '." CLOSE2-OWNER=" paced-child @ TCB.OWNER @ .',
+            '." CLOSE2-AUTH=" paced-child @ TCB.AUTH-STATE @ .',
+            '." CLOSE2-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames + [alert_ack],
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "TERM-BEGIN=0 ",
+            "TERM-IOR=-4201 TERM-ALERT=0 TERM-PROGRESS=4 ",
+            "TERM-STATE=3 ", "DISP-IOR=0 DISP-PROGRESS=1 ",
+            "DISP-STATE=4 ", "DISP-CLOSE-PHASE=1 ",
+            "DISP-TX=24 ", f"DISP-NXT={server_next + 24} ",
+            "DISP-ORACLE=-1 ", "CLOSE1=-4219 ",
+            "CLOSE1-TX=24 ", "CLOSE1-STATE=4 ",
+            "AGAIN-IOR=0 AGAIN-PROGRESS=1 ", "AGAIN-TX=24 ",
+            f"AGAIN-NXT={server_next + 24} ",
+            f"ACK-UNA={server_next + 24} ", "ACK-TX=0 ",
+            "CLOSE2=0 ", "CLOSE2-CTX=0 ", "CLOSE2-TCB=0 ",
+            "CLOSE2-STATE=5 ", "CLOSE2-OWNER=0 ",
+            "CLOSE2-AUTH=0 ", f"CLOSE2-NXT={server_next + 25} ",
+            "LISTENER-LIVE=-1 ", "REFS-END=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        parsed = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None
+        ]
+        payload_frames = [frame for frame in parsed if frame["payload"]]
+        self.assertEqual(len(payload_frames), 6)
+        self.assertEqual(payload_frames[-1]["payload"], expected_alert)
+        fin_frames = [
+            frame for frame in parsed
+            if frame["flags"] & TestKDOSNetStack.TCP_FIN
+        ]
+        self.assertEqual(len(fin_frames), 1)
+        self.assertEqual(fin_frames[0]["seq"], server_next + 24)
+
+    def test_server_terminal_disposition_suppresses_peer_alert_response(self):
+        """A non-close peer alert produces no reciprocal TLS alert."""
+        peer_alert = bytes.fromhex(
+            "1703030013c8624a81d55c9b8ab7b612b6f98bdfd96291e0"
+        )
+        lines, frames, server_next, _ = (
+            self._attached_server_terminal_setup_lines(
+                "terminal-peer-alert", peer_alert
+            )
+        )
+        lines += self._forth_bytes("terminal-zero-write", bytes(48))
+        lines += [
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." DISP-IOR=" . ." DISP-PROGRESS=" .',
+            '." DISP-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." DISP-LEVEL=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.PEER-ALERT-LEVEL + @ .',
+            '." DISP-DESC=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.TERMINAL-DESC + @ .',
+            '." DISP-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." DISP-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." DISP-PENDING=" server-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + @ .',
+            '." DISP-WR-WIPED=" server-ctx @ TLS-CTX.WR-KEY '
+            'terminal-zero-write 48 _XC-BYTES= .',
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." AGAIN-IOR=" . ." AGAIN-PROGRESS=" .',
+            '." AGAIN-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." AGAIN-NXT=" paced-child @ TCB.SND-NXT @ .',
+            'server-ctx @ TLS-CLOSE-TRY ." CLOSE=" .',
+            '." CLOSE-CTX=" server-ctx @ TLS-CTX-CLAIMED? .',
+            '." CLOSE-STATE=" paced-child @ TCB.STATE @ .',
+            '." CLOSE-OWNER=" paced-child @ TCB.OWNER @ .',
+            '." CLOSE-AUTH=" paced-child @ TCB.AUTH-STATE @ .',
+            '." CLOSE-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "TERM-BEGIN=0 ",
+            "TERM-IOR=-4201 TERM-ALERT=40 TERM-PROGRESS=5 ",
+            "TERM-STATE=3 ", "DISP-IOR=0 DISP-PROGRESS=1 ",
+            "DISP-STATE=4 ", "DISP-LEVEL=2 ", "DISP-DESC=40 ",
+            "DISP-TX=0 ", f"DISP-NXT={server_next} ",
+            "DISP-PENDING=0 ", "DISP-WR-WIPED=-1 ",
+            "AGAIN-IOR=0 AGAIN-PROGRESS=1 ", "AGAIN-TX=0 ",
+            f"AGAIN-NXT={server_next} ", "CLOSE=0 ",
+            "CLOSE-CTX=0 ", "CLOSE-STATE=5 ", "CLOSE-OWNER=0 ",
+            "CLOSE-AUTH=0 ", f"CLOSE-NXT={server_next + 1} ",
+            "LISTENER-LIVE=-1 ", "REFS-END=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        parsed = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None
+        ]
+        payload_frames = [frame for frame in parsed if frame["payload"]]
+        self.assertEqual(len(payload_frames), 5)
+        fin_frames = [
+            frame for frame in parsed
+            if frame["flags"] & TestKDOSNetStack.TCP_FIN
+        ]
+        self.assertEqual(len(fin_frames), 1)
+        self.assertEqual(fin_frames[0]["seq"], server_next)
+
+    def test_server_terminal_disposition_complete_releases_after_child_reuse(self):
+        """Close/abort releases stale TLS without touching a replacement."""
+        peer_alert = bytes.fromhex(
+            "1703030013c8624a81d55c9b8ab7b612b6f98bdfd96291e0"
+        )
+        for cleanup_label, cleanup_word, busy_result in (
+            ("CLOSE", "TLS-CLOSE-TRY", -4219),
+            ("ABORT", "TLS-ABORT", 3),
+        ):
+            with self.subTest(cleanup=cleanup_label):
+                lines, frames, _, _ = (
+                    self._attached_server_terminal_setup_lines(
+                        "terminal-peer-alert", peer_alert
+                    )
+                )
+                lines += [
+                    "VARIABLE complete-replacement-owner",
+                    "VARIABLE complete-replacement-gen",
+                    "server-ctx @ paced-ctx-gen @ "
+                    "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+                    '." DISP-IOR=" . ." DISP-PROGRESS=" .',
+                    '." DISP-STATE=" server-ctx @ '
+                    'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+                    "paced-child @ paced-cgen @ server-ctx @ "
+                    "TCP-OWNER-ABORT",
+                    '." OLD-ABORT-IOR=" . ." OLD-ABORT-STATUS=" .',
+                    'TCB-ALLOC ." REPLACEMENT-IDX=" .',
+                    "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
+                    "9443 paced-child @ TCB.LOCAL-PORT !",
+                    "55000 paced-child @ TCB.REMOTE-PORT !",
+                    "7000 paced-child @ TCB.SND-UNA !",
+                    "7000 paced-child @ TCB.SND-NXT !",
+                    "8000 paced-child @ TCB.RCV-NXT !",
+                    "4096 paced-child @ TCB.SND-WND !",
+                    "4096 paced-child @ TCB.RCV-WND !",
+                    "TCP-MSS paced-child @ TCB.CWND !",
+                    "paced-child @ complete-replacement-owner TCP-ATTACH",
+                    '." REPLACEMENT-IOR=" . '
+                    'DUP complete-replacement-gen ! '
+                    '." REPLACEMENT-GEN=" .',
+                    '." REPLACEMENT-EXACT-BEFORE=" paced-child @ '
+                    'complete-replacement-gen @ complete-replacement-owner '
+                    'TCB-ATTACHED-TO? .',
+                    "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+                    f'server-ctx @ {cleanup_word} ." BUSY-CLEANUP=" .',
+                    '." BUSY-CLAIMED=" server-ctx @ TLS-CTX-CLAIMED? .',
+                    '." BUSY-REPLACEMENT-EXACT=" paced-child @ '
+                    'complete-replacement-gen @ complete-replacement-owner '
+                    'TCB-ATTACHED-TO? .',
+                    "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+                    f'server-ctx @ {cleanup_word} ." CLEANUP=" .',
+                    '." CTX-CLAIMED=" server-ctx @ TLS-CTX-CLAIMED? .',
+                    '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+                    '." REPLACEMENT-EXACT-AFTER=" paced-child @ '
+                    'complete-replacement-gen @ complete-replacement-owner '
+                    'TCB-ATTACHED-TO? .',
+                    '." REPLACEMENT-STATE=" paced-child @ TCB.STATE @ .',
+                    '." REPLACEMENT-NXT=" paced-child @ TCB.SND-NXT @ .',
+                    '." REPLACEMENT-TX=" paced-child @ TCB.TX-LEN @ .',
+                    '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+                    'paced-listener-owner TCB-ATTACHED-TO? .',
+                    "paced-child @ complete-replacement-gen @ "
+                    "complete-replacement-owner TCP-OWNER-ABORT",
+                    '." REPLACEMENT-ABORT-IOR=" . '
+                    '." REPLACEMENT-ABORT-STATUS=" .',
+                    'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+                    '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+                    '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+                    '." FINAL-DEPTH=" DEPTH .',
+                ]
+                sent: list[bytes] = []
+                text = self._run_kdos(
+                    lines,
+                    nic_frames=frames,
+                    max_steps=250_000_000,
+                    nic_tx_callback=lambda _nic, frame: sent.append(
+                        bytes(frame)
+                    ),
+                )
+                self.assertNotIn("Stack underflow", text)
+                for token in (
+                    "TERM-BEGIN=0 ",
+                    "TERM-IOR=-4201 TERM-ALERT=40 TERM-PROGRESS=5 ",
+                    "TERM-STATE=3 ", "DISP-IOR=0 DISP-PROGRESS=1 ",
+                    "DISP-STATE=4 ", "OLD-ABORT-IOR=0 ",
+                    "REPLACEMENT-IDX=1 ", "REPLACEMENT-IOR=0 ",
+                    "REPLACEMENT-EXACT-BEFORE=-1 ",
+                    f"BUSY-CLEANUP={busy_result} ", "BUSY-CLAIMED=-1 ",
+                    "BUSY-REPLACEMENT-EXACT=-1 ", "CLEANUP=0 ",
+                    "CTX-CLAIMED=0 ", "REFS-END=0 ",
+                    "REPLACEMENT-EXACT-AFTER=-1 ",
+                    "REPLACEMENT-STATE=4 ", "REPLACEMENT-NXT=7000 ",
+                    "REPLACEMENT-TX=0 ", "LISTENER-LIVE=-1 ",
+                    "REPLACEMENT-ABORT-IOR=0 ", "DELETE=0 ",
+                    "TLS-OWNER=0 ", "NET-OWNER=0 ",
+                    "FINAL-DEPTH=0 ",
+                ):
+                    self.assertIn(token, text)
+                payload_frames = [
+                    frame
+                    for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+                    if frame is not None and frame["payload"]
+                ]
+                self.assertEqual(len(payload_frames), 5)
+
+    def test_server_terminal_disposition_pending_abort_releases_reused_child(self):
+        """Explicit abort releases a pending terminal after child reuse."""
+        peer_alert = bytes.fromhex(
+            "1703030013c8624a81d55c9b8ab7b612b6f98bdfd96291e0"
+        )
+        lines, frames, _, _ = self._attached_server_terminal_setup_lines(
+            "terminal-peer-alert", peer_alert
+        )
+        lines += [
+            "VARIABLE pending-replacement-owner",
+            "VARIABLE pending-replacement-gen",
+            '." PENDING-STATE=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            "paced-child @ paced-cgen @ server-ctx @ TCP-OWNER-ABORT",
+            '." OLD-ABORT-IOR=" . ." OLD-ABORT-STATUS=" .',
+            'TCB-ALLOC ." REPLACEMENT-IDX=" .',
+            "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
+            "7000 paced-child @ TCB.SND-UNA !",
+            "7000 paced-child @ TCB.SND-NXT !",
+            "4096 paced-child @ TCB.SND-WND !",
+            "TCP-MSS paced-child @ TCB.CWND !",
+            "paced-child @ pending-replacement-owner TCP-ATTACH",
+            '." REPLACEMENT-IOR=" . DUP pending-replacement-gen ! '
+            '." REPLACEMENT-GEN=" .',
+            '." REPLACEMENT-EXACT-BEFORE=" paced-child @ '
+            'pending-replacement-gen @ pending-replacement-owner '
+            'TCB-ATTACHED-TO? .',
+            "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+            'server-ctx @ TLS-ABORT ." BUSY-ABORT=" .',
+            '." BUSY-CLAIMED=" server-ctx @ TLS-CTX-CLAIMED? .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            '." CTX-CLAIMED=" server-ctx @ TLS-CTX-CLAIMED? .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." REPLACEMENT-EXACT-AFTER=" paced-child @ '
+            'pending-replacement-gen @ pending-replacement-owner '
+            'TCB-ATTACHED-TO? .',
+            '." REPLACEMENT-STATE=" paced-child @ TCB.STATE @ .',
+            '." REPLACEMENT-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." REPLACEMENT-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            "paced-child @ pending-replacement-gen @ "
+            "pending-replacement-owner TCP-OWNER-ABORT",
+            '." REPLACEMENT-ABORT-IOR=" . '
+            '." REPLACEMENT-ABORT-STATUS=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "TERM-BEGIN=0 ",
+            "TERM-IOR=-4201 TERM-ALERT=40 TERM-PROGRESS=5 ",
+            "TERM-STATE=3 ", "PENDING-STATE=3 ",
+            "OLD-ABORT-IOR=0 ", "REPLACEMENT-IDX=1 ",
+            "REPLACEMENT-IOR=0 ", "REPLACEMENT-EXACT-BEFORE=-1 ",
+            "BUSY-ABORT=3 ", "BUSY-CLAIMED=-1 ", "ABORT=0 ",
+            "CTX-CLAIMED=0 ", "REFS-END=0 ",
+            "REPLACEMENT-EXACT-AFTER=-1 ", "REPLACEMENT-STATE=4 ",
+            "REPLACEMENT-NXT=7000 ", "REPLACEMENT-TX=0 ",
+            "LISTENER-LIVE=-1 ", "REPLACEMENT-ABORT-IOR=0 ",
+            "DELETE=0 ", "TLS-OWNER=0 ", "NET-OWNER=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        payload_frames = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None and frame["payload"]
+        ]
+        self.assertEqual(len(payload_frames), 5)
+
+    def test_server_terminal_disposition_rejects_reused_child_exactly(self):
+        """A stale seal cannot mutate the replacement TCB incarnation."""
+        peer_alert = bytes.fromhex(
+            "1703030013c8624a81d55c9b8ab7b612b6f98bdfd96291e0"
+        )
+        lines, frames, _, _ = self._attached_server_terminal_setup_lines(
+            "terminal-peer-alert", peer_alert
+        )
+        lines += [
+            "VARIABLE replacement-owner VARIABLE replacement-gen",
+            "paced-child @ paced-cgen @ server-ctx @ TCP-OWNER-ABORT",
+            '." OLD-ABORT-IOR=" . ." OLD-ABORT-STATUS=" .',
+            'TCB-ALLOC ." REPLACEMENT-IDX=" .',
+            "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
+            "9443 paced-child @ TCB.LOCAL-PORT !",
+            "55000 paced-child @ TCB.REMOTE-PORT !",
+            "7000 paced-child @ TCB.SND-UNA !",
+            "7000 paced-child @ TCB.SND-NXT !",
+            "8000 paced-child @ TCB.RCV-NXT !",
+            "4096 paced-child @ TCB.SND-WND !",
+            "4096 paced-child @ TCB.RCV-WND !",
+            "TCP-MSS paced-child @ TCB.CWND !",
+            "paced-child @ replacement-owner TCP-ATTACH",
+            '." REPLACEMENT-IOR=" . DUP replacement-gen ! '
+            '." REPLACEMENT-GEN=" .',
+            '." REPLACEMENT-EXACT-BEFORE=" paced-child @ '
+            'replacement-gen @ replacement-owner TCB-ATTACHED-TO? .',
+            "server-ctx @ paced-ctx-gen @ "
+            "TLS-SERVER-INGRESS-DISPOSITION-STEP",
+            '." DISP-IOR=" . ." DISP-PROGRESS=" .',
+            '." DISP-CTX-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." DISP-CTX-GEN=" server-ctx @ '
+            'TLS-CTX.TCB-GENERATION @ .',
+            '." DISP-SEAL-ZERO=" server-ctx @ _TSSE-SEAL-ZERO? .',
+            '." DISP-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." DISP-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." DISP-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." DISP-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." REPLACEMENT-EXACT-AFTER=" paced-child @ '
+            'replacement-gen @ replacement-owner TCB-ATTACHED-TO? .',
+            '." REPLACEMENT-STATE=" paced-child @ TCB.STATE @ .',
+            '." REPLACEMENT-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." REPLACEMENT-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            'server-ctx @ TLS-ABORT ." TLS-ABORT=" .',
+            "paced-child @ replacement-gen @ replacement-owner "
+            "TCP-OWNER-ABORT",
+            '." REPLACEMENT-ABORT-IOR=" . '
+            '." REPLACEMENT-ABORT-STATUS=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "TERM-BEGIN=0 ",
+            "TERM-IOR=-4201 TERM-ALERT=40 TERM-PROGRESS=5 ",
+            "TERM-STATE=3 ", "OLD-ABORT-IOR=0 ",
+            "REPLACEMENT-IDX=1 ", "REPLACEMENT-IOR=0 ",
+            "REPLACEMENT-EXACT-BEFORE=-1 ",
+            "DISP-IOR=-4218 DISP-PROGRESS=0 ",
+            "DISP-CTX-TCB=0 ", "DISP-CTX-GEN=0 ",
+            "DISP-SEAL-ZERO=-1 ", "DISP-STATE=3 ",
+            "DISP-ERROR=-4218 ", "DISP-PIN=0 ", "DISP-REFS=0 ",
+            "REPLACEMENT-EXACT-AFTER=-1 ", "REPLACEMENT-STATE=4 ",
+            "REPLACEMENT-NXT=7000 ", "REPLACEMENT-TX=0 ",
+            "LISTENER-LIVE=-1 ", "TLS-ABORT=0 ",
+            "REPLACEMENT-ABORT-IOR=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        payload_frames = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None and frame["payload"]
+        ]
+        self.assertEqual(len(payload_frames), 5)
+
     def test_server_client_flight_step_reclaims_transport_eof(self):
         """EOF after a partial record reclaims only the sealed child."""
         client_record, *_ = self._client_finished_reference()
@@ -28177,7 +28863,12 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." APP-WR=" ingress-write-live? .',
             '." APP-RD=" ingress-read-zero? .',
             '." APP-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
-            'server-ctx @ TLS-ABORT ." APP-ABORT=" .',
+            '." APP-SEAL-ZERO=" server-ctx @ _TSSE-SEAL-ZERO? .',
+            '." APP-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." APP-TCB-GEN=" server-ctx @ '
+            'TLS-CTX.TCB-GENERATION @ .',
+            'server-ctx @ TLS-CLOSE-TRY ." APP-CLOSE=" .',
+            '." APP-CLAIMED=" server-ctx @ TLS-CTX-CLAIMED? .',
             '." APP-OWNER=" TLS-OWNER-DEPTH @ .',
             '." APP-FINAL-DEPTH=" DEPTH .',
         ]
@@ -28190,7 +28881,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "APP-C=23 ", "APP-P=3 ", "APP-A=10 ",
             "APP-I=-4221 ", "APP-FATAL=3 ", "APP-ERROR=-4221 ",
             "APP-WR=-1 ", "APP-RD=-1 ", "APP-REFS=0 ",
-            "APP-ABORT=0 ", "APP-OWNER=0 ", "APP-FINAL-DEPTH=0 ",
+            "APP-SEAL-ZERO=-1 ", "APP-TCB=0 ", "APP-TCB-GEN=0 ",
+            "APP-CLOSE=0 ", "APP-CLAIMED=0 ", "APP-OWNER=0 ",
+            "APP-FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
