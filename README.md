@@ -68,10 +68,15 @@ record/TCP boundaries, authenticates client Finished, and reaches the existing
 explicit publication boundary. Sticky terminal ingress now drives one exact
 protected fatal or close-notify record over that child, or deliberately sends
 nothing for a non-close peer alert; retries preserve ciphertext and nonce, and
-close waits for alert acknowledgement before FIN. Authenticated accepted-socket
-publication is still missing, so TLS listen/accept remains fail-closed.
-The immediate release path is only that remaining vertical slice, one
-independent TLS peer exchange, application I/O, and graceful cleanup. See
+close waits for alert acknowledgement before FIN. An authenticated attached
+server context can now publish one reciprocal TLS descriptor through the exact
+context generation only after descriptor capacity, credential ownership, and
+the sealed child are proven in one transaction. Predictable contention and
+capacity failures leave the raw context unchanged; stale child authority stays
+abortable without touching a replacement. TLS-marked listen/accept remains
+fail-closed until the production coordinator and listener policy drive these
+qualified steps. The immediate release path is that minimal coordinator plus
+one independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

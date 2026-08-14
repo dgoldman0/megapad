@@ -25211,6 +25211,53 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         return lines, ack_frames + [terminal_frame], server_next, client_next
 
+    @classmethod
+    def _attached_server_success_setup_lines(
+        cls,
+    ) -> tuple[list[str], list[bytes], int, int]:
+        """Drive one real accepted child through authenticated Finished."""
+        client_record, *_ = cls._client_finished_reference()
+        lines, ack_frames, record_lengths = (
+            cls._attached_server_flight_setup_lines()
+        )
+        lines += cls._forth_bytes("publish-client-finished", client_record)
+        server_next = 1000 + sum(record_lengths)
+        client_next = 2000 + len(client_record)
+        finished_frame = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            2000,
+            server_next,
+            TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+            4096,
+            client_record,
+        )
+        for _ in record_lengths:
+            lines += [
+                "server-ctx @ paced-ctx-gen @ "
+                "TLS-SERVER-FLIGHT-STEP 2DROP",
+                "TCP-POLL",
+            ]
+        lines += [
+            "server-ctx @ paced-ctx-gen @ 0 "
+            "TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED",
+            '." READY-BEGIN=" .',
+            "TCP-POLL",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." READY-IOR=" . ." READY-ALERT=" . '
+            '." READY-PROGRESS=" .',
+        ]
+        return (
+            lines,
+            ack_frames + [finished_frame],
+            server_next,
+            client_next,
+        )
+
     def test_server_phase_leaves_dictionary_allocations_reachable(self):
         """Server preparation cannot strand later cold-cache definitions."""
         lines, _ = self._server_phase_one_lines()
@@ -27489,24 +27536,60 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." COMPLETE-RAW-PROGRESS=" . '
             '." COMPLETE-RAW-CONSUMED=" .',
             '." COMPLETE-RAW-FOLLOWING=" paced-child @ TCB.RX-COUNT @ .',
+            'server-ctx @ TLS-HANDSHAKE-PUBLISH ." RAW-PUBLISH=" .',
+            '." RAW-PUBLISH-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." RAW-PUBLISH-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." RAW-PUBLISH-INGRESS=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." RAW-PUBLISH-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." RAW-PUBLISH-SEAL=" server-ctx @ _TSSE-SEAL-BOUND? .',
+            '." RAW-PUBLISH-FOLLOWING=" paced-child @ TCB.RX-COUNT @ .',
             "CREATE attached-following-out 7 ALLOT",
             "paced-child @ paced-cgen @ server-ctx @ "
             "attached-following-out 7 TCP-OWNER-RECV",
             '." FOLLOW-IOR=" . ." FOLLOW-U=" .',
             '." FOLLOW-BYTES=" attached-following-out '
             'attached-following 7 _XC-BYTES= .',
-            'server-ctx @ TLS-HANDSHAKE-PUBLISH ." PUBLISH=" .',
+            "VARIABLE published-sd",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-SOCKET-PUBLISH",
+            '." PUBLISH-IOR=" . DUP published-sd ! 0<> '
+            '." PUBLISH-SD=" .',
             '." CONNECTED-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
             '." CONNECTED-STATE=" server-ctx @ TLS-CTX.STATE @ .',
             '." CONNECTED-AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." SOCKET-STATE=" published-sd @ SOCK.STATE @ .',
+            '." SOCKET-FLAGS=" published-sd @ SOCK.FLAGS @ .',
+            '." SOCKET-HANDLE=" published-sd @ SOCK.HANDLE @ '
+            'server-ctx @ = .',
+            '." SOCKET-GEN=" published-sd @ SOCK.HANDLE-GEN @ '
+            'paced-ctx-gen @ = .',
+            '." SOCKET-PORT=" published-sd @ SOCK.LOCAL-PORT @ .',
+            '." SOCKET-OWNER=" server-ctx @ TLS-CTX.SOCKET-OWNER @ '
+            'published-sd @ = .',
+            '." CONNECTED-EXACT=" paced-child @ paced-cgen @ server-ctx @ '
+            'TCB-ATTACHED-TO? .',
             '." PIN-AFTER=" server-ctx @ _TLS-SERVER-PINNED? .',
             '." SEAL-AFTER=" server-ctx @ _TSSE-SEAL-ZERO? .',
             '." REFS-AFTER=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
             'paced-listener-owner TCB-ATTACHED-TO? .',
-            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            "TLS-OWNER-TRY DROP",
+            "published-sd @ SOCK-TLS-RESOLVE paced-ctx-gen @ =",
+            '." RESOLVE-GEN=" . server-ctx @ = ." RESOLVE-CTX=" .',
+            "TLS-OWNER-RELEASE",
+            'server-ctx @ TLS-ABORT ." RAW-ABORT=" .',
+            'published-sd @ SOCK-ABORT ." SOCK-ABORT-IOR=" . '
+            '." SOCK-ABORT-STATUS=" .',
+            '." SOCKET-FREE=" published-sd @ SOCK.STATE @ .',
+            '." CTX-RELEASED=" server-ctx @ TLS-CTX-CLAIMED? .',
+            '." CHILD-CLOSED=" paced-child @ TCB.STATE @ .',
+            '." CHILD-OWNER=" paced-child @ TCB.OWNER @ .',
+            '." CHILD-AUTH=" paced-child @ TCB.AUTH-STATE @ .',
+            '." LISTENER-END=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
             'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
             '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." CRED-OWNER=" _TC-LOCK-OWNER-CORE @ .',
             '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
             '." FINAL-DEPTH=" DEPTH .',
         ]
@@ -27539,14 +27622,320 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "COMPLETE-RAW-IOR=-4204 COMPLETE-RAW-ALERT=0 ",
             "COMPLETE-RAW-PROGRESS=0 COMPLETE-RAW-CONSUMED=0 ",
             "COMPLETE-RAW-FOLLOWING=7 ",
+            "RAW-PUBLISH=-4204 ", "RAW-PUBLISH-HS=8 ",
+            "RAW-PUBLISH-STATE=1 ", "RAW-PUBLISH-INGRESS=2 ",
+            "RAW-PUBLISH-PIN=-1 ", "RAW-PUBLISH-SEAL=-1 ",
+            "RAW-PUBLISH-FOLLOWING=7 ",
             "FOLLOW-IOR=0 FOLLOW-U=7 ", "FOLLOW-BYTES=-1 ",
-            "PUBLISH=0 ", "CONNECTED-HS=9 ", "CONNECTED-STATE=2 ",
-            "CONNECTED-AUTH=1 ", "PIN-AFTER=0 ", "SEAL-AFTER=-1 ",
-            "REFS-AFTER=0 ", "LISTENER-LIVE=-1 ", "ABORT=1 ",
-            "DELETE=0 ", "TLS-OWNER=0 ", "NET-OWNER=0 ",
+            "PUBLISH-IOR=0 PUBLISH-SD=-1 ",
+            "CONNECTED-HS=9 ", "CONNECTED-STATE=2 ",
+            "CONNECTED-AUTH=1 ", "SOCKET-STATE=2 ",
+            "SOCKET-FLAGS=1 ", "SOCKET-HANDLE=-1 ",
+            "SOCKET-GEN=-1 ", "SOCKET-PORT=443 ",
+            "SOCKET-OWNER=-1 ", "CONNECTED-EXACT=-1 ",
+            "PIN-AFTER=0 ", "SEAL-AFTER=-1 ",
+            "REFS-AFTER=0 ", "LISTENER-LIVE=-1 ",
+            "RESOLVE-GEN=-1 RESOLVE-CTX=-1 ", "RAW-ABORT=3 ",
+            "SOCK-ABORT-IOR=0 SOCK-ABORT-STATUS=1 ",
+            "SOCKET-FREE=0 ", "CTX-RELEASED=0 ",
+            "CHILD-CLOSED=0 ", "CHILD-OWNER=0 ", "CHILD-AUTH=0 ",
+            "LISTENER-END=-1 ", "DELETE=0 ", "TLS-OWNER=0 ",
+            "CRED-OWNER=-1 ", "NET-OWNER=0 ",
             "FINAL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
+
+    def test_server_socket_publish_retries_contention_and_capacity_atomically(
+        self,
+    ):
+        """Expected publication failures preserve the authenticated child."""
+        lines, frames, _, _ = self._attached_server_success_setup_lines()
+        lines += [
+            "VARIABLE retry-sd VARIABLE filler-sd VARIABLE filler-count",
+            "CREATE retry-ctx-copy /TLS-CTX ALLOT",
+            "CREATE retry-tcb-copy /TCB ALLOT",
+            "CREATE retry-meta-copy TLS-SERVER-META-CAPACITY ALLOT",
+            "CREATE retry-phase-copy "
+            "/TLS-SERVER-EMIT-META /TLS-SERVER-INGRESS-META + ALLOT",
+            ": retry-snapshot",
+            "  server-ctx @ retry-ctx-copy /TLS-CTX MOVE",
+            "  paced-child @ retry-tcb-copy /TCB MOVE",
+            "  server-ctx @ TLS-RXW.SERVER-META retry-meta-copy",
+            "  TLS-SERVER-META-CAPACITY MOVE",
+            "  server-ctx @ TLS-RXW.SERVER-EMIT-META retry-phase-copy",
+            "  /TLS-SERVER-EMIT-META /TLS-SERVER-INGRESS-META + MOVE ;",
+            ": retry-same?",
+            "  server-ctx @ retry-ctx-copy /TLS-CTX _XC-BYTES=",
+            "  paced-child @ retry-tcb-copy /TCB _XC-BYTES= AND",
+            "  server-ctx @ TLS-RXW.SERVER-META retry-meta-copy",
+            "  TLS-SERVER-META-CAPACITY _XC-BYTES= AND",
+            "  server-ctx @ TLS-RXW.SERVER-EMIT-META retry-phase-copy",
+            "  /TLS-SERVER-EMIT-META /TLS-SERVER-INGRESS-META +",
+            "  _XC-BYTES= AND ;",
+            ": free-sockets",
+            "  0 SOCK-MAX 0 DO",
+            "    I SOCK-N SOCK.STATE @ SOCKST-FREE = IF 1+ THEN",
+            "  LOOP ;",
+            ": fill-sockets",
+            "  0 filler-count ! SOCK-MAX 0 DO",
+            "    SOCK-TYPE-TCP SOCKET DUP -1 = IF DROP UNLOOP EXIT THEN",
+            "    DUP filler-sd ! DROP 1 filler-count +!",
+            "  LOOP ;",
+            ": release-filler-sockets",
+            "  NET-TX-ACQUIRE SOCK-MAX 0 DO",
+            "    I SOCK-N DUP SOCK.STATE @ SOCKST-FREE <> IF",
+            "      SOCK-RELEASE ELSE DROP THEN",
+            "  LOOP NET-TX-RELEASE ;",
+            "retry-snapshot",
+            "_TC-LOCK-TRY .\" CRED-LOCK=\" .",
+            "TASK-ID 1+ _TC-LOCK-OWNER-TASK !",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-SOCKET-PUBLISH",
+            '." CRED-IOR=" . ." CRED-SD=" .',
+            '." CRED-SAME=" retry-same? .',
+            '." CRED-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." CRED-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." CRED-FREE=" free-sockets .',
+            "TASK-ID _TC-LOCK-OWNER-TASK ! _TC-UNLOCK",
+            "NET-TX-TRY .\" NET-LOCK=\" .",
+            "TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-SOCKET-PUBLISH",
+            '." NET-IOR=" . ." NET-SD=" .',
+            '." NET-SAME=" retry-same? .',
+            '." NET-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." NET-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." NET-FREE=" free-sockets .',
+            '." NET-HELD=" NET-TX-OWNER-DEPTH @ .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            "fill-sockets",
+            '." FILLER-COUNT=" filler-count @ .',
+            '." FULL-FREE=" free-sockets .',
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-SOCKET-PUBLISH",
+            '." FULL-IOR=" . ." FULL-SD=" .',
+            '." FULL-SAME=" retry-same? .',
+            '." FULL-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." FULL-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." FULL-FREE-AFTER=" free-sockets .',
+            "NET-TX-ACQUIRE filler-sd @ SOCK-RELEASE NET-TX-RELEASE",
+            '." RETRY-FREE=" free-sockets .',
+            "TCPS-CLOSE-WAIT paced-child @ TCB.STATE !",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-SOCKET-PUBLISH",
+            '." RETRY-IOR=" . DUP retry-sd ! 0<> ." RETRY-SD=" .',
+            '." RETRY-REUSED=" retry-sd @ filler-sd @ = .',
+            '." RETRY-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." RETRY-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." RETRY-CHILD-STATE=" paced-child @ TCB.STATE @ .',
+            '." RETRY-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." RETRY-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." RETRY-SEAL-ZERO=" server-ctx @ _TSSE-SEAL-ZERO? .',
+            'server-ctx @ TLS-ABORT ." RETRY-RAW-ABORT=" .',
+            'retry-sd @ SOCK-ABORT ." RETRY-ABORT-IOR=" . '
+            '." RETRY-ABORT-STATUS=" .',
+            "release-filler-sockets",
+            '." CLEAN-FREE=" free-sockets .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." CRED-OWNER=" _TC-LOCK-OWNER-CORE @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            max_steps=250_000_000,
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "READY-BEGIN=0 ",
+            "READY-IOR=0 READY-ALERT=0 READY-PROGRESS=2 ",
+            "CRED-LOCK=0 ", "CRED-IOR=-4206 CRED-SD=0 ",
+            "CRED-SAME=-1 ", "CRED-PIN=-1 ", "CRED-REFS=1 ",
+            "NET-LOCK=0 ", "NET-IOR=-4206 NET-SD=0 ",
+            "NET-SAME=-1 ", "NET-PIN=-1 ", "NET-REFS=1 ",
+            "NET-HELD=1 ", "FULL-FREE=0 ",
+            "FULL-IOR=-4206 FULL-SD=0 ", "FULL-SAME=-1 ",
+            "FULL-PIN=-1 ", "FULL-REFS=1 ", "FULL-FREE-AFTER=0 ",
+            "RETRY-FREE=1 ", "RETRY-IOR=0 RETRY-SD=-1 ",
+            "RETRY-REUSED=-1 ", "RETRY-STATE=2 ", "RETRY-HS=9 ",
+            "RETRY-CHILD-STATE=7 ",
+            "RETRY-PIN=0 ", "RETRY-REFS=0 ",
+            "RETRY-SEAL-ZERO=-1 ", "RETRY-RAW-ABORT=3 ",
+            "RETRY-ABORT-IOR=0 RETRY-ABORT-STATUS=1 ",
+            "DELETE=0 ", "TLS-OWNER=0 ", "CRED-OWNER=-1 ",
+            "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+        filler_match = re.search(r"FILLER-COUNT=(\d+)", text)
+        cred_free_match = re.search(r"CRED-FREE=(\d+)", text)
+        net_free_match = re.search(r"NET-FREE=(\d+)", text)
+        clean_free_match = re.search(r"CLEAN-FREE=(\d+)", text)
+        self.assertIsNotNone(filler_match)
+        self.assertIsNotNone(cred_free_match)
+        self.assertIsNotNone(net_free_match)
+        self.assertIsNotNone(clean_free_match)
+        self.assertEqual(filler_match.group(1), cred_free_match.group(1))
+        self.assertEqual(filler_match.group(1), net_free_match.group(1))
+        self.assertEqual(filler_match.group(1), clean_free_match.group(1))
+
+    def test_server_socket_publish_rejects_stale_context_and_reused_child(
+        self,
+    ):
+        """Publication never transfers a stale child or context incarnation."""
+        lines, frames, _, _ = self._attached_server_success_setup_lines()
+        lines += [
+            "VARIABLE stale-sd VARIABLE replacement-owner",
+            "VARIABLE replacement-gen",
+            "CREATE stale-ctx-copy /TLS-CTX ALLOT",
+            "CREATE stale-tcb-copy /TCB ALLOT",
+            "CREATE stale-meta-copy TLS-SERVER-META-CAPACITY ALLOT",
+            "CREATE stale-phase-copy "
+            "/TLS-SERVER-EMIT-META /TLS-SERVER-INGRESS-META + ALLOT",
+            ": stale-snapshot",
+            "  server-ctx @ stale-ctx-copy /TLS-CTX MOVE",
+            "  paced-child @ stale-tcb-copy /TCB MOVE",
+            "  server-ctx @ TLS-RXW.SERVER-META stale-meta-copy",
+            "  TLS-SERVER-META-CAPACITY MOVE",
+            "  server-ctx @ TLS-RXW.SERVER-EMIT-META stale-phase-copy",
+            "  /TLS-SERVER-EMIT-META /TLS-SERVER-INGRESS-META + MOVE ;",
+            ": stale-same?",
+            "  server-ctx @ stale-ctx-copy /TLS-CTX _XC-BYTES=",
+            "  paced-child @ stale-tcb-copy /TCB _XC-BYTES= AND",
+            "  server-ctx @ TLS-RXW.SERVER-META stale-meta-copy",
+            "  TLS-SERVER-META-CAPACITY _XC-BYTES= AND",
+            "  server-ctx @ TLS-RXW.SERVER-EMIT-META stale-phase-copy",
+            "  /TLS-SERVER-EMIT-META /TLS-SERVER-INGRESS-META +",
+            "  _XC-BYTES= AND ;",
+            ": stale-free-sockets",
+            "  0 SOCK-MAX 0 DO",
+            "    I SOCK-N SOCK.STATE @ SOCKST-FREE = IF 1+ THEN",
+            "  LOOP ;",
+            "stale-snapshot",
+            "server-ctx @ paced-ctx-gen @ 1+ TLS-SERVER-SOCKET-PUBLISH",
+            '." WRONG-IOR=" . ." WRONG-SD=" .',
+            '." WRONG-SAME=" stale-same? .',
+            '." WRONG-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." WRONG-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." WRONG-FREE=" stale-free-sockets .',
+            "paced-child @ paced-cgen @ server-ctx @ TCP-OWNER-ABORT",
+            '." OLD-ABORT-IOR=" . ." OLD-ABORT-STATUS=" .',
+            'TCB-ALLOC ." REPLACEMENT-IDX=" .',
+            "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
+            "9443 paced-child @ TCB.LOCAL-PORT !",
+            "55000 paced-child @ TCB.REMOTE-PORT !",
+            "7000 paced-child @ TCB.SND-UNA !",
+            "7000 paced-child @ TCB.SND-NXT !",
+            "8000 paced-child @ TCB.RCV-NXT !",
+            "4096 paced-child @ TCB.SND-WND !",
+            "4096 paced-child @ TCB.RCV-WND !",
+            "TCP-MSS paced-child @ TCB.CWND !",
+            "paced-child @ replacement-owner TCP-ATTACH",
+            '." REPLACEMENT-IOR=" . DUP replacement-gen ! '
+            '." REPLACEMENT-GEN=" .',
+            "stale-snapshot",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-SOCKET-PUBLISH",
+            '." STALE-IOR=" . ." STALE-SD=" .',
+            '." STALE-SAME=" stale-same? .',
+            '." STALE-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." STALE-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." STALE-AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." STALE-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." STALE-INGRESS=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." STALE-SEAL=" server-ctx @ _TSSE-SEAL-BOUND? .',
+            '." STALE-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." STALE-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." STALE-SOCKET=" server-ctx @ TLS-CTX.SOCKET-OWNER @ .',
+            '." STALE-FREE=" stale-free-sockets .',
+            '." REPLACEMENT-EXACT=" paced-child @ replacement-gen @ '
+            'replacement-owner TCB-ATTACHED-TO? .',
+            '." REPLACEMENT-STATE=" paced-child @ TCB.STATE @ .',
+            '." REPLACEMENT-NXT=" paced-child @ TCB.SND-NXT @ .',
+            '." REPLACEMENT-TX=" paced-child @ TCB.TX-LEN @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            "0 server-ctx @ TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + !",
+            "0 server-ctx @ TLS-RXW.SERVER-EMIT-META TSE.PHASE + !",
+            '." PHASE-INACTIVE=" server-ctx @ '
+            '_TLS-SERVER-PROTOCOL-OWNED? 0= .',
+            '_TC-LOCK-TRY ." ABORT-LOCK=" .',
+            "TASK-ID 1+ _TC-LOCK-OWNER-TASK !",
+            'server-ctx @ TLS-ABORT ." BUSY-ABORT=" .',
+            '." BUSY-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." BUSY-TCB-GEN=" server-ctx @ '
+            'TLS-CTX.TCB-GENERATION @ .',
+            '." BUSY-BOUND-HISTORY=" server-ctx @ '
+            '_TLS-SERVER-TRANSPORT-BOUND? .',
+            '." BUSY-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." BUSY-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'server-ctx @ TLS-HANDSHAKE-PUBLISH '
+            '." BUSY-RAW-PUBLISH=" .',
+            '." BUSY-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." BUSY-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." BUSY-SEAL-TCB=" server-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.TCB-SEAL + @ 0<> .',
+            '." BUSY-SEAL-GEN=" server-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.TCB-GEN-SEAL + @ 0<> .',
+            "TASK-ID _TC-LOCK-OWNER-TASK ! _TC-UNLOCK",
+            'server-ctx @ TLS-ABORT ." STALE-ABORT=" .',
+            '." CTX-RELEASED=" server-ctx @ TLS-CTX-CLAIMED? .',
+            '." CTX-STATE-END=" server-ctx @ TLS-CTX.STATE @ .',
+            '." REFS-END=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." REPLACEMENT-END=" paced-child @ replacement-gen @ '
+            'replacement-owner TCB-ATTACHED-TO? .',
+            '." REPLACEMENT-STATE-END=" paced-child @ TCB.STATE @ .',
+            '." REPLACEMENT-NXT-END=" paced-child @ TCB.SND-NXT @ .',
+            '." LISTENER-END=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            "paced-child @ replacement-gen @ replacement-owner "
+            "TCP-OWNER-ABORT",
+            '." REPLACEMENT-ABORT-IOR=" . '
+            '." REPLACEMENT-ABORT-STATUS=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." CRED-OWNER=" _TC-LOCK-OWNER-CORE @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            max_steps=250_000_000,
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "READY-BEGIN=0 ",
+            "READY-IOR=0 READY-ALERT=0 READY-PROGRESS=2 ",
+            "WRONG-IOR=-4204 WRONG-SD=0 ", "WRONG-SAME=-1 ",
+            "WRONG-PIN=-1 ", "WRONG-REFS=1 ",
+            "OLD-ABORT-IOR=0 ", "REPLACEMENT-IDX=1 ",
+            "REPLACEMENT-IOR=0 ", "STALE-IOR=-4218 STALE-SD=0 ",
+            "STALE-SAME=-1 ", "STALE-HS=8 ", "STALE-STATE=1 ",
+            "STALE-AUTH=1 ", "STALE-ERROR=0 ", "STALE-INGRESS=2 ",
+            "STALE-SEAL=-1 ", "STALE-PIN=-1 ", "STALE-REFS=1 ",
+            "STALE-SOCKET=0 ", "REPLACEMENT-EXACT=-1 ",
+            "REPLACEMENT-STATE=4 ", "REPLACEMENT-NXT=7000 ",
+            "REPLACEMENT-TX=0 ", "LISTENER-LIVE=-1 ",
+            "PHASE-INACTIVE=-1 ", "ABORT-LOCK=0 ",
+            "BUSY-ABORT=3 ", "BUSY-TCB=0 ", "BUSY-TCB-GEN=0 ",
+            "BUSY-BOUND-HISTORY=-1 ", "BUSY-PIN=-1 ",
+            "BUSY-REFS=1 ", "BUSY-RAW-PUBLISH=-4204 ",
+            "BUSY-HS=8 ", "BUSY-STATE=1 ",
+            "BUSY-SEAL-TCB=-1 ", "BUSY-SEAL-GEN=-1 ",
+            "STALE-ABORT=0 ",
+            "CTX-RELEASED=0 ", "CTX-STATE-END=0 ", "REFS-END=0 ",
+            "REPLACEMENT-END=-1 ", "REPLACEMENT-STATE-END=4 ",
+            "REPLACEMENT-NXT-END=7000 ", "LISTENER-END=-1 ",
+            "REPLACEMENT-ABORT-IOR=0 ", "DELETE=0 ",
+            "TLS-OWNER=0 ", "CRED-OWNER=-1 ", "NET-OWNER=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+        wrong_free_match = re.search(r"WRONG-FREE=(\d+)", text)
+        stale_free_match = re.search(r"STALE-FREE=(\d+)", text)
+        self.assertIsNotNone(wrong_free_match)
+        self.assertIsNotNone(stale_free_match)
+        self.assertEqual(wrong_free_match.group(1), stale_free_match.group(1))
 
     def test_server_terminal_disposition_fatal_is_exact_and_retry_safe(self):
         """A sticky fatal owns one protected record across backpressure."""
@@ -33416,7 +33805,7 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
         self.assertIn("advanced=-1 ", text)
         self.assertIn("new-state=1 ", text)
 
-    def test_tls_listen_fails_closed_before_plaintext_accept_exists(self):
+    def test_tls_listen_and_accept_remain_fail_closed_without_coordinator(self):
         """A TLS-marked listener cannot silently publish raw TCP children."""
         text = self._run_kdos([
             "TCP-INIT-ALL",

@@ -1767,6 +1767,7 @@ handler wiring.
 | `TLS-SERVER-CLIENT-FLIGHT-FEED` | `( ctx bytes-a bytes-u -- consumed progress alert-desc ior )` | On the socket-independent zero-seal surface, copy at most through one complete client-flight record, retaining a partial header/body or Finished fragment per context; the caller retains and resubmits any unconsumed tail. Incomplete input returns the consumed count, `TLS-SERVER-INGRESS-NONE`, zero alert, and `TLS-E-WOULD-BLOCK`. Exact compatibility CCS is ignored. Failed C-HS trial decryption consumes the sealed 0-RTT budget without advancing sequence only until the first authenticated record. Successful exact client-Finished verification commits its transcript, installs C-AP read, and returns `TLS-SERVER-INGRESS-FINISHED`. Terminal progress returns an outbound alert description or the preserved peer alert description but does not claim wire transmission. |
 | `TLS-SERVER-CLIENT-FLIGHT-STEP` | `( ctx ctx-generation -- progress alert-desc ior )` | Read and process at most one protected client-flight record over the completed flight's sealed accepted child. Each owner-qualified receive asks only for the missing header or exact declared record bound, so arbitrary TCP segmentation returns `NONE`/`TLS-E-WOULD-BLOCK`, a committed nonfinal record returns `RECORD`, and verified Finished returns `FINISHED` without consuming a following TCP record. NET contention is retryable. Known dead/stale transport is generation-exactly reclaimed; a receive throw wipes the complete retained lanes but preserves unresolved authority for `TLS-ABORT`. Protocol terminal results retain the S-AP write epoch for later protected disposition transmission. |
 | `TLS-SERVER-INGRESS-DISPOSITION-STEP` | `( ctx ctx-generation -- progress ior )` | Consume the attached client flight's sticky terminal classification without accepting caller-provided alert bytes or a transport callback. `SEND-FATAL` emits protected level 2 plus the classified description; `SEND-CLOSE` emits protected warning `close_notify`; a non-close `PEER-ALERT` emits nothing. One 24-byte ciphertext remains connection-owned and byte-identical across send-window backpressure or NET contention, with S-AP sequence commit only after exact TCP admission. `TLS-SERVER-DISPOSITION-COMPLETE` means response admission or intentional no-response, not ACK or FIN. Pending disposition blocks `TLS-CLOSE-TRY`; after completion, close waits for any retained alert ACK before FIN. Dead/stale authority is generation-exactly reclaimed and cannot touch a replacement TCB incarnation. |
+| `TLS-SERVER-SOCKET-PUBLISH` | `( ctx ctx-generation -- sd ior )` | Publish one fully authenticated attached server context as a reciprocal TLS descriptor. The transaction owns TLS, credential, then NET authority; revalidates the exact pinned context and sealed child; proves descriptor capacity before unpinning; and publishes handshake/context/socket state only after every fallible admission check. Wrong context/protocol state returns `(0,TLS-E-STATE)`, credential/NET contention or capacity returns `(0,TLS-E-BUSY)` without changing the ready context, stale child authority returns `(0,TLS-E-TRANSPORT)` while retaining sealed abort authority, and success returns `(sd,0)`. An exact attached child may already be in an owner-visible close/failure state; publication preserves that status for descriptor I/O and cleanup rather than orphaning it. Defensive post-unpin failure cleanup uses the held exact NET authority; an internal cleanup-invariant breach quarantines the private descriptor rather than making it allocator-visible. |
 
 `TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
 and future secrets have published; it is not transport readiness or an
@@ -1787,8 +1788,10 @@ description the future adapter must transmit; `SEND-CLOSE` returns
 response. Terminal and completed results are sticky and consume no further
 input. Disposition progress is `TLS-SERVER-DISPOSITION-NONE` (0) or
 `TLS-SERVER-DISPOSITION-COMPLETE` (1). Successful Finished leaves the context
-authenticated in `TLSH-APPLICATION-READY`; `TLS-HANDSHAKE-PUBLISH` remains the
-explicit establishment boundary. Budget overrun while the rejection window
+authenticated in `TLSH-APPLICATION-READY`. A client or socket-independent
+server uses `TLS-HANDSHAKE-PUBLISH`; a transport-bound
+server must use exact-generation `TLS-SERVER-SOCKET-PUBLISH`, and the generic
+entry refuses it without mutation. Budget overrun while the rejection window
 remains open returns `TLS-E-EARLY-DATA-LIMIT` (-4220). Authenticated content
 that cannot be the exact expected Finished—including a verify-data mismatch,
 wrong handshake framing, or premature application data—returns
@@ -1851,11 +1854,12 @@ incarnation-safe accepted child to a prepared server TLS context, ingest the
 initial ClientHello through owner-qualified TCP, and emit the complete
 ACK-paced server flight through the same authority. It now reads the protected
 client flight through that sealed child, authenticates Finished, preserves a
-following TCP record, and reaches explicit establishment publication. Sticky
+following TCP record, and publishes an exact reciprocal TLS descriptor. Sticky
 terminal ingress can now admit one exact protected fatal/close response or
-complete without a response for a non-close peer alert. It does not yet accept
-TLS sockets or demonstrate live socket interoperability with an independent
-TLS implementation. Cipher-suite support is:
+complete without a response for a non-close peer alert. Public TLS-marked
+listen/accept still fails closed until a production coordinator supplies
+listener policy and drives every step; live socket interoperability with an
+independent TLS implementation is also unproved. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1887,7 +1891,7 @@ hash family rather than synthesizing success:
 | `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Derive both endpoint handshake traffic secrets and install local-write/peer-read record keys from the sealed client/server role. Stop at the first hash/HKDF failure and wipe admitted partial schedule state. |
 | `TLS-KS-APPLICATION` | `( ctx -- status )` | Derive role-neutral application/exporter secrets. A client installs both record directions and enters `TLSH-APPLICATION-READY`; a server installs only its write direction and enters `TLSH-CLIENT-FINISHED-PENDING` while retaining its client-handshake read epoch. |
 | `TLS-BUILD-FINISHED` | `( ctx rec -- reclen )` | Build one raw-context Finished record under exact TLS ownership. Socket-owned contexts and contexts retained by server flight/ingress return zero without destination, transcript, sequence, or owner-depth mutation; admitted owner-held handshake code uses the internal builder. |
-| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | Publish `TLSS-ESTABLISHED` only from authenticated `TLSH-APPLICATION-READY`. For a client this follows its local Finished boundary; for a server it follows `TLS-SERVER-CLIENT-FLIGHT-FEED` or the attached `TLS-SERVER-CLIENT-FLIGHT-STEP` verifying peer Finished, staging the completed transcript, and installing C-AP read. Superseded schedule secrets are wiped. |
+| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | Publish `TLSS-ESTABLISHED` only from authenticated `TLSH-APPLICATION-READY` for client or unbound socket-independent composition. A server with live transport fields or retained transport-seal history is rejected without mutation and must use `TLS-SERVER-SOCKET-PUBLISH`, which couples establishment to exact descriptor publication. Superseded schedule secrets are wiped on success. |
 | `TLS-EXPORT` | `( ctx label-a label-u context-a context-u out-a out-u -- ior )` | Derive 0..8160 authenticated exporter bytes into a non-aliasing caller span. Labels are printable 1..249-byte values; output is atomic and the exporter master is never exposed. |
 | `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |
 | `TLS-ALPN-CONFIGURED` | `( ctx -- name-a name-u )` | Return the context-owned configured ProtocolName. |
@@ -1946,9 +1950,10 @@ authority exists. The attached emitter is qualified through every ACK-paced
 protected record and server Finished. Attached protected client-flight ingress
 uses the same exact pair and record engine through client Finished. Attached
 terminal disposition reuses that pair and the completed emitter's pending lane
-through exact protected alert admission. Authenticated socket publication is
-now the active transport incompatibility, not a reason for further TCP or
-crypto expansion.
+through exact protected alert admission. Exact authenticated socket publication
+now consumes that same generational authority and is no longer a transport
+incompatibility. The active gap is the bounded listener/coordinator that drives
+the qualified steps, not a reason for further TCP or crypto expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at
@@ -2033,7 +2038,7 @@ points reject a socket-owned context.
 |------|-------------|-------------|
 | `SOCKET` | `( type -- sd \| -1 )` | Create a socket descriptor.  *type*: 0 = TCP, 1 = TLS. |
 | `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
-| `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1` without allocating a TCB or changing descriptor state/handle until authenticated secure accept exists. |
+| `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1` without allocating a TCB or changing descriptor state/handle until a policy-bearing production TLS accept coordinator owns every terminal path. |
 | `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Reserve a descriptor, validate the exact listener and queued child tokens, and transfer the child owner before publishing an ordinary TCP socket. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |

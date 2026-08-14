@@ -5,8 +5,9 @@ socket-independent server handshake through client Finished, exact lower
 transport ownership/close, and atomic queued-child attachment are qualified,
 and attached initial ClientHello ingress plus the complete ACK-paced server
 flight, protected client-Finished ingress, and protected terminal disposition
-are now qualified. Authenticated accepted-socket publication is the single
-active critical path.
+are now qualified. Exact authenticated accepted-socket publication is also
+qualified. The active critical path is now the minimal production listener and
+handshake coordinator followed by independent socket interoperability.
 Last updated: 2026-08-14
 
 ## Purpose
@@ -73,6 +74,20 @@ record byte-exactly across lower backpressure, or completes without a TLS
 response for a non-close peer alert. Alert admission advances the retained TCP
 stream once; close cannot bypass a pending disposition and FIN cannot precede
 the admitted alert's cumulative ACK.
+`TLS-SERVER-SOCKET-PUBLISH` is the only publication path for a transport-bound
+server context. It requires the carried exact context generation and a fully
+authenticated, pinned, sealed attached state. One TLS-to-credential-to-NET
+transaction revalidates the exact child and reserves a TLS descriptor before
+the irreversible credential release, then publishes handshake state and both
+sides of the descriptor/context edge. Credential or NET contention and socket
+capacity leave the complete ready state unchanged. Stale child authority
+publishes nothing and remains explicitly abortable; a reused TCB is untouched.
+The generationless `TLS-HANDSHAKE-PUBLISH` entry rejects a bound server, and
+retained seal history preserves that refusal if a retryable stale abort clears
+the context's live TCB fields before credential unpin can complete. Defensive
+post-unpin failure cleanup aborts through the already-held exact NET authority;
+an internal invariant breach quarantines the private CONNECTING descriptor
+instead of returning it to allocation while context ownership is uncertain.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,
 commits the transcript through that message, installs C-AP read, and leaves
@@ -82,9 +97,9 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is secure socket accept/publication and
-interoperability over that path with an independent TLS implementation. The
-following lower-level facts
+The remaining server work is a minimal secure-listener policy/coordinator and
+interoperability over the resulting socket with an independent TLS
+implementation. The following lower-level facts
 continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
@@ -981,8 +996,12 @@ Native guest tests cover:
 - multi-read delivery of application records larger than the caller buffer;
 - alternating connections with isolated partial records, retained plaintext,
   and fragmented post-handshake messages, including exact per-context wipe;
-- fail-closed refusal of TLS-marked `LISTEN` and `SOCK-ACCEPT` before a secure
-  accept path exists;
+- fail-closed refusal of TLS-marked `LISTEN` and `SOCK-ACCEPT` until a
+  policy-bearing production TLS accept coordinator owns every terminal path;
+- exact attached server-socket publication, including generationless raw
+  refusal, TLS/credential/NET contention, dynamic descriptor exhaustion,
+  close-wait publication, reciprocal resolution, descriptor-owned teardown,
+  stale context refusal, and reused-child isolation;
 - full-width `MS@` and `EPOCH@` reconstruction across byte boundaries;
 - handshake reassembly across arbitrary protected-record boundaries;
 - legacy record version, size-class, and compatibility CCS validation;
@@ -1021,13 +1040,18 @@ order, verifies all five expected payload hashes and lengths, reaches
 client-Finished-pending, and drains the final retained TCP segment. Attached
 protected-ingress tests then admit an independently derived Finished across
 real TCP segmentation, reject raw/stale authority, preserve the following
-record, reach explicit publication, and generation-exactly reclaim a partial
-record on EOF without disturbing the listener. Attached terminal-disposition
+record, reach the exact socket-publication boundary, and generation-exactly
+reclaim a partial record on EOF without disturbing the listener. Attached terminal-disposition
 tests cover byte-identical fatal retry, exact fatal/close wire oracles,
 close-notify ACK before FIN, peer-alert no-response, and reused-child isolation.
-Secure socket acceptance and interoperability over sockets with an independent
-TLS stack remain unproved. The final affected selector passed 19/19
-sequentially under the ordinary checked source-mode limits.
+The publication matrix proves reciprocal socket authority and teardown, exact
+failure atomicity under lock/capacity pressure, retained-seal raw-publication
+refusal after abort/unpin contention, and stale-child cleanup without touching
+the replacement. Public secure-listener acceptance and interoperability
+over sockets with an independent TLS stack remain unproved. The disposition
+affected selector passed 19/19 sequentially under the ordinary checked
+source-mode limits; the final publication-focused and adjoining affected
+selector passed 15/15 sequentially under ordinary checked limits.
 The uint24-maximum Certificate capstone is separate maturity evidence and must
 not delay this vertical closure.
 
@@ -1039,9 +1063,11 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Publish a TLS accepted socket only after client Finished authentication and
-  explicit handshake publication. Prove credential-pin/reference and exact
-  TCB-owner cleanup on every failure.
+- Drive the qualified exact-child handshake and authenticated socket
+  publication from one bounded production coordinator with caller-provided
+  credential, ALPN, and rejected-0RTT policy. Keep TLS-marked public
+  `LISTEN`/`SOCK-ACCEPT` fail-closed until that coordinator owns every terminal
+  disposition and deadline.
 - Qualify socket lifecycle, application bytes, exporter equality, and
   close-notify/FIN completion against an independent TLS 1.3 implementation.
 

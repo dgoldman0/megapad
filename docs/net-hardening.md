@@ -13,8 +13,8 @@ server Finished. Attached protected ingress now authenticates client Finished
 through the exact child and preserves a following TCP record. Attached
 terminal disposition now emits an exact protected fatal/close response or no
 response for a non-close peer alert, with retry-stable ciphertext and
-alert-ACK-before-FIN ordering. Authenticated TLS socket publication is not
-implemented.
+alert-ACK-before-FIN ordering. Exact authenticated TLS socket publication is
+implemented; the production TLS listener/accept coordinator is not.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -40,8 +40,15 @@ most one protected record per step.
 `TLS-SERVER-INGRESS-DISPOSITION-STEP` then consumes only the sticky terminal
 classification and exact context generation. Its protected response reuses
 the completed emitter's pending lane across TCP/NET backpressure; a peer alert
-that is not close_notify intentionally produces no TLS record. It does not
-publish an authenticated TLS socket.
+that is not close_notify intentionally produces no TLS record.
+`TLS-SERVER-SOCKET-PUBLISH` consumes only a successful attached client-flight
+boundary and the exact context generation. Under TLS-to-credential-to-NET lock
+order it proves the still-pinned context, exact child, and descriptor capacity
+before releasing the credential reference, publishing handshake state, and
+creating reciprocal descriptor/context authority. Bound server contexts cannot
+bypass this transaction through generationless `TLS-HANDSHAKE-PUBLISH`; a
+retained transport seal keeps that gate closed even when retryable stale-abort
+cleanup has already cleared the live TCB fields.
 
 ## TCB and table geometry
 
@@ -202,14 +209,22 @@ oracles, byte-identical retry, close-alert ACK before FIN, peer-alert
 no-response, and exact reused-child isolation. Its final affected selector,
 including ordinary sealed-emitter and TLS-abort paths, passed 19/19
 sequentially under the checked source-mode limits.
+The authenticated-publication slice adds seal-history-aware generationless
+raw-publish refusal,
+reciprocal descriptor/context resolution, credential/NET/capacity retry with
+byte-identical TLS, TCB, and server metadata, publication of a close-wait child,
+descriptor-owned teardown, and stale child-reuse isolation. Its focused matrix
+and final adjoining affected selector pass 15/15 sequentially under the
+ordinary checked limits.
 
 ## Remaining secure-server boundary
 
-The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
+The authority substrate now includes the exact authenticated socket-publication
+boundary, but it is not yet a public secure TLS accept API. TLS-marked `LISTEN`
 and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
 critical path is:
 
-- publish an accepted socket only after client Finished authentication and
-  explicit TLS establishment;
+- drive the qualified attachment, handshake, disposition, and publication
+  steps from one minimal listener policy and bounded coordinator; and
 - qualify the complete socket lifecycle and close against an independent TLS
   1.3 implementation.

@@ -9077,18 +9077,28 @@ CREATE _TC-STATIC-END
     _TC-PIN-CHAIN-A @ _TC-PIN-CHAIN-U @ _TC-PIN-COUNT @
     _TC-PIN-SCHEME @ TLS-CREDENTIAL-OK ;
 
+\ Publication already owns TLS -> credential -> NET.  This body performs the
+\ exact reference decrement without recursively acquiring depthless lock 11.
+: _TC-UNPIN-LOCKED ( slot+1 gen -- ior )
+    _TLS-OWNER? 0= _TC-LOCK-OWNER? 0= OR IF
+        2DROP TLS-CREDENTIAL-E-BUSY EXIT
+    THEN
+    _TC-GENERATION ! _TC-H1 !
+    _TC-H1 @ _TC-GENERATION @ _TC-HANDLE-RESOLVE DUP IF
+        NIP EXIT
+    THEN DROP _TC-SLOT !
+    _TC-SLOT @ TC.REFS + DUP @ DUP 0= IF
+        2DROP TLS-CREDENTIAL-E-STATE EXIT
+    THEN
+    1- SWAP !
+    TLS-CREDENTIAL-OK ;
+
 : _TC-UNPIN ( slot+1 gen -- ior )
     _TLS-OWNER? 0= IF 2DROP TLS-CREDENTIAL-E-BUSY EXIT THEN
     _TC-GENERATION ! _TC-H1 !
     _TC-LOCK-TRY DUP IF EXIT THEN DROP
-    _TC-H1 @ _TC-GENERATION @ _TC-HANDLE-RESOLVE DUP IF
-        NIP _TC-UNLOCK EXIT
-    THEN DROP _TC-SLOT !
-    _TC-SLOT @ TC.REFS + DUP @ DUP 0= IF
-        2DROP _TC-UNLOCK TLS-CREDENTIAL-E-STATE EXIT
-    THEN
-    1- SWAP !
-    _TC-UNLOCK TLS-CREDENTIAL-OK ;
+    _TC-H1 @ _TC-GENERATION @ _TC-UNPIN-LOCKED
+    >R _TC-UNLOCK R> ;
 
 : _TC-SIGN-RUN ( -- der-u ior )
     _TC-SLOT @ TC.PRIVATE + _TC-HASH @ _TC-DER-STAGE 72
@@ -9930,6 +9940,16 @@ VARIABLE _TSPR-CTX
 VARIABLE _TSPR-META
 VARIABLE _TSPR-IOR
 
+: _TLS-SERVER-PIN-CLEAR  ( -- )
+    _TSPR-META @ TSM.FLAGS + DUP @
+    TSMF-CRED-PINNED INVERT AND SWAP !
+    _TSPR-META @ TSM.CRED-H1 +
+    TSM.WIRE-LIST-U TSM.CRED-H1 - 1 CELLS + 0 FILL ;
+
+: _TLS-SERVER-PIN-RELEASE-FINISH  ( credential-ior -- credential-ior )
+    DUP _TSPR-IOR ! IF _TSPR-IOR @ EXIT THEN
+    _TLS-SERVER-PIN-CLEAR TLS-CREDENTIAL-OK ;
+
 \ Release the immutable credential lease before erasing its only handle.
 \ An unsuccessful release deliberately leaves every metadata byte intact so
 \ close/abort can retry without leaking or guessing at lower ownership.
@@ -9941,12 +9961,19 @@ VARIABLE _TSPR-IOR
     DUP _TSPR-CTX ! TLS-RXW.SERVER-META _TSPR-META !
     _TSPR-META @ TSM.CRED-H1 + @
     _TSPR-META @ TSM.CRED-GEN + @ _TC-UNPIN
-    DUP _TSPR-IOR ! IF _TSPR-IOR @ EXIT THEN
-    _TSPR-META @ TSM.FLAGS + DUP @
-    TSMF-CRED-PINNED INVERT AND SWAP !
-    _TSPR-META @ TSM.CRED-H1 +
-    TSM.WIRE-LIST-U TSM.CRED-H1 - 1 CELLS + 0 FILL
-    TLS-CREDENTIAL-OK ;
+    _TLS-SERVER-PIN-RELEASE-FINISH ;
+
+\ The publication transaction already owns credential lock 11 and must not
+\ mistake that authority for contention in the depthless public unpin path.
+: _TLS-SERVER-PIN-RELEASE-LOCKED  ( ctx -- credential-ior )
+    DUP _TLS-SERVER-DRIVER-ACTIVE? IF
+        DROP TLS-CREDENTIAL-E-BUSY EXIT
+    THEN
+    DUP _TLS-SERVER-PINNED? 0= IF DROP TLS-CREDENTIAL-OK EXIT THEN
+    DUP _TSPR-CTX ! TLS-RXW.SERVER-META _TSPR-META !
+    _TSPR-META @ TSM.CRED-H1 + @
+    _TSPR-META @ TSM.CRED-GEN + @ _TC-UNPIN-LOCKED
+    _TLS-SERVER-PIN-RELEASE-FINISH ;
 
 : _TLS-CREDENTIAL-IOR>TLS  ( credential-ior -- tls-ior )
     DUP TLS-CREDENTIAL-OK = IF EXIT THEN
@@ -10066,8 +10093,8 @@ VARIABLE _TSCB-IOR
     _TSCB-CTX @ (TLS-CTX-RELEASE) R> ;
 
 \ Initialize one unbound server-role context for deterministic handshake
-\ work.  Checkpoint 4 will compose this transaction with accepted-TCB
-\ attachment; no persistent listener policy is hidden in a free context.
+\ work.  The production accept coordinator composes this transaction with the
+\ exact accepted child; no persistent listener policy is hidden here.
 : (TLS-SERVER-CONTEXT-BEGIN)
     ( ctx credential-h1 credential-gen alpn-a alpn-u -- ior )
     _TSCB-ALPN-U ! _TSCB-ALPN ! _TSCB-GEN ! _TSCB-H1 ! _TSCB-CTX !
@@ -13497,8 +13524,20 @@ VARIABLE _THC-REC
     TLS-TR-RESET TLS-HS-RBUF-RESET TLS-E-OK
 ;
 
+: _TLS-SERVER-TRANSPORT-BOUND?  ( ctx -- flag )
+    DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX.ROLE @ TLS-ROLE-SERVER = >R
+    DUP TLS-CTX.TCB @ 0<>
+    OVER TLS-CTX.TCB-GENERATION @ 0<> OR
+    OVER TLS-RXW.SERVER-EMIT-META TSE.TCB-SEAL + @ 0<> OR
+    SWAP TLS-RXW.SERVER-EMIT-META TSE.TCB-GEN-SEAL + @ 0<> OR
+    R> AND ;
+
 : TLS-HANDSHAKE-PUBLISH ( ctx -- ior )
     TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    DUP _TLS-SERVER-TRANSPORT-BOUND? IF
+        DROP TLS-E-STATE _TLS-OWNER-RETURN EXIT
+    THEN
     (TLS-HANDSHAKE-PUBLISH) _TLS-OWNER-RETURN ;
 
 \ =====================================================================
@@ -16589,9 +16628,12 @@ VARIABLE _TCL-CTX
     TLS-SERVER-INGRESS-TERMINAL-COMPLETE
     _TLS-SERVER-ATTACHED-INGRESS-STATE? ;
 
-: _TLS-SERVER-DISPOSITION-OWNED?  ( ctx -- flag )
-    DUP _TLS-SERVER-DISPOSITION-PENDING?
-    SWAP _TLS-SERVER-DISPOSITION-COMPLETE? OR ;
+: _TLS-SERVER-SEALED-RAW?  ( ctx -- flag )
+    DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX-CLAIMED?
+    OVER TLS-CTX.ROLE @ TLS-ROLE-SERVER = AND
+    OVER TLS-CTX.SOCKET-OWNER @ 0= AND
+    SWAP _TSSE-SEAL-BOUND? AND ;
 
 : (TLS-CLOSE) ( ctx -- ior )
     _TCL-CTX !
@@ -16682,11 +16724,11 @@ VARIABLE _TLA-STATUS
     _TLA-CTX @ TLS-CTX.TCB @ 0<>
     _TLA-CTX @ TLS-CTX.TCB-GENERATION @ 0<> OR IF
         _TLA-CTX @ _TLS-CTX>TCB 0= IF
-            \ Explicit abort may dismantle either pending or completed
-            \ disposition.  A retained attached seal proves that a missing or
-            \ reused child is no longer ours; raw zero-seal contexts do not get
+            \ Explicit abort may dismantle any raw sealed server phase.  A
+            \ retained attached seal proves that a missing or reused child is
+            \ no longer ours; socket-owned and zero-seal contexts do not get
             \ this stale-authority exception.
-            _TLA-CTX @ _TLS-SERVER-DISPOSITION-OWNED? 0= IF
+            _TLA-CTX @ _TLS-SERVER-SEALED-RAW? 0= IF
                 TLS-ABORT-S-BUSY EXIT
             THEN
             _TLA-CTX @ _TSSE-SEALED-ABORT-TRY DUP IF
@@ -17334,8 +17376,8 @@ VARIABLE _SLSN-GEN
     _SLSN-SD !
     _SLSN-SD @ SOCK-MEMBER? 0= IF -1 EXIT THEN
     \ A TLS-marked listener is not a plaintext listener with a copied flag.
-    \ Keep this surface unavailable until secure accept can attach and finish
-    \ an authenticated server context before publishing the child socket.
+    \ Keep this surface unavailable until one policy-bearing production accept
+    \ coordinator owns every path through exact authenticated publication.
     _SLSN-SD @ SOCK.STATE @ SOCKST-TCP <>
     _SLSN-SD @ SOCK.FLAGS @ 1 AND 0<> OR IF -1 EXIT THEN
     _SLSN-SD @ SOCK.HANDLE @ 0<>
@@ -17543,6 +17585,197 @@ VARIABLE _STLS-U
     ['] (SOCK-TLS-PUBLISH) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
+
+\ Publish one successfully authenticated attached server context as a TLS
+\ descriptor.  The complete transaction owns TLS -> credential -> NET, proves
+\ exact child authority and descriptor capacity, then unpins and publishes
+\ both sides of the socket edge.  BUSY/capacity failures leave the raw
+\ authenticated context byte-for-byte retryable; stale transport authority
+\ remains sealed and explicitly abortable.
+VARIABLE _TSSP-CTX
+VARIABLE _TSSP-CTX-GEN
+VARIABLE _TSSP-SD
+VARIABLE _TSSP-IOR
+VARIABLE _TSSP-NET-HELD
+VARIABLE _TSSP-CRED-HELD
+VARIABLE _TSSP-COMMIT-STARTED
+VARIABLE _TSSP-QUARANTINED-SD
+
+: _TSSP-SCRATCH-WIPE  ( -- )
+    0 _TSSP-CTX ! 0 _TSSP-CTX-GEN ! 0 _TSSP-SD !
+    0 _TSSP-IOR ! 0 _TSSP-NET-HELD ! 0 _TSSP-CRED-HELD !
+    0 _TSSP-COMMIT-STARTED ! ;
+
+: _TSSP-BASE-VALID?  ( -- flag )
+    _TSSP-CTX @ DUP _TLS-PURE-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX-CLAIMED? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX.GENERATION @ _TSSP-CTX-GEN @ =
+    OVER TLS-CTX.ROLE @ TLS-ROLE-SERVER = AND
+    OVER TLS-CTX.STATE @ TLSS-HANDSHAKE = AND
+    OVER TLS-CTX.HS-STATE @ TLSH-APPLICATION-READY = AND
+    OVER TLS-CTX.PEER-AUTH @ 1 = AND
+    OVER TLS-CTX.ERROR @ TLS-E-OK = AND
+    OVER TLS-CTX.SOCKET-OWNER @ 0= AND
+    OVER TLS-CRYPTO-PROFILE TLS-CRYPTO-NONE <> AND
+    OVER _TLS-SERVER-TRANSPORT-BOUND? AND
+    OVER _TLS-SERVER-PINNED? AND
+    OVER TLS-RXW.SERVER-META TSM.FLIGHT-PHASE + @
+    TLS-SERVER-FLIGHT-COMPLETE = AND
+    OVER TLS-RXW.SERVER-META TSM.TRANSCRIPT-PHASE + @
+    TLS-SERVER-TRANSCRIPT-SERVER-FINISHED = AND
+    OVER TLS-RXW.SERVER-EMIT-META TSE.PHASE + @
+    TLS-SERVER-EMIT-PHASE-FINISHED = AND
+    OVER TLS-RXW.SERVER-EMIT-META TSE.DRIVER-CLAIMED + @ 0= AND
+    OVER TLS-RXW.SERVER-EMIT-META TSE.PENDING-STATE + @
+    TLS-SERVER-PENDING-EMPTY = AND
+    OVER TLS-RXW.SERVER-EMIT-META TSE.PENDING-LEN + @ 0= AND
+    OVER TLS-RXW.SERVER-INGRESS-META TSI.STATE + @
+    TLS-SERVER-INGRESS-COMPLETE = AND
+    OVER TLS-RXW.SERVER-INGRESS-META TSI.EARLY-OPEN + @ 0= AND
+    OVER TLS-CTX.RX-REC-LEN @ 0= AND
+    OVER TLS-CTX.RX-REC-ERROR @ 0= AND
+    OVER TLS-CTX.RX-HS-LEN @ 0= AND
+    OVER TLS-CTX.RX-HS-ERROR @ 0= AND
+    OVER _TSSE-SEAL-BOUND? AND
+    SWAP DROP ;
+
+: _TSSP-NET-VALID?  ( -- flag )
+    _TSSP-BASE-VALID? 0= IF 0 EXIT THEN
+    _TSSP-CTX @ _TLS-CTX>TCB 0<> ;
+
+: _TSSP-SD-RELEASE  ( -- )
+    _TSSP-SD @ DUP 0<> IF
+        DUP SOCK-MEMBER? IF SOCK-RELEASE ELSE DROP THEN
+    ELSE
+        DROP
+    THEN
+    0 _TSSP-SD ! ;
+
+: _TSSP-NET-RELEASE  ( -- )
+    _TSSP-NET-HELD @ IF
+        0 _TSSP-NET-HELD ! NET-TX-RELEASE
+    THEN ;
+
+: _TSSP-CRED-RELEASE  ( -- )
+    _TSSP-CRED-HELD @ IF
+        0 _TSSP-CRED-HELD ! _TC-UNLOCK
+    THEN ;
+
+: _TSSP-LOWER-RELEASE  ( -- )
+    _TSSP-NET-RELEASE _TSSP-CRED-RELEASE ;
+
+\ Once the credential lease is released, rollback is impossible.  This
+\ locked body uses the already-held exact NET authority directly, so cleanup
+\ cannot report ordinary lock contention after commit begins.
+: _TSSP-COMMIT-RECLAIM?  ( -- flag )
+    _TLS-OWNER? 0= _TSSP-CRED-HELD @ 0= OR
+    _TSSP-NET-HELD @ 0= OR IF 0 EXIT THEN
+    _TSSP-SD @ DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP SOCK.STATE @ SOCKST-CONNECTING <>
+    OVER SOCK.HANDLE @ 0<> OR
+    OVER SOCK.HANDLE-GEN @ 0<> OR IF DROP 0 EXIT THEN
+    DROP
+    _TSSP-CTX @ DUP TLS-CTX-MEMBER? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX-CLAIMED? 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX.SOCKET-OWNER @ 0<> IF DROP 0 EXIT THEN
+    DUP _TLS-SERVER-PINNED? IF DROP 0 EXIT THEN
+    DUP _TLS-CTX>TCB 0= IF DROP 0 EXIT THEN
+    DUP TLS-CTX.TCB @
+    OVER TLS-CTX.TCB-GENERATION @
+    2 PICK (TCP-OWNER-ABORT)
+    DUP IF 2DROP DROP 0 EXIT THEN
+    2DROP
+    0 OVER TLS-CTX.TCB-GENERATION !
+    0 OVER TLS-CTX.TCB !
+    DUP _TLS-SERVER-EMIT-UNION-WIPE
+    DUP _TLS-RX-WIPE-RAW
+    (TLS-CTX-RELEASE) -1 ;
+
+\ Any unexpected failure in the otherwise store-only publication tail aborts
+\ the exact raw context before its private descriptor is reusable.  A broken
+\ internal invariant instead quarantines CONNECTING: recycling that slot while
+\ a partly published context might remain would turn a defensive path into an
+\ ownership transfer bug.
+: _TSSP-COMMIT-ABORT  ( ior -- )
+    _TSSP-IOR !
+    _TSSP-COMMIT-RECLAIM? IF
+        0 _TSSP-COMMIT-STARTED !
+        _TSSP-SD-RELEASE EXIT
+    THEN
+    _TSSP-SD @ _TSSP-QUARANTINED-SD !
+    0 _TSSP-SD !
+    0 _TSSP-COMMIT-STARTED !
+    TLS-E-TRANSPORT _TSSP-IOR ! ;
+
+: _TSSP-BODY  ( -- )
+    0 _TSSP-SD ! TLS-E-OK _TSSP-IOR !
+    _TSSP-BASE-VALID? 0= IF TLS-E-STATE _TSSP-IOR ! EXIT THEN
+    _TC-LOCK-TRY DUP IF
+        _TLS-CREDENTIAL-IOR>TLS _TSSP-IOR ! EXIT
+    THEN DROP -1 _TSSP-CRED-HELD !
+    NET-TX-TRY IF
+        TLS-E-BUSY _TSSP-IOR ! _TSSP-CRED-RELEASE EXIT
+    THEN
+    -1 _TSSP-NET-HELD !
+    _TSSP-NET-VALID? 0= IF
+        TLS-E-TRANSPORT _TSSP-IOR ! _TSSP-LOWER-RELEASE EXIT
+    THEN
+    SOCK-TYPE-TLS (SOCKET) DUP -1 = IF
+        DROP TLS-E-BUSY _TSSP-IOR ! _TSSP-LOWER-RELEASE EXIT
+    THEN _TSSP-SD !
+    _TSSP-SD @ (SOCK-CONNECT-CLAIM) SOCKST-TLS <> IF
+        _TSSP-SD-RELEASE TLS-E-STATE _TSSP-IOR !
+        _TSSP-LOWER-RELEASE EXIT
+    THEN
+    _TSSP-CTX @ _TLS-SERVER-PIN-RELEASE-LOCKED DUP IF
+        _TLS-CREDENTIAL-IOR>TLS _TSSP-IOR !
+        _TSSP-SD-RELEASE _TSSP-LOWER-RELEASE EXIT
+    THEN
+    DROP -1 _TSSP-COMMIT-STARTED !
+    _TSSP-CTX @ (TLS-HANDSHAKE-PUBLISH) DUP IF
+        _TSSP-COMMIT-ABORT _TSSP-LOWER-RELEASE EXIT
+    THEN DROP
+    _TSSP-SD @ _TSSP-CTX @ (SOCK-TLS-PUBLISH) 0= IF
+        \ The reservation, context, and exact TCB were stable under this NET
+        \ transaction, so failure is an internal contract breach.  Do not
+        \ leave the now-established raw context reachable without a socket.
+        TLS-E-STATE _TSSP-COMMIT-ABORT
+    ELSE
+        0 _TSSP-COMMIT-STARTED !
+    THEN
+    _TSSP-LOWER-RELEASE ;
+
+: _TSSP-RECOVER  ( throw -- )
+    DROP
+    _TSSP-NET-HELD @ IF
+        _TSSP-COMMIT-STARTED @ IF
+            TLS-E-TRANSPORT _TSSP-COMMIT-ABORT
+        ELSE
+            _TSSP-SD-RELEASE
+        THEN
+    THEN
+    _TSSP-LOWER-RELEASE
+    0 _TSSP-SD ! TLS-E-TRANSPORT _TSSP-IOR ! ;
+
+: _TSSP-RETURN  ( -- sd ior )
+    _TSSP-SD @ _TSSP-IOR @ >R >R
+    _TSSP-SCRATCH-WIPE TLS-OWNER-RELEASE
+    R> R> ;
+
+: TLS-SERVER-SOCKET-PUBLISH  ( ctx ctx-generation -- sd ior )
+    OVER _TLS-PURE-CTX-MEMBER? 0= IF
+        2DROP 0 TLS-E-STATE EXIT
+    THEN
+    DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        2DROP 0 TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    _TSSP-CTX-GEN ! _TSSP-CTX !
+    ['] _TSSP-BODY CATCH ?DUP IF _TSSP-RECOVER THEN
+    _TSSP-RETURN ;
 
 \ Publication failure is unreachable while CONNECTING remains reserved, but
 \ defensive cleanup must still reclaim the exact client transport before the
