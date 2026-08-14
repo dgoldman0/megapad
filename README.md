@@ -62,9 +62,12 @@ cleanup; its plaintext ServerHello/exact-send boundary is qualified. The
 initial ClientHello now enters through the same exact child across arbitrary
 TCP and TLSPlaintext-record fragmentation, with explicit record progress and
 exact following-record retention. The existing attached emitter is now
-qualified through its complete ACK-paced protected flight. Attached
-client-flight ingress, protected dispositions, and authenticated socket
-publication are still missing, so TLS listen/accept remains fail-closed.
+qualified through its complete ACK-paced protected flight. The protected
+client flight now enters through the same sealed child, preserves exact
+record/TCP boundaries, authenticates client Finished, and reaches the existing
+explicit publication boundary. Protected dispositions and authenticated
+accepted-socket publication are still missing, so TLS listen/accept remains
+fail-closed.
 The immediate release path is only that remaining vertical slice, one
 independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and

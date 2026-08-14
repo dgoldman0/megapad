@@ -9,8 +9,10 @@ untouched while clearing stale local authority. Initial ClientHello ingress now
 reassembles arbitrary TCP and TLSPlaintext-record fragmentation through that
 same exact child without overreading the following record. The existing
 attached emitter is qualified through all ACK-paced protected records and
-server Finished. Attached protected ingress and authenticated TLS socket
-publication are not implemented.
+server Finished. Attached protected ingress now authenticates client Finished
+through the exact child and preserves a following TCP record. Protected
+disposition output and authenticated TLS socket publication are not
+implemented.
 **Date:** 2026-08-14 qualification
 
 ## Scope
@@ -29,8 +31,11 @@ consumes that sealed authority for outbound records without exposing a caller
 callback. `TLS-SERVER-CLIENT-HELLO-STEP` consumes the same attached authority
 for bounded initial ingress; each ClientHello-fragment record may use legacy
 version `0x0301` or `0x0303`. It retains incomplete record/message prefixes per
-context and admits exactly one complete ClientHello. It does not yet ingest the
-protected client flight or publish an authenticated TLS socket.
+context and admits exactly one complete ClientHello.
+`TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED` and
+`TLS-SERVER-CLIENT-FLIGHT-STEP` then retain that seal while authenticating at
+most one protected record per step. They do not yet transmit terminal
+dispositions or publish an authenticated TLS socket.
 
 ## TCB and table geometry
 
@@ -182,6 +187,10 @@ parser exclusion after attachment, real Ethernet/IP/TCP segmentation,
 TLSPlaintext fragmentation across `0x0301` and `0x0303` records, exact
 following-record retention, fatal framing/handshake alerts, EOF reclamation,
 and stale-incarnation isolation.
+The attached protected-ingress slice adds segmented independent Finished,
+raw/stale authority exclusion, exact following-record retention, explicit TLS
+publication, and partial-record EOF reclamation. A final sequential 11-test
+affected selector passed under the ordinary checked source-mode limits.
 
 ## Remaining secure-server boundary
 
@@ -189,8 +198,6 @@ The authority substrate is not a secure TLS accept API. TLS-marked `LISTEN`
 and `SOCK-ACCEPT` still fail closed before consuming a child. The remaining
 critical path is:
 
-- adapt client-flight ingress to the same exact child without exposing
-  plaintext;
 - transmit protected fatal/close dispositions rather than retaining only a
   terminal classification;
 - publish an accepted socket only after client Finished authentication and

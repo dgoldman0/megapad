@@ -1762,8 +1762,10 @@ handler wiring.
 | `TLS-SERVER-PREPARE-FLIGHT` | `( ctx -- ior )` | From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, derive master/application/exporter secrets without installing application record epochs, and initialize the post-ClientHello emitter union. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This word prepares immutable material but performs no transport callback. |
 | `TLS-SERVER-FLIGHT-STEP-WITH` | `( ctx send-xt -- progress ior )` | Offer at most one retained server-flight record through `send-xt ( ctx record-a record-u -- actual )` without lock 10. The record is borrowed and read-only for the callback. Zero retains byte-identical retry state and returns `TLS-E-WOULD-BLOCK`; retries of that retained record must use the identical `send-xt`. The exact length commits the sequence/cursors and returns `TLS-SERVER-EMIT-RECORD` or `TLS-SERVER-EMIT-COMPLETE`; any short nonzero result, callback exception, or callback lock-10 leak is terminal. This socket-independent entry requires `TLS-CTX.TCB` to be zero. |
 | `TLS-SERVER-FLIGHT-STEP` | `( ctx ctx-generation -- progress ior )` | Advance at most one retained server-flight record over the accepted-child pair sealed by flight preparation. The fixed adapter checks reciprocal authority inside its owner-qualified NET transaction and uses all-or-none TCP admission: NET contention returns `TLS-E-BUSY`, live zero-byte backpressure returns `TLS-E-WOULD-BLOCK`, and both retain the record and seal. A dead still-exact child is aborted before TLS binding and secrets are erased; stale lower authority is treated as already disposed, so only the old TLS binding is cleared and a reused TCB incarnation is untouched. Same-task NET ownership, caller-selected callbacks, and stale context incarnations cannot enter this attached path. |
-| `TLS-SERVER-CLIENT-FLIGHT-BEGIN` | `( ctx early-wire-budget -- ior )` | From a completely emitted, unbound (`TLS-CTX.TCB == 0`) server flight in `TLSH-CLIENT-FINISHED-PENDING` with read sequence zero, seal a nonnegative complete-wire-byte budget for discarding rejected 0-RTT records. Zero is valid. The budget is usable only when the owned ClientHello offered `early_data`; no hidden default is imposed. |
-| `TLS-SERVER-CLIENT-FLIGHT-FEED` | `( ctx bytes-a bytes-u -- consumed progress alert-desc ior )` | Copy at most through one complete client-flight record, retaining a partial header/body or Finished fragment per context; the caller retains and resubmits any unconsumed tail. Incomplete input returns the consumed count, `TLS-SERVER-INGRESS-NONE`, zero alert, and `TLS-E-WOULD-BLOCK`. Exact compatibility CCS is ignored. Failed C-HS trial decryption consumes the sealed 0-RTT budget without advancing sequence only until the first authenticated record. Successful exact client-Finished verification commits its transcript, installs C-AP read, and returns `TLS-SERVER-INGRESS-FINISHED`. Terminal progress returns an outbound alert description or the preserved peer alert description but does not claim wire transmission. |
+| `TLS-SERVER-CLIENT-FLIGHT-BEGIN` | `( ctx early-wire-budget -- ior )` | From a completely emitted socket-independent server flight with both transport fields and the emitter seal zero, seal a nonnegative complete-wire-byte budget for discarding rejected 0-RTT records. Zero is valid. The budget is usable only when the owned ClientHello offered `early_data`; no hidden default is imposed. |
+| `TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED` | `( ctx ctx-generation early-wire-budget -- ior )` | Begin the same client-flight protocol state only when the caller carries the exact live server-context generation and the completed server flight retains a nonzero seal equal to the reciprocal accepted-child binding. Raw and stale authority are rejected before ingress state changes. |
+| `TLS-SERVER-CLIENT-FLIGHT-FEED` | `( ctx bytes-a bytes-u -- consumed progress alert-desc ior )` | On the socket-independent zero-seal surface, copy at most through one complete client-flight record, retaining a partial header/body or Finished fragment per context; the caller retains and resubmits any unconsumed tail. Incomplete input returns the consumed count, `TLS-SERVER-INGRESS-NONE`, zero alert, and `TLS-E-WOULD-BLOCK`. Exact compatibility CCS is ignored. Failed C-HS trial decryption consumes the sealed 0-RTT budget without advancing sequence only until the first authenticated record. Successful exact client-Finished verification commits its transcript, installs C-AP read, and returns `TLS-SERVER-INGRESS-FINISHED`. Terminal progress returns an outbound alert description or the preserved peer alert description but does not claim wire transmission. |
+| `TLS-SERVER-CLIENT-FLIGHT-STEP` | `( ctx ctx-generation -- progress alert-desc ior )` | Read and process at most one protected client-flight record over the completed flight's sealed accepted child. Each owner-qualified receive asks only for the missing header or exact declared record bound, so arbitrary TCP segmentation returns `NONE`/`TLS-E-WOULD-BLOCK`, a committed nonfinal record returns `RECORD`, and verified Finished returns `FINISHED` without consuming a following TCP record. NET contention is retryable. Known dead/stale transport is generation-exactly reclaimed; a receive throw wipes the complete retained lanes but preserves unresolved authority for `TLS-ABORT`. Protocol terminal results retain the S-AP write epoch for later protected disposition transmission. |
 
 `TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
 and future secrets have published; it is not transport readiness or an
@@ -1845,10 +1847,12 @@ under C-HS, commits the transcript through that message, installs C-AP read,
 and supports explicit establishment publication. It can atomically attach one
 incarnation-safe accepted child to a prepared server TLS context, ingest the
 initial ClientHello through owner-qualified TCP, and emit the complete
-ACK-paced server flight through the same authority. It does not yet adapt
-protected client-flight ingress, accept TLS sockets, transmit terminal
-dispositions, or demonstrate live socket interoperability with an independent
-TLS implementation. Cipher-suite support is:
+ACK-paced server flight through the same authority. It now reads the protected
+client flight through that sealed child, authenticates Finished, preserves a
+following TCP record, and reaches explicit establishment publication. It does
+not yet accept TLS sockets, transmit terminal dispositions, or demonstrate live
+socket interoperability with an independent TLS implementation. Cipher-suite
+support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1880,7 +1884,7 @@ hash family rather than synthesizing success:
 | `TLS-KS-HANDSHAKE` | `( ctx -- status )` | Derive both endpoint handshake traffic secrets and install local-write/peer-read record keys from the sealed client/server role. Stop at the first hash/HKDF failure and wipe admitted partial schedule state. |
 | `TLS-KS-APPLICATION` | `( ctx -- status )` | Derive role-neutral application/exporter secrets. A client installs both record directions and enters `TLSH-APPLICATION-READY`; a server installs only its write direction and enters `TLSH-CLIENT-FINISHED-PENDING` while retaining its client-handshake read epoch. |
 | `TLS-BUILD-FINISHED` | `( ctx rec -- reclen )` | Build one raw-context Finished record under exact TLS ownership. Socket-owned contexts and contexts retained by server flight/ingress return zero without destination, transcript, sequence, or owner-depth mutation; admitted owner-held handshake code uses the internal builder. |
-| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | Publish `TLSS-ESTABLISHED` only from authenticated `TLSH-APPLICATION-READY`. For a client this follows its local Finished boundary; for a server it follows `TLS-SERVER-CLIENT-FLIGHT-FEED` verifying peer Finished, staging the completed transcript, and installing C-AP read. Superseded schedule secrets are wiped. |
+| `TLS-HANDSHAKE-PUBLISH` | `( ctx -- ior )` | Publish `TLSS-ESTABLISHED` only from authenticated `TLSH-APPLICATION-READY`. For a client this follows its local Finished boundary; for a server it follows `TLS-SERVER-CLIENT-FLIGHT-FEED` or the attached `TLS-SERVER-CLIENT-FLIGHT-STEP` verifying peer Finished, staging the completed transcript, and installing C-AP read. Superseded schedule secrets are wiped. |
 | `TLS-EXPORT` | `( ctx label-a label-u context-a context-u out-a out-u -- ior )` | Derive 0..8160 authenticated exporter bytes into a non-aliasing caller span. Labels are printable 1..249-byte values; output is atomic and the exporter master is never exposed. |
 | `TLS-ALPN-CONFIGURE` | `( ctx name-a name-u -- ior )` | Before handshake start, copy zero or one exact 1..255-byte ALPN ProtocolName into the connection context. Invalid input leaves the preceding configuration unchanged. |
 | `TLS-ALPN-CONFIGURED` | `( ctx -- name-a name-u )` | Return the context-owned configured ProtocolName. |
@@ -1937,8 +1941,10 @@ ClientHello ingress uses the same TLS-to-NET order, retains partial record and
 handshake bytes per context, and refuses the raw parser once transport
 authority exists. The attached emitter is qualified through every ACK-paced
 protected record and server Finished. Attached protected client-flight ingress
-is now the active transport incompatibility, not a reason for further TCP or
-crypto expansion.
+uses the same exact pair and record engine through client Finished. Protected
+disposition transmission and authenticated socket publication are now the
+active transport incompatibilities, not reasons for further TCP or crypto
+expansion.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at

@@ -25086,6 +25086,87 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         return lines, hello
 
+    @classmethod
+    def _attached_server_flight_setup_lines(
+        cls,
+    ) -> tuple[list[str], list[bytes], tuple[int, ...]]:
+        """Build one real accepted child through prepared attached flight."""
+        hello, entropy, _, _ = cls._certificate_transcript_phase()
+        hello_record = cls._tls_plaintext(hello)
+        record_lengths = (127, 43, 503, 101, 58)
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        acknowledged = 1000
+        ack_frames = []
+        for record_length in record_lengths:
+            acknowledged += record_length
+            ack_frames.append(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, 2000, acknowledged,
+                TestKDOSNetStack.TCP_ACK, 4096, b"",
+            ))
+
+        lines, _ = cls._provision_lines()
+        for name, data in (
+            ("server-alpn", cls.ALPN),
+            ("paced-hello-record", hello_record),
+            ("paced-entropy", entropy),
+        ):
+            lines += cls._forth_bytes(name, data)
+        lines += [
+            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "VARIABLE paced-listener VARIABLE paced-child",
+            "VARIABLE paced-lgen VARIABLE paced-cgen VARIABLE paced-ior",
+            "VARIABLE paced-ctx-gen VARIABLE paced-listener-owner",
+            "CREATE paced-peer-ip 4 ALLOT CREATE paced-peer-mac 6 ALLOT",
+            "10 0 0 2 IP-SET 10 0 0 1 paced-peer-ip IP!",
+            "paced-peer-mac 6 170 FILL paced-peer-ip paced-peer-mac ARP-INSERT",
+            "TCP-INIT-ALL",
+            "TCB-ALLOC DROP 0 TCB-N paced-listener !",
+            "TCPS-LISTEN paced-listener @ TCB.STATE !",
+            "443 paced-listener @ TCB.LOCAL-PORT !",
+            "paced-listener @ paced-listener-owner TCP-ATTACH",
+            "paced-ior ! paced-lgen !",
+            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
+            "TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN-IOR=" . paced-ctx-gen !',
+            "TCB-ALLOC DROP 1 TCB-N paced-child !",
+            "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
+            "443 paced-child @ TCB.LOCAL-PORT !",
+            "50000 paced-child @ TCB.REMOTE-PORT !",
+            "paced-peer-ip paced-child @ TCB.REMOTE-IP 4 CMOVE",
+            "1000 paced-child @ TCB.SND-UNA !",
+            "1000 paced-child @ TCB.SND-NXT !",
+            "2000 paced-child @ TCB.RCV-NXT !",
+            "4096 paced-child @ TCB.SND-WND !",
+            "4096 paced-child @ TCB.RCV-WND !",
+            "TCP-MSS paced-child @ TCB.CWND !",
+            "paced-listener @ TCB-HANDLE@",
+            "paced-child @ TCB.PARENT-GEN !",
+            "paced-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN paced-child @ TCB.AUTH-STATE !",
+            "paced-listener @ AQ-RESERVE DROP",
+            "paced-child @ paced-listener @ AQ-PUSH DROP",
+            "server-ctx @ paced-ctx-gen @ paced-listener @ paced-lgen @ "
+            "paced-listener-owner TLS-SERVER-ACCEPT-ATTACH",
+            '." ATTACH=" .',
+            "server-ctx @ TLS-CTX.TCB-GENERATION @ paced-cgen !",
+            f"paced-child @ paced-hello-record {len(hello_record)} "
+            "(TCP-RX-PUSH) DROP",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
+            '." HELLO-IOR=" . ." HELLO-ALERT=" . '
+            '." HELLO-PROGRESS=" .',
+            "TLS-OWNER-TRY DROP",
+            "server-ctx @ _TSPH-BEGIN 2DROP",
+            "paced-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
+            "TLS-OWNER-RELEASE",
+            '." PREP=" server-ctx @ TLS-SERVER-PREPARE-FLIGHT .',
+        ]
+        return lines, ack_frames, record_lengths
+
     def test_server_phase_leaves_dictionary_allocations_reachable(self):
         """Server preparation cannot strand later cold-cache definitions."""
         lines, _ = self._server_phase_one_lines()
@@ -27115,9 +27196,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
 
     def test_server_flight_step_completes_over_ack_paced_child(self):
         """The existing attached step needs only TCP ACKs to finish flight."""
-        hello, entropy, _, _ = self._certificate_transcript_phase()
-        hello_record = self._tls_plaintext(hello)
-        record_lengths = (127, 43, 503, 101, 58)
+        lines, ack_frames, record_lengths = (
+            self._attached_server_flight_setup_lines()
+        )
         expected_hashes = tuple(bytes.fromhex(value) for value in (
             "f4c91bd6d8ba40eb7ae4404ac7cf2de0be6c7e3237e9458c022c8b61f731abd6",
             "c691aaeb90548131d6404bc558a2e8525f5e5e365399a4c48d9320f70965b035",
@@ -27125,77 +27206,6 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "cd92dd4579370d423e9e35834107c34f6c9c495a4124c21b4b744fa90bcc4379",
             "6c0ae11654ed9f02249319980defb847dccb34157fca29783005c8943d949f63",
         ))
-        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
-        peer_mac = [0xAA] * 6
-        local_ip = [10, 0, 0, 2]
-        peer_ip = [10, 0, 0, 1]
-        acknowledged = 1000
-        ack_frames = []
-        for record_length in record_lengths:
-            acknowledged += record_length
-            ack_frames.append(TestKDOSNetStack._build_tcp_frame(
-                nic_mac, peer_mac, peer_ip, local_ip,
-                50000, 443, 2000, acknowledged,
-                TestKDOSNetStack.TCP_ACK, 4096, b"",
-            ))
-
-        lines, _ = self._provision_lines()
-        for name, data in (
-            ("server-alpn", self.ALPN),
-            ("paced-hello-record", hello_record),
-            ("paced-entropy", entropy),
-        ):
-            lines += self._forth_bytes(name, data)
-        lines += [
-            "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
-            "VARIABLE paced-listener VARIABLE paced-child",
-            "VARIABLE paced-lgen VARIABLE paced-cgen VARIABLE paced-ior",
-            "VARIABLE paced-ctx-gen VARIABLE paced-listener-owner",
-            "CREATE paced-peer-ip 4 ALLOT CREATE paced-peer-mac 6 ALLOT",
-            "10 0 0 2 IP-SET 10 0 0 1 paced-peer-ip IP!",
-            "paced-peer-mac 6 170 FILL paced-peer-ip paced-peer-mac ARP-INSERT",
-            "TCP-INIT-ALL",
-            "TCB-ALLOC DROP 0 TCB-N paced-listener !",
-            "TCPS-LISTEN paced-listener @ TCB.STATE !",
-            "443 paced-listener @ TCB.LOCAL-PORT !",
-            "paced-listener @ paced-listener-owner TCP-ATTACH",
-            "paced-ior ! paced-lgen !",
-            "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN",
-            '." BEGIN-IOR=" . paced-ctx-gen !',
-            "TCB-ALLOC DROP 1 TCB-N paced-child !",
-            "TCPS-ESTABLISHED paced-child @ TCB.STATE !",
-            "443 paced-child @ TCB.LOCAL-PORT !",
-            "50000 paced-child @ TCB.REMOTE-PORT !",
-            "paced-peer-ip paced-child @ TCB.REMOTE-IP 4 CMOVE",
-            "1000 paced-child @ TCB.SND-UNA !",
-            "1000 paced-child @ TCB.SND-NXT !",
-            "2000 paced-child @ TCB.RCV-NXT !",
-            "4096 paced-child @ TCB.SND-WND !",
-            "4096 paced-child @ TCB.RCV-WND !",
-            "TCP-MSS paced-child @ TCB.CWND !",
-            "paced-listener @ TCB-HANDLE@",
-            "paced-child @ TCB.PARENT-GEN !",
-            "paced-child @ TCB.PARENT-H1 !",
-            "TCP-AUTH-HALF-OPEN paced-child @ TCB.AUTH-STATE !",
-            "paced-listener @ AQ-RESERVE DROP",
-            "paced-child @ paced-listener @ AQ-PUSH DROP",
-            "server-ctx @ paced-ctx-gen @ paced-listener @ paced-lgen @ "
-            "paced-listener-owner TLS-SERVER-ACCEPT-ATTACH",
-            '." ATTACH=" .',
-            "server-ctx @ TLS-CTX.TCB-GENERATION @ paced-cgen !",
-            f"paced-child @ paced-hello-record {len(hello_record)} "
-            "(TCP-RX-PUSH) DROP",
-            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-HELLO-STEP",
-            '." HELLO-IOR=" . ." HELLO-ALERT=" . '
-            '." HELLO-PROGRESS=" .',
-            "TLS-OWNER-TRY DROP",
-            "server-ctx @ _TSPH-BEGIN 2DROP",
-            "paced-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
-            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
-            "TLS-OWNER-RELEASE",
-            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." PREP=" .',
-        ]
         acknowledged = 1000
         for index, record_length in enumerate(record_lengths):
             acknowledged += record_length
@@ -27289,6 +27299,257 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
              for frame in payload_frames],
             list(expected_hashes),
         )
+
+    def test_server_client_flight_step_authenticates_attached_child(self):
+        """Segmented client Finished stays on the exact accepted child."""
+        (
+            client_record,
+            _,
+            _,
+            full_hash,
+            _,
+            client_ap_key,
+            client_ap_iv,
+            _,
+        ) = self._client_finished_reference()
+        following_record = b"\x17\x03\x03\x00\x02\xaa\xbb"
+        lines, ack_frames, record_lengths = (
+            self._attached_server_flight_setup_lines()
+        )
+        for name, data in (
+            ("attached-client-finished", client_record),
+            ("attached-full-hash", full_hash),
+            ("attached-app-key", client_ap_key),
+            ("attached-app-iv", client_ap_iv),
+            ("attached-following", following_record),
+        ):
+            lines += self._forth_bytes(name, data)
+
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        server_ack = 1000 + sum(record_lengths)
+        client_frames = []
+        client_sequence = 2000
+        for segment in (
+            client_record[:2],
+            client_record[2:] + following_record,
+        ):
+            client_frames.append(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, client_sequence, server_ack,
+                TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+                4096, segment,
+            ))
+            client_sequence += len(segment)
+
+        for _ in record_lengths:
+            lines += [
+                "server-ctx @ paced-ctx-gen @ TLS-SERVER-FLIGHT-STEP 2DROP",
+                "TCP-POLL",
+            ]
+        lines += [
+            "server-ctx @ 0 TLS-SERVER-CLIENT-FLIGHT-BEGIN",
+            '." RAW-BEGIN=" .',
+            "server-ctx @ paced-ctx-gen @ 1+ 0 "
+            "TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED",
+            '." STALE-BEGIN=" .',
+            "server-ctx @ paced-ctx-gen @ 0 "
+            "TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED",
+            '." BEGIN=" .',
+            '." BEGIN-INGRESS=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." BEGIN-SEAL=" server-ctx @ _TSSE-SEAL-BOUND? .',
+            "server-ctx @ attached-client-finished 1 "
+            "TLS-SERVER-CLIENT-FLIGHT-FEED",
+            '." RAW-FEED-IOR=" . ." RAW-FEED-ALERT=" . '
+            '." RAW-FEED-PROGRESS=" . ." RAW-FEED-CONSUMED=" .',
+            '." RAW-FEED-REC=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "TCP-POLL",
+            "server-ctx @ paced-ctx-gen @ 1+ "
+            "TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." STALE-IOR=" . ." STALE-ALERT=" . '
+            '." STALE-PROGRESS=" .',
+            '." STALE-TCP=" paced-child @ TCB.RX-COUNT @ .',
+            '." STALE-REC=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." PART-IOR=" . ." PART-ALERT=" . '
+            '." PART-PROGRESS=" .',
+            '." PART-TCP=" paced-child @ TCB.RX-COUNT @ .',
+            '." PART-REC=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "TCP-POLL",
+            '." TAIL-BEFORE=" paced-child @ TCB.RX-COUNT @ .',
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." FIN-IOR=" . ." FIN-ALERT=" . ." FIN-PROGRESS=" .',
+            '." REC=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." HLEN=" server-ctx @ TLS-CTX.RX-HS-LEN @ .',
+            '." AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." INGRESS=" server-ctx @ TLS-RXW.SERVER-INGRESS-META '
+            'TSI.STATE + @ .',
+            '." FULL-HASH=" server-ctx @ TLS-CTX.TRANSCRIPT '
+            'attached-full-hash 32 _XC-BYTES= .',
+            '." APP-KEY=" server-ctx @ TLS-CTX.RD-KEY '
+            'attached-app-key 16 _XC-BYTES= .',
+            '." APP-IV=" server-ctx @ TLS-CTX.RD-IV '
+            'attached-app-iv 12 _XC-BYTES= .',
+            '." RD-SEQ=" server-ctx @ TLS-CTX.RD-SEQ @ .',
+            '." EXACT=" paced-child @ paced-cgen @ server-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            '." SEAL=" server-ctx @ _TSSE-SEAL-BOUND? .',
+            '." PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." FOLLOWING=" paced-child @ TCB.RX-COUNT @ .',
+            '." RCV-NXT=" paced-child @ TCB.RCV-NXT @ .',
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." AGAIN-IOR=" . ." AGAIN-ALERT=" . '
+            '." AGAIN-PROGRESS=" .',
+            '." AGAIN-FOLLOWING=" paced-child @ TCB.RX-COUNT @ .',
+            "server-ctx @ 0 0 TLS-SERVER-CLIENT-FLIGHT-FEED",
+            '." COMPLETE-RAW-IOR=" . ." COMPLETE-RAW-ALERT=" . '
+            '." COMPLETE-RAW-PROGRESS=" . '
+            '." COMPLETE-RAW-CONSUMED=" .',
+            '." COMPLETE-RAW-FOLLOWING=" paced-child @ TCB.RX-COUNT @ .',
+            "CREATE attached-following-out 7 ALLOT",
+            "paced-child @ paced-cgen @ server-ctx @ "
+            "attached-following-out 7 TCP-OWNER-RECV",
+            '." FOLLOW-IOR=" . ." FOLLOW-U=" .',
+            '." FOLLOW-BYTES=" attached-following-out '
+            'attached-following 7 _XC-BYTES= .',
+            'server-ctx @ TLS-HANDSHAKE-PUBLISH ." PUBLISH=" .',
+            '." CONNECTED-HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
+            '." CONNECTED-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." CONNECTED-AUTH=" server-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." PIN-AFTER=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." SEAL-AFTER=" server-ctx @ _TSSE-SEAL-ZERO? .',
+            '." REFS-AFTER=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            'server-ctx @ TLS-ABORT ." ABORT=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(
+            lines,
+            nic_frames=ack_frames + client_frames,
+            max_steps=250_000_000,
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN-IOR=0 ", "ATTACH=0 ",
+            "HELLO-IOR=0 HELLO-ALERT=0 HELLO-PROGRESS=2 ",
+            "PREP=0 ", "RAW-BEGIN=-4204 ", "STALE-BEGIN=-4204 ",
+            "BEGIN=0 ", "BEGIN-INGRESS=1 ", "BEGIN-SEAL=-1 ",
+            "RAW-FEED-IOR=-4204 RAW-FEED-ALERT=0 ",
+            "RAW-FEED-PROGRESS=0 RAW-FEED-CONSUMED=0 ",
+            "RAW-FEED-REC=0 ",
+            "STALE-IOR=-4204 STALE-ALERT=0 STALE-PROGRESS=0 ",
+            "STALE-TCP=2 ", "STALE-REC=0 ",
+            "PART-IOR=-4219 PART-ALERT=0 PART-PROGRESS=0 ",
+            "PART-TCP=0 ", "PART-REC=2 ", "TAIL-BEFORE=63 ",
+            "FIN-IOR=0 FIN-ALERT=0 FIN-PROGRESS=2 ",
+            "REC=0 ", "HLEN=0 ", "AUTH=1 ", "HS=8 ",
+            "STATE=1 ", "ERROR=0 ", "INGRESS=2 ",
+            "FULL-HASH=-1 ", "APP-KEY=-1 ", "APP-IV=-1 ",
+            "RD-SEQ=0 ", "EXACT=-1 ", "SEAL=-1 ", "PIN=-1 ",
+            "FOLLOWING=7 ", "RCV-NXT=2065 ",
+            "AGAIN-IOR=0 AGAIN-ALERT=0 AGAIN-PROGRESS=2 ",
+            "AGAIN-FOLLOWING=7 ",
+            "COMPLETE-RAW-IOR=-4204 COMPLETE-RAW-ALERT=0 ",
+            "COMPLETE-RAW-PROGRESS=0 COMPLETE-RAW-CONSUMED=0 ",
+            "COMPLETE-RAW-FOLLOWING=7 ",
+            "FOLLOW-IOR=0 FOLLOW-U=7 ", "FOLLOW-BYTES=-1 ",
+            "PUBLISH=0 ", "CONNECTED-HS=9 ", "CONNECTED-STATE=2 ",
+            "CONNECTED-AUTH=1 ", "PIN-AFTER=0 ", "SEAL-AFTER=-1 ",
+            "REFS-AFTER=0 ", "LISTENER-LIVE=-1 ", "ABORT=1 ",
+            "DELETE=0 ", "TLS-OWNER=0 ", "NET-OWNER=0 ",
+            "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_client_flight_step_reclaims_transport_eof(self):
+        """EOF after a partial record reclaims only the sealed child."""
+        client_record, *_ = self._client_finished_reference()
+        lines, ack_frames, record_lengths = (
+            self._attached_server_flight_setup_lines()
+        )
+        client_frame = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            2000,
+            1000 + sum(record_lengths),
+            TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+            4096,
+            client_record[:2],
+        )
+        for _ in record_lengths:
+            lines += [
+                "server-ctx @ paced-ctx-gen @ TLS-SERVER-FLIGHT-STEP 2DROP",
+                "TCP-POLL",
+            ]
+        lines += [
+            "server-ctx @ paced-ctx-gen @ 0 "
+            "TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED",
+            '." BEGIN=" .',
+            "TCP-POLL",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." PART-IOR=" . ." PART-ALERT=" . '
+            '." PART-PROGRESS=" .',
+            '." PART-REC=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            "TCPS-CLOSE-WAIT paced-child @ TCB.STATE !",
+            "server-ctx @ paced-ctx-gen @ TLS-SERVER-CLIENT-FLIGHT-STEP",
+            '." EOF-IOR=" . ." EOF-ALERT=" . ." EOF-PROGRESS=" .',
+            '." EOF-STATE=" server-ctx @ TLS-CTX.STATE @ .',
+            '." EOF-ERROR=" server-ctx @ TLS-CTX.ERROR @ .',
+            '." EOF-TCB=" server-ctx @ TLS-CTX.TCB @ .',
+            '." EOF-GEN=" server-ctx @ TLS-CTX.TCB-GENERATION @ .',
+            '." EOF-REC=" server-ctx @ TLS-CTX.RX-REC-LEN @ .',
+            '." EOF-INGRESS=" server-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            '." EOF-SEAL=" server-ctx @ _TSSE-SEAL-ZERO? .',
+            '." EOF-CHILD=" paced-child @ TCB.STATE @ .',
+            '." EOF-CHILD-OWNER=" paced-child @ TCB.OWNER @ .',
+            '." EOF-CHILD-AUTH=" paced-child @ TCB.AUTH-STATE @ .',
+            '." EOF-PIN=" server-ctx @ _TLS-SERVER-PINNED? .',
+            '." EOF-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '." LISTENER-LIVE=" paced-listener @ paced-lgen @ '
+            'paced-listener-owner TCB-ATTACHED-TO? .',
+            'server-ctx @ TLS-ABORT ." EOF-ABORT=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." TLS-OWNER=" TLS-OWNER-DEPTH @ .',
+            '." NET-OWNER=" NET-TX-OWNER-DEPTH @ .',
+            '." FINAL-DEPTH=" DEPTH .',
+        ]
+        text = self._run_kdos(
+            lines,
+            nic_frames=ack_frames + [client_frame],
+            max_steps=250_000_000,
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN-IOR=0 ", "ATTACH=0 ",
+            "HELLO-IOR=0 HELLO-ALERT=0 HELLO-PROGRESS=2 ",
+            "PREP=0 ", "BEGIN=0 ",
+            "PART-IOR=-4219 PART-ALERT=0 PART-PROGRESS=0 ",
+            "PART-REC=2 ",
+            "EOF-IOR=-4218 EOF-ALERT=0 EOF-PROGRESS=0 ",
+            "EOF-STATE=3 ", "EOF-ERROR=-4218 ",
+            "EOF-TCB=0 ", "EOF-GEN=0 ", "EOF-REC=0 ",
+            "EOF-INGRESS=0 ", "EOF-SEAL=-1 ", "EOF-CHILD=0 ",
+            "EOF-CHILD-OWNER=0 ", "EOF-CHILD-AUTH=0 ",
+            "EOF-PIN=0 ", "EOF-REFS=0 ", "LISTENER-LIVE=-1 ",
+            "EOF-ABORT=0 ", "DELETE=0 ", "TLS-OWNER=0 ",
+            "NET-OWNER=0 ", "FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
 
     def test_server_flight_terminal_paths_preserve_exact_authority(self):
         """Stale and exceptional cleanup retain the right incarnation."""

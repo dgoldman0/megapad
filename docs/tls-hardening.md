@@ -4,9 +4,9 @@ Status: no usable listening TLS server yet; the bounded client profile,
 socket-independent server handshake through client Finished, exact lower
 transport ownership/close, and atomic queued-child attachment are qualified,
 and attached initial ClientHello ingress plus the complete ACK-paced server
-flight are now qualified. Attached protected ingress, protected dispositions,
-and authenticated accepted-socket publication are the single active critical
-path.
+flight and protected client-Finished ingress are now qualified. Protected
+dispositions and authenticated accepted-socket publication are the single
+active critical path.
 Last updated: 2026-08-14
 
 ## Purpose
@@ -62,8 +62,12 @@ may use legacy version `0x0301` or `0x0303`. It consumes at most one record per
 call. Fatal
 peer input latches a closing disposition while preserving the binding and pin;
 dead or stale transport follows the same exact-incarnation cleanup rule.
-Protected client-flight ingress and disposition output are not yet bound to
-the child.
+`TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED` and
+`TLS-SERVER-CLIENT-FLIGHT-STEP` retain the completed flight's seal and read at
+most one exact protected record directly from that child. TCP header/body
+segmentation remains retryable, raw caller-fed ingress is excluded once the
+seal is bound, and Finished authentication leaves any following record in the
+TCP receive ring. Protected disposition output is not yet bound to the child.
 The bounded inbound engine now rejects offered 0-RTT under a sealed caller
 wire-byte budget, authenticates and reassembles the exact client Finished,
 commits the transcript through that message, installs C-AP read, and leaves
@@ -73,8 +77,8 @@ SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
 boundary; it is not live interoperability with an independent TLS stack.
-The remaining server work is attached client-flight ingress, protected terminal
-output, secure socket accept/publication, and
+The remaining server work is protected terminal output, secure socket
+accept/publication, and
 interoperability over that path with an independent TLS implementation. The
 following lower-level facts
 continue to bound an authenticated server role:
@@ -560,14 +564,17 @@ client-Finished-pending. The caller-selected callback entry intentionally has
 no raw-TCB authority; attached emission is available only through the fixed
 sealed adapter.
 
-`TLS-SERVER-CLIENT-FLIGHT-BEGIN` then seals a nonnegative caller-provided
-wire-byte budget. Failed trial C-HS decryption can be discarded only when the
-owned ClientHello offered `early_data`, the budget admits the complete record,
-and no protected client-handshake record has authenticated. Discard does not
-advance the read sequence. Exact compatibility CCS is ignored without spending
-the budget or closing the window. The first authenticated record closes the
-window permanently; a later tag failure is `bad_record_mac`, even if budget
-remains.
+Socket-independent tests use `TLS-SERVER-CLIENT-FLIGHT-BEGIN` to seal a
+nonnegative caller-provided wire-byte budget only when both the transport
+fields and emitter seal are zero. The attached path instead uses
+`TLS-SERVER-CLIENT-FLIGHT-BEGIN-ATTACHED` with the exact context generation and
+completed-flight transport seal. Failed trial C-HS decryption can be discarded
+only when the owned ClientHello offered `early_data`, the budget admits the
+complete record, and no protected client-handshake record has authenticated.
+Discard does not advance the read sequence. Exact compatibility CCS is ignored
+without spending the budget or closing the window. The first authenticated
+record closes the window permanently; a later tag failure is `bad_record_mac`,
+even if budget remains.
 
 `TLS-SERVER-CLIENT-FLIGHT-FEED` copies at most one record per call into
 connection-owned storage and retains partial headers, bodies, and the exact
@@ -592,6 +599,17 @@ If credential unpin is contended or fails, its generational handle remains for
 Protocol mutation remains excluded from emitter
 completion through publish, close, or abort, and no raw TCB value grants input
 or output authority.
+
+`TLS-SERVER-CLIENT-FLIGHT-STEP` is the fixed attached adapter around that same
+record engine. It owner-qualifies each exact receive against the reciprocal TCB
+generation, reads only the missing five-byte header prefix and then the
+protocol-derived complete record bound, and returns `NONE`/`WOULD-BLOCK`,
+`RECORD`, or `FINISHED` without consuming a following record. A stale context
+generation cannot read peer bytes. Known transport failure exact-aborts only
+the sealed incarnation and wipes the TLS epoch; a lower receive throw wipes the
+complete retained lanes while preserving the seal and binding for
+`TLS-ABORT`. The adapter still returns terminal fatal/close classifications—it
+does not claim to have transmitted them.
 
 `TLS-ALPN-CONFIGURE` copies zero or one exact ProtocolName into connection-owned
 storage before the handshake.  A nonempty name is bounded by ALPN's one-byte
@@ -984,8 +1002,13 @@ fatal input latching, terminal EOF cleanup, and stale-incarnation isolation.
 An additional exact-child test ACKs ServerHello and every protected record in
 order, verifies all five expected payload hashes and lengths, reaches
 client-Finished-pending, and drains the final retained TCP segment. Attached
-protected ingress, secure socket acceptance, terminal-alert transmission, and
-interoperability over sockets with an independent TLS stack remain unproved.
+protected-ingress tests then admit an independently derived Finished across
+real TCP segmentation, reject raw/stale authority, preserve the following
+record, reach explicit publication, and generation-exactly reclaim a partial
+record on EOF without disturbing the listener. Secure socket acceptance,
+terminal-alert transmission, and interoperability over sockets with an
+independent TLS stack remain unproved. The final affected selector passed
+11/11 sequential tests under ordinary checked source-mode limits.
 The uint24-maximum Certificate capstone is separate maturity evidence and must
 not delay this vertical closure.
 
@@ -997,9 +1020,8 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- Adapt authoritative nonblocking TCP input to the qualified
-  rejected-0RTT/client-Finished boundary, including protected terminal-alert
-  output, without exposing a plaintext accepted child.
+- Transmit the protected terminal-alert/close dispositions already classified
+  by attached ingress without exposing a plaintext accepted child.
 - Publish a TLS accepted socket only after client Finished authentication and
   explicit handshake publication. Prove credential-pin/reference and exact
   TCB-owner cleanup on every failure.
