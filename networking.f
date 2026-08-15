@@ -19450,23 +19450,18 @@ CREATE _TSAO-SCRATCH-END
         DROP 0 TLS-E-TRANSPORT
     THEN ;
 
-: _TSAO-LOWER-SD-EXACT?  ( -- flag )
-    _TSAOM-LOWER @ DUP SOCK-MEMBER? 0= IF DROP 0 EXIT THEN
-    DUP SOCK.STATE @ SOCKST-TLS =
-    OVER SOCK.FLAGS @ 1 AND 0<> AND
-    OVER SOCK.HANDLE @ _TSAOM-OP @ TSAO.CTX @ = AND
-    OVER SOCK.HANDLE-GEN @ _TSAOM-OP @ TSAO.CTX-GEN @ = AND
-    OVER SOCK.HANDLE @ TLS-CTX.SOCKET-OWNER @ 2 PICK = AND
-    SWAP DROP ;
-
 : _TSAO-PUBLISH-COMMITTED  ( -- )
     _TSAOM-LOWER @ _TSAOM-OP @ TSAO.RESULT-SD !
     _TSAOM-OP @ TSAO.CTX 2 CELLS 0 FILL
     TLS-SERVER-ACCEPT-ST-PUBLISHED-LEASE _TSAO-PROGRESSED ;
 
 : _TSAO-PUBLISH-MAP  ( -- )
+    \ TLS-SERVER-SOCKET-PUBLISH owns the complete TLS -> credential -> NET
+    \ transaction and returns only (exact-public-sd,0) or (0,ior).  Once it
+    \ returns, the descriptor is public: never try to authorize that result
+    \ by rereading socket/context fields while holding only the TSAO lock.
     _TSAOM-LOWER @ IF
-        _TSAO-LOWER-SD-EXACT? IF
+        _TSAOM-LOWER-IOR @ 0= IF
             _TSAO-PUBLISH-COMMITTED
         ELSE
             TLS-E-TRANSPORT _TSAO-ABORT-READY
