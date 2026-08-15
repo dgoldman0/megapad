@@ -10103,9 +10103,9 @@ VARIABLE _TSCB-IOR
     _TSCB-CTX @ (TLS-CTX-RELEASE) R> ;
 
 \ Initialize one unbound server-role context for deterministic handshake
-\ work.  The production accept coordinator composes this transaction with the
-\ exact accepted child; no persistent listener policy is hidden here.
-: (TLS-SERVER-CONTEXT-BEGIN)
+\ work.  The secure-accept boundary composes this transaction with the exact
+\ accepted child; no persistent listener policy is hidden here.
+: _TSCB-BEGIN-PREPARE
     ( ctx credential-h1 credential-gen alpn-a alpn-u -- ior )
     _TSCB-ALPN-U ! _TSCB-ALPN ! _TSCB-GEN ! _TSCB-H1 ! _TSCB-CTX !
     _TLS-SERVER-BEGIN-VALIDATE DUP IF EXIT THEN DROP
@@ -10113,7 +10113,10 @@ VARIABLE _TSCB-IOR
     _TSCB-CTX @ TLS-CTX-CLAIM 0= IF TLS-E-STATE EXIT THEN
     _TSCB-CTX @ _TSCB-ALPN @ _TSCB-ALPN-U @
     (TLS-ALPN-CONFIGURE) DUP IF _TLS-SERVER-BEGIN-FAIL EXIT THEN DROP
-    _TSCB-H1 @ _TSCB-GEN @ _TC-PIN-BORROW
+    TLS-E-OK ;
+
+: _TSCB-PIN-PUBLISH
+    ( chain-a chain-u cert-count scheme credential-ior -- ior )
     _TSCB-IOR ! _TSCB-SCHEME ! _TSCB-CERT-COUNT !
     _TSCB-CHAIN-U ! _TSCB-CHAIN-A !
     _TSCB-IOR @ DUP IF _TLS-SERVER-BEGIN-FAIL EXIT THEN DROP
@@ -10133,6 +10136,21 @@ VARIABLE _TSCB-IOR
     TLSH-SERVER-WAIT-CLIENT-HELLO _TSCB-CTX @ TLS-CTX.HS-STATE !
     TLSS-HANDSHAKE _TSCB-CTX @ TLS-CTX.STATE !
     TLS-E-OK ;
+
+: (TLS-SERVER-CONTEXT-BEGIN)
+    ( ctx credential-h1 credential-gen alpn-a alpn-u -- ior )
+    _TSCB-BEGIN-PREPARE DUP IF EXIT THEN DROP
+    _TSCB-H1 @ _TSCB-GEN @ _TC-PIN-BORROW _TSCB-PIN-PUBLISH ;
+
+\ Secure accept already owns TLS and credential locks while listener policy is
+\ stable under NET.  This sibling keeps that canonical lock order intact by
+\ borrowing the configured credential through the already-held locked body.
+: _TLS-SERVER-CONTEXT-BEGIN-LOCKED
+    ( ctx credential-h1 credential-gen alpn-a alpn-u -- ior )
+    _TSCB-BEGIN-PREPARE DUP IF EXIT THEN DROP
+    _TSCB-H1 @ _TSCB-GEN @ _TC-PIN-BORROW-LOCKED
+    DUP IF _TLS-CREDENTIAL-IOR>TLS THEN
+    _TSCB-PIN-PUBLISH ;
 
 : TLS-SERVER-CONTEXT-BEGIN
     ( ctx credential-h1 credential-gen alpn-a alpn-u -- ctx-generation ior )
@@ -12313,10 +12331,9 @@ VARIABLE _TSPH-EE-U
     THEN
     ['] _TSPH-BODY _TSPH-GUARD ;
 
-\ Coordinator-only incarnation guard.  Context addresses are reusable, so a
-\ persistent accept operation must prove its saved generation under the same
-\ TLS transaction that begins phase-one preparation.
-: _TLS-SERVER-PREPARE-HELLO-EXACT  ( ctx generation -- alert ior )
+\ Persistent upper-layer operations carry address plus generation.  Prove that
+\ saved incarnation under the same TLS transaction that begins preparation.
+: TLS-SERVER-PREPARE-HELLO-EXACT  ( ctx generation -- alert ior )
     OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
@@ -13408,7 +13425,7 @@ VARIABLE _TSPF-ADMITTED
 
 \ As above, but for the signing/flight preparation transaction.  Validation
 \ and mutation are indivisible with respect to slot release and reuse.
-: _TLS-SERVER-PREPARE-FLIGHT-EXACT  ( ctx generation -- ior )
+: TLS-SERVER-PREPARE-FLIGHT-EXACT  ( ctx generation -- ior )
     OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP TLS-E-STATE EXIT THEN
     DUP 0= IF 2DROP TLS-E-STATE EXIT THEN
     NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
@@ -16953,7 +16970,7 @@ VARIABLE _TLSX-IOR
     _TLSX-RETIRED @ _TLSX-IOR @ >R >R
     _TLSX-WIPE TLS-OWNER-RELEASE R> R> ;
 
-: _TLS-SERVER-CLOSE-EXACT-TRY  ( ctx generation -- retired? ior )
+: TLS-SERVER-CLOSE-EXACT-TRY  ( ctx generation -- retired? ior )
     OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
@@ -16969,7 +16986,7 @@ VARIABLE _TLSX-IOR
     THEN
     _TLSX-RETURN ;
 
-: _TLS-SERVER-ABORT-EXACT  ( ctx generation -- retired? ior )
+: TLS-SERVER-ABORT-EXACT  ( ctx generation -- retired? ior )
     OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
@@ -17413,7 +17430,7 @@ VARIABLE _TLSCP-HELLO
 \    BIND       ( sd port -- ior )
 \    LISTEN     ( sd -- ior )
 \    TLS-LISTEN ( sd cred-h1 cred-gen alpn-a alpn-u early-budget timeout-ms
-\                 -- ior )
+\                 -- listener-h1 listener-gen ior )
 \    SOCK-ACCEPT ( sd -- new-sd | -1 )
 \    CONNECT    ( sd rip rport -- ior )
 \    SEND       ( sd addr len -- actual )
@@ -18169,8 +18186,7 @@ VARIABLE _TLSL-COMMITTED
     THEN
     SOCK-TLS-POLICY-LIVE _TLSL-SD @ SOCK.TLS-POLICY-STATE !
     SOCKST-LISTENING _TLSL-SD @ SOCK.STATE !
-    -1 _TLSL-COMMITTED ! 0 _TLSL-PINNED !
-    0 _TLSL-TCB ! 0 _TLSL-TCB-GEN ! ;
+    -1 _TLSL-COMMITTED ! 0 _TLSL-PINNED ! ;
 
 : _TLSL-BODY  ( -- )
     TLS-E-OK _TLSL-IOR !
@@ -18194,26 +18210,44 @@ VARIABLE _TLSL-COMMITTED
     DROP _TLSL-TCB-GEN !
     _TLSL-PUBLISH ;
 
-: _TLSL-RETURN  ( -- ior )
+: _TLSL-RETURN  ( -- listener-h1 listener-gen ior )
     _TLSL-COMMITTED @ 0= IF _TLSL-ROLLBACK THEN
-    _TLSL-IOR @ >R
+    _TLSL-COMMITTED @ _TLSL-IOR @ 0= AND IF
+        _TLSL-TCB @ TCB>H1 _TLSL-TCB-GEN @
+    ELSE
+        0 0
+    THEN
+    _TLSL-IOR @ >R >R >R
     _TLSL-NET-HELD @ IF 0 _TLSL-NET-HELD ! NET-TX-RELEASE THEN
     _TLSL-CRED-HELD @ IF 0 _TLSL-CRED-HELD ! _TC-UNLOCK THEN
-    _TLSL-WIPE TLS-OWNER-RELEASE R> ;
+    _TLSL-WIPE TLS-OWNER-RELEASE R> R> R> ;
+
+: _TLSL-FAIL  ( sd h1 gen alpn-a alpn-u budget timeout ior -- 0 0 ior )
+    >R 2DROP 2DROP 2DROP DROP 0 0 R> ;
 
 : TLS-LISTEN
-    ( sd cred-h1 cred-gen alpn-a alpn-u early-wire-budget timeout-ms -- ior )
-    DUP 0> 0= IF 2DROP 2DROP 2DROP DROP TLS-E-HANDSHAKE-PARAM EXIT THEN
-    OVER 0< IF 2DROP 2DROP 2DROP DROP TLS-E-HANDSHAKE-PARAM EXIT THEN
+    ( sd cred-h1 cred-gen alpn-a alpn-u early-budget timeout-ms -- listener-h1 listener-gen ior )
+    DUP 0> 0= IF
+        TLS-E-HANDSHAKE-PARAM _TLSL-FAIL EXIT
+    THEN
+    OVER 0< IF
+        TLS-E-HANDSHAKE-PARAM _TLSL-FAIL EXIT
+    THEN
     3 PICK 3 PICK _TLSL-ALPN-PREFLIGHT DUP IF
-        >R 2DROP 2DROP 2DROP DROP R> EXIT
+        _TLSL-FAIL EXIT
     THEN DROP
     NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
-        2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT
+        TLS-E-BUSY _TLSL-FAIL EXIT
     THEN
-    _TC-LOCK-OWNER? IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
-    TLS-OWNER-DEPTH @ IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
-    TLS-OWNER-TRY IF 2DROP 2DROP 2DROP DROP TLS-E-BUSY EXIT THEN
+    _TC-LOCK-OWNER? IF
+        TLS-E-BUSY _TLSL-FAIL EXIT
+    THEN
+    TLS-OWNER-DEPTH @ IF
+        TLS-E-BUSY _TLSL-FAIL EXIT
+    THEN
+    TLS-OWNER-TRY IF
+        TLS-E-BUSY _TLSL-FAIL EXIT
+    THEN
     _TLSL-TIMEOUT-MS ! _TLSL-EARLY-BUDGET !
     _TLSL-ALPN-U ! _TLSL-ALPN ! _TLSL-CRED-GEN !
     _TLSL-CRED-H1 ! _TLSL-SD !
@@ -18221,6 +18255,109 @@ VARIABLE _TLSL-COMMITTED
         DROP TLS-E-TRANSPORT _TLSL-IOR !
     THEN
     _TLSL-RETURN ;
+
+\ ---------------------------------------------------------------------
+\  Atomic queued-child to TLS-context claim
+\ ---------------------------------------------------------------------
+\
+\ TLS-LISTEN returns an opaque TCB handle plus its generation.  Paired with
+\ the caller-retained socket descriptor, those three cells name one listener
+\ incarnation without exposing a raw table pointer.  Claim validates that
+\ reciprocal authority, allocates and credential-pins one server context, and
+\ transfers exactly one queued child directly into it.  No plaintext accepted
+\ socket is ever published.  Ordinary empty/context-capacity/lock contention
+\ returns zero authority and leaves both the queue and context generations
+\ unchanged.
+VARIABLE _SAC-SD VARIABLE _SAC-H1 VARIABLE _SAC-LG VARIABLE _SAC-L
+VARIABLE _SAC-C VARIABLE _SAC-E VARIABLE _SAC-HOLD
+\ A caught throw or impossible expected-error cleanup failure leaves its
+\ claimed context permanently allocator-invisible and blocks later claims.
+\ There is no recovery API, so the quarantined context itself is the latch.
+VARIABLE _SAC-QC 0 _SAC-QC !
+
+: _SAC-CLEAR  ( -- )
+    0 _SAC-SD ! 0 _SAC-H1 ! 0 _SAC-LG ! 0 _SAC-L !
+    0 _SAC-C ! 0 _SAC-E ! 0 _SAC-HOLD ! ;
+
+: _SAC-RELEASE  ( -- )
+    _SAC-HOLD @ 2 = IF NET-TX-RELEASE THEN
+    _SAC-HOLD @ IF _TC-UNLOCK THEN 0 _SAC-HOLD ! ;
+
+: _SAC-LISTENER@  ( -- tcb | 0 )
+    _SAC-SD @ DUP (SOCK-TLS-LISTENER?) 0= IF DROP 0 EXIT THEN
+    DUP SOCK.TLS-POLICY-STATE @ SOCK-TLS-POLICY-LIVE <> IF DROP 0 EXIT THEN
+    DROP
+    _SAC-H1 @ _SAC-LG @ TCB-HANDLE-RESOLVE DUP 0= IF EXIT THEN
+    DUP _SAC-LG @ _SAC-SD @ TCB-ATTACHED-TO?
+    OVER TCB.STATE @ TCPS-LISTEN = AND
+    OVER _SAC-SD @ SOCK.HANDLE @ = AND
+    _SAC-LG @ _SAC-SD @ SOCK.HANDLE-GEN @ = AND
+    IF EXIT THEN DROP 0 ;
+
+: _SAC-DROP?  ( -- retired? )
+    _SAC-C @ _TLS-SERVER-PIN-RELEASE-LOCKED DUP IF DROP 0 EXIT THEN DROP
+    _SAC-C @ _TLS-SERVER-EMIT-UNION-WIPE
+    _SAC-C @ _TLS-RX-WIPE-RAW
+    _SAC-C @ (TLS-CTX-RELEASE) 0 _SAC-C ! -1 ;
+
+: _SAC-QUARANTINE  ( -- )
+    _SAC-C @ _SAC-QC !
+    0 _SAC-C ! TLS-E-TRANSPORT _SAC-E ! ;
+
+: _SAC-CATCH  ( throw -- )
+    DROP TLS-E-TRANSPORT _SAC-E !
+    _SAC-C @ ?DUP IF
+        TLS-CTX-CLAIMED? IF _SAC-QUARANTINE ELSE 0 _SAC-C ! THEN
+    THEN ;
+
+: _SAC-BODY  ( -- )
+    0 _SAC-E !
+    _SAC-QC @ IF TLS-E-TRANSPORT _SAC-E ! EXIT THEN
+    _TC-LOCK-TRY DUP IF _TLS-CREDENTIAL-IOR>TLS _SAC-E ! EXIT THEN
+    DROP 1 _SAC-HOLD !
+    NET-TX-TRY IF TLS-E-BUSY _SAC-E ! EXIT THEN 2 _SAC-HOLD !
+    _SAC-LISTENER@ DUP 0= IF DROP TLS-E-STATE _SAC-E ! EXIT THEN
+    DUP _SAC-L ! TCB.AQ-COUNT @ 0= IF TLS-E-WOULD-BLOCK _SAC-E ! EXIT THEN
+    _TLS-SERVER-CONTEXT-FREE@ DUP 0= IF
+        DROP TLS-E-BUSY _SAC-E ! EXIT
+    THEN _SAC-C !
+    _SAC-C @ _SAC-SD @ SOCK.TLS-CRED-H1 @
+    _SAC-SD @ SOCK.TLS-CRED-GEN @ _SAC-SD @ SOCK.TLS-ALPN
+    _SAC-SD @ SOCK.TLS-ALPN-LEN @ _TLS-SERVER-CONTEXT-BEGIN-LOCKED
+    DUP IF
+        _SAC-E ! _SAC-C @ TLS-CTX-CLAIMED?
+        IF _SAC-QUARANTINE ELSE 0 _SAC-C ! THEN EXIT
+    THEN DROP
+    _SAC-C @ DUP TLS-CTX.GENERATION @
+    _SAC-L @ _SAC-LG @ _SAC-SD @ (TLS-SERVER-ACCEPT-ATTACH)
+    DUP IF
+        _SAC-E ! _SAC-DROP? 0= IF _SAC-QUARANTINE THEN EXIT
+    THEN DROP ;
+
+: _SAC-RETURN  ( -- ctx ctx-generation ior )
+    _SAC-E @ IF 0 0 ELSE _SAC-C @ DUP TLS-CTX.GENERATION @ THEN
+    _SAC-E @ >R >R >R
+    _TSAA-WIPE _SAC-RELEASE _SAC-CLEAR TLS-OWNER-RELEASE R> R> R> ;
+
+: _SAC-FAIL  ( sd h1 gen ior -- 0 0 ior )
+    >R 2DROP DROP 0 0 R> ;
+
+: TLS-SERVER-ACCEPT-CLAIM
+    ( listener-sd listener-h1 listener-generation -- ctx ctx-generation ior )
+    2 PICK SOCK-MEMBER? 0= IF TLS-E-STATE _SAC-FAIL EXIT THEN
+    OVER DUP 1 < SWAP /TCP-MAX-CONN > OR IF
+        TLS-E-STATE _SAC-FAIL EXIT
+    THEN
+    DUP 0= IF TLS-E-STATE _SAC-FAIL EXIT THEN
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        TLS-E-BUSY _SAC-FAIL EXIT
+    THEN
+    _TC-LOCK-OWNER? IF TLS-E-BUSY _SAC-FAIL EXIT THEN
+    TLS-OWNER-DEPTH @ IF TLS-E-BUSY _SAC-FAIL EXIT THEN
+    TLS-OWNER-TRY IF TLS-E-BUSY _SAC-FAIL EXIT THEN
+    _TSAA-WIPE _SAC-CLEAR
+    _SAC-LG ! _SAC-H1 ! _SAC-SD !
+    ['] _SAC-BODY CATCH ?DUP IF _SAC-CATCH THEN _SAC-RETURN ;
 
 \ ---------------------------------------------------------------------
 \  Caller-owned bounded secure accept operation
@@ -18977,7 +19114,7 @@ CREATE _TSAO-SCRATCH-END
 
 : _TSAO-PREPARE-HELLO  ( op -- op alert ior )
     DUP TSAO.CTX @ OVER TSAO.CTX-GEN @
-    _TLS-SERVER-PREPARE-HELLO-EXACT ;
+    TLS-SERVER-PREPARE-HELLO-EXACT ;
 
 : _TSAO-PREPARE-HELLO-GUARDED  ( op -- op alert ior )
     ['] _TSAO-PREPARE-HELLO CATCH ?DUP IF
@@ -19035,7 +19172,7 @@ CREATE _TSAO-SCRATCH-END
 
 : _TSAO-PREPARE-FLIGHT  ( op -- op ior )
     DUP TSAO.CTX @ OVER TSAO.CTX-GEN @
-    _TLS-SERVER-PREPARE-FLIGHT-EXACT ;
+    TLS-SERVER-PREPARE-FLIGHT-EXACT ;
 
 : _TSAO-PREPARE-FLIGHT-GUARDED  ( op -- op ior )
     ['] _TSAO-PREPARE-FLIGHT CATCH ?DUP IF
@@ -19344,7 +19481,7 @@ CREATE _TSAO-SCRATCH-END
 
 : _TSAO-CLOSE  ( op -- op retired? ior )
     DUP TSAO.CTX @ OVER TSAO.CTX-GEN @
-    _TLS-SERVER-CLOSE-EXACT-TRY ;
+    TLS-SERVER-CLOSE-EXACT-TRY ;
 
 : _TSAO-CLOSE-GUARDED  ( op -- op retired? ior )
     ['] _TSAO-CLOSE CATCH ?DUP IF
@@ -19664,7 +19801,7 @@ CREATE _TSAO-SCRATCH-END
     R> R> R> R> ;
 
 : _TSAO-CONTEXT-ABORT  ( op -- op retired? ior )
-    DUP TSAO.CTX @ OVER TSAO.CTX-GEN @ _TLS-SERVER-ABORT-EXACT ;
+    DUP TSAO.CTX @ OVER TSAO.CTX-GEN @ TLS-SERVER-ABORT-EXACT ;
 
 : _TSAO-ABORT-PUBLISH
     ( op retired? lower-ior epoch -- op epoch release? ior )

@@ -12,7 +12,10 @@ snapshot. The bounded one-segment TCP data/control/close profile is qualified.
 Layer 2 now has exact attached-child ClientHello ingress, the complete
 ACK-paced server flight, authenticated client-Finished ingress, protected
 terminal dispositions, generation-exact TLS socket publication, and atomic
-policy-bearing `TLS-LISTEN`. A caller-owned bounded operation now leases the
+policy-bearing `TLS-LISTEN`. That listener transaction now returns exact opaque
+listener authority, and `TLS-SERVER-ACCEPT-CLAIM` transfers one queued child
+directly into a pinned TLS context without plaintext socket publication. A
+caller-owned bounded operation now leases the
 exact listener, creates one prepared context, waits retryably, attaches one
 exact queued child, drives fragmented ClientHello ingress, and aborts without
 publishing plaintext. It also prepares immutable ServerHello and
@@ -27,12 +30,16 @@ cancellation, settles the listener lease, and returns it as `ESTABLISHED`.
 An independent OpenSSL peer now completes the actual TCP/TLS accept path,
 certificate and hostname verification, ALPN, bidirectional socket application
 I/O, authenticated close, FIN, and exact cleanup. The bounded secure-server
-transport vertical is complete; broader profiles and maximum-size/concurrency
-evidence remain maturity work.
+engine and its temporary KDOS coordinator oracle are complete. Production
+service-lifecycle closure is now being re-run through an Akashic XIO-driven
+accept adapter and authenticated NIO port; `/TLS-SERVER-ACCEPT-OP` is frozen
+and must not grow while that replacement is built. Broader profiles and
+maximum-size/concurrency evidence remain maturity work.
 Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
-root. Application features may now build on the bounded surface without making
-broader transport maturity a prerequisite.
+root. Application code continues to consume the already-open port abstraction;
+the new Akashic path must pass closure before the temporary coordinator is
+deleted.
 
 ---
 
@@ -135,7 +142,8 @@ Implemented network components, bottom-up:
     settlement, and abort. An independent OpenSSL TLS 1.3 peer completes that
     path through verified handshake, ALPN, bidirectional I/O, and teardown.
 18. ✅ **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
-    and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
+    atomic policy-bearing `TLS-LISTEN`, and generation-exact nonblocking secure
+    child claim exist. The generic `LISTEN` entry
     remains fail closed for TLS descriptors, while secure listeners use the
     caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
     operation currently owns each child through exact ClientHello admission,

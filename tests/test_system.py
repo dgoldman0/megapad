@@ -25032,14 +25032,14 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "listen-sd @ 8443 BIND DROP",
             "listen-sd @ tc-slot @ tc-gen @ 1+ listen-alpn 8 37 2500 "
             "TLS-LISTEN",
-            '." STALE=" .',
+            '." STALE-IOR=" . ." STALE-GEN=" . ." STALE-H1=" .',
             '." ROLLED-STATE=" listen-sd @ SOCK.STATE @ .',
             '." ROLLED-HANDLE=" listen-sd @ SOCK.HANDLE @ .',
             '." ROLLED-POLICY=" listen-sd @ SOCK.TLS-POLICY-STATE @ .',
             '." ROLLED-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             '." ROLLED-TCB=" 8443 TCB-FIND-LPORT 0= .',
             "listen-sd @ tc-slot @ tc-gen @ listen-alpn 8 37 2500 "
-            "TLS-LISTEN",
+            "TLS-LISTEN NIP NIP",
             '." LISTEN=" .',
             "listen-sd @ SOCK-TCB@ listen-tcb !",
             "88 listen-alpn C!",
@@ -25074,7 +25074,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         text = self._run_kdos(lines)
         for token in (
             "BORROW-BUSY=-4329 ", "BORROW-DEPTH=0 ",
-            "STALE=-4204 ", "ROLLED-STATE=2 ", "ROLLED-HANDLE=0 ",
+            "STALE-IOR=-4204 STALE-GEN=0 STALE-H1=0 ",
+            "ROLLED-STATE=2 ", "ROLLED-HANDLE=0 ",
             "ROLLED-POLICY=0 ", "ROLLED-REFS=0 ", "ROLLED-TCB=-1 ",
             "LISTEN=0 ", "STATE=3 ", "POLICY=1 ", "TCB=-1 ",
             "ATTACHED=-1 ", "TCB-STATE=-1 ", "PORT=8443 ",
@@ -25084,6 +25085,197 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "REFS-AFTER-PLAIN=1 ", "CLOSE=0 ",
             "FREE=0 ", "TCB-FREE=-1 ", "POLICY-FREE=0 ",
             "REFS-FREE=0 ", "DELETE=0 ", "OWNERS=-1 ", "DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_accept_claim_is_exact_nonallocating_and_aba_safe(self):
+        """The fused boundary hides plaintext children and rejects old listeners."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("claim-alpn", self.ALPN)
+        lines += [
+            "TCP-INIT-ALL",
+            "VARIABLE claim-request-sd VARIABLE claim-sd",
+            "VARIABLE claim-h1 VARIABLE claim-lgen VARIABLE claim-listener",
+            "VARIABLE claim-child VARIABLE claim-ctx VARIABLE claim-ctx-gen",
+            "VARIABLE claim-ior VARIABLE claim-before-gen",
+            "VARIABLE claim-new-request-sd VARIABLE claim-new-sd",
+            "VARIABLE claim-new-h1 VARIABLE claim-new-lgen",
+            "VARIABLE claim-new-listener VARIABLE claim-new-child",
+            "SOCK-TYPE-TLS SOCKET claim-request-sd !",
+            "claim-request-sd @ claim-sd !",
+            "claim-request-sd @ 8443 BIND DROP",
+            "claim-request-sd @ tc-slot @ tc-gen @ claim-alpn 8 37 2500 "
+            "TLS-LISTEN",
+            "claim-ior ! claim-lgen ! claim-h1 !",
+            '." LISTEN-IOR=" claim-ior @ .',
+            '." LISTEN-SD=" claim-sd @ claim-request-sd @ = .',
+            "claim-h1 @ claim-lgen @ TCB-HANDLE-RESOLVE claim-listener !",
+            '." LISTEN-EXACT=" claim-listener @ 0<> '
+            'claim-listener @ claim-lgen @ claim-sd @ TCB-ATTACHED-TO? AND .',
+            "0 TLS-CTX@ TLS-CTX.GENERATION @ claim-before-gen !",
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            '." EMPTY-IOR=" . ." EMPTY-GEN=" . ." EMPTY-CTX=" .',
+            '." EMPTY-NO-CHURN=" 0 TLS-CTX@ TLS-CTX.GENERATION @ '
+            'claim-before-gen @ = .',
+            '." EMPTY-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '_TC-LOCK-TRY ." CLAIM-LOCK=" .',
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            '." CONTEND-IOR=" . ." CONTEND-GEN=" . '
+            '." CONTEND-CTX=" .',
+            "_TC-UNLOCK",
+            '." CONTEND-NO-CHURN=" 0 TLS-CTX@ TLS-CTX.GENERATION @ '
+            'claim-before-gen @ = .',
+            '." CONTEND-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "TCB-ALLOC TCB-N claim-child !",
+            "TCPS-ESTABLISHED claim-child @ TCB.STATE !",
+            "claim-listener @ TCB-HANDLE@",
+            "claim-child @ TCB.PARENT-GEN !",
+            "claim-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN claim-child @ TCB.AUTH-STATE !",
+            "claim-listener @ AQ-RESERVE DROP",
+            "claim-child @ claim-listener @ AQ-PUSH DROP",
+            "0 TLS-CTX@ TLS-CTX.GENERATION @ claim-before-gen !",
+            'NET-TX-TRY ." NET-LOCK=" .',
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            '." NET-CONTEND-IOR=" . ." NET-CONTEND-GEN=" . '
+            '." NET-CONTEND-CTX=" .',
+            "NET-TX-RELEASE",
+            '." NET-CONTEND-QUEUE=" claim-listener @ TCB.AQ-COUNT @ .',
+            '." NET-CONTEND-CHILD=" claim-child @ TCB.AUTH-STATE @ .',
+            '." NET-CONTEND-NO-CHURN=" 0 TLS-CTX@ TLS-CTX.GENERATION @ '
+            'claim-before-gen @ = .',
+            'TLS-OWNER-TRY ." TLS-LOCK=" .',
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            '." TLS-CONTEND-IOR=" . ." TLS-CONTEND-GEN=" . '
+            '." TLS-CONTEND-CTX=" .',
+            "TLS-OWNER-RELEASE",
+            '." TLS-CONTEND-QUEUE=" claim-listener @ TCB.AQ-COUNT @ .',
+            '." TLS-CONTEND-CHILD=" claim-child @ TCB.AUTH-STATE @ .',
+            '." TLS-CONTEND-NO-CHURN=" 0 TLS-CTX@ TLS-CTX.GENERATION @ '
+            'claim-before-gen @ = .',
+            "VARIABLE claim-all",
+            ": claim-exhaust-all -1 claim-all ! TLS-MAX-CTX 0 DO "
+            "I TLS-CTX@ TLS-CTX-CLAIM claim-all @ AND claim-all ! LOOP ;",
+            ": claim-release-all -1 claim-all ! TLS-MAX-CTX 0 DO "
+            "I TLS-CTX@ TLS-CTX-RELEASE 0= claim-all @ AND "
+            "claim-all ! LOOP ;",
+            "claim-exhaust-all",
+            '." EXHAUST-CLAIMED=" claim-all @ .',
+            "0 TLS-CTX@ TLS-CTX.GENERATION @ claim-before-gen !",
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            '." EXHAUST-IOR=" . ." EXHAUST-GEN=" . '
+            '." EXHAUST-CTX=" .',
+            '." EXHAUST-QUEUE=" claim-listener @ TCB.AQ-COUNT @ .',
+            '." EXHAUST-CHILD=" claim-child @ TCB.AUTH-STATE @ .',
+            '." EXHAUST-NO-CHURN=" 0 TLS-CTX@ TLS-CTX.GENERATION @ '
+            'claim-before-gen @ = .',
+            "claim-release-all",
+            '." EXHAUST-RELEASED=" claim-all @ .',
+            '." EXHAUST-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            "claim-ior ! claim-ctx-gen ! claim-ctx !",
+            '." CLAIM-IOR=" claim-ior @ .',
+            '." CLAIM-AUTH=" claim-ctx @ 0<> claim-ctx-gen @ 0<> AND .',
+            '." CLAIM-EXACT=" claim-ctx @ TLS-CTX.TCB @ claim-child @ = '
+            'claim-child @ claim-ctx @ TLS-CTX.TCB-GENERATION @ '
+            'claim-ctx @ TCB-ATTACHED-TO? AND .',
+            '." CLAIM-QUEUE=" claim-listener @ TCB.AQ-COUNT @ '
+            'claim-listener @ TCB.AQ-RESERVED @ OR .',
+            '." CLAIM-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'claim-sd @ CLOSE-TRY ." LISTENER-CLOSE=" .',
+            '." CHILD-SURVIVES=" claim-child @ '
+            'claim-ctx @ TLS-CTX.TCB-GENERATION @ claim-ctx @ '
+            'TCB-ATTACHED-TO? .',
+            '." CONTEXT-REF=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "claim-ctx @ claim-ctx-gen @ 1+ TLS-SERVER-ABORT-EXACT",
+            '." STALE-ABORT-IOR=" . ." STALE-ABORT-RETIRED=" .',
+            '." STALE-ABORT-LIVE=" claim-ctx @ TLS-CTX-CLAIMED? .',
+            "claim-ctx @ claim-ctx-gen @ TLS-SERVER-ABORT-EXACT",
+            '." ABORT-IOR=" . ." ABORT-RETIRED=" .',
+            '." ABORT-CHILD=" claim-child @ TCB.STATE @ TCPS-CLOSED = .',
+            '." ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "SOCK-TYPE-TLS SOCKET claim-new-request-sd !",
+            "claim-new-request-sd @ claim-new-sd !",
+            "claim-new-request-sd @ 8443 BIND DROP",
+            "claim-new-request-sd @ tc-slot @ tc-gen @ claim-alpn 8 37 2500 "
+            "TLS-LISTEN",
+            "claim-ior ! claim-new-lgen ! claim-new-h1 !",
+            '." RELISTEN-IOR=" claim-ior @ .',
+            '." REUSED-SD=" claim-new-sd @ claim-sd @ = .',
+            '." NEW-AUTH=" claim-new-h1 @ claim-h1 @ <> '
+            'claim-new-lgen @ claim-lgen @ <> OR .',
+            "claim-new-h1 @ claim-new-lgen @ TCB-HANDLE-RESOLVE "
+            "claim-new-listener !",
+            "TCB-ALLOC TCB-N claim-new-child !",
+            "TCPS-ESTABLISHED claim-new-child @ TCB.STATE !",
+            "claim-new-listener @ TCB-HANDLE@",
+            "claim-new-child @ TCB.PARENT-GEN !",
+            "claim-new-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN claim-new-child @ TCB.AUTH-STATE !",
+            "claim-new-listener @ AQ-RESERVE DROP",
+            "claim-new-child @ claim-new-listener @ AQ-PUSH DROP",
+            "claim-sd @ claim-h1 @ claim-lgen @ TLS-SERVER-ACCEPT-CLAIM",
+            '." OLD-IOR=" . ." OLD-GEN=" . ." OLD-CTX=" .',
+            '." OLD-QUEUE=" claim-new-listener @ TCB.AQ-COUNT @ .',
+            '." OLD-CHILD=" claim-new-child @ TCB.OWNER @ .',
+            '." OLD-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "0 claim-new-listener @ TCB.AQ-GENS "
+            "claim-new-listener @ TCB.AQ-HEAD @ 8 * + !",
+            "claim-new-sd @ claim-new-h1 @ claim-new-lgen @ "
+            "TLS-SERVER-ACCEPT-CLAIM",
+            '." CORRUPT-IOR=" . ." CORRUPT-GEN=" . '
+            '." CORRUPT-CTX=" .',
+            '." CORRUPT-QUEUE=" claim-new-listener @ TCB.AQ-COUNT @ '
+            'claim-new-listener @ TCB.AQ-RESERVED @ OR .',
+            '." CORRUPT-CHILD=" claim-new-child @ TCB.AUTH-STATE @ .',
+            '." CORRUPT-CONTEXT-FREE=" _TLS-SERVER-CONTEXT-FREE@ 0<> .',
+            '." CORRUPT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'claim-new-sd @ CLOSE-TRY ." NEW-CLOSE=" .',
+            '." CORRUPT-CHILD-CLOSED=" claim-new-child @ TCB.STATE @ '
+            'TCPS-CLOSED = .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." CLAIM-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            '_TC-LOCK-OWNER-CORE @ -1 = AND '
+            'NET-TX-OWNER-DEPTH @ 0= AND .',
+            'DEPTH ." CLAIM-DEPTH=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "LISTEN-IOR=0 ", "LISTEN-SD=-1 ", "LISTEN-EXACT=-1 ",
+            "EMPTY-IOR=-4219 EMPTY-GEN=0 EMPTY-CTX=0 ",
+            "EMPTY-NO-CHURN=-1 ", "EMPTY-REFS=1 ",
+            "CLAIM-LOCK=0 ",
+            "CONTEND-IOR=-4206 CONTEND-GEN=0 CONTEND-CTX=0 ",
+            "CONTEND-NO-CHURN=-1 ", "CONTEND-REFS=1 ",
+            "NET-LOCK=0 ",
+            "NET-CONTEND-IOR=-4206 NET-CONTEND-GEN=0 NET-CONTEND-CTX=0 ",
+            "NET-CONTEND-QUEUE=1 ", "NET-CONTEND-CHILD=2 ",
+            "NET-CONTEND-NO-CHURN=-1 ", "TLS-LOCK=0 ",
+            "TLS-CONTEND-IOR=-4206 TLS-CONTEND-GEN=0 TLS-CONTEND-CTX=0 ",
+            "TLS-CONTEND-QUEUE=1 ", "TLS-CONTEND-CHILD=2 ",
+            "TLS-CONTEND-NO-CHURN=-1 ", "EXHAUST-CLAIMED=-1 ",
+            "EXHAUST-IOR=-4206 EXHAUST-GEN=0 EXHAUST-CTX=0 ",
+            "EXHAUST-QUEUE=1 ", "EXHAUST-CHILD=2 ",
+            "EXHAUST-NO-CHURN=-1 ", "EXHAUST-RELEASED=-1 ",
+            "EXHAUST-REFS=1 ",
+            "CLAIM-IOR=0 ", "CLAIM-AUTH=-1 ", "CLAIM-EXACT=-1 ",
+            "CLAIM-QUEUE=0 ", "CLAIM-REFS=2 ",
+            "LISTENER-CLOSE=0 ", "CHILD-SURVIVES=-1 ",
+            "CONTEXT-REF=1 ",
+            "STALE-ABORT-IOR=0 STALE-ABORT-RETIRED=-1 ",
+            "STALE-ABORT-LIVE=-1 ",
+            "ABORT-IOR=0 ABORT-RETIRED=-1 ",
+            "ABORT-CHILD=-1 ", "ABORT-REFS=0 ",
+            "RELISTEN-IOR=0 ", "REUSED-SD=-1 ", "NEW-AUTH=-1 ",
+            "OLD-IOR=-4204 OLD-GEN=0 OLD-CTX=0 ",
+            "OLD-QUEUE=1 ", "OLD-CHILD=0 ", "OLD-REFS=1 ",
+            "CORRUPT-IOR=-4218 CORRUPT-GEN=0 CORRUPT-CTX=0 ",
+            "CORRUPT-QUEUE=0 ", "CORRUPT-CHILD=2 ",
+            "CORRUPT-CONTEXT-FREE=-1 ", "CORRUPT-REFS=1 ",
+            "NEW-CLOSE=0 ", "CORRUPT-CHILD-CLOSED=-1 ",
+            "DELETE=0 ", "CLAIM-OWNERS=-1 ",
+            "CLAIM-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
@@ -25109,7 +25301,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "SOCK-TYPE-TLS SOCKET accept-sd !",
             "accept-sd @ 8443 BIND DROP",
             "accept-sd @ tc-slot @ tc-gen @ accept-op-alpn 8 37 2500 "
-            "TLS-LISTEN",
+            "TLS-LISTEN NIP NIP",
             '." OP-LISTEN=" .',
             "accept-sd @ SOCK-TCB@ accept-listener-tcb !",
             "accept-sd @ SOCK.HANDLE-GEN @ accept-listener-gen !",
@@ -25298,7 +25490,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "SOCK-TYPE-TLS SOCKET opi-sd !",
             "opi-sd @ 443 BIND DROP",
             "opi-sd @ tc-slot @ tc-gen @ op-ingress-alpn 8 37 2500 "
-            "TLS-LISTEN",
+            "TLS-LISTEN NIP NIP",
             '." OPI-LISTEN=" .',
             "opi-sd @ SOCK-TCB@ opi-listener !",
             "opi-sd @ SOCK.HANDLE-GEN @ opi-lgen !",
@@ -26056,7 +26248,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "SOCK-TYPE-TLS SOCKET peer-listen-sd !",
             "peer-listen-sd @ 443 BIND DROP",
             "peer-listen-sd @ tc-slot @ tc-gen @ peer-alpn 8 0 2500",
-            'TLS-LISTEN ." PEER-LISTEN=" .',
+            'TLS-LISTEN NIP NIP ." PEER-LISTEN=" .',
             "peer-listen-sd @ SOCK-TCB@ peer-listener-tcb !",
             "peer-listen-sd @ peer-op TLS-SERVER-ACCEPT-BEGIN",
             '." PEER-BEGIN=" .',
@@ -26352,7 +26544,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'opf-op TLS-SERVER-ACCEPT-OP-INIT ." OPF-INIT=" .',
             "SOCK-TYPE-TLS SOCKET opf-sd !",
             "opf-sd @ 8443 BIND DROP",
-            "opf-sd @ tc-slot @ tc-gen @ opf-alpn 8 37 2500 TLS-LISTEN",
+            "opf-sd @ tc-slot @ tc-gen @ opf-alpn 8 37 2500 "
+            "TLS-LISTEN NIP NIP",
             '." OPF-LISTEN=" .',
             "opf-sd @ SOCK-TCB@ opf-listener !",
             "opf-sd @ SOCK.HANDLE-GEN @ opf-lgen !",
@@ -26822,7 +27015,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "op-late TLS-SERVER-ACCEPT-OP-INIT DROP",
             "SOCK-TYPE-TLS SOCKET opl-sd ! opl-sd @ 443 BIND DROP",
             "opl-sd @ tc-slot @ tc-gen @ op-late-alpn 8 0 2500 "
-            "TLS-LISTEN DROP",
+            "TLS-LISTEN 2DROP DROP",
             "opl-sd @ SOCK-TCB@ opl-listener !",
             "opl-sd @ SOCK.HANDLE-GEN @ opl-lgen !",
             "opl-sd @ op-late TLS-SERVER-ACCEPT-BEGIN DROP",
@@ -27157,6 +27350,71 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "REBEGIN=0 REBEGIN-GEN=2 ", "CTX-GEN2=2 ", "REFS2=1 ",
             "REABORT=0 ", "REFS-REABORT=0 ", "DELETE=0 ",
             "BEGIN-FINAL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_server_exact_cleanup_cannot_retire_a_reused_context(self):
+        """Generation-qualified close and abort never act on a replacement."""
+        lines, _ = self._provision_lines()
+        lines += self._forth_bytes("exact-cleanup-alpn", self.ALPN)
+        lines += [
+            "VARIABLE exact-cleanup-ctx 0 TLS-CTX@ exact-cleanup-ctx !",
+            "VARIABLE exact-cleanup-gen1 VARIABLE exact-cleanup-gen2",
+            "exact-cleanup-ctx @ tc-slot @ tc-gen @ "
+            "exact-cleanup-alpn 8 TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN1-IOR=" . exact-cleanup-gen1 !',
+            "exact-cleanup-ctx @ exact-cleanup-gen1 @ 1+ "
+            "TLS-SERVER-CLOSE-EXACT-TRY",
+            '." STALE-CLOSE-IOR=" . ." STALE-CLOSE-RETIRED=" .',
+            '." STALE-CLOSE-LIVE=" exact-cleanup-ctx @ '
+            'TLS-CTX-CLAIMED? .',
+            '." STALE-CLOSE-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            '_TC-LOCK-TRY ." LOCK=" .',
+            "exact-cleanup-ctx @ exact-cleanup-gen1 @ "
+            "TLS-SERVER-CLOSE-EXACT-TRY",
+            '." BUSY-CLOSE-IOR=" . ." BUSY-CLOSE-RETIRED=" .',
+            "_TC-UNLOCK",
+            "exact-cleanup-ctx @ exact-cleanup-gen1 @ "
+            "TLS-SERVER-CLOSE-EXACT-TRY",
+            '." CLOSE-IOR=" . ." CLOSE-RETIRED=" .',
+            '." CLOSE-LIVE=" exact-cleanup-ctx @ TLS-CTX-CLAIMED? .',
+            '." CLOSE-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "exact-cleanup-ctx @ tc-slot @ tc-gen @ "
+            "exact-cleanup-alpn 8 TLS-SERVER-CONTEXT-BEGIN",
+            '." BEGIN2-IOR=" . exact-cleanup-gen2 !',
+            '." NEW-GEN=" exact-cleanup-gen2 @ exact-cleanup-gen1 @ <> .',
+            "exact-cleanup-ctx @ exact-cleanup-gen1 @ "
+            "TLS-SERVER-ABORT-EXACT",
+            '." OLD-ABORT-IOR=" . ." OLD-ABORT-RETIRED=" .',
+            '." OLD-ABORT-LIVE=" exact-cleanup-ctx @ '
+            'TLS-CTX-CLAIMED? .',
+            '." OLD-ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            "exact-cleanup-ctx @ exact-cleanup-gen2 @ "
+            "TLS-SERVER-ABORT-EXACT",
+            '." ABORT-IOR=" . ." ABORT-RETIRED=" .',
+            '." ABORT-LIVE=" exact-cleanup-ctx @ TLS-CTX-CLAIMED? .',
+            '." ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." DELETE=" .',
+            '." EXACT-CLEANUP-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            '_TC-LOCK-OWNER-CORE @ -1 = AND '
+            'NET-TX-OWNER-DEPTH @ 0= AND .',
+            'DEPTH ." EXACT-CLEANUP-DEPTH=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "BEGIN1-IOR=0 ",
+            "STALE-CLOSE-IOR=0 STALE-CLOSE-RETIRED=-1 ",
+            "STALE-CLOSE-LIVE=-1 ", "STALE-CLOSE-REFS=1 ",
+            "LOCK=0 ", "BUSY-CLOSE-IOR=-4206 BUSY-CLOSE-RETIRED=0 ",
+            "CLOSE-IOR=0 CLOSE-RETIRED=-1 ",
+            "CLOSE-LIVE=0 ", "CLOSE-REFS=0 ",
+            "BEGIN2-IOR=0 ", "NEW-GEN=-1 ",
+            "OLD-ABORT-IOR=0 OLD-ABORT-RETIRED=-1 ",
+            "OLD-ABORT-LIVE=-1 ", "OLD-ABORT-REFS=1 ",
+            "ABORT-IOR=0 ABORT-RETIRED=-1 ",
+            "ABORT-LIVE=0 ", "ABORT-REFS=0 ", "DELETE=0 ",
+            "EXACT-CLEANUP-OWNERS=-1 ", "EXACT-CLEANUP-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 
@@ -28454,8 +28712,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "CREATE ledger-copy TLS-SERVER-LEDGER-CAPACITY ALLOT",
             "CREATE meta-copy TLS-SERVER-META-CAPACITY ALLOT",
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "VARIABLE server-ctx-gen",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
+            "TLS-SERVER-CONTEXT-BEGIN DROP server-ctx-gen !",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
             "TLS-OWNER-TRY DROP",
@@ -28463,7 +28722,10 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "phase-entropy server-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
             "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE",
             "TLS-OWNER-RELEASE",
-            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." IOR=" .',
+            'server-ctx @ server-ctx-gen @ 1+ '
+            'TLS-SERVER-PREPARE-FLIGHT-EXACT ." STALE-IOR=" .',
+            'server-ctx @ server-ctx-gen @ '
+            'TLS-SERVER-PREPARE-FLIGHT-EXACT ." IOR=" .',
             '." PREPARE-DEPTH=" DEPTH .',
             '." CV=" server-ctx @ TLS-RXW.SERVER-LEDGER TSL.CV + '
             'expected-cv 79 _XC-BYTES= .',
@@ -28528,7 +28790,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "TLS-SERVER-LEDGER-CAPACITY MOVE",
             "server-ctx @ TLS-RXW.SERVER-META meta-copy "
             "TLS-SERVER-META-CAPACITY MOVE",
-            'server-ctx @ TLS-SERVER-PREPARE-FLIGHT ." RETRY-IOR=" .',
+            'server-ctx @ server-ctx-gen @ '
+            'TLS-SERVER-PREPARE-FLIGHT-EXACT ." RETRY-IOR=" .',
             '." RETRY-CTX=" server-ctx @ context-copy /TLS-CTX '
             '_XC-BYTES= .',
             '." RETRY-LEDGER=" server-ctx @ TLS-RXW.SERVER-LEDGER '
@@ -28542,7 +28805,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines)
         for token in (
-            "IOR=0 ", "PREPARE-DEPTH=0 ", "CV=-1 ", "FIN=-1 ",
+            "STALE-IOR=-4204 ", "IOR=0 ", "PREPARE-DEPTH=0 ",
+            "CV=-1 ", "FIN=-1 ",
             "FIN-LEN=36 ", "TRANSCRIPT=-1 ", "MASTER=-1 ",
             "C-AP=-1 ", "S-AP=-1 ", "EXPORTER=-1 ",
             "WR-KEY=-1 ", "RD-KEY=-1 ", "WR-IV=-1 ", "RD-IV=-1 ",
@@ -32038,11 +32302,16 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             lines += self._forth_bytes(name, data)
         lines += [
             "VARIABLE server-ctx 0 TLS-CTX@ server-ctx !",
+            "VARIABLE checked-hello-ctx-gen",
             "server-ctx @ tc-slot @ tc-gen @ server-alpn 8 "
-            "TLS-SERVER-CONTEXT-BEGIN 2DROP",
+            "TLS-SERVER-CONTEXT-BEGIN DROP checked-hello-ctx-gen !",
             f"server-ctx @ client-hello {len(hello)} "
             "TLS-PARSE-CLIENT-HELLO 2DROP",
-            'server-ctx @ TLS-SERVER-PREPARE-HELLO '
+            'server-ctx @ checked-hello-ctx-gen @ 1+ '
+            'TLS-SERVER-PREPARE-HELLO-EXACT '
+            '." STALE-IOR=" . ." STALE-ALERT=" .',
+            'server-ctx @ checked-hello-ctx-gen @ '
+            'TLS-SERVER-PREPARE-HELLO-EXACT '
             '." IOR=" . ." ALERT=" .',
             '." STATE=" server-ctx @ TLS-CTX.STATE @ .',
             '." HS=" server-ctx @ TLS-CTX.HS-STATE @ .',
@@ -32074,6 +32343,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines)
         for token in (
+            "STALE-IOR=-4204 STALE-ALERT=0 ",
             "IOR=0 ALERT=0 ", "STATE=1 ", "HS=12 ", "ERROR=0 ",
             "SH-LEN=122 ", "EE-LEN=21 ",
             "PRIVATE-ZERO=-1 ", "SHARED-ZERO=-1 ",

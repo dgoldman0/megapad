@@ -8,7 +8,10 @@ flight, protected client-Finished ingress, and protected terminal disposition
 are now qualified. Exact authenticated accepted-socket publication is also
 qualified. `TLS-LISTEN` now atomically copies ALPN/early-data/deadline policy,
 pins the exact credential, publishes the TCP listener, and owns exact setup
-rollback plus listener close/unpin cleanup. The caller-owned bounded accept
+rollback plus listener close/unpin cleanup. It returns the opaque listener
+handle and generation consumed by `TLS-SERVER-ACCEPT-CLAIM`, which moves one
+queued child directly into a newly pinned TLS server context without exposing
+a plaintext accepted socket. The caller-owned bounded accept
 operation now owns its complete critical path: exact listener/context lease,
 retryable wait, child attachment, fragmented
 ClientHello admission, sticky early failure/deadline classification,
@@ -20,8 +23,12 @@ returns the descriptor only after publication authority and listener accounting
 are settled. An independent OpenSSL TLS 1.3 peer now qualifies the actual TCP
 listener, public accept operation, reciprocal socket, bidirectional
 application I/O, authenticated close, FIN, and complete local cleanup. The
-secure-server vertical is closed for the bounded profile; broader profile and
-concurrency work remains maturity rather than missing main functionality.
+lower secure-server engine is closed for the bounded profile, and the completed
+caller-owned KDOS accept operation is frozen as a transitional regression
+oracle. Production lifecycle closure is being moved to Akashic XIO/NIO; do not
+extend `/TLS-SERVER-ACCEPT-OP`, and do not claim the layer split complete until
+the independent peer journey passes through the replacement path. Broader
+profile and concurrency work remains separate maturity work.
 Last updated: 2026-08-15
 
 ## Purpose
@@ -180,7 +187,8 @@ hash state, per-context application RX state, and enforced serialized scratch
 ownership are now implemented as independently useful client/server substrate.
 `TLS-LISTEN` is the explicit policy-bearing listener entry: it pins the exact
 credential, copies one protocol-bounded ALPN plus rejected-0RTT/deadline values,
-attaches the passive TCB, and publishes listener state last. The generic
+attaches the passive TCB, publishes listener state last, and returns the exact
+opaque listener authority for nonblocking secure claim. The generic
 `LISTEN` entry remains fail-closed for TLS descriptors, and `SOCK-ACCEPT`
 refuses a secure listener before consuming its queue. Evidence must keep
 emulator protocol correctness, RTL behavior, and physical entropy/side-channel
@@ -1036,7 +1044,8 @@ Native guest tests cover:
 - alternating connections with isolated partial records, retained plaintext,
   and fragmented post-handshake messages, including exact per-context wipe;
 - fail-closed refusal of generic TLS-marked `LISTEN` and `SOCK-ACCEPT`, plus
-  atomic `TLS-LISTEN` policy copy, credential pin, rollback, and close/unpin;
+  atomic `TLS-LISTEN` policy copy, credential pin, exact listener-authority
+  return, rollback, close/unpin, and direct queued-child secure claim;
 - exact attached server-socket publication, including generationless raw
   refusal, TLS/credential/NET contention, dynamic descriptor exhaustion,
   close-wait publication, reciprocal resolution, descriptor-owned teardown,

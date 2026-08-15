@@ -75,7 +75,11 @@ the sealed child are proven in one transaction. Predictable contention and
 capacity failures leave the raw context unchanged; stale child authority stays
 abortable without touching a replacement. `TLS-LISTEN` now copies the listener
 policy, pins the exact credential, atomically publishes the passive TCB, and
-owns listener close/unpin cleanup. The generic `LISTEN` entry remains
+returns its opaque handle and generation. The fused nonblocking
+`TLS-SERVER-ACCEPT-CLAIM` boundary uses that exact authority to transfer one
+queued child directly into a pinned TLS server context, with no plaintext
+accepted socket publication. `TLS-LISTEN` also owns listener close/unpin
+cleanup. The generic `LISTEN` entry remains
 fail-closed for TLS descriptors, and `SOCK-ACCEPT` remains deliberately
 fail-closed for secure listeners. The caller-owned bounded accept operation now
 leases one exact listener incarnation, creates and pins one server context,
@@ -100,8 +104,13 @@ OpenSSL TLS 1.3 peer now completes a real TCP handshake through that public
 operation, verifies the server chain and hostname, negotiates `rabbit/1`,
 exchanges application bytes through the returned descriptor in both
 directions, and completes authenticated `close_notify`, FIN, and exact
-resource cleanup. Remaining server items are broader-profile maturity work
-rather than missing main functionality. See
+resource cleanup. That caller-owned KDOS operation is now frozen as a
+transitional regression oracle: service scheduling, deadlines, cancellation,
+retained results, and cleanup arbitration are moving to Akashic XIO/NIO and
+must be re-qualified through that path before the coordinator is removed.
+Do not extend `/TLS-SERVER-ACCEPT-OP`; the lower TLS engine and fused exact
+claim remain the KDOS boundary. Remaining protocol-profile items are broader
+maturity work. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

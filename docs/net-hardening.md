@@ -232,7 +232,10 @@ ordinary checked limits.
 
 The authority substrate now includes the exact authenticated socket-publication
 boundary and `TLS-LISTEN`, which copies policy, pins the exact credential, and
-publishes its passive TCB atomically. The generic `LISTEN` entry remains
+publishes its passive TCB atomically while returning its opaque handle and
+generation. `TLS-SERVER-ACCEPT-CLAIM` consumes that exact authority and moves
+one queued child directly into a prepared TLS context, so no plaintext accepted
+socket crosses the secure boundary. The generic `LISTEN` entry remains
 fail-closed for TLS descriptors, and `SOCK-ACCEPT` fails closed before consuming
 a secure child because secure acceptance uses the separate caller-owned
 operation. That operation now holds the exact listener lease and prepared
@@ -253,5 +256,9 @@ TCP/TLS handshake, verifies the credential chain and hostname, negotiates
 ALPN, exchanges application bytes in both directions through the returned
 descriptor, and completes
 `close_notify`, FIN, and exact cleanup. Remaining transport work is broader
-profile, concurrency, and protocol-maximum maturity evidence; it is not a
-missing stage in this bounded secure-server path.
+profile, concurrency, and protocol-maximum maturity evidence. The completed
+KDOS accept coordinator remains only a frozen migration oracle: Akashic XIO
+now owns the service-operation lifecycle, and the authenticated NIO/HCONN path
+must re-close this journey before `/TLS-SERVER-ACCEPT-OP` is deleted. No new
+deadline, cancellation, retention, or scheduling behavior belongs in that
+lower coordinator.
