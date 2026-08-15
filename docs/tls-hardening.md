@@ -12,10 +12,11 @@ rollback plus listener close/unpin cleanup. The active critical path is
 now to extend the caller-owned bounded accept operation beyond its completed
 exact listener/context lease, retryable wait, child attachment, fragmented
 ClientHello admission, sticky early failure/deadline classification,
-phase-one hello/epoch preparation, and abort. Its current boundary is
-`PREPARE_FLIGHT`; the resulting socket must then prove independent
+phase-one hello/epoch preparation, exact signed-flight preparation, and abort.
+Its current boundary is `FLIGHT` before transport emission; the resulting
+socket must then prove independent
 interoperability.
-Last updated: 2026-08-14
+Last updated: 2026-08-15
 
 ## Purpose
 
@@ -110,9 +111,10 @@ attaches one exact child, drives fragmented ClientHello ingress one lower step
 per call, and can abort without socket publication. Fatal peer alerts and the
 attach-time deadline are sticky operation results. One further step prepares
 immutable ServerHello/EncryptedExtensions and handshake epochs without socket
-I/O. The remaining server work is to drive that same operation from
-`PREPARE_FLIGHT` through the qualified signed-flight, transport,
-disposition/publication transactions and then
+I/O, and the next exact-generation step signs and freezes the complete server
+flight without emitting it. The remaining server work is to drive that same
+operation from `FLIGHT` through the qualified ACK-paced transport, protected
+ingress, disposition/publication transactions and then
 prove interoperability over the resulting socket with an independent TLS
 implementation. The following lower-level facts
 continue to bound an authenticated server role:
@@ -1067,8 +1069,8 @@ copied ALPN, exact listener authority, credential lifetime, and close cleanup.
 Public secure acceptance and interoperability over sockets with an independent
 TLS stack remain unproved. The bounded accept operation currently proves its
 listener/context lease, retryable wait, exact attach, fragmented ClientHello
-ingress, sticky fatal/deadline results, phase-one preparation, and abort
-lifecycle but stops at `PREPARE_FLIGHT`. The disposition
+ingress, sticky fatal/deadline results, phase-one preparation, exact signed-flight
+preparation, and abort lifecycle but stops at `FLIGHT` before transport emission. The disposition
 affected selector passed 19/19 sequentially under the ordinary checked
 source-mode limits; the final publication-focused and adjoining affected
 selector passed 15/15 sequentially under ordinary checked limits.

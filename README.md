@@ -84,10 +84,12 @@ drives the initial ClientHello across arbitrary TCP/TLS-record fragmentation.
 Fatal peer alerts and the attach-time deadline remain sticky until disposition
 or abort, and abort reclaims the complete authority chain without publishing a
 socket. One following step prepares immutable ServerHello and
-EncryptedExtensions plus the handshake epochs without transport I/O. The
-current `STEP` boundary stops at `PREPARE_FLIGHT`; the immediate release path is
-to extend that same operation through the already-qualified signed-flight,
-transport, disposition, and socket-publication steps, then prove one
+EncryptedExtensions plus the handshake epochs without transport I/O, and the
+next exact-generation step signs and freezes the remaining server flight. The
+current `STEP` boundary stops at `FLIGHT` before emitting transport bytes; the
+immediate release path is to extend that same operation through the
+already-qualified ACK-paced transport, protected ingress, disposition, and
+socket-publication steps, then prove one
 independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
