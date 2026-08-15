@@ -25587,6 +25587,104 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ]
         self.assertEqual(len(payload_frames), 5)
 
+    def test_server_accept_op_authenticates_client_finished(self):
+        """The operation begins attached ingress and stops at publication."""
+        client_record, *_ = self._client_finished_reference()
+        lines, ack_frames, record_lengths = (
+            self._accept_op_deterministic_flight_lines()
+        )
+        server_next = 1000 + sum(record_lengths)
+        finished_frame = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            2000,
+            server_next,
+            TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+            4096,
+            client_record,
+        )
+        for _ in record_lengths:
+            lines += [
+                "op-late TLS-SERVER-ACCEPT-STEP 2DROP 2DROP",
+                "TCP-POLL",
+            ]
+        lines += [
+            '." OPL-FLIGHT-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-CLIENT-FLIGHT-BEGIN = .',
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-BEGIN-IOR=" . ." OPL-BEGIN-ALERT=" . '
+            '." OPL-BEGIN-PROGRESS=" . ." OPL-BEGIN-SD=" .',
+            '." OPL-BEGIN-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-CLIENT-FLIGHT = .',
+            '." OPL-BEGIN-INGRESS=" opl-ctx @ '
+            'TLS-RXW.SERVER-INGRESS-META TSI.STATE + @ .',
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-WAIT-IOR=" . ." OPL-WAIT-ALERT=" . '
+            '." OPL-WAIT-PROGRESS=" . ." OPL-WAIT-SD=" .',
+            '." OPL-WAIT-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-CLIENT-FLIGHT = .',
+            "TCP-POLL",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-FIN-IOR=" . ." OPL-FIN-ALERT=" . '
+            '." OPL-FIN-PROGRESS=" . ." OPL-FIN-SD=" .',
+            '." OPL-FIN-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PUBLISH = .',
+            '." OPL-FIN-CTX=" opl-ctx @ TLS-CTX.PEER-AUTH @ 1 = '
+            'opl-ctx @ TLS-CTX.HS-STATE @ TLSH-APPLICATION-READY = AND '
+            'opl-ctx @ TLS-CTX.STATE @ TLSS-HANDSHAKE = AND '
+            'opl-ctx @ TLS-CTX.ERROR @ 0= AND .',
+            '." OPL-FIN-AUTH=" opl-child @ opl-cgen @ opl-ctx @ '
+            'TCB-ATTACHED-TO? opl-ctx @ _TLS-SERVER-PINNED? AND '
+            'opl-sd @ SOCK.TLS-ACTIVE-OPS @ 1 = AND op-late '
+            'TSAO.LEASE-HELD @ 0<> AND .',
+            '." OPL-FIN-RESULT=" op-late TSAO.RESULT-SD @ 0= '
+            'op-late TSAO.RESULT-ALERT @ 0= AND '
+            'op-late TSAO.RESULT-IOR @ 0= AND .',
+            "op-late TLS-SERVER-ACCEPT-ABORT",
+            '." OPL-ABORT-IOR=" . ." OPL-ABORT-ALERT=" . '
+            '." OPL-ABORT-PROGRESS=" .',
+            '." OPL-ABORT-CLEAN=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-IDLE = opl-ctx @ TLS-CTX-CLAIMED? 0= '
+            'AND opl-child @ TCB.STATE @ TCPS-CLOSED = AND '
+            'opl-sd @ SOCK.TLS-ACTIVE-OPS @ 0= AND .',
+            'opl-sd @ CLOSE-TRY ." OPL-CLOSE=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." OPL-DELETE=" .',
+            '." OPL-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            'NET-TX-OWNER-DEPTH @ 0= AND '
+            '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
+            'DEPTH ." OPL-DEPTH=" .',
+        ]
+        text = self._run_kdos(
+            lines,
+            nic_frames=ack_frames + [finished_frame],
+            max_steps=250_000_000,
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "OPL-PREP-IOR=0 OPL-PREP-ALERT=0 ",
+            "OPL-PREP-PROGRESS=1 OPL-PREP-SD=0 ",
+            "OPL-FLIGHT-STATE=-1 ",
+            "OPL-BEGIN-IOR=0 OPL-BEGIN-ALERT=0 ",
+            "OPL-BEGIN-PROGRESS=1 OPL-BEGIN-SD=0 ",
+            "OPL-BEGIN-STATE=-1 ", "OPL-BEGIN-INGRESS=1 ",
+            "OPL-WAIT-IOR=-4219 OPL-WAIT-ALERT=0 ",
+            "OPL-WAIT-PROGRESS=2 OPL-WAIT-SD=0 ",
+            "OPL-WAIT-STATE=-1 ",
+            "OPL-FIN-IOR=0 OPL-FIN-ALERT=0 ",
+            "OPL-FIN-PROGRESS=1 OPL-FIN-SD=0 ",
+            "OPL-FIN-STATE=-1 ", "OPL-FIN-CTX=-1 ",
+            "OPL-FIN-AUTH=-1 ", "OPL-FIN-RESULT=-1 ",
+            "OPL-ABORT-IOR=0 OPL-ABORT-ALERT=0 ",
+            "OPL-ABORT-PROGRESS=7 ", "OPL-ABORT-CLEAN=-1 ",
+            "OPL-CLOSE=0 ", "OPL-DELETE=0 ",
+            "OPL-OWNERS=-1 ", "OPL-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_server_accept_op_preserves_client_hello_failures(self):
         """Fatal alerts and attach-time deadlines remain sticky until abort."""
         fatal_record = b"\x15\x03\x03\x00\x02\x01\x00"
@@ -26036,6 +26134,88 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             server_next,
             client_next,
         )
+
+    @classmethod
+    def _accept_op_deterministic_flight_lines(
+        cls,
+    ) -> tuple[list[str], list[bytes], tuple[int, ...]]:
+        """Build a leased accept operation at deterministic signed-flight prep."""
+        hello, entropy, _, _ = cls._certificate_transcript_phase()
+        hello_record = cls._tls_plaintext(hello)
+        record_lengths = (127, 43, 503, 101, 58)
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        acknowledged = 1000
+        ack_frames = []
+        for record_length in record_lengths:
+            acknowledged += record_length
+            ack_frames.append(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, 2000, acknowledged,
+                TestKDOSNetStack.TCP_ACK, 4096, b"",
+            ))
+
+        lines, _ = cls._provision_lines()
+        for name, data in (
+            ("op-late-alpn", cls.ALPN),
+            ("op-late-hello-record", hello_record),
+            ("op-late-entropy", entropy),
+        ):
+            lines += cls._forth_bytes(name, data)
+        lines += [
+            "TCP-INIT-ALL ARP-CLEAR",
+            "CREATE op-late-raw /TLS-SERVER-ACCEPT-OP 7 + ALLOT",
+            ": op-late op-late-raw 7 + -8 AND ;",
+            "VARIABLE opl-sd VARIABLE opl-listener VARIABLE opl-lgen",
+            "VARIABLE opl-child VARIABLE opl-cgen",
+            "VARIABLE opl-ctx VARIABLE opl-ctx-gen",
+            "CREATE opl-peer-ip 4 ALLOT CREATE opl-peer-mac 6 ALLOT",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "10 0 0 1 opl-peer-ip IP! opl-peer-mac 6 170 FILL",
+            "opl-peer-ip opl-peer-mac ARP-INSERT",
+            "op-late TLS-SERVER-ACCEPT-OP-INIT DROP",
+            "SOCK-TYPE-TLS SOCKET opl-sd ! opl-sd @ 443 BIND DROP",
+            "opl-sd @ tc-slot @ tc-gen @ op-late-alpn 8 0 2500 "
+            "TLS-LISTEN DROP",
+            "opl-sd @ SOCK-TCB@ opl-listener !",
+            "opl-sd @ SOCK.HANDLE-GEN @ opl-lgen !",
+            "opl-sd @ op-late TLS-SERVER-ACCEPT-BEGIN DROP",
+            "op-late TSAO.CTX @ opl-ctx !",
+            "op-late TSAO.CTX-GEN @ opl-ctx-gen !",
+            "TCB-ALLOC DROP 1 TCB-N opl-child !",
+            "TCPS-ESTABLISHED opl-child @ TCB.STATE !",
+            "443 opl-child @ TCB.LOCAL-PORT !",
+            "50000 opl-child @ TCB.REMOTE-PORT !",
+            "opl-peer-ip opl-child @ TCB.REMOTE-IP 4 CMOVE",
+            "1000 opl-child @ TCB.SND-UNA !",
+            "1000 opl-child @ TCB.SND-NXT !",
+            "2000 opl-child @ TCB.RCV-NXT !",
+            "4096 opl-child @ TCB.SND-WND !",
+            "4096 opl-child @ TCB.RCV-WND !",
+            "TCP-MSS opl-child @ TCB.CWND !",
+            "opl-listener @ TCB-HANDLE@",
+            "opl-child @ TCB.PARENT-GEN !",
+            "opl-child @ TCB.PARENT-H1 !",
+            "TCP-AUTH-HALF-OPEN opl-child @ TCB.AUTH-STATE !",
+            "opl-listener @ AQ-RESERVE DROP",
+            "opl-child @ opl-listener @ AQ-PUSH DROP",
+            "op-late TLS-SERVER-ACCEPT-STEP 2DROP 2DROP",
+            "opl-ctx @ TLS-CTX.TCB-GENERATION @ opl-cgen !",
+            f"opl-child @ op-late-hello-record {len(hello_record)} "
+            "(TCP-RX-PUSH) DROP",
+            "op-late TLS-SERVER-ACCEPT-STEP 2DROP 2DROP",
+            "TLS-OWNER-TRY DROP opl-ctx @ _TSPH-BEGIN 2DROP",
+            "op-late-entropy opl-ctx @ TLS-CTX.MY-PRIVKEY 64 MOVE",
+            "_TSPH-RUN-STAGED 2DROP _TSPH-SCRATCH-WIPE TLS-OWNER-RELEASE",
+            "TLS-SERVER-ACCEPT-ST-PREPARE-FLIGHT op-late TSAO.STATE !",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-PREP-IOR=" . ." OPL-PREP-ALERT=" . '
+            '." OPL-PREP-PROGRESS=" . ." OPL-PREP-SD=" .',
+        ]
+        return lines, ack_frames, record_lengths
 
     def test_server_phase_leaves_dictionary_allocations_reachable(self):
         """Server preparation cannot strand later cold-cache definitions."""

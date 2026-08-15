@@ -19,8 +19,9 @@ caller-owned bounded secure-accept operation now owns initialization, exact
 listener/context authority, retryable empty-queue waits, exact child
 attachment, fragmented ClientHello ingress, sticky early failure/deadline
 classification, phase-one hello/epoch preparation, exact signed-flight
-preparation, ACK-paced server-flight transport, and abort. Its protected-ingress,
-disposition, and socket-result publication phases are not yet dispatched.
+preparation, ACK-paced server-flight transport, protected client ingress,
+terminal-result latching, and abort. Its disposition and socket-result
+publication phases are not yet dispatched.
 **Date:** 2026-08-15 qualification
 
 ## Scope
@@ -240,10 +241,12 @@ only after one further step has prepared immutable ServerHello,
 EncryptedExtensions, and handshake epochs without transport I/O, then signs
 and freezes the complete server flight through exact context authority. It now
 dispatches all five flight records through the attached child with retryable
-write backpressure and no internal polling. The remaining
+write backpressure and no internal polling, then initializes protected ingress,
+maps read backpressure, authenticates Finished, and latches terminal results at
+the disposition boundary. The remaining
 critical path is:
 
-- extend its `STEP` dispatcher through the qualified protected client ingress,
-  disposition, and socket-publication transactions; and
+- extend its `STEP` dispatcher through the qualified disposition and
+  socket-publication transactions; and
 - qualify the complete socket lifecycle and close against an independent TLS
   1.3 implementation.

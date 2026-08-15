@@ -19,8 +19,9 @@ publishing plaintext. It also prepares immutable ServerHello and
 EncryptedExtensions plus handshake epochs without emitting them, then signs
 and freezes the complete server flight through exact context authority. It
 also dispatches the five-record server flight through ACK-paced exact child
-transport. It remains incomplete because that operation stops before protected
-client-flight ingress and publication, and the
+transport, initializes protected ingress, and authenticates client Finished.
+It remains incomplete because that operation stops at disposition or socket
+publication, and the
 resulting socket lifecycle has not completed an independent peer
 application-I/O and cleanup journey.
 Current transport status and the narrow ordering authority are maintained in
@@ -121,16 +122,17 @@ Implemented network components, bottom-up:
     owns initialization, exact listener/context authority, retryable queue wait,
     exact child attachment, bounded fragmented ClientHello ingress, sticky
     early failure/deadline results, phase-one hello/epoch preparation, exact
-    signed-flight preparation, ACK-paced server-flight transport, and abort;
-    its remaining handshake phases
+    signed-flight preparation, ACK-paced server-flight transport, protected
+    client ingress through authenticated Finished, and abort; its remaining
+    disposition/publication phases
     and one independent interoperability journey remain
 18. 🔄 **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
     and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
     remains fail closed for TLS descriptors, while secure listeners use the
     caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
     operation currently owns each child through exact ClientHello admission,
-    phase-one and signed-flight preparation, and ACK-paced server-flight
-    transport, and can abort, but does not yet publish the
+    phase-one and signed-flight preparation, ACK-paced server-flight transport,
+    and authenticated client Finished, and can abort, but does not yet publish the
     authenticated socket
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE

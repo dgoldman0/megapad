@@ -87,10 +87,11 @@ socket. One following step prepares immutable ServerHello and
 EncryptedExtensions plus the handshake epochs without transport I/O, and the
 next exact-generation step signs and freezes the remaining server flight. The
 operation now emits all five records through exact child authority, exposes
-retryable write backpressure between records, and reaches the client-flight
-ingress boundary. The immediate release path is to extend that same operation
-through the already-qualified protected ingress, disposition, and
-socket-publication steps, then prove one
+retryable write backpressure between records, initializes protected ingress,
+and processes one attached client record per call. Authenticated Finished
+reaches the publication boundary; protected terminal results are latched at
+the disposition boundary. The immediate release path is to dispatch those
+already-qualified disposition and socket-publication steps, then prove one
 independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
