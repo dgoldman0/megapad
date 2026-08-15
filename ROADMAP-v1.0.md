@@ -19,9 +19,10 @@ publishing plaintext. It also prepares immutable ServerHello and
 EncryptedExtensions plus handshake epochs without emitting them, then signs
 and freezes the complete server flight through exact context authority. It
 also dispatches the five-record server flight through ACK-paced exact child
-transport, initializes protected ingress, and authenticates client Finished.
-It remains incomplete because that operation stops at disposition or socket
-publication, and the
+transport, initializes protected ingress, authenticates client Finished, and
+completes protected terminal disposition through alert-ACK-before-FIN close
+and exact listener-lease release. It remains incomplete because that operation
+stops at socket publication, and the
 resulting socket lifecycle has not completed an independent peer
 application-I/O and cleanup journey.
 Current transport status and the narrow ordering authority are maintained in
@@ -123,8 +124,8 @@ Implemented network components, bottom-up:
     exact child attachment, bounded fragmented ClientHello ingress, sticky
     early failure/deadline results, phase-one hello/epoch preparation, exact
     signed-flight preparation, ACK-paced server-flight transport, protected
-    client ingress through authenticated Finished, and abort; its remaining
-    disposition/publication phases
+    client ingress through authenticated Finished, protected terminal
+    disposition and close, and abort; its remaining publication phase
     and one independent interoperability journey remain
 18. 🔄 **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
     and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
@@ -132,7 +133,8 @@ Implemented network components, bottom-up:
     caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
     operation currently owns each child through exact ClientHello admission,
     phase-one and signed-flight preparation, ACK-paced server-flight transport,
-    and authenticated client Finished, and can abort, but does not yet publish the
+    authenticated client Finished, and terminal close, and can abort, but does
+    not yet publish the
     authenticated socket
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE

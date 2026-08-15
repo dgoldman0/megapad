@@ -14,9 +14,9 @@ exact listener/context lease, retryable wait, child attachment, fragmented
 ClientHello admission, sticky early failure/deadline classification,
 phase-one hello/epoch preparation, exact signed-flight preparation, ACK-paced
 server-flight transport, protected client ingress through authenticated
-Finished, terminal-result latching, and abort. Its current boundaries are
-terminal disposition and authenticated socket publication; the resulting
-socket must then prove independent
+Finished, terminal disposition, alert-ACK-before-FIN close, exact terminal
+lease release, and abort. Its current boundary is authenticated socket
+publication; the resulting socket must then prove independent
 interoperability.
 Last updated: 2026-08-15
 
@@ -117,9 +117,10 @@ I/O, and the next exact-generation step signs and freezes the complete server
 flight without emitting it. The operation now dispatches the five-record
 flight through exact child authority and maps retained-write backpressure
 without internal polling. It then initializes attached protected ingress,
-maps read backpressure, authenticates Finished, and preserves terminal
-classifications for disposition. The remaining server work is to drive that
-same operation through disposition/publication transactions and then
+maps read backpressure, authenticates Finished, and drives terminal
+classifications through protected disposition, exact graceful close, and
+listener-lease release. The remaining server work is to drive that same
+operation through socket publication and then
 prove interoperability over the resulting socket with an independent TLS
 implementation. The following lower-level facts
 continue to bound an authenticated server role:
@@ -1076,8 +1077,8 @@ TLS stack remain unproved. The bounded accept operation currently proves its
 listener/context lease, retryable wait, exact attach, fragmented ClientHello
 ingress, sticky fatal/deadline results, phase-one preparation, exact signed-flight
 preparation, ACK-paced transport, protected client ingress through Finished,
-terminal-result latching, and abort lifecycle but stops at disposition or
-publication. The disposition
+terminal disposition/close, exact terminal lease release, and abort lifecycle
+but stops at publication. The disposition
 affected selector passed 19/19 sequentially under the ordinary checked
 source-mode limits; the final publication-focused and adjoining affected
 selector passed 15/15 sequentially under ordinary checked limits.

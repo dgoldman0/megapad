@@ -25685,6 +25685,160 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_server_accept_op_disposes_terminal_ingress_before_fin(self):
+        """A terminal operation admits its alert, closes, and releases its lease."""
+        wrong_finished = bytes.fromhex(
+            "1703030035de4a5ff64b354480a575ef8001fdc3a129fc64ee79971c5f"
+            "efd24c8f3a54890dd08ae439d51bb2684829bb32c0dd00ae2a1174ca27"
+        )
+        expected_alert = bytes.fromhex(
+            "1703030013f5f07412b52bd80b733ee38fcb7212866b6919"
+        )
+        lines, ack_frames, record_lengths = (
+            self._accept_op_deterministic_flight_lines()
+        )
+        server_next = 1000 + sum(record_lengths)
+        client_next = 2000 + len(wrong_finished)
+        wrong_frame = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            2000,
+            server_next,
+            TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK,
+            4096,
+            wrong_finished,
+        )
+        alert_ack = TestKDOSNetStack._build_tcp_frame(
+            [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00],
+            [0xAA] * 6,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            50000,
+            443,
+            client_next,
+            server_next + len(expected_alert),
+            TestKDOSNetStack.TCP_ACK,
+            4096,
+            b"",
+        )
+        lines += self._forth_bytes("opl-expected-alert", expected_alert)
+        for _ in record_lengths:
+            lines += [
+                "op-late TLS-SERVER-ACCEPT-STEP 2DROP 2DROP",
+                "TCP-POLL",
+            ]
+        lines += [
+            "op-late TLS-SERVER-ACCEPT-STEP 2DROP 2DROP",
+            "TCP-POLL",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPT-TERM-IOR=" . ." OPT-TERM-ALERT=" . '
+            '." OPT-TERM-PROGRESS=" . ." OPT-TERM-SD=" .',
+            '." OPT-TERM-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-DISPOSITION = .',
+            '." OPT-TERM-LATCH=" op-late TSAO.RESULT-ALERT @ 51 = '
+            'op-late TSAO.RESULT-IOR @ TLS-E-PEER-FINISHED = AND .',
+            "0 opl-child @ TCB.SND-WND !",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPT-DISP-WAIT-IOR=" . ." OPT-DISP-WAIT-ALERT=" . '
+            '." OPT-DISP-WAIT-PROGRESS=" . ." OPT-DISP-WAIT-SD=" .',
+            '." OPT-DISP-WAIT-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-DISPOSITION = .',
+            "4096 opl-child @ TCB.SND-WND !",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPT-DISP-IOR=" . ." OPT-DISP-ALERT=" . '
+            '." OPT-DISP-PROGRESS=" . ." OPT-DISP-SD=" .',
+            '." OPT-DISP-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-CLOSE = .',
+            '." OPT-DISP-WIRE=" opl-child @ TCB.TX-LEN @ 24 = '
+            'opl-child @ TCB.TX-BUF opl-expected-alert 24 '
+            '_XC-BYTES= AND .',
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPT-CLOSE-WAIT-IOR=" . ." OPT-CLOSE-WAIT-ALERT=" . '
+            '." OPT-CLOSE-WAIT-PROGRESS=" . '
+            '." OPT-CLOSE-WAIT-SD=" .',
+            '." OPT-CLOSE-WAIT-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-CLOSE = .',
+            "TCP-POLL",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPT-CLOSE-IOR=" . ." OPT-CLOSE-ALERT=" . '
+            '." OPT-CLOSE-PROGRESS=" . ." OPT-CLOSE-SD=" .',
+            '." OPT-CLOSE-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-TERMINAL-LEASE = .',
+            '." OPT-CLOSE-CTX=" op-late TSAO.CTX @ 0= '
+            'op-late TSAO.CTX-GEN @ 0= AND '
+            'opl-ctx @ TLS-CTX-CLAIMED? 0= AND .',
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPT-DONE-IOR=" . ." OPT-DONE-ALERT=" . '
+            '." OPT-DONE-PROGRESS=" . ." OPT-DONE-SD=" .',
+            '." OPT-DONE-CLEAN=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-IDLE = op-late TSAO.LEASE-HELD @ 0= '
+            'AND opl-sd @ SOCK.TLS-ACTIVE-OPS @ 0= AND .',
+            '." OPT-DONE-LISTENER=" opl-listener @ opl-lgen @ opl-sd @ '
+            'TCB-ATTACHED-TO? .',
+            'opl-sd @ CLOSE-TRY ." OPT-LISTENER-CLOSE=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE '
+            '." OPT-DELETE=" .',
+            '." OPT-OWNERS=" TLS-OWNER-DEPTH @ 0= '
+            'NET-TX-OWNER-DEPTH @ 0= AND '
+            '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
+            'DEPTH ." OPT-DEPTH=" .',
+        ]
+        sent: list[bytes] = []
+        text = self._run_kdos(
+            lines,
+            nic_frames=ack_frames + [wrong_frame, alert_ack],
+            max_steps=250_000_000,
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)),
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "OPT-TERM-IOR=-4221 OPT-TERM-ALERT=51 ",
+            "OPT-TERM-PROGRESS=5 OPT-TERM-SD=0 ",
+            "OPT-TERM-STATE=-1 ", "OPT-TERM-LATCH=-1 ",
+            "OPT-DISP-WAIT-IOR=-4219 OPT-DISP-WAIT-ALERT=0 ",
+            "OPT-DISP-WAIT-PROGRESS=3 OPT-DISP-WAIT-SD=0 ",
+            "OPT-DISP-WAIT-STATE=-1 ",
+            "OPT-DISP-IOR=0 OPT-DISP-ALERT=0 ",
+            "OPT-DISP-PROGRESS=1 OPT-DISP-SD=0 ",
+            "OPT-DISP-STATE=-1 ", "OPT-DISP-WIRE=-1 ",
+            "OPT-CLOSE-WAIT-IOR=-4219 OPT-CLOSE-WAIT-ALERT=0 ",
+            "OPT-CLOSE-WAIT-PROGRESS=3 OPT-CLOSE-WAIT-SD=0 ",
+            "OPT-CLOSE-WAIT-STATE=-1 ",
+            "OPT-CLOSE-IOR=0 OPT-CLOSE-ALERT=0 ",
+            "OPT-CLOSE-PROGRESS=1 OPT-CLOSE-SD=0 ",
+            "OPT-CLOSE-STATE=-1 ", "OPT-CLOSE-CTX=-1 ",
+            "OPT-DONE-IOR=-4221 OPT-DONE-ALERT=51 ",
+            "OPT-DONE-PROGRESS=7 OPT-DONE-SD=0 ",
+            "OPT-DONE-CLEAN=-1 ", "OPT-DONE-LISTENER=-1 ",
+            "OPT-LISTENER-CLOSE=0 ", "OPT-DELETE=0 ",
+            "OPT-OWNERS=-1 ", "OPT-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        parsed = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None
+        ]
+        payload_frames = [frame for frame in parsed if frame["payload"]]
+        fin_frames = [
+            frame for frame in parsed
+            if frame["flags"] & TestKDOSNetStack.TCP_FIN
+        ]
+        self.assertEqual(len(payload_frames), 6)
+        self.assertEqual(payload_frames[-1]["payload"], expected_alert)
+        self.assertEqual(len(fin_frames), 1)
+        self.assertLess(
+            sent.index(next(raw for raw in sent if raw.endswith(expected_alert))),
+            sent.index(next(
+                raw for raw in sent
+                if (TestKDOSNetStack._parse_tcp_frame(raw) or {})
+                .get("flags", 0) & TestKDOSNetStack.TCP_FIN
+            )),
+        )
+
     def test_server_accept_op_preserves_client_hello_failures(self):
         """Fatal alerts and attach-time deadlines remain sticky until abort."""
         fatal_record = b"\x15\x03\x03\x00\x02\x01\x00"

@@ -89,9 +89,11 @@ next exact-generation step signs and freezes the remaining server flight. The
 operation now emits all five records through exact child authority, exposes
 retryable write backpressure between records, initializes protected ingress,
 and processes one attached client record per call. Authenticated Finished
-reaches the publication boundary; protected terminal results are latched at
-the disposition boundary. The immediate release path is to dispatch those
-already-qualified disposition and socket-publication steps, then prove one
+reaches the publication boundary. Protected terminal results now drive their
+exact alert disposition, wait for alert acknowledgement before FIN, retire the
+context, release the listener lease once, and return the original sticky
+result. The immediate release path is to dispatch authenticated socket
+publication, then prove one
 independent TLS peer exchange, application I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
