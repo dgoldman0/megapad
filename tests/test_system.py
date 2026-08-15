@@ -25645,7 +25645,35 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'op-late TSAO.RESULT-ALERT @ 0= AND '
             'op-late TSAO.RESULT-IOR @ 0= AND .',
             "VARIABLE opl-published",
+            "_TC-LOCK-TRY DROP TASK-ID 1+ _TC-LOCK-OWNER-TASK !",
             "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-PUBLISH-BUSY-IOR=" . '
+            '." OPL-PUBLISH-BUSY-ALERT=" . '
+            '." OPL-PUBLISH-BUSY-PROGRESS=" . '
+            '." OPL-PUBLISH-BUSY-SD=" .',
+            '." OPL-PUBLISH-BUSY-SAFE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PUBLISH = op-late TSAO.CTX @ '
+            'opl-ctx @ = AND op-late TSAO.CTX-GEN @ opl-ctx-gen @ = AND '
+            'op-late TSAO.RESULT-SD @ 0= AND opl-ctx @ '
+            'TLS-CTX.SOCKET-OWNER @ 0= AND .',
+            "TASK-ID _TC-LOCK-OWNER-TASK ! _TC-UNLOCK",
+            "VARIABLE opl-publish-epoch VARIABLE opl-publish-action",
+            "VARIABLE opl-lower-ior VARIABLE opl-race-sd",
+            "op-late _TSAO-STEP-CLAIM",
+            'DROP DROP DROP opl-publish-action ! opl-publish-epoch ! DROP',
+            '." OPL-PUBLISH-CLAIM=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PUBLISH-ACTIVE = opl-publish-action @ '
+            '_TSAO-ACTION-PUBLISH = AND .',
+            "op-late _TSAO-PUBLISH-GUARDED",
+            "opl-lower-ior ! opl-race-sd ! DROP",
+            '." OPL-PUBLISH-LOWER=" opl-lower-ior @ 0= opl-race-sd @ '
+            '0<> AND .',
+            "op-late TLS-SERVER-ACCEPT-ABORT",
+            '." OPL-PUBLISH-RACE-ABORT-IOR=" . '
+            '." OPL-PUBLISH-RACE-ABORT-ALERT=" . '
+            '." OPL-PUBLISH-RACE-ABORT-PROGRESS=" .',
+            'op-late opl-race-sd @ opl-lower-ior @ opl-publish-epoch @ '
+            "_TSAO-PUBLISH-PUBLISH",
             '." OPL-PUBLISH-IOR=" . ." OPL-PUBLISH-ALERT=" . '
             '." OPL-PUBLISH-PROGRESS=" . ." OPL-PUBLISH-SD=" '
             '.',
@@ -25725,6 +25753,15 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "OPL-FIN-PROGRESS=1 OPL-FIN-SD=0 ",
             "OPL-FIN-STATE=-1 ", "OPL-FIN-CTX=-1 ",
             "OPL-FIN-AUTH=-1 ", "OPL-FIN-RESULT=-1 ",
+            "OPL-PUBLISH-BUSY-IOR=-4206 ",
+            "OPL-PUBLISH-BUSY-ALERT=0 ",
+            "OPL-PUBLISH-BUSY-PROGRESS=4 ",
+            "OPL-PUBLISH-BUSY-SD=0 ",
+            "OPL-PUBLISH-BUSY-SAFE=-1 ",
+            "OPL-PUBLISH-CLAIM=-1 ", "OPL-PUBLISH-LOWER=-1 ",
+            "OPL-PUBLISH-RACE-ABORT-IOR=-4206 ",
+            "OPL-PUBLISH-RACE-ABORT-ALERT=0 ",
+            "OPL-PUBLISH-RACE-ABORT-PROGRESS=5 ",
             "OPL-PUBLISH-IOR=0 OPL-PUBLISH-ALERT=0 ",
             "OPL-PUBLISH-PROGRESS=1 OPL-PUBLISH-SD=0 ",
             "OPL-PUBLISH-STATE=-1 ", "OPL-PUBLISH-OP=-1 ",
