@@ -46,6 +46,7 @@ import hmac
 import os
 import random
 import re
+import ssl
 import struct
 import sys
 import tempfile
@@ -25783,6 +25784,395 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "OPL-OWNERS=-1 ", "OPL-DEPTH=0 ",
         ):
             self.assertIn(token, text)
+
+    def test_server_accept_op_interoperates_with_python_ssl_socket_io_and_close(
+        self,
+    ):
+        """An independent TLS peer uses the published socket through close."""
+        leaf = TestKDOSTLSCredentials._fixture("leaf")
+        intermediate = TestKDOSTLSCredentials._fixture("intermediate")
+        root = TestKDOSTLSCredentials._fixture("root")
+        client_plaintext = b"client data through the published socket"
+        server_plaintext = b"server data through the published socket"
+
+        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_context.minimum_version = ssl.TLSVersion.TLSv1_3
+        client_context.maximum_version = ssl.TLSVersion.TLSv1_3
+        client_context.check_hostname = True
+        client_context.verify_mode = ssl.CERT_REQUIRED
+        client_context.load_verify_locations(
+            cadata=ssl.DER_cert_to_PEM_cert(root)
+        )
+        client_context.set_alpn_protocols([self.ALPN.decode("ascii")])
+        incoming = ssl.MemoryBIO()
+        outgoing = ssl.MemoryBIO()
+        peer = client_context.wrap_bio(
+            incoming,
+            outgoing,
+            server_side=False,
+            server_hostname="test.example.com",
+        )
+
+        def drain_outgoing() -> bytes:
+            wire = bytearray()
+            while outgoing.pending:
+                wire.extend(outgoing.read())
+            return bytes(wire)
+
+        with self.assertRaises(ssl.SSLWantReadError):
+            peer.do_handshake()
+        client_hello = drain_outgoing()
+        self.assertGreater(len(client_hello), 5)
+        self.assertEqual(client_hello[0], 22)
+        client_hello_chunks = [
+            client_hello[offset:offset + 1000]
+            for offset in range(0, len(client_hello), 1000)
+        ]
+
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        local_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 1]
+        client_isn = 1999
+        state = {
+            "client_next": client_isn + 1,
+            "server_next": None,
+            "synack_seen": False,
+            "handshake_complete": False,
+            "pending_handshake": bytearray(),
+            "client_write": 0,
+            "server_plaintext": bytearray(),
+            "close_started": False,
+            "close_complete": False,
+            "client_fin_sent": False,
+            "server_fin_seen": False,
+            "version": None,
+            "cipher": None,
+            "alpn": None,
+            "peer_cert": None,
+            "errors": [],
+        }
+
+        def note_error(label: str, error) -> None:
+            state["errors"].append(f"{label}: {error!r}")
+
+        def inject_peer_frame(nic, payload=b"", flags=None) -> None:
+            if flags is None:
+                flags = TestKDOSNetStack.TCP_ACK
+                if payload:
+                    flags |= TestKDOSNetStack.TCP_PSH
+            if state["server_next"] is None:
+                note_error("inject-before-synack", flags)
+                return
+            nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                nic_mac,
+                peer_mac,
+                peer_ip,
+                local_ip,
+                50000,
+                443,
+                state["client_next"],
+                state["server_next"],
+                flags,
+                4096,
+                payload,
+            ))
+            state["client_next"] += len(payload)
+            if flags & TestKDOSNetStack.TCP_FIN:
+                state["client_next"] += 1
+
+        def inject_peer_payload(nic, payload: bytes) -> None:
+            if not payload:
+                inject_peer_frame(nic)
+                return
+            for offset in range(0, len(payload), 1400):
+                inject_peer_frame(nic, payload[offset:offset + 1400])
+
+        def on_server_frame(nic, raw_frame) -> None:
+            frame = TestKDOSNetStack._parse_tcp_frame(bytes(raw_frame))
+            if frame is None or frame["sport"] != 443 or frame["dport"] != 50000:
+                return
+            flags = frame["flags"]
+            payload = frame["payload"]
+            if flags & TestKDOSNetStack.TCP_RST:
+                note_error("server-rst", frame)
+                return
+            if flags & TestKDOSNetStack.TCP_SYN:
+                if not flags & TestKDOSNetStack.TCP_ACK:
+                    note_error("server-syn-without-ack", frame)
+                    return
+                state["synack_seen"] = True
+                state["server_next"] = frame["seq"] + 1
+                inject_peer_frame(nic)
+                for chunk in client_hello_chunks:
+                    inject_peer_frame(nic, chunk)
+                return
+
+            if payload:
+                if frame["seq"] != state["server_next"]:
+                    note_error(
+                        "server-payload-sequence",
+                        (frame["seq"], state["server_next"]),
+                    )
+                    inject_peer_frame(nic)
+                    return
+                state["server_next"] += len(payload)
+                try:
+                    incoming.write(payload)
+                    if not state["handshake_complete"]:
+                        try:
+                            peer.do_handshake()
+                        except ssl.SSLWantReadError:
+                            pass
+                        else:
+                            state["handshake_complete"] = True
+                            state["version"] = peer.version()
+                            state["cipher"] = peer.cipher()
+                            state["alpn"] = peer.selected_alpn_protocol()
+                            state["peer_cert"] = peer.getpeercert()
+                        state["pending_handshake"].extend(drain_outgoing())
+                        if state["handshake_complete"]:
+                            state["client_write"] = peer.write(client_plaintext)
+                            state["pending_handshake"].extend(
+                                drain_outgoing()
+                            )
+                            inject_peer_payload(
+                                nic, bytes(state["pending_handshake"])
+                            )
+                            state["pending_handshake"].clear()
+                        else:
+                            inject_peer_frame(nic)
+                        return
+
+                    if state["close_started"]:
+                        try:
+                            peer.unwrap()
+                        except ssl.SSLWantReadError:
+                            pass
+                        else:
+                            state["close_complete"] = True
+                        unexpected = drain_outgoing()
+                        if unexpected:
+                            note_error("post-fin-tls-output", unexpected.hex())
+                        inject_peer_frame(nic)
+                        return
+
+                    while True:
+                        try:
+                            plaintext = peer.read(4096)
+                        except ssl.SSLWantReadError:
+                            break
+                        if not plaintext:
+                            break
+                        state["server_plaintext"].extend(plaintext)
+                    if bytes(state["server_plaintext"]) == server_plaintext:
+                        state["close_started"] = True
+                        try:
+                            peer.unwrap()
+                        except ssl.SSLWantReadError:
+                            pass
+                        else:
+                            state["close_complete"] = True
+                        close_wire = drain_outgoing()
+                        if not close_wire:
+                            note_error("missing-client-close-notify", b"")
+                            inject_peer_frame(nic)
+                        else:
+                            inject_peer_frame(
+                                nic,
+                                close_wire,
+                                TestKDOSNetStack.TCP_PSH
+                                | TestKDOSNetStack.TCP_ACK
+                                | TestKDOSNetStack.TCP_FIN,
+                            )
+                            state["client_fin_sent"] = True
+                    else:
+                        inject_peer_frame(nic)
+                except ssl.SSLError as error:
+                    note_error("peer-tls", error)
+                    inject_peer_frame(nic)
+                except Exception as error:  # callback failures need context
+                    note_error("peer-callback", error)
+                    inject_peer_frame(nic)
+                return
+
+            if flags & TestKDOSNetStack.TCP_FIN:
+                if frame["seq"] != state["server_next"]:
+                    note_error(
+                        "server-fin-sequence",
+                        (frame["seq"], state["server_next"]),
+                    )
+                state["server_next"] = frame["seq"] + 1
+                state["server_fin_seen"] = True
+                inject_peer_frame(nic)
+
+        syn_frame = TestKDOSNetStack._build_tcp_frame(
+            nic_mac,
+            peer_mac,
+            peer_ip,
+            local_ip,
+            50000,
+            443,
+            client_isn,
+            0,
+            TestKDOSNetStack.TCP_SYN,
+            4096,
+            b"",
+        )
+        lines, _ = self._provision_lines(certs=[leaf, intermediate])
+        lines += self._forth_bytes("peer-alpn", self.ALPN)
+        lines += self._forth_bytes("peer-client-expected", client_plaintext)
+        lines += self._forth_bytes("peer-server-data", server_plaintext)
+        lines += [
+            "TCP-INIT-ALL ARP-CLEAR",
+            "CREATE peer-op-raw /TLS-SERVER-ACCEPT-OP 7 + ALLOT",
+            ": peer-op peer-op-raw 7 + -8 AND ;",
+            "VARIABLE peer-listen-sd VARIABLE peer-listener-tcb",
+            "VARIABLE peer-ctx VARIABLE peer-ctx-gen",
+            "VARIABLE peer-child VARIABLE peer-child-gen",
+            "VARIABLE peer-result-sd VARIABLE peer-last-progress",
+            "VARIABLE peer-last-alert VARIABLE peer-last-ior",
+            "VARIABLE peer-drive-count VARIABLE peer-recv-u",
+            "VARIABLE peer-resolve-ctx VARIABLE peer-resolve-gen",
+            "CREATE peer-ip 4 ALLOT CREATE peer-mac 6 ALLOT",
+            f"CREATE peer-client-out {len(client_plaintext)} ALLOT",
+            "CREATE peer-close-out 1 ALLOT",
+            ": peer-step",
+            "  peer-op TLS-SERVER-ACCEPT-STEP",
+            "  peer-last-ior ! peer-last-alert ! peer-last-progress !",
+            "  DUP IF peer-result-sd ! ELSE DROP THEN ;",
+            ": peer-drive-accept",
+            "  0 peer-drive-count !",
+            "  BEGIN peer-result-sd @ 0= peer-drive-count @ 16 < AND WHILE",
+            "    peer-step 1 peer-drive-count +!",
+            "  REPEAT ;",
+            ": peer-live-sockets 0 SOCK-MAX 0 DO",
+            "  I SOCK-N SOCK.STATE @ SOCKST-FREE <> IF 1+ THEN LOOP ;",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "10 0 0 1 peer-ip IP! peer-mac 6 170 FILL",
+            "peer-ip peer-mac ARP-INSERT",
+            'peer-op TLS-SERVER-ACCEPT-OP-INIT ." PEER-OP-INIT=" .',
+            "SOCK-TYPE-TLS SOCKET peer-listen-sd !",
+            "peer-listen-sd @ 443 BIND DROP",
+            "peer-listen-sd @ tc-slot @ tc-gen @ peer-alpn 8 0 2500",
+            'TLS-LISTEN ." PEER-LISTEN=" .',
+            "peer-listen-sd @ SOCK-TCB@ peer-listener-tcb !",
+            "peer-listen-sd @ peer-op TLS-SERVER-ACCEPT-BEGIN",
+            '." PEER-BEGIN=" .',
+            "peer-op TSAO.CTX @ peer-ctx !",
+            "peer-op TSAO.CTX-GEN @ peer-ctx-gen !",
+            "TCP-POLL",
+            "TCP-POLL",
+            "peer-step",
+            "peer-ctx @ TLS-CTX.TCB @ peer-child !",
+            "peer-ctx @ TLS-CTX.TCB-GENERATION @ peer-child-gen !",
+            '." PEER-ATTACH=" peer-last-ior @ 0= peer-child @ 0<> AND '
+            'peer-child @ peer-child-gen @ peer-ctx @ '
+            'TCB-ATTACHED-TO? AND .',
+        ]
+        for _ in client_hello_chunks:
+            lines += ["TCP-POLL", "peer-step"]
+        lines += [
+            '." PEER-HELLO=" peer-last-ior @ 0= peer-op TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PREPARE-HELLO = AND .',
+            "peer-step",
+            '." PEER-PHASE-ONE=" peer-last-ior @ 0= '
+            'peer-op TSAO.STATE @ TLS-SERVER-ACCEPT-ST-PREPARE-FLIGHT = '
+            'AND .',
+            "peer-step",
+            '." PEER-FLIGHT-READY=" peer-last-ior @ 0= '
+            'peer-op TSAO.STATE @ TLS-SERVER-ACCEPT-ST-FLIGHT = AND .',
+        ]
+        for _ in range(5):
+            lines += ["peer-step", "TCP-POLL"]
+        lines += [
+            '." PEER-FLIGHT-DONE=" peer-op TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-CLIENT-FLIGHT-BEGIN = .',
+            "peer-step",
+            '." PEER-INGRESS-BEGIN=" peer-last-ior @ 0= '
+            'peer-op TSAO.STATE @ TLS-SERVER-ACCEPT-ST-CLIENT-FLIGHT = '
+            'AND .',
+            "TCP-POLL",
+            "TCP-POLL",
+            "TCP-POLL",
+            "peer-drive-accept",
+            '." PEER-ACCEPT=" peer-result-sd @ 0<> peer-last-ior @ 0= '
+            'AND peer-last-progress @ TLS-SERVER-ACCEPT-ESTABLISHED = AND '
+            'peer-op TSAO.STATE @ TLS-SERVER-ACCEPT-ST-IDLE = AND .',
+            "TLS-OWNER-TRY DROP peer-result-sd @ SOCK-TLS-RESOLVE",
+            "peer-resolve-gen ! peer-resolve-ctx ! TLS-OWNER-RELEASE",
+            '." PEER-RECIPROCAL=" peer-resolve-ctx @ peer-ctx @ = '
+            'peer-resolve-gen @ peer-ctx-gen @ = AND peer-ctx @ '
+            'TLS-CTX.SOCKET-OWNER @ peer-result-sd @ = AND .',
+            '." PEER-AUTH=" peer-ctx @ TLS-CTX.STATE @ TLSS-ESTABLISHED = '
+            'peer-ctx @ TLS-CTX.PEER-AUTH @ 1 = AND peer-ctx @ '
+            'TLS-CTX.ALPN-SELECTED-LEN @ 8 = AND peer-ctx @ '
+            'TLS-CTX.ALPN-NAME peer-alpn 8 _XC-BYTES= AND .',
+            f"peer-result-sd @ peer-client-out {len(client_plaintext)} RECV",
+            "peer-recv-u !",
+            '." PEER-CLIENT-RECV=" peer-recv-u @ '
+            f'{len(client_plaintext)} = peer-client-out '
+            f'peer-client-expected {len(client_plaintext)} '
+            '_XC-BYTES= AND .',
+            f"peer-result-sd @ peer-server-data {len(server_plaintext)} SEND",
+            '." PEER-SERVER-SEND=" .',
+            "TCP-POLL",
+            'peer-result-sd @ SOCKET-READY? ." PEER-CLOSE-READY=" .',
+            "peer-result-sd @ peer-close-out 1 RECV",
+            '." PEER-CLOSE-RECV=" .',
+            'peer-result-sd @ SOCK-TLS-IO-STATUS ." PEER-CLOSE-STATUS=" .',
+            'peer-result-sd @ CLOSE-TRY ." PEER-CLOSE1=" .',
+            "TCP-POLL",
+            'peer-result-sd @ CLOSE-TRY ." PEER-CLOSE2=" .',
+            "TCP-POLL",
+            '." PEER-SOCKET-FREE=" peer-result-sd @ SOCK.STATE @ '
+            'SOCKST-FREE = peer-ctx @ TLS-CTX-CLAIMED? 0= AND '
+            'peer-child @ TCB.STATE @ TCPS-CLOSED = AND .',
+            'peer-listen-sd @ CLOSE-TRY ." PEER-LISTENER-CLOSE=" .',
+            'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE '
+            '." PEER-CREDENTIAL-DELETE=" .',
+            '." PEER-CLEAN=" peer-live-sockets 0= peer-listener-tcb @ '
+            'TCB.STATE @ TCPS-CLOSED = AND tc-slot @ 1- _TC@ TC.REFS + @ '
+            '0= AND TLS-OWNER-DEPTH @ 0= AND NET-TX-OWNER-DEPTH @ 0= AND '
+            '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
+            'DEPTH ." PEER-DEPTH=" .',
+        ]
+        text = self._run_kdos(
+            lines,
+            nic_frames=[syn_frame],
+            nic_tx_callback=on_server_frame,
+            max_steps=250_000_000,
+        )
+        self.assertNotIn("Stack underflow", text)
+        for token in (
+            "PEER-OP-INIT=0 ", "PEER-LISTEN=0 ", "PEER-BEGIN=0 ",
+            "PEER-ATTACH=-1 ", "PEER-HELLO=-1 ",
+            "PEER-PHASE-ONE=-1 ", "PEER-FLIGHT-READY=-1 ",
+            "PEER-FLIGHT-DONE=-1 ", "PEER-INGRESS-BEGIN=-1 ",
+            "PEER-ACCEPT=-1 ", "PEER-RECIPROCAL=-1 ",
+            "PEER-AUTH=-1 ", "PEER-CLIENT-RECV=-1 ",
+            f"PEER-SERVER-SEND={len(server_plaintext)} ",
+            "PEER-CLOSE-READY=-1 ", "PEER-CLOSE-RECV=0 ",
+            "PEER-CLOSE-STATUS=0 ", "PEER-CLOSE1=-4219 ",
+            "PEER-CLOSE2=0 ", "PEER-SOCKET-FREE=-1 ",
+            "PEER-LISTENER-CLOSE=0 ", "PEER-CREDENTIAL-DELETE=0 ",
+            "PEER-CLEAN=-1 ", "PEER-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+        self.assertEqual(state["errors"], [])
+        self.assertTrue(state["synack_seen"])
+        self.assertTrue(state["handshake_complete"])
+        self.assertEqual(state["client_write"], len(client_plaintext))
+        self.assertEqual(bytes(state["server_plaintext"]), server_plaintext)
+        self.assertTrue(state["close_started"])
+        self.assertTrue(state["close_complete"])
+        self.assertTrue(state["client_fin_sent"])
+        self.assertTrue(state["server_fin_seen"])
+        self.assertEqual(state["version"], "TLSv1.3")
+        self.assertEqual(state["cipher"][0], "TLS_AES_128_GCM_SHA256")
+        self.assertEqual(state["alpn"], self.ALPN.decode("ascii"))
+        self.assertTrue(state["peer_cert"])
 
     def test_server_accept_op_disposes_terminal_ingress_before_fin(self):
         """A terminal operation admits its alert, closes, and releases its lease."""
