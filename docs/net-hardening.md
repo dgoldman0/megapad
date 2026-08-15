@@ -14,16 +14,15 @@ through the exact child and preserves a following TCP record. Attached
 terminal disposition now emits an exact protected fatal/close response or no
 response for a non-close peer alert, with retry-stable ciphertext and
 alert-ACK-before-FIN ordering. Exact authenticated TLS socket publication and
-atomic credential-pinned listener policy publication are implemented; the
-caller-owned bounded secure-accept operation now owns initialization, exact
-listener/context authority, retryable empty-queue waits, exact child
-attachment, fragmented ClientHello ingress, sticky early failure/deadline
-classification, phase-one hello/epoch preparation, exact signed-flight
-preparation, ACK-paced server-flight transport, protected client ingress,
-terminal disposition, alert-ACK-before-FIN close, authenticated socket
-publication, exact lease settlement, and abort. Independent application I/O
-and teardown over the returned socket are now qualified by a stateful OpenSSL
-TLS 1.3 peer using the actual KDOS TCP listener and public socket API.
+atomic credential-pinned listener policy publication are implemented. KDOS
+ends at a compact generation-exact substrate: configured listener publication,
+fused secure-child claim, bounded handshake/transport phases, authenticated
+socket publication, and exact close or abort. Akashic's persistent inbound
+owner supplies accept scheduling, deadlines, cancellation, retained results,
+cooperative cleanup, and adoption into the shared established TLS NIO port.
+Independent TLS 1.3 peers qualify application I/O and teardown through that
+owner and HCONN, including same-listener recovery after cancellation, timeout,
+and malformed input.
 **Date:** 2026-08-15 qualification
 
 ## Scope
@@ -79,12 +78,12 @@ slots; the authority fields added after retained transport state are:
 its own nonzero incarnation at +976, the reciprocal socket owner at +984, and
 the slot/close lifecycle at +992. `TLS-CLOSE-FREE` marks a released slot while
 preserving its last generation, so one successful claim creates one live
-incarnation. `/SOCK` is 352 bytes: its common header carries either the plain
+incarnation. `/SOCK` is 344 bytes: its common header carries either the plain
 TCB generation or TLS-context generation at +32, and its protocol-bounded tail
 holds one copied secure-listener policy, including at most one 255-byte ALPN
 ProtocolName. With the 230,688-byte TLS receive/server workspace, the logical
-table cost is 238,344 bytes per connection. Independently normalized XMEM
-allocations consume 238,352, 476,688, and 715,040 bytes for one, two, and three
+table cost is 238,328 bytes per connection. Independently normalized XMEM
+allocations consume 238,336, 476,656, and 714,992 bytes for one, two, and three
 connections.
 
 ## Incarnation and ownership rules
@@ -237,28 +236,23 @@ generation. `TLS-SERVER-ACCEPT-CLAIM` consumes that exact authority and moves
 one queued child directly into a prepared TLS context, so no plaintext accepted
 socket crosses the secure boundary. The generic `LISTEN` entry remains
 fail-closed for TLS descriptors, and `SOCK-ACCEPT` fails closed before consuming
-a secure child because secure acceptance uses the separate caller-owned
-operation. That operation now holds the exact listener lease and prepared
-context across retryable empty waits, attaches one exact child, and can abort
-the complete chain without publication. It also dispatches one bounded
-ClientHello ingress step per call, preserves a following TLS record, and then
-prepares immutable ServerHello,
-EncryptedExtensions, and handshake epochs without transport I/O, then signs
-and freezes the complete server flight through exact context authority. It now
-dispatches all five flight records through the attached child with retryable
-write backpressure and no internal polling, then initializes protected ingress,
-maps read backpressure, authenticates Finished, and drives terminal results
-through exact disposition, graceful close, and listener-lease release.
-Authenticated completion now publishes one reciprocal descriptor, preserves it
-across cancellation or lease contention, and returns it only after settling the
-exact listener lease. The independent OpenSSL journey now completes the
-TCP/TLS handshake, verifies the credential chain and hostname, negotiates
-ALPN, exchanges application bytes in both directions through the returned
-descriptor, and completes
-`close_notify`, FIN, and exact cleanup. Remaining transport work is broader
-profile, concurrency, and protocol-maximum maturity evidence. The completed
-KDOS accept coordinator remains only a frozen migration oracle: Akashic XIO
-now owns the service-operation lifecycle, and the authenticated NIO/HCONN path
-must re-close this journey before `/TLS-SERVER-ACCEPT-OP` is deleted. No new
-deadline, cancellation, retention, or scheduling behavior belongs in that
-lower coordinator.
+a secure child. Akashic's persistent listener owner instead carries exact
+listener and context authority, asks XIO to serialize one bounded accept
+request, and invokes one lower operation on each cooperative step. KDOS retains
+all credential, wire, authentication, publication, and teardown decisions;
+Akashic owns deadline/cancellation precedence, result retention, and cleanup
+settlement. Authenticated completion is adopted into the shared established
+TLS NIO port, after which HCONN is unchanged. The independent peer journeys now
+complete the TCP/TLS handshake, verify the credential chain and hostname,
+negotiate ALPN, exchange HTTP bytes, complete `close_notify` and FIN, reuse the
+listener, and recover after cancellation, timeout, malformed ClientHello, and
+cleanup contention. Remaining transport work is broader profile, concurrency,
+and protocol-maximum maturity evidence.
+
+Historically, a 144-byte caller-owned KDOS coordinator exercised the same
+lower phases and its six public-path journeys passed in 39.58 seconds. It was a
+migration oracle, not the final lifecycle boundary, and was removed after the
+Akashic success and recovery paths supplied equivalent composition evidence.
+Those measurements remain useful regression history; the coordinator, its
+listener lease bookkeeping, and its public entries are not part of the current
+KDOS interface.

@@ -14,32 +14,26 @@ ACK-paced server flight, authenticated client-Finished ingress, protected
 terminal dispositions, generation-exact TLS socket publication, and atomic
 policy-bearing `TLS-LISTEN`. That listener transaction now returns exact opaque
 listener authority, and `TLS-SERVER-ACCEPT-CLAIM` transfers one queued child
-directly into a pinned TLS context without plaintext socket publication. A
-caller-owned bounded operation now leases the
-exact listener, creates one prepared context, waits retryably, attaches one
-exact queued child, drives fragmented ClientHello ingress, and aborts without
-publishing plaintext. It also prepares immutable ServerHello and
-EncryptedExtensions plus handshake epochs without emitting them, then signs
-and freezes the complete server flight through exact context authority. It
-also dispatches the five-record server flight through ACK-paced exact child
-transport, initializes protected ingress, authenticates client Finished, and
-completes protected terminal disposition through alert-ACK-before-FIN close
-and exact listener-lease release. Authenticated completion now publishes one
-reciprocal descriptor, preserves it across lease-release contention and
-cancellation, settles the listener lease, and returns it as `ESTABLISHED`.
-An independent OpenSSL peer now completes the actual TCP/TLS accept path,
-certificate and hostname verification, ALPN, bidirectional socket application
-I/O, authenticated close, FIN, and exact cleanup. The bounded secure-server
-engine and its temporary KDOS coordinator oracle are complete. Production
-service-lifecycle closure is now being re-run through an Akashic XIO-driven
-accept adapter and authenticated NIO port; `/TLS-SERVER-ACCEPT-OP` is frozen
-and must not grow while that replacement is built. Broader profiles and
+directly into a pinned TLS context without plaintext socket publication.
+Generation-qualified lower entries then perform ClientHello ingress, phase-one
+and signed-flight preparation, ACK-paced emission, client-Finished
+authentication, terminal disposition, authenticated socket publication, and
+exact close or abort.
+
+Akashic now owns the service lifecycle around those entries. Its persistent
+listener owner composes one XIO-driven accept request, deadline and
+cancellation policy, retained results, cooperative cleanup, and adoption into
+the shared established KDOS-TLS NIO port. Independent TLS 1.3 clients qualify
+two connections on one listener through NIO and HCONN, authenticated close and
+FIN, plus cancellation, timeout, malformed-handshake, cleanup-contention, and
+same-listener recovery. A temporary KDOS coordinator previously qualified the
+same lower phase order and was retained as a migration oracle; it was removed
+after the Akashic success and recovery paths closed. Its measurements remain
+historical evidence rather than current API surface. Broader profiles and
 maximum-size/concurrency evidence remain maturity work.
 Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
-root. Application code continues to consume the already-open port abstraction;
-the new Akashic path must pass closure before the temporary coordinator is
-deleted.
+root. Application code continues to consume the already-open port abstraction.
 
 ---
 
@@ -132,25 +126,23 @@ Implemented network components, bottom-up:
     deterministic signed server messages, bounded outbound replay, client
     Finished authentication, exact TCP-child attachment, attached handshake
     driving, terminal dispositions, authenticated socket publication, and an
-    atomic credential-pinned listener policy. The bounded accept operation now
-    owns initialization, exact listener/context authority, retryable queue wait,
-    exact child attachment, bounded fragmented ClientHello ingress, sticky
-    early failure/deadline results, phase-one hello/epoch preparation, exact
-    signed-flight preparation, ACK-paced server-flight transport, protected
-    client ingress through authenticated Finished, protected terminal
-    disposition and close, authenticated socket publication, exact lease
-    settlement, and abort. An independent OpenSSL TLS 1.3 peer completes that
-    path through verified handshake, ALPN, bidirectional I/O, and teardown.
+    atomic credential-pinned listener policy. KDOS owns the exact secure-child
+    claim, credential and wire state, every bounded handshake phase, terminal
+    disposition, publication, and teardown. Akashic owns accept scheduling,
+    deadlines, cancellation, retained completion, cooperative cleanup, and
+    adoption of the authenticated descriptor into the shared NIO port. Real
+    independent TLS 1.3 peers complete that composition through verified
+    handshake, ALPN, HCONN application I/O, teardown, and same-listener
+    recovery after representative failures.
 18. ✅ **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
     atomic policy-bearing `TLS-LISTEN`, and generation-exact nonblocking secure
     child claim exist. The generic `LISTEN` entry
-    remains fail closed for TLS descriptors, while secure listeners use the
-    caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
-    operation currently owns each child through exact ClientHello admission,
-    phase-one and signed-flight preparation, ACK-paced server-flight transport,
-    authenticated client Finished and terminal close, and can either abort or
-    publish and return the authenticated socket after exact lease settlement.
-    The returned socket is qualified through application I/O and graceful close.
+    remains fail closed for TLS descriptors, and `SOCK-ACCEPT` refuses secure
+    listeners before queue consumption. Akashic instead drives the lower
+    generation-qualified server entries from `TLS-SERVER-ACCEPT-CLAIM` through
+    authenticated publication, then wraps the returned descriptor in the
+    shared NIO byte stream. The returned socket is qualified through
+    application I/O and graceful close.
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 

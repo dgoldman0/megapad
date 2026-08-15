@@ -11,23 +11,18 @@ pins the exact credential, publishes the TCP listener, and owns exact setup
 rollback plus listener close/unpin cleanup. It returns the opaque listener
 handle and generation consumed by `TLS-SERVER-ACCEPT-CLAIM`, which moves one
 queued child directly into a newly pinned TLS server context without exposing
-a plaintext accepted socket. The caller-owned bounded accept
-operation now owns its complete critical path: exact listener/context lease,
-retryable wait, child attachment, fragmented
-ClientHello admission, sticky early failure/deadline classification,
-phase-one hello/epoch preparation, exact signed-flight preparation, ACK-paced
-server-flight transport, protected client ingress through authenticated
-Finished, terminal disposition, alert-ACK-before-FIN close, authenticated
-socket publication, exact lease release, and abort. The completed operation
-returns the descriptor only after publication authority and listener accounting
-are settled. An independent OpenSSL TLS 1.3 peer now qualifies the actual TCP
-listener, public accept operation, reciprocal socket, bidirectional
-application I/O, authenticated close, FIN, and complete local cleanup. The
-lower secure-server engine is closed for the bounded profile, and the completed
-caller-owned KDOS accept operation is frozen as a transitional regression
-oracle. Production lifecycle closure is being moved to Akashic XIO/NIO; do not
-extend `/TLS-SERVER-ACCEPT-OP`, and do not claim the layer split complete until
-the independent peer journey passes through the replacement path. Broader
+a plaintext accepted socket. KDOS owns the exact context/child authority,
+credential policy and signing, fragmented ingress, flight construction and
+transport, client-Finished authentication, terminal disposition,
+authenticated socket publication, and exact close or abort. Akashic's
+persistent inbound listener owner composes those lower entries through XIO,
+which owns operation serialization, deadlines, cancellation, retained success,
+callback containment, and cooperative cleanup. Successful publication is
+adopted into the shared established KDOS-TLS NIO port and then passed unchanged
+to HCONN. Independent TLS 1.3 clients qualify two connections on one listener,
+HTTP application bytes, authenticated close and FIN, plus cancellation,
+timeout, malformed-handshake, cleanup-contention, and recovery paths. The
+bounded lower engine and the Akashic lifecycle split are closed; broader
 profile and concurrency work remains separate maturity work.
 Last updated: 2026-08-15
 
@@ -119,33 +114,30 @@ socket-independent composition test uses a Python-standard-library
 SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
-boundary. A separate stateful OpenSSL MemoryBIO client now supplies live
-independent-stack evidence: it performs the TCP/TLS handshake through
-`TLS-SERVER-ACCEPT-STEP`, verifies the leaf/intermediate chain and hostname,
-negotiates `rabbit/1`, exchanges application data through public `SEND` and
-`RECV`, and completes peer-first `close_notify` plus TCP FIN. Python 3.13's
-`SSLObject` exposes no exporter API, so that journey cannot compare exporter
-bytes; the independent HKDF/AES-GCM oracle remains the exporter evidence.
-The initial bounded secure-accept lifecycle is now present: caller storage owns
-the exact listener lease and prepared context across empty-queue retries,
-attaches one exact child, drives fragmented ClientHello ingress one lower step
-per call, and can abort without socket publication. Fatal peer alerts and the
-attach-time deadline are sticky operation results. One further step prepares
-immutable ServerHello/EncryptedExtensions and handshake epochs without socket
-I/O, and the next exact-generation step signs and freezes the complete server
-flight without emitting it. The operation now dispatches the five-record
-flight through exact child authority and maps retained-write backpressure
-without internal polling. It then initializes attached protected ingress,
-maps read backpressure, authenticates Finished, and drives terminal
-classifications through protected disposition, exact graceful close, and
-listener-lease release. Authenticated completion publishes one reciprocal TLS
-descriptor, retains it across post-publication cancellation or lease
-contention, and returns it only after exact lease settlement. Explicit
-`TLS-SERVER-ACCEPT-ABORT` may still win a nonactive pre-publication disposition
-or close retry and choose immediate exact teardown instead of graceful alert
-completion. If `STEP` already owns the lower transaction, abort returns busy;
-after successful socket publication, the descriptor irreversibly wins. The
-following lower-level facts
+boundary. A separate stateful OpenSSL MemoryBIO client supplies
+independent-stack evidence through the production composition: Akashic drives
+the generation-qualified KDOS server phases, adopts the published descriptor
+into the shared NIO port, and gives that already-open port to HCONN. The client
+verifies the leaf/intermediate chain and hostname, negotiates `http/1.1`,
+exchanges a real HTTP request and response, and completes peer-first
+`close_notify` plus TCP FIN. A second client succeeds on the same listener, and
+the companion recovery journey proves cancellation, deadline expiry,
+malformed-ClientHello disposition, contended cleanup, and a later good NIO
+connection. Python 3.13's `SSLObject` exposes no exporter API, so that journey
+cannot compare exporter bytes; the independent HKDF/AES-GCM oracle remains the
+exporter evidence.
+
+The lower secure-accept contract is deliberately phase-oriented and
+nonblocking. `TLS-SERVER-ACCEPT-CLAIM` returns exact context authority or a
+retryable empty/contention status. The Akashic owner carries that authority
+through ClientHello ingress, exact hello and signed-flight preparation,
+ACK-paced emission, attached client-flight ingress, disposition, publication,
+and close or role-neutral exact abort. Each KDOS entry performs one bounded
+security/transport action and retains unresolved lower authority for retry.
+XIO, not KDOS, decides operation admission, deadline/cancellation precedence,
+retained-result adoption, and exact-once cleanup. After successful publication,
+the descriptor irreversibly transfers into the shared established-port
+lifecycle. The following lower-level facts
 continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
@@ -177,8 +169,8 @@ RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
 the bounded server gate required composing the exact-child stages through the
-caller-owned operation and external-stack socket interoperability; both are
-now qualified.
+Akashic XIO/NIO owner and external-stack socket interoperability; both are now
+qualified.
 Reusing `EC-MUL` or precomputing a fixture signature remains
 test scaffolding rather than a server security result.
 
@@ -615,7 +607,7 @@ exists. The step retains a partial TLSPlaintext record in the context record
 lane and appends complete nonempty handshake fragments to the full-width
 ClientHello lane. It derives the exact message bound from the uint24 handshake
 header, rejects coalesced/trailing bytes, and never reads beyond the current
-record. `TLS-SERVER-CLIENT-HELLO-RECORD` tells an edge-triggered coordinator to
+record. `TLS-SERVER-CLIENT-HELLO-RECORD` tells the cooperative upper owner to
 step again immediately after a complete nonfinal record;
 `TLS-SERVER-CLIENT-HELLO-COMPLETE` means the parser committed the exact
 message. No or partial record progress returns `NONE` with
@@ -702,9 +694,9 @@ blocking entry points. `TLS-ALPN-CONFIGURED` returns the owned configured
 bytes. `TLS-ALPN-SELECTED` publishes the result only after the connection is
 established and the peer is authenticated; earlier calls return `0 0`. Plain
 `TLS-CONNECT` requests no ALPN.  `TLS-CONNECT-ALPN` and
-`TLS-CONNECT-HYBRID-ALPN` temporarily preserve the existing `http/1.1` caller
-while Akashic migrates; they compose the same generic bytes and are not a
-registry for additional application protocols.
+`TLS-CONNECT-HYBRID-ALPN` preserve the existing `http/1.1` compatibility
+caller; they compose the same generic bytes and are not a registry for
+additional application protocols.
 
 ### TLS exporters and serialized ownership
 
@@ -783,10 +775,10 @@ therefore isolated by context.  The high-level application receive and
 owner-held blocking-handshake paths use the transient global plaintext buffer
 only while lock 10 is held and scrub its complete contents before releasing
 ownership.  Raw `TLS-DECRYPT-RECORD` instead writes to its caller-selected
-output and does not scrub that output. With a 5,952-byte TCB and two 352-byte
-socket descriptors, the logical network-table cost is 238,344 bytes per
+output and does not scrub that output. With a 5,952-byte TCB and two 344-byte
+socket descriptors, the logical network-table cost is 238,328 bytes per
 connection. The four XMEM table allocations are normalized independently, so
-one, two, and three connections reserve 238,352, 476,688, and 715,040 bytes;
+one, two, and three connections reserve 238,336, 476,656, and 714,992 bytes;
 capacity uses the exact aggregate.
 
 The context generation protects the socket-published path. A TLS descriptor
@@ -1097,22 +1089,26 @@ failure atomicity under lock/capacity pressure, retained-seal raw-publication
 refusal after abort/unpin contention, and stale-child cleanup without touching
 the replacement. The secure-listener regression proves stale-policy rollback,
 copied ALPN, exact listener authority, credential lifetime, and close cleanup.
-The bounded public secure-accept path and independent socket interoperability
-are now qualified. The accept operation proves its listener/context lease,
-retryable wait, exact attach, fragmented ClientHello ingress, sticky
-fatal/deadline results, phase-one preparation, exact signed-flight preparation,
-ACK-paced transport, protected client ingress through Finished,
-terminal disposition/close, authenticated socket publication, exact lease
-settlement, and abort lifecycle. The OpenSSL peer additionally proves full
-public-path TCP/TLS acceptance, certificate and hostname verification, ALPN,
-bidirectional socket I/O, peer-first authenticated close, FIN, and resource
-reclamation. The disposition-affected selector passed 19/19 sequentially under
-the ordinary checked source-mode limits; the final publication-focused and
-adjoining affected
-selector passed 15/15 sequentially under ordinary checked limits. Final
-closure selectors passed 6/6 public accept-operation journeys in 39.58 seconds,
-2/2 lower socket-publication cases in 30.73 seconds, and 1/1 source-dispatch
-case in 0.46 seconds, all sequentially under the checked-in limits.
+The Akashic-owned public secure-accept path and independent socket
+interoperability are now qualified. The persistent listener owner proves
+retryable claim, fragmented ClientHello ingress, exact phase preparation,
+ACK-paced transport, protected client ingress through Finished, terminal
+disposition/close, authenticated socket adoption into the shared NIO port,
+deadline and cancellation precedence, retained success, and cooperative exact
+cleanup. The OpenSSL peers additionally prove full public-path TCP/TLS
+acceptance, certificate and hostname verification, ALPN, HCONN application I/O,
+peer-first authenticated close, FIN, listener reuse, and recovery after
+representative failures. The disposition-affected selector passed 19/19
+sequentially under the ordinary checked source-mode limits; the final
+publication-focused and adjoining affected selector passed 15/15 under
+ordinary checked limits.
+
+Before retirement, the temporary KDOS coordinator's historical closure
+selectors passed 6/6 public journeys in 39.58 seconds, alongside 2/2 lower
+socket-publication cases in 30.73 seconds and 1/1 source-dispatch case in 0.46
+seconds. Those results remain evidence for the lower phase behavior that
+Akashic now composes; the coordinator tests and public API were removed after
+replacement-path closure.
 The uint24-maximum Certificate capstone is separate maturity evidence and must
 not delay this vertical closure.
 
@@ -1124,15 +1120,16 @@ credential. None enters a product trust bundle or production credential slot.
 
 ### Secure server transport
 
-- The caller-owned bounded operation now carries its exact listener/context
-  lease and child attachment through handshake, terminal disposition,
-  deadline, authenticated socket publication, and exact lease settlement.
-  Generic `LISTEN` remains fail-closed for TLS descriptors, and secure
-  listeners route through this operation rather than `SOCK-ACCEPT`.
-- An independent OpenSSL TLS 1.3 peer now qualifies the socket lifecycle,
-  bidirectional application bytes, and close-notify/FIN completion. Exporter
-  equality remains qualified by the separate independent HKDF/AES-GCM oracle
-  because Python 3.13 `SSLObject` does not expose an exporter API.
+- KDOS owns configured listener publication, the fused exact-child claim,
+  every generation-qualified handshake/transport phase, authenticated socket
+  publication, and exact close or abort. Generic `LISTEN` remains fail-closed
+  for TLS descriptors, and `SOCK-ACCEPT` refuses secure listeners.
+- Akashic owns the persistent listener/request lifecycle through XIO and adopts
+  successful publication into the shared established TLS NIO port. Independent
+  OpenSSL TLS 1.3 clients qualify HCONN application bytes, listener reuse,
+  failure recovery, and close-notify/FIN completion. Exporter equality remains
+  qualified by the separate independent HKDF/AES-GCM oracle because Python
+  3.13 `SSLObject` does not expose an exporter API.
 
 ### Post-closure trust lifecycle
 

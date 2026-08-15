@@ -81,36 +81,27 @@ queued child directly into a pinned TLS server context, with no plaintext
 accepted socket publication. `TLS-LISTEN` also owns listener close/unpin
 cleanup. The generic `LISTEN` entry remains
 fail-closed for TLS descriptors, and `SOCK-ACCEPT` remains deliberately
-fail-closed for secure listeners. The caller-owned bounded accept operation now
-leases one exact listener incarnation, creates and pins one server context,
-waits retryably without context churn, attaches exactly one queued child, and
-drives the initial ClientHello across arbitrary TCP/TLS-record fragmentation.
-Fatal peer alerts and the attach-time deadline remain sticky until disposition
-or abort, and abort reclaims the complete authority chain without publishing a
-socket. One following step prepares immutable ServerHello and
-EncryptedExtensions plus the handshake epochs without transport I/O, and the
-next exact-generation step signs and freezes the remaining server flight. The
-operation now emits all five records through exact child authority, exposes
-retryable write backpressure between records, initializes protected ingress,
-and processes one attached client record per call. Authenticated Finished
-reaches the publication boundary. Protected terminal results now drive their
-exact alert disposition, wait for alert acknowledgement before FIN, retire the
-context, release the listener lease once, and return the original sticky
-result. Authenticated Finished now publishes one reciprocal TLS descriptor;
-the operation drops raw-context authority at that irreversible boundary,
-retains the descriptor across cancellation or lease contention, releases the
-listener lease once, and only then returns `ESTABLISHED`. An independent
-OpenSSL TLS 1.3 peer now completes a real TCP handshake through that public
-operation, verifies the server chain and hostname, negotiates `rabbit/1`,
-exchanges application bytes through the returned descriptor in both
-directions, and completes authenticated `close_notify`, FIN, and exact
-resource cleanup. That caller-owned KDOS operation is now frozen as a
-transitional regression oracle: service scheduling, deadlines, cancellation,
-retained results, and cleanup arbitration are moving to Akashic XIO/NIO and
-must be re-qualified through that path before the coordinator is removed.
-Do not extend `/TLS-SERVER-ACCEPT-OP`; the lower TLS engine and fused exact
-claim remain the KDOS boundary. Remaining protocol-profile items are broader
-maturity work. See
+fail-closed for secure listeners.
+
+Service lifecycle sits above that boundary. Akashic's persistent inbound
+listener owner uses its external-I/O operation machinery for serialization,
+deadlines, cancellation, retained success, callback containment, and exact
+cleanup. Each cooperative step invokes one generation-qualified KDOS claim,
+ingress, preparation, flight, disposition, publication, close, or abort
+primitive. After authentication, Akashic adopts the published descriptor into
+the same established KDOS-TLS NIO port used by outbound connections; HTTP's
+connection owner receives only that already-open port. Independent TLS 1.3
+clients qualify two connections on one listener, `http/1.1` ALPN, application
+bytes through the cooperative HTTP stack, authenticated `close_notify`/FIN,
+and cancellation, deadline, malformed-handshake, cleanup-contention, and
+recovery paths without exposing a plaintext accepted child.
+
+A temporary KDOS coordinator previously qualified the lower phase ordering and
+socket journey. It was retired after the Akashic path supplied equivalent
+success and recovery evidence; its recorded results remain historical evidence,
+not a current API or lifecycle layer. The compact lower TLS engine and fused
+exact claim remain the KDOS boundary. Remaining protocol-profile items are
+broader maturity work. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

@@ -1635,9 +1635,9 @@ derived from 25% of XMEM. The 256 ceiling is an implementation policy limit,
 not a wire or architectural requirement. The standard networking loader
 requires XMEM. A guarded one-connection Bank-0 allocation path remains for
 manually composed builds, but it is not a qualified deployment profile. The
-logical TLS-capable table cost is 238,344 bytes per connection; backing
+logical TLS-capable table cost is 238,328 bytes per connection; backing
 allocator alignment rounds the four allocations independently. Exact XMEM
-totals are 238,352, 476,688, and 715,040 bytes for one through three
+totals are 238,336, 476,656, and 714,992 bytes for one through three
 connections.
 
 Do not read the current fields as a general sliding window. The qualified data
@@ -1677,8 +1677,8 @@ Attached transport authority is `(TCB address, generation, owner)`. A
 1,000-byte TLS context stores the TCB generation at +968, its own incarnation
 at +976, its reciprocal socket owner at +984, and slot/close lifecycle at
 +992. `TLS-CLOSE-FREE` marks a released slot while preserving its last
-generation, so one claim creates exactly one live incarnation. A 352-byte
-socket descriptor stores the common generation at +32; its +40...+351 tail is
+generation, so one claim creates exactly one live incarnation. A 344-byte
+socket descriptor stores the common generation at +32; its +40...+343 tail is
 used only by secure listeners for copied credential/policy state, including the
 protocol-defined 255-byte ALPN maximum. A TLS socket is valid only when
 descriptor and context name each other and the context and TCB also form an
@@ -1758,8 +1758,8 @@ handler wiring.
 | `TLS-CREDENTIAL-DELETE` | `( slot+1 generation -- ior )` | On core 0, synchronously revoke a non-referenced credential, wipe its key/record and complete allocated DER-chain payload, free the payload, and stale the old handle. |
 | `TLS-SERVER-CONTEXT-BEGIN` | `( ctx slot+1 credential-generation alpn-a alpn-u -- ctx-generation ior )` | Begin a server-role handshake with one pinned credential and an owned zero-or-one-name ALPN policy. Success returns the newly claimed nonzero context generation; every failure returns generation zero. Setup is atomic and the pin remains held until publish, abort, close, or another terminal path releases it. Callers must carry the returned generation rather than recover authority by rereading a reusable context slot. |
 | `TLS-SERVER-ACCEPT-CLAIM` | `( listener-sd listener-h1 listener-generation -- ctx ctx-generation ior )` | Validate the exact secure-listener incarnation, copy its configured credential and ALPN policy into one newly pinned server context, and atomically transfer exactly one queued TCP child directly to that context. The child is never published as a plaintext socket. Empty backlog and lock/context contention return zero authority with `TLS-E-WOULD-BLOCK` or `TLS-E-BUSY`; every nonzero `ior` returns `(0,0,ior)`. An empty or contended claim does not advance a context generation. A stale listener triple cannot consume a replacement listener's queue. |
-| `TLS-SERVER-ACCEPT-ATTACH` | `( ctx ctx-generation listener listener-generation listener-owner -- ior )` | Under TLS-to-NET lock order, validate the exact context incarnation, then consume at most one exact queued child into that prepared, pinned raw server context and publish reciprocal context/TCB generation authority atomically. A stale context generation is rejected before accept-queue mutation. An empty queue returns `TLS-E-WOULD-BLOCK` without mutation; other invalid context state is rejected before queue consumption, while a stale or malformed queued transport token follows the transport's bounded discard/reclaim rules. This is the lower attachment boundary, not yet a secure socket accept or handshake driver. |
-| `TLS-SERVER-CLIENT-HELLO-STEP` | `( ctx ctx-generation -- progress alert ior )` | Make one bounded initial-handshake ingress step on the exact accepted child. It reassembles one ClientHello across arbitrary TCP segmentation and one or more nonempty TLSPlaintext handshake records; each ClientHello-fragment record may use legacy version `0x0301` or `0x0303`. A call completes at most one record and never consumes bytes from the following record. `NONE` plus `TLS-E-WOULD-BLOCK` means no complete record; `RECORD` plus zero `ior` means a nonfinal record committed and the coordinator should step again; `COMPLETE` plus zero `ior` means ClientHello admission committed. NET contention returns `NONE`/`TLS-E-BUSY`; peer framing/parser failure returns a fatal wire alert with zero `ior` and latches `CLOSING` while retaining the child and credential pin for alert/abort disposition. Dead exact transport is reclaimed; stale lower authority clears only the old binding and cannot touch a reused TCB incarnation. |
+| `TLS-SERVER-ACCEPT-ATTACH` | `( ctx ctx-generation listener listener-generation listener-owner -- ior )` | Under TLS-to-NET lock order, validate the exact context incarnation, then consume at most one exact queued child into that prepared, pinned raw server context and publish reciprocal context/TCB generation authority atomically. A stale context generation is rejected before accept-queue mutation. An empty queue returns `TLS-E-WOULD-BLOCK` without mutation; other invalid context state is rejected before queue consumption, while a stale or malformed queued transport token follows the transport's bounded discard/reclaim rules. This is a lower attachment primitive, not a secure socket accept or lifecycle driver. |
+| `TLS-SERVER-CLIENT-HELLO-STEP` | `( ctx ctx-generation -- progress alert ior )` | Make one bounded initial-handshake ingress step on the exact accepted child. It reassembles one ClientHello across arbitrary TCP segmentation and one or more nonempty TLSPlaintext handshake records; each ClientHello-fragment record may use legacy version `0x0301` or `0x0303`. A call completes at most one record and never consumes bytes from the following record. `NONE` plus `TLS-E-WOULD-BLOCK` means no complete record; `RECORD` plus zero `ior` means a nonfinal record committed and the cooperative upper owner should step again; `COMPLETE` plus zero `ior` means ClientHello admission committed. NET contention returns `NONE`/`TLS-E-BUSY`; peer framing/parser failure returns a fatal wire alert with zero `ior` and latches `CLOSING` while retaining the child and credential pin for alert/abort disposition. Dead exact transport is reclaimed; stale lower authority clears only the old binding and cannot touch a reused TCB incarnation. |
 | `TLS-PARSE-CLIENT-HELLO` | `( ctx msg-a msg-u -- alert ior )` | Retain and transactionally admit one complete TLS 1.3 ClientHello on an unbound raw server context. Once TCB or socket authority is present, callers must use the attached ingress step. Peer protocol failures return a wire alert with zero `ior`; local failures use zero alert and a negative status. |
 | `TLS-SERVER-PREPARE-HELLO-EXACT` | `( ctx ctx-generation -- alert ior )` | Generation-qualified server-hello preparation for a retained upper-layer operation. From an admitted ClientHello, apply pinned-chain signature policy, obtain checked ephemeral/random entropy, build exact ServerHello and EncryptedExtensions bytes, derive X25519/SHA-256 handshake secrets, install server-write/client-read record epochs at sequence zero, and publish the prepared server-hello phase last. A stale generation is rejected without touching a replacement context. Failures erase all phase output while retaining the admitted ClientHello and credential pin for alert/abort cleanup. |
 | `TLS-SERVER-PREPARE-FLIGHT-EXACT` | `( ctx ctx-generation -- ior )` | Generation-qualified signed-flight preparation. From the prepared server-hello phase, stream the exact Certificate transcript, sign and construct CertificateVerify and Finished, commit the final transcript digest, derive master/application/exporter secrets without installing application record epochs, and initialize the post-ClientHello emitter union. Busy/cancelled signing preserves phase-one retry; admitted crypto failure is terminal. This word prepares immutable material but performs no transport callback, and stale authority cannot mutate a reused context. |
@@ -1773,7 +1773,6 @@ handler wiring.
 | `TLS-SERVER-SOCKET-PUBLISH` | `( ctx ctx-generation -- sd ior )` | Publish one fully authenticated attached server context as a reciprocal TLS descriptor. The transaction owns TLS, credential, then NET authority; revalidates the exact pinned context and sealed child; proves descriptor capacity before unpinning; and publishes handshake/context/socket state only after every fallible admission check. Wrong context/protocol state returns `(0,TLS-E-STATE)`, credential/NET contention or capacity returns `(0,TLS-E-BUSY)` without changing the ready context, stale child authority returns `(0,TLS-E-TRANSPORT)` while retaining sealed abort authority, and success returns `(sd,0)`. An exact attached child may already be in an owner-visible close/failure state; publication preserves that status for descriptor I/O and cleanup rather than orphaning it. Defensive post-unpin failure cleanup uses the held exact NET authority; an internal cleanup-invariant breach quarantines the private descriptor rather than making it allocator-visible. |
 | `TLS-SERVER-CLOSE-EXACT-TRY` | `( ctx ctx-generation -- retired? ior )` | Attempt generation-qualified graceful close of a raw server context. Success or an already-stale incarnation returns true `retired?` and zero status; retryable lower contention returns false with its status. A stale saved generation never closes a live replacement in the same slot. |
 | `TLS-ABORT-EXACT` | `( ctx ctx-generation -- retired? ior )` | Role-neutral, generation-qualified immediate secure teardown for cancellation and terminal cleanup. It reclaims exact transport authority, releases any credential pin, and wipes/releases only the matching context incarnation; an already-stale incarnation is idempotently reported retired. Busy cleanup returns false and remains retryable, without falling back to generationless authority. |
-| `TLS-SERVER-ABORT-EXACT` | `( ctx ctx-generation -- retired? ior )` | Temporary compatibility alias of `TLS-ABORT-EXACT` for the frozen KDOS accept coordinator. New lower-engine owners use the role-neutral entry. |
 
 `TLSH-SERVER-FLIGHT-READY` (13) means that immutable plaintext flight material
 and future secrets have published; it is not transport readiness or an
@@ -1867,21 +1866,23 @@ publishes copied listener policy and an exact credential pin atomically and
 returns the opaque listener handle/generation used by the fused
 `TLS-SERVER-ACCEPT-CLAIM` boundary;
 the generic `LISTEN` entry remains fail closed for TLS descriptors, and
-`SOCK-ACCEPT` remains fail closed for secure listeners. The separate bounded
-accept operation now owns the exact listener/context lease, retryable queue
-wait, exact child attachment, fragmented ClientHello admission, phase-one
-hello/epoch preparation, exact signed-flight preparation, ACK-paced
-server-flight transport, protected client ingress, terminal disposition and
-close, authenticated socket publication, exact lease settlement, and abort.
-An independent OpenSSL TLS 1.3 peer qualifies the actual TCP accept path,
-certificate and hostname verification, ALPN, bidirectional socket I/O,
-authenticated close, FIN, and exact cleanup. Cipher-suite support is:
+`SOCK-ACCEPT` remains fail closed for secure listeners. Akashic's persistent
+listener owner drives the lower generation-qualified claim, ingress,
+preparation, flight, disposition, publication, close, and abort entries through
+XIO. Akashic owns scheduling, deadlines, cancellation, retained-result
+adoption, and cooperative cleanup; KDOS continues to own credential authority,
+wire protocol, authentication, socket publication, and exact teardown.
+Successful descriptors enter the shared established KDOS-TLS NIO port and are
+consumed unchanged by HCONN. Independent OpenSSL TLS 1.3 clients qualify the
+actual TCP accept path, certificate and hostname verification, ALPN, HTTP I/O,
+authenticated close, FIN, listener reuse, and recovery after cancellation,
+timeout, malformed input, and cleanup contention.
 
-That accept operation is frozen as a transitional regression oracle, not the
-production service-lifecycle boundary. Akashic XIO/NIO is replacing its
-scheduling, deadline, cancellation, result-retention, and cleanup arbitration;
-the independent journey must be re-qualified there before the coordinator and
-its entries below are removed.
+A temporary caller-owned KDOS coordinator previously qualified this phase
+sequence as a migration oracle. It and its public entries were removed after
+the Akashic success and recovery journeys supplied equivalent composition
+evidence; its recorded timings remain historical rather than current API
+claims. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1977,15 +1978,12 @@ now consumes that same generational authority and is no longer a transport
 incompatibility. `TLS-LISTEN` now owns atomic listener-policy publication and
 returns exact listener authority; `TLS-SERVER-ACCEPT-CLAIM` turns that
 authority plus one queued child directly into a pinned server context. The
-bounded caller-owned accept operation now owns initialization, exact
-listener/context authority, retryable empty wait, exact child attachment,
-complete handshake dispatch, terminal disposition, authenticated publication,
-lease settlement, and abort. An independent peer now qualifies the returned
-descriptor through application I/O and close; broader protocol profiles and
-parallel TLS execution remain separate maturity work.
-This describes the frozen coordinator's qualified behavior. New service code
-must compose the generation-exact lower entries through Akashic XIO and NIO;
-it must not extend this temporary operation.
+Akashic listener owner carries exact listener/context authority across
+retryable empty waits and composes the complete lower handshake, disposition,
+publication, close, and abort sequence through XIO. It adopts authenticated
+publication into the shared NIO port; an independent peer qualifies that port
+through HCONN application I/O and close. Broader protocol profiles and parallel
+TLS execution remain separate maturity work.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at
@@ -2012,8 +2010,8 @@ receive and owner-held blocking-handshake paths copy authenticated plaintext
 into connection-owned or caller storage and scrub their complete global
 staging buffer before releasing ownership.  The raw `TLS-DECRYPT-RECORD` word
 writes to its caller-selected output and does not scrub that output.  Together
-with the 5,952-byte TCB and two 352-byte socket
-descriptors, the logical network-table cost is 238,344 bytes per connection,
+with the 5,952-byte TCB and two 344-byte socket
+descriptors, the logical network-table cost is 238,328 bytes per connection,
 before backing-allocator rounding.  Capacity is derived from the exact four
 normalized table allocations rather than this logical quotient.
 
@@ -2059,12 +2057,15 @@ its context-owned RX workspace for all state retained across public calls.
 ## §17 Socket API
 
 BSD-style socket interface over TCP and TLS (§17 in `networking.f`). Each
-352-byte descriptor stores its handle generation at +32: a TCB generation for
+344-byte descriptor stores its handle generation at +32: a TCB generation for
 plain sockets or a TLS-context generation for TLS sockets. Plain operations
 resolve reciprocal `(TCB, generation, descriptor-owner)` authority. TLS
 operations first resolve reciprocal `(context, generation, descriptor-owner)`
 authority and then the context's reciprocal TCB binding. Raw TLS-context entry
-points reject a socket-owned context.
+points reject a socket-owned context. Secure-listener lifecycle is composed by
+the Akashic owner above this API: KDOS exposes the atomic listener and fused
+claim plus the generation-qualified TLS server phases, while Akashic supplies
+operation scheduling and lifecycle policy.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -2073,10 +2074,6 @@ points reject a socket-owned context.
 | `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1`; use `TLS-LISTEN` so no plaintext or unconfigured listener state is published. |
 | `TLS-LISTEN` | `( sd cred-h1 cred-gen alpn-a alpn-u early-wire-budget timeout-ms -- listener-h1 listener-generation ior )` | Atomically pin the exact server credential, copy the protocol-bounded ALPN and bounded-ingress/deadline values, create and attach the TCP listener, and publish the secure listener last. The caller retains its input descriptor; success returns the opaque TCB handle and generation needed with that descriptor by `TLS-SERVER-ACCEPT-CLAIM`, while failure returns `(0,0,ior)`. Ordinary failure rolls the TCB and credential reference back; secure-listener close reclaims queued/half-open children and releases the exact policy pin. |
 | `TLS-SERVER-ACCEPT-CLAIM` | `( listener-sd listener-h1 listener-generation -- ctx ctx-generation ior )` | Nonblocking lower secure-accept boundary: claim one queued child directly into a prepared, credential-pinned server context using the listener's copied credential/ALPN policy. No plaintext accepted descriptor is exposed. Empty backlog and contention are retryable; every failure returns zero context authority. |
-| `TLS-SERVER-ACCEPT-OP-INIT` | `( op -- ior )` | **Frozen transitional coordinator.** Initialize an 8-byte-aligned caller-owned `/TLS-SERVER-ACCEPT-OP` span. The current interface size is 144 bytes, including durable terminal alert/status and authenticated result-descriptor cells; initialization refuses overlapping internal mutable storage or reinitialization while the operation owns live authority. New lifecycle behavior belongs in Akashic XIO/NIO, and this entry is removed after replacement-path closure. |
-| `TLS-SERVER-ACCEPT-BEGIN` | `( listener-sd op -- ior )` | Lease the exact configured TLS-listener incarnation, copy its bounded policy into one newly pinned prepared server context, and enter retryable child wait. The lease makes listener close retryably busy until publication or abort releases it. |
-| `TLS-SERVER-ACCEPT-STEP` | `( op -- sd progress alert ior )` | Advance at most one lower phase without polling internally. An empty queue returns `0 TLS-SERVER-ACCEPT-WAIT-CHILD 0 TLS-E-WOULD-BLOCK` without context churn; exact attachment enters `CLIENT_HELLO`. Subsequent calls retain arbitrary TCP/TLS-record fragmentation and enter `PREPARE_HELLO` only after exact ClientHello admission without consuming a following record. One further exact-generation call prepares immutable ServerHello/EncryptedExtensions and handshake epochs without transport I/O, then enters `PREPARE_FLIGHT`; the next signs and freezes the complete server flight through exact context authority. Later calls emit one lower flight record at a time and return `WAIT_WRITE` while the prior record remains unacknowledged. The operation then initializes attached protected ingress exactly once, returns `WAIT_READ` for incomplete input, advances per committed record, and publishes only after authenticated Finished. Protected terminal classifications drive exact disposition and graceful close; retained alerts return `WAIT_WRITE` until acknowledged, FIN follows the alert ACK, the exact listener lease is then released once, and the original alert/status is returned with `TERMINAL`. Successful publication is irreversible: raw context authority is cleared, the descriptor survives cancellation or lease contention, the listener lease is released exactly once, and only the final call returns that descriptor with `ESTABLISHED`. Fatal peer alerts and attach-time deadline expiry remain sticky until cleanup. |
-| `TLS-SERVER-ACCEPT-ABORT` | `( op -- progress alert ior )` | Cancel and generation-exactly retire any attached child/prepared context before releasing the exact listener lease. If abort wins a nonactive pre-publication disposition/close retry, it may choose immediate teardown instead of finishing graceful alert/FIN delivery; an already active lower `STEP` returns abort as busy. Successful socket publication is irreversible and the descriptor wins. Cleanup is retryable under contention and idempotent after the operation reaches idle. |
 | `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Reserve a descriptor, validate the exact listener and queued child tokens, and transfer the child owner before publishing an ordinary TCP socket. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
@@ -2085,6 +2082,6 @@ points reject a socket-owned context.
 | `SOCK-TLS-IO-STATUS` | `( sd -- ior )` | Resolve exact reciprocal TLS descriptor authority and return sticky status. A fresh terminal transport result remains deferred while authenticated plaintext is retained. |
 | `SOCK-TLS-CLOSE-EXACT-TRY` | `( sd -- ior )` | Nonblocking graceful close for a caller that already knows `sd` is a TLS descriptor. It acquires TLS and NET only with try operations, validates the reciprocal socket/context generation, and retains the one NET transaction through context teardown and exact descriptor release. TLS/NET/credential contention returns `TLS-E-BUSY` without discarding unresolved authority; zero proves the descriptor was released. It performs no generic descriptor-kind snapshot. |
 | `SOCK-TLS-ABORT-EXACT-TRY` | `( sd -- status ior )` | Nonblocking immediate counterpart for a caller-known TLS descriptor. It validates and retires the reciprocal context and descriptor in one TLS-to-NET transaction; `status` is `TLS-ABORT-S-*`. Contention returns `TLS-ABORT-S-BUSY TLS-E-BUSY` and retains retry authority. It performs no generic kind snapshot or blocking NET acquisition. |
-| `CLOSE-TRY` | `( sd -- ior )` | Close through the descriptor's exact authority; preserve the descriptor and handle on stale authority, backpressure, or contention. For a secure listener, drain the exact passive TCB lineage, release the credential pin, and wipe/release the descriptor; active accept operations make close retryable-busy. |
+| `CLOSE-TRY` | `( sd -- ior )` | Close through the descriptor's exact authority; preserve the descriptor and handle on stale authority, backpressure, or contention. For a secure listener, drain the exact passive TCB lineage, release the credential pin, and wipe/release the descriptor. |
 | `CLOSE` | `( sd -- ior )` | Checked alias of `CLOSE-TRY`; zero means the descriptor has been released, while nonzero preserves retry authority. |
-| `SOCK-ABORT` | `( sd -- status ior )` | Immediately reclaim the descriptor's exact plain-TCB, reciprocal TLS-context, or secure-listener authority. A secure-listener abort drains its passive lineage, releases the credential pin, and wipes/releases the descriptor; active accept operations return retryable-busy. `status` reports the transport disposition; nonzero `ior` leaves stale, busy, or wrong-state authority visible instead of releasing an unrelated descriptor. |
+| `SOCK-ABORT` | `( sd -- status ior )` | Immediately reclaim the descriptor's exact plain-TCB, reciprocal TLS-context, or secure-listener authority. A secure-listener abort drains its passive lineage, releases the credential pin, and wipes/releases the descriptor. `status` reports the transport disposition; nonzero `ior` leaves stale, busy, or wrong-state authority visible instead of releasing an unrelated descriptor. |
