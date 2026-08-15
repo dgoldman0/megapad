@@ -1846,8 +1846,8 @@ capability generations, not durable rollback counters.
 
 ### §16.8–§16.11 TLS 1.3
 
-Authenticated bounded TLS 1.3 client profile plus a partially attached
-standard-profile server handshake boundary. The server admits ClientHello,
+Authenticated bounded TLS 1.3 client profile plus a complete bounded
+standard-profile listening server path. The server admits ClientHello,
 transactionally constructs and emits its signed flight, bounds and discards
 rejected 0-RTT TLSCiphertext, reassembles and authenticates client Finished
 under C-HS, commits the transcript through that message, installs C-AP read,
@@ -1867,8 +1867,9 @@ wait, exact child attachment, fragmented ClientHello admission, phase-one
 hello/epoch preparation, exact signed-flight preparation, ACK-paced
 server-flight transport, protected client ingress, terminal disposition and
 close, authenticated socket publication, exact lease settlement, and abort.
-Live socket interoperability
-with an independent TLS implementation is also unproved. Cipher-suite support is:
+An independent OpenSSL TLS 1.3 peer qualifies the actual TCP accept path,
+certificate and hostname verification, ALPN, bidirectional socket I/O,
+authenticated close, FIN, and exact cleanup. Cipher-suite support is:
 
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446 default)
 - **0xFF01** — AES-256-GCM + SHA3-256 (explicit private profile)
@@ -1963,10 +1964,11 @@ through exact protected alert admission. Exact authenticated socket publication
 now consumes that same generational authority and is no longer a transport
 incompatibility. `TLS-LISTEN` now owns atomic listener-policy publication; the
 bounded caller-owned accept operation now owns initialization, exact
-listener/context authority, retryable empty wait, exact child attachment, and
-abort. The active gap is extending its existing `STEP` dispatcher through the
-qualified handshake and publication steps, not a reason for further TCP or
-crypto expansion.
+listener/context authority, retryable empty wait, exact child attachment,
+complete handshake dispatch, terminal disposition, authenticated publication,
+lease settlement, and abort. An independent peer now qualifies the returned
+descriptor through application I/O and close; broader protocol profiles and
+parallel TLS execution remain separate maturity work.
 The exporter uses 8,224 bytes of global staged-output
 and intermediate scratch; its complete HkdfLabel scratch is 514 bytes. The TLS
 context is 1,000 bytes: attached TCB generation at +968, context generation at
@@ -2053,10 +2055,10 @@ points reject a socket-owned context.
 | `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
 | `LISTEN` | `( sd -- ior )` | Open a passive listener only for a TCP-marked descriptor. A TLS-marked descriptor fails closed with `-1`; use `TLS-LISTEN` so no plaintext or unconfigured listener state is published. |
 | `TLS-LISTEN` | `( sd cred-h1 cred-gen alpn-a alpn-u early-wire-budget timeout-ms -- ior )` | Atomically pin the exact server credential, copy the protocol-bounded ALPN and bounded-ingress/deadline values for the accept operation, create and attach the TCP listener, and publish the secure listener last. Ordinary failure rolls the TCB and credential reference back; secure-listener close reclaims queued/half-open children and releases the exact policy pin. |
-| `TLS-SERVER-ACCEPT-OP-INIT` | `( op -- ior )` | Initialize an 8-byte-aligned caller-owned `/TLS-SERVER-ACCEPT-OP` span. The current interface size is 144 bytes, including durable terminal alert/status and future result-descriptor cells; initialization refuses overlapping internal mutable storage or reinitialization while the operation owns live authority. |
+| `TLS-SERVER-ACCEPT-OP-INIT` | `( op -- ior )` | Initialize an 8-byte-aligned caller-owned `/TLS-SERVER-ACCEPT-OP` span. The current interface size is 144 bytes, including durable terminal alert/status and authenticated result-descriptor cells; initialization refuses overlapping internal mutable storage or reinitialization while the operation owns live authority. |
 | `TLS-SERVER-ACCEPT-BEGIN` | `( listener-sd op -- ior )` | Lease the exact configured TLS-listener incarnation, copy its bounded policy into one newly pinned prepared server context, and enter retryable child wait. The lease makes listener close retryably busy until publication or abort releases it. |
 | `TLS-SERVER-ACCEPT-STEP` | `( op -- sd progress alert ior )` | Advance at most one lower phase without polling internally. An empty queue returns `0 TLS-SERVER-ACCEPT-WAIT-CHILD 0 TLS-E-WOULD-BLOCK` without context churn; exact attachment enters `CLIENT_HELLO`. Subsequent calls retain arbitrary TCP/TLS-record fragmentation and enter `PREPARE_HELLO` only after exact ClientHello admission without consuming a following record. One further exact-generation call prepares immutable ServerHello/EncryptedExtensions and handshake epochs without transport I/O, then enters `PREPARE_FLIGHT`; the next signs and freezes the complete server flight through exact context authority. Later calls emit one lower flight record at a time and return `WAIT_WRITE` while the prior record remains unacknowledged. The operation then initializes attached protected ingress exactly once, returns `WAIT_READ` for incomplete input, advances per committed record, and publishes only after authenticated Finished. Protected terminal classifications drive exact disposition and graceful close; retained alerts return `WAIT_WRITE` until acknowledged, FIN follows the alert ACK, the exact listener lease is then released once, and the original alert/status is returned with `TERMINAL`. Successful publication is irreversible: raw context authority is cleared, the descriptor survives cancellation or lease contention, the listener lease is released exactly once, and only the final call returns that descriptor with `ESTABLISHED`. Fatal peer alerts and attach-time deadline expiry remain sticky until cleanup. |
-| `TLS-SERVER-ACCEPT-ABORT` | `( op -- progress alert ior )` | Cancel and generation-exactly retire any attached child/prepared context before releasing the exact listener lease. Cleanup is retryable under contention and idempotent after the operation reaches idle. |
+| `TLS-SERVER-ACCEPT-ABORT` | `( op -- progress alert ior )` | Cancel and generation-exactly retire any attached child/prepared context before releasing the exact listener lease. If abort wins a nonactive pre-publication disposition/close retry, it may choose immediate teardown instead of finishing graceful alert/FIN delivery; an already active lower `STEP` returns abort as busy. Successful socket publication is irreversible and the descriptor wins. Cleanup is retryable under contention and idempotent after the operation reaches idle. |
 | `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Reserve a descriptor, validate the exact listener and queued child tokens, and transfer the child owner before publishing an ordinary TCP socket. Refuse a TLS-marked listener before consuming its accept queue. |
 | `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |

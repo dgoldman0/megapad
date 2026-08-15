@@ -22,7 +22,8 @@ classification, phase-one hello/epoch preparation, exact signed-flight
 preparation, ACK-paced server-flight transport, protected client ingress,
 terminal disposition, alert-ACK-before-FIN close, authenticated socket
 publication, exact lease settlement, and abort. Independent application I/O
-and teardown over the returned socket remain unproved.
+and teardown over the returned socket are now qualified by a stateful OpenSSL
+TLS 1.3 peer using the actual KDOS TCP listener and public socket API.
 **Date:** 2026-08-15 qualification
 
 ## Scope
@@ -227,7 +228,7 @@ descriptor-owned teardown, and stale child-reuse isolation. Its focused matrix
 and final adjoining affected selector pass 15/15 sequentially under the
 ordinary checked limits.
 
-## Remaining secure-server boundary
+## Secure-server closure status
 
 The authority substrate now includes the exact authenticated socket-publication
 boundary and `TLS-LISTEN`, which copies policy, pins the exact credential, and
@@ -247,7 +248,10 @@ maps read backpressure, authenticates Finished, and drives terminal results
 through exact disposition, graceful close, and listener-lease release.
 Authenticated completion now publishes one reciprocal descriptor, preserves it
 across cancellation or lease contention, and returns it only after settling the
-exact listener lease. The remaining critical path is:
-
-- qualify the complete socket lifecycle and close against an independent TLS
-  1.3 implementation.
+exact listener lease. The independent OpenSSL journey now completes the
+TCP/TLS handshake, verifies the credential chain and hostname, negotiates
+ALPN, exchanges application bytes in both directions through the returned
+descriptor, and completes
+`close_notify`, FIN, and exact cleanup. Remaining transport work is broader
+profile, concurrency, and protocol-maximum maturity evidence; it is not a
+missing stage in this bounded secure-server path.

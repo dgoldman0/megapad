@@ -24,11 +24,15 @@ completes protected terminal disposition through alert-ACK-before-FIN close
 and exact listener-lease release. Authenticated completion now publishes one
 reciprocal descriptor, preserves it across lease-release contention and
 cancellation, settles the listener lease, and returns it as `ESTABLISHED`.
-The resulting socket lifecycle has not yet completed an independent peer
-application-I/O and cleanup journey.
+An independent OpenSSL peer now completes the actual TCP/TLS accept path,
+certificate and hostname verification, ALPN, bidirectional socket application
+I/O, authenticated close, FIN, and exact cleanup. The bounded secure-server
+transport vertical is complete; broader profiles and maximum-size/concurrency
+evidence remain maturity work.
 Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
-root. Application features must not preempt that vertical closure.
+root. Application features may now build on the bounded surface without making
+broader transport maturity a prerequisite.
 
 ---
 
@@ -100,7 +104,7 @@ root. Application features must not preempt that vertical closure.
 7. ✅ **KDOS crypto words** — `HASH`, `HMAC`, `ENCRYPT`, `DECRYPT`, `VERIFY`
 8. ✅ **Filesystem encryption** — `FENCRYPT`, `FDECRYPT`, `FS-KEY!`
 
-### Layer 2: Network Stack (Items 9–18) — 🔄 ACTIVE HARDENING
+### Layer 2: Network Stack (Items 9–18) — ✅ BOUNDED PROFILE COMPLETE
 
 Implemented network components, bottom-up:
 
@@ -115,8 +119,9 @@ Implemented network components, bottom-up:
     one-outstanding-segment sender, strict ACK/window admission, retained
     data/control replay, passive backlog, exact accepted-child transfer,
     bounded close, and TIME_WAIT quarantine
-17. 🔄 **TLS 1.3** — authenticated bounded client profile, record/application
-    data, X.509 verification, generic ALPN/exporters, native server credential,
+17. ✅ **TLS 1.3 bounded profile** — authenticated bounded client profile,
+    record/application data, X.509 verification, generic ALPN/exporters,
+    native server credential,
     deterministic signed server messages, bounded outbound replay, client
     Finished authentication, exact TCP-child attachment, attached handshake
     driving, terminal dispositions, authenticated socket publication, and an
@@ -127,15 +132,17 @@ Implemented network components, bottom-up:
     signed-flight preparation, ACK-paced server-flight transport, protected
     client ingress through authenticated Finished, protected terminal
     disposition and close, authenticated socket publication, exact lease
-    settlement, and abort; one independent interoperability journey remains
-18. 🔄 **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
+    settlement, and abort. An independent OpenSSL TLS 1.3 peer completes that
+    path through verified handshake, ALPN, bidirectional I/O, and teardown.
+18. ✅ **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
     and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
     remains fail closed for TLS descriptors, while secure listeners use the
     caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
     operation currently owns each child through exact ClientHello admission,
     phase-one and signed-flight preparation, ACK-paced server-flight transport,
     authenticated client Finished and terminal close, and can either abort or
-    publish and return the authenticated socket after exact lease settlement
+    publish and return the authenticated socket after exact lease settlement.
+    The returned socket is qualified through application I/O and graceful close.
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 
@@ -300,7 +307,6 @@ CURRENT-SITUATION.
 
 | # | Item | Effort | Priority |
 |---|------|--------|----------|
-| 16–18 | **Secure server closure** — finish phased dispatch in the caller-owned bounded TLS accept operation, then independent socket application I/O/cleanup and peer interop | active vertical; see handoff | Critical |
 | 28 | **On-device editor** — line/screen editor in Forth | ~1–2 days | Medium |
 | 30 | **Remote REPL** — UART or TCP-based remote Forth session | ~1 day | Medium |
 | 45 | **SCROLL** — network resource fetcher (HTTP/1.1, TFTP, Gopher); `SCROLL-GET`, `SCROLL-SAVE`, `SCROLL-LOAD` for over-LAN package loading | ~2–3 days | High |
@@ -319,35 +325,28 @@ CURRENT-SITUATION.
 
 ### Shortest path to "v1.0 done"
 
-Secure server closure is the active release path because a remote REPL and
-later listening services otherwise rest on an incomplete server surface.
-Preserve the completed bounded TCP and TLS crypto/message substrate.
-Exact attached-child ingress, the ACK-paced complete server flight, client
-Finished authentication, protected terminal disposition, atomic TLS socket
-publication, and policy-bearing `TLS-LISTEN` are complete. The remaining order
-is strict: extend the existing caller-owned operation beyond its exact
-wait/attach/abort boundary to drive those proven handshake, disposition, and
-publication transactions; prove application I/O and cleanup through the
-published socket; and then qualify one independent TLS peer.
-Protocol-maximum capstones, new algorithms, broader TCP, and concurrency work
-are maturity work and must not interrupt this vertical.
+Secure server closure is complete for the bounded profile. Preserve the exact
+attached-child handshake, protected terminal disposition, reciprocal socket
+publication, and independent-peer application/close evidence while later
+services consume that surface. Protocol-maximum capstones, new algorithms,
+broader TCP, and true concurrent TLS work remain maturity items rather than
+prerequisites for the completed vertical.
 
 SCROLL is an independent client-side track now that the bounded client
 TCP/TLS profile is qualified; it does not depend on server accept. It remains a
 high-value application feature for fetching Forth source, loading packages over
 LAN, and browsing docs, but work on it must be explicitly scheduled rather than
-silently expanding the active secure-server milestone.
+silently reopening the completed secure-server milestone.
 
 The editor and remote REPL are polish items that round out the
 interactive experience.  Everything else is post-v1.0 optimization
 or hardware extension.
 
 **Proposed order:**
-1. Secure transport closure (items 16–18; active handoff)
-2. SCROLL (§45) — network fetcher + SCROLL-LOAD
-3. Editor (§28) — on-device line editor
-4. Remote REPL (§30) — TCP session
-5. Tag v1.0
+1. SCROLL (§45) — network fetcher + SCROLL-LOAD
+2. Editor (§28) — on-device line editor
+3. Remote REPL (§30) — TCP session
+4. Tag v1.0
 
 ---
 
@@ -356,7 +355,7 @@ or hardware extension.
 ```
 Layer 0  Items  1– 4  Foundation                              ✅ DONE
 Layer 1  Items  5– 8  Crypto Stack                            ✅ DONE
-Layer 2  Items  9–18  Network Stack transport hardening        🔄 ACTIVE
+Layer 2  Items  9–18  Network Stack bounded profile            ✅ COMPLETE
 Layer 3  Items 19–24  Multi-Core OS                           ✅ DONE
 Layer 4  Items 25–30  Application-Level                       🔄 3 of 6 open
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto          ✅ DONE
@@ -367,7 +366,7 @@ Memory   Items 47–48  Hardening + Arenas                      ✅ DONE
 Compiler Item 49      STC Compiler Checks                     ✅ DONE
 ```
 
-**Layer 2 transport closure and three Layer 4 application items remain.**
+**Layer 2 bounded transport is closed; three Layer 4 application items remain.**
 
 ---
 

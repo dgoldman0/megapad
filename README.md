@@ -95,9 +95,13 @@ context, release the listener lease once, and return the original sticky
 result. Authenticated Finished now publishes one reciprocal TLS descriptor;
 the operation drops raw-context authority at that irreversible boundary,
 retains the descriptor across cancellation or lease contention, releases the
-listener lease once, and only then returns `ESTABLISHED`. The remaining
-functional gate is to prove one independent TLS peer exchange, application
-I/O, and graceful cleanup. See
+listener lease once, and only then returns `ESTABLISHED`. An independent
+OpenSSL TLS 1.3 peer now completes a real TCP handshake through that public
+operation, verifies the server chain and hostname, negotiates `rabbit/1`,
+exchanges application bytes through the returned descriptor in both
+directions, and completes authenticated `close_notify`, FIN, and exact
+resource cleanup. Remaining server items are broader-profile maturity work
+rather than missing main functionality. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

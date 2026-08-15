@@ -17,8 +17,11 @@ server-flight transport, protected client ingress through authenticated
 Finished, terminal disposition, alert-ACK-before-FIN close, authenticated
 socket publication, exact lease release, and abort. The completed operation
 returns the descriptor only after publication authority and listener accounting
-are settled. The active critical path is now independent interoperability over
-that socket.
+are settled. An independent OpenSSL TLS 1.3 peer now qualifies the actual TCP
+listener, public accept operation, reciprocal socket, bidirectional
+application I/O, authenticated close, FIN, and complete local cleanup. The
+secure-server vertical is closed for the bounded profile; broader profile and
+concurrency work remains maturity rather than missing main functionality.
 Last updated: 2026-08-15
 
 ## Purpose
@@ -45,7 +48,8 @@ secure byte stream and should not implement another TLS engine.  Listener
 policy, application protocol behavior, peer authorization, and service
 identity remain higher-layer responsibilities.
 
-The current implementation is not yet a complete listening TLS server. KDOS
+The current implementation is a complete listening server for the documented
+bounded TLS 1.3 profile. KDOS
 admits and retains a full-width ClientHello, applies the pinned credential
 policy, obtains one checked 64-byte entropy transaction, constructs exact
 ServerHello and EncryptedExtensions messages, performs X25519, hashes
@@ -57,8 +61,9 @@ transcript digest, and derives master, application, and exporter secrets. A
 connection-owned emitter now retains one exact record across backpressure,
 emits plaintext ServerHello followed by MSS-fitting protected records through
 Finished, commits its sequence and cursors only after exact admission, and
-installs only the S-AP write epoch after Finished admission. Its transport
-callback qualification remains socket-independent.
+installs only the S-AP write epoch after Finished admission. Lower emitter
+qualification remains useful in isolation, while the complete public path is
+also exercised over the actual KDOS TCP and socket layers.
 `TLS-SERVER-CONTEXT-BEGIN` returns its newly claimed context generation, and
 `TLS-SERVER-ACCEPT-ATTACH` requires that carried token before it consumes one
 generation-qualified queued child and publishes reciprocal context/TCB
@@ -107,7 +112,13 @@ socket-independent composition test uses a Python-standard-library
 SHA-256/HMAC/HKDF oracle plus a fixed externally generated AES-GCM
 client-Finished record, reaches publication, checks published ALPN and
 independently derived exporter output. This qualifies the byte-level protocol
-boundary; it is not live interoperability with an independent TLS stack.
+boundary. A separate stateful OpenSSL MemoryBIO client now supplies live
+independent-stack evidence: it performs the TCP/TLS handshake through
+`TLS-SERVER-ACCEPT-STEP`, verifies the leaf/intermediate chain and hostname,
+negotiates `rabbit/1`, exchanges application data through public `SEND` and
+`RECV`, and completes peer-first `close_notify` plus TCP FIN. Python 3.13's
+`SSLObject` exposes no exporter API, so that journey cannot compare exporter
+bytes; the independent HKDF/AES-GCM oracle remains the exporter evidence.
 The initial bounded secure-accept lifecycle is now present: caller storage owns
 the exact listener lease and prepared context across empty-queue retries,
 attaches one exact child, drives fragmented ClientHello ingress one lower step
@@ -122,9 +133,12 @@ maps read backpressure, authenticates Finished, and drives terminal
 classifications through protected disposition, exact graceful close, and
 listener-lease release. Authenticated completion publishes one reciprocal TLS
 descriptor, retains it across post-publication cancellation or lease
-contention, and returns it only after exact lease settlement. The remaining
-server work is to prove interoperability over that socket with an independent TLS
-implementation. The following lower-level facts
+contention, and returns it only after exact lease settlement. Explicit
+`TLS-SERVER-ACCEPT-ABORT` may still win a nonactive pre-publication disposition
+or close retry and choose immediate exact teardown instead of graceful alert
+completion. If `STEP` already owns the lower transaction, abort returns busy;
+after successful socket publication, the descriptor irreversibly wins. The
+following lower-level facts
 continue to bound an authenticated server role:
 
 - P-256 `EC-MUL` branches on scalar bits and remains qualified only for public
@@ -155,9 +169,9 @@ client signature offer. The native secret-scalar operation, deterministic
 RFC 6979 generation, fixed-work signing arithmetic, canonical DER staging,
 complete signer scratch cleanup, lower-owned credential storage, public-key
 matching, and cancellation publication arbitration are implemented. Closing
-the server gate still requires composing the qualified exact-child stages
-through the remaining phases of the existing caller-owned accept operation,
-followed by external-stack socket interoperability.
+the bounded server gate required composing the exact-child stages through the
+caller-owned operation and external-stack socket interoperability; both are
+now qualified.
 Reusing `EC-MUL` or precomputing a fixture signature remains
 test scaffolding rather than a server security result.
 
@@ -1074,17 +1088,22 @@ failure atomicity under lock/capacity pressure, retained-seal raw-publication
 refusal after abort/unpin contention, and stale-child cleanup without touching
 the replacement. The secure-listener regression proves stale-policy rollback,
 copied ALPN, exact listener authority, credential lifetime, and close cleanup.
-Public secure acceptance and interoperability over sockets with an independent
-TLS stack remain unproved. The bounded accept operation currently proves its
-listener/context lease, retryable wait, exact attach, fragmented ClientHello
-ingress, sticky fatal/deadline results, phase-one preparation, exact signed-flight
-preparation, ACK-paced transport, protected client ingress through Finished,
+The bounded public secure-accept path and independent socket interoperability
+are now qualified. The accept operation proves its listener/context lease,
+retryable wait, exact attach, fragmented ClientHello ingress, sticky
+fatal/deadline results, phase-one preparation, exact signed-flight preparation,
+ACK-paced transport, protected client ingress through Finished,
 terminal disposition/close, authenticated socket publication, exact lease
-settlement, and abort lifecycle. Independent socket interoperability remains
-unproved. The disposition
-affected selector passed 19/19 sequentially under the ordinary checked
-source-mode limits; the final publication-focused and adjoining affected
-selector passed 15/15 sequentially under ordinary checked limits.
+settlement, and abort lifecycle. The OpenSSL peer additionally proves full
+public-path TCP/TLS acceptance, certificate and hostname verification, ALPN,
+bidirectional socket I/O, peer-first authenticated close, FIN, and resource
+reclamation. The disposition-affected selector passed 19/19 sequentially under
+the ordinary checked source-mode limits; the final publication-focused and
+adjoining affected
+selector passed 15/15 sequentially under ordinary checked limits. Final
+closure selectors passed 6/6 public accept-operation journeys in 39.58 seconds,
+2/2 lower socket-publication cases in 30.73 seconds, and 1/1 source-dispatch
+case in 0.46 seconds, all sequentially under the checked-in limits.
 The uint24-maximum Certificate capstone is separate maturity evidence and must
 not delay this vertical closure.
 
@@ -1092,18 +1111,19 @@ Signer and credential fixtures use only standardized or synthetic test
 scalars, including the RFC 6979 Appendix A P-256 key and a synthetic `d=3`
 credential. None enters a product trust bundle or production credential slot.
 
-## Active Transport Closure and Deferred Maturity
+## Completed Transport Closure and Deferred Maturity
 
 ### Secure server transport
 
-- Extend the existing caller-owned bounded operation from its exact
-  listener/context lease and child-attachment boundary through the qualified
-  exact-child handshake, terminal disposition, deadline, and authenticated
-  socket-publication phases. Keep generic `LISTEN` fail-closed for TLS
-  descriptors and route secure listeners only through this operation rather
-  than `SOCK-ACCEPT`.
-- Qualify socket lifecycle, application bytes, exporter equality, and
-  close-notify/FIN completion against an independent TLS 1.3 implementation.
+- The caller-owned bounded operation now carries its exact listener/context
+  lease and child attachment through handshake, terminal disposition,
+  deadline, authenticated socket publication, and exact lease settlement.
+  Generic `LISTEN` remains fail-closed for TLS descriptors, and secure
+  listeners route through this operation rather than `SOCK-ACCEPT`.
+- An independent OpenSSL TLS 1.3 peer now qualifies the socket lifecycle,
+  bidirectional application bytes, and close-notify/FIN completion. Exporter
+  equality remains qualified by the separate independent HKDF/AES-GCM oracle
+  because Python 3.13 `SSLObject` does not expose an exporter API.
 
 ### Post-closure trust lifecycle
 
