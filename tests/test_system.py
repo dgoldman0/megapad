@@ -35399,6 +35399,86 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
+    def test_socket_connect_rollback_try_preserves_claim_under_net_contention(self):
+        """A private socket claim is replayed exactly only after NET admits it."""
+        text = self._run_kdos([
+            "VARIABLE rbtry-sd VARIABLE rbtry-state",
+            "SOCK-TYPE-TLS SOCKET rbtry-sd !",
+            "rbtry-sd @ SOCK-CONNECT-CLAIM rbtry-state !",
+            "1 NET-TX-OWNER-DEPTH !",
+            "COREID 1+ NET-TX-OWNER-CORE !",
+            "TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "rbtry-sd @ rbtry-state @ SOCK-CONNECT-ROLLBACK-TRY",
+            '." BUSY-IOR=" .',
+            'rbtry-sd @ SOCK.STATE @ ." BUSY-STATE=" .',
+            '_NET-TX-OWNER? ." FOREIGN-NET=" .',
+            "_NET-TX-OWNER-CLEAR",
+            "rbtry-sd @ rbtry-state @ SOCK-CONNECT-ROLLBACK-TRY",
+            '." ROLLBACK-IOR=" .',
+            'rbtry-sd @ SOCK.STATE @ ." ROLLBACK-STATE=" .',
+            "rbtry-sd @ SOCK-TLS-ABORT-EXACT-TRY",
+            '." RELEASE-IOR=" . ." RELEASE-STATUS=" .',
+            'rbtry-sd @ SOCK.STATE @ ." END-STATE=" .',
+            'DEPTH ." ROLLBACK-DEPTH=" .',
+        ])
+        for token in (
+            "BUSY-IOR=-4230 ", "BUSY-STATE=5 ", "FOREIGN-NET=0 ",
+            "ROLLBACK-IOR=0 ", "ROLLBACK-STATE=2 ",
+            "RELEASE-IOR=0 RELEASE-STATUS=2 ", "END-STATE=0 ",
+            "ROLLBACK-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_publish_try_is_retryable_under_net_contention(self):
+        """Try-publication keeps the raw reciprocal authority byte-exact."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE pubtry-sd VARIABLE pubtry-ctx VARIABLE pubtry-tcb",
+            "SOCK-TYPE-TLS SOCKET pubtry-sd !",
+            "pubtry-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ pubtry-ctx !",
+            "pubtry-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT pubtry-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED pubtry-ctx @ TLS-CTX.STATE !",
+            "1 pubtry-ctx @ TLS-CTX.PEER-AUTH !",
+            "TCB-ALLOC DROP 0 TCB-N pubtry-tcb !",
+            "TCPS-ESTABLISHED pubtry-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "pubtry-ctx @ pubtry-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "1 NET-TX-OWNER-DEPTH !",
+            "COREID 1+ NET-TX-OWNER-CORE !",
+            "TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "pubtry-sd @ pubtry-ctx @ SOCK-TLS-PUBLISH-TRY",
+            '." BUSY-IOR=" . ." BUSY-PUBLISHED=" .',
+            'pubtry-sd @ SOCK.STATE @ ." BUSY-SD-STATE=" .',
+            'pubtry-ctx @ TLS-CTX.SOCKET-OWNER @ 0= ." RAW-CTX=" .',
+            'pubtry-tcb @ pubtry-ctx @ TLS-CTX.TCB-GENERATION @ '
+            'pubtry-ctx @ TCB-ATTACHED-TO? ." RAW-TCB=" .',
+            "_NET-TX-OWNER-CLEAR",
+            "pubtry-sd @ pubtry-ctx @ SOCK-TLS-PUBLISH-TRY",
+            '." PUBLISH-IOR=" . ." PUBLISHED=" .',
+            'pubtry-sd @ SOCK.STATE @ ." PUBLISHED-STATE=" .',
+            'pubtry-ctx @ TLS-CTX.SOCKET-OWNER @ pubtry-sd @ = '
+            '." RECIPROCAL=" .',
+            "TLS-OWNER-RELEASE",
+            "pubtry-sd @ SOCK-TLS-ABORT-EXACT-TRY 2DROP",
+            'TLS-OWNER-DEPTH @ NET-TX-OWNER-DEPTH @ OR 0= '
+            '." OWNERS-CLEAR=" .',
+            'pubtry-sd @ SOCK.STATE @ ." END-SD=" .',
+            'pubtry-ctx @ TLS-CTX-CLAIMED? ." END-CTX=" .',
+            'pubtry-tcb @ TCB.STATE @ ." END-TCB=" .',
+            'DEPTH ." PUBLISH-DEPTH=" .',
+        ])
+        for token in (
+            "BUSY-IOR=-4206 BUSY-PUBLISHED=0 ",
+            "BUSY-SD-STATE=5 ", "RAW-CTX=-1 ", "RAW-TCB=-1 ",
+            "PUBLISH-IOR=0 PUBLISHED=-1 ", "PUBLISHED-STATE=2 ",
+            "RECIPROCAL=-1 ", "OWNERS-CLEAR=-1 ",
+            "END-SD=0 ", "END-CTX=0 ", "END-TCB=0 ",
+            "PUBLISH-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
     def test_tls_socket_exact_try_cleanup_is_retryable_under_net_contention(self):
         """Known-TLS try entries retain exact authority when NET is busy."""
         text = self._run_kdos([

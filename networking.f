@@ -17735,6 +17735,14 @@ VARIABLE _SCON-RB-STATE
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
 
+\ Cooperative callers use the same rollback body without waiting for NET.
+: SOCK-CONNECT-ROLLBACK-TRY  ( sd original-state -- ior )
+    NET-TX-TRY IF 2DROP TCP-ACCEPT-E-BUSY EXIT THEN
+    ['] (SOCK-CONNECT-ROLLBACK) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN
+    0 ;
+
 VARIABLE _SCON-PUB-SD
 VARIABLE _SCON-PUB-STATE
 VARIABLE _SCON-PUB-HANDLE
@@ -17866,6 +17874,15 @@ VARIABLE _STLS-U
     ['] (SOCK-TLS-PUBLISH) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
+
+\ The caller retains TLS ownership; ordinary NET contention is retryable.
+: SOCK-TLS-PUBLISH-TRY  ( sd ctx -- published? ior )
+    _TLS-OWNER? 0= IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    NET-TX-TRY IF 2DROP 0 TLS-E-BUSY EXIT THEN
+    ['] (SOCK-TLS-PUBLISH) CATCH >R
+    NET-TX-RELEASE
+    R> ?DUP IF THROW THEN
+    0 ;
 
 \ Publish one successfully authenticated attached server context as a TLS
 \ descriptor.  The complete transaction owns TLS -> credential -> NET, proves
