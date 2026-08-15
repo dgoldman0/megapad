@@ -20,8 +20,9 @@ listener/context authority, retryable empty-queue waits, exact child
 attachment, fragmented ClientHello ingress, sticky early failure/deadline
 classification, phase-one hello/epoch preparation, exact signed-flight
 preparation, ACK-paced server-flight transport, protected client ingress,
-terminal disposition, alert-ACK-before-FIN close, exact terminal lease release,
-and abort. Its socket-result publication phase is not yet dispatched.
+terminal disposition, alert-ACK-before-FIN close, authenticated socket
+publication, exact lease settlement, and abort. Independent application I/O
+and teardown over the returned socket remain unproved.
 **Date:** 2026-08-15 qualification
 
 ## Scope
@@ -236,17 +237,17 @@ a secure child because secure acceptance uses the separate caller-owned
 operation. That operation now holds the exact listener lease and prepared
 context across retryable empty waits, attaches one exact child, and can abort
 the complete chain without publication. It also dispatches one bounded
-ClientHello ingress step per call, preserves a following TLS record, and stops
-only after one further step has prepared immutable ServerHello,
+ClientHello ingress step per call, preserves a following TLS record, and then
+prepares immutable ServerHello,
 EncryptedExtensions, and handshake epochs without transport I/O, then signs
 and freezes the complete server flight through exact context authority. It now
 dispatches all five flight records through the attached child with retryable
 write backpressure and no internal polling, then initializes protected ingress,
 maps read backpressure, authenticates Finished, and drives terminal results
-through exact disposition, graceful close, and listener-lease release. The remaining
-critical path is:
+through exact disposition, graceful close, and listener-lease release.
+Authenticated completion now publishes one reciprocal descriptor, preserves it
+across cancellation or lease contention, and returns it only after settling the
+exact listener lease. The remaining critical path is:
 
-- extend its `STEP` dispatcher through the qualified socket-publication
-  transaction; and
 - qualify the complete socket lifecycle and close against an independent TLS
   1.3 implementation.

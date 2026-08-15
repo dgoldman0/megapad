@@ -25588,7 +25588,7 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         self.assertEqual(len(payload_frames), 5)
 
     def test_server_accept_op_authenticates_client_finished(self):
-        """The operation begins attached ingress and stops at publication."""
+        """Authenticated ingress publishes and returns one exact TLS socket."""
         client_record, *_ = self._client_finished_reference()
         lines, ack_frames, record_lengths = (
             self._accept_op_deterministic_flight_lines()
@@ -25644,13 +25644,60 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." OPL-FIN-RESULT=" op-late TSAO.RESULT-SD @ 0= '
             'op-late TSAO.RESULT-ALERT @ 0= AND '
             'op-late TSAO.RESULT-IOR @ 0= AND .',
+            "VARIABLE opl-published",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-PUBLISH-IOR=" . ." OPL-PUBLISH-ALERT=" . '
+            '." OPL-PUBLISH-PROGRESS=" . ." OPL-PUBLISH-SD=" '
+            '.',
+            'op-late TSAO.RESULT-SD @ opl-published !',
+            '." OPL-PUBLISH-STATE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PUBLISHED-LEASE = .',
+            '." OPL-PUBLISH-OP=" op-late TSAO.CTX @ 0= '
+            'op-late TSAO.CTX-GEN @ 0= AND op-late TSAO.RESULT-SD @ '
+            'opl-published @ = AND .',
+            '." OPL-PUBLISH-SOCKET=" opl-published @ SOCK.STATE @ '
+            'SOCKST-TLS = opl-published @ SOCK.HANDLE @ opl-ctx @ = AND '
+            'opl-published @ SOCK.HANDLE-GEN @ opl-ctx-gen @ = AND '
+            'opl-ctx @ TLS-CTX.SOCKET-OWNER @ opl-published @ = AND .',
+            '." OPL-PUBLISH-AUTH=" opl-child @ opl-cgen @ opl-ctx @ '
+            'TCB-ATTACHED-TO? opl-ctx @ TLS-CTX.STATE @ '
+            'TLSS-ESTABLISHED = AND opl-ctx @ TLS-CTX.PEER-AUTH @ 1 = '
+            'AND opl-ctx @ _TLS-SERVER-PINNED? 0= AND .',
+            '." OPL-PUBLISH-LEASE=" op-late TSAO.LEASE-HELD @ 0<> '
+            'opl-sd @ SOCK.TLS-ACTIVE-OPS @ 1 = AND '
+            'tc-slot @ 1- _TC@ TC.REFS + @ 1 = AND .',
             "op-late TLS-SERVER-ACCEPT-ABORT",
-            '." OPL-ABORT-IOR=" . ." OPL-ABORT-ALERT=" . '
-            '." OPL-ABORT-PROGRESS=" .',
-            '." OPL-ABORT-CLEAN=" op-late TSAO.STATE @ '
-            'TLS-SERVER-ACCEPT-ST-IDLE = opl-ctx @ TLS-CTX-CLAIMED? 0= '
-            'AND opl-child @ TCB.STATE @ TCPS-CLOSED = AND '
-            'opl-sd @ SOCK.TLS-ACTIVE-OPS @ 0= AND .',
+            '." OPL-PUBLISHED-ABORT-IOR=" . '
+            '." OPL-PUBLISHED-ABORT-ALERT=" . '
+            '." OPL-PUBLISHED-ABORT-PROGRESS=" .',
+            '." OPL-PUBLISHED-ABORT-SAFE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PUBLISHED-LEASE = op-late '
+            'TSAO.RESULT-SD @ opl-published @ = AND opl-ctx @ '
+            'TLS-CTX.SOCKET-OWNER @ opl-published @ = AND .',
+            "NET-TX-TRY DROP TASK-ID 1+ NET-TX-OWNER-TASK !",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-LEASE-WAIT-IOR=" . ." OPL-LEASE-WAIT-ALERT=" . '
+            '." OPL-LEASE-WAIT-PROGRESS=" . '
+            '." OPL-LEASE-WAIT-SD=" .',
+            '." OPL-LEASE-WAIT-SAFE=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-PUBLISHED-LEASE = op-late '
+            'TSAO.RESULT-SD @ opl-published @ = AND opl-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ 1 = AND .',
+            "TASK-ID NET-TX-OWNER-TASK ! NET-TX-RELEASE",
+            "op-late TLS-SERVER-ACCEPT-STEP",
+            '." OPL-DONE-IOR=" . ." OPL-DONE-ALERT=" . '
+            '." OPL-DONE-PROGRESS=" . ." OPL-DONE-SD=" '
+            'opl-published @ = .',
+            '." OPL-DONE-OP=" op-late TSAO.STATE @ '
+            'TLS-SERVER-ACCEPT-ST-IDLE = op-late TSAO.LEASE-HELD @ 0= '
+            'AND op-late TSAO.RESULT-SD @ 0= AND opl-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ 0= AND .',
+            'op-late TLS-SERVER-ACCEPT-OP-INIT ." OPL-REINIT=" .',
+            'opl-published @ SOCK-ABORT ." OPL-SOCK-ABORT-IOR=" . '
+            '." OPL-SOCK-ABORT-STATUS=" .',
+            '." OPL-SOCK-CLEAN=" opl-published @ SOCK.STATE @ '
+            'SOCKST-FREE = opl-ctx @ TLS-CTX-CLAIMED? 0= AND '
+            'opl-child @ TCB.STATE @ TCPS-CLOSED = AND .',
             'opl-sd @ CLOSE-TRY ." OPL-CLOSE=" .',
             'tc-slot @ tc-gen @ TLS-CREDENTIAL-DELETE ." OPL-DELETE=" .',
             '." OPL-OWNERS=" TLS-OWNER-DEPTH @ 0= '
@@ -25678,8 +25725,23 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "OPL-FIN-PROGRESS=1 OPL-FIN-SD=0 ",
             "OPL-FIN-STATE=-1 ", "OPL-FIN-CTX=-1 ",
             "OPL-FIN-AUTH=-1 ", "OPL-FIN-RESULT=-1 ",
-            "OPL-ABORT-IOR=0 OPL-ABORT-ALERT=0 ",
-            "OPL-ABORT-PROGRESS=7 ", "OPL-ABORT-CLEAN=-1 ",
+            "OPL-PUBLISH-IOR=0 OPL-PUBLISH-ALERT=0 ",
+            "OPL-PUBLISH-PROGRESS=1 OPL-PUBLISH-SD=0 ",
+            "OPL-PUBLISH-STATE=-1 ", "OPL-PUBLISH-OP=-1 ",
+            "OPL-PUBLISH-SOCKET=-1 ", "OPL-PUBLISH-AUTH=-1 ",
+            "OPL-PUBLISH-LEASE=-1 ",
+            "OPL-PUBLISHED-ABORT-IOR=-4206 ",
+            "OPL-PUBLISHED-ABORT-ALERT=0 ",
+            "OPL-PUBLISHED-ABORT-PROGRESS=5 ",
+            "OPL-PUBLISHED-ABORT-SAFE=-1 ",
+            "OPL-LEASE-WAIT-IOR=-4206 OPL-LEASE-WAIT-ALERT=0 ",
+            "OPL-LEASE-WAIT-PROGRESS=4 OPL-LEASE-WAIT-SD=0 ",
+            "OPL-LEASE-WAIT-SAFE=-1 ",
+            "OPL-DONE-IOR=0 OPL-DONE-ALERT=0 ",
+            "OPL-DONE-PROGRESS=6 OPL-DONE-SD=-1 ",
+            "OPL-DONE-OP=-1 ", "OPL-REINIT=0 ",
+            "OPL-SOCK-ABORT-IOR=0 OPL-SOCK-ABORT-STATUS=1 ",
+            "OPL-SOCK-CLEAN=-1 ",
             "OPL-CLOSE=0 ", "OPL-DELETE=0 ",
             "OPL-OWNERS=-1 ", "OPL-DEPTH=0 ",
         ):

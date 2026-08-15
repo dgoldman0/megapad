@@ -8,16 +8,17 @@ flight, protected client-Finished ingress, and protected terminal disposition
 are now qualified. Exact authenticated accepted-socket publication is also
 qualified. `TLS-LISTEN` now atomically copies ALPN/early-data/deadline policy,
 pins the exact credential, publishes the TCP listener, and owns exact setup
-rollback plus listener close/unpin cleanup. The active critical path is
-now to extend the caller-owned bounded accept operation beyond its completed
-exact listener/context lease, retryable wait, child attachment, fragmented
+rollback plus listener close/unpin cleanup. The caller-owned bounded accept
+operation now owns its complete critical path: exact listener/context lease,
+retryable wait, child attachment, fragmented
 ClientHello admission, sticky early failure/deadline classification,
 phase-one hello/epoch preparation, exact signed-flight preparation, ACK-paced
 server-flight transport, protected client ingress through authenticated
-Finished, terminal disposition, alert-ACK-before-FIN close, exact terminal
-lease release, and abort. Its current boundary is authenticated socket
-publication; the resulting socket must then prove independent
-interoperability.
+Finished, terminal disposition, alert-ACK-before-FIN close, authenticated
+socket publication, exact lease release, and abort. The completed operation
+returns the descriptor only after publication authority and listener accounting
+are settled. The active critical path is now independent interoperability over
+that socket.
 Last updated: 2026-08-15
 
 ## Purpose
@@ -119,9 +120,10 @@ flight through exact child authority and maps retained-write backpressure
 without internal polling. It then initializes attached protected ingress,
 maps read backpressure, authenticates Finished, and drives terminal
 classifications through protected disposition, exact graceful close, and
-listener-lease release. The remaining server work is to drive that same
-operation through socket publication and then
-prove interoperability over the resulting socket with an independent TLS
+listener-lease release. Authenticated completion publishes one reciprocal TLS
+descriptor, retains it across post-publication cancellation or lease
+contention, and returns it only after exact lease settlement. The remaining
+server work is to prove interoperability over that socket with an independent TLS
 implementation. The following lower-level facts
 continue to bound an authenticated server role:
 
@@ -1077,8 +1079,9 @@ TLS stack remain unproved. The bounded accept operation currently proves its
 listener/context lease, retryable wait, exact attach, fragmented ClientHello
 ingress, sticky fatal/deadline results, phase-one preparation, exact signed-flight
 preparation, ACK-paced transport, protected client ingress through Finished,
-terminal disposition/close, exact terminal lease release, and abort lifecycle
-but stops at publication. The disposition
+terminal disposition/close, authenticated socket publication, exact lease
+settlement, and abort lifecycle. Independent socket interoperability remains
+unproved. The disposition
 affected selector passed 19/19 sequentially under the ordinary checked
 source-mode limits; the final publication-focused and adjoining affected
 selector passed 15/15 sequentially under ordinary checked limits.

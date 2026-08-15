@@ -92,9 +92,12 @@ and processes one attached client record per call. Authenticated Finished
 reaches the publication boundary. Protected terminal results now drive their
 exact alert disposition, wait for alert acknowledgement before FIN, retire the
 context, release the listener lease once, and return the original sticky
-result. The immediate release path is to dispatch authenticated socket
-publication, then prove one
-independent TLS peer exchange, application I/O, and graceful cleanup. See
+result. Authenticated Finished now publishes one reciprocal TLS descriptor;
+the operation drops raw-context authority at that irreversible boundary,
+retains the descriptor across cancellation or lease contention, releases the
+listener lease once, and only then returns `ESTABLISHED`. The remaining
+functional gate is to prove one independent TLS peer exchange, application
+I/O, and graceful cleanup. See
 [`docs/tls-hardening.md`](docs/tls-hardening.md) for current claims and
 nonclaims.
 

@@ -7,7 +7,7 @@ cohesive as a v1.0 release.
 
 **Snapshot audited: 2026-03-07** (425 commits, 140K total lines, 165 tracked files)
 
-**Current correction (2026-08-14):** The counts below remain a historical
+**Current correction (2026-08-15):** The counts below remain a historical
 snapshot. The bounded one-segment TCP data/control/close profile is qualified.
 Layer 2 now has exact attached-child ClientHello ingress, the complete
 ACK-paced server flight, authenticated client-Finished ingress, protected
@@ -21,9 +21,10 @@ and freezes the complete server flight through exact context authority. It
 also dispatches the five-record server flight through ACK-paced exact child
 transport, initializes protected ingress, authenticates client Finished, and
 completes protected terminal disposition through alert-ACK-before-FIN close
-and exact listener-lease release. It remains incomplete because that operation
-stops at socket publication, and the
-resulting socket lifecycle has not completed an independent peer
+and exact listener-lease release. Authenticated completion now publishes one
+reciprocal descriptor, preserves it across lease-release contention and
+cancellation, settles the listener lease, and returns it as `ESTABLISHED`.
+The resulting socket lifecycle has not yet completed an independent peer
 application-I/O and cleanup journey.
 Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
@@ -125,17 +126,16 @@ Implemented network components, bottom-up:
     early failure/deadline results, phase-one hello/epoch preparation, exact
     signed-flight preparation, ACK-paced server-flight transport, protected
     client ingress through authenticated Finished, protected terminal
-    disposition and close, and abort; its remaining publication phase
-    and one independent interoperability journey remain
+    disposition and close, authenticated socket publication, exact lease
+    settlement, and abort; one independent interoperability journey remains
 18. 🔄 **Socket API** — ordinary TCP connect/listen/accept, TLS client connect,
     and atomic policy-bearing `TLS-LISTEN` exist. The generic `LISTEN` entry
     remains fail closed for TLS descriptors, while secure listeners use the
     caller-owned bounded accept operation rather than `SOCK-ACCEPT`. That
     operation currently owns each child through exact ClientHello admission,
     phase-one and signed-flight preparation, ACK-paced server-flight transport,
-    authenticated client Finished, and terminal close, and can abort, but does
-    not yet publish the
-    authenticated socket
+    authenticated client Finished and terminal close, and can either abort or
+    publish and return the authenticated socket after exact lease settlement
 
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 
