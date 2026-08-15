@@ -25235,8 +25235,8 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
         ):
             self.assertIn(token, text)
 
-    def test_server_accept_op_reassembles_and_prepares_signed_flight(self):
-        """One bounded operation drives ingress through signed-flight readiness."""
+    def test_server_accept_op_dispatches_ack_paced_server_flight(self):
+        """One bounded operation drives fragmented ingress and the paced flight."""
         hello = self._client_hello()
         first_record = self._tls_plaintext(hello[:2], version=0x0301)
         second_record = self._tls_plaintext(hello[2:], version=0x0303)
@@ -25260,6 +25260,21 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
                 4096, segment,
             ))
             seq += len(segment)
+
+        sent: list[bytes] = []
+
+        def acknowledge_server_record(nic, frame):
+            raw = bytes(frame)
+            sent.append(raw)
+            parsed = TestKDOSNetStack._parse_tcp_frame(raw)
+            if parsed is None or not parsed["payload"]:
+                return
+            nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                nic_mac, peer_mac, peer_ip, local_ip,
+                50000, 443, parsed["ack"],
+                (parsed["seq"] + len(parsed["payload"])) & 0xFFFFFFFF,
+                TestKDOSNetStack.TCP_ACK, 4096, b"",
+            ))
 
         lines, _ = self._provision_lines()
         lines += self._forth_bytes("op-ingress-alpn", self.ALPN)
@@ -25417,6 +25432,47 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'opi-sd @ SOCK.TLS-ACTIVE-OPS @ 1 = AND .',
             '." OPI-FLIGHT-PREP-NO-PUBLISH=" opi-ctx @ '
             'TLS-CTX.SOCKET-OWNER @ 0= opi-live-sockets 1 = AND .',
+        ]
+        for index in range(5):
+            expected_state = (
+                "TLS-SERVER-ACCEPT-ST-CLIENT-FLIGHT-BEGIN"
+                if index == 4 else "TLS-SERVER-ACCEPT-ST-FLIGHT"
+            )
+            lines += [
+                "op-ingress TLS-SERVER-ACCEPT-STEP",
+                f'." OPI-FLIGHT{index}-IOR=" . '
+                f'." OPI-FLIGHT{index}-ALERT=" . '
+                f'." OPI-FLIGHT{index}-PROGRESS=" . '
+                f'." OPI-FLIGHT{index}-SD=" .',
+                f'." OPI-FLIGHT{index}-STATE=" op-ingress TSAO.STATE @ '
+                f'{expected_state} = .',
+                f'." OPI-FLIGHT{index}-TX=" opi-child @ TCB.TX-LEN @ .',
+            ]
+            if index < 4:
+                lines += [
+                    "op-ingress TLS-SERVER-ACCEPT-STEP",
+                    f'." OPI-BLOCK{index}-IOR=" . '
+                    f'." OPI-BLOCK{index}-ALERT=" . '
+                    f'." OPI-BLOCK{index}-PROGRESS=" . '
+                    f'." OPI-BLOCK{index}-SD=" .',
+                    f'." OPI-BLOCK{index}-STATE=" '
+                    'op-ingress TSAO.STATE @ '
+                    'TLS-SERVER-ACCEPT-ST-FLIGHT = .',
+                ]
+            lines += [
+                "TCP-POLL",
+                f'." OPI-ACK{index}-TX=" opi-child @ TCB.TX-LEN @ .',
+            ]
+        lines += [
+            '." OPI-FLIGHT-END-HS=" opi-ctx @ TLS-CTX.HS-STATE @ .',
+            '." OPI-FLIGHT-END-PHASE=" opi-ctx @ '
+            'TLS-RXW.SERVER-EMIT-META TSE.PHASE + @ .',
+            '." OPI-FLIGHT-END-EXACT=" opi-child @ opi-child-gen @ '
+            'opi-ctx @ TCB-ATTACHED-TO? opi-sd @ '
+            'SOCK.TLS-ACTIVE-OPS @ 1 = AND op-ingress '
+            'TSAO.LEASE-HELD @ 0<> AND .',
+            '." OPI-FLIGHT-END-NO-PUBLISH=" opi-ctx @ '
+            'TLS-CTX.SOCKET-OWNER @ 0= opi-live-sockets 1 = AND .',
             "op-ingress TLS-SERVER-ACCEPT-ABORT",
             '." OPI-ABORT-IOR=" . ." OPI-ABORT-ALERT=" . '
             '." OPI-ABORT-PROGRESS=" .',
@@ -25442,7 +25498,11 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '_TSAO-LOCK-OWNER-CORE @ -1 = AND .',
             'DEPTH ." OPI-DEPTH=" .',
         ]
-        text = self._run_kdos(lines, nic_frames=frames)
+        text = self._run_kdos(
+            lines,
+            nic_frames=frames,
+            nic_tx_callback=acknowledge_server_record,
+        )
         self.assertNotIn("Stack underflow", text)
         for token in (
             "OPI-INIT=0 ", "OPI-LISTEN=0 ", "OPI-BEGIN=0 ",
@@ -25489,6 +25549,9 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "OPI-FLIGHT-PREP-TRANSPORT=-1 ",
             "OPI-FLIGHT-PREP-AUTH=-1 ",
             "OPI-FLIGHT-PREP-NO-PUBLISH=-1 ",
+            "OPI-FLIGHT-END-HS=7 ", "OPI-FLIGHT-END-PHASE=10 ",
+            "OPI-FLIGHT-END-EXACT=-1 ",
+            "OPI-FLIGHT-END-NO-PUBLISH=-1 ",
             "OPI-ABORT-IOR=0 OPI-ABORT-ALERT=0 ",
             "OPI-ABORT-PROGRESS=7 ", "OPI-ABORT-STATE=0 ",
             "OPI-ABORT-CHILD=-1 ", "OPI-ABORT-CTX=0 ",
@@ -25498,6 +25561,31 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             "OPI-DELETE=0 ", "OPI-OWNERS=-1 ", "OPI-DEPTH=0 ",
         ):
             self.assertIn(token, text)
+        for index in range(5):
+            self.assertIn(
+                f"OPI-FLIGHT{index}-IOR=0 "
+                f"OPI-FLIGHT{index}-ALERT=0 "
+                f"OPI-FLIGHT{index}-PROGRESS=1 "
+                f"OPI-FLIGHT{index}-SD=0 ",
+                text,
+            )
+            self.assertIn(f"OPI-FLIGHT{index}-STATE=-1 ", text)
+            self.assertRegex(text, rf"OPI-FLIGHT{index}-TX=[1-9]\d* ")
+            self.assertIn(f"OPI-ACK{index}-TX=0 ", text)
+            if index < 4:
+                self.assertIn(
+                    f"OPI-BLOCK{index}-IOR=-4219 "
+                    f"OPI-BLOCK{index}-ALERT=0 "
+                    f"OPI-BLOCK{index}-PROGRESS=3 "
+                    f"OPI-BLOCK{index}-SD=0 ",
+                    text,
+                )
+                self.assertIn(f"OPI-BLOCK{index}-STATE=-1 ", text)
+        payload_frames = [
+            frame for frame in map(TestKDOSNetStack._parse_tcp_frame, sent)
+            if frame is not None and frame["payload"]
+        ]
+        self.assertEqual(len(payload_frames), 5)
 
     def test_server_accept_op_preserves_client_hello_failures(self):
         """Fatal alerts and attach-time deadlines remain sticky until abort."""
