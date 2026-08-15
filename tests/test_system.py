@@ -6613,7 +6613,7 @@ def _build_kdos_network_snapshot():
     steps = 0
     # Source-mode qualification compiles the complete production networking
     # module; this is emulator headroom, not a networking capacity bound.
-    max_steps = 475_000_000
+    max_steps = 485_000_000
     while steps < max_steps:
         if sys_obj.cpu.halted:
             break
@@ -25187,10 +25187,10 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             'claim-ctx @ TLS-CTX.TCB-GENERATION @ claim-ctx @ '
             'TCB-ATTACHED-TO? .',
             '." CONTEXT-REF=" tc-slot @ 1- _TC@ TC.REFS + @ .',
-            "claim-ctx @ claim-ctx-gen @ 1+ TLS-SERVER-ABORT-EXACT",
+            "claim-ctx @ claim-ctx-gen @ 1+ TLS-ABORT-EXACT",
             '." STALE-ABORT-IOR=" . ." STALE-ABORT-RETIRED=" .',
             '." STALE-ABORT-LIVE=" claim-ctx @ TLS-CTX-CLAIMED? .',
-            "claim-ctx @ claim-ctx-gen @ TLS-SERVER-ABORT-EXACT",
+            "claim-ctx @ claim-ctx-gen @ TLS-ABORT-EXACT",
             '." ABORT-IOR=" . ." ABORT-RETIRED=" .',
             '." ABORT-CHILD=" claim-child @ TCB.STATE @ TCPS-CLOSED = .',
             '." ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
@@ -27384,13 +27384,13 @@ class TestKDOSTLSServerClientHello(_KDOSNetworkTestBase):
             '." BEGIN2-IOR=" . exact-cleanup-gen2 !',
             '." NEW-GEN=" exact-cleanup-gen2 @ exact-cleanup-gen1 @ <> .',
             "exact-cleanup-ctx @ exact-cleanup-gen1 @ "
-            "TLS-SERVER-ABORT-EXACT",
+            "TLS-ABORT-EXACT",
             '." OLD-ABORT-IOR=" . ." OLD-ABORT-RETIRED=" .',
             '." OLD-ABORT-LIVE=" exact-cleanup-ctx @ '
             'TLS-CTX-CLAIMED? .',
             '." OLD-ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
             "exact-cleanup-ctx @ exact-cleanup-gen2 @ "
-            "TLS-SERVER-ABORT-EXACT",
+            "TLS-ABORT-EXACT",
             '." ABORT-IOR=" . ." ABORT-RETIRED=" .',
             '." ABORT-LIVE=" exact-cleanup-ctx @ TLS-CTX-CLAIMED? .',
             '." ABORT-REFS=" tc-slot @ 1- _TC@ TC.REFS + @ .',
@@ -35396,6 +35396,94 @@ class TestKDOSSocket(_KDOSNetworkTestBase):
             "ior=0 ", "status=0 ", "sentinel=777777 ", "depth=0 ",
             "sd-state=0 ", "tcb-state=0 ", "ctx-live=0 ",
             "ctx-phase=-1 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_exact_try_cleanup_is_retryable_under_net_contention(self):
+        """Known-TLS try entries retain exact authority when NET is busy."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE xbusy-sd VARIABLE xbusy-ctx VARIABLE xbusy-tcb",
+            "SOCK-TYPE-TLS SOCKET xbusy-sd !",
+            "xbusy-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ xbusy-ctx !",
+            "xbusy-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT xbusy-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED xbusy-ctx @ TLS-CTX.STATE !",
+            "1 xbusy-ctx @ TLS-CTX.PEER-AUTH !",
+            "TCB-ALLOC DROP 0 TCB-N xbusy-tcb !",
+            "TCPS-ESTABLISHED xbusy-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "xbusy-ctx @ xbusy-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "xbusy-sd @ xbusy-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            "1 NET-TX-OWNER-DEPTH !",
+            "COREID 1+ NET-TX-OWNER-CORE !",
+            "TASK-ID 1+ NET-TX-OWNER-TASK !",
+            '_NET-TX-OWNER? ." FOREIGN-NET=" .',
+            'xbusy-sd @ SOCK-TLS-CLOSE-EXACT-TRY ." CLOSE-IOR=" .',
+            "xbusy-sd @ SOCK-TLS-ABORT-EXACT-TRY",
+            '." ABORT-IOR=" . ." ABORT-STATUS=" .',
+            'xbusy-sd @ SOCK.STATE @ ." RETAINED-STATE=" .',
+            'xbusy-sd @ SOCK.HANDLE @ xbusy-ctx @ = ." SD-CTX=" .',
+            'xbusy-ctx @ TLS-CTX.SOCKET-OWNER @ xbusy-sd @ = '
+            '." CTX-SD=" .',
+            'xbusy-ctx @ TLS-CTX-CLAIMED? ." CTX-LIVE=" .',
+            'xbusy-tcb @ TCB.OWNER @ xbusy-ctx @ = ." TCB-CTX=" .',
+            'TLS-OWNER-DEPTH @ ." TLS-DEPTH=" .',
+            'NET-TX-OWNER-DEPTH @ ." NET-DEPTH=" .',
+            "_NET-TX-OWNER-CLEAR",
+            "xbusy-sd @ SOCK-TLS-ABORT-EXACT-TRY",
+            '." RETIRE-IOR=" . ." RETIRE-STATUS=" .',
+            'xbusy-sd @ SOCK.STATE @ ." END-SD=" .',
+            'xbusy-ctx @ TLS-CTX-CLAIMED? ." END-CTX=" .',
+            'xbusy-tcb @ TCB.STATE @ ." END-TCB=" .',
+            'DEPTH ." EXACT-BUSY-DEPTH=" .',
+        ])
+        for token in (
+            "FOREIGN-NET=0 ", "CLOSE-IOR=-4206 ",
+            "ABORT-IOR=-4206 ABORT-STATUS=3 ",
+            "RETAINED-STATE=2 ", "SD-CTX=-1 ", "CTX-SD=-1 ",
+            "CTX-LIVE=-1 ", "TCB-CTX=-1 ",
+            "TLS-DEPTH=0 ", "NET-DEPTH=1 ",
+            "RETIRE-IOR=0 RETIRE-STATUS=0 ",
+            "END-SD=0 ", "END-CTX=0 ", "END-TCB=0 ",
+            "EXACT-BUSY-DEPTH=0 ",
+        ):
+            self.assertIn(token, text)
+
+    def test_tls_socket_exact_close_retires_one_reciprocal_incarnation(self):
+        """Known-TLS close releases the exact socket/context edge atomically."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "VARIABLE xclose-sd VARIABLE xclose-ctx VARIABLE xclose-tcb",
+            "SOCK-TYPE-TLS SOCKET xclose-sd !",
+            "xclose-sd @ SOCK-CONNECT-CLAIM DROP",
+            "0 TLS-CTX@ xclose-ctx !",
+            "xclose-ctx @ TLS-CTX-CLAIM 0= IF -1 THROW THEN",
+            "TLS-ROLE-CLIENT xclose-ctx @ TLS-CTX.ROLE !",
+            "TLSS-ESTABLISHED xclose-ctx @ TLS-CTX.STATE !",
+            "1 xclose-ctx @ TLS-CTX.PEER-AUTH !",
+            "TCB-ALLOC DROP 0 TCB-N xclose-tcb !",
+            "TCPS-ESTABLISHED xclose-tcb @ TCB.STATE !",
+            "TLS-OWNER-TRY DROP",
+            "xclose-ctx @ xclose-tcb @ _TLS-ATTACH-TCB ?DUP IF THROW THEN",
+            "xclose-sd @ xclose-ctx @ SOCK-TLS-PUBLISH 0= IF -1 THROW THEN",
+            "TLS-OWNER-RELEASE",
+            "TLSS-NONE xclose-ctx @ TLS-CTX.STATE !",
+            "TCPS-FAILED xclose-tcb @ TCB.STATE !",
+            'xclose-sd @ SOCK-TLS-CLOSE-EXACT-TRY ." CLOSE-IOR=" .',
+            'xclose-sd @ SOCK.STATE @ ." END-SD=" .',
+            'xclose-ctx @ TLS-CTX-CLAIMED? ." END-CTX=" .',
+            'xclose-tcb @ TCB.STATE @ ." END-TCB=" .',
+            'TLS-OWNER-DEPTH @ NET-TX-OWNER-DEPTH @ OR 0= '
+            '." OWNERS-CLEAR=" .',
+            'DEPTH ." EXACT-CLOSE-DEPTH=" .',
+        ])
+        for token in (
+            "CLOSE-IOR=0 ", "END-SD=0 ", "END-CTX=0 ",
+            "END-TCB=0 ", "OWNERS-CLEAR=-1 ",
+            "EXACT-CLOSE-DEPTH=0 ",
         ):
             self.assertIn(token, text)
 

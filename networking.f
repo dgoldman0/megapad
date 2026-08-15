@@ -16925,10 +16925,10 @@ VARIABLE _TLA-STATUS
     THEN
     (TLS-ABORT) >R TLS-OWNER-RELEASE R> ;
 
-\ Persistent server accept operations carry an address plus generation.  A
-\ terminal lower step may already have revoked and released that incarnation,
-\ so cleanup treats a generation mismatch as "the old operation is retired"
-\ and must never run a generationless close/abort against the replacement.
+\ Persistent lower-engine owners carry an address plus generation.  A terminal
+\ step may already have revoked and released that incarnation, so cleanup
+\ treats a generation mismatch as "the old operation is retired" and must
+\ never run a generationless close/abort against the replacement.
 VARIABLE _TLSX-CTX
 VARIABLE _TLSX-GEN
 VARIABLE _TLSX-RETIRED
@@ -16986,7 +16986,7 @@ VARIABLE _TLSX-IOR
     THEN
     _TLSX-RETURN ;
 
-: TLS-SERVER-ABORT-EXACT  ( ctx generation -- retired? ior )
+: TLS-ABORT-EXACT  ( ctx generation -- retired? ior )
     OVER _TLS-PURE-CTX-MEMBER? 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     DUP 0= IF 2DROP 0 TLS-E-STATE EXIT THEN
     NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
@@ -17001,6 +17001,11 @@ VARIABLE _TLSX-IOR
         0 _TLSX-RETIRED ! TLS-E-TRANSPORT _TLSX-IOR !
     THEN
     _TLSX-RETURN ;
+
+\ Temporary compatibility bridge for the frozen KDOS accept coordinator.  New
+\ raw-context owners use the role-neutral exact authority entry above.
+: TLS-SERVER-ABORT-EXACT  ( ctx generation -- retired? ior )
+    TLS-ABORT-EXACT ;
 
 VARIABLE _TLCF-CTX
 
@@ -20175,6 +20180,95 @@ VARIABLE _STLR-GEN
     ['] (SOCK-TLS-RELEASE-EXACT) CATCH >R
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
+
+\ An established-port owner already knows that its descriptor is TLS.  These
+\ exact try entries therefore avoid both generic kind snapshots and every
+\ blocking NET acquisition.  TLS ownership serializes the reciprocal edge;
+\ NET remains held from descriptor resolution through context teardown and
+\ exact descriptor release, so a successful lower retirement cannot leave a
+\ stale live descriptor merely because a second NET acquisition contended.
+VARIABLE _STLXT-SD
+VARIABLE _STLXT-CTX
+VARIABLE _STLXT-GEN
+VARIABLE _STLXT-IOR
+VARIABLE _STLXT-STATUS
+
+: _STLXT-WIPE  ( -- )
+    0 _STLXT-SD ! 0 _STLXT-CTX ! 0 _STLXT-GEN !
+    0 _STLXT-IOR ! 0 _STLXT-STATUS ! ;
+
+: _STLXT-CLAIM  ( sd -- ior )
+    \ Refuse same-task recursion before touching depth-counted locks; the
+    \ transaction uses module scratch and must have exactly one driver.
+    NET-TX-OWNER-DEPTH @ 0> _NET-TX-OWNER? AND IF
+        DROP TLS-E-BUSY EXIT
+    THEN
+    _TC-LOCK-OWNER? IF DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-DEPTH @ IF DROP TLS-E-BUSY EXIT THEN
+    TLS-OWNER-TRY IF DROP TLS-E-BUSY EXIT THEN
+    NET-TX-TRY IF
+        DROP TLS-OWNER-RELEASE TLS-E-BUSY EXIT
+    THEN
+    _STLXT-SD ! TLS-E-TRANSPORT _STLXT-IOR !
+    TLS-ABORT-S-BUSY _STLXT-STATUS ! TLS-E-OK ;
+
+: _STLXT-CLOSE-BODY  ( -- )
+    _STLXT-SD @ (SOCK-TLS-CLOSE-RESOLVE)
+    DUP IF >R 2DROP R> _STLXT-IOR ! EXIT THEN DROP
+    _STLXT-GEN ! _STLXT-CTX !
+    \ The resolver releases a well-formed empty TLS descriptor itself.
+    _STLXT-CTX @ 0= IF TLS-E-OK _STLXT-IOR ! EXIT THEN
+    _STLXT-CTX @ (TLS-CLOSE) DUP _STLXT-IOR ! IF EXIT THEN
+    _STLXT-SD @ _STLXT-CTX @ _STLXT-GEN @
+    (SOCK-TLS-RELEASE-EXACT) 0= IF
+        TCP-ACCEPT-E-STALE _STLXT-IOR !
+    THEN ;
+
+: _STLXT-CLOSE-RETURN  ( -- ior )
+    _STLXT-IOR @ >R _STLXT-WIPE
+    NET-TX-RELEASE TLS-OWNER-RELEASE R> ;
+
+: SOCK-TLS-CLOSE-EXACT-TRY  ( sd -- ior )
+    _STLXT-CLAIM DUP IF EXIT THEN DROP
+    ['] _STLXT-CLOSE-BODY CATCH ?DUP IF
+        DROP TLS-E-TRANSPORT _STLXT-IOR !
+    THEN
+    _STLXT-CLOSE-RETURN ;
+
+: _STLXT-ABORT-BODY  ( -- )
+    _STLXT-SD @ (SOCK-TLS-CLOSE-RESOLVE)
+    DUP IF
+        >R 2DROP R> _STLXT-IOR !
+        TLS-ABORT-S-BUSY _STLXT-STATUS ! EXIT
+    THEN DROP
+    _STLXT-GEN ! _STLXT-CTX !
+    \ The resolver releases a well-formed empty TLS descriptor itself.
+    _STLXT-CTX @ 0= IF
+        TLS-ABORT-S-NONE _STLXT-STATUS !
+        TLS-E-OK _STLXT-IOR ! EXIT
+    THEN
+    _STLXT-CTX @ (TLS-ABORT) DUP _STLXT-STATUS !
+    DUP TLS-ABORT-S-BUSY = IF
+        DROP TLS-E-BUSY _STLXT-IOR ! EXIT
+    THEN DROP
+    _STLXT-SD @ _STLXT-CTX @ _STLXT-GEN @
+    (SOCK-TLS-RELEASE-EXACT) IF
+        TLS-E-OK _STLXT-IOR !
+    ELSE
+        TCP-ACCEPT-E-STALE _STLXT-IOR !
+    THEN ;
+
+: _STLXT-ABORT-RETURN  ( -- status ior )
+    _STLXT-STATUS @ _STLXT-IOR @ >R >R _STLXT-WIPE
+    NET-TX-RELEASE TLS-OWNER-RELEASE R> R> ;
+
+: SOCK-TLS-ABORT-EXACT-TRY  ( sd -- status ior )
+    _STLXT-CLAIM DUP IF TLS-ABORT-S-BUSY SWAP EXIT THEN DROP
+    ['] _STLXT-ABORT-BODY CATCH ?DUP IF
+        DROP TLS-ABORT-S-BUSY _STLXT-STATUS !
+        TLS-E-TRANSPORT _STLXT-IOR !
+    THEN
+    _STLXT-ABORT-RETURN ;
 
 : (SOCK-TLS-CLOSE-TRY)  ( sd -- ior )
     _STLS-SD !
