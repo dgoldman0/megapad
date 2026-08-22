@@ -55,8 +55,9 @@ organized by their source sections in `kdos.f` and `networking.f`.
 17. [§13 Help System](#13-help-system)
 18. [§14 Startup](#14-startup)
 19. [§15 Pipeline Bundles](#15-pipeline-bundles)
-20. [`networking.f` §16 Network Stack](#16-network-stack)
-21. [`networking.f` §17 Socket API](#17-socket-api)
+20. [§20 Module Registry](#20-module-registry)
+21. [`networking.f` §16 Network Stack](#16-network-stack)
+22. [`networking.f` §17 Socket API](#17-socket-api)
 
 ---
 
@@ -68,14 +69,15 @@ Small general-purpose helpers used throughout KDOS.
 |------|-------------|-------------|
 | `.R` | `( n width -- )` | Print number *n* right-justified in a field of *width* characters.  Currently a simplified implementation that drops the width and calls `.`. |
 | `SAMESTR?` | `( addr1 addr2 maxlen -- flag )` | Compare two zero-padded byte strings up to *maxlen* bytes.  Returns `-1` if identical, `0` if they differ.  Uses the BIOS `COMPARE` word internally. |
-| `PARSE-NAME` | `( "name" -- )` | Parse the next whitespace-delimited word from the input stream and copy it into `NAMEBUF` (a 16-byte scratch buffer), null-terminated.  Sets `PN-LEN` to the parsed length. |
+| `PARSE-NAME` | `( "name" -- )` | Parse the next blank-delimited word.  Preserve up to 127 bytes in `PATHBUF`, copy its first 23 bytes into the null-terminated 24-byte `NAMEBUF` used for MP64FS component lookup, and set `PN-LEN` to that clamped component length. |
 | `NEEDS` | `( n -- )` | Stack safety guard — aborts with an error message if the data stack currently has fewer than *n* items.  Useful at the start of words that need a specific number of arguments. |
 | `ASSERT` | `( flag -- )` | Abort with "Assertion failed" if the flag is false (zero).  Useful in tests and sanity checks. |
 | `.DEPTH` | `( -- )` | Print the current stack depth in brackets, e.g., `[3 deep]`.  Handy for debugging stack issues. |
 | `DEFER` | `( "name" -- )` | Create a deferred word whose action can be changed at run-time.  Defaults to `ABORT`.  Set the action with `IS`. |
 | `IS` | `( xt "name" -- )` | Set the action of a deferred word.  E.g. `' my-open IS OPEN`. |
 
-**Variables:** `NAMEBUF` (16-byte name scratch buffer), `PN-LEN` (parsed name length).
+**Variables:** `NAMEBUF` (24-byte component scratch), `PATHBUF` (128-byte
+path scratch), `PN-LEN` (clamped `NAMEBUF` length).
 
 **Example:**
 ```forth
@@ -87,18 +89,28 @@ PARSE-NAME cat   \ copies "cat" into NAMEBUF, PN-LEN = 3
 
 ### §1.1 Memory Allocator
 
-Dynamic heap allocator with first-fit free-list strategy.  The heap lives
-above HERE with a 4 KiB dictionary guard.  All allocations are 8-byte
-aligned with 16-byte minimum.
+`ALLOCATE` is region-aware: it uses the XMEM free-list/bump allocator when
+external memory is present and falls back to the Bank 0 first-fit heap when it
+is not.  XMEM allocations carry an 8-byte size prefix.  Bank 0 blocks carry a
+24-byte allocator header and are 8-byte aligned with a 16-byte minimum payload.
+Use the `DMA-*` variants when storage must reside in Bank 0 regardless of XMEM
+availability.  Allocation and mutation are core-0-only.
+
+`HEAP-SETUP` tile-aligns the system dictionary and begins the Bank 0 heap after
+the 32 KiB `LATE-DICT-RESERVE`, leaving room for late system-mode modules.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `ALLOCATE` | `( u -- addr ior )` | Allocate a strictly positive *u* bytes. Returns address and 0 on success, or 0 and -1 for zero, negative, unrepresentable, or unavailable sizes. |
-| `FREE` | `( addr -- )` | Free a previously allocated block.  Merges adjacent free blocks. |
+| `ALLOCATE` | `( u -- addr ior )` | Allocate a strictly positive *u* bytes from XMEM when available, otherwise Bank 0. Returns address and 0 on success, or 0 and -1 for zero, negative, unrepresentable, or unavailable sizes. |
+| `FREE` | `( addr -- )` | Route by address and free a block returned by `ALLOCATE`.  Bank 0 frees coalesce adjacent blocks; XMEM frees return blocks to its reusable free-list. |
 | `RESIZE` | `( addr u -- addr' ior )` | Resize an allocated block.  May move data.  Returns 0 on success. |
-| `HEAP-SETUP` | `( -- )` | Initialize the heap (called automatically on first ALLOCATE). |
-| `HEAP-FREE-BYTES` | `( -- n )` | Return total free bytes in the heap. |
-| `.HEAP` | `( -- )` | Print heap statistics: total, free, largest block. |
+| `DMA-ALLOCATE` | `( u -- addr ior )` | Allocate explicitly from the Bank 0 heap, even when XMEM is present. |
+| `DMA-FREE` | `( addr -- )` | Free a block returned by `DMA-ALLOCATE`. |
+| `DMA-RESIZE` | `( addr u -- addr' ior )` | Resize a Bank 0 heap block. |
+| `HEAP-SETUP` | `( -- )` | Initialize the Bank 0 heap (called automatically on its first allocation). |
+| `LATE-DICT-RESERVE` | `( -- u )` | Constant: 32 KiB kept between the tile-aligned cold system dictionary and `HEAP-BASE` for late Bank 0 compilation. |
+| `HEAP-FREE-BYTES` | `( -- n )` | Return total free bytes in the Bank 0 heap. |
+| `.HEAP` | `( -- )` | Print Bank 0 heap statistics: total, free, largest block. |
 | `MEM-SIZE` | `( -- n )` | Return total RAM in bytes (from SysInfo MMIO). |
 
 ---
@@ -483,7 +495,7 @@ userland zone.  System words remain accessible.
 | Region | Address Range | Contents |
 |--------|--------------|----------|
 | System RAM | `0x00000 .. HERE` | BIOS + KDOS core dictionary |
-| System heap | `HERE+4K .. 0x7F000` | `ALLOCATE` / `FREE` blocks |
+| System heap | cold aligned `HERE+32 KiB .. 0x7F000` | Explicit Bank 0 `DMA-ALLOCATE` / `DMA-FREE` blocks |
 | Stacks | `0x80000 .. 0xFFFFF` | Data stack + return stack |
 | Userland dict | `EXT-MEM-BASE+N .. +U-ZONE-SIZE` | User word definitions + data |
 | XMEM general | `+U-ZONE-SIZE .. end` | `XMEM-ALLOT` bump allocator |
@@ -1329,9 +1341,10 @@ The startup section runs automatically when the KDOS core loads.  It:
 The standard autoexec enables JIT for its own load, enters the 32 MiB XMEM
 userland dictionary, loads `networking.f` with KDOS `REQUIRE`, configures DHCP
 or the static fallback, loads `tools.f`, and disables JIT.  The module loader
-batches both validated MP64FS extents into external memory, so the network
-stack does not enlarge the Bank 0 core dictionary or alias the BIOS boot
-buffer.
+batches validated MP64FS extents into a separate, temporary transfer
+allocation, so the network stack does not enlarge the Bank 0 core dictionary
+or alias the BIOS boot buffer.  That allocation resides in XMEM when available
+and is reclaimed after evaluation.
 
 Users can re-enable JIT for their own code with `JIT-ON`.
 
@@ -1501,6 +1514,76 @@ data-flow P.RUN
 
 ---
 
+## §20 Module Registry
+
+KDOS modules identify themselves with exact, case-sensitive evaluator tokens.
+A logical module ID is independent of the MP64FS filename or path passed to
+`REQUIRE`; filesystem component limits therefore do not truncate or otherwise
+change module identity.  The current evaluator accepts physical lines through
+255 bytes, so a `PROVIDED ` declaration admits an ID from 1 through 246 bytes
+(255 minus the eight-letter word and its separating blank).  KDOS applies that
+same envelope to `MODULE?`.  Empty or longer IDs throw rather than aliasing a
+shorter name.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `PROVIDED` | `( "id" -- )` | Register the exact ID.  A duplicate is an allocation-neutral no-op.  A new entry leaves no result; an entry-allocation failure throws. |
+| `MODULE?` | `( "id" -- flag )` | Return one flag indicating whether the exact ID is pending or committed. |
+| `REQUIRE` | `( "path" -- )` | Resolve and load a Forth source file.  When its first prescanned `PROVIDED` ID is already present, skip evaluation as a stack-neutral no-op.  A newly evaluated source may intentionally leave its own data-stack results. |
+| `MODULES` | `( -- )` | Print every exact registered ID and the exact count, leaving no data-stack cells.  Enumeration order is unspecified. |
+
+All four public operations are core-0-only.  Registration bookkeeping never
+appears on the public data stack: `PROVIDED` and `REQUIRE` leave no private
+status cells, `MODULE?` leaves exactly its flag, and `MODULES` only prints.  If
+`REQUIRE` evaluates a new source, values intentionally left by that source are
+preserved.  If the exact ID was already registered, the source is not evaluated
+and the duplicate load changes neither the stack nor persistent allocation.
+
+### Storage and growth
+
+The registry is a module-specific chained hash table.  Each stable entry owns
+the complete ID bytes in the Bank 0 heap through private wrappers over
+`DMA-ALLOCATE` and `DMA-FREE`; it therefore remains valid across
+`ENTER-USERLAND`, `LEAVE-USERLAND`, and `XMEM-RESET`.  A small inline bucket
+vector is the initial lookup-performance seed, not an entry limit.  Entry
+capacity is bounded by available Bank 0 heap memory.
+
+A committed insertion may trigger best-effort allocation of a larger bucket
+vector.  If that performance allocation fails, KDOS retains the old chains and
+the new entry remains registered and findable.  By contrast, failure to
+allocate a node for a previously absent ID throws.  `REQUIRE` performs that
+provisional registration before evaluating any source line, so registry OOM
+cannot execute a source prefix.  Exact duplicate lookup happens before
+allocation, preserving idempotence even under memory pressure.
+
+### Loading, cycles, and rollback
+
+Before walking source, `REQUIRE` prescans for the first evaluator line whose
+first token is `PROVIDED` and provisionally registers its exact following ID.
+Presence includes provisional entries, so mutual and longer dependency cycles
+terminate without recursively evaluating the same module.  Every additional
+new `PROVIDED` ID declared while that source is active belongs to the same
+loader frame.  Successful evaluation commits the complete frame-owned set.
+
+If source evaluation throws, KDOS first unwinds the evaluator to that loader
+frame's depth checkpoint, then removes and frees every registry entry owned by
+the failing frame, releases its transfer allocation, restores loader and
+relative-directory state, and rethrows.  A dependency that completed in its own
+nested loader frame is already committed and survives a later parent failure.
+This is a registry transaction, not transactional compilation: definitions,
+output, and other source effects completed before the throw are not rewound.
+After the source is corrected, its rolled-back IDs can be registered and loaded
+normally on retry.
+
+```forth
+PROVIDED example.codec       \ direct exact-ID registration
+MODULE? example.codec .      \ true
+REQUIRE networking.f         \ guarded by networking.f's PROVIDED ID
+MODULES                      \ exact IDs plus count
+```
+
+---
+
 ## Quick Reference Card
 
 ### Most-Used Words by Task
@@ -1536,6 +1619,13 @@ DIR                      \ list files
 CAT filename             \ print file
 LOAD script.f            \ evaluate Forth source
 buf SAVE-BUFFER fname    \ save buffer to file
+```
+
+**Managing modules:**
+```forth
+REQUIRE module.f         \ load once when source declares PROVIDED
+MODULE? exact-id         \ query exact, case-sensitive identity
+MODULES                  \ list exact identities and count
 ```
 
 **Multitasking:**

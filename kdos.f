@@ -116,14 +116,16 @@ VARIABLE PN-LEN
 \  §1.1  Memory Allocator
 \ =====================================================================
 \
-\  First-fit free-list allocator.  Each block has a 16-byte header:
+\  Bank-0 first-fit free-list allocator.  Each block has a 24-byte header:
 \    +0   next    pointer to next free block (0 = end of list)
 \    +8   size    usable bytes in this block (excludes header)
+\    +16  magic   allocation canary (zero while free)
 \
-\  ALLOCATE returns an address past the header.  FREE takes that
-\  address, backs up 16 bytes to find the header, and inserts
-\  the block into the free list (sorted by address, coalescing
-\  adjacent blocks).
+\  The private Bank-0 allocator returns an address past the header.  Its
+\  paired free takes that address, backs up 24 bytes to find the header, and
+\  inserts the block into the free list (sorted by address and coalescing
+\  adjacent blocks).  §1.0b later routes public ALLOCATE/FREE through XMEM
+\  when available and exposes DMA-ALLOCATE/DMA-FREE for explicit Bank 0.
 \
 \  The heap lives above HERE (which is reserved for the Forth
 \  dictionary).  HEAP-BASE marks the start; it's set at load time
@@ -180,12 +182,18 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 \ -- Stack-proximity guard constant --
 4096 CONSTANT HEAP-GUARD   \ minimum gap between heap top and stack bottom
 
+\ Late Bank-0 source compilation grows the dictionary after the system heap
+\ is initialised.  Keep that dictionary reserve ahead of every persistent heap
+\ allocation; graphics.f currently uses a little over 18 KiB of it.
+32768 CONSTANT LATE-DICT-RESERVE
+
 \ HEAP-SETUP ( -- )  initialise the heap above HERE
-\   Leaves a 16 KiB gap above HERE for late Bank-0 dictionary growth,
+\   Leaves LATE-DICT-RESERVE bytes above HERE for late Bank-0 dictionary growth,
 \   then creates one large free block spanning to the stack guard.
 : HEAP-SETUP  ( -- )
     HEAP-INIT @ IF EXIT THEN
-    HERE  16384  + TALIGN  HEAP-BASE !
+    TALIGN
+    HERE LATE-DICT-RESERVE + HEAP-BASE !
     \ Heap end = data-stack bottom - 4096 guard
     MEM-SIZE 2 / 4096 -   ( heap-end )
     HEAP-BASE @ -          ( available-bytes )
@@ -2443,7 +2451,7 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
 \  Full design: docs/arenas.md
 
 \ -- Source constants --
-0 CONSTANT A-HEAP    \ arena backed by Bank 0 heap
+0 CONSTANT A-HEAP    \ arena backed by the general ALLOCATE/FREE route
 1 CONSTANT A-XMEM    \ arena backed by external RAM
 2 CONSTANT A-HBW     \ arena backed by HBW math RAM
 
@@ -5469,29 +5477,60 @@ VARIABLE LD-CUR
 VARIABLE LD-LEN
 
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
-\ Includes CWD so relative-path loads restore the working directory.
-\ Frame = 5 vars × 8 bytes = 40 bytes.  16 levels → 640 bytes.
-40 CONSTANT _LD-FRAME
+\ Includes CWD so relative-path loads restore the working directory.  Each
+\ frame also owns an evaluator-depth checkpoint and a private transaction
+\ pointer used by the module registry.  The loader hooks below are no-ops
+\ until §20 installs that registry's commit and rollback actions.
+\
+\ Frame layout (7 cells, 56 bytes):
+\   +0  saved LD-BUF       +8  saved LD-SZ
+\   +16 saved LD-CUR       +24 saved LD-LEN
+\   +32 saved CWD          +40 evaluator-depth checkpoint
+\   +48 loader transaction head
+56 CONSTANT _LD-FRAME
 16 CONSTANT _LD-MAXLVL
 CREATE _LD-STK _LD-FRAME _LD-MAXLVL * ALLOT
 VARIABLE _LD-SP
 0 _LD-SP !
 
+: _LD-ACTIVE-FRAME  ( -- addr )
+    _LD-SP @ _LD-FRAME - _LD-STK + ;
+
+: _LD-EVAL-CHECKPOINT  ( -- n )
+    _LD-ACTIVE-FRAME 40 + @ ;
+
+: _LD-TXN-HEAD  ( -- addr )
+    _LD-ACTIVE-FRAME 48 + ;
+
+: _LD-TXN-NOOP  ( -- ) ;
+DEFER _LD-TXN-COMMIT
+DEFER _LD-TXN-ROLLBACK
+DEFER _LD-TXN-AFTER-RELEASE
+' _LD-TXN-NOOP IS _LD-TXN-COMMIT
+' _LD-TXN-NOOP IS _LD-TXN-ROLLBACK
+' _LD-TXN-NOOP IS _LD-TXN-AFTER-RELEASE
+
 : _LD-SAVE  ( -- )
     _LD-SP @ _LD-FRAME _LD-MAXLVL * >= ABORT" REQUIRE nested too deep"
-    LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    CWD  @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
+    _LD-SP @ _LD-STK +
+    LD-BUF @ OVER      !
+    LD-SZ  @ OVER  8 + !
+    LD-CUR @ OVER 16 + !
+    LD-LEN @ OVER 24 + !
+    CWD    @ OVER 32 + !
+    EVAL-DEPTH @ OVER 40 + !
+    0 SWAP 48 + !
+    _LD-FRAME _LD-SP +! ;
 
 : _LD-RESTORE  ( -- )
     _LD-SP @ 0= ABORT" REQUIRE nesting underflow"
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ CWD  !
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-SZ  !
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-BUF ! ;
+    _LD-FRAME NEGATE _LD-SP +!
+    _LD-SP @ _LD-STK +
+    DUP      @ LD-BUF !
+    DUP  8 + @ LD-SZ  !
+    DUP 16 + @ LD-CUR !
+    DUP 24 + @ LD-LEN !
+        32 + @ CWD    ! ;
 
 VARIABLE _LD-RUN-SEC
 VARIABLE _LD-RUN-CNT
@@ -5723,9 +5762,16 @@ VARIABLE _SEC-LINE
 : _LD-WALK-GUARDED  ( -- )
     ['] _LD-WALK CATCH
     DUP IF
-        >R _LD-RELEASE R> THROW
+        _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
+        _LD-TXN-ROLLBACK
+        _LD-RELEASE
+        _LD-TXN-AFTER-RELEASE
+        THROW
     THEN
-    DROP _LD-RELEASE ;
+    DROP
+    _LD-TXN-COMMIT
+    _LD-RELEASE
+    _LD-TXN-AFTER-RELEASE ;
 
 : LOAD  ( "filename" -- )
     FS-ENSURE
@@ -5832,12 +5878,18 @@ VARIABLE _SEC-LINE
     ['] _APP-LOAD-WALK CATCH
     DUP IF
         SYS-EXIT _APP-MPU-OFF
-        >R _LD-RELEASE R> THROW
+        _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
+        _LD-TXN-ROLLBACK
+        _LD-RELEASE
+        _LD-TXN-AFTER-RELEASE
+        THROW
     THEN
     DROP
     SYS-EXIT
     _APP-MPU-OFF
-    _LD-RELEASE ;
+    _LD-TXN-COMMIT
+    _LD-RELEASE
+    _LD-TXN-AFTER-RELEASE ;
 
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;
@@ -8653,6 +8705,11 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     ."     n f FTRUNCATE          Set file size (clamps cursor)" CR
     ."     f FSIZE / f F.INFO     File size / info" CR
     ."     FILES                  List legacy files" CR
+    CR ."   MODULE WORDS (CORE 0 ONLY):" CR
+    ."     PROVIDED id            Register exact 1..246-byte ID (case-sensitive)" CR
+    ."     MODULE? id             Query exact ID -> flag" CR
+    ."     REQUIRE path           Load source once via PROVIDED" CR
+    ."     MODULES                List exact IDs and count" CR
     CR ."   SCHEDULER WORDS:" CR
     ."     ' word 0 TASK name     Create named task (xt pri)" CR
     ."     xt SPAWN               Spawn anonymous task" CR
@@ -9178,60 +9235,267 @@ VARIABLE _HTE-HT
 \  §20  Module System
 \ =====================================================================
 \
-\  Pre-scan guard: before executing any line of a loaded file,
-\  _MOD-PRESCAN scans the raw file buffer for a line beginning with
-\  "PROVIDED".  If found, the module name is extracted and checked
-\  against the hash table.  If already loaded, _MOD-LOAD-BODY skips
-\  _LD-WALK entirely — zero lines are executed, zero side effects.
+\ Module identities are exact, case-sensitive evaluator tokens.  They are
+\ independent of NAMEBUF and its MP64FS component limit.  Stable registry
+\ entries own their complete ID bytes in the Bank-0 heap, so XMEM-RESET and
+\ userland transitions cannot invalidate them.  A small inline bucket vector
+\ is only a performance seed; chained entries are limited by available heap
+\ memory, not by bucket count.
 \
-\  PROVIDED itself (when executed during _LD-WALK) simply registers
-\  the module name in the hash table.  It is a plain marker now; all
-\  guard logic lives in the pre-scan.
+\ A loader pre-registers the first PROVIDED identity before evaluating any
+\ source.  This remains the cycle-breaking rule.  Every new identity declared
+\ while that source is active joins the loader frame's provisional list.
+\ Successful evaluation commits the whole list; a throw unlinks and frees the
+\ whole list before the source allocation is released and the error rethrown.
 \
-\  Because the hash key is always the canonical name declared by the
-\  file's own PROVIDED line (not the caller's REQUIRE path), different
-\  paths to the same file share the same key.
-\
-\  Uses a hash table (§19) for O(1) lookup.  24-byte key = module
-\  name (zero-padded, matching NAMEBUF layout), 1-byte value.
+\ All public module operations are core-0-only.  Registry operations use
+\ HT-LOCK, but never hold it while allocating, freeing, or evaluating source.
 
-24 1 128 HASHTABLE _MOD-HT
+16 CONSTANT _MOD-INLINE-BUCKETS
+CREATE _MOD-INLINE  _MOD-INLINE-BUCKETS CELLS ALLOT
+_MOD-INLINE _MOD-INLINE-BUCKETS CELLS 0 FILL
 
-\ Scratch for the 1-byte "loaded" marker value.
-CREATE _MOD-VAL  1 ALLOT
-1 _MOD-VAL C!
+\ Registry descriptor: bucket pointer, bucket count, entry count,
+\ heap-owned-bucket flag, lock number.
+CREATE _MOD-REG
+    _MOD-INLINE ,
+    _MOD-INLINE-BUCKETS ,
+    0 ,
+    0 ,
+    HT-LOCK ,
 
-\ One provisional PROVIDED key per active loader frame.  A module is marked
-\ before execution to break mutual-REQUIRE cycles; if its walk throws, that
-\ frame owns deletion of the incomplete mark before propagating the error.
-_LD-MAXLVL 24 * XBUF _MOD-PENDING-NAMES
-_LD-MAXLVL 8 * XBUF _MOD-PENDING-FLAGS
-_MOD-PENDING-FLAGS _LD-MAXLVL 8 * 0 FILL
+: _MOD-BUCKETS       ( -- addr )  _MOD-REG      @ ;
+: _MOD-BUCKET-COUNT  ( -- n )     _MOD-REG  8 + @ ;
+: _MOD-COUNT         ( -- n )     _MOD-REG 16 + @ ;
+: _MOD-BUCKETS-HEAP? ( -- flag )  _MOD-REG 24 + @ ;
+: _MOD-LOCK          ( -- n )     _MOD-REG 32 + @ ;
 
-: _MOD-DEPTH-INDEX  ( -- n )
-    _LD-SP @ _LD-FRAME / 1- ;
+\ Stable entry: bucket-next, provisional-next, hash, exact length, ID bytes.
+32 CONSTANT /MOD-NODE
+: _MN-NEXT  ( node -- addr ) ;
+: _MN-PROV  ( node -- addr )  8 + ;
+: _MN-HASH  ( node -- addr ) 16 + ;
+: _MN-LEN   ( node -- addr ) 24 + ;
+: _MN-ID    ( node -- addr ) 32 + ;
 
-: _MOD-PENDING-NAME  ( -- addr )
-    _MOD-DEPTH-INDEX 24 * _MOD-PENDING-NAMES + ;
+\ Private allocation seam.  Production bindings deliberately use the Bank-0
+\ heap; DEFER keeps deterministic entry/rehash failure qualification possible.
+DEFER _MOD-ALLOCATE
+DEFER _MOD-FREE
+' DMA-ALLOCATE IS _MOD-ALLOCATE
+' DMA-FREE     IS _MOD-FREE
 
-: _MOD-PENDING-FLAG  ( -- addr )
-    _MOD-DEPTH-INDEX 8 * _MOD-PENDING-FLAGS + ;
+-4100 CONSTANT _MOD-E-NOMEM
+-4101 CONSTANT _MOD-E-BAD-ID
+255 CONSTANT _MOD-EVAL-LINE-MAX
+_MOD-EVAL-LINE-MAX 9 - CONSTANT _MOD-ID-MAX  \ minus "PROVIDED "
 
-\ _MOD-MARK ( -- )  Mark NAMEBUF as a loaded module in _MOD-HT.
-: _MOD-MARK  ( -- )
-    NAMEBUF _MOD-VAL _MOD-HT HT-PUT ;
+\ Private nonthrowing FNV-1a hash.  The 32-bit mask keeps MOD input positive.
+: _MOD-HASH  ( addr len -- hash )
+    0x811C9DC5 -ROT
+    OVER + SWAP ?DO
+        I C@ XOR 0x01000193 * 0xFFFFFFFF AND
+    LOOP ;
 
-\ _MOD-LOADED? ( -- flag )  True if current NAMEBUF is in _MOD-HT.
-: _MOD-LOADED?  ( -- flag )
-    NAMEBUF _MOD-HT HT-GET 0<> ;
+: _MOD-BUCKET  ( hash -- bucket-addr )
+    _MOD-BUCKET-COUNT MOD CELLS _MOD-BUCKETS + ;
+
+\ Lookup scratch is written only after _MOD-LOCK is held.  No word called by
+\ the locked walk allocates, frees, yields, or throws.
+VARIABLE _MF-A
+VARIABLE _MF-U
+VARIABLE _MF-H
+
+: _MOD-FIND-LOCKED  ( id-addr id-len hash -- node | 0 )
+    _MF-H ! _MF-U ! _MF-A !
+    _MF-H @ _MOD-BUCKET @
+    BEGIN DUP WHILE
+        DUP _MN-HASH @ _MF-H @ = IF
+            DUP _MN-LEN @ _MF-U @ = IF
+                DUP _MN-ID _MF-U @ _MF-A @ _MF-U @ COMPARE 0= IF
+                    EXIT
+                THEN
+            THEN
+        THEN
+        @
+    REPEAT ;
+
+: _MOD-FIND  ( id-addr id-len -- node | 0 )
+    2DUP _MOD-HASH >R
+    _MOD-LOCK LOCK
+    R> _MOD-FIND-LOCKED
+    _MOD-LOCK UNLOCK ;
+
+\ _MOD-INSERT ( id-addr id-len -- node inserted? ior )
+\ Publish only a complete node.  Duplicate lookup occurs before allocation and
+\ is repeated under the publication lock, so duplicates remain allocation-free.
+: _MOD-INSERT  ( id-addr id-len -- node inserted? ior )
+    ?CORE0
+    DUP 0= OVER _MOD-ID-MAX > OR IF
+        2DROP 0 FALSE _MOD-E-BAD-ID EXIT
+    THEN
+    2DUP _MOD-HASH                         ( id-addr id-len hash )
+    _MOD-LOCK LOCK
+    2 PICK 2 PICK 2 PICK _MOD-FIND-LOCKED ( id-addr id-len hash node )
+    _MOD-LOCK UNLOCK
+    DUP IF
+        >R 2DROP DROP R> FALSE 0 EXIT
+    THEN
+    DROP                                    ( id-addr id-len hash )
+
+    OVER /MOD-NODE + _MOD-ALLOCATE IF
+        DROP 2DROP DROP 0 FALSE _MOD-E-NOMEM EXIT
+    THEN                                    ( id-addr id-len hash candidate )
+    0 OVER !
+    0 OVER _MN-PROV !
+    OVER OVER _MN-HASH !
+    2 PICK OVER _MN-LEN !
+    3 PICK OVER _MN-ID 4 PICK CMOVE
+
+    _MOD-LOCK LOCK
+    3 PICK 3 PICK 3 PICK _MOD-FIND-LOCKED  ( ... candidate node )
+    DUP IF
+        _MOD-LOCK UNLOCK
+        >R _MOD-FREE 2DROP DROP R> FALSE 0 EXIT
+    THEN
+    DROP                                    ( id-addr id-len hash candidate )
+    OVER _MOD-BUCKET                        ( ... candidate bucket-addr )
+    DUP @ 2 PICK _MN-NEXT !
+    OVER SWAP !
+    1 _MOD-REG 16 + +!
+    _MOD-LOCK UNLOCK
+    >R 2DROP DROP R> TRUE 0 ;
+
+\ Best-effort retained growth.  Load factor may affect lookup time but never
+\ entry capacity.  Nodes stay at stable addresses while only bucket links move.
+VARIABLE _MG-NEW
+VARIABLE _MG-N
+VARIABLE _MG-NODE
+VARIABLE _MG-NEXT
+
+: _MOD-GROW-TARGET  ( -- buckets | 0 )
+    _MOD-LOCK LOCK
+    _MOD-BUCKET-COUNT DUP
+    BEGIN _MOD-COUNT OVER 2* > WHILE 2* REPEAT
+    2DUP = IF 2DROP 0 ELSE NIP THEN
+    _MOD-LOCK UNLOCK ;
+
+: _MOD-MAYBE-GROW  ( -- )
+    _MOD-GROW-TARGET DUP 0= IF DROP EXIT THEN
+    DUP CELLS _MOD-ALLOCATE IF 2DROP EXIT THEN  ( target candidate )
+    DUP 2 PICK CELLS 0 FILL
+
+    _MOD-LOCK LOCK
+    _MOD-BUCKET-COUNT 2 PICK >=
+    _MOD-COUNT _MOD-BUCKET-COUNT 2* <= OR IF
+        _MOD-LOCK UNLOCK
+        NIP _MOD-FREE EXIT
+    THEN
+    _MG-NEW ! _MG-N !
+
+    _MOD-BUCKET-COUNT 0 DO
+        _MOD-BUCKETS I CELLS + @ _MG-NODE !
+        BEGIN _MG-NODE @ WHILE
+            _MG-NODE @ _MN-NEXT @ _MG-NEXT !
+            _MG-NODE @ _MN-HASH @ _MG-N @ MOD CELLS _MG-NEW @ +
+            DUP @ _MG-NODE @ _MN-NEXT !
+            _MG-NODE @ SWAP !
+            _MG-NEXT @ _MG-NODE !
+        REPEAT
+    LOOP
+
+    _MOD-BUCKETS _MOD-BUCKETS-HEAP?       ( old-buckets old-heap? )
+    _MG-NEW @ _MOD-REG !
+    _MG-N @ _MOD-REG 8 + !
+    1 _MOD-REG 24 + !
+    _MOD-LOCK UNLOCK
+    IF _MOD-FREE ELSE DROP THEN ;
+
+VARIABLE _MOD-GROW-PENDING
+VARIABLE _MOD-GROW-READY
+0 _MOD-GROW-PENDING !
+0 _MOD-GROW-READY !
+
+: _MOD-TRY-PENDING-GROWTH  ( -- )
+    _MOD-GROW-PENDING @ IF
+        _MOD-MAYBE-GROW
+        _MOD-GROW-TARGET 0= IF 0 _MOD-GROW-PENDING ! THEN
+    THEN ;
+
+: _MOD-ADOPT  ( node inserted? -- )
+    IF
+        _LD-SP @ IF
+            _LD-TXN-HEAD @ OVER _MN-PROV !
+            _LD-TXN-HEAD !
+        ELSE
+            0 OVER _MN-PROV ! DROP
+            1 _MOD-GROW-PENDING !
+            _MOD-TRY-PENDING-GROWTH
+        THEN
+    ELSE
+        DROP
+    THEN ;
+
+VARIABLE _MU-TARGET
+VARIABLE _MU-LINK
+
+: _MOD-UNLINK-LOCKED  ( node -- )
+    _MU-TARGET !
+    _MU-TARGET @ _MN-HASH @ _MOD-BUCKET _MU-LINK !
+    BEGIN _MU-LINK @ @ DUP WHILE
+        DUP _MU-TARGET @ = IF
+            _MN-NEXT @ _MU-LINK @ !
+            -1 _MOD-REG 16 + +!
+            EXIT
+        THEN
+        _MN-NEXT _MU-LINK !
+    REPEAT
+    DROP ;
+
+VARIABLE _MRB-NODE
+
+: _MOD-ROLLBACK-FRAME  ( -- )
+    _LD-TXN-HEAD @ DUP 0= IF DROP EXIT THEN
+    0 _LD-TXN-HEAD !
+    DUP _MRB-NODE !
+    _MOD-LOCK LOCK
+    BEGIN _MRB-NODE @ WHILE
+        _MRB-NODE @ _MOD-UNLINK-LOCKED
+        _MRB-NODE @ _MN-PROV @ _MRB-NODE !
+    REPEAT
+    _MOD-LOCK UNLOCK
+    BEGIN DUP WHILE
+        DUP _MN-PROV @ SWAP _MOD-FREE
+    REPEAT
+    DROP ;
+
+: _MOD-COMMIT-FRAME  ( -- )
+    _LD-TXN-HEAD @
+    0 _LD-TXN-HEAD !
+    DUP IF
+        1 _MOD-GROW-PENDING !
+        1 _MOD-GROW-READY !
+    THEN
+    BEGIN DUP WHILE
+        DUP _MN-PROV @ SWAP _MN-PROV 0 SWAP !
+    REPEAT
+    DROP ;
+
+: _MOD-AFTER-RELEASE  ( -- )
+    _LD-SP @ 0= _MOD-GROW-READY @ AND IF
+        0 _MOD-GROW-READY !
+        _MOD-TRY-PENDING-GROWTH
+    THEN ;
+
+' _MOD-COMMIT-FRAME   IS _LD-TXN-COMMIT
+' _MOD-ROLLBACK-FRAME IS _LD-TXN-ROLLBACK
+' _MOD-AFTER-RELEASE  IS _LD-TXN-AFTER-RELEASE
 
 \ ── Pre-scan for PROVIDED ────────────────────────────────────────────
-\  _MOD-PRESCAN scans the file buffer (LD-BUF / LD-SZ) line by line
-\  looking for a line whose first non-whitespace token is "PROVIDED".
-\  Comment lines (starting with '\') are skipped.
-\  If found, the module name (the next whitespace-delimited word) is
-\  copied into NAMEBUF and the word returns TRUE.
-\  If no PROVIDED line exists, returns FALSE.  NAMEBUF is unchanged.
+\ _MOD-PRESCAN scans LD-BUF/LD-SZ for a line whose first evaluator token
+\ is PROVIDED.  It returns the following token as an exact slice of the live
+\ source buffer; it never copies through filesystem scratch.  The evaluator
+\ and BL WORD delimit on byte 32, so this scanner deliberately does the same.
 
 CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
 80 _PS-TAG     C!         \ P
@@ -9244,8 +9508,6 @@ CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
 68 _PS-TAG 7 + C!         \ D
  0 _PS-TAG 8 + C!         \ NUL
 
-CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
-
 \ _PS-MATCH8? ( addr -- flag )  True if addr points to "PROVIDED"
 \   (exactly 8 chars, case-sensitive).
 : _PS-MATCH8?  ( addr -- flag )
@@ -9255,124 +9517,81 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
         THEN
     LOOP NIP ;
 
-\ _PS-SKIP-WS ( addr rem -- addr' rem' )  Skip spaces/tabs.
+\ _PS-SKIP-WS ( addr rem -- addr' rem' )  Skip evaluator delimiters.
 : _PS-SKIP-WS  ( addr rem -- addr' rem' )
     BEGIN
         DUP 0> IF
-            OVER C@ DUP 32 = SWAP 9 = OR
+            OVER C@ 32 =
         ELSE FALSE THEN
     WHILE
         1- SWAP 1+ SWAP
     REPEAT ;
 
-\ _PS-TOKEN-LEN ( addr rem -- len )  Length of next non-WS token.
+\ _PS-TOKEN-LEN ( addr rem -- len )  Exact BL-delimited token length.
 : _PS-TOKEN-LEN  ( addr rem -- len )
     0                                ( addr rem len )
     BEGIN
         OVER 0> IF
-            2 PICK OVER + C@ DUP 32 > SWAP 127 < AND   ( ... printable? )
+            2 PICK OVER + C@ 32 <>
         ELSE FALSE THEN
     WHILE
         1+ SWAP 1- SWAP
     REPEAT
     NIP NIP ;
 
-\ _MOD-PRESCAN ( -- flag )  Scan LD-BUF/LD-SZ for PROVIDED line.
-\   On TRUE: module name is in NAMEBUF (ready for _MOD-LOADED?).
-\   On FALSE: no PROVIDED found; NAMEBUF is unchanged.
-: _MOD-PRESCAN  ( -- flag )
-    LD-BUF @ LD-SZ @                    ( ptr rem )
-    BEGIN DUP 0> WHILE
-        \ Find end of current line (newline or end of buffer)
-        2DUP                             ( ptr rem ptr rem )
-        0                                ( ptr rem ptr rem i )
-        BEGIN
-            DUP 2 PICK < IF
-                2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
-            ELSE TRUE THEN
-        UNTIL                            ( ptr rem ptr rem linelen )
-        NIP NIP                          ( ptr rem linelen )
-        \ Process this line: skip leading whitespace
-        >R 2DUP R>                       ( ptr rem ptr rem linelen )
-        DROP                             ( ptr rem lineptr linerem )
-        _PS-SKIP-WS                      ( ptr rem lp' lr' )
-        \ Skip comment lines (first non-ws char is '\')
-        DUP 0> IF
-            OVER C@ 92 = IF             \ backslash
-                2DROP                    ( ptr rem )
-            ELSE
-                \ Check if first token is "PROVIDED" (8 chars)
-                2DUP _PS-TOKEN-LEN       ( ptr rem lp lr toklen )
-                8 = IF
-                    OVER _PS-MATCH8? IF  ( ptr rem lp lr )
-                        \ Found! Extract module name after "PROVIDED "
-                        8 - SWAP 8 + SWAP  ( ptr rem name-area-ptr nar )
-                        _PS-SKIP-WS        ( ptr rem np nr )
-                        2DUP _PS-TOKEN-LEN ( ptr rem np nr namelen )
-                        DUP 0= IF
-                            \ PROVIDED with no argument — ignore
-                            DROP 2DROP     ( ptr rem )
-                        ELSE
-                            \ Copy name into NAMEBUF
-                            NAMEBUF 24 0 FILL
-                            23 MIN         ( ptr rem np nr namelen' )
-                            NIP            ( ptr rem np namelen' )
-                            NAMEBUF SWAP CMOVE  ( ptr rem )
-                            2DROP TRUE EXIT
-                        THEN
-                    ELSE
-                        2DROP              ( ptr rem )
-                    THEN
-                ELSE
-                    2DROP                  ( ptr rem )
+VARIABLE _PS-PTR
+VARIABLE _PS-REM
+VARIABLE _PS-LINE-U
+
+: _PS-LINE-LEN  ( addr rem -- len )
+    0
+    BEGIN
+        DUP 2 PICK < IF
+            2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
+        ELSE TRUE THEN
+    UNTIL
+    NIP NIP ;
+
+: _MOD-PRESCAN  ( -- id-addr id-len found? )
+    LD-BUF @ _PS-PTR !
+    LD-SZ @ _PS-REM !
+    BEGIN _PS-REM @ 0> WHILE
+        _PS-PTR @ _PS-REM @ _PS-LINE-LEN DUP _PS-LINE-U !
+        _PS-PTR @ SWAP _PS-SKIP-WS
+        2DUP _PS-TOKEN-LEN 8 = IF
+            OVER _PS-MATCH8? IF
+                _PS-LINE-U @ _MOD-EVAL-LINE-MAX > IF
+                    2DROP 0 0 TRUE EXIT
                 THEN
+                8 - SWAP 8 + SWAP _PS-SKIP-WS
+                2DUP _PS-TOKEN-LEN NIP TRUE EXIT
             THEN
-        ELSE
-            2DROP                          ( ptr rem )
         THEN
-        \ Advance past line + newline
-        2DUP                               ( ptr rem ptr rem )
-        0                                  ( ptr rem ptr rem i )
-        BEGIN
-            DUP 2 PICK < IF
-                2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
-            ELSE TRUE THEN
-        UNTIL                              ( ptr rem ptr rem linelen )
-        NIP NIP                            ( ptr rem linelen )
-        1+ DUP >R
-        NEGATE +                           ( ptr rem' )
-        SWAP R> + SWAP                     ( ptr' rem' )
+        2DROP
+        _PS-LINE-U @
+        DUP _PS-REM @ < IF 1+ THEN
+        DUP _PS-PTR +!
+        NEGATE _PS-REM +!
     REPEAT
-    2DROP FALSE ;
+    0 0 FALSE ;
+
+: _MOD-PARSE-ID  ( "id" -- id-addr id-len )
+    BL WORD COUNT ;
 
 \ PROVIDED ( "name" -- )  Register a module as loaded.
-\   Simply marks the name in the hash table.  The pre-scan in
-\   _MOD-LOAD-BODY handles the actual duplicate-load guard;
-\   this word just does the registration when executed normally.
+\ Leaves no insertion status on the public data stack.
 : PROVIDED  ( "name" -- )
-    PARSE-NAME  _MOD-MARK ;
+    ?CORE0
+    _MOD-PARSE-ID _MOD-INSERT
+    DUP IF >R 2DROP R> THROW THEN
+    DROP _MOD-ADOPT ;
 
 \ MODULE? ( "name" -- flag )  Test if a module is already loaded.
 : MODULE?  ( "name" -- flag )
-    PARSE-NAME  _MOD-LOADED? ;
-
-: _MOD-ROLLBACK-PENDING  ( -- )
-    _MOD-PENDING-FLAG @ IF
-        _MOD-PENDING-NAME _MOD-HT HT-DEL DROP
-        0 _MOD-PENDING-FLAG !
-    THEN ;
-
-: _MOD-WALK-GUARDED  ( -- )
-    ['] _LD-WALK CATCH
-    DUP IF
-        >R
-        _MOD-ROLLBACK-PENDING
-        _LD-RELEASE
-        R> THROW
-    THEN
-    DROP
-    0 _MOD-PENDING-FLAG !
-    _LD-RELEASE ;
+    ?CORE0
+    _MOD-PARSE-ID
+    DUP 0= OVER _MOD-ID-MAX > OR IF 2DROP _MOD-E-BAD-ID THROW THEN
+    _MOD-FIND 0<> ;
 
 \ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
 \   This is the core of LOAD without the PARSE-NAME call.
@@ -9390,7 +9609,6 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
         2DROP ."  Empty module" CR EXIT
     THEN
     _LD-SAVE
-    0 _MOD-PENDING-FLAG !
     LD-SZ !                              ( slot )
     \ Module source is a reclaimable loader allocation, not permanent XMEM.
     DUP _LD-SLOT-BYTES ALLOCATE IF
@@ -9399,30 +9617,27 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
     THEN
     LD-BUF !
     _LD-READ-SLOT
-    \ Pre-scan: look for PROVIDED before executing anything.
-    \ Save/restore NAMEBUF across prescan (NAMEBUF holds the
-    \ filename we just loaded; prescan overwrites it with the
-    \ PROVIDED argument if found).
-    NAMEBUF _PS-NBSAVE 24 CMOVE         \ save NAMEBUF
+    \ Pre-register the exact source-buffer slice before executing anything.
     _MOD-PRESCAN IF
-        \ PROVIDED line found — check if already loaded
-        _MOD-LOADED? IF
-            \ Already loaded — skip execution entirely
-            _PS-NBSAVE NAMEBUF 24 CMOVE  \ restore NAMEBUF
-            _LD-RELEASE EXIT
+        _MOD-INSERT                     ( node inserted? ior )
+        DUP IF
+            >R 2DROP
+            _LD-RELEASE
+            _LD-TXN-AFTER-RELEASE
+            R> THROW
         THEN
-        \ First time — pre-register NOW so that any mutual
-        \ REQUIRE during _LD-WALK sees us as already loaded.
-        \ NAMEBUF still holds the PROVIDED name from prescan.
-        NAMEBUF _MOD-PENDING-NAME 24 CMOVE
-        1 _MOD-PENDING-FLAG !
-        _MOD-MARK
-        _PS-NBSAVE NAMEBUF 24 CMOVE
+        DROP                            ( node inserted? )
+        DUP 0= IF
+            2DROP
+            _LD-RELEASE
+            _LD-TXN-AFTER-RELEASE
+            EXIT
+        THEN
+        _MOD-ADOPT
     ELSE
-        \ No PROVIDED found — restore NAMEBUF; load unconditionally
-        _PS-NBSAVE NAMEBUF 24 CMOVE
+        2DROP
     THEN
-    _MOD-WALK-GUARDED ;
+    _LD-WALK-GUARDED ;
 
 \ REQUIRE ( "name" -- )  Load a module file.
 \   The file's own PROVIDED line is the sole guard against duplicate
@@ -9448,6 +9663,7 @@ VARIABLE _REQ-SP  0 _REQ-SP !
     _MOD-LOAD-BODY ;
 
 : REQUIRE  ( "name" -- )
+    ?CORE0
     PARSE-NAME
     FS-ENSURE                  \ load FS before path resolution
     _REQ-SAVE-CWD
@@ -9455,15 +9671,31 @@ VARIABLE _REQ-SP  0 _REQ-SP !
     _REQ-RESTORE-CWD           \ restore before returning or rethrowing
     THROW ;
 
-\ _MOD-SHOW ( key-addr val-addr -- )  Print one module name.
-: _MOD-SHOW  ( key-addr val-addr -- )
-    DROP ."   " .ZSTR CR ;
+VARIABLE _ML-NODE
+
+: _MOD-LIST-BODY  ( -- )
+    ."  Loaded modules:" CR
+    _MOD-BUCKET-COUNT 0 DO
+        _MOD-BUCKETS I CELLS + @ _ML-NODE !
+        BEGIN _ML-NODE @ WHILE
+            ."   "
+            _ML-NODE @ DUP _MN-ID SWAP _MN-LEN @ TYPE CR
+            _ML-NODE @ _MN-NEXT @ _ML-NODE !
+        REPEAT
+    LOOP
+    _MOD-COUNT . ."  module(s)" CR ;
 
 \ MODULES ( -- )  List all loaded modules.
+\ Lock order is registry then UART; rollback cannot free an ID while TYPE uses
+\ it, and CATCH guarantees both locks are released before any rethrow.
 : MODULES  ( -- )
-    ."  Loaded modules:" CR
-    ['] _MOD-SHOW _MOD-HT HT-EACH
-    _MOD-HT HT-COUNT . ."  module(s)" CR ;
+    ?CORE0
+    _MOD-LOCK LOCK
+    UART-ACQUIRE
+    ['] _MOD-LIST-BODY CATCH
+    UART-RELEASE
+    _MOD-LOCK UNLOCK
+    THROW ;
 
 \ =====================================================================
 \  §14  Startup

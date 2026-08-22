@@ -6441,11 +6441,13 @@ class _KDOSTestBase(unittest.TestCase):
                   storage_image=None,
                   storage_faults=None,
                   nic_frames=None,
-                  nic_tx_callback=None) -> str:
+                  nic_tx_callback=None,
+                  ext_mem_mib=KDOS_TEST_EXT_MEM_MIB) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
         # Use the fast snapshot path whenever the snapshot exists.
         # The fast path now supports storage_image and nic_frames.
-        if self._snapshot_data() is not None:
+        if (ext_mem_mib == KDOS_TEST_EXT_MEM_MIB
+                and self._snapshot_data() is not None):
             return self._run_kdos_fast(extra_lines,
                                       max_steps=max_steps,
                                       nic_frames=nic_frames,
@@ -6453,7 +6455,10 @@ class _KDOSTestBase(unittest.TestCase):
                                       storage_faults=storage_faults,
                                       nic_tx_callback=nic_tx_callback)
 
-        sys, buf = self._boot_bios(storage_image=storage_image)
+        sys, buf = self._boot_bios(
+            storage_image=storage_image,
+            ext_mem_mib=ext_mem_mib,
+        )
         if storage_faults:
             for fault in storage_faults:
                 sys.storage.inject_fault(**fault)
@@ -42394,6 +42399,716 @@ class TestKDOSModuleSystem(_KDOSTestBase):
             os.unlink(path)
 
 
+class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
+    """Focused scale, identity, cycle, and rollback registry coverage."""
+
+    @staticmethod
+    def _marker_payload(text, marker):
+        """Join a bracketed report split across interactive input lines."""
+        chunks = []
+        collecting = False
+        token = f"[{marker}"
+        for raw_line in text.replace("\r", "").splitlines():
+            if raw_line.startswith("> "):
+                continue
+            line = raw_line
+            if not collecting:
+                start = line.find(token)
+                if start < 0:
+                    continue
+                line = line[start:]
+                collecting = True
+            line = re.sub(r"\s+ok\s*$", "", line).strip()
+            if line:
+                chunks.append(line)
+            if "]" in line:
+                break
+        return " ".join(chunks)
+
+    def _make_module_image(self, files):
+        path = self._make_formatted_image()
+        for name, source in files.items():
+            du_inject_file(path, name, source, ftype=FTYPE_FORTH)
+        return path
+
+    def test_257_direct_exact_ids_grow_and_remain_allocation_stable(self):
+        """Direct IDs survive repeated growth; duplicates allocate nothing."""
+        module_ids = [f"direct.registry.{i:03d}" for i in range(257)]
+        lines = [
+            "VARIABLE _DR-SP VARIABLE _DR-BAD-SP VARIABLE _DR-MISS",
+            "VARIABLE _DR-HEAP-START VARIABLE _DR-HEAP-UNIQUE",
+            "0 _DR-BAD-SP ! 0 _DR-MISS !",
+            "HEAP-FREE-BYTES _DR-HEAP-START !",
+        ]
+
+        for index, module_id in enumerate(module_ids, start=1):
+            lines.append(
+                f"DEPTH _DR-SP ! PROVIDED {module_id} "
+                "DEPTH _DR-SP @ <> IF 1 _DR-BAD-SP +! THEN"
+            )
+            if index in (33, 65, 129, 257):
+                lines.append(
+                    f'CR ." [DR-GROW-{index} " '
+                    '_MOD-BUCKET-COUNT . ." ]"'
+                )
+
+        lines.append("HEAP-FREE-BYTES _DR-HEAP-UNIQUE !")
+        for module_id in module_ids:
+            lines.append(
+                f"DEPTH _DR-SP ! PROVIDED {module_id} "
+                "DEPTH _DR-SP @ <> IF 1 _DR-BAD-SP +! THEN"
+            )
+        for module_id in module_ids:
+            lines.append(
+                f"MODULE? {module_id} 0= IF 1 _DR-MISS +! THEN"
+            )
+
+        lines.extend([
+            'CR ." [DR-DIRECT " _DR-BAD-SP @ . _DR-MISS @ .',
+            '_MOD-COUNT . _MOD-BUCKET-COUNT .',
+            '_DR-HEAP-START @ . _DR-HEAP-UNIQUE @ .',
+            'HEAP-FREE-BYTES . DEPTH . ." ]"',
+            "MODULES",
+        ])
+        text = self._run_kdos(lines)
+
+        for count, buckets in ((33, 32), (65, 64), (129, 128), (257, 256)):
+            self.assertRegex(
+                text,
+                rf"\[DR-GROW-{count}\s+{buckets}\s+\]",
+            )
+        result = re.fullmatch(
+            r"\[DR-DIRECT\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+"
+            r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+\]",
+            self._marker_payload(text, "DR-DIRECT"),
+        )
+        self.assertIsNotNone(result, text)
+        bad_stack, missing, count, buckets, heap_start, heap_unique, heap_dup, depth = (
+            map(int, result.groups())
+        )
+        self.assertEqual(bad_stack, 0)
+        self.assertEqual(missing, 0)
+        self.assertEqual(count, len(module_ids))
+        self.assertEqual(buckets, 256)
+        self.assertLess(heap_unique, heap_start)
+        self.assertEqual(heap_dup, heap_unique)
+        self.assertEqual(depth, 0)
+
+        listed_ids = set(re.findall(
+            r"^\s+(direct\.registry\.\d{3})\s*$",
+            text,
+            flags=re.MULTILINE,
+        ))
+        self.assertEqual(listed_ids, set(module_ids))
+        self.assertRegex(text, r"257\s+module\(s\)")
+
+    def test_two_maximum_evaluator_ids_remain_exact_and_idempotent(self):
+        """Two 246-byte IDs sharing 245 bytes remain distinct and stable."""
+        prefix_label = "maximum.registry."
+        common_prefix = prefix_label + "x" * (245 - len(prefix_label))
+        module_a = common_prefix + "a"
+        module_b = common_prefix + "b"
+        self.assertEqual(len(common_prefix.encode("ascii")), 245)
+        self.assertEqual(len(module_a.encode("ascii")), 246)
+        self.assertEqual(len(module_b.encode("ascii")), 246)
+        self.assertEqual(len(f"PROVIDED {module_a}".encode("ascii")), 255)
+
+        image = self._make_module_image({
+            "long-a.f": (
+                f"PROVIDED {module_a}\n: LONG-A-VALUE 611 ;\n"
+            ).encode("ascii"),
+            "long-b.f": (
+                f"PROVIDED {module_b}\n: LONG-B-VALUE 733 ;\n"
+            ).encode("ascii"),
+        })
+        try:
+            text = self._run_kdos([
+                "VARIABLE _LR-A VARIABLE _LR-B",
+                "VARIABLE _LR-HERE VARIABLE _LR-HEAP",
+                "REQUIRE long-a.f",
+                "REQUIRE long-b.f",
+                f"MODULE? {module_a}",
+                "_LR-A !",
+                f"MODULE? {module_b}",
+                "_LR-B !",
+                "HERE _LR-HERE ! HEAP-FREE-BYTES _LR-HEAP !",
+                "REQUIRE long-a.f",
+                "REQUIRE long-b.f",
+                'CR ." [LR-EXACT " _LR-A @ . _LR-B @ . _MOD-COUNT .',
+                'HERE _LR-HERE @ = . HEAP-FREE-BYTES _LR-HEAP @ = .',
+                'LONG-A-VALUE . LONG-B-VALUE . DEPTH . ." ]"',
+                "MODULES",
+            ], storage_image=image)
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "LR-EXACT"),
+            r"\[LR-EXACT\s+-1\s+-1\s+2\s+-1\s+-1\s+611\s+733\s+0\s+\]",
+        )
+        for module_id in (module_a, module_b):
+            self.assertRegex(
+                text,
+                re.compile(
+                    rf"^\s+{re.escape(module_id)}\s*$",
+                    flags=re.MULTILINE,
+                ),
+            )
+        self.assertRegex(text, r"2\s+module\(s\)")
+
+    def test_invalid_id_boundaries_throw_without_registry_mutation(self):
+        """Empty and 247-byte public IDs fail atomically at the envelope."""
+        text = self._run_kdos([
+            "VARIABLE _IB-S0 VARIABLE _IB-T0 VARIABLE _IB-S1 VARIABLE _IB-T1",
+            "VARIABLE _IB-S2 VARIABLE _IB-T2 VARIABLE _IB-COUNT",
+            "VARIABLE _IB-HEAP VARIABLE _IB-HERE VARIABLE _IB-DEPTH",
+            "CREATE _IB-CMD 255 ALLOT",
+            'S" MODULE? " _IB-CMD SWAP CMOVE',
+            "_IB-CMD 8 + 247 120 FILL",
+            "_MOD-COUNT _IB-COUNT ! HEAP-FREE-BYTES _IB-HEAP !",
+            "HERE _IB-HERE ! DEPTH _IB-DEPTH !",
+            'S" PROVIDED" EVALUATE-CHECKED _IB-S0 !',
+            "EVAL-THROW @ _IB-T0 !",
+            'S" MODULE?" EVALUATE-CHECKED _IB-S1 !',
+            "EVAL-THROW @ _IB-T1 !",
+            "_IB-CMD 255 EVALUATE-CHECKED _IB-S2 !",
+            "EVAL-THROW @ _IB-T2 !",
+            'CR ." [IB-REJECT " _IB-S0 @ . _IB-T0 @ .',
+            '_IB-S1 @ . _IB-T1 @ . _IB-S2 @ . _IB-T2 @ .',
+            '_MOD-COUNT _IB-COUNT @ = . HEAP-FREE-BYTES _IB-HEAP @ = .',
+            'HERE _IB-HERE @ = . DEPTH _IB-DEPTH @ = .',
+            'EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+        ])
+
+        self.assertRegex(
+            self._marker_payload(text, "IB-REJECT"),
+            r"\[IB-REJECT\s+5\s+-4101\s+5\s+-4101\s+5\s+-4101\s+"
+            r"-1\s+-1\s+-1\s+-1\s+0\s+0\s+0\s+\]",
+        )
+
+    def test_require_is_idempotent_after_129_registered_ids(self):
+        """Past the old limit, duplicate REQUIRE preserves one source result."""
+        seed_ids = [f"require.seed.{i:03d}" for i in range(129)]
+        image = self._make_module_image({
+            "boundary.f": (
+                b"PROVIDED require.boundary.module\n"
+                b"1 _RI-HIT +!\n"
+                b": REQUIRE-BOUNDARY-VALUE 6060 ;\n"
+                b"REQUIRE-BOUNDARY-VALUE\n"
+            ),
+        })
+        try:
+            lines = [
+                "VARIABLE _RI-HIT VARIABLE _RI-MISS VARIABLE _RI-DEPTH0",
+                "VARIABLE _RI-DEPTH1 VARIABLE _RI-VALUE",
+                "VARIABLE _RI-HERE0 VARIABLE _RI-HERE1",
+                "VARIABLE _RI-HEAP0 VARIABLE _RI-HEAP1",
+                "VARIABLE _RI-DSTABLE VARIABLE _RI-VSTABLE",
+                "0 _RI-HIT ! 0 _RI-MISS !",
+            ]
+            lines.extend(f"PROVIDED {module_id}" for module_id in seed_ids)
+            lines.extend([
+                "DEPTH _RI-DEPTH0 ! HERE _RI-HERE0 !",
+                "HEAP-FREE-BYTES _RI-HEAP0 !",
+                "REQUIRE boundary.f",
+                "DEPTH _RI-DEPTH1 ! DUP _RI-VALUE !",
+                "HERE _RI-HERE1 ! HEAP-FREE-BYTES _RI-HEAP1 !",
+                "REQUIRE boundary.f",
+                "DEPTH _RI-DEPTH1 @ = _RI-DSTABLE !",
+                "DUP _RI-VALUE @ = _RI-VSTABLE !",
+            ])
+            for module_id in seed_ids:
+                lines.append(
+                    f"MODULE? {module_id} 0= IF 1 _RI-MISS +! THEN"
+                )
+            lines.extend([
+                "MODULE? require.boundary.module 0= IF 1 _RI-MISS +! THEN",
+                'CR ." [RI-BOUNDARY " _RI-MISS @ .',
+                '_RI-DEPTH1 @ _RI-DEPTH0 @ 1+ = . _RI-VALUE @ .',
+                '_RI-HIT @ . _MOD-COUNT . _MOD-BUCKET-COUNT .',
+                '_RI-HEAP1 @ _RI-HEAP0 @ < . _RI-HERE1 @ _RI-HERE0 @ > .',
+                '_RI-DSTABLE @ . _RI-VSTABLE @ .',
+                'HERE _RI-HERE1 @ = . HEAP-FREE-BYTES _RI-HEAP1 @ = .',
+                '_RI-HIT @ 1 = . . DEPTH _RI-DEPTH0 @ = .',
+                'EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . HEAP-CHECK . ." ]"',
+            ])
+            text = self._run_kdos(lines, storage_image=image)
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "RI-BOUNDARY"),
+            r"\[RI-BOUNDARY\s+0\s+-1\s+6060\s+1\s+130\s+128\s+"
+            r"-1\s+-1\s+-1\s+-1\s+-1\s+-1\s+-1\s+6060\s+-1\s+"
+            r"0\s+0\s+0\s+-1\s+\]",
+        )
+
+    def test_cycles_after_129_seed_ids_preserve_registry_and_stacks(self):
+        """Two- and three-module cycles work after the former boundary."""
+        seed_ids = [f"cycle.seed.{i:03d}" for i in range(129)]
+        cycle_ids = (
+            "cycle.two.a", "cycle.two.b",
+            "cycle.three.a", "cycle.three.b", "cycle.three.c",
+        )
+        image = self._make_module_image({
+            "cycle2-a.f": (
+                b"REQUIRE cycle2-b.f\n"
+                b"PROVIDED cycle.two.a\n"
+                b": CYCLE2-A CYCLE2-B 1+ ;\n"
+            ),
+            "cycle2-b.f": (
+                b"REQUIRE cycle2-a.f\n"
+                b"PROVIDED cycle.two.b\n"
+                b": CYCLE2-B 200 ;\n"
+            ),
+            "cycle3-a.f": (
+                b"REQUIRE cycle3-b.f\n"
+                b"PROVIDED cycle.three.a\n"
+                b": CYCLE3-A CYCLE3-B 1+ ;\n"
+            ),
+            "cycle3-b.f": (
+                b"REQUIRE cycle3-c.f\n"
+                b"PROVIDED cycle.three.b\n"
+                b": CYCLE3-B CYCLE3-C 1+ ;\n"
+            ),
+            "cycle3-c.f": (
+                b"REQUIRE cycle3-a.f\n"
+                b"PROVIDED cycle.three.c\n"
+                b": CYCLE3-C 300 ;\n"
+            ),
+        })
+        try:
+            lines = [
+                "VARIABLE _CR-MISS VARIABLE _CR-HEAP",
+                "0 _CR-MISS !",
+            ]
+            lines.extend(f"PROVIDED {module_id}" for module_id in seed_ids)
+            lines.extend([
+                "REQUIRE cycle2-a.f",
+                "REQUIRE cycle3-a.f",
+            ])
+            for module_id in (*seed_ids, *cycle_ids):
+                lines.append(
+                    f"MODULE? {module_id} 0= IF 1 _CR-MISS +! THEN"
+                )
+            lines.extend([
+                "HEAP-FREE-BYTES _CR-HEAP !",
+                "REQUIRE cycle2-a.f",
+                "REQUIRE cycle2-b.f",
+                "REQUIRE cycle3-a.f",
+                "REQUIRE cycle3-b.f",
+                "REQUIRE cycle3-c.f",
+                'CR ." [CR-CYCLES " _CR-MISS @ . _MOD-COUNT .',
+                '_MOD-BUCKET-COUNT . DEPTH . _LD-SP @ . _REQ-SP @ .',
+                'HEAP-FREE-BYTES _CR-HEAP @ = .',
+                'CYCLE2-A . CYCLE2-B . CYCLE3-A . CYCLE3-B . CYCLE3-C .',
+                '." ]"',
+            ])
+            text = self._run_kdos(lines, storage_image=image)
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "CR-CYCLES"),
+            r"\[CR-CYCLES\s+0\s+134\s+128\s+0\s+0\s+0\s+-1\s+"
+            r"201\s+200\s+302\s+301\s+300\s+\]",
+        )
+
+    def test_nested_throw_rolls_back_all_provisional_ids_then_retries(self):
+        """A successful nested frame survives its throwing outer frame."""
+        seed_ids = [f"rollback.seed.{i:03d}" for i in range(255)]
+        outer_ids = ("rollback.outer", "rollback.outer.alias")
+        inner_id = "rollback.inner"
+
+        image = self._make_formatted_image()
+        fs = MP64FS.load(image)
+        fs.mkdir("/rollback")
+        fs.mkdir("/rollback/nested")
+        fs.inject_file(
+            "outer.f",
+            (
+                b"PROVIDED rollback.outer\n"
+                b"PROVIDED rollback.outer.alias\n"
+                b"REQUIRE nested/inner.f\n"
+                b"1 _RR-OUTER-ATTEMPTS +!\n"
+                b"_RR-OUTER-ATTEMPTS @ 1 = IF -733 THROW THEN\n"
+                b": ROLLBACK-OUTER-VALUE ROLLBACK-INNER-VALUE 1+ ;\n"
+            ),
+            ftype=FTYPE_FORTH,
+            path="/rollback",
+        )
+        fs.inject_file(
+            "inner.f",
+            (
+                b"PROVIDED rollback.inner\n"
+                b"1 _RR-INNER-ATTEMPTS +!\n"
+                b": ROLLBACK-INNER-VALUE 901 ;\n"
+            ),
+            ftype=FTYPE_FORTH,
+            path="/rollback/nested",
+        )
+        fs.save(image)
+
+        try:
+            lines = [
+                "VARIABLE _RR-INNER-ATTEMPTS VARIABLE _RR-OUTER-ATTEMPTS",
+                "VARIABLE _RR-STATUS VARIABLE _RR-THROW VARIABLE _RR-BAD",
+                "VARIABLE _RR-RETRY1 VARIABLE _RR-RETRY2",
+                "VARIABLE _RR-DEPTH VARIABLE _RR-EVAL VARIABLE _RR-CWD",
+                "VARIABLE _RR-LD-SP VARIABLE _RR-REQ-SP VARIABLE _RR-HEAP",
+                "VARIABLE _RR-HEAP-FAIL VARIABLE _RR-HEAP-RETRY",
+                "VARIABLE _RR-HERE-FAIL VARIABLE _RR-HERE-RETRY",
+                "VARIABLE _RR-COUNT VARIABLE _RR-HEAP-EXACT",
+                "VARIABLE _RR-HEAP-DELTA VARIABLE _RR-INNER-BLOCK",
+                "VARIABLE _RR-FRAG VARIABLE _RR-FRAG-FAIL",
+                "VARIABLE _RR-HEAP-STABLE VARIABLE _RR-HERE-STABLE",
+                "0 _RR-INNER-ATTEMPTS ! 0 _RR-OUTER-ATTEMPTS !",
+                "0 _RR-BAD !",
+                "FS-ENSURE",
+                *(f"PROVIDED {module_id}" for module_id in seed_ids),
+                ': _RR-CHECKED S" REQUIRE rollback/outer.f" '
+                'EVALUATE-CHECKED ;',
+                "DEPTH _RR-DEPTH ! EVAL-DEPTH @ _RR-EVAL ! CWD @ _RR-CWD !",
+                "_LD-SP @ _RR-LD-SP ! _REQ-SP @ _RR-REQ-SP !",
+                "HEAP-FREE-BYTES _RR-HEAP ! HEAP-FRAG _RR-FRAG !",
+                "_MOD-COUNT _RR-COUNT !",
+                "_RR-CHECKED _RR-STATUS ! EVAL-THROW @ _RR-THROW !",
+            ]
+            for module_id in seed_ids:
+                lines.append(
+                    f"MODULE? {module_id} 0= IF 1 _RR-BAD +! THEN"
+                )
+            lines.append(
+                f"MODULE? {inner_id} 0= IF 1 _RR-BAD +! THEN"
+            )
+            for module_id in outer_ids:
+                lines.append(
+                    f"MODULE? {module_id} IF 1 _RR-BAD +! THEN"
+                )
+            lines.extend([
+                "HEAP-FREE-BYTES _RR-HEAP-FAIL ! HERE _RR-HERE-FAIL !",
+                "_RR-HEAP @ _RR-HEAP-FAIL @ - _RR-HEAP-DELTA !",
+                'S" rollback.inner" _MOD-FIND /ALLOC-HDR - 8 + @',
+                "_RR-INNER-BLOCK !",
+                "HEAP-FRAG DUP _RR-FRAG-FAIL ! _RR-FRAG @ -",
+                "1+ /ALLOC-HDR * _RR-INNER-BLOCK @ +",
+                "_RR-HEAP-DELTA @ =",
+                "_RR-HEAP-EXACT !",
+                'CR ." [RR-ROLLBACK " _RR-STATUS @ . _RR-THROW @ .',
+                '_RR-BAD @ . DEPTH _RR-DEPTH @ = .',
+                'EVAL-DEPTH @ _RR-EVAL @ = . CWD @ _RR-CWD @ = .',
+                '_LD-SP @ _RR-LD-SP @ = . _REQ-SP @ _RR-REQ-SP @ = .',
+                '_RR-HEAP-DELTA @ . _RR-INNER-BLOCK @ .',
+                '_RR-FRAG-FAIL @ _RR-FRAG @ - .',
+                '_RR-HEAP-EXACT @ . _MOD-COUNT _RR-COUNT @ 1+ = .',
+                '_MOD-COUNT . _MOD-BUCKET-COUNT . _MOD-GROW-PENDING @ .',
+                '_RR-INNER-ATTEMPTS @ . _RR-OUTER-ATTEMPTS @ .',
+                'ROLLBACK-INNER-VALUE . HEAP-CHECK . ." ]"',
+                "0 _RR-BAD ! _RR-CHECKED _RR-RETRY1 !",
+            ])
+            for module_id in (*outer_ids, inner_id):
+                lines.append(
+                    f"MODULE? {module_id} 0= IF 1 _RR-BAD +! THEN"
+                )
+            lines.extend([
+                "HEAP-FREE-BYTES _RR-HEAP-RETRY ! HERE _RR-HERE-RETRY !",
+                "_RR-CHECKED _RR-RETRY2 !",
+                "HEAP-FREE-BYTES _RR-HEAP-RETRY @ = _RR-HEAP-STABLE !",
+                "HERE _RR-HERE-RETRY @ = _RR-HERE-STABLE !",
+                'CR ." [RR-RETRY " _RR-RETRY1 @ . _RR-RETRY2 @ .',
+                '_RR-BAD @ . _MOD-COUNT . _MOD-BUCKET-COUNT .',
+                'DEPTH _RR-DEPTH @ = .',
+                'EVAL-DEPTH @ _RR-EVAL @ = . CWD @ _RR-CWD @ = .',
+                '_LD-SP @ _RR-LD-SP @ = . _REQ-SP @ _RR-REQ-SP @ = .',
+                '_RR-HEAP-RETRY @ _RR-HEAP-FAIL @ < .',
+                '_RR-HERE-RETRY @ _RR-HERE-FAIL @ > .',
+                '_RR-HEAP-STABLE @ . _RR-HERE-STABLE @ .',
+                '_RR-INNER-ATTEMPTS @ . _RR-OUTER-ATTEMPTS @ .',
+                'ROLLBACK-OUTER-VALUE . ROLLBACK-INNER-VALUE .',
+                'HEAP-CHECK . ." ]"',
+            ])
+            text = self._run_kdos(lines, storage_image=image)
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "RR-ROLLBACK"),
+            r"\[RR-ROLLBACK\s+5\s+-733\s+0\s+-1\s+-1\s+-1\s+-1\s+"
+            r"-1\s+([1-9]\d*)\s+([1-9]\d*)\s+(-?\d+)\s+-1\s+-1\s+"
+            r"256\s+128\s+"
+            r"0\s+1\s+1\s+901\s+-1\s+\]",
+        )
+        self.assertRegex(
+            self._marker_payload(text, "RR-RETRY"),
+            r"\[RR-RETRY\s+0\s+0\s+0\s+258\s+256\s+-1\s+-1\s+-1\s+"
+            r"-1\s+-1\s+-1\s+-1\s+-1\s+-1\s+1\s+2\s+902\s+901\s+"
+            r"-1\s+\]",
+        )
+
+    def test_entry_allocation_oom_is_atomic_and_retriable(self):
+        """Direct and loader entry OOM leave no identity or source effects."""
+        image = self._make_module_image({
+            "oom-loader.f": (
+                b"PROVIDED oom.loader.registry\n"
+                b"1 _OR-LOAD-HIT +!\n"
+                b": OOM-LOADER-VALUE 818 ;\n"
+            ),
+        })
+        try:
+            text = self._run_kdos([
+                "VARIABLE _OR-FAIL-SIZE VARIABLE _OR-FAILS",
+                "VARIABLE _OR-STATUS VARIABLE _OR-THROW VARIABLE _OR-RETRY",
+                "VARIABLE _OR-HEAP VARIABLE _OR-COUNT VARIABLE _OR-HERE",
+                "VARIABLE _OR-LOAD-HIT",
+                ": _OR-ALLOCATE  ( u -- addr ior )",
+                "  DUP _OR-FAIL-SIZE @ = _OR-FAILS @ 0= AND IF",
+                "    DROP 1 _OR-FAILS +! 0 -99 EXIT",
+                "  THEN DMA-ALLOCATE ;",
+                ': _OR-DIRECT  S" PROVIDED oom.direct.registry" '
+                'EVALUATE-CHECKED ;',
+                ': _OR-LOAD  S" REQUIRE oom-loader.f" EVALUATE-CHECKED ;',
+                "FS-ENSURE",
+                "HEAP-FREE-BYTES _OR-HEAP ! _MOD-COUNT _OR-COUNT !",
+                'S" oom.direct.registry" NIP /MOD-NODE + _OR-FAIL-SIZE !',
+                "0 _OR-FAILS ! ' _OR-ALLOCATE IS _MOD-ALLOCATE",
+                "_OR-DIRECT _OR-STATUS ! EVAL-THROW @ _OR-THROW !",
+                "' DMA-ALLOCATE IS _MOD-ALLOCATE",
+                'CR ." [OR-DIRECT " _OR-STATUS @ . _OR-THROW @ .',
+                '_OR-FAILS @ . MODULE? oom.direct.registry 0= .',
+                '_MOD-COUNT _OR-COUNT @ = .',
+                'HEAP-FREE-BYTES _OR-HEAP @ = .',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+                "_OR-DIRECT _OR-RETRY !",
+                'CR ." [OR-DIRECT-RETRY " _OR-RETRY @ .',
+                'MODULE? oom.direct.registry .',
+                '_MOD-COUNT _OR-COUNT @ 1+ = .',
+                'HEAP-FREE-BYTES _OR-HEAP @ < . DEPTH . ." ]"',
+                "HEAP-FREE-BYTES _OR-HEAP ! _MOD-COUNT _OR-COUNT !",
+                "HERE _OR-HERE ! 0 _OR-LOAD-HIT !",
+                'S" oom.loader.registry" NIP /MOD-NODE + _OR-FAIL-SIZE !',
+                "0 _OR-FAILS ! ' _OR-ALLOCATE IS _MOD-ALLOCATE",
+                "_OR-LOAD _OR-STATUS ! EVAL-THROW @ _OR-THROW !",
+                "' DMA-ALLOCATE IS _MOD-ALLOCATE",
+                'CR ." [OR-LOAD " _OR-STATUS @ . _OR-THROW @ .',
+                '_OR-FAILS @ . _OR-LOAD-HIT @ .',
+                'MODULE? oom.loader.registry 0= .',
+                '_MOD-COUNT _OR-COUNT @ = .',
+                'HEAP-FREE-BYTES _OR-HEAP @ = . HERE _OR-HERE @ = .',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+                "_OR-LOAD _OR-RETRY !",
+                'CR ." [OR-LOAD-RETRY " _OR-RETRY @ .',
+                '_OR-LOAD-HIT @ . MODULE? oom.loader.registry .',
+                '_MOD-COUNT _OR-COUNT @ 1+ = .',
+                'HEAP-FREE-BYTES _OR-HEAP @ < . OOM-LOADER-VALUE .',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+            ], storage_image=image)
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "OR-DIRECT"),
+            r"\[OR-DIRECT\s+5\s+-4100\s+1\s+-1\s+-1\s+-1\s+"
+            r"0\s+0\s+0\s+0\s+\]",
+        )
+        self.assertRegex(
+            self._marker_payload(text, "OR-DIRECT-RETRY"),
+            r"\[OR-DIRECT-RETRY\s+0\s+-1\s+-1\s+-1\s+0\s+\]",
+        )
+        self.assertRegex(
+            self._marker_payload(text, "OR-LOAD"),
+            r"\[OR-LOAD\s+5\s+-4100\s+1\s+0\s+-1\s+-1\s+-1\s+-1\s+"
+            r"0\s+0\s+0\s+0\s+\]",
+        )
+        self.assertRegex(
+            self._marker_payload(text, "OR-LOAD-RETRY"),
+            r"\[OR-LOAD-RETRY\s+0\s+1\s+-1\s+-1\s+-1\s+818\s+"
+            r"0\s+0\s+0\s+0\s+\]",
+        )
+
+    def test_rehash_oom_retains_entry_duplicate_is_neutral_and_insert_recovers(self):
+        """Failed growth keeps the node; a duplicate is allocation-neutral."""
+        module_ids = [f"rehash.registry.{i:03d}" for i in range(1, 35)]
+        image = self._make_module_image({
+            "rehash-dup.f": (
+                b"PROVIDED rehash.registry.033\n"
+                b"1 _RH-DUP-HIT +!\n"
+            ),
+        })
+        lines = [
+            "VARIABLE _RH-FAIL-SIZE VARIABLE _RH-FAILS",
+            "VARIABLE _RH-S33 VARIABLE _RH-S34 VARIABLE _RH-P33",
+            "VARIABLE _RH-C33 VARIABLE _RH-B33 VARIABLE _RH-G33",
+            "VARIABLE _RH-SDUP VARIABLE _RH-HDUP VARIABLE _RH-H33",
+            "VARIABLE _RH-BDUP VARIABLE _RH-GDUP VARIABLE _RH-DUP-HIT",
+            "VARIABLE _RH-MISS",
+            ": _RH-ALLOCATE  ( u -- addr ior )",
+            "  DUP _RH-FAIL-SIZE @ = _RH-FAILS @ 0= AND IF",
+            "    DROP 1 _RH-FAILS +! 0 -99 EXIT",
+            "  THEN DMA-ALLOCATE ;",
+            ': _RH-ADD33  S" PROVIDED rehash.registry.033" '
+            'EVALUATE-CHECKED ;',
+            ': _RH-ADD34  S" PROVIDED rehash.registry.034" '
+            'EVALUATE-CHECKED ;',
+            ': _RH-DUP  S" REQUIRE rehash-dup.f" EVALUATE-CHECKED ;',
+            "FS-ENSURE 0 _RH-DUP-HIT !",
+        ]
+        lines.extend(f"PROVIDED {module_id}" for module_id in module_ids[:32])
+        lines.extend([
+            "_MOD-BUCKET-COUNT 2* CELLS _RH-FAIL-SIZE !",
+            "0 _RH-FAILS ! ' _RH-ALLOCATE IS _MOD-ALLOCATE",
+            "_RH-ADD33 _RH-S33 !",
+            "MODULE? rehash.registry.033 _RH-P33 !",
+            "_MOD-COUNT _RH-C33 ! _MOD-BUCKET-COUNT _RH-B33 !",
+            "_MOD-GROW-PENDING @ _RH-G33 !",
+            "HEAP-FREE-BYTES _RH-H33 ! _RH-DUP _RH-SDUP !",
+            "HEAP-FREE-BYTES _RH-H33 @ = _RH-HDUP !",
+            "_MOD-BUCKET-COUNT _RH-BDUP !",
+            "_MOD-GROW-PENDING @ _RH-GDUP !",
+            "_RH-ADD34 _RH-S34 !",
+            "' DMA-ALLOCATE IS _MOD-ALLOCATE",
+            "0 _RH-MISS !",
+        ])
+        lines.extend(
+            f"MODULE? {module_id} 0= IF 1 _RH-MISS +! THEN"
+            for module_id in module_ids
+        )
+        lines.extend([
+            'CR ." [RH-FAIL " _RH-S33 @ . _RH-FAILS @ . _RH-P33 @ .',
+            '_RH-C33 @ . _RH-B33 @ . _RH-G33 @ .',
+            '_RH-SDUP @ . _RH-DUP-HIT @ . _RH-HDUP @ .',
+            '_RH-BDUP @ . _RH-GDUP @ . ." ]"',
+            'CR ." [RH-RECOVER " _RH-S34 @ . _RH-FAILS @ .',
+            'MODULE? rehash.registry.033 . MODULE? rehash.registry.034 .',
+            '_MOD-COUNT . _MOD-BUCKET-COUNT . _MOD-GROW-PENDING @ .',
+            '_RH-MISS @ . HEAP-CHECK . DEPTH . ." ]"',
+        ])
+        try:
+            text = self._run_kdos(lines, storage_image=image)
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "RH-FAIL"),
+            r"\[RH-FAIL\s+0\s+1\s+-1\s+33\s+16\s+1\s+0\s+0\s+"
+            r"-1\s+16\s+1\s+\]",
+        )
+        self.assertRegex(
+            self._marker_payload(text, "RH-RECOVER"),
+            r"\[RH-RECOVER\s+0\s+1\s+-1\s+-1\s+34\s+32\s+0\s+"
+            r"0\s+-1\s+0\s+\]",
+        )
+
+    def test_registry_storage_survives_userland_and_xmem_reset(self):
+        """Entries and grown buckets remain Bank-0-owned across XMEM reset."""
+        module_ids = [f"reset.bank0.{i:03d}" for i in range(1, 51)]
+        lines = [
+            "VARIABLE _XR-X0 VARIABLE _XR-XFLOOR",
+            "VARIABLE _XR-H0 VARIABLE _XR-H1 VARIABLE _XR-HDUP",
+            "VARIABLE _XR-XSTABLE1 VARIABLE _XR-HUSED1",
+            "VARIABLE _XR-BANK-BUCKET VARIABLE _XR-BANK-NODE1",
+            "VARIABLE _XR-XSTABLE2 VARIABLE _XR-HUSED2",
+            "VARIABLE _XR-BANK-NODE2 VARIABLE _XR-XADV VARIABLE _XR-MISS",
+            "XMEM-HERE @ _XR-X0 ! HEAP-FREE-BYTES _XR-H0 !",
+        ]
+        lines.extend(f"PROVIDED {module_id}" for module_id in module_ids[:33])
+        lines.extend([
+            "XMEM-HERE @ _XR-X0 @ = _XR-XSTABLE1 !",
+            "HEAP-FREE-BYTES _XR-H0 @ < _XR-HUSED1 !",
+            "_MOD-BUCKETS EXT-MEM-BASE < _XR-BANK-BUCKET !",
+            'S" reset.bank0.001" _MOD-FIND EXT-MEM-BASE < '
+            '_XR-BANK-NODE1 !',
+            "ENTER-USERLAND XMEM-HERE @ _XR-XFLOOR !",
+            "HEAP-FREE-BYTES _XR-H1 !",
+        ])
+        lines.extend(f"PROVIDED {module_id}" for module_id in module_ids[33:])
+        lines.extend([
+            "XMEM-HERE @ _XR-XFLOOR @ = _XR-XSTABLE2 !",
+            "HEAP-FREE-BYTES _XR-H1 @ < _XR-HUSED2 !",
+            'S" reset.bank0.050" _MOD-FIND EXT-MEM-BASE < '
+            '_XR-BANK-NODE2 !',
+            "4096 XMEM-ALLOT DROP",
+            "XMEM-HERE @ _XR-XFLOOR @ > _XR-XADV !",
+            "XMEM-RESET 0 _XR-MISS !",
+        ])
+        lines.extend(
+            f"MODULE? {module_id} 0= IF 1 _XR-MISS +! THEN"
+            for module_id in module_ids
+        )
+        lines.append("HEAP-FREE-BYTES _XR-HDUP !")
+        lines.extend(f"PROVIDED {module_id}" for module_id in module_ids)
+        lines.extend([
+            'CR ." [XR-BANK0 " _XR-XSTABLE1 @ . _XR-HUSED1 @ .',
+            '_MOD-BUCKETS-HEAP? . _XR-BANK-BUCKET @ .',
+            '_XR-BANK-NODE1 @ . _XR-XSTABLE2 @ . _XR-HUSED2 @ .',
+            '_XR-BANK-NODE2 @ . _XR-XADV @ .',
+            'XMEM-HERE @ _XR-XFLOOR @ = . ULAND @ . _XR-MISS @ .',
+            '_MOD-COUNT . _MOD-BUCKET-COUNT .',
+            'HEAP-FREE-BYTES _XR-HDUP @ = . HEAP-CHECK .',
+            'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+        ])
+        text = self._run_kdos(lines)
+
+        self.assertRegex(
+            self._marker_payload(text, "XR-BANK0"),
+            r"\[XR-BANK0\s+-1\s+-1\s+1\s+-1\s+-1\s+-1\s+-1\s+-1\s+"
+            r"-1\s+-1\s+1\s+0\s+50\s+32\s+-1\s+-1\s+0\s+0\s+0\s+"
+            r"0\s+\]",
+        )
+
+    def test_cold_no_xmem_registry_and_require(self):
+        """Cold source mode supports growth and REQUIRE without external RAM."""
+        module_ids = [f"noxmem.registry.{i:03d}" for i in range(1, 41)]
+        image = self._make_module_image({
+            "noxmem-loader.f": (
+                b"PROVIDED noxmem.loader.registry\n"
+                b"1 _NX-HIT +!\n"
+                b": NOXMEM-REGISTRY-VALUE 4242 ;\n"
+            ),
+        })
+        try:
+            lines = [
+                "VARIABLE _NX-HIT VARIABLE _NX-MISS",
+                "VARIABLE _NX-H0 VARIABLE _NX-H1 VARIABLE _NX-HERE",
+                "0 _NX-HIT ! 0 _NX-MISS ! FS-ENSURE",
+                "HEAP-FREE-BYTES _NX-H0 !",
+            ]
+            lines.extend(f"PROVIDED {module_id}" for module_id in module_ids)
+            lines.extend([
+                "REQUIRE noxmem-loader.f",
+                "HERE _NX-HERE ! HEAP-FREE-BYTES _NX-H1 !",
+            ])
+            for module_id in module_ids:
+                lines.append(
+                    f"MODULE? {module_id} 0= IF 1 _NX-MISS +! THEN"
+                )
+            lines.extend([
+                "MODULE? noxmem.loader.registry 0= IF 1 _NX-MISS +! THEN",
+            ])
+            lines.extend(f"PROVIDED {module_id}" for module_id in module_ids)
+            lines.extend([
+                "REQUIRE noxmem-loader.f",
+                'CR ." [NX-COLD " XMEM? 0= . _NX-HIT @ . _NX-MISS @ .',
+                '_MOD-COUNT . _MOD-BUCKET-COUNT .',
+                'HEAP-FREE-BYTES _NX-H0 @ < .',
+                'HEAP-FREE-BYTES _NX-H1 @ = . HERE _NX-HERE @ = .',
+                'NOXMEM-REGISTRY-VALUE . HEAP-CHECK .',
+                'DEPTH . EVAL-DEPTH @ . _LD-SP @ . _REQ-SP @ . ." ]"',
+            ])
+            text = self._run_kdos(
+                lines,
+                storage_image=image,
+                ext_mem_mib=0,
+            )
+        finally:
+            os.unlink(image)
+
+        self.assertRegex(
+            self._marker_payload(text, "NX-COLD"),
+            r"\[NX-COLD\s+-1\s+1\s+0\s+41\s+32\s+-1\s+-1\s+-1\s+"
+            r"4242\s+-1\s+0\s+0\s+0\s+0\s+\]",
+        )
+
+
 class TestModuleProvidedGuard(_KDOSTestBase):
     """Rich tests for the pre-scan PROVIDED guard module system.
 
@@ -44099,8 +44814,11 @@ class TestKDOSGraphicsModule(_KDOSTestBase):
         try:
             text = self._run_kdos([
                 "REQUIRE graphics.f",
+                ('CR ." [GFX-REG " MODULE? graphics.f . '
+                 'HEAP-BASE @ HERE > . HEAP-CHECK . ." ]"'),
                 "GFX-TEST-CARD",
             ], storage_image=img, max_steps=400_000_000)
+            self.assertRegex(text, r"\[GFX-REG\s+-1\s+-1\s+-1\s+\]")
             self.assertIn("GFX-TEST-CARD complete", text)
         finally:
             os.unlink(img)

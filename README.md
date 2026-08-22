@@ -236,15 +236,25 @@ benchmarking, a full dashboard, a categorized help system with per-word
 `DESCRIBE`, pipeline bundles, **multicore dispatch** (CORE-RUN,
 CORE-WAIT, BARRIER, P.RUN-PAR), and auto-boot.
 
+Its core-0 module registry stores complete, case-sensitive evaluator IDs in
+dynamic Bank 0 chains.  The current 1–246-byte ID envelope comes from the
+evaluator's line bound, not a fixed registry capacity or MP64FS filename limit.
+Duplicate registration is allocation-neutral; bucket growth is best effort,
+and entries remain valid across userland transitions and `XMEM-RESET`.
+
 **Networking module** — `networking.f` supplies Ethernet, ARP, IPv4,
 ICMP, UDP, DHCP, DNS, TCP, TLS 1.3, sockets, and the UDP-backed data-port
 transport.  The standard `autoexec.f` enters userland and loads this module
 with KDOS `REQUIRE` before it loads `tools.f`, keeping the KDOS core dictionary
 in Bank 0.  The module loader batches large and fragmented MP64FS extents into
-external memory, so it does not re-enter the BIOS boot loader's live buffer.
-Its temporary transfer allocation, relative-directory state, and provisional
-`PROVIDED` mark are all unwound when source evaluation throws, allowing an
-incomplete module to be corrected and retried.
+a separate external-memory temporary allocation, so it does not re-enter the
+BIOS boot loader's live buffer.  `REQUIRE` pre-registers the source's exact
+`PROVIDED` ID before evaluation to terminate dependency cycles.  Entry OOM
+executes no source; a source throw unwinds its evaluator frame, transfer
+allocation, relative-directory state, and every frame-owned provisional ID
+while preserving a nested dependency that already completed.  The corrected
+source can then be retried.
+
 The feature inventory is not a completion claim: current TCP/TLS qualification
 boundaries are recorded in `docs/tls-hardening.md`.
 
