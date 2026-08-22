@@ -161,9 +161,16 @@ VARIABLE HEAP-INIT    0 HEAP-INIT !    \ flag: has heap been initialised?
         R@ HERE - > ABORT" userland dictionary full"
         R> DROP EXIT
     THEN
-    HERE + 256 +
-    DUP SP@ >= ABORT" dictionary overflow"
-    HEAP-INIT @ IF  HEAP-BASE @ >= ABORT" dictionary into heap"  ELSE DROP  THEN ;
+    \ Keep every comparison in subtraction geometry.  A positive request near
+    \ the signed-cell ceiling must not turn HERE+u into a negative value that
+    \ slips past the signed address comparisons.
+    HERE SP@ 256 - >= ABORT" dictionary overflow"
+    DUP SP@ 256 - HERE - >= ABORT" dictionary overflow"
+    HEAP-INIT @ IF
+        HERE HEAP-BASE @ 256 - >= ABORT" dictionary into heap"
+        DUP HEAP-BASE @ 256 - HERE - >= ABORT" dictionary into heap"
+    THEN
+    DROP ;
 
 \ MEM-SIZE ( -- u )  total RAM in bytes
 \   Reads bank0_size (64-bit, in bytes) from SysInfo register at offset 0x08.
@@ -678,8 +685,11 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 -8 CONSTANT U-DICT-E-FULL
 
 : _KDOS-DICT-FAULT  ( -- )
+    \ Bank-0 and userland source transactions share the same checked failure.
+    \ The Bank-0 preflight retains a 256-byte stack margin, so the handler can
+    \ unwind before any write without abandoning loader-owned state.
+    HANDLER @ IF U-DICT-E-FULL THROW THEN
     DICT-LIMIT@ IF
-        HANDLER @ IF U-DICT-E-FULL THROW THEN
         TRUE ABORT" Userland dictionary full"
     THEN
     TRUE ABORT" dictionary overflow" ;
@@ -2162,6 +2172,12 @@ DEFER _XMEM-FREE-SPAN-CHECK
     \ Rounding is part of the owned span, so validate it independently.
     2DUP SWAP XMEM-LIMIT @ SWAP - >
     ABORT" XMEM-FREE: exceeds limit"
+    \ A returned block must already belong to the allocated high-water span.
+    \ This rejects manufactured future free-list nodes before USERLAND-INIT
+    \ as well as after the dictionary/general-XMEM partition is sealed.
+    OVER XMEM-HERE @ >= ABORT" XMEM-FREE: above high water"
+    2DUP SWAP XMEM-HERE @ SWAP - >
+    ABORT" XMEM-FREE: above high water"
     2DUP _XMEM-FREE-SPAN-CHECK
     OVER !                            \ addr+0 = size
     XMEM-FL @ OVER 8 + !             \ addr+8 = old head
@@ -2464,6 +2480,10 @@ VARIABLE _U-AVAILABLE   0 _U-AVAILABLE !
     DUP _U-AVAILABLE @ >= ABORT" Insufficient ext mem for userland dictionary"
     XMEM-LIMIT @ SWAP -              ( base dict-limit )
     2DUP >= ABORT" Insufficient ext mem for userland dictionary"
+    \ Validate the physical interval before publishing any KDOS partition
+    \ cell.  USERLAND-INIT is independently callable, so disarm the checked
+    \ interval again until ENTER-USERLAND redirects HERE into it.
+    2DUP DICT-BOUNDS! DICT-BOUNDS-OFF
     DUP U-DICT-LIMIT !
     OVER U-DICT-BASE !
     OVER U-DICT-HERE !

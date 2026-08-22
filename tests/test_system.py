@@ -3033,7 +3033,12 @@ class TestBIOS(unittest.TestCase):
                 "1 2 + .",
                 "MODULE? networking.f .",
             ], max_steps=600_000_000)
-            self.assertIn("Standard autoexec requires external memory", text)
+            # FSLOAD does not echo autoexec source.  Pin the diagnostic to the
+            # recovered REPL prompt so only the runtime ABORT" can satisfy it.
+            self.assertRegex(
+                text,
+                r"Standard autoexec requires external memory\s*> 1 2 \+ \.",
+            )
             self.assertIn("3 ", text)
             self.assertIn("0 ", text)
         finally:
@@ -3636,6 +3641,44 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("dictionary overflow", text)
         self.assertRegex(text, r"\[DB-OVER\s+1\s+(-1\s+){3}\]")
+
+    def test_repeat_branch_accepts_exact_dictionary_fit(self):
+        """REPEAT preflights its complete three-byte backward branch."""
+        sys, buf = self._boot_bios(ram_kib=256, ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE DR-SYS VARIABLE DR-END HERE DR-SYS !",
+            "0 0x100000 ! 0x1122334455667788 0x100040 !",
+            "0x100000 0x100040 DICT-BOUNDS!",
+            "0x10003D HERE - ALLOT",
+            "0x100008 0x100000 REPEAT HERE DR-END !",
+            "DICT-BOUNDS-OFF DR-SYS @ HERE - ALLOT",
+            'CR ." [DB-REPEAT-EXACT " '
+            'DR-END @ 0x100040 = . 0x10003D C@ 0x40 = . '
+            '0x100040 @ 0x1122334455667788 = . '
+            'HERE DR-SYS @ = . ." ]"',
+        ])
+        self.assertRegex(text, r"\[DB-REPEAT-EXACT\s+(-1\s+){4}\]")
+
+    def test_repeat_branch_overflow_faults_before_opcode_store(self):
+        """A full dictionary leaves REPEAT's branch and XMEM untouched."""
+        sys, buf = self._boot_bios(ram_kib=256, ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE DR-SYS VARIABLE DR-FAULTED HERE DR-SYS !",
+            ": DR-FAULT 1 DR-FAULTED ! DICT-BOUNDS-OFF "
+            "DR-SYS @ HERE - ALLOT ;",
+            "' DR-FAULT DICT-FAULT-XT!",
+            "0x8877665544332211 0x100000 !",
+            "0x1122334455667788 0x100040 !",
+            "0x100000 0x100040 DICT-BOUNDS!",
+            "0x100040 HERE - ALLOT",
+            "0x100008 0x100000 REPEAT",
+            'CR ." [DB-REPEAT-OVER " DR-FAULTED @ . '
+            'HERE DR-SYS @ = . DICT-LIMIT@ 0= . '
+            '0x100000 @ 0x8877665544332211 = . '
+            '0x100040 @ 0x1122334455667788 = . ." ]"',
+        ])
+        self.assertIn("dictionary overflow", text)
+        self.assertRegex(text, r"\[DB-REPEAT-OVER\s+1\s+(-1\s+){4}\]")
 
     def test_squote(self):
         """S\" pushes string address and length."""
@@ -12224,6 +12267,16 @@ class TestKDOSArena(_KDOSTestBase):
             '999999999 ?DICT-ROOM',
         ], max_steps=200_000_000)
         self.assertIn("dictionary overflow", text)
+
+    def test_dict_room_guard_rejects_signed_max_without_mutation(self):
+        """A sign-crossing positive request cannot evade the Bank-0 guard."""
+        text = self._run_kdos([
+            'VARIABLE DG-HERE HERE DG-HERE !',
+            '0x7FFFFFFFFFFFFFFF ?DICT-ROOM',
+            'CR ." [DG-MAX " HERE DG-HERE @ = . ." ]"',
+        ], max_steps=200_000_000)
+        self.assertIn("dictionary overflow", text)
+        self.assertRegex(text, r"\[DG-MAX\s+-1\s+\]")
 
     def test_allot_overflow_aborts(self):
         """ALLOT with size that overflows into stack aborts."""
@@ -45453,6 +45506,40 @@ class TestKDOSExtMem(_KDOSTestBase):
         ])
         self.assertIn('XMEM-FREE: exceeds limit', text)
 
+    def test_xmem_free_rejects_unallocated_future_span(self):
+        """A forged node above the bump high-water cannot enter the list."""
+        text = self._run_kdos([
+            'VARIABLE XH-HERE VARIABLE XH-FL VARIABLE XH-ADDR',
+            'XMEM-HERE @ XH-HERE ! XMEM-FL @ XH-FL !',
+            'XMEM-HERE @ 16 + DUP XH-ADDR !',
+            '0x1122334455667788 SWAP !',
+            'XH-ADDR @ 16 XMEM-FREE-BLOCK',
+            'CR ." [XH-FUTURE " XMEM-HERE @ XH-HERE @ = . '
+            'XMEM-FL @ XH-FL @ = . '
+            'XH-ADDR @ @ 0x1122334455667788 = . ." ]"',
+        ])
+        self.assertIn('XMEM-FREE: above high water', text)
+        self.assertRegex(text, r"\[XH-FUTURE\s+(-1\s+){3}\]")
+
+    def test_xmem_free_rejects_owned_span_crossing_high_water(self):
+        """A real final block cannot be enlarged beyond allocated storage."""
+        text = self._run_kdos([
+            'VARIABLE XH-HERE VARIABLE XH-FL VARIABLE XH-ADDR',
+            'VARIABLE XH-START',
+            'XMEM-HERE @ XH-START ! 0 XMEM-FL !',
+            '16 XMEM-ALLOT DUP XH-ADDR !',
+            '0x8877665544332211 SWAP !',
+            'XMEM-HERE @ XH-HERE ! XMEM-FL @ XH-FL !',
+            'XH-ADDR @ 32 XMEM-FREE-BLOCK',
+            'CR ." [XH-CROSS " XMEM-HERE @ XH-HERE @ = . '
+            'XMEM-FL @ XH-FL @ = . '
+            'XH-ADDR @ @ 0x8877665544332211 = . '
+            'XH-ADDR @ XH-START @ = . ." ]"',
+            'XH-ADDR @ 16 XMEM-FREE-BLOCK',
+        ])
+        self.assertIn('XMEM-FREE: above high water', text)
+        self.assertRegex(text, r"\[XH-CROSS\s+(-1\s+){4}\]")
+
     def test_xmem_extreme_allot_requests_preserve_state(self):
         """Direct XMEM allocators reject zero, negative, and max-cell sizes."""
         text = self._run_kdos([
@@ -46310,6 +46397,30 @@ class TestKDOSUserland(_KDOSTestBase):
             'XMEM-HERE @ U-DICT-LIMIT @ = . ." ]"',
         ])
         self.assertRegex(text, r"\[U-RESERVE\s+1048576\s+-1\s+-1\s+\]")
+
+    def test_userland_init_validates_then_leaves_bios_bounds_disarmed(self):
+        """Partition cells publish only after a temporary BIOS validation."""
+        text = self._run_kdos([
+            'USERLAND-INIT',
+            'CR ." [U-INIT-VALIDATED " U-INIT-DONE @ . '
+            'U-DICT-BASE @ U-DICT-LIMIT @ < . '
+            'XMEM-HERE @ U-DICT-LIMIT @ = . '
+            'XMEM-FLOOR @ U-DICT-LIMIT @ = . '
+            'DICT-BASE@ 0= . DICT-LIMIT@ 0= . ." ]"',
+        ])
+        self.assertRegex(text, r"\[U-INIT-VALIDATED\s+1\s+(-1\s+){5}\]")
+
+    def test_bank0_dictionary_fault_throws_through_catch(self):
+        """Caught Bank-0 exhaustion returns -8 without abandoning KDOS."""
+        text = self._run_kdos([
+            'VARIABLE KB-HERE',
+            ': KB-OVER 0x7FFFFFFFFFFFFFFF ALLOT ;',
+            'HERE KB-HERE !',
+            'CR ." [KB-DIRECT-CATCH " '
+            "' KB-OVER CATCH . HERE KB-HERE @ = . "
+            'DICT-LIMIT@ 0= . ." ]"',
+        ])
+        self.assertRegex(text, r"\[KB-DIRECT-CATCH\s+-8\s+-1\s+-1\s+\]")
 
     def test_dictionary_fault_callback_throws_through_catch(self):
         """The installed BIOS fault callback is an ordinary catchable XT."""

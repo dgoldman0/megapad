@@ -4794,20 +4794,22 @@ w_repeat:
     ; Compile unconditional backward branch: lbr <begin>
     ldi64 r11, var_here
     ldn r0, r11
-    ldi r7, 0x40              ; LBR unconditional
-    st.b r0, r7
-    inc r0
-    ; offset = begin-addr - (opcode_addr+3); R0 is at opcode+1
+    ; offset = begin-addr - (opcode_addr+3)
     mov r1, r9
     sub r1, r0
-    subi r1, 2                ; offset = begin-addr - (R0 + 2) = begin-addr - (opcode+3)
+    subi r1, 3
     ; Range check (backward branch)
     ldi64 r11, check_branch16
     call.l r11
-    ; store 16-bit big-endian offset
+    ; Preflight the complete branch before its first byte.  Exact three-byte
+    ; space is valid; a full dictionary cannot leak the opcode into XMEM.
     ldi r7, 3
     ldi64 r11, dict_preflight
     call.l r11
+    ldi r7, 0x40              ; LBR unconditional
+    st.b r0, r7
+    inc r0
+    ; store 16-bit big-endian offset
     mov r7, r1
     lsri r7, 8
     st.b r0, r7               ; high byte

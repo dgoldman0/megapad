@@ -186,11 +186,13 @@ invalid or out-of-range request, while `XMEM-ALLOT?` returns `0 -1`. Bounds
 checks reject an impossible original request before normalizing it, then
 compare the rounded request with `limit - current` before advancing the bump
 pointer. `XMEM-FREE-BLOCK` similarly validates both the original and rounded
-span before writing free-list metadata; a rejected span leaves the list
-unchanged. Once userland is initialized, the same pre-write validation rejects
-any returned span that intersects `[U-DICT-BASE,U-DICT-LIMIT)`. Wholly
-reclaimed pre-init buffers below the dictionary base remain valid free-list
-nodes.
+span before writing free-list metadata; it also requires the complete span to
+lie below the allocator's current high-water mark. A rejected span leaves the
+list unchanged, and a caller cannot manufacture a future node beyond the
+current bump frontier. Once userland is initialized, the same
+pre-write validation rejects any returned span that intersects
+`[U-DICT-BASE,U-DICT-LIMIT)`. Wholly reclaimed pre-init buffers below the
+dictionary base remain valid free-list nodes.
 
 **Floor protection:** `XMEM-FLOOR` is the lowest address to which the bump
 allocator may reset. Before userland it protects persistent kernel XMEM
@@ -342,9 +344,10 @@ dictionary and general XMEM; this preserves useful capacity on both sides
 without encoding a machine-specific byte ceiling. A boot profile with a
 measured general-allocation requirement may call `U-XMEM-RESERVE!` before the
 first `ENTER-USERLAND`; the complementary dictionary limit is then derived
-from that request. `ENTER-USERLAND` redirects `HERE` into the sealed interval;
-all subsequent `:` definitions, `CREATE`, `VARIABLE`, etc. compile there
-instead of Bank 0.
+from that request. BIOS validates the complete physical interval before KDOS
+publishes any partition cell, then leaves the low-level bound disarmed until
+`ENTER-USERLAND` redirects `HERE` into the sealed interval. All subsequent
+`:` definitions, `CREATE`, `VARIABLE`, etc. compile there instead of Bank 0.
 
 ```forth
 ENTER-USERLAND      \ HERE → XMEM userland zone
@@ -361,15 +364,19 @@ sector-rounded transfer allocations and release them after evaluation,
 including the guarded THROW path; compiled definitions remain in the userland
 dictionary rather than in those temporary buffers.
 
-The BIOS owns the write boundary, not just the reporting words. Before an
-emitter writes, it proves the complete operation fits within the inclusive
-base and exclusive limit by subtraction. Exact fit is valid; an overrun,
-wrap, or rewind below the base fails before the first byte and before `HERE`
-or `LATEST` changes. A checked evaluator receives standard dictionary-full
-exception `-8`, so its owning loader can unwind and retry. Interactive code
-outside a `CATCH` receives `Userland dictionary full` and aborts. Even native
-`WORD` is checked because its transient counted string is written at `HERE`
-without advancing it.
+The BIOS owns the write boundary, not just the reporting words. Before each
+atomic emitted span writes, it proves that complete span fits within the
+inclusive base and exclusive limit by subtraction. Exact fit is valid; an
+overrun, wrap, or rewind below the base fails before that span's first byte and
+before its `HERE` or `LATEST` publication. Composite compiler words may have
+already published earlier individually checked spans, so checked source
+owners retain their existing HERE/LATEST rollback obligation. A caught fault
+in either Bank 0 or userland returns
+standard dictionary-full exception `-8`, so its owning loader can unwind and
+retry. Interactive userland code outside a `CATCH` receives `Userland
+dictionary full`; the corresponding Bank-0 diagnostic remains `dictionary
+overflow`. Even native `WORD` is checked because its transient counted string
+is written at `HERE` without advancing it.
 
 ---
 

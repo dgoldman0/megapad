@@ -520,14 +520,25 @@ partition from `XMEM-LIMIT`. The default splits the remaining capacity in
 half; a positive `U-XMEM-RESERVE!` request is rounded to the allocator's
 16-byte boundary and leaves the complementary span to the dictionary. Both
 sides must remain nonempty, and the policy cannot change after initialization.
+BIOS validates the candidate physical interval before KDOS publishes any
+partition cell; `USERLAND-INIT` leaves that low-level bound disarmed until the
+actual `ENTER-USERLAND` transition.
 
 The BIOS words `DICT-BOUNDS!`, `DICT-BOUNDS-OFF`, `DICT-BASE@`,
 `DICT-LIMIT@`, and `DICT-FAULT-XT!` enforce the interval. They are the
 low-level transition seam used by KDOS, not a second allocator API. Every
-HERE-growing emitter and native `WORD` preflights its exact span. Exact fit is
-allowed; a wrap, overrun, or rewind below the base changes neither bytes nor
-dictionary publication state. Under `EVALUATE-CHECKED` the KDOS fault hook
-throws standard code `-8`, reported as status 5 in `EVAL-S-THROW`.
+atomic HERE-growing emitter span and native `WORD` transient write preflights
+its exact size. Exact fit is allowed; a wrap, overrun, or rewind below the base
+changes neither that span's bytes nor its dictionary publication state.
+Composite compiler words can contain several such spans, so checked source
+owners still roll back their transaction checkpoint after a failure. Under a
+surrounding `CATCH`, the KDOS fault hook throws standard code `-8` for either
+Bank-0 or userland exhaustion; checked evaluation reports that as status 5 in
+`EVAL-S-THROW`.
+
+`XMEM-FREE-BLOCK` accepts only spans wholly below the current XMEM high-water
+mark, then applies the dictionary-overlap check after initialization. This
+prevents a forged pre-init free node from becoming later dictionary storage.
 
 > **Important:** Do not call `ENTER-USERLAND` inside interpret-mode
 > `IF … THEN`.  The BIOS clears temporary code between `var_interp_if_start`
