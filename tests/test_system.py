@@ -3039,33 +3039,6 @@ class TestBIOS(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_standard_autoexec_rejects_undersized_external_memory(self):
-        """The 32 MiB userland reservation fails closed without capacity."""
-        fs = build_sample_image()
-        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
-            path = f.name
-            fs.save(path)
-        try:
-            sys, buf = self._boot_bios(ram_kib=1024, storage_image=path,
-                                       ext_mem_mib=16)
-            text = self._run_forth(sys, buf, [
-                "1 2 + .",
-                "9999 1+ ULAND @ + .",
-                "MODULE? networking.f 19999 1+ + .",
-                "29999 1+ U-INIT-DONE @ + .",
-                "39999 1+ U-DICT-BASE @ + .",
-                "49999 1+ U-DICT-HERE @ + .",
-            ], max_steps=600_000_000)
-            self.assertIn("Insufficient ext mem for userland dictionary", text)
-            self.assertIn("3 ", text)
-            self.assertIn("10000 ", text)
-            self.assertIn("20000 ", text)
-            self.assertIn("30000 ", text)
-            self.assertIn("40000 ", text)
-            self.assertIn("50000 ", text)
-        finally:
-            os.unlink(path)
-
     def test_standard_autoexec_does_not_reenter_bios_fsload(self):
         """Userland networking uses KDOS REQUIRE while KDOS autoboot is live."""
         fs = build_sample_image()
@@ -3627,6 +3600,43 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("42 ", text)
 
+    def test_external_dictionary_bounds_allow_exact_fit_and_restore_bank0(self):
+        """The BIOS accepts the exclusive limit exactly and can disarm it."""
+        sys, buf = self._boot_bios(ram_kib=256, ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE DB-SYS HERE DB-SYS !",
+            ": DB-EXACT 0x100038 HERE - ALLOT 0x1122334455667788 , "
+            "DICT-BOUNDS-OFF DB-SYS @ HERE - ALLOT ;",
+            "0x100000 0x100040 DICT-BOUNDS!",
+            "0x100000 HERE - ALLOT",
+            'CR ." [DB-ACTIVE " DICT-BASE@ 0x100000 = . '
+            'DICT-LIMIT@ 0x100040 = . ." ]"',
+            "DB-EXACT",
+            'CR ." [DB-EXACT " 0x100038 @ 0x1122334455667788 = . '
+            'HERE DB-SYS @ = . DICT-BASE@ 0= . DICT-LIMIT@ 0= . ." ]"',
+        ])
+        self.assertRegex(text, r"\[DB-ACTIVE\s+-1\s+-1\s+\]")
+        self.assertRegex(text, r"\[DB-EXACT\s+(-1\s+){4}\]")
+
+    def test_external_dictionary_overflow_faults_before_first_store(self):
+        """One-byte-over comma preserves HERE, XMEM bytes, and recovery."""
+        sys, buf = self._boot_bios(ram_kib=256, ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE DO-SYS VARIABLE DO-FAULTED HERE DO-SYS !",
+            ": DO-FAULT 1 DO-FAULTED ! DICT-BOUNDS-OFF "
+            "DO-SYS @ HERE - ALLOT ;",
+            "' DO-FAULT DICT-FAULT-XT!",
+            ": DO-OVER 0x100039 HERE - ALLOT 0x8877665544332211 , ;",
+            "0x123456789ABCDEF0 0x100038 !",
+            "0x100000 0x100040 DICT-BOUNDS!",
+            "0x100000 HERE - ALLOT",
+            "DO-OVER",
+            'CR ." [DB-OVER " DO-FAULTED @ . HERE DO-SYS @ = . '
+            'DICT-LIMIT@ 0= . 0x100038 @ 0x123456789ABCDEF0 = . ." ]"',
+        ])
+        self.assertIn("dictionary overflow", text)
+        self.assertRegex(text, r"\[DB-OVER\s+1\s+(-1\s+){3}\]")
+
     def test_squote(self):
         """S\" pushes string address and length."""
         sys, buf = self._boot_bios()
@@ -3635,6 +3645,27 @@ class TestBIOS(unittest.TestCase):
             "TS",
         ])
         self.assertIn("HELLO", text)
+
+    def test_abort_quote_preserves_inline_diagnostic_and_recovery(self):
+        """The preflighted ABORT\" string remains printable at runtime."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "JIT-ON",
+            ': TAQ TRUE ABORT" stable abort quote" ;',
+            "TAQ",
+            "40 2 + .",
+        ])
+        self.assertGreaterEqual(text.count("stable abort quote"), 2)
+        self.assertIn("42 ", text)
+
+    def test_word_preflight_preserves_exact_token_and_input_tail(self):
+        """Native WORD still returns a counted token and advances >IN once."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TWORD BL WORD COUNT 2DUP TYPE NIP . ;",
+            "TWORD autoexec.f 99 .",
+        ])
+        self.assertRegex(text, r"autoexec\.f10\s+99\s+")
 
     def test_zero_gt(self):
         """0> returns true for positive, false for zero/negative."""
@@ -5044,7 +5075,12 @@ class TestBIOSTACC(unittest.TestCase):
         """WOTS appends after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
-            ("d_wots_chain", "d_tacc_claim_q"),
+            ("d_wots_chain", "d_dict_fault_xt_store"),
+            ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
+            ("d_dict_limit_fetch", "d_dict_base_fetch"),
+            ("d_dict_base_fetch", "d_dict_bounds_off"),
+            ("d_dict_bounds_off", "d_dict_bounds_store"),
+            ("d_dict_bounds_store", "d_tacc_claim_q"),
             ("d_tacc_claim_q", "d_tacc_status_fetch"),
             ("d_tacc_status_fetch", "d_tacc_release"),
             ("d_tacc_release", "d_tacc_store"),
@@ -5072,7 +5108,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 472)
+        self.assertEqual(len(seen), 477)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -6333,9 +6369,9 @@ def _build_kdos_snapshot():
             kdos_lines.append(line)
     _kdos_shared_lines = kdos_lines
 
-    # The shared fixture needs room for the 32 MiB userland zone and runtime
-    # allocations, but need not pay the copy cost of the 128 MiB emulator
-    # default in every KDOS test.
+    # The shared fixture needs representative room for both sides of the
+    # capacity-derived user-dictionary/XMEM partition, but need not pay the
+    # copy cost of the 128 MiB emulator default in every KDOS test.
     sys_obj = make_system(ram_kib=1024, ext_mem_mib=KDOS_TEST_EXT_MEM_MIB)
     buf = capture_uart(sys_obj)
     sys_obj.load_binary(0, _kdos_shared_bios_code)
@@ -14753,7 +14789,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 472)
+        self.assertEqual(len(seen), 477)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -16298,6 +16334,13 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
+        dictionary_bound_chain = (
+            ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
+            ("d_dict_limit_fetch", "d_dict_base_fetch"),
+            ("d_dict_base_fetch", "d_dict_bounds_off"),
+            ("d_dict_bounds_off", "d_dict_bounds_store"),
+            ("d_dict_bounds_store", "d_tacc_claim_q"),
+        )
         claim_previous = int.from_bytes(
             self._bios_harness.bios_code[
                 labels["d_tacc_claim_q"]:labels["d_tacc_claim_q"] + 8
@@ -16323,7 +16366,15 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
-        self.assertEqual(wots_previous, labels["d_tacc_claim_q"])
+        self.assertEqual(wots_previous, labels["d_dict_fault_xt_store"])
+        for current, previous in dictionary_bound_chain:
+            link = int.from_bytes(
+                self._bios_harness.bios_code[
+                    labels[current]:labels[current] + 8
+                ],
+                "little",
+            )
+            self.assertEqual(link, labels[previous])
         self.assertEqual(claim_previous, labels["d_tacc_status_fetch"])
         self.assertEqual(caller_span_previous, labels["d_entropy_ready"])
         self.assertEqual(ready_previous, labels["d_entropy_fill"])
@@ -46193,16 +46244,12 @@ class TestKDOSUserland(_KDOSTestBase):
         """XMEM-RESET respects the userland zone floor."""
         text = self._run_kdos([
             'ENTER-USERLAND LEAVE-USERLAND',
+            'U-DICT-LIMIT @ XMEM-FLOOR @ =',
             '4096 XMEM-ALLOT DROP XMEM-RESET',
-            'XMEM-HERE @ .',
+            'XMEM-HERE @ XMEM-FLOOR @ =',
+            'CR ." [U-FLOOR " . . ." ]"',
         ])
-        import re
-        m = re.search(r'(\d+)', text.split('XMEM-HERE')[1])
-        self.assertIsNotNone(m)
-        here = int(m.group(1))
-        # The allocator floor must protect the complete 32 MiB zone.  It may
-        # be higher because persistent XMEM buffers can precede userland.
-        self.assertGreaterEqual(here, 0x100000 + 32 * 1024 * 1024)
+        self.assertRegex(text, r"\[U-FLOOR\s+-1\s+-1\s+\]")
 
     def test_u_used(self):
         """U-USED reports bytes used in userland dictionary."""
@@ -46211,8 +46258,137 @@ class TestKDOSUserland(_KDOSTestBase):
 
     def test_u_free(self):
         """U-FREE reports bytes remaining in userland zone."""
-        text = self._run_kdos(['ENTER-USERLAND  333 ALLOT  U-FREE .'])
-        self.assertIn('33554099', text)  # 33554432 - 333
+        text = self._run_kdos([
+            'ENTER-USERLAND U-FREE 333 ALLOT U-FREE -',
+            'CR ." [U-FREE-DELTA " . ." ]"',
+        ])
+        self.assertRegex(text, r"\[U-FREE-DELTA\s+333\s+\]")
+
+    def test_capacity_derived_partition_is_sealed_and_nonempty(self):
+        """USERLAND-INIT derives two disjoint nonempty capacity spans."""
+        text = self._run_kdos([
+            'ENTER-USERLAND',
+            'CR ." [U-PARTITION "',
+            'U-DICT-BASE @ U-DICT-LIMIT @ < .',
+            'U-DICT-LIMIT @ XMEM-FLOOR @ = .',
+            'U-DICT-LIMIT @ XMEM-HERE @ = .',
+            'U-ZONE-SIZE 0> .',
+            'XMEM-LIMIT @ U-DICT-LIMIT @ - 0> .',
+            'U-ZONE-SIZE XMEM-LIMIT @ U-DICT-LIMIT @ - +',
+            'XMEM-LIMIT @ U-DICT-BASE @ - = .',
+            'DICT-BASE@ U-DICT-BASE @ = .',
+            'DICT-LIMIT@ U-DICT-LIMIT @ = .',
+            '." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[U-PARTITION\s+(-1\s+){8}\]",
+        )
+
+    def test_small_external_memory_derives_bounds_without_a_fixed_claim(self):
+        """A 16 MiB device can seal its own nonempty two-sided partition."""
+        text = self._run_kdos([
+            'ENTER-USERLAND',
+            'CR ." [U-SMALL " U-INIT-DONE @ .',
+            'U-DICT-BASE @ U-DICT-LIMIT @ < .',
+            'U-DICT-LIMIT @ XMEM-LIMIT @ < .',
+            'U-ZONE-SIZE 0> .',
+            'XMEM-LIMIT @ U-DICT-LIMIT @ - 0> .',
+            'U-ZONE-SIZE XMEM-LIMIT @ U-DICT-LIMIT @ - +',
+            'XMEM-LIMIT @ U-DICT-BASE @ - = .',
+            '." ]"',
+        ], ext_mem_mib=16)
+        self.assertNotIn('Insufficient ext mem for userland dictionary', text)
+        self.assertRegex(text, r"\[U-SMALL\s+1\s+(-1\s+){5}\]")
+
+    def test_explicit_xmem_reserve_is_runtime_capacity_not_fixed_zone(self):
+        """A pre-init reserve request derives the complementary dict limit."""
+        text = self._run_kdos([
+            '1048576 U-XMEM-RESERVE! ENTER-USERLAND',
+            'CR ." [U-RESERVE "',
+            'XMEM-LIMIT @ U-DICT-LIMIT @ - .',
+            'U-ZONE-SIZE U-DICT-BASE @ + U-DICT-LIMIT @ = .',
+            'XMEM-HERE @ U-DICT-LIMIT @ = .',
+            '." ]"',
+        ])
+        self.assertRegex(text, r"\[U-RESERVE\s+1048576\s+-1\s+-1\s+\]")
+
+    def test_dictionary_bounds_fail_before_mutation_and_retry(self):
+        """All core emitter families throw -8 without crossing into XMEM."""
+        text = self._run_kdos([
+            'VARIABLE _UB-ROOT VARIABLE _UB-AT VARIABLE _UB-LATEST',
+            'VARIABLE _UB-STATE VARIABLE _UB-FAILS',
+            'VARIABLE _UB-XADDR VARIABLE _UB-XHERE',
+            'VARIABLE _UB-EVAL-S VARIABLE _UB-EVAL-T',
+            ': _UB-DO-ALLOT U-FREE 1+ ALLOT ;',
+            ': _UB-DO-COMMA 123 , ;',
+            ': _UB-DO-CCOMMA 123 C, ;',
+            ': _UB-DO-WORD 32 WORD DROP ;',
+            ': _UB-DO-CREATE CREATE ;',
+            ': _UB-DO-VARIABLE VARIABLE ;',
+            ': _UB-DO-CONSTANT 17 CONSTANT ;',
+            ': _UB-DO-VALUE 19 VALUE ;',
+            "' : CONSTANT _UB-COLON-XT",
+            "' :NONAME CONSTANT _UB-NONAME-XT",
+            ': _UB-BOUNDARY  ( xt slack -- )',
+            '  HERE _UB-ROOT !  U-FREE SWAP - ALLOT',
+            '  HERE _UB-AT !  LATEST _UB-LATEST !  STATE @ _UB-STATE !',
+            '  CATCH U-DICT-E-FULL <> IF 1 _UB-FAILS +! THEN',
+            '  HERE _UB-AT @ <> IF 1 _UB-FAILS +! THEN',
+            '  LATEST _UB-LATEST @ <> IF 1 _UB-FAILS +! THEN',
+            '  STATE @ _UB-STATE @ <> IF 1 _UB-FAILS +! THEN',
+            '  _UB-ROOT @ HERE - ALLOT ;',
+            ': _UB-EVAL-BOUNDARY',
+            '  HERE _UB-ROOT !  LATEST _UB-LATEST !  U-FREE ALLOT',
+            '  S" 1 DROP" EVALUATE-CHECKED _UB-EVAL-S !',
+            '  EVAL-THROW @ _UB-EVAL-T !',
+            '  LATEST _UB-LATEST @ <> IF 1 _UB-FAILS +! THEN',
+            '  _UB-ROOT @ HERE - ALLOT ;',
+            ': _UB-RETRY S" : UB-RETRY-VALUE 77 ;" EVALUATE-CHECKED ;',
+            ': _UB-EXACT-FILL U-FREE ALLOT LEAVE-USERLAND ;',
+            '0 _UB-FAILS ! ENTER-USERLAND',
+            '16 XMEM-ALLOT DUP _UB-XADDR ! 987654321 SWAP !',
+            'XMEM-HERE @ _UB-XHERE !',
+            "['] _UB-DO-ALLOT U-FREE _UB-BOUNDARY",
+            "['] _UB-DO-COMMA 7 _UB-BOUNDARY",
+            "['] _UB-DO-CCOMMA 0 _UB-BOUNDARY",
+            "['] _UB-DO-WORD 0 _UB-BOUNDARY A",
+            "['] _UB-DO-CREATE 3 _UB-BOUNDARY B",
+            "['] _UB-DO-VARIABLE 3 _UB-BOUNDARY C",
+            "['] _UB-DO-CONSTANT 3 _UB-BOUNDARY D",
+            "['] _UB-DO-VALUE 3 _UB-BOUNDARY E",
+            '_UB-COLON-XT 3 _UB-BOUNDARY F',
+            '_UB-NONAME-XT 0 _UB-BOUNDARY',
+            '_UB-EVAL-BOUNDARY _UB-RETRY',
+            'UB-RETRY-VALUE _UB-EXACT-FILL',
+            'CR ." [U-BOUNDS " _UB-FAILS @ .',
+            '_UB-EVAL-S @ . _UB-EVAL-T @ . SWAP . .',
+            'U-HERE U-DICT-LIMIT @ = . DICT-LIMIT@ 0= .',
+            '_UB-XADDR @ @ 987654321 = .',
+            'XMEM-HERE @ _UB-XHERE @ = .',
+            '_UB-XADDR @ U-DICT-BASE @ <',
+            '_UB-XADDR @ U-DICT-LIMIT @ >= OR .',
+            '." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[U-BOUNDS\s+0\s+5\s+-8\s+0\s+77\s+"
+            r"-1\s+-1\s+-1\s+-1\s+-1\s+\]",
+        )
+
+    def test_xmem_free_rejects_dictionary_overlap_before_list_write(self):
+        """A forged free block cannot publish a node inside the dictionary."""
+        text = self._run_kdos([
+            'VARIABLE _UF-FL VARIABLE _UF-ADDR',
+            'ENTER-USERLAND XMEM-FL @ _UF-FL !',
+            'U-DICT-LIMIT @ 16 - DUP _UF-ADDR ! 424242 SWAP !',
+            '_UF-ADDR @ 16 XMEM-FREE-BLOCK',
+            'CR ." [U-FREE-OVERLAP "',
+            '_UF-ADDR @ @ 424242 = . XMEM-FL @ _UF-FL @ = .',
+            '." ]"',
+        ])
+        self.assertIn('XMEM-FREE: user dictionary overlap', text)
+        self.assertRegex(text, r"\[U-FREE-OVERLAP\s+-1\s+-1\s+\]")
 
     def test_enter_idempotent(self):
         """Calling ENTER-USERLAND twice is safe (no-op)."""

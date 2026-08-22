@@ -497,8 +497,9 @@ userland zone.  System words remain accessible.
 | System RAM | `0x00000 .. HERE` | BIOS + KDOS core dictionary |
 | System heap | cold aligned `HERE+32 KiB .. 0x7F000` | Explicit Bank 0 `DMA-ALLOCATE` / `DMA-FREE` blocks |
 | Stacks | `0x80000 .. 0xFFFFF` | Data stack + return stack |
-| Userland dict | `EXT-MEM-BASE+N .. +U-ZONE-SIZE` | User word definitions + data |
-| XMEM general | `+U-ZONE-SIZE .. end` | `XMEM-ALLOT` bump allocator |
+| Pre-init XMEM | `EXT-MEM-BASE .. U-DICT-BASE` | Persistent kernel objects and reclaimable loader buffers allocated before the partition |
+| Userland dict | `U-DICT-BASE .. U-DICT-LIMIT` | User word definitions + data; inclusive base, exclusive limit |
+| XMEM general | `U-DICT-LIMIT .. XMEM-LIMIT` | `XMEM-ALLOT` bump capacity plus safe reclaimed blocks below the dictionary base |
 
 | Word | Stack | Description |
 |------|-------|-------------|
@@ -509,7 +510,24 @@ userland zone.  System words remain accessible.
 | `U-USED` | `( -- u )` | Bytes used in the userland dictionary. |
 | `U-FREE` | `( -- u )` | Bytes remaining in the userland zone. |
 | `.USERLAND` | `( -- )` | Display userland memory status. |
-| `U-ZONE-SIZE` | `( -- u )` | Constant: 32 MiB (size of the userland dictionary zone). |
+| `U-DICT-BASE` | `( -- addr )` | Variable containing the sealed inclusive dictionary base. |
+| `U-DICT-LIMIT` | `( -- addr )` | Variable containing the sealed exclusive dictionary limit. |
+| `U-ZONE-SIZE` | `( -- u )` | Derived size `U-DICT-LIMIT - U-DICT-BASE`. |
+| `U-XMEM-RESERVE!` | `( u -- )` | Before initialization, request exact general-XMEM capacity; zero selects the default half of remaining capacity. |
+
+`USERLAND-INIT` aligns above the live XMEM high-water mark and derives the
+partition from `XMEM-LIMIT`. The default splits the remaining capacity in
+half; a positive `U-XMEM-RESERVE!` request is rounded to the allocator's
+16-byte boundary and leaves the complementary span to the dictionary. Both
+sides must remain nonempty, and the policy cannot change after initialization.
+
+The BIOS words `DICT-BOUNDS!`, `DICT-BOUNDS-OFF`, `DICT-BASE@`,
+`DICT-LIMIT@`, and `DICT-FAULT-XT!` enforce the interval. They are the
+low-level transition seam used by KDOS, not a second allocator API. Every
+HERE-growing emitter and native `WORD` preflights its exact span. Exact fit is
+allowed; a wrap, overrun, or rewind below the base changes neither bytes nor
+dictionary publication state. Under `EVALUATE-CHECKED` the KDOS fault hook
+throws standard code `-8`, reported as status 5 in `EVAL-S-THROW`.
 
 > **Important:** Do not call `ENTER-USERLAND` inside interpret-mode
 > `IF … THEN`.  The BIOS clears temporary code between `var_interp_if_start`
@@ -1338,8 +1356,9 @@ The startup section runs automatically when the KDOS core loads.  It:
 5. Runs `autoexec.f` if present on disk
 6. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
 
-The standard autoexec enables JIT for its own load, enters the 32 MiB XMEM
-userland dictionary, loads `networking.f` with KDOS `REQUIRE`, configures DHCP
+The standard autoexec enables JIT for its own load, enters the capacity-derived
+and BIOS-bounded XMEM userland dictionary, loads `networking.f` with KDOS
+`REQUIRE`, configures DHCP
 or the static fallback, loads `tools.f`, and disables JIT.  The module loader
 batches validated MP64FS extents into a separate, temporary transfer
 allocation, so the network stack does not enlarge the Bank 0 core dictionary

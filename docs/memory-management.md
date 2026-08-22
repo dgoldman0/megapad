@@ -28,8 +28,9 @@ different bus with different characteristics:
  0x000F_FFFF
 
  0x0010_0000          External RAM   up to    HyperRAM/SDRAM  6+ cycles
-   ├─ Userland dictionary (32 MiB zone)  ~4 GiB
-   └─ XMEM allocator region
+   ├─ Pre-init persistent/loader allocations                ~4 GiB
+   ├─ Capacity-derived userland dictionary interval
+   └─ Reserved XMEM allocator interval
  0xFEFF_FFFF (hardware max, before VRAM/HBW)
 
  0xFF00_0000          VRAM            4 MiB   Dedicated FB  varies
@@ -186,12 +187,17 @@ checks reject an impossible original request before normalizing it, then
 compare the rounded request with `limit - current` before advancing the bump
 pointer. `XMEM-FREE-BLOCK` similarly validates both the original and rounded
 span before writing free-list metadata; a rejected span leaves the list
-unchanged.
+unchanged. Once userland is initialized, the same pre-write validation rejects
+any returned span that intersects `[U-DICT-BASE,U-DICT-LIMIT)`. Wholly
+reclaimed pre-init buffers below the dictionary base remain valid free-list
+nodes.
 
-**Floor protection:** `XMEM-FLOOR` marks the boundary between
-kernel-reserved XMEM allocations (file buffers loaded at boot) and
-the general-purpose region. The public `XMEM-RESET` is a deferred checked
-action whose underlying primitive never reclaims below the floor. The
+**Floor protection:** `XMEM-FLOOR` is the lowest address to which the bump
+allocator may reset. Before userland it protects persistent kernel XMEM
+allocations; userland initialization advances it to `U-DICT-LIMIT`, thereby
+protecting both those earlier objects and the complete dictionary interval.
+The public `XMEM-RESET` is a deferred checked action whose underlying
+primitive never reclaims below the floor. The
 networking module installs a credential-aware wrapper: on an XMEM machine it
 acquires TLS ownership, throws `TLS-CREDENTIAL-E-BUSY` if ownership is
 contended or any credential is active, and otherwise performs the reset. When
@@ -329,9 +335,14 @@ data that must persist across arena resets, objects that need `RESIZE`.
 
 ### 2.5 Userland Dictionary — `ENTER-USERLAND`
 
-When external RAM is present, KDOS reserves a 32 MiB XMEM zone for the
-userland dictionary.  It begins above any XMEM buffers allocated before
-userland initialization.  `ENTER-USERLAND` redirects `HERE` into this zone;
+When external RAM is present, KDOS seals a dictionary interval above every
+XMEM allocation that is live at userland initialization. By default the
+remaining hardware-reported capacity is divided equally between the
+dictionary and general XMEM; this preserves useful capacity on both sides
+without encoding a machine-specific byte ceiling. A boot profile with a
+measured general-allocation requirement may call `U-XMEM-RESERVE!` before the
+first `ENTER-USERLAND`; the complementary dictionary limit is then derived
+from that request. `ENTER-USERLAND` redirects `HERE` into the sealed interval;
 all subsequent `:` definitions, `CREATE`, `VARIABLE`, etc. compile there
 instead of Bank 0.
 
@@ -349,6 +360,16 @@ regardless of where HERE points.  LOAD, APP-LOAD, and REQUIRE use separate
 sector-rounded transfer allocations and release them after evaluation,
 including the guarded THROW path; compiled definitions remain in the userland
 dictionary rather than in those temporary buffers.
+
+The BIOS owns the write boundary, not just the reporting words. Before an
+emitter writes, it proves the complete operation fits within the inclusive
+base and exclusive limit by subtraction. Exact fit is valid; an overrun,
+wrap, or rewind below the base fails before the first byte and before `HERE`
+or `LATEST` changes. A checked evaluator receives standard dictionary-full
+exception `-8`, so its owning loader can unwind and retry. Interactive code
+outside a `CATCH` receives `Userland dictionary full` and aborts. Even native
+`WORD` is checked because its transient counted string is written at `HERE`
+without advancing it.
 
 ---
 
@@ -517,20 +538,21 @@ KDOS splits XMEM into two zones:
 ```
 XMEM region:
   ┌──────────────────────────────┐  EXT-MEM-BASE
-  │  Kernel file buffers (XBUF)  │  ← protected by XMEM-FLOOR
-  ├──────────────────────────────┤
+  │  Pre-init XBUF/loader spans  │
+  ├──────────────────────────────┤  U-DICT-BASE
   │  Userland dictionary         │  ← HERE when ULAND=1
-  │  (32 MiB zone)              │
-  ├──────────────────────────────┤  XMEM-FLOOR
-  │  XMEM general allocator     │  ← XMEM-ALLOT / arenas
-  │  (remaining XMEM)           │
+  │  (capacity-derived)          │
+  ├──────────────────────────────┤  U-DICT-LIMIT = XMEM-FLOOR
+  │  XMEM general allocator      │  ← XMEM-ALLOT / arenas
+  │  (default or chosen reserve) │
   └──────────────────────────────┘  XMEM-LIMIT
 ```
 
-`XMEM-FLOOR` protects kernel allocations from `XMEM-RESET`.  The
-userland zone is reserved at `ENTER-USERLAND` time and is not
-reclaimable by the XMEM allocator.  `LEAVE-USERLAND` switches `HERE`
-back to Bank 0 without affecting XMEM allocations.
+`XMEM-FLOOR` protects the earlier kernel allocations and dictionary from
+`XMEM-RESET`. The userland interval is sealed at `ENTER-USERLAND` time and is
+not reclaimable by the XMEM allocator. `LEAVE-USERLAND` disables the active
+BIOS bounds and switches `HERE` back to Bank 0 without affecting either XMEM
+side.
 
 The module registry deliberately does not live in either XMEM zone.  Its
 stable exact-ID entries and any grown bucket vector use the Bank 0 heap through
@@ -805,6 +827,6 @@ Switch the affected workload to arenas — arenas cannot fragment.
 | **Free-list** | Linked list of available blocks.  First-fit search.  Can fragment. |
 | **Coalescing** | Merging adjacent free blocks to reduce fragmentation. |
 | **XMEM floor** | Pointer below which `XMEM-RESET` will not reclaim.  Protects kernel data. |
-| **Userland zone** | 32 MiB dictionary area in XMEM for networking, tools, and user-loaded code. |
+| **Userland zone** | Capacity-derived, BIOS-bounded XMEM dictionary interval for networking, tools, and user-loaded code. |
 | **Descriptor** | 32-byte arena metadata: base, size, ptr, source. |
 | **?CORE0** | Runtime guard that aborts if `COREID` ≠ 0.  Protects shared-state allocators. |

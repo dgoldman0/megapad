@@ -146,11 +146,21 @@ VARIABLE HEAP-FREE    0 HEAP-FREE !    \ head of free list
 VARIABLE HEAP-INIT    0 HEAP-INIT !    \ flag: has heap been initialised?
 
 \ ?DICT-ROOM ( u -- )
-\   Abort if HERE + u would reach within 256 bytes of SP,
-\   or would collide with the heap (if initialised).
+\   In Bank 0, abort if HERE + u would reach within 256 bytes of SP,
+\   or would collide with the heap (if initialised).  While the BIOS
+\   user-dictionary interval is active, prove the exact request fits by
+\   subtraction so a wrapping HERE + u cannot evade the bound.
 \   Use before large ALLOT or CREATE sequences in Forth code
 \   to catch dictionary overflow before it corrupts the stack.
 : ?DICT-ROOM  ( u -- )
+    DUP 0< ABORT" Invalid dictionary size"
+    DICT-LIMIT@ ?DUP IF
+        >R
+        HERE DICT-BASE@ < ABORT" userland dictionary below base"
+        HERE R@ > ABORT" userland dictionary beyond limit"
+        R@ HERE - > ABORT" userland dictionary full"
+        R> DROP EXIT
+    THEN
     HERE + 256 +
     DUP SP@ >= ABORT" dictionary overflow"
     HEAP-INIT @ IF  HEAP-BASE @ >= ABORT" dictionary into heap"  ELSE DROP  THEN ;
@@ -659,6 +669,22 @@ _TASK-HANDLERS 4 CELLS 0 FILL
         SP!             ( restore data stack )
         DROP R>         ( drop stale TOS, retrieve throw-code )
     THEN ;
+
+\ BIOS dictionary emitters call this hook only after proving that an exact
+\ operation cannot fit, and before publishing HERE or writing any byte.  The
+\ standard -8 exception lets EVALUATE-CHECKED report EVAL-S-THROW and lets its
+\ caller roll back the containing source transaction.  Outside a CATCH, retain
+\ a stable interactive diagnostic and ABORT rather than returning to BIOS.
+-8 CONSTANT U-DICT-E-FULL
+
+: _KDOS-DICT-FAULT  ( -- )
+    DICT-LIMIT@ IF
+        HANDLER @ IF U-DICT-E-FULL THROW THEN
+        TRUE ABORT" Userland dictionary full"
+    THEN
+    TRUE ABORT" dictionary overflow" ;
+
+' _KDOS-DICT-FAULT DICT-FAULT-XT!
 
 \ Preserve the BIOS task ABI while adding KDOS-owned exception cleanup.  BIOS
 \ cannot clear _TASK-HANDLERS because that table is allocated when KDOS loads.
@@ -2109,6 +2135,14 @@ VARIABLE FL-PREV                     \ search scratch
 VARIABLE FL-CURR                     \ search scratch
 VARIABLE FL-NEED                     \ requested bytes during first-fit
 
+\ USERLAND-INIT installs an interval-aware validator later in this file.  The
+\ indirection is required because XMEM-FREE-BLOCK is defined before the
+\ userland partition state.  Prior to initialization every returned block is
+\ necessarily below the future dictionary base.
+: (_XMEM-FREE-SPAN-CHECK)  ( addr size -- )  2DROP ;
+DEFER _XMEM-FREE-SPAN-CHECK
+' (_XMEM-FREE-SPAN-CHECK) IS _XMEM-FREE-SPAN-CHECK
+
 : _XMEM-NORMALIZE-SIZE  ( u -- u' )
     15 + -16 AND ;
 
@@ -2128,6 +2162,7 @@ VARIABLE FL-NEED                     \ requested bytes during first-fit
     \ Rounding is part of the owned span, so validate it independently.
     2DUP SWAP XMEM-LIMIT @ SWAP - >
     ABORT" XMEM-FREE: exceeds limit"
+    2DUP _XMEM-FREE-SPAN-CHECK
     OVER !                            \ addr+0 = size
     XMEM-FL @ OVER 8 + !             \ addr+8 = old head
     XMEM-FL ! ;                       \ head = addr
@@ -2357,9 +2392,10 @@ XMEM-INIT      \ initialise at load time
 \      kernel-data-end .. ~0x7F000   KDOS dictionary + system heap
 \      0x80000 .. 0xFFFFF     Stacks (data + return)
 \
-\    External RAM (128 MiB by default, at 0x100000):
-\      0x100000 .. +U-ZONE    Userland dictionary (HERE when ULAND=1)
-\      +U-ZONE  .. end        XMEM general allocator
+\    External RAM (capacity reported by hardware, at EXT-MEM-BASE):
+\      prior XMEM high-water .. U-DICT-BASE  existing kernel/loader objects
+\      U-DICT-BASE .. U-DICT-LIMIT           userland dictionary
+\      U-DICT-LIMIT .. XMEM-LIMIT            XMEM bump allocator
 \
 \  Words:
 \    ULAND           ( -- addr )  flag variable: 0=system, 1=userland
@@ -2367,30 +2403,74 @@ XMEM-INIT      \ initialise at load time
 \    LEAVE-USERLAND  ( -- )       switch HERE back to system dict
 \    .USERLAND       ( -- )       display userland status
 
-33554432 CONSTANT U-ZONE-SIZE  \ 32 MiB reserved for userland dictionary
-
 VARIABLE ULAND          0 ULAND !
 VARIABLE SYS-HERE-SAVE  0 SYS-HERE-SAVE !
 VARIABLE U-DICT-HERE    0 U-DICT-HERE !
 VARIABLE U-DICT-BASE    0 U-DICT-BASE !
+VARIABLE U-DICT-LIMIT   0 U-DICT-LIMIT !
 VARIABLE U-INIT-DONE    0 U-INIT-DONE !
+VARIABLE U-XMEM-RESERVE 0 U-XMEM-RESERVE !
+VARIABLE _U-AVAILABLE   0 _U-AVAILABLE !
 
-\ USERLAND-INIT ( -- )  Partition ext mem: [0..U-ZONE) = userland,
-\   [U-ZONE..end) = XMEM.  Called lazily on first ENTER-USERLAND.
-\   No-op if ext mem is absent or already initialised.
+\ U-ZONE-SIZE ( -- u )  Capacity of the initialized dictionary interval.
+: U-ZONE-SIZE  ( -- u )
+    U-DICT-LIMIT @ U-DICT-BASE @ - ;
+
+\ U-XMEM-RESERVE! ( u -- )  Select post-partition general-XMEM capacity.
+\   Zero restores the capacity-derived default (half the available span).
+\   A positive request is rounded up to the allocator's 16-byte boundary at
+\   initialization.  Partition policy is immutable once userland is live.
+: U-XMEM-RESERVE!  ( u -- )
+    U-INIT-DONE @ ABORT" Userland partition already initialized"
+    DUP 0< ABORT" Invalid XMEM reserve"
+    U-XMEM-RESERVE ! ;
+
+\ Reject any manufactured free-list node that intersects the live dictionary.
+\ XMEM-FREE-BLOCK has already proved addr+size is non-wrapping and within the
+\ physical external-memory limit before this hook executes.  A reclaimed
+\ pre-init loader object may remain wholly below U-DICT-BASE and is valid.
+: _U-XMEM-FREE-SPAN-CHECK  ( addr size -- )
+    U-INIT-DONE @ 0= IF 2DROP EXIT THEN
+    OVER U-DICT-LIMIT @ < IF
+        2DUP + U-DICT-BASE @ >
+        ABORT" XMEM-FREE: user dictionary overlap"
+    THEN
+    2DROP ;
+
+' _U-XMEM-FREE-SPAN-CHECK IS _XMEM-FREE-SPAN-CHECK
+
+\ USERLAND-INIT ( -- )  Seal a dictionary/general-XMEM partition above every
+\   live pre-init allocation.  The default assigns half the remaining capacity
+\   to each side; U-XMEM-RESERVE! may instead provide an explicit runtime
+\   requirement.  Called lazily on first ENTER-USERLAND.  No-op if ext mem is
+\   absent or already initialized.  No partition cell is published until the
+\   complete capacity calculation has passed.
 : USERLAND-INIT  ( -- )
     U-INIT-DONE @ IF EXIT THEN
     XMEM? 0= IF EXIT THEN
     \ Start userland dict above any live prior XMEM allocations.  Loader
     \ source buffers use reclaimable ALLOCATE/FREE storage, while persistent
-    \ XBUF kernel buffers remain below this boundary.  Cell-align for safe
-    \ @ / ! access.
-    XMEM-HERE @ 7 + -8 AND
-    DUP U-ZONE-SIZE + EXT-MEM-BASE EXT-MEM-SIZE + >
-        ABORT" Insufficient ext mem for userland dictionary"
-    DUP U-DICT-BASE ! U-DICT-HERE !
-    \ Push XMEM allocator past the userland zone
-    U-DICT-BASE @ U-ZONE-SIZE +  DUP XMEM-HERE ! XMEM-FLOOR !
+    \ XBUF kernel buffers remain below this boundary.  Align to the XMEM
+    \ allocator's 16-byte recyclable-block geometry (and therefore cells).
+    XMEM-HERE @ 15 + -16 AND
+    DUP XMEM-LIMIT @ >= ABORT" Insufficient ext mem for userland partition"
+    XMEM-LIMIT @ OVER - DUP _U-AVAILABLE ! DROP
+    U-XMEM-RESERVE @ ?DUP IF
+        15 + -16 AND
+    ELSE
+        _U-AVAILABLE @ 2/ 15 + -16 AND
+    THEN
+    DUP 16 < ABORT" Insufficient XMEM reserve"
+    DUP _U-AVAILABLE @ >= ABORT" Insufficient ext mem for userland dictionary"
+    XMEM-LIMIT @ SWAP -              ( base dict-limit )
+    2DUP >= ABORT" Insufficient ext mem for userland dictionary"
+    DUP U-DICT-LIMIT !
+    OVER U-DICT-BASE !
+    OVER U-DICT-HERE !
+    \ Push the general allocator to the sealed dictionary limit.  This is also
+    \ the reset floor, so neither reset nor bump allocation can enter the zone.
+    DUP XMEM-HERE ! DUP XMEM-FLOOR !
+    2DROP
     1 U-INIT-DONE ! ;
 
 \ ENTER-USERLAND ( -- )  Save system HERE, redirect to userland dict.
@@ -2399,6 +2479,7 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
     ULAND @ IF EXIT THEN             \ already in userland
     U-INIT-DONE @ 0= IF USERLAND-INIT THEN
     HERE SYS-HERE-SAVE !             \ save system dict pointer
+    U-DICT-BASE @ U-DICT-LIMIT @ DICT-BOUNDS!
     U-DICT-HERE @ HERE - ALLOT       \ HERE <- userland dict pointer
     1 ULAND ! ;
 
@@ -2406,6 +2487,7 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
 : LEAVE-USERLAND  ( -- )
     ULAND @ 0= IF EXIT THEN          \ not in userland
     HERE U-DICT-HERE !               \ save userland dict pointer
+    DICT-BOUNDS-OFF
     SYS-HERE-SAVE @ HERE - ALLOT     \ HERE <- system dict pointer
     0 ULAND ! ;
 
@@ -2420,7 +2502,7 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
 
 \ U-FREE ( -- u )  Bytes remaining in userland dictionary zone.
 : U-FREE  ( -- u )
-    U-ZONE-SIZE U-USED - ;
+    U-DICT-LIMIT @ U-HERE - ;
 
 \ .USERLAND ( -- )  Display userland status.
 : .USERLAND  ( -- )
@@ -2428,8 +2510,10 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
     XMEM? IF
         ."   Mode  = " ULAND @ IF ." ACTIVE" ELSE ." system" THEN CR
         ."   Base  = " U-DICT-BASE @ . CR
+        ."   Limit = " U-DICT-LIMIT @ . CR
         ."   Used  = " U-USED . ." bytes" CR
         ."   Free  = " U-FREE . ." bytes" CR
+        ."   XMEM reserve = " XMEM-LIMIT @ U-DICT-LIMIT @ - . ." bytes" CR
     ELSE
         ."   (no ext mem -- userland disabled)" CR
     THEN ;

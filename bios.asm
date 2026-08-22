@@ -168,6 +168,16 @@ boot:
     ldi64 r11, var_task_active
     str r11, r1               ; core 0 starts in foreground task context
 
+    ; RAM survives warm reset.  A callback points into loaded KDOS code and
+    ; an armed interval belongs to that KDOS instance, so neither may survive
+    ; into the fresh Bank-0 interpreter.  Clear the active marker first.
+    ldi64 r11, var_dict_limit
+    str r11, r1
+    ldi64 r11, var_dict_base
+    str r11, r1
+    ldi64 r11, var_dict_fault_xt
+    str r11, r1
+
     ; The portable MMIO-crypto guard is a single machine-wide transaction.
     ; Hardware spinlock 8 resets independently, while these full-width owner
     ; fields and logical cursors must also be returned to their cold state on
@@ -2066,37 +2076,108 @@ w_here:
     str r14, r1
     ret.l
 
-; ALLOT ( n -- )
-;   Advances HERE by n bytes.  Aborts if the new HERE would
-;   reach within 256 bytes of the data stack pointer (R14).
-;   Guard skipped when current HERE is in ext mem (userland zone).
-;   Uses R1 for margin check (already consumed from stack).
-;   MUST NOT touch R3 (= PC via PSEL).
-w_allot:
-    ldn r1, r14               ; R1 = n
-    addi r14, 8
-    ldi64 r11, var_here
-    ldn r0, r11               ; R0 = HERE (current)
-    ; --- dictionary overflow guard (check BEFORE advancing) ---
-    cmp r2, r0                ; ram_size vs current HERE
-    brle .allot_extmem         ; current HERE >= ram_size → ext mem, skip
-    ; HERE is in bank 0 — compute target
-    add r0, r1                ; R0 = HERE + n (target)
-    cmp r2, r0                ; ram_size vs target
-    brle .allot_store          ; target >= ram_size → crossing to ext mem, OK
-    ; Still in bank 0 — check SP guard
-    mov r1, r0                ; R1 = target
-    addi r1, 256              ; R1 = target + 256
-    cmp r1, r14               ; vs SP
-    brgt .allot_overflow
-.allot_store:
-    str r11, r0               ; update var_here
+; Dictionary write preflight.
+;
+; Input:
+;   R0 = first byte that would be written (normally current HERE)
+;   R7 = exact positive byte count
+; Preserves R0/R1/R7/R9/R10/R12/R13 and clobbers R11 only on success.
+;
+; Active bounds are the inclusive base and exclusive limit installed by
+; DICT-BOUNDS!.  Prove size <= limit-start by subtraction, so a wrapping
+; start+size can never pass.  With bounds disabled, retain the Bank-0
+; dictionary/data-stack margin and reject unbounded external-memory writes.
+dict_preflight:
+    ldi64 r11, var_dict_limit
+    ldn r11, r11
+    cmpi r11, 0
+    breq .dict_preflight_bank0
+
+    ; start must be inside [base, limit]
+    ldi64 r11, var_dict_base
+    ldn r11, r11
+    cmp r0, r11
+    lbrcc dict_fault           ; start < base
+    ldi64 r11, var_dict_limit
+    ldn r11, r11
+    cmp r11, r0
+    lbrcc dict_fault           ; limit < start
+
+    ; Exact fit is valid: requested bytes may equal limit-start.
+    sub r11, r0
+    cmp r11, r7
+    lbrcc dict_fault           ; remaining < requested
     ret.l
-.allot_extmem:
-    add r0, r1                ; ext mem — no guard needed
-    str r11, r0
+
+.dict_preflight_bank0:
+    ; External dictionary writes are never unbounded.  KDOS must install the
+    ; userland interval before moving HERE into it.
+    cmp r2, r0
+    lbrle dict_fault           ; start >= ram_size
+
+    ; Require start+size+256 <= DSP without forming either potentially
+    ; wrapping sum.
+    ; ADDI/SUBI carry signed 8-bit immediates, so form the 256-byte
+    ; ceiling in exact encodable chunks after proving the subtraction cannot
+    ; underflow.
+    mov r11, r14
+    lsri r11, 8
+    cmpi r11, 0
+    lbreq dict_fault           ; DSP is below the required margin
+    mov r11, r14
+    subi r11, 127
+    subi r11, 127
+    subi r11, 2
+    cmp r11, r0
+    lbrcc dict_fault           ; margin end < start
+    sub r11, r0
+    cmp r11, r7
+    lbrcc dict_fault           ; margin remaining < requested
     ret.l
-.allot_overflow:
+
+; Validate an ALLOT target.  R0 is the proposed new HERE.  Active external
+; bounds accept either growth or rollback inside the interval.  With bounds
+; disabled, HERE must remain in guarded Bank 0.
+dict_target_preflight:
+    ldi64 r11, var_dict_limit
+    ldn r11, r11
+    cmpi r11, 0
+    breq .dict_target_bank0
+    ldi64 r11, var_dict_base
+    ldn r11, r11
+    cmp r0, r11
+    lbrcc dict_fault           ; target < base
+    ldi64 r11, var_dict_limit
+    ldn r11, r11
+    cmp r11, r0
+    lbrcc dict_fault           ; limit < target
+    ret.l
+
+.dict_target_bank0:
+    cmp r2, r0
+    lbrle dict_fault           ; target >= ram_size
+    mov r11, r14
+    lsri r11, 8
+    cmpi r11, 0
+    lbreq dict_fault           ; DSP is below the required margin
+    mov r11, r14
+    subi r11, 127
+    subi r11, 127
+    subi r11, 2
+    cmp r11, r0
+    lbrcc dict_fault           ; target above guarded Bank-0 ceiling
+    ret.l
+
+; A configured KDOS callback may THROW through a surrounding CATCH.  If no
+; callback is installed, or if a broken callback returns, preserve the BIOS
+; fail-closed diagnostic/ABORT behaviour.
+dict_fault:
+    ldi64 r11, var_dict_fault_xt
+    ldn r11, r11
+    cmpi r11, 0
+    breq .dict_fault_abort
+    call.l r11
+.dict_fault_abort:
     ldi64 r10, str_dict_overflow
     ldi64 r11, print_str
     call.l r11
@@ -2104,17 +2185,127 @@ w_allot:
     call.l r11
     halt
 
+; DICT-BOUNDS! ( base limit -- )
+; Install one external dictionary interval.  0 0 is the disabled state.
+; Invalid or wrapping intervals fail before either published cell changes.
+w_dict_bounds_store:
+    ldn r1, r14               ; exclusive limit
+    addi r14, 8
+    ldn r7, r14               ; inclusive base
+    addi r14, 8
+
+    cmpi r1, 0
+    brne .dict_bounds_nonzero
+    cmpi r7, 0
+    lbrne dict_fault
+    lbr w_dict_bounds_off
+
+.dict_bounds_nonzero:
+    cmpi r7, 0
+    lbreq dict_fault
+    cmp r1, r7
+    lbrle dict_fault           ; require limit > base
+
+    ; The complete interval must lie inside the advertised external RAM.
+    ldi64 r11, 0xFFFF_FF00_0000_0338
+    ldn r9, r11               ; external-memory base
+    cmp r7, r9
+    lbrcc dict_fault           ; base < external-memory base
+    mov r12, r9               ; preserve base for wrap proof
+    ldi64 r11, 0xFFFF_FF00_0000_0340
+    ldn r0, r11               ; external-memory size
+    cmpi r0, 0
+    lbreq dict_fault
+    add r9, r0                ; exclusive external-memory end
+    cmp r9, r12
+    lbrcc dict_fault           ; base+size wrapped
+    cmp r9, r1
+    lbrcc dict_fault           ; external-memory end < limit
+
+.dict_bounds_publish:
+    ; Clear the active marker before changing the base.  Any asynchronous
+    ; dictionary writer during publication therefore encounters the disabled
+    ; external-memory guard instead of a torn interval.
+    ldi r0, 0
+    ldi64 r11, var_dict_limit
+    str r11, r0
+    ldi64 r11, var_dict_base
+    str r11, r7
+    ldi64 r11, var_dict_limit
+    str r11, r1
+    ret.l
+
+; DICT-BOUNDS-OFF ( -- )
+w_dict_bounds_off:
+    ldi r1, 0
+    ; Limit is the active marker: clear it first so a concurrent preflight
+    ; fails closed while HERE still names external memory.
+    ldi64 r11, var_dict_limit
+    str r11, r1
+    ldi64 r11, var_dict_base
+    str r11, r1
+    ret.l
+
+; DICT-BASE@ / DICT-LIMIT@ expose the active interval for diagnostics.
+w_dict_base_fetch:
+    ldi64 r11, var_dict_base
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+w_dict_limit_fetch:
+    ldi64 r11, var_dict_limit
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; DICT-FAULT-XT! ( xt -- )
+w_dict_fault_xt_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, var_dict_fault_xt
+    str r11, r1
+    ret.l
+
+; ALLOT ( n -- )
+;   Advances or rewinds HERE only within the active dictionary interval.
+;   With external bounds disabled, HERE remains in guarded Bank 0.
+w_allot:
+    ldn r1, r14               ; R1 = n
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE (current)
+    mov r7, r0                ; preserve current HERE for wrap proof
+    add r0, r1                ; R0 = HERE + n (target)
+    cmpi r1, 0
+    lbrmi .allot_negative
+    cmp r0, r7
+    lbrcc dict_fault           ; non-negative ALLOT wrapped below current HERE
+    lbr .allot_target
+.allot_negative:
+    cmp r7, r0
+    lbrcc dict_fault           ; negative ALLOT wrapped above current HERE
+.allot_target:
+    ldi64 r11, dict_target_preflight
+    call.l r11
+    ldi64 r11, var_here
+    str r11, r0               ; update var_here
+    ret.l
+
 ; , ( x -- ) store cell at HERE, advance HERE by 8
-;   No inline guard — : already checks 1024-byte margin before
-;   compilation starts.  The Forth-level ?DICT-ROOM word covers
-;   any non-compilation use of , that might overflow.
 w_comma:
     ldn r1, r14
     addi r14, 8
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 8
+    ldi64 r11, dict_preflight
+    call.l r11
     str r0, r1
     addi r0, 8
+    ldi64 r11, var_here
     str r11, r0
     ret.l
 
@@ -2124,8 +2315,12 @@ w_ccomma:
     addi r14, 8
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 1
+    ldi64 r11, dict_preflight
+    call.l r11
     st.b r0, r1
     inc r0
+    ldi64 r11, var_here
     str r11, r0
     ret.l
 
@@ -3075,6 +3270,9 @@ forth_exit:                           ; R17 is PC here
 compile_call:
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
+    ldi r7, 10
+    ldi64 r11, dict_preflight
+    call.l r11
     sex r0                    ; R(X) = HERE for STXI chain
     ; REX prefix for R16: 0xF4
     ldi r7, 0xF4
@@ -3151,6 +3349,9 @@ reloc_record_skip:
 compile_literal:
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
+    ldi r7, 16
+    ldi64 r11, dict_preflight
+    call.l r11
     sex r0                    ; R(X) = HERE for STXI chain
     ; ldi64 r1: 0xF0 0x60 0x10
     ldi r7, 0xF0
@@ -3213,8 +3414,20 @@ compile_literal:
 compile_byte:
     ldi64 r11, var_here
     ldn r0, r11
+    ; compile_byte historically preserves R7.  ABORT" and other composite
+    ; emitters retain fixup/data addresses there across a byte sequence.
+    ; Save it on the return stack while R7 carries the preflight byte count;
+    ; a dictionary THROW unwinds this scratch slot with its caller frame.
+    subi r15, 8
+    str r15, r7
+    ldi r7, 1
+    ldi64 r11, dict_preflight
+    call.l r11
+    ldn r7, r15
+    addi r15, 8
     st.b r0, r1
     inc r0
+    ldi64 r11, var_here
     str r11, r0
     ret.l
 
@@ -3223,6 +3436,9 @@ compile_byte:
 compile_ret:
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 2
+    ldi64 r11, dict_preflight
+    call.l r11
     sex r0                    ; R(X) = HERE for STXI chain
     ldi r7, 0xF4
     glo r7
@@ -3375,6 +3591,13 @@ jit_bg_found:
     ldn r7, r11                   ; R7 = current HERE
     ldi64 r11, var_jit_last_here
     ldn r0, r11                   ; R0 = rewound HERE (pre-prev)
+    mov r7, r12
+    ldi64 r11, dict_preflight
+    call.l r11
+    ; Reload current HERE for the accounting below; preflight deliberately
+    ; validated the rewound destination rather than this old endpoint.
+    ldi64 r11, var_here
+    ldn r7, r11
     sub r7, r0                    ; R7 = prev body size
     addi r7, 10                   ; + 10 (compile_call for current)
     sub r7, r12                   ; - fused body size
@@ -3456,6 +3679,9 @@ jit_cw_found:
     ; Copy body bytes to HERE
     ldi64 r11, var_here
     ldn r0, r11                       ; R0 = HERE
+    mov r7, r12
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0
 jit_cw_copy:
     cmp r7, r12
@@ -3523,6 +3749,13 @@ jit_emit_lit_fold:
     ; Rewind HERE to before the literal
     ldi64 r11, var_jit_last_here
     ldn r0, r11                   ; R0 = rewound HERE
+    subi r15, 8
+    str r15, r7                   ; preserve ALU opcode
+    ldi r7, 7
+    ldi64 r11, dict_preflight
+    call.l r11
+    ldn r7, r15
+    addi r15, 8
     ; Emit: ldn r1, r14 → 50 1E
     ldi r11, 0x50
     st.b r0, r11
@@ -3591,6 +3824,9 @@ jit_compile_literal:
     ; --- Compact: ldi r1, imm8 + push = 8 bytes (saves 8) ---
     ldi64 r11, var_here
     ldn r0, r11                       ; R0 = HERE
+    ldi r7, 8
+    ldi64 r11, dict_preflight
+    call.l r11
     ; ldi r1, imm8:  60 10 XX
     ldi r7, 0x60
     st.b r0, r7
@@ -3642,6 +3878,9 @@ jit_cl_neg:
     ; --- TRUE: ldi r1,0; dec r1; push = 9 bytes (saves 7) ---
     ldi64 r11, var_here
     ldn r0, r11                       ; R0 = HERE
+    ldi r7, 9
+    ldi64 r11, dict_preflight
+    call.l r11
     ; ldi r1, 0:  60 10 00
     ldi r7, 0x60
     st.b r0, r7
@@ -3988,29 +4227,22 @@ w_colon_not_compiling:
     str r11, r1
     ldi64 r11, var_jit_last_type
     str r11, r1
-    ; Check dictionary space: HERE + 1024 < R14 (data stack pointer)
-    ; but only when HERE is in Bank 0 (system dict).  When KDOS
-    ; ENTER-USERLAND moves HERE into ext mem (>= ram_size), the
-    ; userland zone limit is managed by KDOS, not by this guard.
-    ldi64 r11, var_here
-    ldn r11, r11
-    cmp r2, r11                ; ram_size vs HERE
-    brle w_colon_space_ok      ; HERE >= ram_size → ext mem, skip guard
-    addi r11, 1024             ; HERE + safety margin
-    cmp r11, r14
-    brle w_colon_space_ok
-    ; Dictionary full!
-    ldi64 r10, str_dict_full
-    ldi64 r11, print_str
-    call.l r11
-    ret.l
-w_colon_space_ok:
     ; Parse the name
     ldi64 r11, parse_word
     call.l r11
     ; R9=word addr, R12=word length
     cmpi r12, 0
     lbreq w_colon_err          ; no name given
+
+    ; Reserve the complete header before publishing its first byte.  The body
+    ; has no known total size; every subsequent compiler emitter preflights
+    ; its own exact span.
+    ldi64 r11, var_here
+    ldn r0, r11
+    mov r7, r12
+    addi r7, 9                 ; link + flags/length + name
+    ldi64 r11, dict_preflight
+    call.l r11
 
     ; Save name addr/len on data stack temporarily
     subi r14, 8
@@ -4290,6 +4522,9 @@ w_if_compile:
     ldn r1, r11
     ; Compile the branch opcode
     mov r0, r1
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x41
     st.b r0, r7
     inc r0
@@ -4313,6 +4548,9 @@ w_else:
     ; LBR unconditional: F=4, N=0 → 0x40
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x40
     st.b r0, r7
     inc r0
@@ -4470,6 +4708,9 @@ w_until:
     ldi64 r11, check_branch16
     call.l r11
     ; Compile lbreq (0x41) + 16-bit big-endian offset
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x41
     st.b r0, r7
     inc r0
@@ -4522,6 +4763,9 @@ w_while:
     ; lbreq <placeholder>
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x41
     st.b r0, r7
     inc r0
@@ -4561,6 +4805,9 @@ w_repeat:
     ldi64 r11, check_branch16
     call.l r11
     ; store 16-bit big-endian offset
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     mov r7, r1
     lsri r7, 8
     st.b r0, r7               ; high byte
@@ -4647,6 +4894,9 @@ w_of:
     ;   lbreq <placeholder> (0x41 + 2 bytes offset)
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x41
     st.b r0, r7
     inc r0
@@ -5069,6 +5319,9 @@ w_loop_ok:
     addi r14, 8
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 6                 ; branch + loop-frame cleanup
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x42              ; LBRNE
     st.b r0, r7
     inc r0
@@ -5417,6 +5670,9 @@ w_plus_loop_ok:
     addi r14, 8
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 6                 ; branch + loop-frame cleanup
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x42              ; LBRNE
     st.b r0, r7
     inc r0
@@ -5487,6 +5743,9 @@ w_again:
     addi r14, 8
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x40              ; LBR (unconditional)
     st.b r0, r7
     inc r0
@@ -5574,6 +5833,11 @@ w_create:
     ; Build dictionary entry header at HERE
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
+    mov r7, r12
+    addi r7, 39                ; header (9+name) + 30-byte trampoline
+    ldi64 r11, dict_preflight
+    call.l r11
+    mov r7, r12                ; restore name length
     mov r1, r0                ; save entry start in R1
 
     ; Link field = current LATEST
@@ -6042,37 +6306,66 @@ w_word_forth:
     ldn r10, r11
     ; Save HERE start in R1 (will be c-addr to return)
     mov r1, r10
-    inc r10                   ; skip past count byte
-    ldi r12, 0                ; R12 = char count
     ; Skip leading delimiters
 wd_skip:
     cmp r0, r7
-    breq wd_done
-    brgt wd_done
+    breq wd_scan_start
+    brgt wd_scan_start
     mov r11, r9
     add r11, r0
     ld.b r11, r11
     cmp r11, r13
-    brne wd_copy
+    brne wd_scan_start
     inc r0
     br wd_skip
-    ; Copy non-delimiter chars
-wd_copy:
+
+    ; First measure the exact transient span without writing at HERE.  WORD
+    ; does not advance HERE, but its counted string and terminator still must
+    ; not cross the active dictionary ceiling.
+wd_scan_start:
+    subi r15, 8
+    str r15, r0               ; token start offset
+    ldi r12, 0                ; character count
+wd_scan:
     cmp r0, r7
-    breq wd_done
-    brgt wd_done
+    breq wd_scanned
+    brgt wd_scanned
     mov r11, r9
     add r11, r0
     ld.b r11, r11
     cmp r11, r13
-    breq wd_trail
-    st.b r10, r11
-    inc r10
+    breq wd_scan_trail
     inc r12
     inc r0
-    br wd_copy
-wd_trail:
+    br wd_scan
+wd_scan_trail:
     inc r0                    ; skip past trailing delimiter
+wd_scanned:
+    mov r13, r0               ; final >IN
+
+    ; Count byte + token bytes + trailing NUL.
+    mov r0, r1
+    mov r7, r12
+    addi r7, 2
+    ldi64 r11, dict_preflight
+    call.l r11
+
+    ldn r0, r15               ; token start offset
+    addi r15, 8
+    mov r10, r1
+    inc r10                   ; destination after count byte
+    ldi r7, 0
+wd_copy:
+    cmp r7, r12
+    breq wd_done
+    mov r11, r9
+    add r11, r0
+    add r11, r7
+    ld.b r11, r11
+    st.b r10, r11
+    inc r10
+    inc r7
+    br wd_copy
 wd_done:
     ; Store count byte at c-addr (saved in R1)
     st.b r1, r12
@@ -6081,7 +6374,7 @@ wd_done:
     st.b r10, r11
     ; Update >IN
     ldi64 r11, var_to_in
-    str r11, r0
+    str r11, r13
     ; Push c-addr (R1 = HERE at entry)
     subi r14, 8
     str r14, r1
@@ -6105,6 +6398,10 @@ w_variable:
     ; Build dictionary entry header (same as : does)
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE = entry start
+    mov r7, r12
+    addi r7, 34                ; header (9+name) + code (17) + cell (8)
+    ldi64 r11, dict_preflight
+    call.l r11
     mov r13, r0               ; save entry start
 
     ; Link
@@ -6240,6 +6537,10 @@ w_constant:
     ; Build dictionary entry header
     ldi64 r11, var_here
     ldn r0, r11
+    mov r7, r12
+    addi r7, 27                ; header (9+name) + literal (16) + return (2)
+    ldi64 r11, dict_preflight
+    call.l r11
     mov r1, r0                ; save entry start
 
     ; push entry start
@@ -8850,7 +9151,10 @@ w_talign:
     breq w_talign_done         ; already aligned
     ldi r7, 64
     sub r7, r1                ; bytes needed
+    ldi64 r11, dict_preflight
+    call.l r11
     add r0, r7                ; advance HERE
+    ldi64 r11, var_here
     str r11, r0
 w_talign_done:
     ret.l
@@ -8975,6 +9279,10 @@ w_abq_no_advance:
     ; Compile inline string bytes at HERE
     ldi64 r11, var_here
     ldn r0, r11               ; HERE = string start in code space
+    mov r7, r13
+    inc r7                    ; string bytes plus terminating NUL
+    ldi64 r11, dict_preflight
+    call.l r11
     ; Save string addr for later ldi64
     mov r7, r0                ; R7 = string address in code
     ldi r1, 0
@@ -10049,6 +10357,9 @@ w_quote_open_ok:
     ; LBR unconditional: opcode 0x40, then 16-bit BE offset
     ldi64 r11, var_here
     ldn r0, r11
+    ldi r7, 3
+    ldi64 r11, dict_preflight
+    call.l r11
     ldi r7, 0x40
     st.b r0, r7
     inc r0
@@ -10169,6 +10480,10 @@ w_value:
     ; Build dictionary entry header at HERE
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
+    mov r7, r12
+    addi r7, 36                ; header (9+name) + code (19) + cell (8)
+    ldi64 r11, dict_preflight
+    call.l r11
     mov r13, r0               ; save entry start
 
     ; Link
@@ -21425,10 +21740,55 @@ d_tacc_claim_q:
     call.l r11
     ret.l
 
+; === DICT-BOUNDS! ===
+d_dict_bounds_store:
+    .dq d_tacc_claim_q
+    .db 12
+    .ascii "DICT-BOUNDS!"
+    ldi64 r11, w_dict_bounds_store
+    call.l r11
+    ret.l
+
+; === DICT-BOUNDS-OFF ===
+d_dict_bounds_off:
+    .dq d_dict_bounds_store
+    .db 15
+    .ascii "DICT-BOUNDS-OFF"
+    ldi64 r11, w_dict_bounds_off
+    call.l r11
+    ret.l
+
+; === DICT-BASE@ ===
+d_dict_base_fetch:
+    .dq d_dict_bounds_off
+    .db 10
+    .ascii "DICT-BASE@"
+    ldi64 r11, w_dict_base_fetch
+    call.l r11
+    ret.l
+
+; === DICT-LIMIT@ ===
+d_dict_limit_fetch:
+    .dq d_dict_base_fetch
+    .db 11
+    .ascii "DICT-LIMIT@"
+    ldi64 r11, w_dict_limit_fetch
+    call.l r11
+    ret.l
+
+; === DICT-FAULT-XT! ===
+d_dict_fault_xt_store:
+    .dq d_dict_limit_fetch
+    .db 14
+    .ascii "DICT-FAULT-XT!"
+    ldi64 r11, w_dict_fault_xt_store
+    call.l r11
+    ret.l
+
 ; === WOTS-CHAIN ===
 latest_entry:
 d_wots_chain:
-    .dq d_tacc_claim_q
+    .dq d_dict_fault_xt_store
     .db 10
     .ascii "WOTS-CHAIN"
     ldi64 r11, w_wots_chain
@@ -21445,6 +21805,15 @@ var_base:
 var_here:
     .dq 0
 var_latest:
+    .dq 0
+; Optional external dictionary interval.  A zero limit disables the interval;
+; DICT-BOUNDS! publishes only a validated pair.  Keep these cells after
+; var_latest so KDOS's historical STATE+24 var_latest ABI remains intact.
+var_dict_base:
+    .dq 0
+var_dict_limit:
+    .dq 0
+var_dict_fault_xt:
     .dq 0
 var_crc_owner_base:
     .dq 0                         ; topology-sized records begin at dict_free
