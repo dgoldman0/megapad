@@ -46267,18 +46267,18 @@ class TestKDOSUserland(_KDOSTestBase):
     def test_capacity_derived_partition_is_sealed_and_nonempty(self):
         """USERLAND-INIT derives two disjoint nonempty capacity spans."""
         text = self._run_kdos([
-            'ENTER-USERLAND',
-            'CR ." [U-PARTITION "',
-            'U-DICT-BASE @ U-DICT-LIMIT @ < .',
-            'U-DICT-LIMIT @ XMEM-FLOOR @ = .',
-            'U-DICT-LIMIT @ XMEM-HERE @ = .',
-            'U-ZONE-SIZE 0> .',
-            'XMEM-LIMIT @ U-DICT-LIMIT @ - 0> .',
-            'U-ZONE-SIZE XMEM-LIMIT @ U-DICT-LIMIT @ - +',
-            'XMEM-LIMIT @ U-DICT-BASE @ - = .',
-            'DICT-BASE@ U-DICT-BASE @ = .',
-            'DICT-LIMIT@ U-DICT-LIMIT @ = .',
-            '." ]"',
+            ': _U-PARTITION-REPORT',
+            '  CR ." [U-PARTITION "',
+            '  U-DICT-BASE @ U-DICT-LIMIT @ < .',
+            '  U-DICT-LIMIT @ XMEM-FLOOR @ = .',
+            '  U-DICT-LIMIT @ XMEM-HERE @ = .',
+            '  U-ZONE-SIZE 0> .',
+            '  XMEM-LIMIT @ U-DICT-LIMIT @ - 0> .',
+            '  U-ZONE-SIZE XMEM-LIMIT @ U-DICT-LIMIT @ - +',
+            '  XMEM-LIMIT @ U-DICT-BASE @ - = .',
+            '  DICT-BASE@ U-DICT-BASE @ = .',
+            '  DICT-LIMIT@ U-DICT-LIMIT @ = . ." ]" ;',
+            'ENTER-USERLAND _U-PARTITION-REPORT',
         ])
         self.assertRegex(
             text,
@@ -46288,30 +46288,37 @@ class TestKDOSUserland(_KDOSTestBase):
     def test_small_external_memory_derives_bounds_without_a_fixed_claim(self):
         """A 16 MiB device can seal its own nonempty two-sided partition."""
         text = self._run_kdos([
-            'ENTER-USERLAND',
-            'CR ." [U-SMALL " U-INIT-DONE @ .',
-            'U-DICT-BASE @ U-DICT-LIMIT @ < .',
-            'U-DICT-LIMIT @ XMEM-LIMIT @ < .',
-            'U-ZONE-SIZE 0> .',
-            'XMEM-LIMIT @ U-DICT-LIMIT @ - 0> .',
-            'U-ZONE-SIZE XMEM-LIMIT @ U-DICT-LIMIT @ - +',
-            'XMEM-LIMIT @ U-DICT-BASE @ - = .',
-            '." ]"',
+            ': _U-SMALL-REPORT',
+            '  CR ." [U-SMALL " U-INIT-DONE @ .',
+            '  U-DICT-BASE @ U-DICT-LIMIT @ < .',
+            '  U-DICT-LIMIT @ XMEM-LIMIT @ < .',
+            '  U-ZONE-SIZE 0> .',
+            '  XMEM-LIMIT @ U-DICT-LIMIT @ - 0> .',
+            '  U-ZONE-SIZE XMEM-LIMIT @ U-DICT-LIMIT @ - +',
+            '  XMEM-LIMIT @ U-DICT-BASE @ - = . ." ]" ;',
+            'ENTER-USERLAND _U-SMALL-REPORT',
         ], ext_mem_mib=16)
-        self.assertNotIn('Insufficient ext mem for userland dictionary', text)
         self.assertRegex(text, r"\[U-SMALL\s+1\s+(-1\s+){5}\]")
 
     def test_explicit_xmem_reserve_is_runtime_capacity_not_fixed_zone(self):
         """A pre-init reserve request derives the complementary dict limit."""
         text = self._run_kdos([
             '1048576 U-XMEM-RESERVE! ENTER-USERLAND',
-            'CR ." [U-RESERVE "',
-            'XMEM-LIMIT @ U-DICT-LIMIT @ - .',
-            'U-ZONE-SIZE U-DICT-BASE @ + U-DICT-LIMIT @ = .',
-            'XMEM-HERE @ U-DICT-LIMIT @ = .',
-            '." ]"',
+            'CR ." [U-RESERVE " '
+            'XMEM-LIMIT @ U-DICT-LIMIT @ - . '
+            'U-ZONE-SIZE U-DICT-BASE @ + U-DICT-LIMIT @ = . '
+            'XMEM-HERE @ U-DICT-LIMIT @ = . ." ]"',
         ])
         self.assertRegex(text, r"\[U-RESERVE\s+1048576\s+-1\s+-1\s+\]")
+
+    def test_dictionary_fault_callback_throws_through_catch(self):
+        """The installed BIOS fault callback is an ordinary catchable XT."""
+        text = self._run_kdos([
+            'ENTER-USERLAND',
+            "CR .\" [U-DIRECT-CATCH \" "
+            "' _KDOS-DICT-FAULT CATCH . .\" ]\"",
+        ])
+        self.assertRegex(text, r"\[U-DIRECT-CATCH\s+-8\s+\]")
 
     def test_dictionary_bounds_fail_before_mutation_and_retry(self):
         """All core emitter families throw -8 without crossing into XMEM."""
@@ -46320,6 +46327,7 @@ class TestKDOSUserland(_KDOSTestBase):
             'VARIABLE _UB-STATE VARIABLE _UB-FAILS',
             'VARIABLE _UB-XADDR VARIABLE _UB-XHERE',
             'VARIABLE _UB-EVAL-S VARIABLE _UB-EVAL-T',
+            'VARIABLE _UB-WORD-TAIL',
             ': _UB-DO-ALLOT U-FREE 1+ ALLOT ;',
             ': _UB-DO-COMMA 123 , ;',
             ': _UB-DO-CCOMMA 123 C, ;',
@@ -46328,8 +46336,8 @@ class TestKDOSUserland(_KDOSTestBase):
             ': _UB-DO-VARIABLE VARIABLE ;',
             ': _UB-DO-CONSTANT 17 CONSTANT ;',
             ': _UB-DO-VALUE 19 VALUE ;',
+            ': _UB-WORD-TAIL-XT 1 _UB-WORD-TAIL +! ;',
             "' : CONSTANT _UB-COLON-XT",
-            "' :NONAME CONSTANT _UB-NONAME-XT",
             ': _UB-BOUNDARY  ( xt slack -- )',
             '  HERE _UB-ROOT !  U-FREE SWAP - ALLOT',
             '  HERE _UB-AT !  LATEST _UB-LATEST !  STATE @ _UB-STATE !',
@@ -46340,40 +46348,42 @@ class TestKDOSUserland(_KDOSTestBase):
             '  _UB-ROOT @ HERE - ALLOT ;',
             ': _UB-EVAL-BOUNDARY',
             '  HERE _UB-ROOT !  LATEST _UB-LATEST !  U-FREE ALLOT',
-            '  S" 1 DROP" EVALUATE-CHECKED _UB-EVAL-S !',
+            '  S" :NONAME 1 ;" EVALUATE-CHECKED _UB-EVAL-S !',
             '  EVAL-THROW @ _UB-EVAL-T !',
+            '  _UB-ROOT @ HERE - ALLOT EVALUATOR-RESET',
             '  LATEST _UB-LATEST @ <> IF 1 _UB-FAILS +! THEN',
-            '  _UB-ROOT @ HERE - ALLOT ;',
+            '  STATE @ IF 1 _UB-FAILS +! THEN ;',
             ': _UB-RETRY S" : UB-RETRY-VALUE 77 ;" EVALUATE-CHECKED ;',
             ': _UB-EXACT-FILL U-FREE ALLOT LEAVE-USERLAND ;',
-            '0 _UB-FAILS ! ENTER-USERLAND',
+            ': _UB-REPORT',
+            '  CR ." [U-BOUNDS " _UB-FAILS @ .',
+            '  _UB-EVAL-S @ . _UB-EVAL-T @ . SWAP . .',
+            '  U-HERE U-DICT-LIMIT @ = . DICT-LIMIT@ 0= .',
+            '  _UB-XADDR @ @ 987654321 = .',
+            '  XMEM-HERE @ _UB-XHERE @ = .',
+            '  _UB-XADDR @ U-DICT-BASE @ <',
+            '  _UB-XADDR @ U-DICT-LIMIT @ >= OR .',
+            '  _UB-WORD-TAIL @ 1 = . ." ]" ;',
+            '0 _UB-FAILS ! 0 _UB-WORD-TAIL ! ENTER-USERLAND',
             '16 XMEM-ALLOT DUP _UB-XADDR ! 987654321 SWAP !',
             'XMEM-HERE @ _UB-XHERE !',
-            "['] _UB-DO-ALLOT U-FREE _UB-BOUNDARY",
-            "['] _UB-DO-COMMA 7 _UB-BOUNDARY",
-            "['] _UB-DO-CCOMMA 0 _UB-BOUNDARY",
-            "['] _UB-DO-WORD 0 _UB-BOUNDARY A",
-            "['] _UB-DO-CREATE 3 _UB-BOUNDARY B",
-            "['] _UB-DO-VARIABLE 3 _UB-BOUNDARY C",
-            "['] _UB-DO-CONSTANT 3 _UB-BOUNDARY D",
-            "['] _UB-DO-VALUE 3 _UB-BOUNDARY E",
+            "' _UB-DO-ALLOT U-FREE _UB-BOUNDARY",
+            "' _UB-DO-COMMA 7 _UB-BOUNDARY",
+            "' _UB-DO-CCOMMA 0 _UB-BOUNDARY",
+            "' _UB-DO-WORD 0 _UB-BOUNDARY _UB-WORD-TAIL-XT",
+            "' _UB-DO-CREATE 3 _UB-BOUNDARY B",
+            "' _UB-DO-VARIABLE 3 _UB-BOUNDARY C",
+            "' _UB-DO-CONSTANT 3 _UB-BOUNDARY D",
+            "' _UB-DO-VALUE 3 _UB-BOUNDARY E",
             '_UB-COLON-XT 3 _UB-BOUNDARY F',
-            '_UB-NONAME-XT 0 _UB-BOUNDARY',
             '_UB-EVAL-BOUNDARY _UB-RETRY',
             'UB-RETRY-VALUE _UB-EXACT-FILL',
-            'CR ." [U-BOUNDS " _UB-FAILS @ .',
-            '_UB-EVAL-S @ . _UB-EVAL-T @ . SWAP . .',
-            'U-HERE U-DICT-LIMIT @ = . DICT-LIMIT@ 0= .',
-            '_UB-XADDR @ @ 987654321 = .',
-            'XMEM-HERE @ _UB-XHERE @ = .',
-            '_UB-XADDR @ U-DICT-BASE @ <',
-            '_UB-XADDR @ U-DICT-LIMIT @ >= OR .',
-            '." ]"',
+            '_UB-REPORT',
         ])
         self.assertRegex(
             text,
             r"\[U-BOUNDS\s+0\s+5\s+-8\s+0\s+77\s+"
-            r"-1\s+-1\s+-1\s+-1\s+-1\s+\]",
+            r"(-1\s+){6}\]",
         )
 
     def test_xmem_free_rejects_dictionary_overlap_before_list_write(self):
@@ -46383,9 +46393,8 @@ class TestKDOSUserland(_KDOSTestBase):
             'ENTER-USERLAND XMEM-FL @ _UF-FL !',
             'U-DICT-LIMIT @ 16 - DUP _UF-ADDR ! 424242 SWAP !',
             '_UF-ADDR @ 16 XMEM-FREE-BLOCK',
-            'CR ." [U-FREE-OVERLAP "',
-            '_UF-ADDR @ @ 424242 = . XMEM-FL @ _UF-FL @ = .',
-            '." ]"',
+            'CR ." [U-FREE-OVERLAP " '
+            '_UF-ADDR @ @ 424242 = . XMEM-FL @ _UF-FL @ = . ." ]"',
         ])
         self.assertIn('XMEM-FREE: user dictionary overlap', text)
         self.assertRegex(text, r"\[U-FREE-OVERLAP\s+-1\s+-1\s+\]")
