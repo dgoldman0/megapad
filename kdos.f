@@ -7062,18 +7062,24 @@ RQ-INIT       \ initialise at load time
     SWAP STEAL-FROM ;                 ( flag )
 
 \ -- BALANCE ( -- ) rebalance work across all full cores --
-\   Idle full cores steal from the busiest full core, one task at a time,
+\   Underloaded full cores steal from the busiest full core, one task at a time,
 \   until no more imbalance exists (max difference ≤ 1).
 : BALANCE  ( -- )
     \ Repeat until stable
     BEGIN
         0                             ( stole-any? )
         N-FULL-CORES 0 DO
-            I RQ-EMPTY? IF
-                I WORK-STEAL IF
-                    DROP -1           \ mark that we stole something
-                THEN
-            THEN
+            I RQ-BUSIEST DUP -1 <> IF
+                \ Move one task only when the busiest victim exceeds this
+                \ queue by more than one.  Each move strictly reduces the
+                \ imbalance, including when work is sparser than the core
+                \ set, so singleton tasks cannot circulate forever.
+                DUP RQ-COUNT I RQ-COUNT - 1 > IF
+                    I STEAL-FROM IF
+                        DROP -1       \ mark that we stole something
+                    THEN
+                ELSE DROP THEN
+            ELSE DROP THEN
         LOOP
         0=                            ( stop if nothing was stolen )
     UNTIL ;

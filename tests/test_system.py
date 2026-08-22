@@ -19328,9 +19328,14 @@ class TestKDOSHardening(_KDOSTestBase):
             text = self._run_forth(sys, buf, [
                 "0 1 64 BUFFER diskbuf",
                 "BUF-COUNT @ .",
-            ], max_steps=500_000_000)
+                '." [DISK-WORDS-DONE]"',
+            # Match the sibling cold-disk boot gate: KDOS plus standard
+            # autoexec is a roughly 600M-step path, so 800M is infrastructure
+            # headroom rather than a product capacity contract.
+            ], max_steps=800_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("1 ", text)
+            self.assertIn("[DISK-WORDS-DONE]", text)
         finally:
             os.unlink(path)
 
@@ -20127,7 +20132,10 @@ class TestKDOSMulticore(unittest.TestCase):
             "networking",
             "CHAR < EMIT CHAR M EMIT CHAR C EMIT CHAR 2 EMIT CHAR > EMIT",
             "<MC2>",
-            max_steps=450_000_000,
+            # Match the ordinary source-mode networking fixture.  The
+            # four-core scheduler preserves production timing and now needs
+            # the same 485M infrastructure headroom to reach a clean REPL.
+            max_steps=485_000_000,
         )
 
         # Save snapshot: raw memory + core 0 CPU state + per-core states
@@ -20933,6 +20941,34 @@ class TestKDOSMulticore(unittest.TestCase):
         ])
         # After balancing 4 tasks across 4 cores, each should have ~1
         self.assertIn("1  task(s)", text)
+
+    def test_balance_sparse_work_converges_without_stack_leak(self):
+        """Fewer tasks than cores settle as singletons instead of cycling."""
+        text = self._run_mc([
+            ": BS  ;",
+            "' BS 0 RQ-PUSH",
+            "' BS 0 RQ-PUSH",
+            "BALANCE",
+            'CR ." [BAL-SPARSE " 0 RQ-COUNT . 1 RQ-COUNT . '
+            '2 RQ-COUNT . 3 RQ-COUNT . DEPTH . ." ]"',
+        ])
+        self.assertRegex(text, r"\[BAL-SPARSE\s+1\s+1\s+0\s+0\s+0\s+\]")
+
+    def test_balance_reduces_nonempty_skew_to_one(self):
+        """BALANCE redistributes skew even after every core has work."""
+        text = self._run_mc([
+            ": BX  ;",
+            "' BX 0 RQ-PUSH",
+            "' BX 0 RQ-PUSH",
+            "' BX 0 RQ-PUSH",
+            "' BX 0 RQ-PUSH",
+            "' BX 0 RQ-PUSH",
+            "' BX 0 RQ-PUSH",
+            "BALANCE",
+            'CR ." [BAL-SKEW " 0 RQ-COUNT . 1 RQ-COUNT . '
+            '2 RQ-COUNT . 3 RQ-COUNT . DEPTH . ." ]"',
+        ])
+        self.assertRegex(text, r"\[BAL-SKEW\s+2\s+2\s+1\s+1\s+0\s+\]")
 
     def test_sched_balanced(self):
         """SCHED-BALANCED balances then dispatches all tasks."""
