@@ -174,7 +174,7 @@ PORTS                          \ List all port bindings
 - **DEFER/IS**: Deferred word mechanism — OPEN is a DEFER word for VFS interception
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
 - **Refactored file I/O**: FWRITE/FREAD with cursor advancement and used_bytes tracking
-- **Module registry**: core-0-only `PROVIDED`, `MODULE?`, `REQUIRE`, and
+- **Module registry**: core-0-only `PROVIDED`, `PROVIDED-SPAN`, `MODULE?`, `REQUIRE`, and
   `MODULES` over exact 1–246-byte IDs, with dynamic Bank 0 chains,
   allocation-neutral duplicates, cycle-breaking pre-registration, and
   frame-scoped rollback

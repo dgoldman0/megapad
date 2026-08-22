@@ -42571,6 +42571,23 @@ class TestKDOSDynamicModuleRegistry(_KDOSTestBase):
             du_inject_file(path, name, source, ftype=FTYPE_FORTH)
         return path
 
+    def test_runtime_span_registration_is_exact_and_idempotent(self):
+        """A caller-owned ID span uses the same stable registry contract."""
+        text = self._run_kdos([
+            "VARIABLE _RS-DEPTH VARIABLE _RS-HEAP",
+            "DEPTH _RS-DEPTH !",
+            'S" runtime.span.module" PROVIDED-SPAN',
+            "HEAP-FREE-BYTES _RS-HEAP !",
+            'S" runtime.span.module" PROVIDED-SPAN',
+            'CR ." [RSPAN " MODULE? runtime.span.module .',
+            'DEPTH _RS-DEPTH @ = . HEAP-FREE-BYTES _RS-HEAP @ = .',
+            '_MOD-COUNT . ." ]"',
+        ])
+        self.assertEqual(
+            self._marker_payload(text, "RSPAN"),
+            "[RSPAN -1 -1 -1 1 ]",
+        )
+
     def test_257_direct_exact_ids_grow_and_remain_allocation_stable(self):
         """Direct IDs survive repeated growth; duplicates allocate nothing."""
         module_ids = [f"direct.registry.{i:03d}" for i in range(257)]

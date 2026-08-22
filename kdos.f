@@ -8816,7 +8816,8 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     ."     f FSIZE / f F.INFO     File size / info" CR
     ."     FILES                  List legacy files" CR
     CR ."   MODULE WORDS (CORE 0 ONLY):" CR
-    ."     PROVIDED id            Register exact 1..246-byte ID (case-sensitive)" CR
+    ."     PROVIDED id            Register parsed exact ID (case-sensitive)" CR
+    ."     addr len PROVIDED-SPAN Register caller-owned exact ID span" CR
     ."     MODULE? id             Query exact ID -> flag" CR
     ."     REQUIRE path           Load source once via PROVIDED" CR
     ."     MODULES                List exact IDs and count" CR
@@ -9688,13 +9689,17 @@ VARIABLE _PS-LINE-U
 : _MOD-PARSE-ID  ( "id" -- id-addr id-len )
     BL WORD COUNT ;
 
-\ PROVIDED ( "name" -- )  Register a module as loaded.
-\ Leaves no insertion status on the public data stack.
-: PROVIDED  ( "name" -- )
+\ PROVIDED-SPAN ( id-addr id-len -- ) registers a caller-owned exact ID.
+\ PROVIDED parses the same public operation from the current input source.
+\ Neither word leaves insertion status on the public data stack.
+: PROVIDED-SPAN  ( id-addr id-len -- )
     ?CORE0
-    _MOD-PARSE-ID _MOD-INSERT
+    _MOD-INSERT
     DUP IF >R 2DROP R> THROW THEN
     DROP _MOD-ADOPT ;
+
+: PROVIDED  ( "name" -- )
+    _MOD-PARSE-ID PROVIDED-SPAN ;
 
 \ MODULE? ( "name" -- flag )  Test if a module is already loaded.
 : MODULE?  ( "name" -- flag )

@@ -1549,22 +1549,24 @@ data-flow P.RUN
 KDOS modules identify themselves with exact, case-sensitive evaluator tokens.
 A logical module ID is independent of the MP64FS filename or path passed to
 `REQUIRE`; filesystem component limits therefore do not truncate or otherwise
-change module identity.  The current evaluator accepts physical lines through
-255 bytes, so a `PROVIDED ` declaration admits an ID from 1 through 246 bytes
-(255 minus the eight-letter word and its separating blank).  KDOS applies that
-same envelope to `MODULE?`.  Empty or longer IDs throw rather than aliasing a
-shorter name.
+change module identity.  IDs are bounded to 1 through 246 bytes.  That is the
+largest `PROVIDED ` declaration accepted by the evaluator's 255-byte physical
+line (minus the eight-letter word and its separating blank), and the same
+envelope applies to caller-owned `PROVIDED-SPAN` values and `MODULE?`.  Empty
+or longer IDs throw rather than aliasing a shorter name.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `PROVIDED` | `( "id" -- )` | Register the exact ID.  A duplicate is an allocation-neutral no-op.  A new entry leaves no result; an entry-allocation failure throws. |
+| `PROVIDED-SPAN` | `( id-addr id-len -- )` | Register the exact caller-owned byte span with the same duplicate, allocation, and active-loader transaction semantics as `PROVIDED`. |
 | `MODULE?` | `( "id" -- flag )` | Return one flag indicating whether the exact ID is pending or committed. |
 | `REQUIRE` | `( "path" -- )` | Resolve and load a Forth source file.  When its first prescanned `PROVIDED` ID is already present, skip evaluation as a stack-neutral no-op.  A newly evaluated source may intentionally leave its own data-stack results. |
 | `MODULES` | `( -- )` | Print every exact registered ID and the exact count, leaving no data-stack cells.  Enumeration order is unspecified. |
 
-All four public operations are core-0-only.  Registration bookkeeping never
-appears on the public data stack: `PROVIDED` and `REQUIRE` leave no private
-status cells, `MODULE?` leaves exactly its flag, and `MODULES` only prints.  If
+All five public operations are core-0-only.  Registration bookkeeping never
+appears on the public data stack: `PROVIDED`, `PROVIDED-SPAN`, and `REQUIRE`
+leave no private status cells, `MODULE?` leaves exactly its flag, and `MODULES`
+only prints.  If
 `REQUIRE` evaluates a new source, values intentionally left by that source are
 preserved.  If the exact ID was already registered, the source is not evaluated
 and the duplicate load changes neither the stack nor persistent allocation.
@@ -1606,7 +1608,8 @@ After the source is corrected, its rolled-back IDs can be registered and loaded
 normally on retry.
 
 ```forth
-PROVIDED example.codec       \ direct exact-ID registration
+PROVIDED example.codec       \ parsed exact-ID registration
+S" generated.codec" PROVIDED-SPAN  \ runtime exact-ID registration
 MODULE? example.codec .      \ true
 REQUIRE networking.f         \ guarded by networking.f's PROVIDED ID
 MODULES                      \ exact IDs plus count
