@@ -24,7 +24,45 @@ HTTP application bytes, authenticated close and FIN, plus cancellation,
 timeout, malformed-handshake, cleanup-contention, and recovery paths. The
 bounded lower engine and the Akashic lifecycle split are closed; broader
 profile and concurrency work remains separate maturity work.
-Last updated: 2026-08-15
+Transport closure updated: 2026-08-15
+
+Combined integration updated: 2026-08-22 at MegaPad `8f0e478`
+
+## 2026-08-22 Combined Integration Reconciliation
+
+The secure-server transport contracts below are unchanged by the combined
+module-registry integration. Stable registry nodes and buckets use Bank-0
+allocation and survive `XMEM-RESET`. TLS source compilation and its XMEM
+workspaces now occupy explicitly disjoint, capacity-derived spans:
+`USERLAND-INIT` divides the space above the live high-water and below
+`XMEM-LIMIT` between the user dictionary and general XMEM, defaulting to an
+equal split, while a pre-init `U-XMEM-RESERVE!` selects the general-XMEM reserve
+and complementary dictionary span.
+
+The BIOS exposes `DICT-BOUNDS!`, `DICT-BOUNDS-OFF`, `DICT-BASE@`,
+`DICT-LIMIT@`, and `DICT-FAULT-XT!`. Every HERE-growing emitter and native
+`WORD` preflights its complete span. Exact fit succeeds; rewind, address wrap,
+or overrun throws caught KDOS dictionary fault `-8` before the first write.
+Bank-0 stack/heap-margin enforcement remains active when external bounds are
+off, and XMEM floor/free-list/live-high-water validation prevents allocation
+into the user dictionary.
+
+`8f0e478` also fixes a general KDOS scheduler defect: `BALANCE` moves work only
+when the busiest queue exceeds the target by more than one, so sparse layouts
+converge without circulating singleton tasks. This does not change the TLS
+authority model or the historical LAST-ACK fixture diagnosis, which remains a
+correct account of queued final-ACK service after HCONN terminal.
+
+The exact in-sandbox sequential sweep at `8f0e478` passed 3,613 tests, skipped
+36, and deselected the four host-loopback UDP-backend tests in 1,470.94 seconds.
+`TestKDOSMulticore` separately passed 87/87 in 854.40 seconds, and 11 other
+`tests/test_networking.py` cases pass in the sandbox. The approval service
+rejected unsandboxed execution, so the four current-tree host AF_INET loopback
+confirmations remain pending; they are not guest UDP or TLS failures. Their
+exact node IDs are recorded in `docs/net-hardening.md` and the module-registry
+handoff. The current four-core networking source fixture uses 485M steps as a
+test-infrastructure allowance; no TLS geometry, protocol, runtime, or production
+capacity limit changed.
 
 ## Purpose
 
@@ -1048,19 +1086,24 @@ Native guest tests cover:
 - clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
-Final affected sequential source-mode qualification passed 39/39 TLS
+Historical affected sequential source-mode qualification at the lower
+secure-server closure passed 39/39 TLS
 application-data, 25/25 socket/readiness, 28/28 tools, and 43/43 complete
 server-handshake tests. The preceding unchanged lower baseline passed 279/279
 network-stack and 65/65 adjacent hardening/source-selection tests. The
 corrected four-core credential and server-flight cancellation capstones passed
 together, 2/2 in 665.79 seconds, after proving complete KDOS and networking
-source loads and execution of a terminal body marker. The 450,000,000-step
-allowance applies only to networking snapshot construction; each capstone
-retains its independent 400,000,000-step execution ceiling. A dedicated
+source loads and execution of a terminal body marker. At that boundary the
+450,000,000-step allowance applied only to networking snapshot construction;
+each capstone retained its independent 400,000,000-step execution ceiling. The
+current combined fixture uses 485,000,000 steps for four-core networking source
+construction, also as test infrastructure rather than a product limit. A
+dedicated
 post-server-phase regression also proves that later `VARIABLE`, `CREATE`, and
 `ALLOT` definitions remain reachable, so the capstone's comparison storage can
 be prepared before the concurrency transition without hiding dictionary
-damage.
+damage. The integrated BIOS now additionally enforces that invariant directly:
+the complete growth span is validated before any dictionary write.
 
 These tests prove deterministic construction plus bounded socket-independent
 server-flight emission, rejected-0RTT handling, client-Finished

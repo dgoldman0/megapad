@@ -6,9 +6,33 @@
 > [`docs/crypto-interface-contract.md`](docs/crypto-interface-contract.md).
 > Current TCP/TLS claims are defined by
 > [`docs/tls-hardening.md`](docs/tls-hardening.md); the active implementation
-> order and evidence ledger live in
-> `MEGAPAD_SECURE_SERVER_TRANSPORT_HANDOFF.md` at the workspace root outside
-> this repository.
+> history and combined-integration evidence ledgers live in
+> `MEGAPAD_SECURE_SERVER_TRANSPORT_HANDOFF.md` and
+> `MEGAPAD_KDOS_MODULE_REGISTRY_HANDOFF.md` at the workspace root outside this
+> repository.
+
+> **Current correction — 2026-08-22:** MegaPad branch
+> `integration/secure-registry-burrow` at
+> `8f0e4788eb8f1ca4a68d8f3c141ec4c8e4b97fbd` combines the closed secure-server
+> lower transport with the exact, available-memory-bound module registry. Stable
+> registry nodes and buckets use the Bank-0 heap and survive `XMEM-RESET`.
+> Userland now derives disjoint dictionary and general-XMEM spans from actual
+> remaining capacity; the default divides that capacity equally, while a
+> pre-initialization `U-XMEM-RESERVE!` selects the general-XMEM reserve and
+> complementary dictionary span. BIOS active bounds preflight every HERE-growing
+> path and throw caught KDOS fault `-8` before any rewind, wrap, or overrun write.
+> The same checkpoint fixes sparse-work `BALANCE` convergence without changing
+> the historical TLS LAST-ACK diagnosis.
+>
+> The exact in-sandbox sequential sweep passed 3,613 tests, skipped 36, and
+> deselected four host-loopback UDP-backend cases in 1,470.94 seconds;
+> `TestKDOSMulticore` passed 87/87 in 854.40 seconds. Eleven other
+> `tests/test_networking.py` cases pass in the sandbox. Unsandboxed execution of
+> the four host AF_INET loopback confirmations was rejected by the approval
+> service, so they remain pending environment confirmations, not guest UDP
+> failures.
+> Library/Burrow can resume after this combined MegaPad checkpoint is selected
+> and downstream Akashic is qualified against that exact commit.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  

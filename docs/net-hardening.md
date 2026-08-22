@@ -23,7 +23,9 @@ cooperative cleanup, and adoption into the shared established TLS NIO port.
 Independent TLS 1.3 peers qualify application I/O and teardown through that
 owner and HCONN, including same-listener recovery after cancellation, timeout,
 and malformed input.
-**Date:** 2026-08-15 qualification
+**Date:** 2026-08-15 transport qualification
+
+**Integration update:** 2026-08-22 at MegaPad `8f0e478`
 
 ## Scope
 
@@ -227,6 +229,45 @@ descriptor-owned teardown, and stale child-reuse isolation. Its focused matrix
 and final adjoining affected selector pass 15/15 sequentially under the
 ordinary checked limits.
 
+## 2026-08-22 integration reconciliation
+
+Combining this transport line with the dynamic KDOS module registry did not
+change TCP/TLS authority, wire behavior, table geometry, ownership, or close
+semantics. The registry uses stable Bank-0 allocation and survives
+`XMEM-RESET`. Networking source now compiles inside a capacity-derived user
+dictionary that is disjoint from general XMEM. BIOS active bounds preflight
+every complete HERE-growing operation: exact fit succeeds, and rewind, address
+wrap, or overrun throws caught KDOS dictionary fault `-8` before any write.
+XMEM floor, free-list, and live high-water checks prevent allocation into the
+dictionary span.
+
+The current four-core networking source fixture uses a 485M-step construction
+allowance. That is a source-loading test-infrastructure correction, not a TCP,
+TLS, runtime, or connection-capacity change. `8f0e478` also fixes a general KDOS
+`BALANCE` convergence defect for sparse run queues; it does not revise the
+transport's historical LAST-ACK scheduler diagnosis.
+
+The exact in-sandbox sequential sweep at `8f0e478` was:
+
+```text
+make test-sequential K='not test_udp_backend_lifecycle and not test_udp_backend_roundtrip and not test_nic_device_with_udp_backend and not test_nic_device_backend_rx'
+3613 passed, 36 skipped, 4 deselected in 1470.94s
+```
+
+`TestKDOSMulticore` separately passed 87/87 in 854.40 seconds.
+
+Eleven other cases in `tests/test_networking.py` pass in the sandbox. The four
+deselected cases are host AF_INET loopback/UDP-backend confirmations, not guest
+injected-frame UDP failures:
+
+- `tests/test_networking.py::TestNICBackends::test_udp_backend_lifecycle`
+- `tests/test_networking.py::TestNICBackends::test_udp_backend_roundtrip`
+- `tests/test_networking.py::TestNICBackends::test_nic_device_with_udp_backend`
+- `tests/test_networking.py::TestNICBackends::test_nic_device_backend_rx`
+
+Unsandboxed execution was requested and rejected by the approval service, so
+those four current-tree host-loopback confirmations remain pending.
+
 ## Secure-server closure status
 
 The authority substrate now includes the exact authenticated socket-publication
@@ -246,8 +287,9 @@ TLS NIO port, after which HCONN is unchanged. The independent peer journeys now
 complete the TCP/TLS handshake, verify the credential chain and hostname,
 negotiate ALPN, exchange HTTP bytes, complete `close_notify` and FIN, reuse the
 listener, and recover after cancellation, timeout, malformed ClientHello, and
-cleanup contention. Remaining transport work is broader profile, concurrency,
-and protocol-maximum maturity evidence.
+cleanup contention. Remaining transport work is broader profile and
+concurrency maturity plus the uint24-maximum Certificate capstone; the
+protocol-maximum ClientHello capstone is already complete.
 
 Historically, a 144-byte caller-owned KDOS coordinator exercised the same
 lower phases and its six public-path journeys passed in 39.58 seconds. It was a

@@ -35,6 +35,30 @@ Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
 root. Application code continues to consume the already-open port abstraction.
 
+**Infrastructure integration correction (2026-08-22):**
+`integration/secure-registry-burrow` at
+`8f0e4788eb8f1ca4a68d8f3c141ec4c8e4b97fbd` combines that lower transport with
+the exact, available-memory-bound KDOS module registry. Registry nodes and
+buckets use stable Bank-0 allocations and remain valid across `XMEM-RESET`.
+Userland now derives disjoint dictionary and general-XMEM spans from actual
+remaining capacity, defaulting to an equal split and allowing a pre-init
+`U-XMEM-RESERVE!` to select the general-XMEM reserve. BIOS active dictionary
+bounds preflight every HERE-growing path and fail before the first write on
+rewind, wrap, or overrun. XMEM floor, free-list, and live high-water validation
+keep both allocation directions disjoint.
+
+The same checkpoint corrects a general `BALANCE` defect: work moves only while
+the busiest run queue exceeds the target by more than one, so sparse and skewed
+layouts converge without stack leakage or circulating singleton tasks. This is
+not a change to TLS authority or to the historical LAST-ACK service diagnosis.
+The exact in-sandbox sequential sweep passed 3,613 tests, skipped 36, and
+deselected four host-loopback UDP-backend cases in 1,470.94 seconds;
+`TestKDOSMulticore` passed 87/87 in 854.40 seconds. Eleven other networking-test
+cases pass in the sandbox. The four current-tree host AF_INET loopback
+confirmations remain pending because the approval service rejected unsandboxed
+execution; they are not guest UDP failures. The old inventory and counts below
+remain historical.
+
 ---
 
 ## Project at a Glance
@@ -147,7 +171,8 @@ Implemented network components, bottom-up:
 ### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
 
 19. ✅ **Per-core run queues**
-20. ✅ **Work stealing**
+20. ✅ **Work stealing** — `BALANCE` converges sparse and skewed queues to a
+    maximum count difference of one without stack leakage
 21. ✅ **Core affinity**
 22. ✅ **Per-core preemption** — timer IRQ on all cores
 23. ✅ **IPI messaging** — mailbox for structured inter-core messages
@@ -206,7 +231,10 @@ Per `docs/SoC-hardening.md`:
 - 33 ✅ **BIOS `.'` delimiter bug** — ANS Forth compliant
 - 43 ✅ **Display screen 8 exits to RPL** — stack imbalance fix, dynamic core-type detection
 - 44 ✅ **CLI `--clusters` flag** — uncapped `--cores`, `--clusters` arg
-- 47 ✅ **Memory management hardening** — 5 phases: coalescing, MARKER/FORGET, heap/stack collision guard, HEAP-CHECK, in-place RESIZE, buffer registry scaling, `.MEM`
+- 47 ✅ **Memory management hardening** — coalescing, MARKER/FORGET,
+  heap/stack collision guard, HEAP-CHECK, in-place RESIZE, buffer registry
+  scaling, `.MEM`, stable Bank-0 dynamic module-registry allocation, and a
+  capacity-derived BIOS-bounded user-dictionary/general-XMEM partition
 - 48 ✅ **Arena allocator** — 4 phases: heap-backed, multi-source + snapshots, scoped arena stack, arena-scoped buffers (33 tests)
 - 49 ✅ **STC compiler hardening** — branch offset overflow checks, LEAVE overflow (12 tests)
 
@@ -325,12 +353,17 @@ CURRENT-SITUATION.
 
 ### Shortest path to "v1.0 done"
 
-Secure server closure is complete for the bounded profile. Preserve the exact
+Secure server closure is complete for the bounded profile. The combined
+registry/memory/scheduler checkpoint is a merge and downstream-qualification
+gate, not reopened TLS implementation work: select the exact MegaPad commit and
+qualify Akashic against it before resuming the paused Library/Burrow vertical.
+Preserve the exact
 attached-child handshake, protected terminal disposition, reciprocal socket
 publication, and independent-peer application/close evidence while later
-services consume that surface. Protocol-maximum capstones, new algorithms,
-broader TCP, and true concurrent TLS work remain maturity items rather than
-prerequisites for the completed vertical.
+services consume that surface. The remaining uint24-maximum Certificate
+capstone, new algorithms, broader TCP, and true concurrent TLS work remain
+maturity items rather than prerequisites for the completed vertical; the
+protocol-maximum ClientHello capstone is already complete.
 
 SCROLL is an independent client-side track now that the bounded client
 TCP/TLS profile is qualified; it does not depend on server accept. It remains a
