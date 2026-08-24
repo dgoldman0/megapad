@@ -148,7 +148,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         self.assertRegex(start, probe)
         self.assertEqual(close, b"0 0 0 ")
 
-    def test_real_core_snapshot_key_and_synchronized_close(self) -> None:
+    def test_real_core_snapshot_key_resize_and_synchronized_close(self) -> None:
         memory, ext_memory, cpu_state = self._snapshot_data()
         system = make_system(
             ram_kib=1024,
@@ -182,6 +182,11 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "VARIABLE PT-TEST-EVENT-V1",
                 "VARIABLE PT-TEST-EVENT-V2",
                 "VARIABLE PT-TEST-EVENT-V3",
+                "VARIABLE PT-TEST-RESIZE-S",
+                "VARIABLE PT-TEST-RESIZE-TYPE",
+                "VARIABLE PT-TEST-RESIZE-V0",
+                "VARIABLE PT-TEST-RESIZE-V1",
+                "VARIABLE PT-TEST-RESIZE-V2",
                 "VARIABLE PT-TEST-CLOSE-S",
                 "VARIABLE PT-TEST-CLOSE-WAIT-S",
                 "VARIABLE PT-TEST-PHASE",
@@ -229,10 +234,13 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  PT-TEST-EVENT-TYPE @ . PT-TEST-EVENT-REV @ .",
                 "  PT-TEST-EVENT-V0 @ . PT-TEST-EVENT-V1 @ .",
                 "  PT-TEST-EVENT-V2 @ . PT-TEST-EVENT-V3 @ .",
+                "  PT-TEST-RESIZE-S @ . PT-TEST-RESIZE-TYPE @ .",
+                "  PT-TEST-RESIZE-V0 @ . PT-TEST-RESIZE-V1 @ .",
+                "  PT-TEST-RESIZE-V2 @ .",
                 "  PT-TEST-CLOSE-S @ . PT-TEST-CLOSE-WAIT-S @ .",
                 "  PT-TEST-SESSION PT-STATE@ . PT-STREAM-OWNED? .",
                 "  TX-FLUSH ;",
-                ": PT-TEST-SEND-SNAPSHOT",
+                ": PT-TEST-SEND-INITIAL-SNAPSHOT",
                 "  0 PT-TEST-TX-S !",
                 "  2 2 2 4 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
                 "    PT-TEST-TX-STATUS",
@@ -243,6 +251,20 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  67 4 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
                 "  32 7 1 32 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
                 "  1 1 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
+                "  PT-TEST-SESSION PT-TX-COMMIT PT-TEST-TX-STATUS ;",
+                ": PT-TEST-SEND-RESIZED-SNAPSHOT",
+                "  0 PT-TEST-TX-S !",
+                "  3 2 2 6 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
+                "    PT-TEST-TX-STATUS",
+                "  0 0 3 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  68 1 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  69 2 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  70 3 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  1 0 3 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  71 4 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  72 5 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  73 6 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  1 2 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
                 "  PT-TEST-SESSION PT-TX-COMMIT PT-TEST-TX-STATUS ;",
                 ": PT-TEST-RECEIVE-RESULT",
                 "  PT-TEST-TX-S @ ?DUP IF PT-TEST-RESULT-S ! EXIT THEN",
@@ -257,6 +279,13 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  PT-TEST-EVENT PT-EVENT-VALUE1@ PT-TEST-EVENT-V1 !",
                 "  PT-TEST-EVENT PT-EVENT-VALUE2@ PT-TEST-EVENT-V2 !",
                 "  PT-TEST-EVENT PT-EVENT-VALUE3@ PT-TEST-EVENT-V3 ! ;",
+                ": PT-TEST-RECEIVE-RESIZE",
+                "  PT-TEST-WAIT-EVENT DUP PT-TEST-RESIZE-S !",
+                "  PT-S-OK <> IF EXIT THEN",
+                "  PT-TEST-EVENT PT-EVENT-TYPE@ PT-TEST-RESIZE-TYPE !",
+                "  PT-TEST-EVENT PT-EVENT-VALUE0@ PT-TEST-RESIZE-V0 !",
+                "  PT-TEST-EVENT PT-EVENT-VALUE1@ PT-TEST-RESIZE-V1 !",
+                "  PT-TEST-EVENT PT-EVENT-VALUE2@ PT-TEST-RESIZE-V2 ! ;",
                 ": PT-TEST-DO-CLOSE",
                 "  0 PT-TEST-SESSION PT-CLOSE DUP PT-TEST-CLOSE-S !",
                 "  PT-S-OK <> IF EXIT THEN",
@@ -267,6 +296,9 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  -9 PT-TEST-EVENT-TYPE ! -9 PT-TEST-EVENT-REV !",
                 "  -9 PT-TEST-EVENT-V0 ! -9 PT-TEST-EVENT-V1 !",
                 "  -9 PT-TEST-EVENT-V2 ! -9 PT-TEST-EVENT-V3 !",
+                "  -9 PT-TEST-RESIZE-S ! -9 PT-TEST-RESIZE-TYPE !",
+                "  -9 PT-TEST-RESIZE-V0 ! -9 PT-TEST-RESIZE-V1 !",
+                "  -9 PT-TEST-RESIZE-V2 !",
                 "  -9 PT-TEST-CLOSE-S ! -9 PT-TEST-CLOSE-WAIT-S !",
                 "  PT-TEST-RX 8192 PT-TEST-TX 8192",
                 "  PT-TEST-INCOMING-EVENT PT-EVENT-SIZE PT-TEST-SESSION",
@@ -275,15 +307,19 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  PT-TEST-SESSION PT-START PT-TEST-START-S !",
                 "  PT-TEST-WAIT-ACTIVE PT-TEST-ACTIVE-S !",
                 "  2 PT-TEST-PHASE !",
-                "  PT-TEST-SEND-SNAPSHOT",
+                "  PT-TEST-SEND-INITIAL-SNAPSHOT",
                 "  PT-TEST-RECEIVE-RESULT",
                 "  3 PT-TEST-PHASE !",
                 "  PT-TEST-RECEIVE-EVENT",
                 "  4 PT-TEST-PHASE !",
-                "  PT-TEST-DO-CLOSE",
+                "  PT-TEST-RECEIVE-RESIZE",
+                "  PT-TEST-SEND-RESIZED-SNAPSHOT",
+                "  PT-TEST-RECEIVE-RESULT",
                 "  5 PT-TEST-PHASE !",
+                "  PT-TEST-DO-CLOSE",
+                "  6 PT-TEST-PHASE !",
                 "  PT-TEST-SESSION PT-STATE@ PT-ST-ANSI = IF PT-TEST-REPORT THEN",
-                "  6 PT-TEST-PHASE ! ;",
+                "  7 PT-TEST-PHASE ! ;",
                 "PT-TEST-HAPPY BYE",
             ]
         )
@@ -295,14 +331,15 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         terminal_ansi = bytearray()
         terminal_views = []
         key_sent = False
+        resize_sent = False
         core = PresentationTerminalCore(
             TerminalConfig(
                 max_payload=256,
                 max_transaction_bytes=512,
                 terminal_receive_credit=1_024,
-                max_cells=4,
+                max_cells=6,
                 max_feed_bytes=4_096,
-                max_cols=2,
+                max_cols=3,
                 max_rows=2,
                 cols=2,
                 rows=2,
@@ -312,7 +349,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         )
 
         def pump_terminal() -> None:
-            nonlocal terminal_cursor, key_sent
+            nonlocal terminal_cursor, key_sent, resize_sent
             current = bytes(uart)
             if terminal_cursor is None:
                 marker_at = current.find(begin_marker)
@@ -332,6 +369,10 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                     assert key is not None
                     system.uart.inject_input(key.payload)
                     key_sent = True
+                    resize = core.send_resize(3, 2)
+                    assert resize is not None
+                    system.uart.inject_input(resize.payload)
+                    resize_sent = True
 
         while steps < SOURCE_LOAD_MAX_STEPS:
             pump_terminal()
@@ -400,15 +441,25 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         ):
             self.assertNotIn(diagnostic, text)
 
-        expected = b"PTRESULT 0 0 0 0 0 0 512 1 120 1 0 1 0 0 0 0 "
+        expected = (
+            b"PTRESULT 0 0 0 0 0 0 512 1 120 1 0 1 "
+            b"0 515 3 2 1 0 0 0 0 "
+        )
         self.assertIn(expected, raw)
         self.assertTrue(key_sent)
+        self.assertTrue(resize_sent)
         self.assertEqual(core.state, TerminalState.ANSI)
-        self.assertEqual(len(terminal_views), 1)
-        view = terminal_views[0]
-        self.assertEqual(view.revision, 1)
+        self.assertEqual(len(terminal_views), 2)
+        initial_view, resized_view = terminal_views
+        self.assertEqual(initial_view.revision, 1)
         self.assertEqual(
-            tuple(cell.codepoint for row in view.cells for cell in row),
+            tuple(cell.codepoint for row in initial_view.cells for cell in row),
             (ord("A"), ord("B"), ord("C"), ord(" ")),
+        )
+        self.assertEqual((resized_view.cols, resized_view.rows), (3, 2))
+        self.assertEqual(resized_view.revision, 1)
+        self.assertEqual(
+            tuple(cell.codepoint for row in resized_view.cells for cell in row),
+            tuple(map(ord, "DEFGHI")),
         )
         self.assertIn(expected, terminal_ansi)
