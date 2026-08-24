@@ -53,6 +53,8 @@ _READY = struct.Struct("<IIIIIIQ")
 _CREDIT = struct.Struct("<Q")
 _TX_RESULT = struct.Struct("<QHHQ")
 _KEY = struct.Struct("<IBBHQ")
+_CLOSE = struct.Struct("<H6sQ")
+_CLOSE_ACK = struct.Struct("<H6s")
 
 _NAMED_KEY_SYMBOLS = frozenset(range(0x00110001, 0x0011000F)) | frozenset(
     range(0x00110020, 0x0011002C)
@@ -156,8 +158,11 @@ class TerminalConfig:
         )
         cols = _integer("cols", self.cols, minimum=1, maximum=UINT16_MAX)
         rows = _integer("rows", self.rows, minimum=1, maximum=UINT16_MAX)
-        if max_payload < 12 + 8 * cols:
-            raise ValueError("max_payload cannot admit one maximum-width CELL_SPAN")
+        required_payload = max(_READY.size, 12 + 8 * cols)
+        if max_payload < required_payload:
+            raise ValueError(
+                "max_payload cannot admit READY and one maximum-width CELL_SPAN"
+            )
         if cols * rows > max_cells:
             raise ValueError("selected geometry exceeds caller-owned model capacity")
         snapshot_bytes = snapshot_wire_bytes(cols, rows)
@@ -485,22 +490,22 @@ class PresentationTerminalCore:
             self._fatal(str(exc), cause=exc)
         outbound: list[OutboundBytes] = []
         views: list[TerminalView] = []
-        for frame in frames:
+        for index, frame in enumerate(frames):
+            if frame.message_type == MessageType.CLOSE:
+                if index != len(frames) - 1 or decoder.buffered_bytes:
+                    self._fatal("client sent bytes after CLOSE before CLOSE_ACK")
             generated, view = self._process_frame(frame)
             outbound.extend(generated)
             if view is not None:
                 views.append(view)
+            if self._state is TerminalState.CLOSING:
+                self._complete_peer_close()
         return CoreResult(outbound=tuple(outbound), views=tuple(views))
 
     def _process_frame(
         self,
         frame: Frame,
     ) -> tuple[tuple[OutboundBytes, ...], TerminalView | None]:
-        if (
-            self._state is TerminalState.OPENING
-            and frame.message_type != MessageType.CLIENT_READY
-        ):
-            self._fatal("CLIENT_READY was not the first client frame")
         try:
             message_type = MessageType(frame.message_type)
         except ValueError:
@@ -509,7 +514,12 @@ class PresentationTerminalCore:
                 return self._release_data(frame.complete_bytes), None
             self._fatal(f"unsupported mandatory message type 0x{frame.message_type:04x}")
 
+        if message_type is MessageType.CLOSE:
+            return self._accept_close(frame.payload), None
+
         if self._state is TerminalState.OPENING:
+            if message_type is not MessageType.CLIENT_READY:
+                self._fatal("CLIENT_READY or CLOSE was not the first client frame")
             self._accept_client_ready(frame.payload)
             self._state = TerminalState.ACTIVE
             return (), None
@@ -534,6 +544,46 @@ class PresentationTerminalCore:
         if message_type in {MessageType.TX_COMMIT, MessageType.SNAPSHOT_COMMIT}:
             return self._accept_commit(frame, message_type)
         self._fatal(f"message {message_type.name} is not legal client presentation data")
+
+    def _accept_close(self, payload: bytes) -> tuple[OutboundBytes, ...]:
+        if self._state not in {
+            TerminalState.OPENING,
+            TerminalState.ACTIVE,
+            TerminalState.RESYNCING,
+        }:
+            self._fatal("CLOSE is outside an open enhanced session")
+        if len(payload) != _CLOSE.size:
+            self._fatal("CLOSE payload length is not 16")
+        reason, reserved, _last_revision = _CLOSE.unpack(payload)
+        if reserved != bytes(6):
+            self._fatal("CLOSE reserved bytes are nonzero")
+        acknowledgement = self._encode_control(
+            MessageType.CLOSE_ACK,
+            _CLOSE_ACK.pack(reason, bytes(6)),
+        )
+        self._state = TerminalState.CLOSING
+        return (acknowledgement,)
+
+    def _complete_peer_close(self) -> None:
+        """Retire state after the complete ACK has been encoded for delivery."""
+
+        if self._state is not TerminalState.CLOSING:
+            self._fatal("close completion is outside CLOSING")
+        self._state = TerminalState.ANSI
+        self._scanner = _NegotiationScanner()
+        self._nonce = None
+        self._session_id = None
+        self._offer = None
+        self._open = None
+        self._decoder = None
+        self._encoder = None
+        self._model = None
+        self._client_data_grant = 0
+        self._client_data_received = 0
+        self._client_data_released = 0
+        self._server_data_grant = 0
+        self._server_data_sent = 0
+        self._clear_wire_transaction()
 
     def _accept_client_ready(self, payload: bytes) -> None:
         if len(payload) != _READY.size:

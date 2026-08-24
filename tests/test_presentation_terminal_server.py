@@ -34,6 +34,8 @@ COMMIT = struct.Struct("<Q")
 TX_RESULT = struct.Struct("<QHHQ")
 CREDIT = struct.Struct("<Q")
 KEY = struct.Struct("<IBBHQ")
+CLOSE = struct.Struct("<H6sQ")
+CLOSE_ACK = struct.Struct("<H6s")
 
 
 def _config() -> TerminalConfig:
@@ -187,3 +189,39 @@ def test_probe_cancellation_is_legal_only_before_open():
     core.feed_machine(encode_open(request) + client_ready)
     with pytest.raises(TerminalSessionError, match="after the OPEN"):
         core.cancel_probe()
+
+
+def test_client_close_is_acknowledged_before_returning_to_ansi():
+    core, offer, request, encoder, client_ready = _negotiate()
+    close = encoder.encode(
+        MessageType.CLOSE,
+        CLOSE.pack(7, bytes(6), 0),
+    )
+
+    result = core.feed_machine(encode_open(request) + client_ready + close)
+
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    frames = []
+    for outbound in result.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in frames] == [
+        MessageType.SERVER_READY,
+        MessageType.CLOSE_ACK,
+    ]
+    assert CLOSE_ACK.unpack(frames[1].payload) == (7, bytes(6))
+    assert core.state is TerminalState.ANSI
+    assert core.view is None
+    assert core.feed_machine(b"legacy").ansi_bytes == b"legacy"
+
+
+def test_ready_payload_floor_is_enforced_for_narrow_geometries():
+    with pytest.raises(ValueError, match="READY"):
+        TerminalConfig(
+            max_payload=20,
+            max_transaction_bytes=256,
+            terminal_receive_credit=256,
+            max_cells=1,
+            max_feed_bytes=4_352,
+            cols=1,
+            rows=1,
+        )
