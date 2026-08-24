@@ -32,6 +32,9 @@ SPAN = struct.Struct("<III")
 CELL = struct.Struct("<IBBH")
 CURSOR = struct.Struct("<IIB7x")
 COMMIT = struct.Struct("<Q")
+TEXT_PREFIX = struct.Struct("<HHQ")
+POINTER = struct.Struct("<iiHHHHhhQ")
+FOCUS = struct.Struct("<B7sQ")
 
 
 def _terminal_config() -> TerminalConfig:
@@ -102,17 +105,21 @@ def _snapshot(encoder: FrameEncoder) -> bytes:
     )
 
 
-def _open_bytes(offer: Offer) -> tuple[bytes, FrameEncoder]:
+def _open_bytes(
+    offer: Offer,
+    *,
+    client_credit: int = 256,
+) -> tuple[bytes, FrameEncoder]:
     request = OpenRequest(
         nonce=offer.nonce,
         session_id=offer.session_id,
         client_max_payload=256,
-        client_receive_credit=256,
+        client_receive_credit=client_credit,
     )
     encoder = FrameEncoder(offer.session_id, max_payload=offer.max_payload)
     ready = encoder.encode(
         MessageType.CLIENT_READY,
-        READY.pack(1, 256, 0, 256, 64, 0, 0x3F),
+        READY.pack(1, 256, 0, client_credit, 64, 0, 0x3F),
     )
     return encode_open(request) + ready + _snapshot(encoder), encoder
 
@@ -128,7 +135,7 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
         system,
         _host_limits(),
         _terminal_config(),
-        DriverLimits(4_096, 8),
+        DriverLimits(4_096, 3),
         ansi_sink=ansi_batches.append,
         view_sink=views.append,
         session_id_factory=lambda: 0x0123456789ABCDEF,
@@ -153,7 +160,7 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     offer = parse_negotiation(_drain_uart_rx(system))
     assert isinstance(offer, Offer)
 
-    open_and_snapshot, _client_encoder = _open_bytes(offer)
+    open_and_snapshot, _client_encoder = _open_bytes(offer, client_credit=512)
     _write_native_uart(system, open_and_snapshot)
     presented = driver.service()
     assert presented.status is DriverStatus.PROGRESS
@@ -177,6 +184,58 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     system.run_batch_stats(1)
     key = decoder.feed(_drain_uart_rx(system))
     assert len(key) == 1 and key[0].message_type == MessageType.KEY
+
+    assert driver.max_text_bytes == 64
+    assert driver.send_text(b"hi", paste=True) is DriverStatus.PROGRESS
+    assert (
+        driver.send_pointer(1, 0, buttons=1, modifiers=2, kind=2)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.send_focus(True) is DriverStatus.PROGRESS
+
+    # The bounded retention queue is full.  Rejection happens before the
+    # core advances sequence/credit or changes its pointer-button history.
+    assert (
+        driver.send_pointer(1, 0, buttons=0, kind=3)
+        is DriverStatus.BACKPRESSURED
+    )
+    assert driver.service().outbound_records == 3
+    assert driver.send_pointer(1, 0, buttons=0, kind=3) is DriverStatus.PROGRESS
+    assert driver.service().outbound_records == 1
+    system.run_batch_stats(1)
+
+    normalized = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in normalized] == [
+        MessageType.TEXT,
+        MessageType.POINTER,
+        MessageType.FOCUS,
+        MessageType.POINTER,
+    ]
+    assert TEXT_PREFIX.unpack(normalized[0].payload[:12]) == (1, 0, 1)
+    assert normalized[0].payload[12:] == b"hi"
+    assert POINTER.unpack(normalized[1].payload) == (
+        1,
+        0,
+        1,
+        1,
+        2,
+        2,
+        0,
+        0,
+        1,
+    )
+    assert FOCUS.unpack(normalized[2].payload) == (1, bytes(7), 1)
+    assert POINTER.unpack(normalized[3].payload) == (
+        1,
+        0,
+        0,
+        1,
+        0,
+        3,
+        0,
+        0,
+        1,
+    )
 
     assert driver.close().value == "accepted"
     _write_native_uart(system, b"legacy")

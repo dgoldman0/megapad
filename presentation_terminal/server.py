@@ -53,6 +53,9 @@ _READY = struct.Struct("<IIIIIIQ")
 _CREDIT = struct.Struct("<Q")
 _TX_RESULT = struct.Struct("<QHHQ")
 _KEY = struct.Struct("<IBBHQ")
+_TEXT_PREFIX = struct.Struct("<HHQ")
+_POINTER = struct.Struct("<iiHHHHhhQ")
+_FOCUS = struct.Struct("<B7sQ")
 _CLOSE = struct.Struct("<H6sQ")
 _CLOSE_ACK = struct.Struct("<H6s")
 
@@ -289,6 +292,8 @@ class PresentationTerminalCore:
         self._client_data_released = 0
         self._server_data_grant = 0
         self._server_data_sent = 0
+        self._client_max_text = 0
+        self._pointer_buttons = 0
         self._wire_transaction_id: int | None = None
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
@@ -316,6 +321,12 @@ class PresentationTerminalCore:
     @property
     def view(self) -> TerminalView | None:
         return None if self._model is None else self._model.view
+
+    @property
+    def max_text_bytes(self) -> int:
+        """Maximum UTF-8 bytes accepted by one negotiated TEXT event."""
+
+        return self._client_max_text
 
     def feed_machine(self, data) -> CoreResult:
         """Consume one bounded machine publication outside scheduler settlement."""
@@ -379,6 +390,92 @@ class PresentationTerminalCore:
             model.revision,
         )
         return self._encode_data(MessageType.KEY, payload)
+
+    def send_text(self, data, *, paste: bool = False) -> OutboundBytes | None:
+        """Encode one bounded, well-formed UTF-8 TEXT event."""
+
+        model = self._require_active_model()
+        if isinstance(data, str):
+            raise TypeError("data must be bytes-like, not str")
+        try:
+            raw = memoryview(data).tobytes()
+        except (TypeError, ValueError) as exc:
+            raise TypeError("data must be bytes-like") from exc
+        if not raw:
+            raise ValueError("text data must not be empty")
+        try:
+            raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValueError("text data must be well-formed UTF-8") from exc
+        if len(raw) > self._client_max_text:
+            raise ValueError("text data exceeds the negotiated client limit")
+        if not isinstance(paste, bool):
+            raise TypeError("paste must be bool")
+        payload = _TEXT_PREFIX.pack(int(paste), 0, model.revision) + raw
+        return self._encode_data(MessageType.TEXT, payload)
+
+    def send_pointer(
+        self,
+        x: int,
+        y: int,
+        *,
+        buttons: int = 0,
+        modifiers: int = 0,
+        kind: int = 1,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> OutboundBytes | None:
+        """Encode one cell-coordinate pointer transition."""
+
+        model = self._require_active_model()
+        normalized_x = _integer(
+            "x", x, minimum=-(1 << 31), maximum=(1 << 31) - 1
+        )
+        normalized_y = _integer(
+            "y", y, minimum=-(1 << 31), maximum=(1 << 31) - 1
+        )
+        normalized_buttons = _integer(
+            "buttons", buttons, minimum=0, maximum=0x1F
+        )
+        normalized_modifiers = _integer(
+            "modifiers", modifiers, minimum=0, maximum=0x3F
+        )
+        normalized_kind = _integer("kind", kind, minimum=1, maximum=4)
+        normalized_wheel_x = _integer(
+            "wheel_x", wheel_x, minimum=-(1 << 15), maximum=(1 << 15) - 1
+        )
+        normalized_wheel_y = _integer(
+            "wheel_y", wheel_y, minimum=-(1 << 15), maximum=(1 << 15) - 1
+        )
+        if normalized_kind != 4 and (normalized_wheel_x or normalized_wheel_y):
+            raise ValueError("wheel deltas require pointer kind 4")
+        changed = self._pointer_buttons ^ normalized_buttons
+        payload = _POINTER.pack(
+            normalized_x,
+            normalized_y,
+            normalized_buttons,
+            changed,
+            normalized_modifiers,
+            normalized_kind,
+            normalized_wheel_x,
+            normalized_wheel_y,
+            model.revision,
+        )
+        encoded = self._encode_data(MessageType.POINTER, payload)
+        if encoded is not None:
+            self._pointer_buttons = normalized_buttons
+        return encoded
+
+    def send_focus(self, focused: bool) -> OutboundBytes | None:
+        """Encode one normalized focus transition."""
+
+        model = self._require_active_model()
+        if not isinstance(focused, bool):
+            raise TypeError("focused must be bool")
+        return self._encode_data(
+            MessageType.FOCUS,
+            _FOCUS.pack(int(focused), bytes(7), model.revision),
+        )
 
     def _feed_ansi_owned(self, raw: bytes) -> CoreResult:
         ansi = bytearray()
@@ -583,6 +680,8 @@ class PresentationTerminalCore:
         self._client_data_released = 0
         self._server_data_grant = 0
         self._server_data_sent = 0
+        self._client_max_text = 0
+        self._pointer_buttons = 0
         self._clear_wire_transaction()
 
     def _accept_client_ready(self, payload: bytes) -> None:
@@ -611,6 +710,7 @@ class PresentationTerminalCore:
             or capabilities != MANDATORY_CAPABILITIES
         ):
             self._fatal("CLIENT_READY does not match OPEN or mandatory CELL-1 limits")
+        self._client_max_text = max_text
 
     def _accept_credit(self, payload: bytes) -> None:
         if len(payload) != _CREDIT.size:

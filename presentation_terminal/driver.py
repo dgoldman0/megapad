@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol
 
-from .apt1 import CONTROL_RESERVE_BYTES, UINT64_MAX
+from .apt1 import CONTROL_RESERVE_BYTES, HEADER_BYTES, UINT64_MAX
 from .cell_model import TerminalView
 from .server import (
     OutboundBytes,
@@ -25,7 +25,15 @@ from .transport import (
 
 _MAX_FATAL_CONTROL_FRAME_BYTES = 296
 _MIN_VALID_RESULT_EVENTS = 3
-_KEY_FRAME_BYTES = 56
+_KEY_FRAME_BYTES = HEADER_BYTES + 16
+_TEXT_FRAME_OVERHEAD = HEADER_BYTES + 12
+_POINTER_FRAME_BYTES = HEADER_BYTES + 28
+_FOCUS_FRAME_BYTES = HEADER_BYTES + 16
+_MAX_FIXED_INPUT_FRAME_BYTES = max(
+    _KEY_FRAME_BYTES,
+    _POINTER_FRAME_BYTES,
+    _FOCUS_FRAME_BYTES,
+)
 
 
 def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
@@ -101,6 +109,7 @@ class PresentationTerminalDriver:
         self,
         lease: TerminalHostLease,
         core: PresentationTerminalCore,
+        host_limits: HostPortLimits,
         limits: DriverLimits,
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
@@ -110,6 +119,8 @@ class PresentationTerminalDriver:
             raise TypeError("lease must be TerminalHostLease")
         if not isinstance(core, PresentationTerminalCore):
             raise TypeError("core must be PresentationTerminalCore")
+        if not isinstance(host_limits, HostPortLimits):
+            raise TypeError("host_limits must be HostPortLimits")
         if not isinstance(limits, DriverLimits):
             raise TypeError("limits must be DriverLimits")
         if ansi_sink is not None and not callable(ansi_sink):
@@ -118,6 +129,7 @@ class PresentationTerminalDriver:
             raise TypeError("view_sink must be callable or None")
         self._lease = lease
         self._core = core
+        self._host_limits = host_limits
         self._limits = limits
         self._ansi_sink = ansi_sink
         self._view_sink = view_sink
@@ -168,10 +180,12 @@ class PresentationTerminalDriver:
         if host_limits.ingress_control_events < 1:
             raise ValueError("ingress control capacity needs one event slot")
         if (
-            host_limits.ordinary_ingress_bytes < _KEY_FRAME_BYTES
+            host_limits.ordinary_ingress_bytes < _MAX_FIXED_INPUT_FRAME_BYTES
             or host_limits.ordinary_ingress_events < 1
         ):
-            raise ValueError("ordinary ingress capacity cannot admit one KEY frame")
+            raise ValueError(
+                "ordinary ingress capacity cannot admit every fixed-size input frame"
+            )
 
         lease = system.attach_presentation_terminal(host_limits)
         try:
@@ -189,6 +203,7 @@ class PresentationTerminalDriver:
             return cls(
                 lease,
                 core,
+                host_limits,
                 driver_limits,
                 ansi_sink=ansi_sink,
                 view_sink=view_sink,
@@ -212,6 +227,19 @@ class PresentationTerminalDriver:
     @property
     def pending_outbound_events(self) -> int:
         return len(self._pending)
+
+    @property
+    def max_text_bytes(self) -> int:
+        """Effective one-event TEXT bound across peer and local storage."""
+
+        return max(
+            0,
+            min(
+                self._core.max_text_bytes,
+                self._host_limits.ordinary_ingress_bytes - _TEXT_FRAME_OVERHEAD,
+                self._limits.pending_outbound_bytes - _TEXT_FRAME_OVERHEAD,
+            ),
+        )
 
     @property
     def failure_reason(self) -> str | None:
@@ -339,6 +367,8 @@ class PresentationTerminalDriver:
             return DriverStatus.STALE
         if self._failure_reason is not None:
             return DriverStatus.FAILED
+        if not self._can_retain(_KEY_FRAME_BYTES, 1):
+            return DriverStatus.BACKPRESSURED
         try:
             outbound = self._core.send_key(
                 key_symbol,
@@ -346,6 +376,87 @@ class PresentationTerminalDriver:
                 location=location,
                 modifiers=modifiers,
             )
+            if outbound is None:
+                return DriverStatus.BACKPRESSURED
+            self._retain_outbound((outbound,))
+        except (TerminalSessionError, TypeError, ValueError):
+            return DriverStatus.INVALID
+        return DriverStatus.PROGRESS
+
+    def send_text(self, data, *, paste: bool = False) -> DriverStatus:
+        """Queue one nonempty normalized UTF-8 TEXT event."""
+
+        if self._closed:
+            return DriverStatus.STALE
+        if self._failure_reason is not None:
+            return DriverStatus.FAILED
+        if isinstance(data, str):
+            return DriverStatus.INVALID
+        try:
+            raw = memoryview(data).tobytes()
+        except (TypeError, ValueError):
+            return DriverStatus.INVALID
+        frame_bytes = _TEXT_FRAME_OVERHEAD + len(raw)
+        if not raw or len(raw) > self.max_text_bytes:
+            return DriverStatus.INVALID
+        if not self._can_retain(frame_bytes, 1):
+            return DriverStatus.BACKPRESSURED
+        try:
+            outbound = self._core.send_text(raw, paste=paste)
+            if outbound is None:
+                return DriverStatus.BACKPRESSURED
+            self._retain_outbound((outbound,))
+        except (TerminalSessionError, TypeError, ValueError):
+            return DriverStatus.INVALID
+        return DriverStatus.PROGRESS
+
+    def send_pointer(
+        self,
+        x: int,
+        y: int,
+        *,
+        buttons: int = 0,
+        modifiers: int = 0,
+        kind: int = 1,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> DriverStatus:
+        """Queue one normalized cell-coordinate pointer event."""
+
+        if self._closed:
+            return DriverStatus.STALE
+        if self._failure_reason is not None:
+            return DriverStatus.FAILED
+        if not self._can_retain(_POINTER_FRAME_BYTES, 1):
+            return DriverStatus.BACKPRESSURED
+        try:
+            outbound = self._core.send_pointer(
+                x,
+                y,
+                buttons=buttons,
+                modifiers=modifiers,
+                kind=kind,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
+            )
+            if outbound is None:
+                return DriverStatus.BACKPRESSURED
+            self._retain_outbound((outbound,))
+        except (TerminalSessionError, TypeError, ValueError):
+            return DriverStatus.INVALID
+        return DriverStatus.PROGRESS
+
+    def send_focus(self, focused: bool) -> DriverStatus:
+        """Queue one normalized focus transition."""
+
+        if self._closed:
+            return DriverStatus.STALE
+        if self._failure_reason is not None:
+            return DriverStatus.FAILED
+        if not self._can_retain(_FOCUS_FRAME_BYTES, 1):
+            return DriverStatus.BACKPRESSURED
+        try:
+            outbound = self._core.send_focus(focused)
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
@@ -366,17 +477,21 @@ class PresentationTerminalDriver:
     def _retain_outbound(self, records: tuple[OutboundBytes, ...]) -> None:
         additional_events = len(records)
         additional_bytes = sum(len(record.payload) for record in records)
-        if additional_events > (
-            self._limits.pending_outbound_events - len(self._pending)
-        ) or additional_bytes > (
-            self._limits.pending_outbound_bytes - self._pending_bytes
-        ):
+        if not self._can_retain(additional_bytes, additional_events):
             raise TerminalSessionError(
                 "one machine publication exceeded the caller-owned outbound "
                 "retention capacity"
             )
         self._pending.extend(records)
         self._pending_bytes += additional_bytes
+
+    def _can_retain(self, additional_bytes: int, additional_events: int) -> bool:
+        return (
+            additional_events
+            <= self._limits.pending_outbound_events - len(self._pending)
+            and additional_bytes
+            <= self._limits.pending_outbound_bytes - self._pending_bytes
+        )
 
     def _flush_pending(self) -> tuple[DriverStatus, int]:
         admitted = 0

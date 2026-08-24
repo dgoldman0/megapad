@@ -34,6 +34,9 @@ COMMIT = struct.Struct("<Q")
 TX_RESULT = struct.Struct("<QHHQ")
 CREDIT = struct.Struct("<Q")
 KEY = struct.Struct("<IBBHQ")
+TEXT_PREFIX = struct.Struct("<HHQ")
+POINTER = struct.Struct("<iiHHHHhhQ")
+FOCUS = struct.Struct("<B7sQ")
 CLOSE = struct.Struct("<H6sQ")
 CLOSE_ACK = struct.Struct("<H6s")
 
@@ -116,7 +119,7 @@ def test_ansi_remains_default_and_non_apt_escapes_pass_byte_exact():
     assert core.view is None
 
 
-def test_real_negotiation_snapshot_result_credit_view_and_key_event():
+def test_real_negotiation_snapshot_result_credit_view_and_normalized_input():
     core, offer, request, encoder, client_ready = _negotiate()
     machine_bytes = encode_open(request) + client_ready + _snapshot_frames(encoder)
 
@@ -153,6 +156,39 @@ def test_real_negotiation_snapshot_result_credit_view_and_key_event():
     key_frame = decoder.feed(key.payload)[0]
     assert key_frame.message_type == MessageType.KEY
     assert KEY.unpack(key_frame.payload) == (ord("x"), 1, 0, 1, 1)
+
+    assert core.max_text_bytes == 64
+    text = core.send_text("café".encode(), paste=True)
+    pointer = core.send_pointer(1, 0, buttons=1, modifiers=2, kind=2)
+    focus = core.send_focus(True)
+    assert text is not None and pointer is not None and focus is not None
+    input_frames = decoder.feed(text.payload + pointer.payload + focus.payload)
+    assert [frame.message_type for frame in input_frames] == [
+        MessageType.TEXT,
+        MessageType.POINTER,
+        MessageType.FOCUS,
+    ]
+    assert TEXT_PREFIX.unpack(input_frames[0].payload[:12]) == (1, 0, 1)
+    assert input_frames[0].payload[12:] == "café".encode()
+    assert POINTER.unpack(input_frames[1].payload) == (
+        1,
+        0,
+        1,
+        1,
+        2,
+        2,
+        0,
+        0,
+        1,
+    )
+    assert FOCUS.unpack(input_frames[2].payload) == (1, bytes(7), 1)
+
+    with pytest.raises(ValueError, match="well-formed UTF-8"):
+        core.send_text(b"\xff")
+    with pytest.raises(ValueError, match="wheel deltas"):
+        core.send_pointer(0, 0, wheel_y=1)
+    with pytest.raises(TypeError, match="focused must be bool"):
+        core.send_focus(1)
 
 
 def test_client_receive_credit_backpressures_data_but_not_control_results():
