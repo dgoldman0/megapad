@@ -252,19 +252,19 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  32 7 1 32 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
                 "  1 1 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
                 "  PT-TEST-SESSION PT-TX-COMMIT PT-TEST-TX-STATUS ;",
+                ": PT-TEST-SEND-16-CELLS",
+                "  16 0 DO",
+                "    DUP I + 7 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  LOOP DROP ;",
                 ": PT-TEST-SEND-RESIZED-SNAPSHOT",
                 "  0 PT-TEST-TX-S !",
-                "  3 2 2 6 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
+                "  16 2 2 32 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
                 "    PT-TEST-TX-STATUS",
-                "  0 0 3 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
-                "  68 1 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  69 2 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  70 3 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  1 0 3 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
-                "  71 4 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  72 5 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  73 6 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  1 2 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
+                "  0 0 16 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  65 PT-TEST-SEND-16-CELLS",
+                "  1 0 16 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  81 PT-TEST-SEND-16-CELLS",
+                "  1 15 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
                 "  PT-TEST-SESSION PT-TX-COMMIT PT-TEST-TX-STATUS ;",
                 ": PT-TEST-RECEIVE-RESULT",
                 "  PT-TEST-TX-S @ ?DUP IF PT-TEST-RESULT-S ! EXIT THEN",
@@ -335,11 +335,11 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         core = PresentationTerminalCore(
             TerminalConfig(
                 max_payload=256,
-                max_transaction_bytes=512,
+                max_transaction_bytes=640,
                 terminal_receive_credit=1_024,
-                max_cells=6,
+                max_cells=32,
                 max_feed_bytes=4_096,
-                max_cols=3,
+                max_cols=16,
                 max_rows=2,
                 cols=2,
                 rows=2,
@@ -369,7 +369,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                     assert key is not None
                     system.uart.inject_input(key.payload)
                     key_sent = True
-                    resize = core.send_resize(3, 2)
+                    resize = core.send_resize(16, 2)
                     assert resize is not None
                     system.uart.inject_input(resize.payload)
                     resize_sent = True
@@ -443,7 +443,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
 
         expected = (
             b"PTRESULT 0 0 0 0 0 0 512 1 120 1 0 1 "
-            b"0 515 3 2 1 0 0 0 0 "
+            b"0 515 16 2 1 0 0 0 0 "
         )
         self.assertIn(expected, raw)
         self.assertTrue(key_sent)
@@ -456,10 +456,10 @@ class TestPresentationTerminalForth(_KDOSTestBase):
             tuple(cell.codepoint for row in initial_view.cells for cell in row),
             (ord("A"), ord("B"), ord("C"), ord(" ")),
         )
-        self.assertEqual((resized_view.cols, resized_view.rows), (3, 2))
+        self.assertEqual((resized_view.cols, resized_view.rows), (16, 2))
         self.assertEqual(resized_view.revision, 1)
         self.assertEqual(
             tuple(cell.codepoint for row in resized_view.cells for cell in row),
-            tuple(map(ord, "DEFGHI")),
+            tuple(range(ord("A"), ord("A") + 32)),
         )
         self.assertIn(expected, terminal_ansi)
