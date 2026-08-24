@@ -721,6 +721,11 @@ class OwnerLedger:
         """
 
         self.validate_prepared(prepared)
+        self._install_prevalidated(prepared)
+
+    def _install_prevalidated(self, prepared: PreparedOwnerLedgerInstall) -> None:
+        """Install after a coordinator has completed every fallible check."""
+
         self._state = prepared.state
 
     def validate_prepared(self, prepared: PreparedOwnerLedgerInstall) -> None:

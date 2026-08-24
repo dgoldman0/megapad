@@ -719,6 +719,17 @@ class CellModel:
     ) -> TerminalView:
         """Atomically publish a prepared view and close its exact staging state."""
 
+        self.validate_prepared(prepared)
+        return self._install_prevalidated(prepared)
+
+    def validate_prepared(
+        self,
+        prepared: PreparedCellPublication,
+        *,
+        lease: TransactionLease | None = None,
+    ) -> None:
+        """Validate exact install provenance without publishing the view."""
+
         if not isinstance(prepared, PreparedCellPublication):
             raise TypeError("prepared must be PreparedCellPublication")
         if (
@@ -726,6 +737,16 @@ class CellModel:
             or prepared._source_state is not self._state
         ):
             raise RuntimeError("prepared CELL publication is stale or foreign")
+        if lease is not None:
+            staging = prepared._source_state.staging
+            if staging is None or staging.authority is not lease:
+                raise RuntimeError("prepared CELL publication lost its transaction lease")
+
+    def _install_prevalidated(
+        self, prepared: PreparedCellPublication
+    ) -> TerminalView:
+        """Install after a coordinator has completed every fallible check."""
+
         self._state = prepared._install_state
         return prepared.view
 

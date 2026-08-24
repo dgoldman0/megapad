@@ -747,6 +747,10 @@ class RetainedSceneModel:
         return self._state
 
     @property
+    def clock(self) -> PresentationClock:
+        return self._clock
+
+    @property
     def transaction_open(self) -> bool:
         return self._staging is not None
 
@@ -1074,6 +1078,14 @@ class RetainedSceneModel:
         return prepared
 
     def install_prepared(self, prepared: PreparedSceneInstall) -> ResultLease:
+        self.validate_prepared(prepared)
+        result = self._clock.complete_success(prepared.lease)
+        self._install_prevalidated(prepared)
+        return result
+
+    def validate_prepared(self, prepared: PreparedSceneInstall) -> None:
+        """Validate exact scene, ledger, lease, and revision provenance."""
+
         if not isinstance(prepared, PreparedSceneInstall):
             raise TypeError("prepared must be PreparedSceneInstall")
         if (
@@ -1090,13 +1102,12 @@ class RetainedSceneModel:
         if self._clock.next_revision(prepared.lease) != prepared.state.revision:
             raise RuntimeError("prepared retained scene revision is stale")
 
-        # Every fallible provenance/preflight check precedes this publication
-        # sequence.  These are bounded pointer/scalar assignments only.
-        result = self._clock.complete_success(prepared.lease)
-        self._owners.install_prepared(prepared.ledger)
+    def _install_prevalidated(self, prepared: PreparedSceneInstall) -> None:
+        """Install after a coordinator has completed every fallible check."""
+
+        self._owners._install_prevalidated(prepared.ledger)
         self._state = prepared.state
         self._staging = None
-        return result
 
     def reject(self) -> ResultLease:
         staging = self._require_staging()
