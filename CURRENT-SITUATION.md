@@ -33,9 +33,10 @@
 > 1,502.26 seconds. The focused dynamic-registry selector passed 11/11, and the
 > module/`PROVIDED` guard selector passed 69/69. Historical adjoining evidence
 > at `8f0e478` remains `TestKDOSMulticore` 87/87 in 854.40 seconds plus 11 other
-> `tests/test_networking.py` cases in the sandbox. The four current-tree host
-> AF_INET loopback confirmations remain pending environment confirmations, not
-> guest UDP failures.
+> `tests/test_networking.py` cases in the sandbox. Final host-environment
+> confirmation at the same executable code then passed all four AF_INET
+> loopback/UDP-backend cases through the required sequential harness in 2.25
+> seconds (4 passed, 3,650 deselected).
 >
 > Documentation-only M* head
 > `c3210bf54f2116190770c0b95caaa0b9b396e937` records this ledger without

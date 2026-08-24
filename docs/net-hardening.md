@@ -246,9 +246,10 @@ seconds. The focused dynamic-registry selector passed 11/11, and the
 module/`PROVIDED` guard selector passed 69/69. The earlier `8f0e478` checkpoint
 remains the historical source of the `BALANCE` correction and adjoining
 `TestKDOSMulticore` result of 87/87 in 854.40 seconds. Its 11 other sandboxed
-networking cases also remain valid adjoining evidence. The four current-tree
-host AF_INET loopback confirmations listed below remain pending environment
-checks, not guest UDP or TLS failures.
+networking cases also remain valid adjoining evidence. Final host-environment
+confirmation at exact `ca02a40` passed all four AF_INET loopback/UDP-backend
+cases listed below through the required sequential harness in 2.25 seconds
+(4 passed, 3,650 deselected).
 
 Documentation-only M* head `c3210bf54f2116190770c0b95caaa0b9b396e937`
 carries this ledger update. It does not replace `ca02a40` as the qualified
@@ -303,8 +304,10 @@ injected-frame UDP failures:
 - `tests/test_networking.py::TestNICBackends::test_nic_device_with_udp_backend`
 - `tests/test_networking.py::TestNICBackends::test_nic_device_backend_rx`
 
-Unsandboxed execution was requested and rejected by the approval service, so
-those four current-tree host-loopback confirmations remain pending.
+Unsandboxed execution was requested and rejected by the approval service at
+that historical checkpoint. Final M* closure subsequently passed all four on
+the unchanged executable code through the required sequential harness in 2.25
+seconds (4 passed, 3,650 deselected).
 
 ## Secure-server closure status
 

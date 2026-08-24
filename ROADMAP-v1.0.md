@@ -61,8 +61,9 @@ host-loopback UDP-backend cases in 1,502.26 seconds. The focused
 dynamic-registry selector passed 11/11, and the module/`PROVIDED` guard selector
 passed 69/69. The historical adjoining evidence at `8f0e478` remains
 `TestKDOSMulticore` 87/87 in 854.40 seconds plus 11 other networking-test cases
-in the sandbox. The four current-tree host AF_INET loopback confirmations
-remain pending; they are not guest UDP failures. A later documentation-only
+in the sandbox. Final host-environment confirmation at exact `ca02a40` passed
+all four AF_INET loopback/UDP-backend cases through the required sequential
+harness in 2.25 seconds (4 passed, 3,650 deselected). A later documentation-only
 M* head, `c3210bf54f2116190770c0b95caaa0b9b396e937`, records the closure
 without replacing `ca02a40` as the qualified MegaPad executable revision.
 

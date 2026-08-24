@@ -45,8 +45,9 @@ seconds. The focused dynamic-registry selector passed 11/11, and the
 module/`PROVIDED` guard selector passed 69/69. The earlier `8f0e478` checkpoint
 remains the historical source of the `BALANCE` correction and adjoining
 `TestKDOSMulticore` result of 87/87 in 854.40 seconds, plus 11 other sandboxed
-networking cases. The four current-tree host AF_INET loopback confirmations
-remain pending environment checks; they are not guest UDP or TLS failures.
+networking cases. Final host-environment confirmation at exact `ca02a40`
+passed all four AF_INET loopback/UDP-backend cases through the required
+sequential harness in 2.25 seconds (4 passed, 3,650 deselected).
 
 Documentation-only M* head `c3210bf54f2116190770c0b95caaa0b9b396e937`
 carries this ledger update. It does not replace `ca02a40` as the qualified
@@ -95,10 +96,11 @@ skipped 36, and deselected the four host-loopback UDP-backend tests in 1,470.94
 seconds.
 `TestKDOSMulticore` separately passed 87/87 in 854.40 seconds, and 11 other
 `tests/test_networking.py` cases pass in the sandbox. The approval service
-rejected unsandboxed execution, so the four current-tree host AF_INET loopback
-confirmations remain pending; they are not guest UDP or TLS failures. Their
-exact node IDs are recorded in `docs/net-hardening.md` and the module-registry
-handoff. The current four-core networking source fixture uses 485M steps as a
+rejected unsandboxed execution at that historical checkpoint. Final M*
+closure subsequently passed all four current-tree host AF_INET loopback cases
+on unchanged executable code in 2.25 seconds; their exact node IDs are recorded
+in `docs/net-hardening.md` and the module-registry handoff. The current
+four-core networking source fixture uses 485M steps as a
 test-infrastructure allowance; no TLS geometry, protocol, runtime, or production
 capacity limit changed.
 
