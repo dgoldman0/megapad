@@ -35,9 +35,9 @@ Current transport status and the narrow ordering authority are maintained in
 `docs/tls-hardening.md` and the secure-server transport handoff at the workspace
 root. Application code continues to consume the already-open port abstraction.
 
-**Infrastructure integration correction (2026-08-22):**
-`integration/secure-registry-burrow` at
-`8f0e4788eb8f1ca4a68d8f3c141ec4c8e4b97fbd` combines that lower transport with
+**M* infrastructure integration closure (2026-08-23):** The qualified MegaPad
+code checkpoint is `integration/secure-registry-burrow` at
+`ca02a40c04840791c731dbb7c77ecd7e85eb4909`. It combines that lower transport with
 the exact, available-memory-bound KDOS module registry. Registry nodes and
 buckets use stable Bank-0 allocations and remain valid across `XMEM-RESET`.
 Userland now derives disjoint dictionary and general-XMEM spans from actual
@@ -45,19 +45,26 @@ remaining capacity, defaulting to an equal split and allowing a pre-init
 `U-XMEM-RESERVE!` to select the general-XMEM reserve. BIOS active dictionary
 bounds preflight every HERE-growing path and fail before the first write on
 rewind, wrap, or overrun. XMEM floor, free-list, and live high-water validation
-keep both allocation directions disjoint.
+keep both allocation directions disjoint. M* also adds public `PROVIDED-SPAN`
+so paired image loaders can register a caller-owned exact module ID through the
+same dynamic-registry transaction as parsed `PROVIDED`, without restoring a
+private fixed table.
 
-The same checkpoint corrects a general `BALANCE` defect: work moves only while
+The earlier `8f0e4788eb8f1ca4a68d8f3c141ec4c8e4b97fbd` checkpoint corrected a
+general `BALANCE` defect: work moves only while
 the busiest run queue exceeds the target by more than one, so sparse and skewed
 layouts converge without stack leakage or circulating singleton tasks. This is
-not a change to TLS authority or to the historical LAST-ACK service diagnosis.
-The exact in-sandbox sequential sweep passed 3,613 tests, skipped 36, and
-deselected four host-loopback UDP-backend cases in 1,470.94 seconds;
-`TestKDOSMulticore` passed 87/87 in 854.40 seconds. Eleven other networking-test
-cases pass in the sandbox. The four current-tree host AF_INET loopback
-confirmations remain pending because the approval service rejected unsandboxed
-execution; they are not guest UDP failures. The old inventory and counts below
-remain historical.
+retained by M* and is not a change to TLS authority or to the historical
+LAST-ACK service diagnosis. At exact M* code `ca02a40`, the in-sandbox
+sequential sweep passed 3,614 tests, skipped 36, and deselected four
+host-loopback UDP-backend cases in 1,502.26 seconds. The focused
+dynamic-registry selector passed 11/11, and the module/`PROVIDED` guard selector
+passed 69/69. The historical adjoining evidence at `8f0e478` remains
+`TestKDOSMulticore` 87/87 in 854.40 seconds plus 11 other networking-test cases
+in the sandbox. The four current-tree host AF_INET loopback confirmations
+remain pending; they are not guest UDP failures. A later documentation-only
+staging head records the closure without replacing `ca02a40` as the qualified
+M* code revision. The old inventory and counts below remain historical.
 
 ---
 

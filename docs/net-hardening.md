@@ -25,7 +25,7 @@ owner and HCONN, including same-listener recovery after cancellation, timeout,
 and malformed input.
 **Date:** 2026-08-15 transport qualification
 
-**Integration update:** 2026-08-22 at MegaPad `8f0e478`
+**M* integration closure:** 2026-08-23 at qualified MegaPad code `ca02a40`
 
 ## Scope
 
@@ -229,7 +229,32 @@ descriptor-owned teardown, and stale child-reuse isolation. Its focused matrix
 and final adjoining affected selector pass 15/15 sequentially under the
 ordinary checked limits.
 
-## 2026-08-22 integration reconciliation
+## 2026-08-23 M* integration closure
+
+The qualified M* code checkpoint is
+`ca02a40c04840791c731dbb7c77ecd7e85eb4909` on
+`integration/secure-registry-burrow`. It retains the secure-server transport
+contracts and the capacity-derived module-registry integration described below,
+then exposes `PROVIDED-SPAN` as the public caller-owned exact-ID registration
+path required by paired binary-image loaders. That addition uses the same
+dynamic Bank-0 registry transaction as parsed `PROVIDED`; it does not change
+TCP/TLS authority, wire behavior, table geometry, ownership, or close semantics.
+
+At exact M* code `ca02a40`, the in-sandbox sequential sweep passed 3,614 tests,
+skipped 36, and deselected the four host-loopback UDP-backend cases in 1,502.26
+seconds. The focused dynamic-registry selector passed 11/11, and the
+module/`PROVIDED` guard selector passed 69/69. The earlier `8f0e478` checkpoint
+remains the historical source of the `BALANCE` correction and adjoining
+`TestKDOSMulticore` result of 87/87 in 854.40 seconds. Its 11 other sandboxed
+networking cases also remain valid adjoining evidence. The four current-tree
+host AF_INET loopback confirmations listed below remain pending environment
+checks, not guest UDP or TLS failures.
+
+A later documentation-only staging head may carry this ledger update. It does
+not replace `ca02a40` as the qualified M* code revision and is not additional
+executable qualification.
+
+## Historical 2026-08-22 integration reconciliation
 
 Combining this transport line with the dynamic KDOS module registry did not
 change TCP/TLS authority, wire behavior, table geometry, ownership, or close
@@ -241,13 +266,13 @@ wrap, or overrun throws caught KDOS dictionary fault `-8` before any write.
 XMEM floor, free-list, and live high-water checks prevent allocation into the
 dictionary span.
 
-The current four-core networking source fixture uses a 485M-step construction
-allowance. That is a source-loading test-infrastructure correction, not a TCP,
-TLS, runtime, or connection-capacity change. `8f0e478` also fixes a general KDOS
+The four-core networking source fixture at that checkpoint used a 485M-step
+construction allowance. That is a source-loading test-infrastructure correction,
+not a TCP, TLS, runtime, or connection-capacity change. `8f0e478` also fixes a general KDOS
 `BALANCE` convergence defect for sparse run queues; it does not revise the
 transport's historical LAST-ACK scheduler diagnosis.
 
-The exact in-sandbox sequential sweep at `8f0e478` was:
+The historical in-sandbox sequential sweep at `8f0e478` was:
 
 ```text
 make test-sequential K='not test_udp_backend_lifecycle and not test_udp_backend_roundtrip and not test_nic_device_with_udp_backend and not test_nic_device_backend_rx'

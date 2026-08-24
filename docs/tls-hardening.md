@@ -26,9 +26,33 @@ bounded lower engine and the Akashic lifecycle split are closed; broader
 profile and concurrency work remains separate maturity work.
 Transport closure updated: 2026-08-15
 
-Combined integration updated: 2026-08-22 at MegaPad `8f0e478`
+M* integration closure: 2026-08-23 at qualified MegaPad code `ca02a40`
 
-## 2026-08-22 Combined Integration Reconciliation
+## 2026-08-23 M* Integration Closure
+
+The qualified M* code checkpoint is
+`ca02a40c04840791c731dbb7c77ecd7e85eb4909` on
+`integration/secure-registry-burrow`. It retains the secure-server transport and
+capacity-derived registry contracts described below, then exposes
+`PROVIDED-SPAN` as the public caller-owned exact-ID registration path required
+by paired binary-image loaders. The operation uses the same dynamic Bank-0
+registry transaction as parsed `PROVIDED` and does not change TLS geometry,
+protocol behavior, authority, runtime limits, or production capacity.
+
+At exact M* code `ca02a40`, the in-sandbox sequential sweep passed 3,614 tests,
+skipped 36, and deselected the four host-loopback UDP-backend cases in 1,502.26
+seconds. The focused dynamic-registry selector passed 11/11, and the
+module/`PROVIDED` guard selector passed 69/69. The earlier `8f0e478` checkpoint
+remains the historical source of the `BALANCE` correction and adjoining
+`TestKDOSMulticore` result of 87/87 in 854.40 seconds, plus 11 other sandboxed
+networking cases. The four current-tree host AF_INET loopback confirmations
+remain pending environment checks; they are not guest UDP or TLS failures.
+
+A later documentation-only staging head may carry this ledger update. It does
+not replace `ca02a40` as the qualified M* code revision and is not additional
+executable qualification.
+
+## Historical 2026-08-22 Combined Integration Reconciliation
 
 The secure-server transport contracts below are unchanged by the combined
 module-registry integration. Stable registry nodes and buckets use Bank-0
@@ -53,8 +77,9 @@ converge without circulating singleton tasks. This does not change the TLS
 authority model or the historical LAST-ACK fixture diagnosis, which remains a
 correct account of queued final-ACK service after HCONN terminal.
 
-The exact in-sandbox sequential sweep at `8f0e478` passed 3,613 tests, skipped
-36, and deselected the four host-loopback UDP-backend tests in 1,470.94 seconds.
+The historical in-sandbox sequential sweep at `8f0e478` passed 3,613 tests,
+skipped 36, and deselected the four host-loopback UDP-backend tests in 1,470.94
+seconds.
 `TestKDOSMulticore` separately passed 87/87 in 854.40 seconds, and 11 other
 `tests/test_networking.py` cases pass in the sandbox. The approval service
 rejected unsandboxed execution, so the four current-tree host AF_INET loopback
