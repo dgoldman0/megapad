@@ -63,8 +63,21 @@ passed 69/69. The historical adjoining evidence at `8f0e478` remains
 `TestKDOSMulticore` 87/87 in 854.40 seconds plus 11 other networking-test cases
 in the sandbox. The four current-tree host AF_INET loopback confirmations
 remain pending; they are not guest UDP failures. A later documentation-only
-staging head records the closure without replacing `ca02a40` as the qualified
-M* code revision. The old inventory and counts below remain historical.
+M* head, `c3210bf54f2116190770c0b95caaa0b9b396e937`, records the closure
+without replacing `ca02a40` as the qualified MegaPad executable revision.
+
+**Paired A* completion (2026-08-23):** Exact Akashic executable code
+`4b8680568a229b1bd114d3a05fa4e73f745157ab` was qualified against exact
+MegaPad executable code `ca02a40c04840791c731dbb7c77ecd7e85eb4909`.
+Checkpoint 5 passed at 27.1 billion guest steps in 811.14 seconds with stable
+replay, its read-only Rabbit data plane, and complete teardown; the current
+canonical Desktop passed at 13.288 billion steps in 332.51 seconds. Akashic
+documentation-only A* head `c69fbe57cb6169c80560033e94d3d9a640ad9def`
+records the result but is not executable qualification. These are paired
+application-integration results, not a MegaPad code change or an extension of
+the TCP/TLS claims. Both repositories' `main` refs remain untouched, and the
+integration stops before either fast-forward. The old inventory and counts
+below remain historical.
 
 ---
 

@@ -37,10 +37,22 @@
 > AF_INET loopback confirmations remain pending environment confirmations, not
 > guest UDP failures.
 >
-> A later documentation-only staging head may record this closure, but M* code
-> qualification remains anchored to exact `ca02a40`. Downstream Akashic must be
-> qualified against that code checkpoint rather than using the later docs head
-> as new executable evidence.
+> Documentation-only M* head
+> `c3210bf54f2116190770c0b95caaa0b9b396e937` records this ledger without
+> replacing exact `ca02a40` as the qualified MegaPad executable code.
+>
+> **Paired A* completion — 2026-08-23:** Exact Akashic executable code
+> `4b8680568a229b1bd114d3a05fa4e73f745157ab` was qualified against exact
+> MegaPad executable code `ca02a40c04840791c731dbb7c77ecd7e85eb4909`.
+> Its Checkpoint-5 product journey passed at 27.1 billion guest steps in
+> 811.14 seconds with stable replay, the read-only Rabbit data plane, and final
+> teardown; the current canonical Desktop passed at 13.288 billion steps in
+> 332.51 seconds. Akashic documentation-only A* head
+> `c69fbe57cb6169c80560033e94d3d9a640ad9def` records that result without
+> replacing the tested executable revisions. Checkpoint 5 is paired
+> application-integration evidence, not an additional MegaPad TCP/TLS claim or
+> a MegaPad code change. Both repositories' `main` refs remain untouched, and
+> integration is intentionally stopped before either fast-forward.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  

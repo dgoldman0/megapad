@@ -250,9 +250,22 @@ networking cases also remain valid adjoining evidence. The four current-tree
 host AF_INET loopback confirmations listed below remain pending environment
 checks, not guest UDP or TLS failures.
 
-A later documentation-only staging head may carry this ledger update. It does
-not replace `ca02a40` as the qualified M* code revision and is not additional
-executable qualification.
+Documentation-only M* head `c3210bf54f2116190770c0b95caaa0b9b396e937`
+carries this ledger update. It does not replace `ca02a40` as the qualified
+MegaPad executable revision or add executable qualification.
+
+Paired A* completion qualified exact Akashic executable code
+`4b8680568a229b1bd114d3a05fa4e73f745157ab` against exact MegaPad executable
+code `ca02a40c04840791c731dbb7c77ecd7e85eb4909`. The Akashic Checkpoint-5
+product journey passed at 27.1 billion guest steps in 811.14 seconds with
+stable replay, its read-only Rabbit data plane, and complete teardown; the
+current canonical Desktop passed at 13.288 billion steps in 332.51 seconds.
+Akashic documentation-only A* head
+`c69fbe57cb6169c80560033e94d3d9a640ad9def` records that result without
+replacing either tested executable revision. This is paired application
+integration evidence, not a change to MegaPad networking code or a new TCP/TLS
+claim. Both repositories' `main` refs remain untouched, and integration is
+stopped before either fast-forward.
 
 ## Historical 2026-08-22 integration reconciliation
 
