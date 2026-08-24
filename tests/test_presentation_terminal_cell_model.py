@@ -22,6 +22,10 @@ from presentation_terminal.cell_model import (
     decode_cursor,
     decode_transaction_begin,
 )
+from presentation_terminal.presentation_model import (
+    PresentationClock,
+    TransactionFamily,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,10 +61,34 @@ def _model() -> CellModel:
 def _commit_vector_snapshot(model: CellModel):
     payloads = _happy_payloads()
     model.begin(decode_transaction_begin(payloads["SNAPSHOT_BEGIN"][0]), snapshot=True)
+    _stage_vector_replacement_body(model, payloads)
+    return model.commit(decode_commit(payloads["SNAPSHOT_COMMIT"][0]))
+
+
+def _stage_vector_replacement_body(
+    model: CellModel,
+    payloads: dict[str, list[bytes]] | None = None,
+) -> None:
+    if payloads is None:
+        payloads = _happy_payloads()
     model.stage_span(decode_cell_span(payloads["CELL_SPAN"][0]))
     model.stage_span(decode_cell_span(payloads["CELL_SPAN"][1]))
     model.stage_cursor(decode_cursor(payloads["CURSOR"][0]))
-    return model.commit(decode_commit(payloads["SNAPSHOT_COMMIT"][0]))
+
+
+def _prepare_clocked_initial_snapshot(
+    model: CellModel,
+    clock: PresentationClock,
+):
+    payloads = _happy_payloads()
+    begin = decode_transaction_begin(payloads["SNAPSHOT_BEGIN"][0])
+    lease = clock.reserve(TransactionFamily.CELL, begin.transaction_id, 0)
+    model.begin_with_lease(begin, snapshot=True, lease=lease)
+    _stage_vector_replacement_body(model, payloads)
+    return lease, model.prepare_publication(
+        lease,
+        global_revision=clock.next_revision(lease),
+    )
 
 
 def test_normative_snapshot_publishes_one_atomic_immutable_view():
@@ -86,6 +114,119 @@ def test_normative_snapshot_publishes_one_atomic_immutable_view():
     assert model.view is view
     assert not model.awaiting_snapshot
     assert not model.transaction_open
+
+
+def test_shared_clock_prepare_is_nonmutating_and_install_is_atomic():
+    model = _model()
+    clock = PresentationClock(presentation_epoch=0)
+    lease, prepared = _prepare_clocked_initial_snapshot(model, clock)
+
+    # Preparing allocates the complete immutable candidate, but neither the
+    # shared clock nor the CELL model has published it yet.
+    assert prepared.transaction_id == 1
+    assert prepared.view.revision == 1
+    assert clock.revision == 0
+    assert model.view is None
+    assert model.awaiting_snapshot
+    assert model.transaction_open
+
+    result = clock.complete_success(lease)
+    assert result.revision == prepared.view.revision
+    installed = model.install_prepared(prepared)
+
+    assert installed is prepared.view
+    assert model.view is installed
+    assert model.revision == 1
+    assert not model.awaiting_snapshot
+    assert not model.transaction_open
+
+
+def test_present_lease_can_prepare_replace_all_at_nonzero_global_revision():
+    model = _model()
+    _commit_vector_snapshot(model)
+    model.select_geometry(2, 2)
+    clock = PresentationClock(
+        presentation_epoch=0,
+        revision=7,
+        transaction_high_water=10,
+    )
+    lease = clock.reserve(TransactionFamily.PRESENT, 11, 7)
+    begin = TransactionBegin(11, 7, 2, 2, 2, 4)
+
+    model.begin_with_lease(begin, snapshot=True, lease=lease)
+    _stage_vector_replacement_body(model)
+    prepared = model.prepare_publication(
+        lease,
+        global_revision=clock.next_revision(lease),
+    )
+
+    assert model.view is None
+    assert prepared.view.revision == 8
+    clock.complete_success(lease)
+    assert model.install_prepared(prepared).revision == 8
+
+
+def test_clocked_delta_uses_global_revision_when_cell_view_lags():
+    model = _model()
+    old = _commit_vector_snapshot(model)
+    clock = PresentationClock(
+        presentation_epoch=0,
+        revision=4,
+        transaction_high_water=8,
+    )
+    lease = clock.reserve(TransactionFamily.CELL, 9, 4)
+    replacement = Cell(ord("G"), 2, 3)
+
+    # Retained-only commits may have advanced the shared clock beyond the last
+    # CELL publication. The exact clock lease, not old.revision, owns the base.
+    model.begin_with_lease(
+        TransactionBegin(9, 4, 2, 2, 1, 1),
+        snapshot=False,
+        lease=lease,
+    )
+    model.stage_span(CellSpan(1, 0, (replacement,)))
+    model.stage_cursor(Cursor(0, 0, False))
+    prepared = model.prepare_publication(
+        lease,
+        global_revision=clock.next_revision(lease),
+    )
+
+    assert model.view is old
+    assert prepared.view.revision == 5
+    clock.complete_success(lease)
+    installed = model.install_prepared(prepared)
+    assert installed.revision == 5
+    assert installed.cells[1][0] is replacement
+
+
+def test_prepared_publication_rejects_stale_and_foreign_model_state():
+    model = _model()
+    clock = PresentationClock(presentation_epoch=0)
+    lease, first = _prepare_clocked_initial_snapshot(model, clock)
+    delayed = model.prepare_publication(
+        lease,
+        global_revision=clock.next_revision(lease),
+    )
+
+    foreign_model = _model()
+    foreign_clock = PresentationClock(presentation_epoch=0)
+    foreign_lease, foreign = _prepare_clocked_initial_snapshot(
+        foreign_model,
+        foreign_clock,
+    )
+
+    clock.complete_success(lease)
+    installed = model.install_prepared(first)
+
+    with pytest.raises(RuntimeError, match="stale or foreign"):
+        model.install_prepared(delayed)
+    assert model.view is installed
+
+    with pytest.raises(RuntimeError, match="stale or foreign"):
+        model.install_prepared(foreign)
+    assert model.view is installed
+    assert foreign_model.view is None
+    assert foreign_clock.open_transaction is foreign_lease
 
 
 def test_delta_preserves_old_view_and_shares_unchanged_rows():

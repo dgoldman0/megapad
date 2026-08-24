@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .apt1 import UINT32_MAX, UINT64_MAX, snapshot_wire_bytes
+from .presentation_model import TransactionFamily, TransactionLease
 
 
 WIRE_ATTRIBUTE_MASK = 0x007F
@@ -168,6 +169,7 @@ class CellSpan:
 class _Staging:
     begin: TransactionBegin
     snapshot: bool
+    authority: TransactionLease | None
     spans_seen: int
     cells_seen: int
     last_row: int
@@ -177,6 +179,26 @@ class _Staging:
     dirty_spans: list[DirtySpan]
     changed_rows: dict[int, list[Cell]]
     snapshot_rows: list[list[Cell | None]] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CellModelState:
+    """One atomically replaceable model/staging publication boundary."""
+
+    view: TerminalView | None
+    staging: _Staging | None
+    awaiting_snapshot: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCellPublication:
+    """A fully validated view bound to one exact CellModel source state."""
+
+    view: TerminalView
+    transaction_id: int
+    _model_token: object
+    _source_state: _CellModelState
+    _install_state: _CellModelState
 
 
 def decode_transaction_begin(payload) -> TransactionBegin:
@@ -300,19 +322,19 @@ class CellModel:
             raise ValueError("initial geometry exceeds caller-owned model capacity")
         if snapshot_wire_bytes(self._cols, self._rows) > self._max_transaction_bytes:
             raise ValueError("max_transaction_bytes cannot admit the initial snapshot")
-        self._view: TerminalView | None = None
-        self._staging: _Staging | None = None
+        self._state = _CellModelState(None, None, True)
+        self._install_token = object()
         self._last_transaction_id = 0
         self._most_recent_aborted_id = 0
-        self._awaiting_snapshot = True
 
     @property
     def view(self) -> TerminalView | None:
-        return self._view
+        return self._state.view
 
     @property
     def revision(self) -> int:
-        return 0 if self._view is None else self._view.revision
+        view = self._state.view
+        return 0 if view is None else view.revision
 
     @property
     def presentation_epoch(self) -> int:
@@ -320,22 +342,50 @@ class CellModel:
 
     @property
     def awaiting_snapshot(self) -> bool:
-        return self._awaiting_snapshot
+        return self._state.awaiting_snapshot
 
     @property
     def transaction_open(self) -> bool:
-        return self._staging is not None
+        return self._state.staging is not None
 
     @property
     def geometry(self) -> tuple[int, int]:
         return self._cols, self._rows
 
     def begin(self, begin: TransactionBegin, *, snapshot: bool) -> None:
+        """Start a transaction using the temporary CELL-only clock.
+
+        This compatibility path preserves the original CELL-1 server API.
+        A shared CELL/retained coordinator uses :meth:`begin_with_lease`
+        instead, leaving transaction-ID and revision authority in its
+        ``PresentationClock``.
+        """
+
+        self._begin(begin, snapshot=snapshot, authority=None)
+
+    def begin_with_lease(
+        self,
+        begin: TransactionBegin,
+        *,
+        snapshot: bool,
+        lease: TransactionLease,
+    ) -> None:
+        """Start CELL staging under one exact admitted shared-clock lease."""
+
+        self._begin(begin, snapshot=snapshot, authority=lease)
+
+    def _begin(
+        self,
+        begin: TransactionBegin,
+        *,
+        snapshot: bool,
+        authority: TransactionLease | None,
+    ) -> None:
         if not isinstance(begin, TransactionBegin):
             raise TypeError("begin must be TransactionBegin")
         if not isinstance(snapshot, bool):
             raise TypeError("snapshot must be bool")
-        if self._staging is not None:
+        if self._state.staging is not None:
             self._fail(CellModelErrorCode.STATE, "a transaction is already open")
 
         try:
@@ -362,22 +412,55 @@ class CellModel:
         except (TypeError, ValueError) as exc:
             raise CellModelError(CellModelErrorCode.TRANSACTION, str(exc)) from exc
 
-        if transaction_id <= self._last_transaction_id:
-            raise CellModelError(
-                CellModelErrorCode.TRANSACTION,
-                "transaction_id is not monotonically increasing",
-            )
-        # Receipt consumes the epoch-scoped ID even when a later semantic
-        # check rejects the declaration.  Reusing a failed ID would make the
-        # peer's ordered transaction history ambiguous.
-        self._last_transaction_id = transaction_id
+        if authority is None:
+            if transaction_id <= self._last_transaction_id:
+                raise CellModelError(
+                    CellModelErrorCode.TRANSACTION,
+                    "transaction_id is not monotonically increasing",
+                )
+            # The compatibility path consumes the epoch-scoped ID even when
+            # a later semantic check rejects the declaration.  Shared-clock
+            # operation deliberately leaves this authority with its lease.
+            self._last_transaction_id = transaction_id
+        else:
+            if not isinstance(authority, TransactionLease):
+                raise TypeError("lease must be TransactionLease")
+            if authority.family not in (
+                TransactionFamily.CELL,
+                TransactionFamily.PRESENT,
+            ):
+                raise CellModelError(
+                    CellModelErrorCode.TRANSACTION,
+                    "transaction lease cannot carry CELL staging",
+                )
+            if not authority.admitted:
+                raise CellModelError(
+                    CellModelErrorCode.TRANSACTION,
+                    "rejected transaction lease cannot stage CELL state",
+                )
+            if authority.presentation_epoch != self._presentation_epoch:
+                raise CellModelError(
+                    CellModelErrorCode.TRANSACTION,
+                    "transaction lease is outside this presentation epoch",
+                )
+            if (
+                authority.transaction_id != transaction_id
+                or authority.base_revision != base_revision
+            ):
+                raise CellModelError(
+                    CellModelErrorCode.TRANSACTION,
+                    "transaction begin does not match its shared-clock lease",
+                )
         if (cols, rows) != (self._cols, self._rows):
             raise CellModelError(CellModelErrorCode.BOUNDS, "transaction geometry is stale")
         if snapshot:
-            if base_revision != 0:
+            legacy_snapshot = (
+                authority is None or authority.family is TransactionFamily.CELL
+            )
+            if legacy_snapshot and base_revision != 0:
                 raise CellModelError(
                     CellModelErrorCode.STALE_REVISION,
-                    "snapshot base_revision must be zero",
+                    "legacy snapshot base_revision must be zero",
                 )
             if span_count == 0 or cell_count != cols * rows:
                 raise CellModelError(
@@ -385,15 +468,21 @@ class CellModel:
                     "snapshot must declare every cell and at least one span",
                 )
         else:
-            if self._awaiting_snapshot or self._view is None:
+            view = self._state.view
+            if self._state.awaiting_snapshot or view is None:
                 raise CellModelError(
                     CellModelErrorCode.STATE,
                     "a replacement snapshot is required",
                 )
-            if base_revision != self._view.revision:
+            if authority is None and base_revision != view.revision:
                 raise CellModelError(
                     CellModelErrorCode.STALE_REVISION,
-                    f"base revision {base_revision} does not match {self._view.revision}",
+                    f"base revision {base_revision} does not match {view.revision}",
+                )
+            if authority is not None and base_revision < view.revision:
+                raise CellModelError(
+                    CellModelErrorCode.STALE_REVISION,
+                    f"global base revision {base_revision} predates CELL view {view.revision}",
                 )
             if (span_count == 0) != (cell_count == 0):
                 raise CellModelError(
@@ -424,9 +513,10 @@ class CellModel:
         snapshot_rows = (
             [[None for _ in range(cols)] for _ in range(rows)] if snapshot else None
         )
-        self._staging = _Staging(
+        staging = _Staging(
             begin=normalized,
             snapshot=snapshot,
+            authority=authority,
             spans_seen=0,
             cells_seen=0,
             last_row=-1,
@@ -436,6 +526,11 @@ class CellModel:
             dirty_spans=[],
             changed_rows={},
             snapshot_rows=snapshot_rows,
+        )
+        self._state = _CellModelState(
+            self._state.view,
+            staging,
+            self._state.awaiting_snapshot,
         )
 
     def stage_span(self, span: CellSpan) -> None:
@@ -472,10 +567,11 @@ class CellModel:
             assert staging.snapshot_rows is not None
             target = staging.snapshot_rows[span.row]
         else:
-            assert self._view is not None
+            view = self._state.view
+            assert view is not None
             target = staging.changed_rows.get(span.row)
             if target is None:
-                target = list(self._view.cells[span.row])
+                target = list(view.cells[span.row])
                 staging.changed_rows[span.row] = target
 
         for offset, cell in enumerate(span.cells):
@@ -501,6 +597,46 @@ class CellModel:
         staging.cursor = cursor
 
     def commit(self, transaction_id: int) -> TerminalView:
+        """Prepare and install using the temporary CELL-only revision clock."""
+
+        staging = self._require_staging()
+        if staging.authority is not None:
+            raise RuntimeError(
+                "shared-clock CELL staging requires prepare_publication"
+            )
+        base_revision = staging.begin.base_revision
+        if base_revision == UINT64_MAX:
+            self._fail(CellModelErrorCode.STATE, "model revision is exhausted")
+        prepared = self._prepare_publication(
+            transaction_id,
+            global_revision=base_revision + 1,
+        )
+        return self.install_prepared(prepared)
+
+    def prepare_publication(
+        self,
+        lease: TransactionLease,
+        *,
+        global_revision: int,
+    ) -> PreparedCellPublication:
+        """Build a validated immutable view without publishing or closing staging."""
+
+        staging = self._require_staging()
+        if not isinstance(lease, TransactionLease):
+            raise TypeError("lease must be TransactionLease")
+        if staging.authority is not lease:
+            raise RuntimeError("transaction lease is stale or foreign")
+        return self._prepare_publication(
+            lease.transaction_id,
+            global_revision=global_revision,
+        )
+
+    def _prepare_publication(
+        self,
+        transaction_id: int,
+        *,
+        global_revision: int,
+    ) -> PreparedCellPublication:
         staging = self._require_staging()
         try:
             normalized_id = _integer(
@@ -511,8 +647,25 @@ class CellModel:
             )
         except (TypeError, ValueError) as exc:
             self._fail(CellModelErrorCode.TRANSACTION, str(exc))
+        try:
+            normalized_revision = _integer(
+                "global_revision",
+                global_revision,
+                minimum=1,
+                maximum=UINT64_MAX,
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(CellModelErrorCode.STATE, str(exc))
         if normalized_id != staging.begin.transaction_id:
             self._fail(CellModelErrorCode.TRANSACTION, "commit transaction_id mismatch")
+        base_revision = staging.begin.base_revision
+        if base_revision == UINT64_MAX:
+            self._fail(CellModelErrorCode.STATE, "presentation revision is exhausted")
+        if normalized_revision != base_revision + 1:
+            self._fail(
+                CellModelErrorCode.STATE,
+                "supplied global revision is not base revision plus one",
+            )
         if staging.spans_seen != staging.begin.span_count:
             self._fail(CellModelErrorCode.TRANSACTION, "span count does not match declaration")
         if staging.cells_seen != staging.begin.cell_count:
@@ -530,48 +683,68 @@ class CellModel:
             )
             if any(len(row) != self._cols for row in rows):
                 self._fail(CellModelErrorCode.TRANSACTION, "snapshot contains an empty cell")
-            revision = 1
         else:
-            assert self._view is not None
-            if self._view.revision == UINT64_MAX:
-                self._fail(CellModelErrorCode.STATE, "model revision is exhausted")
+            view = self._state.view
+            assert view is not None
             if staging.changed_rows:
-                mutable_rows = list(self._view.cells)
+                mutable_rows = list(view.cells)
                 for row_index, row in staging.changed_rows.items():
                     mutable_rows[row_index] = tuple(row)
                 rows = tuple(mutable_rows)
             else:
-                rows = self._view.cells
-            revision = self._view.revision + 1
+                rows = view.cells
 
         view = TerminalView(
             attachment_epoch=self._attachment_epoch,
             session_id=self._session_id,
             presentation_epoch=self._presentation_epoch,
-            revision=revision,
+            revision=normalized_revision,
             cols=self._cols,
             rows=self._rows,
             cells=rows,
             dirty_spans=tuple(staging.dirty_spans),
             cursor=staging.cursor,
         )
-        self._staging = None
-        self._view = view
-        self._awaiting_snapshot = False
-        return view
+        source_state = self._state
+        return PreparedCellPublication(
+            view=view,
+            transaction_id=normalized_id,
+            _model_token=self._install_token,
+            _source_state=source_state,
+            _install_state=_CellModelState(view, None, False),
+        )
+
+    def install_prepared(
+        self, prepared: PreparedCellPublication
+    ) -> TerminalView:
+        """Atomically publish a prepared view and close its exact staging state."""
+
+        if not isinstance(prepared, PreparedCellPublication):
+            raise TypeError("prepared must be PreparedCellPublication")
+        if (
+            prepared._model_token is not self._install_token
+            or prepared._source_state is not self._state
+        ):
+            raise RuntimeError("prepared CELL publication is stale or foreign")
+        self._state = prepared._install_state
+        return prepared.view
 
     def abort(self, transaction_id: int) -> None:
         normalized_id = _integer(
             "transaction_id", transaction_id, minimum=1, maximum=UINT64_MAX
         )
-        staging = self._staging
+        staging = self._state.staging
         if staging is None:
             if normalized_id == self._most_recent_aborted_id:
                 return
             raise CellModelError(CellModelErrorCode.STATE, "no transaction is open")
         if normalized_id != staging.begin.transaction_id:
             self._fail(CellModelErrorCode.TRANSACTION, "abort transaction_id mismatch")
-        self._staging = None
+        self._state = _CellModelState(
+            self._state.view,
+            None,
+            self._state.awaiting_snapshot,
+        )
         self._most_recent_aborted_id = normalized_id
 
     def soft_reset(self, requested_epoch: int) -> None:
@@ -587,18 +760,16 @@ class CellModel:
                 "requested epoch is not current presentation epoch plus one",
             )
         self._presentation_epoch = epoch
-        self._view = None
-        self._staging = None
+        self._state = _CellModelState(None, None, True)
         self._last_transaction_id = 0
         self._most_recent_aborted_id = 0
-        self._awaiting_snapshot = True
 
     def validate_geometry(self, cols: int, rows: int) -> tuple[int, int]:
         """Validate a replacement geometry without mutating model state."""
 
         new_cols = _integer("cols", cols, minimum=1, maximum=UINT32_MAX)
         new_rows = _integer("rows", rows, minimum=1, maximum=UINT32_MAX)
-        if self._staging is not None:
+        if self._state.staging is not None:
             raise CellModelError(
                 CellModelErrorCode.STATE,
                 "geometry cannot change during a transaction",
@@ -619,23 +790,27 @@ class CellModel:
         new_cols, new_rows = self.validate_geometry(cols, rows)
         self._cols = new_cols
         self._rows = new_rows
-        self._view = None
+        self._state = _CellModelState(None, None, True)
         self._most_recent_aborted_id = 0
-        self._awaiting_snapshot = True
 
     def _require_staging(self) -> _Staging:
-        if self._staging is None:
+        staging = self._state.staging
+        if staging is None:
             raise CellModelError(CellModelErrorCode.STATE, "no transaction is open")
-        return self._staging
+        return staging
 
     def _raise(self, code: CellModelErrorCode, detail: str) -> None:
         raise CellModelError(code, detail)
 
     def _fail(self, code: CellModelErrorCode, detail: str) -> None:
-        staging = self._staging
+        staging = self._state.staging
         if staging is not None:
             self._most_recent_aborted_id = staging.begin.transaction_id
-            self._staging = None
+            self._state = _CellModelState(
+                self._state.view,
+                None,
+                self._state.awaiting_snapshot,
+            )
         raise CellModelError(code, detail)
 
 
@@ -648,6 +823,7 @@ __all__ = [
     "CellSpan",
     "Cursor",
     "DirtySpan",
+    "PreparedCellPublication",
     "TerminalView",
     "TransactionBegin",
     "WIRE_ATTRIBUTE_MASK",
