@@ -145,7 +145,7 @@ def test_snapshot_gap_and_soft_reset_require_a_fresh_complete_replacement():
         model.begin(TransactionBegin(1, 0, 2, 2, 0, 0), snapshot=False)
     assert normal.value.code is CellModelErrorCode.STATE
 
-    model.begin(TransactionBegin(1, 0, 2, 2, 2, 4), snapshot=True)
+    model.begin(TransactionBegin(2, 0, 2, 2, 2, 4), snapshot=True)
     with pytest.raises(CellModelError, match="gap"):
         model.stage_span(CellSpan(0, 1, (Cell(ord("A"), 7, 0),)))
     assert not model.transaction_open

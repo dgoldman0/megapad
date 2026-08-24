@@ -367,6 +367,10 @@ class CellModel:
                 CellModelErrorCode.TRANSACTION,
                 "transaction_id is not monotonically increasing",
             )
+        # Receipt consumes the epoch-scoped ID even when a later semantic
+        # check rejects the declaration.  Reusing a failed ID would make the
+        # peer's ordered transaction history ambiguous.
+        self._last_transaction_id = transaction_id
         if (cols, rows) != (self._cols, self._rows):
             raise CellModelError(CellModelErrorCode.BOUNDS, "transaction geometry is stale")
         if snapshot:
@@ -433,9 +437,6 @@ class CellModel:
             changed_rows={},
             snapshot_rows=snapshot_rows,
         )
-        # A transmitted begin consumes its epoch-scoped transaction ID even
-        # when later validation aborts the staging state.
-        self._last_transaction_id = transaction_id
 
     def stage_span(self, span: CellSpan) -> None:
         staging = self._require_staging()
