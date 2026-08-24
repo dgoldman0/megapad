@@ -1,0 +1,203 @@
+# MegaPad terminal host-port contract
+
+Status: normative for the APT-1 CELL-1 emulator implementation.
+
+This document defines the boundary between `MegapadSystem` and a terminal
+session. It does not define the APT-1 wire encoding. The wire contract is
+`APT-1-WIRE.md` in this directory.
+
+## 1. Required properties
+
+The host port is the only production path while an enhanced frontend is
+explicitly attached. It is additive to the existing UART/ANSI frontends; an
+ordinary MegaPad session does not acquire this port and retains its current
+behavior. While attached, the port provides:
+
+* one exclusive primary consumer;
+* ordered, lossless delivery within caller-provided capacity;
+* bounded storage in both directions;
+* non-throwing machine-side publication;
+* deterministic host-to-machine scheduling; and
+* epoch-qualified attach, reset, detach, and geometry changes.
+
+The machine execution path may copy or transfer bytes into the port. It may
+not parse terminal bytes, mutate a terminal model, render, synthesize replies,
+or invoke terminal-owned code.
+
+The guest-side protocol implementation is likewise not part of KDOS. It is a
+separately source-loadable userland module, `presentation-terminal.f`, in the
+same architectural role as `networking.f`. BIOS and KDOS continue to expose
+ordinary UART and geometry primitives whether or not that module is present.
+
+## 2. Attachment and epochs
+
+There is at most one enhanced primary attachment. Attaching returns an opaque token
+containing a monotonically increasing 64-bit attachment epoch. A token is
+valid only for the exact attachment that created it.
+
+With no enhanced attachment, legacy callbacks and frontends retain ownership.
+Acquisition fails if a legacy parser/consumer is active and cannot be paused
+coherently. A successful acquisition suspends legacy consumption only for the
+life of that lease; release restores it without discarding the ANSI terminal
+implementation.
+
+Attach and detach are applied while the system scheduler lock is held and no
+guest batch is active. Detach is idempotent for the current token. Operations
+using stale tokens return `STALE`; they do not mutate queues or the UART.
+
+Machine reset, detach, or replacement of the primary attachment:
+
+1. advances the attachment epoch;
+2. invalidates outstanding handles and view revisions;
+3. drops parser/model state owned by the old terminal session;
+4. cancels old epoch-tagged, not-yet-applied terminal ingress and geometry;
+5. clears old UART RX bytes originating from that attachment; and
+6. returns stream ownership to ANSI.
+
+Bytes already consumed by the guest cannot be recalled. Reset ordering must
+therefore invalidate the epoch before guest execution resumes.
+
+## 3. Capacity configuration
+
+The attaching caller supplies positive limits for:
+
+* accepted egress bytes and batches;
+* one retained machine publication;
+* pending ingress bytes and events; and
+* pending geometry events.
+
+These are configuration values, not protocol constants. Attachment fails
+before acquiring ownership if the values cannot admit the negotiated CELL-1
+limits. Implementations must use checked arithmetic when combining them.
+
+No primary-path archive is enabled by default. Diagnostic observers may
+receive bounded copies after primary acceptance; they may not delay, reject,
+or parse the primary stream.
+
+## 4. Machine egress
+
+Each machine publication is an immutable record:
+
+```
+EgressBatch(attachment_epoch, publication_sequence, payload)
+```
+
+`publication_sequence` starts at zero for an attachment and increments once
+per non-empty publication. UART ring-flush boundaries and execution-batch
+boundaries have no APT framing meaning.
+
+Publication uses accept-or-retain semantics:
+
+* `ACCEPTED`: the port owns an immutable copy and the machine adapter may
+  release its source bytes.
+* `BACKPRESSURED`: ownership does not transfer. The adapter retains the exact
+  publication and must not execute another guest batch.
+* `STALE`: the attachment changed. The old publication is discarded as part
+  of epoch retirement and must not be delivered to the new attachment.
+
+The native UART drain may destructively move one completed execution batch
+into a single adapter-owned retained slot. This is the sole permitted
+one-publication overshoot. If the primary queue cannot accept that record, the
+slot retains it byte-for-byte and the runner is backpressured before another
+guest batch starts. The slot is cleared only after acceptance or epoch
+retirement.
+
+A valid in-contract publication must not raise into scheduler settlement.
+Consumer failures are recorded as terminal-session failures and processed
+after the machine boundary.
+
+## 5. Terminal consumption
+
+Terminal code polls accepted batches outside scheduler settlement. Polling
+preserves publication order and transfers ownership to the caller. Releasing
+a polled batch restores exactly its payload byte count and one batch slot.
+
+The terminal parser may retain an incomplete APT frame across publications.
+It must not retain references into mutable UART or adapter storage.
+
+Terminal parsing, queued reply generation, presentation commits, snapshot
+publication, and rendering all occur outside the machine boundary.
+
+## 6. Terminal ingress
+
+Terminal replies and normalized user input are immutable, epoch-tagged ingress
+records. Admission is all-or-nothing:
+
+* `ACCEPTED` reserves the complete payload;
+* `BACKPRESSURED` leaves ownership with the terminal; and
+* `STALE` rejects an old attachment.
+
+Accepted bytes enter the existing external-event journal through
+`schedule_uart_input`. They are applied only at a legal scheduler boundary.
+No parser or renderer calls `UART.inject_input` directly.
+
+Ingress capacity includes a reserved control allowance sufficient for one
+APT credit, reset, close, or fatal-error response. Ordinary key, text, and
+pointer events cannot consume this reserve.
+
+## 7. Geometry
+
+Initial geometry is attached before guest boot. While APT-1 is active, the
+terminal session is authoritative. An accepted protocol resize is scheduled
+through the existing generation-qualified geometry journal and mirrored to
+legacy UART geometry as one coherent event.
+
+While ANSI owns the stream, the existing host/MMIO geometry path remains
+authoritative. An enhanced-session geometry event and a legacy resize flag
+must never be dispatched as two application events.
+
+## 8. Runner admission
+
+Before starting any guest execution batch, the runner services, in order:
+
+1. epoch transition work;
+2. an adapter-retained egress publication;
+3. admitted terminal ingress and geometry; and
+4. primary-queue low-water admission.
+
+If item 2 remains backpressured, the runner returns a host-backpressure stop
+reason without executing guest instructions. Queue space becoming available
+wakes or permits the next call; it does not execute the machine from a
+consumer callback.
+
+## 9. View publication
+
+The headless terminal core publishes immutable renderer-neutral views only
+after an ANSI-visible change or an accepted enhanced transaction commit. Each
+view contains attachment epoch, terminal session ID, presentation revision,
+geometry, persistent rows, dirty spans, and cursor state.
+
+Cursor blink and other renderer-only overlays do not create cell revisions.
+Unchanged rows may be shared by identity across revisions. A renderer cannot
+obtain mutable access to parser or model state.
+
+## 10. Prohibited shortcuts
+
+The following do not conform:
+
+* a second raw-console or ANSI parser consuming bytes during an enhanced
+  lease;
+* unbounded `tx_buffer`, `_tx_log`, or `raw_output` retention on the primary
+  path;
+* invoking a parser or terminal callback from UART drain settlement;
+* injecting DSR, geometry, key, or protocol replies synchronously;
+* dropping, truncating, or splitting a declined machine publication; or
+* a fake host that omits epochs, capacity, retained publication, or reset
+  behavior.
+
+Removing ANSI support, requiring `presentation-terminal.f` during KDOS boot,
+or automatically acquiring an enhanced lease for ordinary sessions also does
+not conform.
+
+## 11. Initial conformance cases
+
+The lightweight host-port suite must prove:
+
+1. two publications remain ordered;
+2. a full queue retains the exact next publication and prevents another
+   runner batch;
+3. consumption admits that retained publication without duplication;
+4. terminal code is not invoked during settlement;
+5. ingress is applied only at a later scheduler boundary;
+6. stale handles cannot publish after reset or detach; and
+7. geometry has one epoch-qualified application.
