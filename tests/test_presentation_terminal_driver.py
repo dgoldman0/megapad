@@ -445,18 +445,24 @@ def test_driver_retains_ordered_control_replies_across_host_backpressure():
     offer = parse_negotiation(_drain_uart_rx(system))
     assert isinstance(offer, Offer)
 
+    # Occupy the one ordinary slot before OPEN. SERVER_READY then fills the
+    # reserved control slot, leaving the following TX_RESULT retained by the
+    # driver until the exact host-admission boundary.
+    assert driver.send_legacy_input(b"queued-before-open") is DriverStatus.PROGRESS
     open_and_snapshot, _encoder = _open_bytes(offer)
     _write_native_uart(system, open_and_snapshot)
     first = driver.service()
     assert first.status is DriverStatus.BACKPRESSURED
     assert first.outbound_records == 2
-    assert driver.pending_outbound_events == 1
+    assert driver.pending_outbound_events == 2
+    assert driver.core.outstanding_result_transaction_id == 1
 
     system.run_batch_stats(1)
     second = driver.service()
     assert second.status is DriverStatus.PROGRESS
-    assert second.outbound_records == 1
+    assert second.outbound_records == 2
     assert driver.pending_outbound_events == 0
+    assert driver.core.outstanding_result_transaction_id is None
     driver.close()
 
 
@@ -481,7 +487,10 @@ def test_resize_intent_waits_for_adapter_retained_machine_egress():
     offer = parse_negotiation(probe_result.outbound[0].payload)
     assert isinstance(offer, Offer)
     open_and_snapshot, encoder = _open_bytes(offer, client_credit=512)
-    core.feed_machine(open_and_snapshot)
+    opened = core.feed_machine(open_and_snapshot)
+    for outbound in opened.outbound:
+        if outbound.result_transaction_id is not None:
+            core.settle_result_delivery(outbound.result_transaction_id)
     driver = PresentationTerminalDriver(
         lease,
         core,

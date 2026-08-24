@@ -31,6 +31,7 @@ SPAN = struct.Struct("<III")
 CELL = struct.Struct("<IBBH")
 CURSOR = struct.Struct("<IIB7x")
 COMMIT = struct.Struct("<Q")
+ABORT = struct.Struct("<QH6x")
 TX_RESULT = struct.Struct("<QHHQ")
 CREDIT = struct.Struct("<Q")
 KEY = struct.Struct("<IBBHQ")
@@ -40,6 +41,8 @@ RESIZE = struct.Struct("<IIQ")
 FOCUS = struct.Struct("<B7sQ")
 CLOSE = struct.Struct("<H6sQ")
 CLOSE_ACK = struct.Struct("<H6s")
+SOFT_RESET_REQUEST = struct.Struct("<I4xQ")
+SOFT_RESET_ACK = struct.Struct("<IHH")
 
 
 def _config() -> TerminalConfig:
@@ -129,6 +132,20 @@ def _snapshot_frames(
     )
 
 
+def _settle_results(
+    core: PresentationTerminalCore,
+    result,
+) -> tuple[int, ...]:
+    transaction_ids = tuple(
+        outbound.result_transaction_id
+        for outbound in result.outbound
+        if outbound.result_transaction_id is not None
+    )
+    for transaction_id in transaction_ids:
+        core.settle_result_delivery(transaction_id)
+    return transaction_ids
+
+
 def test_ansi_remains_default_and_non_apt_escapes_pass_byte_exact():
     core = PresentationTerminalCore(
         _config(), attachment_epoch=1, session_id_factory=lambda: 2
@@ -174,6 +191,11 @@ def test_real_negotiation_snapshot_result_credit_view_and_normalized_input():
     ]
     assert TX_RESULT.unpack(frames[1].payload) == (1, 0, 0, 1)
     assert CREDIT.unpack(frames[2].payload) == (1_024 + 312,)
+    assert core.outstanding_result_transaction_id == 1
+    with pytest.raises(TerminalSessionError, match="result boundaries"):
+        core.send_key(ord("x"))
+    assert _settle_results(core, result) == (1,)
+    assert core.outstanding_result_transaction_id is None
 
     key = core.send_key(ord("x"), modifiers=1)
     assert key is not None and not key.control
@@ -220,6 +242,7 @@ def test_client_receive_credit_backpressures_data_but_not_control_results():
     result = core.feed_machine(encode_open(request) + client_ready + _snapshot_frames(encoder))
     assert core.active
     assert len(result.outbound) == 3
+    assert _settle_results(core, result) == (1,)
     assert core.send_key(ord("x")) is None
 
 
@@ -228,6 +251,7 @@ def test_resize_requires_one_replacement_snapshot_at_the_new_geometry():
     opened = core.feed_machine(
         encode_open(request) + client_ready + _snapshot_frames(encoder)
     )
+    assert _settle_results(core, opened) == (1,)
     decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
     for outbound in opened.outbound:
         decoder.feed(outbound.payload)
@@ -243,6 +267,18 @@ def test_resize_requires_one_replacement_snapshot_at_the_new_geometry():
     with pytest.raises(TerminalSessionError, match="ACTIVE"):
         core.send_key(ord("x"))
 
+    duplicate = core.feed_machine(
+        _snapshot_frames(encoder, transaction_id=1, cols=4, rows=1)
+    )
+    duplicate_result = next(
+        outbound
+        for outbound in duplicate.outbound
+        if outbound.result_transaction_id is not None
+    )
+    duplicate_frame = decoder.feed(duplicate_result.payload)[0]
+    assert TX_RESULT.unpack(duplicate_frame.payload) == (1, 2, 0, 0)
+    assert _settle_results(core, duplicate) == (1,)
+
     replacement = core.feed_machine(
         _snapshot_frames(encoder, transaction_id=2, cols=4, rows=1)
     )
@@ -257,6 +293,7 @@ def test_resize_waits_for_rejected_transaction_wire_boundary():
     core.feed_machine(
         encode_open(request) + client_ready + _snapshot_frames(encoder)
     )
+    core.settle_result_delivery(1)
 
     rejected_begin = encoder.encode(
         MessageType.TX_BEGIN,
@@ -267,10 +304,105 @@ def test_resize_waits_for_rejected_transaction_wire_boundary():
     with pytest.raises(TerminalSessionError, match="transaction boundary"):
         core.send_resize(4, 1)
 
-    core.feed_machine(
+    rejected = core.feed_machine(
         encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
     )
+    assert core.outstanding_result_transaction_id == 2
+    assert not core.resize_ready
+    assert _settle_results(core, rejected) == (2,)
     assert core.resize_ready
+
+
+def test_rejected_begin_can_drain_through_abort_without_a_result_gate():
+    core, _offer, request, encoder, client_ready = _negotiate(client_credit=512)
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+
+    core.feed_machine(
+        encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(2, 1, 3, 2, 0, 0),
+        )
+    )
+    aborted = core.feed_machine(
+        encoder.encode(MessageType.TX_ABORT, ABORT.pack(2, 7))
+    )
+
+    assert core.outstanding_result_transaction_id is None
+    assert len(aborted.outbound) == 1
+    assert aborted.outbound[0].result_transaction_id is None
+    assert core.feed_machine(
+        encoder.encode(MessageType.TX_ABORT, ABORT.pack(2, 7))
+    ).outbound == ()
+
+    completed = core.feed_machine(
+        encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(3, 1, 2, 2, 0, 0),
+        )
+        + encoder.encode(MessageType.CURSOR, CURSOR.pack(0, 0, 0))
+        + encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(3))
+    )
+    assert len(completed.views) == 1
+    assert completed.views[0].revision == 2
+    assert core.outstanding_result_transaction_id == 3
+
+
+def test_soft_reset_cancels_crossed_commit_then_resets_clock_and_cell_model():
+    core, offer, request, encoder, client_ready = _negotiate(client_credit=512)
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+    outbound_decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    for outbound in opened.outbound:
+        outbound_decoder.feed(outbound.payload)
+
+    core.feed_machine(
+        encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(2, 1, 2, 2, 0, 0),
+        )
+    )
+    reset = core.request_soft_reset()
+    reset_frame = outbound_decoder.feed(reset.payload)[0]
+    assert reset_frame.message_type == MessageType.SOFT_RESET_REQUEST
+    assert SOFT_RESET_REQUEST.unpack(reset_frame.payload) == (1, 1)
+    assert core.state is TerminalState.RESYNCING
+    assert core.view is None
+
+    crossed = core.feed_machine(
+        encoder.encode(MessageType.CURSOR, CURSOR.pack(0, 0, 0))
+        + encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
+    )
+    crossed_frames = []
+    for outbound in crossed.outbound:
+        crossed_frames.extend(outbound_decoder.feed(outbound.payload))
+    assert TX_RESULT.unpack(crossed_frames[0].payload) == (2, 1, 0, 1)
+    assert crossed.views == ()
+    assert core.presentation_revision == 1
+    assert _settle_results(core, crossed) == (2,)
+
+    encoder.set_presentation_epoch(1)
+    acknowledged = core.feed_machine(
+        encoder.encode(
+            MessageType.SOFT_RESET_ACK,
+            SOFT_RESET_ACK.pack(1, 0, 0),
+        )
+    )
+    assert acknowledged.outbound == ()
+    assert core.presentation_revision == 0
+    assert core.state is TerminalState.RESYNCING
+
+    outbound_decoder.advance_presentation_epoch(1)
+    replacement = core.feed_machine(_snapshot_frames(encoder, transaction_id=1))
+    assert len(replacement.views) == 1
+    assert replacement.views[0].presentation_epoch == 1
+    assert replacement.views[0].revision == 1
+    assert core.presentation_revision == 1
+    assert core.state is TerminalState.ACTIVE
 
 
 def test_bad_binary_fails_closed_and_never_returns_to_ansi_locally():

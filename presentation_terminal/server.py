@@ -47,6 +47,12 @@ from .cell_model import (
     decode_cursor,
     decode_transaction_begin,
 )
+from .presentation_model import (
+    PresentationClock,
+    PresentationStateError,
+    ResultLease,
+    TransactionFamily,
+)
 
 
 _READY = struct.Struct("<IIIIIIQ")
@@ -59,6 +65,8 @@ _RESIZE = struct.Struct("<IIQ")
 _FOCUS = struct.Struct("<B7sQ")
 _CLOSE = struct.Struct("<H6sQ")
 _CLOSE_ACK = struct.Struct("<H6s")
+_SOFT_RESET_REQUEST = struct.Struct("<I4xQ")
+_SOFT_RESET_ACK = struct.Struct("<IHH")
 
 _NAMED_KEY_SYMBOLS = frozenset(range(0x00110001, 0x0011000F)) | frozenset(
     range(0x00110020, 0x0011002C)
@@ -201,6 +209,7 @@ class TerminalConfig:
 class OutboundBytes:
     payload: bytes
     control: bool
+    result_transaction_id: int | None = None
 
     def __post_init__(self) -> None:
         payload = _bytes("payload", self.payload)
@@ -209,6 +218,19 @@ class OutboundBytes:
         object.__setattr__(self, "payload", payload)
         if not isinstance(self.control, bool):
             raise TypeError("control must be bool")
+        if self.result_transaction_id is not None:
+            object.__setattr__(
+                self,
+                "result_transaction_id",
+                _integer(
+                    "result_transaction_id",
+                    self.result_transaction_id,
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+            )
+            if not self.control:
+                raise ValueError("a TX_RESULT delivery marker must be control")
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +324,9 @@ class PresentationTerminalCore:
         self._decoder: IncrementalFrameDecoder | None = None
         self._encoder: FrameEncoder | None = None
         self._model: CellModel | None = None
+        self._clock: PresentationClock | None = None
+        self._retained_enabled = False
+        self._reset_requested_epoch: int | None = None
         self._client_data_grant = 0
         self._client_data_received = 0
         self._client_data_released = 0
@@ -314,6 +339,7 @@ class PresentationTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
         self._discard_transaction_status: int | None = None
+        self._most_recent_wire_aborted_id = 0
 
     @staticmethod
     def _random_session_id() -> int:
@@ -336,7 +362,22 @@ class PresentationTerminalCore:
 
     @property
     def view(self) -> TerminalView | None:
-        return None if self._model is None else self._model.view
+        if self._model is None or self._reset_requested_epoch is not None:
+            return None
+        return self._model.view
+
+    @property
+    def presentation_revision(self) -> int:
+        """The authoritative shared CELL/retained presentation revision."""
+
+        return 0 if self._clock is None else self._clock.revision
+
+    @property
+    def outstanding_result_transaction_id(self) -> int | None:
+        clock = self._clock
+        if clock is None or clock.outstanding_result is None:
+            return None
+        return clock.outstanding_result.transaction_id
 
     @property
     def max_text_bytes(self) -> int:
@@ -356,12 +397,16 @@ class PresentationTerminalCore:
     def resize_ready(self) -> bool:
         model = self._model
         decoder = self._decoder
+        clock = self._clock
         return (
             self._state is TerminalState.ACTIVE
             and model is not None
             and decoder is not None
+            and clock is not None
             and decoder.buffered_bytes == 0
             and self._wire_transaction_id is None
+            and clock.open_transaction is None
+            and clock.outstanding_result is None
             and not model.awaiting_snapshot
             and not model.transaction_open
         )
@@ -449,7 +494,8 @@ class PresentationTerminalCore:
     ) -> OutboundBytes | None:
         """Encode one normalized key event, or return None for data backpressure."""
 
-        model = self._require_active_model()
+        self._require_active_model()
+        revision = self._require_clock().revision
         symbol = _integer(
             "key_symbol", key_symbol, minimum=0, maximum=UINT32_MAX
         )
@@ -466,14 +512,15 @@ class PresentationTerminalCore:
             normalized_action,
             normalized_location,
             normalized_modifiers,
-            model.revision,
+            revision,
         )
         return self._encode_data(MessageType.KEY, payload)
 
     def send_text(self, data, *, paste: bool = False) -> OutboundBytes | None:
         """Encode one bounded, well-formed UTF-8 TEXT event."""
 
-        model = self._require_active_model()
+        self._require_active_model()
+        revision = self._require_clock().revision
         if isinstance(data, str):
             raise TypeError("data must be bytes-like, not str")
         try:
@@ -490,7 +537,7 @@ class PresentationTerminalCore:
             raise ValueError("text data exceeds the negotiated client limit")
         if not isinstance(paste, bool):
             raise TypeError("paste must be bool")
-        payload = _TEXT_PREFIX.pack(int(paste), 0, model.revision) + raw
+        payload = _TEXT_PREFIX.pack(int(paste), 0, revision) + raw
         return self._encode_data(MessageType.TEXT, payload)
 
     def send_pointer(
@@ -506,7 +553,8 @@ class PresentationTerminalCore:
     ) -> OutboundBytes | None:
         """Encode one cell-coordinate pointer transition."""
 
-        model = self._require_active_model()
+        self._require_active_model()
+        revision = self._require_clock().revision
         normalized_x = _integer(
             "x", x, minimum=-(1 << 31), maximum=(1 << 31) - 1
         )
@@ -538,7 +586,7 @@ class PresentationTerminalCore:
             normalized_kind,
             normalized_wheel_x,
             normalized_wheel_y,
-            model.revision,
+            revision,
         )
         encoded = self._encode_data(MessageType.POINTER, payload)
         if encoded is not None:
@@ -548,27 +596,28 @@ class PresentationTerminalCore:
     def send_focus(self, focused: bool) -> OutboundBytes | None:
         """Encode one normalized focus transition."""
 
-        model = self._require_active_model()
+        self._require_active_model()
+        revision = self._require_clock().revision
         if not isinstance(focused, bool):
             raise TypeError("focused must be bool")
         return self._encode_data(
             MessageType.FOCUS,
-            _FOCUS.pack(int(focused), bytes(7), model.revision),
+            _FOCUS.pack(int(focused), bytes(7), revision),
         )
 
     def send_resize(self, cols: int, rows: int) -> OutboundBytes | None:
         """Encode one geometry change and require its replacement snapshot."""
 
         normalized_cols, normalized_rows = self.validate_resize(cols, rows)
+        if self._wire_transaction_id is not None:
+            raise TerminalSessionError(
+                "terminal resize waits for the client transaction boundary"
+            )
         model = self._require_active_model()
         decoder = self._decoder
         if decoder is None or decoder.buffered_bytes:
             raise TerminalSessionError(
                 "terminal resize waits for a complete client frame"
-            )
-        if self._wire_transaction_id is not None:
-            raise TerminalSessionError(
-                "terminal resize waits for the client transaction boundary"
             )
         model.validate_geometry(normalized_cols, normalized_rows)
         if self._geometry_generation == UINT64_MAX:
@@ -581,6 +630,7 @@ class PresentationTerminalCore:
         )
         if encoded is None:
             return None
+        self._rebase_legacy_cell_replacement_clock()
         model.select_geometry(normalized_cols, normalized_rows)
         self._config = replace(
             self._config,
@@ -590,6 +640,46 @@ class PresentationTerminalCore:
         self._geometry_generation = generation
         self._state = TerminalState.RESYNCING
         return encoded
+
+    def request_soft_reset(self) -> OutboundBytes:
+        """Begin one ordered presentation-epoch reset from an ACTIVE session."""
+
+        if self._state is not TerminalState.ACTIVE:
+            raise TerminalSessionError("soft reset requires an ACTIVE session")
+        if self._reset_requested_epoch is not None:
+            raise TerminalSessionError("a soft reset is already pending")
+        decoder = self._decoder
+        if decoder is None or decoder.buffered_bytes:
+            raise TerminalSessionError("soft reset waits for a complete client frame")
+        clock = self._require_clock()
+        if clock.outstanding_result is not None:
+            raise TerminalSessionError("soft reset waits for TX_RESULT delivery")
+        if clock.presentation_epoch == UINT32_MAX:
+            raise TerminalSessionError("presentation epoch is exhausted")
+
+        requested_epoch = clock.presentation_epoch + 1
+        encoded = self._encode_control(
+            MessageType.SOFT_RESET_REQUEST,
+            _SOFT_RESET_REQUEST.pack(requested_epoch, clock.revision),
+        )
+        try:
+            decoder.expect_epoch_transition(
+                MessageType.SOFT_RESET_ACK,
+                requested_epoch,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self._fatal(f"cannot arm soft-reset epoch transition: {exc}", cause=exc)
+        self._reset_requested_epoch = requested_epoch
+        self._state = TerminalState.RESYNCING
+        return encoded
+
+    def settle_result_delivery(self, transaction_id: int) -> ResultLease:
+        """Release the BEGIN gate after its exact TX_RESULT is admitted."""
+
+        try:
+            return self._require_clock().settle_result(transaction_id)
+        except (PresentationStateError, TypeError, ValueError) as exc:
+            self._fatal(f"cannot settle TX_RESULT delivery: {exc}", cause=exc)
 
     def _feed_ansi_owned(self, raw: bytes) -> CoreResult:
         ansi = bytearray()
@@ -677,6 +767,9 @@ class PresentationTerminalCore:
             max_transaction_bytes=self._config.max_transaction_bytes,
             max_cells=self._config.max_cells,
         )
+        self._clock = PresentationClock(presentation_epoch=0)
+        self._retained_enabled = False
+        self._reset_requested_epoch = None
         self._client_data_grant = self._config.terminal_receive_credit
         self._server_data_grant = record.client_receive_credit
         self._state = TerminalState.OPENING
@@ -740,6 +833,8 @@ class PresentationTerminalCore:
             return (), None
         if message_type is MessageType.TX_ABORT:
             return self._accept_abort(frame.payload), None
+        if message_type is MessageType.SOFT_RESET_ACK:
+            return self._accept_soft_reset_ack(frame), None
         if message_type in _CONTROL_TYPES:
             self._fatal(f"unexpected client control frame {message_type.name}")
 
@@ -789,6 +884,9 @@ class PresentationTerminalCore:
         self._decoder = None
         self._encoder = None
         self._model = None
+        self._clock = None
+        self._retained_enabled = False
+        self._reset_requested_epoch = None
         self._client_data_grant = 0
         self._client_data_received = 0
         self._client_data_released = 0
@@ -797,6 +895,7 @@ class PresentationTerminalCore:
         self._client_max_text = 0
         self._pointer_buttons = 0
         self._geometry_generation = 0
+        self._most_recent_wire_aborted_id = 0
         self._clear_wire_transaction()
 
     def _accept_client_ready(self, payload: bytes) -> None:
@@ -854,6 +953,8 @@ class PresentationTerminalCore:
             self._fatal("transaction begin is outside ACTIVE/RESYNCING")
         if self._wire_transaction_id is not None:
             self._fatal("nested transaction begin")
+        if self._reset_requested_epoch is not None:
+            self._fatal("new transaction begin crossed a pending soft reset")
         try:
             begin = decode_transaction_begin(frame.payload)
         except CellModelError as exc:
@@ -863,9 +964,35 @@ class PresentationTerminalCore:
         self._wire_transaction_snapshot = snapshot
         self._wire_transaction_bytes = frame.complete_bytes
         self._discard_transaction_status = None
+        clock = self._require_clock()
+        try:
+            lease = clock.reserve(
+                TransactionFamily.CELL,
+                begin.transaction_id,
+                begin.base_revision,
+            )
+        except PresentationStateError as exc:
+            lease = clock.open_transaction
+            if (
+                lease is None
+                or lease.family is not TransactionFamily.CELL
+                or lease.transaction_id != begin.transaction_id
+            ):
+                self._fatal(str(exc), cause=exc)
+            self._discard_transaction_status = (
+                2
+                if begin.transaction_id <= clock.transaction_high_water
+                else 3
+            )
+            # ``reserve`` updates the high-water before a base check.  A lease
+            # rejected for its base therefore has the new ID equal to the
+            # high-water, unlike an old/duplicate ID.
+            if lease.rejection is not None and "base revision" in lease.rejection:
+                self._discard_transaction_status = 3
+            return ()
         model = self._require_model()
         try:
-            model.begin(begin, snapshot=snapshot)
+            model.begin_with_lease(begin, snapshot=snapshot, lease=lease)
         except CellModelError as exc:
             self._discard_transaction_status = self._result_status(exc)
         return ()
@@ -898,8 +1025,13 @@ class PresentationTerminalCore:
         transaction_id = self._wire_transaction_id
         if transaction_id is None:
             self._fatal("commit is outside a transaction")
+        clock = self._require_clock()
+        lease = clock.open_transaction
+        if lease is None or lease.transaction_id != transaction_id:
+            self._fatal("wire transaction has no matching clock lease")
         status = self._discard_transaction_status
         view: TerminalView | None = None
+        result_lease: ResultLease | None = None
         try:
             commit_id = decode_commit(frame.payload)
         except CellModelError:
@@ -915,29 +1047,73 @@ class PresentationTerminalCore:
         )
         if commit_id != transaction_id or message_type is not expected_type:
             status = 2
+        model = self._require_model()
         if status is None:
             try:
-                view = self._require_model().commit(commit_id)
-                status = 0
+                prepared = model.prepare_publication(
+                    lease,
+                    global_revision=clock.next_revision(lease),
+                )
             except CellModelError as exc:
                 status = self._result_status(exc)
+            else:
+                if self._reset_requested_epoch is None:
+                    try:
+                        result_lease = clock.complete_success(lease)
+                        view = model.install_prepared(prepared)
+                    except (PresentationStateError, RuntimeError) as exc:
+                        self._fatal(
+                            f"cannot install committed CELL publication: {exc}",
+                            cause=exc,
+                        )
+                    status = 0
+                else:
+                    # A structurally and semantically valid COMMIT that
+                    # crossed an already-emitted reset is ordered but does not
+                    # become visible or advance the old-epoch revision.
+                    try:
+                        model.abort(transaction_id)
+                    except CellModelError as exc:
+                        self._fatal(str(exc), cause=exc)
+                    try:
+                        result_lease = clock.complete_rejected(lease)
+                    except PresentationStateError as exc:
+                        self._fatal(str(exc), cause=exc)
+                    status = 1
 
-        model = self._require_model()
-        if status != 0 and model.transaction_open:
+        if status != 0 and clock.open_transaction is lease:
+            if model.transaction_open:
+                try:
+                    model.abort(transaction_id)
+                except CellModelError as exc:
+                    self._fatal(str(exc), cause=exc)
             try:
-                model.abort(transaction_id)
-            except CellModelError as exc:
+                result_lease = clock.complete_rejected(lease)
+            except PresentationStateError as exc:
                 self._fatal(str(exc), cause=exc)
 
-        revision = model.revision
+        if status is None:
+            self._fatal("transaction commit did not settle a result status")
+        if result_lease is None:
+            self._fatal("transaction commit did not settle its clock lease")
         result = self._encode_control(
             MessageType.TX_RESULT,
-            _TX_RESULT.pack(transaction_id, status, 0, revision),
+            _TX_RESULT.pack(
+                transaction_id,
+                status,
+                0,
+                result_lease.revision,
+            ),
+            result_transaction_id=transaction_id,
         )
         released = self._wire_transaction_bytes
         self._clear_wire_transaction()
         outputs = (result,) + self._release_data(released)
-        if status == 0 and self._state is TerminalState.RESYNCING:
+        if (
+            status == 0
+            and self._state is TerminalState.RESYNCING
+            and self._reset_requested_epoch is None
+        ):
             self._state = TerminalState.ACTIVE
         return outputs, view
 
@@ -948,6 +1124,8 @@ class PresentationTerminalCore:
             self._fatal(str(exc), cause=exc)
         current = self._wire_transaction_id
         if current is None:
+            if transaction_id == self._most_recent_wire_aborted_id:
+                return ()
             try:
                 self._require_model().abort(transaction_id)
             except CellModelError as exc:
@@ -955,14 +1133,103 @@ class PresentationTerminalCore:
             return ()
         if transaction_id != current:
             self._fatal("TX_ABORT transaction_id mismatch")
-        if self._discard_transaction_status is None:
+        model = self._require_model()
+        if model.transaction_open:
             try:
-                self._require_model().abort(transaction_id)
+                model.abort(transaction_id)
             except CellModelError as exc:
                 self._fatal(str(exc), cause=exc)
+        clock = self._require_clock()
+        lease = clock.open_transaction
+        if lease is None or lease.transaction_id != transaction_id:
+            self._fatal("wire abort has no matching clock lease")
+        try:
+            clock.abort(lease)
+        except PresentationStateError as exc:
+            self._fatal(str(exc), cause=exc)
         released = self._wire_transaction_bytes
+        self._most_recent_wire_aborted_id = transaction_id
         self._clear_wire_transaction()
         return self._release_data(released)
+
+    def _accept_soft_reset_ack(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        requested_epoch = self._reset_requested_epoch
+        if requested_epoch is None or self._state is not TerminalState.RESYNCING:
+            self._fatal("SOFT_RESET_ACK arrived without a pending reset")
+        if len(frame.payload) != _SOFT_RESET_ACK.size:
+            self._fatal("SOFT_RESET_ACK payload length is not eight")
+        echoed_epoch, status, reserved = _SOFT_RESET_ACK.unpack(frame.payload)
+        if (
+            echoed_epoch != requested_epoch
+            or frame.presentation_epoch != requested_epoch
+            or status != 0
+            or reserved != 0
+        ):
+            self._fatal("SOFT_RESET_ACK does not accept the requested epoch")
+
+        clock = self._require_clock()
+        if clock.outstanding_result is not None:
+            self._fatal("SOFT_RESET_ACK crossed an undelivered TX_RESULT")
+        released = 0
+        if self._wire_transaction_id is not None:
+            transaction_id = self._wire_transaction_id
+            lease = clock.open_transaction
+            if lease is None or lease.transaction_id != transaction_id:
+                self._fatal("reset-crossed transaction has no matching clock lease")
+            model = self._require_model()
+            if model.transaction_open:
+                try:
+                    model.abort(transaction_id)
+                except CellModelError as exc:
+                    self._fatal(str(exc), cause=exc)
+            try:
+                clock.abort(lease)
+            except PresentationStateError as exc:
+                self._fatal(str(exc), cause=exc)
+            released = self._wire_transaction_bytes
+            self._clear_wire_transaction()
+        elif clock.open_transaction is not None:
+            self._fatal("clock transaction exists without a wire transaction")
+
+        model = self._require_model()
+        try:
+            model.soft_reset(requested_epoch)
+            clock.soft_reset(requested_epoch)
+        except (CellModelError, PresentationStateError) as exc:
+            self._fatal(f"cannot install soft-reset epoch: {exc}", cause=exc)
+        encoder = self._encoder
+        if encoder is None:
+            self._fatal("soft-reset acknowledgement has no response encoder")
+        encoder.set_presentation_epoch(requested_epoch)
+        self._reset_requested_epoch = None
+        self._pointer_buttons = 0
+        self._most_recent_wire_aborted_id = 0
+        return self._release_data(released)
+
+    def _rebase_legacy_cell_replacement_clock(self) -> None:
+        """Select the pre-RETAINED resize snapshot's revision-zero baseline.
+
+        CELL-1 fallback defines a later legacy replacement snapshot as
+        revision one.  The transaction-ID high-water remains epoch-wide.
+        RETAINED-1 discovery disables this bridge and uses revision-preserving
+        PRESENT CELL_REPLACE instead.
+        """
+
+        if self._retained_enabled:
+            self._fatal(
+                "legacy resize snapshot rebase is unavailable after RETAINED-1"
+            )
+        clock = self._require_clock()
+        if clock.open_transaction is not None or clock.outstanding_result is not None:
+            self._fatal("legacy resize rebase requires a settled transaction clock")
+        self._clock = PresentationClock(
+            presentation_epoch=clock.presentation_epoch,
+            revision=0,
+            transaction_high_water=clock.transaction_high_water,
+        )
 
     def _clear_wire_transaction(self) -> None:
         self._wire_transaction_id = None
@@ -986,7 +1253,13 @@ class PresentationTerminalCore:
         self._client_data_grant = grant
         return (self._encode_control(MessageType.CREDIT, _CREDIT.pack(grant)),)
 
-    def _encode_control(self, message_type: MessageType, payload: bytes) -> OutboundBytes:
+    def _encode_control(
+        self,
+        message_type: MessageType,
+        payload: bytes,
+        *,
+        result_transaction_id: int | None = None,
+    ) -> OutboundBytes:
         encoder = self._encoder
         if encoder is None:
             self._fatal("framed response requested before OPEN")
@@ -994,7 +1267,7 @@ class PresentationTerminalCore:
             encoded = encoder.encode(message_type, payload)
         except (OverflowError, TypeError, ValueError) as exc:
             self._fatal(f"cannot encode control frame: {exc}", cause=exc)
-        return OutboundBytes(encoded, True)
+        return OutboundBytes(encoded, True, result_transaction_id)
 
     def _encode_data(self, message_type: MessageType, payload: bytes) -> OutboundBytes | None:
         encoder = self._encoder
@@ -1017,13 +1290,24 @@ class PresentationTerminalCore:
             self._fatal("enhanced session has no CELL-1 model")
         return self._model
 
+    def _require_clock(self) -> PresentationClock:
+        if self._clock is None:
+            self._fatal("enhanced session has no presentation clock")
+        return self._clock
+
     def _require_active_model(self) -> CellModel:
         if self._state is not TerminalState.ACTIVE:
             raise TerminalSessionError("normalized input requires an ACTIVE session")
         model = self._require_model()
-        if model.awaiting_snapshot or model.transaction_open:
+        clock = self._require_clock()
+        if (
+            model.awaiting_snapshot
+            or model.transaction_open
+            or clock.open_transaction is not None
+            or clock.outstanding_result is not None
+        ):
             raise TerminalSessionError(
-                "normalized input waits for a committed model and transaction boundary"
+                "normalized input waits for committed model/result boundaries"
             )
         return model
 

@@ -691,6 +691,10 @@ class PresentationTerminalDriver:
             if status is AdmissionStatus.STALE:
                 self._closed = True
                 return DriverStatus.STALE, admitted
+            if record.result_transaction_id is not None:
+                self._core.settle_result_delivery(
+                    record.result_transaction_id
+                )
             self._pending.popleft()
             self._pending_bytes -= len(record.payload)
             admitted += 1

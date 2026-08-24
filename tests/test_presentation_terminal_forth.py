@@ -364,6 +364,10 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 terminal_views.extend(result.views)
                 for outbound in result.outbound:
                     system.uart.inject_input(outbound.payload)
+                    if outbound.result_transaction_id is not None:
+                        core.settle_result_delivery(
+                            outbound.result_transaction_id
+                        )
                 if result.views and not key_sent:
                     key = core.send_key(ord("x"), modifiers=1)
                     assert key is not None
