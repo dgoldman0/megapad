@@ -25,7 +25,11 @@ from presentation_terminal import (
     TerminalState,
     TerminalView,
 )
-from session import MachineSession, PresentationSessionConfig
+from session import (
+    MachineSession,
+    PresentationSessionConfig,
+    PresentationSessionPolicy,
+)
 from session_server import main as session_server_main
 from system import EXT_MEM_BASE, HBW_BASE, VRAM_BASE, MegapadSystem
 
@@ -57,6 +61,25 @@ def _presentation_config(*, ansi_history_bytes: int = 32) -> PresentationSession
         driver_limits=DriverLimits(4_096, 8),
         ansi_history_bytes=ansi_history_bytes,
         service_batches=2,
+    )
+
+
+def _presentation_policy() -> PresentationSessionPolicy:
+    return PresentationSessionPolicy(
+        max_cols=400,
+        max_rows=200,
+        egress_high_publications=2,
+        egress_high_batches=32,
+        egress_low_batches=4,
+        ingress_bytes=128 * 1024,
+        ingress_events=256,
+        ingress_control_bytes=4_096,
+        ingress_control_events=32,
+        geometry_events=8,
+        pending_outbound_bytes=128 * 1024,
+        pending_outbound_events=256,
+        ansi_history_bytes=256 * 1024,
+        service_batches=4,
     )
 
 
@@ -589,6 +612,70 @@ def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
 
     assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
     assert from_bios.call_args.kwargs["lanes"] == 4
+    assert from_bios.call_args.kwargs["presentation"] is None
+
+
+def test_presentation_policy_derives_full_maximum_geometry_contract():
+    policy = _presentation_policy()
+    config = policy.configuration(100, 32)
+
+    assert policy.maximum_transaction_bytes == 650_576
+    assert policy.retained_publication_bytes == 654_672
+    assert config.terminal_config.max_payload == 3_212
+    assert config.terminal_config.max_transaction_bytes == 650_576
+    assert config.terminal_config.terminal_receive_credit == 650_576
+    assert config.terminal_config.max_cells == 80_000
+    assert config.terminal_config.max_feed_bytes == 654_672
+    assert config.terminal_config.cols == 100
+    assert config.terminal_config.rows == 32
+    assert config.host_limits.egress.high_bytes == 1_309_344
+    assert config.host_limits.egress.low_bytes == 654_672
+    assert config.host_limits.retained_publication_bytes == 654_672
+    assert config.driver_limits.pending_outbound_events == 256
+
+
+def test_presentation_policy_configuration_attaches_real_host_port():
+    policy = _presentation_policy()
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=100,
+        terminal_rows=32,
+    )
+    with MachineSession(
+        system,
+        cols=100,
+        rows=32,
+        presentation=policy.configuration(100, 32),
+    ) as session:
+        assert session.presentation_enabled
+        assert session.presentation_state is TerminalState.ANSI
+        assert system.presentation_terminal_host.enhanced_attached
+
+
+def test_session_server_opt_in_uses_exact_presentation_policy(monkeypatch):
+    policy = _presentation_policy()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "session_server.py",
+            "--cols",
+            "100",
+            "--rows",
+            "32",
+            "--presentation-terminal-policy",
+            json.dumps(policy.to_dict()),
+        ],
+    )
+    with (
+        patch("session_server.MachineSession.from_bios") as from_bios,
+        patch("session_server.SharedMachine"),
+        patch("session_server.SessionServer"),
+        patch("session_server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+
+    config = from_bios.call_args.kwargs["presentation"]
+    assert config == policy.configuration(100, 32)
 
 
 def test_machine_session_warm_reset_discards_interrupted_uart_batch():

@@ -4,14 +4,34 @@
 from __future__ import annotations
 
 import argparse
+import json
 import signal
 from pathlib import Path
 
-from session import MachineSession
+from session import MachineSession, PresentationSessionPolicy
 from shared_session import DEFAULT_SOCKET, SessionServer, SharedMachine
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _presentation_policy(value: str) -> PresentationSessionPolicy:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid presentation policy JSON: {exc.msg}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise argparse.ArgumentTypeError(
+            "presentation policy JSON must be an object"
+        )
+    try:
+        return PresentationSessionPolicy(**payload)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid presentation policy: {exc}"
+        ) from exc
 
 
 def main() -> int:
@@ -34,6 +54,15 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=30)
     parser.add_argument("--batch-steps", type=int, default=100_000)
     parser.add_argument(
+        "--presentation-terminal-policy",
+        type=_presentation_policy,
+        metavar="JSON",
+        help=(
+            "attach the optional presentation terminal with the complete "
+            "caller-owned JSON policy"
+        ),
+    )
+    parser.add_argument(
         "--nic-tap",
         nargs="?",
         const="mp64tap0",
@@ -51,6 +80,15 @@ def main() -> int:
     )
     parser.add_argument("--paused", action="store_true")
     args = parser.parse_args()
+
+    presentation = None
+    if args.presentation_terminal_policy is not None:
+        try:
+            presentation = args.presentation_terminal_policy.configuration(
+                args.cols, args.rows
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            parser.error(f"invalid selected presentation geometry: {exc}")
 
     nic_backend = None
     if args.nic_tap:
@@ -76,6 +114,7 @@ def main() -> int:
         batch_steps=args.batch_steps,
         nic_backend=nic_backend,
         realtime_clock=not args.virtual_clock,
+        presentation=presentation,
     )
     audio_sink = None
     if args.audio:
@@ -115,6 +154,15 @@ def main() -> int:
         )
         print(
             f"[shared] lanes:  {session.system.worker_count}",
+            flush=True,
+        )
+        print(
+            "[shared] terminal: "
+            + (
+                "APT-1 optional attachment"
+                if args.presentation_terminal_policy is not None
+                else "ANSI"
+            ),
             flush=True,
         )
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)

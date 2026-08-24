@@ -16,6 +16,7 @@ from presentation_terminal import (
     DriverLimits,
     DriverServiceResult,
     DriverStatus,
+    EgressWatermarks,
     HostPortLimits,
     PresentationTerminalDriver,
     TerminalConfig,
@@ -23,6 +24,7 @@ from presentation_terminal import (
     TerminalState,
     TerminalView,
 )
+from presentation_terminal.apt1 import CONTROL_RESERVE_BYTES, snapshot_wire_bytes
 from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
@@ -223,6 +225,141 @@ class PresentationSessionConfig:
             if normalized > (1 << 64) - 1:
                 raise ValueError(f"{name} must fit uint64")
             object.__setattr__(self, name, int(normalized))
+
+
+@dataclass(frozen=True, slots=True)
+class PresentationSessionPolicy:
+    """Reusable product bounds for explicitly enabled presentation sessions."""
+
+    max_cols: int
+    max_rows: int
+    egress_high_publications: int
+    egress_high_batches: int
+    egress_low_batches: int
+    ingress_bytes: int
+    ingress_events: int
+    ingress_control_bytes: int
+    ingress_control_events: int
+    geometry_events: int
+    pending_outbound_bytes: int
+    pending_outbound_events: int
+    ansi_history_bytes: int
+    service_batches: int = 1
+
+    def __post_init__(self) -> None:
+        minima = {
+            "max_cols": 1,
+            "max_rows": 1,
+            "egress_high_publications": 2,
+            "egress_high_batches": 1,
+            "egress_low_batches": 0,
+            "ingress_bytes": 1,
+            "ingress_events": 1,
+            "ingress_control_bytes": 1,
+            "ingress_control_events": 1,
+            "geometry_events": 1,
+            "pending_outbound_bytes": 1,
+            "pending_outbound_events": 1,
+            "ansi_history_bytes": 0,
+            "service_batches": 1,
+        }
+        for name, minimum in minima.items():
+            value = getattr(self, name)
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer, not bool")
+            try:
+                normalized = operator.index(value)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be an integer") from exc
+            if normalized < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+            if normalized > (1 << 64) - 1:
+                raise ValueError(f"{name} must fit uint64")
+            object.__setattr__(self, name, int(normalized))
+        if self.max_cols > 0xFFFF or self.max_rows > 0xFFFF:
+            raise ValueError("maximum geometry must fit APT-1 uint16 fields")
+        if self.egress_low_batches >= self.egress_high_batches:
+            raise ValueError("egress batch low watermark must be below high")
+        if self.ingress_control_bytes >= self.ingress_bytes:
+            raise ValueError("ordinary ingress needs a nonempty byte allowance")
+        if self.ingress_control_events >= self.ingress_events:
+            raise ValueError("ordinary ingress needs a nonempty event allowance")
+        if self.ingress_control_bytes < CONTROL_RESERVE_BYTES:
+            raise ValueError(
+                "ingress control reserve must admit the APT-1 reserve"
+            )
+        if self.ingress_bytes - self.ingress_control_bytes < 68:
+            raise ValueError("ordinary ingress cannot admit every fixed input")
+        if self.pending_outbound_bytes < CONTROL_RESERVE_BYTES:
+            raise ValueError("pending outbound bytes must admit control reserve")
+        if self.pending_outbound_events < 3:
+            raise ValueError("pending outbound needs three result records")
+        # Constructing the maximum geometry proves the complete cross-object
+        # capacity contract once, rather than discovering a mismatch at attach.
+        self.configuration(self.max_cols, self.max_rows)
+
+    @property
+    def maximum_transaction_bytes(self) -> int:
+        return snapshot_wire_bytes(self.max_cols, self.max_rows)
+
+    @property
+    def retained_publication_bytes(self) -> int:
+        return self.maximum_transaction_bytes + CONTROL_RESERVE_BYTES
+
+    def configuration(self, cols: int, rows: int) -> PresentationSessionConfig:
+        """Bind selected geometry without weakening the declared maxima."""
+        selected: dict[str, int] = {}
+        for name, value, maximum in (
+            ("cols", cols, self.max_cols),
+            ("rows", rows, self.max_rows),
+        ):
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer, not bool")
+            try:
+                normalized = operator.index(value)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be an integer") from exc
+            if not 1 <= normalized <= maximum:
+                raise ValueError(f"{name} exceeds presentation policy")
+            selected[name] = int(normalized)
+        transaction_bytes = self.maximum_transaction_bytes
+        publication_bytes = self.retained_publication_bytes
+        return PresentationSessionConfig(
+            host_limits=HostPortLimits(
+                egress=EgressWatermarks(
+                    high_bytes=(
+                        publication_bytes * self.egress_high_publications
+                    ),
+                    low_bytes=publication_bytes,
+                    high_batches=self.egress_high_batches,
+                    low_batches=self.egress_low_batches,
+                ),
+                retained_publication_bytes=publication_bytes,
+                ingress_bytes=self.ingress_bytes,
+                ingress_events=self.ingress_events,
+                ingress_control_bytes=self.ingress_control_bytes,
+                ingress_control_events=self.ingress_control_events,
+                geometry_events=self.geometry_events,
+            ),
+            terminal_config=TerminalConfig(
+                max_payload=max(32, 12 + 8 * self.max_cols),
+                max_transaction_bytes=transaction_bytes,
+                terminal_receive_credit=transaction_bytes,
+                max_cells=self.max_cols * self.max_rows,
+                max_feed_bytes=publication_bytes,
+                cols=selected["cols"],
+                rows=selected["rows"],
+            ),
+            driver_limits=DriverLimits(
+                self.pending_outbound_bytes,
+                self.pending_outbound_events,
+            ),
+            ansi_history_bytes=self.ansi_history_bytes,
+            service_batches=self.service_batches,
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
 
 
 class MachineSession:
