@@ -38,26 +38,30 @@ def test_cell_and_present_share_transaction_id_and_revision_domains():
     assert clock.transaction_high_water == 3
 
 
-def test_rejected_begin_consumes_id_and_holds_result_gate_until_settled():
+def test_rejected_begin_owns_stream_until_commit_then_holds_result_gate():
     clock = PresentationClock(presentation_epoch=0, revision=4)
 
     with pytest.raises(PresentationStateError, match="base revision"):
         clock.reserve(TransactionFamily.PRESENT, 9, 3)
 
-    rejected = clock.outstanding_result
+    rejected = clock.open_transaction
     assert rejected is not None
     assert rejected.family is TransactionFamily.PRESENT
-    assert (rejected.transaction_id, rejected.revision, rejected.succeeded) == (
-        9,
-        4,
-        False,
+    assert (rejected.transaction_id, rejected.base_revision, rejected.admitted) == (
+        9, 3, False
     )
     assert clock.transaction_high_water == 9
-    assert clock.open_transaction is None
+    assert clock.outstanding_result is None
 
+    with pytest.raises(PresentationStateError, match="already open"):
+        clock.reserve(TransactionFamily.CELL, 10, 4)
+    with pytest.raises(PresentationStateError, match="cannot complete successfully"):
+        clock.complete_success(rejected)
+
+    rejected_result = clock.complete_rejected(rejected)
+    assert (rejected_result.transaction_id, rejected_result.revision) == (9, 4)
     with pytest.raises(PresentationStateError, match="result is outstanding"):
         clock.reserve(TransactionFamily.CELL, 10, 4)
-
     clock.settle_result(9)
     lease = clock.reserve(TransactionFamily.CELL, 10, 4)
     rejected_commit = clock.complete_rejected(lease)
@@ -65,11 +69,31 @@ def test_rejected_begin_consumes_id_and_holds_result_gate_until_settled():
     clock.settle_result(10)
 
     # A stale ID is also an ordered semantic rejection.  It does not move the
-    # high-water mark but it does occupy the same result gate.
+    # high-water mark but it does occupy the transaction slot until COMMIT.
     with pytest.raises(PresentationStateError, match="monotonically"):
         clock.reserve(TransactionFamily.PRESENT, 9, 4)
     assert clock.transaction_high_water == 10
-    assert clock.outstanding_result.transaction_id == 9
+    assert clock.outstanding_result is None
+    stale = clock.open_transaction
+    assert stale is not None and stale.transaction_id == 9
+
+
+def test_abort_of_rejected_begin_produces_no_result():
+    clock = PresentationClock(presentation_epoch=2, revision=6)
+
+    with pytest.raises(PresentationStateError, match="base revision"):
+        clock.reserve(TransactionFamily.CELL, 4, 5)
+    rejected = clock.open_transaction
+    assert rejected is not None and not rejected.admitted
+
+    clock.abort(rejected)
+
+    assert clock.open_transaction is None
+    assert clock.outstanding_result is None
+    assert clock.revision == 6
+    assert clock.transaction_high_water == 4
+    followup = clock.reserve(TransactionFamily.PRESENT, 5, 6)
+    assert followup.admitted
 
 
 def test_abort_releases_transaction_without_revision_or_result():

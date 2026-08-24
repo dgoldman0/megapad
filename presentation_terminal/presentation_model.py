@@ -70,6 +70,11 @@ class TransactionLease:
     transaction_id: int
     base_revision: int
     presentation_epoch: int
+    rejection: str | None = None
+
+    @property
+    def admitted(self) -> bool:
+        return self.rejection is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,11 +90,13 @@ class ResultLease:
 class PresentationClock:
     """Own one epoch's global transaction/revision state.
 
-    ``reserve`` consumes a transaction ID immediately, including when later
-    semantic validation fails.  ``complete_*`` closes the transaction and
-    opens a result gate.  ``settle_result`` is intentionally separate so
-    returned ordinary credit cannot accidentally authorize another BEGIN
-    before the ordered result has been consumed.
+    ``reserve`` consumes a valid newer transaction ID immediately.  A semantic
+    BEGIN rejection leaves an explicitly rejected lease open so the receiver
+    can drain through COMMIT or accept TX_ABORT at the real wire boundary.
+    ``complete_*`` closes that transaction and opens a result gate only for a
+    COMMIT.  ``settle_result`` is intentionally separate so returned ordinary
+    credit cannot accidentally authorize another BEGIN before the ordered
+    result has been consumed.
     """
 
     def __init__(
@@ -156,23 +163,31 @@ class PresentationClock:
         if self._result is not None:
             raise PresentationStateError("the preceding transaction result is outstanding")
         if normalized_id <= self._transaction_high_water:
-            self._result = ResultLease(
-                family, normalized_id, self._revision, False
+            detail = "transaction_id is not monotonically increasing"
+            self._open = TransactionLease(
+                family,
+                normalized_id,
+                normalized_base,
+                self._presentation_epoch,
+                detail,
             )
-            raise PresentationStateError(
-                "transaction_id is not monotonically increasing"
-            )
+            raise PresentationStateError(detail)
 
         # Receipt consumes the ID even if base-revision or later semantic
         # validation rejects the request.
         self._transaction_high_water = normalized_id
         if normalized_base != self._revision:
-            self._result = ResultLease(
-                family, normalized_id, self._revision, False
-            )
-            raise PresentationStateError(
+            detail = (
                 f"base revision {normalized_base} does not match {self._revision}"
             )
+            self._open = TransactionLease(
+                family,
+                normalized_id,
+                normalized_base,
+                self._presentation_epoch,
+                detail,
+            )
+            raise PresentationStateError(detail)
         lease = TransactionLease(
             family,
             normalized_id,
@@ -184,6 +199,10 @@ class PresentationClock:
 
     def next_revision(self, lease: TransactionLease) -> int:
         self._require_open(lease)
+        if not lease.admitted:
+            raise PresentationStateError(
+                "a rejected transaction cannot complete successfully"
+            )
         if self._revision == UINT64_MAX:
             raise PresentationStateError("presentation revision is exhausted")
         return self._revision + 1
