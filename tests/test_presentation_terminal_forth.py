@@ -302,6 +302,8 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 terminal_receive_credit=1_024,
                 max_cells=4,
                 max_feed_bytes=4_096,
+                max_cols=2,
+                max_rows=2,
                 cols=2,
                 rows=2,
             ),

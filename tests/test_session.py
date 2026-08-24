@@ -55,6 +55,8 @@ def _presentation_config(*, ansi_history_bytes: int = 32) -> PresentationSession
             terminal_receive_credit=1_024,
             max_cells=16,
             max_feed_bytes=4_608,
+            max_cols=4,
+            max_rows=4,
             cols=2,
             rows=2,
         ),
@@ -626,6 +628,8 @@ def test_presentation_policy_derives_full_maximum_geometry_contract():
     assert config.terminal_config.terminal_receive_credit == 650_576
     assert config.terminal_config.max_cells == 80_000
     assert config.terminal_config.max_feed_bytes == 654_672
+    assert config.terminal_config.max_cols == 400
+    assert config.terminal_config.max_rows == 200
     assert config.terminal_config.cols == 100
     assert config.terminal_config.rows == 32
     assert config.host_limits.egress.high_bytes == 1_309_344
@@ -650,6 +654,10 @@ def test_presentation_policy_configuration_attaches_real_host_port():
         assert session.presentation_enabled
         assert session.presentation_state is TerminalState.ANSI
         assert system.presentation_terminal_host.enhanced_attached
+        assert session.resize(1, 201) is DriverStatus.INVALID
+        assert session.presentation_driver.core.selected_geometry == (100, 32)
+        assert session.resize(400, 200) is DriverStatus.PROGRESS
+        assert session.presentation_driver.core.selected_geometry == (400, 200)
 
 
 def test_session_server_opt_in_uses_exact_presentation_policy(monkeypatch):

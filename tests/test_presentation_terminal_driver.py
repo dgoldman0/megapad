@@ -55,6 +55,8 @@ def _terminal_config() -> TerminalConfig:
         terminal_receive_credit=1_024,
         max_cells=4,
         max_feed_bytes=4_608,
+        max_cols=4,
+        max_rows=2,
         cols=2,
         rows=2,
     )

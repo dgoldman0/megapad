@@ -129,6 +129,8 @@ class TerminalConfig:
     terminal_receive_credit: int
     max_cells: int
     max_feed_bytes: int
+    max_cols: int
+    max_rows: int
     cols: int
     rows: int
 
@@ -160,9 +162,19 @@ class TerminalConfig:
             minimum=1,
             maximum=UINT64_MAX,
         )
+        max_cols = _integer(
+            "max_cols", self.max_cols, minimum=1, maximum=UINT16_MAX
+        )
+        max_rows = _integer(
+            "max_rows", self.max_rows, minimum=1, maximum=UINT16_MAX
+        )
         cols = _integer("cols", self.cols, minimum=1, maximum=UINT16_MAX)
         rows = _integer("rows", self.rows, minimum=1, maximum=UINT16_MAX)
-        required_payload = max(_READY.size, 12 + 8 * cols)
+        if cols > max_cols or rows > max_rows:
+            raise ValueError("selected geometry exceeds caller-owned axis bounds")
+        required_payload = max(
+            _READY.size, 12 + 8 * min(max_cols, max_cells)
+        )
         if max_payload < required_payload:
             raise ValueError(
                 "max_payload cannot admit READY and one maximum-width CELL_SPAN"
@@ -179,6 +191,8 @@ class TerminalConfig:
         object.__setattr__(self, "terminal_receive_credit", receive_credit)
         object.__setattr__(self, "max_cells", max_cells)
         object.__setattr__(self, "max_feed_bytes", max_feed)
+        object.__setattr__(self, "max_cols", max_cols)
+        object.__setattr__(self, "max_rows", max_rows)
         object.__setattr__(self, "cols", cols)
         object.__setattr__(self, "rows", rows)
 
@@ -361,6 +375,11 @@ class PresentationTerminalCore:
         normalized_rows = _integer(
             "rows", rows, minimum=1, maximum=UINT16_MAX
         )
+        if (
+            normalized_cols > self._config.max_cols
+            or normalized_rows > self._config.max_rows
+        ):
+            raise ValueError("new geometry exceeds caller-owned axis bounds")
         if normalized_cols * normalized_rows > self._config.max_cells:
             raise ValueError("new geometry exceeds caller-owned model capacity")
         if (

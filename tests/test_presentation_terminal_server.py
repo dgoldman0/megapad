@@ -49,6 +49,8 @@ def _config() -> TerminalConfig:
         terminal_receive_credit=1_024,
         max_cells=4,
         max_feed_bytes=4_096,
+        max_cols=4,
+        max_rows=2,
         cols=2,
         rows=2,
     )
@@ -330,6 +332,8 @@ def test_ready_payload_floor_is_enforced_for_narrow_geometries():
             terminal_receive_credit=256,
             max_cells=1,
             max_feed_bytes=4_352,
+            max_cols=1,
+            max_rows=1,
             cols=1,
             rows=1,
         )

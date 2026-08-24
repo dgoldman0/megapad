@@ -347,6 +347,8 @@ class PresentationSessionPolicy:
                 terminal_receive_credit=transaction_bytes,
                 max_cells=self.max_cols * self.max_rows,
                 max_feed_bytes=publication_bytes,
+                max_cols=self.max_cols,
+                max_rows=self.max_rows,
                 cols=selected["cols"],
                 rows=selected["rows"],
             ),
