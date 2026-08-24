@@ -1,6 +1,14 @@
 """Stable public surface for MegaPad's additive presentation-terminal port."""
 
+from .cell_model import Cell, Cursor, TerminalView
+from .driver import (
+    DriverLimits,
+    DriverServiceResult,
+    DriverStatus,
+    PresentationTerminalDriver,
+)
 from .megapad import MegapadTerminalHost
+from .server import TerminalConfig, TerminalSessionError, TerminalState
 from .testing import FakeTerminalHost
 from .transport import (
     AdmissionStatus,
@@ -22,6 +30,11 @@ from .transport import (
 __all__ = [
     "AdmissionStatus",
     "BoundedEgressQueue",
+    "Cell",
+    "Cursor",
+    "DriverLimits",
+    "DriverServiceResult",
+    "DriverStatus",
     "EgressBatch",
     "EgressDelivery",
     "EgressPoll",
@@ -31,8 +44,13 @@ __all__ = [
     "HostPortLimits",
     "IngressRecord",
     "MegapadTerminalHost",
+    "PresentationTerminalDriver",
     "ScheduledEventPoll",
     "ScheduledHostEvent",
     "TerminalHost",
     "TerminalHostLease",
+    "TerminalConfig",
+    "TerminalSessionError",
+    "TerminalState",
+    "TerminalView",
 ]
