@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import json
+import operator
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from asm import assemble
 from display import VirtualTerminal
-from system import MegapadSystem
+from presentation_terminal import (
+    DriverLimits,
+    DriverServiceResult,
+    DriverStatus,
+    HostPortLimits,
+    PresentationTerminalDriver,
+    TerminalConfig,
+    TerminalSessionError,
+    TerminalState,
+    TerminalView,
+)
+from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
     from nic_backends import NICBackend
@@ -179,6 +191,40 @@ class RunReport:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class PresentationSessionConfig:
+    """Caller-owned bounds for one optional presentation attachment."""
+
+    host_limits: HostPortLimits
+    terminal_config: TerminalConfig
+    driver_limits: DriverLimits
+    ansi_history_bytes: int
+    service_batches: int = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host_limits, HostPortLimits):
+            raise TypeError("host_limits must be HostPortLimits")
+        if not isinstance(self.terminal_config, TerminalConfig):
+            raise TypeError("terminal_config must be TerminalConfig")
+        if not isinstance(self.driver_limits, DriverLimits):
+            raise TypeError("driver_limits must be DriverLimits")
+        for name, value, minimum in (
+            ("ansi_history_bytes", self.ansi_history_bytes, 0),
+            ("service_batches", self.service_batches, 1),
+        ):
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer, not bool")
+            try:
+                normalized = operator.index(value)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be an integer") from exc
+            if normalized < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+            if normalized > (1 << 64) - 1:
+                raise ValueError(f"{name} must fit uint64")
+            object.__setattr__(self, name, int(normalized))
+
+
 class MachineSession:
     """One synchronous owner for a MegaPad machine and terminal model."""
 
@@ -215,6 +261,31 @@ class MachineSession:
     NAMED_CHARACTERS = {
         "space": " ",
     }
+    PRESENTATION_KEY_SYMBOLS = {
+        "backspace": 0x00110001,
+        "tab": 0x00110002,
+        "enter": 0x00110003,
+        "return": 0x00110003,
+        "escape": 0x00110004,
+        "esc": 0x00110004,
+        "insert": 0x00110005,
+        "delete": 0x00110006,
+        "home": 0x00110007,
+        "end": 0x00110008,
+        "pageup": 0x00110009,
+        "pagedown": 0x0011000A,
+        "left": 0x0011000B,
+        "right": 0x0011000C,
+        "up": 0x0011000D,
+        "down": 0x0011000E,
+        **{f"f{index}": 0x0011001F + index for index in range(1, 13)},
+    }
+    PRESENTATION_MODIFIERS = {
+        "shift": 1 << 0,
+        "ctrl": 1 << 1,
+        "alt": 1 << 2,
+        "super": 1 << 3,
+    }
     MODIFIED_CSI_KEYS = {
         "up": ("1", "A"),
         "down": ("1", "B"),
@@ -243,17 +314,38 @@ class MachineSession:
         cols: int = 80,
         rows: int = 30,
         batch_steps: int = 100_000,
+        presentation: PresentationSessionConfig | None = None,
     ):
         if batch_steps <= 0:
             raise ValueError("batch_steps must be positive")
+        if presentation is not None and not isinstance(
+            presentation, PresentationSessionConfig
+        ):
+            raise TypeError("presentation must be PresentationSessionConfig or None")
+        if presentation is not None and (
+            cols != presentation.terminal_config.cols
+            or rows != presentation.terminal_config.rows
+        ):
+            raise ValueError(
+                "session geometry must match the presentation terminal config"
+            )
         self.system = system
         self.batch_steps = int(batch_steps)
+        self._presentation_config = presentation
+        self._presentation_driver: PresentationTerminalDriver | None = None
+        self._presentation_view: TerminalView | None = None
+        self._presentation_view_selected = False
+        self._presentation_failure_reason: str | None = None
+        self._presentation_lost = False
+        self._last_batch_presentation_progress = False
         self.terminal = VirtualTerminal(
             cols=cols,
             rows=rows,
-            uart_inject=self.system.uart.inject_input,
+            uart_inject=self._inject_terminal_response,
         )
         self.raw_output = bytearray()
+        self._raw_output_total = 0
+        self._raw_output_start = 0
         self.output_batches = 0
         self.output_byte_callbacks = 0
         self.revision = 0
@@ -263,7 +355,18 @@ class MachineSession:
         self._old_on_tx_batch = self.system.uart.on_tx_batch
         self.system.uart.on_tx = self._receive_byte
         self.system.uart.on_tx_batch = self._receive_batch
-        self.resize(cols, rows)
+        try:
+            if presentation is None:
+                self.resize(cols, rows)
+            else:
+                self._attach_presentation_terminal()
+        except BaseException:
+            if self._presentation_driver is not None:
+                self._presentation_driver.close()
+                self._presentation_driver = None
+            self.system.uart.on_tx = self._old_on_tx
+            self.system.uart.on_tx_batch = self._old_on_tx_batch
+            raise
 
     @classmethod
     def from_bios(
@@ -280,6 +383,7 @@ class MachineSession:
         cols: int = 80,
         rows: int = 30,
         batch_steps: int = 100_000,
+        presentation: PresentationSessionConfig | None = None,
         nic_backend: NICBackend | None = None,
         realtime_clock: bool = False,
     ) -> "MachineSession":
@@ -303,7 +407,13 @@ class MachineSession:
                     hook_id,
                     code_size,
                 )
-        session = cls(system, cols=cols, rows=rows, batch_steps=batch_steps)
+        session = cls(
+            system,
+            cols=cols,
+            rows=rows,
+            batch_steps=batch_steps,
+            presentation=presentation,
+        )
         session.bios_labels = dict(labels)
         return session
 
@@ -313,10 +423,58 @@ class MachineSession:
     def __exit__(self, exc_type, exc, traceback):
         self.close()
 
+    @property
+    def presentation_enabled(self) -> bool:
+        return self._presentation_config is not None
+
+    @property
+    def presentation_driver(self) -> PresentationTerminalDriver | None:
+        return self._presentation_driver
+
+    @property
+    def presentation_state(self) -> TerminalState | None:
+        if self._presentation_failure_reason is not None:
+            return TerminalState.FAILED
+        driver = self._presentation_driver
+        return None if driver is None else driver.core.state
+
+    @property
+    def presentation_failure(self) -> str | None:
+        if self._presentation_failure_reason is not None:
+            return self._presentation_failure_reason
+        driver = self._presentation_driver
+        if driver is not None and driver.failure_reason is not None:
+            return driver.failure_reason
+        if self._presentation_config is not None:
+            return self.system.presentation_terminal_host.failure_reason
+        return None
+
+    @property
+    def presentation_lost(self) -> bool:
+        """Whether the exact attachment disappeared outside controlled reset."""
+
+        return self._presentation_lost
+
+    @property
+    def raw_output_start(self) -> int:
+        """Absolute offset of the first retained diagnostic ANSI byte."""
+
+        return self._raw_output_start
+
+    @property
+    def raw_output_end(self) -> int:
+        """Absolute offset immediately after all observed ANSI bytes."""
+
+        return self._raw_output_total
+
     def close(self):
         if self._closed:
             return
         try:
+            driver = self._presentation_driver
+            if driver is not None:
+                driver.close()
+                self._presentation_driver = None
             self.system.storage.save_image()
         finally:
             self.system.uart.on_tx = self._old_on_tx
@@ -328,44 +486,263 @@ class MachineSession:
                 self._closed = True
 
     def boot(self, entry: int = 0):
+        reattach = self.presentation_enabled and self.system._booted
+        if reattach:
+            self._close_presentation_terminal()
+            self._presentation_view = None
+            if self._presentation_view_selected:
+                self.revision += 1
+            self._presentation_view_selected = False
         self.system.boot(entry)
+        if reattach:
+            self._attach_presentation_terminal()
 
     def reset(self, entry: int = 0, *, clear_terminal: bool = True):
         """Reset the owned machine and optionally clear captured terminal state."""
+        self._close_presentation_terminal()
         self.raw_output.clear()
+        self._raw_output_total = 0
+        self._raw_output_start = 0
         self.output_batches = 0
         self.output_byte_callbacks = 0
+        self._presentation_view = None
+        self._presentation_view_selected = False
+        self._presentation_failure_reason = None
+        self._presentation_lost = False
+        self._last_batch_presentation_progress = False
         if clear_terminal:
             cols, rows = self.terminal.cols, self.terminal.rows
             self.terminal = VirtualTerminal(
                 cols=cols,
                 rows=rows,
-                uart_inject=self.system.uart.inject_input,
+                uart_inject=self._inject_terminal_response,
             )
-            self.system.uart_geom.host_set_size(cols, rows)
+            if not self.presentation_enabled:
+                self.system.uart_geom.host_set_size(cols, rows)
         self.revision += 1
         self.system.boot(entry, discard_uart_output=True)
+        if self.presentation_enabled:
+            self._attach_presentation_terminal()
+
+    def _attach_presentation_terminal(self) -> None:
+        config = self._presentation_config
+        if config is None:
+            return
+        if self._presentation_driver is not None:
+            raise RuntimeError("presentation terminal is already attached")
+        terminal_config = replace(
+            config.terminal_config,
+            cols=self.terminal.cols,
+            rows=self.terminal.rows,
+        )
+        self._presentation_driver = PresentationTerminalDriver.attach(
+            self.system,
+            config.host_limits,
+            terminal_config,
+            config.driver_limits,
+            ansi_sink=self._receive_presentation_ansi,
+            view_sink=self._receive_presentation_view,
+        )
+        self._presentation_failure_reason = None
+        self._presentation_lost = False
+
+    def _close_presentation_terminal(self) -> None:
+        driver = self._presentation_driver
+        if driver is None:
+            return
+        try:
+            driver.close()
+        finally:
+            self._presentation_driver = None
+
+    def _inject_terminal_response(self, data: bytes) -> None:
+        if self._presentation_mutation_blocked():
+            raise RuntimeError(self._presentation_failure_reason)
+        driver = self._presentation_driver
+        if driver is None:
+            self.system.uart.inject_input(data)
+            return
+        status = driver.send_legacy_input(data)
+        if status is not DriverStatus.PROGRESS:
+            raise RuntimeError(
+                f"cannot enqueue ANSI terminal response: {status.value}"
+            )
+
+    def _append_raw_output(self, data: bytes) -> None:
+        payload = bytes(data)
+        if not payload:
+            return
+        self._raw_output_total += len(payload)
+        config = self._presentation_config
+        if config is None:
+            self.raw_output.extend(payload)
+            return
+        limit = config.ansi_history_bytes
+        if limit == 0:
+            self.raw_output.clear()
+            self._raw_output_start = self._raw_output_total
+            return
+        if len(payload) >= limit:
+            self.raw_output[:] = payload[-limit:]
+        else:
+            overflow = len(self.raw_output) + len(payload) - limit
+            if overflow > 0:
+                del self.raw_output[:overflow]
+            self.raw_output.extend(payload)
+        self._raw_output_start = self._raw_output_total - len(self.raw_output)
+
+    def _presentation_mutation_blocked(self) -> bool:
+        reason = self.presentation_failure
+        if reason is None:
+            return False
+        if self._presentation_failure_reason is None:
+            self._presentation_failure_reason = reason
+        return True
 
     def _receive_byte(self, value: int):
-        self.raw_output.append(value)
+        self._append_raw_output(bytes((value,)))
         self.output_byte_callbacks += 1
         self.terminal.write(value)
         self.revision += 1
 
     def _receive_batch(self, data: bytes):
-        self.raw_output.extend(data)
+        self._append_raw_output(data)
         self.output_batches += 1
         self.terminal.write(data)
         self.revision += 1
 
+    def _receive_presentation_ansi(self, data: bytes) -> None:
+        self._receive_batch(data)
+
+    def _receive_presentation_view(self, view: TerminalView) -> None:
+        if (self.terminal.cols, self.terminal.rows) != (view.cols, view.rows):
+            self.terminal.resize(view.cols, view.rows)
+        self._presentation_view = view
+        self._presentation_view_selected = True
+        self.revision += 1
+
     def clear_output(self):
         self.raw_output.clear()
+        self._raw_output_start = self._raw_output_total
 
     def raw_text(self) -> str:
         return bytes(self.raw_output).decode("utf-8", errors="replace")
 
     def screen_text(self, trim_right: bool = False) -> str:
         return self.snapshot().text(trim_right=trim_right)
+
+    def service_presentation_terminal(self) -> DriverServiceResult | None:
+        """Service the optional driver without executing guest instructions."""
+
+        driver = self._presentation_driver
+        config = self._presentation_config
+        if driver is None or config is None:
+            return None
+        if self._presentation_failure_reason is not None:
+            raise TerminalSessionError(self._presentation_failure_reason)
+        result = driver.service(max_batches=config.service_batches)
+        self._raise_presentation_failure(result)
+        self._sync_presentation_geometry()
+        self._refresh_presentation_display_boundary()
+        return result
+
+    def run_batch_stats(self, steps: int | None = None) -> SystemRunStats:
+        """Run one session-owned driver/machine/driver alternation."""
+
+        count = self.batch_steps if steps is None else operator.index(steps)
+        if count <= 0:
+            raise ValueError("steps must be positive")
+        before = self.service_presentation_terminal()
+        stats = self.system.run_batch_stats(count)
+        after = self.service_presentation_terminal()
+        self._last_batch_presentation_progress = bool(
+            stats.external_events_applied
+            or (
+                before is not None
+                and before.status is DriverStatus.PROGRESS
+            )
+            or (
+                after is not None
+                and after.status is DriverStatus.PROGRESS
+            )
+        )
+        if stats.system_stop_reason == "terminal_failure":
+            reason = self.system.presentation_terminal_host.failure_reason
+            self._latch_presentation_failure(reason or "presentation host failed")
+        self._refresh_presentation_display_boundary()
+        return stats
+
+    def _raise_presentation_failure(
+        self,
+        result: DriverServiceResult,
+    ) -> None:
+        if result.status is DriverStatus.FAILED:
+            driver = self._presentation_driver
+            reason = None if driver is None else driver.failure_reason
+            self._latch_presentation_failure(reason or "presentation driver failed")
+        if result.status is DriverStatus.STALE:
+            self._latch_presentation_failure(
+                "presentation attachment became stale",
+                lost=True,
+            )
+        host_failure = self.system.presentation_terminal_host.failure_reason
+        if host_failure is not None:
+            self._latch_presentation_failure(host_failure)
+
+    def _latch_presentation_failure(
+        self,
+        reason: str,
+        *,
+        lost: bool = False,
+    ) -> None:
+        if self._presentation_failure_reason is None:
+            self._presentation_failure_reason = str(reason)
+        self._presentation_lost = self._presentation_lost or lost
+        raise TerminalSessionError(self._presentation_failure_reason)
+
+    def _presentation_has_pending_work(self) -> bool:
+        driver = self._presentation_driver
+        if driver is None:
+            return False
+        host = self.system.presentation_terminal_host
+        return bool(
+            driver.pending_outbound_events
+            or (
+                driver.pending_resize is not None
+                and driver.core.resize_ready
+            )
+            or host.accepted_egress_batches
+            or host.retained_publication is not None
+            or host.pending_ingress_events
+            or host.pending_geometry_events
+        )
+
+    def _refresh_presentation_display_boundary(self) -> None:
+        driver = self._presentation_driver
+        if driver is None or not self._presentation_view_selected:
+            return
+        host = self.system.presentation_terminal_host
+        if (
+            driver.core.state is TerminalState.ANSI
+            and driver.pending_outbound_events == 0
+            and host.pending_ingress_events == 0
+            and host.pending_geometry_events == 0
+        ):
+            self._presentation_view_selected = False
+            self.revision += 1
+
+    def _sync_presentation_geometry(self) -> None:
+        """Mirror only geometry already committed by the protocol core."""
+
+        driver = self._presentation_driver
+        if driver is None:
+            return
+        cols, rows = driver.core.selected_geometry
+        if (self.terminal.cols, self.terminal.rows) == (cols, rows):
+            return
+        self.terminal.resize(cols, rows)
+        if not self._presentation_view_selected:
+            self.revision += 1
 
     def run(
         self,
@@ -386,7 +763,7 @@ class MachineSession:
         if idle_tick_cycles <= 0:
             raise ValueError("idle_tick_cycles must be positive")
         start = time.perf_counter()
-        output_start = len(self.raw_output)
+        output_start = self._raw_output_total
         steps = 0
         batches = 0
         matched = False
@@ -403,13 +780,23 @@ class MachineSession:
                 matched = True
                 reason = "matched"
                 break
-            if self.system.all_halted:
+            if self.presentation_failure is not None:
+                reason = "terminal_failure"
+                break
+            if (
+                self.system.all_halted
+                and not self._presentation_has_pending_work()
+            ):
                 reason = "halted"
                 break
             if time.perf_counter() - start >= wall_timeout_s:
                 reason = "wall_timeout"
                 break
-            if self.system.all_idle_or_halted and not self.system.uart.has_rx_data:
+            if (
+                self.system.all_idle_or_halted
+                and not self.system.uart.has_rx_data
+                and not self._presentation_has_pending_work()
+            ):
                 if not advance_idle:
                     reason = "idle"
                     break
@@ -429,9 +816,25 @@ class MachineSession:
                     time.sleep(0.001)
                 continue
             count = min(self.batch_steps, max_steps - steps)
-            executed = self.system.run_batch(count)
+            if self._presentation_driver is None:
+                executed = self.system.run_batch(count)
+                presentation_progress = False
+                stop_reason = ""
+            else:
+                try:
+                    stats = self.run_batch_stats(count)
+                except TerminalSessionError:
+                    reason = "terminal_failure"
+                    break
+                executed = stats.instructions_executed
+                presentation_progress = self._last_batch_presentation_progress
+                stop_reason = stats.system_stop_reason
             batches += 1
-            if executed <= 0:
+            if executed <= 0 and not (
+                presentation_progress
+                or self._presentation_has_pending_work()
+                or stop_reason == "all_idle"
+            ):
                 reason = "stalled"
                 break
             steps += executed
@@ -445,7 +848,7 @@ class MachineSession:
             steps=steps,
             batches=batches,
             elapsed_s=elapsed,
-            output_bytes=len(self.raw_output) - output_start,
+            output_bytes=self._raw_output_total - output_start,
             matched=matched,
         )
 
@@ -473,17 +876,40 @@ class MachineSession:
             advance_idle=True,
         )
 
-    def send_text(self, text: str | bytes):
-        self.system.uart.inject_input(text)
+    def send_text(self, text: str | bytes) -> DriverStatus | None:
+        if isinstance(text, str):
+            payload = text.encode("utf-8")
+        else:
+            try:
+                payload = bytes(text)
+            except (TypeError, ValueError) as exc:
+                raise TypeError("text must be str or bytes-like") from exc
+        if self._presentation_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._presentation_driver
+        if driver is None:
+            self.system.uart.inject_input(payload)
+            return None
+        if driver.core.state in {TerminalState.ANSI, TerminalState.PROBING}:
+            return driver.send_legacy_input(payload)
+        return driver.send_text(payload)
 
-    def send_key(self, key: str):
+    @staticmethod
+    def _key_parts(key: str) -> tuple[str, set[str]]:
+        if not isinstance(key, str):
+            raise TypeError("key must be str")
+        normalized = key.strip().lower().replace("_", "")
+        parts = normalized.split("+")
+        if not parts or not parts[-1]:
+            raise ValueError(f"unknown key: {key}")
+        modifiers = set(parts[:-1])
+        return parts[-1], modifiers
+
+    def _legacy_key_bytes(self, key: str) -> bytes:
         normalized = key.strip().lower().replace("_", "")
         if normalized in self.KEY_SEQUENCES:
-            self.send_text(self.KEY_SEQUENCES[normalized])
-            return
-        parts = normalized.split("+")
-        modifiers = set(parts[:-1])
-        base = parts[-1]
+            return self.KEY_SEQUENCES[normalized]
+        base, modifiers = self._key_parts(key)
         if (
             modifiers
             and modifiers <= {"ctrl", "alt", "shift"}
@@ -494,39 +920,130 @@ class MachineSession:
             modifier += 2 if "alt" in modifiers else 0
             modifier += 4 if "ctrl" in modifiers else 0
             parameter, final = self.MODIFIED_CSI_KEYS[base]
-            self.send_text(f"\x1b[{parameter};{modifier}{final}".encode("ascii"))
-            return
+            return f"\x1b[{parameter};{modifier}{final}".encode("ascii")
         char = self.NAMED_CHARACTERS.get(base, base)
         if len(char) == 1 and modifiers == {"ctrl"}:
             if "a" <= char <= "z":
-                self.send_text(bytes([ord(char) & 0x1F]))
-                return
+                return bytes([ord(char) & 0x1F])
         if len(char) == 1 and modifiers == {"alt"}:
-            self.send_text(b"\x1b" + char.encode("utf-8"))
-            return
+            return b"\x1b" + char.encode("utf-8")
         if len(char) == 1 and modifiers and modifiers <= {"ctrl", "alt", "shift"}:
             modifier = 1
             modifier += 1 if "shift" in modifiers else 0
             modifier += 2 if "alt" in modifiers else 0
             modifier += 4 if "ctrl" in modifiers else 0
-            self.send_text(f"\x1b[{ord(char)};{modifier}u".encode("ascii"))
-            return
+            return f"\x1b[{ord(char)};{modifier}u".encode("ascii")
         if len(char) == 1 and not modifiers:
-            self.send_text(char)
-            return
+            return char.encode("utf-8")
         raise ValueError(f"unknown key: {key}")
 
-    def resize(self, cols: int, rows: int):
+    def _presentation_key(self, key: str) -> tuple[int, int]:
+        base, modifiers = self._key_parts(key)
+        if not modifiers <= self.PRESENTATION_MODIFIERS.keys():
+            raise ValueError(f"unknown key modifier in: {key}")
+        symbol = self.PRESENTATION_KEY_SYMBOLS.get(base)
+        if symbol is None:
+            char = self.NAMED_CHARACTERS.get(base, base)
+            if len(char) != 1:
+                raise ValueError(f"unknown key: {key}")
+            symbol = ord(char)
+        modifier_bits = 0
+        for modifier in modifiers:
+            modifier_bits |= self.PRESENTATION_MODIFIERS[modifier]
+        return symbol, modifier_bits
+
+    def send_key(self, key: str) -> DriverStatus | None:
+        if self._presentation_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._presentation_driver
+        if driver is None or driver.core.state in {
+            TerminalState.ANSI,
+            TerminalState.PROBING,
+        }:
+            payload = self._legacy_key_bytes(key)
+            if driver is None:
+                self.system.uart.inject_input(payload)
+                return None
+            return driver.send_legacy_input(payload)
+        symbol, modifiers = self._presentation_key(key)
+        return driver.send_key(symbol, modifiers=modifiers)
+
+    def send_pointer(
+        self,
+        x: int,
+        y: int,
+        *,
+        buttons: int = 0,
+        modifiers: int = 0,
+        kind: int = 1,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> DriverStatus:
+        if self._presentation_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._presentation_driver
+        if driver is None:
+            return DriverStatus.INVALID
+        return driver.send_pointer(
+            x,
+            y,
+            buttons=buttons,
+            modifiers=modifiers,
+            kind=kind,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
+
+    def send_focus(self, focused: bool) -> DriverStatus:
+        if self._presentation_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._presentation_driver
+        if driver is None:
+            return DriverStatus.INVALID
+        return driver.send_focus(focused)
+
+    def resize(self, cols: int, rows: int) -> DriverStatus | None:
+        if self._presentation_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._presentation_driver
+        if driver is not None:
+            state = driver.core.state
+            status = driver.request_resize(cols, rows)
+            if (
+                status is DriverStatus.PROGRESS
+                and state is TerminalState.ANSI
+            ):
+                changed = (
+                    cols != self.terminal.cols or rows != self.terminal.rows
+                )
+                self.terminal.resize(cols, rows)
+                if changed and not self._presentation_view_selected:
+                    self.revision += 1
+            return status
         changed = cols != self.terminal.cols or rows != self.terminal.rows
         self.terminal.resize(cols, rows)
         self.system.uart_geom.host_set_size(cols, rows)
         if changed:
             self.revision += 1
+        return None
 
     def step(self) -> int:
-        return self.system.step()
+        if self._presentation_driver is None:
+            return self.system.step()
+        self.service_presentation_terminal()
+        cycles = self.system.step()
+        self.service_presentation_terminal()
+        self._refresh_presentation_display_boundary()
+        return cycles
 
     def snapshot(self) -> TerminalSnapshot:
+        view = (
+            self._presentation_view
+            if self._presentation_view_selected
+            else None
+        )
+        if view is not None:
+            return self._snapshot_presentation_view(view)
         terminal = self.terminal
         with terminal._lock:
             cells = tuple(
@@ -550,6 +1067,32 @@ class MachineSession:
                 cursor_visible=terminal.cursor_visible,
                 alternate_screen=terminal._in_alt_screen,
             )
+
+    @staticmethod
+    def _snapshot_presentation_view(view: TerminalView) -> TerminalSnapshot:
+        palette = VirtualTerminal.COLORS
+        cells = tuple(
+            tuple(
+                TerminalCell(
+                    char=chr(cell.codepoint),
+                    fg=palette[cell.foreground],
+                    bg=palette[cell.background],
+                    attrs=(cell.attributes & 0x3F)
+                    | ((cell.attributes & 0x40) << 1),
+                )
+                for cell in row
+            )
+            for row in view.cells
+        )
+        return TerminalSnapshot(
+            cols=view.cols,
+            rows=view.rows,
+            cells=cells,
+            cursor_col=view.cursor.column,
+            cursor_row=view.cursor.row,
+            cursor_visible=view.cursor.visible,
+            alternate_screen=False,
+        )
 
 
 def _load_bios(path: Path) -> tuple[bytes, dict[str, int]]:

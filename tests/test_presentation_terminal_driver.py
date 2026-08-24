@@ -209,6 +209,7 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     ]
 
     assert driver.send_key(ord("x"), modifiers=1) is DriverStatus.PROGRESS
+    assert driver.send_legacy_input(b"not-framed") is DriverStatus.INVALID
     sent = driver.service()
     assert sent.outbound_records == 1
     system.run_batch_stats(1)
@@ -324,6 +325,42 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     assert driver.close().value == "accepted"
     _write_native_uart(system, b"legacy")
     assert legacy_batches == [b"legacy"]
+
+
+def test_driver_routes_bounded_preswitch_input_through_the_lease():
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    driver = PresentationTerminalDriver.attach(
+        system,
+        _host_limits(),
+        _terminal_config(),
+        DriverLimits(4_096, 3),
+    )
+
+    assert driver.max_legacy_input_bytes == 4_096
+    assert driver.send_legacy_input(b"boot\r") is DriverStatus.PROGRESS
+    assert system.uart.rx_pending == 0
+    assert driver.service().outbound_records == 1
+
+    system.cpu.halted = True
+    boundary = system.run_batch_stats(1)
+    assert boundary.external_events_applied == 2  # geometry, then raw input
+    assert _drain_uart_rx(system) == b"boot\r"
+
+    assert driver.request_resize(4, 1) is DriverStatus.PROGRESS
+    assert driver.core.selected_geometry == (4, 1)
+    assert system.run_batch_stats(1).external_events_applied == 1
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (4, 1)
+
+    _write_native_uart(system, encode_probe(7))
+    assert driver.service().outbound_records == 1
+    assert driver.request_resize(2, 2) is DriverStatus.BACKPRESSURED
+    assert system.run_batch_stats(1).external_events_applied == 1
+    offer = parse_negotiation(_drain_uart_rx(system))
+    assert isinstance(offer, Offer)
+    assert (offer.cols, offer.rows) == (4, 1)
+    assert driver.send_legacy_input(b"") is DriverStatus.INVALID
+    assert driver.send_legacy_input("text") is DriverStatus.INVALID
+    driver.close()
 
 
 def test_driver_rejects_incoherent_capacity_before_acquiring_the_lease():

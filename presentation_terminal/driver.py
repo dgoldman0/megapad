@@ -15,6 +15,7 @@ from .server import (
     PresentationTerminalCore,
     TerminalConfig,
     TerminalSessionError,
+    TerminalState,
 )
 from .transport import (
     AdmissionStatus,
@@ -255,6 +256,15 @@ class PresentationTerminalDriver:
         )
 
     @property
+    def max_legacy_input_bytes(self) -> int:
+        """Effective one-record bound while the guest still owns ANSI."""
+
+        return min(
+            self._host_limits.ordinary_ingress_bytes,
+            self._limits.pending_outbound_bytes,
+        )
+
+    @property
     def failure_reason(self) -> str | None:
         return self._failure_reason
 
@@ -272,6 +282,11 @@ class PresentationTerminalDriver:
             return DriverServiceResult(DriverStatus.STALE)
         if self._failure_reason is not None:
             return DriverServiceResult(DriverStatus.FAILED)
+        if self._core.state not in {
+            TerminalState.ACTIVE,
+            TerminalState.RESYNCING,
+        }:
+            self._resize_intent = None
 
         batches = 0
         admitted = 0
@@ -349,6 +364,11 @@ class PresentationTerminalDriver:
             try:
                 result = self._core.feed_machine(delivery.batch.payload)
                 self._retain_outbound(result.outbound)
+                if self._core.state not in {
+                    TerminalState.ACTIVE,
+                    TerminalState.RESYNCING,
+                }:
+                    self._resize_intent = None
             except (TerminalSessionError, TypeError, ValueError) as exc:
                 delivery.release()
                 self._fail(str(exc))
@@ -423,6 +443,36 @@ class PresentationTerminalDriver:
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
+        except (TerminalSessionError, TypeError, ValueError):
+            return DriverStatus.INVALID
+        return DriverStatus.PROGRESS
+
+    def send_legacy_input(self, data) -> DriverStatus:
+        """Queue raw input only before the enhanced OPEN boundary.
+
+        This keeps boot-time and unsupported-peer interaction inside the
+        exclusive lease instead of falling through the suppressed legacy
+        UART facade.  Once OPEN begins, all input must use framed messages.
+        """
+
+        if self._closed:
+            return DriverStatus.STALE
+        if self._failure_reason is not None:
+            return DriverStatus.FAILED
+        if self._core.state not in {TerminalState.ANSI, TerminalState.PROBING}:
+            return DriverStatus.INVALID
+        if isinstance(data, str):
+            return DriverStatus.INVALID
+        try:
+            raw = memoryview(data).tobytes()
+        except (TypeError, ValueError):
+            return DriverStatus.INVALID
+        if not raw or len(raw) > self.max_legacy_input_bytes:
+            return DriverStatus.INVALID
+        if not self._can_retain(len(raw), 1):
+            return DriverStatus.BACKPRESSURED
+        try:
+            self._retain_outbound((OutboundBytes(raw, False),))
         except (TerminalSessionError, TypeError, ValueError):
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS
@@ -516,9 +566,28 @@ class PresentationTerminalDriver:
         if self._failure_reason is not None:
             return DriverStatus.FAILED
         try:
-            self._resize_intent = self._core.validate_resize(cols, rows)
+            geometry = self._core.validate_resize(cols, rows)
         except (TypeError, ValueError):
             return DriverStatus.INVALID
+        state = self._core.state
+        if state is TerminalState.ANSI:
+            if geometry == self._core.selected_geometry:
+                return DriverStatus.PROGRESS
+            admission = self._lease.submit_geometry(*geometry)
+            if admission is AdmissionStatus.BACKPRESSURED:
+                return DriverStatus.BACKPRESSURED
+            if admission is AdmissionStatus.STALE:
+                self._closed = True
+                return DriverStatus.STALE
+            try:
+                self._core.select_ansi_geometry(*geometry)
+            except (TerminalSessionError, TypeError, ValueError) as exc:
+                self._fail(f"cannot commit admitted ANSI geometry: {exc}")
+                return DriverStatus.FAILED
+            return DriverStatus.PROGRESS
+        if state not in {TerminalState.ACTIVE, TerminalState.RESYNCING}:
+            return DriverStatus.BACKPRESSURED
+        self._resize_intent = geometry
         return DriverStatus.PROGRESS
 
     def close(self) -> AdmissionStatus:

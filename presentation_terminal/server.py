@@ -12,7 +12,7 @@ from __future__ import annotations
 import operator
 import secrets
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable
 
@@ -335,6 +335,10 @@ class PresentationTerminalCore:
         return self._geometry_generation
 
     @property
+    def selected_geometry(self) -> tuple[int, int]:
+        return self._config.cols, self._config.rows
+
+    @property
     def resize_ready(self) -> bool:
         model = self._model
         decoder = self._decoder
@@ -369,6 +373,20 @@ class PresentationTerminalCore:
                 "new geometry cannot fit one maximum-width CELL_SPAN"
             )
         return normalized_cols, normalized_rows
+
+    def select_ansi_geometry(self, cols: int, rows: int) -> None:
+        """Commit an already-admitted legacy geometry before negotiation."""
+
+        normalized_cols, normalized_rows = self.validate_resize(cols, rows)
+        if self._state is not TerminalState.ANSI:
+            raise TerminalSessionError(
+                "legacy geometry can change only before negotiation"
+            )
+        self._config = replace(
+            self._config,
+            cols=normalized_cols,
+            rows=normalized_rows,
+        )
 
     def feed_machine(self, data) -> CoreResult:
         """Consume one bounded machine publication outside scheduler settlement."""
@@ -545,6 +563,11 @@ class PresentationTerminalCore:
         if encoded is None:
             return None
         model.select_geometry(normalized_cols, normalized_rows)
+        self._config = replace(
+            self._config,
+            cols=normalized_cols,
+            rows=normalized_rows,
+        )
         self._geometry_generation = generation
         self._state = TerminalState.RESYNCING
         return encoded

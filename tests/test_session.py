@@ -6,18 +6,65 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from cli import MegapadCLI, main as cli_main
 from dev_session import run_scenario
 from devices import UART
 from display import VirtualTerminal
 from nic_backends import LoopbackBackend
-from session import MachineSession
+from presentation_terminal import (
+    Cell,
+    Cursor,
+    DriverLimits,
+    DriverStatus,
+    EgressWatermarks,
+    HostPortLimits,
+    TerminalConfig,
+    TerminalSessionError,
+    TerminalState,
+    TerminalView,
+)
+from session import MachineSession, PresentationSessionConfig
 from session_server import main as session_server_main
 from system import EXT_MEM_BASE, HBW_BASE, VRAM_BASE, MegapadSystem
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BIOS = ROOT / "bios.asm"
+
+
+def _presentation_config(*, ansi_history_bytes: int = 32) -> PresentationSessionConfig:
+    return PresentationSessionConfig(
+        host_limits=HostPortLimits(
+            egress=EgressWatermarks(8_192, 1_024, 16, 2),
+            retained_publication_bytes=4_608,
+            ingress_bytes=8_192,
+            ingress_events=16,
+            ingress_control_bytes=4_096,
+            ingress_control_events=8,
+            geometry_events=2,
+        ),
+        terminal_config=TerminalConfig(
+            max_payload=256,
+            max_transaction_bytes=512,
+            terminal_receive_credit=1_024,
+            max_cells=16,
+            max_feed_bytes=4_608,
+            cols=2,
+            rows=2,
+        ),
+        driver_limits=DriverLimits(4_096, 8),
+        ansi_history_bytes=ansi_history_bytes,
+        service_batches=2,
+    )
+
+
+def _drain_uart_rx(system: MegapadSystem) -> bytes:
+    result = bytearray()
+    while system.uart.has_rx_data:
+        result.append(system.cpu._cs.uart_read8(0x01))
+    return bytes(result)
 
 
 def test_native_uart_rx_status_and_batched_tx():
@@ -159,6 +206,162 @@ def test_machine_session_encodes_modified_named_navigation_keys():
         received = bytes(state.uart_read8(0x01) for _ in range(18))
 
     assert received == b"\x1b[1;3D\x1b[6;5~\x1b[3;3~"
+
+
+def test_machine_session_optional_terminal_owns_preswitch_input_and_geometry():
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        batch_steps=1,
+        presentation=_presentation_config(),
+    ) as session:
+        assert session.presentation_enabled
+        assert session.presentation_state is TerminalState.ANSI
+        assert system.presentation_terminal_host.enhanced_attached
+        assert system.presentation_terminal_host.pending_geometry_events == 1
+        assert session.send_text("boot\r") is DriverStatus.PROGRESS
+        assert system.uart.rx_pending == 0
+
+        system.cpu.halted = True
+        boundary = session.run_batch_stats(1)
+        assert boundary.external_events_applied == 2
+        assert _drain_uart_rx(system) == b"boot\r"
+
+
+def test_machine_session_bounds_optional_ansi_history_without_losing_screen():
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        presentation=_presentation_config(ansi_history_bytes=4),
+    ) as session:
+        payload = b"\x1b[31mA"
+        for value in payload:
+            system.cpu._cs.uart_write8(0x00, value)
+        assert system._drain_native_uart_output() == payload
+        serviced = session.service_presentation_terminal()
+        assert serviced is not None and serviced.ansi_bytes == len(payload)
+        assert bytes(session.raw_output) == b"31mA"
+        assert (session.raw_output_start, session.raw_output_end) == (2, 6)
+        snapshot = session.snapshot()
+        assert snapshot.lines()[0].startswith("A")
+        assert snapshot.cells[0][0].fg == VirtualTerminal.COLORS[1]
+
+
+def test_machine_session_reset_replaces_the_optional_attachment_epoch():
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        presentation=_presentation_config(),
+    ) as session:
+        session.boot()
+        first = session.presentation_driver
+        first_epoch = first.attachment_epoch
+        first.close()
+        with pytest.raises(TerminalSessionError, match="became stale"):
+            session.service_presentation_terminal()
+        assert session.presentation_lost
+        assert session.presentation_state is TerminalState.FAILED
+        assert session.send_text("blocked") is DriverStatus.FAILED
+        assert session.send_key("enter") is DriverStatus.FAILED
+        assert session.resize(4, 1) is DriverStatus.FAILED
+        session.reset()
+        second = session.presentation_driver
+        assert second is not None
+        assert second.attachment_epoch > first_epoch
+        assert not session.presentation_lost
+        assert session.presentation_state is TerminalState.ANSI
+        assert system.presentation_terminal_host.pending_geometry_events == 1
+
+
+def test_machine_session_optional_attach_failure_restores_uart_callbacks():
+    system = MegapadSystem(ram_size=64 * 1024)
+    byte_callback = lambda value: None
+    batch_callback = lambda data: None
+    system.uart.on_tx = byte_callback
+    system.uart.on_tx_batch = batch_callback
+    system.schedule_terminal_resize(80, 30, at_cycle=1_000)
+
+    with pytest.raises(RuntimeError, match="pending legacy terminal input"):
+        MachineSession(
+            system,
+            cols=2,
+            rows=2,
+            presentation=_presentation_config(),
+        )
+
+    assert system.uart.on_tx is byte_callback
+    assert system.uart.on_tx_batch is batch_callback
+    assert not system.presentation_terminal_host.enhanced_attached
+
+
+def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        presentation=_presentation_config(),
+    ) as session:
+        system.cpu.halted = True
+        session.run_batch_stats(1)  # Cross the initial geometry boundary.
+        view = TerminalView(
+            attachment_epoch=session.presentation_driver.attachment_epoch,
+            session_id=7,
+            presentation_epoch=1,
+            revision=1,
+            cols=2,
+            rows=2,
+            cells=(
+                (Cell(ord("A"), 1, 2, 0x40), Cell(ord("B"), 3, 4, 0x20)),
+                (Cell(ord("C"), 5, 6, 0x08), Cell(ord("D"), 7, 0, 0)),
+            ),
+            dirty_spans=(),
+            cursor=Cursor(1, 1, True),
+        )
+        session._receive_presentation_view(view)
+        snapshot = session.snapshot()
+
+        assert snapshot.lines() == ["AB", "CD"]
+        assert snapshot.cells[0][0].fg == VirtualTerminal.COLORS[1]
+        assert snapshot.cells[0][0].bg == VirtualTerminal.COLORS[2]
+        assert snapshot.cells[0][0].attrs == 0x80
+        assert snapshot.cells[0][1].attrs == 0x20
+        assert (snapshot.cursor_col, snapshot.cursor_row) == (1, 1)
+
+        # A committed resize can be followed by CLOSE before its replacement
+        # snapshot.  Keep showing the last immutable view while synchronizing
+        # the hidden ANSI fallback to the core's already-selected geometry.
+        before_sync = session.revision
+        session.presentation_driver.core.select_ansi_geometry(4, 1)
+        session._sync_presentation_geometry()
+        assert (session.terminal.cols, session.terminal.rows) == (4, 1)
+        assert session.snapshot().lines() == ["AB", "CD"]
+        assert session.revision == before_sync
+        session._refresh_presentation_display_boundary()
+        assert (session.snapshot().cols, session.snapshot().rows) == (4, 1)
+        assert session.revision == before_sync + 1
 
 
 def test_machine_session_can_advance_timer_while_guest_is_idle():
