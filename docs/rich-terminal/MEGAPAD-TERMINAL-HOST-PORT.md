@@ -135,12 +135,35 @@ Ingress capacity includes a reserved control allowance sufficient for one
 APT credit, reset, close, or fatal-error response. Ordinary key, text, and
 pointer events cannot consume this reserve.
 
+An APT `RESIZE` is admitted through one composite operation:
+
+```
+ResizeRecord(attachment_epoch, schedule_sequence, payload, cols, rows)
+```
+
+It atomically reserves one ordinary ingress byte/event charge and one
+geometry-event charge. If either allowance is unavailable, admission changes
+no counter, queue, or sequence. A retained composite is retried byte-for-byte;
+the wire frame is never re-encoded merely because the host port is full.
+Before encoding that frame, the driver observes an empty egress poll and
+confirms through the lease that neither accepted nor adapter-retained machine
+egress remains. This prevents an unseen retained `TX_BEGIN` from being crossed
+by asynchronous UI geometry. It also preflights the current ordinary-ingress
+and geometry allowances before encoding. If either is full, the latest-wins
+geometry intent remains unencoded while the runner drains older input; the
+core does not enter resynchronization early.
+
 ## 7. Geometry
 
 Initial geometry is attached before guest boot. While APT-1 is active, the
 terminal session is authoritative. An accepted protocol resize is scheduled
 through the existing generation-qualified geometry journal and mirrored to
 legacy UART geometry as one coherent event.
+
+At the scheduler boundary, the composite geometry is scheduled before its
+framed `RESIZE` payload and no guest instruction may execute between them.
+The fake host likewise transfers and releases both reservations as one
+`ResizeRecord`; it cannot expose a half-resize boundary.
 
 While ANSI owns the stream, the existing host/MMIO geometry path remains
 authoritative. An enhanced-session geometry event and a legacy resize flag
@@ -200,4 +223,5 @@ The lightweight host-port suite must prove:
 4. terminal code is not invoked during settlement;
 5. ingress is applied only at a later scheduler boundary;
 6. stale handles cannot publish after reset or detach; and
-7. geometry has one epoch-qualified application.
+7. geometry has one epoch-qualified application; and
+8. protocol resize either reserves both ingress and geometry or neither.

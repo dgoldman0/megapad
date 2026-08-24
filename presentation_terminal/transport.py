@@ -150,7 +150,45 @@ class GeometryRecord:
         )
 
 
-ScheduledHostEvent: TypeAlias = IngressRecord | GeometryRecord
+@dataclass(frozen=True, slots=True)
+class ResizeRecord:
+    """One atomic APT RESIZE ingress plus matching MMIO geometry change."""
+
+    attachment_epoch: int
+    schedule_sequence: int
+    payload: bytes
+    cols: int
+    rows: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "attachment_epoch",
+            _integer("attachment_epoch", self.attachment_epoch, minimum=1),
+        )
+        object.__setattr__(
+            self,
+            "schedule_sequence",
+            _integer("schedule_sequence", self.schedule_sequence, minimum=0),
+        )
+        object.__setattr__(
+            self,
+            "payload",
+            _payload_bytes(self.payload, allow_empty=False),
+        )
+        object.__setattr__(
+            self,
+            "cols",
+            _integer("cols", self.cols, minimum=1, maximum=(1 << 16) - 1),
+        )
+        object.__setattr__(
+            self,
+            "rows",
+            _integer("rows", self.rows, minimum=1, maximum=(1 << 16) - 1),
+        )
+
+
+ScheduledHostEvent: TypeAlias = IngressRecord | GeometryRecord | ResizeRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +492,12 @@ class EgressDelivery:
 class _LeaseOwner(Protocol):
     def _lease_poll(self, token: object, epoch: int) -> EgressPoll: ...
 
+    def _lease_machine_egress_quiescent(
+        self,
+        token: object,
+        epoch: int,
+    ) -> AdmissionStatus: ...
+
     def _lease_submit_ingress(
         self,
         token: object,
@@ -469,6 +513,23 @@ class _LeaseOwner(Protocol):
         epoch: int,
         cols: int,
         rows: int,
+    ) -> AdmissionStatus: ...
+
+    def _lease_submit_resize(
+        self,
+        token: object,
+        epoch: int,
+        payload,
+        *,
+        cols: int,
+        rows: int,
+    ) -> AdmissionStatus: ...
+
+    def _lease_resize_admission_ready(
+        self,
+        token: object,
+        epoch: int,
+        payload_bytes: int,
     ) -> AdmissionStatus: ...
 
     def _lease_close(self, token: object, epoch: int) -> AdmissionStatus: ...
@@ -506,6 +567,14 @@ class TerminalHostLease:
     def poll_egress(self) -> EgressPoll:
         return self._owner._lease_poll(self._token, self._attachment_epoch)
 
+    def machine_egress_quiescent(self) -> AdmissionStatus:
+        """Report whether no accepted or adapter-retained batch remains."""
+
+        return self._owner._lease_machine_egress_quiescent(
+            self._token,
+            self._attachment_epoch,
+        )
+
     def submit_ingress(self, payload, *, control: bool = False) -> AdmissionStatus:
         return self._owner._lease_submit_ingress(
             self._token,
@@ -520,6 +589,26 @@ class TerminalHostLease:
             self._attachment_epoch,
             cols,
             rows,
+        )
+
+    def submit_resize(self, payload, *, cols: int, rows: int) -> AdmissionStatus:
+        """Atomically admit framed RESIZE ingress and matching geometry."""
+
+        return self._owner._lease_submit_resize(
+            self._token,
+            self._attachment_epoch,
+            payload,
+            cols=cols,
+            rows=rows,
+        )
+
+    def resize_admission_ready(self, payload_bytes: int) -> AdmissionStatus:
+        """Preflight one composite resize without reserving capacity."""
+
+        return self._owner._lease_resize_admission_ready(
+            self._token,
+            self._attachment_epoch,
+            payload_bytes,
         )
 
     def close(self) -> AdmissionStatus:
@@ -564,6 +653,7 @@ __all__ = [
     "GeometryRecord",
     "HostPortLimits",
     "IngressRecord",
+    "ResizeRecord",
     "ScheduledEventPoll",
     "ScheduledHostEvent",
     "TerminalHost",

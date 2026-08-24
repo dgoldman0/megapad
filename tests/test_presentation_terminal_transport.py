@@ -14,6 +14,7 @@ from presentation_terminal import (
     GeometryRecord,
     HostPortLimits,
     IngressRecord,
+    ResizeRecord,
     TerminalHost,
 )
 
@@ -146,6 +147,10 @@ def test_full_queue_retains_one_exact_publication_until_runner_services_it():
     )
     assert host.runner_backpressured
     assert not host.can_start_guest_batch
+    assert (
+        lease.machine_egress_quiescent()
+        is AdmissionStatus.BACKPRESSURED
+    )
 
     # A forbidden extra runner publication neither replaces nor duplicates
     # the one adapter-owned retained record.
@@ -156,6 +161,10 @@ def test_full_queue_retains_one_exact_publication_until_runner_services_it():
     assert first is not None and first.batch.payload == b"ABC"
     assert host.service_retained(lease) is AdmissionStatus.BACKPRESSURED
     assert first.release() is AdmissionStatus.ACCEPTED
+    assert (
+        lease.machine_egress_quiescent()
+        is AdmissionStatus.BACKPRESSURED
+    )
 
     assert host.service_retained(lease) is AdmissionStatus.ACCEPTED
     assert host.retained_publication is None
@@ -165,6 +174,7 @@ def test_full_queue_retains_one_exact_publication_until_runner_services_it():
     assert (second.batch.publication_sequence, second.batch.payload) == (1, b"XY")
     assert lease.poll_egress().delivery is None
     assert second.release() is AdmissionStatus.ACCEPTED
+    assert lease.machine_egress_quiescent() is AdmissionStatus.ACCEPTED
 
 
 def test_reset_invalidates_old_lease_delivery_and_stale_close_cannot_detach_new():
@@ -241,3 +251,61 @@ def test_ingress_reserves_control_capacity_and_geometry_waits_for_boundary():
     assert host.pending_ingress == ()
     assert host.pending_geometry == ()
     assert host.take_scheduled_event(lease).status is AdmissionStatus.STALE
+
+
+def test_resize_admission_reserves_ingress_and_geometry_atomically():
+    host = FakeTerminalHost()
+    lease = host.attach(
+        _limits(
+            ingress_bytes=4,
+            ingress_events=2,
+            control_bytes=1,
+            control_events=1,
+            geometry_events=1,
+        )
+    )
+
+    assert lease.submit_ingress(b"ABC") is AdmissionStatus.ACCEPTED
+    assert lease.resize_admission_ready(1) is AdmissionStatus.BACKPRESSURED
+    assert (
+        lease.submit_resize(b"R", cols=100, rows=40)
+        is AdmissionStatus.BACKPRESSURED
+    )
+    assert (host.pending_ingress_bytes, host.pending_ingress_events) == (3, 1)
+    assert host.pending_geometry_events == 0
+    first = host.take_scheduled_event(lease)
+    assert first.event == IngressRecord(lease.attachment_epoch, 0, b"ABC", False)
+
+    assert lease.submit_geometry(90, 30) is AdmissionStatus.ACCEPTED
+    assert lease.resize_admission_ready(1) is AdmissionStatus.BACKPRESSURED
+    assert (
+        lease.submit_resize(b"R", cols=100, rows=40)
+        is AdmissionStatus.BACKPRESSURED
+    )
+    assert (host.pending_ingress_bytes, host.pending_ingress_events) == (0, 0)
+    assert host.pending_geometry_events == 1
+    second = host.take_scheduled_event(lease)
+    assert second.event == GeometryRecord(lease.attachment_epoch, 1, 90, 30)
+    assert lease.resize_admission_ready(1) is AdmissionStatus.ACCEPTED
+
+    source = bytearray(b"R")
+    assert (
+        lease.submit_resize(source, cols=100, rows=40)
+        is AdmissionStatus.ACCEPTED
+    )
+    source[:] = b"X"
+    expected = ResizeRecord(lease.attachment_epoch, 2, b"R", 100, 40)
+    assert host.pending_ingress == (expected,)
+    assert host.pending_geometry == (expected,)
+    assert (host.pending_ingress_bytes, host.pending_ingress_events) == (1, 1)
+    assert host.pending_geometry_events == 1
+    assert host.take_scheduled_event(lease).event == expected
+    assert (host.pending_ingress_bytes, host.pending_ingress_events) == (0, 0)
+    assert host.pending_geometry_events == 0
+
+    assert lease.close() is AdmissionStatus.ACCEPTED
+    assert lease.resize_admission_ready(1) is AdmissionStatus.STALE
+    assert (
+        lease.submit_resize(b"late", cols=80, rows=24)
+        is AdmissionStatus.STALE
+    )

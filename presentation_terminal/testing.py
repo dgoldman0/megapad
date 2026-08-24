@@ -14,6 +14,7 @@ from .transport import (
     GeometryRecord,
     HostPortLimits,
     IngressRecord,
+    ResizeRecord,
     ScheduledEventPoll,
     ScheduledHostEvent,
     TerminalHostLease,
@@ -110,21 +111,21 @@ class FakeTerminalHost:
             return self._pending_geometry_events
 
     @property
-    def pending_ingress(self) -> tuple[IngressRecord, ...]:
+    def pending_ingress(self) -> tuple[IngressRecord | ResizeRecord, ...]:
         with self._lock:
             return tuple(
                 event
                 for event in self._scheduled
-                if isinstance(event, IngressRecord)
+                if isinstance(event, (IngressRecord, ResizeRecord))
             )
 
     @property
-    def pending_geometry(self) -> tuple[GeometryRecord, ...]:
+    def pending_geometry(self) -> tuple[GeometryRecord | ResizeRecord, ...]:
         with self._lock:
             return tuple(
                 event
                 for event in self._scheduled
-                if isinstance(event, GeometryRecord)
+                if isinstance(event, (GeometryRecord, ResizeRecord))
             )
 
     def _next_epoch_locked(self) -> int:
@@ -248,6 +249,20 @@ class FakeTerminalHost:
             assert queue is not None
             return queue.poll()
 
+    def _lease_machine_egress_quiescent(
+        self,
+        token: object,
+        epoch: int,
+    ) -> AdmissionStatus:
+        with self._lock:
+            if not self._current_locked(token, epoch):
+                return AdmissionStatus.STALE
+            queue = self._egress
+            assert queue is not None
+            if self._retained_publication is not None or queue.accepted_batches:
+                return AdmissionStatus.BACKPRESSURED
+            return AdmissionStatus.ACCEPTED
+
     def _lease_submit_ingress(
         self,
         token: object,
@@ -322,6 +337,78 @@ class FakeTerminalHost:
             self._pending_geometry_events += 1
             return AdmissionStatus.ACCEPTED
 
+    def _lease_submit_resize(
+        self,
+        token: object,
+        epoch: int,
+        payload,
+        *,
+        cols: int,
+        rows: int,
+    ) -> AdmissionStatus:
+        with self._lock:
+            if not self._current_locked(token, epoch):
+                return AdmissionStatus.STALE
+            immutable = _payload_bytes(payload, allow_empty=False)
+            normalized_cols = _integer(
+                "cols", cols, minimum=1, maximum=(1 << 16) - 1
+            )
+            normalized_rows = _integer(
+                "rows", rows, minimum=1, maximum=(1 << 16) - 1
+            )
+            limits = self._limits
+            assert limits is not None
+            size = len(immutable)
+            if not self._resize_fits_locked(size):
+                return AdmissionStatus.BACKPRESSURED
+
+            sequence = self._allocate_schedule_sequence_locked()
+            self._scheduled.append(
+                ResizeRecord(
+                    epoch,
+                    sequence,
+                    immutable,
+                    normalized_cols,
+                    normalized_rows,
+                )
+            )
+            self._pending_ingress_bytes += size
+            self._pending_ingress_events += 1
+            self._pending_ordinary_ingress_bytes += size
+            self._pending_ordinary_ingress_events += 1
+            self._pending_geometry_events += 1
+            return AdmissionStatus.ACCEPTED
+
+    def _lease_resize_admission_ready(
+        self,
+        token: object,
+        epoch: int,
+        payload_bytes: int,
+    ) -> AdmissionStatus:
+        with self._lock:
+            if not self._current_locked(token, epoch):
+                return AdmissionStatus.STALE
+            size = _integer("payload_bytes", payload_bytes, minimum=1)
+            return (
+                AdmissionStatus.ACCEPTED
+                if self._resize_fits_locked(size)
+                else AdmissionStatus.BACKPRESSURED
+            )
+
+    def _resize_fits_locked(self, size: int) -> bool:
+        limits = self._limits
+        assert limits is not None
+        return not (
+            size > limits.ingress_bytes - self._pending_ingress_bytes
+            or self._pending_ingress_events >= limits.ingress_events
+            or size
+            > limits.ordinary_ingress_bytes
+            - self._pending_ordinary_ingress_bytes
+            or self._pending_ordinary_ingress_events
+            >= limits.ordinary_ingress_events
+            or self._pending_geometry_events >= limits.geometry_events
+        )
+
     def _allocate_schedule_sequence_locked(self) -> int:
         if self._next_schedule_sequence > UINT64_MAX:
             raise OverflowError("schedule sequence exhausted")
@@ -344,14 +431,14 @@ class FakeTerminalHost:
             if not self._scheduled:
                 return ScheduledEventPoll(AdmissionStatus.ACCEPTED)
             event = self._scheduled.popleft()
-            if isinstance(event, IngressRecord):
+            if isinstance(event, (IngressRecord, ResizeRecord)):
                 size = len(event.payload)
                 self._pending_ingress_bytes -= size
                 self._pending_ingress_events -= 1
-                if not event.control:
+                if isinstance(event, ResizeRecord) or not event.control:
                     self._pending_ordinary_ingress_bytes -= size
                     self._pending_ordinary_ingress_events -= 1
-            else:
+            if isinstance(event, (GeometryRecord, ResizeRecord)):
                 self._pending_geometry_events -= 1
             return ScheduledEventPoll(AdmissionStatus.ACCEPTED, event)
 

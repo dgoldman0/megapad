@@ -150,6 +150,35 @@ def test_runtime_applies_ingress_and_geometry_only_at_runner_boundary():
     assert (system.uart_geom.cols, system.uart_geom.rows) == (90, 30)
 
 
+def test_runtime_applies_protocol_resize_as_one_scheduler_boundary_record():
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=80,
+        terminal_rows=24,
+    )
+    lease = system.attach_presentation_terminal(_limits())
+
+    assert (
+        lease.submit_resize(b"resize", cols=100, rows=40)
+        is AdmissionStatus.ACCEPTED
+    )
+    assert system.uart.rx_pending == 0
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (80, 24)
+    assert system.presentation_terminal_host.pending_ingress_events == 1
+    assert system.presentation_terminal_host.pending_geometry_events == 1
+
+    system.cpu.halted = True
+    result = system.run_batch_stats(1)
+    assert result.external_events_applied == 1
+    assert system.uart.rx_pending == 6
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (100, 40)
+    assert system.presentation_terminal_host.pending_ingress_events == 0
+    assert system.presentation_terminal_host.pending_geometry_events == 0
+
+    assert lease.close() is AdmissionStatus.ACCEPTED
+    assert system.uart.rx_pending == 0
+
+
 def test_subsequent_boot_retires_the_active_epoch_before_execution_resumes():
     system = MegapadSystem(ram_size=64 * 1024)
     lease = system.attach_presentation_terminal(_limits())

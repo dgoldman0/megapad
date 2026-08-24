@@ -36,6 +36,7 @@ CREDIT = struct.Struct("<Q")
 KEY = struct.Struct("<IBBHQ")
 TEXT_PREFIX = struct.Struct("<HHQ")
 POINTER = struct.Struct("<iiHHHHhhQ")
+RESIZE = struct.Struct("<IIQ")
 FOCUS = struct.Struct("<B7sQ")
 CLOSE = struct.Struct("<H6sQ")
 CLOSE_ACK = struct.Struct("<H6s")
@@ -85,22 +86,43 @@ def _negotiate(*, client_credit: int = 256):
     return core, offer, request, encoder, client_ready
 
 
-def _snapshot_frames(encoder: FrameEncoder) -> bytes:
+def _snapshot_frames(
+    encoder: FrameEncoder,
+    *,
+    transaction_id: int = 1,
+    cols: int = 2,
+    rows: int = 2,
+) -> bytes:
     cells = (
         (ord("A"), 7, 0, 1),
         (ord("B"), 2, 0, 8),
         (ord("C"), 4, 0, 0),
         (ord(" "), 7, 1, 0x20),
     )
-    row_zero = SPAN.pack(0, 0, 2) + b"".join(CELL.pack(*cell) for cell in cells[:2])
-    row_one = SPAN.pack(1, 0, 2) + b"".join(CELL.pack(*cell) for cell in cells[2:])
+    assert cols * rows == len(cells)
+    spans = tuple(
+        SPAN.pack(row, 0, cols)
+        + b"".join(
+            CELL.pack(*cell)
+            for cell in cells[row * cols : (row + 1) * cols]
+        )
+        for row in range(rows)
+    )
     return b"".join(
         (
-            encoder.encode(MessageType.SNAPSHOT_BEGIN, BEGIN.pack(1, 0, 2, 2, 2, 4)),
-            encoder.encode(MessageType.CELL_SPAN, row_zero),
-            encoder.encode(MessageType.CELL_SPAN, row_one),
-            encoder.encode(MessageType.CURSOR, CURSOR.pack(1, 1, 1)),
-            encoder.encode(MessageType.SNAPSHOT_COMMIT, COMMIT.pack(1)),
+            encoder.encode(
+                MessageType.SNAPSHOT_BEGIN,
+                BEGIN.pack(transaction_id, 0, cols, rows, rows, len(cells)),
+            ),
+            *(encoder.encode(MessageType.CELL_SPAN, span) for span in spans),
+            encoder.encode(
+                MessageType.CURSOR,
+                CURSOR.pack(rows - 1, cols - 1, 1),
+            ),
+            encoder.encode(
+                MessageType.SNAPSHOT_COMMIT,
+                COMMIT.pack(transaction_id),
+            ),
         )
     )
 
@@ -197,6 +219,56 @@ def test_client_receive_credit_backpressures_data_but_not_control_results():
     assert core.active
     assert len(result.outbound) == 3
     assert core.send_key(ord("x")) is None
+
+
+def test_resize_requires_one_replacement_snapshot_at_the_new_geometry():
+    core, offer, request, encoder, client_ready = _negotiate(client_credit=512)
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+
+    resize = core.send_resize(4, 1)
+    assert resize is not None
+    assert core.state is TerminalState.RESYNCING
+    assert core.geometry_generation == 1
+    assert core.view is None
+    resize_frame = decoder.feed(resize.payload)[0]
+    assert resize_frame.message_type == MessageType.RESIZE
+    assert RESIZE.unpack(resize_frame.payload) == (4, 1, 1)
+    with pytest.raises(TerminalSessionError, match="ACTIVE"):
+        core.send_key(ord("x"))
+
+    replacement = core.feed_machine(
+        _snapshot_frames(encoder, transaction_id=2, cols=4, rows=1)
+    )
+    assert core.state is TerminalState.ACTIVE
+    assert len(replacement.views) == 1
+    assert (replacement.views[0].cols, replacement.views[0].rows) == (4, 1)
+    assert replacement.views[0].revision == 1
+
+
+def test_resize_waits_for_rejected_transaction_wire_boundary():
+    core, _offer, request, encoder, client_ready = _negotiate(client_credit=512)
+    core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+
+    rejected_begin = encoder.encode(
+        MessageType.TX_BEGIN,
+        BEGIN.pack(2, 1, 3, 2, 0, 0),
+    )
+    core.feed_machine(rejected_begin)
+    assert not core.resize_ready
+    with pytest.raises(TerminalSessionError, match="transaction boundary"):
+        core.send_resize(4, 1)
+
+    core.feed_machine(
+        encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
+    )
+    assert core.resize_ready
 
 
 def test_bad_binary_fails_closed_and_never_returns_to_ansi_locally():

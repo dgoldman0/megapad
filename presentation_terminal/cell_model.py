@@ -593,7 +593,9 @@ class CellModel:
         self._most_recent_aborted_id = 0
         self._awaiting_snapshot = True
 
-    def select_geometry(self, cols: int, rows: int) -> None:
+    def validate_geometry(self, cols: int, rows: int) -> tuple[int, int]:
+        """Validate a replacement geometry without mutating model state."""
+
         new_cols = _integer("cols", cols, minimum=1, maximum=UINT32_MAX)
         new_rows = _integer("rows", rows, minimum=1, maximum=UINT32_MAX)
         if self._staging is not None:
@@ -611,6 +613,10 @@ class CellModel:
                 CellModelErrorCode.BOUNDS,
                 "new geometry exceeds caller-owned model capacity",
             )
+        return new_cols, new_rows
+
+    def select_geometry(self, cols: int, rows: int) -> None:
+        new_cols, new_rows = self.validate_geometry(cols, rows)
         self._cols = new_cols
         self._rows = new_rows
         self._view = None

@@ -55,6 +55,7 @@ _TX_RESULT = struct.Struct("<QHHQ")
 _KEY = struct.Struct("<IBBHQ")
 _TEXT_PREFIX = struct.Struct("<HHQ")
 _POINTER = struct.Struct("<iiHHHHhhQ")
+_RESIZE = struct.Struct("<IIQ")
 _FOCUS = struct.Struct("<B7sQ")
 _CLOSE = struct.Struct("<H6sQ")
 _CLOSE_ACK = struct.Struct("<H6s")
@@ -294,6 +295,7 @@ class PresentationTerminalCore:
         self._server_data_sent = 0
         self._client_max_text = 0
         self._pointer_buttons = 0
+        self._geometry_generation = 0
         self._wire_transaction_id: int | None = None
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
@@ -327,6 +329,46 @@ class PresentationTerminalCore:
         """Maximum UTF-8 bytes accepted by one negotiated TEXT event."""
 
         return self._client_max_text
+
+    @property
+    def geometry_generation(self) -> int:
+        return self._geometry_generation
+
+    @property
+    def resize_ready(self) -> bool:
+        model = self._model
+        decoder = self._decoder
+        return (
+            self._state is TerminalState.ACTIVE
+            and model is not None
+            and decoder is not None
+            and decoder.buffered_bytes == 0
+            and self._wire_transaction_id is None
+            and not model.awaiting_snapshot
+            and not model.transaction_open
+        )
+
+    def validate_resize(self, cols: int, rows: int) -> tuple[int, int]:
+        """Validate geometry against this attachment's declared bounds."""
+
+        normalized_cols = _integer(
+            "cols", cols, minimum=1, maximum=UINT16_MAX
+        )
+        normalized_rows = _integer(
+            "rows", rows, minimum=1, maximum=UINT16_MAX
+        )
+        if normalized_cols * normalized_rows > self._config.max_cells:
+            raise ValueError("new geometry exceeds caller-owned model capacity")
+        if (
+            snapshot_wire_bytes(normalized_cols, normalized_rows)
+            > self._config.max_transaction_bytes
+        ):
+            raise ValueError("new geometry cannot fit a mandatory snapshot")
+        if 12 + 8 * normalized_cols > self._config.max_payload:
+            raise ValueError(
+                "new geometry cannot fit one maximum-width CELL_SPAN"
+            )
+        return normalized_cols, normalized_rows
 
     def feed_machine(self, data) -> CoreResult:
         """Consume one bounded machine publication outside scheduler settlement."""
@@ -476,6 +518,36 @@ class PresentationTerminalCore:
             MessageType.FOCUS,
             _FOCUS.pack(int(focused), bytes(7), model.revision),
         )
+
+    def send_resize(self, cols: int, rows: int) -> OutboundBytes | None:
+        """Encode one geometry change and require its replacement snapshot."""
+
+        normalized_cols, normalized_rows = self.validate_resize(cols, rows)
+        model = self._require_active_model()
+        decoder = self._decoder
+        if decoder is None or decoder.buffered_bytes:
+            raise TerminalSessionError(
+                "terminal resize waits for a complete client frame"
+            )
+        if self._wire_transaction_id is not None:
+            raise TerminalSessionError(
+                "terminal resize waits for the client transaction boundary"
+            )
+        model.validate_geometry(normalized_cols, normalized_rows)
+        if self._geometry_generation == UINT64_MAX:
+            raise TerminalSessionError("terminal geometry generation is exhausted")
+
+        generation = self._geometry_generation + 1
+        encoded = self._encode_data(
+            MessageType.RESIZE,
+            _RESIZE.pack(normalized_cols, normalized_rows, generation),
+        )
+        if encoded is None:
+            return None
+        model.select_geometry(normalized_cols, normalized_rows)
+        self._geometry_generation = generation
+        self._state = TerminalState.RESYNCING
+        return encoded
 
     def _feed_ansi_owned(self, raw: bytes) -> CoreResult:
         ansi = bytearray()
@@ -682,6 +754,7 @@ class PresentationTerminalCore:
         self._server_data_sent = 0
         self._client_max_text = 0
         self._pointer_buttons = 0
+        self._geometry_generation = 0
         self._clear_wire_transaction()
 
     def _accept_client_ready(self, payload: bytes) -> None:

@@ -29,10 +29,12 @@ _KEY_FRAME_BYTES = HEADER_BYTES + 16
 _TEXT_FRAME_OVERHEAD = HEADER_BYTES + 12
 _POINTER_FRAME_BYTES = HEADER_BYTES + 28
 _FOCUS_FRAME_BYTES = HEADER_BYTES + 16
+_RESIZE_FRAME_BYTES = HEADER_BYTES + 16
 _MAX_FIXED_INPUT_FRAME_BYTES = max(
     _KEY_FRAME_BYTES,
     _POINTER_FRAME_BYTES,
     _FOCUS_FRAME_BYTES,
+    _RESIZE_FRAME_BYTES,
 )
 
 
@@ -90,6 +92,12 @@ class DriverServiceResult:
     views: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingOutbound:
+    record: OutboundBytes
+    resize_geometry: tuple[int, int] | None = None
+
+
 class _AttachSystem(Protocol):
     def attach_presentation_terminal(
         self,
@@ -133,8 +141,9 @@ class PresentationTerminalDriver:
         self._limits = limits
         self._ansi_sink = ansi_sink
         self._view_sink = view_sink
-        self._pending: deque[OutboundBytes] = deque()
+        self._pending: deque[_PendingOutbound] = deque()
         self._pending_bytes = 0
+        self._resize_intent: tuple[int, int] | None = None
         self._failure_reason: str | None = None
         self._closed = False
 
@@ -229,6 +238,10 @@ class PresentationTerminalDriver:
         return len(self._pending)
 
     @property
+    def pending_resize(self) -> tuple[int, int] | None:
+        return self._resize_intent
+
+    @property
     def max_text_bytes(self) -> int:
         """Effective one-event TEXT bound across peer and local storage."""
 
@@ -289,9 +302,40 @@ class PresentationTerminalDriver:
                 )
             delivery = polled.delivery
             if delivery is None:
+                resize_status, materialized = self._materialize_resize()
+                if resize_status in {DriverStatus.FAILED, DriverStatus.STALE}:
+                    return DriverServiceResult(
+                        resize_status,
+                        batches,
+                        admitted,
+                        ansi_bytes,
+                        views,
+                    )
+                if materialized:
+                    flush_status, count = self._flush_pending()
+                    admitted += count
+                    if flush_status is DriverStatus.BACKPRESSURED:
+                        self._fail(
+                            "atomic resize admission changed after preflight"
+                        )
+                        return DriverServiceResult(
+                            DriverStatus.FAILED,
+                            batches,
+                            admitted,
+                            ansi_bytes,
+                            views,
+                        )
+                    if flush_status is not DriverStatus.PROGRESS:
+                        return DriverServiceResult(
+                            flush_status,
+                            batches,
+                            admitted,
+                            ansi_bytes,
+                            views,
+                        )
                 status = (
                     DriverStatus.PROGRESS
-                    if batches or admitted or ansi_bytes or views
+                    if batches or admitted or ansi_bytes or views or materialized
                     else DriverStatus.IDLE
                 )
                 return DriverServiceResult(
@@ -464,6 +508,19 @@ class PresentationTerminalDriver:
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS
 
+    def request_resize(self, cols: int, rows: int) -> DriverStatus:
+        """Record the latest desired geometry for safe service-time emission."""
+
+        if self._closed:
+            return DriverStatus.STALE
+        if self._failure_reason is not None:
+            return DriverStatus.FAILED
+        try:
+            self._resize_intent = self._core.validate_resize(cols, rows)
+        except (TypeError, ValueError):
+            return DriverStatus.INVALID
+        return DriverStatus.PROGRESS
+
     def close(self) -> AdmissionStatus:
         """Hard-retire this outer attachment and restore legacy ownership."""
 
@@ -472,6 +529,7 @@ class PresentationTerminalDriver:
         self._closed = True
         self._pending.clear()
         self._pending_bytes = 0
+        self._resize_intent = None
         return self._lease.close()
 
     def _retain_outbound(self, records: tuple[OutboundBytes, ...]) -> None:
@@ -482,8 +540,22 @@ class PresentationTerminalDriver:
                 "one machine publication exceeded the caller-owned outbound "
                 "retention capacity"
             )
-        self._pending.extend(records)
+        self._pending.extend(_PendingOutbound(record) for record in records)
         self._pending_bytes += additional_bytes
+
+    def _retain_resize(
+        self,
+        record: OutboundBytes,
+        cols: int,
+        rows: int,
+    ) -> None:
+        size = len(record.payload)
+        if record.control or not self._can_retain(size, 1):
+            raise TerminalSessionError(
+                "resize exceeded the caller-owned outbound retention capacity"
+            )
+        self._pending.append(_PendingOutbound(record, (cols, rows)))
+        self._pending_bytes += size
 
     def _can_retain(self, additional_bytes: int, additional_events: int) -> bool:
         return (
@@ -493,14 +565,52 @@ class PresentationTerminalDriver:
             <= self._limits.pending_outbound_bytes - self._pending_bytes
         )
 
+    def _materialize_resize(self) -> tuple[DriverStatus, bool]:
+        geometry = self._resize_intent
+        if geometry is None or not self._core.resize_ready:
+            return DriverStatus.IDLE, False
+        quiescent = self._lease.machine_egress_quiescent()
+        if quiescent is AdmissionStatus.STALE:
+            self._closed = True
+            return DriverStatus.STALE, False
+        if quiescent is AdmissionStatus.BACKPRESSURED:
+            return DriverStatus.IDLE, False
+        admission = self._lease.resize_admission_ready(_RESIZE_FRAME_BYTES)
+        if admission is AdmissionStatus.STALE:
+            self._closed = True
+            return DriverStatus.STALE, False
+        if admission is AdmissionStatus.BACKPRESSURED:
+            return DriverStatus.IDLE, False
+        if not self._can_retain(_RESIZE_FRAME_BYTES, 1):
+            return DriverStatus.BACKPRESSURED, False
+        try:
+            outbound = self._core.send_resize(*geometry)
+            if outbound is None:
+                return DriverStatus.BACKPRESSURED, False
+            self._retain_resize(outbound, *geometry)
+        except (TerminalSessionError, TypeError, ValueError) as exc:
+            self._fail(f"cannot materialize terminal resize: {exc}")
+            return DriverStatus.FAILED, False
+        self._resize_intent = None
+        return DriverStatus.PROGRESS, True
+
     def _flush_pending(self) -> tuple[DriverStatus, int]:
         admitted = 0
         while self._pending:
-            record = self._pending[0]
-            status = self._lease.submit_ingress(
-                record.payload,
-                control=record.control,
-            )
+            pending = self._pending[0]
+            record = pending.record
+            geometry = pending.resize_geometry
+            if geometry is None:
+                status = self._lease.submit_ingress(
+                    record.payload,
+                    control=record.control,
+                )
+            else:
+                status = self._lease.submit_resize(
+                    record.payload,
+                    cols=geometry[0],
+                    rows=geometry[1],
+                )
             if status is AdmissionStatus.BACKPRESSURED:
                 return DriverStatus.BACKPRESSURED, admitted
             if status is AdmissionStatus.STALE:

@@ -6,7 +6,12 @@ import struct
 
 import pytest
 
-from presentation_terminal import EgressWatermarks, HostPortLimits
+from presentation_terminal import (
+    AdmissionStatus,
+    EgressWatermarks,
+    FakeTerminalHost,
+    HostPortLimits,
+)
 from presentation_terminal.apt1 import (
     FrameEncoder,
     IncrementalFrameDecoder,
@@ -22,7 +27,11 @@ from presentation_terminal.driver import (
     DriverStatus,
     PresentationTerminalDriver,
 )
-from presentation_terminal.server import TerminalConfig
+from presentation_terminal.server import (
+    PresentationTerminalCore,
+    TerminalConfig,
+    TerminalState,
+)
 from system import MegapadSystem
 
 
@@ -32,8 +41,10 @@ SPAN = struct.Struct("<III")
 CELL = struct.Struct("<IBBH")
 CURSOR = struct.Struct("<IIB7x")
 COMMIT = struct.Struct("<Q")
+CREDIT = struct.Struct("<Q")
 TEXT_PREFIX = struct.Struct("<HHQ")
 POINTER = struct.Struct("<iiHHHHhhQ")
+RESIZE = struct.Struct("<IIQ")
 FOCUS = struct.Struct("<B7sQ")
 
 
@@ -83,24 +94,43 @@ def _drain_uart_rx(system: MegapadSystem) -> bytes:
     return bytes(result)
 
 
-def _snapshot(encoder: FrameEncoder) -> bytes:
+def _snapshot(
+    encoder: FrameEncoder,
+    *,
+    transaction_id: int = 1,
+    cols: int = 2,
+    rows: int = 2,
+) -> bytes:
     cells = (
         (ord("A"), 7, 0, 1),
         (ord("B"), 2, 0, 8),
         (ord("C"), 4, 0, 0),
         (ord(" "), 7, 1, 0x20),
     )
-    rows = (
-        SPAN.pack(0, 0, 2) + b"".join(CELL.pack(*cell) for cell in cells[:2]),
-        SPAN.pack(1, 0, 2) + b"".join(CELL.pack(*cell) for cell in cells[2:]),
+    assert cols * rows == len(cells)
+    spans = tuple(
+        SPAN.pack(row, 0, cols)
+        + b"".join(
+            CELL.pack(*cell)
+            for cell in cells[row * cols : (row + 1) * cols]
+        )
+        for row in range(rows)
     )
     return b"".join(
         (
-            encoder.encode(MessageType.SNAPSHOT_BEGIN, BEGIN.pack(1, 0, 2, 2, 2, 4)),
-            encoder.encode(MessageType.CELL_SPAN, rows[0]),
-            encoder.encode(MessageType.CELL_SPAN, rows[1]),
-            encoder.encode(MessageType.CURSOR, CURSOR.pack(1, 1, 1)),
-            encoder.encode(MessageType.SNAPSHOT_COMMIT, COMMIT.pack(1)),
+            encoder.encode(
+                MessageType.SNAPSHOT_BEGIN,
+                BEGIN.pack(transaction_id, 0, cols, rows, rows, len(cells)),
+            ),
+            *(encoder.encode(MessageType.CELL_SPAN, span) for span in spans),
+            encoder.encode(
+                MessageType.CURSOR,
+                CURSOR.pack(rows - 1, cols - 1, 1),
+            ),
+            encoder.encode(
+                MessageType.SNAPSHOT_COMMIT,
+                COMMIT.pack(transaction_id),
+            ),
         )
     )
 
@@ -160,7 +190,7 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     offer = parse_negotiation(_drain_uart_rx(system))
     assert isinstance(offer, Offer)
 
-    open_and_snapshot, _client_encoder = _open_bytes(offer, client_credit=512)
+    open_and_snapshot, client_encoder = _open_bytes(offer, client_credit=512)
     _write_native_uart(system, open_and_snapshot)
     presented = driver.service()
     assert presented.status is DriverStatus.PROGRESS
@@ -237,6 +267,60 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
         1,
     )
 
+    # A resize request cannot cross an unpolled transaction begin.  Service
+    # first completes that transaction, then materializes one composite wire
+    # and MMIO geometry record only after machine egress is observed empty.
+    _write_native_uart(
+        system,
+        client_encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(2, 1, 2, 2, 0, 0),
+        ),
+    )
+    assert driver.request_resize(4, 1) is DriverStatus.PROGRESS
+    assert driver.pending_resize == (4, 1)
+    assert driver.service().machine_batches == 1
+    assert driver.pending_resize == (4, 1)
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (2, 2)
+
+    _write_native_uart(
+        system,
+        client_encoder.encode(MessageType.CURSOR, CURSOR.pack(1, 1, 1))
+        + client_encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2)),
+    )
+    completed = driver.service()
+    assert completed.views == 1
+    assert driver.pending_resize == (4, 1)
+    materialized = driver.service()
+    assert materialized.outbound_records == 1
+    assert driver.pending_resize is None
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (2, 2)
+
+    resized_boundary = system.run_batch_stats(1)
+    assert resized_boundary.external_events_applied == 3
+    resized_frames = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in resized_frames] == [
+        MessageType.TX_RESULT,
+        MessageType.CREDIT,
+        MessageType.RESIZE,
+    ]
+    assert RESIZE.unpack(resized_frames[2].payload) == (4, 1, 1)
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (4, 1)
+
+    _write_native_uart(
+        system,
+        _snapshot(client_encoder, transaction_id=3, cols=4, rows=1),
+    )
+    replaced = driver.service()
+    assert replaced.views == 1
+    assert (views[-1].cols, views[-1].rows, views[-1].revision) == (4, 1, 1)
+    system.run_batch_stats(1)
+    replacement_results = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in replacement_results] == [
+        MessageType.TX_RESULT,
+        MessageType.CREDIT,
+    ]
+
     assert driver.close().value == "accepted"
     _write_native_uart(system, b"legacy")
     assert legacy_batches == [b"legacy"]
@@ -292,3 +376,87 @@ def test_driver_retains_ordered_control_replies_across_host_backpressure():
     assert second.outbound_records == 1
     assert driver.pending_outbound_events == 0
     driver.close()
+
+
+def test_resize_intent_waits_for_adapter_retained_machine_egress():
+    host_limits = HostPortLimits(
+        egress=EgressWatermarks(60, 0, 4, 0),
+        retained_publication_bytes=60,
+        ingress_bytes=4_096,
+        ingress_events=9,
+        ingress_control_bytes=2_048,
+        ingress_control_events=8,
+        geometry_events=1,
+    )
+    host = FakeTerminalHost()
+    lease = host.attach(host_limits)
+    core = PresentationTerminalCore(
+        _terminal_config(),
+        attachment_epoch=lease.attachment_epoch,
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+    )
+    probe_result = core.feed_machine(encode_probe(1))
+    offer = parse_negotiation(probe_result.outbound[0].payload)
+    assert isinstance(offer, Offer)
+    open_and_snapshot, encoder = _open_bytes(offer, client_credit=512)
+    core.feed_machine(open_and_snapshot)
+    driver = PresentationTerminalDriver(
+        lease,
+        core,
+        host_limits,
+        DriverLimits(4_096, 8),
+    )
+
+    credit = encoder.encode(MessageType.CREDIT, CREDIT.pack(1_024))
+    begin = encoder.encode(
+        MessageType.TX_BEGIN,
+        BEGIN.pack(2, 1, 2, 2, 0, 0),
+    )
+    assert host.publish_egress(lease, credit) is AdmissionStatus.ACCEPTED
+    assert (
+        host.publish_egress(lease, begin[:20])
+        is AdmissionStatus.BACKPRESSURED
+    )
+    assert driver.request_resize(4, 1) is DriverStatus.PROGRESS
+
+    assert driver.service().machine_batches == 1
+    deferred = driver.service()
+    assert deferred.status is DriverStatus.IDLE
+    assert driver.pending_resize == (4, 1)
+    assert core.geometry_generation == 0
+
+    assert host.service_retained(lease) is AdmissionStatus.ACCEPTED
+    assert driver.service().machine_batches == 1
+    assert driver.service().status is DriverStatus.IDLE
+    assert driver.pending_resize == (4, 1)
+    assert core.geometry_generation == 0
+
+    assert host.publish_egress(lease, begin[20:]) is AdmissionStatus.ACCEPTED
+    assert driver.service().machine_batches == 1
+    assert driver.pending_resize == (4, 1)
+    assert core.geometry_generation == 0
+
+    cursor = encoder.encode(MessageType.CURSOR, CURSOR.pack(1, 1, 1))
+    commit = encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
+    assert host.publish_egress(lease, cursor) is AdmissionStatus.ACCEPTED
+    assert driver.service().machine_batches == 1
+    assert host.publish_egress(lease, commit) is AdmissionStatus.ACCEPTED
+    assert driver.service().machine_batches == 1
+
+    assert lease.submit_ingress(b"older-key") is AdmissionStatus.ACCEPTED
+    capacity_deferred = driver.service()
+    assert capacity_deferred.status is DriverStatus.IDLE
+    assert driver.pending_resize == (4, 1)
+    assert core.geometry_generation == 0
+    assert core.state is TerminalState.ACTIVE
+    drained = [host.take_scheduled_event(lease).event for _ in range(3)]
+    assert all(event is not None for event in drained)
+    assert host.take_scheduled_event(lease).event is None
+
+    materialized = driver.service()
+    assert materialized.status is DriverStatus.PROGRESS
+    assert materialized.outbound_records == 1
+    assert driver.pending_resize is None
+    assert core.geometry_generation == 1
+    assert core.state is TerminalState.RESYNCING
+    assert host.pending_geometry_events == 1
