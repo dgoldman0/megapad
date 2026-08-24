@@ -49,9 +49,20 @@ from .cell_model import (
 )
 from .presentation_model import (
     PresentationClock,
+    PresentationGeometry,
     PresentationStateError,
     ResultLease,
     TransactionFamily,
+)
+from .retained_model import RetainedPolicy
+from .retained_wire import (
+    RetainedCaps,
+    RetainedFormats,
+    RetainedMessageType,
+    RetainedWireError,
+    decode_ret_query,
+    encode_ret_caps,
+    encode_ret_formats,
 )
 
 
@@ -67,6 +78,8 @@ _CLOSE = struct.Struct("<H6sQ")
 _CLOSE_ACK = struct.Struct("<H6s")
 _SOFT_RESET_REQUEST = struct.Struct("<I4xQ")
 _SOFT_RESET_ACK = struct.Struct("<IHH")
+
+_RETAINED_DISCOVERY_REPLY_BYTES = 2 * (HEADER_BYTES + 64)
 
 _NAMED_KEY_SYMBOLS = frozenset(range(0x00110001, 0x0011000F)) | frozenset(
     range(0x00110020, 0x0011002C)
@@ -303,10 +316,23 @@ class PresentationTerminalCore:
         config: TerminalConfig,
         *,
         attachment_epoch: int,
+        retained_policy: RetainedPolicy | None = None,
         session_id_factory: Callable[[], int] | None = None,
     ):
+        """Construct one attachment core.
+
+        ``retained_policy=None`` is the production CELL-only default.  Passing
+        a policy is an internal backend-composition assertion: the composer is
+        responsible for installing the mandatory retained dispatch/model
+        layers before exposing that opt-in profile to a guest.
+        """
+
         if not isinstance(config, TerminalConfig):
             raise TypeError("config must be TerminalConfig")
+        if retained_policy is not None and not isinstance(
+            retained_policy, RetainedPolicy
+        ):
+            raise TypeError("retained_policy must be RetainedPolicy or None")
         self._config = config
         self._attachment_epoch = _integer(
             "attachment_epoch",
@@ -325,6 +351,19 @@ class PresentationTerminalCore:
         self._encoder: FrameEncoder | None = None
         self._model: CellModel | None = None
         self._clock: PresentationClock | None = None
+        self._configured_retained_policy = retained_policy
+        self._retained_caps = (
+            None
+            if retained_policy is None
+            else self._caps_from_policy(retained_policy)
+        )
+        self._retained_formats = (
+            None
+            if retained_policy is None
+            else self._formats_from_policy(retained_policy)
+        )
+        self._session_retained_policy: RetainedPolicy | None = None
+        self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch: int | None = None
         self._client_data_grant = 0
@@ -348,6 +387,85 @@ class PresentationTerminalCore:
             value = secrets.randbits(64)
         return value
 
+    @staticmethod
+    def _caps_from_policy(policy: RetainedPolicy) -> RetainedCaps:
+        return RetainedCaps(
+            features=policy.features,
+            max_owner_records=policy.max_owner_records,
+            max_live_owners=policy.max_live_owners,
+            max_regions=policy.max_regions,
+            max_resources=policy.max_resources,
+            max_objects=policy.max_objects,
+            max_series=policy.max_series,
+            max_operations_per_transaction=(
+                policy.max_operations_per_transaction
+            ),
+            max_resource_chunk_bytes=policy.max_resource_chunk_bytes,
+            max_retained_transaction_bytes=(
+                policy.max_retained_transaction_bytes
+            ),
+            total_resource_bytes=policy.total_resource_bytes,
+        )
+
+    @staticmethod
+    def _formats_from_policy(policy: RetainedPolicy) -> RetainedFormats:
+        return RetainedFormats(
+            coordinate_format=1,
+            color_format=1,
+            image_format=policy.image_format,
+            max_image_width=policy.max_image_width,
+            max_image_height=policy.max_image_height,
+            max_path_points=policy.max_path_points,
+            max_label_bytes=policy.max_label_bytes,
+            max_samples_per_append=policy.max_samples_per_append,
+            max_history_per_series=policy.max_history_per_series,
+            minimum_presentation_interval_us=(
+                policy.minimum_presentation_interval_us
+            ),
+            total_sample_slots=policy.total_sample_slots,
+            total_utf8_bytes=policy.total_utf8_bytes,
+        )
+
+    def _bind_retained_policy(
+        self,
+        *,
+        terminal_to_client_max_payload: int,
+    ) -> RetainedPolicy | None:
+        """Bind advertised maxima to this session's negotiated base limits.
+
+        A caller policy is validated when it is constructed, but the peer's
+        terminal-to-client maximum is not known until OPEN.  Reconstructing
+        the policy from the exact advertised records makes an incompatible
+        negotiation the contract's deterministic CELL-only outcome instead
+        of weakening any advertised maximum.
+        """
+
+        caps = self._retained_caps
+        formats = self._retained_formats
+        if caps is None or formats is None:
+            return None
+        try:
+            policy = caps.policy(
+                formats,
+                client_to_terminal_max_payload=self._config.max_payload,
+                terminal_to_client_max_payload=(
+                    terminal_to_client_max_payload
+                ),
+                base_max_transaction_bytes=(
+                    self._config.max_transaction_bytes
+                ),
+            )
+            policy.validate_geometry(
+                PresentationGeometry(
+                    self._config.cols,
+                    self._config.rows,
+                    self._geometry_generation,
+                )
+            )
+        except (TypeError, ValueError):
+            return None
+        return policy
+
     @property
     def state(self) -> TerminalState:
         return self._state
@@ -355,6 +473,26 @@ class PresentationTerminalCore:
     @property
     def active(self) -> bool:
         return self._state is TerminalState.ACTIVE
+
+    @property
+    def retained_configured(self) -> bool:
+        """Whether the attachment caller supplied a RETAINED-1 policy."""
+
+        return self._configured_retained_policy is not None
+
+    @property
+    def retained_enabled(self) -> bool:
+        """Whether deterministic discovery succeeded in the current epoch."""
+
+        return self._retained_enabled
+
+    @property
+    def retained_policy(self) -> RetainedPolicy | None:
+        """The current session policy, exposed only after valid discovery."""
+
+        if not self._retained_enabled:
+            return None
+        return self._session_retained_policy
 
     @property
     def session_id(self) -> int | None:
@@ -638,6 +776,11 @@ class PresentationTerminalCore:
             rows=normalized_rows,
         )
         self._geometry_generation = generation
+        request = self._open
+        assert request is not None
+        self._session_retained_policy = self._bind_retained_policy(
+            terminal_to_client_max_payload=request.client_max_payload,
+        )
         self._state = TerminalState.RESYNCING
         return encoded
 
@@ -768,6 +911,10 @@ class PresentationTerminalCore:
             max_cells=self._config.max_cells,
         )
         self._clock = PresentationClock(presentation_epoch=0)
+        self._session_retained_policy = self._bind_retained_policy(
+            terminal_to_client_max_payload=record.client_max_payload,
+        )
+        self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch = None
         self._client_data_grant = self._config.terminal_receive_credit
@@ -810,6 +957,26 @@ class PresentationTerminalCore:
         self,
         frame: Frame,
     ) -> tuple[tuple[OutboundBytes, ...], TerminalView | None]:
+        if (
+            frame.message_type == RetainedMessageType.RET_QUERY
+            and self._configured_retained_policy is not None
+        ):
+            if self._state is TerminalState.OPENING:
+                self._fatal("CLIENT_READY or CLOSE was not the first client frame")
+            request = self._open
+            if request is None:
+                self._fatal("RET_QUERY has no negotiated OPEN bounds")
+            self._session_retained_policy = self._bind_retained_policy(
+                terminal_to_client_max_payload=request.client_max_payload,
+            )
+            self._charge_data(frame, include_in_transaction=False)
+            if self._session_retained_policy is None:
+                if self._retained_query_seen:
+                    self._fatal("RET_QUERY was already consumed in this epoch")
+                self._retained_query_seen = True
+                return self._release_data(frame.complete_bytes), None
+            return self._accept_retained_query(frame), None
+
         try:
             message_type = MessageType(frame.message_type)
         except ValueError:
@@ -885,6 +1052,8 @@ class PresentationTerminalCore:
         self._encoder = None
         self._model = None
         self._clock = None
+        self._session_retained_policy = None
+        self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch = None
         self._client_data_grant = 0
@@ -933,6 +1102,69 @@ class PresentationTerminalCore:
         if grant < self._server_data_grant:
             self._fatal("client data-credit grant decreased")
         self._server_data_grant = grant
+
+    def _accept_retained_query(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Answer one valid epoch-local RETAINED-1 discovery query."""
+
+        if self._state is not TerminalState.ACTIVE:
+            self._fatal("RET_QUERY is outside ACTIVE")
+        if self._retained_query_seen:
+            self._fatal("RET_QUERY was already consumed in this epoch")
+
+        model = self._require_model()
+        clock = self._require_clock()
+        if (
+            self._reset_requested_epoch is not None
+            or self._wire_transaction_id is not None
+            or model.view is None
+            or model.awaiting_snapshot
+            or model.transaction_open
+            or clock.open_transaction is not None
+            or clock.outstanding_result is not None
+            or clock.transaction_high_water == 0
+        ):
+            self._fatal(
+                "RET_QUERY requires the settled initial snapshot result"
+            )
+        try:
+            decode_ret_query(frame.payload)
+        except (RetainedWireError, TypeError, ValueError) as exc:
+            self._fatal(f"invalid RET_QUERY: {exc}", cause=exc)
+
+        available = self._server_data_grant - self._server_data_sent
+        if available < _RETAINED_DISCOVERY_REPLY_BYTES:
+            self._fatal(
+                "RET_QUERY lacks the required 208-byte reply allowance"
+            )
+
+        caps = self._retained_caps
+        formats = self._retained_formats
+        if caps is None or formats is None:
+            self._fatal("RET_QUERY has no bound retained policy")
+
+        self._retained_query_seen = True
+        caps_reply = self._encode_data(
+            RetainedMessageType.RET_CAPS,
+            encode_ret_caps(caps),
+        )
+        formats_reply = self._encode_data(
+            RetainedMessageType.RET_FORMATS,
+            encode_ret_formats(formats),
+        )
+        if caps_reply is None or formats_reply is None:
+            self._fatal("RET_QUERY reply allowance changed after preflight")
+        covering_credit = self._release_data(frame.complete_bytes)
+        if len(covering_credit) != 1:
+            self._fatal("RET_QUERY did not produce one covering CREDIT")
+
+        # All fixed payloads and both directional sequence advances have now
+        # succeeded.  Publish capability only after the complete ordered
+        # CAPS, FORMATS, covering-CREDIT tuple exists.
+        self._retained_enabled = True
+        return (caps_reply, formats_reply, covering_credit[0])
 
     def _charge_data(self, frame: Frame, *, include_in_transaction: bool = True) -> None:
         complete = frame.complete_bytes
@@ -1205,6 +1437,8 @@ class PresentationTerminalCore:
             self._fatal("soft-reset acknowledgement has no response encoder")
         encoder.set_presentation_epoch(requested_epoch)
         self._reset_requested_epoch = None
+        self._retained_query_seen = False
+        self._retained_enabled = False
         self._pointer_buttons = 0
         self._most_recent_wire_aborted_id = 0
         return self._release_data(released)

@@ -27,6 +27,13 @@ from presentation_terminal.driver import (
     DriverStatus,
     PresentationTerminalDriver,
 )
+from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
+from presentation_terminal.retained_wire import (
+    RetainedMessageType,
+    decode_ret_caps,
+    decode_ret_formats,
+    encode_ret_query,
+)
 from presentation_terminal.server import (
     PresentationTerminalCore,
     TerminalConfig,
@@ -59,6 +66,35 @@ def _terminal_config() -> TerminalConfig:
         max_rows=2,
         cols=2,
         rows=2,
+    )
+
+
+def _retained_policy() -> RetainedPolicy:
+    return RetainedPolicy(
+        features=RetainedFeature.CORE,
+        max_owner_records=4,
+        max_live_owners=2,
+        max_regions=8,
+        max_resources=0,
+        max_objects=0,
+        max_series=0,
+        max_operations_per_transaction=4,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_label_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=512,
     )
 
 
@@ -335,6 +371,83 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     assert driver.close().value == "accepted"
     _write_native_uart(system, b"legacy")
     assert legacy_batches == [b"legacy"]
+
+
+def test_driver_admits_retained_discovery_pair_then_covering_credit_in_order():
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    driver = PresentationTerminalDriver.attach(
+        system,
+        _host_limits(),
+        _terminal_config(),
+        DriverLimits(4_096, 3),
+        retained_policy=_retained_policy(),
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+    )
+    _write_native_uart(system, encode_probe(1))
+    assert driver.service().outbound_records == 1
+    system.cpu.halted = True
+    system.run_batch_stats(1)
+    offer = parse_negotiation(_drain_uart_rx(system))
+    assert isinstance(offer, Offer)
+
+    open_and_snapshot, encoder = _open_bytes(offer, client_credit=512)
+    _write_native_uart(system, open_and_snapshot)
+    opened = driver.service()
+    assert opened.views == 1
+    assert opened.outbound_records == 3
+    system.run_batch_stats(1)
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    initial_frames = decoder.feed(_drain_uart_rx(system))
+    assert initial_frames[-1].message_type == MessageType.CREDIT
+
+    _write_native_uart(
+        system,
+        encoder.encode(
+            RetainedMessageType.RET_QUERY,
+            encode_ret_query(),
+        ),
+    )
+    discovered = driver.service()
+    assert discovered.status is DriverStatus.PROGRESS
+    assert discovered.outbound_records == 3
+    assert driver.pending_outbound_events == 0
+    assert driver.core.retained_enabled
+
+    boundary = system.run_batch_stats(1)
+    assert boundary.external_events_applied == 3
+    frames = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in frames] == [
+        RetainedMessageType.RET_CAPS,
+        RetainedMessageType.RET_FORMATS,
+        MessageType.CREDIT,
+    ]
+    assert decode_ret_caps(frames[0].payload).max_regions == 8
+    assert decode_ret_formats(frames[1].payload).coordinate_format == 1
+    assert CREDIT.unpack(frames[2].payload) == (1_024 + 312 + 48,)
+    driver.close()
+
+
+def test_driver_rejects_retained_discovery_capacity_before_attachment():
+    system = MegapadSystem(ram_size=64 * 1024)
+    host_limits = HostPortLimits(
+        egress=EgressWatermarks(8_192, 1_024, 16, 2),
+        retained_publication_bytes=4_608,
+        ingress_bytes=4_196,
+        ingress_events=9,
+        ingress_control_bytes=4_096,
+        ingress_control_events=8,
+        geometry_events=1,
+    )
+
+    with pytest.raises(ValueError, match="discovery reply"):
+        PresentationTerminalDriver.attach(
+            system,
+            host_limits,
+            _terminal_config(),
+            DriverLimits(4_096, 3),
+            retained_policy=_retained_policy(),
+        )
+    assert not system.presentation_terminal_host.enhanced_attached
 
 
 def test_driver_routes_bounded_preswitch_input_through_the_lease():

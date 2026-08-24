@@ -10,6 +10,7 @@ from typing import Callable, Protocol
 
 from .apt1 import CONTROL_RESERVE_BYTES, HEADER_BYTES, UINT64_MAX
 from .cell_model import TerminalView
+from .retained_model import RetainedPolicy
 from .server import (
     OutboundBytes,
     PresentationTerminalCore,
@@ -31,6 +32,11 @@ _TEXT_FRAME_OVERHEAD = HEADER_BYTES + 12
 _POINTER_FRAME_BYTES = HEADER_BYTES + 28
 _FOCUS_FRAME_BYTES = HEADER_BYTES + 16
 _RESIZE_FRAME_BYTES = HEADER_BYTES + 16
+_RETAINED_DISCOVERY_FRAME_BYTES = HEADER_BYTES + 64
+_RETAINED_DISCOVERY_BATCH_BYTES = (
+    2 * _RETAINED_DISCOVERY_FRAME_BYTES + HEADER_BYTES + 8
+)
+_RETAINED_DISCOVERY_BATCH_EVENTS = 3
 _MAX_FIXED_INPUT_FRAME_BYTES = max(
     _KEY_FRAME_BYTES,
     _POINTER_FRAME_BYTES,
@@ -49,6 +55,29 @@ def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
     if not minimum <= result <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return int(result)
+
+
+def _validate_retained_driver_capacity(
+    host_limits: HostPortLimits,
+    limits: DriverLimits,
+    *,
+    retained_configured: bool,
+) -> None:
+    if not retained_configured:
+        return
+    if host_limits.ordinary_ingress_bytes < _RETAINED_DISCOVERY_FRAME_BYTES:
+        raise ValueError(
+            "ordinary ingress capacity cannot admit one RETAINED-1 "
+            "discovery reply"
+        )
+    if (
+        limits.pending_outbound_bytes < _RETAINED_DISCOVERY_BATCH_BYTES
+        or limits.pending_outbound_events < _RETAINED_DISCOVERY_BATCH_EVENTS
+    ):
+        raise ValueError(
+            "driver retention cannot admit the complete RETAINED-1 "
+            "discovery reply tuple"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +165,11 @@ class PresentationTerminalDriver:
             raise TypeError("ansi_sink must be callable or None")
         if view_sink is not None and not callable(view_sink):
             raise TypeError("view_sink must be callable or None")
+        _validate_retained_driver_capacity(
+            host_limits,
+            limits,
+            retained_configured=core.retained_configured,
+        )
         self._lease = lease
         self._core = core
         self._host_limits = host_limits
@@ -158,6 +192,7 @@ class PresentationTerminalDriver:
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
         view_sink: Callable[[TerminalView], None] | None = None,
+        retained_policy: RetainedPolicy | None = None,
         session_id_factory: Callable[[], int] | None = None,
     ) -> PresentationTerminalDriver:
         """Validate the complete vertical's capacities before acquisition."""
@@ -168,6 +203,15 @@ class PresentationTerminalDriver:
             raise TypeError("terminal_config must be TerminalConfig")
         if not isinstance(driver_limits, DriverLimits):
             raise TypeError("driver_limits must be DriverLimits")
+        if retained_policy is not None and not isinstance(
+            retained_policy, RetainedPolicy
+        ):
+            raise TypeError("retained_policy must be RetainedPolicy or None")
+        _validate_retained_driver_capacity(
+            host_limits,
+            driver_limits,
+            retained_configured=retained_policy is not None,
+        )
         required_publication = (
             terminal_config.max_transaction_bytes + CONTROL_RESERVE_BYTES
         )
@@ -202,6 +246,7 @@ class PresentationTerminalDriver:
             core = PresentationTerminalCore(
                 terminal_config,
                 attachment_epoch=lease.attachment_epoch,
+                retained_policy=retained_policy,
                 session_id_factory=session_id_factory,
             )
             geometry = lease.submit_geometry(

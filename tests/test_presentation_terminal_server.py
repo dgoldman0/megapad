@@ -17,6 +17,13 @@ from presentation_terminal.apt1 import (
     encode_probe,
     parse_negotiation,
 )
+from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
+from presentation_terminal.retained_wire import (
+    RetainedMessageType,
+    decode_ret_caps,
+    decode_ret_formats,
+    encode_ret_query,
+)
 from presentation_terminal.server import (
     PresentationTerminalCore,
     TerminalConfig,
@@ -59,10 +66,45 @@ def _config() -> TerminalConfig:
     )
 
 
-def _negotiate(*, client_credit: int = 256):
+def _retained_policy() -> RetainedPolicy:
+    return RetainedPolicy(
+        features=RetainedFeature.CORE,
+        max_owner_records=4,
+        max_live_owners=2,
+        max_regions=8,
+        max_resources=0,
+        max_objects=0,
+        max_series=0,
+        max_operations_per_transaction=4,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_label_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=512,
+    )
+
+
+def _negotiate(
+    *,
+    client_credit: int = 256,
+    client_max_payload: int = 256,
+    retained_policy: RetainedPolicy | None = None,
+):
     core = PresentationTerminalCore(
         _config(),
         attachment_epoch=9,
+        retained_policy=retained_policy,
         session_id_factory=lambda: 0x0123456789ABCDEF,
     )
     nonce = 0xFEDCBA9876543210
@@ -80,13 +122,21 @@ def _negotiate(*, client_credit: int = 256):
     request = OpenRequest(
         nonce=nonce,
         session_id=offer.session_id,
-        client_max_payload=256,
+        client_max_payload=client_max_payload,
         client_receive_credit=client_credit,
     )
     encoder = FrameEncoder(offer.session_id, max_payload=offer.max_payload)
     client_ready = encoder.encode(
         MessageType.CLIENT_READY,
-        READY.pack(1, 256, 0, client_credit, 64, 0, 0x3F),
+        READY.pack(
+            1,
+            client_max_payload,
+            0,
+            client_credit,
+            min(64, client_max_payload - 12),
+            0,
+            0x3F,
+        ),
     )
     return core, offer, request, encoder, client_ready
 
@@ -235,6 +285,197 @@ def test_real_negotiation_snapshot_result_credit_view_and_normalized_input():
         core.send_pointer(0, 0, wheel_y=1)
     with pytest.raises(TypeError, match="focused must be bool"):
         core.send_focus(1)
+
+
+def test_retained_query_emits_exact_adjacent_replies_before_covering_credit():
+    policy = _retained_policy()
+    core, offer, request, encoder, client_ready = _negotiate(
+        client_credit=512,
+        retained_policy=policy,
+    )
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    outbound_decoder = IncrementalFrameDecoder(
+        offer.session_id,
+        max_payload=256,
+    )
+    for outbound in opened.outbound:
+        outbound_decoder.feed(outbound.payload)
+    assert _settle_results(core, opened) == (1,)
+    assert not core.retained_enabled
+    assert core.retained_policy is None
+
+    discovered = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RET_QUERY,
+            encode_ret_query(),
+        )
+    )
+
+    frames = []
+    for outbound in discovered.outbound:
+        frames.extend(outbound_decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in frames] == [
+        RetainedMessageType.RET_CAPS,
+        RetainedMessageType.RET_FORMATS,
+        MessageType.CREDIT,
+    ]
+    assert [outbound.control for outbound in discovered.outbound] == [
+        False,
+        False,
+        True,
+    ]
+    caps = decode_ret_caps(frames[0].payload)
+    formats = decode_ret_formats(frames[1].payload)
+    assert caps.features == policy.features
+    assert caps.max_regions == policy.max_regions
+    assert formats.coordinate_format == 1
+    assert formats.total_sample_slots == 0
+    assert CREDIT.unpack(frames[2].payload) == (1_024 + 312 + 48,)
+    assert core.retained_enabled
+    assert core.retained_policy is not None
+    assert core.retained_policy.max_regions == policy.max_regions
+
+
+@pytest.mark.parametrize(
+    ("policy", "client_max_payload"),
+    (
+        (None, 256),
+        (_retained_policy(), 48),
+    ),
+)
+def test_retained_query_keeps_cell_only_fallback_without_complete_support(
+    policy: RetainedPolicy | None,
+    client_max_payload: int,
+):
+    core, offer, request, encoder, client_ready = _negotiate(
+        client_credit=512,
+        client_max_payload=client_max_payload,
+        retained_policy=policy,
+    )
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+    discovered = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RET_QUERY,
+            encode_ret_query(),
+        )
+    )
+
+    decoder = IncrementalFrameDecoder(
+        offer.session_id,
+        max_payload=client_max_payload,
+    )
+    frames = []
+    for outbound in opened.outbound + discovered.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in frames[-1:]] == [MessageType.CREDIT]
+    assert CREDIT.unpack(frames[-1].payload) == (1_024 + 312 + 48,)
+    assert not core.retained_enabled
+    assert core.retained_policy is None
+
+
+def test_retained_query_waits_for_initial_snapshot_result_delivery():
+    core, _offer, request, encoder, client_ready = _negotiate(
+        client_credit=512,
+        retained_policy=_retained_policy(),
+    )
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    assert core.outstanding_result_transaction_id == 1
+
+    with pytest.raises(TerminalSessionError, match="settled initial snapshot"):
+        core.feed_machine(
+            encoder.encode(
+                RetainedMessageType.RET_QUERY,
+                encode_ret_query(),
+            )
+        )
+    assert not core.retained_enabled
+
+
+def test_retained_query_remains_valid_after_a_later_settled_cell_delta():
+    core, _offer, request, encoder, client_ready = _negotiate(
+        client_credit=512,
+        retained_policy=_retained_policy(),
+    )
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+    delta = core.feed_machine(
+        encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(2, 1, 2, 2, 0, 0),
+        )
+        + encoder.encode(MessageType.CURSOR, CURSOR.pack(0, 0, 1))
+        + encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
+    )
+    _settle_results(core, delta)
+    assert core.presentation_revision == 2
+
+    discovered = core.feed_machine(
+        encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query())
+    )
+    assert len(discovered.outbound) == 3
+    assert core.retained_enabled
+
+
+def test_soft_reset_clears_retained_and_requires_snapshot_first_rediscovery():
+    core, offer, request, encoder, client_ready = _negotiate(
+        client_credit=512,
+        retained_policy=_retained_policy(),
+    )
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+    first_discovery = core.feed_machine(
+        encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query())
+    )
+    assert core.retained_enabled
+
+    outbound_decoder = IncrementalFrameDecoder(
+        offer.session_id,
+        max_payload=256,
+    )
+    for outbound in opened.outbound + first_discovery.outbound:
+        outbound_decoder.feed(outbound.payload)
+    reset = core.request_soft_reset()
+    reset_frame = outbound_decoder.feed(reset.payload)[0]
+    assert reset_frame.message_type == MessageType.SOFT_RESET_REQUEST
+
+    encoder.set_presentation_epoch(1)
+    core.feed_machine(
+        encoder.encode(
+            MessageType.SOFT_RESET_ACK,
+            SOFT_RESET_ACK.pack(1, 0, 0),
+        )
+    )
+    assert not core.retained_enabled
+    assert core.retained_policy is None
+
+    outbound_decoder.advance_presentation_epoch(1)
+    replacement = core.feed_machine(_snapshot_frames(encoder, transaction_id=1))
+    for outbound in replacement.outbound:
+        outbound_decoder.feed(outbound.payload)
+    _settle_results(core, replacement)
+    rediscovered = core.feed_machine(
+        encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query())
+    )
+    rediscovery_frames = []
+    for outbound in rediscovered.outbound:
+        rediscovery_frames.extend(outbound_decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in rediscovery_frames] == [
+        RetainedMessageType.RET_CAPS,
+        RetainedMessageType.RET_FORMATS,
+        MessageType.CREDIT,
+    ]
+    assert core.retained_enabled
 
 
 def test_client_receive_credit_backpressures_data_but_not_control_results():
