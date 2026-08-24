@@ -257,6 +257,9 @@ def test_machine_session_bounds_optional_ansi_history_without_losing_screen():
         snapshot = session.snapshot()
         assert snapshot.lines()[0].startswith("A")
         assert snapshot.cells[0][0].fg == VirtualTerminal.COLORS[1]
+        session.reset()
+        assert bytes(session.raw_output) == b""
+        assert (session.raw_output_start, session.raw_output_end) == (6, 6)
 
 
 def test_machine_session_reset_replaces_the_optional_attachment_epoch():
@@ -275,8 +278,9 @@ def test_machine_session_reset_replaces_the_optional_attachment_epoch():
         first = session.presentation_driver
         first_epoch = first.attachment_epoch
         first.close()
-        with pytest.raises(TerminalSessionError, match="became stale"):
-            session.service_presentation_terminal()
+        system.cpu.halted = True
+        assert session.run(max_steps=1).reason == "terminal_failure"
+        assert "became stale" in session.presentation_failure
         assert session.presentation_lost
         assert session.presentation_state is TerminalState.FAILED
         assert session.send_text("blocked") is DriverStatus.FAILED
@@ -289,6 +293,40 @@ def test_machine_session_reset_replaces_the_optional_attachment_epoch():
         assert not session.presentation_lost
         assert session.presentation_state is TerminalState.ANSI
         assert system.presentation_terminal_host.pending_geometry_events == 1
+
+
+def test_machine_session_failed_warm_boot_cannot_fall_through_to_legacy(
+    monkeypatch,
+):
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        presentation=_presentation_config(),
+    ) as session:
+        session.boot()
+
+        def fail_boot(*args, **kwargs):
+            raise RuntimeError("injected boot failure")
+
+        monkeypatch.setattr(system, "boot", fail_boot)
+        with pytest.raises(RuntimeError, match="injected boot failure"):
+            session.boot()
+
+        assert session.presentation_driver is None
+        assert session.presentation_lost
+        assert "presentation boot failed" in session.presentation_failure
+        assert session.send_text("must not become raw") is DriverStatus.FAILED
+        assert session.send_key("enter") is DriverStatus.FAILED
+        assert session.resize(4, 1) is DriverStatus.FAILED
+        assert session.run(max_steps=1).reason == "terminal_failure"
+        with pytest.raises(TerminalSessionError, match="presentation boot failed"):
+            session.step()
 
 
 def test_machine_session_optional_attach_failure_restores_uart_callbacks():

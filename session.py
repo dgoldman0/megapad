@@ -443,10 +443,31 @@ class MachineSession:
         if self._presentation_failure_reason is not None:
             return self._presentation_failure_reason
         driver = self._presentation_driver
-        if driver is not None and driver.failure_reason is not None:
-            return driver.failure_reason
+        if driver is not None:
+            if driver.failure_reason is not None:
+                self._record_presentation_failure(driver.failure_reason)
+                return self._presentation_failure_reason
+            host = self.system.presentation_terminal_host
+            if (
+                driver.closed
+                or host.active_attachment_epoch != driver.attachment_epoch
+            ):
+                self._record_presentation_failure(
+                    "presentation attachment became stale",
+                    lost=True,
+                )
+                return self._presentation_failure_reason
         if self._presentation_config is not None:
-            return self.system.presentation_terminal_host.failure_reason
+            host_failure = self.system.presentation_terminal_host.failure_reason
+            if host_failure is not None:
+                self._record_presentation_failure(host_failure)
+                return self._presentation_failure_reason
+            if driver is None and not self._closed:
+                self._record_presentation_failure(
+                    "presentation driver is unavailable",
+                    lost=True,
+                )
+                return self._presentation_failure_reason
         return None
 
     @property
@@ -487,42 +508,57 @@ class MachineSession:
 
     def boot(self, entry: int = 0):
         reattach = self.presentation_enabled and self.system._booted
-        if reattach:
-            self._close_presentation_terminal()
-            self._presentation_view = None
-            if self._presentation_view_selected:
-                self.revision += 1
-            self._presentation_view_selected = False
-        self.system.boot(entry)
-        if reattach:
-            self._attach_presentation_terminal()
+        try:
+            if reattach:
+                self._close_presentation_terminal()
+                self._presentation_view = None
+                if self._presentation_view_selected:
+                    self.revision += 1
+                self._presentation_view_selected = False
+            self.system.boot(entry)
+            if reattach:
+                self._attach_presentation_terminal()
+        except BaseException as exc:
+            if self.presentation_enabled:
+                self._record_presentation_failure(
+                    f"presentation boot failed: {type(exc).__name__}: {exc}",
+                    lost=self._presentation_driver is None,
+                )
+            raise
 
     def reset(self, entry: int = 0, *, clear_terminal: bool = True):
         """Reset the owned machine and optionally clear captured terminal state."""
-        self._close_presentation_terminal()
-        self.raw_output.clear()
-        self._raw_output_total = 0
-        self._raw_output_start = 0
-        self.output_batches = 0
-        self.output_byte_callbacks = 0
-        self._presentation_view = None
-        self._presentation_view_selected = False
-        self._presentation_failure_reason = None
-        self._presentation_lost = False
-        self._last_batch_presentation_progress = False
-        if clear_terminal:
-            cols, rows = self.terminal.cols, self.terminal.rows
-            self.terminal = VirtualTerminal(
-                cols=cols,
-                rows=rows,
-                uart_inject=self._inject_terminal_response,
-            )
-            if not self.presentation_enabled:
-                self.system.uart_geom.host_set_size(cols, rows)
-        self.revision += 1
-        self.system.boot(entry, discard_uart_output=True)
-        if self.presentation_enabled:
-            self._attach_presentation_terminal()
+        try:
+            self._close_presentation_terminal()
+            self.raw_output.clear()
+            self._raw_output_start = self._raw_output_total
+            self.output_batches = 0
+            self.output_byte_callbacks = 0
+            self._presentation_view = None
+            self._presentation_view_selected = False
+            self._presentation_failure_reason = None
+            self._presentation_lost = False
+            self._last_batch_presentation_progress = False
+            if clear_terminal:
+                cols, rows = self.terminal.cols, self.terminal.rows
+                self.terminal = VirtualTerminal(
+                    cols=cols,
+                    rows=rows,
+                    uart_inject=self._inject_terminal_response,
+                )
+                if not self.presentation_enabled:
+                    self.system.uart_geom.host_set_size(cols, rows)
+            self.revision += 1
+            self.system.boot(entry, discard_uart_output=True)
+            if self.presentation_enabled:
+                self._attach_presentation_terminal()
+        except BaseException as exc:
+            if self.presentation_enabled:
+                self._record_presentation_failure(
+                    f"presentation reset failed: {type(exc).__name__}: {exc}",
+                    lost=self._presentation_driver is None,
+                )
+            raise
 
     def _attach_presentation_terminal(self) -> None:
         config = self._presentation_config
@@ -550,10 +586,8 @@ class MachineSession:
         driver = self._presentation_driver
         if driver is None:
             return
-        try:
-            driver.close()
-        finally:
-            self._presentation_driver = None
+        driver.close()
+        self._presentation_driver = None
 
     def _inject_terminal_response(self, data: bytes) -> None:
         if self._presentation_mutation_blocked():
@@ -636,8 +670,11 @@ class MachineSession:
 
         driver = self._presentation_driver
         config = self._presentation_config
-        if driver is None or config is None:
+        if config is None:
             return None
+        if driver is None:
+            reason = self.presentation_failure or "presentation driver is unavailable"
+            self._latch_presentation_failure(reason, lost=True)
         if self._presentation_failure_reason is not None:
             raise TerminalSessionError(self._presentation_failure_reason)
         result = driver.service(max_batches=config.service_batches)
@@ -695,10 +732,18 @@ class MachineSession:
         *,
         lost: bool = False,
     ) -> None:
+        self._record_presentation_failure(reason, lost=lost)
+        raise TerminalSessionError(self._presentation_failure_reason)
+
+    def _record_presentation_failure(
+        self,
+        reason: str,
+        *,
+        lost: bool = False,
+    ) -> None:
         if self._presentation_failure_reason is None:
             self._presentation_failure_reason = str(reason)
         self._presentation_lost = self._presentation_lost or lost
-        raise TerminalSessionError(self._presentation_failure_reason)
 
     def _presentation_has_pending_work(self) -> bool:
         driver = self._presentation_driver
@@ -1028,7 +1073,7 @@ class MachineSession:
         return None
 
     def step(self) -> int:
-        if self._presentation_driver is None:
+        if not self.presentation_enabled:
             return self.system.step()
         self.service_presentation_terminal()
         cycles = self.system.step()
