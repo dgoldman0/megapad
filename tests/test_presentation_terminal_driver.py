@@ -363,6 +363,41 @@ def test_driver_routes_bounded_preswitch_input_through_the_lease():
     driver.close()
 
 
+def test_driver_retries_lease_retirement_after_close_raises(monkeypatch):
+    host = FakeTerminalHost()
+    limits = _host_limits()
+    lease = host.attach(limits)
+    driver = PresentationTerminalDriver(
+        lease,
+        PresentationTerminalCore(
+            _terminal_config(),
+            attachment_epoch=lease.attachment_epoch,
+        ),
+        limits,
+        DriverLimits(4_096, 8),
+    )
+    original_close = host._lease_close
+    calls = 0
+
+    def flaky_close(token, epoch):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("injected retirement failure")
+        return original_close(token, epoch)
+
+    monkeypatch.setattr(host, "_lease_close", flaky_close)
+    with pytest.raises(RuntimeError, match="injected retirement failure"):
+        driver.close()
+
+    assert not driver.closed
+    assert host.active_attachment_epoch == lease.attachment_epoch
+    assert driver.close() is AdmissionStatus.ACCEPTED
+    assert driver.closed
+    assert host.active_attachment_epoch is None
+    assert calls == 2
+
+
 def test_driver_rejects_incoherent_capacity_before_acquiring_the_lease():
     system = MegapadSystem(ram_size=64 * 1024)
     too_small = HostPortLimits(

@@ -595,11 +595,14 @@ class PresentationTerminalDriver:
 
         if self._closed:
             return AdmissionStatus.ACCEPTED
+        result = self._lease.close()
+        if result not in {AdmissionStatus.ACCEPTED, AdmissionStatus.STALE}:
+            return result
         self._closed = True
         self._pending.clear()
         self._pending_bytes = 0
         self._resize_intent = None
-        return self._lease.close()
+        return result
 
     def _retain_outbound(self, records: tuple[OutboundBytes, ...]) -> None:
         additional_events = len(records)
