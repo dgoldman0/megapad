@@ -184,7 +184,10 @@ MUST close before its next sequence would wrap.
 
 Presentation epoch starts at zero. It changes only through the soft reset
 exchange. Model revisions and transaction IDs are scoped to a presentation
-epoch and do not provide authorization.
+epoch and do not provide authorization. An enabled additive presentation
+profile may define additional transaction families only by sharing this one
+transaction-ID and model-revision domain; it may not create a parallel commit
+clock. `APT-1-RETAINED-1-2026-08-24` uses that extension rule.
 
 ## 7. Credit and bounded admission
 
@@ -192,6 +195,14 @@ Credit is a cumulative grant measured in complete frame bytes, including the
 40-byte header. Initial grants come from `OFFER` and `OPEN`. `CREDIT` carries a
 64-bit cumulative total. Grants and sent-byte counters never wrap and never
 decrease.
+
+For either direction, let `initial_grant` be the corresponding value from
+OFFER/OPEN and let `released_bytes` be the receiver's cumulative count of
+complete ordinary frame bytes whose bounded storage has been released. Every
+CREDIT payload is exactly the checked sum
+`initial_grant + released_bytes`. Release accounting is ordered and never
+includes a frame prefix or control-reserve frame. A sender matches a release
+watermark against this sum, not against its currently unused send allowance.
 
 A data frame may be sent only when:
 
@@ -213,6 +224,13 @@ exchange. Those types do not consume ordinary data credit. Their payloads are
 limited by this document, unexpected duplicates are errors, and they cannot
 be used to carry extension data. Ordinary input and presentation frames cannot
 consume the reserve.
+
+An enabled additive profile may add fixed lifecycle frames to this same reserve
+only when its contract names each exact type, direction, payload length, and
+termination purpose. It does not enlarge the 4,096-byte reserve. RETAINED-1
+adds only `RET_RESULT` (`000a`), `OWNER_DROP` (`000b`), and `RESOURCE_ABORT`
+(`000c`) under `APT-1-RETAINED-1.md` Section 17. Its discovery, resource data,
+presentation, object, region, and series frames remain ordinary data.
 
 Credit exhaustion is backpressure, not loss. The sender retains the exact
 unsent frame/transaction and makes no sequence or model progress.
@@ -423,7 +441,10 @@ reconciled rather than dispatched again. A terminal defers resize publication
 while a transaction is open. Before sending it, the terminal verifies that a
 full snapshot at the new dimensions satisfies the negotiated maximum payload,
 transaction, and credit bounds. After the client accepts resize, normal deltas
-stop until a replacement snapshot matching that geometry commits.
+stop until a replacement snapshot matching that geometry commits, or until an
+enabled additive profile's explicitly defined replacement transaction commits.
+RETAINED-1 uses PRESENT CELL_REPLACE and does not authorize legacy
+SNAPSHOT_BEGIN after its discovery.
 
 `FOCUS` (`0204`) payload is `u8 focused`, seven zero bytes, and `u64
 model_revision`. `focused` is zero or one.
@@ -443,11 +464,30 @@ client sequence, a mismatch proves inconsistent session state and is fatal.
 If the current presentation epoch is `FFFFFFFF`, soft reset is unavailable;
 the terminal performs synchronized close and negotiates a new session instead.
 
-On receiving the request, the client stops new old-epoch work. If an outgoing
-transaction is open, it sends `TX_ABORT` in the old epoch. Ordered delivery
-therefore places all prior client frames and the abort before the
-acknowledgement. The client then advances to the requested epoch, resets its
-transaction ID and model revision scopes, and replies with
+Before constructing a locally planned SOFT_RESET_REQUEST, the terminal MUST
+settle every complete COMMIT it has accepted. It applies a successful commit,
+emits its old-epoch TX_RESULT, and only then reads the resulting revision for
+`last_revision` and emits the request. Thus an accepted commit and its result
+are ordered before the request; the request never advertises a revision that an
+already accepted commit can later advance.
+
+On receiving the request, the client stops new old-epoch work. If a transaction
+is genuinely open and the client has not emitted COMMIT, it sends `TX_ABORT` in
+the old epoch. If COMMIT has been emitted and its TX_RESULT is outstanding, the
+client instead holds the reset request and sends neither TX_ABORT nor ACK. A
+terminal which already emitted SOFT_RESET_REQUEST before accepting an otherwise
+valid crossed COMMIT MUST consume the complete COMMIT, discard its staging, and
+emit TX_RESULT for that transaction ID with status 1 and the unchanged revision
+equal to the request's `last_revision`. The result header remains in the old
+presentation epoch. The client consumes that result and only then continues the
+reset. This reset-settlement status 1 is expected cancellation, not a semantic
+rejection that enters SESSION_LOST. Structural or semantic invalidity is not
+downgraded by reset crossing. No TX_RESULT may cross the new-epoch ACK.
+
+Ordered delivery places all prior client frames and any required abort or
+result settlement before the acknowledgement. The client then advances to the
+requested epoch, resets its transaction ID and model revision scopes, and
+replies with
 `SOFT_RESET_ACK` (`0008`): `u32 requested_epoch`, `u16 status`, and zero `u16
 reserved`. Status MUST be zero. The acknowledgement header uses the new
 presentation epoch. The next data message MUST be `SNAPSHOT_BEGIN` in the new
@@ -464,6 +504,16 @@ acknowledgement.
 Hard machine reset, UART detach/reconnect, host attachment replacement, or
 hard terminal reset destroys the session, flushes epoch-tagged queues, and
 returns to ANSI negotiation. It is not a soft reset.
+
+If RETAINED-1 is enabled, the mandatory CELL snapshot remains the first data
+message after soft reset and becomes visible before any retained replay. The
+retained profile then uses its hidden replace/reveal lifecycle; it does not
+weaken or reorder this CELL-1 recovery boundary.
+
+An enabled additive lifecycle profile may require outstanding fixed results to
+settle before the soft-reset acknowledgement. Those results remain old-epoch
+ordered control traffic and must precede the new-epoch ACK as defined by that
+profile; directional sequence and cumulative credit do not restart.
 
 `CLOSE` (`0005`) contains `u16 reason`, six zero bytes, and `u64
 last_revision`. `CLOSE_ACK` (`0006`) contains the echoed reason and six zero
@@ -483,11 +533,17 @@ u64 model_revision
 
 A nonzero result leaves the prior visible model unchanged. Akashic may advance
 its front buffer after local transport acceptance rather than waiting for this
-result; a nonzero result therefore makes the session unusable for deltas and
-requires synchronized framed close or a hard attachment reset before ANSI
-fallback. The module reports `SESSION_LOST` before dispatching another
-application event. A pending successful result makes a new transaction begin
-return `WOULD_BLOCK`; it does not require application repaint.
+result; except for Section 13's reset-settlement status 1 or an enabled additive
+profile's exact authoritative-state exception, a nonzero result therefore makes
+the session unusable for deltas and requires synchronized framed close or a
+hard attachment reset before ANSI fallback. An additive exception must name the
+operation and statuses, require that the sender retain authoritative desired
+state until success, and leave revision, authority, and committed model
+unchanged. RETAINED-1 defines narrow exceptions for retained-only PRESENT and
+`OWNER_DROP` statuses 2 and 3. The module reports `SESSION_LOST` before
+dispatching another application event for every result still governed by the
+base rule. A pending successful result makes a new transaction begin return
+`WOULD_BLOCK`; it does not require application repaint.
 
 `ERROR` (`0004`) payload begins:
 
@@ -542,7 +598,11 @@ Message ranges are reserved as follows:
 | `8000`–`FFFF` | Skippable optional extensions. |
 
 Reservation does not define a payload or grant a capability. Those families
-remain outside the CELL-1 implementation gate.
+remain outside the CELL-1 implementation gate. The optional additive contract
+`APT-1-RETAINED-1-2026-08-24` defines selected IDs in `000a`–`000c`,
+`1000`–`1003`, `2000`–`2024`, `3000`–`3003`, and `8000`–`8002` only after its
+deterministic discovery succeeds. Every other reserved ID keeps the behavior
+defined here; in particular, a sender may not infer a payload from its range.
 
 ## 17. Conformance vectors
 
