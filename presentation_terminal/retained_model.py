@@ -13,7 +13,7 @@ import operator
 from dataclasses import dataclass, replace
 from enum import Enum, IntFlag
 from types import MappingProxyType
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from .apt1 import STRUCTURAL_MAX_PAYLOAD, UINT32_MAX, UINT64_MAX
 from .presentation_model import PresentationGeometry
@@ -669,10 +669,45 @@ class OwnerLedger:
         namespace: ItemNamespace,
         item_id: int,
     ) -> PreparedOwnerLedgerInstall:
-        record = self.require_live(identity)
-        high_water = record.high_water.advanced(namespace, item_id)
+        return self.prepare_item_ids(((identity, namespace, item_id),))
+
+    def prepare_item_ids(
+        self,
+        advances: Iterable[tuple[OwnerIdentity, ItemNamespace, int]],
+    ) -> PreparedOwnerLedgerInstall:
+        """Prepare ordered item-ID advances as one atomic ledger candidate.
+
+        A PRESENT transaction may define several items, including several in
+        the same namespace.  The iterable is consumed synchronously and each
+        advance validates against prior advances in this candidate; no
+        high-water mark changes unless the resulting prepared value installs.
+        """
+
+        try:
+            iterator = iter(advances)
+        except TypeError as exc:
+            raise TypeError("advances must be iterable") from exc
         updated = dict(self._state.records)
-        updated[identity.owner_id] = replace(record, high_water=high_water)
+        for index, advance in enumerate(iterator):
+            try:
+                identity, namespace, item_id = advance
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"item-ID advance {index} must contain identity, namespace, and ID"
+                ) from exc
+            self._validate_scope(identity)
+            record = updated.get(identity.owner_id)
+            if (
+                record is None
+                or not record.live
+                or record.identity.owner_generation != identity.owner_generation
+            ):
+                raise OwnerLedgerError(
+                    OwnerLedgerErrorCode.STALE_OWNER,
+                    "item-ID advance lacks exact live owner authority",
+                )
+            high_water = record.high_water.advanced(namespace, item_id)
+            updated[identity.owner_id] = replace(record, high_water=high_water)
         return self._prepared(
             self._make_state(updated, self._state.reservations), None
         )

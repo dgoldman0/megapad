@@ -275,6 +275,65 @@ def test_item_ids_are_monotonic_per_namespace_and_only_install_consumes():
     assert record.high_water.region == 8
 
 
+def test_multiple_item_ids_prepare_and_install_as_one_atomic_candidate():
+    ledger = _ledger()
+    first = _identity(1)
+    second = _identity(2)
+    ledger.open(first, _quotas())
+    ledger.open(second, _quotas())
+    before = ledger.state
+
+    prepared = ledger.prepare_item_ids(
+        (
+            (first, ItemNamespace.OBJECT, 2),
+            (first, ItemNamespace.OBJECT, 5),
+            (first, ItemNamespace.REGION, 7),
+            (second, ItemNamespace.SERIES, 4),
+        )
+    )
+
+    assert ledger.state is before
+    ledger.install_prepared(prepared)
+    assert ledger.require_live(first).high_water.object == 5
+    assert ledger.require_live(first).high_water.region == 7
+    assert ledger.require_live(second).high_water.series == 4
+
+
+def test_batch_item_id_duplicate_or_stale_owner_rolls_back_whole_candidate():
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas())
+    ledger.install_prepared(
+        ledger.prepare_item_id(owner, ItemNamespace.OBJECT, 5)
+    )
+    before = ledger.state
+
+    with pytest.raises(OwnerLedgerError) as duplicate:
+        ledger.prepare_item_ids(
+            (
+                (owner, ItemNamespace.OBJECT, 6),
+                (owner, ItemNamespace.OBJECT, 6),
+            )
+        )
+    assert duplicate.value.code is OwnerLedgerErrorCode.DUPLICATE_ID
+    assert ledger.state is before
+    assert ledger.require_live(owner).high_water.object == 5
+
+    stale = OwnerIdentity(
+        owner.session_id, owner.presentation_epoch, owner.owner_id, 2
+    )
+    with pytest.raises(OwnerLedgerError) as stale_owner:
+        ledger.prepare_item_ids(
+            (
+                (owner, ItemNamespace.REGION, 1),
+                (stale, ItemNamespace.SERIES, 1),
+            )
+        )
+    assert stale_owner.value.code is OwnerLedgerErrorCode.STALE_OWNER
+    assert ledger.state is before
+    assert ledger.require_live(owner).high_water.region == 0
+
+
 def test_owner_record_capacity_counts_tombstones_without_blocking_new_generation():
     policy = _policy(max_owner_records=2, max_live_owners=2)
     ledger = _ledger(policy)
