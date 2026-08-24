@@ -18,6 +18,7 @@ from presentation_terminal.retained_model import (
 )
 from presentation_terminal.retained_scene import (
     CommitDisposition,
+    ExplicitSamples,
     GroupBody,
     LabelBody,
     MeterBody,
@@ -33,11 +34,13 @@ from presentation_terminal.retained_scene import (
     RegionDefinition,
     RetainedMode,
     RetainedSceneModel,
+    Sample,
     SceneErrorCode,
     SceneModelError,
     SeriesDefinition,
     StatusBody,
     TimestampMode,
+    UniformSamples,
     WaveformBody,
 )
 
@@ -172,6 +175,14 @@ def _stage_soundlab_target(scene: RetainedSceneModel, owner: OwnerIdentity, poin
     scene.define_object(
         _object(owner, 8, WaveformBody(2, -32768, 32767, WHITE, BLACK, 0, True), parent=1)
     )
+
+
+def _reveal_soundlab(clock, scene, owner):
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    _stage_soundlab_target(scene, owner, (Point(0, 0), Point(0xFFFFFFFF, 0xFFFFFFFF)))
+    _install(scene, clock, CommitDisposition.COMMIT)
+    _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
+    _install(scene, clock, CommitDisposition.COMMIT_AND_REVEAL)
 
 
 def test_real_soundlab_definition_target_is_hidden_then_atomically_revealed():
@@ -438,3 +449,169 @@ def test_series_capacity_not_current_samples_consumes_owner_slots():
     assert owners.require_live(owner).high_water.series == 0
     scene.reject()
     clock.settle_result(2)
+
+
+def test_soundlab_value_and_visibility_delta_is_one_immutable_commit():
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    old = scene.state.active
+    old_owner = old.owners[owner.owner_id]
+    high_water = owners.require_live(owner).high_water
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    scene.set_object_value(owner, 4, -99)
+    scene.set_object_value(owner, 5, -100)
+    scene.set_object_value(owner, 6, 0)
+    scene.set_object_visibility(owner, 2, False)
+
+    assert scene.state.active is old
+    _install(scene, clock, CommitDisposition.COMMIT)
+    current = scene.state.active.owners[owner.owner_id]
+    assert scene.state.revision == 4
+    assert current.objects[1] is old_owner.objects[1]
+    assert current.objects[2].visible is False
+    assert current.objects[4].body.value == -99
+    assert current.objects[5].body.value == -100
+    assert current.objects[6].body.value == 0
+    assert old_owner.objects[2].visible is True
+    assert old_owner.objects[4].body.value == -125
+    assert current.usage.utf8_bytes == len(b"Level") + len(b"-9.9 dB")
+    assert owners.require_live(owner).high_water == high_water
+
+
+def test_value_or_visibility_failure_poison_delta_without_partial_change():
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    old = scene.state.active
+    old_ledger = owners.state
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError) as meter:
+        scene.set_object_value(owner, 5, 1)
+    assert meter.value.code is SceneErrorCode.BOUNDS
+    with pytest.raises(SceneModelError, match="was rejected"):
+        scene.set_object_visibility(owner, 2, False)
+    assert scene.state.active is old
+    assert owners.state is old_ledger
+    scene.reject()
+    clock.settle_result(4)
+
+    _begin(clock, scene, 5, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError, match="visibility must be bool"):
+        scene.set_object_visibility(owner, 2, 1)
+    scene.reject()
+    clock.settle_result(5)
+
+
+def test_readout_value_recomputes_complete_utf8_usage_before_staging():
+    clock, owners, owner, scene = _domain(quotas=_quotas(utf8_bytes=13))
+    _reveal_soundlab(clock, scene, owner)
+    old = scene.state.active
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError) as quota:
+        scene.set_object_value(owner, 4, -(1 << 63))
+
+    assert quota.value.code is SceneErrorCode.QUOTA
+    assert scene.state.active is old
+    assert owners.require_live(owner).quotas.utf8_bytes == 13
+    scene.reject()
+    clock.settle_result(4)
+
+
+def test_explicit_and_uniform_appends_copy_batches_and_evict_exact_oldest():
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    explicit_input = [Sample(10, 1), Sample(20, 2)]
+    uniform_input = [3, 4, 5]
+    explicit = ExplicitSamples(explicit_input)
+    uniform = UniformSamples(100, uniform_input)
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    scene.append_series(owner, 1, explicit)
+    scene.append_series(owner, 2, uniform)
+    _install(scene, clock, CommitDisposition.COMMIT)
+    explicit_input.append(Sample(30, 99))
+    uniform_input.append(99)
+
+    owner_scene = scene.state.active.owners[owner.owner_id]
+    assert owner_scene.series[1].samples == (Sample(10, 1), Sample(20, 2))
+    assert tuple(sample.timestamp_us for sample in owner_scene.series[2].samples) == (
+        100,
+        1100,
+        2100,
+    )
+
+    _begin(clock, scene, 5, RetainedMode.DELTA)
+    scene.append_series(
+        owner,
+        1,
+        ExplicitSamples(tuple(Sample(timestamp, timestamp) for timestamp in range(30, 110, 10))),
+    )
+    _install(scene, clock, CommitDisposition.COMMIT)
+    history = scene.state.active.owners[owner.owner_id].series[1].samples
+    assert tuple(sample.timestamp_us for sample in history) == tuple(range(30, 110, 10))
+    assert len(history) == 8
+    assert scene.state.active.owners[owner.owner_id].usage.sample_slots == 16
+    assert owners.require_live(owner).high_water.series == 2
+
+
+def test_series_replace_changes_only_history_not_definition_or_capacity():
+    clock, _owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    scene.append_series(owner, 1, ExplicitSamples((Sample(10, 1), Sample(20, 2))))
+    scene.append_series(owner, 2, UniformSamples(100, (3, 4)))
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    _begin(clock, scene, 5, RetainedMode.DELTA)
+    scene.replace_series(owner, 1, ExplicitSamples((Sample(500, -1),)))
+    scene.replace_series(owner, 2, UniformSamples(5000, (9, 8, 7)))
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    explicit = scene.state.active.owners[owner.owner_id].series[1]
+    uniform = scene.state.active.owners[owner.owner_id].series[2]
+    assert (explicit.history_capacity, explicit.timestamp_mode, explicit.uniform_interval_us) == (
+        8,
+        TimestampMode.EXPLICIT,
+        0,
+    )
+    assert explicit.samples == (Sample(500, -1),)
+    assert (uniform.history_capacity, uniform.timestamp_mode, uniform.uniform_interval_us) == (
+        8,
+        TimestampMode.UNIFORM,
+        1000,
+    )
+    assert tuple(sample.timestamp_us for sample in uniform.samples) == (5000, 6000, 7000)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda scene, owner: scene.append_series(
+            owner, 1, ExplicitSamples((Sample(10, 1),))
+        ),
+        lambda scene, owner: scene.append_series(owner, 1, UniformSamples(10, (1,))),
+        lambda scene, owner: scene.append_series(
+            owner, 2, UniformSamples((1 << 64) - 500, (1, 2))
+        ),
+    ),
+)
+def test_bad_series_append_is_sticky_and_preserves_committed_history(mutation):
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    scene.append_series(owner, 1, ExplicitSamples((Sample(10, 1),)))
+    _install(scene, clock, CommitDisposition.COMMIT)
+    old = scene.state.active
+    old_ledger = owners.state
+
+    _begin(clock, scene, 5, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError):
+        mutation(scene, owner)
+    with pytest.raises(SceneModelError, match="was rejected"):
+        scene.prepare_commit(CommitDisposition.COMMIT)
+    assert scene.state.active is old
+    assert owners.state is old_ledger
+    scene.reject()
+    clock.settle_result(5)

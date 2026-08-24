@@ -5,10 +5,10 @@ targets, validates exact owner authority and final references, accounts each
 target independently against OWNER_OPEN reservations, and publishes a prepared
 scene together with its one atomic owner-ledger high-water candidate.
 
-Resource objects/uploads and property/history mutation are intentionally not in
-this layer.  The SoundLab object definitions represented here are complete
-semantic values; later operations replace or mutate those values without
-weakening the definition-time checks below.
+Resource objects and uploads are intentionally not in this layer.  SoundLab
+object definitions, scalar/visibility mutations, and bounded series histories
+are complete semantic values; every update preserves the definition-time
+checks below and publishes only through the same immutable transaction seam.
 """
 
 from __future__ import annotations
@@ -538,12 +538,78 @@ class ObjectDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class Sample:
+    timestamp_us: int
+    value: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "timestamp_us",
+            _integer(
+                "timestamp_us", self.timestamp_us, minimum=0, maximum=UINT64_MAX
+            ),
+        )
+        object.__setattr__(
+            self,
+            "value",
+            _integer("value", self.value, minimum=INT64_MIN, maximum=INT64_MAX),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExplicitSamples:
+    samples: tuple[Sample, ...]
+
+    def __post_init__(self) -> None:
+        samples = tuple(self.samples)
+        if not samples or any(not isinstance(sample, Sample) for sample in samples):
+            raise ValueError("explicit batch requires at least one Sample")
+        if any(
+            current.timestamp_us >= following.timestamp_us
+            for current, following in zip(samples, samples[1:])
+        ):
+            raise ValueError("explicit sample timestamps are not strictly increasing")
+        object.__setattr__(self, "samples", samples)
+
+
+@dataclass(frozen=True, slots=True)
+class UniformSamples:
+    first_timestamp_us: int
+    values: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "first_timestamp_us",
+            _integer(
+                "first_timestamp_us",
+                self.first_timestamp_us,
+                minimum=0,
+                maximum=UINT64_MAX,
+            ),
+        )
+        values = tuple(self.values)
+        if not values:
+            raise ValueError("uniform batch requires at least one value")
+        normalized = tuple(
+            _integer("value", value, minimum=INT64_MIN, maximum=INT64_MAX)
+            for value in values
+        )
+        object.__setattr__(self, "values", normalized)
+
+
+SeriesBatch = ExplicitSamples | UniformSamples
+
+
+@dataclass(frozen=True, slots=True)
 class SeriesDefinition:
     owner: OwnerIdentity
     series_id: int
     history_capacity: int
     timestamp_mode: TimestampMode
     uniform_interval_us: int
+    samples: tuple[Sample, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -574,6 +640,17 @@ class SeriesDefinition:
         )
         if (mode is TimestampMode.EXPLICIT) != (self.uniform_interval_us == 0):
             raise ValueError("series timestamp mode and uniform interval disagree")
+        samples = tuple(self.samples)
+        if any(not isinstance(sample, Sample) for sample in samples):
+            raise TypeError("series history must contain only Sample values")
+        if len(samples) > self.history_capacity:
+            raise ValueError("series history exceeds its declared capacity")
+        if any(
+            current.timestamp_us >= following.timestamp_us
+            for current, following in zip(samples, samples[1:])
+        ):
+            raise ValueError("series history timestamps are not strictly increasing")
+        object.__setattr__(self, "samples", samples)
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,10 +855,148 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.FEATURE, "SERIES was not advertised")
         if definition.history_capacity > policy.max_history_per_series:
             self._fail(SceneErrorCode.QUOTA, "series history exceeds advertised maximum")
+        if definition.samples:
+            self._fail(SceneErrorCode.STATE, "SERIES_DEFINE history must begin empty")
         self._stage_new_id(staging, definition.owner, ItemNamespace.SERIES, definition.series_id)
         series = dict(owner_scene.series)
         series[definition.series_id] = definition
         self._install_owner_candidate(staging, owner_scene, series=series)
+
+    def set_object_value(
+        self, owner: OwnerIdentity, object_id: int, value: int
+    ) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "object_id", object_id, minimum=1, maximum=UINT64_MAX
+            )
+            normalized_value = _integer(
+                "value", value, minimum=INT64_MIN, maximum=INT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        owner_scene = self._owner_scene(staging.candidate, owner)
+        definition = owner_scene.objects.get(normalized_id)
+        if definition is None:
+            self._fail(SceneErrorCode.MISSING_ID, "object value target is absent")
+        body = definition.body
+        if not isinstance(body, (ReadoutBody, MeterBody, StatusBody)):
+            self._fail(
+                SceneErrorCode.STATE,
+                "OBJECT_SET_VALUE requires READOUT, METER, or STATUS",
+            )
+        if isinstance(body, MeterBody) and not body.minimum <= normalized_value <= body.maximum:
+            self._fail(SceneErrorCode.BOUNDS, "meter value is outside its declared range")
+        try:
+            replacement_body = replace(body, value=normalized_value)
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.BOUNDS, str(exc))
+        objects = dict(owner_scene.objects)
+        objects[normalized_id] = replace(definition, body=replacement_body)
+        self._install_owner_candidate(staging, owner_scene, objects=objects)
+
+    def set_object_visibility(
+        self, owner: OwnerIdentity, object_id: int, visible: bool
+    ) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "object_id", object_id, minimum=1, maximum=UINT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        if not isinstance(visible, bool):
+            self._fail(SceneErrorCode.STATE, "visibility must be bool")
+        owner_scene = self._owner_scene(staging.candidate, owner)
+        definition = owner_scene.objects.get(normalized_id)
+        if definition is None:
+            self._fail(SceneErrorCode.MISSING_ID, "object visibility target is absent")
+        objects = dict(owner_scene.objects)
+        objects[normalized_id] = replace(definition, visible=visible)
+        self._install_owner_candidate(staging, owner_scene, objects=objects)
+
+    def append_series(
+        self, owner: OwnerIdentity, series_id: int, batch: SeriesBatch
+    ) -> None:
+        self._mutate_series(owner, series_id, batch, replace_history=False)
+
+    def replace_series(
+        self, owner: OwnerIdentity, series_id: int, batch: SeriesBatch
+    ) -> None:
+        self._mutate_series(owner, series_id, batch, replace_history=True)
+
+    def _mutate_series(
+        self,
+        owner: OwnerIdentity,
+        series_id: int,
+        batch: SeriesBatch,
+        *,
+        replace_history: bool,
+    ) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "series_id", series_id, minimum=1, maximum=UINT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        owner_scene = self._owner_scene(staging.candidate, owner)
+        definition = owner_scene.series.get(normalized_id)
+        if definition is None:
+            self._fail(SceneErrorCode.MISSING_ID, "series mutation target is absent")
+        samples = self._normalize_series_batch(definition, batch)
+        if (
+            not replace_history
+            and definition.samples
+            and samples[0].timestamp_us <= definition.samples[-1].timestamp_us
+        ):
+            self._fail(
+                SceneErrorCode.BOUNDS,
+                "SERIES_APPEND first timestamp is not newer than committed history",
+            )
+        if replace_history:
+            history = samples
+        else:
+            combined = definition.samples + samples
+            history = combined[-definition.history_capacity :]
+        replacement_series = replace(definition, samples=history)
+        series = dict(owner_scene.series)
+        series[normalized_id] = replacement_series
+        self._install_owner_candidate(staging, owner_scene, series=series)
+
+    def _normalize_series_batch(
+        self, definition: SeriesDefinition, batch: SeriesBatch
+    ) -> tuple[Sample, ...]:
+        policy = self._owners.policy
+        if isinstance(batch, ExplicitSamples):
+            if definition.timestamp_mode is not TimestampMode.EXPLICIT:
+                self._fail(SceneErrorCode.STATE, "explicit batch targets a uniform series")
+            samples = batch.samples
+        elif isinstance(batch, UniformSamples):
+            if definition.timestamp_mode is not TimestampMode.UNIFORM:
+                self._fail(SceneErrorCode.STATE, "uniform batch targets an explicit series")
+            count = len(batch.values)
+            interval = definition.uniform_interval_us
+            if count > 1 and count - 1 > (UINT64_MAX - batch.first_timestamp_us) // interval:
+                self._fail(SceneErrorCode.BOUNDS, "uniform sample timestamp overflows uint64")
+            samples = tuple(
+                Sample(batch.first_timestamp_us + index * interval, value)
+                for index, value in enumerate(batch.values)
+            )
+        else:
+            self._fail(
+                SceneErrorCode.STATE,
+                "series batch must be ExplicitSamples or UniformSamples",
+            )
+        count = len(samples)
+        if count > policy.max_samples_per_append:
+            self._fail(SceneErrorCode.QUOTA, "sample batch exceeds advertised maximum")
+        if count > definition.history_capacity:
+            self._fail(SceneErrorCode.QUOTA, "sample batch exceeds series capacity")
+        return samples
 
     def prepare_commit(self, disposition: CommitDisposition) -> PreparedSceneInstall:
         staging = self._require_staging()
@@ -1114,6 +1329,7 @@ class RetainedSceneModel:
 
 __all__ = [
     "CommitDisposition",
+    "ExplicitSamples",
     "GroupBody",
     "HiddenTargetKind",
     "LabelBody",
@@ -1134,6 +1350,7 @@ __all__ = [
     "RetainedMode",
     "RetainedScene",
     "RetainedSceneModel",
+    "Sample",
     "SceneErrorCode",
     "SceneModelError",
     "SceneModelState",
@@ -1141,5 +1358,6 @@ __all__ = [
     "SeriesDefinition",
     "StatusBody",
     "TimestampMode",
+    "UniformSamples",
     "WaveformBody",
 ]
