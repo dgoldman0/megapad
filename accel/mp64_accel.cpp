@@ -26475,6 +26475,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("uart_has_rx", [](const CPUState& s) { return s.uart->has_rx_data(); })
         .def("uart_rx_size", [](const CPUState& s) { return s.uart->rx_size(); })
+        .def("uart_discard_rx_tail", [](CPUState& s, size_t size) {
+            s.uart->discard_rx_tail(size);
+        })
         .def_property("uart_tx_ring_base",
             [](const CPUState& s) { return s.uart->get_tx_ring_base(); },
             [](CPUState& s, uint64_t value) { s.uart->set_tx_ring_base(value); })

@@ -1,5 +1,6 @@
 """Stable public surface for MegaPad's additive presentation-terminal port."""
 
+from .megapad import MegapadTerminalHost
 from .testing import FakeTerminalHost
 from .transport import (
     AdmissionStatus,
@@ -29,6 +30,7 @@ __all__ = [
     "GeometryRecord",
     "HostPortLimits",
     "IngressRecord",
+    "MegapadTerminalHost",
     "ScheduledEventPoll",
     "ScheduledHostEvent",
     "TerminalHost",

@@ -66,6 +66,8 @@ from devices import (
     CRYPTO_CAP_KECCAK_F1600,
     CRYPTO_CAP_WOTS_CHAIN,
 )
+from presentation_terminal.megapad import MegapadTerminalHost
+from presentation_terminal.transport import HostPortLimits, TerminalHostLease
 
 # Public system stepping must honor deliberate per-core step overrides, while
 # positive production batches remain owned unconditionally by the native
@@ -1276,6 +1278,7 @@ class MegapadSystem:
         self.bus = DeviceBus()
 
         self.uart = UART()
+        self._presentation_terminal_host = MegapadTerminalHost(self)
         # Timer is now handled natively by C++ accelerator — use proxy
         self.timer = CppTimerProxy(self.cores[0]._cs)
         self.storage = Storage(storage_image)
@@ -1434,6 +1437,8 @@ class MegapadSystem:
         ) -> None:
             system = _system_ref()
             if system is not None:
+                if system._presentation_terminal_host.enhanced_attached:
+                    return
                 system.schedule_uart_input(data)
                 return
             uart = _uart_ref()
@@ -1489,6 +1494,8 @@ class MegapadSystem:
         ) -> None:
             system = _system_ref()
             if system is not None:
+                if system._presentation_terminal_host.enhanced_attached:
+                    return
                 system.schedule_terminal_resize(cols, rows)
                 return
             geometry = _geometry_ref()
@@ -1512,7 +1519,9 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
-                system._schedule_external_event(
+                if system._presentation_terminal_host.enhanced_attached:
+                    return
+                system._schedule_legacy_terminal_event(
                     ExternalEventKind.UART_GEOMETRY_ACCEPT_UNCONDITIONAL,
                     at_cycle=None,
                     argument0=cols,
@@ -1533,7 +1542,9 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
-                system._schedule_external_event(
+                if system._presentation_terminal_host.enhanced_attached:
+                    return
+                system._schedule_legacy_terminal_event(
                     ExternalEventKind.UART_GEOMETRY_DENY_UNCONDITIONAL,
                     at_cycle=None,
                 )
@@ -1551,6 +1562,8 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
+                if system._presentation_terminal_host.enhanced_attached:
+                    return False
                 request = geometry.snapshot_resize_request()
                 if request is None or request[0] != generation:
                     return False
@@ -1578,6 +1591,8 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
+                if system._presentation_terminal_host.enhanced_attached:
+                    return False
                 request = geometry.snapshot_resize_request()
                 if request is None or request[0] != generation:
                     return False
@@ -1668,6 +1683,114 @@ class MegapadSystem:
     # -----------------------------------------------------------------
     #  Timestamped host ingress
     # -----------------------------------------------------------------
+
+    @property
+    def presentation_terminal_host(self) -> MegapadTerminalHost:
+        """The optional host port; construction alone does not acquire it."""
+        return self._presentation_terminal_host
+
+    def attach_presentation_terminal(
+        self,
+        limits: HostPortLimits,
+    ) -> TerminalHostLease:
+        """Explicitly acquire the exclusive enhanced terminal primary."""
+        return self._presentation_terminal_host.attach(limits)
+
+    def _require_presentation_terminal_attach_ready_locked(self) -> None:
+        """Reject ownership transitions that cannot pause legacy input."""
+        if self._native_system.external_event_replay_sealed:
+            raise RuntimeError(
+                "an enhanced terminal cannot attach during ingress replay"
+            )
+        terminal_kinds = {
+            ExternalEventKind.UART_RX,
+            ExternalEventKind.UART_GEOMETRY,
+            ExternalEventKind.UART_GEOMETRY_ACCEPT,
+            ExternalEventKind.UART_GEOMETRY_DENY,
+            ExternalEventKind.UART_GEOMETRY_ACCEPT_UNCONDITIONAL,
+            ExternalEventKind.UART_GEOMETRY_DENY_UNCONDITIONAL,
+        }
+        if any(
+            event.kind in terminal_kinds
+            for event in self._native_system.external_event_pending
+        ):
+            raise RuntimeError(
+                "an enhanced terminal cannot pause pending legacy terminal input"
+            )
+
+    def _schedule_presentation_uart_input_locked(
+        self,
+        attachment_epoch: int,
+        payload: bytes,
+    ) -> int:
+        """Apply one lease-qualified ingress record at this boundary."""
+        if not self._presentation_terminal_host._epoch_is_current(
+            attachment_epoch
+        ):
+            raise RuntimeError("presentation UART ingress has a stale epoch")
+        sequence, _ = self._schedule_external_event(
+            ExternalEventKind.UART_RX,
+            at_cycle=None,
+            payload=payload,
+        )
+        return sequence
+
+    def _schedule_presentation_terminal_resize_locked(
+        self,
+        attachment_epoch: int,
+        cols: int,
+        rows: int,
+    ) -> int:
+        """Apply one lease-qualified geometry record at this boundary."""
+        if not self._presentation_terminal_host._epoch_is_current(
+            attachment_epoch
+        ):
+            raise RuntimeError("presentation geometry has a stale epoch")
+        sequence, _ = self._schedule_external_event(
+            ExternalEventKind.UART_GEOMETRY,
+            at_cycle=None,
+            argument0=cols,
+            argument1=rows,
+        )
+        return sequence
+
+    def _schedule_legacy_terminal_event(
+        self,
+        kind,
+        *,
+        at_cycle: Optional[int],
+        payload: bytes = b"",
+        argument0: int = 0,
+        argument1: int = 0,
+    ) -> int:
+        """Linearize a legacy terminal event against lease acquisition."""
+        if self._presentation_terminal_host.enhanced_attached:
+            raise RuntimeError(
+                "the enhanced terminal lease owns terminal ingress"
+            )
+        if at_cycle is None:
+            staged = self._native_system._try_stage_external_event(
+                kind,
+                payload,
+                argument0,
+                argument1,
+            )
+            if staged is not None:
+                return int(staged)
+
+        with self._scheduler_lock:
+            if self._presentation_terminal_host.enhanced_attached:
+                raise RuntimeError(
+                    "the enhanced terminal lease owns terminal ingress"
+                )
+            sequence, _ = self._schedule_external_event(
+                kind,
+                at_cycle=at_cycle,
+                payload=payload,
+                argument0=argument0,
+                argument1=argument1,
+            )
+            return sequence
 
     def _schedule_external_event(
         self,
@@ -1760,12 +1883,11 @@ class MegapadSystem:
     ) -> int:
         """Schedule host-to-guest UART bytes at an exact system cycle."""
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        sequence, _ = self._schedule_external_event(
+        return self._schedule_legacy_terminal_event(
             ExternalEventKind.UART_RX,
             at_cycle=at_cycle,
             payload=payload,
         )
-        return sequence
 
     def schedule_nic_frame(
         self,
@@ -1789,13 +1911,12 @@ class MegapadSystem:
         at_cycle: Optional[int] = None,
     ) -> int:
         """Schedule host terminal geometry at an exact system cycle."""
-        sequence, _ = self._schedule_external_event(
+        return self._schedule_legacy_terminal_event(
             ExternalEventKind.UART_GEOMETRY,
             at_cycle=at_cycle,
             argument0=cols,
             argument1=rows,
         )
-        return sequence
 
     def schedule_terminal_resize_response(
         self,
@@ -1824,13 +1945,12 @@ class MegapadSystem:
             if accepted
             else ExternalEventKind.UART_GEOMETRY_DENY
         )
-        sequence, _ = self._schedule_external_event(
+        return self._schedule_legacy_terminal_event(
             kind,
             at_cycle=at_cycle,
             argument0=generation,
             argument1=packed_dimensions,
         )
-        return sequence
 
     def export_external_ingress_recording(self) -> dict:
         """Return the versioned timestamped host-ingress journal.
@@ -2248,6 +2368,55 @@ class MegapadSystem:
         """Deliver pending native UART output to Python observers in one batch."""
         return self.uart._drain_native_output()
 
+    def _service_presentation_terminal_before_guest_locked(
+        self,
+    ) -> tuple[bool, int]:
+        """Service the optional host port before admitting guest execution."""
+        host = self._presentation_terminal_host
+        if not host.enhanced_attached:
+            return True, 0
+        admission = host._service_before_guest_locked()
+        if not admission.can_execute:
+            return False, admission.external_events_applied
+
+        # Direct diagnostic writes use the public UART facade and may leave a
+        # completed native publication in place after backpressure.  Settle it
+        # before guest code can append another batch.
+        self._drain_native_uart_output()
+        return (
+            not host.runner_backpressured,
+            admission.external_events_applied,
+        )
+
+    def _presentation_terminal_backpressure_stats_locked(
+        self,
+        external_events_applied: int,
+    ) -> SystemRunStats:
+        zeros = (0,) * self.num_cores
+        return SystemRunStats(
+            0,
+            0,
+            zeros,
+            zeros,
+            system_stop_reason=(
+                self._presentation_terminal_host._runner_stop_reason()
+            ),
+            stop_cycle=int(self._native_system.system_cycles),
+            external_events_applied=external_events_applied,
+        )
+
+    @staticmethod
+    def _account_presentation_terminal_events(
+        result: SystemRunStats,
+        applied: int,
+    ) -> SystemRunStats:
+        if not applied:
+            return result
+        return replace(
+            result,
+            external_events_applied=result.external_events_applied + applied,
+        )
+
     def _raw_mem_read(self, addr: int) -> int:
         addr = u64(addr)
         if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
@@ -2375,12 +2544,18 @@ class MegapadSystem:
         Core 0 gets SP at top of RAM; secondary cores get per-core stacks.
         Micro-cores are reset and then either released or held according to
         the persistent SysInfo CLUSTER_EN mask. Authoritative system time,
-        shared ingress devices, and their event journal survive. A session
-        frontend may discard output that was not yet presented; this does not
-        alter guest-visible UART input or its provenance.
+        shared legacy ingress devices, and their event journal survive. A live
+        presentation-terminal lease survives the initial boot but is
+        epoch-retired by a later boot, including its unconsumed UART input. A
+        session frontend may discard legacy output that was not yet presented.
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
+            if (
+                self._booted
+                and self._presentation_terminal_host.enhanced_attached
+            ):
+                self._presentation_terminal_host._retire_for_machine_reset_locked()
             if discard_uart_output:
                 self.cpu._cs.uart_drain_tx()
                 self.uart._tx_ring_base = 0
@@ -2966,11 +3141,18 @@ class MegapadSystem:
         """Execute one coordinated instruction round across active cores.
 
         Returns the elapsed system cycles, with a minimum compatibility value
-        of one when no core can retire.
+        of one when no core can retire.  An explicitly attached presentation
+        terminal may return zero before execution when its host queue is
+        backpressured.
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
             self._require_cycle_unbounded_execution()
+            admitted, _terminal_events = (
+                self._service_presentation_terminal_before_guest_locked()
+            )
+            if not admitted:
+                return 0
             self._begin_external_event_staging_locked()
             try:
                 result = self._step_locked()
@@ -3067,14 +3249,25 @@ class MegapadSystem:
             if n <= 0:
                 return self._run_batch_stats_locked(n)
             self._require_cycle_unbounded_execution()
+            admitted, terminal_events = (
+                self._service_presentation_terminal_before_guest_locked()
+            )
+            if not admitted:
+                return self._presentation_terminal_backpressure_stats_locked(
+                    terminal_events
+                )
             self._begin_external_event_staging_locked()
             try:
                 result = self._run_batch_stats_locked(n)
             finally:
                 applied = self._close_external_event_staging_locked()
-            return self._finalize_staged_ingress_result(
+            result = self._finalize_staged_ingress_result(
                 result,
                 applied,
+            )
+            return self._account_presentation_terminal_events(
+                result,
+                terminal_events,
             )
 
     def run_cycle_batch(
@@ -3131,6 +3324,13 @@ class MegapadSystem:
                     max_system_cycles,
                     max_instructions,
                 )
+            admitted, terminal_events = (
+                self._service_presentation_terminal_before_guest_locked()
+            )
+            if not admitted:
+                return self._presentation_terminal_backpressure_stats_locked(
+                    terminal_events
+                )
             self._begin_external_event_staging_locked()
             try:
                 result = self._run_native_full_core_cycle_batch(
@@ -3139,9 +3339,13 @@ class MegapadSystem:
                 )
             finally:
                 applied = self._close_external_event_staging_locked()
-            return self._finalize_staged_ingress_result(
+            result = self._finalize_staged_ingress_result(
                 result,
                 applied,
+            )
+            return self._account_presentation_terminal_events(
+                result,
+                terminal_events,
             )
 
     def _run_batch_stats_locked(self, n: int) -> SystemRunStats:

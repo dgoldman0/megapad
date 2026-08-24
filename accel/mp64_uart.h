@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 struct UARTDevice {
@@ -67,6 +68,17 @@ struct UARTDevice {
         std::lock_guard<std::mutex> lock(mutex);
         for (size_t i = 0; i < size; ++i)
             rx.push_back(data[i]);
+    }
+
+    void discard_rx_tail(size_t size) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (size > rx.size())
+            throw std::logic_error(
+                "UART RX tail discard exceeds the pending byte count");
+        while (size != 0) {
+            rx.pop_back();
+            --size;
+        }
     }
 
     uint8_t read8(uint32_t mmio_offset) {

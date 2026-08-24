@@ -165,6 +165,11 @@ class UART(Device):
         # instances remain the pure-Python reference device used by tests.
         self._native = None
 
+        # The enhanced terminal sink is installed only for the lifetime of an
+        # explicit exclusive lease.  Keeping ``None`` on the ordinary path
+        # avoids changing legacy callback/listener dispatch.
+        self._presentation_terminal_host = None
+
         # TX ring buffer support (BIOS-level batching)
         self._tx_ring_addr_bytes = bytearray(8)   # LE bytes from UART+0x08 writes
         self.__tx_ring_base: int = 0               # resolved descriptor base in RAM
@@ -278,7 +283,23 @@ class UART(Device):
         if self.__tx_ring_base:
             self._native.uart_tx_ring_base = self.__tx_ring_base
 
+    def _set_presentation_terminal_host(self, host) -> None:
+        """Switch the internal primary sink at a scheduler-owned boundary."""
+        if (
+            host is not None
+            and self._presentation_terminal_host is not None
+            and self._presentation_terminal_host is not host
+        ):
+            raise RuntimeError("the UART already has an enhanced primary sink")
+        self._presentation_terminal_host = host
+
     def _emit_byte(self, value: int):
+        terminal_host = self._presentation_terminal_host
+        if (
+            terminal_host is not None
+            and terminal_host._publish_machine_egress(bytes((value,)))
+        ):
+            return
         self.tx_buffer.append(value)
         if self.on_tx:
             self.on_tx(value)
@@ -287,6 +308,12 @@ class UART(Device):
 
     def _emit_batch(self, data: bytes):
         if not data:
+            return
+        terminal_host = self._presentation_terminal_host
+        if (
+            terminal_host is not None
+            and terminal_host._publish_machine_egress(data)
+        ):
             return
         self.tx_buffer.extend(data)
         if self.on_tx_batch:
@@ -301,9 +328,33 @@ class UART(Device):
         """Move one native TX batch into the Python observer facade."""
         if self._native is None:
             return b""
+        terminal_host = self._presentation_terminal_host
+        if (
+            terminal_host is not None
+            and not terminal_host._machine_drain_admitted()
+        ):
+            return b""
         data = bytes(self._native.uart_drain_tx())
         self._emit_batch(data)
         return data
+
+    def _discard_native_output(self) -> bytes:
+        """Drop native bytes owned by a retiring enhanced attachment."""
+        if self._native is None:
+            return b""
+        return bytes(self._native.uart_drain_tx())
+
+    def _discard_rx_tail(self, count: int) -> None:
+        """Discard an exact attachment-owned RX suffix."""
+        if count < 0:
+            raise ValueError("RX discard count cannot be negative")
+        if self._native is not None:
+            self._native.uart_discard_rx_tail(count)
+            return
+        if count > len(self.rx_buffer):
+            raise RuntimeError("RX discard exceeds the pending byte count")
+        for _ in range(count):
+            self.rx_buffer.pop()
 
     def drain_tx(self) -> str:
         """Return all pending TX bytes as a string and clear the buffer."""

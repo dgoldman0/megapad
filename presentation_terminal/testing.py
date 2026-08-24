@@ -304,8 +304,12 @@ class FakeTerminalHost:
             assert limits is not None
             if self._pending_geometry_events >= limits.geometry_events:
                 return AdmissionStatus.BACKPRESSURED
-            normalized_cols = _integer("cols", cols, minimum=1)
-            normalized_rows = _integer("rows", rows, minimum=1)
+            normalized_cols = _integer(
+                "cols", cols, minimum=1, maximum=(1 << 16) - 1
+            )
+            normalized_rows = _integer(
+                "rows", rows, minimum=1, maximum=(1 << 16) - 1
+            )
             sequence = self._allocate_schedule_sequence_locked()
             self._scheduled.append(
                 GeometryRecord(

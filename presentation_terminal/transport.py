@@ -138,8 +138,16 @@ class GeometryRecord:
             "schedule_sequence",
             _integer("schedule_sequence", self.schedule_sequence, minimum=0),
         )
-        object.__setattr__(self, "cols", _integer("cols", self.cols, minimum=1))
-        object.__setattr__(self, "rows", _integer("rows", self.rows, minimum=1))
+        object.__setattr__(
+            self,
+            "cols",
+            _integer("cols", self.cols, minimum=1, maximum=(1 << 16) - 1),
+        )
+        object.__setattr__(
+            self,
+            "rows",
+            _integer("rows", self.rows, minimum=1, maximum=(1 << 16) - 1),
+        )
 
 
 ScheduledHostEvent: TypeAlias = IngressRecord | GeometryRecord
