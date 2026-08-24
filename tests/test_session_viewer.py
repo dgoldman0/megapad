@@ -71,12 +71,15 @@ class _FakePygame:
 
 
 class _RecordingClient:
-    def __init__(self):
+    def __init__(self, responses=None):
         self.requests = []
+        self.responses = list(responses or [])
 
     def request(self, method, **params):
         self.requests.append((method, params))
-        return {}
+        if self.responses:
+            return {"status": self.responses.pop(0)}
+        return {"status": "progress"}
 
 
 def _key_event(key, *, mod=0, unicode=""):
@@ -105,7 +108,9 @@ def test_alt_digit_is_forwarded_once_without_textinput_leak():
     assert keyboard.text_input(SimpleNamespace(text="5"))
     keyboard.key_up(event)
 
-    assert client.requests == [("send_key", {"key": "alt+5"})]
+    assert client.requests == [
+        ("send_key", {"key": "alt+5", "generation": 0})
+    ]
 
 
 def test_modified_chord_does_not_suppress_unrelated_composed_text():
@@ -119,8 +124,8 @@ def test_modified_chord_does_not_suppress_unrelated_composed_text():
     assert keyboard.text_input(SimpleNamespace(text="f"))
 
     assert client.requests == [
-        ("send_key", {"key": "alt+f"}),
-        ("send_text", {"text": "é"}),
+        ("send_key", {"key": "alt+f", "generation": 0}),
+        ("send_text", {"text": "é", "generation": 0}),
     ]
 
 
@@ -137,9 +142,9 @@ def test_named_keydown_repeats_and_modified_navigation_is_preserved():
     assert keyboard.key_down(alt_left)
 
     assert client.requests == [
-        ("send_key", {"key": "backspace"}),
-        ("send_key", {"key": "backspace"}),
-        ("send_key", {"key": "alt+left"}),
+        ("send_key", {"key": "backspace", "generation": 0}),
+        ("send_key", {"key": "backspace", "generation": 0}),
+        ("send_key", {"key": "alt+left", "generation": 0}),
     ]
 
 
@@ -156,8 +161,8 @@ def test_activation_keys_and_shortcuts_do_not_repeat():
     assert keyboard.key_down(alt_digit, repeated=True)
 
     assert client.requests == [
-        ("send_key", {"key": "enter"}),
-        ("send_key", {"key": "alt+5"}),
+        ("send_key", {"key": "enter", "generation": 0}),
+        ("send_key", {"key": "alt+5", "generation": 0}),
     ]
 
 
@@ -174,7 +179,9 @@ def test_altgr_and_composed_text_remain_textinput_driven():
     assert not keyboard.key_down(altgr)
     assert keyboard.text_input(SimpleNamespace(text="€"))
 
-    assert client.requests == [("send_text", {"text": "€"})]
+    assert client.requests == [
+        ("send_text", {"text": "€", "generation": 0})
+    ]
 
 
 def test_focus_reset_releases_modified_text_suppression():
@@ -188,6 +195,77 @@ def test_focus_reset_releases_modified_text_suppression():
     assert keyboard.text_input(SimpleNamespace(text="x"))
 
     assert client.requests == [
-        ("send_key", {"key": "alt+f"}),
-        ("send_text", {"text": "x"}),
+        ("send_key", {"key": "alt+f", "generation": 0}),
+        ("send_text", {"text": "x", "generation": 0}),
     ]
+
+
+def test_backpressured_input_is_retained_and_retried_in_order():
+    pygame = _FakePygame()
+    client = _RecordingClient(
+        responses=("backpressured", "progress", "progress")
+    )
+    keyboard = _GuestKeyboardForwarder(
+        pygame,
+        client,
+        max_pending_events=2,
+    )
+
+    assert keyboard.key_down(_key_event(pygame.K_RETURN))
+    assert keyboard.pending_events == 1
+    assert keyboard.text_input(SimpleNamespace(text="x"))
+    assert keyboard.pending_events == 2
+    assert client.requests == [
+        ("send_key", {"key": "enter", "generation": 0})
+    ]
+
+    keyboard.flush_pending()
+
+    assert keyboard.pending_events == 0
+    assert client.requests == [
+        ("send_key", {"key": "enter", "generation": 0}),
+        ("send_key", {"key": "enter", "generation": 0}),
+        ("send_text", {"text": "x", "generation": 0}),
+    ]
+
+
+def test_failed_or_full_input_retention_is_visible():
+    pygame = _FakePygame()
+    failed = _RecordingClient(responses=("failed",))
+    keyboard = _GuestKeyboardForwarder(pygame, failed)
+    assert keyboard.key_down(_key_event(pygame.K_RETURN))
+    assert keyboard.pending_events == 0
+    assert "failed" in keyboard.last_error
+
+    blocked = _RecordingClient(responses=("backpressured",))
+    keyboard = _GuestKeyboardForwarder(
+        pygame,
+        blocked,
+        max_pending_events=1,
+    )
+    assert keyboard.key_down(_key_event(pygame.K_RETURN))
+    assert keyboard.text_input(SimpleNamespace(text="x"))
+    assert keyboard.pending_events == 1
+    assert "retention full" in keyboard.last_error
+
+    # Even if the older retained event drains in this same frame, the dropped
+    # input remains visible until a reset/generation change acknowledges it.
+    keyboard.flush_pending()
+    assert keyboard.pending_events == 0
+    assert "retention full" in keyboard.last_error
+
+
+def test_reset_generation_rejects_and_discards_retained_old_input():
+    pygame = _FakePygame()
+    client = _RecordingClient(responses=("backpressured", "stale_generation"))
+    keyboard = _GuestKeyboardForwarder(pygame, client, generation=3)
+
+    assert keyboard.key_down(_key_event(pygame.K_RETURN))
+    assert keyboard.pending_events == 1
+    keyboard.flush_pending()
+
+    assert keyboard.pending_events == 0
+    assert "stale_generation" in keyboard.last_error
+    keyboard.set_generation(4)
+    assert keyboard.generation == 4
+    assert keyboard.last_error is None

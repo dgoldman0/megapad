@@ -488,6 +488,26 @@ class MachineSession:
 
         return self._raw_output_total
 
+    @property
+    def visible_geometry(self) -> tuple[int, int]:
+        """Geometry of the immutable view currently exposed to observers."""
+
+        view = self._presentation_view if self._presentation_view_selected else None
+        if view is not None:
+            return view.cols, view.rows
+        with self.terminal._lock:
+            return self.terminal.cols, self.terminal.rows
+
+    @property
+    def presentation_work_pending(self) -> bool:
+        """Whether a runner boundary can advance owned terminal work."""
+
+        return self._presentation_has_pending_work()
+
+    @property
+    def last_batch_made_progress(self) -> bool:
+        return self._last_batch_presentation_progress
+
     def close(self):
         if self._closed:
             return

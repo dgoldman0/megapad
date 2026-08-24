@@ -587,6 +587,9 @@ class PresentationTerminalDriver:
             return DriverStatus.PROGRESS
         if state not in {TerminalState.ACTIVE, TerminalState.RESYNCING}:
             return DriverStatus.BACKPRESSURED
+        if geometry == self._core.selected_geometry:
+            self._resize_intent = None
+            return DriverStatus.PROGRESS
         self._resize_intent = geometry
         return DriverStatus.PROGRESS
 

@@ -135,8 +135,26 @@ An explicit `--socket` continues to override the default.
 
 Other control commands are `pause`, `resume`, `step`, `reset`, `resize`,
 `key`, `raw`, and `shutdown`. `step` requires the machine to be paused. The
-viewer and CLI are peers: input from either reaches the one UART queue owned by
-the server.
+viewer and CLI are peers: the server serializes input from both through the
+one terminal owner. Baseline ANSI input enters the UART stream; an active
+presentation-terminal attachment instead receives normalized, framed input.
+
+The local control protocol is version 2. `status.generation` identifies the
+current successful boot/reset epoch. Every `send_text`, `send_key`, and
+`resize` request must echo that generation; the server returns
+`stale_generation` without mutating the new machine when a request races a
+reset. Input responses report `progress`, `backpressured`, `invalid`, `stale`,
+or `failed` and use all-or-zero `accepted_bytes`, `accepted_events`, or
+`accepted` fields. A rich-terminal resize with `progress` may be an accepted
+latest-wins intent: `requested` is the intent, while `cols`, `rows`, and
+`revision` describe the currently visible snapshot until a replacement
+snapshot commits.
+
+`raw` uses lifetime-monotonic absolute byte cursors. Its response reports the
+requested slice's `start`, the oldest retained `available_from` offset, the
+next `offset`, and whether bounded history made the request `truncated`.
+Replacement-decoded `text` is accompanied by lossless `data_base64`. Reset
+clears retained ANSI diagnostics without reusing old offsets.
 
 `status` includes all CPU registers, RTC mode and values, NIC counters, the
 current Forth word and BIOS primitive, and bounded data/return-stack snapshots.
@@ -187,8 +205,11 @@ ASCII-34 workarounds and documentation examples only after the word exists.
 - combined character modifiers such as `ctrl+shift+s` (CSI-u encoded)
 - `alt+<character>`
 
-`resize(cols, rows)` updates both the terminal grid and the guest UART geometry
-device.
+In baseline ANSI mode, `resize(cols, rows)` updates both the terminal grid and
+the guest UART geometry device immediately. In active presentation mode it
+records a bounded latest-wins request; the selected geometry changes atomically
+with its framed RESIZE only when transaction and queue ordering permit it, and
+the visible geometry changes when the required replacement snapshot commits.
 
 ## Observation
 

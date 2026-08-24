@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import codecs
 import json
 import sys
 import time
@@ -82,9 +84,23 @@ def main() -> int:
                 print(result["text"], end="")
             elif args.command == "send":
                 text = args.text + ("\n" if args.enter else "")
-                print_json(client.request("send_text", text=text))
+                generation = client.request("status", detailed=False)["generation"]
+                print_json(
+                    client.request(
+                        "send_text",
+                        text=text,
+                        generation=generation,
+                    )
+                )
             elif args.command == "key":
-                print_json(client.request("send_key", key=args.key))
+                generation = client.request("status", detailed=False)["generation"]
+                print_json(
+                    client.request(
+                        "send_key",
+                        key=args.key,
+                        generation=generation,
+                    )
+                )
             elif args.command == "pause":
                 print_json(client.request("pause"))
             elif args.command == "resume":
@@ -94,7 +110,15 @@ def main() -> int:
             elif args.command == "reset":
                 print_json(client.request("reset", paused=args.paused))
             elif args.command == "resize":
-                print_json(client.request("resize", cols=args.cols, rows=args.rows))
+                generation = client.request("status", detailed=False)["generation"]
+                print_json(
+                    client.request(
+                        "resize",
+                        cols=args.cols,
+                        rows=args.rows,
+                        generation=generation,
+                    )
+                )
             elif args.command == "wait-text":
                 return wait_for_text(client, args)
             elif args.command == "capture":
@@ -118,6 +142,7 @@ def wait_for_text(client: SessionClient, args) -> int:
     deadline = time.monotonic() + args.timeout
     accumulated = ""
     offset = 0
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     if args.scope == "raw" and args.from_now:
         offset = client.request("status")["raw_bytes"]
 
@@ -127,12 +152,20 @@ def wait_for_text(client: SessionClient, args) -> int:
         else:
             result = client.request("raw", since=offset)
             offset = result["offset"]
-            accumulated += result["text"]
+            if result["truncated"]:
+                accumulated = ""
+                decoder = codecs.getincrementaldecoder("utf-8")(
+                    errors="replace"
+                )
+            raw = base64.b64decode(result["data_base64"], validate=True)
+            accumulated += decoder.decode(raw, final=False)
         if args.text in accumulated:
             print_json({"matched": True, "text": args.text, "scope": args.scope})
             return 0
         time.sleep(0.02)
 
+    if args.scope == "raw":
+        accumulated += decoder.decode(b"", final=True)
     print_json({
         "matched": False,
         "text": args.text,

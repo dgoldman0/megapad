@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import operator
 import os
 import socket
 import stat
@@ -11,11 +13,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from presentation_terminal import DriverStatus
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import MachineSession, TerminalCell, TerminalSnapshot
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 DEFAULT_SOCKET = shared_session_socket()
 MAX_REQUEST_BYTES = 1 << 20
 
@@ -115,6 +118,8 @@ class SharedMachine:
         self.total_steps = 0
         self.total_batches = 0
         self.last_error: str | None = None
+        self.last_stop_reason: str | None = None
+        self._reset_generation = 0
         self.started_at = time.time()
         self._stopping = False
         self._thread: threading.Thread | None = None
@@ -124,6 +129,7 @@ class SharedMachine:
             if self._thread is not None:
                 return
             self.session.boot()
+            self._reset_generation += 1
             self._thread = threading.Thread(
                 target=self._run_loop,
                 name="megapad-shared-machine",
@@ -142,6 +148,7 @@ class SharedMachine:
     def _run_loop(self):
         while True:
             idle_wait = False
+            progress_wait = False
             with self.condition:
                 if self._stopping:
                     return
@@ -149,22 +156,46 @@ class SharedMachine:
                     self.condition.wait(timeout=0.1)
                     continue
                 system = self.session.system
-                if system.all_halted:
+                terminal_failure = self.session.presentation_failure
+                if terminal_failure is not None:
+                    self.last_error = f"TerminalSessionError: {terminal_failure}"
+                    self.paused = True
+                    continue
+                terminal_pending = self.session.presentation_work_pending
+                if system.all_halted and not terminal_pending:
                     self.condition.wait(timeout=0.05)
                     continue
-                if system.all_idle_or_halted and not system.uart.has_rx_data:
+                if (
+                    system.all_idle_or_halted
+                    and not system.uart.has_rx_data
+                    and not terminal_pending
+                ):
                     idle_wait = True
                 else:
                     try:
-                        executed = system.run_batch(self.session.batch_steps)
+                        stats = self.session.run_batch_stats(
+                            self.session.batch_steps
+                        )
+                        self.last_stop_reason = stats.system_stop_reason
+                        executed = stats.instructions_executed
                         if executed > 0:
                             self.total_steps += executed
                             self.total_batches += 1
+                        elif not self.session.last_batch_made_progress:
+                            # A bounded host queue can remain legitimately
+                            # blocked until a client supplies input or another
+                            # runner boundary becomes admissible.  Preserve the
+                            # exact stop reason and wait instead of fake-charging
+                            # a guest instruction or hot-spinning.
+                            progress_wait = True
                     except Exception as exc:
                         self.last_error = f"{type(exc).__name__}: {exc}"
                         self.paused = True
 
-            if idle_wait:
+            if progress_wait:
+                with self.condition:
+                    self.condition.wait(timeout=self.idle_sleep_s)
+            elif idle_wait:
                 with self.condition:
                     self.condition.wait(timeout=self.idle_sleep_s)
                     if self._stopping or self.paused:
@@ -328,31 +359,60 @@ class SharedMachine:
         with self.lock:
             system = self.session.system
             cpu = system.cpu
-            if self.last_error:
+            presentation_failure = self.session.presentation_failure
+            presentation_pending = self.session.presentation_work_pending
+            quiescent = not system.uart.has_rx_data and not presentation_pending
+            operational = presentation_failure is None
+            halted = system.all_halted
+            idle = system.all_idle_or_halted and quiescent and operational
+            visible_cols, visible_rows = self.session.visible_geometry
+            if self.session.presentation_lost:
+                state = "lost"
+            elif presentation_failure is not None:
+                state = "terminal_failed"
+            elif self.last_error:
                 state = "error"
             elif self.paused:
                 state = "paused"
-            elif system.all_halted:
+            elif halted and not presentation_pending and operational:
                 state = "halted"
-            elif system.all_idle_or_halted and not system.uart.has_rx_data:
+            elif idle:
                 state = "idle"
+            elif self.last_stop_reason == "host_backpressure":
+                state = "backpressured"
             else:
                 state = "running"
             result = {
                 "protocol": PROTOCOL_VERSION,
+                "generation": self._reset_generation,
                 "state": state,
                 "paused": self.paused,
-                "halted": system.all_halted,
-                "idle": system.all_idle_or_halted,
+                "halted": halted,
+                "idle": idle,
+                "stop_reason": self.last_stop_reason,
                 "steps": self.total_steps,
                 "batches": self.total_batches,
                 "revision": self.session.revision,
-                "raw_bytes": len(self.session.raw_output),
+                "raw_bytes": self.session.raw_output_end,
+                "raw_start": self.session.raw_output_start,
+                "raw_offset": self.session.raw_output_end,
+                "raw_retained_bytes": len(self.session.raw_output),
                 "output_batches": self.session.output_batches,
                 "byte_callbacks": self.session.output_byte_callbacks,
-                "terminal": [self.session.terminal.cols, self.session.terminal.rows],
+                "terminal": [visible_cols, visible_rows],
                 "uptime_s": time.time() - self.started_at,
                 "error": self.last_error,
+                "presentation": {
+                    "enabled": self.session.presentation_enabled,
+                    "state": (
+                        None
+                        if self.session.presentation_state is None
+                        else self.session.presentation_state.value
+                    ),
+                    "pending": presentation_pending,
+                    "lost": self.session.presentation_lost,
+                    "failure": presentation_failure,
+                },
             }
             if not detailed:
                 return result
@@ -410,6 +470,12 @@ class SharedMachine:
 
     def resume(self) -> dict:
         with self.condition:
+            terminal_failure = self.session.presentation_failure
+            if terminal_failure is not None or self.session.presentation_lost:
+                raise RuntimeError(
+                    "presentation terminal failure requires a machine reset: "
+                    f"{terminal_failure or 'attachment lost'}"
+                )
             self.paused = False
             self.last_error = None
             self.condition.notify_all()
@@ -422,50 +488,159 @@ class SharedMachine:
         with self.condition:
             if not self.paused:
                 raise RuntimeError("machine must be paused before stepping")
+            terminal_failure = self.session.presentation_failure
+            if terminal_failure is not None or self.session.presentation_lost:
+                self.last_error = (
+                    "TerminalSessionError: "
+                    f"{terminal_failure or 'presentation attachment lost'}"
+                )
+                raise RuntimeError(
+                    "presentation terminal failure requires a machine reset: "
+                    f"{terminal_failure or 'attachment lost'}"
+                )
             executed = 0
             cycles = 0
+            stop_reason = "instruction_limit"
             for _ in range(count):
-                if self.session.system.all_halted:
+                if (
+                    self.session.system.all_halted
+                    and not self.session.presentation_work_pending
+                ):
+                    stop_reason = "all_halted"
                     break
-                cycles += self.session.step()
-                executed += 1
+                try:
+                    stats = self.session.run_batch_stats(1)
+                except Exception as exc:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self.paused = True
+                    raise
+                stop_reason = stats.system_stop_reason
+                cycles += stats.system_cycles_advanced
+                executed += stats.instructions_executed
+                if stats.instructions_executed == 0:
+                    break
+            self.last_stop_reason = stop_reason
             self.total_steps += executed
-            return {"executed": executed, "cycles": cycles, "status": self.status()}
+            return {
+                "executed": executed,
+                "cycles": cycles,
+                "stop_reason": stop_reason,
+                "status": self.status(),
+            }
 
     def reset(self, *, paused: bool | None = None) -> dict:
         with self.condition:
-            self.session.reset()
+            if paused is not None and not isinstance(paused, bool):
+                raise TypeError("reset paused must be a boolean or null")
+            try:
+                self.session.reset()
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.paused = True
+                self.condition.notify_all()
+                raise
             self.total_steps = 0
             self.total_batches = 0
             self.last_error = None
+            self.last_stop_reason = "reset"
+            self._reset_generation += 1
             if paused is not None:
-                self.paused = bool(paused)
+                self.paused = paused
             self.condition.notify_all()
             return self.status()
 
-    def send_text(self, text: str) -> dict:
+    def send_text(self, text: str, *, generation: int | None = None) -> dict:
         with self.condition:
-            self.session.send_text(text)
+            byte_count = len(text.encode("utf-8"))
+            if not self._generation_current(generation):
+                return {"status": "stale_generation", "accepted_bytes": 0}
+            status = self._terminal_mutation_status(self.session.send_text(text))
             self.condition.notify_all()
-            return {"accepted_bytes": len(text.encode("utf-8"))}
+            return {
+                "status": status.value,
+                "accepted_bytes": (
+                    byte_count if status is DriverStatus.PROGRESS else 0
+                ),
+            }
 
-    def send_key(self, key: str) -> dict:
+    def send_key(self, key: str, *, generation: int | None = None) -> dict:
         with self.condition:
-            before = self.session.system.uart.rx_pending
-            self.session.send_key(key)
-            after = self.session.system.uart.rx_pending
+            if not self._generation_current(generation):
+                return {"status": "stale_generation", "accepted_events": 0}
+            status = self._terminal_mutation_status(self.session.send_key(key))
             self.condition.notify_all()
-            return {"accepted_bytes": max(0, after - before)}
+            return {
+                "status": status.value,
+                "accepted_events": 1 if status is DriverStatus.PROGRESS else 0,
+            }
 
-    def resize(self, cols: int, rows: int) -> dict:
+    def resize(
+        self,
+        cols: int,
+        rows: int,
+        *,
+        generation: int | None = None,
+    ) -> dict:
         cols = int(cols)
         rows = int(rows)
-        if not (20 <= cols <= 400 and 5 <= rows <= 200):
-            raise ValueError("terminal size must be within 20x5 and 400x200")
+        if not self.session.presentation_enabled and not (
+            1 <= cols <= 400 and 1 <= rows <= 200
+        ):
+            raise ValueError("ANSI terminal size must be within 1x1 and 400x200")
         with self.condition:
-            self.session.resize(cols, rows)
+            current_generation = self._generation_current(generation)
+            status = (
+                self._terminal_mutation_status(self.session.resize(cols, rows))
+                if current_generation
+                else None
+            )
+            visible_cols, visible_rows = self.session.visible_geometry
+            if not current_generation:
+                return {
+                    "status": "stale_generation",
+                    "accepted": False,
+                    "requested": [cols, rows],
+                    "cols": visible_cols,
+                    "rows": visible_rows,
+                    "revision": self.session.revision,
+                }
             self.condition.notify_all()
-            return {"cols": cols, "rows": rows, "revision": self.session.revision}
+            return {
+                "status": status.value,
+                "accepted": status is DriverStatus.PROGRESS,
+                "requested": [cols, rows],
+                "cols": visible_cols,
+                "rows": visible_rows,
+                "revision": self.session.revision,
+            }
+
+    def _generation_current(self, generation: int | None) -> bool:
+        if generation is None:
+            return True
+        if isinstance(generation, bool):
+            raise TypeError("generation must be an integer, not bool")
+        try:
+            normalized = operator.index(generation)
+        except TypeError as exc:
+            raise TypeError("generation must be an integer") from exc
+        if normalized < 0:
+            raise ValueError("generation cannot be negative")
+        return normalized == self._reset_generation
+
+    def _terminal_mutation_status(
+        self,
+        status: DriverStatus | None,
+    ) -> DriverStatus:
+        normalized = DriverStatus.PROGRESS if status is None else status
+        if normalized in {DriverStatus.STALE, DriverStatus.FAILED}:
+            reason = self.session.presentation_failure or (
+                "presentation attachment became stale"
+                if normalized is DriverStatus.STALE
+                else "presentation terminal failed"
+            )
+            self.last_error = f"TerminalSessionError: {reason}"
+            self.paused = True
+        return normalized
 
     def screen(self, since: int = -1) -> dict:
         with self.lock:
@@ -492,11 +667,18 @@ class SharedMachine:
 
     def raw(self, since: int = 0) -> dict:
         with self.lock:
-            start = max(0, min(int(since), len(self.session.raw_output)))
-            data = bytes(self.session.raw_output[start:])
+            requested = int(since)
+            available_from = self.session.raw_output_start
+            offset = self.session.raw_output_end
+            start = max(available_from, min(requested, offset))
+            data = bytes(self.session.raw_output[start - available_from:])
             return {
-                "offset": len(self.session.raw_output),
+                "start": start,
+                "available_from": available_from,
+                "offset": offset,
+                "truncated": requested < available_from,
                 "text": data.decode("utf-8", errors="replace"),
+                "data_base64": base64.b64encode(data).decode("ascii"),
             }
 
     def capture(self, params: dict) -> dict:
@@ -724,6 +906,21 @@ class SessionServer:
         payload = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
         client.sendall(payload.encode("utf-8") + b"\n")
 
+    @staticmethod
+    def _required_generation(params: dict) -> int:
+        if "generation" not in params:
+            raise ValueError("mutating input request requires generation")
+        value = params["generation"]
+        if isinstance(value, bool):
+            raise TypeError("generation must be an integer, not bool")
+        try:
+            generation = operator.index(value)
+        except TypeError as exc:
+            raise TypeError("generation must be an integer") from exc
+        if generation < 0:
+            raise ValueError("generation cannot be negative")
+        return int(generation)
+
     def dispatch(self, method: str, params: dict) -> Any:
         if method == "ping":
             return {"protocol": PROTOCOL_VERSION, "time": time.time()}
@@ -753,11 +950,21 @@ class SessionServer:
         if method == "reset":
             return self.machine.reset(paused=params.get("paused"))
         if method == "send_text":
-            return self.machine.send_text(str(params.get("text", "")))
+            return self.machine.send_text(
+                str(params.get("text", "")),
+                generation=self._required_generation(params),
+            )
         if method == "send_key":
-            return self.machine.send_key(str(params["key"]))
+            return self.machine.send_key(
+                str(params["key"]),
+                generation=self._required_generation(params),
+            )
         if method == "resize":
-            return self.machine.resize(params["cols"], params["rows"])
+            return self.machine.resize(
+                params["cols"],
+                params["rows"],
+                generation=self._required_generation(params),
+            )
         if method == "screen":
             return self.machine.screen(params.get("since", -1))
         if method == "text":

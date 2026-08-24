@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import operator
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from display import VirtualTerminal
@@ -15,15 +17,91 @@ from shared_session import DEFAULT_SOCKET, SessionClient, snapshot_from_wire
 ROOT = Path(__file__).resolve().parent
 KEY_REPEAT_DELAY_MS = 400
 KEY_REPEAT_INTERVAL_MS = 35
+DEFAULT_PENDING_INPUT_EVENTS = 256
 
 
 class _GuestKeyboardForwarder:
     """Forward pygame input once while keeping TEXTINPUT for composed text."""
 
-    def __init__(self, pygame, client):
+    def __init__(
+        self,
+        pygame,
+        client,
+        *,
+        generation: int = 0,
+        max_pending_events: int = DEFAULT_PENDING_INPUT_EVENTS,
+    ):
+        if isinstance(max_pending_events, bool):
+            raise ValueError("max_pending_events must be a positive integer")
+        try:
+            normalized_limit = operator.index(max_pending_events)
+        except TypeError as exc:
+            raise TypeError("max_pending_events must be an integer") from exc
+        if normalized_limit <= 0:
+            raise ValueError("max_pending_events must be a positive integer")
         self.pygame = pygame
         self.client = client
+        self.generation = operator.index(generation)
+        self.max_pending_events = int(normalized_limit)
         self.suppressed_text_keys: dict[int, set[str]] = {}
+        self._pending_inputs: deque[tuple[str, dict]] = deque()
+        self.last_error: str | None = None
+
+    @property
+    def pending_events(self) -> int:
+        return len(self._pending_inputs)
+
+    def _enqueue_input(self, method: str, params: dict) -> bool:
+        if len(self._pending_inputs) >= self.max_pending_events:
+            self.last_error = (
+                "input retention full while the guest is backpressured"
+            )
+            return False
+        self._pending_inputs.append((method, params))
+        return True
+
+    def set_generation(self, generation: int) -> None:
+        normalized = operator.index(generation)
+        if normalized != self.generation:
+            self._pending_inputs.clear()
+            self.generation = normalized
+            self.last_error = None
+
+    def _request_input(self, method: str, **params) -> None:
+        params["generation"] = self.generation
+        if self._pending_inputs:
+            self._enqueue_input(method, params)
+            return
+        result = self.client.request(method, **params)
+        status = result.get("status")
+        if status == "progress":
+            return
+        if status == "backpressured":
+            self._enqueue_input(method, params)
+            return
+        if status in {"stale", "failed", "stale_generation"}:
+            self._pending_inputs.clear()
+        self.last_error = (
+            f"input rejected ({method}: {status or 'missing status'})"
+        )
+
+    def flush_pending(self) -> None:
+        while self._pending_inputs:
+            method, params = self._pending_inputs[0]
+            result = self.client.request(method, **params)
+            status = result.get("status")
+            if status == "backpressured":
+                return
+            if status != "progress":
+                self._pending_inputs.popleft()
+                if status in {"stale", "failed", "stale_generation"}:
+                    self._pending_inputs.clear()
+                self.last_error = (
+                    "retained input rejected "
+                    f"({method}: {status or 'missing status'})"
+                )
+                return
+            self._pending_inputs.popleft()
 
     def key_down(self, event, *, repeated: bool = False) -> bool:
         key_name = _pygame_guest_key(self.pygame, event)
@@ -38,7 +116,7 @@ class _GuestKeyboardForwarder:
             self.suppressed_text_keys[event.key] = {
                 text for text in (character, translated) if text
             }
-        self.client.request("send_key", key=key_name)
+        self._request_input("send_key", key=key_name)
         return True
 
     def key_up(self, event) -> None:
@@ -51,11 +129,18 @@ class _GuestKeyboardForwarder:
             event.text in texts for texts in self.suppressed_text_keys.values()
         ):
             return True
-        self.client.request("send_text", text=event.text)
+        self._request_input("send_text", text=event.text)
         return True
 
     def reset(self) -> None:
         self.suppressed_text_keys.clear()
+
+    def discard_pending(self) -> None:
+        self._pending_inputs.clear()
+        self.last_error = None
+
+    def report_error(self, message: str) -> None:
+        self.last_error = str(message)
 
 
 def apply_snapshot(terminal: VirtualTerminal, wire: dict):
@@ -81,8 +166,16 @@ def main() -> int:
     parser.add_argument("--font-size", type=int, default=18)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--title", default="MegaPad-64 Shared Session")
+    parser.add_argument(
+        "--input-queue-events",
+        type=int,
+        default=DEFAULT_PENDING_INPUT_EVENTS,
+        help="maximum viewer input events retained during guest backpressure",
+    )
     parser.add_argument("--exit-after", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.input_queue_events <= 0:
+        parser.error("--input-queue-events must be positive")
 
     try:
         import pygame
@@ -132,7 +225,20 @@ def main() -> int:
     connected = True
     glyph_cache = {}
     running = True
-    guest_keyboard = _GuestKeyboardForwarder(pygame, client)
+    guest_keyboard = _GuestKeyboardForwarder(
+        pygame,
+        client,
+        generation=status["generation"],
+        max_pending_events=args.input_queue_events,
+    )
+
+    def request_control(method: str, **params):
+        try:
+            return client.request(method, **params)
+        except RuntimeError as exc:
+            guest_keyboard.report_error(f"{method} rejected: {exc}")
+            return None
+
     keys_down: set[int] = set()
     viewer_started = time.monotonic()
 
@@ -153,14 +259,28 @@ def main() -> int:
                     if ctrl and event.key == pygame.K_q and not repeated:
                         running = False
                     elif ctrl and event.key == pygame.K_F5 and not repeated:
-                        status = client.request("status", detailed=False)
-                        method = "resume" if status["paused"] else "pause"
-                        status = client.request(method)
+                        latest = request_control("status", detailed=False)
+                        if latest is not None:
+                            status = latest
+                            if status["state"] not in ("lost", "terminal_failed"):
+                                method = "resume" if status["paused"] else "pause"
+                                updated = request_control(method)
+                                if updated is not None:
+                                    status = updated
                     elif ctrl and event.key == pygame.K_F10 and not repeated:
-                        status = client.request("pause")
-                        client.request("step", count=1)
+                        latest = request_control("status", detailed=False)
+                        if latest is not None:
+                            status = latest
+                            if status["state"] not in ("lost", "terminal_failed"):
+                                paused = request_control("pause")
+                                if paused is not None:
+                                    status = paused
+                                    request_control("step", count=1)
                     elif ctrl and event.key == pygame.K_r and not repeated:
-                        status = client.request("reset", paused=False)
+                        reset = request_control("reset", paused=False)
+                        if reset is not None:
+                            status = reset
+                            guest_keyboard.set_generation(status["generation"])
                     elif not (
                         ctrl
                         and event.key
@@ -174,6 +294,8 @@ def main() -> int:
                     keys_down.clear()
                     guest_keyboard.reset()
 
+            guest_keyboard.flush_pending()
+
             now = time.monotonic()
             if now - last_poll >= 1.0 / max(1, args.fps):
                 update = client.request("screen", since=revision)
@@ -186,6 +308,7 @@ def main() -> int:
                 last_poll = now
             if now - last_status >= 0.25:
                 status = client.request("status", detailed=False)
+                guest_keyboard.set_generation(status["generation"])
                 last_status = now
 
             screen.fill((0, 0, 0))
@@ -201,11 +324,21 @@ def main() -> int:
             screen.blit(terminal_surface, (0, 0))
             y = terminal.rows * cell_h
             pygame.draw.rect(screen, (28, 30, 34), (0, y, screen.get_width(), status_h))
-            state_color = (100, 220, 140) if status["state"] in ("running", "idle") else (245, 190, 80)
+            if (
+                status["state"] in ("lost", "terminal_failed", "error")
+                or guest_keyboard.last_error is not None
+            ):
+                state_color = (245, 95, 95)
+            elif status["state"] in ("running", "idle"):
+                state_color = (100, 220, 140)
+            else:
+                state_color = (245, 190, 80)
             status_text = (
                 f"{status['state'].upper()}  steps {status['steps']:,}  "
                 f"rev {status['revision']}  clients {status.get('clients', 0)}"
             )
+            if guest_keyboard.last_error is not None:
+                status_text += f"  {guest_keyboard.last_error}"
             label = status_font.render(status_text, True, state_color)
             screen.blit(label, (8, y + (status_h - label.get_height()) // 2))
             pygame.display.flip()

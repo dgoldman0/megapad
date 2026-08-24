@@ -268,6 +268,14 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
         1,
     )
 
+    # Latest-wins resize can return to the already-selected geometry without
+    # forcing a redundant replacement snapshot.
+    assert driver.request_resize(4, 1) is DriverStatus.PROGRESS
+    assert driver.pending_resize == (4, 1)
+    assert driver.request_resize(2, 2) is DriverStatus.PROGRESS
+    assert driver.pending_resize is None
+    assert driver.core.geometry_generation == 0
+
     # A resize request cannot cross an unpolled transaction begin.  Service
     # first completes that transaction, then materializes one composite wire
     # and MMIO geometry record only after machine egress is observed empty.
