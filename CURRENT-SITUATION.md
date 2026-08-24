@@ -38,9 +38,11 @@
 > loopback/UDP-backend cases through the required sequential harness in 2.25
 > seconds (4 passed, 3,650 deselected).
 >
-> Documentation-only M* head
-> `c3210bf54f2116190770c0b95caaa0b9b396e937` records this ledger without
-> replacing exact `ca02a40` as the qualified MegaPad executable code.
+> The first documentation-only M* head,
+> `c3210bf54f2116190770c0b95caaa0b9b396e937`, records the original ledger.
+> Later documentation ledgers advance the exact pre-landing M* closure head to
+> `a8cb7995363ebd5177e7e94375abd068e322329f`. Neither head replaces exact
+> `ca02a40` as the qualified MegaPad executable code.
 >
 > **Paired A* completion — 2026-08-23:** Exact Akashic executable code
 > `4b8680568a229b1bd114d3a05fa4e73f745157ab` was qualified against exact
@@ -48,12 +50,22 @@
 > Its Checkpoint-5 product journey passed at 27.1 billion guest steps in
 > 811.14 seconds with stable replay, the read-only Rabbit data plane, and final
 > teardown; the current canonical Desktop passed at 13.288 billion steps in
-> 332.51 seconds. Akashic documentation-only A* head
+> 332.51 seconds. Akashic documentation-only A* closure head
 > `c69fbe57cb6169c80560033e94d3d9a640ad9def` records that result without
 > replacing the tested executable revisions. Checkpoint 5 is paired
 > application-integration evidence, not an additional MegaPad TCP/TLS claim or
-> a MegaPad code change. Both repositories' `main` refs remain untouched, and
-> integration is intentionally stopped before either fast-forward.
+> a MegaPad code change.
+>
+> **Local landing state — 2026-08-24:** Local MegaPad `main` was fast-forwarded
+> to the exact pre-landing M* closure head `a8cb7995363ebd5177e7e94375abd068e322329f`,
+> and local Akashic `main` was fast-forwarded to exact A* closure head
+> `c69fbe57cb6169c80560033e94d3d9a640ad9def`. The cached `origin/main` refs,
+> confirmed fresh during landing preflight, remain MegaPad
+> `f4b8144786001e423291b9458f24e0efa7ab70ce` and Akashic
+> `d2e9551ffc37e324bb83acf51108f506599edfd5`; neither repository has been
+> pushed. The documentation-only landing record containing this update follows
+> those pre-landing heads and adds no executable qualification. Exact
+> `ca02a40`/`4b86805` remain the qualified executable pair.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  

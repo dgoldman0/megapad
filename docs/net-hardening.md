@@ -251,9 +251,11 @@ confirmation at exact `ca02a40` passed all four AF_INET loopback/UDP-backend
 cases listed below through the required sequential harness in 2.25 seconds
 (4 passed, 3,650 deselected).
 
-Documentation-only M* head `c3210bf54f2116190770c0b95caaa0b9b396e937`
-carries this ledger update. It does not replace `ca02a40` as the qualified
-MegaPad executable revision or add executable qualification.
+The first documentation-only M* head,
+`c3210bf54f2116190770c0b95caaa0b9b396e937`, carries the original ledger
+update. Later documentation advances the exact pre-landing M* closure head to
+`a8cb7995363ebd5177e7e94375abd068e322329f`. Neither head replaces `ca02a40` as
+the qualified MegaPad executable revision or adds executable qualification.
 
 Paired A* completion qualified exact Akashic executable code
 `4b8680568a229b1bd114d3a05fa4e73f745157ab` against exact MegaPad executable
@@ -265,8 +267,16 @@ Akashic documentation-only A* head
 `c69fbe57cb6169c80560033e94d3d9a640ad9def` records that result without
 replacing either tested executable revision. This is paired application
 integration evidence, not a change to MegaPad networking code or a new TCP/TLS
-claim. Both repositories' `main` refs remain untouched, and integration is
-stopped before either fast-forward.
+claim. Local MegaPad `main` was fast-forwarded to exact pre-landing M* closure
+head `a8cb7995363ebd5177e7e94375abd068e322329f`, and local Akashic `main` was
+fast-forwarded to exact A* closure head
+`c69fbe57cb6169c80560033e94d3d9a640ad9def`. The cached `origin/main` refs,
+confirmed fresh during landing preflight, remain MegaPad
+`f4b8144786001e423291b9458f24e0efa7ab70ce` and Akashic
+`d2e9551ffc37e324bb83acf51108f506599edfd5`; neither repository has been
+pushed. The documentation-only landing record containing this update follows
+those pre-landing heads and adds no executable qualification. Exact
+`ca02a40`/`4b86805` remain the qualified executable pair.
 
 ## Historical 2026-08-22 integration reconciliation
 

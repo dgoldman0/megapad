@@ -63,9 +63,11 @@ passed 69/69. The historical adjoining evidence at `8f0e478` remains
 `TestKDOSMulticore` 87/87 in 854.40 seconds plus 11 other networking-test cases
 in the sandbox. Final host-environment confirmation at exact `ca02a40` passed
 all four AF_INET loopback/UDP-backend cases through the required sequential
-harness in 2.25 seconds (4 passed, 3,650 deselected). A later documentation-only
-M* head, `c3210bf54f2116190770c0b95caaa0b9b396e937`, records the closure
-without replacing `ca02a40` as the qualified MegaPad executable revision.
+harness in 2.25 seconds (4 passed, 3,650 deselected). The first
+documentation-only M* head, `c3210bf54f2116190770c0b95caaa0b9b396e937`,
+records the original closure ledger. Later documentation advances the exact
+pre-landing M* closure head to `a8cb7995363ebd5177e7e94375abd068e322329f`.
+Neither head replaces `ca02a40` as the qualified MegaPad executable revision.
 
 **Paired A* completion (2026-08-23):** Exact Akashic executable code
 `4b8680568a229b1bd114d3a05fa4e73f745157ab` was qualified against exact
@@ -76,9 +78,17 @@ canonical Desktop passed at 13.288 billion steps in 332.51 seconds. Akashic
 documentation-only A* head `c69fbe57cb6169c80560033e94d3d9a640ad9def`
 records the result but is not executable qualification. These are paired
 application-integration results, not a MegaPad code change or an extension of
-the TCP/TLS claims. Both repositories' `main` refs remain untouched, and the
-integration stops before either fast-forward. The old inventory and counts
-below remain historical.
+the TCP/TLS claims. Local MegaPad `main` was fast-forwarded to exact pre-landing
+M* closure head `a8cb7995363ebd5177e7e94375abd068e322329f`, and local Akashic
+`main` was fast-forwarded to exact A* closure head
+`c69fbe57cb6169c80560033e94d3d9a640ad9def`. The cached `origin/main` refs,
+confirmed fresh during landing preflight, remain MegaPad
+`f4b8144786001e423291b9458f24e0efa7ab70ce` and Akashic
+`d2e9551ffc37e324bb83acf51108f506599edfd5`; neither repository has been
+pushed. The documentation-only landing record containing this update follows
+those pre-landing heads and adds no executable qualification. Exact
+`ca02a40`/`4b86805` remain the qualified executable pair. The old inventory and
+counts below remain historical.
 
 ---
 
