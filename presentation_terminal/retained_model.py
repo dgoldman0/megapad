@@ -720,6 +720,12 @@ class OwnerLedger:
         before making either authoritative state visible.
         """
 
+        self.validate_prepared(prepared)
+        self._state = prepared.state
+
+    def validate_prepared(self, prepared: PreparedOwnerLedgerInstall) -> None:
+        """Validate install provenance without mutating the ledger."""
+
         if not isinstance(prepared, PreparedOwnerLedgerInstall):
             raise TypeError("prepared must be PreparedOwnerLedgerInstall")
         if (
@@ -727,7 +733,6 @@ class OwnerLedger:
             or prepared._source_state is not self._state
         ):
             raise RuntimeError("prepared owner ledger state is stale or foreign")
-        self._state = prepared.state
 
     def _validate_scope(self, identity: OwnerIdentity) -> None:
         if not isinstance(identity, OwnerIdentity):
