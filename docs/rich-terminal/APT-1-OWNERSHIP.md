@@ -9,7 +9,7 @@ replace application authority checks.
 | State | Creator and owner | Mutator | Retirement | Soft reset | Hard reset / detach |
 | --- | --- | --- | --- | --- | --- |
 | MegaPad attachment epoch | MegaPad host port | MegaPad scheduler boundary | Primary lease release/replacement | Preserved | Advanced, invalidating all terminal handles and queued ingress |
-| APT session ID | Enhanced terminal during `OFFER` | Immutable | Close, fatal error, timeout, hard reset | Preserved | Destroyed; ANSI owns the stream |
+| APT session ID | Enhanced terminal during `OFFER` | Immutable | Acknowledged close or hard reset; fatal error/timeout makes it unusable but quarantines the stream | Preserved | Destroyed; ANSI owns the drained replacement stream |
 | Presentation epoch | Starts at zero on open | Terminal requests exactly +1; client acknowledges | Session retirement | Advanced; model/revision/transaction scopes reset | Destroyed |
 | Terminal CELL-1 model | Terminal core | Accepted snapshot/transaction commit | Session retirement | Discarded, then replace-all snapshot rebuilds it | Destroyed |
 | Akashic back buffer | Akashic screen/application | Akashic paint | Screen/application teardown | Preserved and authoritative for rebuild | Preserved across terminal loss if application remains alive |
@@ -31,8 +31,11 @@ They do not own an APT parser or presentation model.
 The root-level `presentation-terminal.f` module owns guest-side negotiation,
 framing, credit, session state, and normalized enhanced input only after it is
 explicitly loaded and asked to open. It borrows caller-provided bounded
-storage. It returns raw-stream ownership to the prior ANSI/key path on refusal,
-timeout, close, or hard failure.
+storage. It returns raw-stream ownership to the prior ANSI/key path on
+pre-`OPEN` refusal or timeout, acknowledged close, or a hard attachment reset
+that advances the outer epoch and drains both directions. A post-`OPEN`
+structural failure enters `LOST` and retains exclusive binary ownership; local
+failure detection alone is never an ANSI-safe boundary.
 
 Akashic owns application/domain state, focus, cell buffers, and whether to
 request the optional service. Its ANSI backend is constructed by default. Its

@@ -59,11 +59,12 @@ A willing terminal chooses a nonzero 64-bit session ID and replies:
 ESC ] 9999;APT1;O;<nonce:16>;<session:16>;<max-payload:8>;<max-transaction:8>;<terminal-rx-credit:8>;<cols:4>;<rows:4>;CELL1 ESC \
 ```
 
-The nonce MUST match. `max-payload` is at most `00100000`. It MUST admit one
-complete maximum-width row span payload:
+The nonce MUST match. `max-payload` is at most `00100000`. It MUST admit both
+the 32-byte mandatory READY payloads and one complete maximum-width row span
+payload:
 
 ```
-max-payload >= 12 + 8 * cols
+max-payload >= max(32, 12 + 8 * cols)
 ```
 
 The mandatory full snapshot budget is:
@@ -125,10 +126,14 @@ Both implementations expose these conceptual states:
 | `ACTIVE` | Framed traffic and CELL-1 transactions are legal. |
 | `RESYNCING` | Soft cache reset accepted; only reset control and one replacement snapshot are legal. |
 | `CLOSING` | A complete close/error frame ended ordinary traffic; acknowledgement may be pending. |
+| `LOST` | The framed session is unusable, but binary ownership remains quarantined until an outer hard-reset-and-drain boundary. |
 
-Hard machine reset, attachment loss, reconnect, opening timeout, or fatal
-framing error destroys the session and returns to `ANSI`. A soft presentation
-cache reset stays inside the framed session and enters `RESYNCING`.
+Hard machine reset or attachment replacement destroys the session, advances
+the outer attachment epoch, drains both directions, and returns to `ANSI`.
+An opening timeout after `OPEN` or a fatal framing error instead enters
+`LOST`; it cannot locally prove an ANSI-safe byte boundary. A soft
+presentation cache reset stays inside the framed session and enters
+`RESYNCING`.
 
 ## 5. Frame format
 

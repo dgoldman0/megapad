@@ -27,7 +27,8 @@ The following are ordinary supported configurations:
 * the module is present but not loaded;
 * it is loaded but no caller requests an enhanced session;
 * a caller requests a session and the terminal ignores or refuses APT-1; and
-* an active session is closed or lost and operation continues through ANSI.
+* an active session is synchronously closed, or an externally reset and
+  drained lost attachment is replaced, and operation continues through ANSI.
 
 None may prevent KDOS, the ANSI terminal, or Akashic's cell UI from working.
 
@@ -35,13 +36,18 @@ None may prevent KDOS, the ANSI terminal, or Akashic's cell UI from working.
 
 Before negotiation, UART input belongs to the existing ANSI/key path. A caller
 explicitly acquires a presentation session and supplies bounded storage and
-timeouts. The module temporarily interposes on raw terminal input only while
-probing/opening or active.
+timeouts. The module interposes on raw terminal input from `PT-START` until a
+proven ANSI-safe close/reset boundary, including while resynchronizing,
+closing, or quarantined in `LOST`.
 
-During `ACTIVE`, the module exclusively owns UART presentation bytes and
-returns normalized input events through its API. It releases ownership at the
-exact close, failure, timeout, or hard-reset boundary. Buffered enhanced bytes
-are never passed into the ANSI key decoder.
+From successful `PT-START` through `OPEN`, `ACTIVE`, resynchronization, close,
+or loss, the module exclusively owns UART presentation bytes and returns
+normalized input events through its API. It releases ownership on a
+pre-`OPEN` refusal/timeout, a valid `CLOSE_ACK`, or an external attachment
+reset that advances the link epoch and drains both directions. A post-`OPEN`
+structural failure enters `PT-ST-LOST` and retains ownership; it is not an
+ANSI fallback boundary. Buffered enhanced bytes are never passed into the
+ANSI key decoder.
 
 Probe failure restores the prior ANSI owner and forces a cell redraw if any
 probe bytes could have affected physical presentation. Ordinary key bytes
@@ -91,6 +97,9 @@ PT-SERVICE          ( session -- status )
 PT-STATE@           ( session -- state )
 PT-ACTIVE?          ( session -- flag )
 PT-SNAPSHOT-NEEDED? ( session -- flag )
+PT-STREAM-OWNED?    ( -- flag )
+PT-OWNS?            ( session -- flag )
+PT-LEGACY-PENDING?  ( session -- flag )
 
 PT-TX-BEGIN         ( cols rows span-count cell-count session -- status )
 PT-SNAPSHOT-BEGIN   ( cols rows span-count cell-count session -- status )
@@ -111,6 +120,14 @@ credit, reset, and close without waiting for another byte. `PT-LEGACY-POLL`
 returns ordinary bytes held while a probe was being distinguished from ANSI;
 it never returns enhanced binary.
 
+After `OPEN`, `PT-CLOSE` is asynchronous: `PT-S-OK` means the close frame was
+published and the state is `PT-ST-CLOSING`. The caller continues
+`PT-SERVICE` until `PT-ST-ANSI`; only the valid acknowledgement releases the
+stream. A close timeout or structural fault enters `PT-ST-LOST`.
+`PT-CLOSE` then returns `PT-S-SESSION-LOST` and keeps ownership until the
+caller performs an external attachment reset/drain and reinitializes the
+session at that proven boundary.
+
 Transaction begin uses the exact span and cell counts to preflight all frame
 bytes: `176 + 52 * span-count + 8 * cell-count`. Negotiation guarantees that a
 maximum-width row span fits one payload. After a successful begin, valid calls
@@ -126,8 +143,8 @@ begin while it is true returns `PT-S-INVALID` without output.
 Local commit acceptance leaves exactly one transaction awaiting `TX_RESULT`.
 Both begin words return `PT-S-WOULD-BLOCK` until a successful result is
 processed by `PT-SERVICE`. A failed result changes the session to lost before
-another event can be returned; the caller must perform synchronized close or
-hard attachment reset and restore ANSI.
+another event can be returned; this module requires a hard attachment reset
+and drain before ANSI can be restored.
 
 ## 6. Akashic adapter
 
@@ -149,9 +166,11 @@ backend only from a caller-supplied live `session`; it does not create or
 auto-open a hidden global session. Packaging that adapter must therefore make
 the MegaPad root module available to KDOS `REQUIRE` resolution.
 
-If the module is absent or inactive, the adapter is not constructed. Session
-loss atomically restores the ANSI backend, leaves application/domain state in
-Akashic, and requests a full ANSI cell redraw.
+If the module is absent or inactive, the adapter is not constructed. An
+acknowledged close atomically restores the ANSI backend, leaves
+application/domain state in Akashic, and requests a full ANSI cell redraw.
+Session loss instead leaves Akashic quiet with the APT backend and input owner
+still bound until an external reset/drain boundary proves ANSI safe.
 
 ## 7. Initial conformance
 
@@ -161,5 +180,6 @@ The lightweight module tests prove:
 2. loading the module alone emits no bytes and changes no input ownership;
 3. an ignored probe times out and returns the original owner;
 4. successful negotiation establishes exclusive framed ownership;
-5. close and hard reset restore ANSI ownership; and
+5. acknowledged close and externally drained hard reset restore ANSI
+   ownership, while structural loss alone does not; and
 6. an Akashic adapter can send one real cell snapshot through the public API.
