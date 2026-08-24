@@ -1,0 +1,877 @@
+{
+  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "transcript": "stale_generation.hex",
+  "initial_state": {
+    "session_state": "ACTIVE",
+    "presentation_epoch": 0,
+    "global_revision": 3,
+    "transaction_id_highwater": 3,
+    "directional_sequences": {
+      "client_to_terminal": 59,
+      "terminal_to_client": 59
+    },
+    "credit_ledgers": {
+      "client_to_terminal": {
+        "initial_grant": 65536,
+        "sent_complete_bytes": 34464,
+        "released_complete_bytes": 34464,
+        "last_advertised_grant": 100000,
+        "advertised_released_bytes": 34464,
+        "pending_release_bytes": 0
+      },
+      "terminal_to_client": {
+        "initial_grant": 4096,
+        "sent_complete_bytes": 208,
+        "released_complete_bytes": 208,
+        "last_advertised_grant": 4096,
+        "advertised_released_bytes": 0,
+        "pending_release_bytes": 208
+      }
+    },
+    "control_reserve": {
+      "client_to_terminal": {
+        "capacity_bytes": 4096,
+        "occupied_bytes": 0,
+        "transcript_consumed_frames": 0,
+        "transcript_consumed_bytes": 0
+      },
+      "terminal_to_client": {
+        "capacity_bytes": 4096,
+        "occupied_bytes": 0,
+        "transcript_consumed_frames": 0,
+        "transcript_consumed_bytes": 0
+      }
+    },
+    "selected_geometry": {
+      "cols": 1,
+      "rows": 1,
+      "generation": 0
+    },
+    "cell": {
+      "cols": 1,
+      "rows": 1,
+      "cursor": {
+        "row": 0,
+        "column": 0,
+        "visible": false
+      },
+      "default": [
+        32,
+        7,
+        0,
+        0
+      ],
+      "overrides": {
+        "0:0": [
+          83,
+          7,
+          0,
+          1
+        ]
+      },
+      "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+    },
+    "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+    "active": {
+      "regions": [],
+      "objects": [],
+      "series": []
+    },
+    "active_usage": [],
+    "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+    "hidden": null,
+    "hidden_usage": [],
+    "retained_visible": true,
+    "rebuild_required": null,
+    "owner_ledger": [
+      {
+        "owner_id": 6003110622949818690,
+        "generation": 7,
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8,
+        "state": "live"
+      }
+    ],
+    "owner_reservation_totals": {
+      "region_quota": 2,
+      "resource_quota": 0,
+      "object_quota": 4,
+      "series_quota": 1,
+      "resource_bytes": 0,
+      "utf8_bytes": 64,
+      "sample_slots": 8
+    },
+    "resources": [],
+    "owner_wide_resource_usage": [],
+    "upload": null,
+    "open_transaction": null,
+    "open_lifecycle_request": null,
+    "pending_reset": null,
+    "last_result": null
+  },
+  "states": [
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 3,
+      "transaction_id_highwater": 3,
+      "directional_sequences": {
+        "client_to_terminal": 60,
+        "terminal_to_client": 59
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 34568,
+          "released_complete_bytes": 34568,
+          "last_advertised_grant": 100000,
+          "advertised_released_bytes": 34464,
+          "pending_release_bytes": 104
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 1,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 1,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            83,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 4,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 64,
+          "sample_slots": 8,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": {
+        "request": "OWNER_OPEN",
+        "owner_id": 6003110622949818690,
+        "generation": 6,
+        "phase": "awaiting_result"
+      },
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 3,
+      "transaction_id_highwater": 3,
+      "directional_sequences": {
+        "client_to_terminal": 60,
+        "terminal_to_client": 60
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 34568,
+          "released_complete_bytes": 34568,
+          "last_advertised_grant": 100000,
+          "advertised_released_bytes": 34464,
+          "pending_release_bytes": 104
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 1,
+          "transcript_consumed_bytes": 88
+        }
+      },
+      "selected_geometry": {
+        "cols": 1,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 1,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            83,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 4,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 64,
+          "sample_slots": 8,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": {
+        "kind": "RET_RESULT",
+        "request_type": 8194,
+        "status": 2,
+        "detail": 0,
+        "owner_id": 6003110622949818690,
+        "generation": 6,
+        "item_id": 0,
+        "model_revision": 3,
+        "accepted_bytes": 0
+      }
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 3,
+      "transaction_id_highwater": 3,
+      "directional_sequences": {
+        "client_to_terminal": 60,
+        "terminal_to_client": 61
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 34568,
+          "released_complete_bytes": 34568,
+          "last_advertised_grant": 100104,
+          "advertised_released_bytes": 34568,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 2,
+          "transcript_consumed_bytes": 136
+        }
+      },
+      "selected_geometry": {
+        "cols": 1,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 1,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            83,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 4,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 64,
+          "sample_slots": 8,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 3,
+      "transaction_id_highwater": 3,
+      "directional_sequences": {
+        "client_to_terminal": 61,
+        "terminal_to_client": 61
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 34672,
+          "released_complete_bytes": 34672,
+          "last_advertised_grant": 100104,
+          "advertised_released_bytes": 34568,
+          "pending_release_bytes": 104
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 2,
+          "transcript_consumed_bytes": 136
+        }
+      },
+      "selected_geometry": {
+        "cols": 1,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 1,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            83,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 4,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 64,
+          "sample_slots": 8,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": {
+        "request": "OWNER_OPEN",
+        "owner_id": 6003110622949818691,
+        "generation": 1,
+        "phase": "awaiting_result"
+      },
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 3,
+      "transaction_id_highwater": 3,
+      "directional_sequences": {
+        "client_to_terminal": 61,
+        "terminal_to_client": 62
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 34672,
+          "released_complete_bytes": 34672,
+          "last_advertised_grant": 100104,
+          "advertised_released_bytes": 34568,
+          "pending_release_bytes": 104
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 3,
+          "transcript_consumed_bytes": 224
+        }
+      },
+      "selected_geometry": {
+        "cols": 1,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 1,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            83,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 4,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 64,
+          "sample_slots": 8,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": {
+        "kind": "RET_RESULT",
+        "request_type": 8194,
+        "status": 1,
+        "detail": 0,
+        "owner_id": 6003110622949818691,
+        "generation": 1,
+        "item_id": 0,
+        "model_revision": 3,
+        "accepted_bytes": 0
+      }
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 3,
+      "transaction_id_highwater": 3,
+      "directional_sequences": {
+        "client_to_terminal": 61,
+        "terminal_to_client": 63
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 34672,
+          "released_complete_bytes": 34672,
+          "last_advertised_grant": 100208,
+          "advertised_released_bytes": 34672,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 4,
+          "transcript_consumed_bytes": 272
+        }
+      },
+      "selected_geometry": {
+        "cols": 1,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 1,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            83,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 4,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 64,
+          "sample_slots": 8,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 4,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 64,
+        "sample_slots": 8
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    }
+  ],
+  "frames": [
+    {
+      "frame_index": 0,
+      "direction": "client_to_terminal",
+      "message": "OWNER_OPEN",
+      "sequence": 60,
+      "epoch": 0,
+      "state_index": 0
+    },
+    {
+      "frame_index": 1,
+      "direction": "terminal_to_client",
+      "message": "RET_RESULT",
+      "sequence": 60,
+      "epoch": 0,
+      "state_index": 1
+    },
+    {
+      "frame_index": 2,
+      "direction": "terminal_to_client",
+      "message": "CREDIT",
+      "sequence": 61,
+      "epoch": 0,
+      "state_index": 2
+    },
+    {
+      "frame_index": 3,
+      "direction": "client_to_terminal",
+      "message": "OWNER_OPEN",
+      "sequence": 61,
+      "epoch": 0,
+      "state_index": 3
+    },
+    {
+      "frame_index": 4,
+      "direction": "terminal_to_client",
+      "message": "RET_RESULT",
+      "sequence": 62,
+      "epoch": 0,
+      "state_index": 4
+    },
+    {
+      "frame_index": 5,
+      "direction": "terminal_to_client",
+      "message": "CREDIT",
+      "sequence": 63,
+      "epoch": 0,
+      "state_index": 5
+    }
+  ]
+}

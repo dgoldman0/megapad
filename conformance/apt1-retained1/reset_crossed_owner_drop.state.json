@@ -1,0 +1,978 @@
+{
+  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "transcript": "reset_crossed_owner_drop.hex",
+  "initial_state": {
+    "session_state": "ACTIVE",
+    "presentation_epoch": 0,
+    "global_revision": 4,
+    "transaction_id_highwater": 4,
+    "directional_sequences": {
+      "client_to_terminal": 179,
+      "terminal_to_client": 179
+    },
+    "credit_ledgers": {
+      "client_to_terminal": {
+        "initial_grant": 65536,
+        "sent_complete_bytes": 20464,
+        "released_complete_bytes": 20464,
+        "last_advertised_grant": 86000,
+        "advertised_released_bytes": 20464,
+        "pending_release_bytes": 0
+      },
+      "terminal_to_client": {
+        "initial_grant": 4096,
+        "sent_complete_bytes": 208,
+        "released_complete_bytes": 208,
+        "last_advertised_grant": 4096,
+        "advertised_released_bytes": 0,
+        "pending_release_bytes": 208
+      }
+    },
+    "control_reserve": {
+      "client_to_terminal": {
+        "capacity_bytes": 4096,
+        "occupied_bytes": 0,
+        "transcript_consumed_frames": 0,
+        "transcript_consumed_bytes": 0
+      },
+      "terminal_to_client": {
+        "capacity_bytes": 4096,
+        "occupied_bytes": 0,
+        "transcript_consumed_frames": 0,
+        "transcript_consumed_bytes": 0
+      }
+    },
+    "selected_geometry": {
+      "cols": 2,
+      "rows": 1,
+      "generation": 0
+    },
+    "cell": {
+      "cols": 2,
+      "rows": 1,
+      "cursor": {
+        "row": 0,
+        "column": 0,
+        "visible": false
+      },
+      "default": [
+        32,
+        7,
+        0,
+        0
+      ],
+      "overrides": {
+        "0:0": [
+          79,
+          7,
+          0,
+          1
+        ],
+        "0:1": [
+          75,
+          7,
+          0,
+          1
+        ]
+      },
+      "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
+    },
+    "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+    "active": {
+      "regions": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_id": 1,
+          "geometry_generation": 0,
+          "left": 0,
+          "top": 0,
+          "cols": 2,
+          "rows": 1,
+          "z_index": 0,
+          "flags": 3
+        }
+      ],
+      "objects": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 4,
+          "object_type": 5,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            0,
+            4294967295,
+            805306367
+          ],
+          "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
+          "format": 1,
+          "decimal_places": 2,
+          "value": 10,
+          "scale": 100,
+          "unit_utf8_hex": "6442",
+          "formatted_utf8_hex": "302e31306442",
+          "utf8_bytes": 6,
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 7,
+          "object_type": 8,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            805306368,
+            4294967295,
+            4294967295
+          ],
+          "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+          "series_id": 1,
+          "visible": true
+        }
+      ],
+      "series": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "series_id": 1,
+          "capacity": 4,
+          "timestamp_mode": 1,
+          "interval_us": 500000,
+          "samples": [
+            {
+              "timestamp_us": 1000000,
+              "value": 10
+            },
+            {
+              "timestamp_us": 1500000,
+              "value": 20
+            }
+          ]
+        }
+      ]
+    },
+    "active_usage": [
+      {
+        "owner_id": 6003110622949818690,
+        "generation": 7,
+        "regions": 1,
+        "objects": 2,
+        "series": 1,
+        "utf8_bytes": 6,
+        "sample_slots": 4
+      }
+    ],
+    "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+    "hidden": null,
+    "hidden_usage": [],
+    "retained_visible": true,
+    "rebuild_required": null,
+    "owner_ledger": [
+      {
+        "owner_id": 6003110622949818690,
+        "generation": 7,
+        "region_quota": 1,
+        "resource_quota": 0,
+        "object_quota": 2,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 8,
+        "sample_slots": 4,
+        "state": "live"
+      }
+    ],
+    "owner_reservation_totals": {
+      "region_quota": 1,
+      "resource_quota": 0,
+      "object_quota": 2,
+      "series_quota": 1,
+      "resource_bytes": 0,
+      "utf8_bytes": 8,
+      "sample_slots": 4
+    },
+    "resources": [],
+    "owner_wide_resource_usage": [],
+    "upload": null,
+    "open_transaction": null,
+    "open_lifecycle_request": null,
+    "pending_reset": null,
+    "last_result": null
+  },
+  "states": [
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 4,
+      "directional_sequences": {
+        "client_to_terminal": 179,
+        "terminal_to_client": 180
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20464,
+          "released_complete_bytes": 20464,
+          "last_advertised_grant": 86000,
+          "advertised_released_bytes": 20464,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 1,
+          "transcript_consumed_bytes": 56
+        }
+      },
+      "selected_geometry": {
+        "cols": 2,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 2,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            79,
+            7,
+            0,
+            1
+          ],
+          "0:1": [
+            75,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
+      },
+      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 2,
+            "rows": 1,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
+            "format": 1,
+            "decimal_places": 2,
+            "value": 10,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "302e31306442",
+            "utf8_bytes": 6,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": 10
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": 20
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 2,
+          "series": 1,
+          "utf8_bytes": 6,
+          "sample_slots": 4
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 1,
+          "resource_quota": 0,
+          "object_quota": 2,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 8,
+          "sample_slots": 4,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 1,
+        "resource_quota": 0,
+        "object_quota": 2,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 8,
+        "sample_slots": 4
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": {
+        "requested_epoch": 1,
+        "last_revision": 4
+      },
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 180,
+        "terminal_to_client": 180
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20464,
+          "released_complete_bytes": 20464,
+          "last_advertised_grant": 86000,
+          "advertised_released_bytes": 20464,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 1,
+          "transcript_consumed_bytes": 72
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 1,
+          "transcript_consumed_bytes": 56
+        }
+      },
+      "selected_geometry": {
+        "cols": 2,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 2,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            79,
+            7,
+            0,
+            1
+          ],
+          "0:1": [
+            75,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
+      },
+      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 2,
+            "rows": 1,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
+            "format": 1,
+            "decimal_places": 2,
+            "value": 10,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "302e31306442",
+            "utf8_bytes": 6,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": 10
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": 20
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 2,
+          "series": 1,
+          "utf8_bytes": 6,
+          "sample_slots": 4
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 1,
+          "resource_quota": 0,
+          "object_quota": 2,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 8,
+          "sample_slots": 4,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 1,
+        "resource_quota": 0,
+        "object_quota": 2,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 8,
+        "sample_slots": 4
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "owner_drop",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "phase": "awaiting_result",
+        "held_complete_bytes": 0
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": {
+        "requested_epoch": 1,
+        "last_revision": 4
+      },
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 180,
+        "terminal_to_client": 181
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20464,
+          "released_complete_bytes": 20464,
+          "last_advertised_grant": 86000,
+          "advertised_released_bytes": 20464,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 1,
+          "transcript_consumed_bytes": 72
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 2,
+          "transcript_consumed_bytes": 116
+        }
+      },
+      "selected_geometry": {
+        "cols": 2,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 2,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            79,
+            7,
+            0,
+            1
+          ],
+          "0:1": [
+            75,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
+      },
+      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 2,
+            "rows": 1,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
+            "format": 1,
+            "decimal_places": 2,
+            "value": 10,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "302e31306442",
+            "utf8_bytes": 6,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": 10
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": 20
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 2,
+          "series": 1,
+          "utf8_bytes": 6,
+          "sample_slots": 4
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 1,
+          "resource_quota": 0,
+          "object_quota": 2,
+          "series_quota": 1,
+          "resource_bytes": 0,
+          "utf8_bytes": 8,
+          "sample_slots": 4,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 1,
+        "resource_quota": 0,
+        "object_quota": 2,
+        "series_quota": 1,
+        "resource_bytes": 0,
+        "utf8_bytes": 8,
+        "sample_slots": 4
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": {
+        "requested_epoch": 1,
+        "last_revision": 4
+      },
+      "last_result": {
+        "kind": "TX_RESULT",
+        "transaction_id": 5,
+        "status": 1,
+        "detail": 0,
+        "model_revision": 4
+      }
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 1,
+      "global_revision": 0,
+      "transaction_id_highwater": 0,
+      "directional_sequences": {
+        "client_to_terminal": 181,
+        "terminal_to_client": 181
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20464,
+          "released_complete_bytes": 20464,
+          "last_advertised_grant": 86000,
+          "advertised_released_bytes": 20464,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 2,
+          "transcript_consumed_bytes": 120
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 2,
+          "transcript_consumed_bytes": 116
+        }
+      },
+      "selected_geometry": {
+        "cols": 2,
+        "rows": 1,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 2,
+        "rows": 1,
+        "cursor": {
+          "row": 0,
+          "column": 0,
+          "visible": false
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {},
+        "digest_sha3_256": "68b7d63fd0831e2ab95c2aef09ffd7e5030a9fa80d230288f47e7455386c2942"
+      },
+      "active_digest_sha3_256": "ef35de00f1767417d6818fd84a4c5a4f67256fa2cdf1b84d02b36abcdb55ef8d",
+      "active": {
+        "regions": [],
+        "objects": [],
+        "series": []
+      },
+      "active_usage": [],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": false,
+      "rebuild_required": "cell_snapshot",
+      "owner_ledger": [],
+      "owner_reservation_totals": {
+        "region_quota": 0,
+        "resource_quota": 0,
+        "object_quota": 0,
+        "series_quota": 0,
+        "resource_bytes": 0,
+        "utf8_bytes": 0,
+        "sample_slots": 0
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    }
+  ],
+  "frames": [
+    {
+      "frame_index": 0,
+      "direction": "terminal_to_client",
+      "message": "SOFT_RESET_REQUEST",
+      "sequence": 180,
+      "epoch": 0,
+      "state_index": 0
+    },
+    {
+      "frame_index": 1,
+      "direction": "client_to_terminal",
+      "message": "OWNER_DROP",
+      "sequence": 180,
+      "epoch": 0,
+      "state_index": 1
+    },
+    {
+      "frame_index": 2,
+      "direction": "terminal_to_client",
+      "message": "TX_RESULT",
+      "sequence": 181,
+      "epoch": 0,
+      "state_index": 2
+    },
+    {
+      "frame_index": 3,
+      "direction": "client_to_terminal",
+      "message": "SOFT_RESET_ACK",
+      "sequence": 181,
+      "epoch": 1,
+      "state_index": 3
+    }
+  ]
+}

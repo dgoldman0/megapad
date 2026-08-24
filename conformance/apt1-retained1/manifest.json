@@ -1,0 +1,376 @@
+{
+  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "base_contract_id": "APT-1-CELL-1-2026-08-24",
+  "byte_order": "little-endian",
+  "header": {
+    "size": 40,
+    "magic_hex": "a5505431",
+    "version": 1,
+    "crc": "CRC-32C over header bytes 0..35 followed by payload"
+  },
+  "canonical_session": "0x0123456789abcdef",
+  "message_types": {
+    "RET_RESULT": "0x000a",
+    "OWNER_DROP": "0x000b",
+    "RESOURCE_ABORT": "0x000c",
+    "RESOURCE_BEGIN": "0x1000",
+    "RESOURCE_CHUNK": "0x1001",
+    "RESOURCE_COMMIT": "0x1002",
+    "RESOURCE_DROP": "0x1003",
+    "PRESENT_BEGIN": "0x2000",
+    "PRESENT_COMMIT": "0x2001",
+    "OWNER_OPEN": "0x2002",
+    "REGION_DEFINE": "0x2010",
+    "REGION_REPLACE": "0x2011",
+    "REGION_DROP": "0x2012",
+    "OBJECT_DEFINE": "0x2020",
+    "OBJECT_REPLACE": "0x2021",
+    "OBJECT_SET_VALUE": "0x2022",
+    "OBJECT_SET_VISIBILITY": "0x2023",
+    "OBJECT_DROP": "0x2024",
+    "SERIES_DEFINE": "0x3000",
+    "SERIES_APPEND": "0x3001",
+    "SERIES_REPLACE": "0x3002",
+    "SERIES_DROP": "0x3003",
+    "RET_QUERY": "0x8000",
+    "RET_CAPS": "0x8001",
+    "RET_FORMATS": "0x8002"
+  },
+  "status_values": {
+    "RET_OK": 0,
+    "RET_INVALID": 1,
+    "RET_STALE_OWNER": 2,
+    "RET_NO_CAPACITY": 3,
+    "RET_DUPLICATE_ID": 4,
+    "RET_IN_USE": 5,
+    "RET_BAD_CONTENT": 6,
+    "RET_ABORTED": 7
+  },
+  "feature_bits": {
+    "RET_CORE": 0,
+    "RET_VECTOR": 1,
+    "RET_RGBA_IMAGE": 2,
+    "RET_INSTRUMENT": 3,
+    "RET_SERIES": 4,
+    "RET_CADENCE": 5
+  },
+  "object_types": {
+    "GROUP": 1,
+    "POLYLINE": 2,
+    "IMAGE": 3,
+    "LABEL": 4,
+    "READOUT": 5,
+    "METER": 6,
+    "STATUS": 7,
+    "PLOT": 8,
+    "WAVEFORM": 9
+  },
+  "canonical_terminal_policy": {
+    "base_max_payload": 1048576,
+    "base_max_transaction_bytes": 65536,
+    "client_receive_credit": 4096,
+    "features": "0x000000000000003f",
+    "max_owner_records": 8,
+    "max_live_owners": 4,
+    "max_regions": 16,
+    "max_resources": 8,
+    "max_objects": 64,
+    "max_series": 16,
+    "max_operations_per_transaction": 128,
+    "max_resource_chunk_bytes": 4096,
+    "max_retained_transaction_bytes": 32768,
+    "total_resource_bytes": 1048576,
+    "coordinate_format": 1,
+    "color_format": 1,
+    "image_format": 1,
+    "max_image_width": 256,
+    "max_image_height": 256,
+    "max_path_points": 256,
+    "max_label_bytes": 256,
+    "max_samples_per_append": 64,
+    "max_history_per_series": 512,
+    "minimum_presentation_interval_us": 500000,
+    "total_sample_slots": 4096,
+    "total_utf8_bytes": 16384
+  },
+  "fixture_format": "one complete frame per nonempty ASCII-hex line",
+  "semantic_meta_format": "independent directions plus exact initial state and two cumulative credit ledgers",
+  "state_sidecar_format": "independent deduplicated exact snapshots with one ordered state reference after every consumed frame",
+  "transcripts": [
+    {
+      "name": "ret_query_supported",
+      "file": "ret_query_supported.hex",
+      "meta_file": "ret_query_supported.meta.json",
+      "state_file": "ret_query_supported.state.json",
+      "kind": "discovery_supported",
+      "frame_count": 4,
+      "invariant": "CAPS then FORMATS precede the exact covering CREDIT and require an initial hidden replacement",
+      "expected_credit_watermarks": [
+        83060
+      ]
+    },
+    {
+      "name": "ret_query_unsupported",
+      "file": "ret_query_unsupported.hex",
+      "meta_file": "ret_query_unsupported.meta.json",
+      "state_file": "ret_query_unsupported.state.json",
+      "kind": "discovery_unsupported",
+      "frame_count": 2,
+      "invariant": "the first covering CREDIT is the deterministic negative answer with no retained reply",
+      "expected_credit_watermarks": [
+        83060
+      ]
+    },
+    {
+      "name": "soundlab_initial_replace",
+      "file": "soundlab_initial_replace.hex",
+      "meta_file": "soundlab_initial_replace.meta.json",
+      "state_file": "soundlab_initial_replace.state.json",
+      "kind": "retained_replace_commit",
+      "frame_count": 30,
+      "invariant": "full SoundLab scene commits hidden through REPLACE_START and REPLACE_CONTINUE, reveals at revision 3, then accepts an unchanged legacy CELL transaction at revision 4",
+      "expected_credit_watermarks": [
+        83164,
+        84164,
+        85054,
+        85290
+      ],
+      "expected_global_revision": 4
+    },
+    {
+      "name": "soundlab_dynamic_append",
+      "file": "soundlab_dynamic_append.hex",
+      "meta_file": "soundlab_dynamic_append.meta.json",
+      "state_file": "soundlab_dynamic_append.state.json",
+      "kind": "dynamic_only_commit",
+      "frame_count": 10,
+      "invariant": "value and series history change without retransmitting any static definition",
+      "expected_credit_watermarks": [
+        85946
+      ],
+      "expected_global_revision": 5
+    },
+    {
+      "name": "mutation_and_drop_lifecycle",
+      "file": "mutation_and_drop_lifecycle.hex",
+      "meta_file": "mutation_and_drop_lifecycle.meta.json",
+      "state_file": "mutation_and_drop_lifecycle.state.json",
+      "kind": "mutation_and_drop_commit",
+      "frame_count": 20,
+      "invariant": "complete LABEL replacement then graph-safe object, series, and region drops leave exact owner authority live",
+      "expected_credit_watermarks": [
+        85372,
+        86236
+      ],
+      "expected_global_revision": 5
+    },
+    {
+      "name": "mixed_commit_and_rejections",
+      "file": "mixed_commit_and_rejections.hex",
+      "meta_file": "mixed_commit_and_rejections.meta.json",
+      "state_file": "mixed_commit_and_rejections.state.json",
+      "kind": "mixed_commit_and_semantic_rejections",
+      "frame_count": 34,
+      "invariant": "CELL and retained state commit atomically; retained-only rejections recover, while the final rejected mixed transaction requires SESSION_LOST",
+      "expected_credit_watermarks": [
+        130348,
+        130580,
+        130812,
+        131084,
+        131388,
+        131808
+      ],
+      "expected_global_revision": 4
+    },
+    {
+      "name": "legacy_cell_and_replace_continue",
+      "file": "legacy_cell_and_replace_continue.hex",
+      "meta_file": "legacy_cell_and_replace_continue.meta.json",
+      "state_file": "legacy_cell_and_replace_continue.state.json",
+      "kind": "legacy_cell_interleave_hidden_replace",
+      "frame_count": 22,
+      "invariant": "unchanged CELL TX interleaves in the global revision domain before hidden REPLACE_START and REPLACE_CONTINUE reveal",
+      "expected_credit_watermarks": [
+        72104,
+        72340,
+        72668,
+        73214
+      ],
+      "expected_global_revision": 4
+    },
+    {
+      "name": "resize_layout_sync",
+      "file": "resize_layout_sync.hex",
+      "meta_file": "resize_layout_sync.meta.json",
+      "state_file": "resize_layout_sync.state.json",
+      "kind": "layout_reveal",
+      "frame_count": 16,
+      "invariant": "canonical full-width PRESENT CELL_REPLACE precedes hidden LAYOUT_START and zero-operation LAYOUT_CONTINUE reveal",
+      "expected_credit_watermarks": [
+        75368,
+        75616,
+        75776
+      ],
+      "expected_global_revision": 7
+    },
+    {
+      "name": "reset_crossed_present_commit",
+      "file": "reset_crossed_present_commit.hex",
+      "meta_file": "reset_crossed_present_commit.meta.json",
+      "state_file": "reset_crossed_present_commit.state.json",
+      "kind": "reset_crossed_present_settlement",
+      "frame_count": 6,
+      "invariant": "an already-requested reset settles a crossed valid PRESENT_COMMIT as old-epoch status 1 before ACK without mutation",
+      "expected_global_revision": 0
+    },
+    {
+      "name": "reset_crossed_owner_drop",
+      "file": "reset_crossed_owner_drop.hex",
+      "meta_file": "reset_crossed_owner_drop.meta.json",
+      "state_file": "reset_crossed_owner_drop.state.json",
+      "kind": "reset_crossed_owner_drop_settlement",
+      "frame_count": 4,
+      "invariant": "an already-requested reset settles a crossed valid OWNER_DROP as old-epoch status 1 before ACK without dropping authority",
+      "expected_global_revision": 0
+    },
+    {
+      "name": "reset_wrong_tuple_upload_abort",
+      "file": "reset_wrong_tuple_upload_abort.hex",
+      "meta_file": "reset_wrong_tuple_upload_abort.meta.json",
+      "state_file": "reset_wrong_tuple_upload_abort.state.json",
+      "kind": "reset_upload_wrong_tuple_noninterference",
+      "frame_count": 10,
+      "invariant": "one crossed wrong-generation CHUNK preserves the real upload, then exact old-epoch RESOURCE_ABORT completes before ACK",
+      "expected_credit_watermarks": [
+        92120,
+        92196
+      ],
+      "expected_global_revision": 0
+    },
+    {
+      "name": "soft_reset_replay",
+      "file": "soft_reset_replay.hex",
+      "meta_file": "soft_reset_replay.meta.json",
+      "state_file": "soft_reset_replay.state.json",
+      "kind": "reset_resource_scene_replay",
+      "frame_count": 59,
+      "invariant": "sequence and credit continue while CELL-first rebuild, rediscovery, resource replay, REPLACE_START, and REPLACE_CONTINUE restart epoch state",
+      "expected_credit_watermarks": [
+        102994,
+        103042,
+        103146,
+        103266,
+        103342,
+        103418,
+        103482,
+        103730,
+        104010
+      ],
+      "expected_global_revision": 3
+    },
+    {
+      "name": "owner_drop_tombstone",
+      "file": "owner_drop_tombstone.hex",
+      "meta_file": "owner_drop_tombstone.meta.json",
+      "state_file": "owner_drop_tombstone.state.json",
+      "kind": "owner_tombstone_lifecycle",
+      "frame_count": 11,
+      "invariant": "exact and repeated tombstone drops advance revisions, stale authority and stale base are recoverable, and only a newer generation reopens",
+      "expected_credit_watermarks": [
+        140104
+      ],
+      "expected_global_revision": 5
+    },
+    {
+      "name": "control_reserve_boundary",
+      "file": "control_reserve_boundary.hex",
+      "meta_file": "control_reserve_boundary.meta.json",
+      "state_file": "control_reserve_boundary.state.json",
+      "kind": "ordinary_exhaustion_control_progress",
+      "frame_count": 6,
+      "invariant": "zero ordinary credit blocks bulk RESOURCE_BEGIN while reserve-backed OWNER_DROP/TX_RESULT retires authority before CREDIT-enabled reopen",
+      "expected_credit_watermarks": [
+        150104,
+        150208
+      ]
+    },
+    {
+      "name": "stale_generation",
+      "file": "stale_generation.hex",
+      "meta_file": "stale_generation.meta.json",
+      "state_file": "stale_generation.state.json",
+      "kind": "lifecycle_rejection",
+      "frame_count": 6,
+      "invariant": "stale OWNER_OPEN returns RET_STALE_OWNER without quota or revision mutation",
+      "expected_credit_watermarks": [
+        100104,
+        100208
+      ],
+      "expected_global_revision": 3,
+      "expected_status": "RET_STALE_OWNER",
+      "expected_over_quota_status": "RET_INVALID"
+    },
+    {
+      "name": "aggregate_quota_exhaustion",
+      "file": "aggregate_quota_exhaustion.hex",
+      "meta_file": "aggregate_quota_exhaustion.meta.json",
+      "state_file": "aggregate_quota_exhaustion.state.json",
+      "kind": "aggregate_owner_quota_rejection",
+      "frame_count": 3,
+      "invariant": "an individually valid second OWNER_OPEN returns RET_NO_CAPACITY because immutable aggregate reservations would overflow",
+      "expected_credit_watermarks": [
+        101104
+      ],
+      "expected_global_revision": 4,
+      "expected_status": "RET_NO_CAPACITY"
+    },
+    {
+      "name": "resource_lifecycle",
+      "file": "resource_lifecycle.hex",
+      "meta_file": "resource_lifecycle.meta.json",
+      "state_file": "resource_lifecycle.state.json",
+      "kind": "resource_abort_drop_lifecycle",
+      "frame_count": 21,
+      "invariant": "wrong-resource COMMIT noninterference, in-use drop, bad and good abort, reference removal, and successful resource drop retain exact lifecycle boundaries",
+      "expected_credit_watermarks": [
+        125064,
+        125184,
+        125248,
+        125472,
+        125536
+      ],
+      "expected_global_revision": 3
+    },
+    {
+      "name": "resource_chunk_overrun",
+      "file": "resource_chunk_overrun.hex",
+      "meta_file": "resource_chunk_overrun.meta.json",
+      "state_file": "resource_chunk_overrun.state.json",
+      "kind": "resource_upload_rejection",
+      "frame_count": 6,
+      "invariant": "a whole overrun chunk returns RET_INVALID, destroys upload state, and releases its reservation",
+      "expected_credit_watermarks": [
+        110120,
+        110197
+      ],
+      "expected_global_revision": 3,
+      "expected_status": "RET_INVALID"
+    },
+    {
+      "name": "resource_digest_failure",
+      "file": "resource_digest_failure.hex",
+      "meta_file": "resource_digest_failure.meta.json",
+      "state_file": "resource_digest_failure.state.json",
+      "kind": "resource_upload_rejection",
+      "frame_count": 8,
+      "invariant": "digest mismatch returns RET_BAD_CONTENT with zero accepted bytes and no resource publication",
+      "expected_credit_watermarks": [
+        120120,
+        120196,
+        120260
+      ],
+      "expected_global_revision": 3,
+      "expected_status": "RET_BAD_CONTENT"
+    }
+  ]
+}

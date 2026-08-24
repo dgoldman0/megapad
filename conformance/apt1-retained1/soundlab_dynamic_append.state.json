@@ -1,0 +1,3867 @@
+{
+  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "transcript": "soundlab_dynamic_append.hex",
+  "initial_state": {
+    "session_state": "ACTIVE",
+    "presentation_epoch": 0,
+    "global_revision": 4,
+    "transaction_id_highwater": 4,
+    "directional_sequences": {
+      "client_to_terminal": 51,
+      "terminal_to_client": 12
+    },
+    "credit_ledgers": {
+      "client_to_terminal": {
+        "initial_grant": 65536,
+        "sent_complete_bytes": 19754,
+        "released_complete_bytes": 19754,
+        "last_advertised_grant": 85290,
+        "advertised_released_bytes": 19754,
+        "pending_release_bytes": 0
+      },
+      "terminal_to_client": {
+        "initial_grant": 4096,
+        "sent_complete_bytes": 208,
+        "released_complete_bytes": 208,
+        "last_advertised_grant": 4096,
+        "advertised_released_bytes": 0,
+        "pending_release_bytes": 208
+      }
+    },
+    "control_reserve": {
+      "client_to_terminal": {
+        "capacity_bytes": 4096,
+        "occupied_bytes": 0,
+        "transcript_consumed_frames": 0,
+        "transcript_consumed_bytes": 0
+      },
+      "terminal_to_client": {
+        "capacity_bytes": 4096,
+        "occupied_bytes": 0,
+        "transcript_consumed_frames": 0,
+        "transcript_consumed_bytes": 0
+      }
+    },
+    "selected_geometry": {
+      "cols": 80,
+      "rows": 25,
+      "generation": 0
+    },
+    "cell": {
+      "cols": 80,
+      "rows": 25,
+      "cursor": {
+        "row": 0,
+        "column": 1,
+        "visible": true
+      },
+      "default": [
+        32,
+        7,
+        0,
+        0
+      ],
+      "overrides": {
+        "0:0": [
+          76,
+          7,
+          0,
+          1
+        ]
+      },
+      "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+    },
+    "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+    "active": {
+      "regions": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_id": 1,
+          "geometry_generation": 0,
+          "left": 0,
+          "top": 0,
+          "cols": 80,
+          "rows": 25,
+          "z_index": 0,
+          "flags": 3
+        }
+      ],
+      "objects": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 1,
+          "object_type": 1,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            0,
+            4294967295,
+            805306367
+          ],
+          "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 2,
+          "object_type": 2,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 1,
+          "bounds": [
+            0,
+            0,
+            4294967295,
+            4294967295
+          ],
+          "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 3,
+          "object_type": 4,
+          "flags": 1,
+          "z_index": 1,
+          "region_id": 1,
+          "parent_id": 1,
+          "bounds": [
+            0,
+            0,
+            4294967295,
+            4294967295
+          ],
+          "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+          "text_utf8_hex": "536f756e644c6162",
+          "utf8_bytes": 8,
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 4,
+          "object_type": 5,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            0,
+            4294967295,
+            805306367
+          ],
+          "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+          "format": 1,
+          "decimal_places": 2,
+          "value": -1200,
+          "scale": 100,
+          "unit_utf8_hex": "6442",
+          "formatted_utf8_hex": "2d31322e30306442",
+          "utf8_bytes": 8,
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 5,
+          "object_type": 6,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            805306368,
+            4294967295,
+            1207959551
+          ],
+          "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+          "value": -1200,
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 6,
+          "object_type": 7,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            1207959552,
+            536870911,
+            1610612735
+          ],
+          "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+          "value": 0,
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 7,
+          "object_type": 8,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            805306368,
+            4294967295,
+            4294967295
+          ],
+          "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+          "series_id": 1,
+          "visible": true
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "object_id": 8,
+          "object_type": 9,
+          "flags": 1,
+          "z_index": 0,
+          "region_id": 1,
+          "parent_id": 0,
+          "bounds": [
+            0,
+            2952790016,
+            4294967295,
+            4294967295
+          ],
+          "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+          "series_id": 2,
+          "visible": true
+        }
+      ],
+      "series": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "series_id": 1,
+          "capacity": 4,
+          "timestamp_mode": 1,
+          "interval_us": 500000,
+          "samples": [
+            {
+              "timestamp_us": 1000000,
+              "value": -1200
+            },
+            {
+              "timestamp_us": 1500000,
+              "value": -900
+            },
+            {
+              "timestamp_us": 2000000,
+              "value": -600
+            }
+          ]
+        },
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "series_id": 2,
+          "capacity": 3,
+          "timestamp_mode": 0,
+          "interval_us": 0,
+          "samples": [
+            {
+              "timestamp_us": 1000000,
+              "value": -2000
+            },
+            {
+              "timestamp_us": 1750000,
+              "value": 2000
+            }
+          ]
+        }
+      ]
+    },
+    "active_usage": [
+      {
+        "owner_id": 6003110622949818690,
+        "generation": 7,
+        "regions": 1,
+        "objects": 8,
+        "series": 2,
+        "utf8_bytes": 16,
+        "sample_slots": 7
+      }
+    ],
+    "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+    "hidden": null,
+    "hidden_usage": [],
+    "retained_visible": true,
+    "rebuild_required": null,
+    "owner_ledger": [
+      {
+        "owner_id": 6003110622949818690,
+        "generation": 7,
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7,
+        "state": "live"
+      }
+    ],
+    "owner_reservation_totals": {
+      "region_quota": 2,
+      "resource_quota": 0,
+      "object_quota": 12,
+      "series_quota": 2,
+      "resource_bytes": 0,
+      "utf8_bytes": 128,
+      "sample_slots": 7
+    },
+    "resources": [],
+    "owner_wide_resource_usage": [],
+    "upload": null,
+    "open_transaction": null,
+    "open_lifecycle_request": null,
+    "pending_reset": null,
+    "last_result": null
+  },
+  "states": [
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 52,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 19858,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 104
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 53,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 19930,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 176
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 54,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20002,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 248
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 55,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20074,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 320
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 56,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20146,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 392
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 57,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20242,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 488
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 4,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 58,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20354,
+          "released_complete_bytes": 19754,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "a815dfdc51cb0763e3abf729b9f857d8c6b1699f4643f1298ee106570919ec7e",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -1200,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d31322e30306442",
+            "utf8_bytes": 8,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -1200,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 0,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -1200
+              },
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1000000,
+                "value": -2000
+              },
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 16,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "body",
+        "held_complete_bytes": 600
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 5,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 59,
+        "terminal_to_client": 12
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20410,
+          "released_complete_bytes": 20410,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 656
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "2d060f909029b940519d6f1143c554e11455eda61e8f852903dac8d35c7f3db9",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": false
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -300,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d332e30306442",
+            "utf8_bytes": 7,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -300,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              },
+              {
+                "timestamp_us": 2500000,
+                "value": -300
+              },
+              {
+                "timestamp_us": 3000000,
+                "value": 100
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              },
+              {
+                "timestamp_us": 2500000,
+                "value": -1000
+              },
+              {
+                "timestamp_us": 3250000,
+                "value": 1000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 15,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": {
+        "family": "present",
+        "transaction_id": 5,
+        "base_revision": 4,
+        "cell_mode": 0,
+        "retained_mode": 1,
+        "phase": "awaiting_result",
+        "held_complete_bytes": 0
+      },
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 5,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 59,
+        "terminal_to_client": 13
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20410,
+          "released_complete_bytes": 20410,
+          "last_advertised_grant": 85290,
+          "advertised_released_bytes": 19754,
+          "pending_release_bytes": 656
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 1,
+          "transcript_consumed_bytes": 60
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "2d060f909029b940519d6f1143c554e11455eda61e8f852903dac8d35c7f3db9",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": false
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -300,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d332e30306442",
+            "utf8_bytes": 7,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -300,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              },
+              {
+                "timestamp_us": 2500000,
+                "value": -300
+              },
+              {
+                "timestamp_us": 3000000,
+                "value": 100
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              },
+              {
+                "timestamp_us": 2500000,
+                "value": -1000
+              },
+              {
+                "timestamp_us": 3250000,
+                "value": 1000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 15,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": {
+        "kind": "TX_RESULT",
+        "transaction_id": 5,
+        "status": 0,
+        "detail": 0,
+        "model_revision": 5
+      }
+    },
+    {
+      "session_state": "ACTIVE",
+      "presentation_epoch": 0,
+      "global_revision": 5,
+      "transaction_id_highwater": 5,
+      "directional_sequences": {
+        "client_to_terminal": 59,
+        "terminal_to_client": 14
+      },
+      "credit_ledgers": {
+        "client_to_terminal": {
+          "initial_grant": 65536,
+          "sent_complete_bytes": 20410,
+          "released_complete_bytes": 20410,
+          "last_advertised_grant": 85946,
+          "advertised_released_bytes": 20410,
+          "pending_release_bytes": 0
+        },
+        "terminal_to_client": {
+          "initial_grant": 4096,
+          "sent_complete_bytes": 208,
+          "released_complete_bytes": 208,
+          "last_advertised_grant": 4096,
+          "advertised_released_bytes": 0,
+          "pending_release_bytes": 208
+        }
+      },
+      "control_reserve": {
+        "client_to_terminal": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 0,
+          "transcript_consumed_bytes": 0
+        },
+        "terminal_to_client": {
+          "capacity_bytes": 4096,
+          "occupied_bytes": 0,
+          "transcript_consumed_frames": 2,
+          "transcript_consumed_bytes": 108
+        }
+      },
+      "selected_geometry": {
+        "cols": 80,
+        "rows": 25,
+        "generation": 0
+      },
+      "cell": {
+        "cols": 80,
+        "rows": 25,
+        "cursor": {
+          "row": 0,
+          "column": 1,
+          "visible": true
+        },
+        "default": [
+          32,
+          7,
+          0,
+          0
+        ],
+        "overrides": {
+          "0:0": [
+            76,
+            7,
+            0,
+            1
+          ]
+        },
+        "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
+      },
+      "active_digest_sha3_256": "2d060f909029b940519d6f1143c554e11455eda61e8f852903dac8d35c7f3db9",
+      "active": {
+        "regions": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "region_id": 1,
+            "geometry_generation": 0,
+            "left": 0,
+            "top": 0,
+            "cols": 80,
+            "rows": 25,
+            "z_index": 0,
+            "flags": 3
+          }
+        ],
+        "objects": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 1,
+            "object_type": 1,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 2,
+            "object_type": 2,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 3,
+            "object_type": 4,
+            "flags": 1,
+            "z_index": 1,
+            "region_id": 1,
+            "parent_id": 1,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5",
+            "text_utf8_hex": "536f756e644c6162",
+            "utf8_bytes": 8,
+            "visible": false
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 4,
+            "object_type": 5,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              0,
+              4294967295,
+              805306367
+            ],
+            "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
+            "format": 1,
+            "decimal_places": 2,
+            "value": -300,
+            "scale": 100,
+            "unit_utf8_hex": "6442",
+            "formatted_utf8_hex": "2d332e30306442",
+            "utf8_bytes": 7,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 5,
+            "object_type": 6,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              1207959551
+            ],
+            "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
+            "value": -300,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 6,
+            "object_type": 7,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              1207959552,
+              536870911,
+              1610612735
+            ],
+            "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
+            "value": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 7,
+            "object_type": 8,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              805306368,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
+            "series_id": 1,
+            "visible": true
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "object_id": 8,
+            "object_type": 9,
+            "flags": 1,
+            "z_index": 0,
+            "region_id": 1,
+            "parent_id": 0,
+            "bounds": [
+              0,
+              2952790016,
+              4294967295,
+              4294967295
+            ],
+            "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
+            "series_id": 2,
+            "visible": true
+          }
+        ],
+        "series": [
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 1,
+            "capacity": 4,
+            "timestamp_mode": 1,
+            "interval_us": 500000,
+            "samples": [
+              {
+                "timestamp_us": 1500000,
+                "value": -900
+              },
+              {
+                "timestamp_us": 2000000,
+                "value": -600
+              },
+              {
+                "timestamp_us": 2500000,
+                "value": -300
+              },
+              {
+                "timestamp_us": 3000000,
+                "value": 100
+              }
+            ]
+          },
+          {
+            "owner_id": 6003110622949818690,
+            "generation": 7,
+            "series_id": 2,
+            "capacity": 3,
+            "timestamp_mode": 0,
+            "interval_us": 0,
+            "samples": [
+              {
+                "timestamp_us": 1750000,
+                "value": 2000
+              },
+              {
+                "timestamp_us": 2500000,
+                "value": -1000
+              },
+              {
+                "timestamp_us": 3250000,
+                "value": 1000
+              }
+            ]
+          }
+        ]
+      },
+      "active_usage": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "regions": 1,
+          "objects": 8,
+          "series": 2,
+          "utf8_bytes": 15,
+          "sample_slots": 7
+        }
+      ],
+      "hidden_digest_sha3_256": "3ea445410f608e6453cdcb7dbe42d57a89aca018993d7e87da85993cbccc6308",
+      "hidden": null,
+      "hidden_usage": [],
+      "retained_visible": true,
+      "rebuild_required": null,
+      "owner_ledger": [
+        {
+          "owner_id": 6003110622949818690,
+          "generation": 7,
+          "region_quota": 2,
+          "resource_quota": 0,
+          "object_quota": 12,
+          "series_quota": 2,
+          "resource_bytes": 0,
+          "utf8_bytes": 128,
+          "sample_slots": 7,
+          "state": "live"
+        }
+      ],
+      "owner_reservation_totals": {
+        "region_quota": 2,
+        "resource_quota": 0,
+        "object_quota": 12,
+        "series_quota": 2,
+        "resource_bytes": 0,
+        "utf8_bytes": 128,
+        "sample_slots": 7
+      },
+      "resources": [],
+      "owner_wide_resource_usage": [],
+      "upload": null,
+      "open_transaction": null,
+      "open_lifecycle_request": null,
+      "pending_reset": null,
+      "last_result": null
+    }
+  ],
+  "frames": [
+    {
+      "frame_index": 0,
+      "direction": "client_to_terminal",
+      "message": "PRESENT_BEGIN",
+      "sequence": 52,
+      "epoch": 0,
+      "state_index": 0
+    },
+    {
+      "frame_index": 1,
+      "direction": "client_to_terminal",
+      "message": "OBJECT_SET_VALUE",
+      "sequence": 53,
+      "epoch": 0,
+      "state_index": 1
+    },
+    {
+      "frame_index": 2,
+      "direction": "client_to_terminal",
+      "message": "OBJECT_SET_VALUE",
+      "sequence": 54,
+      "epoch": 0,
+      "state_index": 2
+    },
+    {
+      "frame_index": 3,
+      "direction": "client_to_terminal",
+      "message": "OBJECT_SET_VALUE",
+      "sequence": 55,
+      "epoch": 0,
+      "state_index": 3
+    },
+    {
+      "frame_index": 4,
+      "direction": "client_to_terminal",
+      "message": "OBJECT_SET_VISIBILITY",
+      "sequence": 56,
+      "epoch": 0,
+      "state_index": 4
+    },
+    {
+      "frame_index": 5,
+      "direction": "client_to_terminal",
+      "message": "SERIES_APPEND",
+      "sequence": 57,
+      "epoch": 0,
+      "state_index": 5
+    },
+    {
+      "frame_index": 6,
+      "direction": "client_to_terminal",
+      "message": "SERIES_APPEND",
+      "sequence": 58,
+      "epoch": 0,
+      "state_index": 6
+    },
+    {
+      "frame_index": 7,
+      "direction": "client_to_terminal",
+      "message": "PRESENT_COMMIT",
+      "sequence": 59,
+      "epoch": 0,
+      "state_index": 7
+    },
+    {
+      "frame_index": 8,
+      "direction": "terminal_to_client",
+      "message": "TX_RESULT",
+      "sequence": 13,
+      "epoch": 0,
+      "state_index": 8
+    },
+    {
+      "frame_index": 9,
+      "direction": "terminal_to_client",
+      "message": "CREDIT",
+      "sequence": 14,
+      "epoch": 0,
+      "state_index": 9
+    }
+  ]
+}
