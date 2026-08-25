@@ -711,6 +711,23 @@ class PreparedSceneInstall:
     _staging: _SceneStaging
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedOwnerRetirement:
+    """One exact owner removal prepared across every retained target.
+
+    The owner ledger tombstone and both scene-plane removals share the same
+    source capabilities.  A coordinator can therefore validate all of them
+    before completing the OWNER_DROP clock lease, after which publication is
+    a fixed sequence of non-failing reference assignments.
+    """
+
+    state: SceneModelState
+    ledger: PreparedOwnerLedgerInstall
+    lease: TransactionLease
+    _model_token: object
+    _source_state: SceneModelState
+
+
 class RetainedSceneModel:
     """Active/hidden retained targets sharing one presentation clock."""
 
@@ -1083,6 +1100,92 @@ class RetainedSceneModel:
         self._install_prevalidated(prepared)
         return result
 
+    def prepare_owner_retirement(
+        self,
+        lease: TransactionLease,
+        owner: OwnerIdentity,
+    ) -> PreparedOwnerRetirement:
+        """Prepare one exact OWNER_DROP across active, hidden, and ledger state."""
+
+        if self._staging is not None:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "owner retirement waits for the retained transaction to settle",
+            )
+        if self._clock.open_transaction is not lease:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "owner retirement lease is not the global open transaction",
+            )
+        if lease.family is not TransactionFamily.OWNER_DROP or not lease.admitted:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "owner retirement requires an admitted OWNER_DROP transaction",
+            )
+
+        # prepare_drop validates the exact session/epoch/ID/generation and
+        # reserves the tombstone candidate without mutating live authority.
+        ledger = self._owners.prepare_drop(owner)
+        source = self._state
+        active = self._scene_without_owner(source.active, owner)
+        hidden = (
+            None
+            if source.hidden is None
+            else self._scene_without_owner(source.hidden, owner)
+        )
+        try:
+            revision = self._clock.next_revision(lease)
+        except PresentationStateError as exc:
+            raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
+        return PreparedOwnerRetirement(
+            state=replace(
+                source,
+                revision=revision,
+                active=active,
+                hidden=hidden,
+            ),
+            ledger=ledger,
+            lease=lease,
+            _model_token=self._token,
+            _source_state=source,
+        )
+
+    def install_owner_retirement(
+        self,
+        prepared: PreparedOwnerRetirement,
+    ) -> ResultLease:
+        """Complete and install a prevalidated owner retirement directly."""
+
+        self.validate_owner_retirement(prepared)
+        result = self._clock.complete_success(prepared.lease)
+        self._install_owner_retirement_prevalidated(prepared)
+        return result
+
+    def validate_owner_retirement(
+        self,
+        prepared: PreparedOwnerRetirement,
+    ) -> None:
+        """Validate scene, ledger, lease, and revision before OWNER_DROP."""
+
+        if not isinstance(prepared, PreparedOwnerRetirement):
+            raise TypeError("prepared must be PreparedOwnerRetirement")
+        if (
+            prepared._model_token is not self._token
+            or prepared._source_state is not self._state
+            or self._staging is not None
+        ):
+            raise RuntimeError("prepared owner retirement is stale or foreign")
+        self._owners.validate_prepared(prepared.ledger)
+        if self._clock.open_transaction is not prepared.lease:
+            raise RuntimeError("prepared owner retirement lost its transaction lease")
+        if (
+            prepared.lease.family is not TransactionFamily.OWNER_DROP
+            or not prepared.lease.admitted
+        ):
+            raise RuntimeError("prepared owner retirement has an invalid clock lease")
+        if self._clock.next_revision(prepared.lease) != prepared.state.revision:
+            raise RuntimeError("prepared owner retirement revision is stale")
+
     def validate_prepared(self, prepared: PreparedSceneInstall) -> None:
         """Validate exact scene, ledger, lease, and revision provenance."""
 
@@ -1108,6 +1211,15 @@ class RetainedSceneModel:
         self._owners._install_prevalidated(prepared.ledger)
         self._state = prepared.state
         self._staging = None
+
+    def _install_owner_retirement_prevalidated(
+        self,
+        prepared: PreparedOwnerRetirement,
+    ) -> None:
+        """Install an owner retirement after every fallible check completed."""
+
+        self._owners._install_prevalidated(prepared.ledger)
+        self._state = prepared.state
 
     def reject(self) -> ResultLease:
         staging = self._require_staging()
@@ -1139,6 +1251,22 @@ class RetainedSceneModel:
             requirement=requirement,
             retained_visible=False,
         )
+
+    @staticmethod
+    def _scene_without_owner(
+        scene: RetainedScene,
+        owner: OwnerIdentity,
+    ) -> RetainedScene:
+        present = scene.owners.get(owner.owner_id)
+        if present is None:
+            return scene
+        if present.owner != owner:
+            raise RuntimeError(
+                "retained scene owner identity disagrees with exact ledger authority"
+            )
+        owners = dict(scene.owners)
+        del owners[owner.owner_id]
+        return RetainedScene(MappingProxyType(owners))
 
     def _stage_new_id(
         self,
@@ -1352,6 +1480,7 @@ __all__ = [
     "PlotBody",
     "Point",
     "PolylineBody",
+    "PreparedOwnerRetirement",
     "PreparedSceneInstall",
     "RGBA",
     "ReadoutBody",

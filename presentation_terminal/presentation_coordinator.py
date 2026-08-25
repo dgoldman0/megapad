@@ -20,7 +20,12 @@ from .presentation_model import (
     TransactionFamily,
     TransactionLease,
 )
-from .retained_scene import PreparedSceneInstall, RetainedSceneModel, SceneModelState
+from .retained_scene import (
+    PreparedOwnerRetirement,
+    PreparedSceneInstall,
+    RetainedSceneModel,
+    SceneModelState,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +52,17 @@ class PreparedPresentationInstall:
     lease: TransactionLease
     cell: PreparedCellPublication | None
     retained: PreparedSceneInstall | None
+    _coordinator_token: object
+    _source_view: CompositePresentationView
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedOwnerRetirementPublication:
+    """A scene-aware OWNER_DROP candidate bound to one composite source."""
+
+    view: CompositePresentationView
+    lease: TransactionLease
+    retirement: PreparedOwnerRetirement
     _coordinator_token: object
     _source_view: CompositePresentationView
 
@@ -269,6 +285,106 @@ class PresentationCoordinator:
         self._view = prepared.view
         return result
 
+    def prepare_owner_retirement(
+        self,
+        lease: TransactionLease,
+        retirement: PreparedOwnerRetirement,
+    ) -> PreparedOwnerRetirementPublication:
+        """Prepare OWNER_DROP publication across ledger, scenes, and composite."""
+
+        if not isinstance(lease, TransactionLease):
+            raise TypeError("lease must be TransactionLease")
+        if not isinstance(retirement, PreparedOwnerRetirement):
+            raise TypeError("retirement must be PreparedOwnerRetirement")
+        if retirement.lease is not lease:
+            raise PresentationStateError(
+                "owner retirement and coordinator leases do not match"
+            )
+        target_revision = self._clock.next_revision(lease)
+        prepared = PreparedOwnerRetirementPublication(
+            view=CompositePresentationView(
+                presentation_epoch=self._clock.presentation_epoch,
+                revision=target_revision,
+                geometry=self._view.geometry,
+                cell=self._view.cell,
+                retained=retirement.state,
+            ),
+            lease=lease,
+            retirement=retirement,
+            _coordinator_token=self._token,
+            _source_view=self._view,
+        )
+        self.validate_owner_retirement(prepared)
+        return prepared
+
+    def validate_owner_retirement(
+        self,
+        prepared: PreparedOwnerRetirementPublication,
+    ) -> None:
+        """Validate all OWNER_DROP sources before the shared clock advances."""
+
+        if not isinstance(prepared, PreparedOwnerRetirementPublication):
+            raise TypeError("prepared must be PreparedOwnerRetirementPublication")
+        if (
+            prepared._coordinator_token is not self._token
+            or prepared._source_view is not self._view
+        ):
+            raise RuntimeError("prepared owner retirement is stale or foreign")
+        if self._cell_model.view is not prepared._source_view.cell:
+            raise RuntimeError("composite CELL source view changed outside coordinator")
+        retained_model = self._retained_model
+        if retained_model is None:
+            raise RuntimeError("composite has no retained model")
+        if retained_model.state is not prepared._source_view.retained:
+            raise RuntimeError("composite retained source changed outside coordinator")
+
+        lease = prepared.lease
+        if self._clock.open_transaction is not lease:
+            raise RuntimeError("prepared owner retirement lost its transaction lease")
+        if lease.family is not TransactionFamily.OWNER_DROP or not lease.admitted:
+            raise PresentationStateError(
+                "owner retirement requires an admitted OWNER_DROP transaction"
+            )
+        if prepared.retirement.lease is not lease:
+            raise RuntimeError("prepared retained retirement has the wrong lease")
+        retained_model.validate_owner_retirement(prepared.retirement)
+
+        revision = self._clock.next_revision(lease)
+        view = prepared.view
+        if (
+            view.presentation_epoch != self._clock.presentation_epoch
+            or view.revision != revision
+        ):
+            raise RuntimeError("prepared owner retirement revision or epoch is stale")
+        if view.geometry != prepared._source_view.geometry:
+            raise RuntimeError("owner retirement changed composite geometry")
+        if view.cell is not prepared._source_view.cell:
+            raise RuntimeError("owner retirement did not share the CELL plane")
+        if view.retained is not prepared.retirement.state:
+            raise RuntimeError("owner retirement has the wrong retained candidate")
+        self._validate_retained_state(
+            prepared.retirement.state,
+            self._clock,
+            view.geometry,
+        )
+
+    def install_owner_retirement(
+        self,
+        prepared: PreparedOwnerRetirementPublication,
+    ) -> ResultLease:
+        """Complete one OWNER_DROP result and publish all prepared authority."""
+
+        self.validate_owner_retirement(prepared)
+
+        # No validation, allocation, or policy work may follow this point.
+        retained_model = cast(RetainedSceneModel, self._retained_model)
+        result = self._clock.complete_success(prepared.lease)
+        retained_model._install_owner_retirement_prevalidated(
+            prepared.retirement
+        )
+        self._view = prepared.view
+        return result
+
     @staticmethod
     def _validate_cell_view(
         view: TerminalView,
@@ -306,6 +422,7 @@ class PresentationCoordinator:
 
 __all__ = [
     "CompositePresentationView",
+    "PreparedOwnerRetirementPublication",
     "PreparedPresentationInstall",
     "PresentationCoordinator",
 ]

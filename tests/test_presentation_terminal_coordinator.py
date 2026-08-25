@@ -256,6 +256,52 @@ def test_retained_only_and_mixed_commits_share_or_swap_planes_as_one_view():
     assert clock.outstanding_result is result
 
 
+def test_owner_retirement_publishes_ledger_scene_and_composite_as_one_revision():
+    clock, cell, owners, owner, retained, coordinator = _domain()
+    _install_initial_cell(clock, cell, coordinator)
+
+    retained_lease = clock.reserve(TransactionFamily.PRESENT, 2, 1)
+    retained.begin(retained_lease, RetainedMode.REPLACE_START, GEOMETRY)
+    retained.define_region(
+        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, True, True, 0)
+    )
+    retained_prepared = retained.prepare_commit(CommitDisposition.COMMIT)
+    retained_publication = coordinator.prepare_commit(
+        retained_lease,
+        retained=retained_prepared,
+    )
+    retained_result = coordinator.install_prepared(retained_publication)
+    clock.settle_result(retained_result.transaction_id)
+
+    source_view = coordinator.view
+    source_cell = cell.view
+    source_scene = retained.state
+    source_ledger = owners.state
+    assert source_scene.hidden is not None
+    assert owner.owner_id in source_scene.hidden.owners
+
+    drop_lease = clock.reserve(TransactionFamily.OWNER_DROP, 3, 2)
+    retirement = retained.prepare_owner_retirement(drop_lease, owner)
+    publication = coordinator.prepare_owner_retirement(drop_lease, retirement)
+
+    assert coordinator.view is source_view
+    assert retained.state is source_scene
+    assert owners.state is source_ledger
+    assert publication.view.revision == 3
+    assert publication.view.cell is source_cell
+    assert publication.view.retained is retirement.state
+
+    result = coordinator.install_owner_retirement(publication)
+    assert result.revision == 3
+    assert coordinator.view is publication.view
+    assert coordinator.view.cell is source_cell
+    assert coordinator.view.retained is retained.state
+    assert retained.state.hidden is not None
+    assert owner.owner_id not in retained.state.hidden.owners
+    assert not owners.state.records[owner.owner_id].live
+    assert source_scene.hidden.owners[owner.owner_id].owner == owner
+
+
 def test_stale_retained_ledger_fails_before_clock_or_composite_publication():
     clock, cell, owners, owner, retained, coordinator = _domain()
     source = _install_initial_cell(clock, cell, coordinator)

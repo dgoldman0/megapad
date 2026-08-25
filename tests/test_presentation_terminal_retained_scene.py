@@ -344,6 +344,54 @@ def test_layout_target_is_copy_on_write_and_active_quota_is_not_double_charged()
     assert scene.state.active.owners[owner.owner_id].regions[1].geometry_generation == 1
 
 
+def test_owner_retirement_removes_exact_authority_from_active_and_hidden_atomically():
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+
+    resized = PresentationGeometry(20, 10, 1)
+    scene.require_layout(resized)
+    _begin(clock, scene, 4, RetainedMode.LAYOUT_START, resized)
+    scene.replace_region(_region(owner, generation=1))
+    _install(scene, clock, CommitDisposition.COMMIT)
+    source_scene = scene.state
+    source_ledger = owners.state
+    assert owner.owner_id in source_scene.active.owners
+    assert source_scene.hidden is not None
+    assert owner.owner_id in source_scene.hidden.owners
+
+    lease = clock.reserve(TransactionFamily.OWNER_DROP, 5, 4)
+    prepared = scene.prepare_owner_retirement(lease, owner)
+
+    assert scene.state is source_scene
+    assert owners.state is source_ledger
+    assert prepared.state.revision == 5
+    assert owner.owner_id not in prepared.state.active.owners
+    assert prepared.state.hidden is not None
+    assert owner.owner_id not in prepared.state.hidden.owners
+    assert not prepared.ledger.state.records[owner.owner_id].live
+    assert prepared.ledger.state.reservations.live_owners == 0
+
+    result = scene.install_owner_retirement(prepared)
+    assert result.revision == 5
+    assert scene.state is prepared.state
+    assert owners.state is prepared.ledger.state
+    assert source_scene.active.owners[owner.owner_id].owner == owner
+    assert source_scene.hidden.owners[owner.owner_id].owner == owner
+    clock.settle_result(5)
+
+    # Dropping the exact tombstone remains a successful revisioned no-op for
+    # the scene planes; the already-empty immutable targets are shared.
+    tombstone_scene = scene.state
+    tombstone_ledger = owners.state
+    repeated_lease = clock.reserve(TransactionFamily.OWNER_DROP, 6, 5)
+    repeated = scene.prepare_owner_retirement(repeated_lease, owner)
+    assert repeated.state.active is tombstone_scene.active
+    assert repeated.state.hidden is tombstone_scene.hidden
+    assert repeated.ledger.state is tombstone_ledger
+    repeated_result = scene.install_owner_retirement(repeated)
+    assert repeated_result.revision == 6
+
+
 def test_layout_reveal_rejects_any_surviving_stale_region():
     clock, _owners, owner, scene = _domain()
     _begin(clock, scene, 2, RetainedMode.REPLACE_START)

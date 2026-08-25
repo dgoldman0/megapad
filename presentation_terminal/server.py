@@ -1194,7 +1194,7 @@ class PresentationTerminalCore:
         if frame.message_type == RetainedMessageType.OWNER_DROP:
             if not self._retained_enabled:
                 self._fatal("OWNER_DROP arrived before retained discovery")
-            return self._accept_owner_drop(frame), None
+            return self._accept_owner_drop(frame)
 
         try:
             message_type = MessageType(frame.message_type)
@@ -1575,10 +1575,10 @@ class PresentationTerminalCore:
     def _accept_owner_drop(
         self,
         frame: Frame,
-    ) -> tuple[OutboundBytes, ...]:
+    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
         """Apply one revisioned exact-owner drop through the shared clock."""
 
-        ledger, clock = self._require_owner_lifecycle_ready(
+        _ledger, clock = self._require_owner_lifecycle_ready(
             "OWNER_DROP",
             allow_crossed_reset=True,
         )
@@ -1593,10 +1593,6 @@ class PresentationTerminalCore:
         identity = None
         if owner_id != 0 and owner_generation != 0:
             identity = self._owner_identity(owner_id, owner_generation)
-            if self._owner_has_scene(identity):
-                self._fatal(
-                    "OWNER_DROP requires coordinated retained scene retirement"
-                )
 
         try:
             lease = clock.reserve(
@@ -1618,40 +1614,43 @@ class PresentationTerminalCore:
                 and "base revision" in lease.rejection
                 else 2
             )
-            return self._complete_owner_drop_rejection(lease, status)
+            return self._complete_owner_drop_rejection(lease, status), None
 
         if owner_id == 0 or owner_generation == 0:
-            return self._complete_owner_drop_rejection(lease, 2)
+            return self._complete_owner_drop_rejection(lease, 2), None
         assert identity is not None
         try:
-            prepared = ledger.prepare_drop(identity)
+            retirement = self._require_retained_model().prepare_owner_retirement(
+                lease,
+                identity,
+            )
+            prepared = self._require_coordinator().prepare_owner_retirement(
+                lease,
+                retirement,
+            )
         except OwnerLedgerError:
-            return self._complete_owner_drop_rejection(lease, 2)
-        try:
-            ledger.validate_prepared(prepared)
-        except (RuntimeError, TypeError) as exc:
+            return self._complete_owner_drop_rejection(lease, 2), None
+        except (PresentationStateError, SceneModelError, RuntimeError, TypeError) as exc:
             self._fatal(f"cannot validate OWNER_DROP publication: {exc}", cause=exc)
 
         if self._reset_requested_epoch is not None:
-            return self._complete_owner_drop_rejection(lease, 1)
+            return self._complete_owner_drop_rejection(lease, 1), None
 
-        try:
-            revision = clock.next_revision(lease)
-        except PresentationStateError as exc:
-            self._fatal(f"cannot advance OWNER_DROP revision: {exc}", cause=exc)
+        revision = prepared.view.revision
         result_record = self._encode_control(
             MessageType.TX_RESULT,
             _TX_RESULT.pack(transaction_id, 0, 0, revision),
             result_transaction_id=transaction_id,
         )
         try:
-            result_lease = clock.complete_success(lease)
-        except PresentationStateError as exc:
+            result_lease = self._require_coordinator().install_owner_retirement(
+                prepared
+            )
+        except (PresentationStateError, RuntimeError) as exc:
             self._fatal(f"cannot complete OWNER_DROP: {exc}", cause=exc)
         if result_lease.revision != revision:
             self._fatal("OWNER_DROP revision changed after preparation")
-        ledger._install_prevalidated(prepared)
-        return (result_record,)
+        return (result_record,), prepared.view
 
     def _complete_owner_drop_rejection(
         self,
@@ -1722,19 +1721,6 @@ class PresentationTerminalCore:
             owner_id=owner_id,
             owner_generation=owner_generation,
         )
-
-    def _owner_has_scene(self, identity: OwnerIdentity) -> bool:
-        retained = self._retained_model
-        if retained is None:
-            return False
-        scenes = (retained.state.active, retained.state.hidden)
-        for scene in scenes:
-            if scene is None:
-                continue
-            owner_scene = scene.owners.get(identity.owner_id)
-            if owner_scene is not None and owner_scene.owner == identity:
-                return True
-        return False
 
     @staticmethod
     def _owner_open_status(error: OwnerLedgerError) -> RetStatus:

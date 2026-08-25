@@ -738,6 +738,7 @@ def test_owner_drop_uses_shared_revision_and_exact_tombstone_authority():
     )
     drop_frame = decoder.feed(dropped.outbound[0].payload)[0]
     assert TX_RESULT.unpack(drop_frame.payload) == (2, 0, 0, 2)
+    assert dropped.views == (core.presentation_view,)
     state = core.owner_state
     assert state is not None
     assert not state.records[owner.owner_id].live
@@ -757,6 +758,7 @@ def test_owner_drop_uses_shared_revision_and_exact_tombstone_authority():
         0,
         3,
     )
+    assert repeated.views == (core.presentation_view,)
     assert core.owner_state is tombstone
     core.settle_result_delivery(3)
 
@@ -1110,7 +1112,7 @@ def test_present_transaction_rejects_an_intervening_control_frame():
     assert core.presentation_revision == 1
 
 
-def test_owner_drop_with_committed_scene_fails_closed_before_authority_mutation():
+def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
     core, encoder, decoder = _open_retained_core()
     owner = _owner_open()
     opened = core.feed_machine(
@@ -1136,17 +1138,50 @@ def test_owner_drop_with_committed_scene_fails_closed_before_authority_mutation(
     owner_source = core.owner_state
     scene_source = core.retained_state
 
-    with pytest.raises(TerminalSessionError, match="scene retirement"):
-        core.feed_machine(
-            encoder.encode(
-                RetainedMessageType.OWNER_DROP,
-                encode_owner_drop(OwnerDrop(3, 2, 7, 1)),
-            )
+    stale = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(3, 2, 7, 2)),
         )
-
+    )
+    assert TX_RESULT.unpack(decoder.feed(stale.outbound[0].payload)[0].payload) == (
+        3,
+        2,
+        0,
+        2,
+    )
     assert core.owner_state is owner_source
     assert core.retained_state is scene_source
     assert core.presentation_revision == 2
+    assert stale.views == ()
+    core.settle_result_delivery(3)
+
+    dropped = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(4, 2, 7, 1)),
+        )
+    )
+    assert TX_RESULT.unpack(decoder.feed(dropped.outbound[0].payload)[0].payload) == (
+        4,
+        0,
+        0,
+        3,
+    )
+    assert core.presentation_revision == 3
+    assert core.owner_state is not owner_source
+    assert core.owner_state is not None
+    assert not core.owner_state.records[7].live
+    assert core.retained_state is not scene_source
+    assert core.retained_state is not None
+    assert core.retained_state.hidden is not None
+    assert 7 not in core.retained_state.hidden.owners
+    assert scene_source is not None
+    assert scene_source.hidden is not None
+    assert scene_source.hidden.owners[7].owner.owner_generation == 1
+    assert core.presentation_view is not None
+    assert core.presentation_view.retained is core.retained_state
+    assert dropped.views == (core.presentation_view,)
 
 
 def test_retained_resize_is_blocked_before_wire_or_geometry_mutation():
