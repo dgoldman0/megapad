@@ -10,8 +10,24 @@ import pytest
 
 from presentation_terminal.apt1 import UINT32_MAX, UINT64_MAX
 from presentation_terminal.retained_model import OwnerQuotas, RetainedFeature
+from presentation_terminal.retained_scene import (
+    ExplicitSamples,
+    GroupBody,
+    LabelBody,
+    ObjectBounds,
+    ObjectKind,
+    Point,
+    PolylineBody,
+    RGBA,
+    Sample,
+    TimestampMode,
+    UniformSamples,
+)
 from presentation_terminal.retained_wire import (
     CellMode,
+    ObjectSetValue,
+    ObjectSetVisibility,
+    ObjectWireDefinition,
     OwnerDrop,
     OwnerOpen,
     PresentBegin,
@@ -19,6 +35,7 @@ from presentation_terminal.retained_wire import (
     PresentDisposition,
     PresentRetainedMode,
     RegionWireDefinition,
+    RetainedItemReference,
     RetStatus,
     RetainedCaps,
     RetainedFormats,
@@ -26,24 +43,42 @@ from presentation_terminal.retained_wire import (
     RetainedResult,
     RetainedWireError,
     RetainedWireErrorCode,
+    SeriesWireDefinition,
+    SeriesWireSamples,
+    decode_object_definition,
+    decode_object_drop,
+    decode_object_set_value,
+    decode_object_set_visibility,
     decode_owner_drop,
     decode_owner_open,
     decode_present_begin,
     decode_present_commit,
     decode_region_definition,
+    decode_region_drop,
     decode_ret_caps,
     decode_ret_formats,
     decode_ret_query,
     decode_ret_result,
+    decode_series_definition,
+    decode_series_drop,
+    decode_series_samples,
+    encode_object_definition,
+    encode_object_drop,
+    encode_object_set_value,
+    encode_object_set_visibility,
     encode_owner_drop,
     encode_owner_open,
     encode_present_begin,
     encode_present_commit,
     encode_region_definition,
+    encode_region_drop,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_query,
     encode_ret_result,
+    encode_series_definition,
+    encode_series_drop,
+    encode_series_samples,
 )
 
 
@@ -422,3 +457,170 @@ def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
     with pytest.raises(RetainedWireError) as scalar:
         decode_region_definition(payload)
     assert scalar.value.code is RetainedWireErrorCode.SCALAR
+
+
+@pytest.mark.parametrize(
+    ("message_type", "decode", "encode"),
+    (
+        (RetainedMessageType.REGION_REPLACE, decode_region_definition, encode_region_definition),
+        (RetainedMessageType.REGION_DROP, decode_region_drop, encode_region_drop),
+        (RetainedMessageType.OBJECT_SET_VALUE, decode_object_set_value, encode_object_set_value),
+        (
+            RetainedMessageType.OBJECT_SET_VISIBILITY,
+            decode_object_set_visibility,
+            encode_object_set_visibility,
+        ),
+        (RetainedMessageType.OBJECT_DROP, decode_object_drop, encode_object_drop),
+        (
+            RetainedMessageType.SERIES_DEFINE,
+            decode_series_definition,
+            encode_series_definition,
+        ),
+        (RetainedMessageType.SERIES_DROP, decode_series_drop, encode_series_drop),
+    ),
+)
+def test_soundlab_fixed_payload_oracles_round_trip_exactly(message_type, decode, encode):
+    for payload in _oracle_payloads(message_type):
+        assert encode(decode(payload)) == payload
+
+
+def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
+    kinds = set()
+    for message_type in (
+        RetainedMessageType.OBJECT_DEFINE,
+        RetainedMessageType.OBJECT_REPLACE,
+    ):
+        for payload in _oracle_payloads(message_type):
+            object_type = int.from_bytes(payload[24:26], "little")
+            if object_type == 3:  # IMAGE is deliberately a separate resource slice.
+                continue
+            definition = decode_object_definition(payload)
+            kinds.add(definition.kind)
+            assert encode_object_definition(definition) == payload
+
+    assert kinds == set(ObjectKind)
+
+
+@pytest.mark.parametrize(
+    "message_type",
+    (RetainedMessageType.SERIES_APPEND, RetainedMessageType.SERIES_REPLACE),
+)
+def test_every_series_sample_oracle_round_trips_without_policy_caps(message_type):
+    for payload in _oracle_payloads(message_type):
+        update = decode_series_samples(payload)
+        assert encode_series_samples(update) == payload
+
+
+def test_variable_payload_codecs_are_structural_not_policy_capped():
+    points = tuple(Point(index, UINT32_MAX - index) for index in range(257))
+    polyline = ObjectWireDefinition(
+        1,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        0,
+        True,
+        PolylineBody(points, 1, RGBA(1, 2, 3, 4), False),
+    )
+    assert decode_object_definition(encode_object_definition(polyline)) == polyline
+
+    label = replace(polyline, object_id=2, body=LabelBody(RGBA(4, 3, 2, 1), 0, 2, "x" * 257))
+    assert decode_object_definition(encode_object_definition(label)) == label
+
+    uniform = SeriesWireSamples(1, 1, 1, UniformSamples(7, tuple(range(65))))
+    assert decode_series_samples(encode_series_samples(uniform)) == uniform
+
+    explicit = SeriesWireSamples(
+        1,
+        1,
+        2,
+        ExplicitSamples(tuple(Sample(index + 1, -index) for index in range(65))),
+    )
+    assert decode_series_samples(encode_series_samples(explicit)) == explicit
+
+
+def test_soundlab_typed_values_enforce_authority_and_scalar_contracts():
+    with pytest.raises(ValueError, match="between 1"):
+        RetainedItemReference(0, 1, 1)
+    with pytest.raises(TypeError, match="must be bool"):
+        ObjectSetVisibility(1, 1, 1, 1)
+    with pytest.raises(ValueError, match="interval must be zero"):
+        SeriesWireDefinition(1, 1, 1, 4, TimestampMode.EXPLICIT, 1)
+    with pytest.raises(ValueError, match="interval must be positive"):
+        SeriesWireDefinition(1, 1, 1, 4, TimestampMode.UNIFORM, 0)
+
+    value = ObjectSetValue(UINT64_MAX, UINT64_MAX, UINT64_MAX, -(1 << 63))
+    assert decode_object_set_value(encode_object_set_value(value)) == value
+
+
+def test_object_decoders_reject_reserved_bits_enums_text_and_non_exact_bodies():
+    group = bytearray(
+        next(
+            payload
+            for payload in _oracle_payloads(RetainedMessageType.OBJECT_DEFINE)
+            if int.from_bytes(payload[24:26], "little") == int(ObjectKind.GROUP)
+        )
+    )
+    group[26:28] = (2).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as flags:
+        decode_object_definition(group)
+    assert flags.value.code is RetainedWireErrorCode.RESERVED
+
+    group[26:28] = (1).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as trailing:
+        decode_object_definition(group + b"\0")
+    assert trailing.value.code is RetainedWireErrorCode.PAYLOAD
+
+    label = bytearray(
+        next(
+            payload
+            for payload in _oracle_payloads(RetainedMessageType.OBJECT_DEFINE)
+            if int.from_bytes(payload[24:26], "little") == int(ObjectKind.LABEL)
+        )
+    )
+    label[-1] = 0xFF
+    with pytest.raises(RetainedWireError) as utf8:
+        decode_object_definition(label)
+    assert utf8.value.code is RetainedWireErrorCode.SCALAR
+
+    label[24:26] = (3).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as image:
+        decode_object_definition(label)
+    assert image.value.code is RetainedWireErrorCode.ENUM
+
+
+def test_mutation_and_series_decoders_reject_padding_modes_and_count_aliases():
+    visibility = bytearray(
+        _oracle_payloads(RetainedMessageType.OBJECT_SET_VISIBILITY)[0]
+    )
+    visibility[-1] = 1
+    with pytest.raises(RetainedWireError) as padding:
+        decode_object_set_visibility(visibility)
+    assert padding.value.code is RetainedWireErrorCode.RESERVED
+
+    visibility[-1] = 0
+    visibility[24] = 2
+    with pytest.raises(RetainedWireError) as boolean:
+        decode_object_set_visibility(visibility)
+    assert boolean.value.code is RetainedWireErrorCode.ENUM
+
+    definition = bytearray(_oracle_payloads(RetainedMessageType.SERIES_DEFINE)[0])
+    definition[28:32] = (2).to_bytes(4, "little")
+    with pytest.raises(RetainedWireError) as mode:
+        decode_series_definition(definition)
+    assert mode.value.code is RetainedWireErrorCode.ENUM
+
+    samples = bytearray(_oracle_payloads(RetainedMessageType.SERIES_APPEND)[0])
+    samples[24:28] = UINT32_MAX.to_bytes(4, "little")
+    with pytest.raises(RetainedWireError) as count:
+        decode_series_samples(samples)
+    assert count.value.code is RetainedWireErrorCode.PAYLOAD
+
+    explicit = SeriesWireSamples(1, 1, 1, ExplicitSamples((Sample(1, 2),)))
+    payload = bytearray(encode_series_samples(explicit))
+    payload[32:40] = (1).to_bytes(8, "little")
+    with pytest.raises(RetainedWireError) as first:
+        decode_series_samples(payload)
+    assert first.value.code is RetainedWireErrorCode.CONSISTENCY

@@ -14,6 +14,25 @@ from enum import Enum, IntEnum
 
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
 from .retained_model import OwnerQuotas, RetainedFeature, RetainedPolicy
+from .retained_scene import (
+    ExplicitSamples,
+    GroupBody,
+    LabelBody,
+    MeterBody,
+    ObjectBounds,
+    ObjectKind,
+    PlotBody,
+    Point,
+    PolylineBody,
+    ReadoutBody,
+    ReadoutFormat,
+    RGBA,
+    Sample,
+    StatusBody,
+    TimestampMode,
+    UniformSamples,
+    WaveformBody,
+)
 
 
 RET1_TAG = 0x31544552
@@ -27,6 +46,22 @@ _OWNER_DROP = struct.Struct("<QQQQ")
 _PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 _PRESENT_COMMIT = struct.Struct("<QII")
 _REGION_DEFINITION = struct.Struct("<QQQIIIIiI")
+_OWNER_ITEM = struct.Struct("<QQQ")
+_OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
+_POLYLINE_BODY = struct.Struct("<II4BI")
+_POINT = struct.Struct("<II")
+_LABEL_BODY = struct.Struct("<4BHHII")
+_READOUT_BODY = struct.Struct("<8BIIqqII")
+_METER_BODY = struct.Struct("<8BIIqqqQ")
+_STATUS_BODY = struct.Struct("<8BqIIQ")
+_PLOT_BODY = struct.Struct("<Qqq8BII")
+_WAVEFORM_BODY = struct.Struct("<Qqq8BqII")
+_OBJECT_SET_VALUE = struct.Struct("<QQQq")
+_OBJECT_SET_VISIBILITY = struct.Struct("<QQQB7s")
+_SERIES_DEFINITION = struct.Struct("<QQQIIQ")
+_SERIES_SAMPLES = struct.Struct("<QQQIIQ")
+_EXPLICIT_SAMPLE = struct.Struct("<Qq")
+_UNIFORM_SAMPLE = struct.Struct("<q")
 
 
 class RetainedMessageType(IntEnum):
@@ -41,6 +76,17 @@ class RetainedMessageType(IntEnum):
     PRESENT_COMMIT = 0x2001
     OWNER_OPEN = 0x2002
     REGION_DEFINE = 0x2010
+    REGION_REPLACE = 0x2011
+    REGION_DROP = 0x2012
+    OBJECT_DEFINE = 0x2020
+    OBJECT_REPLACE = 0x2021
+    OBJECT_SET_VALUE = 0x2022
+    OBJECT_SET_VISIBILITY = 0x2023
+    OBJECT_DROP = 0x2024
+    SERIES_DEFINE = 0x3000
+    SERIES_APPEND = 0x3001
+    SERIES_REPLACE = 0x3002
+    SERIES_DROP = 0x3003
     RET_QUERY = 0x8000
     RET_CAPS = 0x8001
     RET_FORMATS = 0x8002
@@ -117,6 +163,29 @@ def _payload(value, size: int, name: str) -> bytes:
             f"{name} payload is {len(raw)} bytes, expected {size}",
         )
     return raw
+
+
+def _variable_payload(value, minimum_size: int, name: str) -> bytes:
+    """Copy one already frame-bounded payload and enforce its fixed prefix."""
+
+    if isinstance(value, str):
+        raise TypeError(f"{name} payload must be bytes-like, not str")
+    try:
+        raw = bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} payload must be bytes-like") from exc
+    if len(raw) < minimum_size:
+        raise RetainedWireError(
+            RetainedWireErrorCode.PAYLOAD,
+            f"{name} payload is {len(raw)} bytes, expected at least {minimum_size}",
+        )
+    return raw
+
+
+def _boolean(name: str, value) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be bool")
+    return value
 
 
 def _enum(name: str, enum_type, value):
@@ -582,6 +651,212 @@ class RegionWireDefinition:
         return bool(self.flags & 0x2)
 
 
+ObjectWireBody = (
+    GroupBody
+    | PolylineBody
+    | LabelBody
+    | ReadoutBody
+    | MeterBody
+    | StatusBody
+    | PlotBody
+    | WaveformBody
+)
+
+
+_WIRE_BODY_KIND = {
+    GroupBody: ObjectKind.GROUP,
+    PolylineBody: ObjectKind.POLYLINE,
+    LabelBody: ObjectKind.LABEL,
+    ReadoutBody: ObjectKind.READOUT,
+    MeterBody: ObjectKind.METER,
+    StatusBody: ObjectKind.STATUS,
+    PlotBody: ObjectKind.PLOT,
+    WaveformBody: ObjectKind.WAVEFORM,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedItemReference:
+    """Exact owner-scoped REGION/OBJECT/SERIES drop payload."""
+
+    owner_id: int
+    owner_generation: int
+    item_id: int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "item_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectWireDefinition:
+    """Complete non-image object definition before session binding."""
+
+    owner_id: int
+    owner_generation: int
+    object_id: int
+    region_id: int
+    parent_object_id: int
+    bounds: ObjectBounds
+    z_order: int
+    visible: bool
+    body: ObjectWireBody
+
+    def __post_init__(self) -> None:
+        for name, minimum in (
+            ("owner_id", 1),
+            ("owner_generation", 1),
+            ("object_id", 1),
+            ("region_id", 1),
+            ("parent_object_id", 0),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=UINT64_MAX),
+            )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer("z_order", self.z_order, minimum=-(1 << 31), maximum=(1 << 31) - 1),
+        )
+        object.__setattr__(self, "visible", _boolean("visible", self.visible))
+        if type(self.body) not in _WIRE_BODY_KIND:
+            raise TypeError("body is not a supported non-image RETAINED-1 body")
+
+    @property
+    def kind(self) -> ObjectKind:
+        return _WIRE_BODY_KIND[type(self.body)]
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectSetValue:
+    owner_id: int
+    owner_generation: int
+    object_id: int
+    value: int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "object_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+        object.__setattr__(
+            self,
+            "value",
+            _integer("value", self.value, minimum=-(1 << 63), maximum=(1 << 63) - 1),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectSetVisibility:
+    owner_id: int
+    owner_generation: int
+    object_id: int
+    visible: bool
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "object_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+        object.__setattr__(self, "visible", _boolean("visible", self.visible))
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesWireDefinition:
+    owner_id: int
+    owner_generation: int
+    series_id: int
+    history_capacity: int
+    timestamp_mode: TimestampMode
+    uniform_interval_us: int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "series_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+        object.__setattr__(
+            self,
+            "history_capacity",
+            _integer(
+                "history_capacity",
+                self.history_capacity,
+                minimum=1,
+                maximum=UINT32_MAX,
+            ),
+        )
+        mode = _enum("timestamp_mode", TimestampMode, self.timestamp_mode)
+        object.__setattr__(self, "timestamp_mode", mode)
+        object.__setattr__(
+            self,
+            "uniform_interval_us",
+            _integer(
+                "uniform_interval_us",
+                self.uniform_interval_us,
+                minimum=0,
+                maximum=UINT64_MAX,
+            ),
+        )
+        if mode is TimestampMode.EXPLICIT:
+            if self.uniform_interval_us != 0:
+                raise ValueError("explicit series interval must be zero")
+        elif self.uniform_interval_us == 0:
+            raise ValueError("uniform series interval must be positive")
+
+
+SeriesWireBatch = ExplicitSamples | UniformSamples
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesWireSamples:
+    owner_id: int
+    owner_generation: int
+    series_id: int
+    batch: SeriesWireBatch
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "series_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+        if not isinstance(self.batch, (ExplicitSamples, UniformSamples)):
+            raise TypeError("batch must be ExplicitSamples or UniformSamples")
+        count = (
+            len(self.batch.samples)
+            if isinstance(self.batch, ExplicitSamples)
+            else len(self.batch.values)
+        )
+        _integer("sample_count", count, minimum=1, maximum=UINT32_MAX)
+
+    @property
+    def timestamp_mode(self) -> TimestampMode:
+        if isinstance(self.batch, ExplicitSamples):
+            return TimestampMode.EXPLICIT
+        return TimestampMode.UNIFORM
+
+    @property
+    def sample_count(self) -> int:
+        if isinstance(self.batch, ExplicitSamples):
+            return len(self.batch.samples)
+        return len(self.batch.values)
+
+
 def encode_ret_query(_query: RetainedQuery = RetainedQuery()) -> bytes:
     if not isinstance(_query, RetainedQuery):
         raise TypeError("query must be RetainedQuery")
@@ -776,16 +1051,616 @@ def decode_region_definition(payload) -> RegionWireDefinition:
         raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
 
 
+def encode_region_replace(definition: RegionWireDefinition) -> bytes:
+    return encode_region_definition(definition)
+
+
+def decode_region_replace(payload) -> RegionWireDefinition:
+    return decode_region_definition(payload)
+
+
+def _encode_item_reference(reference: RetainedItemReference, name: str) -> bytes:
+    if not isinstance(reference, RetainedItemReference):
+        raise TypeError(f"reference must be RetainedItemReference for {name}")
+    return _OWNER_ITEM.pack(
+        reference.owner_id,
+        reference.owner_generation,
+        reference.item_id,
+    )
+
+
+def _decode_item_reference(payload, name: str) -> RetainedItemReference:
+    raw = _payload(payload, _OWNER_ITEM.size, name)
+    try:
+        return RetainedItemReference(*_OWNER_ITEM.unpack(raw))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_region_drop(reference: RetainedItemReference) -> bytes:
+    return _encode_item_reference(reference, "REGION_DROP")
+
+
+def decode_region_drop(payload) -> RetainedItemReference:
+    return _decode_item_reference(payload, "REGION_DROP")
+
+
+def _rgba_values(color: RGBA) -> tuple[int, int, int, int]:
+    return color.red, color.green, color.blue, color.alpha
+
+
+def _wire_text(raw: bytes, name: str) -> str:
+    try:
+        text = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            f"{name} is not well-formed UTF-8 scalar text",
+        ) from exc
+    if "\r" in text or "\n" in text or "\0" in text:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            f"{name} contains CR, LF, or NUL",
+        )
+    return text
+
+
+def _body_size(raw: bytes, expected: int, name: str) -> None:
+    if len(raw) != expected:
+        raise RetainedWireError(
+            RetainedWireErrorCode.PAYLOAD,
+            f"{name} body is {len(raw)} bytes, expected {expected}",
+        )
+
+
+def _encode_object_body(body: ObjectWireBody) -> bytes:
+    if isinstance(body, GroupBody):
+        return b""
+    if isinstance(body, PolylineBody):
+        point_count = _integer(
+            "point_count", len(body.points), minimum=2, maximum=UINT32_MAX
+        )
+        result = bytearray(_POLYLINE_BODY.size + point_count * _POINT.size)
+        _POLYLINE_BODY.pack_into(
+            result,
+            0,
+            point_count,
+            body.stroke_width,
+            *_rgba_values(body.color),
+            int(body.closed),
+        )
+        offset = _POLYLINE_BODY.size
+        for point in body.points:
+            _POINT.pack_into(result, offset, point.x, point.y)
+            offset += _POINT.size
+        return bytes(result)
+    if isinstance(body, LabelBody):
+        text = body.text.encode("utf-8", "strict")
+        text_bytes = _integer(
+            "text_bytes", len(text), minimum=0, maximum=UINT32_MAX
+        )
+        return _LABEL_BODY.pack(
+            *_rgba_values(body.color),
+            body.horizontal_align,
+            body.vertical_align,
+            text_bytes,
+            int(body.ellipsize),
+        ) + text
+    if isinstance(body, ReadoutBody):
+        unit = body.unit.encode("utf-8", "strict")
+        unit_bytes = _integer(
+            "unit_bytes", len(unit), minimum=0, maximum=UINT32_MAX
+        )
+        return _READOUT_BODY.pack(
+            *_rgba_values(body.foreground),
+            *_rgba_values(body.background),
+            int(body.format),
+            body.decimal_places,
+            body.value,
+            body.scale,
+            unit_bytes,
+            0,
+        ) + unit
+    if isinstance(body, MeterBody):
+        return _METER_BODY.pack(
+            *_rgba_values(body.foreground),
+            *_rgba_values(body.background),
+            int(body.vertical),
+            int(body.show_value),
+            body.minimum,
+            body.maximum,
+            body.value,
+            0,
+        )
+    if isinstance(body, StatusBody):
+        return _STATUS_BODY.pack(
+            *_rgba_values(body.inactive),
+            *_rgba_values(body.active),
+            body.value,
+            body.shape,
+            0,
+            0,
+        )
+    if isinstance(body, PlotBody):
+        flags = int(body.fill_to_minimum) | (int(body.draw_points) << 1)
+        return _PLOT_BODY.pack(
+            body.series_id,
+            body.minimum,
+            body.maximum,
+            *_rgba_values(body.line),
+            *_rgba_values(body.fill),
+            flags,
+            0,
+        )
+    if isinstance(body, WaveformBody):
+        return _WAVEFORM_BODY.pack(
+            body.series_id,
+            body.minimum,
+            body.maximum,
+            *_rgba_values(body.trace),
+            *_rgba_values(body.zero_line),
+            body.zero_value,
+            int(body.draw_zero_line),
+            0,
+        )
+    raise TypeError("body is not a supported non-image RETAINED-1 body")
+
+
+def encode_object_definition(definition: ObjectWireDefinition) -> bytes:
+    if not isinstance(definition, ObjectWireDefinition):
+        raise TypeError("definition must be ObjectWireDefinition")
+    return _OBJECT_PREFIX.pack(
+        definition.owner_id,
+        definition.owner_generation,
+        definition.object_id,
+        int(definition.kind),
+        int(definition.visible),
+        definition.z_order,
+        definition.region_id,
+        definition.parent_object_id,
+        definition.bounds.left,
+        definition.bounds.top,
+        definition.bounds.right,
+        definition.bounds.bottom,
+    ) + _encode_object_body(definition.body)
+
+
+def _decode_object_body(kind: ObjectKind, raw: bytes) -> ObjectWireBody:
+    try:
+        if kind is ObjectKind.GROUP:
+            _body_size(raw, 0, "GROUP")
+            return GroupBody()
+        if kind is ObjectKind.POLYLINE:
+            if len(raw) < _POLYLINE_BODY.size:
+                _body_size(raw, _POLYLINE_BODY.size, "POLYLINE prefix")
+            values = _POLYLINE_BODY.unpack_from(raw)
+            point_count, stroke_width = values[:2]
+            path_flags = values[-1]
+            if path_flags & ~0x1:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "POLYLINE path flags contain reserved bits",
+                )
+            expected = _POLYLINE_BODY.size + point_count * _POINT.size
+            _body_size(raw, expected, "POLYLINE")
+            points = tuple(
+                Point(*_POINT.unpack_from(raw, _POLYLINE_BODY.size + index * _POINT.size))
+                for index in range(point_count)
+            )
+            return PolylineBody(
+                points,
+                stroke_width,
+                RGBA(*values[2:6]),
+                bool(path_flags),
+            )
+        if kind is ObjectKind.LABEL:
+            if len(raw) < _LABEL_BODY.size:
+                _body_size(raw, _LABEL_BODY.size, "LABEL prefix")
+            values = _LABEL_BODY.unpack_from(raw)
+            text_bytes, label_flags = values[6:8]
+            if label_flags & ~0x1:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "LABEL flags contain reserved bits",
+                )
+            if values[4] not in (0, 1, 2) or values[5] not in (0, 1, 2):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.ENUM,
+                    "LABEL alignment is not canonical",
+                )
+            _body_size(raw, _LABEL_BODY.size + text_bytes, "LABEL")
+            return LabelBody(
+                RGBA(*values[:4]),
+                values[4],
+                values[5],
+                _wire_text(raw[_LABEL_BODY.size :], "LABEL text"),
+                bool(label_flags),
+            )
+        if kind is ObjectKind.READOUT:
+            if len(raw) < _READOUT_BODY.size:
+                _body_size(raw, _READOUT_BODY.size, "READOUT prefix")
+            values = _READOUT_BODY.unpack_from(raw)
+            unit_bytes, reserved = values[12:14]
+            if reserved:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "READOUT reserved is nonzero",
+                )
+            if values[8] not in tuple(int(member) for member in ReadoutFormat):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.ENUM,
+                    "READOUT format is not canonical",
+                )
+            _body_size(raw, _READOUT_BODY.size + unit_bytes, "READOUT")
+            return ReadoutBody(
+                RGBA(*values[:4]),
+                RGBA(*values[4:8]),
+                ReadoutFormat(values[8]),
+                values[9],
+                values[10],
+                values[11],
+                _wire_text(raw[_READOUT_BODY.size :], "READOUT unit"),
+            )
+        if kind is ObjectKind.METER:
+            _body_size(raw, _METER_BODY.size, "METER")
+            values = _METER_BODY.unpack(raw)
+            orientation, meter_flags = values[8:10]
+            if orientation not in (0, 1):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.ENUM,
+                    "METER orientation is not canonical",
+                )
+            if meter_flags & ~0x1 or values[13]:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "METER flags or reserved field are nonzero",
+                )
+            return MeterBody(
+                RGBA(*values[:4]),
+                RGBA(*values[4:8]),
+                bool(orientation),
+                bool(meter_flags),
+                values[10],
+                values[11],
+                values[12],
+            )
+        if kind is ObjectKind.STATUS:
+            _body_size(raw, _STATUS_BODY.size, "STATUS")
+            values = _STATUS_BODY.unpack(raw)
+            if values[9] not in (0, 1, 2):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.ENUM,
+                    "STATUS shape is not canonical",
+                )
+            if values[10] or values[11]:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "STATUS flags or reserved field are nonzero",
+                )
+            return StatusBody(
+                RGBA(*values[:4]),
+                RGBA(*values[4:8]),
+                values[8],
+                values[9],
+            )
+        if kind is ObjectKind.PLOT:
+            _body_size(raw, _PLOT_BODY.size, "PLOT")
+            values = _PLOT_BODY.unpack(raw)
+            flags, reserved = values[11:13]
+            if flags & ~0x3 or reserved:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "PLOT flags or reserved field are nonzero",
+                )
+            return PlotBody(
+                values[0],
+                values[1],
+                values[2],
+                RGBA(*values[3:7]),
+                RGBA(*values[7:11]),
+                bool(flags & 0x1),
+                bool(flags & 0x2),
+            )
+        if kind is ObjectKind.WAVEFORM:
+            _body_size(raw, _WAVEFORM_BODY.size, "WAVEFORM")
+            values = _WAVEFORM_BODY.unpack(raw)
+            flags, reserved = values[12:14]
+            if flags & ~0x1 or reserved:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "WAVEFORM flags or reserved field are nonzero",
+                )
+            return WaveformBody(
+                values[0],
+                values[1],
+                values[2],
+                RGBA(*values[3:7]),
+                RGBA(*values[7:11]),
+                values[11],
+                bool(flags),
+            )
+    except RetainedWireError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+    raise RetainedWireError(
+        RetainedWireErrorCode.ENUM,
+        f"object type {int(kind)} has no non-image codec",
+    )
+
+
+def decode_object_definition(payload) -> ObjectWireDefinition:
+    raw = _variable_payload(payload, _OBJECT_PREFIX.size, "OBJECT definition")
+    values = _OBJECT_PREFIX.unpack_from(raw)
+    if not values[0] or not values[1] or not values[2] or not values[6]:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            "OBJECT owner, generation, object, and region IDs must be nonzero",
+        )
+    try:
+        kind = ObjectKind(values[3])
+    except ValueError as exc:
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            f"object type {values[3]} has no non-image codec",
+        ) from exc
+    if values[4] & ~0x1:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "OBJECT flags contain reserved bits",
+        )
+    body = _decode_object_body(kind, raw[_OBJECT_PREFIX.size :])
+    try:
+        return ObjectWireDefinition(
+            owner_id=values[0],
+            owner_generation=values[1],
+            object_id=values[2],
+            region_id=values[6],
+            parent_object_id=values[7],
+            bounds=ObjectBounds(*values[8:12]),
+            z_order=values[5],
+            visible=bool(values[4]),
+            body=body,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
+def encode_object_replace(definition: ObjectWireDefinition) -> bytes:
+    return encode_object_definition(definition)
+
+
+def decode_object_replace(payload) -> ObjectWireDefinition:
+    return decode_object_definition(payload)
+
+
+def encode_object_set_value(update: ObjectSetValue) -> bytes:
+    if not isinstance(update, ObjectSetValue):
+        raise TypeError("update must be ObjectSetValue")
+    return _OBJECT_SET_VALUE.pack(
+        update.owner_id,
+        update.owner_generation,
+        update.object_id,
+        update.value,
+    )
+
+
+def decode_object_set_value(payload) -> ObjectSetValue:
+    raw = _payload(payload, _OBJECT_SET_VALUE.size, "OBJECT_SET_VALUE")
+    try:
+        return ObjectSetValue(*_OBJECT_SET_VALUE.unpack(raw))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_object_set_visibility(update: ObjectSetVisibility) -> bytes:
+    if not isinstance(update, ObjectSetVisibility):
+        raise TypeError("update must be ObjectSetVisibility")
+    return _OBJECT_SET_VISIBILITY.pack(
+        update.owner_id,
+        update.owner_generation,
+        update.object_id,
+        int(update.visible),
+        bytes(7),
+    )
+
+
+def decode_object_set_visibility(payload) -> ObjectSetVisibility:
+    raw = _payload(payload, _OBJECT_SET_VISIBILITY.size, "OBJECT_SET_VISIBILITY")
+    owner_id, generation, object_id, visible, reserved = _OBJECT_SET_VISIBILITY.unpack(raw)
+    if reserved != bytes(7):
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "OBJECT_SET_VISIBILITY padding is nonzero",
+        )
+    if visible not in (0, 1):
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            "OBJECT_SET_VISIBILITY boolean is not canonical",
+        )
+    try:
+        return ObjectSetVisibility(owner_id, generation, object_id, bool(visible))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_object_drop(reference: RetainedItemReference) -> bytes:
+    return _encode_item_reference(reference, "OBJECT_DROP")
+
+
+def decode_object_drop(payload) -> RetainedItemReference:
+    return _decode_item_reference(payload, "OBJECT_DROP")
+
+
+def encode_series_definition(definition: SeriesWireDefinition) -> bytes:
+    if not isinstance(definition, SeriesWireDefinition):
+        raise TypeError("definition must be SeriesWireDefinition")
+    return _SERIES_DEFINITION.pack(
+        definition.owner_id,
+        definition.owner_generation,
+        definition.series_id,
+        definition.history_capacity,
+        int(definition.timestamp_mode),
+        definition.uniform_interval_us,
+    )
+
+
+def decode_series_definition(payload) -> SeriesWireDefinition:
+    raw = _payload(payload, _SERIES_DEFINITION.size, "SERIES_DEFINE")
+    values = _SERIES_DEFINITION.unpack(raw)
+    if not values[0] or not values[1] or not values[2] or not values[3]:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            "SERIES_DEFINE authority, ID, and capacity must be nonzero",
+        )
+    if values[4] not in (int(TimestampMode.EXPLICIT), int(TimestampMode.UNIFORM)):
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            "SERIES_DEFINE timestamp mode is not canonical",
+        )
+    try:
+        return SeriesWireDefinition(*values)
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
+def encode_series_samples(update: SeriesWireSamples) -> bytes:
+    if not isinstance(update, SeriesWireSamples):
+        raise TypeError("update must be SeriesWireSamples")
+    count = update.sample_count
+    if isinstance(update.batch, ExplicitSamples):
+        result = bytearray(_SERIES_SAMPLES.size + count * _EXPLICIT_SAMPLE.size)
+        _SERIES_SAMPLES.pack_into(
+            result,
+            0,
+            update.owner_id,
+            update.owner_generation,
+            update.series_id,
+            count,
+            int(TimestampMode.EXPLICIT),
+            0,
+        )
+        offset = _SERIES_SAMPLES.size
+        for sample in update.batch.samples:
+            _EXPLICIT_SAMPLE.pack_into(result, offset, sample.timestamp_us, sample.value)
+            offset += _EXPLICIT_SAMPLE.size
+        return bytes(result)
+    result = bytearray(_SERIES_SAMPLES.size + count * _UNIFORM_SAMPLE.size)
+    _SERIES_SAMPLES.pack_into(
+        result,
+        0,
+        update.owner_id,
+        update.owner_generation,
+        update.series_id,
+        count,
+        int(TimestampMode.UNIFORM),
+        update.batch.first_timestamp_us,
+    )
+    offset = _SERIES_SAMPLES.size
+    for value in update.batch.values:
+        _UNIFORM_SAMPLE.pack_into(result, offset, value)
+        offset += _UNIFORM_SAMPLE.size
+    return bytes(result)
+
+
+def decode_series_samples(payload) -> SeriesWireSamples:
+    raw = _variable_payload(payload, _SERIES_SAMPLES.size, "SERIES samples")
+    owner_id, generation, series_id, count, mode, first_timestamp_us = (
+        _SERIES_SAMPLES.unpack_from(raw)
+    )
+    if not owner_id or not generation or not series_id:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            "SERIES sample authority and ID must be nonzero",
+        )
+    if mode not in (int(TimestampMode.EXPLICIT), int(TimestampMode.UNIFORM)):
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            "SERIES sample timestamp mode is not canonical",
+        )
+    if count == 0:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            "SERIES sample count must be positive",
+        )
+    sample_size = (
+        _EXPLICIT_SAMPLE.size
+        if mode == int(TimestampMode.EXPLICIT)
+        else _UNIFORM_SAMPLE.size
+    )
+    _body_size(raw, _SERIES_SAMPLES.size + count * sample_size, "SERIES samples")
+    try:
+        if mode == int(TimestampMode.EXPLICIT):
+            if first_timestamp_us != 0:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.CONSISTENCY,
+                    "explicit SERIES first_timestamp_us must be zero",
+                )
+            samples = tuple(
+                Sample(
+                    *_EXPLICIT_SAMPLE.unpack_from(
+                        raw, _SERIES_SAMPLES.size + index * sample_size
+                    )
+                )
+                for index in range(count)
+            )
+            batch: SeriesWireBatch = ExplicitSamples(samples)
+        else:
+            values = tuple(
+                _UNIFORM_SAMPLE.unpack_from(raw, _SERIES_SAMPLES.size + index * sample_size)[0]
+                for index in range(count)
+            )
+            batch = UniformSamples(first_timestamp_us, values)
+        return SeriesWireSamples(owner_id, generation, series_id, batch)
+    except RetainedWireError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
+def encode_series_append(update: SeriesWireSamples) -> bytes:
+    return encode_series_samples(update)
+
+
+def decode_series_append(payload) -> SeriesWireSamples:
+    return decode_series_samples(payload)
+
+
+def encode_series_replace(update: SeriesWireSamples) -> bytes:
+    return encode_series_samples(update)
+
+
+def decode_series_replace(payload) -> SeriesWireSamples:
+    return decode_series_samples(payload)
+
+
+def encode_series_drop(reference: RetainedItemReference) -> bytes:
+    return _encode_item_reference(reference, "SERIES_DROP")
+
+
+def decode_series_drop(payload) -> RetainedItemReference:
+    return _decode_item_reference(payload, "SERIES_DROP")
+
+
 __all__ = [
-    "CellMode", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
-    "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RET1_TAG", "RetStatus",
+    "CellMode", "ObjectSetValue", "ObjectSetVisibility", "ObjectWireBody",
+    "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
+    "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
+    "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
     "RetainedResult", "RetainedWireError", "RetainedWireErrorCode",
-    "decode_owner_drop", "decode_owner_open", "decode_present_begin",
-    "decode_present_commit", "decode_region_definition", "decode_ret_caps", "decode_ret_formats",
-    "decode_ret_query", "decode_ret_result", "encode_owner_drop",
-    "encode_owner_open", "encode_present_begin", "encode_present_commit",
-    "encode_region_definition",
-    "encode_ret_caps", "encode_ret_formats", "encode_ret_query",
-    "encode_ret_result",
+    "decode_object_definition", "decode_object_drop", "decode_object_replace",
+    "decode_object_set_value", "decode_object_set_visibility", "decode_owner_drop",
+    "decode_owner_open", "decode_present_begin", "decode_present_commit",
+    "decode_region_definition", "decode_region_drop", "decode_region_replace",
+    "decode_ret_caps", "decode_ret_formats", "decode_ret_query", "decode_ret_result",
+    "decode_series_append", "decode_series_definition", "decode_series_drop",
+    "decode_series_replace", "decode_series_samples", "encode_object_definition",
+    "encode_object_drop", "encode_object_replace", "encode_object_set_value",
+    "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open",
+    "encode_present_begin", "encode_present_commit", "encode_region_definition",
+    "encode_region_drop", "encode_region_replace", "encode_ret_caps", "encode_ret_formats",
+    "encode_ret_query", "encode_ret_result", "encode_series_append",
+    "encode_series_definition", "encode_series_drop", "encode_series_replace",
+    "encode_series_samples",
 ]
