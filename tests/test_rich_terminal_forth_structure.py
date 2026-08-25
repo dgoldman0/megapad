@@ -59,6 +59,32 @@ def test_service_yields_at_completion_before_any_close_boundary() -> None:
     assert held_binary < service.index("_PT-SERVICE-CREDIT", boundary)
 
 
+def test_retained_activation_waits_for_legacy_transaction_settlement() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    activate = _definition(source, "_PT-RET-ACTIVATE-READY")
+    credit = _definition(source, "_PT-DISPATCH-CREDIT")
+    service = _definition(source, "PT-SERVICE")
+
+    assert "_PT-RD-WAIT-CREDIT" in activate
+    assert "_PT.S.PEER-GRANT @" in activate
+    assert "_PT.S.RET-WATERMARK @" in activate
+    assert "_PT.S.TX-OPEN? @" in activate
+    assert "_PT-RESULT-BUSY?" in activate
+    assert "_PT-RD-AVAILABLE" in activate
+
+    # CREDIT records the covering grant, but availability remains gated until
+    # any pre-discovery CELL transaction and its completion have settled.
+    assert "_PT-RET-ACTIVATE-READY" in credit
+    assert "_PT-RD-AVAILABLE" not in credit
+
+    # PT-SERVICE retries once before ordinary schedulers and again after its
+    # main binary-input pass can have consumed the legacy TX_RESULT.
+    assert service.count("_PT-RET-ACTIVATE-READY") == 2
+    main_binary = service.rindex("_PT-SERVICE-BINARY")
+    assert service.index("_PT-RET-ACTIVATE-READY") < main_binary
+    assert main_binary < service.rindex("_PT-RET-ACTIVATE-READY")
+
+
 def test_retained_records_and_legacy_snapshot_are_lifecycle_gated() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     caps = _definition(source, "PT-RETAINED-CAPS@")

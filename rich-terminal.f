@@ -1246,6 +1246,19 @@ VARIABLE _PT-Z-U
     6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL ;
 
 VARIABLE _PT-CR-GRANT
+
+\ RETAINED-1 cannot become caller-visible while a legacy CELL transaction is
+\ open or awaiting its result.  Otherwise that transaction can finish after
+\ discovery, materialize a completion with no retained-engine owner, and
+\ strand the first PRESENT.  Covering credit is remembered in PEER-GRANT and
+\ activation is retried after service settles the legacy authority.
+: _PT-RET-ACTIVATE-READY  ( s -- )
+    DUP _PT.S.RET-STATE @ _PT-RD-WAIT-CREDIT <> IF DROP EXIT THEN
+    DUP _PT.S.PEER-GRANT @ OVER _PT.S.RET-WATERMARK @ U< IF DROP EXIT THEN
+    DUP _PT.S.TX-OPEN? @ OVER _PT-RESULT-BUSY? OR IF DROP EXIT THEN
+    DUP _PT-RB-REPLACE-REQUIRED SWAP _PT.S.RET-REBUILD !
+    _PT-RD-AVAILABLE SWAP _PT.S.RET-STATE ! ;
+
 : _PT-DISPATCH-CREDIT  ( s -- status )
     _PT-RX-LEN @ 8 <> IF
         5 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
@@ -1263,8 +1276,7 @@ VARIABLE _PT-CR-GRANT
                 \ but before this covering credit.  In that case the profile
                 \ is still in its initial replacement phase; the accepted
                 \ geometry is already held in the session.
-                DUP _PT-RB-REPLACE-REQUIRED SWAP _PT.S.RET-REBUILD !
-                _PT-RD-AVAILABLE SWAP _PT.S.RET-STATE !
+                _PT-RET-ACTIVATE-READY
             ELSE
                 _PT-RET-CELL-ONLY
             THEN
@@ -2244,12 +2256,14 @@ VARIABLE _PT-SVC-N
         THEN
         DUP _PT-SERVICE-CREDIT ?DUP IF NIP EXIT THEN
     THEN
+    DUP _PT-RET-ACTIVATE-READY
     \ Give an already-eligible discovery query priority over newly buffered
     \ ordinary input.  The second opportunity below remains necessary when
     \ this service call itself consumes the initial snapshot TX_RESULT.
     DUP _PT-APPLY-PENDING-RESET ?DUP IF NIP EXIT THEN
     DUP _PT-SERVICE-RET-QUERY ?DUP IF NIP EXIT THEN
     DUP _PT-SERVICE-BINARY ?DUP IF NIP EXIT THEN
+    DUP _PT-RET-ACTIVATE-READY
     DUP _PT-APPLY-PENDING-RESET ?DUP IF NIP EXIT THEN
     DUP _PT-SERVICE-RET-QUERY ?DUP IF NIP EXIT THEN
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
