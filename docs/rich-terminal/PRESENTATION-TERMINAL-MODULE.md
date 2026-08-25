@@ -105,6 +105,7 @@ PT-SESSION-SIZE     ( -- bytes )
 PT-EVENT-SIZE       ( -- bytes )
 PT-COMPLETION-SIZE  ( -- bytes )
 PT-INIT             ( rx-a rx-u tx-a tx-u event-a event-u session -- status )
+PT-STORAGE-DISJOINT? ( a u session -- flag )
 PT-START            ( session -- status )
 PT-SERVICE          ( session -- status )
 PT-STATE@           ( session -- state )
@@ -150,6 +151,13 @@ PT-EVENT-POLL       ( event session -- status has-event )
 PT-LEGACY-POLL      ( session -- byte has-byte )
 PT-CLOSE            ( reason session -- status )
 ```
+
+`PT-STORAGE-DISJOINT?` accepts only a nonempty, nonwrapping candidate span and
+a valid initialized session. It returns true only when the candidate is
+disjoint from the session record and the session's complete borrowed RX, TX,
+and event spans. Composed adapters must use this predicate before clearing or
+retaining any additional caller-owned storage; they do not learn the private
+borrowed addresses.
 
 `PT-START` is nonblocking and is the only call that initiates negotiation.
 `PT-SERVICE` incrementally advances negotiation, framed input, timeouts,

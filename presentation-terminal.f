@@ -605,6 +605,27 @@ VARIABLE _PT-I-S
     1 _PT-I-S @ _PT.S.NEXT-TXID !
     PT-S-OK ;
 
+\ A composed adapter may own additional caller-provided storage beside a live
+\ PT session.  PT retains the exact geometry of all four of its borrowed
+\ spans, so it is the only module that can prove such storage does not alias
+\ the session record or any RX, TX, or event backing.  This predicate performs
+\ no caller-visible storage writes and exposes no borrowed address.
+VARIABLE _PT-SD-A
+VARIABLE _PT-SD-U
+VARIABLE _PT-SD-S
+: PT-STORAGE-DISJOINT?  ( a u session -- flag )
+    _PT-SD-S ! _PT-SD-U ! _PT-SD-A !
+    _PT-SD-S @ _PT-VALID-S? 0= IF FALSE EXIT THEN
+    _PT-SD-A @ _PT-SD-U @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
+    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ /PT-SESSION
+        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ _PT.S.RX-A @
+        _PT-SD-S @ _PT.S.RX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ _PT.S.TX-A @
+        _PT-SD-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ _PT.S.EVENT-A @
+        _PT-SD-S @ _PT.S.EVENT-U @ _PT-RANGES-OVERLAP? 0= ;
+
 \ =====================================================================
 \  Atomic UART publication and fixed-width negotiation encoding
 \ =====================================================================
