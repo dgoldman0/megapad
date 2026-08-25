@@ -22,8 +22,21 @@ from presentation_terminal.retained_model import (
     RetainedFeature,
     RetainedPolicy,
 )
+from presentation_terminal.retained_scene import (
+    ExplicitSamples,
+    GroupBody,
+    ObjectBounds,
+    RGBA,
+    ReadoutBody,
+    ReadoutFormat,
+    Sample,
+    TimestampMode,
+)
 from presentation_terminal.retained_wire import (
     CellMode,
+    ObjectSetValue,
+    ObjectSetVisibility,
+    ObjectWireDefinition,
     OwnerDrop,
     OwnerOpen,
     PresentBegin,
@@ -31,17 +44,31 @@ from presentation_terminal.retained_wire import (
     PresentDisposition,
     PresentRetainedMode,
     RegionWireDefinition,
+    RetainedItemReference,
     RetStatus,
     RetainedMessageType,
+    SeriesWireDefinition,
+    SeriesWireSamples,
     decode_ret_caps,
     decode_ret_formats,
     decode_ret_result,
+    encode_object_definition,
+    encode_object_drop,
+    encode_object_replace,
+    encode_object_set_value,
+    encode_object_set_visibility,
     encode_owner_drop,
     encode_owner_open,
     encode_present_begin,
     encode_present_commit,
     encode_region_definition,
+    encode_region_drop,
+    encode_region_replace,
     encode_ret_query,
+    encode_series_append,
+    encode_series_definition,
+    encode_series_drop,
+    encode_series_replace,
 )
 from presentation_terminal.server import (
     PresentationTerminalCore,
@@ -110,6 +137,40 @@ def _retained_policy() -> RetainedPolicy:
         minimum_presentation_interval_us=0,
         total_sample_slots=0,
         total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=512,
+    )
+
+
+def _soundlab_policy() -> RetainedPolicy:
+    return RetainedPolicy(
+        features=(
+            RetainedFeature.CORE
+            | RetainedFeature.VECTOR
+            | RetainedFeature.INSTRUMENT
+            | RetainedFeature.SERIES
+        ),
+        max_owner_records=4,
+        max_live_owners=2,
+        max_regions=8,
+        max_resources=0,
+        max_objects=8,
+        max_series=4,
+        max_operations_per_transaction=8,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=8,
+        max_label_bytes=64,
+        max_samples_per_append=4,
+        max_history_per_series=8,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=16,
+        total_utf8_bytes=128,
         client_to_terminal_max_payload=256,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=512,
@@ -217,10 +278,12 @@ def _settle_results(
     return transaction_ids
 
 
-def _open_retained_core():
+def _open_retained_core(*, retained_policy: RetainedPolicy | None = None):
     core, offer, request, encoder, client_ready = _negotiate(
         client_credit=512,
-        retained_policy=_retained_policy(),
+        retained_policy=(
+            _retained_policy() if retained_policy is None else retained_policy
+        ),
     )
     opened = core.feed_machine(
         encode_open(request) + client_ready + _snapshot_frames(encoder)
@@ -242,11 +305,23 @@ def _owner_open(
     generation: int = 1,
     *,
     regions: int = 4,
+    objects: int = 0,
+    series: int = 0,
+    utf8_bytes: int = 0,
+    sample_slots: int = 0,
 ) -> OwnerOpen:
     return OwnerOpen(
         owner_id,
         generation,
-        OwnerQuotas(regions, 0, 0, 0, 0, 0, 0),
+        OwnerQuotas(
+            regions,
+            0,
+            objects,
+            series,
+            0,
+            utf8_bytes,
+            sample_slots,
+        ),
     )
 
 
@@ -1235,9 +1310,16 @@ def test_legacy_cell_delta_remains_valid_after_retained_discovery():
     core.settle_result_delivery(2)
 
 
-def test_unimplemented_retained_mutation_opcode_fails_closed():
-    core, encoder, decoder = _open_retained_core()
-    owner = _owner_open()
+def test_soundlab_retained_vocabulary_dispatches_through_atomic_composite_views():
+    core, encoder, decoder = _open_retained_core(
+        retained_policy=_soundlab_policy()
+    )
+    owner = _owner_open(
+        objects=4,
+        series=2,
+        utf8_bytes=64,
+        sample_slots=8,
+    )
     opened = core.feed_machine(
         encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
     )
@@ -1245,6 +1327,270 @@ def test_unimplemented_retained_mutation_opcode_fails_closed():
         decoder.feed(outbound.payload)
     _settle_lifecycle(core, opened)
     region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    series = SeriesWireDefinition(7, 1, 1, 4, TimestampMode.EXPLICIT, 0)
+    bounds = ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
+    group = ObjectWireDefinition(
+        owner_id=7,
+        owner_generation=1,
+        object_id=1,
+        region_id=1,
+        parent_object_id=0,
+        bounds=bounds,
+        z_order=0,
+        visible=True,
+        body=GroupBody(),
+    )
+    readout = ObjectWireDefinition(
+        owner_id=7,
+        owner_generation=1,
+        object_id=2,
+        region_id=1,
+        parent_object_id=1,
+        bounds=bounds,
+        z_order=1,
+        visible=True,
+        body=ReadoutBody(
+            RGBA(255, 255, 255, 255),
+            RGBA(0, 0, 0, 255),
+            ReadoutFormat.FIXED,
+            1,
+            -10,
+            10,
+            " dB",
+        ),
+    )
+
+    def commit(
+        transaction_id: int,
+        mode: PresentRetainedMode,
+        operations: tuple[tuple[RetainedMessageType, bytes], ...],
+        *,
+        disposition: PresentDisposition = PresentDisposition.COMMIT,
+    ):
+        result = core.feed_machine(
+            _present_frames(
+                encoder,
+                transaction_id=transaction_id,
+                base_revision=transaction_id - 1,
+                retained_mode=mode,
+                disposition=disposition,
+                operations=operations,
+            )
+        )
+        frames = []
+        for outbound in result.outbound:
+            frames.extend(decoder.feed(outbound.payload))
+        assert TX_RESULT.unpack(frames[0].payload) == (
+            transaction_id,
+            0,
+            0,
+            transaction_id,
+        )
+        assert result.views == (core.presentation_view,)
+        core.settle_result_delivery(transaction_id)
+        return result
+
+    commit(
+        2,
+        PresentRetainedMode.REPLACE_START,
+        (
+            (RetainedMessageType.REGION_DEFINE, encode_region_definition(region)),
+            (RetainedMessageType.SERIES_DEFINE, encode_series_definition(series)),
+        ),
+    )
+    revealed = commit(
+        3,
+        PresentRetainedMode.REPLACE_CONTINUE,
+        (
+            (RetainedMessageType.OBJECT_DEFINE, encode_object_definition(group)),
+            (RetainedMessageType.OBJECT_DEFINE, encode_object_definition(readout)),
+        ),
+        disposition=PresentDisposition.COMMIT_AND_REVEAL,
+    )
+    revealed_scene = revealed.views[0].retained.active
+
+    replacement_region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, -4, 0x2)
+    commit(
+        4,
+        PresentRetainedMode.DELTA,
+        (
+            (
+                RetainedMessageType.REGION_REPLACE,
+                encode_region_replace(replacement_region),
+            ),
+        ),
+    )
+
+    replacement_readout = ObjectWireDefinition(
+        owner_id=7,
+        owner_generation=1,
+        object_id=2,
+        region_id=1,
+        parent_object_id=1,
+        bounds=bounds,
+        z_order=2,
+        visible=True,
+        body=ReadoutBody(
+            RGBA(32, 220, 96, 255),
+            RGBA(0, 0, 0, 255),
+            ReadoutFormat.FIXED,
+            1,
+            20,
+            10,
+            " dB",
+        ),
+    )
+    commit(
+        5,
+        PresentRetainedMode.DELTA,
+        (
+            (
+                RetainedMessageType.OBJECT_REPLACE,
+                encode_object_replace(replacement_readout),
+            ),
+            (
+                RetainedMessageType.OBJECT_SET_VALUE,
+                encode_object_set_value(ObjectSetValue(7, 1, 2, -33)),
+            ),
+            (
+                RetainedMessageType.OBJECT_SET_VISIBILITY,
+                encode_object_set_visibility(ObjectSetVisibility(7, 1, 2, False)),
+            ),
+        ),
+    )
+
+    commit(
+        6,
+        PresentRetainedMode.DELTA,
+        (
+            (
+                RetainedMessageType.SERIES_APPEND,
+                encode_series_append(
+                    SeriesWireSamples(
+                        7,
+                        1,
+                        1,
+                        ExplicitSamples((Sample(10, 1), Sample(20, 2))),
+                    )
+                ),
+            ),
+            (
+                RetainedMessageType.SERIES_REPLACE,
+                encode_series_replace(
+                    SeriesWireSamples(
+                        7,
+                        1,
+                        1,
+                        ExplicitSamples((Sample(100, -1), Sample(200, -2))),
+                    )
+                ),
+            ),
+        ),
+    )
+
+    state = core.retained_state
+    assert state is not None
+    current = state.active.owners[7]
+    assert current.regions[1].z_order == -4
+    assert not current.regions[1].visible
+    assert current.objects[2].body.value == -33
+    assert not current.objects[2].visible
+    assert current.series[1].samples == (Sample(100, -1), Sample(200, -2))
+    assert revealed_scene.owners[7].regions[1].z_order == 0
+    assert revealed_scene.owners[7].objects[2].body.value == -10
+    assert not revealed_scene.owners[7].series[1].samples
+
+    commit(
+        7,
+        PresentRetainedMode.DELTA,
+        (
+            (
+                RetainedMessageType.OBJECT_DROP,
+                encode_object_drop(RetainedItemReference(7, 1, 1)),
+            ),
+            (
+                RetainedMessageType.OBJECT_DROP,
+                encode_object_drop(RetainedItemReference(7, 1, 2)),
+            ),
+            (
+                RetainedMessageType.SERIES_DROP,
+                encode_series_drop(RetainedItemReference(7, 1, 1)),
+            ),
+            (
+                RetainedMessageType.REGION_DROP,
+                encode_region_drop(RetainedItemReference(7, 1, 1)),
+            ),
+        ),
+    )
+
+    state = core.retained_state
+    assert state is not None
+    emptied = state.active.owners[7]
+    assert not emptied.regions and not emptied.objects and not emptied.series
+    assert core.owner_state is not None
+    high_water = core.owner_state.records[7].high_water
+    assert (high_water.region, high_water.object, high_water.series) == (1, 2, 1)
+
+
+def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
+    core, encoder, decoder = _open_retained_core(
+        retained_policy=_soundlab_policy()
+    )
+    owner = _owner_open(objects=1)
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    group = ObjectWireDefinition(
+        7,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        0,
+        True,
+        GroupBody(),
+    )
+    image_payload = bytearray(encode_object_definition(group))
+    struct.pack_into("<H", image_payload, 24, 3)
+    source = core.retained_state
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+
+    rejected = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=2,
+            base_revision=1,
+            retained_mode=PresentRetainedMode.REPLACE_START,
+            disposition=PresentDisposition.COMMIT,
+            operations=(
+                (RetainedMessageType.OBJECT_DEFINE, bytes(image_payload)),
+                (
+                    RetainedMessageType.REGION_DEFINE,
+                    encode_region_definition(region),
+                ),
+            ),
+        )
+    )
+
+    assert TX_RESULT.unpack(decoder.feed(rejected.outbound[0].payload)[0].payload) == (
+        2,
+        2,
+        0,
+        1,
+    )
+    assert rejected.views == ()
+    assert core.presentation_revision == 1
+    assert core.retained_state is source
+    assert core.owner_state is not None
+    assert core.owner_state.records[7].high_water.region == 0
+
+
+def test_resource_lifecycle_frame_cannot_intervene_inside_present():
+    core, encoder, _decoder = _open_retained_core()
 
     with pytest.raises(TerminalSessionError):
         core.feed_machine(
@@ -1254,7 +1600,7 @@ def test_unimplemented_retained_mutation_opcode_fails_closed():
                 base_revision=1,
                 retained_mode=PresentRetainedMode.REPLACE_START,
                 disposition=PresentDisposition.COMMIT,
-                operations=((0x2011, encode_region_definition(region)),),
+                operations=((RetainedMessageType.RESOURCE_BEGIN, bytes(24)),),
             )
         )
 

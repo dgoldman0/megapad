@@ -863,6 +863,26 @@ class RetainedSceneModel:
         objects[definition.object_id] = definition
         self._install_owner_candidate(staging, owner_scene, objects=objects)
 
+    def replace_object(self, definition: ObjectDefinition) -> None:
+        staging = self._require_mutable_staging()
+        if not isinstance(definition, ObjectDefinition):
+            self._fail(SceneErrorCode.STATE, "object must be ObjectDefinition")
+        self._require_owner(definition.owner)
+        owner_scene = self._owner_scene(staging.candidate, definition.owner)
+        current = owner_scene.objects.get(definition.object_id)
+        if current is None:
+            self._fail(SceneErrorCode.MISSING_ID, "object replacement ID is absent")
+        if definition.kind is not current.kind:
+            self._fail(
+                SceneErrorCode.STATE,
+                "object replacement cannot change the object type",
+            )
+        self._validate_object_policy(definition)
+        self._validate_object_dependencies(owner_scene, definition)
+        objects = dict(owner_scene.objects)
+        objects[definition.object_id] = definition
+        self._install_owner_candidate(staging, owner_scene, objects=objects)
+
     def define_series(self, definition: SeriesDefinition) -> None:
         staging = self._require_mutable_staging()
         if not isinstance(definition, SeriesDefinition):
@@ -881,6 +901,54 @@ class RetainedSceneModel:
         self._stage_new_id(staging, definition.owner, ItemNamespace.SERIES, definition.series_id)
         series = dict(owner_scene.series)
         series[definition.series_id] = definition
+        self._install_owner_candidate(staging, owner_scene, series=series)
+
+    def drop_region(self, owner: OwnerIdentity, region_id: int) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "region_id", region_id, minimum=1, maximum=UINT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        owner_scene = self._owner_scene(staging.candidate, owner)
+        if normalized_id not in owner_scene.regions:
+            self._fail(SceneErrorCode.MISSING_ID, "region drop ID is absent")
+        regions = dict(owner_scene.regions)
+        del regions[normalized_id]
+        self._install_owner_candidate(staging, owner_scene, regions=regions)
+
+    def drop_object(self, owner: OwnerIdentity, object_id: int) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "object_id", object_id, minimum=1, maximum=UINT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        owner_scene = self._owner_scene(staging.candidate, owner)
+        if normalized_id not in owner_scene.objects:
+            self._fail(SceneErrorCode.MISSING_ID, "object drop ID is absent")
+        objects = dict(owner_scene.objects)
+        del objects[normalized_id]
+        self._install_owner_candidate(staging, owner_scene, objects=objects)
+
+    def drop_series(self, owner: OwnerIdentity, series_id: int) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "series_id", series_id, minimum=1, maximum=UINT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        owner_scene = self._owner_scene(staging.candidate, owner)
+        if normalized_id not in owner_scene.series:
+            self._fail(SceneErrorCode.MISSING_ID, "series drop ID is absent")
+        series = dict(owner_scene.series)
+        del series[normalized_id]
         self._install_owner_candidate(staging, owner_scene, series=series)
 
     def set_object_value(

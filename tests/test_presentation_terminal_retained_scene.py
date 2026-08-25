@@ -527,6 +527,93 @@ def test_soundlab_value_and_visibility_delta_is_one_immutable_commit():
     assert owners.require_live(owner).high_water == high_water
 
 
+def test_object_replace_and_ordered_drops_recompute_target_usage_without_reusing_ids():
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    source = scene.state.active
+    high_water = owners.require_live(owner).high_water
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    scene.replace_object(
+        _object(owner, 3, LabelBody(WHITE, 2, 1, "L"), parent=1)
+    )
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    replaced = scene.state.active.owners[owner.owner_id]
+    assert replaced.objects[3].body.text == "L"
+    assert replaced.usage.utf8_bytes == len(b"L") + len(b"-12.5 dB")
+    assert source.owners[owner.owner_id].objects[3].body.text == "Level"
+    assert owners.require_live(owner).high_water == high_water
+
+    _begin(clock, scene, 5, RetainedMode.DELTA)
+    # Final-graph validation deliberately permits the parent and dependency
+    # providers to disappear before their dependents in the same transaction.
+    for object_id in range(1, 9):
+        scene.drop_object(owner, object_id)
+    scene.drop_series(owner, 2)
+    scene.drop_series(owner, 1)
+    scene.drop_region(owner, 1)
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    emptied = scene.state.active.owners[owner.owner_id]
+    assert not emptied.regions
+    assert not emptied.objects
+    assert not emptied.series
+    assert emptied.usage.regions == 0
+    assert emptied.usage.objects == 0
+    assert emptied.usage.series == 0
+    assert emptied.usage.utf8_bytes == 0
+    assert emptied.usage.sample_slots == 0
+    assert owners.require_live(owner).high_water == high_water
+
+
+@pytest.mark.parametrize(
+    "drop",
+    (
+        lambda scene, owner: scene.drop_region(owner, 1),
+        lambda scene, owner: scene.drop_object(owner, 1),
+        lambda scene, owner: scene.drop_series(owner, 1),
+    ),
+)
+def test_drop_defers_surviving_reference_rejection_to_final_graph(drop):
+    clock, owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+    source = scene.state.active
+    ledger = owners.state
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    drop(scene, owner)
+    with pytest.raises(SceneModelError) as invalid:
+        scene.prepare_commit(CommitDisposition.COMMIT)
+
+    assert invalid.value.code is SceneErrorCode.GRAPH
+    assert scene.state.active is source
+    assert owners.state is ledger
+    scene.reject()
+    clock.settle_result(4)
+
+
+def test_object_replace_requires_same_type_and_drop_requires_exact_owner():
+    clock, _owners, owner, scene = _domain()
+    _reveal_soundlab(clock, scene, owner)
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError) as wrong_type:
+        scene.replace_object(_object(owner, 3, GroupBody(), parent=1))
+    assert wrong_type.value.code is SceneErrorCode.STATE
+    with pytest.raises(SceneModelError, match="was rejected"):
+        scene.drop_object(owner, 3)
+    scene.reject()
+    clock.settle_result(4)
+
+    _begin(clock, scene, 5, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError) as stale_owner:
+        scene.drop_region(_owner(generation=owner.owner_generation + 1), 1)
+    assert stale_owner.value.code is SceneErrorCode.AUTHORITY
+    scene.reject()
+    clock.settle_result(5)
+
+
 def test_value_or_visibility_failure_poison_delta_without_partial_change():
     clock, owners, owner, scene = _domain()
     _reveal_soundlab(clock, scene, owner)

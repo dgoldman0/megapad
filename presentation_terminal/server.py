@@ -71,11 +71,13 @@ from .retained_model import (
 )
 from .retained_scene import (
     CommitDisposition,
+    ObjectDefinition,
     RegionDefinition,
     RetainedMode,
     RetainedSceneModel,
     SceneModelError,
     SceneModelState,
+    SeriesDefinition,
 )
 from .retained_wire import (
     CellMode,
@@ -88,10 +90,21 @@ from .retained_wire import (
     RetainedMessageType,
     RetainedResult,
     RetainedWireError,
+    decode_object_definition,
+    decode_object_drop,
+    decode_object_replace,
+    decode_object_set_value,
+    decode_object_set_visibility,
     decode_ret_query,
     decode_present_begin,
     decode_present_commit,
     decode_region_definition,
+    decode_region_drop,
+    decode_region_replace,
+    decode_series_append,
+    decode_series_definition,
+    decode_series_drop,
+    decode_series_replace,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_result,
@@ -137,6 +150,23 @@ _CONTROL_TYPES = frozenset(
         MessageType.SOFT_RESET_ACK,
         MessageType.TX_RESULT,
         MessageType.TX_ABORT,
+    }
+)
+
+_RETAINED_PRESENT_OPERATION_TYPES = frozenset(
+    {
+        RetainedMessageType.REGION_DEFINE,
+        RetainedMessageType.REGION_REPLACE,
+        RetainedMessageType.REGION_DROP,
+        RetainedMessageType.OBJECT_DEFINE,
+        RetainedMessageType.OBJECT_REPLACE,
+        RetainedMessageType.OBJECT_SET_VALUE,
+        RetainedMessageType.OBJECT_SET_VISIBILITY,
+        RetainedMessageType.OBJECT_DROP,
+        RetainedMessageType.SERIES_DEFINE,
+        RetainedMessageType.SERIES_APPEND,
+        RetainedMessageType.SERIES_REPLACE,
+        RetainedMessageType.SERIES_DROP,
     }
 )
 
@@ -1141,8 +1171,8 @@ class PresentationTerminalCore:
             MessageType.TX_ABORT,
             MessageType.CELL_SPAN,
             MessageType.CURSOR,
-            RetainedMessageType.REGION_DEFINE,
             RetainedMessageType.PRESENT_COMMIT,
+            *_RETAINED_PRESENT_OPERATION_TYPES,
         }:
             self._fatal("frame intervened inside a PRESENT transaction")
 
@@ -1172,11 +1202,11 @@ class PresentationTerminalCore:
             self._charge_data(frame)
             return self._accept_present_begin(frame), None
 
-        if frame.message_type == RetainedMessageType.REGION_DEFINE:
+        if frame.message_type in _RETAINED_PRESENT_OPERATION_TYPES:
             if not self._retained_enabled:
-                self._fatal("REGION_DEFINE arrived before retained discovery")
+                self._fatal("retained mutation arrived before retained discovery")
             self._charge_data(frame)
-            self._accept_region_define(frame)
+            self._accept_retained_operation(frame)
             return (), None
 
         if frame.message_type == RetainedMessageType.PRESENT_COMMIT:
@@ -1925,7 +1955,9 @@ class PresentationTerminalCore:
         except CellModelError as exc:
             self._discard_transaction_status = self._result_status(exc)
 
-    def _accept_region_define(self, frame: Frame) -> None:
+    def _accept_retained_operation(self, frame: Frame) -> None:
+        """Decode and stage one owner-bound non-image retained mutation."""
+
         wire = self._require_present_wire_state()
         if (
             wire.cell_spans_seen != wire.cell_span_count
@@ -1938,36 +1970,118 @@ class PresentationTerminalCore:
         wire.retained_operations_seen += 1
         if wire.retained_operations_seen > wire.retained_operation_count:
             self._discard_transaction_status = 2
+
+        message_type = RetainedMessageType(frame.message_type)
         try:
-            definition = decode_region_definition(frame.payload)
+            if message_type is RetainedMessageType.REGION_DEFINE:
+                operation = decode_region_definition(frame.payload)
+            elif message_type is RetainedMessageType.REGION_REPLACE:
+                operation = decode_region_replace(frame.payload)
+            elif message_type is RetainedMessageType.REGION_DROP:
+                operation = decode_region_drop(frame.payload)
+            elif message_type is RetainedMessageType.OBJECT_DEFINE:
+                operation = decode_object_definition(frame.payload)
+            elif message_type is RetainedMessageType.OBJECT_REPLACE:
+                operation = decode_object_replace(frame.payload)
+            elif message_type is RetainedMessageType.OBJECT_SET_VALUE:
+                operation = decode_object_set_value(frame.payload)
+            elif message_type is RetainedMessageType.OBJECT_SET_VISIBILITY:
+                operation = decode_object_set_visibility(frame.payload)
+            elif message_type is RetainedMessageType.OBJECT_DROP:
+                operation = decode_object_drop(frame.payload)
+            elif message_type is RetainedMessageType.SERIES_DEFINE:
+                operation = decode_series_definition(frame.payload)
+            elif message_type is RetainedMessageType.SERIES_APPEND:
+                operation = decode_series_append(frame.payload)
+            elif message_type is RetainedMessageType.SERIES_REPLACE:
+                operation = decode_series_replace(frame.payload)
+            elif message_type is RetainedMessageType.SERIES_DROP:
+                operation = decode_series_drop(frame.payload)
+            else:  # The caller admits only _RETAINED_PRESENT_OPERATION_TYPES.
+                self._fatal("retained mutation dispatch table is incomplete")
         except RetainedWireError:
             self._discard_transaction_status = 2
             return
+
         begin = wire.begin
         if begin is None or begin.retained_mode is PresentRetainedMode.NONE:
             self._discard_transaction_status = 2
             return
         if self._discard_transaction_status is not None:
             return
+
         try:
             owner = self._owner_identity(
-                definition.owner_id,
-                definition.owner_generation,
+                operation.owner_id,
+                operation.owner_generation,
             )
-            self._require_retained_model().define_region(
-                RegionDefinition(
-                    owner,
-                    definition.region_id,
-                    definition.cell_x,
-                    definition.cell_y,
-                    definition.cell_cols,
-                    definition.cell_rows,
-                    definition.z_order,
-                    definition.visible,
-                    definition.clipped,
-                    begin.geometry_generation,
+            model = self._require_retained_model()
+            if message_type in {
+                RetainedMessageType.REGION_DEFINE,
+                RetainedMessageType.REGION_REPLACE,
+            }:
+                region = RegionDefinition(
+                    owner=owner,
+                    region_id=operation.region_id,
+                    cell_x=operation.cell_x,
+                    cell_y=operation.cell_y,
+                    cell_cols=operation.cell_cols,
+                    cell_rows=operation.cell_rows,
+                    z_order=operation.z_order,
+                    visible=operation.visible,
+                    clipped=operation.clipped,
+                    geometry_generation=begin.geometry_generation,
                 )
-            )
+                if message_type is RetainedMessageType.REGION_DEFINE:
+                    model.define_region(region)
+                else:
+                    model.replace_region(region)
+            elif message_type is RetainedMessageType.REGION_DROP:
+                model.drop_region(owner, operation.item_id)
+            elif message_type in {
+                RetainedMessageType.OBJECT_DEFINE,
+                RetainedMessageType.OBJECT_REPLACE,
+            }:
+                definition = ObjectDefinition(
+                    owner=owner,
+                    object_id=operation.object_id,
+                    region_id=operation.region_id,
+                    parent_object_id=operation.parent_object_id,
+                    bounds=operation.bounds,
+                    z_order=operation.z_order,
+                    visible=operation.visible,
+                    body=operation.body,
+                )
+                if message_type is RetainedMessageType.OBJECT_DEFINE:
+                    model.define_object(definition)
+                else:
+                    model.replace_object(definition)
+            elif message_type is RetainedMessageType.OBJECT_SET_VALUE:
+                model.set_object_value(owner, operation.object_id, operation.value)
+            elif message_type is RetainedMessageType.OBJECT_SET_VISIBILITY:
+                model.set_object_visibility(
+                    owner,
+                    operation.object_id,
+                    operation.visible,
+                )
+            elif message_type is RetainedMessageType.OBJECT_DROP:
+                model.drop_object(owner, operation.item_id)
+            elif message_type is RetainedMessageType.SERIES_DEFINE:
+                model.define_series(
+                    SeriesDefinition(
+                        owner=owner,
+                        series_id=operation.series_id,
+                        history_capacity=operation.history_capacity,
+                        timestamp_mode=operation.timestamp_mode,
+                        uniform_interval_us=operation.uniform_interval_us,
+                    )
+                )
+            elif message_type is RetainedMessageType.SERIES_APPEND:
+                model.append_series(owner, operation.series_id, operation.batch)
+            elif message_type is RetainedMessageType.SERIES_REPLACE:
+                model.replace_series(owner, operation.series_id, operation.batch)
+            elif message_type is RetainedMessageType.SERIES_DROP:
+                model.drop_series(owner, operation.item_id)
         except (SceneModelError, TypeError, ValueError):
             self._discard_transaction_status = 2
 
