@@ -8,23 +8,32 @@ this document explicitly narrows an extension point.
 
 ## 1. Scope and Akashic production vertical
 
-RETAINED-1 adds a bounded retained presentation plane to an already active
+RETAINED-1 adds bounded retained terminal output to an already active
 APT-1 CELL-1 session. It does not replace the mandatory CELL-1 plane, ANSI
 fallback, framing, negotiation, ordering, credit, close, reset, or authority
 rules. A CELL-1 implementation may ignore the optional discovery query and
 remain fully conforming.
 
-Akashic consumes this profile only through its internal UIDL/UCTX retained
-backend. Semantic UIDL elements may project regions, vector paths, labels,
-readouts, meters, status indicators, bounded series, plots, waveforms, images,
-and presentation cadence. No applet is a direct protocol consumer or determines
-this profile's semantics or limits.
+Akashic consumes this profile through one generic, consumer-neutral
+rich-terminal engine. Its UIDL-TUI driver may project semantic UIDL elements
+as regions, vector paths, labels, readouts, meters, status indicators, bounded
+series, plots, waveforms, images, and display cadence. Another trusted system
+renderer may use the same engine without creating another protocol or session.
+No applet is a direct protocol consumer or determines this profile's semantics
+or limits.
 
 The profile is deliberately not a canvas command stream. Owners define a
-bounded model. A successful presentation commit atomically changes that model;
-the terminal may coalesce physical presentations, but it may not discard
-committed model state or samples other than the specified bounded-history
-eviction.
+bounded terminal-side materialization. A successful update commit atomically
+changes that state. The terminal may coalesce physical display refreshes, but
+it may not discard committed model state or samples other than the specified
+bounded-history eviction.
+
+There is no protocol object called a presentation. `PRESENT_BEGIN` and
+`PRESENT_COMMIT` are the frozen names of the atomic update envelope that can
+carry CELL and retained changes together. Owners are authority and quota
+namespaces within one terminal session, not presentations, documents, applets,
+or application-visible scenes. Application and UIDL state remain outside the
+wire and authoritative.
 
 ## 2. Base contract and scalar conventions
 

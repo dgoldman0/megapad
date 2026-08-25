@@ -10,12 +10,12 @@ replace application authority checks.
 | --- | --- | --- | --- | --- | --- |
 | MegaPad attachment epoch | MegaPad host port | MegaPad scheduler boundary | Primary lease release/replacement | Preserved | Advanced, invalidating all terminal handles and queued ingress |
 | APT session ID | Enhanced terminal during `OFFER` | Immutable | Acknowledged close or hard reset; fatal error/timeout makes it unusable but quarantines the stream | Preserved | Destroyed; ANSI owns the drained replacement stream |
-| Presentation epoch | Starts at zero on open | Terminal requests exactly +1; client acknowledges | Session retirement | Advanced; model/revision/transaction scopes reset | Destroyed |
+| Terminal-state epoch (`presentation_epoch` on wire) | Starts at zero on open | Terminal requests exactly +1; client acknowledges | Session retirement | Advanced; model/revision/transaction scopes reset | Destroyed |
 | Terminal CELL-1 model | Terminal core | Accepted snapshot/transaction commit | Session retirement | Discarded, then replace-all snapshot rebuilds it | Destroyed |
 | Akashic back buffer | Akashic screen/application | Akashic paint | Screen/application teardown | Preserved and authoritative for rebuild | Preserved across terminal loss if application remains alive |
 | Akashic front buffer | Akashic screen | Only after local backend commit acceptance | Screen teardown or forced redraw invalidation | Invalidated until snapshot acceptance | Invalidated; ANSI redraw required |
 | Open transaction | Sender creates nonzero transaction ID | Sender appends; receiver stages | Commit, abort, error, reset, close | Uncommitted work aborted; crossed COMMIT settled by status 1 before ACK | Destroyed |
-| Model revision | Terminal commit logic, scoped to presentation epoch | Successful atomic commit only | Epoch/session retirement | Reset to zero; replacement commit makes revision one | Destroyed |
+| Model revision | Terminal commit logic, scoped to terminal-state epoch | Successful atomic commit only | Epoch/session retirement | Reset to zero; replacement commit makes revision one | Destroyed |
 | UART egress publication | MegaPad machine adapter | Immutable after publication | Primary consumer release or attachment retirement | Preserved if same attachment/session | Old epoch publication discarded |
 | Terminal ingress event | Terminal frontend/session | Immutable after admission | Scheduled UART application or epoch retirement | Old presentation events rejected | Old attachment events cancelled |
 | Geometry generation | Terminal frontend while active; legacy frontend while ANSI | Current authoritative frontend | Replacement by later generation | Preserved unless snapshot geometry changes it | Re-established before boot/negotiation |
@@ -35,7 +35,7 @@ fallback.
 ## Baseline and optional-module ownership
 
 KDOS and BIOS own only the established UART and terminal-geometry primitives.
-They do not own an APT parser or presentation model.
+They do not own an APT parser or terminal output model.
 
 The root-level `presentation-terminal.f` module owns guest-side negotiation,
 framing, credit, session state, and normalized enhanced input only after it is
@@ -67,7 +67,7 @@ application key, or native Akashic instance address may appear on the wire.
 Owner-wide retirement is atomic and idempotent for the exact generation.
 
 The retained backend is internal and global to the one APT session because
-sequence, credit, transaction IDs, presentation revision, resource upload,
+sequence, credit, transaction IDs, global model revision, resource upload,
 reset, and close are global. It privately maps each exact live host/slot/CINST/
 UCTX binding to a distinct wire owner; applications receive no broker, scope,
 lease, descriptor, provider, or retained mutation API. Wire authority remains

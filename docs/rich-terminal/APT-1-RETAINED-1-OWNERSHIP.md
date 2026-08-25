@@ -12,7 +12,7 @@ and reset/close states.
 RETAINED-1 has two deliberately different ownership layers:
 
 1. A single internal session-global retained backend owns discovery, the
-   client parser, global presentation revision, transaction-ID allocator, one
+   client parser, global model revision, transaction-ID allocator, one
    transaction slot, one resource-upload slot, credit, reset, and close. It is
    the only guest component allowed to emit retained wire frames.
 2. The generic UIDL host gives that backend private per-UCTX projection
@@ -50,7 +50,7 @@ or accepting an older component is an authority violation.
 | External attachment owner | Machine/session construction and coordinated reset/detach | Recreate a LOST attachment and its caller-owned capacities | Treat LOST as ANSI-safe fallback |
 
 The foreground single-input-owner assumption of CELL-1 is unchanged. RETAINED-1
-adds multiple private UCTX presentation owners behind one cooperative backend;
+adds multiple private UCTX retained owners behind one cooperative backend;
 it does not add multiple raw UART readers or writers.
 
 ## 3. State and allocation ledger
@@ -361,7 +361,7 @@ status 1 and leaves its wire binding/model/quota authoritative until ACK destroy
 epoch. No result or authority disposition crosses that acknowledgement.
 
 Unsupported RETAINED-1 is not a failure: the optional consumer stays on the real
-CELL-1 presentation path. After successful retained discovery, a retained
+CELL-1 output path. After successful retained discovery, a retained
 semantic projection may be rejected without corrupting framing, but the backend must
 reconcile its authoritative state before issuing dependent deltas. A structural
 failure is never converted into “retained unavailable” or silent ANSI output.
@@ -395,7 +395,7 @@ must not proceed. Final host detach scrubs remaining UCTX/CINST/region reference
 before those objects are freed; wire acknowledgement may retire the independent
 bounded tombstone afterward under the exact owner rules.
 
-The host similarly owns one presentation driver pump. Host service and guest
+The host similarly owns one rich-terminal driver pump. Host service and guest
 run alternate in bounded steps. Zero guest instructions may mean host
 backpressure or admitted ingress awaiting a scheduler boundary; it is not by
 itself fatal or progress. A sticky terminal/LOST failure outranks later input

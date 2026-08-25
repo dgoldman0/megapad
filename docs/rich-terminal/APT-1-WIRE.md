@@ -2,7 +2,7 @@
 
 Contract ID: `APT-1-CELL-1-2026-08-24`
 
-Status: normative for the first Akashic Presentation Terminal milestone.
+Status: normative for the first APT rich-terminal milestone.
 
 The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
 and MAY are normative. Multi-byte integers are unsigned little-endian unless a
@@ -10,15 +10,29 @@ field is explicitly signed.
 
 ## 1. Scope
 
-APT-1 is an optional, negotiated presentation protocol over the existing
+APT-1 is an optional, negotiated rich-terminal protocol over the existing
 ordered MegaPad UART byte stream. CELL-1 is its first mandatory profile. It
 provides transactional styled cells and normalized terminal input; retained
 resources, plots, images, controls, and animation are not part of this
 revision.
 
+APT-1 selects a mode of one terminal session. It does not create, address, or
+expose an application presentation, document, scene service, broker, or
+independently mutable UI object. The protocol-visible CELL state and any
+additive retained records are terminal-owned output materialization derived
+from a client's authoritative state. A client sends atomic terminal-state
+updates; a successful commit revises that one materialization.
+
+`PRESENT_BEGIN`, `PRESENT_COMMIT`, `presentation_epoch`, and other identifiers
+containing `presentation` are frozen wire spellings. In this contract they name
+only an update family, an epoch, or a physical display boundary. They do not
+name a first-class presentation object or grant application authority.
+Implementations MUST NOT use those spellings to expose APT as an application
+broker, scope, document, or scene-mutation service.
+
 ANSI remains the baseline terminal contract. APT-1 is initiated only by the
-separately loaded `presentation-terminal.f` userland module after an
-application explicitly requests it. KDOS does not contain or require APT-1.
+separately loaded `presentation-terminal.f` userland module after an explicit
+system composition selects it. KDOS does not contain or require APT-1.
 An ANSI-only emulator frontend or physical terminal is a supported target.
 
 ## 2. Transport and ownership
