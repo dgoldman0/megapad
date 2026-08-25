@@ -6,7 +6,7 @@ Status: normative Phase 3 contract. This profile is additive to
 `APT-1-CELL-1-2026-08-24`; every rule in APT-1 CELL-1 remains in force unless
 this document explicitly narrows an extension point.
 
-## 1. Scope and first production vertical
+## 1. Scope and Akashic production vertical
 
 RETAINED-1 adds a bounded retained presentation plane to an already active
 APT-1 CELL-1 session. It does not replace the mandatory CELL-1 plane, ANSI
@@ -14,11 +14,11 @@ fallback, framing, negotiation, ordering, credit, close, reset, or authority
 rules. A CELL-1 implementation may ignore the optional discovery query and
 remain fully conforming.
 
-The first production consumer is Akashic SoundLab. Its retained view uses
-regions, vector paths, labels, readouts, meters, status indicators, bounded
-series, plots, waveforms, and presentation cadence. Observatory is not the
-qualification consumer and must not determine this profile's semantics or
-limits.
+Akashic consumes this profile only through its internal UIDL/UCTX retained
+backend. Semantic UIDL elements may project regions, vector paths, labels,
+readouts, meters, status indicators, bounded series, plots, waveforms, images,
+and presentation cadence. No applet is a direct protocol consumer or determines
+this profile's semantics or limits.
 
 The profile is deliberately not a canvas command stream. Owners define a
 bounded model. A successful presentation commit atomically changes that model;
@@ -1041,8 +1041,9 @@ in the meantime. It never labels input for a revision the user could not yet
 have observed.
 
 CADENCE defines no local-clock sample generation and provides no real-time
-delivery guarantee. SoundLab chooses its publication cadence against the
-advertised minimum and retains authoritative sample timing in SERIES payloads.
+delivery guarantee. The UIDL retained backend chooses publication cadence
+against the advertised minimum, while semantic series retain authoritative
+sample timing in SERIES payloads.
 
 ## 14. Reset, resize, snapshot, and replay
 
@@ -1192,16 +1193,17 @@ frame is a state error. Unknown reserved opcodes with bit 15 clear are mandatory
 and must not be skipped as future behavior. The full `8000..ffff` range has the
 base optional-skip semantics.
 
-## 16. Minimum SoundLab conformance journey
+## 16. Minimum Akashic UIDL conformance journey
 
 A production RETAINED-1 qualification must use the real CELL-1 implementation,
-real retained model, and caller-provided capacities. The minimum SoundLab
-journey is:
+real retained model, caller-provided capacities, and actual UIDL/UCTX lifecycle.
+The minimum Akashic journey is:
 
 1. negotiate APT-1 CELL-1 and reach ACTIVE;
 2. commit the initial CELL snapshot and receive its successful TX_RESULT;
 3. discover RETAINED-1 and validate both fixed replies before covering CREDIT;
-4. open a bounded SoundLab owner;
+4. attach one UCTX through the internal retained backend and open its bounded
+   projection owner without exposing that owner to application code;
 5. build the initial hidden replacement with RET_REPLACE_START followed by at
    least one separate RET_REPLACE_CONTINUE transaction, then reveal regions plus
    at least one polyline, label, readout, meter, status, bounded series, plot,
@@ -1227,7 +1229,7 @@ reserve, a rejected over-quota lifecycle request, transaction bytes retained
 through commit/abort processing plus the separate post-COMMIT TX_RESULT gate,
 and one hidden multi-transaction rebuild.
 Image upload/digest qualification is required before advertising RGBA_IMAGE but
-is not a prerequisite for the first SoundLab consumer when that bit is clear.
+is not a prerequisite when that optional bit is clear.
 
 ## 17. Control reserve lifecycle
 
