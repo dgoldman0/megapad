@@ -1,9 +1,9 @@
 """Focused source-load test for the optional APT-1 guest module.
 
-The presentation client is intentionally not part of KDOS.  This test loads
-the production source into userland, then exercises only the first ownership
-boundary: inert load, caller-owned initialization, probe publication, and
-pre-OPEN cancellation back to ANSI.
+The presentation client is intentionally not part of KDOS.  These tests load
+the production source into userland and exercise its caller-owned attachment,
+CELL snapshot, deterministic retained discovery, input, resize, and close
+boundaries without installing the module in KDOS.
 """
 
 from __future__ import annotations
@@ -171,6 +171,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 ": PT-TEST-SESSION",
                 "  PT-TEST-SESSION-STORAGE 7 + -8 AND ;",
                 "VARIABLE PT-TEST-INIT-S",
+                "VARIABLE PT-TEST-DISCOVER-S",
                 "VARIABLE PT-TEST-START-S",
                 "VARIABLE PT-TEST-ACTIVE-S",
                 "VARIABLE PT-TEST-TX-S",
@@ -189,6 +190,8 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "VARIABLE PT-TEST-RESIZE-V2",
                 "VARIABLE PT-TEST-CLOSE-S",
                 "VARIABLE PT-TEST-CLOSE-WAIT-S",
+                "VARIABLE PT-TEST-RET-STATE",
+                "VARIABLE PT-TEST-RET-CAPS-U",
                 "VARIABLE PT-TEST-PHASE",
                 ": PT-TEST-TX-STATUS",
                 "  PT-TEST-TX-S @ OR PT-TEST-TX-S ! ;",
@@ -228,7 +231,8 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  83 EMIT 85 EMIT 76 EMIT 84 EMIT 32 EMIT ;",
                 ": PT-TEST-REPORT",
                 "  PT-TEST-RESULT-MARK",
-                "  PT-TEST-INIT-S @ . PT-TEST-START-S @ .",
+                "  PT-TEST-INIT-S @ . PT-TEST-DISCOVER-S @ .",
+                "  PT-TEST-START-S @ .",
                 "  PT-TEST-ACTIVE-S @ . PT-TEST-TX-S @ .",
                 "  PT-TEST-RESULT-S @ . PT-TEST-EVENT-S @ .",
                 "  PT-TEST-EVENT-TYPE @ . PT-TEST-EVENT-REV @ .",
@@ -237,6 +241,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  PT-TEST-RESIZE-S @ . PT-TEST-RESIZE-TYPE @ .",
                 "  PT-TEST-RESIZE-V0 @ . PT-TEST-RESIZE-V1 @ .",
                 "  PT-TEST-RESIZE-V2 @ .",
+                "  PT-TEST-RET-STATE @ . PT-TEST-RET-CAPS-U @ .",
                 "  PT-TEST-CLOSE-S @ . PT-TEST-CLOSE-WAIT-S @ .",
                 "  PT-TEST-SESSION PT-STATE@ . PT-STREAM-OWNED? .",
                 "  TX-FLUSH ;",
@@ -286,6 +291,20 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  PT-TEST-EVENT PT-EVENT-VALUE0@ PT-TEST-RESIZE-V0 !",
                 "  PT-TEST-EVENT PT-EVENT-VALUE1@ PT-TEST-RESIZE-V1 !",
                 "  PT-TEST-EVENT PT-EVENT-VALUE2@ PT-TEST-RESIZE-V2 ! ;",
+                ": PT-TEST-WAIT-RETAINED",
+                "  BEGIN",
+                "    PT-TEST-SESSION PT-SERVICE PT-S-OK <> IF",
+                "      PT-RET-ST-INACTIVE EXIT THEN",
+                "    PT-TEST-SESSION PT-RETAINED-STATE@ DUP",
+                "      PT-RET-ST-AVAILABLE =",
+                "    OVER PT-RET-ST-CELL-ONLY = OR IF EXIT THEN DROP",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PT-TEST-CAPTURE-RETAINED",
+                "  PT-TEST-WAIT-RETAINED DUP PT-TEST-RET-STATE !",
+                "  PT-RET-ST-AVAILABLE <> IF 0 PT-TEST-RET-CAPS-U ! EXIT THEN",
+                "  PT-TEST-SESSION PT-RETAINED-CAPS@",
+                "  NIP PT-TEST-RET-CAPS-U ! ;",
                 ": PT-TEST-DO-CLOSE",
                 "  0 PT-TEST-SESSION PT-CLOSE DUP PT-TEST-CLOSE-S !",
                 "  PT-S-OK <> IF EXIT THEN",
@@ -299,10 +318,14 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  -9 PT-TEST-RESIZE-S ! -9 PT-TEST-RESIZE-TYPE !",
                 "  -9 PT-TEST-RESIZE-V0 ! -9 PT-TEST-RESIZE-V1 !",
                 "  -9 PT-TEST-RESIZE-V2 !",
+                "  -9 PT-TEST-RET-STATE ! -9 PT-TEST-RET-CAPS-U !",
                 "  -9 PT-TEST-CLOSE-S ! -9 PT-TEST-CLOSE-WAIT-S !",
+                "  -9 PT-TEST-DISCOVER-S !",
                 "  PT-TEST-RX 8192 PT-TEST-TX 8192",
                 "  PT-TEST-INCOMING-EVENT PT-EVENT-SIZE PT-TEST-SESSION",
                 "    PT-INIT PT-TEST-INIT-S !",
+                "  PT-TEST-SESSION PT-RETAINED-DISCOVER",
+                "    PT-TEST-DISCOVER-S !",
                 "  PT-TEST-BEGIN-MARK PT-TEST-PHASE . TX-FLUSH",
                 "  PT-TEST-SESSION PT-START PT-TEST-START-S !",
                 "  PT-TEST-WAIT-ACTIVE PT-TEST-ACTIVE-S !",
@@ -315,6 +338,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
                 "  PT-TEST-RECEIVE-RESIZE",
                 "  PT-TEST-SEND-RESIZED-SNAPSHOT",
                 "  PT-TEST-RECEIVE-RESULT",
+                "  PT-TEST-CAPTURE-RETAINED",
                 "  5 PT-TEST-PHASE !",
                 "  PT-TEST-DO-CLOSE",
                 "  6 PT-TEST-PHASE !",
@@ -446,8 +470,8 @@ class TestPresentationTerminalForth(_KDOSTestBase):
             self.assertNotIn(diagnostic, text)
 
         expected = (
-            b"PTRESULT 0 0 0 0 0 0 512 1 120 1 0 1 "
-            b"0 515 16 2 1 0 0 0 0 "
+            b"PTRESULT 0 0 0 0 0 0 0 512 1 120 1 0 1 "
+            b"0 515 16 2 1 3 0 0 0 0 0 "
         )
         self.assertIn(expected, raw)
         self.assertTrue(key_sent)

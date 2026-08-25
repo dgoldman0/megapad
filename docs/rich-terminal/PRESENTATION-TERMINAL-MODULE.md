@@ -13,11 +13,11 @@ boot, ANSI application, or Akashic session does not require or automatically
 load it. Autoexec policy is outside the module and must remain opt-in for the
 first milestone.
 
-No APT parser, cell transaction model, negotiation state, or enhanced input
-decoder is compiled into KDOS. Phase 1 requires no new BIOS or MMIO mapping;
-the module uses the existing UART and terminal-geometry primitives. If future
-physical flow control requires hardware support, BIOS exposes only that
-bounded primitive and the protocol policy remains in this module.
+No APT parser, cell transaction model, negotiation state, retained discovery
+state, or enhanced input decoder is compiled into KDOS. The module requires no
+new BIOS or MMIO mapping; it uses the existing UART and terminal-geometry
+primitives. If future physical flow control requires hardware support, BIOS
+exposes only that bounded primitive and the protocol policy remains here.
 
 ## 2. Supported absence
 
@@ -62,11 +62,15 @@ The module owns:
 * session ID, sequence, presentation epoch, and credit accounting;
 * one non-nested outgoing transaction;
 * replace-all snapshot transmission;
-* normalized key, text, pointer, focus, and resize event decoding; and
+* normalized key, text, pointer, focus, and resize event decoding;
+* explicitly requested RETAINED-1 discovery, exact CAPS/FORMATS validation,
+  and lifecycle-bounded access to the accepted records; and
 * close, hard failure, soft cache reset, and fallback.
 
 It does not own application focus, Desk regions, widgets, retained semantic
-objects, or the Akashic front/back cell buffers.
+objects, retained PRESENT transaction construction, or the Akashic front/back
+cell buffers. In particular, a successful discovery does not imply that this
+module can yet publish a retained scene.
 
 ## 5. Caller-owned capacity
 
@@ -101,6 +105,12 @@ PT-STREAM-OWNED?    ( -- flag )
 PT-OWNS?            ( session -- flag )
 PT-LEGACY-PENDING?  ( session -- flag )
 
+PT-RETAINED-DISCOVER   ( session -- status )
+PT-RETAINED-STATE@     ( session -- state )
+PT-RETAINED-AVAILABLE? ( session -- flag )
+PT-RETAINED-CAPS@      ( session -- a u )
+PT-RETAINED-FORMATS@   ( session -- a u )
+
 PT-TX-BEGIN         ( cols rows span-count cell-count session -- status )
 PT-SNAPSHOT-BEGIN   ( cols rows span-count cell-count session -- status )
 PT-SPAN-BEGIN       ( row col count session -- status )
@@ -119,6 +129,30 @@ PT-CLOSE            ( reason session -- status )
 credit, reset, and close without waiting for another byte. `PT-LEGACY-POLL`
 returns ordinary bytes held while a probe was being distinguished from ANSI;
 it never returns enhanced binary.
+
+RETAINED-1 discovery is not an automatic consequence of opening a CELL-1
+session. `PT-RETAINED-DISCOVER` is the caller's explicit opt-in; the call
+records intent but emits no bytes. It may be made before `PT-START` or on a
+live session and is idempotent within the caller-owned session. The opt-in
+survives soft reset and synchronized close/reopen, while `PT-INIT` clears it.
+A caller that never invokes it remains a CELL-only client and never sends
+`RET_QUERY`.
+
+After opt-in, `PT-SERVICE` waits for the successful initial CELL snapshot
+result, an empty transaction slot, no outstanding result, and the exact
+directional credit preconditions before sending the epoch's one query. It
+classifies the covering-CREDIT-only response as `PT-RET-ST-CELL-ONLY`, and
+publishes `PT-RET-ST-AVAILABLE` only after validating one adjacent exact
+CAPS/FORMATS pair and then receiving the covering CREDIT. The raw record
+accessors return `0 0` unless that public state is currently AVAILABLE; close,
+loss, ANSI state, and reset therefore cannot expose stale records.
+
+The public retained states are `PT-RET-ST-PENDING`,
+`PT-RET-ST-QUERYING`, `PT-RET-ST-AVAILABLE`,
+`PT-RET-ST-CELL-ONLY`, and `PT-RET-ST-INACTIVE`. Pending covers an opted-in
+live session whose mandatory snapshot has not settled. Querying covers query
+publication through its covering CREDIT, including a malformed or incomplete
+positive reply that will resolve to CELL-only at that watermark.
 
 After `OPEN`, `PT-CLOSE` is asynchronous: `PT-S-OK` means the close frame was
 published and the state is `PT-ST-CLOSING`. The caller continues
@@ -139,6 +173,20 @@ cell.
 `PT-SNAPSHOT-NEEDED?` is true after opening and after an accepted soft reset.
 Only a successful `TX_RESULT` for a snapshot commit clears it. Normal delta
 begin while it is true returns `PT-S-INVALID` without output.
+
+After positive retained discovery, ordinary CELL delta transactions remain
+available, but legacy replace-all snapshots are forbidden by RETAINED-1.
+`PT-SNAPSHOT-BEGIN` therefore returns `PT-S-UNSUPPORTED` while the discovery
+state is AVAILABLE. A presentation consumer must not opt in unless it owns the
+separate PRESENT builder needed for later resize/replacement work. The generic
+CELL adapter does not opt in. A soft reset returns discovery to pending and
+allows the mandatory revision-zero-to-one CELL recovery snapshot before the
+module rediscovers retained support.
+
+If resize arrives after positive discovery, the module records the new
+geometry and replacement-needed state but preserves the global presentation
+revision. It does not fabricate the legacy revision-zero snapshot sequence;
+the owning PRESENT consumer must complete the retained replacement or close.
 
 Local commit acceptance leaves exactly one transaction awaiting `TX_RESULT`.
 Both begin words return `PT-S-WOULD-BLOCK` until a successful result is
@@ -182,4 +230,12 @@ The lightweight module tests prove:
 4. successful negotiation establishes exclusive framed ownership;
 5. acknowledged close and externally drained hard reset restore ANSI
    ownership, while structural loss alone does not; and
-6. an Akashic adapter can send one real cell snapshot through the public API.
+6. an Akashic adapter can send one real cell snapshot through the public API;
+   and
+7. a caller that explicitly opts in sends deterministic discovery only after
+   its successful snapshot, and the covering-CREDIT-only answer leaves it on
+   CELL-1 without exposing partial capability records.
+
+The current guest module conformance does not claim a positive retained scene:
+PRESENT construction, owner/resource brokerage, replay, and retained resize
+are separate consumers and remain outside this module boundary.

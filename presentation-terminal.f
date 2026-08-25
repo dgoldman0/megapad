@@ -1,12 +1,14 @@
 \ =====================================================================
-\  presentation-terminal.f -- optional APT-1 CELL-1 guest client
+\  presentation-terminal.f -- optional APT-1 CELL/retained guest client
 \ =====================================================================
 \
 \  This module is deliberately inert when loaded.  PT-START is the only
 \  word that emits an APT probe or takes raw UART input ownership.  ANSI
 \  remains the baseline before negotiation and after a synchronized close.
 \
-\  Contract: APT-1-CELL-1-2026-08-24
+\  Contracts: APT-1-CELL-1-2026-08-24 plus the deterministic discovery
+\             subset of APT-1-RETAINED-1-2026-08-24.  This module does not
+\             yet encode PRESENT transactions.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 
 PROVIDED presentation-terminal.f
@@ -42,7 +44,7 @@ PROVIDED presentation-terminal.f
 \ FOCUS:   revision=model, v0=focused.
 \ TEXT data remains valid until the next PT-SERVICE for the session.
 64  CONSTANT /PT-EVENT
-512 CONSTANT /PT-SESSION
+616 CONSTANT /PT-SESSION
 
 : PT-SESSION-SIZE  ( -- bytes )  /PT-SESSION ;
 : PT-EVENT-SIZE    ( -- bytes )  /PT-EVENT ;
@@ -61,6 +63,25 @@ PROVIDED presentation-terminal.f
 : PT-EVENT-VALUE2@    ( event -- u )  32 + @ ;
 : PT-EVENT-VALUE3@    ( event -- u )  40 + @ ;
 : PT-EVENT-DATA@      ( event -- a u ) DUP 48 + @ SWAP 56 + @ ;
+
+\ RETAINED-1 discovery is an explicit caller opt-in.  Calling
+\ PT-RETAINED-DISCOVER records that opt-in on the caller-owned session; it
+\ never emits a frame itself.  PT-SERVICE sends the one query only after a
+\ successful initial CELL snapshot has settled and no transaction result is
+\ outstanding.  The opt-in survives soft reset and synchronized close/reopen,
+\ and PT-INIT clears it.
+\
+\ PENDING means the opted-in session still needs its initial snapshot,
+\ QUERYING covers RET_QUERY through its covering CREDIT, AVAILABLE requires
+\ one valid adjacent CAPS/FORMATS pair, and CELL-ONLY is the deterministic
+\ negative answer.  A rejected pair remains QUERYING until its covering
+\ CREDIT makes that negative answer final.  INACTIVE covers a caller that has
+\ not opted in, an invalid handle, ANSI/probing/opening, closing, or loss.
+0 CONSTANT PT-RET-ST-PENDING
+1 CONSTANT PT-RET-ST-QUERYING
+2 CONSTANT PT-RET-ST-AVAILABLE
+3 CONSTANT PT-RET-ST-CELL-ONLY
+4 CONSTANT PT-RET-ST-INACTIVE
 
 \ Fixed frame and profile constants.
 40       CONSTANT _PT-HDR
@@ -104,6 +125,20 @@ CREATE _PT-OWNER  0 ,
 0x0202 CONSTANT _PT-M-POINTER
 0x0203 CONSTANT _PT-M-RESIZE
 0x0204 CONSTANT _PT-M-FOCUS
+0x8000 CONSTANT _PT-M-RET-QUERY
+0x8001 CONSTANT _PT-M-RET-CAPS
+0x8002 CONSTANT _PT-M-RET-FORMATS
+
+0x31544552 CONSTANT _PT-RET1-TAG
+208        CONSTANT _PT-RET-REPLY-BYTES
+
+0 CONSTANT _PT-RD-SNAPSHOT
+1 CONSTANT _PT-RD-WAIT-CAPS
+2 CONSTANT _PT-RD-WAIT-FORMATS
+3 CONSTANT _PT-RD-WAIT-CREDIT
+4 CONSTANT _PT-RD-INVALID
+5 CONSTANT _PT-RD-AVAILABLE
+6 CONSTANT _PT-RD-CELL-ONLY
 
 \ Session fields are all native 64-bit cells.  Wire fields are always read
 \ and written with explicit little-endian helpers below.
@@ -159,10 +194,17 @@ CREATE _PT-OWNER  0 ,
 : _PT.S.AWAIT-TXID      ( s -- a ) 392 + ;
 : _PT.S.AWAIT-SNAPSHOT? ( s -- a ) 400 + ;
 : _PT.S.CLOSE-REASON    ( s -- a ) 408 + ;
+: _PT.S.PEER-INITIAL    ( s -- a ) 416 + ;
 : _PT.S.CREDIT-DIRTY?   ( s -- a ) 424 + ;
 : _PT.S.GEOMETRY-GEN    ( s -- a ) 432 + ;
 : _PT.S.GEOMETRY-SEEN?  ( s -- a ) 440 + ;
 : _PT.S.CLOSE-OPENING?  ( s -- a ) 448 + ;
+: _PT.S.RET-STATE       ( s -- a ) 456 + ;
+: _PT.S.RET-WATERMARK   ( s -- a ) 464 + ;
+: _PT.S.RET-CAPS        ( s -- a ) 472 + ;  \ exact 64-byte RET_CAPS payload
+: _PT.S.RET-FORMATS     ( s -- a ) 536 + ;  \ exact 64-byte RET_FORMATS payload
+: _PT.S.RET-SQUERY      ( s -- a ) 600 + ;
+: _PT.S.RET-ENABLED?    ( s -- a ) 608 + ;
 
 : _PT-VALID-S?  ( s -- flag )
     DUP 0= IF DROP FALSE EXIT THEN
@@ -189,6 +231,63 @@ CREATE _PT-OWNER  0 ,
 : PT-SNAPSHOT-NEEDED?  ( session -- flag )
     DUP _PT-VALID-S? 0= IF DROP FALSE EXIT THEN
     _PT.S.SNAPSHOT? @ 0<> ;
+
+: PT-RETAINED-STATE@  ( session -- state )
+    DUP _PT-VALID-S? 0= IF DROP PT-RET-ST-INACTIVE EXIT THEN
+    DUP _PT.S.RET-ENABLED? @ 0= IF DROP PT-RET-ST-INACTIVE EXIT THEN
+    DUP _PT.S.STATE @ DUP PT-ST-ACTIVE = SWAP PT-ST-RESYNCING = OR 0= IF
+        DROP PT-RET-ST-INACTIVE EXIT
+    THEN
+    _PT.S.RET-STATE @
+    DUP _PT-RD-AVAILABLE = IF DROP PT-RET-ST-AVAILABLE EXIT THEN
+    DUP _PT-RD-CELL-ONLY = IF DROP PT-RET-ST-CELL-ONLY EXIT THEN
+    DUP _PT-RD-SNAPSHOT = IF DROP PT-RET-ST-PENDING EXIT THEN
+    DROP PT-RET-ST-QUERYING ;
+
+: PT-RETAINED-AVAILABLE?  ( session -- flag )
+    PT-RETAINED-STATE@ PT-RET-ST-AVAILABLE = ;
+
+\ The returned records are exact little-endian wire payloads with the layouts
+\ documented in APT-1-RETAINED-1 sections 4.1 and 4.2.  Their addresses remain
+\ valid until soft reset, close, loss, or PT-INIT.  An unavailable record is
+\ reported as 0 0; callers never observe a partial pair.
+: PT-RETAINED-CAPS@  ( session -- a u )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP 0 0 EXIT THEN
+    _PT.S.RET-CAPS 64 ;
+
+: PT-RETAINED-FORMATS@  ( session -- a u )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP 0 0 EXIT THEN
+    _PT.S.RET-FORMATS 64 ;
+
+: _PT-RET-RECORDS-CLEAR  ( s -- )
+    DUP _PT.S.RET-CAPS 64 0 FILL
+    _PT.S.RET-FORMATS 64 0 FILL ;
+
+: _PT-RET-RESET  ( s -- )
+    DUP _PT-RET-RECORDS-CLEAR
+    DUP _PT.S.RET-WATERMARK OFF
+    DUP _PT.S.RET-SQUERY OFF
+    _PT-RD-SNAPSHOT SWAP _PT.S.RET-STATE ! ;
+
+: _PT-RET-INVALIDATE  ( s -- )
+    DUP _PT-RET-RECORDS-CLEAR
+    _PT-RD-INVALID SWAP _PT.S.RET-STATE ! ;
+
+: _PT-RET-CELL-ONLY  ( s -- )
+    DUP _PT-RET-RECORDS-CLEAR
+    _PT-RD-CELL-ONLY SWAP _PT.S.RET-STATE ! ;
+
+\ Opt in without publishing bytes.  It is safe before PT-START or after the
+\ initial snapshot; PT-SERVICE performs the quiescence and credit preflight.
+\ Repeating the call is idempotent and never retries an epoch-local answer.
+: PT-RETAINED-DISCOVER  ( session -- status )
+    DUP _PT-VALID-S? 0= IF DROP PT-S-INVALID EXIT THEN
+    DUP _PT.S.STATE @ DUP PT-ST-CLOSING = SWAP PT-ST-LOST = OR IF
+        DROP PT-S-SESSION-LOST EXIT
+    THEN
+    DUP _PT.S.RET-ENABLED? @ IF DROP PT-S-OK EXIT THEN
+    TRUE OVER _PT.S.RET-ENABLED? !
+    _PT-RET-RESET PT-S-OK ;
 
 : _PT-OP-LOST?  ( s -- flag )
     _PT.S.STATE @ DUP PT-ST-LOST = SWAP PT-ST-CLOSING = OR ;
@@ -526,6 +625,7 @@ VARIABLE _PT-A-SUFFIX
     _PT-O-MAXPAY @ _PT-A-S @ _PT.S.PEER-MAX-PAY !
     _PT-O-MAXTX @ _PT-A-S @ _PT.S.PEER-MAX-TX !
     _PT-O-CREDIT @ _PT-A-S @ _PT.S.PEER-GRANT !
+    _PT-O-CREDIT @ _PT-A-S @ _PT.S.PEER-INITIAL !
     _PT-O-COLS @ _PT-A-S @ _PT.S.COLS !
     _PT-O-ROWS @ _PT-A-S @ _PT.S.ROWS !
     _PT-CAPS _PT-A-S @ _PT.S.CAPS !
@@ -547,6 +647,7 @@ VARIABLE _PT-A-SUFFIX
     1 _PT-A-S @ _PT.S.NEXT-TXID !
     0 _PT-A-S @ _PT.S.REVISION !
     TRUE _PT-A-S @ _PT.S.SNAPSHOT? !
+    _PT-A-S @ _PT-RET-RESET
     _PT-A-S @ _PT-SEND-OPEN
     PT-ST-OPENING _PT-A-S @ _PT.S.STATE !
     MS@ _PT-TIMEOUT-MS + _PT-A-S @ _PT.S.DEADLINE ! ;
@@ -679,6 +780,30 @@ VARIABLE _PT-RESET-EPOCH
     _PT-M-SOFT-RESET-ACK 8 _PT-F-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
     _PT-RESET-EPOCH @ _PT-FRAME-PAYLOAD L!
     FALSE _PT-F-S @ _PT-FRAME-SEND ;
+
+VARIABLE _PT-RQ-S
+VARIABLE _PT-RQ-SENT
+VARIABLE _PT-RQ-WATERMARK
+: _PT-SEND-RET-QUERY  ( s -- status )
+    _PT-RQ-S !
+    _PT-RQ-S @ _PT.S.PEER-SENT @ 48 + DUP _PT-RQ-SENT !
+    _PT-RQ-S @ _PT.S.PEER-SENT @ U< IF
+        _PT-RQ-S @ _PT-RET-CELL-ONLY
+        PT-S-OK EXIT
+    THEN
+    _PT-RQ-SENT @ _PT-RQ-S @ _PT.S.PEER-INITIAL @ +
+    DUP _PT-RQ-WATERMARK !
+    _PT-RQ-S @ _PT.S.PEER-INITIAL @ U< IF
+        _PT-RQ-S @ _PT-RET-CELL-ONLY
+        PT-S-OK EXIT
+    THEN
+    _PT-M-RET-QUERY 8 _PT-RQ-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
+    _PT-RET1-TAG _PT-FRAME-PAYLOAD L!
+    TRUE _PT-RQ-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
+    _PT-RQ-SENT @ _PT-RQ-S @ _PT.S.RET-SQUERY !
+    _PT-RQ-WATERMARK @ _PT-RQ-S @ _PT.S.RET-WATERMARK !
+    _PT-RD-WAIT-CAPS _PT-RQ-S @ _PT.S.RET-STATE !
+    PT-S-OK ;
 
 VARIABLE _PT-ERR-CODE
 VARIABLE _PT-ERR-TYPE
@@ -843,6 +968,7 @@ VARIABLE _PT-RX-DATA?
     _PT-M-FOCUS = ;
 
 : _PT-TO-ANSI  ( s -- )
+    DUP _PT-RET-RESET
     DUP _PT.S.BIN-U OFF
     DUP _PT.S.EVENT-PENDING OFF
     DUP _PT.S.TX-OPEN? OFF
@@ -865,6 +991,7 @@ VARIABLE _PT-FAIL-SEQ
     0 _PT-FAIL-S @ _PT.S.EVENT-PENDING !
     0 _PT-FAIL-S @ _PT.S.TX-OPEN? !
     0 _PT-FAIL-S @ _PT.S.AWAIT? !
+    _PT-FAIL-S @ _PT-RET-RESET
     PT-ST-LOST _PT-FAIL-S @ _PT.S.STATE !
     PT-S-SESSION-LOST ;
 
@@ -919,14 +1046,28 @@ VARIABLE _PT-Z-U
     THEN
     6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL ;
 
+VARIABLE _PT-CR-GRANT
 : _PT-DISPATCH-CREDIT  ( s -- status )
     _PT-RX-LEN @ 8 <> IF
         5 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
     THEN
-    _PT-RX-P @ _PT-U64@ OVER _PT.S.PEER-GRANT @ U< IF
+    _PT-RX-P @ _PT-U64@ DUP _PT-CR-GRANT !
+    OVER _PT.S.PEER-GRANT @ U< IF
         5 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
     THEN
-    _PT-RX-P @ _PT-U64@ SWAP _PT.S.PEER-GRANT ! PT-S-OK ;
+    _PT-CR-GRANT @ OVER _PT.S.PEER-GRANT !
+    DUP _PT.S.RET-STATE @ DUP _PT-RD-WAIT-CAPS _PT-U>=
+    SWAP _PT-RD-INVALID _PT-U<= AND IF
+        _PT-CR-GRANT @ OVER _PT.S.RET-WATERMARK @ _PT-U>= IF
+            DUP _PT.S.RET-STATE @ _PT-RD-WAIT-CREDIT = IF
+                _PT-RD-AVAILABLE SWAP _PT.S.RET-STATE !
+            ELSE
+                _PT-RET-CELL-ONLY
+            THEN
+            PT-S-OK EXIT
+        THEN
+    THEN
+    DROP PT-S-OK ;
 
 VARIABLE _PT-RES-EXPECTED
 : _PT-DISPATCH-TX-RESULT  ( s -- status )
@@ -1006,6 +1147,7 @@ VARIABLE _PT-SR-GRANT
     0 _PT-SR-S @ _PT.S.TX-OPEN? !
     0 _PT-SR-S @ _PT.S.SPAN-REMAIN !
     0 _PT-SR-S @ _PT.S.EVENT-PENDING !
+    _PT-SR-S @ _PT-RET-RESET
     PT-ST-CLOSING _PT-SR-S @ _PT.S.STATE !
     MS@ _PT-TIMEOUT-MS + _PT-SR-S @ _PT.S.DEADLINE !
     DROP PT-S-OK ;
@@ -1046,6 +1188,7 @@ VARIABLE _PT-SR-GRANT
     0 OVER _PT.S.REVISION !
     1 OVER _PT.S.NEXT-TXID !
     TRUE OVER _PT.S.SNAPSHOT? !
+    DUP _PT-RET-RESET
     PT-ST-RESYNCING OVER _PT.S.STATE !
     _PT-SR-EPOCH @ SWAP _PT-SEND-RESET-ACK ;
 
@@ -1138,6 +1281,180 @@ VARIABLE _PT-REL-U
     THEN
     _PT-REL-S @ _PT.S.LOCAL-GRANT !
     TRUE _PT-REL-S @ _PT.S.CREDIT-DIRTY? ! PT-S-OK ;
+
+\ =====================================================================
+\  RETAINED-1 fixed discovery records and cross-field admission
+\ =====================================================================
+
+: _PT-POSITIVE-EXACT?  ( value feature-present? -- flag )
+    IF 0<> ELSE 0= THEN ;
+
+VARIABLE _PT-RV-S
+VARIABLE _PT-RV-P
+VARIABLE _PT-RV-FEATURES
+VARIABLE _PT-RV-RETMAX
+VARIABLE _PT-RV-ROWBYTES
+VARIABLE _PT-RV-TOTAL
+
+: _PT-RET-CAPS-VALID?  ( s -- flag )
+    _PT-RV-S ! _PT-RX-P @ _PT-RV-P !
+    _PT-RX-LEN @ 64 <> IF FALSE EXIT THEN
+    _PT-RV-P @ L@ _PT-RET1-TAG <> IF FALSE EXIT THEN
+    _PT-RV-P @ 4 + W@ 1 <> _PT-RV-P @ 6 + W@ 0<> OR IF
+        FALSE EXIT
+    THEN
+    _PT-RV-P @ 8 + _PT-U64@ DUP _PT-RV-FEATURES !
+    DUP 0x3F INVERT AND IF DROP FALSE EXIT THEN
+    DUP 1 AND 0= IF DROP FALSE EXIT THEN
+    DUP 0x10 AND SWAP 0x08 AND 0= AND IF FALSE EXIT THEN
+
+    _PT-RV-P @ 16 + L@ 0= _PT-RV-P @ 20 + L@ 0= OR IF FALSE EXIT THEN
+    _PT-RV-P @ 20 + L@ _PT-RV-P @ 16 + L@ U> IF FALSE EXIT THEN
+    _PT-RV-P @ 24 + L@ 0= _PT-RV-P @ 40 + L@ 0= OR IF FALSE EXIT THEN
+    _PT-RV-P @ 48 + _PT-U64@ DUP _PT-RV-RETMAX ! 0= IF FALSE EXIT THEN
+    _PT-RV-RETMAX @ 248 U< IF FALSE EXIT THEN
+    _PT-RV-RETMAX @ _PT-RV-S @ _PT.S.PEER-MAX-TX @ U> IF FALSE EXIT THEN
+    _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 64 U<
+    _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 64 U< OR IF FALSE EXIT THEN
+
+    _PT-RV-P @ 32 + L@
+    _PT-RV-FEATURES @ 0x1E AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RV-P @ 36 + L@
+    _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RV-P @ 28 + L@
+    _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RV-P @ 44 + L@
+    _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RV-P @ 56 + _PT-U64@
+    _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+
+    _PT-RV-FEATURES @ 0x04 AND IF
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 80 U< IF FALSE EXIT THEN
+        _PT-RV-P @ 44 + L@ 32 +
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
+    THEN
+
+    12 _PT-RV-S @ _PT.S.COLS @ 8 * +
+    _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
+    52 _PT-RV-S @ _PT.S.COLS @ 8 * + DUP _PT-RV-ROWBYTES !
+    _PT-RV-S @ _PT.S.ROWS @ UM* DUP IF
+        2DROP FALSE EXIT
+    THEN DROP
+    DUP 0xFFFFFFFFFFFFFFFF 216 - U> IF DROP FALSE EXIT THEN
+    216 + DUP _PT-RV-TOTAL !
+    _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
+    _PT-RV-TOTAL @ _PT-RV-S @ _PT.S.PEER-MAX-TX @ U> IF FALSE EXIT THEN
+    TRUE ;
+
+VARIABLE _PT-RF-CAPS
+VARIABLE _PT-RF-FORMATS
+VARIABLE _PT-RF-PIXELS
+
+: _PT-RET-FORMATS-VALID?  ( s -- flag )
+    DUP _PT-RV-S !
+    DUP _PT.S.RET-CAPS _PT-RF-CAPS !
+    DROP _PT-RX-P @ _PT-RF-FORMATS !
+    _PT-RX-LEN @ 64 <> IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ L@ 1 <>
+    _PT-RF-FORMATS @ 4 + L@ 1 <> OR IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 8 + L@ 1 U> IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 56 + _PT-U64@ IF FALSE EXIT THEN
+    _PT-RF-CAPS @ 8 + _PT-U64@ _PT-RV-FEATURES !
+    _PT-RF-CAPS @ 48 + _PT-U64@ _PT-RV-RETMAX !
+
+    _PT-RF-FORMATS @ 8 + L@
+    _PT-RV-FEATURES @ 0x04 AND 0<> IF 1 = ELSE 0= THEN
+    0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 12 + L@
+    _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 16 + L@
+    _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 20 + L@
+    _PT-RV-FEATURES @ 0x02 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 24 + L@
+    _PT-RV-FEATURES @ 0x08 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 48 + _PT-U64@
+    _PT-RV-FEATURES @ 0x08 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 28 + L@
+    _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 32 + L@
+    _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 40 + _PT-U64@
+    _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RF-FORMATS @ 36 + L@
+    _PT-RV-FEATURES @ 0x20 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+
+    _PT-RV-FEATURES @ 0x08 AND IF
+        _PT-RF-FORMATS @ 48 + _PT-U64@
+        _PT-RF-FORMATS @ 24 + L@ U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 112 U< IF FALSE EXIT THEN
+        _PT-RF-FORMATS @ 24 + L@ 104 +
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
+        _PT-RF-FORMATS @ 24 + L@ 304 + 312 MAX
+        _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
+    THEN
+    _PT-RV-FEATURES @ 0x02 AND IF
+        _PT-RF-FORMATS @ 20 + L@ 8 * 80 +
+        DUP _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF DROP FALSE EXIT THEN
+        200 + _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
+    THEN
+    _PT-RV-FEATURES @ 0x04 AND IF
+        _PT-RF-FORMATS @ 12 + L@ _PT-RF-FORMATS @ 16 + L@ UM*
+        DUP IF 2DROP FALSE EXIT THEN DROP DUP _PT-RF-PIXELS !
+        0x3FFFFFFFFFFFFFFF U> IF FALSE EXIT THEN
+        _PT-RF-PIXELS @ 4 * _PT-RF-CAPS @ 56 + _PT-U64@ U> IF
+            FALSE EXIT
+        THEN
+        _PT-RV-RETMAX @ 280 U< IF FALSE EXIT THEN
+    THEN
+    _PT-RV-FEATURES @ 0x10 AND IF
+        _PT-RF-FORMATS @ 28 + L@ DUP
+        _PT-RF-FORMATS @ 32 + L@ U> IF DROP FALSE EXIT THEN
+        DROP
+        _PT-RF-FORMATS @ 32 + L@
+        _PT-RF-FORMATS @ 40 + _PT-U64@ U> IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 112 U< IF FALSE EXIT THEN
+        _PT-RF-FORMATS @ 28 + L@ 16 * 40 +
+        DUP _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF DROP FALSE EXIT THEN
+        200 + 312 MAX _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
+    THEN
+    TRUE ;
+
+: _PT-DISPATCH-RET-CAPS  ( s -- status )
+    DUP _PT.S.RET-STATE @ _PT-RD-WAIT-CAPS = IF
+        DUP _PT-RET-CAPS-VALID? IF
+            _PT-RX-P @ OVER _PT.S.RET-CAPS 64 MOVE
+            _PT-RD-WAIT-FORMATS OVER _PT.S.RET-STATE !
+        ELSE
+            DUP _PT-RET-INVALIDATE
+        THEN
+    ELSE
+        DUP _PT.S.RET-STATE @ DUP _PT-RD-WAIT-FORMATS =
+        SWAP _PT-RD-WAIT-CREDIT = OR IF DUP _PT-RET-INVALIDATE THEN
+    THEN
+    _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA ;
+
+: _PT-DISPATCH-RET-FORMATS  ( s -- status )
+    DUP _PT.S.RET-STATE @ _PT-RD-WAIT-FORMATS = IF
+        DUP _PT-RET-FORMATS-VALID? IF
+            _PT-RX-P @ OVER _PT.S.RET-FORMATS 64 MOVE
+            _PT-RD-WAIT-CREDIT OVER _PT.S.RET-STATE !
+        ELSE
+            DUP _PT-RET-INVALIDATE
+        THEN
+    ELSE
+        DUP _PT.S.RET-STATE @ DUP _PT-RD-WAIT-CAPS =
+        SWAP _PT-RD-WAIT-CREDIT = OR IF DUP _PT-RET-INVALIDATE THEN
+    THEN
+    _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA ;
+
+: _PT-RET-CHECK-ADJACENCY  ( s -- )
+    DUP _PT.S.RET-STATE @ _PT-RD-WAIT-FORMATS =
+    _PT-RX-TYPE @ _PT-M-RET-FORMATS <> AND IF
+        _PT-RET-INVALIDATE
+    ELSE
+        DROP
+    THEN ;
 
 VARIABLE _PT-EV-S
 : _PT-ACCEPT-EVENT  ( s -- status )
@@ -1268,7 +1585,13 @@ VARIABLE _PT-RSZ-SNAPSHOT
     _PT-RSZ-ROWS @ OVER _PT.S.ROWS !
     _PT-RSZ-GEN @ OVER _PT.S.GEOMETRY-GEN !
     TRUE OVER _PT.S.GEOMETRY-SEEN? !
-    0 OVER _PT.S.REVISION !
+    \ Base CELL resize recovery restarts at revision zero.  Retained resize
+    \ is a later PRESENT commit in the existing global revision sequence, so
+    \ discovery-only clients preserve that revision and report replacement
+    \ needed without fabricating a legacy snapshot.
+    DUP _PT.S.RET-STATE @ _PT-RD-AVAILABLE <> IF
+        0 OVER _PT.S.REVISION !
+    THEN
     TRUE OVER _PT.S.SNAPSHOT? !
     PT-ST-RESYNCING OVER _PT.S.STATE !
     _PT-ACCEPT-EVENT ;
@@ -1289,6 +1612,7 @@ VARIABLE _PT-RSZ-SNAPSHOT
     _PT-ACCEPT-EVENT ;
 
 : _PT-DISPATCH  ( s -- status )
+    DUP _PT-RET-CHECK-ADJACENCY
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
         _PT-RX-TYPE @ _PT-M-SERVER-READY =
         _PT-RX-TYPE @ _PT-M-CLOSE = OR
@@ -1305,6 +1629,10 @@ VARIABLE _PT-RSZ-SNAPSHOT
         _PT-DISPATCH-SOFT-RESET EXIT
     THEN
     _PT-RX-TYPE @ _PT-M-TX-RESULT = IF _PT-DISPATCH-TX-RESULT EXIT THEN
+    _PT-RX-TYPE @ _PT-M-RET-CAPS = IF _PT-DISPATCH-RET-CAPS EXIT THEN
+    _PT-RX-TYPE @ _PT-M-RET-FORMATS = IF
+        _PT-DISPATCH-RET-FORMATS EXIT
+    THEN
     _PT-RX-TYPE @ _PT-M-KEY = IF _PT-DISPATCH-KEY EXIT THEN
     _PT-RX-TYPE @ _PT-M-TEXT = IF _PT-DISPATCH-TEXT EXIT THEN
     _PT-RX-TYPE @ _PT-M-POINTER = IF _PT-DISPATCH-POINTER EXIT THEN
@@ -1445,6 +1773,7 @@ VARIABLE _PT-SVC-N
     DUP _PT-SVC-S !
     OVER OVER _PT-SEND-CLOSE ?DUP IF NIP NIP EXIT THEN
     OVER _PT-SVC-S @ _PT.S.CLOSE-REASON !
+    _PT-SVC-S @ _PT-RET-RESET
     PT-ST-CLOSING _PT-SVC-S @ _PT.S.STATE !
     MS@ _PT-TIMEOUT-MS + _PT-SVC-S @ _PT.S.DEADLINE !
     2DROP PT-S-OK ;
@@ -1472,6 +1801,30 @@ VARIABLE _PT-SVC-N
     DUP _PT-SEND-CREDIT ?DUP IF NIP EXIT THEN
     0 SWAP _PT.S.CREDIT-DIRTY? ! PT-S-OK ;
 
+: _PT-SERVICE-RET-QUERY  ( s -- status )
+    DUP _PT.S.RET-ENABLED? @ 0= IF DROP PT-S-OK EXIT THEN
+    DUP _PT.S.RET-STATE @ _PT-RD-SNAPSHOT <> IF DROP PT-S-OK EXIT THEN
+    DUP _PT.S.STATE @ PT-ST-ACTIVE <> IF DROP PT-S-OK EXIT THEN
+    DUP _PT.S.SNAPSHOT? @ IF DROP PT-S-OK EXIT THEN
+    DUP _PT.S.EVENT-PENDING @ IF DROP PT-S-OK EXIT THEN
+    DUP _PT.S.TX-OPEN? @ OVER _PT.S.AWAIT? @ OR IF
+        DROP PT-S-OK EXIT
+    THEN
+    DUP _PT.S.LOCAL-RECEIVED @ OVER _PT.S.LOCAL-GRANT @ U> IF
+        PT-ST-LOST SWAP _PT.S.STATE ! PT-S-SESSION-LOST EXIT
+    THEN
+    DUP _PT.S.LOCAL-GRANT @ OVER _PT.S.LOCAL-RECEIVED @ -
+    _PT-RET-REPLY-BYTES U< IF
+        _PT-RET-CELL-ONLY PT-S-OK EXIT
+    THEN
+    DUP _PT.S.PEER-SENT @ OVER _PT.S.PEER-GRANT @ U> IF
+        PT-ST-LOST SWAP _PT.S.STATE ! PT-S-SESSION-LOST EXIT
+    THEN
+    DUP _PT.S.PEER-GRANT @ OVER _PT.S.PEER-SENT @ - 48 U< IF
+        DROP PT-S-OK EXIT
+    THEN
+    _PT-SEND-RET-QUERY ;
+
 : PT-SERVICE  ( session -- status )
     DUP _PT-VALID-S? 0= IF DROP PT-S-INVALID EXIT THEN
     DUP _PT-SVC-S !
@@ -1488,7 +1841,12 @@ VARIABLE _PT-SVC-N
         THEN
         DUP _PT-SERVICE-CREDIT ?DUP IF NIP EXIT THEN
     THEN
+    \ Give an already-eligible discovery query priority over newly buffered
+    \ ordinary input.  The second opportunity below remains necessary when
+    \ this service call itself consumes the initial snapshot TX_RESULT.
+    DUP _PT-SERVICE-RET-QUERY ?DUP IF NIP EXIT THEN
     DUP _PT-SERVICE-BINARY ?DUP IF NIP EXIT THEN
+    DUP _PT-SERVICE-RET-QUERY ?DUP IF NIP EXIT THEN
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
         MS@ OVER _PT.S.DEADLINE @ _PT-U>= IF
             TRUE OVER _PT.S.CLOSE-OPENING? !
@@ -1662,6 +2020,14 @@ VARIABLE _PT-B-SEQ-ROOM?
         _PT-B-S @ _PT.S.STATE @ DUP PT-ST-ACTIVE <>
         SWAP PT-ST-RESYNCING <> AND IF PT-S-INVALID EXIT THEN
         _PT-B-S @ _PT.S.SNAPSHOT? @ 0= IF PT-S-INVALID EXIT THEN
+        \ A positive discovery makes later replace-all work a PRESENT
+        \ transaction.  This discovery-only module must not emit the now
+        \ forbidden legacy SNAPSHOT_BEGIN in its place.  Soft reset first
+        \ returns the discovery state to SNAPSHOT, so its mandatory CELL
+        \ recovery remains available.
+        _PT-B-S @ _PT.S.RET-STATE @ _PT-RD-AVAILABLE = IF
+            PT-S-UNSUPPORTED EXIT
+        THEN
     ELSE
         _PT-B-S @ _PT.S.STATE @ PT-ST-ACTIVE <> IF PT-S-INVALID EXIT THEN
         _PT-B-S @ _PT.S.SNAPSHOT? @ IF PT-S-INVALID EXIT THEN
