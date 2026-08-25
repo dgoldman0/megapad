@@ -53,16 +53,28 @@ from .presentation_model import (
     PresentationStateError,
     ResultLease,
     TransactionFamily,
+    TransactionLease,
 )
-from .retained_model import RetainedPolicy
+from .retained_model import (
+    OwnerIdentity,
+    OwnerLedger,
+    OwnerLedgerError,
+    OwnerLedgerErrorCode,
+    OwnerLedgerState,
+    OwnerQuotas,
+    RetainedPolicy,
+)
 from .retained_wire import (
+    RetStatus,
     RetainedCaps,
     RetainedFormats,
     RetainedMessageType,
+    RetainedResult,
     RetainedWireError,
     decode_ret_query,
     encode_ret_caps,
     encode_ret_formats,
+    encode_ret_result,
 )
 
 
@@ -78,6 +90,8 @@ _CLOSE = struct.Struct("<H6sQ")
 _CLOSE_ACK = struct.Struct("<H6s")
 _SOFT_RESET_REQUEST = struct.Struct("<I4xQ")
 _SOFT_RESET_ACK = struct.Struct("<IHH")
+_OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
+_OWNER_DROP = struct.Struct("<QQQQ")
 
 _RETAINED_DISCOVERY_REPLY_BYTES = 2 * (HEADER_BYTES + 64)
 
@@ -219,10 +233,58 @@ class TerminalConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LifecycleResultLease:
+    """Exact object-identity gate for one emitted lifecycle result.
+
+    The token is deliberately independent of the validated RET_RESULT domain
+    object.  A well-framed rejected request must echo even a semantically
+    invalid zero owner/item scalar, while delivery still needs an exact object
+    marker at the host admission boundary.
+    """
+
+    request_type: RetainedMessageType
+    owner_id: int
+    owner_generation: int
+    item_id: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.request_type, bool):
+            raise TypeError("request_type must not be bool")
+        try:
+            request_type = RetainedMessageType(self.request_type)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "request_type must be a retained lifecycle type"
+            ) from exc
+        if request_type not in {
+            RetainedMessageType.OWNER_OPEN,
+            RetainedMessageType.RESOURCE_BEGIN,
+            RetainedMessageType.RESOURCE_CHUNK,
+            RetainedMessageType.RESOURCE_COMMIT,
+            RetainedMessageType.RESOURCE_DROP,
+            RetainedMessageType.RESOURCE_ABORT,
+        }:
+            raise ValueError("request_type must be a retained lifecycle type")
+        object.__setattr__(self, "request_type", request_type)
+        for name in ("owner_id", "owner_generation", "item_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=0,
+                    maximum=UINT64_MAX,
+                ),
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class OutboundBytes:
     payload: bytes
     control: bool
     result_transaction_id: int | None = None
+    lifecycle_result: LifecycleResultLease | None = None
 
     def __post_init__(self) -> None:
         payload = _bytes("payload", self.payload)
@@ -244,6 +306,18 @@ class OutboundBytes:
             )
             if not self.control:
                 raise ValueError("a TX_RESULT delivery marker must be control")
+        if self.lifecycle_result is not None:
+            if not isinstance(self.lifecycle_result, LifecycleResultLease):
+                raise TypeError(
+                    "lifecycle_result must be LifecycleResultLease or None"
+                )
+            if not self.control:
+                raise ValueError("a RET_RESULT delivery marker must be control")
+        if (
+            self.result_transaction_id is not None
+            and self.lifecycle_result is not None
+        ):
+            raise ValueError("an outbound record cannot settle two result gates")
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +437,9 @@ class PresentationTerminalCore:
             else self._formats_from_policy(retained_policy)
         )
         self._session_retained_policy: RetainedPolicy | None = None
+        self._owner_ledger: OwnerLedger | None = None
+        self._outstanding_lifecycle_result: LifecycleResultLease | None = None
+        self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch: int | None = None
@@ -495,6 +572,20 @@ class PresentationTerminalCore:
         return self._session_retained_policy
 
     @property
+    def owner_state(self) -> OwnerLedgerState | None:
+        """Immutable exact-generation owner authority for the current epoch."""
+
+        if not self._retained_enabled or self._owner_ledger is None:
+            return None
+        return self._owner_ledger.state
+
+    @property
+    def outstanding_lifecycle_result(self) -> LifecycleResultLease | None:
+        """The exact RET_RESULT whose delivery gates later lifecycle work."""
+
+        return self._outstanding_lifecycle_result
+
+    @property
     def session_id(self) -> int | None:
         return self._session_id
 
@@ -545,6 +636,7 @@ class PresentationTerminalCore:
             and self._wire_transaction_id is None
             and clock.open_transaction is None
             and clock.outstanding_result is None
+            and self._outstanding_lifecycle_result is None
             and not model.awaiting_snapshot
             and not model.transaction_open
         )
@@ -791,6 +883,8 @@ class PresentationTerminalCore:
             raise TerminalSessionError("soft reset requires an ACTIVE session")
         if self._reset_requested_epoch is not None:
             raise TerminalSessionError("a soft reset is already pending")
+        if self._outstanding_lifecycle_result is not None:
+            raise TerminalSessionError("soft reset waits for RET_RESULT delivery")
         decoder = self._decoder
         if decoder is None or decoder.buffered_bytes:
             raise TerminalSessionError("soft reset waits for a complete client frame")
@@ -813,6 +907,7 @@ class PresentationTerminalCore:
         except (RuntimeError, TypeError, ValueError) as exc:
             self._fatal(f"cannot arm soft-reset epoch transition: {exc}", cause=exc)
         self._reset_requested_epoch = requested_epoch
+        self._reset_crossed_lifecycle_consumed = False
         self._state = TerminalState.RESYNCING
         return encoded
 
@@ -823,6 +918,22 @@ class PresentationTerminalCore:
             return self._require_clock().settle_result(transaction_id)
         except (PresentationStateError, TypeError, ValueError) as exc:
             self._fatal(f"cannot settle TX_RESULT delivery: {exc}", cause=exc)
+
+    def settle_lifecycle_result_delivery(
+        self,
+        result: LifecycleResultLease,
+    ) -> LifecycleResultLease:
+        """Release the lifecycle gate after its exact RET_RESULT is admitted."""
+
+        outstanding = self._outstanding_lifecycle_result
+        if not isinstance(result, LifecycleResultLease):
+            self._fatal("RET_RESULT delivery marker has the wrong type")
+        if outstanding is None:
+            self._fatal("no RET_RESULT delivery is outstanding")
+        if result is not outstanding:
+            self._fatal("RET_RESULT delivery marker is stale or foreign")
+        self._outstanding_lifecycle_result = None
+        return result
 
     def _feed_ansi_owned(self, raw: bytes) -> CoreResult:
         ansi = bytearray()
@@ -914,6 +1025,9 @@ class PresentationTerminalCore:
         self._session_retained_policy = self._bind_retained_policy(
             terminal_to_client_max_payload=record.client_max_payload,
         )
+        self._owner_ledger = None
+        self._outstanding_lifecycle_result = None
+        self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch = None
@@ -977,6 +1091,17 @@ class PresentationTerminalCore:
                 return self._release_data(frame.complete_bytes), None
             return self._accept_retained_query(frame), None
 
+        if frame.message_type == RetainedMessageType.OWNER_OPEN:
+            if not self._retained_enabled:
+                self._fatal("OWNER_OPEN arrived before retained discovery")
+            self._charge_data(frame, include_in_transaction=False)
+            return self._accept_owner_open(frame), None
+
+        if frame.message_type == RetainedMessageType.OWNER_DROP:
+            if not self._retained_enabled:
+                self._fatal("OWNER_DROP arrived before retained discovery")
+            return self._accept_owner_drop(frame), None
+
         try:
             message_type = MessageType(frame.message_type)
         except ValueError:
@@ -1030,6 +1155,43 @@ class PresentationTerminalCore:
         reason, reserved, _last_revision = _CLOSE.unpack(payload)
         if reserved != bytes(6):
             self._fatal("CLOSE reserved bytes are nonzero")
+        clock = self._clock
+        if self._outstanding_lifecycle_result is not None or (
+            clock is not None and clock.outstanding_result is not None
+        ):
+            self._fatal("CLOSE crossed an unsettled emitted result")
+
+        # CLOSE is itself the synchronized retirement boundary, so a BEGIN
+        # which has not emitted a result is discarded instead of preventing
+        # closure.  Check exact model/clock provenance before aborting either
+        # side of the shared transaction seam.
+        transaction_id = self._wire_transaction_id
+        model = self._model
+        if transaction_id is None:
+            if (clock is not None and clock.open_transaction is not None) or (
+                model is not None and model.transaction_open
+            ):
+                self._fatal("CLOSE found transaction authority without wire state")
+        else:
+            if clock is None or model is None:
+                self._fatal("CLOSE cannot retire an incomplete session transaction")
+            lease = clock.open_transaction
+            if lease is None or lease.transaction_id != transaction_id:
+                self._fatal("CLOSE wire transaction has no matching clock lease")
+            if model.transaction_open:
+                try:
+                    model.abort(transaction_id)
+                except CellModelError as exc:
+                    self._fatal(
+                        f"cannot discard CELL staging for CLOSE: {exc}",
+                        cause=exc,
+                    )
+            try:
+                clock.abort(lease)
+            except PresentationStateError as exc:
+                self._fatal(f"cannot discard transaction for CLOSE: {exc}", cause=exc)
+            self._clear_wire_transaction()
+
         acknowledgement = self._encode_control(
             MessageType.CLOSE_ACK,
             _CLOSE_ACK.pack(reason, bytes(6)),
@@ -1053,6 +1215,9 @@ class PresentationTerminalCore:
         self._model = None
         self._clock = None
         self._session_retained_policy = None
+        self._owner_ledger = None
+        self._outstanding_lifecycle_result = None
+        self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch = None
@@ -1145,6 +1310,21 @@ class PresentationTerminalCore:
         if caps is None or formats is None:
             self._fatal("RET_QUERY has no bound retained policy")
 
+        session_id = self._session_id
+        if session_id is None:
+            self._fatal("RET_QUERY has no live session identity")
+        policy = self._session_retained_policy
+        if policy is None:
+            self._fatal("RET_QUERY lost its bound retained policy")
+        try:
+            owner_ledger = OwnerLedger(
+                session_id=session_id,
+                presentation_epoch=clock.presentation_epoch,
+                policy=policy,
+            )
+        except (TypeError, ValueError) as exc:
+            self._fatal(f"cannot initialize retained owner authority: {exc}", cause=exc)
+
         self._retained_query_seen = True
         caps_reply = self._encode_data(
             RetainedMessageType.RET_CAPS,
@@ -1163,8 +1343,248 @@ class PresentationTerminalCore:
         # All fixed payloads and both directional sequence advances have now
         # succeeded.  Publish capability only after the complete ordered
         # CAPS, FORMATS, covering-CREDIT tuple exists.
+        self._owner_ledger = owner_ledger
         self._retained_enabled = True
         return (caps_reply, formats_reply, covering_credit[0])
+
+    def _accept_owner_open(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Reserve one exact owner quota set and order its RET_RESULT."""
+
+        ledger, clock = self._require_owner_lifecycle_ready(
+            "OWNER_OPEN",
+            allow_crossed_reset=True,
+        )
+        if len(frame.payload) != _OWNER_OPEN.size:
+            self._fatal(
+                f"OWNER_OPEN payload length is {len(frame.payload)}, "
+                f"expected {_OWNER_OPEN.size}"
+            )
+        (
+            owner_id,
+            owner_generation,
+            regions,
+            resources,
+            objects,
+            series,
+            resource_bytes,
+            utf8_bytes,
+            sample_slots,
+            reserved,
+        ) = _OWNER_OPEN.unpack(frame.payload)
+
+        prepared = None
+        if owner_id == 0 or owner_generation == 0 or reserved != 0:
+            status = RetStatus.INVALID
+        else:
+            try:
+                quotas = OwnerQuotas(
+                    regions,
+                    resources,
+                    objects,
+                    series,
+                    resource_bytes,
+                    utf8_bytes,
+                    sample_slots,
+                )
+                identity = self._owner_identity(owner_id, owner_generation)
+                prepared = ledger.prepare_open(identity, quotas)
+            except OwnerLedgerError as exc:
+                status = self._owner_open_status(exc)
+            except (TypeError, ValueError) as exc:
+                self._fatal(f"cannot normalize OWNER_OPEN fields: {exc}", cause=exc)
+            else:
+                status = RetStatus.OK
+                try:
+                    ledger.validate_prepared(prepared)
+                except (RuntimeError, TypeError) as exc:
+                    self._fatal(
+                        f"cannot validate OWNER_OPEN publication: {exc}",
+                        cause=exc,
+                    )
+
+        result_lease = LifecycleResultLease(
+            RetainedMessageType.OWNER_OPEN,
+            owner_id,
+            owner_generation,
+        )
+        result = RetainedResult(
+            RetainedMessageType.OWNER_OPEN,
+            status,
+            owner_id,
+            owner_generation,
+            0,
+            clock.revision,
+        )
+        result_record = self._encode_control(
+            RetainedMessageType.RET_RESULT,
+            encode_ret_result(result),
+            lifecycle_result=result_lease,
+        )
+        covering_credit = self._release_data(frame.complete_bytes)
+        if len(covering_credit) != 1:
+            self._fatal("OWNER_OPEN did not produce one covering CREDIT")
+
+        if prepared is not None:
+            ledger._install_prevalidated(prepared)
+        self._outstanding_lifecycle_result = result_lease
+        return (result_record, covering_credit[0])
+
+    def _accept_owner_drop(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Apply one revisioned exact-owner drop through the shared clock."""
+
+        ledger, clock = self._require_owner_lifecycle_ready(
+            "OWNER_DROP",
+            allow_crossed_reset=True,
+        )
+        if len(frame.payload) != _OWNER_DROP.size:
+            self._fatal(
+                f"OWNER_DROP payload length is {len(frame.payload)}, "
+                f"expected {_OWNER_DROP.size}"
+            )
+        transaction_id, base_revision, owner_id, owner_generation = (
+            _OWNER_DROP.unpack(frame.payload)
+        )
+
+        try:
+            lease = clock.reserve(
+                TransactionFamily.OWNER_DROP,
+                transaction_id,
+                base_revision,
+            )
+        except (PresentationStateError, TypeError, ValueError) as exc:
+            lease = clock.open_transaction
+            if (
+                lease is None
+                or lease.family is not TransactionFamily.OWNER_DROP
+                or lease.transaction_id != transaction_id
+            ):
+                self._fatal(str(exc), cause=exc)
+            status = (
+                3
+                if lease.rejection is not None
+                and "base revision" in lease.rejection
+                else 2
+            )
+            return self._complete_owner_drop_rejection(lease, status)
+
+        if owner_id == 0 or owner_generation == 0:
+            return self._complete_owner_drop_rejection(lease, 2)
+        identity = self._owner_identity(owner_id, owner_generation)
+        try:
+            prepared = ledger.prepare_drop(identity)
+        except OwnerLedgerError:
+            return self._complete_owner_drop_rejection(lease, 2)
+        try:
+            ledger.validate_prepared(prepared)
+        except (RuntimeError, TypeError) as exc:
+            self._fatal(f"cannot validate OWNER_DROP publication: {exc}", cause=exc)
+
+        if self._reset_requested_epoch is not None:
+            return self._complete_owner_drop_rejection(lease, 1)
+
+        try:
+            revision = clock.next_revision(lease)
+        except PresentationStateError as exc:
+            self._fatal(f"cannot advance OWNER_DROP revision: {exc}", cause=exc)
+        result_record = self._encode_control(
+            MessageType.TX_RESULT,
+            _TX_RESULT.pack(transaction_id, 0, 0, revision),
+            result_transaction_id=transaction_id,
+        )
+        try:
+            result_lease = clock.complete_success(lease)
+        except PresentationStateError as exc:
+            self._fatal(f"cannot complete OWNER_DROP: {exc}", cause=exc)
+        if result_lease.revision != revision:
+            self._fatal("OWNER_DROP revision changed after preparation")
+        ledger._install_prevalidated(prepared)
+        return (result_record,)
+
+    def _complete_owner_drop_rejection(
+        self,
+        lease: TransactionLease,
+        status: int,
+    ) -> tuple[OutboundBytes, ...]:
+        clock = self._require_clock()
+        try:
+            result_lease = clock.complete_rejected(lease)
+        except PresentationStateError as exc:
+            self._fatal(f"cannot reject OWNER_DROP: {exc}", cause=exc)
+        result_record = self._encode_control(
+            MessageType.TX_RESULT,
+            _TX_RESULT.pack(
+                lease.transaction_id,
+                status,
+                0,
+                result_lease.revision,
+            ),
+            result_transaction_id=lease.transaction_id,
+        )
+        return (result_record,)
+
+    def _require_owner_lifecycle_ready(
+        self,
+        request_name: str,
+        *,
+        allow_crossed_reset: bool,
+    ) -> tuple[OwnerLedger, PresentationClock]:
+        pending_reset = self._reset_requested_epoch is not None
+        if pending_reset:
+            if (
+                not allow_crossed_reset
+                or self._state is not TerminalState.RESYNCING
+                or self._reset_crossed_lifecycle_consumed
+            ):
+                self._fatal(f"{request_name} crossed an unavailable soft reset boundary")
+            self._reset_crossed_lifecycle_consumed = True
+        elif self._state is not TerminalState.ACTIVE:
+            self._fatal(f"{request_name} is outside ACTIVE")
+        if self._outstanding_lifecycle_result is not None:
+            self._fatal(f"{request_name} crossed an outstanding RET_RESULT")
+        model = self._require_model()
+        clock = self._require_clock()
+        if (
+            self._wire_transaction_id is not None
+            or model.transaction_open
+            or clock.open_transaction is not None
+            or clock.outstanding_result is not None
+        ):
+            self._fatal(f"{request_name} crossed a transaction/result boundary")
+        ledger = self._owner_ledger
+        if ledger is None:
+            self._fatal(f"{request_name} has no retained owner authority")
+        return ledger, clock
+
+    def _owner_identity(
+        self,
+        owner_id: int,
+        owner_generation: int,
+    ) -> OwnerIdentity:
+        session_id = self._session_id
+        if session_id is None:
+            self._fatal("owner lifecycle has no live session identity")
+        return OwnerIdentity(
+            session_id=session_id,
+            presentation_epoch=self._require_clock().presentation_epoch,
+            owner_id=owner_id,
+            owner_generation=owner_generation,
+        )
+
+    @staticmethod
+    def _owner_open_status(error: OwnerLedgerError) -> RetStatus:
+        statuses = {
+            OwnerLedgerErrorCode.INVALID: RetStatus.INVALID,
+            OwnerLedgerErrorCode.STALE_OWNER: RetStatus.STALE_OWNER,
+            OwnerLedgerErrorCode.NO_CAPACITY: RetStatus.NO_CAPACITY,
+            OwnerLedgerErrorCode.DUPLICATE_ID: RetStatus.INVALID,
+        }
+        return statuses[error.code]
 
     def _charge_data(self, frame: Frame, *, include_in_transaction: bool = True) -> None:
         complete = frame.complete_bytes
@@ -1187,6 +1607,8 @@ class PresentationTerminalCore:
             self._fatal("nested transaction begin")
         if self._reset_requested_epoch is not None:
             self._fatal("new transaction begin crossed a pending soft reset")
+        if self._outstanding_lifecycle_result is not None:
+            self._fatal("transaction begin crossed an outstanding RET_RESULT")
         try:
             begin = decode_transaction_begin(frame.payload)
         except CellModelError as exc:
@@ -1405,6 +1827,8 @@ class PresentationTerminalCore:
         clock = self._require_clock()
         if clock.outstanding_result is not None:
             self._fatal("SOFT_RESET_ACK crossed an undelivered TX_RESULT")
+        if self._outstanding_lifecycle_result is not None:
+            self._fatal("SOFT_RESET_ACK crossed an undelivered RET_RESULT")
         released = 0
         if self._wire_transaction_id is not None:
             transaction_id = self._wire_transaction_id
@@ -1437,6 +1861,9 @@ class PresentationTerminalCore:
             self._fatal("soft-reset acknowledgement has no response encoder")
         encoder.set_presentation_epoch(requested_epoch)
         self._reset_requested_epoch = None
+        self._owner_ledger = None
+        self._outstanding_lifecycle_result = None
+        self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
         self._retained_enabled = False
         self._pointer_buttons = 0
@@ -1489,10 +1916,11 @@ class PresentationTerminalCore:
 
     def _encode_control(
         self,
-        message_type: MessageType,
+        message_type: int,
         payload: bytes,
         *,
         result_transaction_id: int | None = None,
+        lifecycle_result: LifecycleResultLease | None = None,
     ) -> OutboundBytes:
         encoder = self._encoder
         if encoder is None:
@@ -1501,7 +1929,12 @@ class PresentationTerminalCore:
             encoded = encoder.encode(message_type, payload)
         except (OverflowError, TypeError, ValueError) as exc:
             self._fatal(f"cannot encode control frame: {exc}", cause=exc)
-        return OutboundBytes(encoded, True, result_transaction_id)
+        return OutboundBytes(
+            encoded,
+            True,
+            result_transaction_id,
+            lifecycle_result,
+        )
 
     def _encode_data(self, message_type: MessageType, payload: bytes) -> OutboundBytes | None:
         encoder = self._encoder
@@ -1555,6 +1988,7 @@ class PresentationTerminalCore:
 
 __all__ = [
     "CoreResult",
+    "LifecycleResultLease",
     "OutboundBytes",
     "PresentationTerminalCore",
     "TerminalConfig",

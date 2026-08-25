@@ -740,6 +740,10 @@ class PresentationTerminalDriver:
                 self._core.settle_result_delivery(
                     record.result_transaction_id
                 )
+            if record.lifecycle_result is not None:
+                self._core.settle_lifecycle_result_delivery(
+                    record.lifecycle_result
+                )
             self._pending.popleft()
             self._pending_bytes -= len(record.payload)
             admitted += 1

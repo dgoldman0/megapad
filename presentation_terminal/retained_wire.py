@@ -379,9 +379,10 @@ class RetainedResult:
             )
         object.__setattr__(self, "request_type", request)
         object.__setattr__(self, "status", status)
+        owner_minimum = 0 if status is RetStatus.INVALID else 1
         for name, minimum in (
-            ("owner_id", 1),
-            ("owner_generation", 1),
+            ("owner_id", owner_minimum),
+            ("owner_generation", owner_minimum),
             ("item_id", 0),
             ("current_revision", 0),
             ("accepted_bytes", 0),
@@ -394,7 +395,7 @@ class RetainedResult:
         if request is RetainedMessageType.OWNER_OPEN:
             if self.item_id != 0:
                 raise ValueError("OWNER_OPEN result item_id must be zero")
-        elif self.item_id == 0:
+        elif self.item_id == 0 and status is not RetStatus.INVALID:
             raise ValueError("resource result item_id must be nonzero")
         successful_commit = (
             request is RetainedMessageType.RESOURCE_COMMIT

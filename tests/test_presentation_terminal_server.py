@@ -17,11 +17,21 @@ from presentation_terminal.apt1 import (
     encode_probe,
     parse_negotiation,
 )
-from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
+from presentation_terminal.retained_model import (
+    OwnerQuotas,
+    RetainedFeature,
+    RetainedPolicy,
+)
 from presentation_terminal.retained_wire import (
+    OwnerDrop,
+    OwnerOpen,
+    RetStatus,
     RetainedMessageType,
     decode_ret_caps,
     decode_ret_formats,
+    decode_ret_result,
+    encode_owner_drop,
+    encode_owner_open,
     encode_ret_query,
 )
 from presentation_terminal.server import (
@@ -50,6 +60,8 @@ CLOSE = struct.Struct("<H6sQ")
 CLOSE_ACK = struct.Struct("<H6s")
 SOFT_RESET_REQUEST = struct.Struct("<I4xQ")
 SOFT_RESET_ACK = struct.Struct("<IHH")
+OWNER_OPEN_WIRE = struct.Struct("<QQIIIIQQQQ")
+OWNER_DROP_WIRE = struct.Struct("<QQQQ")
 
 
 def _config() -> TerminalConfig:
@@ -194,6 +206,48 @@ def _settle_results(
     for transaction_id in transaction_ids:
         core.settle_result_delivery(transaction_id)
     return transaction_ids
+
+
+def _open_retained_core():
+    core, offer, request, encoder, client_ready = _negotiate(
+        client_credit=512,
+        retained_policy=_retained_policy(),
+    )
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+    discovery = core.feed_machine(
+        encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query())
+    )
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    for outbound in opened.outbound + discovery.outbound:
+        decoder.feed(outbound.payload)
+    assert core.retained_enabled
+    assert core.owner_state is not None
+    return core, encoder, decoder
+
+
+def _owner_open(
+    owner_id: int = 7,
+    generation: int = 1,
+    *,
+    regions: int = 4,
+) -> OwnerOpen:
+    return OwnerOpen(
+        owner_id,
+        generation,
+        OwnerQuotas(regions, 0, 0, 0, 0, 0, 0),
+    )
+
+
+def _settle_lifecycle(core: PresentationTerminalCore, result) -> None:
+    marker = next(
+        outbound.lifecycle_result
+        for outbound in result.outbound
+        if outbound.lifecycle_result is not None
+    )
+    core.settle_lifecycle_result_delivery(marker)
 
 
 def test_ansi_remains_default_and_non_apt_escapes_pass_byte_exact():
@@ -478,6 +532,346 @@ def test_soft_reset_clears_retained_and_requires_snapshot_first_rediscovery():
     assert core.retained_enabled
 
 
+def test_owner_open_reserves_atomically_and_reports_exact_lifecycle_statuses():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(owner),
+        )
+    )
+    frames = []
+    for outbound in opened.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in frames] == [
+        RetainedMessageType.RET_RESULT,
+        MessageType.CREDIT,
+    ]
+    result = decode_ret_result(frames[0].payload)
+    assert result.request_type is RetainedMessageType.OWNER_OPEN
+    assert result.status is RetStatus.OK
+    assert result.current_revision == 1
+    assert CREDIT.unpack(frames[1].payload) == (1_024 + 312 + 48 + 104,)
+    assert core.outstanding_lifecycle_result is opened.outbound[0].lifecycle_result
+    state = core.owner_state
+    assert state is not None
+    assert state.records[owner.owner_id].identity.owner_generation == 1
+    assert state.reservations.regions == 4
+    _settle_lifecycle(core, opened)
+
+    source = core.owner_state
+    duplicate = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(owner),
+        )
+    )
+    duplicate_result = decode_ret_result(
+        decoder.feed(duplicate.outbound[0].payload)[0].payload
+    )
+    decoder.feed(duplicate.outbound[1].payload)
+    assert duplicate_result.status is RetStatus.OK
+    assert core.owner_state is source
+    _settle_lifecycle(core, duplicate)
+
+    stale = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(_owner_open(generation=2)),
+        )
+    )
+    stale_result = decode_ret_result(decoder.feed(stale.outbound[0].payload)[0].payload)
+    decoder.feed(stale.outbound[1].payload)
+    assert stale_result.status is RetStatus.STALE_OWNER
+    assert core.owner_state is source
+    _settle_lifecycle(core, stale)
+
+    exhausted = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(_owner_open(owner_id=8, regions=5)),
+        )
+    )
+    exhausted_result = decode_ret_result(
+        decoder.feed(exhausted.outbound[0].payload)[0].payload
+    )
+    decoder.feed(exhausted.outbound[1].payload)
+    assert exhausted_result.status is RetStatus.NO_CAPACITY
+    assert core.owner_state is source
+    _settle_lifecycle(core, exhausted)
+
+
+@pytest.mark.parametrize(
+    ("owner_id", "owner_generation", "reserved"),
+    ((0, 1, 0), (7, 0, 0), (7, 1, 1)),
+)
+def test_owner_open_well_framed_scalar_rejections_echo_ret_invalid(
+    owner_id: int,
+    owner_generation: int,
+    reserved: int,
+):
+    core, encoder, decoder = _open_retained_core()
+    source = core.owner_state
+    payload = OWNER_OPEN_WIRE.pack(
+        owner_id,
+        owner_generation,
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        reserved,
+    )
+
+    rejected = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, payload)
+    )
+    result_frame = decoder.feed(rejected.outbound[0].payload)[0]
+    decoder.feed(rejected.outbound[1].payload)
+
+    result = decode_ret_result(result_frame.payload)
+    assert result.request_type is RetainedMessageType.OWNER_OPEN
+    assert result.status is RetStatus.INVALID
+    assert result.owner_id == owner_id
+    assert result.owner_generation == owner_generation
+    assert result.item_id == 0
+    assert result.current_revision == 1
+    assert result.accepted_bytes == 0
+    assert core.owner_state is source
+    _settle_lifecycle(core, rejected)
+
+
+def test_owner_open_result_gate_blocks_a_second_lifecycle_request():
+    core, encoder, _decoder = _open_retained_core()
+    owner = _owner_open()
+    core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(owner),
+        )
+    )
+
+    with pytest.raises(TerminalSessionError, match="outstanding RET_RESULT"):
+        core.feed_machine(
+            encoder.encode(
+                RetainedMessageType.OWNER_OPEN,
+                encode_owner_open(_owner_open(owner_id=8)),
+            )
+        )
+
+
+def test_owner_drop_uses_shared_revision_and_exact_tombstone_authority():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+
+    dropped = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(2, 1, owner.owner_id, owner.owner_generation)),
+        )
+    )
+    drop_frame = decoder.feed(dropped.outbound[0].payload)[0]
+    assert TX_RESULT.unpack(drop_frame.payload) == (2, 0, 0, 2)
+    state = core.owner_state
+    assert state is not None
+    assert not state.records[owner.owner_id].live
+    assert state.reservations.live_owners == 0
+    core.settle_result_delivery(2)
+
+    tombstone = core.owner_state
+    repeated = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(3, 2, owner.owner_id, owner.owner_generation)),
+        )
+    )
+    assert TX_RESULT.unpack(decoder.feed(repeated.outbound[0].payload)[0].payload) == (
+        3,
+        0,
+        0,
+        3,
+    )
+    assert core.owner_state is tombstone
+    core.settle_result_delivery(3)
+
+    stale = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(4, 3, owner.owner_id, 2)),
+        )
+    )
+    assert TX_RESULT.unpack(decoder.feed(stale.outbound[0].payload)[0].payload) == (
+        4,
+        2,
+        0,
+        3,
+    )
+    assert core.owner_state is tombstone
+    core.settle_result_delivery(4)
+
+    stale_base = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(5, 2, owner.owner_id, owner.owner_generation)),
+        )
+    )
+    assert TX_RESULT.unpack(
+        decoder.feed(stale_base.outbound[0].payload)[0].payload
+    ) == (5, 3, 0, 3)
+    assert core.owner_state is tombstone
+
+
+@pytest.mark.parametrize(
+    ("owner_id", "owner_generation"),
+    ((0, 1), (7, 0)),
+)
+def test_owner_drop_invalid_owner_scalars_return_status_two_without_mutation(
+    owner_id: int,
+    owner_generation: int,
+):
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    source = core.owner_state
+
+    rejected = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            OWNER_DROP_WIRE.pack(2, 1, owner_id, owner_generation),
+        )
+    )
+
+    assert TX_RESULT.unpack(decoder.feed(rejected.outbound[0].payload)[0].payload) == (
+        2,
+        2,
+        0,
+        1,
+    )
+    assert core.owner_state is source
+    assert core.presentation_revision == 1
+    core.settle_result_delivery(2)
+
+
+@pytest.mark.parametrize(
+    ("message_type", "payload", "detail"),
+    (
+        (
+            RetainedMessageType.OWNER_OPEN,
+            bytes(OWNER_OPEN_WIRE.size - 1),
+            "OWNER_OPEN payload length",
+        ),
+        (
+            RetainedMessageType.OWNER_DROP,
+            bytes(OWNER_DROP_WIRE.size - 1),
+            "OWNER_DROP payload length",
+        ),
+    ),
+)
+def test_owner_lifecycle_wrong_fixed_length_remains_structurally_fatal(
+    message_type: RetainedMessageType,
+    payload: bytes,
+    detail: str,
+):
+    core, encoder, _decoder = _open_retained_core()
+
+    with pytest.raises(TerminalSessionError, match=detail):
+        core.feed_machine(encoder.encode(message_type, payload))
+
+
+def test_soft_reset_settles_one_crossed_owner_open_then_destroys_epoch_authority():
+    core, encoder, decoder = _open_retained_core()
+    reset = core.request_soft_reset()
+    assert decoder.feed(reset.payload)[0].message_type == MessageType.SOFT_RESET_REQUEST
+
+    crossed = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(_owner_open()),
+        )
+    )
+    result_frame = decoder.feed(crossed.outbound[0].payload)[0]
+    decoder.feed(crossed.outbound[1].payload)
+    assert decode_ret_result(result_frame.payload).status is RetStatus.OK
+    assert core.owner_state is not None
+    assert core.owner_state.reservations.live_owners == 1
+    _settle_lifecycle(core, crossed)
+
+    encoder.set_presentation_epoch(1)
+    acknowledged = core.feed_machine(
+        encoder.encode(
+            MessageType.SOFT_RESET_ACK,
+            SOFT_RESET_ACK.pack(1, 0, 0),
+        )
+    )
+    assert acknowledged.outbound == ()
+    assert core.owner_state is None
+    assert not core.retained_enabled
+
+
+def test_soft_reset_cancels_crossed_exact_owner_drop_with_status_one():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    decoder.feed(core.request_soft_reset().payload)
+
+    crossed = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(2, 1, owner.owner_id, owner.owner_generation)),
+        )
+    )
+    assert TX_RESULT.unpack(decoder.feed(crossed.outbound[0].payload)[0].payload) == (
+        2,
+        1,
+        0,
+        1,
+    )
+    state = core.owner_state
+    assert state is not None
+    assert state.records[owner.owner_id].live
+    core.settle_result_delivery(2)
+
+
+def test_synchronized_close_retires_settled_owner_authority():
+    core, encoder, _decoder = _open_retained_core()
+    opened = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(_owner_open()),
+        )
+    )
+    _settle_lifecycle(core, opened)
+    assert core.owner_state is not None
+
+    core.feed_machine(
+        encoder.encode(
+            MessageType.CLOSE,
+            CLOSE.pack(0, bytes(6), 1),
+        )
+    )
+    assert core.state is TerminalState.ANSI
+    assert core.owner_state is None
+
+
 def test_client_receive_credit_backpressures_data_but_not_control_results():
     core, _offer, request, encoder, client_ready = _negotiate(client_credit=40)
     result = core.feed_machine(encode_open(request) + client_ready + _snapshot_frames(encoder))
@@ -695,6 +1089,51 @@ def test_client_close_is_acknowledged_before_returning_to_ansi():
     assert core.state is TerminalState.ANSI
     assert core.view is None
     assert core.feed_machine(b"legacy").ansi_bytes == b"legacy"
+
+
+def test_client_close_discards_an_open_transaction_without_a_result():
+    core, offer, request, encoder, client_ready = _negotiate(client_credit=512)
+    opened = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, opened)
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+
+    closed = core.feed_machine(
+        encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(2, 1, 2, 2, 0, 0),
+        )
+        + encoder.encode(
+            MessageType.CLOSE,
+            CLOSE.pack(7, bytes(6), 1),
+        )
+    )
+
+    frames = []
+    for outbound in closed.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in frames] == [MessageType.CLOSE_ACK]
+    assert CLOSE_ACK.unpack(frames[0].payload) == (7, bytes(6))
+    assert core.state is TerminalState.ANSI
+    assert core.outstanding_result_transaction_id is None
+
+
+def test_client_close_refuses_an_already_emitted_transaction_result():
+    core, _offer, request, encoder, client_ready = _negotiate(client_credit=512)
+    core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+
+    with pytest.raises(TerminalSessionError, match="unsettled emitted result"):
+        core.feed_machine(
+            encoder.encode(
+                MessageType.CLOSE,
+                CLOSE.pack(7, bytes(6), 1),
+            )
+        )
 
 
 def test_ready_payload_floor_is_enforced_for_narrow_geometries():

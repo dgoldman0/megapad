@@ -27,11 +27,21 @@ from presentation_terminal.driver import (
     DriverStatus,
     PresentationTerminalDriver,
 )
-from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
+from presentation_terminal.retained_model import (
+    OwnerQuotas,
+    RetainedFeature,
+    RetainedPolicy,
+)
 from presentation_terminal.retained_wire import (
+    OwnerDrop,
+    OwnerOpen,
+    RetStatus,
     RetainedMessageType,
     decode_ret_caps,
     decode_ret_formats,
+    decode_ret_result,
+    encode_owner_drop,
+    encode_owner_open,
     encode_ret_query,
 )
 from presentation_terminal.server import (
@@ -48,6 +58,7 @@ SPAN = struct.Struct("<III")
 CELL = struct.Struct("<IBBH")
 CURSOR = struct.Struct("<IIB7x")
 COMMIT = struct.Struct("<Q")
+TX_RESULT = struct.Struct("<QHHQ")
 CREDIT = struct.Struct("<Q")
 TEXT_PREFIX = struct.Struct("<HHQ")
 POINTER = struct.Struct("<iiHHHHhhQ")
@@ -448,6 +459,74 @@ def test_driver_rejects_retained_discovery_capacity_before_attachment():
             retained_policy=_retained_policy(),
         )
     assert not system.presentation_terminal_host.enhanced_attached
+
+
+def test_driver_settles_owner_lifecycle_markers_after_ordered_admission():
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    driver = PresentationTerminalDriver.attach(
+        system,
+        _host_limits(),
+        _terminal_config(),
+        DriverLimits(4_096, 3),
+        retained_policy=_retained_policy(),
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+    )
+    _write_native_uart(system, encode_probe(1))
+    driver.service()
+    system.cpu.halted = True
+    system.run_batch_stats(1)
+    offer = parse_negotiation(_drain_uart_rx(system))
+    assert isinstance(offer, Offer)
+    opened_bytes, encoder = _open_bytes(offer, client_credit=512)
+    _write_native_uart(system, opened_bytes)
+    driver.service()
+    system.run_batch_stats(1)
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    decoder.feed(_drain_uart_rx(system))
+
+    _write_native_uart(
+        system,
+        encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query()),
+    )
+    driver.service()
+    system.run_batch_stats(1)
+    decoder.feed(_drain_uart_rx(system))
+
+    owner = OwnerOpen(7, 1, OwnerQuotas(4, 0, 0, 0, 0, 0, 0))
+    _write_native_uart(
+        system,
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner)),
+    )
+    owner_result = driver.service()
+    assert owner_result.outbound_records == 2
+    assert driver.core.outstanding_lifecycle_result is None
+    assert driver.core.owner_state is not None
+    assert driver.core.owner_state.reservations.regions == 4
+    system.run_batch_stats(1)
+    owner_frames = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in owner_frames] == [
+        RetainedMessageType.RET_RESULT,
+        MessageType.CREDIT,
+    ]
+    assert decode_ret_result(owner_frames[0].payload).status is RetStatus.OK
+
+    _write_native_uart(
+        system,
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(2, 1, 7, 1)),
+        ),
+    )
+    drop_result = driver.service()
+    assert drop_result.outbound_records == 1
+    assert driver.core.outstanding_result_transaction_id is None
+    assert driver.core.presentation_revision == 2
+    assert driver.core.owner_state is not None
+    assert not driver.core.owner_state.records[7].live
+    system.run_batch_stats(1)
+    drop_frame = decoder.feed(_drain_uart_rx(system))[0]
+    assert TX_RESULT.unpack(drop_frame.payload) == (2, 0, 0, 2)
+    driver.close()
 
 
 def test_driver_routes_bounded_preswitch_input_through_the_lease():

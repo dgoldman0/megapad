@@ -250,6 +250,67 @@ def test_owner_lifecycle_scalars_and_result_semantics_are_exact():
         OwnerDrop(0, 0, 1, 1)
 
 
+@pytest.mark.parametrize(
+    ("owner_id", "owner_generation"),
+    ((0, 0), (0, 7), (7, 0)),
+)
+def test_ret_invalid_round_trips_exact_invalid_owner_scalars(
+    owner_id: int,
+    owner_generation: int,
+):
+    result = RetainedResult(
+        RetainedMessageType.OWNER_OPEN,
+        RetStatus.INVALID,
+        owner_id,
+        owner_generation,
+        0,
+        11,
+    )
+
+    assert decode_ret_result(encode_ret_result(result)) == result
+
+
+@pytest.mark.parametrize(
+    "status",
+    (RetStatus.OK, RetStatus.STALE_OWNER, RetStatus.NO_CAPACITY),
+)
+def test_non_invalid_owner_results_still_require_nonzero_authority(status: RetStatus):
+    with pytest.raises(ValueError, match="between 1"):
+        RetainedResult(
+            RetainedMessageType.OWNER_OPEN,
+            status,
+            0,
+            1,
+            0,
+            11,
+        )
+
+
+def test_ret_invalid_resource_result_round_trips_a_zero_item_id():
+    result = RetainedResult(
+        RetainedMessageType.RESOURCE_BEGIN,
+        RetStatus.INVALID,
+        7,
+        1,
+        0,
+        11,
+    )
+
+    assert decode_ret_result(encode_ret_result(result)) == result
+
+
+def test_non_invalid_resource_result_still_requires_a_nonzero_item_id():
+    with pytest.raises(ValueError, match="item_id must be nonzero"):
+        RetainedResult(
+            RetainedMessageType.RESOURCE_BEGIN,
+            RetStatus.OK,
+            7,
+            1,
+            0,
+            11,
+        )
+
+
 def test_present_begin_enforces_modes_counts_and_exact_operation_free_bytes():
     retained_start = PresentBegin(
         1,
