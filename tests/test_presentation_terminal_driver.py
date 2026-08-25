@@ -438,10 +438,21 @@ def test_driver_admits_retained_discovery_pair_then_covering_credit_in_order():
 
     assert driver.request_resize(2, 2) is DriverStatus.PROGRESS
     assert driver.pending_resize is None
-    assert driver.request_resize(4, 1) is DriverStatus.BACKPRESSURED
+    assert driver.request_resize(4, 1) is DriverStatus.PROGRESS
+    assert driver.pending_resize == (4, 1)
+    materialized = driver.service()
+    assert materialized.outbound_records == 1
     assert driver.pending_resize is None
-    assert driver.core.selected_geometry == (2, 2)
-    assert driver.core.geometry_generation == 0
+    assert driver.core.selected_geometry == (4, 1)
+    assert driver.core.geometry_generation == 1
+    assert driver.core.state is TerminalState.RESYNCING
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (2, 2)
+
+    assert system.run_batch_stats(1).external_events_applied == 1
+    resize = decoder.feed(_drain_uart_rx(system))[0]
+    assert resize.message_type == MessageType.RESIZE
+    assert RESIZE.unpack(resize.payload) == (4, 1, 1)
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (4, 1)
     driver.close()
 
 

@@ -121,6 +121,9 @@ class PresentationCoordinator:
         self._cell_model = cell_model
         self._retained_model = retained_model
         self._token = object()
+        self._selected_geometry = geometry
+        self._source_cell = cell
+        self._source_retained = retained
         self._view = CompositePresentationView(
             presentation_epoch=clock.presentation_epoch,
             revision=clock.revision,
@@ -158,7 +161,7 @@ class PresentationCoordinator:
         if retained is not None and not isinstance(retained, PreparedSceneInstall):
             raise TypeError("retained must be PreparedSceneInstall or None")
         if geometry is None:
-            target_geometry = self._view.geometry
+            target_geometry = self._selected_geometry
         elif isinstance(geometry, PresentationGeometry):
             target_geometry = geometry
         else:
@@ -170,9 +173,9 @@ class PresentationCoordinator:
                 presentation_epoch=self._clock.presentation_epoch,
                 revision=target_revision,
                 geometry=target_geometry,
-                cell=self._view.cell if cell is None else cell.view,
+                cell=self._source_cell if cell is None else cell.view,
                 retained=(
-                    self._view.retained if retained is None else retained.state
+                    self._source_retained if retained is None else retained.state
                 ),
             ),
             lease=lease,
@@ -194,12 +197,12 @@ class PresentationCoordinator:
             or prepared._source_view is not self._view
         ):
             raise RuntimeError("prepared presentation is stale or foreign")
-        if self._cell_model.view is not prepared._source_view.cell:
+        if self._cell_model.view is not self._source_cell:
             raise RuntimeError("composite CELL source view changed outside coordinator")
         if self._retained_model is None:
             if prepared._source_view.retained is not None or prepared.retained is not None:
                 raise RuntimeError("composite has no retained model")
-        elif self._retained_model.state is not prepared._source_view.retained:
+        elif self._retained_model.state is not self._source_retained:
             raise RuntimeError("composite retained source changed outside coordinator")
 
         lease = prepared.lease
@@ -231,7 +234,7 @@ class PresentationCoordinator:
             raise RuntimeError("prepared composite revision or epoch is stale")
 
         if prepared.cell is None:
-            if view.cell is not prepared._source_view.cell:
+            if view.cell is not self._source_cell:
                 raise RuntimeError("unchanged CELL plane was not structurally shared")
         else:
             self._cell_model.validate_prepared(prepared.cell, lease=lease)
@@ -244,7 +247,7 @@ class PresentationCoordinator:
                 raise RuntimeError("prepared CELL revision is not the global revision")
 
         if prepared.retained is None:
-            if view.retained is not prepared._source_view.retained:
+            if view.retained is not self._source_retained:
                 raise RuntimeError("unchanged retained plane was not structurally shared")
         else:
             retained_model = self._retained_model
@@ -282,8 +285,44 @@ class PresentationCoordinator:
             self._cell_model._install_prevalidated(prepared.cell)
         if prepared.retained is not None:
             retained_model._install_prevalidated(prepared.retained)
+        self._source_cell = prepared.view.cell
+        self._source_retained = prepared.view.retained
+        self._selected_geometry = prepared.view.geometry
         self._view = prepared.view
         return result
+
+    def admit_resize(self, geometry: PresentationGeometry) -> None:
+        """Bind already-selected model state without publishing a half resize.
+
+        The last immutable composite remains the physical view until the peer
+        commits the mandatory PRESENT CELL_REPLACE.  Subsequent preparation
+        nevertheless uses the newly selected CELL/retained sources.
+        """
+
+        if not isinstance(geometry, PresentationGeometry):
+            raise TypeError("geometry must be PresentationGeometry")
+        if (
+            self._clock.open_transaction is not None
+            or self._clock.outstanding_result is not None
+        ):
+            raise PresentationStateError("resize admission requires a settled clock")
+        if geometry.generation <= self._selected_geometry.generation:
+            raise PresentationStateError("resize geometry generation is not newer")
+        if self._cell_model.geometry != (geometry.cols, geometry.rows):
+            raise PresentationStateError("CELL model did not select resize geometry")
+        if self._cell_model.view is not None or not self._cell_model.awaiting_snapshot:
+            raise PresentationStateError("CELL model does not require replacement")
+        retained_model = self._retained_model
+        if retained_model is None:
+            raise PresentationStateError("retained resize has no retained model")
+        retained = retained_model.state
+        if retained.geometry != geometry:
+            raise PresentationStateError("retained model did not select resize geometry")
+        if retained.retained_visible or retained.hidden is not None:
+            raise PresentationStateError("retained resize did not hide stale layout")
+        self._selected_geometry = geometry
+        self._source_cell = None
+        self._source_retained = retained
 
     def prepare_owner_retirement(
         self,

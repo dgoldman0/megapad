@@ -29,6 +29,7 @@ from presentation_terminal.retained_scene import (
     RGBA,
     ReadoutBody,
     ReadoutFormat,
+    RebuildRequirement,
     Sample,
     TimestampMode,
 )
@@ -1259,16 +1260,61 @@ def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
     assert dropped.views == (core.presentation_view,)
 
 
-def test_retained_resize_is_blocked_before_wire_or_geometry_mutation():
-    core, _encoder, _decoder = _open_retained_core()
-    geometry = core.selected_geometry
-    generation = core.geometry_generation
+def test_retained_resize_requires_present_cell_replace_before_publication():
+    core, encoder, decoder = _open_retained_core()
+    old_presentation = core.presentation_view
 
-    assert not core.resize_ready
-    with pytest.raises(TerminalSessionError, match="retained resize is blocked"):
-        core.send_resize(4, 1)
-    assert core.selected_geometry == geometry
-    assert core.geometry_generation == generation
+    assert core.resize_ready
+    resize = core.send_resize(4, 1)
+    assert resize is not None
+    assert RESIZE.unpack(decoder.feed(resize.payload)[0].payload) == (4, 1, 1)
+    assert core.state is TerminalState.RESYNCING
+    assert core.selected_geometry == (4, 1)
+    assert core.geometry_generation == 1
+    assert core.view is None
+    assert core.presentation_view is old_presentation
+    assert core.retained_state is not None
+    assert core.retained_state.requirement is RebuildRequirement.REPLACE
+    assert not core.retained_state.retained_visible
+
+    cells = b"".join(
+        CELL.pack(codepoint, 7, 0, 0)
+        for codepoint in (ord("W"), ord("I"), ord("D"), ord("E"))
+    )
+    begin = PresentBegin(
+        2,
+        1,
+        1,
+        300,
+        4,
+        1,
+        1,
+        4,
+        0,
+        CellMode.REPLACE,
+        PresentRetainedMode.NONE,
+    )
+    replaced = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.PRESENT_BEGIN,
+            encode_present_begin(begin),
+        )
+        + encoder.encode(MessageType.CELL_SPAN, SPAN.pack(0, 0, 4) + cells)
+        + encoder.encode(MessageType.CURSOR, CURSOR.pack(0, 3, 1))
+        + encoder.encode(
+            RetainedMessageType.PRESENT_COMMIT,
+            encode_present_commit(PresentCommit(2, PresentDisposition.COMMIT)),
+        )
+    )
+
+    assert core.state is TerminalState.ACTIVE
+    assert core.presentation_revision == 2
+    assert replaced.views == (core.presentation_view,)
+    assert core.presentation_view is not old_presentation
+    assert core.presentation_view is not None
+    assert core.presentation_view.geometry.generation == 1
+    assert core.presentation_view.cell is core.view
+    assert core.presentation_view.retained is core.retained_state
 
 
 def test_legacy_snapshot_begin_is_forbidden_after_retained_discovery():

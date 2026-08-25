@@ -635,12 +635,6 @@ class PresentationTerminalDriver:
         if geometry == self._core.selected_geometry:
             self._resize_intent = None
             return DriverStatus.PROGRESS
-        if self._core.retained_enabled:
-            # RETAINED-1 must replace the CELL plane through PRESENT and then
-            # relayout the retained plane.  Until that admission path exists,
-            # do not retain an intent that can never become wire-visible.
-            self._resize_intent = None
-            return DriverStatus.BACKPRESSURED
         self._resize_intent = geometry
         return DriverStatus.PROGRESS
 

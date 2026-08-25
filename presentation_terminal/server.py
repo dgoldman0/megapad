@@ -716,8 +716,8 @@ class PresentationTerminalCore:
         model = self._model
         decoder = self._decoder
         clock = self._clock
-        return (
-            self._state is TerminalState.ACTIVE
+        quiescent = (
+            self._state in {TerminalState.ACTIVE, TerminalState.RESYNCING}
             and model is not None
             and decoder is not None
             and clock is not None
@@ -726,10 +726,15 @@ class PresentationTerminalCore:
             and clock.open_transaction is None
             and clock.outstanding_result is None
             and self._outstanding_lifecycle_result is None
-            and not self._retained_enabled
-            and not model.awaiting_snapshot
+            and self._reset_requested_epoch is None
             and not model.transaction_open
         )
+        if not quiescent:
+            return False
+        if self._retained_enabled:
+            retained = self._retained_model
+            return retained is not None and not retained.transaction_open
+        return self._state is TerminalState.ACTIVE and not model.awaiting_snapshot
 
     def validate_resize(self, cols: int, rows: int) -> tuple[int, int]:
         """Validate geometry against this attachment's declared bounds."""
@@ -755,6 +760,17 @@ class PresentationTerminalCore:
         if 12 + 8 * normalized_cols > self._config.max_payload:
             raise ValueError(
                 "new geometry cannot fit one maximum-width CELL_SPAN"
+            )
+        if self._retained_enabled:
+            policy = self._session_retained_policy
+            if policy is None:
+                raise TerminalSessionError("retained resize lost its bound policy")
+            policy.validate_geometry(
+                PresentationGeometry(
+                    normalized_cols,
+                    normalized_rows,
+                    self._geometry_generation + 1,
+                )
             )
         return normalized_cols, normalized_rows
 
@@ -927,12 +943,14 @@ class PresentationTerminalCore:
 
     def send_resize(self, cols: int, rows: int) -> OutboundBytes | None:
         """Encode one geometry change and require its replacement snapshot."""
-
-        if self._retained_enabled:
-            raise TerminalSessionError(
-                "retained resize is blocked until PRESENT layout admission is installed"
-            )
         normalized_cols, normalized_rows = self.validate_resize(cols, rows)
+        if (normalized_cols, normalized_rows) == self.selected_geometry:
+            raise ValueError("resize geometry is unchanged")
+        if not self.resize_ready:
+            raise TerminalSessionError(
+                "terminal resize waits for a settled transaction boundary "
+                "and presentation state"
+            )
         if self._wire_transaction_id is not None:
             raise TerminalSessionError(
                 "terminal resize waits for the client transaction boundary"
@@ -948,14 +966,31 @@ class PresentationTerminalCore:
             raise TerminalSessionError("terminal geometry generation is exhausted")
 
         generation = self._geometry_generation + 1
+        geometry = PresentationGeometry(normalized_cols, normalized_rows, generation)
+        retained = self._retained_model if self._retained_enabled else None
+        coordinator = self._coordinator if self._retained_enabled else None
+        if retained is not None:
+            policy = self._session_retained_policy
+            if policy is None or coordinator is None:
+                raise TerminalSessionError("retained resize lost its model authority")
+            required = policy.validate_geometry(geometry)
+            if required > self._client_data_grant - self._client_data_received:
+                return None
         encoded = self._encode_data(
             MessageType.RESIZE,
             _RESIZE.pack(normalized_cols, normalized_rows, generation),
         )
         if encoded is None:
             return None
-        self._rebase_legacy_cell_replacement_clock()
+        if retained is None:
+            self._rebase_legacy_cell_replacement_clock()
         model.select_geometry(normalized_cols, normalized_rows)
+        if retained is not None:
+            try:
+                retained.require_layout(geometry)
+                coordinator.admit_resize(geometry)
+            except (PresentationStateError, SceneModelError) as exc:
+                self._fatal(f"cannot install retained resize boundary: {exc}", cause=exc)
         self._config = replace(
             self._config,
             cols=normalized_cols,
@@ -964,9 +999,10 @@ class PresentationTerminalCore:
         self._geometry_generation = generation
         request = self._open
         assert request is not None
-        self._session_retained_policy = self._bind_retained_policy(
-            terminal_to_client_max_payload=request.client_max_payload,
-        )
+        if retained is None:
+            self._session_retained_policy = self._bind_retained_policy(
+                terminal_to_client_max_payload=request.client_max_payload,
+            )
         self._state = TerminalState.RESYNCING
         return encoded
 
@@ -1843,6 +1879,14 @@ class PresentationTerminalCore:
             return ()
         wire.begin = begin
 
+        if (
+            self._state is TerminalState.RESYNCING
+            and self._reset_requested_epoch is None
+            and begin.cell_mode is not CellMode.REPLACE
+        ):
+            self._discard_transaction_status = 2
+            return ()
+
         retained_state = self._require_retained_model().state
         retained_policy = self._session_retained_policy
         if retained_policy is None:
@@ -2190,6 +2234,14 @@ class PresentationTerminalCore:
         )
         released = self._wire_transaction_bytes
         self._clear_wire_transaction()
+        if (
+            status == 0
+            and self._state is TerminalState.RESYNCING
+            and self._reset_requested_epoch is None
+            and wire.begin is not None
+            and wire.begin.cell_mode is CellMode.REPLACE
+        ):
+            self._state = TerminalState.ACTIVE
         return (result,) + self._release_data(released), view
 
     def _reject_present_transaction(self, lease: TransactionLease) -> ResultLease:
