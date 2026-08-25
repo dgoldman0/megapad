@@ -44,7 +44,7 @@ PROVIDED rich-terminal.f
 \ TEXT data remains valid until the next PT-SERVICE for the session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
-872 CONSTANT /PT-SESSION
+880 CONSTANT /PT-SESSION
 
 : PT-SESSION-SIZE  ( -- bytes )  /PT-SESSION ;
 : PT-EVENT-SIZE    ( -- bytes )  /PT-EVENT ;
@@ -306,6 +306,7 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
 : _PT.S.RET-REBUILD     ( s -- a ) 848 + ;
 : _PT.S.RESET-PENDING?  ( s -- a ) 856 + ;
 : _PT.S.RESET-EPOCH     ( s -- a ) 864 + ;
+: _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;
 
 0 CONSTANT _PT-TX-NONE
 1 CONSTANT _PT-TX-CELL
@@ -344,7 +345,9 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
     _PT.S.STATE @ ;
 
 : PT-ACTIVE?  ( session -- flag )
-    PT-STATE@ DUP PT-ST-ACTIVE = SWAP PT-ST-RESYNCING = OR ;
+    DUP _PT-VALID-S? 0= IF DROP FALSE EXIT THEN
+    DUP _PT.S.CLOSE-PENDING? @ IF DROP FALSE EXIT THEN
+    _PT.S.STATE @ DUP PT-ST-ACTIVE = SWAP PT-ST-RESYNCING = OR ;
 
 : PT-SNAPSHOT-NEEDED?  ( session -- flag )
     DUP _PT-VALID-S? 0= IF DROP FALSE EXIT THEN
@@ -353,6 +356,7 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
 : PT-RETAINED-STATE@  ( session -- state )
     DUP _PT-VALID-S? 0= IF DROP PT-RET-ST-INACTIVE EXIT THEN
     DUP _PT.S.RET-ENABLED? @ 0= IF DROP PT-RET-ST-INACTIVE EXIT THEN
+    DUP _PT.S.CLOSE-PENDING? @ IF DROP PT-RET-ST-INACTIVE EXIT THEN
     DUP _PT.S.STATE @ DUP PT-ST-ACTIVE = SWAP PT-ST-RESYNCING = OR 0= IF
         DROP PT-RET-ST-INACTIVE EXIT
     THEN
@@ -403,6 +407,7 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
 \ Repeating the call is idempotent and never retries an epoch-local answer.
 : PT-RETAINED-DISCOVER  ( session -- status )
     DUP _PT-VALID-S? 0= IF DROP PT-S-INVALID EXIT THEN
+    DUP _PT.S.CLOSE-PENDING? @ IF DROP PT-S-SESSION-LOST EXIT THEN
     DUP _PT.S.STATE @ DUP PT-ST-CLOSING = SWAP PT-ST-LOST = OR IF
         DROP PT-S-SESSION-LOST EXIT
     THEN
@@ -411,6 +416,7 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
     _PT-RET-RESET PT-S-OK ;
 
 : _PT-OP-LOST?  ( s -- flag )
+    DUP _PT.S.CLOSE-PENDING? @ IF DROP TRUE EXIT THEN
     _PT.S.STATE @ DUP PT-ST-LOST = SWAP PT-ST-CLOSING = OR ;
 
 : _PT-OWNER-RELEASE  ( s -- )
@@ -450,11 +456,17 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
     DUP _PT.S.COMPLETE? OFF
     _PT.S.COMP-KIND /PT-COMPLETION 0 FILL ;
 
-: _PT-RESULT-BUSY?  ( s -- flag )
+: _PT-SETTLEMENT-BUSY?  ( s -- flag )
     DUP _PT.S.AWAIT? @
     OVER _PT.S.LIFE-AWAIT? @ OR
     OVER _PT.S.COMPLETE? @ OR
     SWAP _PT.S.RESET-PENDING? @ OR ;
+
+\ Close intent is an admission barrier even before CLOSE reaches the wire.
+\ The close scheduler itself uses the narrower settlement predicate above.
+: _PT-RESULT-BUSY?  ( s -- flag )
+    DUP _PT-SETTLEMENT-BUSY?
+    SWAP _PT.S.CLOSE-PENDING? @ OR ;
 
 \ =====================================================================
 \  Checked scalar, range, and little-endian helpers
@@ -1172,6 +1184,7 @@ VARIABLE _PT-RX-DATA?
     DUP _PT.S.RESET-PENDING? OFF
     DUP _PT.S.CREDIT-DIRTY? OFF
     DUP _PT.S.CLOSE-OPENING? OFF
+    DUP _PT.S.CLOSE-PENDING? OFF
     DUP PT-ST-ANSI SWAP _PT.S.STATE !
     _PT-OWNER-RELEASE ;
 
@@ -1190,6 +1203,8 @@ VARIABLE _PT-FAIL-SEQ
     _PT-FAIL-S @ _PT-AWAIT-CLEAR
     _PT-FAIL-S @ _PT-LIFE-CLEAR
     _PT-FAIL-S @ _PT.S.RESET-PENDING? OFF
+    _PT-FAIL-S @ _PT.S.CLOSE-PENDING? OFF
+    _PT-FAIL-S @ _PT.S.CLOSE-OPENING? OFF
     _PT-FAIL-S @ _PT-RET-RESET
     PT-ST-LOST _PT-FAIL-S @ _PT.S.STATE !
     PT-S-SESSION-LOST ;
@@ -1517,6 +1532,16 @@ VARIABLE _PT-SR-GRANT
     OVER _PT.S.LIFE-AWAIT? @ OR OVER _PT.S.COMPLETE? @ OR IF
         DROP PT-S-OK EXIT
     THEN
+    \ A first-latched close owns the final sequence slot.  When RESET_ACK no
+    \ longer fits, the valid crossed reset is subsumed by that CLOSE instead
+    \ of replacing its reason/deadline through _PT-RESET-CLOSE.  At max-1
+    \ the normal ACK still fits and leaves max for CLOSE.
+    DUP _PT.S.CLOSE-PENDING? @
+    OVER _PT.S.TX-SEQ @ 0xFFFFFFFFFFFFFFFF = AND IF
+        DUP _PT.S.RESET-PENDING? OFF
+        _PT.S.RESET-EPOCH OFF
+        PT-S-OK EXIT
+    THEN
     DUP _PT.S.RESET-EPOCH @ OVER _PT.S.EPOCH !
     DUP _PT.S.RESET-PENDING? OFF
     DUP _PT.S.RESET-EPOCH OFF
@@ -1559,11 +1584,20 @@ VARIABLE _PT-SR-GRANT
         0xFFFFFFFFFFFFFFFC
     ELSE
         0xFFFFFFFFFFFFFFFD
-    THEN U> IF _PT-RESET-CLOSE EXIT THEN
+    THEN U> IF
+        \ A pending caller/automatic close already reserves the only legal
+        \ terminal frame.  Record this reset below; settlement either emits
+        \ its ACK first or subsumes it when no sequence slot remains.
+        DUP _PT.S.CLOSE-PENDING? @ 0= IF _PT-RESET-CLOSE EXIT THEN
+    THEN
     DUP _PT-DISCARD-PENDING-EVENT ?DUP IF NIP EXIT THEN
     0 OVER _PT-ABORT-OPEN-RAW ?DUP IF NIP EXIT THEN
     _PT-SR-EPOCH @ OVER _PT.S.RESET-EPOCH !
     TRUE OVER _PT.S.RESET-PENDING? !
+    \ Close-pending service owns the ordered RESET_ACK decision and its
+    \ absolute deadline.  Keep parsing so a crossed result can materialize,
+    \ but never apply the reset inline from receive dispatch.
+    DUP _PT.S.CLOSE-PENDING? @ IF DROP PT-S-OK EXIT THEN
     _PT-APPLY-PENDING-RESET ;
 
 : _PT-DISPATCH-CLOSE  ( s -- status )
@@ -2170,10 +2204,8 @@ VARIABLE _PT-SVC-N
 : _PT-BEGIN-CLOSE  ( reason s -- status )
     DUP _PT-SVC-S !
     OVER OVER _PT-SEND-CLOSE ?DUP IF NIP NIP EXIT THEN
-    OVER _PT-SVC-S @ _PT.S.CLOSE-REASON !
     _PT-SVC-S @ _PT-RET-RESET
     PT-ST-CLOSING _PT-SVC-S @ _PT.S.STATE !
-    MS@ _PT-TIMEOUT-MS + _PT-SVC-S @ _PT.S.DEADLINE !
     2DROP PT-S-OK ;
 
 : _PT-SERVICE-BINARY  ( s -- status )
@@ -2233,26 +2265,119 @@ VARIABLE _PT-SVC-N
     THEN
     _PT-SEND-RET-QUERY ;
 
+VARIABLE _PT-CLOSE-S
+VARIABLE _PT-CLOSE-STATUS
+
+\ Publish a previously latched CLOSE only after every emitted result and any
+\ crossed reset acknowledgement have settled.  An open, uncommitted writer is
+\ local staging and is discarded at the close boundary.  A backpressured
+\ CLOSE keeps the original pending deadline rather than starting a new wait.
+: _PT-PUBLISH-PENDING-CLOSE  ( s -- status )
+    DUP _PT-CLOSE-S !
+    DUP _PT-SETTLEMENT-BUSY? IF DROP PT-S-WOULD-BLOCK EXIT THEN
+    DUP _PT-TX-CLEAR
+    0 OVER _PT.S.EVENT-PENDING !
+    DROP
+    _PT-CLOSE-S @ _PT.S.CLOSE-REASON @ _PT-CLOSE-S @ _PT-BEGIN-CLOSE
+    DUP PT-S-OK = IF
+        FALSE _PT-CLOSE-S @ _PT.S.CLOSE-PENDING? !
+    ELSE DUP PT-S-SESSION-LOST = IF
+        FALSE _PT-CLOSE-S @ _PT.S.CLOSE-PENDING? !
+        FALSE _PT-CLOSE-S @ _PT.S.CLOSE-OPENING? !
+    THEN
+    THEN ;
+
+\ A caller-requested close gets one bounded pre-CLOSING settlement window.
+\ Only ordered input/result processing and a required reset ACK may advance;
+\ ordinary credit, discovery, events, and new writers cannot prolong it.
+: _PT-SERVICE-CLOSE-PENDING  ( s -- status )
+    DUP _PT-SVC-S !
+    \ Close makes a queued input event non-authoritative.  Discard one that
+    \ already exists before binary parsing so its backpressure cannot prevent
+    \ this bounded scheduler from reaching the deadline.
+    DUP _PT-DISCARD-PENDING-EVENT ?DUP IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
+        NIP EXIT
+    THEN
+    DUP _PT-SERVICE-BINARY _PT-CLOSE-STATUS !
+    _PT-SVC-S @ _PT.S.STATE @ PT-ST-ANSI = IF DROP PT-S-OK EXIT THEN
+    _PT-SVC-S @ _PT.S.STATE @ PT-ST-LOST = IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        DROP PT-S-SESSION-LOST EXIT
+    THEN
+    \ No receive-side helper should bypass the latch, but if one has already
+    \ published CLOSE, retire the local pending flag rather than send twice.
+    _PT-SVC-S @ _PT.S.STATE @ PT-ST-CLOSING = IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        DROP PT-S-OK EXIT
+    THEN
+    _PT-CLOSE-STATUS @ DUP PT-S-OK <>
+    SWAP PT-S-WOULD-BLOCK <> AND IF
+        DROP _PT-CLOSE-STATUS @ EXIT
+    THEN
+    \ Binary input may have materialized one last event.  Retire it before
+    \ checking the deadline, while preserving binary WOULD-BLOCK separately.
+    DUP _PT-DISCARD-PENDING-EVENT ?DUP IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
+        NIP EXIT
+    THEN
+    MS@ _PT-SVC-S @ _PT.S.DEADLINE @ _PT-U>= IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
+        PT-ST-LOST _PT-SVC-S @ _PT.S.STATE !
+        DROP PT-S-SESSION-LOST EXIT
+    THEN
+    _PT-CLOSE-STATUS @ PT-S-WOULD-BLOCK = IF
+        DROP PT-S-WOULD-BLOCK EXIT
+    THEN
+    \ An exposed completion belongs to its exact consumer.  Do not emit a
+    \ reset acknowledgement or CLOSE until that consumer has reconciled it.
+    _PT-SVC-S @ _PT.S.COMPLETE? @ IF
+        DROP PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-SVC-S @ _PT-APPLY-PENDING-RESET _PT-CLOSE-STATUS !
+    _PT-SVC-S @ _PT.S.STATE @ PT-ST-ANSI = IF DROP PT-S-OK EXIT THEN
+    _PT-SVC-S @ _PT.S.STATE @ PT-ST-LOST = IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        DROP PT-S-SESSION-LOST EXIT
+    THEN
+    _PT-SVC-S @ _PT.S.STATE @ PT-ST-CLOSING = IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        DROP PT-S-OK EXIT
+    THEN
+    MS@ _PT-SVC-S @ _PT.S.DEADLINE @ _PT-U>= IF
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+        FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
+        PT-ST-LOST _PT-SVC-S @ _PT.S.STATE !
+        DROP PT-S-SESSION-LOST EXIT
+    THEN
+    _PT-CLOSE-STATUS @ PT-S-OK <> IF
+        DROP _PT-CLOSE-STATUS @ EXIT
+    THEN
+    DROP _PT-SVC-S @ _PT-PUBLISH-PENDING-CLOSE ;
+
 : PT-SERVICE  ( session -- status )
     DUP _PT-VALID-S? 0= IF DROP PT-S-INVALID EXIT THEN
     DUP _PT-SVC-S !
     DUP _PT.S.STATE @ PT-ST-ANSI = IF DROP PT-S-OK EXIT THEN
     DUP _PT.S.STATE @ PT-ST-LOST = IF DROP PT-S-SESSION-LOST EXIT THEN
     DUP _PT.S.STATE @ PT-ST-PROBING = IF _PT-SERVICE-PROBE EXIT THEN
+    _PT-SVC-S @ _PT.S.CLOSE-PENDING? @ IF
+        DROP _PT-SVC-S @ _PT-SERVICE-CLOSE-PENDING EXIT
+    THEN
     DUP _PT.S.STATE @ PT-ST-ACTIVE =
     OVER _PT.S.STATE @ PT-ST-RESYNCING = OR IF
         _PT-SVC-S @ _PT.S.TX-SEQ @ 0xFFFFFFFFFFFFFFFE _PT-U>=
         IF
-            _PT-SVC-S @ _PT.S.TX-OPEN? @ 0=
-            _PT-SVC-S @ _PT-RESULT-BUSY? 0= AND IF
-                FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
-                0 _PT-SVC-S @ _PT.S.EVENT-PENDING !
-                DROP 2 _PT-SVC-S @ _PT-BEGIN-CLOSE EXIT
-            THEN
-            \ Reserve the final sequence for CLOSE.  While an admitted result
-            \ is outstanding, service may only receive enough input to expose
-            \ its completion; it must not emit CREDIT, reset, or RET query.
-            DROP _PT-SVC-S @ _PT-SERVICE-BINARY EXIT
+            2 _PT-SVC-S @ _PT.S.CLOSE-REASON !
+            TRUE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !
+            FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
+            MS@ _PT-TIMEOUT-MS + _PT-SVC-S @ _PT.S.DEADLINE !
+            0 _PT-SVC-S @ _PT.S.EVENT-PENDING !
+            _PT-SVC-S @ _PT-TX-CLEAR
+            DROP _PT-SVC-S @ _PT-PUBLISH-PENDING-CLOSE EXIT
         THEN
         DUP _PT-SERVICE-CREDIT ?DUP IF NIP EXIT THEN
     THEN
@@ -2268,39 +2393,60 @@ VARIABLE _PT-SVC-N
     DUP _PT-SERVICE-RET-QUERY ?DUP IF NIP EXIT THEN
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
         MS@ OVER _PT.S.DEADLINE @ _PT-U>= IF
+            1 OVER _PT.S.CLOSE-REASON !
+            TRUE OVER _PT.S.CLOSE-PENDING? !
             TRUE OVER _PT.S.CLOSE-OPENING? !
-            1 SWAP _PT-BEGIN-CLOSE EXIT
+            MS@ _PT-TIMEOUT-MS + OVER _PT.S.DEADLINE !
+            DUP _PT-TX-CLEAR
+            _PT-PUBLISH-PENDING-CLOSE EXIT
         THEN
     THEN
     DUP _PT.S.STATE @ PT-ST-CLOSING = IF
         MS@ OVER _PT.S.DEADLINE @ _PT-U>= IF
+            FALSE OVER _PT.S.CLOSE-PENDING? !
+            FALSE OVER _PT.S.CLOSE-OPENING? !
             PT-ST-LOST SWAP _PT.S.STATE !
             PT-S-SESSION-LOST EXIT
         THEN
     THEN
     DROP PT-S-OK ;
 
-\ After OPEN, OK means CLOSE was published and state is CLOSING; the caller
-\ continues PT-SERVICE until ANSI.  Repeated close is WOULD-BLOCK.  LOST is
-\ never a fallback boundary: PT-CLOSE returns SESSION-LOST and keeps ownership.
+VARIABLE _PT-PC-S
+VARIABLE _PT-PC-REASON
+
+\ After OPEN, OK means CLOSE was published and state is CLOSING.  When an
+\ emitted result, crossed reset, or CLOSE publication is still pending, the
+\ first call latches one immutable reason and bounded deadline and returns
+\ WOULD-BLOCK.  PT-SERVICE advances that settlement without ordinary output;
+\ expiry enters LOST.  Repeated calls cannot alter the latched reason or bound.
 : PT-CLOSE  ( reason session -- status )
     DUP _PT-VALID-S? 0= IF 2DROP PT-S-INVALID EXIT THEN
     OVER _PT-U16? 0= IF 2DROP PT-S-INVALID EXIT THEN
-    DUP _PT.S.STATE @ PT-ST-ANSI = IF 2DROP PT-S-OK EXIT THEN
-    DUP _PT.S.STATE @ PT-ST-PROBING = IF
-        DUP _PT-SVC-S !
-        DUP _PT-PROMOTE-LEGACY
-        PT-ST-ANSI OVER _PT.S.STATE !
-        DUP _PT-OWNER-RELEASE
-        2DROP PT-S-OK EXIT
+    _PT-PC-S ! _PT-PC-REASON !
+    _PT-PC-S @ _PT.S.STATE @ PT-ST-ANSI = IF PT-S-OK EXIT THEN
+    _PT-PC-S @ _PT.S.STATE @ PT-ST-PROBING = IF
+        _PT-PC-S @ _PT-PROMOTE-LEGACY
+        PT-ST-ANSI _PT-PC-S @ _PT.S.STATE !
+        _PT-PC-S @ _PT-OWNER-RELEASE
+        PT-S-OK EXIT
     THEN
-    DUP _PT.S.STATE @ PT-ST-CLOSING = IF 2DROP PT-S-WOULD-BLOCK EXIT THEN
-    DUP _PT.S.STATE @ PT-ST-LOST = IF 2DROP PT-S-SESSION-LOST EXIT THEN
-    DUP _PT.S.RESET-PENDING? @ IF 2DROP PT-S-WOULD-BLOCK EXIT THEN
-    DUP _PT.S.STATE @ PT-ST-OPENING = OVER _PT.S.CLOSE-OPENING? !
-    DUP _PT-TX-CLEAR
-    0 OVER _PT.S.EVENT-PENDING !
-    _PT-BEGIN-CLOSE ;
+    _PT-PC-S @ _PT.S.STATE @ PT-ST-CLOSING = IF
+        PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-PC-S @ _PT.S.STATE @ PT-ST-LOST = IF
+        PT-S-SESSION-LOST EXIT
+    THEN
+    _PT-PC-S @ _PT.S.CLOSE-PENDING? @ IF
+        PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-PC-REASON @ _PT-PC-S @ _PT.S.CLOSE-REASON !
+    TRUE _PT-PC-S @ _PT.S.CLOSE-PENDING? !
+    _PT-PC-S @ _PT.S.STATE @ PT-ST-OPENING =
+        _PT-PC-S @ _PT.S.CLOSE-OPENING? !
+    MS@ _PT-TIMEOUT-MS + _PT-PC-S @ _PT.S.DEADLINE !
+    0 _PT-PC-S @ _PT.S.EVENT-PENDING !
+    _PT-PC-S @ _PT-TX-CLEAR
+    _PT-PC-S @ _PT-PUBLISH-PENDING-CLOSE ;
 
 VARIABLE _PT-EP-DST
 VARIABLE _PT-EP-S

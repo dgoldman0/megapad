@@ -50,13 +50,141 @@ def test_service_yields_at_completion_before_any_close_boundary() -> None:
     )
     assert post_dispatch < binary.index("_PT.S.STATE @ PT-ST-ANSI")
 
-    # Sequence exhaustion reserves CLOSE until no transaction/result authority
-    # remains.  The held path only services input and bypasses every ordinary
-    # outbound scheduler.
+    # Sequence exhaustion latches the same bounded close intent before any
+    # ordinary outbound scheduler.  An open local transaction is discarded;
+    # emitted result authority is handled by the pending-close service path.
     boundary = service.index("0xFFFFFFFFFFFFFFFE _PT-U>=")
-    held_binary = service.index("_PT-SERVICE-BINARY EXIT", boundary)
-    assert service.index("_PT-RESULT-BUSY? 0= AND IF", boundary) < held_binary
-    assert held_binary < service.index("_PT-SERVICE-CREDIT", boundary)
+    latch = service.index("TRUE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !", boundary)
+    deadline = service.index("_PT.S.DEADLINE !", latch)
+    discard = service.index("_PT-TX-CLEAR", deadline)
+    publish = service.index("_PT-PUBLISH-PENDING-CLOSE EXIT", discard)
+    assert latch < deadline < discard < publish
+    assert publish < service.index("_PT-SERVICE-CREDIT", boundary)
+
+
+def test_close_intent_is_one_bounded_writer_barrier() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    settlement = _definition(source, "_PT-SETTLEMENT-BUSY?")
+    writer_busy = _definition(source, "_PT-RESULT-BUSY?")
+    begin_close = _definition(source, "_PT-BEGIN-CLOSE")
+    publish = _definition(source, "_PT-PUBLISH-PENDING-CLOSE")
+    pending_service = _definition(source, "_PT-SERVICE-CLOSE-PENDING")
+    soft_reset = _definition(source, "_PT-DISPATCH-SOFT-RESET")
+    apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")
+    to_ansi = _definition(source, "_PT-TO-ANSI")
+    fail_common = _definition(source, "_PT-FAIL-COMMON")
+    close = _definition(source, "PT-CLOSE")
+    service = _definition(source, "PT-SERVICE")
+
+    assert "880 CONSTANT /PT-SESSION" in source
+    assert ": _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;" in source
+    for field in (
+        "_PT.S.AWAIT?",
+        "_PT.S.LIFE-AWAIT?",
+        "_PT.S.COMPLETE?",
+        "_PT.S.RESET-PENDING?",
+    ):
+        assert field in settlement
+    assert "_PT.S.CLOSE-PENDING?" not in settlement
+    assert "_PT.S.CLOSE-PENDING? @ OR" in writer_busy
+    assert "_PT-SETTLEMENT-BUSY?" in writer_busy
+
+    # The wire transition consumes the already-latched reason and deadline;
+    # neither can be refreshed by publication backpressure or CLOSE_ACK wait.
+    assert "_PT.S.CLOSE-REASON !" not in begin_close
+    assert "_PT.S.DEADLINE !" not in begin_close
+    assert "_PT.S.CLOSE-REASON !" not in publish
+    assert "_PT.S.DEADLINE !" not in publish
+    assert "_PT-SETTLEMENT-BUSY?" in publish
+    assert "_PT-RESULT-BUSY?" not in publish
+    assert publish.index("_PT-TX-CLEAR") < publish.index("_PT-BEGIN-CLOSE")
+    assert publish.index("_PT-BEGIN-CLOSE") < publish.index(
+        "FALSE _PT-CLOSE-S @ _PT.S.CLOSE-PENDING? !"
+    )
+
+    repeated = close.index("_PT.S.CLOSE-PENDING? @ IF")
+    repeated_exit = close.index("PT-S-WOULD-BLOCK EXIT", repeated)
+    reason = close.index("_PT.S.CLOSE-REASON !", repeated)
+    latch = close.index("TRUE _PT-PC-S @ _PT.S.CLOSE-PENDING? !", reason)
+    deadline = close.index("_PT.S.DEADLINE !", latch)
+    discard = close.index("_PT-TX-CLEAR", deadline)
+    publish_call = close.index("_PT-PUBLISH-PENDING-CLOSE", discard)
+    assert repeated < repeated_exit < reason < latch < deadline < discard
+    assert discard < publish_call
+    assert close.count("_PT.S.CLOSE-REASON !") == 1
+    assert close.count("_PT.S.DEADLINE !") == 1
+
+    # Pending service has its own early scheduler.  It retires event
+    # backpressure on both sides of binary parsing, exposes at most one result,
+    # checks the original bound before RESET_ACK, and cannot emit ordinary
+    # output or buy time.
+    pre_discard = pending_service.index("_PT-DISCARD-PENDING-EVENT")
+    binary = pending_service.index("_PT-SERVICE-BINARY", pre_discard)
+    post_discard = pending_service.index("_PT-DISCARD-PENDING-EVENT", binary)
+    first_timeout = pending_service.index("_PT.S.DEADLINE @ _PT-U>=", post_discard)
+    would_return = pending_service.index(
+        "_PT-CLOSE-STATUS @ PT-S-WOULD-BLOCK = IF", first_timeout
+    )
+    completion_gate = pending_service.index("_PT.S.COMPLETE? @ IF", would_return)
+    reset = pending_service.index("_PT-APPLY-PENDING-RESET", completion_gate)
+    second_timeout = pending_service.index("_PT.S.DEADLINE @ _PT-U>=", reset)
+    publish_retry = pending_service.index("_PT-PUBLISH-PENDING-CLOSE")
+    assert pre_discard < binary < post_discard < first_timeout
+    assert first_timeout < would_return < completion_gate < reset
+    assert reset < second_timeout < publish_retry
+    assert pending_service.count("_PT-DISCARD-PENDING-EVENT") == 2
+    assert pending_service.count("_PT.S.DEADLINE @ _PT-U>=") == 2
+    assert pending_service.count("_PT.S.STATE @ PT-ST-CLOSING = IF") == 2
+    assert pending_service.count(
+        "FALSE _PT-SVC-S @ _PT.S.CLOSE-PENDING? !"
+    ) >= 4
+    for forbidden in (
+        "_PT-SERVICE-CREDIT",
+        "_PT-SERVICE-RET-QUERY",
+        "_PT-RET-ACTIVATE-READY",
+        "PT-RETAINED-DISCOVER",
+    ):
+        assert forbidden not in pending_service
+
+    # A valid crossed reset cannot take the legacy sequence-headroom close
+    # while a first close intent is pending.  RESET_ACK uses max-1 when it
+    # fits; at max the reset is subsumed so the original CLOSE owns that slot.
+    headroom = soft_reset.index("THEN U> IF")
+    reset_close = soft_reset.index("_PT-RESET-CLOSE EXIT", headroom)
+    assert soft_reset.index("_PT.S.CLOSE-PENDING? @ 0= IF", headroom) < reset_close
+    latch = soft_reset.index("TRUE OVER _PT.S.RESET-PENDING? !")
+    deferred_apply = soft_reset.index("_PT-APPLY-PENDING-RESET", latch)
+    assert soft_reset.index("_PT.S.CLOSE-PENDING? @ IF", latch) < deferred_apply
+    final_slot = apply_reset.index("_PT.S.TX-SEQ @ 0xFFFFFFFFFFFFFFFF =")
+    close_qualified = apply_reset.index("_PT.S.CLOSE-PENDING? @")
+    epoch_advance = apply_reset.index("_PT.S.RESET-EPOCH @ OVER _PT.S.EPOCH !")
+    assert close_qualified < final_slot < epoch_advance
+    assert "AND IF" in apply_reset[final_slot:epoch_advance]
+    assert "_PT.S.RESET-PENDING? OFF" in apply_reset[final_slot:epoch_advance]
+    assert "_PT.S.RESET-EPOCH OFF" in apply_reset[final_slot:epoch_advance]
+    assert "_PT-RESET-CLOSE" not in pending_service
+
+    # Every terminal boundary clears both parts of the pending-close latch;
+    # neither ANSI reuse nor a hard failure may inherit stale close authority.
+    for field in ("_PT.S.CLOSE-PENDING? OFF", "_PT.S.CLOSE-OPENING? OFF"):
+        assert field in to_ansi
+        assert field in fail_common
+    pending_branch = service.index("_PT-SERVICE-CLOSE-PENDING")
+    assert pending_branch < service.index("0xFFFFFFFFFFFFFFFE _PT-U>=")
+    assert pending_branch < service.index("_PT-SERVICE-CREDIT")
+    assert service.index("_PT.S.EVENT-PENDING !") < service.index(
+        "_PT-PUBLISH-PENDING-CLOSE EXIT"
+    )
+
+    # The underlying ACTIVE/RESYNCING wire state remains intact for results,
+    # while every public admission surface sees the irrevocable close barrier.
+    for word in (
+        "PT-ACTIVE?",
+        "PT-RETAINED-STATE@",
+        "PT-RETAINED-DISCOVER",
+        "_PT-OP-LOST?",
+    ):
+        assert "_PT.S.CLOSE-PENDING?" in _definition(source, word)
 
 
 def test_retained_activation_waits_for_legacy_transaction_settlement() -> None:
@@ -192,6 +320,7 @@ def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
     owner_drop = _definition(source, "PT-OWNER-DROP")
     service_credit = _definition(source, "_PT-SERVICE-CREDIT")
     close = _definition(source, "PT-CLOSE")
+    settlement = _definition(source, "_PT-SETTLEMENT-BUSY?")
 
     assert "PT-ST-RESYNCING" in resize_state
     assert "_PT-RSZ-GEN @ 0=" in resize
@@ -202,4 +331,5 @@ def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
     assert "_PT-RETAINED-LIFECYCLE-STATE?" in owner_drop
     assert "PT-S-WOULD-BLOCK EXIT" in owner_drop
     assert "_PT.S.RESET-PENDING?" in service_credit
-    assert "_PT.S.RESET-PENDING?" in close
+    assert "_PT.S.RESET-PENDING?" in settlement
+    assert "_PT-PUBLISH-PENDING-CLOSE" in close

@@ -189,10 +189,23 @@ live session whose mandatory snapshot has not settled. Querying covers query
 publication through its covering CREDIT, including a malformed or incomplete
 positive reply that will resolve to CELL-only at that watermark.
 
-After `OPEN`, `PT-CLOSE` is asynchronous: `PT-S-OK` means the close frame was
-published and the state is `PT-ST-CLOSING`. The caller continues
-`PT-SERVICE` until `PT-ST-ANSI`; only the valid acknowledgement releases the
-stream. A close timeout or structural fault enters `PT-ST-LOST`.
+After `OPEN`, the first `PT-CLOSE` irrevocably latches its reason and one
+absolute settlement/publication deadline. New writers and discovery are then
+refused while the underlying ACTIVE/RESYNCING state remains able to receive an
+already-emitted result. `PT-SERVICE` may reconcile that result, finish a crossed
+reset acknowledgement, and retry CLOSE, but receive dispatch only records the
+reset; the dedicated close scheduler checks the original deadline before it
+may emit RESET_ACK. Pending input events are discarded on both sides of that
+bounded receive pass so their backpressure cannot hide expiry. Ordinary output
+and repeated close calls cannot restart the bound. `PT-S-OK` means the close frame was published
+and the state is `PT-ST-CLOSING`; the same deadline remains authoritative while
+the caller continues `PT-SERVICE` until `PT-ST-ANSI`. Only the valid
+acknowledgement releases the stream. Expiry or a structural fault enters
+`PT-ST-LOST`.
+If a valid crossed reset arrives at the final outbound sequence, it is
+subsumed by the already-latched CLOSE when RESET_ACK cannot fit; at the
+penultimate sequence, RESET_ACK is sent first and CLOSE uses the final slot.
+Neither case may replace the first close reason or restart its deadline.
 `PT-CLOSE` then returns `PT-S-SESSION-LOST` and keeps ownership until the
 caller performs an external attachment reset/drain and reinitializes the
 session at that proven boundary.
