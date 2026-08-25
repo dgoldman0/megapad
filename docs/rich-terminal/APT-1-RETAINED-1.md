@@ -38,7 +38,7 @@ wire and authoritative.
 ## 2. Base contract and scalar conventions
 
 All messages use the APT-1 40-byte little-endian frame header, one directional
-sequence space, session ID, presentation epoch, CRC-32C, ordered lossless
+sequence space, session ID, wire `presentation_epoch`, CRC-32C, ordered lossless
 transport, and cumulative byte credit. Unless a field says otherwise:
 
 - unsigned integers are little-endian and must be in range before mutation;
@@ -112,7 +112,7 @@ RET_QUERY <II>
 The client may send exactly one `RET_QUERY` after both READY messages have
 completed, the session is ACTIVE, and the client has received the successful
 initial CELL snapshot TX_RESULT reporting revision one. It must send the query
-outside a CELL or presentation transaction, outside resource upload, with no
+outside a CELL or PRESENT transaction, outside resource upload, with no
 result outstanding, and before sending any retained message. The same
 CELL-snapshot-first rule applies after soft reset.
 The query frame is exactly 48 complete ordinary bytes: its 40-byte header plus
@@ -163,7 +163,7 @@ inconsistent, or late reply
 is an unsupported-profile result, not permission to guess defaults. The client
 continues CELL-1. A structurally valid optional reply that arrives after the
 negative answer is skipped and recredited. Neither side may retry discovery in
-the same presentation epoch. A successful discovery marks retained
+the same `presentation_epoch`. A successful discovery marks retained
 initialization required: retained content remains empty and hidden until one
 RET_REPLACE_START/CONTINUE sequence completes with COMMIT_AND_REVEAL. RET_DELTA
 is invalid before that first reveal.
@@ -198,7 +198,7 @@ Feature bits are:
 | 2 | `RET_RGBA_IMAGE` | immutable raw RGBA8 resources and `IMAGE` objects |
 | 3 | `RET_INSTRUMENT` | `LABEL`, `READOUT`, `METER`, and `STATUS` objects |
 | 4 | `RET_SERIES` | bounded i64 series, `PLOT`, and `WAVEFORM` objects |
-| 5 | `RET_CADENCE` | bounded presentation cadence and physical coalescing |
+| 5 | `RET_CADENCE` | bounded display cadence and physical coalescing |
 | 6 | reserved `RET_MONO_DRCS` | same-phase addendum; must be zero here |
 | 7 | reserved `RET_MOSAIC` | same-phase addendum; must be zero here |
 
@@ -274,7 +274,7 @@ set. `max_objects` is positive when any object feature is set, and `max_series`
 is positive exactly when SERIES is set. Values may be smaller than another
 implementation's policy, but may not be self-contradictory.
 
-Every advertised bound is a hard acceptance bound for the presentation epoch.
+Every advertised bound is a hard acceptance bound for the `presentation_epoch`.
 The terminal may reject an owner quota that cannot be reserved within these
 bounds, but it may not advertise a value and then accept an owner on the
 assumption that some unrelated owner will use less.
@@ -296,7 +296,7 @@ CELL-1 transactions remain valid and unchanged. RETAINED-1 adds
 `PRESENT_BEGIN`/`PRESENT_COMMIT` for retained-only or mixed cell/retained
 updates. Both transaction families use one session-wide transaction slot, one
 strictly increasing nonzero transaction-ID allocator, and one global 64-bit
-presentation revision within the presentation epoch.
+model revision within the `presentation_epoch`.
 
 A transaction ID used by either family must be greater than every previously
 started transaction ID in that epoch. A sender must not begin either family
@@ -317,7 +317,7 @@ from rewinding retained revision.
 
 An implementation must expose the resulting global revision to input event
 normalization. Existing KEY/TEXT/POINTER/RESIZE/FOCUS `model_revision` fields
-therefore refer to this presentation revision once RETAINED-1 is enabled.
+therefore refer to this model revision once RETAINED-1 is enabled.
 While a hidden replacement/layout target exists, the terminal emits no
 normalized KEY/TEXT/POINTER/FOCUS event: intermediate commits advance the
 global revision but do not have a matching visible retained view. The frontend
@@ -464,7 +464,7 @@ backing may remain physically retained until consumers release it. A replacement
 reveal swaps the hidden retained model for the active one. A layout reveal
 additionally requires every live region to have been defined or replaced
 against the current geometry generation. The swap and any mixed CELL change
-become visible at one logical presentation boundary.
+become visible at one logical output boundary.
 
 The existing `TX_ABORT <QH6x>` aborts a PRESENT transaction. It discards only
 that transaction's staging. It does not discard an already committed hidden
@@ -885,7 +885,7 @@ u8  text[text_bytes]
 ```
 
 Text is well-formed UTF-8 scalar text, contains no CR, LF, or NUL, and is at
-most `max_label_bytes`. Empty text is valid. The terminal's presentation font
+most `max_label_bytes`. Empty text is valid. The terminal's output font
 is authoritative; no font identifier or host-measured glyph metric crosses the
 wire. Font choice does not affect accounting: the exact text byte count
 contributes to the transaction target's post-commit UTF-8 usage and must fit
@@ -975,7 +975,7 @@ Series IDs are nonzero and strictly increasing within an owner generation.
 Series history capacity consumes the transaction target's sample-slot usage at
 DEFINE time. Active and hidden series usage are checked independently against
 the same owner sample-slot reservation under Section 5. Committed history is a
-bounded ordered ring; it is presentation state, not an unbounded telemetry
+bounded ordered ring; it is retained terminal state, not an unbounded telemetry
 archive.
 
 `SERIES_DEFINE <QQQIIQ>` (40 bytes) carries owner ID, generation, series ID,
@@ -1021,12 +1021,12 @@ local clock, repeat the last sample as a new sample, interpolate a new stored
 sample, or fabricate timestamps. Rendering may connect committed points
 visually.
 
-## 13. Presentation cadence
+## 13. Display cadence
 
-Logical commit and physical presentation are separate. Every successful commit
+Logical commit and physical display are separate. Every successful commit
 updates the retained model and global revision immediately. When CADENCE is
-advertised, the terminal may delay or coalesce physical presentation so the
-interval between retained presentations is at least
+advertised, the terminal may delay or coalesce physical display so the
+interval between retained display refreshes is at least
 `minimum_presentation_interval_us`.
 
 Coalescing may omit superseded intermediate property images on screen. It may
@@ -1036,8 +1036,8 @@ one atomic physical boundary with any mixed CELL replacement. Close and reset
 may discard an unpresented model only under their explicit lifecycle rules.
 
 Cadence is not permission for indefinite starvation. While renderer/service
-polling continues, the terminal must present the newest pending committed view
-at the first eligible presentation opportunity after the advertised minimum
+polling continues, the terminal must display the newest pending committed view
+at the first eligible display opportunity after the advertised minimum
 interval. An intermediate physical view superseded before that opportunity may
 be skipped. Protocol parsing, logical commits, result delivery, credit, reset,
 and close continue independently of renderer eligibility.
@@ -1059,7 +1059,7 @@ sample timing in SERIES payloads.
 ### 14.1 Soft reset
 
 The base soft-reset handshake is unchanged. On successful ACK, the terminal
-increments presentation epoch, drops all owners/resources/regions/objects/
+increments `presentation_epoch`, drops all owners/resources/regions/objects/
 series/hidden targets, and resets the global revision and transaction-ID scope
 to zero. Directional sequences and cumulative credit do not restart; they
 continue monotonically across soft reset exactly as required by APT-1 CELL-1.
@@ -1130,7 +1130,7 @@ that TX_RESULT does the client send RET_QUERY. If RETAINED-1 is rediscovered,
 the broker then reopens owners, reuploads needed resources, and builds a hidden
 retained replacement using RET_REPLACE_START/CONTINUE. Only a validating
 COMMIT_AND_REVEAL makes retained content visible. Until reveal, the committed
-CELL snapshot is the complete visible presentation. The exact order is CELL
+CELL snapshot is the complete visible terminal output. The exact order is CELL
 snapshot/result, discovery, owner open, resource replay, retained hidden
 replace, reveal.
 
@@ -1247,7 +1247,7 @@ When RETAINED-1 is enabled, the fixed frames `RET_RESULT`, `OWNER_DROP`, and
 `RESOURCE_ABORT` join the base allowlist. They may use reserve only for their
 exact fixed payloads above and only to terminate or advance the matching
 bounded lifecycle. RESOURCE_BEGIN/CHUNK/COMMIT/DROP, discovery replies,
-presentation transactions, object/region/series operations, and arbitrary
+PRESENT transactions, object/region/series operations, and arbitrary
 ERROR detail remain ordinary-credit traffic.
 
 Control-reserve occupancy is reclaimed when the corresponding complete frame is
@@ -1296,8 +1296,9 @@ success.
 Every transcript has a machine-readable expected-state sidecar containing an
 ordered state record after each consumed frame. The manifest names both files.
 At minimum each record carries directional sequences and ordinary sent/released/
-grant counters, separate per-direction control-reserve occupancy, presentation
-epoch/revision and transaction-ID high-water, open/result/upload lifecycle,
+grant counters, separate per-direction control-reserve occupancy,
+`presentation_epoch`, model revision, and transaction-ID high-water,
+open/result/upload lifecycle,
 selected geometry/generation, visible CELL digest,
 active and hidden retained digests/mode, immutable owner reservations, separate
 active and hidden scene usage, owner-wide resource usage, live/tombstone ledger,

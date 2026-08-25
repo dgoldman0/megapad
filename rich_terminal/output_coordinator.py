@@ -1,8 +1,8 @@
-"""Atomic renderer-neutral publication of CELL and retained presentation planes.
+"""Atomic renderer-neutral publication of CELL and retained terminal output.
 
 The individual models build immutable candidates and retain their own staging
-invariants.  :class:`PresentationCoordinator` supplies the publication boundary:
-all participating candidates are validated first, one shared presentation clock
+invariants.  :class:`TerminalOutputCoordinator` supplies the publication boundary:
+all participating candidates are validated first, one shared update authority
 lease completes, and only then are the prevalidated plane states installed.
 """
 
@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from typing import cast
 
 from .cell_model import CellModel, PreparedCellPublication, TerminalView
-from .presentation_model import (
-    PresentationClock,
-    PresentationGeometry,
-    PresentationStateError,
+from .update_authority import (
+    TerminalUpdateAuthority,
+    TerminalGeometry,
+    TerminalUpdateError,
     ResultLease,
     TransactionFamily,
     TransactionLease,
@@ -29,8 +29,8 @@ from .retained_scene import (
 
 
 @dataclass(frozen=True, slots=True)
-class CompositePresentationView:
-    """One immutable logical presentation with independently shared planes.
+class CompositeTerminalView:
+    """One immutable logical terminal view with independently shared planes.
 
     ``revision`` is the authoritative global revision.  A plane object can be
     shared from an older composite when that plane did not participate in the
@@ -39,82 +39,82 @@ class CompositePresentationView:
 
     presentation_epoch: int
     revision: int
-    geometry: PresentationGeometry
+    geometry: TerminalGeometry
     cell: TerminalView | None
     retained: SceneModelState | None
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedPresentationInstall:
+class PreparedOutputInstall:
     """A composite candidate bound to one coordinator and exact source view."""
 
-    view: CompositePresentationView
+    view: CompositeTerminalView
     lease: TransactionLease
     cell: PreparedCellPublication | None
     retained: PreparedSceneInstall | None
     _coordinator_token: object
-    _source_view: CompositePresentationView
+    _source_view: CompositeTerminalView
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedOwnerRetirementPublication:
     """A scene-aware OWNER_DROP candidate bound to one composite source."""
 
-    view: CompositePresentationView
+    view: CompositeTerminalView
     lease: TransactionLease
     retirement: PreparedOwnerRetirement
     _coordinator_token: object
-    _source_view: CompositePresentationView
+    _source_view: CompositeTerminalView
 
 
-class PresentationCoordinator:
+class TerminalOutputCoordinator:
     """Publish CELL-only, retained-only, or mixed state under one clock result."""
 
     def __init__(
         self,
         *,
-        clock: PresentationClock,
+        clock: TerminalUpdateAuthority,
         cell_model: CellModel,
-        geometry: PresentationGeometry,
+        geometry: TerminalGeometry,
         retained_model: RetainedSceneModel | None = None,
     ) -> None:
-        if not isinstance(clock, PresentationClock):
-            raise TypeError("clock must be PresentationClock")
+        if not isinstance(clock, TerminalUpdateAuthority):
+            raise TypeError("clock must be TerminalUpdateAuthority")
         if not isinstance(cell_model, CellModel):
             raise TypeError("cell_model must be CellModel")
-        if not isinstance(geometry, PresentationGeometry):
-            raise TypeError("geometry must be PresentationGeometry")
+        if not isinstance(geometry, TerminalGeometry):
+            raise TypeError("geometry must be TerminalGeometry")
         if retained_model is not None and not isinstance(
             retained_model, RetainedSceneModel
         ):
             raise TypeError("retained_model must be RetainedSceneModel or None")
         if cell_model.presentation_epoch != clock.presentation_epoch:
-            raise PresentationStateError(
-                "CELL model and presentation clock epochs do not match"
+            raise TerminalUpdateError(
+                "CELL model and update-authority epochs do not match"
             )
         if cell_model.geometry != (geometry.cols, geometry.rows):
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "CELL model and composite geometry do not match"
             )
         cell = cell_model.view
         if cell is not None:
             self._validate_cell_view(cell, clock, geometry)
             if cell.revision > clock.revision:
-                raise PresentationStateError(
-                    "CELL view revision is ahead of the presentation clock"
+                raise TerminalUpdateError(
+                    "CELL view revision is ahead of the update authority"
                 )
 
         retained = None
         if retained_model is not None:
             if retained_model.clock is not clock:
-                raise PresentationStateError(
-                    "retained model does not use the composite presentation clock"
+                raise TerminalUpdateError(
+                    "retained model does not use the composite update authority"
                 )
             retained = retained_model.state
             self._validate_retained_state(retained, clock, geometry)
             if retained.revision > clock.revision:
-                raise PresentationStateError(
-                    "retained state revision is ahead of the presentation clock"
+                raise TerminalUpdateError(
+                    "retained state revision is ahead of the update authority"
                 )
 
         self._clock = clock
@@ -124,7 +124,7 @@ class PresentationCoordinator:
         self._selected_geometry = geometry
         self._source_cell = cell
         self._source_retained = retained
-        self._view = CompositePresentationView(
+        self._view = CompositeTerminalView(
             presentation_epoch=clock.presentation_epoch,
             revision=clock.revision,
             geometry=geometry,
@@ -133,11 +133,11 @@ class PresentationCoordinator:
         )
 
     @property
-    def clock(self) -> PresentationClock:
+    def clock(self) -> TerminalUpdateAuthority:
         return self._clock
 
     @property
-    def view(self) -> CompositePresentationView:
+    def view(self) -> CompositeTerminalView:
         return self._view
 
     def prepare_commit(
@@ -146,13 +146,13 @@ class PresentationCoordinator:
         *,
         cell: PreparedCellPublication | None = None,
         retained: PreparedSceneInstall | None = None,
-        geometry: PresentationGeometry | None = None,
-    ) -> PreparedPresentationInstall:
+        geometry: TerminalGeometry | None = None,
+    ) -> PreparedOutputInstall:
         """Build and fully validate one composite candidate without publication."""
 
         if cell is None and retained is None:
-            raise PresentationStateError(
-                "a presentation commit must contain at least one plane"
+            raise TerminalUpdateError(
+                "an output commit must contain at least one plane"
             )
         if not isinstance(lease, TransactionLease):
             raise TypeError("lease must be TransactionLease")
@@ -162,14 +162,14 @@ class PresentationCoordinator:
             raise TypeError("retained must be PreparedSceneInstall or None")
         if geometry is None:
             target_geometry = self._selected_geometry
-        elif isinstance(geometry, PresentationGeometry):
+        elif isinstance(geometry, TerminalGeometry):
             target_geometry = geometry
         else:
-            raise TypeError("geometry must be PresentationGeometry or None")
+            raise TypeError("geometry must be TerminalGeometry or None")
 
         target_revision = self._clock.next_revision(lease)
-        prepared = PreparedPresentationInstall(
-            view=CompositePresentationView(
+        prepared = PreparedOutputInstall(
+            view=CompositeTerminalView(
                 presentation_epoch=self._clock.presentation_epoch,
                 revision=target_revision,
                 geometry=target_geometry,
@@ -187,16 +187,16 @@ class PresentationCoordinator:
         self.validate_prepared(prepared)
         return prepared
 
-    def validate_prepared(self, prepared: PreparedPresentationInstall) -> None:
+    def validate_prepared(self, prepared: PreparedOutputInstall) -> None:
         """Validate every source and candidate without mutating any authority."""
 
-        if not isinstance(prepared, PreparedPresentationInstall):
-            raise TypeError("prepared must be PreparedPresentationInstall")
+        if not isinstance(prepared, PreparedOutputInstall):
+            raise TypeError("prepared must be PreparedOutputInstall")
         if (
             prepared._coordinator_token is not self._token
             or prepared._source_view is not self._view
         ):
-            raise RuntimeError("prepared presentation is stale or foreign")
+            raise RuntimeError("prepared output is stale or foreign")
         if self._cell_model.view is not self._source_cell:
             raise RuntimeError("composite CELL source view changed outside coordinator")
         if self._retained_model is None:
@@ -207,22 +207,22 @@ class PresentationCoordinator:
 
         lease = prepared.lease
         if self._clock.open_transaction is not lease:
-            raise RuntimeError("prepared presentation lost its transaction lease")
+            raise RuntimeError("prepared output lost its transaction lease")
         if not lease.admitted:
-            raise PresentationStateError(
-                "a rejected presentation transaction cannot be installed"
+            raise TerminalUpdateError(
+                "a rejected output transaction cannot be installed"
             )
         if lease.family not in (TransactionFamily.CELL, TransactionFamily.PRESENT):
-            raise PresentationStateError(
-                "lease family cannot publish a composite presentation"
+            raise TerminalUpdateError(
+                "lease family cannot publish composite terminal output"
             )
         if lease.family is TransactionFamily.CELL and prepared.retained is not None:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "a CELL transaction cannot contain a retained plane"
             )
         if prepared.cell is None and prepared.retained is None:
-            raise PresentationStateError(
-                "a presentation commit must contain at least one plane"
+            raise TerminalUpdateError(
+                "an output commit must contain at least one plane"
             )
 
         revision = self._clock.next_revision(lease)
@@ -265,15 +265,15 @@ class PresentationCoordinator:
         if view.cell is not None and (
             view.cell.cols != view.geometry.cols or view.cell.rows != view.geometry.rows
         ):
-            raise PresentationStateError(
-                "composite CELL plane does not match presentation geometry"
+            raise TerminalUpdateError(
+                "composite CELL plane does not match terminal geometry"
             )
         if view.retained is not None and view.retained.geometry != view.geometry:
-            raise PresentationStateError(
-                "composite retained plane does not match presentation geometry"
+            raise TerminalUpdateError(
+                "composite retained plane does not match terminal geometry"
             )
 
-    def install_prepared(self, prepared: PreparedPresentationInstall) -> ResultLease:
+    def install_prepared(self, prepared: PreparedOutputInstall) -> ResultLease:
         """Complete one clock result, then publish all prevalidated state."""
 
         self.validate_prepared(prepared)
@@ -291,7 +291,7 @@ class PresentationCoordinator:
         self._view = prepared.view
         return result
 
-    def admit_resize(self, geometry: PresentationGeometry) -> None:
+    def admit_resize(self, geometry: TerminalGeometry) -> None:
         """Bind already-selected model state without publishing a half resize.
 
         The last immutable composite remains the physical view until the peer
@@ -299,27 +299,27 @@ class PresentationCoordinator:
         nevertheless uses the newly selected CELL/retained sources.
         """
 
-        if not isinstance(geometry, PresentationGeometry):
-            raise TypeError("geometry must be PresentationGeometry")
+        if not isinstance(geometry, TerminalGeometry):
+            raise TypeError("geometry must be TerminalGeometry")
         if (
             self._clock.open_transaction is not None
             or self._clock.outstanding_result is not None
         ):
-            raise PresentationStateError("resize admission requires a settled clock")
+            raise TerminalUpdateError("resize admission requires a settled clock")
         if geometry.generation <= self._selected_geometry.generation:
-            raise PresentationStateError("resize geometry generation is not newer")
+            raise TerminalUpdateError("resize geometry generation is not newer")
         if self._cell_model.geometry != (geometry.cols, geometry.rows):
-            raise PresentationStateError("CELL model did not select resize geometry")
+            raise TerminalUpdateError("CELL model did not select resize geometry")
         if self._cell_model.view is not None or not self._cell_model.awaiting_snapshot:
-            raise PresentationStateError("CELL model does not require replacement")
+            raise TerminalUpdateError("CELL model does not require replacement")
         retained_model = self._retained_model
         if retained_model is None:
-            raise PresentationStateError("retained resize has no retained model")
+            raise TerminalUpdateError("retained resize has no retained model")
         retained = retained_model.state
         if retained.geometry != geometry:
-            raise PresentationStateError("retained model did not select resize geometry")
+            raise TerminalUpdateError("retained model did not select resize geometry")
         if retained.retained_visible or retained.hidden is not None:
-            raise PresentationStateError("retained resize did not hide stale layout")
+            raise TerminalUpdateError("retained resize did not hide stale layout")
         self._selected_geometry = geometry
         self._source_cell = None
         self._source_retained = retained
@@ -336,12 +336,12 @@ class PresentationCoordinator:
         if not isinstance(retirement, PreparedOwnerRetirement):
             raise TypeError("retirement must be PreparedOwnerRetirement")
         if retirement.lease is not lease:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "owner retirement and coordinator leases do not match"
             )
         target_revision = self._clock.next_revision(lease)
         prepared = PreparedOwnerRetirementPublication(
-            view=CompositePresentationView(
+            view=CompositeTerminalView(
                 presentation_epoch=self._clock.presentation_epoch,
                 revision=target_revision,
                 geometry=self._view.geometry,
@@ -381,7 +381,7 @@ class PresentationCoordinator:
         if self._clock.open_transaction is not lease:
             raise RuntimeError("prepared owner retirement lost its transaction lease")
         if lease.family is not TransactionFamily.OWNER_DROP or not lease.admitted:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "owner retirement requires an admitted OWNER_DROP transaction"
             )
         if prepared.retirement.lease is not lease:
@@ -427,41 +427,41 @@ class PresentationCoordinator:
     @staticmethod
     def _validate_cell_view(
         view: TerminalView,
-        clock: PresentationClock,
-        geometry: PresentationGeometry,
+        clock: TerminalUpdateAuthority,
+        geometry: TerminalGeometry,
     ) -> None:
         if view.presentation_epoch != clock.presentation_epoch:
-            raise PresentationStateError(
-                "CELL view is outside the presentation clock epoch"
+            raise TerminalUpdateError(
+                "CELL view is outside the update-authority epoch"
             )
         if view.revision > clock.revision + 1:
-            raise PresentationStateError(
-                "CELL view revision is ahead of the presentation clock"
+            raise TerminalUpdateError(
+                "CELL view revision is ahead of the update authority"
             )
         if (view.cols, view.rows) != (geometry.cols, geometry.rows):
-            raise PresentationStateError(
-                "CELL view does not match presentation geometry"
+            raise TerminalUpdateError(
+                "CELL view does not match terminal geometry"
             )
 
     @staticmethod
     def _validate_retained_state(
         state: SceneModelState,
-        clock: PresentationClock,
-        geometry: PresentationGeometry,
+        clock: TerminalUpdateAuthority,
+        geometry: TerminalGeometry,
     ) -> None:
         if state.geometry != geometry:
-            raise PresentationStateError(
-                "retained state does not match presentation geometry"
+            raise TerminalUpdateError(
+                "retained state does not match terminal geometry"
             )
         if state.revision > clock.revision + 1:
-            raise PresentationStateError(
-                "retained state revision is ahead of the presentation clock"
+            raise TerminalUpdateError(
+                "retained state revision is ahead of the update authority"
             )
 
 
 __all__ = [
-    "CompositePresentationView",
+    "CompositeTerminalView",
     "PreparedOwnerRetirementPublication",
-    "PreparedPresentationInstall",
-    "PresentationCoordinator",
+    "PreparedOutputInstall",
+    "TerminalOutputCoordinator",
 ]

@@ -168,7 +168,7 @@ class UART(Device):
         # The enhanced terminal sink is installed only for the lifetime of an
         # explicit exclusive lease.  Keeping ``None`` on the ordinary path
         # avoids changing legacy callback/listener dispatch.
-        self._presentation_terminal_host = None
+        self._rich_terminal_host = None
 
         # TX ring buffer support (BIOS-level batching)
         self._tx_ring_addr_bytes = bytearray(8)   # LE bytes from UART+0x08 writes
@@ -283,18 +283,18 @@ class UART(Device):
         if self.__tx_ring_base:
             self._native.uart_tx_ring_base = self.__tx_ring_base
 
-    def _set_presentation_terminal_host(self, host) -> None:
+    def _set_rich_terminal_host(self, host) -> None:
         """Switch the internal primary sink at a scheduler-owned boundary."""
         if (
             host is not None
-            and self._presentation_terminal_host is not None
-            and self._presentation_terminal_host is not host
+            and self._rich_terminal_host is not None
+            and self._rich_terminal_host is not host
         ):
             raise RuntimeError("the UART already has an enhanced primary sink")
-        self._presentation_terminal_host = host
+        self._rich_terminal_host = host
 
     def _emit_byte(self, value: int):
-        terminal_host = self._presentation_terminal_host
+        terminal_host = self._rich_terminal_host
         if (
             terminal_host is not None
             and terminal_host._publish_machine_egress(bytes((value,)))
@@ -309,7 +309,7 @@ class UART(Device):
     def _emit_batch(self, data: bytes):
         if not data:
             return
-        terminal_host = self._presentation_terminal_host
+        terminal_host = self._rich_terminal_host
         if (
             terminal_host is not None
             and terminal_host._publish_machine_egress(data)
@@ -328,7 +328,7 @@ class UART(Device):
         """Move one native TX batch into the Python observer facade."""
         if self._native is None:
             return b""
-        terminal_host = self._presentation_terminal_host
+        terminal_host = self._rich_terminal_host
         if (
             terminal_host is not None
             and not terminal_host._machine_drain_admitted()

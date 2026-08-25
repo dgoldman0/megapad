@@ -1,7 +1,7 @@
-"""Shared transaction, revision, and geometry authority for APT presentation.
+"""Shared transaction, revision, and geometry authority for APT output updates.
 
 CELL-1 and RETAINED-1 deliberately share one transaction slot, transaction-ID
-high-water mark, and presentation revision.  This module contains that small
+high-water mark, and model revision.  This module contains that small
 renderer-neutral authority.  It has no wire parser, transport, or renderer
 dependency and therefore can be shared by the legacy CELL path and the
 additive retained path without making either one own the other.
@@ -16,7 +16,7 @@ from enum import Enum
 from .apt1 import UINT32_MAX, UINT64_MAX
 
 
-class PresentationStateError(ValueError):
+class TerminalUpdateError(ValueError):
     """A transaction, result, revision, reset, or geometry invariant failed."""
 
 
@@ -41,7 +41,7 @@ def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class PresentationGeometry:
+class TerminalGeometry:
     cols: int
     rows: int
     generation: int = 0
@@ -87,7 +87,7 @@ class ResultLease:
     succeeded: bool
 
 
-class PresentationClock:
+class TerminalUpdateAuthority:
     """Own one epoch's global transaction/revision state.
 
     ``reserve`` consumes a valid newer transaction ID immediately.  A semantic
@@ -159,9 +159,9 @@ class PresentationClock:
             "base_revision", base_revision, minimum=0, maximum=UINT64_MAX
         )
         if self._open is not None:
-            raise PresentationStateError("a presentation transaction is already open")
+            raise TerminalUpdateError("a terminal update transaction is already open")
         if self._result is not None:
-            raise PresentationStateError("the preceding transaction result is outstanding")
+            raise TerminalUpdateError("the preceding transaction result is outstanding")
         if normalized_id <= self._transaction_high_water:
             detail = "transaction_id is not monotonically increasing"
             self._open = TransactionLease(
@@ -171,7 +171,7 @@ class PresentationClock:
                 self._presentation_epoch,
                 detail,
             )
-            raise PresentationStateError(detail)
+            raise TerminalUpdateError(detail)
 
         # Receipt consumes the ID even if base-revision or later semantic
         # validation rejects the request.
@@ -187,7 +187,7 @@ class PresentationClock:
                 self._presentation_epoch,
                 detail,
             )
-            raise PresentationStateError(detail)
+            raise TerminalUpdateError(detail)
         lease = TransactionLease(
             family,
             normalized_id,
@@ -200,11 +200,11 @@ class PresentationClock:
     def next_revision(self, lease: TransactionLease) -> int:
         self._require_open(lease)
         if not lease.admitted:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "a rejected transaction cannot complete successfully"
             )
         if self._revision == UINT64_MAX:
-            raise PresentationStateError("presentation revision is exhausted")
+            raise TerminalUpdateError("terminal model revision is exhausted")
         return self._revision + 1
 
     def complete_success(self, lease: TransactionLease) -> ResultLease:
@@ -236,9 +236,9 @@ class PresentationClock:
         )
         result = self._result
         if result is None:
-            raise PresentationStateError("no presentation result is outstanding")
+            raise TerminalUpdateError("no terminal update result is outstanding")
         if result.transaction_id != normalized_id:
-            raise PresentationStateError("result transaction_id mismatch")
+            raise TerminalUpdateError("result transaction_id mismatch")
         self._result = None
         return result
 
@@ -247,14 +247,14 @@ class PresentationClock:
             "requested_epoch", requested_epoch, minimum=0, maximum=UINT32_MAX
         )
         if self._presentation_epoch == UINT32_MAX:
-            raise PresentationStateError("presentation epoch is exhausted")
+            raise TerminalUpdateError("presentation_epoch is exhausted")
         if epoch != self._presentation_epoch + 1:
-            raise PresentationStateError(
-                "requested epoch is not current presentation epoch plus one"
+            raise TerminalUpdateError(
+                "requested epoch is not current presentation_epoch plus one"
             )
         if self._open is not None or self._result is not None:
-            raise PresentationStateError(
-                "presentation transaction/result must settle before reset"
+            raise TerminalUpdateError(
+                "terminal update transaction/result must settle before reset"
             )
         self._presentation_epoch = epoch
         self._revision = 0
@@ -264,13 +264,13 @@ class PresentationClock:
         if not isinstance(lease, TransactionLease):
             raise TypeError("lease must be TransactionLease")
         if self._open is not lease:
-            raise PresentationStateError("transaction lease is not the open authority")
+            raise TerminalUpdateError("transaction lease is not the open authority")
 
 
 __all__ = [
-    "PresentationClock",
-    "PresentationGeometry",
-    "PresentationStateError",
+    "TerminalUpdateAuthority",
+    "TerminalGeometry",
+    "TerminalUpdateError",
     "ResultLease",
     "TransactionFamily",
     "TransactionLease",

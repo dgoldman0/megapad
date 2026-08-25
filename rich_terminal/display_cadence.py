@@ -1,4 +1,4 @@
-"""Renderer-neutral physical presentation cadence and latest-view coalescing."""
+"""Renderer-neutral physical display cadence and latest-view coalescing."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from collections.abc import Callable
 
 from .apt1 import UINT32_MAX, UINT64_MAX
 from .cell_model import TerminalView
-from .presentation_coordinator import CompositePresentationView
-from .presentation_model import PresentationStateError
+from .output_coordinator import CompositeTerminalView
+from .update_authority import TerminalUpdateError
 from .retained_model import RetainedPolicy
 
 
@@ -30,11 +30,11 @@ def _integer(name: str, value, *, minimum: int, maximum: int | None = None) -> i
     return int(result)
 
 
-class PresentationCadenceScheduler:
+class DisplayCadenceScheduler:
     """Coalesce committed views without delaying logical protocol service.
 
-    The scheduler retains at most the physically presented view and one latest
-    pending view.  Session and presentation-epoch transitions are explicit so
+    The scheduler retains at most the physically displayed view and one latest
+    pending view.  Session and presentation_epoch transitions are explicit so
     a stale immutable view cannot re-enter a replacement scope.
     """
 
@@ -53,14 +53,14 @@ class PresentationCadenceScheduler:
         self._attachment_epoch: int | None = None
         self._session_id: int | None = None
         self._presentation_epoch: int | None = None
-        self._presented: CompositePresentationView | None = None
-        self._pending: CompositePresentationView | None = None
+        self._displayed: CompositeTerminalView | None = None
+        self._pending: CompositeTerminalView | None = None
         self._last_observed_us: int | None = None
-        self._last_presented_us: int | None = None
+        self._last_displayed_us: int | None = None
 
     @property
-    def presented_revision(self) -> int | None:
-        return None if self._presented is None else self._presented.revision
+    def displayed_revision(self) -> int | None:
+        return None if self._displayed is None else self._displayed.revision
 
     @property
     def pending_revision(self) -> int | None:
@@ -70,7 +70,7 @@ class PresentationCadenceScheduler:
         self,
         attachment_epoch: int,
         session_id: int,
-        initial_view: CompositePresentationView | None = None,
+        initial_view: CompositeTerminalView | None = None,
     ) -> None:
         """Replace all renderer state with one new protocol session at epoch zero."""
 
@@ -88,14 +88,14 @@ class PresentationCadenceScheduler:
         self._attachment_epoch = attachment
         self._session_id = session
         self._presentation_epoch = 0
-        self._presented = None
+        self._displayed = None
         self._pending = initial_view
-        self._last_presented_us = None
+        self._last_displayed_us = None
 
     def reset_presentation_epoch(
         self,
         new_epoch: int,
-        initial_view: CompositePresentationView | None = None,
+        initial_view: CompositeTerminalView | None = None,
     ) -> None:
         """Discard the prior epoch and make the first replacement immediately due."""
 
@@ -104,8 +104,8 @@ class PresentationCadenceScheduler:
             "new_epoch", new_epoch, minimum=0, maximum=UINT32_MAX
         )
         if current == UINT32_MAX or epoch != current + 1:
-            raise PresentationStateError(
-                "new_epoch is not current presentation epoch plus one"
+            raise TerminalUpdateError(
+                "new_epoch is not current presentation_epoch plus one"
             )
         assert self._attachment_epoch is not None
         assert self._session_id is not None
@@ -117,15 +117,15 @@ class PresentationCadenceScheduler:
         )
 
         self._presentation_epoch = epoch
-        self._presented = None
+        self._displayed = None
         self._pending = initial_view
-        self._last_presented_us = None
+        self._last_displayed_us = None
 
-    def submit(self, view: CompositePresentationView) -> None:
-        """Retain the newest current-scope logical view for physical presentation."""
+    def submit(self, view: CompositeTerminalView) -> None:
+        """Retain the newest current-scope logical view for physical display."""
 
-        if not isinstance(view, CompositePresentationView):
-            raise TypeError("view must be CompositePresentationView")
+        if not isinstance(view, CompositeTerminalView):
+            raise TypeError("view must be CompositeTerminalView")
         current_epoch = self._require_session()
         assert self._attachment_epoch is not None
         assert self._session_id is not None
@@ -136,39 +136,39 @@ class PresentationCadenceScheduler:
             presentation_epoch=current_epoch,
         )
 
-        if view == self._pending or view == self._presented:
+        if view == self._pending or view == self._displayed:
             return
-        newest = self._pending if self._pending is not None else self._presented
+        newest = self._pending if self._pending is not None else self._displayed
         if newest is not None and view.revision <= newest.revision:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "same or lower revision cannot replace a different view"
             )
         self._pending = view
 
-    def service(self) -> CompositePresentationView | None:
+    def service(self) -> CompositeTerminalView | None:
         """Return the newest pending view at its first eligible opportunity."""
 
         pending = self._pending
         if pending is None:
             return None
         if self._minimum_interval_us == 0:
-            return self._present(pending, presented_at_us=None)
+            return self._display(pending, displayed_at_us=None)
 
         now = self._read_monotonic_us()
-        last = self._last_presented_us
+        last = self._last_displayed_us
         if last is not None and now - last < self._minimum_interval_us:
             return None
-        return self._present(pending, presented_at_us=now)
+        return self._display(pending, displayed_at_us=now)
 
-    def _present(
+    def _display(
         self,
-        view: CompositePresentationView,
+        view: CompositeTerminalView,
         *,
-        presented_at_us: int | None,
-    ) -> CompositePresentationView:
+        displayed_at_us: int | None,
+    ) -> CompositeTerminalView:
         self._pending = None
-        self._presented = view
-        self._last_presented_us = presented_at_us
+        self._displayed = view
+        self._last_displayed_us = displayed_at_us
         return view
 
     def _read_monotonic_us(self) -> int:
@@ -182,13 +182,13 @@ class PresentationCadenceScheduler:
     def _require_session(self) -> int:
         epoch = self._presentation_epoch
         if self._attachment_epoch is None or self._session_id is None or epoch is None:
-            raise PresentationStateError("no presentation session is active")
+            raise TerminalUpdateError("no rich-terminal session is active")
         return epoch
 
     @classmethod
     def _validate_initial_view(
         cls,
-        view: CompositePresentationView | None,
+        view: CompositeTerminalView | None,
         *,
         attachment_epoch: int,
         session_id: int,
@@ -196,8 +196,8 @@ class PresentationCadenceScheduler:
     ) -> None:
         if view is None:
             return
-        if not isinstance(view, CompositePresentationView):
-            raise TypeError("initial_view must be CompositePresentationView or None")
+        if not isinstance(view, CompositeTerminalView):
+            raise TypeError("initial_view must be CompositeTerminalView or None")
         cls._validate_view(
             view,
             attachment_epoch=attachment_epoch,
@@ -207,7 +207,7 @@ class PresentationCadenceScheduler:
 
     @staticmethod
     def _validate_view(
-        view: CompositePresentationView,
+        view: CompositeTerminalView,
         *,
         attachment_epoch: int,
         session_id: int,
@@ -215,28 +215,28 @@ class PresentationCadenceScheduler:
     ) -> None:
         cell = view.cell
         if cell is None:
-            raise PresentationStateError("composite view has no mandatory CELL plane")
+            raise TerminalUpdateError("composite view has no mandatory CELL plane")
         if not isinstance(cell, TerminalView):
             raise TypeError("composite CELL plane must be TerminalView")
         if view.presentation_epoch != presentation_epoch or (
             cell.presentation_epoch != presentation_epoch
         ):
-            raise PresentationStateError(
-                "view belongs to a foreign presentation epoch"
+            raise TerminalUpdateError(
+                "view belongs to a foreign presentation_epoch"
             )
         if (
             cell.attachment_epoch != attachment_epoch
             or cell.session_id != session_id
         ):
-            raise PresentationStateError("view belongs to a foreign session")
+            raise TerminalUpdateError("view belongs to a foreign session")
         if cell.revision > view.revision:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "CELL plane revision is ahead of the composite revision"
             )
         if (cell.cols, cell.rows) != (view.geometry.cols, view.geometry.rows):
-            raise PresentationStateError(
-                "CELL plane does not match composite presentation geometry"
+            raise TerminalUpdateError(
+                "CELL plane does not match composite terminal geometry"
             )
 
 
-__all__ = ["PresentationCadenceScheduler"]
+__all__ = ["DisplayCadenceScheduler"]

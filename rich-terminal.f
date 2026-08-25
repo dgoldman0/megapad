@@ -1,5 +1,5 @@
 \ =====================================================================
-\  presentation-terminal.f -- optional APT-1 rich-terminal guest client
+\  rich-terminal.f -- optional APT-1 rich-terminal guest client
 \ =====================================================================
 \
 \  This module is deliberately inert when loaded.  PT-START is the only
@@ -10,7 +10,7 @@
 \             APT-1-RETAINED-1-2026-08-24.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 
-PROVIDED presentation-terminal.f
+PROVIDED rich-terminal.f
 
 \ =====================================================================
 \  Public constants and caller-owned records

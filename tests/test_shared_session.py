@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from presentation_terminal import (
+from rich_terminal import (
     Cell,
     Cursor,
     DriverLimits,
@@ -19,7 +19,7 @@ from presentation_terminal import (
     TerminalConfig,
     TerminalView,
 )
-from session import MachineSession, PresentationSessionConfig
+from session import MachineSession, RichTerminalSessionConfig
 from shared_session import (
     PROTOCOL_VERSION,
     SessionClient,
@@ -35,11 +35,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BIOS = ROOT / "bios.asm"
 
 
-def _presentation_config(
+def _rich_terminal_config(
     *,
     ansi_history_bytes: int = 32,
-) -> PresentationSessionConfig:
-    return PresentationSessionConfig(
+) -> RichTerminalSessionConfig:
+    return RichTerminalSessionConfig(
         host_limits=HostPortLimits(
             egress=EgressWatermarks(8_192, 1_024, 16, 2),
             retained_publication_bytes=4_608,
@@ -91,10 +91,10 @@ class _RunLoopSession:
     def __init__(self, *, remain_pending: bool):
         self.system = _RunLoopSystem()
         self.batch_steps = 17
-        self.presentation_enabled = True
-        self.presentation_failure = None
-        self.presentation_lost = False
-        self.presentation_work_pending = True
+        self.rich_terminal_enabled = True
+        self.rich_terminal_failure = None
+        self.rich_terminal_lost = False
+        self.rich_terminal_work_pending = True
         self.last_batch_made_progress = False
         self.remain_pending = remain_pending
         self.calls = 0
@@ -112,7 +112,7 @@ class _RunLoopSession:
         self.calls += 1
         self.called.set()
         if not self.remain_pending:
-            self.presentation_work_pending = False
+            self.rich_terminal_work_pending = False
             self.last_batch_made_progress = True
             return SystemRunStats(
                 instructions_executed=0,
@@ -132,14 +132,14 @@ class _RunLoopSession:
         )
 
 
-def test_shared_owner_services_presentation_work_after_guest_halt():
+def test_shared_owner_services_rich_terminal_work_after_guest_halt():
     session = _RunLoopSession(remain_pending=False)
     machine = SharedMachine(session, idle_sleep_s=0.005)
 
     machine.start()
     try:
         assert session.called.wait(timeout=1.0)
-        wait_until(lambda: not session.presentation_work_pending)
+        wait_until(lambda: not session.rich_terminal_work_pending)
         assert session.calls == 1
         assert machine.total_steps == 0
         assert machine.last_stop_reason == "all_halted"
@@ -187,11 +187,11 @@ def test_shared_screen_round_trips_the_selected_rich_view():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(),
+        rich_terminal=_rich_terminal_config(),
     ) as session:
-        session._receive_presentation_view(
+        session._receive_terminal_output(
             TerminalView(
-                attachment_epoch=session.presentation_driver.attachment_epoch,
+                attachment_epoch=session.rich_terminal_driver.attachment_epoch,
                 session_id=7,
                 presentation_epoch=1,
                 revision=9,
@@ -224,8 +224,8 @@ def test_shared_screen_round_trips_the_selected_rich_view():
         # A committed resize can precede its required replacement snapshot.
         # Status and screen must both continue to describe the retained rich
         # view while the hidden ANSI fallback tracks the new geometry.
-        session.presentation_driver.core.select_ansi_geometry(4, 1)
-        session._sync_presentation_geometry()
+        session.rich_terminal_driver.core.select_ansi_geometry(4, 1)
+        session._sync_rich_terminal_geometry()
         assert session.visible_geometry == (2, 2)
         assert (session.terminal.cols, session.terminal.rows) == (4, 1)
         assert machine.status(detailed=False)["terminal"] == [2, 2]
@@ -241,10 +241,10 @@ def test_shared_raw_uses_absolute_bounded_cursors_across_reset():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(ansi_history_bytes=4),
+        rich_terminal=_rich_terminal_config(ansi_history_bytes=4),
     ) as session:
         machine = SharedMachine(session)
-        session._receive_presentation_ansi(b"abcdef")
+        session._receive_rich_terminal_ansi(b"abcdef")
 
         rolled = machine.raw(since=0)
         assert rolled == {
@@ -338,10 +338,10 @@ def test_session_dispatch_rejects_input_from_an_old_reset_generation(tmp_path):
             server.dispatch("send_key", {"key": "enter"})
 
 
-@pytest.mark.parametrize("presentation", (None, _presentation_config()))
+@pytest.mark.parametrize("rich_terminal", (None, _rich_terminal_config()))
 def test_shared_paused_step_counts_only_guest_instructions(
     monkeypatch,
-    presentation,
+    rich_terminal,
 ):
     system = MegapadSystem(
         ram_size=64 * 1024,
@@ -352,7 +352,7 @@ def test_shared_paused_step_counts_only_guest_instructions(
         system,
         cols=2,
         rows=2,
-        presentation=presentation,
+        rich_terminal=rich_terminal,
     ) as session:
         machine = SharedMachine(session)
         machine.paused = True
@@ -399,16 +399,16 @@ def test_shared_lost_session_requires_successful_reset():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(),
+        rich_terminal=_rich_terminal_config(),
     ) as session:
         machine = SharedMachine(session)
         machine.paused = True
-        session.presentation_driver.close()
+        session.rich_terminal_driver.close()
 
         status = machine.status(detailed=False)
         assert status["state"] == "lost"
         assert not status["idle"]
-        assert status["presentation"]["lost"]
+        assert status["rich_terminal"]["lost"]
         with pytest.raises(RuntimeError, match="requires a machine reset"):
             machine.resume()
         with pytest.raises(RuntimeError, match="requires a machine reset"):
@@ -416,8 +416,8 @@ def test_shared_lost_session_requires_successful_reset():
 
         reset = machine.reset(paused=True)
         assert reset["state"] == "paused"
-        assert not reset["presentation"]["lost"]
-        assert reset["presentation"]["failure"] is None
+        assert not reset["rich_terminal"]["lost"]
+        assert reset["rich_terminal"]["failure"] is None
 
 
 def test_shared_failed_reset_remains_paused_and_visible(monkeypatch):

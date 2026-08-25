@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from presentation_terminal.apt1 import (
+from rich_terminal.apt1 import (
     FrameEncoder,
     IncrementalFrameDecoder,
     MessageType,
@@ -17,12 +17,12 @@ from presentation_terminal.apt1 import (
     encode_probe,
     parse_negotiation,
 )
-from presentation_terminal.retained_model import (
+from rich_terminal.retained_model import (
     OwnerQuotas,
     RetainedFeature,
     RetainedPolicy,
 )
-from presentation_terminal.retained_scene import (
+from rich_terminal.retained_scene import (
     ExplicitSamples,
     GroupBody,
     ObjectBounds,
@@ -33,7 +33,7 @@ from presentation_terminal.retained_scene import (
     Sample,
     TimestampMode,
 )
-from presentation_terminal.retained_wire import (
+from rich_terminal.retained_wire import (
     CellMode,
     ObjectSetValue,
     ObjectSetVisibility,
@@ -71,8 +71,8 @@ from presentation_terminal.retained_wire import (
     encode_series_drop,
     encode_series_replace,
 )
-from presentation_terminal.server import (
-    PresentationTerminalCore,
+from rich_terminal.server import (
+    RichTerminalCore,
     TerminalConfig,
     TerminalSessionError,
     TerminalState,
@@ -184,7 +184,7 @@ def _negotiate(
     client_max_payload: int = 256,
     retained_policy: RetainedPolicy | None = None,
 ):
-    core = PresentationTerminalCore(
+    core = RichTerminalCore(
         _config(),
         attachment_epoch=9,
         retained_policy=retained_policy,
@@ -266,7 +266,7 @@ def _snapshot_frames(
 
 
 def _settle_results(
-    core: PresentationTerminalCore,
+    core: RichTerminalCore,
     result,
 ) -> tuple[int, ...]:
     transaction_ids = tuple(
@@ -326,7 +326,7 @@ def _owner_open(
     )
 
 
-def _settle_lifecycle(core: PresentationTerminalCore, result) -> None:
+def _settle_lifecycle(core: RichTerminalCore, result) -> None:
     marker = next(
         outbound.lifecycle_result
         for outbound in result.outbound
@@ -384,7 +384,7 @@ def _present_frames(
 
 
 def test_ansi_remains_default_and_non_apt_escapes_pass_byte_exact():
-    core = PresentationTerminalCore(
+    core = RichTerminalCore(
         _config(), attachment_epoch=1, session_id_factory=lambda: 2
     )
     assert core.state is TerminalState.ANSI
@@ -603,7 +603,7 @@ def test_retained_query_remains_valid_after_a_later_settled_cell_delta():
         + encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
     )
     _settle_results(core, delta)
-    assert core.presentation_revision == 2
+    assert core.model_revision == 2
 
     discovered = core.feed_machine(
         encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query())
@@ -814,7 +814,7 @@ def test_owner_drop_uses_shared_revision_and_exact_tombstone_authority():
     )
     drop_frame = decoder.feed(dropped.outbound[0].payload)[0]
     assert TX_RESULT.unpack(drop_frame.payload) == (2, 0, 0, 2)
-    assert dropped.views == (core.presentation_view,)
+    assert dropped.views == (core.output_view,)
     state = core.owner_state
     assert state is not None
     assert not state.records[owner.owner_id].live
@@ -834,7 +834,7 @@ def test_owner_drop_uses_shared_revision_and_exact_tombstone_authority():
         0,
         3,
     )
-    assert repeated.views == (core.presentation_view,)
+    assert repeated.views == (core.output_view,)
     assert core.owner_state is tombstone
     core.settle_result_delivery(3)
 
@@ -897,7 +897,7 @@ def test_owner_drop_invalid_owner_scalars_return_status_two_without_mutation(
         1,
     )
     assert core.owner_state is source
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
     core.settle_result_delivery(2)
 
 
@@ -1155,7 +1155,7 @@ def test_present_abort_discards_only_transaction_staging_and_returns_credit():
         == MessageType.CREDIT
     )
     assert core.outstanding_result_transaction_id is None
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
     assert core.retained_state is scene_source
     assert core.owner_state is owner_source
 
@@ -1185,7 +1185,7 @@ def test_present_transaction_rejects_an_intervening_control_frame():
     with pytest.raises(TerminalSessionError, match="intervened inside a PRESENT"):
         core.feed_machine(encoder.encode(MessageType.CREDIT, CREDIT.pack(4_096)))
 
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
 
 
 def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
@@ -1228,7 +1228,7 @@ def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
     )
     assert core.owner_state is owner_source
     assert core.retained_state is scene_source
-    assert core.presentation_revision == 2
+    assert core.model_revision == 2
     assert stale.views == ()
     core.settle_result_delivery(3)
 
@@ -1244,7 +1244,7 @@ def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
         0,
         3,
     )
-    assert core.presentation_revision == 3
+    assert core.model_revision == 3
     assert core.owner_state is not owner_source
     assert core.owner_state is not None
     assert not core.owner_state.records[7].live
@@ -1255,14 +1255,14 @@ def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
     assert scene_source is not None
     assert scene_source.hidden is not None
     assert scene_source.hidden.owners[7].owner.owner_generation == 1
-    assert core.presentation_view is not None
-    assert core.presentation_view.retained is core.retained_state
-    assert dropped.views == (core.presentation_view,)
+    assert core.output_view is not None
+    assert core.output_view.retained is core.retained_state
+    assert dropped.views == (core.output_view,)
 
 
 def test_retained_resize_requires_present_cell_replace_before_publication():
     core, encoder, decoder = _open_retained_core()
-    old_presentation = core.presentation_view
+    old_output = core.output_view
 
     assert core.resize_ready
     resize = core.send_resize(4, 1)
@@ -1272,7 +1272,7 @@ def test_retained_resize_requires_present_cell_replace_before_publication():
     assert core.selected_geometry == (4, 1)
     assert core.geometry_generation == 1
     assert core.view is None
-    assert core.presentation_view is old_presentation
+    assert core.output_view is old_output
     assert core.retained_state is not None
     assert core.retained_state.requirement is RebuildRequirement.REPLACE
     assert not core.retained_state.retained_visible
@@ -1308,13 +1308,13 @@ def test_retained_resize_requires_present_cell_replace_before_publication():
     )
 
     assert core.state is TerminalState.ACTIVE
-    assert core.presentation_revision == 2
-    assert replaced.views == (core.presentation_view,)
-    assert core.presentation_view is not old_presentation
-    assert core.presentation_view is not None
-    assert core.presentation_view.geometry.generation == 1
-    assert core.presentation_view.cell is core.view
-    assert core.presentation_view.retained is core.retained_state
+    assert core.model_revision == 2
+    assert replaced.views == (core.output_view,)
+    assert core.output_view is not old_output
+    assert core.output_view is not None
+    assert core.output_view.geometry.generation == 1
+    assert core.output_view.cell is core.view
+    assert core.output_view.retained is core.retained_state
 
 
 def test_legacy_snapshot_begin_is_forbidden_after_retained_discovery():
@@ -1325,7 +1325,7 @@ def test_legacy_snapshot_begin_is_forbidden_after_retained_discovery():
     with pytest.raises(TerminalSessionError, match="forbidden after retained"):
         core.feed_machine(_snapshot_frames(encoder, transaction_id=2))
 
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
     assert core.view is view
     assert core.owner_state is owner_state
     assert core.outstanding_result_transaction_id is None
@@ -1432,7 +1432,7 @@ def test_soundlab_retained_vocabulary_dispatches_through_atomic_composite_views(
             0,
             transaction_id,
         )
-        assert result.views == (core.presentation_view,)
+        assert result.views == (core.output_view,)
         core.settle_result_delivery(transaction_id)
         return result
 
@@ -1629,7 +1629,7 @@ def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
         1,
     )
     assert rejected.views == ()
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
     assert core.retained_state is source
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.region == 0
@@ -1650,7 +1650,7 @@ def test_resource_lifecycle_frame_cannot_intervene_inside_present():
             )
         )
 
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
 
 
 def test_client_receive_credit_backpressures_data_but_not_control_results():
@@ -1798,7 +1798,7 @@ def test_soft_reset_cancels_crossed_commit_then_resets_clock_and_cell_model():
         crossed_frames.extend(outbound_decoder.feed(outbound.payload))
     assert TX_RESULT.unpack(crossed_frames[0].payload) == (2, 1, 0, 1)
     assert crossed.views == ()
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
     assert _settle_results(core, crossed) == (2,)
 
     encoder.set_presentation_epoch(1)
@@ -1809,7 +1809,7 @@ def test_soft_reset_cancels_crossed_commit_then_resets_clock_and_cell_model():
         )
     )
     assert acknowledged.outbound == ()
-    assert core.presentation_revision == 0
+    assert core.model_revision == 0
     assert core.state is TerminalState.RESYNCING
 
     outbound_decoder.advance_presentation_epoch(1)
@@ -1817,7 +1817,7 @@ def test_soft_reset_cancels_crossed_commit_then_resets_clock_and_cell_model():
     assert len(replacement.views) == 1
     assert replacement.views[0].presentation_epoch == 1
     assert replacement.views[0].revision == 1
-    assert core.presentation_revision == 1
+    assert core.model_revision == 1
     assert core.state is TerminalState.ACTIVE
 
 
@@ -1834,7 +1834,7 @@ def test_bad_binary_fails_closed_and_never_returns_to_ansi_locally():
 
 
 def test_probe_cancellation_is_legal_only_before_open():
-    core = PresentationTerminalCore(
+    core = RichTerminalCore(
         _config(), attachment_epoch=1, session_id_factory=lambda: 2
     )
     probe = encode_probe(3)

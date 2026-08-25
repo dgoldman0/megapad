@@ -137,7 +137,7 @@ Other control commands are `pause`, `resume`, `step`, `reset`, `resize`,
 `key`, `raw`, and `shutdown`. `step` requires the machine to be paused. The
 viewer and CLI are peers: the server serializes input from both through the
 one terminal owner. Baseline ANSI input enters the UART stream; an active
-presentation-terminal attachment instead receives normalized, framed input.
+rich-terminal attachment instead receives normalized, framed input.
 
 The local control protocol is version 2. `status.generation` identifies the
 current successful boot/reset epoch. Every `send_text`, `send_key`, and
@@ -206,7 +206,7 @@ ASCII-34 workarounds and documentation examples only after the word exists.
 - `alt+<character>`
 
 In baseline ANSI mode, `resize(cols, rows)` updates both the terminal grid and
-the guest UART geometry device immediately. In active presentation mode it
+the guest UART geometry device immediately. In active rich-terminal mode it
 records a bounded latest-wins request; the selected geometry changes atomically
 with its framed RESIZE only when transaction and queue ordering permit it, and
 the visible geometry changes when the required replacement snapshot commits.

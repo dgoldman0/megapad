@@ -25,7 +25,7 @@ not parse terminal bytes, mutate a terminal model, render, synthesize replies,
 or invoke terminal-owned code.
 
 The guest-side protocol implementation is likewise not part of KDOS. It is a
-separately source-loadable userland module, `presentation-terminal.f`, in the
+separately source-loadable userland module, `rich-terminal.f`, in the
 same architectural role as `networking.f`. BIOS and KDOS continue to expose
 ordinary UART and geometry primitives whether or not that module is present.
 
@@ -115,7 +115,7 @@ a polled batch restores exactly its payload byte count and one batch slot.
 The terminal parser may retain an incomplete APT frame across publications.
 It must not retain references into mutable UART or adapter storage.
 
-Terminal parsing, queued reply generation, presentation commits, snapshot
+Terminal parsing, queued reply generation, output commits, snapshot
 publication, and rendering all occur outside the machine boundary.
 
 ## 6. Terminal ingress
@@ -187,7 +187,7 @@ consumer callback.
 
 The headless terminal core publishes immutable renderer-neutral views only
 after an ANSI-visible change or an accepted enhanced transaction commit. Each
-view contains attachment epoch, terminal session ID, presentation revision,
+view contains attachment epoch, terminal session ID, model revision,
 geometry, persistent rows, dirty spans, and cursor state.
 
 Cursor blink and other renderer-only overlays do not create cell revisions.
@@ -208,7 +208,7 @@ The following do not conform:
 * a fake host that omits epochs, capacity, retained publication, or reset
   behavior.
 
-Removing ANSI support, requiring `presentation-terminal.f` during KDOS boot,
+Removing ANSI support, requiring `rich-terminal.f` during KDOS boot,
 or automatically acquiring an enhanced lease for ordinary sessions also does
 not conform.
 

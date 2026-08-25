@@ -1,6 +1,6 @@
 """Focused source-load test for the optional APT-1 guest module.
 
-The presentation client is intentionally not part of KDOS.  These tests load
+The rich-terminal client is intentionally not part of KDOS.  These tests load
 the production source into userland and exercise its caller-owned attachment,
 CELL snapshot, deterministic retained discovery, input, resize, and close
 boundaries without installing the module in KDOS.
@@ -18,16 +18,16 @@ from tests.test_system import (
     capture_uart,
     make_system,
 )
-from presentation_terminal.server import (
-    PresentationTerminalCore,
+from rich_terminal.server import (
+    RichTerminalCore,
     TerminalConfig,
     TerminalState,
 )
-from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
+from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = PROJECT_ROOT / "presentation-terminal.f"
+MODULE_PATH = PROJECT_ROOT / "rich-terminal.f"
 
 # This is a watchdog for a single source module and one short Forth word, not
 # a design budget.  The native single-core scheduler normally finishes far
@@ -85,7 +85,7 @@ def _core_retained_policy() -> RetainedPolicy:
     )
 
 
-class TestPresentationTerminalForth(_KDOSTestBase):
+class TestRichTerminalForth(_KDOSTestBase):
     """Exercise the optional module without installing it into KDOS."""
 
     def test_inert_load_probe_and_preopen_close(self) -> None:
@@ -387,7 +387,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         terminal_views = []
         key_sent = False
         resize_sent = False
-        core = PresentationTerminalCore(
+        core = RichTerminalCore(
             TerminalConfig(
                 max_payload=256,
                 max_transaction_bytes=640,
@@ -680,7 +680,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
         terminal_cursor: int | None = None
         begin_marker = b"PTRICH!"
         terminal_views = []
-        core = PresentationTerminalCore(
+        core = RichTerminalCore(
             TerminalConfig(
                 max_payload=256,
                 max_transaction_bytes=512,
@@ -747,7 +747,7 @@ class TestPresentationTerminalForth(_KDOSTestBase):
             system.cpu.halted,
             "retained writer source test exceeded its "
             f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog "
-            f"(core={core.state.value}, revision={core.presentation_revision}, "
+            f"(core={core.state.value}, revision={core.model_revision}, "
             f"views={len(terminal_views)}, phase={phase}, "
             f"tail={raw[-160:].hex()})",
         )

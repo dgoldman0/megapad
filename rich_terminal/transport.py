@@ -1,4 +1,4 @@
-"""Bounded, epoch-qualified transport primitives for presentation terminals.
+"""Bounded, epoch-qualified transport primitives for rich terminals.
 
 This module is deliberately independent of MegaPad's UART, scheduler, ANSI
 terminal, and rendering code.  A later machine adapter can use these types at

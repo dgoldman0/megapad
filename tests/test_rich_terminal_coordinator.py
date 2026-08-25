@@ -1,30 +1,30 @@
-"""Focused atomic publication tests for the composite presentation view."""
+"""Focused atomic publication tests for the composite terminal output view."""
 
 from __future__ import annotations
 
 import pytest
 
-from presentation_terminal.cell_model import (
+from rich_terminal.cell_model import (
     Cell,
     CellModel,
     CellSpan,
     Cursor,
     TransactionBegin,
 )
-from presentation_terminal.presentation_coordinator import PresentationCoordinator
-from presentation_terminal.presentation_model import (
-    PresentationClock,
-    PresentationGeometry,
+from rich_terminal.output_coordinator import TerminalOutputCoordinator
+from rich_terminal.update_authority import (
+    TerminalUpdateAuthority,
+    TerminalGeometry,
     TransactionFamily,
 )
-from presentation_terminal.retained_model import (
+from rich_terminal.retained_model import (
     OwnerIdentity,
     OwnerLedger,
     OwnerQuotas,
     RetainedFeature,
     RetainedPolicy,
 )
-from presentation_terminal.retained_scene import (
+from rich_terminal.retained_scene import (
     CommitDisposition,
     RegionDefinition,
     RetainedMode,
@@ -34,7 +34,7 @@ from presentation_terminal.retained_scene import (
 
 SESSION_ID = 0x0123456789ABCDEF
 PRESENTATION_EPOCH = 3
-GEOMETRY = PresentationGeometry(2, 2, 0)
+GEOMETRY = TerminalGeometry(2, 2, 0)
 
 
 def _policy() -> RetainedPolicy:
@@ -67,7 +67,7 @@ def _policy() -> RetainedPolicy:
 
 
 def _domain():
-    clock = PresentationClock(presentation_epoch=PRESENTATION_EPOCH)
+    clock = TerminalUpdateAuthority(presentation_epoch=PRESENTATION_EPOCH)
     cell = CellModel(
         attachment_epoch=7,
         session_id=SESSION_ID,
@@ -100,7 +100,7 @@ def _domain():
         owners=owners,
         geometry=GEOMETRY,
     )
-    coordinator = PresentationCoordinator(
+    coordinator = TerminalOutputCoordinator(
         clock=clock,
         cell_model=cell,
         retained_model=retained,
@@ -109,7 +109,7 @@ def _domain():
     return clock, cell, owners, owner, retained, coordinator
 
 
-def _prepare_initial_cell(clock: PresentationClock, cell: CellModel):
+def _prepare_initial_cell(clock: TerminalUpdateAuthority, cell: CellModel):
     lease = clock.reserve(TransactionFamily.CELL, 1, 0)
     cell.begin_with_lease(
         TransactionBegin(1, 0, 2, 2, 2, 4),
@@ -144,7 +144,7 @@ def test_cell_only_prepare_is_nonmutating_and_rejects_foreign_or_stale_installs(
     lease, cell_prepared = _prepare_initial_cell(clock, cell)
 
     prepared = coordinator.prepare_commit(lease, cell=cell_prepared)
-    foreign_coordinator = PresentationCoordinator(
+    foreign_coordinator = TerminalOutputCoordinator(
         clock=clock,
         cell_model=cell,
         retained_model=retained,

@@ -20,10 +20,10 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .apt1 import UINT32_MAX, UINT64_MAX
-from .presentation_model import (
-    PresentationClock,
-    PresentationGeometry,
-    PresentationStateError,
+from .update_authority import (
+    TerminalUpdateAuthority,
+    TerminalGeometry,
+    TerminalUpdateError,
     ResultLease,
     TransactionFamily,
     TransactionLease,
@@ -220,7 +220,7 @@ class RegionDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         object.__setattr__(self, "clipped", _boolean("clipped", self.clipped))
 
-    def validate_geometry(self, geometry: PresentationGeometry) -> None:
+    def validate_geometry(self, geometry: TerminalGeometry) -> None:
         if self.geometry_generation != geometry.generation:
             raise SceneModelError(SceneErrorCode.BOUNDS, "region geometry stamp is stale")
         if (
@@ -679,7 +679,7 @@ class RetainedScene:
 @dataclass(frozen=True, slots=True)
 class SceneModelState:
     revision: int
-    geometry: PresentationGeometry
+    geometry: TerminalGeometry
     active: RetainedScene
     hidden: RetainedScene | None
     hidden_kind: HiddenTargetKind | None
@@ -692,7 +692,7 @@ class SceneModelState:
 class _SceneStaging:
     lease: TransactionLease
     mode: RetainedMode
-    geometry: PresentationGeometry
+    geometry: TerminalGeometry
     candidate: RetainedScene
     item_advances: list[tuple[OwnerIdentity, ItemNamespace, int]]
     staged_high_water: dict[tuple[int, ItemNamespace], int]
@@ -729,17 +729,17 @@ class PreparedOwnerRetirement:
 
 
 class RetainedSceneModel:
-    """Active/hidden retained targets sharing one presentation clock."""
+    """Active/hidden retained targets sharing one update authority."""
 
     def __init__(
         self,
         *,
-        clock: PresentationClock,
+        clock: TerminalUpdateAuthority,
         owners: OwnerLedger,
-        geometry: PresentationGeometry,
+        geometry: TerminalGeometry,
     ) -> None:
-        if not isinstance(clock, PresentationClock):
-            raise TypeError("clock must be PresentationClock")
+        if not isinstance(clock, TerminalUpdateAuthority):
+            raise TypeError("clock must be TerminalUpdateAuthority")
         if not isinstance(owners, OwnerLedger):
             raise TypeError("owners must be OwnerLedger")
         owners.policy.validate_geometry(geometry)
@@ -764,7 +764,7 @@ class RetainedSceneModel:
         return self._state
 
     @property
-    def clock(self) -> PresentationClock:
+    def clock(self) -> TerminalUpdateAuthority:
         return self._clock
 
     @property
@@ -775,7 +775,7 @@ class RetainedSceneModel:
         self,
         lease: TransactionLease,
         mode: RetainedMode,
-        geometry: PresentationGeometry,
+        geometry: TerminalGeometry,
     ) -> None:
         if self._staging is not None:
             raise SceneModelError(SceneErrorCode.STATE, "a retained transaction is already open")
@@ -1128,7 +1128,7 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.AUTHORITY, str(exc))
         try:
             revision = self._clock.next_revision(staging.lease)
-        except PresentationStateError as exc:
+        except TerminalUpdateError as exc:
             self._fail(SceneErrorCode.STATE, str(exc))
         old = self._state
         if staging.mode is RetainedMode.DELTA:
@@ -1203,7 +1203,7 @@ class RetainedSceneModel:
         )
         try:
             revision = self._clock.next_revision(lease)
-        except PresentationStateError as exc:
+        except TerminalUpdateError as exc:
             raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
         return PreparedOwnerRetirement(
             state=replace(
@@ -1300,7 +1300,7 @@ class RetainedSceneModel:
         self._clock.abort(staging.lease)
         self._staging = None
 
-    def require_layout(self, geometry: PresentationGeometry) -> None:
+    def require_layout(self, geometry: TerminalGeometry) -> None:
         if self._staging is not None or self._clock.open_transaction is not None or self._clock.outstanding_result is not None:
             raise SceneModelError(SceneErrorCode.STATE, "layout waits for transaction/result settlement")
         self._owners.policy.validate_geometry(geometry)

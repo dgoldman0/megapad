@@ -1,4 +1,4 @@
-"""Pure conformance tests for the additive presentation-terminal host port."""
+"""Pure conformance tests for the additive rich-terminal host port."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from presentation_terminal import (
+from rich_terminal import (
     AdmissionStatus,
     EgressBatch,
     EgressWatermarks,

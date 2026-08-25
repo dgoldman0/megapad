@@ -6,9 +6,9 @@ from types import MappingProxyType
 
 import pytest
 
-from presentation_terminal.apt1 import STRUCTURAL_MAX_PAYLOAD, UINT32_MAX
-from presentation_terminal.presentation_model import PresentationGeometry
-from presentation_terminal.retained_model import (
+from rich_terminal.apt1 import STRUCTURAL_MAX_PAYLOAD, UINT32_MAX
+from rich_terminal.update_authority import TerminalGeometry
+from rich_terminal.retained_model import (
     ItemNamespace,
     OwnerDropDisposition,
     OwnerIdentity,
@@ -93,10 +93,10 @@ def test_policy_validates_all_advertised_families_and_exact_geometry_bytes():
     policy = _policy()
 
     # 216 + rows * (52 + 8 * cols), including every complete frame header.
-    assert policy.validate_geometry(PresentationGeometry(8, 4, 9)) == 680
+    assert policy.validate_geometry(TerminalGeometry(8, 4, 9)) == 680
 
     with pytest.raises(ValueError, match="row exceeds inbound payload"):
-        policy.validate_geometry(PresentationGeometry(31, 1))
+        policy.validate_geometry(TerminalGeometry(31, 1))
 
     with pytest.raises(ValueError, match="transaction maximum"):
         _policy(max_retained_transaction_bytes=335)

@@ -12,8 +12,8 @@ from .apt1 import CONTROL_RESERVE_BYTES, HEADER_BYTES, UINT64_MAX
 from .retained_model import RetainedPolicy
 from .server import (
     OutboundBytes,
-    PresentationView,
-    PresentationTerminalCore,
+    TerminalOutputView,
+    RichTerminalCore,
     TerminalConfig,
     TerminalSessionError,
     TerminalState,
@@ -129,13 +129,13 @@ class _PendingOutbound:
 
 
 class _AttachSystem(Protocol):
-    def attach_presentation_terminal(
+    def attach_rich_terminal(
         self,
         limits: HostPortLimits,
     ) -> TerminalHostLease: ...
 
 
-class PresentationTerminalDriver:
+class RichTerminalDriver:
     """Own one explicit lease and service it outside guest execution.
 
     The driver never executes the machine.  Its owner alternates bounded
@@ -146,17 +146,17 @@ class PresentationTerminalDriver:
     def __init__(
         self,
         lease: TerminalHostLease,
-        core: PresentationTerminalCore,
+        core: RichTerminalCore,
         host_limits: HostPortLimits,
         limits: DriverLimits,
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
-        view_sink: Callable[[PresentationView], None] | None = None,
+        view_sink: Callable[[TerminalOutputView], None] | None = None,
     ):
         if not isinstance(lease, TerminalHostLease):
             raise TypeError("lease must be TerminalHostLease")
-        if not isinstance(core, PresentationTerminalCore):
-            raise TypeError("core must be PresentationTerminalCore")
+        if not isinstance(core, RichTerminalCore):
+            raise TypeError("core must be RichTerminalCore")
         if not isinstance(host_limits, HostPortLimits):
             raise TypeError("host_limits must be HostPortLimits")
         if not isinstance(limits, DriverLimits):
@@ -191,10 +191,10 @@ class PresentationTerminalDriver:
         driver_limits: DriverLimits,
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
-        view_sink: Callable[[PresentationView], None] | None = None,
+        view_sink: Callable[[TerminalOutputView], None] | None = None,
         retained_policy: RetainedPolicy | None = None,
         session_id_factory: Callable[[], int] | None = None,
-    ) -> PresentationTerminalDriver:
+    ) -> RichTerminalDriver:
         """Validate the complete vertical's capacities before acquisition."""
 
         if not isinstance(host_limits, HostPortLimits):
@@ -241,9 +241,9 @@ class PresentationTerminalDriver:
                 "ordinary ingress capacity cannot admit every fixed-size input frame"
             )
 
-        lease = system.attach_presentation_terminal(host_limits)
+        lease = system.attach_rich_terminal(host_limits)
         try:
-            core = PresentationTerminalCore(
+            core = RichTerminalCore(
                 terminal_config,
                 attachment_epoch=lease.attachment_epoch,
                 retained_policy=retained_policy,
@@ -268,7 +268,7 @@ class PresentationTerminalDriver:
             raise
 
     @property
-    def core(self) -> PresentationTerminalCore:
+    def core(self) -> RichTerminalCore:
         return self._core
 
     @property
@@ -757,5 +757,5 @@ __all__ = [
     "DriverLimits",
     "DriverServiceResult",
     "DriverStatus",
-    "PresentationTerminalDriver",
+    "RichTerminalDriver",
 ]

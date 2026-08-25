@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from .apt1 import STRUCTURAL_MAX_PAYLOAD, UINT32_MAX, UINT64_MAX
-from .presentation_model import PresentationGeometry
+from .update_authority import TerminalGeometry
 
 
 class RetainedFeature(IntFlag):
@@ -336,11 +336,11 @@ class RetainedPolicy:
             for name in self.__dataclass_fields__
         }
 
-    def validate_geometry(self, geometry: PresentationGeometry) -> int:
+    def validate_geometry(self, geometry: TerminalGeometry) -> int:
         """Return exact CELL_REPLACE transaction bytes for ``geometry``."""
 
-        if not isinstance(geometry, PresentationGeometry):
-            raise TypeError("geometry must be PresentationGeometry")
+        if not isinstance(geometry, TerminalGeometry):
+            raise TypeError("geometry must be TerminalGeometry")
         span_payload = _checked_add(
             "CELL_REPLACE span payload",
             12,
@@ -756,7 +756,7 @@ class OwnerLedger:
         ):
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.STALE_OWNER,
-                "owner identity is outside this session/presentation epoch",
+                "owner identity is outside this session/presentation_epoch",
             )
 
     def _validate_quotas(self, quotas: OwnerQuotas) -> None:

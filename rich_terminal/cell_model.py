@@ -1,4 +1,4 @@
-"""Atomic renderer-neutral CELL-1 presentation model.
+"""Atomic renderer-neutral CELL-1 terminal output model.
 
 The model stages one bounded transaction, validates the declared wire shape,
 and publishes immutable views only after a complete commit.  It contains no
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .apt1 import UINT32_MAX, UINT64_MAX, snapshot_wire_bytes
-from .presentation_model import TransactionFamily, TransactionLease
+from .update_authority import TransactionFamily, TransactionLease
 
 
 WIRE_ATTRIBUTE_MASK = 0x007F
@@ -358,7 +358,7 @@ class CellModel:
         This compatibility path preserves the original CELL-1 server API.
         A shared CELL/retained coordinator uses :meth:`begin_with_lease`
         instead, leaving transaction-ID and revision authority in its
-        ``PresentationClock``.
+        ``TerminalUpdateAuthority``.
         """
 
         self._begin(begin, snapshot=snapshot, authority=None)
@@ -441,7 +441,7 @@ class CellModel:
             if authority.presentation_epoch != self._presentation_epoch:
                 raise CellModelError(
                     CellModelErrorCode.TRANSACTION,
-                    "transaction lease is outside this presentation epoch",
+                    "transaction lease is outside this presentation_epoch",
                 )
             if (
                 authority.transaction_id != transaction_id
@@ -660,7 +660,7 @@ class CellModel:
             self._fail(CellModelErrorCode.TRANSACTION, "commit transaction_id mismatch")
         base_revision = staging.begin.base_revision
         if base_revision == UINT64_MAX:
-            self._fail(CellModelErrorCode.STATE, "presentation revision is exhausted")
+            self._fail(CellModelErrorCode.STATE, "model revision is exhausted")
         if normalized_revision != base_revision + 1:
             self._fail(
                 CellModelErrorCode.STATE,
@@ -778,7 +778,7 @@ class CellModel:
         if self._presentation_epoch == UINT32_MAX or epoch != self._presentation_epoch + 1:
             raise CellModelError(
                 CellModelErrorCode.STATE,
-                "requested epoch is not current presentation epoch plus one",
+                "requested epoch is not current presentation_epoch plus one",
             )
         self._presentation_epoch = epoch
         self._state = _CellModelState(None, None, True)

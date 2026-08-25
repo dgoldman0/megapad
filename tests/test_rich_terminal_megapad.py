@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from presentation_terminal import (
+from rich_terminal import (
     AdmissionStatus,
     EgressWatermarks,
     HostPortLimits,
@@ -47,13 +47,13 @@ def test_runtime_attachment_suspends_and_restores_legacy_uart_consumers():
     system.uart.on_tx = None
     system.uart.on_tx_batch = legacy_batches.append
 
-    assert isinstance(system.presentation_terminal_host, TerminalHost)
-    assert not system.presentation_terminal_host.enhanced_attached
+    assert isinstance(system.rich_terminal_host, TerminalHost)
+    assert not system.rich_terminal_host.enhanced_attached
     assert _write_native_uart(system, b"A") == b"A"
     assert legacy_batches == [b"A"]
     assert bytes(system.uart.tx_buffer) == b"A"
 
-    lease = system.attach_presentation_terminal(_limits())
+    lease = system.attach_rich_terminal(_limits())
     assert _write_native_uart(system, b"B") == b"B"
     assert legacy_batches == [b"A"]
     assert bytes(system.uart.tx_buffer) == b"A"
@@ -71,7 +71,7 @@ def test_runtime_attachment_suspends_and_restores_legacy_uart_consumers():
 
 def test_runtime_retains_one_exact_batch_and_stops_before_more_guest_work():
     system = MegapadSystem(ram_size=64 * 1024)
-    lease = system.attach_presentation_terminal(
+    lease = system.attach_rich_terminal(
         _limits(
             high_bytes=4,
             low_bytes=0,
@@ -83,7 +83,7 @@ def test_runtime_retains_one_exact_batch_and_stops_before_more_guest_work():
 
     assert _write_native_uart(system, b"ABC") == b"ABC"
     assert _write_native_uart(system, b"XY") == b"XY"
-    retained = system.presentation_terminal_host.retained_publication
+    retained = system.rich_terminal_host.retained_publication
     assert retained is not None
     assert retained.payload == b"XY"
 
@@ -115,7 +115,7 @@ def test_runtime_applies_ingress_and_geometry_only_at_runner_boundary():
         terminal_rows=24,
     )
     system.schedule_uart_input(b"L")
-    lease = system.attach_presentation_terminal(_limits())
+    lease = system.attach_rich_terminal(_limits())
 
     # The legacy keyboard/DSR and display-resize facades are paused without
     # replacing their callbacks; the lease is the only active host route.
@@ -134,8 +134,8 @@ def test_runtime_applies_ingress_and_geometry_only_at_runner_boundary():
     assert result.external_events_applied == 2
     assert system.uart.rx_pending == 2
     assert (system.uart_geom.cols, system.uart_geom.rows) == (100, 40)
-    assert system.presentation_terminal_host.pending_ingress_events == 0
-    assert system.presentation_terminal_host.pending_geometry_events == 0
+    assert system.rich_terminal_host.pending_ingress_events == 0
+    assert system.rich_terminal_host.pending_geometry_events == 0
 
     # Older ANSI input remains at the front.  Detach then removes only the
     # unconsumed byte supplied by this attachment.
@@ -156,7 +156,7 @@ def test_runtime_applies_protocol_resize_as_one_scheduler_boundary_record():
         terminal_cols=80,
         terminal_rows=24,
     )
-    lease = system.attach_presentation_terminal(_limits())
+    lease = system.attach_rich_terminal(_limits())
 
     assert (
         lease.submit_resize(b"resize", cols=100, rows=40)
@@ -164,16 +164,16 @@ def test_runtime_applies_protocol_resize_as_one_scheduler_boundary_record():
     )
     assert system.uart.rx_pending == 0
     assert (system.uart_geom.cols, system.uart_geom.rows) == (80, 24)
-    assert system.presentation_terminal_host.pending_ingress_events == 1
-    assert system.presentation_terminal_host.pending_geometry_events == 1
+    assert system.rich_terminal_host.pending_ingress_events == 1
+    assert system.rich_terminal_host.pending_geometry_events == 1
 
     system.cpu.halted = True
     result = system.run_batch_stats(1)
     assert result.external_events_applied == 1
     assert system.uart.rx_pending == 6
     assert (system.uart_geom.cols, system.uart_geom.rows) == (100, 40)
-    assert system.presentation_terminal_host.pending_ingress_events == 0
-    assert system.presentation_terminal_host.pending_geometry_events == 0
+    assert system.rich_terminal_host.pending_ingress_events == 0
+    assert system.rich_terminal_host.pending_geometry_events == 0
 
     assert lease.close() is AdmissionStatus.ACCEPTED
     assert system.uart.rx_pending == 0
@@ -181,9 +181,9 @@ def test_runtime_applies_protocol_resize_as_one_scheduler_boundary_record():
 
 def test_subsequent_boot_retires_the_active_epoch_before_execution_resumes():
     system = MegapadSystem(ram_size=64 * 1024)
-    lease = system.attach_presentation_terminal(_limits())
+    lease = system.attach_rich_terminal(_limits())
     system.boot()
-    assert system.presentation_terminal_host.enhanced_attached
+    assert system.rich_terminal_host.enhanced_attached
 
     assert _write_native_uart(system, b"view") == b"view"
     old_delivery = lease.poll_egress().delivery
@@ -194,17 +194,17 @@ def test_subsequent_boot_retires_the_active_epoch_before_execution_resumes():
     assert system.uart.rx_pending == 3
 
     system.boot()
-    assert not system.presentation_terminal_host.enhanced_attached
+    assert not system.rich_terminal_host.enhanced_attached
     assert system.uart.rx_pending == 0
     assert old_delivery.release() is AdmissionStatus.STALE
     assert lease.poll_egress().status is AdmissionStatus.STALE
     assert lease.submit_ingress(b"late") is AdmissionStatus.STALE
 
-    current = system.attach_presentation_terminal(_limits())
+    current = system.attach_rich_terminal(_limits())
     assert current.attachment_epoch > lease.attachment_epoch
     assert lease.close() is AdmissionStatus.STALE
     assert (
-        system.presentation_terminal_host.active_attachment_epoch
+        system.rich_terminal_host.active_attachment_epoch
         == current.attachment_epoch
     )
 
@@ -214,7 +214,7 @@ def test_oversized_invalid_publication_latches_without_leaking_or_throwing():
     legacy_batches: list[bytes] = []
     system.uart.on_tx = None
     system.uart.on_tx_batch = legacy_batches.append
-    lease = system.attach_presentation_terminal(_limits(retained_bytes=8))
+    lease = system.attach_rich_terminal(_limits(retained_bytes=8))
     assert lease.submit_ingress(b"Q") is AdmissionStatus.ACCEPTED
 
     # A misconfigured or nonconforming guest can exceed the caller's declared
@@ -223,14 +223,14 @@ def test_oversized_invalid_publication_latches_without_leaking_or_throwing():
     assert _write_native_uart(system, b"123456789") == b"123456789"
     assert legacy_batches == []
     assert lease.poll_egress().delivery is None
-    assert "9 bytes" in system.presentation_terminal_host.failure_reason
+    assert "9 bytes" in system.rich_terminal_host.failure_reason
 
     stopped = system.run_batch_stats(1)
     assert stopped.instructions_executed == 0
     assert stopped.system_cycles_advanced == 0
     assert stopped.system_stop_reason == "terminal_failure"
     assert system.uart.rx_pending == 0
-    assert system.presentation_terminal_host.pending_ingress_events == 1
+    assert system.rich_terminal_host.pending_ingress_events == 1
 
     assert lease.close() is AdmissionStatus.ACCEPTED
     assert _write_native_uart(system, b"A") == b"A"

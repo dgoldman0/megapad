@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from presentation_terminal.presentation_model import (
-    PresentationClock,
-    PresentationGeometry,
+from rich_terminal.update_authority import (
+    TerminalUpdateAuthority,
+    TerminalGeometry,
     TransactionFamily,
 )
-from presentation_terminal.retained_model import (
+from rich_terminal.retained_model import (
     OwnerIdentity,
     OwnerLedger,
     OwnerQuotas,
     RetainedFeature,
     RetainedPolicy,
 )
-from presentation_terminal.retained_scene import (
+from rich_terminal.retained_scene import (
     CommitDisposition,
     ExplicitSamples,
     GroupBody,
@@ -46,7 +46,7 @@ from presentation_terminal.retained_scene import (
 
 
 SESSION = 0x0123456789ABCDEF
-GEOMETRY = PresentationGeometry(20, 10, 0)
+GEOMETRY = TerminalGeometry(20, 10, 0)
 WHITE = RGBA(255, 255, 255, 255)
 BLACK = RGBA(0, 0, 0, 255)
 GREEN = RGBA(32, 220, 96, 255)
@@ -106,7 +106,7 @@ def _quotas(**changes) -> OwnerQuotas:
 
 
 def _domain(*, quotas: OwnerQuotas | None = None):
-    clock = PresentationClock(
+    clock = TerminalUpdateAuthority(
         presentation_epoch=3, revision=1, transaction_high_water=1
     )
     owners = OwnerLedger(
@@ -322,7 +322,7 @@ def test_layout_target_is_copy_on_write_and_active_quota_is_not_double_charged()
     active = scene.state.active
     active_owner = active.owners[owner.owner_id]
 
-    resized = PresentationGeometry(20, 10, 1)
+    resized = TerminalGeometry(20, 10, 1)
     scene.require_layout(resized)
     _begin(clock, scene, 4, RetainedMode.LAYOUT_START, resized)
     scene.replace_region(_region(owner, generation=1))
@@ -348,7 +348,7 @@ def test_owner_retirement_removes_exact_authority_from_active_and_hidden_atomica
     clock, owners, owner, scene = _domain()
     _reveal_soundlab(clock, scene, owner)
 
-    resized = PresentationGeometry(20, 10, 1)
+    resized = TerminalGeometry(20, 10, 1)
     scene.require_layout(resized)
     _begin(clock, scene, 4, RetainedMode.LAYOUT_START, resized)
     scene.replace_region(_region(owner, generation=1))
@@ -400,7 +400,7 @@ def test_layout_reveal_rejects_any_surviving_stale_region():
     _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
     _install(scene, clock, CommitDisposition.COMMIT_AND_REVEAL)
 
-    resized = PresentationGeometry(20, 10, 1)
+    resized = TerminalGeometry(20, 10, 1)
     scene.require_layout(resized)
     _begin(clock, scene, 4, RetainedMode.LAYOUT_START, resized)
     _install(scene, clock, CommitDisposition.COMMIT)
@@ -421,7 +421,7 @@ def test_resize_before_first_reveal_discards_hidden_but_stays_replace_required()
     assert scene.state.hidden is not None
     assert not scene.state.retained_initialized
 
-    newest = PresentationGeometry(16, 8, 1)
+    newest = TerminalGeometry(16, 8, 1)
     scene.require_layout(newest)
 
     assert scene.state.hidden is None

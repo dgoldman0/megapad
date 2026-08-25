@@ -343,7 +343,7 @@ class IncrementalFrameDecoder:
         if self._pending_epoch_transition is not None:
             raise RuntimeError("an epoch transition is already pending")
         if self._presentation_epoch == UINT32_MAX or epoch != self._presentation_epoch + 1:
-            raise ValueError("requested epoch must be current presentation epoch plus one")
+            raise ValueError("requested epoch must be current presentation_epoch plus one")
         self._pending_epoch_transition = (type_id, epoch)
 
     def advance_presentation_epoch(self, requested_epoch: int) -> None:
@@ -366,7 +366,7 @@ class IncrementalFrameDecoder:
         if self._pending_epoch_transition is not None:
             raise RuntimeError("cannot advance epoch while a peer transition is pending")
         if self._presentation_epoch == UINT32_MAX or epoch != self._presentation_epoch + 1:
-            raise ValueError("requested epoch must be current presentation epoch plus one")
+            raise ValueError("requested epoch must be current presentation_epoch plus one")
         self._presentation_epoch = epoch
 
     def feed(self, data) -> tuple[Frame, ...]:

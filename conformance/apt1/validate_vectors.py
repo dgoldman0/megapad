@@ -214,12 +214,12 @@ def frame_specs() -> tuple[FrameSpec, ...]:
                   "STAGING_SNAPSHOT", "STAGING_SNAPSHOT", "stage cursor state"),
         FrameSpec("client_to_server", "SNAPSHOT_COMMIT", 5, 0, COMMIT.pack(1),
                   {"transaction_id": 1},
-                  "STAGING_SNAPSHOT", "ACTIVE", "atomically publish presentation revision 1"),
+                  "STAGING_SNAPSHOT", "ACTIVE", "atomically publish model revision 1"),
         FrameSpec("server_to_client", "TX_RESULT", 1, 0,
                   TX_RESULT.pack(1, 0, 0, 1),
                   {"transaction_id": 1, "status": 0, "reserved": 0,
                    "model_revision": 1},
-                  "ACTIVE", "ACTIVE", "confirm presentation revision 1 to the client"),
+                  "ACTIVE", "ACTIVE", "confirm model revision 1 to the client"),
         FrameSpec("server_to_client", "KEY", 2, 0, KEY.pack(0x41, 1, 0, 1, 1),
                   {"key_symbol": 65, "action": 1, "location": 0, "modifiers": 1,
                    "model_revision": 1},
@@ -227,7 +227,7 @@ def frame_specs() -> tuple[FrameSpec, ...]:
         FrameSpec("server_to_client", "SOFT_RESET_REQUEST", 3, 0,
                   SOFT_RESET_REQUEST.pack(1, 1),
                   {"requested_epoch": 1, "last_revision": 1},
-                  "ACTIVE", "RESYNCING", "discard presentation cache and request replace-all"),
+                  "ACTIVE", "RESYNCING", "discard terminal output cache and request replace-all"),
         FrameSpec("client_to_server", "SOFT_RESET_ACK", 6, 1,
                   SOFT_RESET_ACK.pack(1, 0, 0),
                   {"requested_epoch": 1, "status": 0, "reserved": 0},
@@ -245,12 +245,12 @@ def frame_specs() -> tuple[FrameSpec, ...]:
                   "STAGING_SNAPSHOT", "STAGING_SNAPSHOT", "restage cursor state"),
         FrameSpec("client_to_server", "SNAPSHOT_COMMIT", 11, 1, COMMIT.pack(1),
                   {"transaction_id": 1},
-                  "STAGING_SNAPSHOT", "ACTIVE", "atomically publish presentation revision 1"),
+                  "STAGING_SNAPSHOT", "ACTIVE", "atomically publish model revision 1"),
         FrameSpec("server_to_client", "TX_RESULT", 4, 1,
                   TX_RESULT.pack(1, 0, 0, 1),
                   {"transaction_id": 1, "status": 0, "reserved": 0,
                    "model_revision": 1},
-                  "ACTIVE", "ACTIVE", "confirm rebuilt presentation revision 1"),
+                  "ACTIVE", "ACTIVE", "confirm rebuilt model revision 1"),
     )
 
 
@@ -412,7 +412,7 @@ def expected_manifest_transcript(name: str, canonical: dict[str, Any]) -> dict[s
             "frames": [expected_frame_entry(spec, frame) for spec, frame in canonical["frames"]],
             "expected_final": {
                 "state": canonical["final_state"],
-                "presentation_revision": canonical["expected_revision"],
+                "model_revision": canonical["expected_revision"],
                 "presentation_epoch": canonical["expected_epoch"],
             },
         })
@@ -516,7 +516,7 @@ def validate() -> None:
         check_equal(f"{label} type", decoded["type"], f"0x{MESSAGE_TYPES[spec.message]:04x}")
         check_equal(f"{label} session", decoded["session"], f"0x{SESSION:016x}")
         check_equal(f"{label} sequence", decoded["sequence"], next_sequence[spec.direction])
-        check_equal(f"{label} presentation epoch", decoded["presentation_epoch"], spec.epoch)
+        check_equal(f"{label} presentation_epoch", decoded["presentation_epoch"], spec.epoch)
         check_equal(f"{label} payload", frame[HEADER_BYTES:], spec.payload)
         if spec.state_from not in legal_states or spec.state_to not in legal_states:
             fail(f"{label}: state transition uses an unknown state")

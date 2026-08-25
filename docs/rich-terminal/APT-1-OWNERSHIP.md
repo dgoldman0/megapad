@@ -17,9 +17,9 @@ replace application authority checks.
 | Open transaction | Sender creates nonzero transaction ID | Sender appends; receiver stages | Commit, abort, error, reset, close | Uncommitted work aborted; crossed COMMIT settled by status 1 before ACK | Destroyed |
 | Model revision | Terminal commit logic, scoped to terminal-state epoch | Successful atomic commit only | Epoch/session retirement | Reset to zero; replacement commit makes revision one | Destroyed |
 | UART egress publication | MegaPad machine adapter | Immutable after publication | Primary consumer release or attachment retirement | Preserved if same attachment/session | Old epoch publication discarded |
-| Terminal ingress event | Terminal frontend/session | Immutable after admission | Scheduled UART application or epoch retirement | Old presentation events rejected | Old attachment events cancelled |
+| Terminal ingress event | Terminal frontend/session | Immutable after admission | Scheduled UART application or epoch retirement | Old-epoch events rejected | Old attachment events cancelled |
 | Geometry generation | Terminal frontend while active; legacy frontend while ANSI | Current authoritative frontend | Replacement by later generation | Preserved unless snapshot geometry changes it | Re-established before boot/negotiation |
-| Normalized input event | Terminal session | Immutable | Akashic validation/dispatch or bounded rejection | Events for old presentation epoch rejected | Old session events rejected |
+| Normalized input event | Terminal session | Immutable | Akashic validation/dispatch or bounded rejection | Events for an old `presentation_epoch` rejected | Old session events rejected |
 | Optional retained owner ID + generation | Internal session-global retained backend from one exact private UCTX projection binding (not CELL-1) | Backend for that exact live binding only | Successful exact idempotent owner drop | Destroyed; backend allocates/replays a current-epoch wire binding for each still-live UCTX | Destroyed with session |
 | Optional retained region/object/resource/series IDs | Exact live private UCTX projection binding (not CELL-1) | Backend for the exact live owner generation only | Exact item drop or owner drop | Destroyed; regenerated from authoritative UIDL semantics under the new wire binding | Destroyed |
 
@@ -37,7 +37,7 @@ fallback.
 KDOS and BIOS own only the established UART and terminal-geometry primitives.
 They do not own an APT parser or terminal output model.
 
-The root-level `presentation-terminal.f` module owns guest-side negotiation,
+The root-level `rich-terminal.f` module owns guest-side negotiation,
 framing, credit, session state, and normalized enhanced input only after it is
 explicitly loaded and asked to open. It borrows caller-provided bounded
 storage. It returns raw-stream ownership to the prior ANSI/key path on

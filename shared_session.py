@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from presentation_terminal import DriverStatus
+from rich_terminal import DriverStatus
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import MachineSession, TerminalCell, TerminalSnapshot
 
@@ -156,12 +156,12 @@ class SharedMachine:
                     self.condition.wait(timeout=0.1)
                     continue
                 system = self.session.system
-                terminal_failure = self.session.presentation_failure
+                terminal_failure = self.session.rich_terminal_failure
                 if terminal_failure is not None:
                     self.last_error = f"TerminalSessionError: {terminal_failure}"
                     self.paused = True
                     continue
-                terminal_pending = self.session.presentation_work_pending
+                terminal_pending = self.session.rich_terminal_work_pending
                 if system.all_halted and not terminal_pending:
                     self.condition.wait(timeout=0.05)
                     continue
@@ -359,22 +359,22 @@ class SharedMachine:
         with self.lock:
             system = self.session.system
             cpu = system.cpu
-            presentation_failure = self.session.presentation_failure
-            presentation_pending = self.session.presentation_work_pending
-            quiescent = not system.uart.has_rx_data and not presentation_pending
-            operational = presentation_failure is None
+            rich_terminal_failure = self.session.rich_terminal_failure
+            rich_terminal_pending = self.session.rich_terminal_work_pending
+            quiescent = not system.uart.has_rx_data and not rich_terminal_pending
+            operational = rich_terminal_failure is None
             halted = system.all_halted
             idle = system.all_idle_or_halted and quiescent and operational
             visible_cols, visible_rows = self.session.visible_geometry
-            if self.session.presentation_lost:
+            if self.session.rich_terminal_lost:
                 state = "lost"
-            elif presentation_failure is not None:
+            elif rich_terminal_failure is not None:
                 state = "terminal_failed"
             elif self.last_error:
                 state = "error"
             elif self.paused:
                 state = "paused"
-            elif halted and not presentation_pending and operational:
+            elif halted and not rich_terminal_pending and operational:
                 state = "halted"
             elif idle:
                 state = "idle"
@@ -402,16 +402,16 @@ class SharedMachine:
                 "terminal": [visible_cols, visible_rows],
                 "uptime_s": time.time() - self.started_at,
                 "error": self.last_error,
-                "presentation": {
-                    "enabled": self.session.presentation_enabled,
+                "rich_terminal": {
+                    "enabled": self.session.rich_terminal_enabled,
                     "state": (
                         None
-                        if self.session.presentation_state is None
-                        else self.session.presentation_state.value
+                        if self.session.rich_terminal_state is None
+                        else self.session.rich_terminal_state.value
                     ),
-                    "pending": presentation_pending,
-                    "lost": self.session.presentation_lost,
-                    "failure": presentation_failure,
+                    "pending": rich_terminal_pending,
+                    "lost": self.session.rich_terminal_lost,
+                    "failure": rich_terminal_failure,
                 },
             }
             if not detailed:
@@ -470,10 +470,10 @@ class SharedMachine:
 
     def resume(self) -> dict:
         with self.condition:
-            terminal_failure = self.session.presentation_failure
-            if terminal_failure is not None or self.session.presentation_lost:
+            terminal_failure = self.session.rich_terminal_failure
+            if terminal_failure is not None or self.session.rich_terminal_lost:
                 raise RuntimeError(
-                    "presentation terminal failure requires a machine reset: "
+                    "rich terminal failure requires a machine reset: "
                     f"{terminal_failure or 'attachment lost'}"
                 )
             self.paused = False
@@ -488,14 +488,14 @@ class SharedMachine:
         with self.condition:
             if not self.paused:
                 raise RuntimeError("machine must be paused before stepping")
-            terminal_failure = self.session.presentation_failure
-            if terminal_failure is not None or self.session.presentation_lost:
+            terminal_failure = self.session.rich_terminal_failure
+            if terminal_failure is not None or self.session.rich_terminal_lost:
                 self.last_error = (
                     "TerminalSessionError: "
-                    f"{terminal_failure or 'presentation attachment lost'}"
+                    f"{terminal_failure or 'rich-terminal attachment lost'}"
                 )
                 raise RuntimeError(
-                    "presentation terminal failure requires a machine reset: "
+                    "rich terminal failure requires a machine reset: "
                     f"{terminal_failure or 'attachment lost'}"
                 )
             executed = 0
@@ -504,7 +504,7 @@ class SharedMachine:
             for _ in range(count):
                 if (
                     self.session.system.all_halted
-                    and not self.session.presentation_work_pending
+                    and not self.session.rich_terminal_work_pending
                 ):
                     stop_reason = "all_halted"
                     break
@@ -583,7 +583,7 @@ class SharedMachine:
     ) -> dict:
         cols = int(cols)
         rows = int(rows)
-        if not self.session.presentation_enabled and not (
+        if not self.session.rich_terminal_enabled and not (
             1 <= cols <= 400 and 1 <= rows <= 200
         ):
             raise ValueError("ANSI terminal size must be within 1x1 and 400x200")
@@ -633,10 +633,10 @@ class SharedMachine:
     ) -> DriverStatus:
         normalized = DriverStatus.PROGRESS if status is None else status
         if normalized in {DriverStatus.STALE, DriverStatus.FAILED}:
-            reason = self.session.presentation_failure or (
-                "presentation attachment became stale"
+            reason = self.session.rich_terminal_failure or (
+                "rich-terminal attachment became stale"
                 if normalized is DriverStatus.STALE
-                else "presentation terminal failed"
+                else "rich terminal failed"
             )
             self.last_error = f"TerminalSessionError: {reason}"
             self.paused = True

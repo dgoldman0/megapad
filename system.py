@@ -66,8 +66,8 @@ from devices import (
     CRYPTO_CAP_KECCAK_F1600,
     CRYPTO_CAP_WOTS_CHAIN,
 )
-from presentation_terminal.megapad import MegapadTerminalHost
-from presentation_terminal.transport import HostPortLimits, TerminalHostLease
+from rich_terminal.megapad import MegapadRichTerminalHost
+from rich_terminal.transport import HostPortLimits, TerminalHostLease
 
 # Public system stepping must honor deliberate per-core step overrides, while
 # positive production batches remain owned unconditionally by the native
@@ -1278,7 +1278,7 @@ class MegapadSystem:
         self.bus = DeviceBus()
 
         self.uart = UART()
-        self._presentation_terminal_host = MegapadTerminalHost(self)
+        self._rich_terminal_host = MegapadRichTerminalHost(self)
         # Timer is now handled natively by C++ accelerator — use proxy
         self.timer = CppTimerProxy(self.cores[0]._cs)
         self.storage = Storage(storage_image)
@@ -1437,7 +1437,7 @@ class MegapadSystem:
         ) -> None:
             system = _system_ref()
             if system is not None:
-                if system._presentation_terminal_host.enhanced_attached:
+                if system._rich_terminal_host.enhanced_attached:
                     return
                 system.schedule_uart_input(data)
                 return
@@ -1494,7 +1494,7 @@ class MegapadSystem:
         ) -> None:
             system = _system_ref()
             if system is not None:
-                if system._presentation_terminal_host.enhanced_attached:
+                if system._rich_terminal_host.enhanced_attached:
                     return
                 system.schedule_terminal_resize(cols, rows)
                 return
@@ -1519,7 +1519,7 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
-                if system._presentation_terminal_host.enhanced_attached:
+                if system._rich_terminal_host.enhanced_attached:
                     return
                 system._schedule_legacy_terminal_event(
                     ExternalEventKind.UART_GEOMETRY_ACCEPT_UNCONDITIONAL,
@@ -1542,7 +1542,7 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
-                if system._presentation_terminal_host.enhanced_attached:
+                if system._rich_terminal_host.enhanced_attached:
                     return
                 system._schedule_legacy_terminal_event(
                     ExternalEventKind.UART_GEOMETRY_DENY_UNCONDITIONAL,
@@ -1562,7 +1562,7 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
-                if system._presentation_terminal_host.enhanced_attached:
+                if system._rich_terminal_host.enhanced_attached:
                     return False
                 request = geometry.snapshot_resize_request()
                 if request is None or request[0] != generation:
@@ -1591,7 +1591,7 @@ class MegapadSystem:
             system = _system_ref()
             geometry = _geometry_ref()
             if system is not None and geometry is not None:
-                if system._presentation_terminal_host.enhanced_attached:
+                if system._rich_terminal_host.enhanced_attached:
                     return False
                 request = geometry.snapshot_resize_request()
                 if request is None or request[0] != generation:
@@ -1685,18 +1685,18 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     @property
-    def presentation_terminal_host(self) -> MegapadTerminalHost:
+    def rich_terminal_host(self) -> MegapadRichTerminalHost:
         """The optional host port; construction alone does not acquire it."""
-        return self._presentation_terminal_host
+        return self._rich_terminal_host
 
-    def attach_presentation_terminal(
+    def attach_rich_terminal(
         self,
         limits: HostPortLimits,
     ) -> TerminalHostLease:
         """Explicitly acquire the exclusive enhanced terminal primary."""
-        return self._presentation_terminal_host.attach(limits)
+        return self._rich_terminal_host.attach(limits)
 
-    def _require_presentation_terminal_attach_ready_locked(self) -> None:
+    def _require_rich_terminal_attach_ready_locked(self) -> None:
         """Reject ownership transitions that cannot pause legacy input."""
         if self._native_system.external_event_replay_sealed:
             raise RuntimeError(
@@ -1718,16 +1718,16 @@ class MegapadSystem:
                 "an enhanced terminal cannot pause pending legacy terminal input"
             )
 
-    def _schedule_presentation_uart_input_locked(
+    def _schedule_rich_terminal_uart_input_locked(
         self,
         attachment_epoch: int,
         payload: bytes,
     ) -> int:
         """Apply one lease-qualified ingress record at this boundary."""
-        if not self._presentation_terminal_host._epoch_is_current(
+        if not self._rich_terminal_host._epoch_is_current(
             attachment_epoch
         ):
-            raise RuntimeError("presentation UART ingress has a stale epoch")
+            raise RuntimeError("rich-terminal UART ingress has a stale epoch")
         sequence, _ = self._schedule_external_event(
             ExternalEventKind.UART_RX,
             at_cycle=None,
@@ -1735,17 +1735,17 @@ class MegapadSystem:
         )
         return sequence
 
-    def _schedule_presentation_terminal_resize_locked(
+    def _schedule_rich_terminal_resize_locked(
         self,
         attachment_epoch: int,
         cols: int,
         rows: int,
     ) -> int:
         """Apply one lease-qualified geometry record at this boundary."""
-        if not self._presentation_terminal_host._epoch_is_current(
+        if not self._rich_terminal_host._epoch_is_current(
             attachment_epoch
         ):
-            raise RuntimeError("presentation geometry has a stale epoch")
+            raise RuntimeError("terminal geometry has a stale epoch")
         sequence, _ = self._schedule_external_event(
             ExternalEventKind.UART_GEOMETRY,
             at_cycle=None,
@@ -1764,7 +1764,7 @@ class MegapadSystem:
         argument1: int = 0,
     ) -> int:
         """Linearize a legacy terminal event against lease acquisition."""
-        if self._presentation_terminal_host.enhanced_attached:
+        if self._rich_terminal_host.enhanced_attached:
             raise RuntimeError(
                 "the enhanced terminal lease owns terminal ingress"
             )
@@ -1779,7 +1779,7 @@ class MegapadSystem:
                 return int(staged)
 
         with self._scheduler_lock:
-            if self._presentation_terminal_host.enhanced_attached:
+            if self._rich_terminal_host.enhanced_attached:
                 raise RuntimeError(
                     "the enhanced terminal lease owns terminal ingress"
                 )
@@ -2368,11 +2368,11 @@ class MegapadSystem:
         """Deliver pending native UART output to Python observers in one batch."""
         return self.uart._drain_native_output()
 
-    def _service_presentation_terminal_before_guest_locked(
+    def _service_rich_terminal_before_guest_locked(
         self,
     ) -> tuple[bool, int]:
         """Service the optional host port before admitting guest execution."""
-        host = self._presentation_terminal_host
+        host = self._rich_terminal_host
         if not host.enhanced_attached:
             return True, 0
         admission = host._service_before_guest_locked()
@@ -2388,7 +2388,7 @@ class MegapadSystem:
             admission.external_events_applied,
         )
 
-    def _presentation_terminal_backpressure_stats_locked(
+    def _rich_terminal_backpressure_stats_locked(
         self,
         external_events_applied: int,
     ) -> SystemRunStats:
@@ -2399,14 +2399,14 @@ class MegapadSystem:
             zeros,
             zeros,
             system_stop_reason=(
-                self._presentation_terminal_host._runner_stop_reason()
+                self._rich_terminal_host._runner_stop_reason()
             ),
             stop_cycle=int(self._native_system.system_cycles),
             external_events_applied=external_events_applied,
         )
 
     @staticmethod
-    def _account_presentation_terminal_events(
+    def _account_rich_terminal_events(
         result: SystemRunStats,
         applied: int,
     ) -> SystemRunStats:
@@ -2545,7 +2545,7 @@ class MegapadSystem:
         Micro-cores are reset and then either released or held according to
         the persistent SysInfo CLUSTER_EN mask. Authoritative system time,
         shared legacy ingress devices, and their event journal survive. A live
-        presentation-terminal lease survives the initial boot but is
+        rich-terminal lease survives the initial boot but is
         epoch-retired by a later boot, including its unconsumed UART input. A
         session frontend may discard legacy output that was not yet presented.
         """
@@ -2553,9 +2553,9 @@ class MegapadSystem:
             self._reject_native_batch_reentry()
             if (
                 self._booted
-                and self._presentation_terminal_host.enhanced_attached
+                and self._rich_terminal_host.enhanced_attached
             ):
-                self._presentation_terminal_host._retire_for_machine_reset_locked()
+                self._rich_terminal_host._retire_for_machine_reset_locked()
             if discard_uart_output:
                 self.cpu._cs.uart_drain_tx()
                 self.uart._tx_ring_base = 0
@@ -3141,7 +3141,7 @@ class MegapadSystem:
         """Execute one coordinated instruction round across active cores.
 
         Returns the elapsed system cycles, with a minimum compatibility value
-        of one when no core can retire.  An explicitly attached presentation
+        of one when no core can retire.  An explicitly attached rich-terminal
         terminal may return zero before execution when its host queue is
         backpressured.
         """
@@ -3149,7 +3149,7 @@ class MegapadSystem:
             self._reject_native_batch_reentry()
             self._require_cycle_unbounded_execution()
             admitted, _terminal_events = (
-                self._service_presentation_terminal_before_guest_locked()
+                self._service_rich_terminal_before_guest_locked()
             )
             if not admitted:
                 return 0
@@ -3250,10 +3250,10 @@ class MegapadSystem:
                 return self._run_batch_stats_locked(n)
             self._require_cycle_unbounded_execution()
             admitted, terminal_events = (
-                self._service_presentation_terminal_before_guest_locked()
+                self._service_rich_terminal_before_guest_locked()
             )
             if not admitted:
-                return self._presentation_terminal_backpressure_stats_locked(
+                return self._rich_terminal_backpressure_stats_locked(
                     terminal_events
                 )
             self._begin_external_event_staging_locked()
@@ -3265,7 +3265,7 @@ class MegapadSystem:
                 result,
                 applied,
             )
-            return self._account_presentation_terminal_events(
+            return self._account_rich_terminal_events(
                 result,
                 terminal_events,
             )
@@ -3325,10 +3325,10 @@ class MegapadSystem:
                     max_instructions,
                 )
             admitted, terminal_events = (
-                self._service_presentation_terminal_before_guest_locked()
+                self._service_rich_terminal_before_guest_locked()
             )
             if not admitted:
-                return self._presentation_terminal_backpressure_stats_locked(
+                return self._rich_terminal_backpressure_stats_locked(
                     terminal_events
                 )
             self._begin_external_event_staging_locked()
@@ -3343,7 +3343,7 @@ class MegapadSystem:
                 result,
                 applied,
             )
-            return self._account_presentation_terminal_events(
+            return self._account_rich_terminal_events(
                 result,
                 terminal_events,
             )

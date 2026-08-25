@@ -8,30 +8,30 @@ import json
 import signal
 from pathlib import Path
 
-from presentation_terminal.retained_model import RetainedPolicy
-from session import MachineSession, PresentationSessionPolicy
+from rich_terminal.retained_model import RetainedPolicy
+from session import MachineSession, RichTerminalSessionPolicy
 from shared_session import DEFAULT_SOCKET, SessionServer, SharedMachine
 
 
 ROOT = Path(__file__).resolve().parent
 
 
-def _presentation_policy(value: str) -> PresentationSessionPolicy:
+def _rich_terminal_policy(value: str) -> RichTerminalSessionPolicy:
     try:
         payload = json.loads(value)
     except json.JSONDecodeError as exc:
         raise argparse.ArgumentTypeError(
-            f"invalid presentation policy JSON: {exc.msg}"
+            f"invalid rich-terminal policy JSON: {exc.msg}"
         ) from exc
     if not isinstance(payload, dict):
         raise argparse.ArgumentTypeError(
-            "presentation policy JSON must be an object"
+            "rich-terminal policy JSON must be an object"
         )
     try:
-        return PresentationSessionPolicy(**payload)
+        return RichTerminalSessionPolicy(**payload)
     except (TypeError, ValueError, OverflowError) as exc:
         raise argparse.ArgumentTypeError(
-            f"invalid presentation policy: {exc}"
+            f"invalid rich-terminal policy: {exc}"
         ) from exc
 
 
@@ -70,11 +70,11 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=30)
     parser.add_argument("--batch-steps", type=int, default=100_000)
     parser.add_argument(
-        "--presentation-terminal-policy",
-        type=_presentation_policy,
+        "--rich-terminal-policy",
+        type=_rich_terminal_policy,
         metavar="JSON",
         help=(
-            "attach the optional presentation terminal with the complete "
+            "attach the optional rich terminal with the complete "
             "caller-owned JSON policy"
         ),
     )
@@ -84,7 +84,7 @@ def main() -> int:
         metavar="JSON",
         help=(
             "enable RETAINED-1 with the complete caller-owned JSON policy; "
-            "requires --presentation-terminal-policy"
+            "requires --rich-terminal-policy"
         ),
     )
     parser.add_argument(
@@ -108,22 +108,22 @@ def main() -> int:
 
     if (
         args.retained_terminal_policy is not None
-        and args.presentation_terminal_policy is None
+        and args.rich_terminal_policy is None
     ):
         parser.error(
-            "--retained-terminal-policy requires --presentation-terminal-policy"
+            "--retained-terminal-policy requires --rich-terminal-policy"
         )
 
-    presentation = None
-    if args.presentation_terminal_policy is not None:
+    rich_terminal = None
+    if args.rich_terminal_policy is not None:
         try:
-            presentation = args.presentation_terminal_policy.configuration(
+            rich_terminal = args.rich_terminal_policy.configuration(
                 args.cols,
                 args.rows,
                 retained_policy=args.retained_terminal_policy,
             )
         except (TypeError, ValueError, OverflowError) as exc:
-            parser.error(f"invalid selected presentation geometry: {exc}")
+            parser.error(f"invalid selected terminal geometry: {exc}")
 
     nic_backend = None
     if args.nic_tap:
@@ -149,7 +149,7 @@ def main() -> int:
         batch_steps=args.batch_steps,
         nic_backend=nic_backend,
         realtime_clock=not args.virtual_clock,
-        presentation=presentation,
+        rich_terminal=rich_terminal,
     )
     audio_sink = None
     if args.audio:
@@ -199,7 +199,7 @@ def main() -> int:
                     if args.retained_terminal_policy is not None
                     else "APT-1 optional attachment"
                 )
-                if args.presentation_terminal_policy is not None
+                if args.rich_terminal_policy is not None
                 else "ANSI"
             ),
             flush=True,

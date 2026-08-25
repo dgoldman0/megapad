@@ -31,7 +31,7 @@ Implementations MUST NOT use those spellings to expose APT as an application
 broker, scope, document, or scene-mutation service.
 
 ANSI remains the baseline terminal contract. APT-1 is initiated only by the
-separately loaded `presentation-terminal.f` userland module after an explicit
+separately loaded `rich-terminal.f` userland module after an explicit
 system composition selects it. KDOS does not contain or require APT-1.
 An ANSI-only emulator frontend or physical terminal is a supported target.
 
@@ -146,7 +146,7 @@ Hard machine reset or attachment replacement destroys the session, advances
 the outer attachment epoch, drains both directions, and returns to `ANSI`.
 An opening timeout after `OPEN` or a fatal framing error instead enters
 `LOST`; it cannot locally prove an ANSI-safe byte boundary. A soft
-presentation cache reset stays inside the framed session and enters
+terminal-output cache reset stays inside the framed session and enters
 `RESYNCING`.
 
 ## 5. Frame format
@@ -196,9 +196,9 @@ ready frame and increases by exactly one for every frame, including control
 frames. Duplicate, missing, reordered, or wrapped sequences are fatal. A side
 MUST close before its next sequence would wrap.
 
-Presentation epoch starts at zero. It changes only through the soft reset
-exchange. Model revisions and transaction IDs are scoped to a presentation
-epoch and do not provide authorization. An enabled additive presentation
+The wire `presentation_epoch` starts at zero. It changes only through the soft
+reset exchange. Model revisions and transaction IDs are scoped to that epoch
+and do not provide authorization. An enabled additive rich-terminal
 profile may define additional transaction families only by sharing this one
 transaction-ID and model-revision domain; it may not create a parallel commit
 clock. `APT-1-RETAINED-1-2026-08-24` uses that extension rule.
@@ -236,7 +236,7 @@ Each peer additionally reserves 4,096 bytes for `CREDIT`, `ERROR`, `CLOSE`,
 `TX_RESULT`, as well as the single expected `SERVER_READY`/`CLIENT_READY`
 exchange. Those types do not consume ordinary data credit. Their payloads are
 limited by this document, unexpected duplicates are errors, and they cannot
-be used to carry extension data. Ordinary input and presentation frames cannot
+be used to carry extension data. Ordinary input and output-update frames cannot
 consume the reserve.
 
 An enabled additive profile may add fixed lifecycle frames to this same reserve
@@ -244,7 +244,7 @@ only when its contract names each exact type, direction, payload length, and
 termination purpose. It does not enlarge the 4,096-byte reserve. RETAINED-1
 adds only `RET_RESULT` (`000a`), `OWNER_DROP` (`000b`), and `RESOURCE_ABORT`
 (`000c`) under `APT-1-RETAINED-1.md` Section 17. Its discovery, resource data,
-presentation, object, region, and series frames remain ordinary data.
+PRESENT, object, region, and series frames remain ordinary data.
 
 Credit exhaustion is backpressure, not loss. The sender retains the exact
 unsent frame/transaction and makes no sequence or model progress.
@@ -285,7 +285,7 @@ Capability bits are:
 | 2 | UTF-8 text input. |
 | 3 | Cell-coordinate pointer input. |
 | 4 | Resize input. |
-| 5 | Soft presentation reset and replacement snapshot. |
+| 5 | Soft terminal-output reset and replacement snapshot. |
 
 Bits 0 through 5 are mandatory for this contract ID. Other bits are zero.
 `SERVER_READY` repeats the terminal values from `OFFER`. `CLIENT_READY`
@@ -468,7 +468,7 @@ model_revision`. `focused` is zero or one.
 `SOFT_RESET_REQUEST` (`0007`, terminal to client) contains `u32
 requested_epoch`, four zero bytes, and `u64 last_revision`. It is legal only
 in `ACTIVE`, requests exactly current epoch plus one, and means the terminal
-discarded presentation cache but retained the framed session. After sending
+discarded the terminal output cache but retained the framed session. After sending
 it, the terminal sends no ordinary input or data frame until resynchronization
 completes.
 
@@ -510,7 +510,7 @@ epoch. Directional frame sequences do not restart.
 The acknowledgement is the sole frame allowed to use the requested epoch
 while its receiver still expects the prior epoch. The terminal continues to
 parse any preceding old-epoch frames in sequence but does not make their
-staged presentation visible. Receipt of the acknowledgement discards any such
+staged terminal output visible. Receipt of the acknowledgement discards any such
 staging and atomically changes its expected epoch. A client unable to accept a
 valid mandatory reset sends `CLOSE` in the old epoch instead of an
 acknowledgement.

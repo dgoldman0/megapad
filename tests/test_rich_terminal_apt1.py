@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from presentation_terminal.apt1 import (
+from rich_terminal.apt1 import (
     Frame,
     FrameEncoder,
     FramingErrorCode,

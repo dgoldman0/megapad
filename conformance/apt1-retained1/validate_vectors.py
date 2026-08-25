@@ -1522,7 +1522,7 @@ def mixed_commit_and_rejections() -> Scenario:
         fs(CLIENT, "CELL_SPAN", 111, 0, cell_span, "stage one CELL mutation"),
         fs(CLIENT, "CURSOR", 112, 0, cursor, "stage the mandatory mixed CELL cursor"),
         fs(CLIENT, "OBJECT_SET_VALUE", 113, 0, value, "stage one retained value mutation"),
-        fs(CLIENT, "PRESENT_COMMIT", 114, 0, commit, "atomically commit both presentation planes"),
+        fs(CLIENT, "PRESENT_COMMIT", 114, 0, commit, "atomically commit both terminal output planes"),
     )
     credit += mixed_bytes
 
@@ -2826,7 +2826,7 @@ def declared_present_bytes(scenario: Scenario) -> tuple[int, int]:
 
 
 def validate_initial_and_dynamic(initial: Scenario, dynamic: Scenario) -> None:
-    replacement_start, replacement_continue = presentation_segments(initial)
+    replacement_start, replacement_continue = output_update_segments(initial)
     start = PRESENT_BEGIN.unpack(replacement_start[0].payload)
     continuation = PRESENT_BEGIN.unpack(replacement_continue[0].payload)
     check_equal("initial replacement START mode/base", (start[0],start[1],start[10]), (2,1,2))
@@ -3020,7 +3020,7 @@ def validate_object_bodies(initial: Scenario) -> None:
     check_equal("WAVEFORM zero/flags/reserved", waveform_values[-3:], (0, 1, 0))
 
 
-def presentation_segments(scenario: Scenario) -> tuple[tuple[FrameSpec, ...], ...]:
+def output_update_segments(scenario: Scenario) -> tuple[tuple[FrameSpec, ...], ...]:
     segments: list[tuple[FrameSpec, ...]] = []
     index = 0
     while index < len(scenario.frames):
@@ -3038,7 +3038,7 @@ def presentation_segments(scenario: Scenario) -> tuple[tuple[FrameSpec, ...], ..
 
 
 def validate_mutation_and_drops(scenario: Scenario) -> None:
-    replace, drops = presentation_segments(scenario)
+    replace, drops = output_update_segments(scenario)
     check_equal("mutation/drop transaction count", len((replace, drops)), 2)
     check_equal("replacement body messages", [frame.message for frame in replace], ["PRESENT_BEGIN", "OBJECT_REPLACE", "PRESENT_COMMIT"])
     replacement_prefix = OBJECT_PREFIX.unpack_from(replace[1].payload)
@@ -3147,7 +3147,7 @@ def validate_resource_lifecycle(scenario: Scenario) -> None:
 
 
 def validate_mixed_and_rejections(scenario: Scenario) -> None:
-    mixed, bad_bytes, bad_count, bad_timestamp, missing_reference, lost_mixed = presentation_segments(scenario)
+    mixed, bad_bytes, bad_count, bad_timestamp, missing_reference, lost_mixed = output_update_segments(scenario)
     mixed_begin = PRESENT_BEGIN.unpack(mixed[0].payload)
     check_equal("mixed CELL/retained counts", mixed_begin[6:11], (1, 1, 1, 1, 1))
     check_equal("mixed frame order", [frame.message for frame in mixed], ["PRESENT_BEGIN", "CELL_SPAN", "CURSOR", "OBJECT_SET_VALUE", "PRESENT_COMMIT"])
@@ -3193,7 +3193,7 @@ def validate_mixed_and_rejections(scenario: Scenario) -> None:
 
 
 def validate_resize(scenario: Scenario) -> None:
-    cell_replace, layout_start, layout_continue = presentation_segments(scenario)
+    cell_replace, layout_start, layout_continue = output_update_segments(scenario)
     check_equal(
         "resize canonical CELL_REPLACE frames",
         [frame.message for frame in cell_replace],
@@ -3234,7 +3234,7 @@ def validate_legacy_interleave(scenario: Scenario) -> None:
     begin = TX_BEGIN.unpack(find_frames(scenario, "TX_BEGIN")[0].payload)
     check_equal("legacy interleave TX_BEGIN", begin, (2, 1, 2, 1, 1, 1))
     check_equal("legacy interleave TX_COMMIT", TX_COMMIT.unpack(find_frames(scenario, "TX_COMMIT")[0].payload), (2,))
-    replacement_start, replacement_continue = presentation_segments(scenario)
+    replacement_start, replacement_continue = output_update_segments(scenario)
     start = PRESENT_BEGIN.unpack(replacement_start[0].payload)
     continuation = PRESENT_BEGIN.unpack(replacement_continue[0].payload)
     check_equal("replacement START mode/base", (start[0], start[1], start[10]), (3, 2, 2))
@@ -3379,7 +3379,7 @@ def validate_reset_replay(scenario: Scenario) -> None:
     image_prefix = OBJECT_PREFIX.unpack_from(image.payload)
     check_equal("reset IMAGE identity/type", (image_prefix[2], image_prefix[3]), (IMAGE_ID, OBJECT_TYPES["IMAGE"]))
     check_equal("reset IMAGE exact body", IMAGE_BODY.unpack(image.payload[OBJECT_PREFIX.size :]), (RESOURCE_ID, 1, 255))
-    replacement_start, replacement_continue = presentation_segments(scenario)
+    replacement_start, replacement_continue = output_update_segments(scenario)
     start = PRESENT_BEGIN.unpack(replacement_start[0].payload)
     continuation = PRESENT_BEGIN.unpack(replacement_continue[0].payload)
     check_equal("reset retained START mode/base", (start[0],start[1],start[10]), (2,1,2))

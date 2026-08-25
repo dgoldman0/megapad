@@ -6,13 +6,13 @@ import struct
 
 import pytest
 
-from presentation_terminal import (
+from rich_terminal import (
     AdmissionStatus,
     EgressWatermarks,
     FakeTerminalHost,
     HostPortLimits,
 )
-from presentation_terminal.apt1 import (
+from rich_terminal.apt1 import (
     FrameEncoder,
     IncrementalFrameDecoder,
     MessageType,
@@ -22,17 +22,17 @@ from presentation_terminal.apt1 import (
     encode_probe,
     parse_negotiation,
 )
-from presentation_terminal.driver import (
+from rich_terminal.driver import (
     DriverLimits,
     DriverStatus,
-    PresentationTerminalDriver,
+    RichTerminalDriver,
 )
-from presentation_terminal.retained_model import (
+from rich_terminal.retained_model import (
     OwnerQuotas,
     RetainedFeature,
     RetainedPolicy,
 )
-from presentation_terminal.retained_wire import (
+from rich_terminal.retained_wire import (
     OwnerDrop,
     OwnerOpen,
     RetStatus,
@@ -44,8 +44,8 @@ from presentation_terminal.retained_wire import (
     encode_owner_open,
     encode_ret_query,
 )
-from presentation_terminal.server import (
-    PresentationTerminalCore,
+from rich_terminal.server import (
+    RichTerminalCore,
     TerminalConfig,
     TerminalState,
 )
@@ -210,7 +210,7 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     views = []
     system.uart.on_tx = None
     system.uart.on_tx_batch = legacy_batches.append
-    driver = PresentationTerminalDriver.attach(
+    driver = RichTerminalDriver.attach(
         system,
         _host_limits(),
         _terminal_config(),
@@ -386,7 +386,7 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
 
 def test_driver_admits_retained_discovery_pair_then_covering_credit_in_order():
     system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
-    driver = PresentationTerminalDriver.attach(
+    driver = RichTerminalDriver.attach(
         system,
         _host_limits(),
         _terminal_config(),
@@ -469,19 +469,19 @@ def test_driver_rejects_retained_discovery_capacity_before_attachment():
     )
 
     with pytest.raises(ValueError, match="discovery reply"):
-        PresentationTerminalDriver.attach(
+        RichTerminalDriver.attach(
             system,
             host_limits,
             _terminal_config(),
             DriverLimits(4_096, 3),
             retained_policy=_retained_policy(),
         )
-    assert not system.presentation_terminal_host.enhanced_attached
+    assert not system.rich_terminal_host.enhanced_attached
 
 
 def test_driver_settles_owner_lifecycle_markers_after_ordered_admission():
     system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
-    driver = PresentationTerminalDriver.attach(
+    driver = RichTerminalDriver.attach(
         system,
         _host_limits(),
         _terminal_config(),
@@ -538,7 +538,7 @@ def test_driver_settles_owner_lifecycle_markers_after_ordered_admission():
     drop_result = driver.service()
     assert drop_result.outbound_records == 1
     assert driver.core.outstanding_result_transaction_id is None
-    assert driver.core.presentation_revision == 2
+    assert driver.core.model_revision == 2
     assert driver.core.owner_state is not None
     assert not driver.core.owner_state.records[7].live
     system.run_batch_stats(1)
@@ -549,7 +549,7 @@ def test_driver_settles_owner_lifecycle_markers_after_ordered_admission():
 
 def test_driver_routes_bounded_preswitch_input_through_the_lease():
     system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
-    driver = PresentationTerminalDriver.attach(
+    driver = RichTerminalDriver.attach(
         system,
         _host_limits(),
         _terminal_config(),
@@ -587,9 +587,9 @@ def test_driver_retries_lease_retirement_after_close_raises(monkeypatch):
     host = FakeTerminalHost()
     limits = _host_limits()
     lease = host.attach(limits)
-    driver = PresentationTerminalDriver(
+    driver = RichTerminalDriver(
         lease,
-        PresentationTerminalCore(
+        RichTerminalCore(
             _terminal_config(),
             attachment_epoch=lease.attachment_epoch,
         ),
@@ -630,18 +630,18 @@ def test_driver_rejects_incoherent_capacity_before_acquiring_the_lease():
         geometry_events=1,
     )
     with pytest.raises(ValueError, match="maximum transaction"):
-        PresentationTerminalDriver.attach(
+        RichTerminalDriver.attach(
             system,
             too_small,
             _terminal_config(),
             DriverLimits(4_096, 8),
         )
-    assert not system.presentation_terminal_host.enhanced_attached
+    assert not system.rich_terminal_host.enhanced_attached
 
 
 def test_driver_retains_ordered_control_replies_across_host_backpressure():
     system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
-    driver = PresentationTerminalDriver.attach(
+    driver = RichTerminalDriver.attach(
         system,
         _host_limits(control_events=1, ingress_events=2),
         _terminal_config(),
@@ -688,7 +688,7 @@ def test_resize_intent_waits_for_adapter_retained_machine_egress():
     )
     host = FakeTerminalHost()
     lease = host.attach(host_limits)
-    core = PresentationTerminalCore(
+    core = RichTerminalCore(
         _terminal_config(),
         attachment_epoch=lease.attachment_epoch,
         session_id_factory=lambda: 0x0123456789ABCDEF,
@@ -701,7 +701,7 @@ def test_resize_intent_waits_for_adapter_retained_machine_egress():
     for outbound in opened.outbound:
         if outbound.result_transaction_id is not None:
             core.settle_result_delivery(outbound.result_transaction_id)
-    driver = PresentationTerminalDriver(
+    driver = RichTerminalDriver(
         lease,
         core,
         host_limits,

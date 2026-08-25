@@ -276,7 +276,7 @@
             "state_transition": {
               "from": "STAGING_SNAPSHOT",
               "to": "ACTIVE",
-              "effect": "atomically publish presentation revision 1"
+              "effect": "atomically publish model revision 1"
             }
           }
         },
@@ -302,7 +302,7 @@
             "state_transition": {
               "from": "ACTIVE",
               "to": "ACTIVE",
-              "effect": "confirm presentation revision 1 to the client"
+              "effect": "confirm model revision 1 to the client"
             }
           }
         },
@@ -354,7 +354,7 @@
             "state_transition": {
               "from": "ACTIVE",
               "to": "RESYNCING",
-              "effect": "discard presentation cache and request replace-all"
+              "effect": "discard terminal output cache and request replace-all"
             }
           }
         },
@@ -526,7 +526,7 @@
             "state_transition": {
               "from": "STAGING_SNAPSHOT",
               "to": "ACTIVE",
-              "effect": "atomically publish presentation revision 1"
+              "effect": "atomically publish model revision 1"
             }
           }
         },
@@ -552,14 +552,14 @@
             "state_transition": {
               "from": "ACTIVE",
               "to": "ACTIVE",
-              "effect": "confirm rebuilt presentation revision 1"
+              "effect": "confirm rebuilt model revision 1"
             }
           }
         }
       ],
       "expected_final": {
         "state": "ACTIVE",
-        "presentation_revision": 1,
+        "model_revision": 1,
         "presentation_epoch": 1
       }
     },

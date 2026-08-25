@@ -1093,7 +1093,7 @@ def reduce_transcript(meta: dict[str,Any], encoded_frames: Sequence[bytes]) -> d
             if frame["epoch"] != requested_epoch:
                 _fail("SOFT_RESET_ACK header epoch mismatch")
         elif frame["epoch"] != state["presentation_epoch"]:
-            _fail(f"{message} uses wrong presentation epoch")
+            _fail(f"{message} uses wrong presentation_epoch")
 
         _account_frame(state,direction,frame)
 

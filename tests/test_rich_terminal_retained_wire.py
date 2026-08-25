@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from presentation_terminal.apt1 import UINT32_MAX, UINT64_MAX
-from presentation_terminal.retained_model import OwnerQuotas, RetainedFeature
-from presentation_terminal.retained_scene import (
+from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
+from rich_terminal.retained_model import OwnerQuotas, RetainedFeature
+from rich_terminal.retained_scene import (
     ExplicitSamples,
     GroupBody,
     LabelBody,
@@ -23,7 +23,7 @@ from presentation_terminal.retained_scene import (
     TimestampMode,
     UniformSamples,
 )
-from presentation_terminal.retained_wire import (
+from rich_terminal.retained_wire import (
     CellMode,
     ObjectSetValue,
     ObjectSetVisibility,

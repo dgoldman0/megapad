@@ -15,7 +15,7 @@ from dev_session import run_scenario
 from devices import UART
 from display import VirtualTerminal
 from nic_backends import LoopbackBackend
-from presentation_terminal import (
+from rich_terminal import (
     Cell,
     Cursor,
     DriverLimits,
@@ -27,13 +27,13 @@ from presentation_terminal import (
     TerminalState,
     TerminalView,
 )
-from presentation_terminal.presentation_coordinator import CompositePresentationView
-from presentation_terminal.presentation_model import PresentationGeometry
-from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
+from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.update_authority import TerminalGeometry
+from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
 from session import (
     MachineSession,
-    PresentationSessionConfig,
-    PresentationSessionPolicy,
+    RichTerminalSessionConfig,
+    RichTerminalSessionPolicy,
 )
 from session_server import main as session_server_main
 from system import EXT_MEM_BASE, HBW_BASE, VRAM_BASE, MegapadSystem
@@ -43,12 +43,12 @@ ROOT = Path(__file__).resolve().parents[1]
 BIOS = ROOT / "bios.asm"
 
 
-def _presentation_config(
+def _rich_terminal_config(
     *,
     ansi_history_bytes: int = 32,
     retained_policy: RetainedPolicy | None = None,
-) -> PresentationSessionConfig:
-    return PresentationSessionConfig(
+) -> RichTerminalSessionConfig:
+    return RichTerminalSessionConfig(
         host_limits=HostPortLimits(
             egress=EgressWatermarks(8_192, 1_024, 16, 2),
             retained_publication_bytes=4_608,
@@ -109,8 +109,8 @@ def _retained_policy(*, interval_us: int = 0) -> RetainedPolicy:
     )
 
 
-def _presentation_policy() -> PresentationSessionPolicy:
-    return PresentationSessionPolicy(
+def _rich_terminal_policy() -> RichTerminalSessionPolicy:
+    return RichTerminalSessionPolicy(
         max_cols=400,
         max_rows=200,
         egress_high_publications=2,
@@ -287,12 +287,12 @@ def test_machine_session_optional_terminal_owns_preswitch_input_and_geometry():
         cols=2,
         rows=2,
         batch_steps=1,
-        presentation=_presentation_config(),
+        rich_terminal=_rich_terminal_config(),
     ) as session:
-        assert session.presentation_enabled
-        assert session.presentation_state is TerminalState.ANSI
-        assert system.presentation_terminal_host.enhanced_attached
-        assert system.presentation_terminal_host.pending_geometry_events == 1
+        assert session.rich_terminal_enabled
+        assert session.rich_terminal_state is TerminalState.ANSI
+        assert system.rich_terminal_host.enhanced_attached
+        assert system.rich_terminal_host.pending_geometry_events == 1
         assert session.send_text("boot\r") is DriverStatus.PROGRESS
         assert system.uart.rx_pending == 0
 
@@ -312,13 +312,13 @@ def test_machine_session_bounds_optional_ansi_history_without_losing_screen():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(ansi_history_bytes=4),
+        rich_terminal=_rich_terminal_config(ansi_history_bytes=4),
     ) as session:
         payload = b"\x1b[31mA"
         for value in payload:
             system.cpu._cs.uart_write8(0x00, value)
         assert system._drain_native_uart_output() == payload
-        serviced = session.service_presentation_terminal()
+        serviced = session.service_rich_terminal()
         assert serviced is not None and serviced.ansi_bytes == len(payload)
         assert bytes(session.raw_output) == b"31mA"
         assert (session.raw_output_start, session.raw_output_end) == (2, 6)
@@ -340,27 +340,27 @@ def test_machine_session_reset_replaces_the_optional_attachment_epoch():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(),
+        rich_terminal=_rich_terminal_config(),
     ) as session:
         session.boot()
-        first = session.presentation_driver
+        first = session.rich_terminal_driver
         first_epoch = first.attachment_epoch
         first.close()
         system.cpu.halted = True
         assert session.run(max_steps=1).reason == "terminal_failure"
-        assert "became stale" in session.presentation_failure
-        assert session.presentation_lost
-        assert session.presentation_state is TerminalState.FAILED
+        assert "became stale" in session.rich_terminal_failure
+        assert session.rich_terminal_lost
+        assert session.rich_terminal_state is TerminalState.FAILED
         assert session.send_text("blocked") is DriverStatus.FAILED
         assert session.send_key("enter") is DriverStatus.FAILED
         assert session.resize(4, 1) is DriverStatus.FAILED
         session.reset()
-        second = session.presentation_driver
+        second = session.rich_terminal_driver
         assert second is not None
         assert second.attachment_epoch > first_epoch
-        assert not session.presentation_lost
-        assert session.presentation_state is TerminalState.ANSI
-        assert system.presentation_terminal_host.pending_geometry_events == 1
+        assert not session.rich_terminal_lost
+        assert session.rich_terminal_state is TerminalState.ANSI
+        assert system.rich_terminal_host.pending_geometry_events == 1
 
 
 def test_machine_session_failed_warm_boot_cannot_fall_through_to_legacy(
@@ -375,7 +375,7 @@ def test_machine_session_failed_warm_boot_cannot_fall_through_to_legacy(
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(),
+        rich_terminal=_rich_terminal_config(),
     ) as session:
         session.boot()
 
@@ -386,14 +386,14 @@ def test_machine_session_failed_warm_boot_cannot_fall_through_to_legacy(
         with pytest.raises(RuntimeError, match="injected boot failure"):
             session.boot()
 
-        assert session.presentation_driver is None
-        assert session.presentation_lost
-        assert "presentation boot failed" in session.presentation_failure
+        assert session.rich_terminal_driver is None
+        assert session.rich_terminal_lost
+        assert "rich-terminal boot failed" in session.rich_terminal_failure
         assert session.send_text("must not become raw") is DriverStatus.FAILED
         assert session.send_key("enter") is DriverStatus.FAILED
         assert session.resize(4, 1) is DriverStatus.FAILED
         assert session.run(max_steps=1).reason == "terminal_failure"
-        with pytest.raises(TerminalSessionError, match="presentation boot failed"):
+        with pytest.raises(TerminalSessionError, match="rich-terminal boot failed"):
             session.step()
 
 
@@ -410,12 +410,12 @@ def test_machine_session_optional_attach_failure_restores_uart_callbacks():
             system,
             cols=2,
             rows=2,
-            presentation=_presentation_config(),
+            rich_terminal=_rich_terminal_config(),
         )
 
     assert system.uart.on_tx is byte_callback
     assert system.uart.on_tx_batch is batch_callback
-    assert not system.presentation_terminal_host.enhanced_attached
+    assert not system.rich_terminal_host.enhanced_attached
 
 
 def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
@@ -428,12 +428,12 @@ def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(),
+        rich_terminal=_rich_terminal_config(),
     ) as session:
         system.cpu.halted = True
         session.run_batch_stats(1)  # Cross the initial geometry boundary.
         view = TerminalView(
-            attachment_epoch=session.presentation_driver.attachment_epoch,
+            attachment_epoch=session.rich_terminal_driver.attachment_epoch,
             session_id=7,
             presentation_epoch=1,
             revision=1,
@@ -446,7 +446,7 @@ def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
             dirty_spans=(),
             cursor=Cursor(1, 1, True),
         )
-        session._receive_presentation_view(view)
+        session._receive_terminal_output(view)
         snapshot = session.snapshot()
 
         assert snapshot.lines() == ["AB", "CD"]
@@ -460,19 +460,19 @@ def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
         # snapshot.  Keep showing the last immutable view while synchronizing
         # the hidden ANSI fallback to the core's already-selected geometry.
         before_sync = session.revision
-        session.presentation_driver.core.select_ansi_geometry(4, 1)
-        session._sync_presentation_geometry()
+        session.rich_terminal_driver.core.select_ansi_geometry(4, 1)
+        session._sync_rich_terminal_geometry()
         assert (session.terminal.cols, session.terminal.rows) == (4, 1)
         assert session.snapshot().lines() == ["AB", "CD"]
         assert session.revision == before_sync
-        session._refresh_presentation_display_boundary()
+        session._refresh_output_display_boundary()
         assert (session.snapshot().cols, session.snapshot().rows) == (4, 1)
         assert session.revision == before_sync + 1
 
 
 def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
     policy = _retained_policy(interval_us=100)
-    product = _presentation_policy()
+    product = _rich_terminal_policy()
     assert product.configuration(2, 2, retained_policy=policy).retained_policy is policy
     assert "retained_policy" not in product.to_dict()
 
@@ -485,16 +485,16 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(retained_policy=policy),
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
     ) as session:
-        driver = session.presentation_driver
+        driver = session.rich_terminal_driver
         assert driver is not None and driver.core.retained_configured
         system.cpu.halted = True
         session.run_batch_stats(1)  # Cross the initial host-geometry boundary.
         system.cpu.halted = False
         now = [1_000]
-        assert session._presentation_cadence is not None
-        session._presentation_cadence._monotonic_us = lambda: now[0]
+        assert session._display_cadence is not None
+        session._display_cadence._monotonic_us = lambda: now[0]
 
         cell_one = TerminalView(
             attachment_epoch=driver.attachment_epoch,
@@ -510,21 +510,21 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
             dirty_spans=(),
             cursor=Cursor(0, 0, True),
         )
-        geometry = PresentationGeometry(2, 2)
-        first = CompositePresentationView(0, 1, geometry, cell_one, None)
+        geometry = TerminalGeometry(2, 2)
+        first = CompositeTerminalView(0, 1, geometry, cell_one, None)
         core = driver.core
         core._retained_enabled = True
         core._coordinator = SimpleNamespace(view=first)
         core._clock = SimpleNamespace(revision=1)
         core._state = TerminalState.ACTIVE
 
-        session._receive_presentation_view(cell_one)
-        session._receive_presentation_view(first)
-        assert session.presentation_logical_view is first
-        assert session.presentation_presented_view is None
-        assert session._service_presentation_cadence()
-        assert session.presentation_presented_view is first
-        assert session.presentation_presented_revision == 1
+        session._receive_terminal_output(cell_one)
+        session._receive_terminal_output(first)
+        assert session.logical_output_view is first
+        assert session.displayed_output_view is None
+        assert session._service_display_cadence()
+        assert session.displayed_output_view is first
+        assert session.displayed_model_revision == 1
         assert session.snapshot().lines() == ["AA", "AA"]
 
         cell_two = replace(
@@ -535,16 +535,16 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
                 (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
             ),
         )
-        second = CompositePresentationView(0, 2, geometry, cell_two, None)
+        second = CompositeTerminalView(0, 2, geometry, cell_two, None)
         core._coordinator.view = second
         core._clock.revision = 2
-        session._receive_presentation_view(second)
+        session._receive_terminal_output(second)
         now[0] = 1_050
-        assert not session._service_presentation_cadence()
-        assert session.presentation_logical_view is second
-        assert session.presentation_presented_view is first
+        assert not session._service_display_cadence()
+        assert session.logical_output_view is second
+        assert session.displayed_output_view is first
         assert session.snapshot().lines() == ["AA", "AA"]
-        assert session.presentation_work_pending
+        assert session.rich_terminal_work_pending
         assert session.send_text("held") is DriverStatus.BACKPRESSURED
 
         # A tombstone-only lifecycle publication may advance the composite
@@ -553,9 +553,9 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         latest = replace(second, revision=3)
         core._coordinator.view = latest
         core._clock.revision = 3
-        session._receive_presentation_view(latest)
+        session._receive_terminal_output(latest)
         cadence_reads = iter((1_050, 1_100))
-        session._presentation_cadence._monotonic_us = lambda: next(cadence_reads)
+        session._display_cadence._monotonic_us = lambda: next(cadence_reads)
         guest_batches = []
 
         def forbidden_guest_batch(count):
@@ -569,8 +569,8 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         assert halted.reason == "halted"
         assert halted.steps == 0 and halted.batches == 0
         assert guest_batches == []
-        assert session.presentation_presented_view is latest
-        assert session.presentation_presented_revision == 3
+        assert session.displayed_output_view is latest
+        assert session.displayed_model_revision == 3
         assert session.snapshot().lines() == ["BB", "BB"]
 
         cell_three = replace(
@@ -581,12 +581,12 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
                 (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
             ),
         )
-        idle_view = CompositePresentationView(0, 4, geometry, cell_three, None)
+        idle_view = CompositeTerminalView(0, 4, geometry, cell_three, None)
         core._coordinator.view = idle_view
         core._clock.revision = 4
-        session._receive_presentation_view(idle_view)
+        session._receive_terminal_output(idle_view)
         cadence_reads = iter((1_150, 1_200))
-        session._presentation_cadence._monotonic_us = lambda: next(cadence_reads)
+        session._display_cadence._monotonic_us = lambda: next(cadence_reads)
         system.cpu.halted = False
         system.cpu.idle = True
         idle = session.run(max_steps=1, wall_timeout_s=0.1)
@@ -594,7 +594,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         assert idle.reason == "idle"
         assert idle.steps == 0 and idle.batches == 0
         assert guest_batches == []
-        assert session.presentation_presented_view is idle_view
+        assert session.displayed_output_view is idle_view
         assert session.snapshot().lines() == ["CC", "CC"]
 
 
@@ -609,9 +609,9 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
         system,
         cols=2,
         rows=2,
-        presentation=_presentation_config(retained_policy=policy),
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
     ) as session:
-        driver = session.presentation_driver
+        driver = session.rich_terminal_driver
         assert driver is not None
         cell = TerminalView(
             attachment_epoch=driver.attachment_epoch,
@@ -627,10 +627,10 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
             dirty_spans=(),
             cursor=Cursor(0, 0, True),
         )
-        rich = CompositePresentationView(
+        rich = CompositeTerminalView(
             0,
             1,
-            PresentationGeometry(2, 2),
+            TerminalGeometry(2, 2),
             cell,
             None,
         )
@@ -638,14 +638,14 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
         core._retained_enabled = True
         core._coordinator = SimpleNamespace(view=rich)
         core._clock = SimpleNamespace(revision=1)
-        session._receive_presentation_view(cell)
-        session._receive_presentation_view(rich)
-        assert session._service_presentation_cadence()
+        session._receive_terminal_output(cell)
+        session._receive_terminal_output(rich)
+        assert session._service_display_cadence()
 
         core._retained_enabled = False
         core._coordinator = None
-        assert not session._service_presentation_cadence()
-        assert session.presentation_presented_view is rich
+        assert not session._service_display_cadence()
+        assert session.displayed_output_view is rich
         assert session.snapshot().lines() == ["RR", "RR"]
 
         replacement = replace(
@@ -657,9 +657,9 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
                 (Cell(ord("N"), 7, 0), Cell(ord("N"), 7, 0)),
             ),
         )
-        session._receive_presentation_view(replacement)
-        assert session.presentation_logical_view is None
-        assert session.presentation_presented_view is None
+        session._receive_terminal_output(replacement)
+        assert session.logical_output_view is None
+        assert session.displayed_output_view is None
         assert session.snapshot().lines() == ["NN", "NN"]
 
 
@@ -850,11 +850,11 @@ def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
 
     assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
     assert from_bios.call_args.kwargs["lanes"] == 4
-    assert from_bios.call_args.kwargs["presentation"] is None
+    assert from_bios.call_args.kwargs["rich_terminal"] is None
 
 
-def test_presentation_policy_derives_full_maximum_geometry_contract():
-    policy = _presentation_policy()
+def test_rich_terminal_policy_derives_full_maximum_geometry_contract():
+    policy = _rich_terminal_policy()
     config = policy.configuration(100, 32)
 
     assert policy.maximum_transaction_bytes == 650_576
@@ -874,8 +874,8 @@ def test_presentation_policy_derives_full_maximum_geometry_contract():
     assert config.driver_limits.pending_outbound_events == 256
 
 
-def test_presentation_policy_configuration_attaches_real_host_port():
-    policy = _presentation_policy()
+def test_rich_terminal_policy_configuration_attaches_real_host_port():
+    policy = _rich_terminal_policy()
     system = MegapadSystem(
         ram_size=64 * 1024,
         terminal_cols=100,
@@ -885,19 +885,19 @@ def test_presentation_policy_configuration_attaches_real_host_port():
         system,
         cols=100,
         rows=32,
-        presentation=policy.configuration(100, 32),
+        rich_terminal=policy.configuration(100, 32),
     ) as session:
-        assert session.presentation_enabled
-        assert session.presentation_state is TerminalState.ANSI
-        assert system.presentation_terminal_host.enhanced_attached
+        assert session.rich_terminal_enabled
+        assert session.rich_terminal_state is TerminalState.ANSI
+        assert system.rich_terminal_host.enhanced_attached
         assert session.resize(1, 201) is DriverStatus.INVALID
-        assert session.presentation_driver.core.selected_geometry == (100, 32)
+        assert session.rich_terminal_driver.core.selected_geometry == (100, 32)
         assert session.resize(400, 200) is DriverStatus.PROGRESS
-        assert session.presentation_driver.core.selected_geometry == (400, 200)
+        assert session.rich_terminal_driver.core.selected_geometry == (400, 200)
 
 
-def test_session_server_opt_in_uses_exact_presentation_policy(monkeypatch):
-    policy = _presentation_policy()
+def test_session_server_opt_in_uses_exact_rich_terminal_policy(monkeypatch):
+    policy = _rich_terminal_policy()
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -906,7 +906,7 @@ def test_session_server_opt_in_uses_exact_presentation_policy(monkeypatch):
             "100",
             "--rows",
             "32",
-            "--presentation-terminal-policy",
+            "--rich-terminal-policy",
             json.dumps(policy.to_dict()),
         ],
     )
@@ -918,12 +918,12 @@ def test_session_server_opt_in_uses_exact_presentation_policy(monkeypatch):
     ):
         assert session_server_main() == 0
 
-    config = from_bios.call_args.kwargs["presentation"]
+    config = from_bios.call_args.kwargs["rich_terminal"]
     assert config == policy.configuration(100, 32)
 
 
 def test_session_server_carries_the_exact_retained_policy(monkeypatch):
-    policy = _presentation_policy()
+    policy = _rich_terminal_policy()
     retained = RetainedPolicy(
         features=RetainedFeature.CORE | RetainedFeature.CADENCE,
         max_owner_records=1,
@@ -958,7 +958,7 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
             "100",
             "--rows",
             "32",
-            "--presentation-terminal-policy",
+            "--rich-terminal-policy",
             json.dumps(policy.to_dict()),
             "--retained-terminal-policy",
             json.dumps(retained.to_dict()),
@@ -972,7 +972,7 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
     ):
         assert session_server_main() == 0
 
-    config = from_bios.call_args.kwargs["presentation"]
+    config = from_bios.call_args.kwargs["rich_terminal"]
     assert config == policy.configuration(100, 32, retained_policy=retained)
     assert config.retained_policy is not None
     assert config.retained_policy.to_dict() == retained.to_dict()

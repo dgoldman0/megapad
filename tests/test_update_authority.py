@@ -1,20 +1,20 @@
-"""Focused tests for the shared APT presentation authority."""
+"""Focused tests for the shared APT terminal update authority."""
 
 from __future__ import annotations
 
 import pytest
 
-from presentation_terminal.apt1 import UINT32_MAX, UINT64_MAX
-from presentation_terminal.presentation_model import (
-    PresentationClock,
-    PresentationGeometry,
-    PresentationStateError,
+from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
+from rich_terminal.update_authority import (
+    TerminalUpdateAuthority,
+    TerminalGeometry,
+    TerminalUpdateError,
     TransactionFamily,
 )
 
 
 def test_cell_and_present_share_transaction_id_and_revision_domains():
-    clock = PresentationClock(presentation_epoch=7)
+    clock = TerminalUpdateAuthority(presentation_epoch=7)
 
     # SNAPSHOT is deliberately a mode of the CELL family.  Its first success
     # advances the same clock that subsequent retained transactions use.
@@ -24,7 +24,7 @@ def test_cell_and_present_share_transaction_id_and_revision_domains():
     assert (result.transaction_id, result.revision, result.succeeded) == (1, 1, True)
     assert clock.open_transaction is None
 
-    with pytest.raises(PresentationStateError, match="result is outstanding"):
+    with pytest.raises(TerminalUpdateError, match="result is outstanding"):
         clock.reserve(TransactionFamily.PRESENT, 2, 1)
 
     assert clock.settle_result(1) is result
@@ -39,9 +39,9 @@ def test_cell_and_present_share_transaction_id_and_revision_domains():
 
 
 def test_rejected_begin_owns_stream_until_commit_then_holds_result_gate():
-    clock = PresentationClock(presentation_epoch=0, revision=4)
+    clock = TerminalUpdateAuthority(presentation_epoch=0, revision=4)
 
-    with pytest.raises(PresentationStateError, match="base revision"):
+    with pytest.raises(TerminalUpdateError, match="base revision"):
         clock.reserve(TransactionFamily.PRESENT, 9, 3)
 
     rejected = clock.open_transaction
@@ -53,14 +53,14 @@ def test_rejected_begin_owns_stream_until_commit_then_holds_result_gate():
     assert clock.transaction_high_water == 9
     assert clock.outstanding_result is None
 
-    with pytest.raises(PresentationStateError, match="already open"):
+    with pytest.raises(TerminalUpdateError, match="already open"):
         clock.reserve(TransactionFamily.CELL, 10, 4)
-    with pytest.raises(PresentationStateError, match="cannot complete successfully"):
+    with pytest.raises(TerminalUpdateError, match="cannot complete successfully"):
         clock.complete_success(rejected)
 
     rejected_result = clock.complete_rejected(rejected)
     assert (rejected_result.transaction_id, rejected_result.revision) == (9, 4)
-    with pytest.raises(PresentationStateError, match="result is outstanding"):
+    with pytest.raises(TerminalUpdateError, match="result is outstanding"):
         clock.reserve(TransactionFamily.CELL, 10, 4)
     clock.settle_result(9)
     lease = clock.reserve(TransactionFamily.CELL, 10, 4)
@@ -70,7 +70,7 @@ def test_rejected_begin_owns_stream_until_commit_then_holds_result_gate():
 
     # A stale ID is also an ordered semantic rejection.  It does not move the
     # high-water mark but it does occupy the transaction slot until COMMIT.
-    with pytest.raises(PresentationStateError, match="monotonically"):
+    with pytest.raises(TerminalUpdateError, match="monotonically"):
         clock.reserve(TransactionFamily.PRESENT, 9, 4)
     assert clock.transaction_high_water == 10
     assert clock.outstanding_result is None
@@ -79,9 +79,9 @@ def test_rejected_begin_owns_stream_until_commit_then_holds_result_gate():
 
 
 def test_abort_of_rejected_begin_produces_no_result():
-    clock = PresentationClock(presentation_epoch=2, revision=6)
+    clock = TerminalUpdateAuthority(presentation_epoch=2, revision=6)
 
-    with pytest.raises(PresentationStateError, match="base revision"):
+    with pytest.raises(TerminalUpdateError, match="base revision"):
         clock.reserve(TransactionFamily.CELL, 4, 5)
     rejected = clock.open_transaction
     assert rejected is not None and not rejected.admitted
@@ -97,7 +97,7 @@ def test_abort_of_rejected_begin_produces_no_result():
 
 
 def test_abort_releases_transaction_without_revision_or_result():
-    clock = PresentationClock(presentation_epoch=3, revision=8)
+    clock = TerminalUpdateAuthority(presentation_epoch=3, revision=8)
     lease = clock.reserve(TransactionFamily.PRESENT, 17, 8)
 
     clock.abort(lease)
@@ -111,13 +111,13 @@ def test_abort_releases_transaction_without_revision_or_result():
 
 
 def test_soft_reset_requires_settlement_and_restarts_only_epoch_domains():
-    clock = PresentationClock(
+    clock = TerminalUpdateAuthority(
         presentation_epoch=4, revision=12, transaction_high_water=20
     )
     lease = clock.reserve(TransactionFamily.OWNER_DROP, 21, 12)
     clock.complete_success(lease)
 
-    with pytest.raises(PresentationStateError, match="must settle"):
+    with pytest.raises(TerminalUpdateError, match="must settle"):
         clock.soft_reset(5)
 
     clock.settle_result(21)
@@ -126,29 +126,29 @@ def test_soft_reset_requires_settlement_and_restarts_only_epoch_domains():
     assert clock.revision == 0
     assert clock.transaction_high_water == 0
 
-    with pytest.raises(PresentationStateError, match="plus one"):
+    with pytest.raises(TerminalUpdateError, match="plus one"):
         clock.soft_reset(7)
 
 
 def test_geometry_has_unsigned_wire_bounds_without_policy_caps():
-    geometry = PresentationGeometry(UINT32_MAX, UINT32_MAX, UINT64_MAX)
+    geometry = TerminalGeometry(UINT32_MAX, UINT32_MAX, UINT64_MAX)
     assert geometry.cols == UINT32_MAX
     assert geometry.rows == UINT32_MAX
     assert geometry.generation == UINT64_MAX
 
     with pytest.raises(ValueError, match="between 1"):
-        PresentationGeometry(0, 1)
+        TerminalGeometry(0, 1)
     with pytest.raises(TypeError, match="not bool"):
-        PresentationGeometry(True, 1)
+        TerminalGeometry(True, 1)
 
 
 def test_wrong_lease_cannot_mutate_the_open_authority():
-    first = PresentationClock(presentation_epoch=0)
-    second = PresentationClock(presentation_epoch=0)
+    first = TerminalUpdateAuthority(presentation_epoch=0)
+    second = TerminalUpdateAuthority(presentation_epoch=0)
     lease = first.reserve(TransactionFamily.CELL, 1, 0)
     foreign = second.reserve(TransactionFamily.CELL, 1, 0)
 
-    with pytest.raises(PresentationStateError, match="not the open authority"):
+    with pytest.raises(TerminalUpdateError, match="not the open authority"):
         first.complete_success(foreign)
 
     assert first.open_transaction is lease

@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 
-SOURCE = Path(__file__).resolve().parents[1] / "presentation-terminal.f"
+SOURCE = Path(__file__).resolve().parents[1] / "rich-terminal.f"
 
 
 def _definition(source: str, word: str) -> str:

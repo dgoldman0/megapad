@@ -1,4 +1,4 @@
-"""MegaPad scheduler adapter for the optional presentation-terminal port.
+"""MegaPad scheduler adapter for the optional rich-terminal port.
 
 The adapter owns only transport state.  It never parses terminal bytes and
 never calls terminal-owned code from a machine settlement boundary.
@@ -38,8 +38,8 @@ class _RunnerAdmission:
     external_events_applied: int = 0
 
 
-class MegapadTerminalHost:
-    """One explicit, exclusive presentation-terminal attachment.
+class MegapadRichTerminalHost:
+    """One explicit, exclusive rich-terminal attachment.
 
     ``MegapadSystem`` constructs this adapter but does not acquire it.  A
     frontend must call :meth:`attach` with its own storage limits.  Lease
@@ -154,7 +154,7 @@ class MegapadTerminalHost:
             # Legacy bytes completed before the ownership transition remain
             # legacy bytes.  Drain them before publishing the new epoch.
             system._drain_native_uart_output()
-            system._require_presentation_terminal_attach_ready_locked()
+            system._require_rich_terminal_attach_ready_locked()
 
             with self._lock:
                 if self._active_token is not None:
@@ -177,7 +177,7 @@ class MegapadTerminalHost:
                 self._applied_ingress_bytes = 0
                 self._failure_reason = None
                 self._clear_scheduled_locked()
-                system.uart._set_presentation_terminal_host(self)
+                system.uart._set_rich_terminal_host(self)
                 return lease
 
     def _current_locked(self, token: object, epoch: int) -> bool:
@@ -255,7 +255,7 @@ class MegapadTerminalHost:
             )
             status = queue.accept(batch)
             if status is AdmissionStatus.STALE:
-                raise RuntimeError("active presentation egress queue became stale")
+                raise RuntimeError("active rich-terminal egress queue became stale")
             self._next_publication_sequence += 1
             if status is AdmissionStatus.BACKPRESSURED:
                 self._retained_publication = batch
@@ -457,7 +457,7 @@ class MegapadTerminalHost:
                     return _RunnerAdmission(False)
                 if status is AdmissionStatus.STALE:
                     raise RuntimeError(
-                        "active retained presentation publication became stale"
+                        "active retained terminal output publication became stale"
                     )
                 self._retained_publication = None
 
@@ -466,10 +466,10 @@ class MegapadTerminalHost:
                 event = self._scheduled[0]
                 if event.attachment_epoch != epoch:
                     raise RuntimeError(
-                        "presentation scheduler queue crossed an attachment epoch"
+                        "rich-terminal scheduler queue crossed an attachment epoch"
                     )
                 if isinstance(event, IngressRecord):
-                    system._schedule_presentation_uart_input_locked(
+                    system._schedule_rich_terminal_uart_input_locked(
                         epoch,
                         event.payload,
                     )
@@ -482,7 +482,7 @@ class MegapadTerminalHost:
                     self._applied_ingress_bytes += size
                     applied += 1
                 elif isinstance(event, GeometryRecord):
-                    system._schedule_presentation_terminal_resize_locked(
+                    system._schedule_rich_terminal_resize_locked(
                         epoch,
                         event.cols,
                         event.rows,
@@ -492,12 +492,12 @@ class MegapadTerminalHost:
                 else:
                     assert isinstance(event, ResizeRecord)
                     try:
-                        system._schedule_presentation_terminal_resize_locked(
+                        system._schedule_rich_terminal_resize_locked(
                             epoch,
                             event.cols,
                             event.rows,
                         )
-                        system._schedule_presentation_uart_input_locked(
+                        system._schedule_rich_terminal_uart_input_locked(
                             epoch,
                             event.payload,
                         )
@@ -538,7 +538,7 @@ class MegapadTerminalHost:
                 self._discard_applied_ingress_locked(system)
                 self._retire_attachment_locked()
                 self._epoch_clock = next_epoch
-                system.uart._set_presentation_terminal_host(None)
+                system.uart._set_rich_terminal_host(None)
                 return AdmissionStatus.ACCEPTED
 
     def _retire_for_machine_reset_locked(self) -> None:
@@ -552,7 +552,7 @@ class MegapadTerminalHost:
             self._discard_applied_ingress_locked(system)
             self._retire_attachment_locked()
             self._epoch_clock = next_epoch
-            system.uart._set_presentation_terminal_host(None)
+            system.uart._set_rich_terminal_host(None)
 
     def _discard_applied_ingress_locked(self, system: MegapadSystem) -> None:
         # Legacy/future UART ingress is barred for the duration of the lease,
@@ -589,4 +589,4 @@ class MegapadTerminalHost:
         self._pending_geometry_events = 0
 
 
-__all__ = ["MegapadTerminalHost"]
+__all__ = ["MegapadRichTerminalHost"]

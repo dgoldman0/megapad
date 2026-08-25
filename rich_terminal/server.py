@@ -48,14 +48,14 @@ from .cell_model import (
     decode_cursor,
     decode_transaction_begin,
 )
-from .presentation_coordinator import (
-    CompositePresentationView,
-    PresentationCoordinator,
+from .output_coordinator import (
+    CompositeTerminalView,
+    TerminalOutputCoordinator,
 )
-from .presentation_model import (
-    PresentationClock,
-    PresentationGeometry,
-    PresentationStateError,
+from .update_authority import (
+    TerminalUpdateAuthority,
+    TerminalGeometry,
+    TerminalUpdateError,
     ResultLease,
     TransactionFamily,
     TransactionLease,
@@ -371,7 +371,7 @@ class OutboundBytes:
             raise ValueError("an outbound record cannot settle two result gates")
 
 
-PresentationView = TerminalView | CompositePresentationView
+TerminalOutputView = TerminalView | CompositeTerminalView
 
 
 @dataclass(slots=True)
@@ -394,7 +394,7 @@ class _PresentWireState:
 class CoreResult:
     ansi_bytes: bytes = b""
     outbound: tuple[OutboundBytes, ...] = ()
-    views: tuple[PresentationView, ...] = ()
+    views: tuple[TerminalOutputView, ...] = ()
 
 
 class _NegotiationScanner:
@@ -452,7 +452,7 @@ class _NegotiationScanner:
         return raw, None, None
 
 
-class PresentationTerminalCore:
+class RichTerminalCore:
     """Server side of one optional APT-1 CELL-1 terminal attachment."""
 
     def __init__(
@@ -494,9 +494,9 @@ class PresentationTerminalCore:
         self._decoder: IncrementalFrameDecoder | None = None
         self._encoder: FrameEncoder | None = None
         self._model: CellModel | None = None
-        self._clock: PresentationClock | None = None
+        self._clock: TerminalUpdateAuthority | None = None
         self._retained_model: RetainedSceneModel | None = None
-        self._coordinator: PresentationCoordinator | None = None
+        self._coordinator: TerminalOutputCoordinator | None = None
         self._configured_retained_policy = retained_policy
         self._retained_caps = (
             None
@@ -606,7 +606,7 @@ class PresentationTerminalCore:
                 ),
             )
             policy.validate_geometry(
-                PresentationGeometry(
+                TerminalGeometry(
                     self._config.cols,
                     self._config.rows,
                     self._geometry_generation,
@@ -661,8 +661,8 @@ class PresentationTerminalCore:
         return self._retained_model.state
 
     @property
-    def presentation_view(self) -> PresentationView | None:
-        """The latest immutable CELL-only or composite presentation view."""
+    def output_view(self) -> TerminalOutputView | None:
+        """The latest immutable CELL-only or composite terminal output."""
 
         if self._coordinator is not None:
             return self._coordinator.view
@@ -685,8 +685,8 @@ class PresentationTerminalCore:
         return self._model.view
 
     @property
-    def presentation_revision(self) -> int:
-        """The authoritative shared CELL/retained presentation revision."""
+    def model_revision(self) -> int:
+        """The authoritative shared CELL/retained model revision."""
 
         return 0 if self._clock is None else self._clock.revision
 
@@ -766,7 +766,7 @@ class PresentationTerminalCore:
             if policy is None:
                 raise TerminalSessionError("retained resize lost its bound policy")
             policy.validate_geometry(
-                PresentationGeometry(
+                TerminalGeometry(
                     normalized_cols,
                     normalized_rows,
                     self._geometry_generation + 1,
@@ -949,7 +949,7 @@ class PresentationTerminalCore:
         if not self.resize_ready:
             raise TerminalSessionError(
                 "terminal resize waits for a settled transaction boundary "
-                "and presentation state"
+                "and terminal output state"
             )
         if self._wire_transaction_id is not None:
             raise TerminalSessionError(
@@ -966,7 +966,7 @@ class PresentationTerminalCore:
             raise TerminalSessionError("terminal geometry generation is exhausted")
 
         generation = self._geometry_generation + 1
-        geometry = PresentationGeometry(normalized_cols, normalized_rows, generation)
+        geometry = TerminalGeometry(normalized_cols, normalized_rows, generation)
         retained = self._retained_model if self._retained_enabled else None
         coordinator = self._coordinator if self._retained_enabled else None
         if retained is not None:
@@ -989,7 +989,7 @@ class PresentationTerminalCore:
             try:
                 retained.require_layout(geometry)
                 coordinator.admit_resize(geometry)
-            except (PresentationStateError, SceneModelError) as exc:
+            except (TerminalUpdateError, SceneModelError) as exc:
                 self._fatal(f"cannot install retained resize boundary: {exc}", cause=exc)
         self._config = replace(
             self._config,
@@ -1007,7 +1007,7 @@ class PresentationTerminalCore:
         return encoded
 
     def request_soft_reset(self) -> OutboundBytes:
-        """Begin one ordered presentation-epoch reset from an ACTIVE session."""
+        """Begin one ordered presentation_epoch reset from an ACTIVE session."""
 
         if self._state is not TerminalState.ACTIVE:
             raise TerminalSessionError("soft reset requires an ACTIVE session")
@@ -1022,7 +1022,7 @@ class PresentationTerminalCore:
         if clock.outstanding_result is not None:
             raise TerminalSessionError("soft reset waits for TX_RESULT delivery")
         if clock.presentation_epoch == UINT32_MAX:
-            raise TerminalSessionError("presentation epoch is exhausted")
+            raise TerminalSessionError("presentation_epoch is exhausted")
 
         requested_epoch = clock.presentation_epoch + 1
         encoded = self._encode_control(
@@ -1046,7 +1046,7 @@ class PresentationTerminalCore:
 
         try:
             return self._require_clock().settle_result(transaction_id)
-        except (PresentationStateError, TypeError, ValueError) as exc:
+        except (TerminalUpdateError, TypeError, ValueError) as exc:
             self._fatal(f"cannot settle TX_RESULT delivery: {exc}", cause=exc)
 
     def settle_lifecycle_result_delivery(
@@ -1068,7 +1068,7 @@ class PresentationTerminalCore:
     def _feed_ansi_owned(self, raw: bytes) -> CoreResult:
         ansi = bytearray()
         outbound: list[OutboundBytes] = []
-        views: list[PresentationView] = []
+        views: list[TerminalOutputView] = []
 
         for position, byte in enumerate(raw):
             emitted, record, record_bytes = self._scanner.push(byte)
@@ -1151,7 +1151,7 @@ class PresentationTerminalCore:
             max_transaction_bytes=self._config.max_transaction_bytes,
             max_cells=self._config.max_cells,
         )
-        self._clock = PresentationClock(presentation_epoch=0)
+        self._clock = TerminalUpdateAuthority(presentation_epoch=0)
         self._session_retained_policy = self._bind_retained_policy(
             terminal_to_client_max_payload=record.client_max_payload,
         )
@@ -1186,7 +1186,7 @@ class PresentationTerminalCore:
         except SessionFramingError as exc:
             self._fatal(str(exc), cause=exc)
         outbound: list[OutboundBytes] = []
-        views: list[PresentationView] = []
+        views: list[TerminalOutputView] = []
         for index, frame in enumerate(frames):
             if frame.message_type == MessageType.CLOSE:
                 if index != len(frames) - 1 or decoder.buffered_bytes:
@@ -1202,7 +1202,7 @@ class PresentationTerminalCore:
     def _process_frame(
         self,
         frame: Frame,
-    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+    ) -> tuple[tuple[OutboundBytes, ...], TerminalOutputView | None]:
         if self._present_wire_state is not None and frame.message_type not in {
             MessageType.TX_ABORT,
             MessageType.CELL_SPAN,
@@ -1312,7 +1312,7 @@ class PresentationTerminalCore:
             return (), None
         if message_type in {MessageType.TX_COMMIT, MessageType.SNAPSHOT_COMMIT}:
             return self._accept_commit(frame, message_type)
-        self._fatal(f"message {message_type.name} is not legal client presentation data")
+        self._fatal(f"message {message_type.name} is not legal client terminal output data")
 
     def _accept_close(self, payload: bytes) -> tuple[OutboundBytes, ...]:
         if self._state not in {
@@ -1363,7 +1363,7 @@ class PresentationTerminalCore:
             if retained is not None and retained.transaction_open:
                 try:
                     retained.abort()
-                except (PresentationStateError, SceneModelError) as exc:
+                except (TerminalUpdateError, SceneModelError) as exc:
                     self._fatal(
                         f"cannot discard retained transaction for CLOSE: {exc}",
                         cause=exc,
@@ -1371,7 +1371,7 @@ class PresentationTerminalCore:
             else:
                 try:
                     clock.abort(lease)
-                except PresentationStateError as exc:
+                except TerminalUpdateError as exc:
                     self._fatal(
                         f"cannot discard transaction for CLOSE: {exc}",
                         cause=exc,
@@ -1510,7 +1510,7 @@ class PresentationTerminalCore:
                 presentation_epoch=clock.presentation_epoch,
                 policy=policy,
             )
-            geometry = PresentationGeometry(
+            geometry = TerminalGeometry(
                 self._config.cols,
                 self._config.rows,
                 self._geometry_generation,
@@ -1520,14 +1520,14 @@ class PresentationTerminalCore:
                 owners=owner_ledger,
                 geometry=geometry,
             )
-            coordinator = PresentationCoordinator(
+            coordinator = TerminalOutputCoordinator(
                 clock=clock,
                 cell_model=model,
                 retained_model=retained_model,
                 geometry=geometry,
             )
-        except (PresentationStateError, SceneModelError, TypeError, ValueError) as exc:
-            self._fatal(f"cannot initialize retained presentation: {exc}", cause=exc)
+        except (TerminalUpdateError, SceneModelError, TypeError, ValueError) as exc:
+            self._fatal(f"cannot initialize retained terminal output: {exc}", cause=exc)
 
         self._retained_query_seen = True
         caps_reply = self._encode_data(
@@ -1641,7 +1641,7 @@ class PresentationTerminalCore:
     def _accept_owner_drop(
         self,
         frame: Frame,
-    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+    ) -> tuple[tuple[OutboundBytes, ...], TerminalOutputView | None]:
         """Apply one revisioned exact-owner drop through the shared clock."""
 
         _ledger, clock = self._require_owner_lifecycle_ready(
@@ -1666,7 +1666,7 @@ class PresentationTerminalCore:
                 transaction_id,
                 base_revision,
             )
-        except (PresentationStateError, TypeError, ValueError) as exc:
+        except (TerminalUpdateError, TypeError, ValueError) as exc:
             lease = clock.open_transaction
             if (
                 lease is None
@@ -1696,7 +1696,7 @@ class PresentationTerminalCore:
             )
         except OwnerLedgerError:
             return self._complete_owner_drop_rejection(lease, 2), None
-        except (PresentationStateError, SceneModelError, RuntimeError, TypeError) as exc:
+        except (TerminalUpdateError, SceneModelError, RuntimeError, TypeError) as exc:
             self._fatal(f"cannot validate OWNER_DROP publication: {exc}", cause=exc)
 
         if self._reset_requested_epoch is not None:
@@ -1712,7 +1712,7 @@ class PresentationTerminalCore:
             result_lease = self._require_coordinator().install_owner_retirement(
                 prepared
             )
-        except (PresentationStateError, RuntimeError) as exc:
+        except (TerminalUpdateError, RuntimeError) as exc:
             self._fatal(f"cannot complete OWNER_DROP: {exc}", cause=exc)
         if result_lease.revision != revision:
             self._fatal("OWNER_DROP revision changed after preparation")
@@ -1726,7 +1726,7 @@ class PresentationTerminalCore:
         clock = self._require_clock()
         try:
             result_lease = clock.complete_rejected(lease)
-        except PresentationStateError as exc:
+        except TerminalUpdateError as exc:
             self._fatal(f"cannot reject OWNER_DROP: {exc}", cause=exc)
         result_record = self._encode_control(
             MessageType.TX_RESULT,
@@ -1745,7 +1745,7 @@ class PresentationTerminalCore:
         request_name: str,
         *,
         allow_crossed_reset: bool,
-    ) -> tuple[OwnerLedger, PresentationClock]:
+    ) -> tuple[OwnerLedger, TerminalUpdateAuthority]:
         pending_reset = self._reset_requested_epoch is not None
         if pending_reset:
             if (
@@ -1856,7 +1856,7 @@ class PresentationTerminalCore:
                 transaction_id,
                 base_revision,
             )
-        except (PresentationStateError, TypeError, ValueError) as exc:
+        except (TerminalUpdateError, TypeError, ValueError) as exc:
             lease = clock.open_transaction
             if (
                 lease is None
@@ -1894,7 +1894,7 @@ class PresentationTerminalCore:
         available_before_begin = self._client_data_grant - (
             self._client_data_received - frame.complete_bytes
         )
-        geometry = PresentationGeometry(
+        geometry = TerminalGeometry(
             self._config.cols,
             self._config.rows,
             self._geometry_generation,
@@ -2132,7 +2132,7 @@ class PresentationTerminalCore:
     def _accept_present_commit(
         self,
         frame: Frame,
-    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+    ) -> tuple[tuple[OutboundBytes, ...], TerminalOutputView | None]:
         wire = self._require_present_wire_state()
         clock = self._require_clock()
         lease = clock.open_transaction
@@ -2174,7 +2174,7 @@ class PresentationTerminalCore:
         ):
             status = 2
 
-        view: PresentationView | None = None
+        view: TerminalOutputView | None = None
         result_lease: ResultLease | None = None
         if status is None:
             assert commit is not None
@@ -2202,7 +2202,7 @@ class PresentationTerminalCore:
                 )
             except (CellModelError, SceneModelError):
                 status = 2
-            except (PresentationStateError, RuntimeError, TypeError, ValueError) as exc:
+            except (TerminalUpdateError, RuntimeError, TypeError, ValueError) as exc:
                 self._fatal(f"cannot prepare PRESENT publication: {exc}", cause=exc)
             else:
                 if self._reset_requested_epoch is None:
@@ -2210,7 +2210,7 @@ class PresentationTerminalCore:
                         result_lease = self._require_coordinator().install_prepared(
                             prepared
                         )
-                    except (PresentationStateError, RuntimeError) as exc:
+                    except (TerminalUpdateError, RuntimeError) as exc:
                         self._fatal(f"cannot install PRESENT publication: {exc}", cause=exc)
                     status = 0
                     view = prepared.view
@@ -2255,11 +2255,11 @@ class PresentationTerminalCore:
         if retained is not None and retained.transaction_open:
             try:
                 return retained.reject()
-            except (PresentationStateError, SceneModelError) as exc:
+            except (TerminalUpdateError, SceneModelError) as exc:
                 self._fatal(f"cannot reject PRESENT retained state: {exc}", cause=exc)
         try:
             return self._require_clock().complete_rejected(lease)
-        except PresentationStateError as exc:
+        except TerminalUpdateError as exc:
             self._fatal(f"cannot reject PRESENT transaction: {exc}", cause=exc)
 
     def _charge_data(self, frame: Frame, *, include_in_transaction: bool = True) -> None:
@@ -2301,7 +2301,7 @@ class PresentationTerminalCore:
                 begin.transaction_id,
                 begin.base_revision,
             )
-        except PresentationStateError as exc:
+        except TerminalUpdateError as exc:
             lease = clock.open_transaction
             if (
                 lease is None
@@ -2351,7 +2351,7 @@ class PresentationTerminalCore:
         self,
         frame: Frame,
         message_type: MessageType,
-    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+    ) -> tuple[tuple[OutboundBytes, ...], TerminalOutputView | None]:
         if self._present_wire_state is not None:
             self._fatal("legacy CELL commit crossed a PRESENT transaction")
         transaction_id = self._wire_transaction_id
@@ -2362,7 +2362,7 @@ class PresentationTerminalCore:
         if lease is None or lease.transaction_id != transaction_id:
             self._fatal("wire transaction has no matching clock lease")
         status = self._discard_transaction_status
-        view: PresentationView | None = None
+        view: TerminalOutputView | None = None
         result_lease: ResultLease | None = None
         try:
             commit_id = decode_commit(frame.payload)
@@ -2395,7 +2395,7 @@ class PresentationTerminalCore:
                         try:
                             result_lease = clock.complete_success(lease)
                             view = model.install_prepared(prepared)
-                        except (PresentationStateError, RuntimeError) as exc:
+                        except (TerminalUpdateError, RuntimeError) as exc:
                             self._fatal(
                                 f"cannot install committed CELL publication: {exc}",
                                 cause=exc,
@@ -2408,7 +2408,7 @@ class PresentationTerminalCore:
                             )
                             result_lease = coordinator.install_prepared(composite)
                             view = composite.view
-                        except (PresentationStateError, RuntimeError) as exc:
+                        except (TerminalUpdateError, RuntimeError) as exc:
                             self._fatal(
                                 f"cannot install composite CELL publication: {exc}",
                                 cause=exc,
@@ -2424,7 +2424,7 @@ class PresentationTerminalCore:
                         self._fatal(str(exc), cause=exc)
                     try:
                         result_lease = clock.complete_rejected(lease)
-                    except PresentationStateError as exc:
+                    except TerminalUpdateError as exc:
                         self._fatal(str(exc), cause=exc)
                     status = 1
 
@@ -2436,7 +2436,7 @@ class PresentationTerminalCore:
                     self._fatal(str(exc), cause=exc)
             try:
                 result_lease = clock.complete_rejected(lease)
-            except PresentationStateError as exc:
+            except TerminalUpdateError as exc:
                 self._fatal(str(exc), cause=exc)
 
         if status is None:
@@ -2494,12 +2494,12 @@ class PresentationTerminalCore:
         if retained is not None and retained.transaction_open:
             try:
                 retained.abort()
-            except (PresentationStateError, SceneModelError) as exc:
+            except (TerminalUpdateError, SceneModelError) as exc:
                 self._fatal(str(exc), cause=exc)
         else:
             try:
                 clock.abort(lease)
-            except PresentationStateError as exc:
+            except TerminalUpdateError as exc:
                 self._fatal(str(exc), cause=exc)
         released = self._wire_transaction_bytes
         self._most_recent_wire_aborted_id = transaction_id
@@ -2545,12 +2545,12 @@ class PresentationTerminalCore:
             if retained is not None and retained.transaction_open:
                 try:
                     retained.abort()
-                except (PresentationStateError, SceneModelError) as exc:
+                except (TerminalUpdateError, SceneModelError) as exc:
                     self._fatal(str(exc), cause=exc)
             else:
                 try:
                     clock.abort(lease)
-                except PresentationStateError as exc:
+                except TerminalUpdateError as exc:
                     self._fatal(str(exc), cause=exc)
             released = self._wire_transaction_bytes
             self._clear_wire_transaction()
@@ -2561,7 +2561,7 @@ class PresentationTerminalCore:
         try:
             model.soft_reset(requested_epoch)
             clock.soft_reset(requested_epoch)
-        except (CellModelError, PresentationStateError) as exc:
+        except (CellModelError, TerminalUpdateError) as exc:
             self._fatal(f"cannot install soft-reset epoch: {exc}", cause=exc)
         encoder = self._encoder
         if encoder is None:
@@ -2595,7 +2595,7 @@ class PresentationTerminalCore:
         clock = self._require_clock()
         if clock.open_transaction is not None or clock.outstanding_result is not None:
             self._fatal("legacy resize rebase requires a settled transaction clock")
-        self._clock = PresentationClock(
+        self._clock = TerminalUpdateAuthority(
             presentation_epoch=clock.presentation_epoch,
             revision=0,
             transaction_high_water=clock.transaction_high_water,
@@ -2667,9 +2667,9 @@ class PresentationTerminalCore:
             self._fatal("enhanced session has no CELL-1 model")
         return self._model
 
-    def _require_clock(self) -> PresentationClock:
+    def _require_clock(self) -> TerminalUpdateAuthority:
         if self._clock is None:
-            self._fatal("enhanced session has no presentation clock")
+            self._fatal("enhanced session has no update authority")
         return self._clock
 
     def _require_retained_model(self) -> RetainedSceneModel:
@@ -2677,9 +2677,9 @@ class PresentationTerminalCore:
             self._fatal("retained dispatch has no scene model")
         return self._retained_model
 
-    def _require_coordinator(self) -> PresentationCoordinator:
+    def _require_coordinator(self) -> TerminalOutputCoordinator:
         if self._coordinator is None:
-            self._fatal("retained dispatch has no presentation coordinator")
+            self._fatal("retained dispatch has no output coordinator")
         return self._coordinator
 
     def _require_present_wire_state(self) -> _PresentWireState:
@@ -2721,8 +2721,8 @@ __all__ = [
     "CoreResult",
     "LifecycleResultLease",
     "OutboundBytes",
-    "PresentationView",
-    "PresentationTerminalCore",
+    "TerminalOutputView",
+    "RichTerminalCore",
     "TerminalConfig",
     "TerminalSessionError",
     "TerminalState",

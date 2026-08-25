@@ -1,14 +1,14 @@
-# `presentation-terminal.f` module boundary
+# `rich-terminal.f` module boundary
 
 Status: normative for the optional APT-1 guest implementation.
 
 ## 1. Placement
 
-`presentation-terminal.f` is a source-loadable MegaPad userland module. Its
+`rich-terminal.f` is a source-loadable MegaPad userland module. Its
 role matches `networking.f`: KDOS supplies bounded hardware primitives and the
 module supplies the higher-level protocol only when a caller loads it.
 
-The provider identifier is `presentation-terminal.f` (23 bytes). A normal
+The provider identifier is `rich-terminal.f` (15 bytes). A normal
 boot, ANSI application, or Akashic session does not require or automatically
 load it. Autoexec policy is outside the module and must remain opt-in for the
 first milestone.
@@ -35,13 +35,13 @@ None may prevent KDOS, the ANSI terminal, or Akashic's cell UI from working.
 ## 3. Ownership
 
 Before negotiation, UART input belongs to the existing ANSI/key path. A caller
-explicitly acquires a presentation session and supplies bounded storage and
+explicitly acquires a rich-terminal session and supplies bounded storage and
 timeouts. The module interposes on raw terminal input from `PT-START` until a
 proven ANSI-safe close/reset boundary, including while resynchronizing,
 closing, or quarantined in `LOST`.
 
 From successful `PT-START` through `OPEN`, `ACTIVE`, resynchronization, close,
-or loss, the module exclusively owns UART presentation bytes and returns
+or loss, the module exclusively owns framed rich-terminal bytes and returns
 normalized input events through its API. It releases ownership on a
 pre-`OPEN` refusal/timeout, a valid `CLOSE_ACK`, or an external attachment
 reset that advances the link epoch and drains both directions. A post-`OPEN`
@@ -50,7 +50,7 @@ ANSI fallback boundary. Buffered enhanced bytes are never passed into the
 ANSI key decoder.
 
 Probe failure restores the prior ANSI owner and forces a cell redraw if any
-probe bytes could have affected physical presentation. Ordinary key bytes
+probe bytes could have affected physical display output. Ordinary key bytes
 received before the enhanced switch boundary retain their original order.
 
 ## 4. Public responsibility
@@ -59,7 +59,7 @@ The module owns:
 
 * the APT-1 ANSI-safe negotiation state machine;
 * framed encoding and incremental decoding;
-* session ID, sequence, presentation epoch, and credit accounting;
+* session ID, sequence, wire `presentation_epoch`, and credit accounting;
 * one non-nested outgoing transaction;
 * replace-all snapshot transmission;
 * normalized key, text, pointer, focus, and resize event decoding;
@@ -221,8 +221,8 @@ returns discovery to pending and allows the mandatory revision-zero-to-one CELL
 recovery snapshot before the module rediscovers retained support.
 
 If resize arrives after positive discovery, the module records the new
-geometry and layout-required state but preserves the global presentation
-revision. It does not fabricate the legacy revision-zero snapshot sequence;
+geometry and layout-required state but preserves the global model revision.
+It does not fabricate the legacy revision-zero snapshot sequence;
 the owning rich-terminal engine first publishes canonical PRESENT CELL_REPLACE
 and then completes the retained layout/reveal or closes.
 An exact positive discovery reply followed by RESIZE before its covering CREDIT
@@ -288,22 +288,26 @@ at one logical boundary.
 Akashic retains its ANSI backend as the default. Its optional neutral
 rich-terminal engine binds only to a live module session, serializes semantic
 work above PT, and translates native cells field-by-field into CELL-1/PRESENT
-spans. Akashic may load and call the module, but the engine does not duplicate
-its wire parser, UART ownership, session state machine, transaction allocator,
-revision, credit, or result slot.
+spans. The engine does not duplicate the module's wire parser, UART ownership,
+session state machine, transaction allocator, revision, credit, or result
+slot.
 
-The generic Akashic screen and ANSI backend never `REQUIRE` this module. The
-optional integration loader uses this explicit order:
+System composition loads this MegaPad module at boot when the configured
+hardware includes the optional rich terminal, following the established
+`networking.f` pattern. Akashic consumes the resulting public `PT-*` runtime
+ABI. No Akashic source file may `REQUIRE` a filesystem path into MegaPad, copy
+this module, or pull it into Akashic's linked source closure. The relevant
+composition order is therefore:
 
 ```forth
-REQUIRE presentation-terminal.f
-REQUIRE akashic/tui/screen-backend-apt1.f
+REQUIRE rich-terminal.f
+\ continue booting the independently packaged Akashic system
 ```
 
-`screen-backend-apt1.f` may depend on the public `PT-` words and constructs a
-backend only from a caller-supplied live `session`; it does not create or
-auto-open a hidden global session. Packaging that adapter must therefore make
-the MegaPad root module available to KDOS `REQUIRE` resolution.
+The generic Akashic engine and its separate UIDL-TUI adapter may depend on the
+already-loaded public `PT-*` words and bind only to a caller-supplied live
+session. They do not create or auto-open a hidden global session, and Desk or
+applets do not receive a separate service, broker, or scene API.
 
 If the module is absent or inactive, the adapter is not constructed. An
 acknowledged close atomically restores the ANSI backend, leaves

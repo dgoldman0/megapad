@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from presentation_terminal.cell_model import (
+from rich_terminal.cell_model import (
     Cell,
     CellModel,
     CellModelError,
@@ -22,8 +22,8 @@ from presentation_terminal.cell_model import (
     decode_cursor,
     decode_transaction_begin,
 )
-from presentation_terminal.presentation_model import (
-    PresentationClock,
+from rich_terminal.update_authority import (
+    TerminalUpdateAuthority,
     TransactionFamily,
 )
 
@@ -78,7 +78,7 @@ def _stage_vector_replacement_body(
 
 def _prepare_clocked_initial_snapshot(
     model: CellModel,
-    clock: PresentationClock,
+    clock: TerminalUpdateAuthority,
 ):
     payloads = _happy_payloads()
     begin = decode_transaction_begin(payloads["SNAPSHOT_BEGIN"][0])
@@ -118,7 +118,7 @@ def test_normative_snapshot_publishes_one_atomic_immutable_view():
 
 def test_shared_clock_prepare_is_nonmutating_and_install_is_atomic():
     model = _model()
-    clock = PresentationClock(presentation_epoch=0)
+    clock = TerminalUpdateAuthority(presentation_epoch=0)
     lease, prepared = _prepare_clocked_initial_snapshot(model, clock)
 
     # Preparing allocates the complete immutable candidate, but neither the
@@ -145,7 +145,7 @@ def test_present_lease_can_prepare_replace_all_at_nonzero_global_revision():
     model = _model()
     _commit_vector_snapshot(model)
     model.select_geometry(2, 2)
-    clock = PresentationClock(
+    clock = TerminalUpdateAuthority(
         presentation_epoch=0,
         revision=7,
         transaction_high_water=10,
@@ -169,7 +169,7 @@ def test_present_lease_can_prepare_replace_all_at_nonzero_global_revision():
 def test_clocked_delta_uses_global_revision_when_cell_view_lags():
     model = _model()
     old = _commit_vector_snapshot(model)
-    clock = PresentationClock(
+    clock = TerminalUpdateAuthority(
         presentation_epoch=0,
         revision=4,
         transaction_high_water=8,
@@ -201,7 +201,7 @@ def test_clocked_delta_uses_global_revision_when_cell_view_lags():
 
 def test_prepared_publication_rejects_stale_and_foreign_model_state():
     model = _model()
-    clock = PresentationClock(presentation_epoch=0)
+    clock = TerminalUpdateAuthority(presentation_epoch=0)
     lease, first = _prepare_clocked_initial_snapshot(model, clock)
     delayed = model.prepare_publication(
         lease,
@@ -209,7 +209,7 @@ def test_prepared_publication_rejects_stale_and_foreign_model_state():
     )
 
     foreign_model = _model()
-    foreign_clock = PresentationClock(presentation_epoch=0)
+    foreign_clock = TerminalUpdateAuthority(presentation_epoch=0)
     foreign_lease, foreign = _prepare_clocked_initial_snapshot(
         foreign_model,
         foreign_clock,

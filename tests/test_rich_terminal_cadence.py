@@ -1,4 +1,4 @@
-"""Focused tests for latest-view physical presentation cadence."""
+"""Focused tests for latest-view physical display cadence."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from dataclasses import replace
 
 import pytest
 
-from presentation_terminal.cell_model import Cell, Cursor, TerminalView
-from presentation_terminal.presentation_cadence import PresentationCadenceScheduler
-from presentation_terminal.presentation_coordinator import CompositePresentationView
-from presentation_terminal.presentation_model import (
-    PresentationGeometry,
-    PresentationStateError,
+from rich_terminal.cell_model import Cell, Cursor, TerminalView
+from rich_terminal.display_cadence import DisplayCadenceScheduler
+from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.update_authority import (
+    TerminalGeometry,
+    TerminalUpdateError,
 )
-from presentation_terminal.retained_model import (
+from rich_terminal.retained_model import (
     RetainedFeature,
     RetainedPolicy,
 )
@@ -58,9 +58,9 @@ def _view(
     *,
     attachment_epoch: int = 1,
     session_id: int = 2,
-) -> CompositePresentationView:
-    geometry = PresentationGeometry(1, 1)
-    return CompositePresentationView(
+) -> CompositeTerminalView:
+    geometry = TerminalGeometry(1, 1)
+    return CompositeTerminalView(
         presentation_epoch=epoch,
         revision=revision,
         geometry=geometry,
@@ -81,7 +81,7 @@ def _view(
 
 def test_zero_interval_and_first_view_are_immediately_eligible() -> None:
     clock = [10]
-    cadence = PresentationCadenceScheduler(
+    cadence = DisplayCadenceScheduler(
         policy=_policy(0), monotonic_us=lambda: clock[0]
     )
     first = _view(0, 0)
@@ -89,7 +89,7 @@ def test_zero_interval_and_first_view_are_immediately_eligible() -> None:
 
     assert cadence.pending_revision == 0
     assert cadence.service() is first
-    assert cadence.presented_revision == 0
+    assert cadence.displayed_revision == 0
     assert cadence.pending_revision is None
 
     next_view = _view(0, 1)
@@ -98,7 +98,7 @@ def test_zero_interval_and_first_view_are_immediately_eligible() -> None:
 
 
 def test_default_monotonic_clock_is_available_to_production_callers() -> None:
-    cadence = PresentationCadenceScheduler(policy=_policy(0))
+    cadence = DisplayCadenceScheduler(policy=_policy(0))
     first = _view(0, 0)
     cadence.replace_session(1, 2, first)
     assert cadence.service() is first
@@ -106,7 +106,7 @@ def test_default_monotonic_clock_is_available_to_production_callers() -> None:
 
 def test_one_pending_slot_coalesces_to_latest_until_interval_expires() -> None:
     clock = [1_000]
-    cadence = PresentationCadenceScheduler(
+    cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: clock[0]
     )
     cadence.replace_session(1, 2)
@@ -126,7 +126,7 @@ def test_one_pending_slot_coalesces_to_latest_until_interval_expires() -> None:
 
 
 def test_exact_view_retry_is_idempotent_but_foreign_revision_is_rejected() -> None:
-    cadence = PresentationCadenceScheduler(
+    cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: 0
     )
     first = _view(0, 4)
@@ -134,17 +134,17 @@ def test_exact_view_retry_is_idempotent_but_foreign_revision_is_rejected() -> No
     cadence.submit(replace(first))
     assert cadence.pending_revision == 4
 
-    with pytest.raises(PresentationStateError, match="same or lower revision"):
+    with pytest.raises(TerminalUpdateError, match="same or lower revision"):
         cadence.submit(
             replace(first, cell=replace(first.cell, cursor=Cursor(0, 0, False)))
         )
-    with pytest.raises(PresentationStateError, match="same or lower revision"):
+    with pytest.raises(TerminalUpdateError, match="same or lower revision"):
         cadence.submit(_view(0, 3))
 
 
 def test_clock_rollback_cannot_make_a_pending_view_eligible_early() -> None:
     clock = [1_000]
-    cadence = PresentationCadenceScheduler(
+    cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: clock[0]
     )
     cadence.replace_session(1, 2, _view(0, 1))
@@ -163,7 +163,7 @@ def test_clock_rollback_cannot_make_a_pending_view_eligible_early() -> None:
 
 def test_session_and_epoch_replacement_discard_stale_views_and_reset_eligibility() -> None:
     clock = [1_000]
-    cadence = PresentationCadenceScheduler(
+    cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: clock[0]
     )
     cadence.replace_session(1, 2, _view(0, 1))
@@ -172,13 +172,13 @@ def test_session_and_epoch_replacement_discard_stale_views_and_reset_eligibility
 
     reset_view = _view(1, 0)
     cadence.reset_presentation_epoch(1, reset_view)
-    assert cadence.presented_revision is None
+    assert cadence.displayed_revision is None
     assert cadence.service() is reset_view
-    with pytest.raises(PresentationStateError, match="foreign presentation epoch"):
+    with pytest.raises(TerminalUpdateError, match="foreign presentation_epoch"):
         cadence.submit(_view(0, 3))
 
     replacement = _view(0, 0, attachment_epoch=2, session_id=3)
     cadence.replace_session(2, 3, replacement)
     assert cadence.service() is replacement
-    with pytest.raises(PresentationStateError, match="foreign session"):
+    with pytest.raises(TerminalUpdateError, match="foreign session"):
         cadence.submit(_view(0, 1))

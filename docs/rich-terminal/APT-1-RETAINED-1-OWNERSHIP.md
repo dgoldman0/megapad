@@ -57,9 +57,9 @@ it does not add multiple raw UART readers or writers.
 
 | State/allocation | Creator and allocator | Mutator | Retirement | Soft reset | Hard reset/detach |
 |---|---|---|---|---|---|
-| RET discovery record | Backend/client after READY; terminal validates query | Fixed CAPS/FORMATS exchange only | Presentation epoch end | Destroyed; rediscover | Destroyed |
-| Global revision | Terminal authoritative; backend mirrors | Successful CELL/SNAPSHOT/PRESENT/OWNER_DROP commit only | Presentation epoch end | Reset to 0; mandatory CELL snapshot makes 1 | Destroyed |
-| Global transaction ID high-water | Backend mints; terminal validates | BEGIN in either CELL or PRESENT family, or OWNER_DROP | Presentation epoch end | Reset for new epoch | Destroyed |
+| RET discovery record | Backend/client after READY; terminal validates query | Fixed CAPS/FORMATS exchange only | `presentation_epoch` end | Destroyed; rediscover | Destroyed |
+| Global revision | Terminal authoritative; backend mirrors | Successful CELL/SNAPSHOT/PRESENT/OWNER_DROP commit only | `presentation_epoch` end | Reset to 0; mandatory CELL snapshot makes 1 | Destroyed |
+| Global transaction ID high-water | Backend mints; terminal validates | BEGIN in either CELL or PRESENT family, or OWNER_DROP | `presentation_epoch` end | Reset for new epoch | Destroyed |
 | One open transaction | Backend starts after exact byte/count/credit preflight | Backend appends canonical frames; terminal stages | Commit, abort, rejection, reset, close | Aborted | Destroyed |
 | One outstanding TX_RESULT | Terminal creates after COMMIT or OWNER_DROP processing | Backend consumes and reconciles revision | Exact ordered consume | Settled before ACK | Destroyed |
 | Owner live record | Backend requests for one exact private projection binding; terminal reserves quotas | Exact owner generation only | Successful OWNER_DROP status 0 -> tombstone | Destroyed, not carried across epoch | Destroyed |
@@ -148,7 +148,7 @@ is the recovery boundary.
 
 The terminal performs checks in this order before owner-scoped mutation:
 
-1. header session and presentation epoch under base APT-1;
+1. header session and `presentation_epoch` under base APT-1;
 2. RETAINED-1 successfully enabled in this epoch;
 3. opcode legal in current global lifecycle/transaction state;
 4. owner ID exists and is live;

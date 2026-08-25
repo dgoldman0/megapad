@@ -12,23 +12,23 @@ from typing import TYPE_CHECKING, Literal
 
 from asm import assemble
 from display import VirtualTerminal
-from presentation_terminal import (
+from rich_terminal import (
     DriverLimits,
     DriverServiceResult,
     DriverStatus,
     EgressWatermarks,
     HostPortLimits,
-    PresentationTerminalDriver,
+    RichTerminalDriver,
     TerminalConfig,
     TerminalSessionError,
     TerminalState,
     TerminalView,
 )
-from presentation_terminal.apt1 import CONTROL_RESERVE_BYTES, snapshot_wire_bytes
-from presentation_terminal.presentation_cadence import PresentationCadenceScheduler
-from presentation_terminal.presentation_coordinator import CompositePresentationView
-from presentation_terminal.presentation_model import PresentationStateError
-from presentation_terminal.retained_model import RetainedPolicy
+from rich_terminal.apt1 import CONTROL_RESERVE_BYTES, snapshot_wire_bytes
+from rich_terminal.display_cadence import DisplayCadenceScheduler
+from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.update_authority import TerminalUpdateError
+from rich_terminal.retained_model import RetainedPolicy
 from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
@@ -199,8 +199,8 @@ class RunReport:
 
 
 @dataclass(frozen=True, slots=True)
-class PresentationSessionConfig:
-    """Caller-owned bounds for one optional presentation attachment."""
+class RichTerminalSessionConfig:
+    """Caller-owned bounds for one optional rich-terminal attachment."""
 
     host_limits: HostPortLimits
     terminal_config: TerminalConfig
@@ -238,8 +238,8 @@ class PresentationSessionConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class PresentationSessionPolicy:
-    """Reusable product bounds for explicitly enabled presentation sessions."""
+class RichTerminalSessionPolicy:
+    """Reusable product bounds for explicitly enabled rich-terminal sessions."""
 
     max_cols: int
     max_rows: int
@@ -322,7 +322,7 @@ class PresentationSessionPolicy:
         rows: int,
         *,
         retained_policy: RetainedPolicy | None = None,
-    ) -> PresentationSessionConfig:
+    ) -> RichTerminalSessionConfig:
         """Bind selected geometry without weakening the declared maxima."""
         selected: dict[str, int] = {}
         for name, value, maximum in (
@@ -336,11 +336,11 @@ class PresentationSessionPolicy:
             except TypeError as exc:
                 raise TypeError(f"{name} must be an integer") from exc
             if not 1 <= normalized <= maximum:
-                raise ValueError(f"{name} exceeds presentation policy")
+                raise ValueError(f"{name} exceeds rich-terminal policy")
             selected[name] = int(normalized)
         transaction_bytes = self.maximum_transaction_bytes
         publication_bytes = self.retained_publication_bytes
-        return PresentationSessionConfig(
+        return RichTerminalSessionConfig(
             host_limits=HostPortLimits(
                 egress=EgressWatermarks(
                     high_bytes=(
@@ -417,7 +417,7 @@ class MachineSession:
     NAMED_CHARACTERS = {
         "space": " ",
     }
-    PRESENTATION_KEY_SYMBOLS = {
+    RICH_TERMINAL_KEY_SYMBOLS = {
         "backspace": 0x00110001,
         "tab": 0x00110002,
         "enter": 0x00110003,
@@ -436,7 +436,7 @@ class MachineSession:
         "down": 0x0011000E,
         **{f"f{index}": 0x0011001F + index for index in range(1, 13)},
     }
-    PRESENTATION_MODIFIERS = {
+    RICH_TERMINAL_MODIFIERS = {
         "shift": 1 << 0,
         "ctrl": 1 << 1,
         "alt": 1 << 2,
@@ -470,39 +470,39 @@ class MachineSession:
         cols: int = 80,
         rows: int = 30,
         batch_steps: int = 100_000,
-        presentation: PresentationSessionConfig | None = None,
+        rich_terminal: RichTerminalSessionConfig | None = None,
     ):
         if batch_steps <= 0:
             raise ValueError("batch_steps must be positive")
-        if presentation is not None and not isinstance(
-            presentation, PresentationSessionConfig
+        if rich_terminal is not None and not isinstance(
+            rich_terminal, RichTerminalSessionConfig
         ):
-            raise TypeError("presentation must be PresentationSessionConfig or None")
-        if presentation is not None and (
-            cols != presentation.terminal_config.cols
-            or rows != presentation.terminal_config.rows
+            raise TypeError("rich_terminal must be RichTerminalSessionConfig or None")
+        if rich_terminal is not None and (
+            cols != rich_terminal.terminal_config.cols
+            or rows != rich_terminal.terminal_config.rows
         ):
             raise ValueError(
-                "session geometry must match the presentation terminal config"
+                "session geometry must match the rich terminal config"
             )
         self.system = system
         self.batch_steps = int(batch_steps)
-        self._presentation_config = presentation
-        self._presentation_driver: PresentationTerminalDriver | None = None
-        self._presentation_view: TerminalView | None = None
-        self._presentation_view_selected = False
-        self._presentation_logical_composite: CompositePresentationView | None = None
-        self._presentation_presented_composite: CompositePresentationView | None = None
-        self._presentation_cadence = (
+        self._rich_terminal_config = rich_terminal
+        self._rich_terminal_driver: RichTerminalDriver | None = None
+        self._output_view: TerminalView | None = None
+        self._output_view_selected = False
+        self._logical_composite_output: CompositeTerminalView | None = None
+        self._displayed_composite_output: CompositeTerminalView | None = None
+        self._display_cadence = (
             None
-            if presentation is None or presentation.retained_policy is None
-            else PresentationCadenceScheduler(policy=presentation.retained_policy)
+            if rich_terminal is None or rich_terminal.retained_policy is None
+            else DisplayCadenceScheduler(policy=rich_terminal.retained_policy)
         )
-        self._presentation_cadence_scope: tuple[int, int, int] | None = None
+        self._display_cadence_scope: tuple[int, int, int] | None = None
         self._last_cadence_service_progress = False
-        self._presentation_failure_reason: str | None = None
-        self._presentation_lost = False
-        self._last_batch_presentation_progress = False
+        self._rich_terminal_failure_reason: str | None = None
+        self._rich_terminal_lost = False
+        self._last_batch_rich_terminal_progress = False
         self.terminal = VirtualTerminal(
             cols=cols,
             rows=rows,
@@ -521,14 +521,14 @@ class MachineSession:
         self.system.uart.on_tx = self._receive_byte
         self.system.uart.on_tx_batch = self._receive_batch
         try:
-            if presentation is None:
+            if rich_terminal is None:
                 self.resize(cols, rows)
             else:
-                self._attach_presentation_terminal()
+                self._attach_rich_terminal()
         except BaseException:
-            if self._presentation_driver is not None:
-                self._presentation_driver.close()
-                self._presentation_driver = None
+            if self._rich_terminal_driver is not None:
+                self._rich_terminal_driver.close()
+                self._rich_terminal_driver = None
             self.system.uart.on_tx = self._old_on_tx
             self.system.uart.on_tx_batch = self._old_on_tx_batch
             raise
@@ -548,7 +548,7 @@ class MachineSession:
         cols: int = 80,
         rows: int = 30,
         batch_steps: int = 100_000,
-        presentation: PresentationSessionConfig | None = None,
+        rich_terminal: RichTerminalSessionConfig | None = None,
         nic_backend: NICBackend | None = None,
         realtime_clock: bool = False,
     ) -> "MachineSession":
@@ -577,7 +577,7 @@ class MachineSession:
             cols=cols,
             rows=rows,
             batch_steps=batch_steps,
-            presentation=presentation,
+            rich_terminal=rich_terminal,
         )
         session.bios_labels = dict(labels)
         return session
@@ -589,76 +589,76 @@ class MachineSession:
         self.close()
 
     @property
-    def presentation_enabled(self) -> bool:
-        return self._presentation_config is not None
+    def rich_terminal_enabled(self) -> bool:
+        return self._rich_terminal_config is not None
 
     @property
-    def presentation_driver(self) -> PresentationTerminalDriver | None:
-        return self._presentation_driver
+    def rich_terminal_driver(self) -> RichTerminalDriver | None:
+        return self._rich_terminal_driver
 
     @property
-    def presentation_logical_view(self) -> CompositePresentationView | None:
+    def logical_output_view(self) -> CompositeTerminalView | None:
         """Newest committed retained composite, whether or not yet displayed."""
 
-        return self._presentation_logical_composite
+        return self._logical_composite_output
 
     @property
-    def presentation_presented_view(self) -> CompositePresentationView | None:
+    def displayed_output_view(self) -> CompositeTerminalView | None:
         """Retained composite most recently promoted at physical cadence."""
 
-        return self._presentation_presented_composite
+        return self._displayed_composite_output
 
     @property
-    def presentation_presented_revision(self) -> int | None:
+    def displayed_model_revision(self) -> int | None:
         """Global revision physically available to a retained-view observer."""
 
-        view = self._presentation_presented_composite
+        view = self._displayed_composite_output
         return None if view is None else view.revision
 
     @property
-    def presentation_state(self) -> TerminalState | None:
-        if self._presentation_failure_reason is not None:
+    def rich_terminal_state(self) -> TerminalState | None:
+        if self._rich_terminal_failure_reason is not None:
             return TerminalState.FAILED
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         return None if driver is None else driver.core.state
 
     @property
-    def presentation_failure(self) -> str | None:
-        if self._presentation_failure_reason is not None:
-            return self._presentation_failure_reason
-        driver = self._presentation_driver
+    def rich_terminal_failure(self) -> str | None:
+        if self._rich_terminal_failure_reason is not None:
+            return self._rich_terminal_failure_reason
+        driver = self._rich_terminal_driver
         if driver is not None:
             if driver.failure_reason is not None:
-                self._record_presentation_failure(driver.failure_reason)
-                return self._presentation_failure_reason
-            host = self.system.presentation_terminal_host
+                self._record_rich_terminal_failure(driver.failure_reason)
+                return self._rich_terminal_failure_reason
+            host = self.system.rich_terminal_host
             if (
                 driver.closed
                 or host.active_attachment_epoch != driver.attachment_epoch
             ):
-                self._record_presentation_failure(
-                    "presentation attachment became stale",
+                self._record_rich_terminal_failure(
+                    "rich-terminal attachment became stale",
                     lost=True,
                 )
-                return self._presentation_failure_reason
-        if self._presentation_config is not None:
-            host_failure = self.system.presentation_terminal_host.failure_reason
+                return self._rich_terminal_failure_reason
+        if self._rich_terminal_config is not None:
+            host_failure = self.system.rich_terminal_host.failure_reason
             if host_failure is not None:
-                self._record_presentation_failure(host_failure)
-                return self._presentation_failure_reason
+                self._record_rich_terminal_failure(host_failure)
+                return self._rich_terminal_failure_reason
             if driver is None and not self._closed:
-                self._record_presentation_failure(
-                    "presentation driver is unavailable",
+                self._record_rich_terminal_failure(
+                    "rich-terminal driver is unavailable",
                     lost=True,
                 )
-                return self._presentation_failure_reason
+                return self._rich_terminal_failure_reason
         return None
 
     @property
-    def presentation_lost(self) -> bool:
+    def rich_terminal_lost(self) -> bool:
         """Whether the exact attachment disappeared outside controlled reset."""
 
-        return self._presentation_lost
+        return self._rich_terminal_lost
 
     @property
     def raw_output_start(self) -> int:
@@ -676,34 +676,34 @@ class MachineSession:
     def visible_geometry(self) -> tuple[int, int]:
         """Geometry of the immutable view currently exposed to observers."""
 
-        view = self._presentation_view if self._presentation_view_selected else None
+        view = self._output_view if self._output_view_selected else None
         if view is not None:
             return view.cols, view.rows
         with self.terminal._lock:
             return self.terminal.cols, self.terminal.rows
 
     @property
-    def presentation_work_pending(self) -> bool:
+    def rich_terminal_work_pending(self) -> bool:
         """Whether a runner boundary can advance owned terminal work."""
 
-        return self._presentation_has_pending_work()
+        return self._rich_terminal_has_pending_work()
 
     @property
     def last_batch_made_progress(self) -> bool:
-        return self._last_batch_presentation_progress
+        return self._last_batch_rich_terminal_progress
 
     def close(self):
         if self._closed:
             return
         try:
-            driver = self._presentation_driver
+            driver = self._rich_terminal_driver
             if driver is not None:
                 driver.close()
-                self._presentation_driver = None
-            self._presentation_logical_composite = None
-            self._presentation_presented_composite = None
-            self._presentation_cadence_scope = None
-            self._presentation_cadence = None
+                self._rich_terminal_driver = None
+            self._logical_composite_output = None
+            self._displayed_composite_output = None
+            self._display_cadence_scope = None
+            self._display_cadence = None
             self.system.storage.save_image()
         finally:
             self.system.uart.on_tx = self._old_on_tx
@@ -715,61 +715,61 @@ class MachineSession:
                 self._closed = True
 
     def boot(self, entry: int = 0):
-        reattach = self.presentation_enabled and self.system._booted
+        reattach = self.rich_terminal_enabled and self.system._booted
         try:
             if reattach:
-                self._close_presentation_terminal()
-                self._presentation_view = None
-                self._presentation_logical_composite = None
-                self._presentation_presented_composite = None
-                self._presentation_cadence_scope = None
-                config = self._presentation_config
-                self._presentation_cadence = (
+                self._close_rich_terminal()
+                self._output_view = None
+                self._logical_composite_output = None
+                self._displayed_composite_output = None
+                self._display_cadence_scope = None
+                config = self._rich_terminal_config
+                self._display_cadence = (
                     None
                     if config is None or config.retained_policy is None
-                    else PresentationCadenceScheduler(
+                    else DisplayCadenceScheduler(
                         policy=config.retained_policy
                     )
                 )
-                if self._presentation_view_selected:
+                if self._output_view_selected:
                     self.revision += 1
-                self._presentation_view_selected = False
+                self._output_view_selected = False
             self.system.boot(entry)
             if reattach:
-                self._attach_presentation_terminal()
+                self._attach_rich_terminal()
         except BaseException as exc:
-            if self.presentation_enabled:
-                self._record_presentation_failure(
-                    f"presentation boot failed: {type(exc).__name__}: {exc}",
-                    lost=self._presentation_driver is None,
+            if self.rich_terminal_enabled:
+                self._record_rich_terminal_failure(
+                    f"rich-terminal boot failed: {type(exc).__name__}: {exc}",
+                    lost=self._rich_terminal_driver is None,
                 )
             raise
 
     def reset(self, entry: int = 0, *, clear_terminal: bool = True):
         """Reset the owned machine and optionally clear captured terminal state."""
         try:
-            self._close_presentation_terminal()
+            self._close_rich_terminal()
             self.raw_output.clear()
             self._raw_output_start = self._raw_output_total
             self.output_batches = 0
             self.output_byte_callbacks = 0
-            self._presentation_view = None
-            self._presentation_view_selected = False
-            self._presentation_logical_composite = None
-            self._presentation_presented_composite = None
-            self._presentation_cadence_scope = None
-            self._presentation_cadence = (
+            self._output_view = None
+            self._output_view_selected = False
+            self._logical_composite_output = None
+            self._displayed_composite_output = None
+            self._display_cadence_scope = None
+            self._display_cadence = (
                 None
-                if self._presentation_config is None
-                or self._presentation_config.retained_policy is None
-                else PresentationCadenceScheduler(
-                    policy=self._presentation_config.retained_policy
+                if self._rich_terminal_config is None
+                or self._rich_terminal_config.retained_policy is None
+                else DisplayCadenceScheduler(
+                    policy=self._rich_terminal_config.retained_policy
                 )
             )
             self._last_cadence_service_progress = False
-            self._presentation_failure_reason = None
-            self._presentation_lost = False
-            self._last_batch_presentation_progress = False
+            self._rich_terminal_failure_reason = None
+            self._rich_terminal_lost = False
+            self._last_batch_rich_terminal_progress = False
             if clear_terminal:
                 cols, rows = self.terminal.cols, self.terminal.rows
                 self.terminal = VirtualTerminal(
@@ -777,54 +777,54 @@ class MachineSession:
                     rows=rows,
                     uart_inject=self._inject_terminal_response,
                 )
-                if not self.presentation_enabled:
+                if not self.rich_terminal_enabled:
                     self.system.uart_geom.host_set_size(cols, rows)
             self.revision += 1
             self.system.boot(entry, discard_uart_output=True)
-            if self.presentation_enabled:
-                self._attach_presentation_terminal()
+            if self.rich_terminal_enabled:
+                self._attach_rich_terminal()
         except BaseException as exc:
-            if self.presentation_enabled:
-                self._record_presentation_failure(
-                    f"presentation reset failed: {type(exc).__name__}: {exc}",
-                    lost=self._presentation_driver is None,
+            if self.rich_terminal_enabled:
+                self._record_rich_terminal_failure(
+                    f"rich-terminal reset failed: {type(exc).__name__}: {exc}",
+                    lost=self._rich_terminal_driver is None,
                 )
             raise
 
-    def _attach_presentation_terminal(self) -> None:
-        config = self._presentation_config
+    def _attach_rich_terminal(self) -> None:
+        config = self._rich_terminal_config
         if config is None:
             return
-        if self._presentation_driver is not None:
-            raise RuntimeError("presentation terminal is already attached")
+        if self._rich_terminal_driver is not None:
+            raise RuntimeError("rich terminal is already attached")
         terminal_config = replace(
             config.terminal_config,
             cols=self.terminal.cols,
             rows=self.terminal.rows,
         )
-        self._presentation_driver = PresentationTerminalDriver.attach(
+        self._rich_terminal_driver = RichTerminalDriver.attach(
             self.system,
             config.host_limits,
             terminal_config,
             config.driver_limits,
-            ansi_sink=self._receive_presentation_ansi,
-            view_sink=self._receive_presentation_view,
+            ansi_sink=self._receive_rich_terminal_ansi,
+            view_sink=self._receive_terminal_output,
             retained_policy=config.retained_policy,
         )
-        self._presentation_failure_reason = None
-        self._presentation_lost = False
+        self._rich_terminal_failure_reason = None
+        self._rich_terminal_lost = False
 
-    def _close_presentation_terminal(self) -> None:
-        driver = self._presentation_driver
+    def _close_rich_terminal(self) -> None:
+        driver = self._rich_terminal_driver
         if driver is None:
             return
         driver.close()
-        self._presentation_driver = None
+        self._rich_terminal_driver = None
 
     def _inject_terminal_response(self, data: bytes) -> None:
-        if self._presentation_mutation_blocked():
-            raise RuntimeError(self._presentation_failure_reason)
-        driver = self._presentation_driver
+        if self._rich_terminal_mutation_blocked():
+            raise RuntimeError(self._rich_terminal_failure_reason)
+        driver = self._rich_terminal_driver
         if driver is None:
             self.system.uart.inject_input(data)
             return
@@ -839,7 +839,7 @@ class MachineSession:
         if not payload:
             return
         self._raw_output_total += len(payload)
-        config = self._presentation_config
+        config = self._rich_terminal_config
         if config is None:
             self.raw_output.extend(payload)
             return
@@ -857,12 +857,12 @@ class MachineSession:
             self.raw_output.extend(payload)
         self._raw_output_start = self._raw_output_total - len(self.raw_output)
 
-    def _presentation_mutation_blocked(self) -> bool:
-        reason = self.presentation_failure
+    def _rich_terminal_mutation_blocked(self) -> bool:
+        reason = self.rich_terminal_failure
         if reason is None:
             return False
-        if self._presentation_failure_reason is None:
-            self._presentation_failure_reason = reason
+        if self._rich_terminal_failure_reason is None:
+            self._rich_terminal_failure_reason = reason
         return True
 
     def _receive_byte(self, value: int):
@@ -877,31 +877,31 @@ class MachineSession:
         self.terminal.write(data)
         self.revision += 1
 
-    def _receive_presentation_ansi(self, data: bytes) -> None:
+    def _receive_rich_terminal_ansi(self, data: bytes) -> None:
         self._receive_batch(data)
 
-    def _receive_presentation_view(
+    def _receive_terminal_output(
         self,
-        view: TerminalView | CompositePresentationView,
+        view: TerminalView | CompositeTerminalView,
     ) -> None:
-        if isinstance(view, CompositePresentationView):
-            self._submit_composite_presentation(view)
+        if isinstance(view, CompositeTerminalView):
+            self._submit_composite_output(view)
             return
         if not isinstance(view, TerminalView):
-            raise TypeError("presentation view has an unsupported type")
+            raise TypeError("terminal output view has an unsupported type")
         self._align_cadence_to_cell_view(view)
         if (self.terminal.cols, self.terminal.rows) != (view.cols, view.rows):
             self.terminal.resize(view.cols, view.rows)
-        self._presentation_view = view
-        self._presentation_view_selected = True
-        self._presentation_logical_composite = None
-        self._presentation_presented_composite = None
+        self._output_view = view
+        self._output_view_selected = True
+        self._logical_composite_output = None
+        self._displayed_composite_output = None
         self.revision += 1
 
     def _align_cadence_to_cell_view(self, view: TerminalView) -> None:
         """Track session/epoch replacement before retained discovery repeats."""
 
-        cadence = self._presentation_cadence
+        cadence = self._display_cadence
         if cadence is None:
             return
         target = (
@@ -909,11 +909,11 @@ class MachineSession:
             view.session_id,
             view.presentation_epoch,
         )
-        current = self._presentation_cadence_scope
+        current = self._display_cadence_scope
         if current is None or target[:2] != current[:2]:
             if view.presentation_epoch != 0:
-                raise PresentationStateError(
-                    "a replacement presentation session must begin at epoch zero"
+                raise TerminalUpdateError(
+                    "a replacement rich-terminal session must begin at epoch zero"
                 )
             cadence.replace_session(view.attachment_epoch, view.session_id)
         elif view.presentation_epoch == current[2]:
@@ -921,25 +921,25 @@ class MachineSession:
         elif view.presentation_epoch == current[2] + 1:
             cadence.reset_presentation_epoch(view.presentation_epoch)
         else:
-            raise PresentationStateError(
-                "CELL view skipped or regressed the presentation epoch"
+            raise TerminalUpdateError(
+                "CELL view skipped or regressed the presentation_epoch"
             )
-        self._presentation_cadence_scope = target
+        self._display_cadence_scope = target
 
-    def _submit_composite_presentation(
+    def _submit_composite_output(
         self,
-        view: CompositePresentationView,
+        view: CompositeTerminalView,
     ) -> None:
         """Submit one logical composite without making it physically visible."""
 
-        cadence = self._presentation_cadence
+        cadence = self._display_cadence
         if cadence is None:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "a composite view requires a configured retained policy"
             )
         cell = view.cell
         if cell is None:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "a MachineSession composite requires the mandatory CELL plane"
             )
         target = (
@@ -947,7 +947,7 @@ class MachineSession:
             cell.session_id,
             view.presentation_epoch,
         )
-        current = self._presentation_cadence_scope
+        current = self._display_cadence_scope
         if current is None or target[:2] != current[:2]:
             cadence.replace_session(
                 cell.attachment_epoch,
@@ -962,50 +962,50 @@ class MachineSession:
                 initial_view=view,
             )
         else:
-            raise PresentationStateError(
-                "composite view skipped or regressed the presentation epoch"
+            raise TerminalUpdateError(
+                "composite view skipped or regressed the presentation_epoch"
             )
-        self._presentation_cadence_scope = target
-        self._presentation_logical_composite = view
+        self._display_cadence_scope = target
+        self._logical_composite_output = view
 
-    def _service_presentation_cadence(self) -> bool:
+    def _service_display_cadence(self) -> bool:
         """Promote at most one newest logical view at an owner pump boundary."""
 
-        cadence = self._presentation_cadence
-        driver = self._presentation_driver
+        cadence = self._display_cadence
+        driver = self._rich_terminal_driver
         if cadence is None or driver is None or not driver.core.retained_enabled:
             return False
-        logical = driver.core.presentation_view
-        if isinstance(logical, CompositePresentationView) and (
-            logical != self._presentation_logical_composite
+        logical = driver.core.output_view
+        if isinstance(logical, CompositeTerminalView) and (
+            logical != self._logical_composite_output
         ):
-            self._submit_composite_presentation(logical)
-        presented = cadence.service()
-        if presented is None:
+            self._submit_composite_output(logical)
+        displayed = cadence.service()
+        if displayed is None:
             return False
-        cell = presented.cell
+        cell = displayed.cell
         if cell is None:
-            raise PresentationStateError(
+            raise TerminalUpdateError(
                 "cadence promoted a composite without a CELL plane"
             )
         if (self.terminal.cols, self.terminal.rows) != (cell.cols, cell.rows):
             self.terminal.resize(cell.cols, cell.rows)
-        self._presentation_presented_composite = presented
-        self._presentation_view = cell
-        self._presentation_view_selected = True
+        self._displayed_composite_output = displayed
+        self._output_view = cell
+        self._output_view_selected = True
         self.revision += 1
         return True
 
-    def _presentation_input_revision_ready(self) -> bool:
+    def _output_revision_ready(self) -> bool:
         """Require normalized input to name a revision already shown."""
 
-        cadence = self._presentation_cadence
-        driver = self._presentation_driver
+        cadence = self._display_cadence
+        driver = self._rich_terminal_driver
         if cadence is None or driver is None or not driver.core.retained_enabled:
             return True
         return (
             cadence.pending_revision is None
-            and cadence.presented_revision == driver.core.presentation_revision
+            and cadence.displayed_revision == driver.core.model_revision
         )
 
     def clear_output(self):
@@ -1018,24 +1018,24 @@ class MachineSession:
     def screen_text(self, trim_right: bool = False) -> str:
         return self.snapshot().text(trim_right=trim_right)
 
-    def service_presentation_terminal(self) -> DriverServiceResult | None:
+    def service_rich_terminal(self) -> DriverServiceResult | None:
         """Service the optional driver without executing guest instructions."""
 
-        driver = self._presentation_driver
-        config = self._presentation_config
+        driver = self._rich_terminal_driver
+        config = self._rich_terminal_config
         if config is None:
             return None
         if driver is None:
-            reason = self.presentation_failure or "presentation driver is unavailable"
-            self._latch_presentation_failure(reason, lost=True)
-        if self._presentation_failure_reason is not None:
-            raise TerminalSessionError(self._presentation_failure_reason)
+            reason = self.rich_terminal_failure or "rich-terminal driver is unavailable"
+            self._latch_rich_terminal_failure(reason, lost=True)
+        if self._rich_terminal_failure_reason is not None:
+            raise TerminalSessionError(self._rich_terminal_failure_reason)
         self._last_cadence_service_progress = False
         result = driver.service(max_batches=config.service_batches)
-        self._raise_presentation_failure(result)
-        self._sync_presentation_geometry()
-        self._last_cadence_service_progress = self._service_presentation_cadence()
-        self._refresh_presentation_display_boundary()
+        self._raise_rich_terminal_failure(result)
+        self._sync_rich_terminal_geometry()
+        self._last_cadence_service_progress = self._service_display_cadence()
+        self._refresh_output_display_boundary()
         return result
 
     def run_batch_stats(self, steps: int | None = None) -> SystemRunStats:
@@ -1044,12 +1044,12 @@ class MachineSession:
         count = self.batch_steps if steps is None else operator.index(steps)
         if count <= 0:
             raise ValueError("steps must be positive")
-        before = self.service_presentation_terminal()
+        before = self.service_rich_terminal()
         cadence_before = self._last_cadence_service_progress
         stats = self.system.run_batch_stats(count)
-        after = self.service_presentation_terminal()
+        after = self.service_rich_terminal()
         cadence_after = self._last_cadence_service_progress
-        self._last_batch_presentation_progress = bool(
+        self._last_batch_rich_terminal_progress = bool(
             stats.external_events_applied
             or cadence_before
             or cadence_after
@@ -1063,54 +1063,54 @@ class MachineSession:
             )
         )
         if stats.system_stop_reason == "terminal_failure":
-            reason = self.system.presentation_terminal_host.failure_reason
-            self._latch_presentation_failure(reason or "presentation host failed")
-        self._refresh_presentation_display_boundary()
+            reason = self.system.rich_terminal_host.failure_reason
+            self._latch_rich_terminal_failure(reason or "rich-terminal host failed")
+        self._refresh_output_display_boundary()
         return stats
 
-    def _raise_presentation_failure(
+    def _raise_rich_terminal_failure(
         self,
         result: DriverServiceResult,
     ) -> None:
         if result.status is DriverStatus.FAILED:
-            driver = self._presentation_driver
+            driver = self._rich_terminal_driver
             reason = None if driver is None else driver.failure_reason
-            self._latch_presentation_failure(reason or "presentation driver failed")
+            self._latch_rich_terminal_failure(reason or "rich-terminal driver failed")
         if result.status is DriverStatus.STALE:
-            self._latch_presentation_failure(
-                "presentation attachment became stale",
+            self._latch_rich_terminal_failure(
+                "rich-terminal attachment became stale",
                 lost=True,
             )
-        host_failure = self.system.presentation_terminal_host.failure_reason
+        host_failure = self.system.rich_terminal_host.failure_reason
         if host_failure is not None:
-            self._latch_presentation_failure(host_failure)
+            self._latch_rich_terminal_failure(host_failure)
 
-    def _latch_presentation_failure(
+    def _latch_rich_terminal_failure(
         self,
         reason: str,
         *,
         lost: bool = False,
     ) -> None:
-        self._record_presentation_failure(reason, lost=lost)
-        raise TerminalSessionError(self._presentation_failure_reason)
+        self._record_rich_terminal_failure(reason, lost=lost)
+        raise TerminalSessionError(self._rich_terminal_failure_reason)
 
-    def _record_presentation_failure(
+    def _record_rich_terminal_failure(
         self,
         reason: str,
         *,
         lost: bool = False,
     ) -> None:
-        if self._presentation_failure_reason is None:
-            self._presentation_failure_reason = str(reason)
-        self._presentation_lost = self._presentation_lost or lost
+        if self._rich_terminal_failure_reason is None:
+            self._rich_terminal_failure_reason = str(reason)
+        self._rich_terminal_lost = self._rich_terminal_lost or lost
 
-    def _presentation_transport_has_pending_work(self) -> bool:
+    def _rich_terminal_transport_has_pending_work(self) -> bool:
         """Whether a driver/machine boundary can advance protocol transport."""
 
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is None:
             return False
-        host = self.system.presentation_terminal_host
+        host = self.system.rich_terminal_host
         return bool(
             driver.pending_outbound_events
             or (
@@ -1123,11 +1123,11 @@ class MachineSession:
             or host.pending_geometry_events
         )
 
-    def _presentation_cadence_has_pending_work(self) -> bool:
+    def _display_cadence_has_pending_work(self) -> bool:
         """Whether only host time can make a committed composite presentable."""
 
-        driver = self._presentation_driver
-        cadence = self._presentation_cadence
+        driver = self._rich_terminal_driver
+        cadence = self._display_cadence
         return bool(
             driver is not None
             and cadence is not None
@@ -1135,39 +1135,39 @@ class MachineSession:
             and cadence.pending_revision is not None
         )
 
-    def _presentation_has_pending_work(self) -> bool:
+    def _rich_terminal_has_pending_work(self) -> bool:
         return bool(
-            self._presentation_transport_has_pending_work()
-            or self._presentation_cadence_has_pending_work()
+            self._rich_terminal_transport_has_pending_work()
+            or self._display_cadence_has_pending_work()
         )
 
-    def _refresh_presentation_display_boundary(self) -> None:
-        driver = self._presentation_driver
-        if driver is None or not self._presentation_view_selected:
+    def _refresh_output_display_boundary(self) -> None:
+        driver = self._rich_terminal_driver
+        if driver is None or not self._output_view_selected:
             return
-        host = self.system.presentation_terminal_host
+        host = self.system.rich_terminal_host
         if (
             driver.core.state is TerminalState.ANSI
             and driver.pending_outbound_events == 0
             and host.pending_ingress_events == 0
             and host.pending_geometry_events == 0
         ):
-            self._presentation_view_selected = False
-            self._presentation_logical_composite = None
-            self._presentation_presented_composite = None
+            self._output_view_selected = False
+            self._logical_composite_output = None
+            self._displayed_composite_output = None
             self.revision += 1
 
-    def _sync_presentation_geometry(self) -> None:
+    def _sync_rich_terminal_geometry(self) -> None:
         """Mirror only geometry already committed by the protocol core."""
 
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is None:
             return
         cols, rows = driver.core.selected_geometry
         if (self.terminal.cols, self.terminal.rows) == (cols, rows):
             return
         self.terminal.resize(cols, rows)
-        if not self._presentation_view_selected:
+        if not self._output_view_selected:
             self.revision += 1
 
     def run(
@@ -1221,11 +1221,11 @@ class MachineSession:
                 matched = True
                 reason = "matched"
                 break
-            if self.presentation_failure is not None:
+            if self.rich_terminal_failure is not None:
                 reason = "terminal_failure"
                 break
-            transport_pending = self._presentation_transport_has_pending_work()
-            cadence_pending = self._presentation_cadence_has_pending_work()
+            transport_pending = self._rich_terminal_transport_has_pending_work()
+            cadence_pending = self._display_cadence_has_pending_work()
             if self.system.all_halted and not transport_pending and not cadence_pending:
                 reason = "halted"
                 break
@@ -1237,7 +1237,7 @@ class MachineSession:
                 and not self.system.uart.has_rx_data
             )
             if owner_quiescent and not transport_pending and cadence_pending:
-                if self._service_presentation_cadence():
+                if self._service_display_cadence():
                     continue
                 if advance_idle and not self.system.all_halted:
                     advance_idle_devices()
@@ -1260,9 +1260,9 @@ class MachineSession:
                     time.sleep(_IDLE_OWNER_YIELD_SECONDS)
                 continue
             count = min(self.batch_steps, max_steps - steps)
-            if self._presentation_driver is None:
+            if self._rich_terminal_driver is None:
                 executed = self.system.run_batch(count)
-                presentation_progress = False
+                rich_terminal_progress = False
                 stop_reason = ""
             else:
                 try:
@@ -1271,11 +1271,11 @@ class MachineSession:
                     reason = "terminal_failure"
                     break
                 executed = stats.instructions_executed
-                presentation_progress = self._last_batch_presentation_progress
+                rich_terminal_progress = self._last_batch_rich_terminal_progress
                 stop_reason = stats.system_stop_reason
             batches += 1
             cadence_wait_boundary = (
-                self._presentation_cadence_has_pending_work()
+                self._display_cadence_has_pending_work()
                 and (
                     self.system.all_halted
                     or (
@@ -1285,8 +1285,8 @@ class MachineSession:
                 )
             )
             if executed <= 0 and not (
-                presentation_progress
-                or self._presentation_transport_has_pending_work()
+                rich_terminal_progress
+                or self._rich_terminal_transport_has_pending_work()
                 or cadence_wait_boundary
                 or stop_reason == "all_idle"
             ):
@@ -1339,15 +1339,15 @@ class MachineSession:
                 payload = bytes(text)
             except (TypeError, ValueError) as exc:
                 raise TypeError("text must be str or bytes-like") from exc
-        if self._presentation_mutation_blocked():
+        if self._rich_terminal_mutation_blocked():
             return DriverStatus.FAILED
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is None:
             self.system.uart.inject_input(payload)
             return None
         if driver.core.state in {TerminalState.ANSI, TerminalState.PROBING}:
             return driver.send_legacy_input(payload)
-        if not self._presentation_input_revision_ready():
+        if not self._output_revision_ready():
             return DriverStatus.BACKPRESSURED
         return driver.send_text(payload)
 
@@ -1394,11 +1394,11 @@ class MachineSession:
             return char.encode("utf-8")
         raise ValueError(f"unknown key: {key}")
 
-    def _presentation_key(self, key: str) -> tuple[int, int]:
+    def _rich_terminal_key(self, key: str) -> tuple[int, int]:
         base, modifiers = self._key_parts(key)
-        if not modifiers <= self.PRESENTATION_MODIFIERS.keys():
+        if not modifiers <= self.RICH_TERMINAL_MODIFIERS.keys():
             raise ValueError(f"unknown key modifier in: {key}")
-        symbol = self.PRESENTATION_KEY_SYMBOLS.get(base)
+        symbol = self.RICH_TERMINAL_KEY_SYMBOLS.get(base)
         if symbol is None:
             char = self.NAMED_CHARACTERS.get(base, base)
             if len(char) != 1:
@@ -1406,13 +1406,13 @@ class MachineSession:
             symbol = ord(char)
         modifier_bits = 0
         for modifier in modifiers:
-            modifier_bits |= self.PRESENTATION_MODIFIERS[modifier]
+            modifier_bits |= self.RICH_TERMINAL_MODIFIERS[modifier]
         return symbol, modifier_bits
 
     def send_key(self, key: str) -> DriverStatus | None:
-        if self._presentation_mutation_blocked():
+        if self._rich_terminal_mutation_blocked():
             return DriverStatus.FAILED
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is None or driver.core.state in {
             TerminalState.ANSI,
             TerminalState.PROBING,
@@ -1422,8 +1422,8 @@ class MachineSession:
                 self.system.uart.inject_input(payload)
                 return None
             return driver.send_legacy_input(payload)
-        symbol, modifiers = self._presentation_key(key)
-        if not self._presentation_input_revision_ready():
+        symbol, modifiers = self._rich_terminal_key(key)
+        if not self._output_revision_ready():
             return DriverStatus.BACKPRESSURED
         return driver.send_key(symbol, modifiers=modifiers)
 
@@ -1438,12 +1438,12 @@ class MachineSession:
         wheel_x: int = 0,
         wheel_y: int = 0,
     ) -> DriverStatus:
-        if self._presentation_mutation_blocked():
+        if self._rich_terminal_mutation_blocked():
             return DriverStatus.FAILED
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is None:
             return DriverStatus.INVALID
-        if not self._presentation_input_revision_ready():
+        if not self._output_revision_ready():
             return DriverStatus.BACKPRESSURED
         return driver.send_pointer(
             x,
@@ -1456,19 +1456,19 @@ class MachineSession:
         )
 
     def send_focus(self, focused: bool) -> DriverStatus:
-        if self._presentation_mutation_blocked():
+        if self._rich_terminal_mutation_blocked():
             return DriverStatus.FAILED
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is None:
             return DriverStatus.INVALID
-        if not self._presentation_input_revision_ready():
+        if not self._output_revision_ready():
             return DriverStatus.BACKPRESSURED
         return driver.send_focus(focused)
 
     def resize(self, cols: int, rows: int) -> DriverStatus | None:
-        if self._presentation_mutation_blocked():
+        if self._rich_terminal_mutation_blocked():
             return DriverStatus.FAILED
-        driver = self._presentation_driver
+        driver = self._rich_terminal_driver
         if driver is not None:
             state = driver.core.state
             status = driver.request_resize(cols, rows)
@@ -1480,7 +1480,7 @@ class MachineSession:
                     cols != self.terminal.cols or rows != self.terminal.rows
                 )
                 self.terminal.resize(cols, rows)
-                if changed and not self._presentation_view_selected:
+                if changed and not self._output_view_selected:
                     self.revision += 1
             return status
         changed = cols != self.terminal.cols or rows != self.terminal.rows
@@ -1491,22 +1491,22 @@ class MachineSession:
         return None
 
     def step(self) -> int:
-        if not self.presentation_enabled:
+        if not self.rich_terminal_enabled:
             return self.system.step()
-        self.service_presentation_terminal()
+        self.service_rich_terminal()
         cycles = self.system.step()
-        self.service_presentation_terminal()
-        self._refresh_presentation_display_boundary()
+        self.service_rich_terminal()
+        self._refresh_output_display_boundary()
         return cycles
 
     def snapshot(self) -> TerminalSnapshot:
         view = (
-            self._presentation_view
-            if self._presentation_view_selected
+            self._output_view
+            if self._output_view_selected
             else None
         )
         if view is not None:
-            return self._snapshot_presentation_view(view)
+            return self._snapshot_output_view(view)
         terminal = self.terminal
         with terminal._lock:
             cells = tuple(
@@ -1532,7 +1532,7 @@ class MachineSession:
             )
 
     @staticmethod
-    def _snapshot_presentation_view(view: TerminalView) -> TerminalSnapshot:
+    def _snapshot_output_view(view: TerminalView) -> TerminalSnapshot:
         palette = VirtualTerminal.COLORS
         cells = tuple(
             tuple(

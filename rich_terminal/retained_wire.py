@@ -1,7 +1,7 @@
 """Pure RETAINED-1 discovery and transaction-envelope payload codec.
 
 This module stops at the payload boundary.  It neither owns frame ordering nor
-mutates a presentation model; callers first use the base APT-1 frame codec and
+mutates a terminal output model; callers first use the base APT-1 frame codec and
 then decode the exact payload type selected by the frame message ID.
 """
 
