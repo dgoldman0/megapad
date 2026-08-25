@@ -2166,10 +2166,15 @@ VARIABLE _PT-SVC-N
 
 : _PT-SERVICE-BINARY  ( s -- status )
     _PT-SVC-S ! 0 _PT-SVC-N !
+    \ A materialized completion is an ownership boundary.  Its exact caller
+    \ must reconcile it before service may consume a following CLOSE/CLOSE_ACK
+    \ frame whose ANSI transition would erase the completion record.
+    _PT-SVC-S @ _PT.S.COMPLETE? @ IF PT-S-OK EXIT THEN
     BEGIN _PT-SVC-N @ _PT-SERVICE-BYTES U< WHILE
         _PT-SVC-S @ _PT-TRY-FRAME IF
             DUP PT-S-OK <> IF EXIT THEN DROP
             _PT-SVC-N @ _PT-RX-TOTAL @ + _PT-SVC-N !
+            _PT-SVC-S @ _PT.S.COMPLETE? @ IF PT-S-OK EXIT THEN
             _PT-SVC-S @ _PT.S.STATE @ PT-ST-ANSI = IF PT-S-OK EXIT THEN
             _PT-SVC-S @ _PT.S.EVENT-PENDING @ IF PT-S-OK EXIT THEN
         ELSE
@@ -2225,10 +2230,17 @@ VARIABLE _PT-SVC-N
     DUP _PT.S.STATE @ PT-ST-ACTIVE =
     OVER _PT.S.STATE @ PT-ST-RESYNCING = OR IF
         _PT-SVC-S @ _PT.S.TX-SEQ @ 0xFFFFFFFFFFFFFFFE _PT-U>=
-        _PT-SVC-S @ _PT.S.TX-OPEN? @ 0= AND IF
-            FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
-            0 _PT-SVC-S @ _PT.S.EVENT-PENDING !
-            DROP 2 _PT-SVC-S @ _PT-BEGIN-CLOSE EXIT
+        IF
+            _PT-SVC-S @ _PT.S.TX-OPEN? @ 0=
+            _PT-SVC-S @ _PT-RESULT-BUSY? 0= AND IF
+                FALSE _PT-SVC-S @ _PT.S.CLOSE-OPENING? !
+                0 _PT-SVC-S @ _PT.S.EVENT-PENDING !
+                DROP 2 _PT-SVC-S @ _PT-BEGIN-CLOSE EXIT
+            THEN
+            \ Reserve the final sequence for CLOSE.  While an admitted result
+            \ is outstanding, service may only receive enough input to expose
+            \ its completion; it must not emit CREDIT, reset, or RET query.
+            DROP _PT-SVC-S @ _PT-SERVICE-BINARY EXIT
         THEN
         DUP _PT-SERVICE-CREDIT ?DUP IF NIP EXIT THEN
     THEN

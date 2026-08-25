@@ -27,9 +27,36 @@ def test_retained_discovery_is_explicit_and_scheduled_without_input_starvation()
     assert "_PT.S.RET-ENABLED? !" in discover
     assert "_PT-FRAME" not in discover
     assert service.count("_PT-SERVICE-RET-QUERY") == 2
-    assert service.index("_PT-SERVICE-RET-QUERY") < service.index(
+    assert service.index("_PT-SERVICE-RET-QUERY") < service.rindex(
         "_PT-SERVICE-BINARY"
     ) < service.rindex("_PT-SERVICE-RET-QUERY")
+
+
+def test_service_yields_at_completion_before_any_close_boundary() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    binary = _definition(source, "_PT-SERVICE-BINARY")
+    service = _definition(source, "PT-SERVICE")
+
+    # Entry and post-dispatch guards prevent a later CLOSE/CLOSE_ACK in the
+    # same buffered input from erasing a completion before its exact consumer
+    # can poll it.
+    assert binary.count("_PT.S.COMPLETE? @ IF PT-S-OK EXIT THEN") == 2
+    assert binary.index("_PT.S.COMPLETE? @ IF PT-S-OK EXIT THEN") < (
+        binary.index("BEGIN")
+    )
+    post_dispatch = binary.index(
+        "_PT.S.COMPLETE? @ IF PT-S-OK EXIT THEN",
+        binary.index("_PT-TRY-FRAME"),
+    )
+    assert post_dispatch < binary.index("_PT.S.STATE @ PT-ST-ANSI")
+
+    # Sequence exhaustion reserves CLOSE until no transaction/result authority
+    # remains.  The held path only services input and bypasses every ordinary
+    # outbound scheduler.
+    boundary = service.index("0xFFFFFFFFFFFFFFFE _PT-U>=")
+    held_binary = service.index("_PT-SERVICE-BINARY EXIT", boundary)
+    assert service.index("_PT-RESULT-BUSY? 0= AND IF", boundary) < held_binary
+    assert held_binary < service.index("_PT-SERVICE-CREDIT", boundary)
 
 
 def test_retained_records_and_legacy_snapshot_are_lifecycle_gated() -> None:
