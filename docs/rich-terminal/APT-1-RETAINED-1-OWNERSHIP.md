@@ -11,20 +11,22 @@ and reset/close states.
 
 RETAINED-1 has two deliberately different ownership layers:
 
-1. A single session service broker owns the APT stream, client parser, global
-   presentation revision, global transaction-ID allocator, one transaction
-   slot, one resource-upload slot, discovery state, credit ledger, reset, and
-   close. It is the only component allowed to emit retained wire frames.
-2. Application/backend activations receive opaque broker leases. On the wire,
-   each lease is represented exactly by a nonzero `(owner_id,
-   owner_generation)`. Every owner-bound frame repeats that exact tuple. The
-   terminal never infers authority from current application focus, region,
-   object, resource digest, or an unscoped item ID.
+1. A single internal session-global retained backend owns discovery, the
+   client parser, global presentation revision, transaction-ID allocator, one
+   transaction slot, one resource-upload slot, credit, reset, and close. It is
+   the only guest component allowed to emit retained wire frames.
+2. The generic UIDL host gives that backend private per-UCTX projection
+   bindings. On the wire, each materialized binding is represented exactly by
+   a nonzero `(owner_id, owner_generation)`. Every owner-bound frame repeats
+   that tuple. The terminal never infers authority from current focus, region,
+   UIDL identity, object, resource digest, or an unscoped item ID.
 
-The global broker does not collapse owners into one implicit owner. Conversely,
-an activation never directly owns or services the UART. Akashic application
-keys may be opaque and friendly, but their binding to wire owner/item tuples is
-broker state and must be explicit, bounded, and retired with the lease.
+The backend does not collapse bindings into one implicit owner. Conversely, a
+UCTX or application never owns or services the UART. Stable UIDL element and
+semantic-subkey mappings to wire owner/item tuples are private, bounded backend
+state and retire with the exact projection binding. Applications receive no
+broker, scope, lease, retained descriptor/provider contract, wire identity, or
+retained mutation API.
 
 The complete terminal authority key is:
 
@@ -42,28 +44,28 @@ or accepting an older component is an authority violation.
 | Role | Owns | May mutate | Must not do |
 |---|---|---|---|
 | APT host/driver | Host lease, ingress/egress queues, terminal core, retained renderer | Decode and atomically apply validated ordered frames; publish immutable views | Infer guest owner authority; run guest code; fall back from structural LOST |
-| Guest presentation broker | One PT session, discovery, sequence/credit, revision/txid allocators, owner bindings, replay plan | Serialize all wire operations and normalized events | Hand raw PT session or wire IDs to child activations; allow concurrent frame writers |
-| Backend activation | Caller-owned copied descriptors, opaque app keys, pull providers, broker lease | Request owner-scoped model/resource/series changes through broker | Retain caller pointers after return; mint wire IDs; close/reset global session |
+| Guest retained backend | One PT adapter, discovery, sequence/credit, revision/txid allocators, private UCTX bindings, replay plan | Project validated UIDL semantics and serialize all wire operations | Publish itself as an application service; expose wire IDs or mutation calls; allow concurrent frame writers |
+| Generic UIDL host/projectors | Exact host/slot/CINST/UCTX lifecycle, UIDL tree/layout/dirty state, backend-neutral semantic snapshots | Attach, quiesce, project, relayout, and detach through the internal backend | Let application code acquire retained authority; maintain a second app-authored scene; emit protocol frames from callbacks |
 | Renderer/view sink | Immutable committed CELL and retained views plus shared immutable resources | Present/coalesce physical images within cadence rules | Mutate authoritative model; invent samples; release resource backing early |
 | External attachment owner | Machine/session construction and coordinated reset/detach | Recreate a LOST attachment and its caller-owned capacities | Treat LOST as ANSI-safe fallback |
 
 The foreground single-input-owner assumption of CELL-1 is unchanged. RETAINED-1
-adds multiple presentation owners behind one cooperative broker; it does not add
-multiple raw UART readers or writers.
+adds multiple private UCTX presentation owners behind one cooperative backend;
+it does not add multiple raw UART readers or writers.
 
 ## 3. State and allocation ledger
 
 | State/allocation | Creator and allocator | Mutator | Retirement | Soft reset | Hard reset/detach |
 |---|---|---|---|---|---|
-| RET discovery record | Broker/client after READY; terminal validates query | Fixed CAPS/FORMATS exchange only | Presentation epoch end | Destroyed; rediscover | Destroyed |
-| Global revision | Terminal authoritative; broker mirrors | Successful CELL/SNAPSHOT/PRESENT/OWNER_DROP commit only | Presentation epoch end | Reset to 0; mandatory CELL snapshot makes 1 | Destroyed |
-| Global transaction ID high-water | Broker mints; terminal validates | BEGIN in either CELL or PRESENT family, or OWNER_DROP | Presentation epoch end | Reset for new epoch | Destroyed |
-| One open transaction | Broker starts after exact byte/count/credit preflight | Broker appends canonical frames; terminal stages | Commit, abort, rejection, reset, close | Aborted | Destroyed |
-| One outstanding TX_RESULT | Terminal creates after COMMIT or OWNER_DROP processing | Broker consumes and reconciles revision | Exact ordered consume | Settled before ACK | Destroyed |
-| Owner live record | Broker requests; terminal reserves quotas | Exact owner generation only | Successful OWNER_DROP status 0 -> tombstone | Destroyed, not carried across epoch | Destroyed |
+| RET discovery record | Backend/client after READY; terminal validates query | Fixed CAPS/FORMATS exchange only | Presentation epoch end | Destroyed; rediscover | Destroyed |
+| Global revision | Terminal authoritative; backend mirrors | Successful CELL/SNAPSHOT/PRESENT/OWNER_DROP commit only | Presentation epoch end | Reset to 0; mandatory CELL snapshot makes 1 | Destroyed |
+| Global transaction ID high-water | Backend mints; terminal validates | BEGIN in either CELL or PRESENT family, or OWNER_DROP | Presentation epoch end | Reset for new epoch | Destroyed |
+| One open transaction | Backend starts after exact byte/count/credit preflight | Backend appends canonical frames; terminal stages | Commit, abort, rejection, reset, close | Aborted | Destroyed |
+| One outstanding TX_RESULT | Terminal creates after COMMIT or OWNER_DROP processing | Backend consumes and reconciles revision | Exact ordered consume | Settled before ACK | Destroyed |
+| Owner live record | Backend requests for one exact private projection binding; terminal reserves quotas | Exact owner generation only | Successful OWNER_DROP status 0 -> tombstone | Destroyed, not carried across epoch | Destroyed |
 | Owner tombstone | Terminal on successful exact OWNER_DROP status 0 | Newer generation open may supersede | Epoch end | Destroyed | Destroyed |
-| Broker owner binding | Broker from opaque activation lease to exact wire tuple | Broker only | Terminal-confirmed OWNER_DROP status 0 or session destruction | Invalidated before replay | Destroyed |
-| Item ID high-water | Broker mints per owner generation/namespace; terminal mirrors | Successful DEFINE/BEGIN | Owner/epoch end; never decremented | Destroyed | Destroyed |
+| Private UCTX projection binding | Backend from exact host/slot/CINST/UCTX authority to one wire tuple | Backend only | Terminal-confirmed OWNER_DROP status 0 or session destruction | Wire tuple invalidated before replay; live UCTX authority remains | Destroyed |
+| Item ID high-water | Backend mints per owner generation/namespace; terminal mirrors | Successful DEFINE/BEGIN | Owner/epoch end; never decremented | Destroyed | Destroyed |
 | Active region/object/series model | Terminal from successful commits | Exact owner transactions | Exact drop/owner drop/reset | Destroyed | Destroyed |
 | Hidden retained rebuild | Terminal on valid START commit | Matching CONTINUE commits only | Atomic REVEAL, replacement START, new resize, reset, close | Destroyed | Destroyed |
 | Immutable resource | Terminal after verified upload COMMIT | Never; references change transactionally | Unreferenced RESOURCE_DROP/owner drop/reset | Destroyed | Destroyed |
@@ -74,41 +76,56 @@ multiple raw UART readers or writers.
 | Owner-wide resource usage | Terminal charges one count/declared bytes on accepted RESOURCE_BEGIN | Exact-upload completion/abort and exact RESOURCE_DROP | Exact-upload abort/rejection, exact RESOURCE_DROP, OWNER_DROP status 0, or epoch end | Released | Released |
 | Retained immutable view | Driver publishes after logical commit/reveal | Never | Replaced after consumers release reference | Released/replaced | Released |
 
-No row in this table authorizes a pointer into caller-owned transient memory.
-Guest descriptors and provider output must be copied or consumed during the
-documented synchronous call. Host immutable views/resources may share backing
-only through explicit immutable lifetime ownership.
+No row authorizes a pointer into application-owned transient memory. UIDL
+semantic snapshots and source output are copied, revision-bound, or consumed
+during the documented host-owned synchronous call. Host immutable views and
+resources may share backing only through explicit immutable lifetime ownership.
 
-## 4. Broker lease lifecycle
+## 4. Private projection-binding lifecycle
 
-An activation lease is a bounded broker record containing at least:
+A projection binding is a bounded backend record containing at least:
 
-- opaque activation identity used only inside the guest;
-- wire owner ID and generation;
+- the exact host, host slot and slot ID, CINST pointer/ID/generation, UCTX, and
+  internal binding-token generation validated by the generic host ABI;
+- wire owner ID and generation when materialized;
 - requested and accepted owner quotas;
 - per-namespace next item ID/high-water;
-- mapping from opaque child item keys to exact namespace/item IDs;
-- lifecycle state `LOCAL`, `OPENING`, `LIVE`, `DROPPING`, `TOMBSTONED`, or
-  `QUARANTINED`; and
-- replay descriptors/providers needed by the owning application policy.
+- stable mappings from UCTX element index and semantic subkey to exact
+  namespace/item IDs;
+- lifecycle state `LOCAL`, `OPENING`, `LIVE`, `QUIESCING`, `DROPPING`,
+  `TOMBSTONED`, or `QUARANTINED`; and
+- copied or exact-revision-bound UIDL projection state needed for replay.
 
-The broker allocates all storage from caller policy/caller-provided bounds. The
-wire maxima are upper bounds, not an instruction to allocate every advertised
-slot eagerly. A caller may configure fewer broker records, but it must reject
-locally before emitting OWNER_OPEN when it cannot represent every accepted wire
-record and binding.
+The backend allocates all storage from product policy and caller-provided
+bounds. Wire maxima are upper bounds, not an instruction to allocate every
+advertised slot eagerly. A profile may configure fewer binding records, but
+the backend rejects projection locally before OWNER_OPEN when it cannot
+represent every accepted wire record, mapping, quota, and retryable tombstone.
+The complete semantic-tree admission derives the owner reservation; no applet
+declares or enlarges terminal quota.
 
-Only LIVE leases may emit model/resource/series requests. OPENING becomes LIVE
-only after `RET_RESULT(OWNER_OPEN,RET_OK)`. DROPPING remains authoritative until
-the matching successful TX_RESULT. After successful drop, the binding becomes
-TOMBSTONED and child calls fail deterministically; it is not silently rebound
-to a new generation. A new activation gets a distinct lease and a generation
-newer than the terminal tombstone for any reused owner ID.
+Attach validates and copies the exact live host tuple and issues an internal
+generation-checked token. Before every later operation, the backend validates
+that token against its own record and revalidates the stored host/slot/CINST/
+UCTX graph. The token and record are private host/backend state, never an
+application capability. A stale token, reused slot, changed CINST generation,
+foreign host, or changed UCTX fails closed without touching wire state.
+
+Only LIVE bindings may emit model/resource/series changes. OPENING becomes LIVE
+only after `RET_RESULT(OWNER_OPEN,RET_OK)`. Host-owned pre-shutdown quiesce first
+makes projection stale, synchronously detaches every semantic source callback,
+and records enough exact owner state for allocation-free retryable retirement.
+If callback detachment cannot be proven, application shutdown and state free
+must not run. DROPPING remains authoritative until matching successful
+TX_RESULT. After successful drop, the wire binding becomes TOMBSTONED and the
+internal token is stale; it is never rebound to a new UCTX. A later UCTX gets a
+distinct binding generation and a wire generation newer than any terminal
+tombstone for a reused owner ID.
 
 Specifically, OWNER_DROP status 2 or 3 clears the outstanding-result gate but
-does not retire a DROPPING lease. The broker retains the exact binding,
-authoritative desired state, quotas, and model; it neither tombstones nor makes
-the reservation available to another activation. It may retry OWNER_DROP with
+does not retire a DROPPING binding. The backend retains the exact wire binding,
+authoritative copied desired state, quotas, and model; it neither tombstones nor
+makes the reservation available to another UCTX. It may retry OWNER_DROP with
 a newer transaction ID after reconciling the unchanged reported revision, or
 carry the binding into the prescribed reset path. Only matching status 0
 authorizes local binding retirement. Outside the reset settlement below, any
@@ -117,13 +134,13 @@ lifecycle exception.
 
 If an already-emitted SOFT_RESET_REQUEST crosses the pending drop before the
 terminal accepted it, reset settlement instead returns status 1 without
-mutation. The DROPPING lease remains authoritative until the broker consumes
+mutation. The DROPPING binding remains authoritative until the backend consumes
 that result and sends ACK; ACK then retires the entire old-epoch binding. This
 status 1 permits no old-epoch retry or binding release and is not a general
 third recoverable OWNER_DROP validation result.
 
 If an owner lifecycle result is lost behind a structural frame/session fault,
-the broker marks every binding QUARANTINED. It does not guess whether quota was
+the backend marks every binding QUARANTINED. It does not guess whether quota was
 reserved or released. Coordinated external reset/detach destroys the epoch and
 is the recovery boundary.
 
@@ -149,7 +166,7 @@ defines no cross-owner references.
 IDs are never reused within an owner generation, including after failed content
 commit if the terminal has acknowledged reservation of that ID. Before
 acknowledged RESOURCE_BEGIN or committed DEFINE, a purely local candidate ID may
-be abandoned. The broker still uses a monotonic allocator and does not depend
+be abandoned. The backend still uses a monotonic allocator and does not depend
 on reuse for boundedness.
 
 The one session-wide upload has its own exact `(owner_id, owner_generation,
@@ -170,7 +187,7 @@ epoch capabilities. The separate sums of live-owner region, resource, object,
 and series count quotas must fit their corresponding global maxima, and the
 separate resource-byte, UTF-8-byte, and sample-slot sums must fit their global
 totals. Every sum is checked before mutation. This makes later admission depend
-on the owner lease rather than unrelated owners becoming idle.
+on the owner reservation rather than unrelated owners becoming idle.
 
 The reservation ledger and usage ledgers are distinct. OWNER_OPEN increases the
 aggregate live-owner reservation sums; those sums do not decrease when an item
@@ -221,7 +238,7 @@ never eviction of another owner.
 
 ## 7. Global transaction serialization
 
-The broker is the sole allocator of transaction IDs and revisions. It serializes
+The backend is the sole allocator of transaction IDs and revisions. It serializes
 legacy CELL transactions and PRESENT transactions through one queue:
 
 ```text
@@ -232,11 +249,12 @@ preflight -> BEGIN -> body -> COMMIT -> TX_RESULT -> next request
 Successful local BEGIN admission reserves all declared frames, operation/count
 slots, sequence numbers, and ordinary credit through commit or abort processing.
 After COMMIT, the result gate still blocks the next BEGIN even if ordinary
-credit has already been returned. A child API must return backpressure before
-BEGIN if the broker cannot finish the declared transaction. It must not emit a
-partial transaction and ask the child to retry from an unknown frame.
+credit has already been returned. Projection admission returns backpressure
+before BEGIN if the backend cannot finish the declared transaction. It must not
+emit a partial transaction and ask UIDL or application code to recover an
+unknown terminal state.
 
-The broker accounts ordinary credit and the shared control reserve in separate
+The backend accounts ordinary credit and the shared control reserve in separate
 bounded ledgers. Ordered consumption of RET_RESULT, OWNER_DROP, or
 RESOURCE_ABORT reclaims only its control-reserve occupancy; it never increments
 ordinary released bytes or a CREDIT watermark. Transaction frames and resource
@@ -252,25 +270,27 @@ Mixed CELL/retained transactions are globally atomic. No renderer/view sink may
 observe the new CELL plane with the old retained delta, or the reverse. A view
 publication carries the resulting global revision and geometry generation.
 
-## 8. Resource provider lifetime
+## 8. Semantic resource-source lifetime
 
-An Akashic resource provider is pull-based. The broker copies the immutable
-resource descriptor and SHA3-256 digest before RESOURCE_BEGIN. For each requested
-offset it obtains no more than the negotiated chunk maximum, copies or
-synchronously emits exactly those bytes, and releases the provider buffer before
-returning. The provider may not write directly into the PT transmit ring.
+A backend-neutral UIDL resource snapshot exposes a bounded pull source. It is
+not an APT provider API and application code cannot issue retained operations
+through it. The backend copies the immutable snapshot metadata and SHA3-256
+digest before RESOURCE_BEGIN. For each requested offset it obtains no more than
+the negotiated chunk maximum into backend-owned staging, copies or synchronously
+emits exactly those bytes, and retains no returned source pointer. A source may
+not write directly into the PT transmit ring or call the backend.
 
-The broker allows one upload session-wide. It waits for successful BEGIN result,
+The backend allows one upload session-wide. It waits for successful BEGIN result,
 then for CREDIT covering each chunk, then for COMMIT result. It retains enough
-descriptor/digest/provider state to abort exactly the active owner/generation/
-resource. On provider error it emits RESOURCE_ABORT if reserve and stream state
+snapshot/digest/source state to abort exactly the active owner/generation/
+resource. On source error it emits RESOURCE_ABORT if reserve and stream state
 permit. It does not publish an object reference until successful resource
 commit.
 
-The broker compares every resource result's echoed tuple to that retained exact
-upload tuple. It clears provider/upload state only when the contract says an
+The backend compares every resource result's echoed tuple to that retained exact
+upload tuple. It clears source/upload state only when the contract says an
 exact-tuple result completed or destroyed it. A stale/wrong-tuple CHUNK or
-COMMIT result leaves the real upload and provider state live; reset/close cleanup
+COMMIT result leaves the real upload and source state live; reset/close cleanup
 must still abort that exact upload and await its result where the wire contract
 requires.
 
@@ -280,13 +300,14 @@ remove authority/model reachability but must not free backing while an already
 published immutable view still references it. Such renderer retention is not a
 wire resource and does not consume guest quota after the drop becomes visible.
 
-## 9. Series provider and history lifetime
+## 9. Semantic series-source and history lifetime
 
-A series descriptor reserves a fixed history capacity from its owner. Pull
-providers deliver bounded explicit timestamp/value pairs or a uniform first
-timestamp plus i64 values. The broker copies each append payload before emission
-and retains it until the corresponding transaction result. It never exposes a
-provider pointer to the host.
+A semantic UIDL series snapshot reserves a fixed history capacity for its
+private owner binding. Its bounded pull source delivers explicit timestamp/value
+pairs or a uniform first timestamp plus i64 values into backend-owned staging.
+The backend copies each append payload before emission and retains it until the
+corresponding transaction result. The source is backend-neutral and exposes no
+wire descriptor, identity, or mutation authority.
 
 The terminal's authoritative history is exactly the committed bounded ring.
 Evicted oldest samples cease to be model state at commit. A renderer snapshot
@@ -296,9 +317,9 @@ pixels between committed points only; it must not allocate, timestamp, or report
 new samples.
 
 Series replay uses DEFINE plus bounded REPLACE/APPEND chunks in a hidden
-replacement/layout target. An application that cannot reproduce authoritative
-history declares a smaller replay set under its policy; the broker does not
-synthesize missing samples.
+replacement/layout target. A semantic widget that cannot reproduce its declared
+authoritative history must expose an honestly smaller bounded snapshot; the
+backend does not synthesize missing samples.
 
 ## 10. Hidden rebuild ownership
 
@@ -322,13 +343,13 @@ from active and hidden state together.
 
 ## 11. Reset, loss, fallback, and close
 
-| Event | Broker action | Terminal retained action | ANSI authority |
+| Event | Internal backend action | Terminal retained action | ANSI authority |
 |---|---|---|---|
-| Unsupported discovery | Keep CELL-1; never allocate wire owners | Skip query, send covering CREDIT only | Unchanged CELL-1 rules |
-| Synchronized CLOSE/CLOSE_ACK | Stop child requests, drain/abort bounded lifecycle, close | Destroy retained state with session | Released only at base close boundary |
-| Soft reset ACK | Invalidate all bindings, rediscover, CELL snapshot first, allocate/replay new-epoch bindings | Drop entire retained epoch, revision 0 | Binary remains owned |
+| Unsupported discovery | Keep CELL-1; never materialize a wire owner | Skip query, send covering CREDIT only | Unchanged CELL-1 rules |
+| Synchronized CLOSE/CLOSE_ACK | Stop projection, quiesce sources, drain/abort bounded lifecycle, close | Destroy retained state with session | Released only at base close boundary |
+| Soft reset ACK | Invalidate wire tuples, preserve live UCTX bindings, rediscover, CELL snapshot first, allocate/replay new-epoch owners | Drop entire retained epoch, revision 0 | Binary remains owned |
 | Resize | Quiesce deltas, CELL replace, hidden layout/reveal | Hide stale regions; accept newest generation layout | Binary remains owned |
-| Structural/session failure | Quarantine broker and every lease | Freeze unusable protocol model; retain last immutable view/backing and exclusive stream ownership | Never fallback |
+| Structural/session failure | Quarantine backend and every projection binding | Freeze unusable protocol model; retain last immutable view/backing and exclusive stream ownership | Never fallback |
 | Hard machine reset/detach | External owner destroys and recreates attachment/capacities | Destroy session, tombstones, views, uploads | Base external boundary decides |
 
 Base commit settlement orders every accepted CELL or PRESENT TX_RESULT before a
@@ -336,12 +357,12 @@ locally planned reset request. A valid COMMIT crossed by an already-emitted
 request is settled as aborted with unchanged revision before ACK. The same
 ordering applies to OWNER_DROP: an accepted successful drop/result precedes
 construction of the request, while a crossed unaccepted drop returns reset-only
-status 1 and leaves its lease/model/quota authoritative until ACK destroys the
+status 1 and leaves its wire binding/model/quota authoritative until ACK destroys the
 epoch. No result or authority disposition crosses that acknowledgement.
 
 Unsupported RETAINED-1 is not a failure: the optional consumer stays on the real
 CELL-1 presentation path. After successful retained discovery, a retained
-semantic request may be rejected without corrupting framing, but the broker must
+semantic projection may be rejected without corrupting framing, but the backend must
 reconcile its authoritative state before issuing dependent deltas. A structural
 failure is never converted into “retained unavailable” or silent ANSI output.
 It also is not an allocation-retirement boundary: the last immutable view and
@@ -349,19 +370,30 @@ all backing it references remain host-owned for display/diagnosis, while the
 wire model and quotas remain quarantined and cannot accept or authorize work.
 Only coordinated hard reset/detach or a valid close boundary retires them.
 
-Close does not bypass authority cleanup. The broker stops new child calls,
-finishes or aborts the one upload/transaction where the base protocol permits,
-services outstanding results, and then performs synchronized close. A timeout
-after binary ownership was acquired remains LOST until external reset.
+Close does not bypass authority cleanup. The backend stops new projection,
+quiesces every semantic source, finishes or aborts the one upload/transaction
+where the base protocol permits, services outstanding results, and then performs
+synchronized close. A timeout after binary ownership was acquired remains LOST
+until external reset.
 
-## 12. Concurrency and service ownership
+## 12. Concurrency and backend ownership
 
-The profile assumes a cooperative single broker/service owner for the guest
-stream. Child activations may enqueue requests concurrently only through a
-broker queue whose storage and ordering are caller-bounded. Queue admission
-copies request descriptors and returns explicit accepted/backpressured/failed
-status. It must not retain arbitrary child stack addresses or silently drop a
-request.
+The profile assumes one cooperative internal backend owner for the guest
+stream. The generic UIDL host stages projection only through its private
+host/slot/CINST/UCTX binding token while that exact UCTX is active or available
+through validated saved context. Application callbacks cannot enqueue retained
+requests. Projection admission copies or revision-binds complete semantic
+snapshots into caller-bounded backend storage and reports explicit accepted,
+backpressured, or failed status; it never retains arbitrary application stack
+addresses or silently drops state.
+
+Before arbitrary application shutdown, the host must quiesce the binding and
+synchronously detach every semantic source callback. Quiesce records the exact
+retryable owner-retirement obligation without depending on later application
+state. If local callback detachment cannot be proven, shutdown and state free
+must not proceed. Final host detach scrubs remaining UCTX/CINST/region references
+before those objects are freed; wire acknowledgement may retire the independent
+bounded tombstone afterward under the exact owner rules.
 
 The host similarly owns one presentation driver pump. Host service and guest
 run alternate in bounded steps. Zero guest instructions may mean host
@@ -372,7 +404,7 @@ reset, or close.
 
 The absence of a generic KDOS raw-ingress lease is not expanded by this profile.
 The production vertical relies on the documented single-foreground UI/input
-owner and cooperative PT registry. The broker must still prove the stream is
+owner and cooperative PT registry. The backend must still prove the stream is
 unowned before initial acquisition and preserve LOST ownership until external
 attachment reset.
 
@@ -391,7 +423,8 @@ these invariants:
    them.
 6. Resize/reset never expose retained content before the mandatory CELL
    replacement/snapshot.
-7. Every child-facing pointer is copied or consumed synchronously; every
+7. No application retained mutation API exists; every semantic snapshot/source
+   pointer is copied, revision-bound, or consumed synchronously, and every
    host-facing shared object is immutable with explicit lifetime.
 8. Unknown owner/item generations and wrong upload tuples fail closed without
    affecting another owner or the actual session-wide upload.
@@ -400,5 +433,5 @@ these invariants:
     reset/detach.
 
 These are functional contract conditions, not optional hardening. A terminal or
-broker that cannot represent one of them must leave RETAINED-1 unsupported and
+backend that cannot represent one of them must leave RETAINED-1 unsupported and
 continue the conforming CELL-1 path.

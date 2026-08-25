@@ -20,8 +20,8 @@ replace application authority checks.
 | Terminal ingress event | Terminal frontend/session | Immutable after admission | Scheduled UART application or epoch retirement | Old presentation events rejected | Old attachment events cancelled |
 | Geometry generation | Terminal frontend while active; legacy frontend while ANSI | Current authoritative frontend | Replacement by later generation | Preserved unless snapshot geometry changes it | Re-established before boot/negotiation |
 | Normalized input event | Terminal session | Immutable | Akashic validation/dispatch or bounded rejection | Events for old presentation epoch rejected | Old session events rejected |
-| Optional retained owner ID + generation | Akashic service-broker activation lease (not CELL-1) | Exact owning activation through the broker | Successful exact idempotent owner drop | Destroyed; broker allocates/replays current-epoch binding | Destroyed with session |
-| Optional retained region/object/resource/series IDs | Exact live retained owner projection (not CELL-1) | Exact live owner generation through one global broker | Exact item drop or owner drop | Destroyed; replayed with the new epoch binding | Destroyed |
+| Optional retained owner ID + generation | Internal session-global retained backend from one exact private UCTX projection binding (not CELL-1) | Backend for that exact live binding only | Successful exact idempotent owner drop | Destroyed; backend allocates/replays a current-epoch wire binding for each still-live UCTX | Destroyed with session |
+| Optional retained region/object/resource/series IDs | Exact live private UCTX projection binding (not CELL-1) | Backend for the exact live owner generation only | Exact item drop or owner drop | Destroyed; regenerated from authoritative UIDL semantics under the new wire binding | Destroyed |
 
 The terminal reset planner owns the commit/result settlement gate. It emits an
 accepted COMMIT's result before constructing SOFT_RESET_REQUEST and derives
@@ -46,10 +46,12 @@ that advances the outer epoch and drains both directions. A post-`OPEN`
 structural failure enters `LOST` and retains exclusive binary ownership; local
 failure detection alone is never an ANSI-safe boundary.
 
-Akashic owns application/domain state, focus, cell buffers, and whether to
-request the optional service. Its ANSI backend is constructed by default. Its
-APT adapter owns no terminal session independently; it borrows a live module
-session and may be discarded without discarding Akashic state.
+Akashic owns application/domain state, UIDL/UCTX state, focus, cell buffers,
+and whether the explicit rich composition constructs the optional retained
+backend. Its ANSI backend is constructed by default. The internal retained
+backend owns no terminal session independently; it borrows the live APT shell
+adapter and may be discarded without discarding Akashic or application state.
+It is a UIDL output backend, not an application service or second UI model.
 
 The MegaPad enhanced frontend owns terminal projection only while its primary
 host-port lease exists. Without that lease, existing ANSI frontends retain
@@ -64,10 +66,12 @@ item_namespace, item_id)`. No component pointer, region address, opaque
 application key, or native Akashic instance address may appear on the wire.
 Owner-wide retirement is atomic and idempotent for the exact generation.
 
-The retained service broker is global to the one APT session because sequence,
-credit, transaction IDs, presentation revision, resource upload, reset, and
-close are global. Wire authority is nevertheless owner-exact: the broker may
-not substitute its session ownership for the `(owner_id,owner_generation)` on
-an item operation. The normative quota, tombstone, hidden-rebuild, immutable
-view, and activation-lease lifetimes are in
-`APT-1-RETAINED-1-OWNERSHIP.md`.
+The retained backend is internal and global to the one APT session because
+sequence, credit, transaction IDs, presentation revision, resource upload,
+reset, and close are global. It privately maps each exact live host/slot/CINST/
+UCTX binding to a distinct wire owner; applications receive no broker, scope,
+lease, descriptor, provider, or retained mutation API. Wire authority remains
+owner-exact: the backend may not substitute its session ownership for the
+`(owner_id,owner_generation)` on an item operation. The normative quota,
+tombstone, hidden-rebuild, immutable-view, and private projection-binding
+lifetimes are in `APT-1-RETAINED-1-OWNERSHIP.md`.
