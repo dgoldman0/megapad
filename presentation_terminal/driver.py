@@ -9,10 +9,10 @@ from enum import Enum
 from typing import Callable, Protocol
 
 from .apt1 import CONTROL_RESERVE_BYTES, HEADER_BYTES, UINT64_MAX
-from .cell_model import TerminalView
 from .retained_model import RetainedPolicy
 from .server import (
     OutboundBytes,
+    PresentationView,
     PresentationTerminalCore,
     TerminalConfig,
     TerminalSessionError,
@@ -151,7 +151,7 @@ class PresentationTerminalDriver:
         limits: DriverLimits,
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
-        view_sink: Callable[[TerminalView], None] | None = None,
+        view_sink: Callable[[PresentationView], None] | None = None,
     ):
         if not isinstance(lease, TerminalHostLease):
             raise TypeError("lease must be TerminalHostLease")
@@ -191,7 +191,7 @@ class PresentationTerminalDriver:
         driver_limits: DriverLimits,
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
-        view_sink: Callable[[TerminalView], None] | None = None,
+        view_sink: Callable[[PresentationView], None] | None = None,
         retained_policy: RetainedPolicy | None = None,
         session_id_factory: Callable[[], int] | None = None,
     ) -> PresentationTerminalDriver:
@@ -635,6 +635,12 @@ class PresentationTerminalDriver:
         if geometry == self._core.selected_geometry:
             self._resize_intent = None
             return DriverStatus.PROGRESS
+        if self._core.retained_enabled:
+            # RETAINED-1 must replace the CELL plane through PRESENT and then
+            # relayout the retained plane.  Until that admission path exists,
+            # do not retain an intent that can never become wire-visible.
+            self._resize_intent = None
+            return DriverStatus.BACKPRESSURED
         self._resize_intent = geometry
         return DriverStatus.PROGRESS
 

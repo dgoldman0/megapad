@@ -41,11 +41,16 @@ from .cell_model import (
     CellModelError,
     CellModelErrorCode,
     TerminalView,
+    TransactionBegin,
     decode_abort,
     decode_cell_span,
     decode_commit,
     decode_cursor,
     decode_transaction_begin,
+)
+from .presentation_coordinator import (
+    CompositePresentationView,
+    PresentationCoordinator,
 )
 from .presentation_model import (
     PresentationClock,
@@ -64,7 +69,19 @@ from .retained_model import (
     OwnerQuotas,
     RetainedPolicy,
 )
+from .retained_scene import (
+    CommitDisposition,
+    RegionDefinition,
+    RetainedMode,
+    RetainedSceneModel,
+    SceneModelError,
+    SceneModelState,
+)
 from .retained_wire import (
+    CellMode,
+    PresentBegin,
+    PresentDisposition,
+    PresentRetainedMode,
     RetStatus,
     RetainedCaps,
     RetainedFormats,
@@ -72,6 +89,9 @@ from .retained_wire import (
     RetainedResult,
     RetainedWireError,
     decode_ret_query,
+    decode_present_begin,
+    decode_present_commit,
+    decode_region_definition,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_result,
@@ -92,6 +112,7 @@ _SOFT_RESET_REQUEST = struct.Struct("<I4xQ")
 _SOFT_RESET_ACK = struct.Struct("<IHH")
 _OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
 _OWNER_DROP = struct.Struct("<QQQQ")
+_PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 
 _RETAINED_DISCOVERY_REPLY_BYTES = 2 * (HEADER_BYTES + 64)
 
@@ -320,11 +341,30 @@ class OutboundBytes:
             raise ValueError("an outbound record cannot settle two result gates")
 
 
+PresentationView = TerminalView | CompositePresentationView
+
+
+@dataclass(slots=True)
+class _PresentWireState:
+    transaction_id: int
+    declared_transaction_bytes: int
+    cell_span_count: int
+    cell_count: int
+    retained_operation_count: int
+    cell_mode: int
+    retained_mode: int
+    begin: PresentBegin | None
+    cell_spans_seen: int = 0
+    cells_seen: int = 0
+    cursor_seen: bool = False
+    retained_operations_seen: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class CoreResult:
     ansi_bytes: bytes = b""
     outbound: tuple[OutboundBytes, ...] = ()
-    views: tuple[TerminalView, ...] = ()
+    views: tuple[PresentationView, ...] = ()
 
 
 class _NegotiationScanner:
@@ -425,6 +465,8 @@ class PresentationTerminalCore:
         self._encoder: FrameEncoder | None = None
         self._model: CellModel | None = None
         self._clock: PresentationClock | None = None
+        self._retained_model: RetainedSceneModel | None = None
+        self._coordinator: PresentationCoordinator | None = None
         self._configured_retained_policy = retained_policy
         self._retained_caps = (
             None
@@ -455,6 +497,7 @@ class PresentationTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
         self._discard_transaction_status: int | None = None
+        self._present_wire_state: _PresentWireState | None = None
         self._most_recent_wire_aborted_id = 0
 
     @staticmethod
@@ -580,6 +623,22 @@ class PresentationTerminalCore:
         return self._owner_ledger.state
 
     @property
+    def retained_state(self) -> SceneModelState | None:
+        """Immutable retained scene state after successful discovery."""
+
+        if not self._retained_enabled or self._retained_model is None:
+            return None
+        return self._retained_model.state
+
+    @property
+    def presentation_view(self) -> PresentationView | None:
+        """The latest immutable CELL-only or composite presentation view."""
+
+        if self._coordinator is not None:
+            return self._coordinator.view
+        return None if self._model is None else self._model.view
+
+    @property
     def outstanding_lifecycle_result(self) -> LifecycleResultLease | None:
         """The exact RET_RESULT whose delivery gates later lifecycle work."""
 
@@ -637,6 +696,7 @@ class PresentationTerminalCore:
             and clock.open_transaction is None
             and clock.outstanding_result is None
             and self._outstanding_lifecycle_result is None
+            and not self._retained_enabled
             and not model.awaiting_snapshot
             and not model.transaction_open
         )
@@ -838,6 +898,10 @@ class PresentationTerminalCore:
     def send_resize(self, cols: int, rows: int) -> OutboundBytes | None:
         """Encode one geometry change and require its replacement snapshot."""
 
+        if self._retained_enabled:
+            raise TerminalSessionError(
+                "retained resize is blocked until PRESENT layout admission is installed"
+            )
         normalized_cols, normalized_rows = self.validate_resize(cols, rows)
         if self._wire_transaction_id is not None:
             raise TerminalSessionError(
@@ -938,7 +1002,7 @@ class PresentationTerminalCore:
     def _feed_ansi_owned(self, raw: bytes) -> CoreResult:
         ansi = bytearray()
         outbound: list[OutboundBytes] = []
-        views: list[TerminalView] = []
+        views: list[PresentationView] = []
 
         for position, byte in enumerate(raw):
             emitted, record, record_bytes = self._scanner.push(byte)
@@ -1026,6 +1090,8 @@ class PresentationTerminalCore:
             terminal_to_client_max_payload=record.client_max_payload,
         )
         self._owner_ledger = None
+        self._retained_model = None
+        self._coordinator = None
         self._outstanding_lifecycle_result = None
         self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
@@ -1054,7 +1120,7 @@ class PresentationTerminalCore:
         except SessionFramingError as exc:
             self._fatal(str(exc), cause=exc)
         outbound: list[OutboundBytes] = []
-        views: list[TerminalView] = []
+        views: list[PresentationView] = []
         for index, frame in enumerate(frames):
             if frame.message_type == MessageType.CLOSE:
                 if index != len(frames) - 1 or decoder.buffered_bytes:
@@ -1070,7 +1136,16 @@ class PresentationTerminalCore:
     def _process_frame(
         self,
         frame: Frame,
-    ) -> tuple[tuple[OutboundBytes, ...], TerminalView | None]:
+    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+        if self._present_wire_state is not None and frame.message_type not in {
+            MessageType.TX_ABORT,
+            MessageType.CELL_SPAN,
+            MessageType.CURSOR,
+            RetainedMessageType.REGION_DEFINE,
+            RetainedMessageType.PRESENT_COMMIT,
+        }:
+            self._fatal("frame intervened inside a PRESENT transaction")
+
         if (
             frame.message_type == RetainedMessageType.RET_QUERY
             and self._configured_retained_policy is not None
@@ -1090,6 +1165,25 @@ class PresentationTerminalCore:
                 self._retained_query_seen = True
                 return self._release_data(frame.complete_bytes), None
             return self._accept_retained_query(frame), None
+
+        if frame.message_type == RetainedMessageType.PRESENT_BEGIN:
+            if not self._retained_enabled:
+                self._fatal("PRESENT_BEGIN arrived before retained discovery")
+            self._charge_data(frame)
+            return self._accept_present_begin(frame), None
+
+        if frame.message_type == RetainedMessageType.REGION_DEFINE:
+            if not self._retained_enabled:
+                self._fatal("REGION_DEFINE arrived before retained discovery")
+            self._charge_data(frame)
+            self._accept_region_define(frame)
+            return (), None
+
+        if frame.message_type == RetainedMessageType.PRESENT_COMMIT:
+            if not self._retained_enabled:
+                self._fatal("PRESENT_COMMIT arrived before retained discovery")
+            self._charge_data(frame)
+            return self._accept_present_commit(frame)
 
         if frame.message_type == RetainedMessageType.OWNER_OPEN:
             if not self._retained_enabled:
@@ -1130,14 +1224,25 @@ class PresentationTerminalCore:
         if message_type in _CONTROL_TYPES:
             self._fatal(f"unexpected client control frame {message_type.name}")
 
+        if self._retained_enabled and message_type is MessageType.SNAPSHOT_BEGIN:
+            self._fatal(
+                "legacy SNAPSHOT_BEGIN is forbidden after retained discovery"
+            )
+
         self._charge_data(frame)
         if message_type in {MessageType.TX_BEGIN, MessageType.SNAPSHOT_BEGIN}:
             return self._accept_begin(frame, message_type), None
         if message_type is MessageType.CELL_SPAN:
-            self._accept_span(frame.payload)
+            if self._present_wire_state is None:
+                self._accept_span(frame.payload)
+            else:
+                self._accept_present_span(frame.payload)
             return (), None
         if message_type is MessageType.CURSOR:
-            self._accept_cursor(frame.payload)
+            if self._present_wire_state is None:
+                self._accept_cursor(frame.payload)
+            else:
+                self._accept_present_cursor(frame.payload)
             return (), None
         if message_type in {MessageType.TX_COMMIT, MessageType.SNAPSHOT_COMMIT}:
             return self._accept_commit(frame, message_type)
@@ -1167,9 +1272,12 @@ class PresentationTerminalCore:
         # side of the shared transaction seam.
         transaction_id = self._wire_transaction_id
         model = self._model
+        retained = self._retained_model
         if transaction_id is None:
             if (clock is not None and clock.open_transaction is not None) or (
                 model is not None and model.transaction_open
+            ) or (
+                retained is not None and retained.transaction_open
             ):
                 self._fatal("CLOSE found transaction authority without wire state")
         else:
@@ -1186,10 +1294,22 @@ class PresentationTerminalCore:
                         f"cannot discard CELL staging for CLOSE: {exc}",
                         cause=exc,
                     )
-            try:
-                clock.abort(lease)
-            except PresentationStateError as exc:
-                self._fatal(f"cannot discard transaction for CLOSE: {exc}", cause=exc)
+            if retained is not None and retained.transaction_open:
+                try:
+                    retained.abort()
+                except (PresentationStateError, SceneModelError) as exc:
+                    self._fatal(
+                        f"cannot discard retained transaction for CLOSE: {exc}",
+                        cause=exc,
+                    )
+            else:
+                try:
+                    clock.abort(lease)
+                except PresentationStateError as exc:
+                    self._fatal(
+                        f"cannot discard transaction for CLOSE: {exc}",
+                        cause=exc,
+                    )
             self._clear_wire_transaction()
 
         acknowledgement = self._encode_control(
@@ -1216,6 +1336,8 @@ class PresentationTerminalCore:
         self._clock = None
         self._session_retained_policy = None
         self._owner_ledger = None
+        self._retained_model = None
+        self._coordinator = None
         self._outstanding_lifecycle_result = None
         self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
@@ -1322,8 +1444,24 @@ class PresentationTerminalCore:
                 presentation_epoch=clock.presentation_epoch,
                 policy=policy,
             )
-        except (TypeError, ValueError) as exc:
-            self._fatal(f"cannot initialize retained owner authority: {exc}", cause=exc)
+            geometry = PresentationGeometry(
+                self._config.cols,
+                self._config.rows,
+                self._geometry_generation,
+            )
+            retained_model = RetainedSceneModel(
+                clock=clock,
+                owners=owner_ledger,
+                geometry=geometry,
+            )
+            coordinator = PresentationCoordinator(
+                clock=clock,
+                cell_model=model,
+                retained_model=retained_model,
+                geometry=geometry,
+            )
+        except (PresentationStateError, SceneModelError, TypeError, ValueError) as exc:
+            self._fatal(f"cannot initialize retained presentation: {exc}", cause=exc)
 
         self._retained_query_seen = True
         caps_reply = self._encode_data(
@@ -1344,6 +1482,8 @@ class PresentationTerminalCore:
         # succeeded.  Publish capability only after the complete ordered
         # CAPS, FORMATS, covering-CREDIT tuple exists.
         self._owner_ledger = owner_ledger
+        self._retained_model = retained_model
+        self._coordinator = coordinator
         self._retained_enabled = True
         return (caps_reply, formats_reply, covering_credit[0])
 
@@ -1450,6 +1590,13 @@ class PresentationTerminalCore:
         transaction_id, base_revision, owner_id, owner_generation = (
             _OWNER_DROP.unpack(frame.payload)
         )
+        identity = None
+        if owner_id != 0 and owner_generation != 0:
+            identity = self._owner_identity(owner_id, owner_generation)
+            if self._owner_has_scene(identity):
+                self._fatal(
+                    "OWNER_DROP requires coordinated retained scene retirement"
+                )
 
         try:
             lease = clock.reserve(
@@ -1475,7 +1622,7 @@ class PresentationTerminalCore:
 
         if owner_id == 0 or owner_generation == 0:
             return self._complete_owner_drop_rejection(lease, 2)
-        identity = self._owner_identity(owner_id, owner_generation)
+        assert identity is not None
         try:
             prepared = ledger.prepare_drop(identity)
         except OwnerLedgerError:
@@ -1576,6 +1723,19 @@ class PresentationTerminalCore:
             owner_generation=owner_generation,
         )
 
+    def _owner_has_scene(self, identity: OwnerIdentity) -> bool:
+        retained = self._retained_model
+        if retained is None:
+            return False
+        scenes = (retained.state.active, retained.state.hidden)
+        for scene in scenes:
+            if scene is None:
+                continue
+            owner_scene = scene.owners.get(identity.owner_id)
+            if owner_scene is not None and owner_scene.owner == identity:
+                return True
+        return False
+
     @staticmethod
     def _owner_open_status(error: OwnerLedgerError) -> RetStatus:
         statuses = {
@@ -1585,6 +1745,370 @@ class PresentationTerminalCore:
             OwnerLedgerErrorCode.DUPLICATE_ID: RetStatus.INVALID,
         }
         return statuses[error.code]
+
+    def _accept_present_begin(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Open one shared CELL/retained PRESENT transaction."""
+
+        if self._state not in {TerminalState.ACTIVE, TerminalState.RESYNCING}:
+            self._fatal("PRESENT_BEGIN is outside ACTIVE/RESYNCING")
+        if self._wire_transaction_id is not None:
+            self._fatal("nested transaction begin")
+        if self._reset_requested_epoch is not None:
+            self._fatal("new PRESENT_BEGIN crossed a pending soft reset")
+        if self._outstanding_lifecycle_result is not None:
+            self._fatal("PRESENT_BEGIN crossed an outstanding RET_RESULT")
+        if len(frame.payload) != _PRESENT_BEGIN.size:
+            self._fatal(
+                f"PRESENT_BEGIN payload length is {len(frame.payload)}, "
+                f"expected {_PRESENT_BEGIN.size}"
+            )
+
+        raw = _PRESENT_BEGIN.unpack(frame.payload)
+        (
+            transaction_id,
+            base_revision,
+            _geometry_generation,
+            declared_transaction_bytes,
+            _cols,
+            _rows,
+            cell_span_count,
+            cell_count,
+            retained_operation_count,
+            cell_mode,
+            retained_mode,
+            _reserved,
+        ) = raw
+        wire = _PresentWireState(
+            transaction_id=transaction_id,
+            declared_transaction_bytes=declared_transaction_bytes,
+            cell_span_count=cell_span_count,
+            cell_count=cell_count,
+            retained_operation_count=retained_operation_count,
+            cell_mode=cell_mode,
+            retained_mode=retained_mode,
+            begin=None,
+        )
+        self._wire_transaction_id = transaction_id
+        self._wire_transaction_snapshot = False
+        self._wire_transaction_bytes = frame.complete_bytes
+        self._discard_transaction_status = None
+        self._present_wire_state = wire
+
+        clock = self._require_clock()
+        try:
+            lease = clock.reserve(
+                TransactionFamily.PRESENT,
+                transaction_id,
+                base_revision,
+            )
+        except (PresentationStateError, TypeError, ValueError) as exc:
+            lease = clock.open_transaction
+            if (
+                lease is None
+                or lease.family is not TransactionFamily.PRESENT
+                or lease.transaction_id != transaction_id
+            ):
+                self._fatal(str(exc), cause=exc)
+            self._discard_transaction_status = (
+                3
+                if lease.rejection is not None
+                and "base revision" in lease.rejection
+                else 2
+            )
+            return ()
+
+        try:
+            begin = decode_present_begin(frame.payload)
+        except RetainedWireError:
+            self._discard_transaction_status = 2
+            return ()
+        wire.begin = begin
+
+        retained_state = self._require_retained_model().state
+        retained_policy = self._session_retained_policy
+        if retained_policy is None:
+            self._fatal("PRESENT_BEGIN lost its retained policy")
+        available_before_begin = self._client_data_grant - (
+            self._client_data_received - frame.complete_bytes
+        )
+        geometry = PresentationGeometry(
+            self._config.cols,
+            self._config.rows,
+            self._geometry_generation,
+        )
+        if (
+            begin.declared_transaction_bytes
+            > retained_policy.max_retained_transaction_bytes
+            or begin.declared_transaction_bytes > self._config.max_transaction_bytes
+            or begin.declared_transaction_bytes > available_before_begin
+            or begin.retained_operation_count
+            > retained_policy.max_operations_per_transaction
+            or (begin.cols, begin.rows, begin.geometry_generation)
+            != (geometry.cols, geometry.rows, geometry.generation)
+            or retained_state.geometry != geometry
+        ):
+            self._discard_transaction_status = 2
+            return ()
+
+        model = self._require_model()
+        if begin.cell_mode is not CellMode.NONE:
+            try:
+                model.begin_with_lease(
+                    TransactionBegin(
+                        begin.transaction_id,
+                        begin.base_revision,
+                        begin.cols,
+                        begin.rows,
+                        begin.cell_span_count,
+                        begin.cell_count,
+                    ),
+                    snapshot=begin.cell_mode is CellMode.REPLACE,
+                    lease=lease,
+                )
+            except CellModelError as exc:
+                self._discard_transaction_status = self._result_status(exc)
+                return ()
+
+        if begin.retained_mode is not PresentRetainedMode.NONE:
+            try:
+                self._require_retained_model().begin(
+                    lease,
+                    RetainedMode(begin.retained_mode),
+                    geometry,
+                )
+            except SceneModelError:
+                self._discard_transaction_status = 2
+        return ()
+
+    def _accept_present_span(self, payload: bytes) -> None:
+        wire = self._require_present_wire_state()
+        wire.cell_spans_seen += 1
+        if (
+            wire.cell_mode == int(CellMode.NONE)
+            or wire.cursor_seen
+            or wire.retained_operations_seen
+            or wire.cell_spans_seen > wire.cell_span_count
+        ):
+            self._discard_transaction_status = 2
+        try:
+            span = decode_cell_span(payload)
+        except CellModelError:
+            self._discard_transaction_status = 2
+            return
+        wire.cells_seen += span.count
+        if wire.cells_seen > wire.cell_count:
+            self._discard_transaction_status = 2
+        begin = wire.begin
+        if begin is not None and begin.cell_mode is CellMode.REPLACE:
+            expected_row = wire.cell_spans_seen - 1
+            if (
+                span.row != expected_row
+                or span.column != 0
+                or span.count != begin.cols
+            ):
+                self._discard_transaction_status = 2
+        if self._discard_transaction_status is not None:
+            return
+        try:
+            self._require_model().stage_span(span)
+        except CellModelError as exc:
+            self._discard_transaction_status = self._result_status(exc)
+
+    def _accept_present_cursor(self, payload: bytes) -> None:
+        wire = self._require_present_wire_state()
+        if (
+            wire.cell_mode == int(CellMode.NONE)
+            or wire.cursor_seen
+            or wire.retained_operations_seen
+            or wire.cell_spans_seen != wire.cell_span_count
+        ):
+            self._discard_transaction_status = 2
+        wire.cursor_seen = True
+        try:
+            cursor = decode_cursor(payload)
+        except CellModelError:
+            self._discard_transaction_status = 2
+            return
+        if self._discard_transaction_status is not None:
+            return
+        try:
+            self._require_model().stage_cursor(cursor)
+        except CellModelError as exc:
+            self._discard_transaction_status = self._result_status(exc)
+
+    def _accept_region_define(self, frame: Frame) -> None:
+        wire = self._require_present_wire_state()
+        if (
+            wire.cell_spans_seen != wire.cell_span_count
+            or (
+                wire.cell_mode != int(CellMode.NONE)
+                and not wire.cursor_seen
+            )
+        ):
+            self._discard_transaction_status = 2
+        wire.retained_operations_seen += 1
+        if wire.retained_operations_seen > wire.retained_operation_count:
+            self._discard_transaction_status = 2
+        try:
+            definition = decode_region_definition(frame.payload)
+        except RetainedWireError:
+            self._discard_transaction_status = 2
+            return
+        begin = wire.begin
+        if begin is None or begin.retained_mode is PresentRetainedMode.NONE:
+            self._discard_transaction_status = 2
+            return
+        if self._discard_transaction_status is not None:
+            return
+        try:
+            owner = self._owner_identity(
+                definition.owner_id,
+                definition.owner_generation,
+            )
+            self._require_retained_model().define_region(
+                RegionDefinition(
+                    owner,
+                    definition.region_id,
+                    definition.cell_x,
+                    definition.cell_y,
+                    definition.cell_cols,
+                    definition.cell_rows,
+                    definition.z_order,
+                    definition.visible,
+                    definition.clipped,
+                    begin.geometry_generation,
+                )
+            )
+        except (SceneModelError, TypeError, ValueError):
+            self._discard_transaction_status = 2
+
+    def _accept_present_commit(
+        self,
+        frame: Frame,
+    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+        wire = self._require_present_wire_state()
+        clock = self._require_clock()
+        lease = clock.open_transaction
+        if (
+            lease is None
+            or lease.family is not TransactionFamily.PRESENT
+            or lease.transaction_id != wire.transaction_id
+        ):
+            self._fatal("PRESENT wire transaction has no matching clock lease")
+
+        status = self._discard_transaction_status
+        commit = None
+        try:
+            commit = decode_present_commit(frame.payload)
+        except RetainedWireError:
+            status = 2
+        if commit is not None and commit.transaction_id != wire.transaction_id:
+            status = 2
+        if (
+            wire.begin is None
+            or self._wire_transaction_bytes != wire.declared_transaction_bytes
+            or wire.cell_spans_seen != wire.cell_span_count
+            or wire.cells_seen != wire.cell_count
+            or wire.retained_operations_seen != wire.retained_operation_count
+            or (
+                wire.cell_mode == int(CellMode.NONE)
+                and wire.cursor_seen
+            )
+            or (
+                wire.cell_mode != int(CellMode.NONE)
+                and not wire.cursor_seen
+            )
+        ):
+            status = 2
+        if (
+            commit is not None
+            and wire.retained_mode == int(PresentRetainedMode.NONE)
+            and commit.disposition is PresentDisposition.COMMIT_AND_REVEAL
+        ):
+            status = 2
+
+        view: PresentationView | None = None
+        result_lease: ResultLease | None = None
+        if status is None:
+            assert commit is not None
+            assert wire.begin is not None
+            try:
+                cell_prepared = (
+                    None
+                    if wire.begin.cell_mode is CellMode.NONE
+                    else self._require_model().prepare_publication(
+                        lease,
+                        global_revision=clock.next_revision(lease),
+                    )
+                )
+                retained_prepared = (
+                    None
+                    if wire.begin.retained_mode is PresentRetainedMode.NONE
+                    else self._require_retained_model().prepare_commit(
+                        CommitDisposition(commit.disposition)
+                    )
+                )
+                prepared = self._require_coordinator().prepare_commit(
+                    lease,
+                    cell=cell_prepared,
+                    retained=retained_prepared,
+                )
+            except (CellModelError, SceneModelError):
+                status = 2
+            except (PresentationStateError, RuntimeError, TypeError, ValueError) as exc:
+                self._fatal(f"cannot prepare PRESENT publication: {exc}", cause=exc)
+            else:
+                if self._reset_requested_epoch is None:
+                    try:
+                        result_lease = self._require_coordinator().install_prepared(
+                            prepared
+                        )
+                    except (PresentationStateError, RuntimeError) as exc:
+                        self._fatal(f"cannot install PRESENT publication: {exc}", cause=exc)
+                    status = 0
+                    view = prepared.view
+                else:
+                    result_lease = self._reject_present_transaction(lease)
+                    status = 1
+
+        if status != 0 and result_lease is None:
+            result_lease = self._reject_present_transaction(lease)
+        if result_lease is None:
+            self._fatal("PRESENT_COMMIT did not settle its clock lease")
+        result = self._encode_control(
+            MessageType.TX_RESULT,
+            _TX_RESULT.pack(
+                wire.transaction_id,
+                status,
+                0,
+                result_lease.revision,
+            ),
+            result_transaction_id=wire.transaction_id,
+        )
+        released = self._wire_transaction_bytes
+        self._clear_wire_transaction()
+        return (result,) + self._release_data(released), view
+
+    def _reject_present_transaction(self, lease: TransactionLease) -> ResultLease:
+        model = self._require_model()
+        if model.transaction_open:
+            try:
+                model.abort(lease.transaction_id)
+            except CellModelError as exc:
+                self._fatal(f"cannot discard rejected PRESENT CELL state: {exc}", cause=exc)
+        retained = self._retained_model
+        if retained is not None and retained.transaction_open:
+            try:
+                return retained.reject()
+            except (PresentationStateError, SceneModelError) as exc:
+                self._fatal(f"cannot reject PRESENT retained state: {exc}", cause=exc)
+        try:
+            return self._require_clock().complete_rejected(lease)
+        except PresentationStateError as exc:
+            self._fatal(f"cannot reject PRESENT transaction: {exc}", cause=exc)
 
     def _charge_data(self, frame: Frame, *, include_in_transaction: bool = True) -> None:
         complete = frame.complete_bytes
@@ -1675,7 +2199,9 @@ class PresentationTerminalCore:
         self,
         frame: Frame,
         message_type: MessageType,
-    ) -> tuple[tuple[OutboundBytes, ...], TerminalView | None]:
+    ) -> tuple[tuple[OutboundBytes, ...], PresentationView | None]:
+        if self._present_wire_state is not None:
+            self._fatal("legacy CELL commit crossed a PRESENT transaction")
         transaction_id = self._wire_transaction_id
         if transaction_id is None:
             self._fatal("commit is outside a transaction")
@@ -1684,7 +2210,7 @@ class PresentationTerminalCore:
         if lease is None or lease.transaction_id != transaction_id:
             self._fatal("wire transaction has no matching clock lease")
         status = self._discard_transaction_status
-        view: TerminalView | None = None
+        view: PresentationView | None = None
         result_lease: ResultLease | None = None
         try:
             commit_id = decode_commit(frame.payload)
@@ -1712,14 +2238,29 @@ class PresentationTerminalCore:
                 status = self._result_status(exc)
             else:
                 if self._reset_requested_epoch is None:
-                    try:
-                        result_lease = clock.complete_success(lease)
-                        view = model.install_prepared(prepared)
-                    except (PresentationStateError, RuntimeError) as exc:
-                        self._fatal(
-                            f"cannot install committed CELL publication: {exc}",
-                            cause=exc,
-                        )
+                    coordinator = self._coordinator
+                    if coordinator is None:
+                        try:
+                            result_lease = clock.complete_success(lease)
+                            view = model.install_prepared(prepared)
+                        except (PresentationStateError, RuntimeError) as exc:
+                            self._fatal(
+                                f"cannot install committed CELL publication: {exc}",
+                                cause=exc,
+                            )
+                    else:
+                        try:
+                            composite = coordinator.prepare_commit(
+                                lease,
+                                cell=prepared,
+                            )
+                            result_lease = coordinator.install_prepared(composite)
+                            view = composite.view
+                        except (PresentationStateError, RuntimeError) as exc:
+                            self._fatal(
+                                f"cannot install composite CELL publication: {exc}",
+                                cause=exc,
+                            )
                     status = 0
                 else:
                     # A structurally and semantically valid COMMIT that
@@ -1797,10 +2338,17 @@ class PresentationTerminalCore:
         lease = clock.open_transaction
         if lease is None or lease.transaction_id != transaction_id:
             self._fatal("wire abort has no matching clock lease")
-        try:
-            clock.abort(lease)
-        except PresentationStateError as exc:
-            self._fatal(str(exc), cause=exc)
+        retained = self._retained_model
+        if retained is not None and retained.transaction_open:
+            try:
+                retained.abort()
+            except (PresentationStateError, SceneModelError) as exc:
+                self._fatal(str(exc), cause=exc)
+        else:
+            try:
+                clock.abort(lease)
+            except PresentationStateError as exc:
+                self._fatal(str(exc), cause=exc)
         released = self._wire_transaction_bytes
         self._most_recent_wire_aborted_id = transaction_id
         self._clear_wire_transaction()
@@ -1841,10 +2389,17 @@ class PresentationTerminalCore:
                     model.abort(transaction_id)
                 except CellModelError as exc:
                     self._fatal(str(exc), cause=exc)
-            try:
-                clock.abort(lease)
-            except PresentationStateError as exc:
-                self._fatal(str(exc), cause=exc)
+            retained = self._retained_model
+            if retained is not None and retained.transaction_open:
+                try:
+                    retained.abort()
+                except (PresentationStateError, SceneModelError) as exc:
+                    self._fatal(str(exc), cause=exc)
+            else:
+                try:
+                    clock.abort(lease)
+                except PresentationStateError as exc:
+                    self._fatal(str(exc), cause=exc)
             released = self._wire_transaction_bytes
             self._clear_wire_transaction()
         elif clock.open_transaction is not None:
@@ -1862,6 +2417,8 @@ class PresentationTerminalCore:
         encoder.set_presentation_epoch(requested_epoch)
         self._reset_requested_epoch = None
         self._owner_ledger = None
+        self._retained_model = None
+        self._coordinator = None
         self._outstanding_lifecycle_result = None
         self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
@@ -1897,6 +2454,7 @@ class PresentationTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
         self._discard_transaction_status = None
+        self._present_wire_state = None
 
     @staticmethod
     def _result_status(error: CellModelError) -> int:
@@ -1962,6 +2520,22 @@ class PresentationTerminalCore:
             self._fatal("enhanced session has no presentation clock")
         return self._clock
 
+    def _require_retained_model(self) -> RetainedSceneModel:
+        if self._retained_model is None:
+            self._fatal("retained dispatch has no scene model")
+        return self._retained_model
+
+    def _require_coordinator(self) -> PresentationCoordinator:
+        if self._coordinator is None:
+            self._fatal("retained dispatch has no presentation coordinator")
+        return self._coordinator
+
+    def _require_present_wire_state(self) -> _PresentWireState:
+        wire = self._present_wire_state
+        if wire is None or self._wire_transaction_id is None:
+            self._fatal("retained mutation is outside a PRESENT transaction")
+        return wire
+
     def _require_active_model(self) -> CellModel:
         if self._state is not TerminalState.ACTIVE:
             raise TerminalSessionError("normalized input requires an ACTIVE session")
@@ -1975,6 +2549,11 @@ class PresentationTerminalCore:
         ):
             raise TerminalSessionError(
                 "normalized input waits for committed model/result boundaries"
+            )
+        retained = self._retained_model
+        if retained is not None and retained.state.hidden is not None:
+            raise TerminalSessionError(
+                "normalized input waits for retained hidden-target reveal"
             )
         return model
 
@@ -1990,6 +2569,7 @@ __all__ = [
     "CoreResult",
     "LifecycleResultLease",
     "OutboundBytes",
+    "PresentationView",
     "PresentationTerminalCore",
     "TerminalConfig",
     "TerminalSessionError",

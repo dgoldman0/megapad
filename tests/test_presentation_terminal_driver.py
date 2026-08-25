@@ -435,6 +435,13 @@ def test_driver_admits_retained_discovery_pair_then_covering_credit_in_order():
     assert decode_ret_caps(frames[0].payload).max_regions == 8
     assert decode_ret_formats(frames[1].payload).coordinate_format == 1
     assert CREDIT.unpack(frames[2].payload) == (1_024 + 312 + 48,)
+
+    assert driver.request_resize(2, 2) is DriverStatus.PROGRESS
+    assert driver.pending_resize is None
+    assert driver.request_resize(4, 1) is DriverStatus.BACKPRESSURED
+    assert driver.pending_resize is None
+    assert driver.core.selected_geometry == (2, 2)
+    assert driver.core.geometry_generation == 0
     driver.close()
 
 

@@ -18,6 +18,7 @@ from presentation_terminal.retained_wire import (
     PresentCommit,
     PresentDisposition,
     PresentRetainedMode,
+    RegionWireDefinition,
     RetStatus,
     RetainedCaps,
     RetainedFormats,
@@ -29,6 +30,7 @@ from presentation_terminal.retained_wire import (
     decode_owner_open,
     decode_present_begin,
     decode_present_commit,
+    decode_region_definition,
     decode_ret_caps,
     decode_ret_formats,
     decode_ret_query,
@@ -37,6 +39,7 @@ from presentation_terminal.retained_wire import (
     encode_owner_open,
     encode_present_begin,
     encode_present_commit,
+    encode_region_definition,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_query,
@@ -71,6 +74,11 @@ def _oracle_payloads(message_type: RetainedMessageType) -> tuple[bytes, ...]:
         (RetainedMessageType.OWNER_DROP, decode_owner_drop, encode_owner_drop),
         (RetainedMessageType.PRESENT_BEGIN, decode_present_begin, encode_present_begin),
         (RetainedMessageType.PRESENT_COMMIT, decode_present_commit, encode_present_commit),
+        (
+            RetainedMessageType.REGION_DEFINE,
+            decode_region_definition,
+            encode_region_definition,
+        ),
     ),
 )
 def test_committed_full_frame_oracles_round_trip_exact_payloads(
@@ -124,6 +132,7 @@ def test_discovery_pair_builds_the_canonical_caller_bounded_policy():
         (RetainedMessageType.OWNER_DROP, decode_owner_drop),
         (RetainedMessageType.PRESENT_BEGIN, decode_present_begin),
         (RetainedMessageType.PRESENT_COMMIT, decode_present_commit),
+        (RetainedMessageType.REGION_DEFINE, decode_region_definition),
     ),
 )
 def test_every_payload_decoder_rejects_non_exact_length(message_type, decode):
@@ -384,3 +393,32 @@ def test_present_replace_product_must_fit_the_wire_cell_count():
             CellMode.REPLACE,
             PresentRetainedMode.NONE,
         )
+
+
+def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
+    definition = RegionWireDefinition(
+        UINT64_MAX,
+        UINT64_MAX,
+        UINT64_MAX,
+        UINT32_MAX - 1,
+        UINT32_MAX - 1,
+        1,
+        1,
+        -(1 << 31),
+        0x3,
+    )
+    assert decode_region_definition(encode_region_definition(definition)) == definition
+    assert definition.visible
+    assert definition.clipped
+
+    payload = bytearray(encode_region_definition(definition))
+    payload[-4:] = (0x4).to_bytes(4, "little")
+    with pytest.raises(RetainedWireError) as reserved:
+        decode_region_definition(payload)
+    assert reserved.value.code is RetainedWireErrorCode.RESERVED
+
+    payload = bytearray(encode_region_definition(definition))
+    payload[32:36] = bytes(4)
+    with pytest.raises(RetainedWireError) as scalar:
+        decode_region_definition(payload)
+    assert scalar.value.code is RetainedWireErrorCode.SCALAR

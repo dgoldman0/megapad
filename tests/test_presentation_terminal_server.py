@@ -23,8 +23,14 @@ from presentation_terminal.retained_model import (
     RetainedPolicy,
 )
 from presentation_terminal.retained_wire import (
+    CellMode,
     OwnerDrop,
     OwnerOpen,
+    PresentBegin,
+    PresentCommit,
+    PresentDisposition,
+    PresentRetainedMode,
+    RegionWireDefinition,
     RetStatus,
     RetainedMessageType,
     decode_ret_caps,
@@ -32,6 +38,9 @@ from presentation_terminal.retained_wire import (
     decode_ret_result,
     encode_owner_drop,
     encode_owner_open,
+    encode_present_begin,
+    encode_present_commit,
+    encode_region_definition,
     encode_ret_query,
 )
 from presentation_terminal.server import (
@@ -248,6 +257,54 @@ def _settle_lifecycle(core: PresentationTerminalCore, result) -> None:
         if outbound.lifecycle_result is not None
     )
     core.settle_lifecycle_result_delivery(marker)
+
+
+def _present_frames(
+    encoder: FrameEncoder,
+    *,
+    transaction_id: int,
+    base_revision: int,
+    retained_mode: PresentRetainedMode,
+    disposition: PresentDisposition,
+    operations: tuple[tuple[RetainedMessageType, bytes], ...] = (),
+    declared_adjustment: int = 0,
+) -> bytes:
+    declared = (
+        104
+        + sum(40 + len(payload) for _message_type, payload in operations)
+        + 56
+        + declared_adjustment
+    )
+    begin = PresentBegin(
+        transaction_id,
+        base_revision,
+        0,
+        declared,
+        2,
+        2,
+        0,
+        0,
+        len(operations),
+        CellMode.NONE,
+        retained_mode,
+    )
+    commit = PresentCommit(transaction_id, disposition)
+    return b"".join(
+        (
+            encoder.encode(
+                RetainedMessageType.PRESENT_BEGIN,
+                encode_present_begin(begin),
+            ),
+            *(
+                encoder.encode(message_type, payload)
+                for message_type, payload in operations
+            ),
+            encoder.encode(
+                RetainedMessageType.PRESENT_COMMIT,
+                encode_present_commit(commit),
+            ),
+        )
+    )
 
 
 def test_ansi_remains_default_and_non_apt_escapes_pass_byte_exact():
@@ -870,6 +927,303 @@ def test_synchronized_close_retires_settled_owner_authority():
     )
     assert core.state is TerminalState.ANSI
     assert core.owner_state is None
+
+
+def test_present_region_hidden_replace_commits_then_reveals_atomically():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+
+    started = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=2,
+            base_revision=1,
+            retained_mode=PresentRetainedMode.REPLACE_START,
+            disposition=PresentDisposition.COMMIT,
+            operations=((RetainedMessageType.REGION_DEFINE, encode_region_definition(region)),),
+        )
+    )
+    frames = []
+    for outbound in started.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    assert TX_RESULT.unpack(frames[0].payload) == (2, 0, 0, 2)
+    assert frames[1].message_type == MessageType.CREDIT
+    assert len(started.views) == 1
+    hidden = core.retained_state
+    assert hidden is not None
+    assert hidden.revision == 2
+    assert hidden.hidden is not None
+    assert hidden.active.owners == {}
+    assert hidden.hidden.owners[7].regions[1].geometry_generation == 0
+    assert not hidden.retained_visible
+    assert core.owner_state is not None
+    assert core.owner_state.records[7].high_water.region == 1
+    core.settle_result_delivery(2)
+    with pytest.raises(TerminalSessionError, match="hidden-target reveal"):
+        core.send_key(ord("x"))
+
+    revealed = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=3,
+            base_revision=2,
+            retained_mode=PresentRetainedMode.REPLACE_CONTINUE,
+            disposition=PresentDisposition.COMMIT_AND_REVEAL,
+        )
+    )
+    reveal_frames = []
+    for outbound in revealed.outbound:
+        reveal_frames.extend(decoder.feed(outbound.payload))
+    assert TX_RESULT.unpack(reveal_frames[0].payload) == (3, 0, 0, 3)
+    assert len(revealed.views) == 1
+    state = core.retained_state
+    assert state is not None
+    assert state.revision == 3
+    assert state.hidden is None
+    assert state.active.owners[7].regions[1].visible
+    assert state.retained_visible
+    assert revealed.views[0].retained is state
+    core.settle_result_delivery(3)
+
+
+def test_present_declared_byte_mismatch_rejects_without_scene_or_id_publication():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    scene_source = core.retained_state
+    owner_source = core.owner_state
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+
+    rejected = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=2,
+            base_revision=1,
+            retained_mode=PresentRetainedMode.REPLACE_START,
+            disposition=PresentDisposition.COMMIT,
+            operations=((RetainedMessageType.REGION_DEFINE, encode_region_definition(region)),),
+            declared_adjustment=1,
+        )
+    )
+
+    assert TX_RESULT.unpack(decoder.feed(rejected.outbound[0].payload)[0].payload) == (
+        2,
+        2,
+        0,
+        1,
+    )
+    decoder.feed(rejected.outbound[1].payload)
+    assert rejected.views == ()
+    assert core.retained_state is scene_source
+    assert core.owner_state is owner_source
+    core.settle_result_delivery(2)
+
+
+def test_present_abort_discards_only_transaction_staging_and_returns_credit():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    scene_source = core.retained_state
+    owner_source = core.owner_state
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    begin = PresentBegin(
+        2,
+        1,
+        0,
+        248,
+        2,
+        2,
+        0,
+        0,
+        1,
+        CellMode.NONE,
+        PresentRetainedMode.REPLACE_START,
+    )
+    core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.PRESENT_BEGIN,
+            encode_present_begin(begin),
+        )
+        + encoder.encode(
+            RetainedMessageType.REGION_DEFINE,
+            encode_region_definition(region),
+        )
+    )
+
+    aborted = core.feed_machine(
+        encoder.encode(MessageType.TX_ABORT, ABORT.pack(2, 7))
+    )
+
+    assert len(aborted.outbound) == 1
+    assert (
+        decoder.feed(aborted.outbound[0].payload)[0].message_type
+        == MessageType.CREDIT
+    )
+    assert core.outstanding_result_transaction_id is None
+    assert core.presentation_revision == 1
+    assert core.retained_state is scene_source
+    assert core.owner_state is owner_source
+
+
+def test_present_transaction_rejects_an_intervening_control_frame():
+    core, encoder, _decoder = _open_retained_core()
+    begin = PresentBegin(
+        2,
+        1,
+        0,
+        160,
+        2,
+        2,
+        0,
+        0,
+        0,
+        CellMode.NONE,
+        PresentRetainedMode.REPLACE_START,
+    )
+    core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.PRESENT_BEGIN,
+            encode_present_begin(begin),
+        )
+    )
+
+    with pytest.raises(TerminalSessionError, match="intervened inside a PRESENT"):
+        core.feed_machine(encoder.encode(MessageType.CREDIT, CREDIT.pack(4_096)))
+
+    assert core.presentation_revision == 1
+
+
+def test_owner_drop_with_committed_scene_fails_closed_before_authority_mutation():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    started = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=2,
+            base_revision=1,
+            retained_mode=PresentRetainedMode.REPLACE_START,
+            disposition=PresentDisposition.COMMIT,
+            operations=((RetainedMessageType.REGION_DEFINE, encode_region_definition(region)),),
+        )
+    )
+    for outbound in started.outbound:
+        decoder.feed(outbound.payload)
+    core.settle_result_delivery(2)
+    owner_source = core.owner_state
+    scene_source = core.retained_state
+
+    with pytest.raises(TerminalSessionError, match="scene retirement"):
+        core.feed_machine(
+            encoder.encode(
+                RetainedMessageType.OWNER_DROP,
+                encode_owner_drop(OwnerDrop(3, 2, 7, 1)),
+            )
+        )
+
+    assert core.owner_state is owner_source
+    assert core.retained_state is scene_source
+    assert core.presentation_revision == 2
+
+
+def test_retained_resize_is_blocked_before_wire_or_geometry_mutation():
+    core, _encoder, _decoder = _open_retained_core()
+    geometry = core.selected_geometry
+    generation = core.geometry_generation
+
+    assert not core.resize_ready
+    with pytest.raises(TerminalSessionError, match="retained resize is blocked"):
+        core.send_resize(4, 1)
+    assert core.selected_geometry == geometry
+    assert core.geometry_generation == generation
+
+
+def test_legacy_snapshot_begin_is_forbidden_after_retained_discovery():
+    core, encoder, _decoder = _open_retained_core()
+    view = core.view
+    owner_state = core.owner_state
+
+    with pytest.raises(TerminalSessionError, match="forbidden after retained"):
+        core.feed_machine(_snapshot_frames(encoder, transaction_id=2))
+
+    assert core.presentation_revision == 1
+    assert core.view is view
+    assert core.owner_state is owner_state
+    assert core.outstanding_result_transaction_id is None
+
+
+def test_legacy_cell_delta_remains_valid_after_retained_discovery():
+    core, encoder, decoder = _open_retained_core()
+
+    committed = core.feed_machine(
+        encoder.encode(
+            MessageType.TX_BEGIN,
+            BEGIN.pack(2, 1, 2, 2, 0, 0),
+        )
+        + encoder.encode(MessageType.CURSOR, CURSOR.pack(1, 1, 1))
+        + encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2))
+    )
+
+    assert TX_RESULT.unpack(decoder.feed(committed.outbound[0].payload)[0].payload) == (
+        2,
+        0,
+        0,
+        2,
+    )
+    assert len(committed.views) == 1
+    assert committed.views[0].revision == 2
+    assert committed.views[0].cell is core.view
+    assert committed.views[0].retained is core.retained_state
+    core.settle_result_delivery(2)
+
+
+def test_unimplemented_retained_mutation_opcode_fails_closed():
+    core, encoder, decoder = _open_retained_core()
+    owner = _owner_open()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+
+    with pytest.raises(TerminalSessionError):
+        core.feed_machine(
+            _present_frames(
+                encoder,
+                transaction_id=2,
+                base_revision=1,
+                retained_mode=PresentRetainedMode.REPLACE_START,
+                disposition=PresentDisposition.COMMIT,
+                operations=((0x2011, encode_region_definition(region)),),
+            )
+        )
+
+    assert core.presentation_revision == 1
 
 
 def test_client_receive_credit_backpressures_data_but_not_control_results():

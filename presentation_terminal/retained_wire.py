@@ -26,6 +26,7 @@ _RET_RESULT = struct.Struct("<HHIQQQQQ")
 _OWNER_DROP = struct.Struct("<QQQQ")
 _PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 _PRESENT_COMMIT = struct.Struct("<QII")
+_REGION_DEFINITION = struct.Struct("<QQQIIIIiI")
 
 
 class RetainedMessageType(IntEnum):
@@ -39,6 +40,7 @@ class RetainedMessageType(IntEnum):
     PRESENT_BEGIN = 0x2000
     PRESENT_COMMIT = 0x2001
     OWNER_OPEN = 0x2002
+    REGION_DEFINE = 0x2010
     RET_QUERY = 0x8000
     RET_CAPS = 0x8001
     RET_FORMATS = 0x8002
@@ -534,6 +536,52 @@ class PresentCommit:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RegionWireDefinition:
+    """Exact REGION_DEFINE/REGION_REPLACE payload before session binding."""
+
+    owner_id: int
+    owner_generation: int
+    region_id: int
+    cell_x: int
+    cell_y: int
+    cell_cols: int
+    cell_rows: int
+    z_order: int
+    flags: int
+
+    def __post_init__(self) -> None:
+        for name, minimum, maximum in (
+            ("owner_id", 1, UINT64_MAX),
+            ("owner_generation", 1, UINT64_MAX),
+            ("region_id", 1, UINT64_MAX),
+            ("cell_x", 0, UINT32_MAX),
+            ("cell_y", 0, UINT32_MAX),
+            ("cell_cols", 1, UINT32_MAX),
+            ("cell_rows", 1, UINT32_MAX),
+            ("z_order", -(1 << 31), (1 << 31) - 1),
+            ("flags", 0, 0x3),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=minimum,
+                    maximum=maximum,
+                ),
+            )
+
+    @property
+    def visible(self) -> bool:
+        return bool(self.flags & 0x1)
+
+    @property
+    def clipped(self) -> bool:
+        return bool(self.flags & 0x2)
+
+
 def encode_ret_query(_query: RetainedQuery = RetainedQuery()) -> bytes:
     if not isinstance(_query, RetainedQuery):
         raise TypeError("query must be RetainedQuery")
@@ -698,15 +746,46 @@ def decode_present_commit(payload) -> PresentCommit:
         raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
 
 
+def encode_region_definition(definition: RegionWireDefinition) -> bytes:
+    if not isinstance(definition, RegionWireDefinition):
+        raise TypeError("definition must be RegionWireDefinition")
+    return _REGION_DEFINITION.pack(
+        definition.owner_id,
+        definition.owner_generation,
+        definition.region_id,
+        definition.cell_x,
+        definition.cell_y,
+        definition.cell_cols,
+        definition.cell_rows,
+        definition.z_order,
+        definition.flags,
+    )
+
+
+def decode_region_definition(payload) -> RegionWireDefinition:
+    raw = _payload(payload, _REGION_DEFINITION.size, "REGION definition")
+    values = _REGION_DEFINITION.unpack(raw)
+    if values[-1] & ~0x3:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "REGION definition flags contain reserved bits",
+        )
+    try:
+        return RegionWireDefinition(*values)
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
 __all__ = [
     "CellMode", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
-    "PresentRetainedMode", "PresentCommit", "RET1_TAG", "RetStatus",
+    "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RET1_TAG", "RetStatus",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
     "RetainedResult", "RetainedWireError", "RetainedWireErrorCode",
     "decode_owner_drop", "decode_owner_open", "decode_present_begin",
-    "decode_present_commit", "decode_ret_caps", "decode_ret_formats",
+    "decode_present_commit", "decode_region_definition", "decode_ret_caps", "decode_ret_formats",
     "decode_ret_query", "decode_ret_result", "encode_owner_drop",
     "encode_owner_open", "encode_present_begin", "encode_present_commit",
+    "encode_region_definition",
     "encode_ret_caps", "encode_ret_formats", "encode_ret_query",
     "encode_ret_result",
 ]
