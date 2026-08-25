@@ -23,6 +23,7 @@ from presentation_terminal.server import (
     TerminalConfig,
     TerminalState,
 )
+from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,36 @@ def _between(raw: bytes, start: int, end: int) -> bytes:
     end_at = raw.find(bytes((end,)), start_at + 1)
     assert end_at >= 0, f"missing output marker {end:#x}"
     return raw[start_at + 1 : end_at]
+
+
+def _core_retained_policy() -> RetainedPolicy:
+    """Small CORE-only policy that admits the guest owner/region slice."""
+    return RetainedPolicy(
+        features=RetainedFeature.CORE,
+        max_owner_records=4,
+        max_live_owners=2,
+        max_regions=8,
+        max_resources=0,
+        max_objects=0,
+        max_series=0,
+        max_operations_per_transaction=4,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_label_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=512,
+    )
 
 
 class TestPresentationTerminalForth(_KDOSTestBase):
@@ -491,3 +522,248 @@ class TestPresentationTerminalForth(_KDOSTestBase):
             tuple(range(ord("A"), ord("A") + 32)),
         )
         self.assertIn(expected, terminal_ansi)
+
+    def test_real_core_owner_region_present_and_legacy_cell_interleave(self) -> None:
+        """Drive the production guest writers through one CORE-only terminal."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-RICH-RX 8192 ALLOT",
+                "CREATE PT-RICH-TX 8192 ALLOT",
+                "CREATE PT-RICH-INCOMING PT-EVENT-SIZE ALLOT",
+                "CREATE PT-RICH-COMPLETION PT-COMPLETION-SIZE ALLOT",
+                "CREATE PT-RICH-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-RICH-SESSION PT-RICH-SESSION-STORAGE 7 + -8 AND ;",
+                "VARIABLE PT-RICH-ERROR",
+                "VARIABLE PT-RICH-PHASE",
+                "VARIABLE PT-RICH-WANT-KIND",
+                "VARIABLE PT-RICH-WANT-REQUEST",
+                "VARIABLE PT-RICH-WANT-REVISION",
+                ": PT-RICH-STATUS+ PT-RICH-ERROR @ OR PT-RICH-ERROR ! ;",
+                ": PT-RICH-WAIT-ACTIVE",
+                "  BEGIN",
+                "    PT-RICH-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PT-RICH-SESSION PT-ACTIVE? IF PT-S-OK EXIT THEN YIELD",
+                "  AGAIN ;",
+                ": PT-RICH-WAIT-SNAPSHOT",
+                "  BEGIN",
+                "    PT-RICH-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PT-RICH-SESSION PT-SNAPSHOT-NEEDED? 0= IF PT-S-OK EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PT-RICH-WAIT-RETAINED",
+                "  BEGIN",
+                "    PT-RICH-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PT-RICH-SESSION PT-RETAINED-STATE@ DUP",
+                "    PT-RET-ST-AVAILABLE = IF DROP PT-S-OK EXIT THEN",
+                "    PT-RET-ST-CELL-ONLY = IF PT-S-UNSUPPORTED EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PT-RICH-WAIT-COMPLETION",
+                "  BEGIN",
+                "    PT-RICH-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PT-RICH-COMPLETION PT-RICH-SESSION PT-COMPLETION-POLL",
+                "    IF EXIT THEN",
+                "    DUP PT-S-OK <> IF EXIT THEN DROP YIELD",
+                "  AGAIN ;",
+                ": PT-RICH-CHECK-COMPLETION",
+                "  PT-RICH-WANT-REVISION ! PT-RICH-WANT-REQUEST !",
+                "  PT-RICH-WANT-KIND !",
+                "  PT-RICH-COMPLETION PT-COMPLETION-KIND@",
+                "    PT-RICH-WANT-KIND @ <> PT-RICH-STATUS+",
+                "  PT-RICH-COMPLETION PT-COMPLETION-REQUEST@",
+                "    PT-RICH-WANT-REQUEST @ <> PT-RICH-STATUS+",
+                "  PT-RICH-COMPLETION PT-COMPLETION-STATUS@ 0<>",
+                "    PT-RICH-STATUS+",
+                "  PT-RICH-COMPLETION PT-COMPLETION-REVISION@",
+                "    PT-RICH-WANT-REVISION @ <> PT-RICH-STATUS+ ;",
+                ": PT-RICH-SNAPSHOT",
+                "  2 2 2 4 PT-RICH-SESSION PT-SNAPSHOT-BEGIN PT-RICH-STATUS+",
+                "  0 0 2 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  65 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
+                "  66 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
+                "  1 0 2 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  67 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
+                "  68 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
+                "  0 0 0 PT-RICH-SESSION PT-CURSOR PT-RICH-STATUS+",
+                "  PT-RICH-SESSION PT-TX-COMMIT PT-RICH-STATUS+ ;",
+                ": PT-RICH-REPLACE-START",
+                "  2 2 0 0 1 88 PT-CELL-NONE PT-RET-REPLACE-START",
+                "    PT-RICH-SESSION PT-PRESENT-BEGIN PT-RICH-STATUS+",
+                "  1 1 1 0 0 2 2 0 1 PT-RICH-SESSION",
+                "    PT-REGION-DEFINE PT-RICH-STATUS+",
+                "  PT-COMMIT PT-RICH-SESSION PT-PRESENT-COMMIT",
+                "    PT-RICH-STATUS+ ;",
+                ": PT-RICH-REPLACE-REVEAL",
+                "  2 2 0 0 0 0 PT-CELL-NONE PT-RET-REPLACE-CONTINUE",
+                "    PT-RICH-SESSION PT-PRESENT-BEGIN PT-RICH-STATUS+",
+                "  PT-COMMIT-AND-REVEAL PT-RICH-SESSION PT-PRESENT-COMMIT",
+                "    PT-RICH-STATUS+ ;",
+                ": PT-RICH-CELL-DELTA",
+                "  2 2 1 1 PT-RICH-SESSION PT-TX-BEGIN PT-RICH-STATUS+",
+                "  0 0 1 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  90 2 0 1 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
+                "  0 0 1 PT-RICH-SESSION PT-CURSOR PT-RICH-STATUS+",
+                "  PT-RICH-SESSION PT-TX-COMMIT PT-RICH-STATUS+ ;",
+                ": PT-RICH-SEND-DROP",
+                "  BEGIN",
+                "    1 1 PT-RICH-SESSION PT-OWNER-DROP DUP",
+                "    PT-S-WOULD-BLOCK = IF",
+                "      DROP PT-RICH-SESSION PT-SERVICE",
+                "      DUP PT-S-OK <> IF EXIT THEN DROP YIELD",
+                "    ELSE EXIT THEN",
+                "  AGAIN ;",
+                ": PT-RICH-WAIT-ANSI",
+                "  BEGIN",
+                "    PT-RICH-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PT-RICH-SESSION PT-STATE@ PT-ST-ANSI = IF PT-S-OK EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PT-RICH-BEGIN-MARK",
+                "  80 EMIT 84 EMIT 82 EMIT 73 EMIT 67 EMIT 72 EMIT 33 EMIT",
+                "  PT-RICH-PHASE . TX-FLUSH ;",
+                ": PT-RICH-REPORT",
+                "  80 EMIT 84 EMIT 82 EMIT 69 EMIT 80 EMIT 79 EMIT 82 EMIT 84 EMIT",
+                "  32 EMIT PT-RICH-ERROR @ . PT-RICH-SESSION PT-STATE@ .",
+                "  PT-STREAM-OWNED? . TX-FLUSH ;",
+                ": PT-RICH-RUN",
+                "  0 PT-RICH-ERROR ! 0 PT-RICH-PHASE !",
+                "  PT-RICH-RX 8192 PT-RICH-TX 8192 PT-RICH-INCOMING",
+                "    PT-EVENT-SIZE PT-RICH-SESSION PT-INIT PT-RICH-STATUS+",
+                "  PT-RICH-SESSION PT-RETAINED-DISCOVER PT-RICH-STATUS+",
+                "  PT-RICH-BEGIN-MARK",
+                "  PT-RICH-SESSION PT-START PT-RICH-STATUS+",
+                "  PT-RICH-WAIT-ACTIVE PT-RICH-STATUS+ 1 PT-RICH-PHASE !",
+                "  PT-RICH-SNAPSHOT PT-RICH-WAIT-SNAPSHOT PT-RICH-STATUS+",
+                "  PT-RICH-WAIT-RETAINED PT-RICH-STATUS+ 2 PT-RICH-PHASE !",
+                "  1 1 1 0 0 0 0 0 0 PT-RICH-SESSION",
+                "    PT-OWNER-OPEN PT-RICH-STATUS+",
+                "  PT-RICH-WAIT-COMPLETION PT-RICH-STATUS+",
+                "  PT-COMPLETE-RET PT-REQUEST-OWNER-OPEN 1",
+                "    PT-RICH-CHECK-COMPLETION",
+                "  PT-RICH-REPLACE-START PT-RICH-WAIT-COMPLETION",
+                "    PT-RICH-STATUS+",
+                "  PT-COMPLETE-TX PT-REQUEST-PRESENT-COMMIT 2",
+                "    PT-RICH-CHECK-COMPLETION",
+                "  PT-RICH-REPLACE-REVEAL PT-RICH-WAIT-COMPLETION",
+                "    PT-RICH-STATUS+",
+                "  PT-COMPLETE-TX PT-REQUEST-PRESENT-COMMIT 3",
+                "    PT-RICH-CHECK-COMPLETION 3 PT-RICH-PHASE !",
+                "  PT-RICH-CELL-DELTA PT-RICH-WAIT-COMPLETION",
+                "    PT-RICH-STATUS+",
+                "  PT-COMPLETE-TX PT-REQUEST-TX-COMMIT 4",
+                "    PT-RICH-CHECK-COMPLETION",
+                "  PT-RICH-SEND-DROP PT-RICH-STATUS+",
+                "  PT-RICH-WAIT-COMPLETION PT-RICH-STATUS+",
+                "  PT-COMPLETE-TX PT-REQUEST-OWNER-DROP 5",
+                "    PT-RICH-CHECK-COMPLETION 4 PT-RICH-PHASE !",
+                "  0 PT-RICH-SESSION PT-CLOSE PT-RICH-STATUS+",
+                "  PT-RICH-WAIT-ANSI PT-RICH-STATUS+",
+                "  PT-RICH-REPORT 5 PT-RICH-PHASE ! ;",
+                "PT-RICH-RUN BYE",
+            ]
+        )
+        payload = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+        terminal_cursor: int | None = None
+        begin_marker = b"PTRICH!"
+        terminal_views = []
+        core = PresentationTerminalCore(
+            TerminalConfig(
+                max_payload=256,
+                max_transaction_bytes=512,
+                terminal_receive_credit=4_096,
+                max_cells=4,
+                max_feed_bytes=4_096,
+                max_cols=2,
+                max_rows=2,
+                cols=2,
+                rows=2,
+            ),
+            attachment_epoch=1,
+            retained_policy=_core_retained_policy(),
+            session_id_factory=lambda: 0x0123456789ABCDEF,
+        )
+
+        def pump_terminal() -> None:
+            nonlocal terminal_cursor
+            current = bytes(uart)
+            if terminal_cursor is None:
+                marker_at = current.find(begin_marker)
+                if marker_at < 0:
+                    return
+                terminal_cursor = marker_at + len(begin_marker)
+            while terminal_cursor < len(current):
+                end = min(terminal_cursor + 4_096, len(current))
+                result = core.feed_machine(current[terminal_cursor:end])
+                terminal_cursor = end
+                terminal_views.extend(result.views)
+                for outbound in result.outbound:
+                    system.uart.inject_input(outbound.payload)
+                    if outbound.result_transaction_id is not None:
+                        core.settle_result_delivery(outbound.result_transaction_id)
+                    if outbound.lifecycle_result is not None:
+                        core.settle_lifecycle_result_delivery(
+                            outbound.lifecycle_result
+                        )
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            pump_terminal()
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data and position < len(payload):
+                chunk = _next_line_chunk(payload, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+            batch_limit = 10_000 if terminal_cursor is not None else RUN_BATCH_STEPS
+            executed = system.run_batch(
+                min(batch_limit, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += executed if executed else batch_limit
+        pump_terminal()
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        phase_match = re.search(rb"PTRICH!([0-9]+) ", raw)
+        phase = (
+            system.cpu.mem_read64(int(phase_match.group(1)))
+            if phase_match is not None
+            else -1
+        )
+        self.assertEqual(position, len(payload), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "retained writer source test exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog "
+            f"(core={core.state.value}, revision={core.presentation_revision}, "
+            f"views={len(terminal_views)}, phase={phase}, "
+            f"tail={raw[-160:].hex()})",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "nested definition",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        self.assertIn(b"PTREPORT 0 0 0 ", raw)
+        self.assertEqual(core.state, TerminalState.ANSI)
+        self.assertGreaterEqual(len(terminal_views), 3)

@@ -64,13 +64,21 @@ The module owns:
 * replace-all snapshot transmission;
 * normalized key, text, pointer, focus, and resize event decoding;
 * explicitly requested RETAINED-1 discovery, exact CAPS/FORMATS validation,
-  and lifecycle-bounded access to the accepted records; and
+  and lifecycle-bounded access to the accepted records;
+* the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
+  completion gate;
+* core OWNER_OPEN/OWNER_DROP lifecycle publication and exact RET_RESULT
+  reconciliation; and
+* PRESENT construction for CELL_NONE/DELTA/REPLACE plus fixed retained region
+  DEFINE/REPLACE/DROP operations;
 * close, hard failure, soft cache reset, and fallback.
 
-It does not own application focus, Desk regions, widgets, retained semantic
-objects, retained PRESENT transaction construction, or the Akashic front/back
-cell buffers. In particular, a successful discovery does not imply that this
-module can yet publish a retained scene.
+It does not own consumer focus, host regions, widgets, retained semantic
+objects, owner/item allocation policy, quota derivation, replay planning, or
+the Akashic front/back cell buffers. The core retained writers accept bounded
+wire-neutral intent from a single internal rich-terminal engine; they are not
+an independently discoverable scene or mutation API. Object, resource, and
+series families remain outside the currently implemented writer subset.
 
 ## 5. Caller-owned capacity
 
@@ -95,6 +103,7 @@ The first implementation preserves these public stack contracts:
 ```forth
 PT-SESSION-SIZE     ( -- bytes )
 PT-EVENT-SIZE       ( -- bytes )
+PT-COMPLETION-SIZE  ( -- bytes )
 PT-INIT             ( rx-a rx-u tx-a tx-u event-a event-u session -- status )
 PT-START            ( session -- status )
 PT-SERVICE          ( session -- status )
@@ -110,6 +119,24 @@ PT-RETAINED-STATE@     ( session -- state )
 PT-RETAINED-AVAILABLE? ( session -- flag )
 PT-RETAINED-CAPS@      ( session -- a u )
 PT-RETAINED-FORMATS@   ( session -- a u )
+
+PT-COMPLETION-POLL  ( completion session -- status has-completion )
+
+PT-OWNER-OPEN       ( owner generation region-q resource-q object-q series-q
+                      resource-byte-q utf8-byte-q sample-slot-q session
+                      -- status )
+PT-OWNER-DROP       ( owner generation session -- status )
+
+PT-PRESENT-BEGIN    ( cols rows cell-spans cells retained-ops
+                      retained-frame-bytes cell-mode retained-mode session
+                      -- status )
+PT-PRESENT-OP       ( type payload-a payload-u session -- status )
+PT-REGION-DEFINE    ( owner generation region x y cols rows z flags session
+                      -- status )
+PT-REGION-REPLACE   ( owner generation region x y cols rows z flags session
+                      -- status )
+PT-REGION-DROP      ( owner generation region session -- status )
+PT-PRESENT-COMMIT   ( disposition session -- status )
 
 PT-TX-BEGIN         ( cols rows span-count cell-count session -- status )
 PT-SNAPSHOT-BEGIN   ( cols rows span-count cell-count session -- status )
@@ -175,31 +202,87 @@ Only a successful `TX_RESULT` for a snapshot commit clears it. Normal delta
 begin while it is true returns `PT-S-INVALID` without output.
 
 After positive retained discovery, ordinary CELL delta transactions remain
-available, but legacy replace-all snapshots are forbidden by RETAINED-1.
+available through the existing public words and share PT's one transaction-ID,
+result, and revision domain with PRESENT. Legacy replace-all snapshots are
+forbidden by RETAINED-1.
 `PT-SNAPSHOT-BEGIN` therefore returns `PT-S-UNSUPPORTED` while the discovery
-state is AVAILABLE. A presentation consumer must not opt in unless it owns the
-separate PRESENT builder needed for later resize/replacement work. The generic
-CELL adapter does not opt in. A soft reset returns discovery to pending and
-allows the mandatory revision-zero-to-one CELL recovery snapshot before the
-module rediscovers retained support.
+state is AVAILABLE. A rich-terminal consumer must not opt in unless it owns the
+bounded semantic/replay state needed to drive PT's PRESENT writer through later
+resize and replacement. The generic CELL adapter does not opt in. A soft reset
+returns discovery to pending and allows the mandatory revision-zero-to-one CELL
+recovery snapshot before the module rediscovers retained support.
 
 If resize arrives after positive discovery, the module records the new
-geometry and replacement-needed state but preserves the global presentation
+geometry and layout-required state but preserves the global presentation
 revision. It does not fabricate the legacy revision-zero snapshot sequence;
-the owning PRESENT consumer must complete the retained replacement or close.
+the owning rich-terminal engine first publishes canonical PRESENT CELL_REPLACE
+and then completes the retained layout/reveal or closes.
+An exact positive discovery reply followed by RESIZE before its covering CREDIT
+uses the same PRESENT capacity preflight and preserves the revision; once the
+covering CREDIT arrives, the still-empty retained plane starts its required
+initial replacement at the accepted geometry. A later RESIZE supersedes an
+unstarted older replacement and is admitted only after the same exact checks.
 
 Local commit acceptance leaves exactly one transaction awaiting `TX_RESULT`.
-Both begin words return `PT-S-WOULD-BLOCK` until a successful result is
-processed by `PT-SERVICE`. A failed result changes the session to lost before
-another event can be returned; this module requires a hard attachment reset
-and drain before ANSI can be restored.
+All transaction-begin and lifecycle words return `PT-S-WOULD-BLOCK` until the
+outstanding result is processed by `PT-SERVICE`; retained completions must also
+be polled before another writer is admitted. Except for the narrow retained
+exceptions below, a failed result changes the session to lost before another
+event can be returned; this module requires a hard attachment reset and drain
+before ANSI can be restored.
+
+The retained APIs make the narrow RETAINED-1 result exceptions explicit rather
+than weakening that CELL rule. `PT-COMPLETION-POLL` returns one fixed 80-byte
+native descriptor containing completion kind, completed request type, status,
+detail, transaction ID, revision, owner tuple, item, and accepted bytes.
+OWNER_OPEN always completes through RET_RESULT. OWNER_DROP and PRESENT complete
+through TX_RESULT. Once retained discovery is positive, successful legacy CELL
+deltas also produce a completion so the upper engine observes their place in
+the shared transaction/revision domain; CELL-only callers retain the original
+automatic settlement behavior. PT accepts a nonzero PRESENT result without
+loss only when the transaction was retained-only, and accepts ordinary
+OWNER_DROP status 2 or 3 without loss; the consumer must retain authoritative
+desired state and poll the completion before PT admits another writer. Mixed
+or CELL-bearing PRESENT, legacy CELL, and SNAPSHOT rejections retain the base
+fail-closed behavior.
+
+Owner lifecycle publication is temporarily backpressured while an accepted
+resize still requires its first PRESENT CELL_REPLACE. It returns
+`PT-S-WOULD-BLOCK`, not `PT-S-UNSUPPORTED`, because retained support remains
+negotiated. A crossed soft reset similarly holds result completion and its
+new-epoch acknowledgement in order; cumulative CREDIT and caller-requested
+close wait until that bounded settlement is complete.
+
+`PT-PRESENT-BEGIN` derives transaction ID, base revision, geometry generation,
+and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
+40-byte headers plus payloads for the declared retained operations. PT
+preflights the complete BEGIN-through-COMMIT byte and sequence budget before it
+emits BEGIN, then checks every operation against the declared count and byte
+sum. The current generic `PT-PRESENT-OP` admission recognizes only the fixed
+REGION_DEFINE/REPLACE/DROP payloads implemented by this module; the typed region
+words keep their raw payload assembly private.
+
+The mode constants are `PT-CELL-NONE`, `PT-CELL-DELTA`,
+`PT-CELL-REPLACE`, `PT-RET-NONE`, `PT-RET-DELTA`,
+`PT-RET-REPLACE-START`, `PT-RET-REPLACE-CONTINUE`,
+`PT-RET-LAYOUT-START`, and `PT-RET-LAYOUT-CONTINUE`. Commit disposition is
+`PT-COMMIT` or `PT-COMMIT-AND-REVEAL`. PT tracks only the coarse wire rebuild
+state needed to reject an impossible START/CONTINUE/DELTA sequence; semantic
+model and replay authority remain in the upper rich-terminal engine.
+CELL_REPLACE is canonical full-row replacement both for the required resize
+boundary and for a caller-selected replace-all update while ACTIVE. RET_NONE,
+RET_DELTA, and either START mode require COMMIT. A final matching CONTINUE may
+use COMMIT_AND_REVEAL and may include CELL_REPLACE so both planes become visible
+at one logical boundary.
 
 ## 6. Akashic adapter
 
-Akashic retains its ANSI backend as the default. Its optional APT adapter binds
-only to a live module session and translates native cells field-by-field into
-CELL-1 spans. Akashic may load and call the module, but does not duplicate its
-wire parser or session state machine.
+Akashic retains its ANSI backend as the default. Its optional neutral
+rich-terminal engine binds only to a live module session, serializes semantic
+work above PT, and translates native cells field-by-field into CELL-1/PRESENT
+spans. Akashic may load and call the module, but the engine does not duplicate
+its wire parser, UART ownership, session state machine, transaction allocator,
+revision, credit, or result slot.
 
 The generic Akashic screen and ANSI backend never `REQUIRE` this module. The
 optional integration loader uses this explicit order:
@@ -231,11 +314,16 @@ The lightweight module tests prove:
 5. acknowledged close and externally drained hard reset restore ANSI
    ownership, while structural loss alone does not; and
 6. an Akashic adapter can send one real cell snapshot through the public API;
-   and
 7. a caller that explicitly opts in sends deterministic discovery only after
    its successful snapshot, and the covering-CREDIT-only answer leaves it on
-   CELL-1 without exposing partial capability records.
+   CELL-1 without exposing partial capability records;
+8. positive discovery can open one bounded owner, poll its exact RET_RESULT,
+   commit a hidden PRESENT containing a real fixed region, and poll the shared
+   TX_RESULT completion; and
+9. an ordinary legacy CELL delta after retained enablement interleaves in the
+   same transaction-ID and global revision domain.
 
-The current guest module conformance does not claim a positive retained scene:
-PRESENT construction, owner/resource brokerage, replay, and retained resize
-are separate consumers and remain outside this module boundary.
+The current guest module conformance claims only the core owner/region writer
+slice. Object, resource, series, full semantic replay, and end-to-end retained
+resize journeys remain upper-engine follow-on work and must not be advertised
+through this API until implemented and qualified.
