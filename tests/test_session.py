@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +27,9 @@ from presentation_terminal import (
     TerminalState,
     TerminalView,
 )
+from presentation_terminal.presentation_coordinator import CompositePresentationView
+from presentation_terminal.presentation_model import PresentationGeometry
+from presentation_terminal.retained_model import RetainedFeature, RetainedPolicy
 from session import (
     MachineSession,
     PresentationSessionConfig,
@@ -38,7 +43,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BIOS = ROOT / "bios.asm"
 
 
-def _presentation_config(*, ansi_history_bytes: int = 32) -> PresentationSessionConfig:
+def _presentation_config(
+    *,
+    ansi_history_bytes: int = 32,
+    retained_policy: RetainedPolicy | None = None,
+) -> PresentationSessionConfig:
     return PresentationSessionConfig(
         host_limits=HostPortLimits(
             egress=EgressWatermarks(8_192, 1_024, 16, 2),
@@ -63,6 +72,40 @@ def _presentation_config(*, ansi_history_bytes: int = 32) -> PresentationSession
         driver_limits=DriverLimits(4_096, 8),
         ansi_history_bytes=ansi_history_bytes,
         service_batches=2,
+        retained_policy=retained_policy,
+    )
+
+
+def _retained_policy(*, interval_us: int = 0) -> RetainedPolicy:
+    return RetainedPolicy(
+        features=(
+            RetainedFeature.CORE
+            if interval_us == 0
+            else RetainedFeature.CORE | RetainedFeature.CADENCE
+        ),
+        max_owner_records=1,
+        max_live_owners=1,
+        max_regions=1,
+        max_resources=0,
+        max_objects=0,
+        max_series=0,
+        max_operations_per_transaction=1,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_label_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=interval_us,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=256,
+        base_max_transaction_bytes=512,
     )
 
 
@@ -425,6 +468,199 @@ def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
         session._refresh_presentation_display_boundary()
         assert (session.snapshot().cols, session.snapshot().rows) == (4, 1)
         assert session.revision == before_sync + 1
+
+
+def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
+    policy = _retained_policy(interval_us=100)
+    product = _presentation_policy()
+    assert product.configuration(2, 2, retained_policy=policy).retained_policy is policy
+    assert "retained_policy" not in product.to_dict()
+
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        presentation=_presentation_config(retained_policy=policy),
+    ) as session:
+        driver = session.presentation_driver
+        assert driver is not None and driver.core.retained_configured
+        system.cpu.halted = True
+        session.run_batch_stats(1)  # Cross the initial host-geometry boundary.
+        system.cpu.halted = False
+        now = [1_000]
+        assert session._presentation_cadence is not None
+        session._presentation_cadence._monotonic_us = lambda: now[0]
+
+        cell_one = TerminalView(
+            attachment_epoch=driver.attachment_epoch,
+            session_id=7,
+            presentation_epoch=0,
+            revision=1,
+            cols=2,
+            rows=2,
+            cells=(
+                (Cell(ord("A"), 7, 0), Cell(ord("A"), 7, 0)),
+                (Cell(ord("A"), 7, 0), Cell(ord("A"), 7, 0)),
+            ),
+            dirty_spans=(),
+            cursor=Cursor(0, 0, True),
+        )
+        geometry = PresentationGeometry(2, 2)
+        first = CompositePresentationView(0, 1, geometry, cell_one, None)
+        core = driver.core
+        core._retained_enabled = True
+        core._coordinator = SimpleNamespace(view=first)
+        core._clock = SimpleNamespace(revision=1)
+        core._state = TerminalState.ACTIVE
+
+        session._receive_presentation_view(cell_one)
+        session._receive_presentation_view(first)
+        assert session.presentation_logical_view is first
+        assert session.presentation_presented_view is None
+        assert session._service_presentation_cadence()
+        assert session.presentation_presented_view is first
+        assert session.presentation_presented_revision == 1
+        assert session.snapshot().lines() == ["AA", "AA"]
+
+        cell_two = replace(
+            cell_one,
+            revision=2,
+            cells=(
+                (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
+                (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
+            ),
+        )
+        second = CompositePresentationView(0, 2, geometry, cell_two, None)
+        core._coordinator.view = second
+        core._clock.revision = 2
+        session._receive_presentation_view(second)
+        now[0] = 1_050
+        assert not session._service_presentation_cadence()
+        assert session.presentation_logical_view is second
+        assert session.presentation_presented_view is first
+        assert session.snapshot().lines() == ["AA", "AA"]
+        assert session.presentation_work_pending
+        assert session.send_text("held") is DriverStatus.BACKPRESSURED
+
+        # A tombstone-only lifecycle publication may advance the composite
+        # while structurally sharing every plane.  Cadence follows the global
+        # revision rather than CELL object identity.
+        latest = replace(second, revision=3)
+        core._coordinator.view = latest
+        core._clock.revision = 3
+        session._receive_presentation_view(latest)
+        cadence_reads = iter((1_050, 1_100))
+        session._presentation_cadence._monotonic_us = lambda: next(cadence_reads)
+        guest_batches = []
+
+        def forbidden_guest_batch(count):
+            guest_batches.append(count)
+            raise AssertionError("cadence-only wait ran a guest batch")
+
+        system.run_batch_stats = forbidden_guest_batch
+        system.cpu.halted = True
+        halted = session.run(max_steps=1, wall_timeout_s=0.1)
+
+        assert halted.reason == "halted"
+        assert halted.steps == 0 and halted.batches == 0
+        assert guest_batches == []
+        assert session.presentation_presented_view is latest
+        assert session.presentation_presented_revision == 3
+        assert session.snapshot().lines() == ["BB", "BB"]
+
+        cell_three = replace(
+            cell_two,
+            revision=4,
+            cells=(
+                (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
+                (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
+            ),
+        )
+        idle_view = CompositePresentationView(0, 4, geometry, cell_three, None)
+        core._coordinator.view = idle_view
+        core._clock.revision = 4
+        session._receive_presentation_view(idle_view)
+        cadence_reads = iter((1_150, 1_200))
+        session._presentation_cadence._monotonic_us = lambda: next(cadence_reads)
+        system.cpu.halted = False
+        system.cpu.idle = True
+        idle = session.run(max_steps=1, wall_timeout_s=0.1)
+
+        assert idle.reason == "idle"
+        assert idle.steps == 0 and idle.batches == 0
+        assert guest_batches == []
+        assert session.presentation_presented_view is idle_view
+        assert session.snapshot().lines() == ["CC", "CC"]
+
+
+def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
+    policy = _retained_policy()
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        presentation=_presentation_config(retained_policy=policy),
+    ) as session:
+        driver = session.presentation_driver
+        assert driver is not None
+        cell = TerminalView(
+            attachment_epoch=driver.attachment_epoch,
+            session_id=9,
+            presentation_epoch=0,
+            revision=1,
+            cols=2,
+            rows=2,
+            cells=(
+                (Cell(ord("R"), 7, 0), Cell(ord("R"), 7, 0)),
+                (Cell(ord("R"), 7, 0), Cell(ord("R"), 7, 0)),
+            ),
+            dirty_spans=(),
+            cursor=Cursor(0, 0, True),
+        )
+        rich = CompositePresentationView(
+            0,
+            1,
+            PresentationGeometry(2, 2),
+            cell,
+            None,
+        )
+        core = driver.core
+        core._retained_enabled = True
+        core._coordinator = SimpleNamespace(view=rich)
+        core._clock = SimpleNamespace(revision=1)
+        session._receive_presentation_view(cell)
+        session._receive_presentation_view(rich)
+        assert session._service_presentation_cadence()
+
+        core._retained_enabled = False
+        core._coordinator = None
+        assert not session._service_presentation_cadence()
+        assert session.presentation_presented_view is rich
+        assert session.snapshot().lines() == ["RR", "RR"]
+
+        replacement = replace(
+            cell,
+            presentation_epoch=1,
+            revision=1,
+            cells=(
+                (Cell(ord("N"), 7, 0), Cell(ord("N"), 7, 0)),
+                (Cell(ord("N"), 7, 0), Cell(ord("N"), 7, 0)),
+            ),
+        )
+        session._receive_presentation_view(replacement)
+        assert session.presentation_logical_view is None
+        assert session.presentation_presented_view is None
+        assert session.snapshot().lines() == ["NN", "NN"]
 
 
 def test_machine_session_can_advance_timer_while_guest_is_idle():

@@ -25,6 +25,10 @@ from presentation_terminal import (
     TerminalView,
 )
 from presentation_terminal.apt1 import CONTROL_RESERVE_BYTES, snapshot_wire_bytes
+from presentation_terminal.presentation_cadence import PresentationCadenceScheduler
+from presentation_terminal.presentation_coordinator import CompositePresentationView
+from presentation_terminal.presentation_model import PresentationStateError
+from presentation_terminal.retained_model import RetainedPolicy
 from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
@@ -38,6 +42,7 @@ _ACCEL_HOOKS = (
     ("w_vram_copy", 3, 131),
     ("w_blit_string", 4, 175),
 )
+_IDLE_OWNER_YIELD_SECONDS = 0.001
 
 
 @dataclass(frozen=True)
@@ -202,6 +207,7 @@ class PresentationSessionConfig:
     driver_limits: DriverLimits
     ansi_history_bytes: int
     service_batches: int = 1
+    retained_policy: RetainedPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.host_limits, HostPortLimits):
@@ -210,6 +216,10 @@ class PresentationSessionConfig:
             raise TypeError("terminal_config must be TerminalConfig")
         if not isinstance(self.driver_limits, DriverLimits):
             raise TypeError("driver_limits must be DriverLimits")
+        if self.retained_policy is not None and not isinstance(
+            self.retained_policy, RetainedPolicy
+        ):
+            raise TypeError("retained_policy must be RetainedPolicy or None")
         for name, value, minimum in (
             ("ansi_history_bytes", self.ansi_history_bytes, 0),
             ("service_batches", self.service_batches, 1),
@@ -306,7 +316,13 @@ class PresentationSessionPolicy:
     def retained_publication_bytes(self) -> int:
         return self.maximum_transaction_bytes + CONTROL_RESERVE_BYTES
 
-    def configuration(self, cols: int, rows: int) -> PresentationSessionConfig:
+    def configuration(
+        self,
+        cols: int,
+        rows: int,
+        *,
+        retained_policy: RetainedPolicy | None = None,
+    ) -> PresentationSessionConfig:
         """Bind selected geometry without weakening the declared maxima."""
         selected: dict[str, int] = {}
         for name, value, maximum in (
@@ -358,6 +374,7 @@ class PresentationSessionPolicy:
             ),
             ansi_history_bytes=self.ansi_history_bytes,
             service_batches=self.service_batches,
+            retained_policy=retained_policy,
         )
 
     def to_dict(self) -> dict[str, int]:
@@ -474,6 +491,15 @@ class MachineSession:
         self._presentation_driver: PresentationTerminalDriver | None = None
         self._presentation_view: TerminalView | None = None
         self._presentation_view_selected = False
+        self._presentation_logical_composite: CompositePresentationView | None = None
+        self._presentation_presented_composite: CompositePresentationView | None = None
+        self._presentation_cadence = (
+            None
+            if presentation is None or presentation.retained_policy is None
+            else PresentationCadenceScheduler(policy=presentation.retained_policy)
+        )
+        self._presentation_cadence_scope: tuple[int, int, int] | None = None
+        self._last_cadence_service_progress = False
         self._presentation_failure_reason: str | None = None
         self._presentation_lost = False
         self._last_batch_presentation_progress = False
@@ -571,6 +597,25 @@ class MachineSession:
         return self._presentation_driver
 
     @property
+    def presentation_logical_view(self) -> CompositePresentationView | None:
+        """Newest committed retained composite, whether or not yet displayed."""
+
+        return self._presentation_logical_composite
+
+    @property
+    def presentation_presented_view(self) -> CompositePresentationView | None:
+        """Retained composite most recently promoted at physical cadence."""
+
+        return self._presentation_presented_composite
+
+    @property
+    def presentation_presented_revision(self) -> int | None:
+        """Global revision physically available to a retained-view observer."""
+
+        view = self._presentation_presented_composite
+        return None if view is None else view.revision
+
+    @property
     def presentation_state(self) -> TerminalState | None:
         if self._presentation_failure_reason is not None:
             return TerminalState.FAILED
@@ -655,6 +700,10 @@ class MachineSession:
             if driver is not None:
                 driver.close()
                 self._presentation_driver = None
+            self._presentation_logical_composite = None
+            self._presentation_presented_composite = None
+            self._presentation_cadence_scope = None
+            self._presentation_cadence = None
             self.system.storage.save_image()
         finally:
             self.system.uart.on_tx = self._old_on_tx
@@ -671,6 +720,17 @@ class MachineSession:
             if reattach:
                 self._close_presentation_terminal()
                 self._presentation_view = None
+                self._presentation_logical_composite = None
+                self._presentation_presented_composite = None
+                self._presentation_cadence_scope = None
+                config = self._presentation_config
+                self._presentation_cadence = (
+                    None
+                    if config is None or config.retained_policy is None
+                    else PresentationCadenceScheduler(
+                        policy=config.retained_policy
+                    )
+                )
                 if self._presentation_view_selected:
                     self.revision += 1
                 self._presentation_view_selected = False
@@ -695,6 +755,18 @@ class MachineSession:
             self.output_byte_callbacks = 0
             self._presentation_view = None
             self._presentation_view_selected = False
+            self._presentation_logical_composite = None
+            self._presentation_presented_composite = None
+            self._presentation_cadence_scope = None
+            self._presentation_cadence = (
+                None
+                if self._presentation_config is None
+                or self._presentation_config.retained_policy is None
+                else PresentationCadenceScheduler(
+                    policy=self._presentation_config.retained_policy
+                )
+            )
+            self._last_cadence_service_progress = False
             self._presentation_failure_reason = None
             self._presentation_lost = False
             self._last_batch_presentation_progress = False
@@ -737,6 +809,7 @@ class MachineSession:
             config.driver_limits,
             ansi_sink=self._receive_presentation_ansi,
             view_sink=self._receive_presentation_view,
+            retained_policy=config.retained_policy,
         )
         self._presentation_failure_reason = None
         self._presentation_lost = False
@@ -807,12 +880,133 @@ class MachineSession:
     def _receive_presentation_ansi(self, data: bytes) -> None:
         self._receive_batch(data)
 
-    def _receive_presentation_view(self, view: TerminalView) -> None:
+    def _receive_presentation_view(
+        self,
+        view: TerminalView | CompositePresentationView,
+    ) -> None:
+        if isinstance(view, CompositePresentationView):
+            self._submit_composite_presentation(view)
+            return
+        if not isinstance(view, TerminalView):
+            raise TypeError("presentation view has an unsupported type")
+        self._align_cadence_to_cell_view(view)
         if (self.terminal.cols, self.terminal.rows) != (view.cols, view.rows):
             self.terminal.resize(view.cols, view.rows)
         self._presentation_view = view
         self._presentation_view_selected = True
+        self._presentation_logical_composite = None
+        self._presentation_presented_composite = None
         self.revision += 1
+
+    def _align_cadence_to_cell_view(self, view: TerminalView) -> None:
+        """Track session/epoch replacement before retained discovery repeats."""
+
+        cadence = self._presentation_cadence
+        if cadence is None:
+            return
+        target = (
+            view.attachment_epoch,
+            view.session_id,
+            view.presentation_epoch,
+        )
+        current = self._presentation_cadence_scope
+        if current is None or target[:2] != current[:2]:
+            if view.presentation_epoch != 0:
+                raise PresentationStateError(
+                    "a replacement presentation session must begin at epoch zero"
+                )
+            cadence.replace_session(view.attachment_epoch, view.session_id)
+        elif view.presentation_epoch == current[2]:
+            return
+        elif view.presentation_epoch == current[2] + 1:
+            cadence.reset_presentation_epoch(view.presentation_epoch)
+        else:
+            raise PresentationStateError(
+                "CELL view skipped or regressed the presentation epoch"
+            )
+        self._presentation_cadence_scope = target
+
+    def _submit_composite_presentation(
+        self,
+        view: CompositePresentationView,
+    ) -> None:
+        """Submit one logical composite without making it physically visible."""
+
+        cadence = self._presentation_cadence
+        if cadence is None:
+            raise PresentationStateError(
+                "a composite view requires a configured retained policy"
+            )
+        cell = view.cell
+        if cell is None:
+            raise PresentationStateError(
+                "a MachineSession composite requires the mandatory CELL plane"
+            )
+        target = (
+            cell.attachment_epoch,
+            cell.session_id,
+            view.presentation_epoch,
+        )
+        current = self._presentation_cadence_scope
+        if current is None or target[:2] != current[:2]:
+            cadence.replace_session(
+                cell.attachment_epoch,
+                cell.session_id,
+                initial_view=view,
+            )
+        elif view.presentation_epoch == current[2]:
+            cadence.submit(view)
+        elif view.presentation_epoch == current[2] + 1:
+            cadence.reset_presentation_epoch(
+                view.presentation_epoch,
+                initial_view=view,
+            )
+        else:
+            raise PresentationStateError(
+                "composite view skipped or regressed the presentation epoch"
+            )
+        self._presentation_cadence_scope = target
+        self._presentation_logical_composite = view
+
+    def _service_presentation_cadence(self) -> bool:
+        """Promote at most one newest logical view at an owner pump boundary."""
+
+        cadence = self._presentation_cadence
+        driver = self._presentation_driver
+        if cadence is None or driver is None or not driver.core.retained_enabled:
+            return False
+        logical = driver.core.presentation_view
+        if isinstance(logical, CompositePresentationView) and (
+            logical != self._presentation_logical_composite
+        ):
+            self._submit_composite_presentation(logical)
+        presented = cadence.service()
+        if presented is None:
+            return False
+        cell = presented.cell
+        if cell is None:
+            raise PresentationStateError(
+                "cadence promoted a composite without a CELL plane"
+            )
+        if (self.terminal.cols, self.terminal.rows) != (cell.cols, cell.rows):
+            self.terminal.resize(cell.cols, cell.rows)
+        self._presentation_presented_composite = presented
+        self._presentation_view = cell
+        self._presentation_view_selected = True
+        self.revision += 1
+        return True
+
+    def _presentation_input_revision_ready(self) -> bool:
+        """Require normalized input to name a revision already shown."""
+
+        cadence = self._presentation_cadence
+        driver = self._presentation_driver
+        if cadence is None or driver is None or not driver.core.retained_enabled:
+            return True
+        return (
+            cadence.pending_revision is None
+            and cadence.presented_revision == driver.core.presentation_revision
+        )
 
     def clear_output(self):
         self.raw_output.clear()
@@ -836,9 +1030,11 @@ class MachineSession:
             self._latch_presentation_failure(reason, lost=True)
         if self._presentation_failure_reason is not None:
             raise TerminalSessionError(self._presentation_failure_reason)
+        self._last_cadence_service_progress = False
         result = driver.service(max_batches=config.service_batches)
         self._raise_presentation_failure(result)
         self._sync_presentation_geometry()
+        self._last_cadence_service_progress = self._service_presentation_cadence()
         self._refresh_presentation_display_boundary()
         return result
 
@@ -849,10 +1045,14 @@ class MachineSession:
         if count <= 0:
             raise ValueError("steps must be positive")
         before = self.service_presentation_terminal()
+        cadence_before = self._last_cadence_service_progress
         stats = self.system.run_batch_stats(count)
         after = self.service_presentation_terminal()
+        cadence_after = self._last_cadence_service_progress
         self._last_batch_presentation_progress = bool(
             stats.external_events_applied
+            or cadence_before
+            or cadence_after
             or (
                 before is not None
                 and before.status is DriverStatus.PROGRESS
@@ -904,7 +1104,9 @@ class MachineSession:
             self._presentation_failure_reason = str(reason)
         self._presentation_lost = self._presentation_lost or lost
 
-    def _presentation_has_pending_work(self) -> bool:
+    def _presentation_transport_has_pending_work(self) -> bool:
+        """Whether a driver/machine boundary can advance protocol transport."""
+
         driver = self._presentation_driver
         if driver is None:
             return False
@@ -921,6 +1123,24 @@ class MachineSession:
             or host.pending_geometry_events
         )
 
+    def _presentation_cadence_has_pending_work(self) -> bool:
+        """Whether only host time can make a committed composite presentable."""
+
+        driver = self._presentation_driver
+        cadence = self._presentation_cadence
+        return bool(
+            driver is not None
+            and cadence is not None
+            and driver.core.retained_enabled
+            and cadence.pending_revision is not None
+        )
+
+    def _presentation_has_pending_work(self) -> bool:
+        return bool(
+            self._presentation_transport_has_pending_work()
+            or self._presentation_cadence_has_pending_work()
+        )
+
     def _refresh_presentation_display_boundary(self) -> None:
         driver = self._presentation_driver
         if driver is None or not self._presentation_view_selected:
@@ -933,6 +1153,8 @@ class MachineSession:
             and host.pending_geometry_events == 0
         ):
             self._presentation_view_selected = False
+            self._presentation_logical_composite = None
+            self._presentation_presented_composite = None
             self.revision += 1
 
     def _sync_presentation_geometry(self) -> None:
@@ -967,6 +1189,7 @@ class MachineSession:
         if idle_tick_cycles <= 0:
             raise ValueError("idle_tick_cycles must be positive")
         start = time.perf_counter()
+        deadline = start + wall_timeout_s
         output_start = self._raw_output_total
         steps = 0
         batches = 0
@@ -979,6 +1202,20 @@ class MachineSession:
             haystack = self.raw_text() if text_scope == "raw" else self.screen_text()
             return until_text in haystack
 
+        def advance_idle_devices() -> None:
+            self.system.bus.tick(idle_tick_cycles)
+            if self.system.timer.irq_pending:
+                for cpu in self.system.cores:
+                    if cpu.idle and cpu.flag_i:
+                        cpu.idle = False
+                        break
+            for cpu in self.system.cores:
+                if cpu.idle and cpu.irq_ipi and cpu.flag_i:
+                    cpu.idle = False
+            core0 = self.system.cores[0]
+            if core0.idle and self.system._any_nic_rx():
+                core0.idle = False
+
         while steps < max_steps:
             if has_match():
                 matched = True
@@ -987,37 +1224,40 @@ class MachineSession:
             if self.presentation_failure is not None:
                 reason = "terminal_failure"
                 break
-            if (
-                self.system.all_halted
-                and not self._presentation_has_pending_work()
-            ):
+            transport_pending = self._presentation_transport_has_pending_work()
+            cadence_pending = self._presentation_cadence_has_pending_work()
+            if self.system.all_halted and not transport_pending and not cadence_pending:
                 reason = "halted"
                 break
-            if time.perf_counter() - start >= wall_timeout_s:
+            if time.perf_counter() >= deadline:
                 reason = "wall_timeout"
                 break
+            owner_quiescent = self.system.all_halted or (
+                self.system.all_idle_or_halted
+                and not self.system.uart.has_rx_data
+            )
+            if owner_quiescent and not transport_pending and cadence_pending:
+                if self._service_presentation_cadence():
+                    continue
+                if advance_idle and not self.system.all_halted:
+                    advance_idle_devices()
+                    if not self.system.all_idle_or_halted:
+                        continue
+                remaining = deadline - time.perf_counter()
+                if remaining > 0:
+                    time.sleep(min(_IDLE_OWNER_YIELD_SECONDS, remaining))
+                continue
             if (
                 self.system.all_idle_or_halted
                 and not self.system.uart.has_rx_data
-                and not self._presentation_has_pending_work()
+                and not transport_pending
             ):
                 if not advance_idle:
                     reason = "idle"
                     break
-                self.system.bus.tick(idle_tick_cycles)
-                if self.system.timer.irq_pending:
-                    for cpu in self.system.cores:
-                        if cpu.idle and cpu.flag_i:
-                            cpu.idle = False
-                            break
-                for cpu in self.system.cores:
-                    if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                        cpu.idle = False
-                core0 = self.system.cores[0]
-                if core0.idle and self.system._any_nic_rx():
-                    core0.idle = False
+                advance_idle_devices()
                 if self.system.all_idle_or_halted:
-                    time.sleep(0.001)
+                    time.sleep(_IDLE_OWNER_YIELD_SECONDS)
                 continue
             count = min(self.batch_steps, max_steps - steps)
             if self._presentation_driver is None:
@@ -1034,9 +1274,20 @@ class MachineSession:
                 presentation_progress = self._last_batch_presentation_progress
                 stop_reason = stats.system_stop_reason
             batches += 1
+            cadence_wait_boundary = (
+                self._presentation_cadence_has_pending_work()
+                and (
+                    self.system.all_halted
+                    or (
+                        self.system.all_idle_or_halted
+                        and not self.system.uart.has_rx_data
+                    )
+                )
+            )
             if executed <= 0 and not (
                 presentation_progress
-                or self._presentation_has_pending_work()
+                or self._presentation_transport_has_pending_work()
+                or cadence_wait_boundary
                 or stop_reason == "all_idle"
             ):
                 reason = "stalled"
@@ -1096,6 +1347,8 @@ class MachineSession:
             return None
         if driver.core.state in {TerminalState.ANSI, TerminalState.PROBING}:
             return driver.send_legacy_input(payload)
+        if not self._presentation_input_revision_ready():
+            return DriverStatus.BACKPRESSURED
         return driver.send_text(payload)
 
     @staticmethod
@@ -1170,6 +1423,8 @@ class MachineSession:
                 return None
             return driver.send_legacy_input(payload)
         symbol, modifiers = self._presentation_key(key)
+        if not self._presentation_input_revision_ready():
+            return DriverStatus.BACKPRESSURED
         return driver.send_key(symbol, modifiers=modifiers)
 
     def send_pointer(
@@ -1188,6 +1443,8 @@ class MachineSession:
         driver = self._presentation_driver
         if driver is None:
             return DriverStatus.INVALID
+        if not self._presentation_input_revision_ready():
+            return DriverStatus.BACKPRESSURED
         return driver.send_pointer(
             x,
             y,
@@ -1204,6 +1461,8 @@ class MachineSession:
         driver = self._presentation_driver
         if driver is None:
             return DriverStatus.INVALID
+        if not self._presentation_input_revision_ready():
+            return DriverStatus.BACKPRESSURED
         return driver.send_focus(focused)
 
     def resize(self, cols: int, rows: int) -> DriverStatus | None:
