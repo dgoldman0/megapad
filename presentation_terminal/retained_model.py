@@ -328,6 +328,14 @@ class RetainedPolicy:
         if not feature_present and value != 0:
             raise ValueError(f"{name} must be zero when its feature is absent")
 
+    def to_dict(self) -> dict[str, int]:
+        """Return the complete scalar policy for an explicit launcher handoff."""
+
+        return {
+            name: int(getattr(self, name))
+            for name in self.__dataclass_fields__
+        }
+
     def validate_geometry(self, geometry: PresentationGeometry) -> int:
         """Return exact CELL_REPLACE transaction bytes for ``geometry``."""
 

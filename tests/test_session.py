@@ -922,6 +922,78 @@ def test_session_server_opt_in_uses_exact_presentation_policy(monkeypatch):
     assert config == policy.configuration(100, 32)
 
 
+def test_session_server_carries_the_exact_retained_policy(monkeypatch):
+    policy = _presentation_policy()
+    retained = RetainedPolicy(
+        features=RetainedFeature.CORE | RetainedFeature.CADENCE,
+        max_owner_records=1,
+        max_live_owners=1,
+        max_regions=1,
+        max_resources=0,
+        max_objects=0,
+        max_series=0,
+        max_operations_per_transaction=1,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=policy.maximum_transaction_bytes,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_label_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=500_000,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=3_212,
+        terminal_to_client_max_payload=3_212,
+        base_max_transaction_bytes=policy.maximum_transaction_bytes,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "session_server.py",
+            "--cols",
+            "100",
+            "--rows",
+            "32",
+            "--presentation-terminal-policy",
+            json.dumps(policy.to_dict()),
+            "--retained-terminal-policy",
+            json.dumps(retained.to_dict()),
+        ],
+    )
+    with (
+        patch("session_server.MachineSession.from_bios") as from_bios,
+        patch("session_server.SharedMachine"),
+        patch("session_server.SessionServer"),
+        patch("session_server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+
+    config = from_bios.call_args.kwargs["presentation"]
+    assert config == policy.configuration(100, 32, retained_policy=retained)
+    assert config.retained_policy is not None
+    assert config.retained_policy.to_dict() == retained.to_dict()
+
+
+def test_session_server_rejects_retained_policy_without_base_attachment(monkeypatch):
+    retained = _retained_policy()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "session_server.py",
+            "--retained-terminal-policy",
+            json.dumps(retained.to_dict()),
+        ],
+    )
+    with patch("session_server.MachineSession.from_bios") as from_bios:
+        with pytest.raises(SystemExit, match="2"):
+            session_server_main()
+    from_bios.assert_not_called()
+
+
 def test_machine_session_warm_reset_discards_interrupted_uart_batch():
     with MachineSession.from_bios(BIOS, cols=80, rows=30) as session:
         session.boot()

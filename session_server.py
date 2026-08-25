@@ -8,6 +8,7 @@ import json
 import signal
 from pathlib import Path
 
+from presentation_terminal.retained_model import RetainedPolicy
 from session import MachineSession, PresentationSessionPolicy
 from shared_session import DEFAULT_SOCKET, SessionServer, SharedMachine
 
@@ -32,6 +33,21 @@ def _presentation_policy(value: str) -> PresentationSessionPolicy:
         raise argparse.ArgumentTypeError(
             f"invalid presentation policy: {exc}"
         ) from exc
+
+
+def _retained_policy(value: str) -> RetainedPolicy:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid retained policy JSON: {exc.msg}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise argparse.ArgumentTypeError("retained policy JSON must be an object")
+    try:
+        return RetainedPolicy(**payload)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid retained policy: {exc}") from exc
 
 
 def main() -> int:
@@ -63,6 +79,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--retained-terminal-policy",
+        type=_retained_policy,
+        metavar="JSON",
+        help=(
+            "enable RETAINED-1 with the complete caller-owned JSON policy; "
+            "requires --presentation-terminal-policy"
+        ),
+    )
+    parser.add_argument(
         "--nic-tap",
         nargs="?",
         const="mp64tap0",
@@ -81,11 +106,21 @@ def main() -> int:
     parser.add_argument("--paused", action="store_true")
     args = parser.parse_args()
 
+    if (
+        args.retained_terminal_policy is not None
+        and args.presentation_terminal_policy is None
+    ):
+        parser.error(
+            "--retained-terminal-policy requires --presentation-terminal-policy"
+        )
+
     presentation = None
     if args.presentation_terminal_policy is not None:
         try:
             presentation = args.presentation_terminal_policy.configuration(
-                args.cols, args.rows
+                args.cols,
+                args.rows,
+                retained_policy=args.retained_terminal_policy,
             )
         except (TypeError, ValueError, OverflowError) as exc:
             parser.error(f"invalid selected presentation geometry: {exc}")
@@ -159,7 +194,11 @@ def main() -> int:
         print(
             "[shared] terminal: "
             + (
-                "APT-1 optional attachment"
+                (
+                    "APT-1 + RETAINED-1 optional attachment"
+                    if args.retained_terminal_policy is not None
+                    else "APT-1 optional attachment"
+                )
                 if args.presentation_terminal_policy is not None
                 else "ANSI"
             ),
