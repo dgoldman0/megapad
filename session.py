@@ -27,6 +27,11 @@ from rich_terminal import (
 from rich_terminal.apt1 import CONTROL_RESERVE_BYTES, snapshot_wire_bytes
 from rich_terminal.display_cadence import DisplayCadenceScheduler
 from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.retained_view import (
+    DisplayScope,
+    RetainedRootLabelPlane,
+    project_composite_root_labels,
+)
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_model import RetainedPolicy
 from system import MegapadSystem, SystemRunStats
@@ -183,6 +188,33 @@ class TerminalSnapshot:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         image.save(target, format="PNG")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalDisplayOffer:
+    """One immutable renderer-facing candidate awaiting physical ACK."""
+
+    offer_id: int
+    scope: DisplayScope
+    cell: TerminalSnapshot
+    retained: RetainedRootLabelPlane
+
+    def __post_init__(self) -> None:
+        if isinstance(self.offer_id, bool):
+            raise TypeError("offer_id must be an integer, not bool")
+        try:
+            normalized = operator.index(self.offer_id)
+        except TypeError as exc:
+            raise TypeError("offer_id must be an integer") from exc
+        if normalized < 1:
+            raise ValueError("offer_id must be positive")
+        object.__setattr__(self, "offer_id", int(normalized))
+        if not isinstance(self.scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        if not isinstance(self.cell, TerminalSnapshot):
+            raise TypeError("cell must be TerminalSnapshot")
+        if not isinstance(self.retained, RetainedRootLabelPlane):
+            raise TypeError("retained must be RetainedRootLabelPlane")
 
 
 @dataclass(frozen=True)
@@ -493,6 +525,10 @@ class MachineSession:
         self._output_view_selected = False
         self._logical_composite_output: CompositeTerminalView | None = None
         self._displayed_composite_output: CompositeTerminalView | None = None
+        self._display_offer: TerminalDisplayOffer | None = None
+        self._display_offer_composite: CompositeTerminalView | None = None
+        self._last_acknowledged_display_offer: tuple[int, DisplayScope] | None = None
+        self._next_display_offer_id = 1
         self._display_cadence = (
             None
             if rich_terminal is None or rich_terminal.retained_policy is None
@@ -604,7 +640,7 @@ class MachineSession:
 
     @property
     def displayed_output_view(self) -> CompositeTerminalView | None:
-        """Retained composite most recently promoted at physical cadence."""
+        """Retained composite whose physical presentation was ACKed."""
 
         return self._displayed_composite_output
 
@@ -614,6 +650,12 @@ class MachineSession:
 
         view = self._displayed_composite_output
         return None if view is None else view.revision
+
+    @property
+    def display_offer(self) -> TerminalDisplayOffer | None:
+        """Immutable physical-display candidate awaiting an exact ACK."""
+
+        return self._display_offer
 
     @property
     def rich_terminal_state(self) -> TerminalState | None:
@@ -692,6 +734,18 @@ class MachineSession:
     def last_batch_made_progress(self) -> bool:
         return self._last_batch_rich_terminal_progress
 
+    def _clear_display_offer_tokens(self) -> None:
+        self._display_offer = None
+        self._display_offer_composite = None
+        self._last_acknowledged_display_offer = None
+
+    def _discard_retained_display_cadence(self) -> None:
+        """Discard every rich-display scope after a bare-CELL fallback."""
+
+        self._clear_display_offer_tokens()
+        self._display_cadence_scope = None
+        self._display_cadence = None
+
     def close(self):
         if self._closed:
             return
@@ -702,6 +756,7 @@ class MachineSession:
                 self._rich_terminal_driver = None
             self._logical_composite_output = None
             self._displayed_composite_output = None
+            self._clear_display_offer_tokens()
             self._display_cadence_scope = None
             self._display_cadence = None
             self.system.storage.save_image()
@@ -722,6 +777,7 @@ class MachineSession:
                 self._output_view = None
                 self._logical_composite_output = None
                 self._displayed_composite_output = None
+                self._clear_display_offer_tokens()
                 self._display_cadence_scope = None
                 config = self._rich_terminal_config
                 self._display_cadence = (
@@ -757,6 +813,7 @@ class MachineSession:
             self._output_view_selected = False
             self._logical_composite_output = None
             self._displayed_composite_output = None
+            self._clear_display_offer_tokens()
             self._display_cadence_scope = None
             self._display_cadence = (
                 None
@@ -815,6 +872,7 @@ class MachineSession:
         self._rich_terminal_lost = False
 
     def _close_rich_terminal(self) -> None:
+        self._discard_retained_display_cadence()
         driver = self._rich_terminal_driver
         if driver is None:
             return
@@ -889,7 +947,20 @@ class MachineSession:
             return
         if not isinstance(view, TerminalView):
             raise TypeError("terminal output view has an unsupported type")
-        self._align_cadence_to_cell_view(view)
+        retained_boundary_active = bool(
+            self._display_offer is not None
+            or self._logical_composite_output is not None
+            or self._displayed_composite_output is not None
+        )
+        target_scope = (
+            view.attachment_epoch,
+            view.session_id,
+            view.presentation_epoch,
+        )
+        if retained_boundary_active and target_scope == self._display_cadence_scope:
+            self._discard_retained_display_cadence()
+        else:
+            self._align_cadence_to_cell_view(view)
         if (self.terminal.cols, self.terminal.rows) != (view.cols, view.rows):
             self.terminal.resize(view.cols, view.rows)
         self._output_view = view
@@ -916,10 +987,12 @@ class MachineSession:
                     "a replacement rich-terminal session must begin at epoch zero"
                 )
             cadence.replace_session(view.attachment_epoch, view.session_id)
+            self._clear_display_offer_tokens()
         elif view.presentation_epoch == current[2]:
             return
         elif view.presentation_epoch == current[2] + 1:
             cadence.reset_presentation_epoch(view.presentation_epoch)
+            self._clear_display_offer_tokens()
         else:
             raise TerminalUpdateError(
                 "CELL view skipped or regressed the presentation_epoch"
@@ -934,9 +1007,14 @@ class MachineSession:
 
         cadence = self._display_cadence
         if cadence is None:
-            raise TerminalUpdateError(
-                "a composite view requires a configured retained policy"
-            )
+            config = self._rich_terminal_config
+            policy = None if config is None else config.retained_policy
+            if policy is None or view.presentation_epoch != 0:
+                raise TerminalUpdateError(
+                    "a composite view requires a configured retained cadence scope"
+                )
+            cadence = DisplayCadenceScheduler(policy=policy)
+            self._display_cadence = cadence
         cell = view.cell
         if cell is None:
             raise TerminalUpdateError(
@@ -954,6 +1032,7 @@ class MachineSession:
                 cell.session_id,
                 initial_view=view,
             )
+            self._clear_display_offer_tokens()
         elif view.presentation_epoch == current[2]:
             cadence.submit(view)
         elif view.presentation_epoch == current[2] + 1:
@@ -961,6 +1040,7 @@ class MachineSession:
                 view.presentation_epoch,
                 initial_view=view,
             )
+            self._clear_display_offer_tokens()
         else:
             raise TerminalUpdateError(
                 "composite view skipped or regressed the presentation_epoch"
@@ -969,7 +1049,7 @@ class MachineSession:
         self._logical_composite_output = view
 
     def _service_display_cadence(self) -> bool:
-        """Promote at most one newest logical view at an owner pump boundary."""
+        """Create at most one immutable renderer offer at an owner boundary."""
 
         cadence = self._display_cadence
         driver = self._rich_terminal_driver
@@ -980,20 +1060,118 @@ class MachineSession:
             logical != self._logical_composite_output
         ):
             self._submit_composite_output(logical)
-        displayed = cadence.service()
-        if displayed is None:
+        offered = cadence.service()
+        if offered is None:
             return False
-        cell = displayed.cell
+        cell = offered.cell
         if cell is None:
             raise TerminalUpdateError(
-                "cadence promoted a composite without a CELL plane"
+                "cadence offered a composite without a CELL plane"
             )
+        try:
+            scope, retained = project_composite_root_labels(offered)
+            cell_snapshot = self._snapshot_output_view(cell)
+            display_offer = TerminalDisplayOffer(
+                offer_id=self._next_display_offer_id,
+                scope=scope,
+                cell=cell_snapshot,
+                retained=retained,
+            )
+        except Exception:
+            cadence.revoke_offer(offered)
+            raise
+        self._next_display_offer_id += 1
+        self._display_offer = display_offer
+        self._display_offer_composite = offered
+        return True
+
+    @staticmethod
+    def _normalize_display_offer_id(offer_id: int) -> int:
+        if isinstance(offer_id, bool):
+            raise TypeError("offer_id must be an integer, not bool")
+        try:
+            normalized = operator.index(offer_id)
+        except TypeError as exc:
+            raise TypeError("offer_id must be an integer") from exc
+        if normalized < 1:
+            raise ValueError("offer_id must be positive")
+        return int(normalized)
+
+    def acknowledge_display_offer(
+        self,
+        offer_id: int,
+        scope: DisplayScope,
+    ) -> bool:
+        """Promote only the exact physical offer; duplicate last ACK is harmless."""
+
+        normalized = self._normalize_display_offer_id(offer_id)
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        offer = self._display_offer
+        if offer is None or offer.offer_id != normalized or offer.scope != scope:
+            if self._last_acknowledged_display_offer == (normalized, scope):
+                return False
+            raise TerminalUpdateError("display ACK is stale or outside the active scope")
+        cadence = self._display_cadence
+        if cadence is None:
+            raise TerminalUpdateError("display ACK has no active retained cadence")
+
+        composite = self._display_offer_composite
+        if composite is None:
+            raise TerminalUpdateError("display ACK lost its exact composite binding")
+        active_scope = self._display_cadence_scope
+        if active_scope != (
+            scope.attachment_epoch,
+            scope.session_id,
+            scope.presentation_epoch,
+        ):
+            raise TerminalUpdateError("display ACK is outside the active scope")
+        cell = composite.cell
+        if cell is None:
+            raise TerminalUpdateError("display offer lost its mandatory CELL plane")
+        cadence.acknowledge(composite)
         if (self.terminal.cols, self.terminal.rows) != (cell.cols, cell.rows):
             self.terminal.resize(cell.cols, cell.rows)
-        self._displayed_composite_output = displayed
+        self._displayed_composite_output = composite
         self._output_view = cell
         self._output_view_selected = True
+        self._display_offer = None
+        self._display_offer_composite = None
+        self._last_acknowledged_display_offer = (normalized, scope)
         self.revision += 1
+        return True
+
+    def revoke_display_offer(
+        self,
+        offer_id: int,
+        scope: DisplayScope,
+    ) -> bool:
+        """Requeue the exact unacknowledged offer after its physical sink is lost."""
+
+        normalized = self._normalize_display_offer_id(offer_id)
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        offer = self._display_offer
+        if offer is None or offer.offer_id != normalized or offer.scope != scope:
+            raise TerminalUpdateError(
+                "display offer revocation is stale or outside the active scope"
+            )
+        cadence = self._display_cadence
+        if cadence is None:
+            raise TerminalUpdateError("display revocation has no active retained cadence")
+        composite = self._display_offer_composite
+        if composite is None:
+            raise TerminalUpdateError("display revocation lost its exact composite binding")
+        active_scope = self._display_cadence_scope
+        if active_scope != (
+            scope.attachment_epoch,
+            scope.session_id,
+            scope.presentation_epoch,
+        ):
+            raise TerminalUpdateError("display revocation is outside the active scope")
+        cadence.revoke_offer(composite)
+        self._display_offer = None
+        self._display_offer_composite = None
         return True
 
     def _output_revision_ready(self) -> bool:
@@ -1001,10 +1179,14 @@ class MachineSession:
 
         cadence = self._display_cadence
         driver = self._rich_terminal_driver
-        if cadence is None or driver is None or not driver.core.retained_enabled:
+        if driver is None or not driver.core.retained_enabled:
             return True
+        if cadence is None:
+            return False
         return (
             cadence.pending_revision is None
+            and cadence.offered_revision is None
+            and self._display_offer is None
             and cadence.displayed_revision == driver.core.model_revision
         )
 
@@ -1124,7 +1306,7 @@ class MachineSession:
         )
 
     def _display_cadence_has_pending_work(self) -> bool:
-        """Whether only host time can make a committed composite presentable."""
+        """Whether cadence can run, excluding an offer blocked on physical ACK."""
 
         driver = self._rich_terminal_driver
         cadence = self._display_cadence
@@ -1133,6 +1315,8 @@ class MachineSession:
             and cadence is not None
             and driver.core.retained_enabled
             and cadence.pending_revision is not None
+            and cadence.offered_revision is None
+            and self._display_offer is None
         )
 
     def _rich_terminal_has_pending_work(self) -> bool:
@@ -1152,6 +1336,7 @@ class MachineSession:
             and host.pending_ingress_events == 0
             and host.pending_geometry_events == 0
         ):
+            self._discard_retained_display_cadence()
             self._output_view_selected = False
             self._logical_composite_output = None
             self._displayed_composite_output = None

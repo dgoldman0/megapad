@@ -192,12 +192,22 @@ geometry, persistent rows, dirty spans, and cursor state. A retained-capable
 session publishes one immutable `CompositeTerminalView` containing the global
 revision and geometry plus independently shareable CELL and retained planes.
 
-The production display boundary consumes that composite; it must not project it
-back to `TerminalSnapshot` before presentation. A CELL compatibility snapshot
-may remain available for text extraction and diagnostics, but it is not a rich
-display view. Cadence may select a newer immutable composite, but the session
-does not mark its revision physically displayed or release revision-bound input
-until every nonempty plane has reached the compositor.
+The production display boundary consumes that composite as one atomic display
+offer; it must not reduce the offer to a CELL-only `TerminalSnapshot` or expose
+the authoritative retained scene model to the renderer. The session may freeze
+the CELL plane into the same immutable snapshot-shaped value used by the
+compatibility path, but only beside the projected retained draw plane and the
+exact composite scope. The source composite remains privately bound to that
+offer until settlement.
+
+Cadence may select a newer immutable composite without making it displayed.
+Selection creates a monotone offer identifier and does not change the session
+revision, visible output, cadence timestamp, geometry exposed through the
+selected view, or revision-bound input eligibility. Only an exact offer-ID and
+scope acknowledgement after physical composition promotes the privately bound
+composite and advances those boundaries. Sink loss revokes the exact offer;
+cadence then re-offers it or a newer coalesced candidate without reusing an
+offer identifier.
 
 For the first visible root-LABEL checkpoint, the compositor uses the CELL canvas
 as its base, draws retained regions and objects in their defined back-to-front

@@ -28,12 +28,14 @@ from rich_terminal import (
     TerminalView,
 )
 from rich_terminal.output_coordinator import CompositeTerminalView
-from rich_terminal.update_authority import TerminalGeometry
+from rich_terminal.retained_view import DisplayScope, RetainedRootLabelPlane
+from rich_terminal.update_authority import TerminalGeometry, TerminalUpdateError
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
 from session import (
     MachineSession,
     RichTerminalSessionConfig,
     RichTerminalSessionPolicy,
+    TerminalDisplayOffer,
 )
 from session_server import main as session_server_main
 from system import EXT_MEM_BASE, HBW_BASE, VRAM_BASE, MegapadSystem
@@ -522,7 +524,25 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         session._receive_terminal_output(first)
         assert session.logical_output_view is first
         assert session.displayed_output_view is None
+        before_offer_revision = session.revision
         assert session._service_display_cadence()
+        offer = session.display_offer
+        assert isinstance(offer, TerminalDisplayOffer)
+        assert not hasattr(offer, "composite")
+        assert session._display_offer_composite is first
+        assert isinstance(offer.scope, DisplayScope)
+        assert offer.scope.model_revision == 1
+        assert offer.cell.lines() == ["AA", "AA"]
+        assert isinstance(offer.retained, RetainedRootLabelPlane)
+        assert not offer.retained.retained_visible
+        assert session.displayed_output_view is None
+        assert session.displayed_model_revision is None
+        assert session.revision == before_offer_revision
+        assert not session._display_cadence_has_pending_work()
+        assert session.send_text("held before ACK") is DriverStatus.BACKPRESSURED
+
+        assert session.acknowledge_display_offer(offer.offer_id, offer.scope)
+        assert session.display_offer is None
         assert session.displayed_output_view is first
         assert session.displayed_model_revision == 1
         assert session.snapshot().lines() == ["AA", "AA"]
@@ -554,7 +574,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         core._coordinator.view = latest
         core._clock.revision = 3
         session._receive_terminal_output(latest)
-        cadence_reads = iter((1_050, 1_100))
+        cadence_reads = iter((1_050, 1_100, 1_100))
         session._display_cadence._monotonic_us = lambda: next(cadence_reads)
         guest_batches = []
 
@@ -569,6 +589,16 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         assert halted.reason == "halted"
         assert halted.steps == 0 and halted.batches == 0
         assert guest_batches == []
+        latest_offer = session.display_offer
+        assert latest_offer is not None
+        assert session._display_offer_composite is latest
+        assert session.displayed_output_view is first
+        assert session.displayed_model_revision == 1
+        assert not session._display_cadence_has_pending_work()
+        assert session.acknowledge_display_offer(
+            latest_offer.offer_id,
+            latest_offer.scope,
+        )
         assert session.displayed_output_view is latest
         assert session.displayed_model_revision == 3
         assert session.snapshot().lines() == ["BB", "BB"]
@@ -585,7 +615,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         core._coordinator.view = idle_view
         core._clock.revision = 4
         session._receive_terminal_output(idle_view)
-        cadence_reads = iter((1_150, 1_200))
+        cadence_reads = iter((1_150, 1_200, 1_200))
         session._display_cadence._monotonic_us = lambda: next(cadence_reads)
         system.cpu.halted = False
         system.cpu.idle = True
@@ -594,6 +624,11 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         assert idle.reason == "idle"
         assert idle.steps == 0 and idle.batches == 0
         assert guest_batches == []
+        idle_offer = session.display_offer
+        assert idle_offer is not None
+        assert session._display_offer_composite is idle_view
+        assert session.displayed_output_view is latest
+        assert session.acknowledge_display_offer(idle_offer.offer_id, idle_offer.scope)
         assert session.displayed_output_view is idle_view
         assert session.snapshot().lines() == ["CC", "CC"]
 
@@ -641,6 +676,31 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
         session._receive_terminal_output(cell)
         session._receive_terminal_output(rich)
         assert session._service_display_cadence()
+        offer = session.display_offer
+        assert offer is not None
+        assert session.displayed_output_view is None
+        assert session.acknowledge_display_offer(offer.offer_id, offer.scope)
+        acknowledged_revision = session.revision
+        assert not session.acknowledge_display_offer(offer.offer_id, offer.scope)
+        assert session.revision == acknowledged_revision
+        foreign_scope = replace(offer.scope, session_id=offer.scope.session_id + 1)
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.acknowledge_display_offer(offer.offer_id, foreign_scope)
+
+        pending_cell = replace(cell, revision=2)
+        pending_rich = CompositeTerminalView(
+            0,
+            2,
+            TerminalGeometry(2, 2),
+            pending_cell,
+            None,
+        )
+        core._coordinator.view = pending_rich
+        core._clock.revision = 2
+        session._receive_terminal_output(pending_rich)
+        assert session._service_display_cadence()
+        pending_offer = session.display_offer
+        assert pending_offer is not None
 
         core._retained_enabled = False
         core._coordinator = None
@@ -658,9 +718,232 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
             ),
         )
         session._receive_terminal_output(replacement)
+        assert session.display_offer is None
         assert session.logical_output_view is None
         assert session.displayed_output_view is None
         assert session.snapshot().lines() == ["NN", "NN"]
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.acknowledge_display_offer(offer.offer_id, offer.scope)
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.acknowledge_display_offer(
+                pending_offer.offer_id,
+                pending_offer.scope,
+            )
+
+        assert session._display_cadence is not None
+        replacement_rich = CompositeTerminalView(
+            1,
+            1,
+            TerminalGeometry(2, 2),
+            replacement,
+            None,
+        )
+        core._retained_enabled = True
+        core._coordinator = SimpleNamespace(view=replacement_rich)
+        core._clock = SimpleNamespace(revision=1)
+        session._receive_terminal_output(replacement_rich)
+        assert session._service_display_cadence()
+        replacement_offer = session.display_offer
+        assert replacement_offer is not None
+        assert replacement_offer.offer_id > pending_offer.offer_id
+        assert session.acknowledge_display_offer(
+            replacement_offer.offer_id,
+            replacement_offer.scope,
+        )
+        assert session.displayed_output_view is replacement_rich
+
+
+def test_machine_session_offer_does_not_promote_geometry_or_revision_before_ack():
+    policy = _retained_policy()
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
+    ) as session:
+        driver = session.rich_terminal_driver
+        assert driver is not None
+        cell = TerminalView(
+            attachment_epoch=driver.attachment_epoch,
+            session_id=13,
+            presentation_epoch=0,
+            revision=1,
+            cols=3,
+            rows=1,
+            cells=(
+                (
+                    Cell(ord("X"), 7, 0),
+                    Cell(ord("Y"), 7, 0),
+                    Cell(ord("Z"), 7, 0),
+                ),
+            ),
+            dirty_spans=(),
+            cursor=Cursor(2, 0, True),
+        )
+        composite = CompositeTerminalView(
+            0,
+            1,
+            TerminalGeometry(3, 1),
+            cell,
+            None,
+        )
+        core = driver.core
+        core._retained_enabled = True
+        core._coordinator = SimpleNamespace(view=composite)
+        core._clock = SimpleNamespace(revision=1)
+        core._state = TerminalState.ACTIVE
+        session._receive_terminal_output(composite)
+
+        before_offer_revision = session.revision
+        assert session.visible_geometry == (2, 2)
+        assert session._service_display_cadence()
+        offer = session.display_offer
+        assert offer is not None
+        assert offer.cell.lines() == ["XYZ"]
+        assert session.visible_geometry == (2, 2)
+        assert (session.terminal.cols, session.terminal.rows) == (2, 2)
+        assert session.revision == before_offer_revision
+
+        assert session.acknowledge_display_offer(offer.offer_id, offer.scope)
+        assert session.visible_geometry == (3, 1)
+        assert (session.terminal.cols, session.terminal.rows) == (3, 1)
+        assert session.revision == before_offer_revision + 1
+        assert session.snapshot().lines() == ["XYZ"]
+
+
+def test_machine_session_revokes_and_reoffers_only_the_exact_display_candidate():
+    policy = _retained_policy()
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
+    ) as session:
+        driver = session.rich_terminal_driver
+        assert driver is not None
+        cell = TerminalView(
+            attachment_epoch=driver.attachment_epoch,
+            session_id=11,
+            presentation_epoch=0,
+            revision=1,
+            cols=2,
+            rows=2,
+            cells=(
+                (Cell(ord("A"), 7, 0), Cell(ord("A"), 7, 0)),
+                (Cell(ord("A"), 7, 0), Cell(ord("A"), 7, 0)),
+            ),
+            dirty_spans=(),
+            cursor=Cursor(0, 0, True),
+        )
+        geometry = TerminalGeometry(2, 2)
+        first = CompositeTerminalView(0, 1, geometry, cell, None)
+        core = driver.core
+        core._retained_enabled = True
+        core._coordinator = SimpleNamespace(view=first)
+        core._clock = SimpleNamespace(revision=1)
+        core._state = TerminalState.ACTIVE
+        session._receive_terminal_output(cell)
+        session._receive_terminal_output(first)
+
+        assert session._service_display_cadence()
+        first_offer = session.display_offer
+        assert first_offer is not None
+        foreign_scope = replace(
+            first_offer.scope,
+            presentation_epoch=first_offer.scope.presentation_epoch + 1,
+        )
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.revoke_display_offer(first_offer.offer_id, foreign_scope)
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.revoke_display_offer(first_offer.offer_id + 1, first_offer.scope)
+        assert session.display_offer is first_offer
+
+        before_revoke_revision = session.revision
+        assert session.revoke_display_offer(first_offer.offer_id, first_offer.scope)
+        assert session.display_offer is None
+        assert session.displayed_output_view is None
+        assert session.revision == before_revoke_revision
+        assert session._display_cadence_has_pending_work()
+        assert session.rich_terminal_work_pending
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.acknowledge_display_offer(
+                first_offer.offer_id,
+                first_offer.scope,
+            )
+
+        assert session._service_display_cadence()
+        reoffer = session.display_offer
+        assert reoffer is not None
+        assert reoffer.offer_id > first_offer.offer_id
+        assert session._display_offer_composite is first
+
+        second_cell = replace(
+            cell,
+            revision=2,
+            cells=(
+                (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
+                (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
+            ),
+        )
+        second = CompositeTerminalView(0, 2, geometry, second_cell, None)
+        core._coordinator.view = second
+        core._clock.revision = 2
+        session._receive_terminal_output(second)
+        assert session.revoke_display_offer(reoffer.offer_id, reoffer.scope)
+        assert session._display_cadence_has_pending_work()
+        assert session.rich_terminal_work_pending
+        assert session._service_display_cadence()
+        latest_offer = session.display_offer
+        assert latest_offer is not None
+        assert session._display_offer_composite is second
+        assert latest_offer.offer_id > reoffer.offer_id
+        assert session.acknowledge_display_offer(
+            latest_offer.offer_id,
+            latest_offer.scope,
+        )
+        assert session.displayed_output_view is second
+        assert session.snapshot().lines() == ["BB", "BB"]
+
+        fallback_cell = replace(
+            second_cell,
+            revision=3,
+            cells=(
+                (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
+                (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
+            ),
+        )
+        before_fallback = CompositeTerminalView(0, 3, geometry, fallback_cell, None)
+        core._coordinator.view = before_fallback
+        core._clock.revision = 3
+        session._receive_terminal_output(before_fallback)
+        assert session._service_display_cadence()
+        abandoned_offer = session.display_offer
+        assert abandoned_offer is not None
+
+        core._retained_enabled = False
+        core._coordinator = None
+        session._receive_terminal_output(fallback_cell)
+        assert session.display_offer is None
+        assert session._display_offer_composite is None
+        assert session._display_cadence is None
+        assert session.logical_output_view is None
+        assert session.displayed_output_view is None
+        assert session.snapshot().lines() == ["CC", "CC"]
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.acknowledge_display_offer(
+                abandoned_offer.offer_id,
+                abandoned_offer.scope,
+            )
 
 
 def test_machine_session_can_advance_timer_while_guest_is_idle():
