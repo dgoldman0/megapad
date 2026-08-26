@@ -986,3 +986,88 @@ loop:
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_executions"] == 3
         assert counts["uncontended_jit_steps"] == 6
+
+
+def test_register_cmp_drives_long_not_equal_branch_natively(
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    cmp r4, r5
+    lbrne mismatch
+    inc r6
+
+    .org 0x200
+mismatch:
+    nop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for _ in range(2):
+        system.cpu.pc = 0
+        system.cpu.regs[4] = 1
+        system.cpu.regs[5] = 1
+        system.cpu.regs[6] = 0x1234
+        system.cpu.flags_unpack(0xAC)
+
+        warm = system.run_batch_stats(2)
+
+        assert warm.instructions_executed == 2
+        assert warm.system_cycles_advanced == 2
+        assert warm.per_core_cycles[0] == 2
+        assert system.cpu.regs[4] == 1
+        assert system.cpu.regs[5] == 1
+        assert system.cpu.regs[6] == 0x1234
+        assert system.cpu.pc == 5
+        assert system.cpu.flags_pack() == 0x93
+
+    system.cpu.pc = 0
+    system.cpu.regs[4] = 0x8000_0000_0000_0000
+    system.cpu.regs[5] = 2
+    system.cpu.regs[6] = 0x5678
+    system.cpu.flags_unpack(0x95)
+    taken = system.run_batch_stats(2)
+
+    assert taken.instructions_executed == 2
+    assert taken.system_cycles_advanced == 3
+    assert taken.per_core_cycles[0] == 3
+    assert system.cpu.regs[4] == 0x8000_0000_0000_0000
+    assert system.cpu.regs[5] == 2
+    assert system.cpu.regs[6] == 0x5678
+    assert system.cpu.pc == 0x200
+    assert system.cpu.flags_pack() == 0xAA
+
+    system.cpu.pc = 0
+    system.cpu.regs[4] = 7
+    system.cpu.regs[5] = 7
+    system.cpu.regs[6] = 0x9ABC
+    system.cpu.flags_unpack(0xAC)
+    live = system.run_batch_stats(2)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert live.instructions_executed == 2
+    assert live.system_cycles_advanced == 2
+    assert live.per_core_cycles[0] == 2
+    assert counts["uncontended_steps"] == 8
+    assert counts["uncontended_block_steps"] == 6
+    assert system.cpu.regs[4] == 7
+    assert system.cpu.regs[5] == 7
+    assert system.cpu.regs[6] == 0x9ABC
+    assert system.cpu.pc == 5
+    assert system.cpu.flags_pack() == 0x93
+    assert system.cpu.cycle_count == 9
+    assert owner.system_cycles == 9
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4

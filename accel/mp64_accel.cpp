@@ -20569,11 +20569,16 @@ static bool decode_single_core_register_instruction(
             break;
         }
         case 0x4: {
-            // Admit the long equality branch needed by compiled Forth
-            // control flow, but keep every other conditional form on the
-            // authoritative path for now.
-            if (subop != CC_AL && subop != CC_EQ)
+            // Admit the long equality and inequality branches needed by
+            // compiled Forth control flow, but keep every other conditional
+            // form on the authoritative path for now.
+            if (
+                subop != CC_AL &&
+                subop != CC_EQ &&
+                subop != CC_NE
+            ) {
                 return false;
+            }
             uint8_t high = 0;
             uint8_t low = 0;
             if (!read_byte(high) || !read_byte(low))
@@ -21000,7 +21005,10 @@ static void emit_single_core_jit_instruction(
                 return;
             }
             if (
-                decoded.subop != CC_EQ ||
+                (
+                    decoded.subop != CC_EQ &&
+                    decoded.subop != CC_NE
+                ) ||
                 decoded.taken_cycle_cost != 1
             ) {
                 throw std::logic_error(
@@ -21008,7 +21016,7 @@ static void emit_single_core_jit_instruction(
             }
             emitter.compare_core_byte(
                 single_core_jit_offset(core, core.flag_z),
-                1);
+                decoded.subop == CC_EQ ? 1 : 0);
             {
                 const std::size_t not_taken =
                     emitter.branch32(0x85); // jne
@@ -21419,9 +21427,12 @@ static bool single_core_block_identity_matches(
                 decoded.cycle_cost == 2 &&
                 decoded.taken_cycle_cost == 0 &&
                 decoded.immediate <= 0xFFFF;
-            const bool valid_long_equal =
+            const bool valid_long_conditional =
                 decoded.family == 0x4 &&
-                decoded.subop == CC_EQ &&
+                (
+                    decoded.subop == CC_EQ ||
+                    decoded.subop == CC_NE
+                ) &&
                 decoded.encoded_size == 3 &&
                 decoded.cycle_cost == 1 &&
                 decoded.taken_cycle_cost == 1 &&
@@ -21430,7 +21441,7 @@ static bool single_core_block_identity_matches(
                 (
                     !valid_short_unconditional &&
                     !valid_long_unconditional &&
-                    !valid_long_equal
+                    !valid_long_conditional
                 ) ||
                 index + 1 != block.instruction_count
             ) {
