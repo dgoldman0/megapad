@@ -123,11 +123,11 @@ python3 megapad/session_ctl.py capture \
 ```
 
 The default Unix socket is `/tmp/megapad-session-<uid>.sock`, is mode `0600`,
-and can be overridden with `--socket` on all three commands. The protocol is
-newline-delimited JSON over that local socket. Screen reads accept a revision
-number and return no cell payload when nothing has changed. Protocol-v3 display
-holders use the independent `since_offer` cursor so a retained display offer can
-arrive even when that CELL revision is unchanged.
+and can be overridden with `--socket` on all three commands. The local control
+protocol is newline-delimited JSON over that local socket. Screen reads accept
+a revision number and return no cell payload when nothing has changed. Display
+holders use the independent `since_offer` cursor so a retained display offer
+can arrive even when that CELL revision is unchanged.
 
 Set `MP64_RUNTIME_NAMESPACE` in the server, controller, and viewer
 environments to use
@@ -143,8 +143,8 @@ viewer and CLI are peers: the server serializes input from both through the
 one terminal owner. Baseline ANSI input enters the UART stream; an active
 rich-terminal attachment instead receives normalized, framed input.
 
-The local control protocol is version 3. `status.generation` identifies the
-current successful boot/reset epoch. Every `send_text`, `send_key`, and
+`status.generation` identifies the current successful boot/reset epoch. Every
+`send_text`, `send_key`, and
 `resize` request must echo that generation; the server returns
 `stale_generation` without mutating the new machine when a request races a
 reset. Input responses report `progress`, `backpressured`, `invalid`, `stale`,

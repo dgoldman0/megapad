@@ -34,7 +34,6 @@ from session import (
 )
 
 
-PROTOCOL_VERSION = 3
 DEFAULT_SOCKET = shared_session_socket()
 MAX_REQUEST_BYTES = 1 << 20
 
@@ -519,7 +518,7 @@ def display_offer_to_wire(offer: TerminalDisplayOffer) -> dict:
 
 
 def display_offer_from_wire(data: dict) -> TerminalDisplayOffer:
-    """Decode an exact immutable physical offer from protocol v3."""
+    """Decode an exact immutable physical offer from the display wire."""
 
     wire = _wire_object(
         data,
@@ -818,7 +817,6 @@ class SharedMachine:
             else:
                 state = "running"
             result = {
-                "protocol": PROTOCOL_VERSION,
                 "generation": self._reset_generation,
                 "state": state,
                 "paused": self.paused,
@@ -839,6 +837,7 @@ class SharedMachine:
                 "error": self.last_error,
                 "rich_terminal": {
                     "enabled": self.session.rich_terminal_enabled,
+                    "display_required": self.session.retained_display_required,
                     "state": (
                         None
                         if self.session.rich_terminal_state is None
@@ -1633,7 +1632,7 @@ class SessionServer:
         connection_id: int | None = None,
     ) -> Any:
         if method == "ping":
-            return {"protocol": PROTOCOL_VERSION, "time": time.time()}
+            return {"time": time.time()}
         if method == "status":
             detailed = params.get("detailed", True)
             if not isinstance(detailed, bool):

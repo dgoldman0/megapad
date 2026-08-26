@@ -39,7 +39,6 @@ from session import (
     TerminalSnapshot,
 )
 from shared_session import (
-    PROTOCOL_VERSION,
     SessionClient,
     SessionServer,
     SharedMachine,
@@ -288,7 +287,7 @@ def test_snapshot_wire_preserves_an_invisible_cursor_outside_geometry():
         snapshot_from_wire(visible)
 
 
-def test_protocol_v3_display_offer_wire_round_trip_is_lossless_and_bounded():
+def test_display_offer_wire_round_trip_is_lossless_and_bounded():
     scope = DisplayScope(
         attachment_epoch=3,
         session_id=5,
@@ -356,7 +355,7 @@ def test_protocol_v3_display_offer_wire_round_trip_is_lossless_and_bounded():
     assert "composite" not in repr(wire)
 
 
-def test_protocol_v3_display_wire_rejects_bool_in_integer_fields():
+def test_display_wire_rejects_bool_in_integer_fields():
     scope = DisplayScope(1, 2, 0, 0, 0, 0, None)
     wire_scope = display_scope_to_wire(scope)
     wire_scope["attachment_epoch"] = True
@@ -629,6 +628,9 @@ def test_session_server_display_lease_binds_delivery_present_input_and_takeover(
         server = SessionServer(machine, str(tmp_path / "unused.sock"))
         offer = session.display_offer
         assert offer is not None
+        assert machine.status(detailed=False)["rich_terminal"][
+            "display_required"
+        ] is True
         proof = {
             "display_offer_id": offer.offer_id,
             "display_scope": display_scope_to_wire(offer.scope),
@@ -1066,19 +1068,29 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
 
         lightweight = machine.status(detailed=False)
         assert calls == []
-        assert lightweight["protocol"] == PROTOCOL_VERSION == 3
+        assert "protocol" not in lightweight
         assert "state" in lightweight
         assert "steps" in lightweight
         assert "revision" in lightweight
         assert "forth" not in lightweight
         assert "cpu" not in lightweight
         assert "nic" not in lightweight
+        assert lightweight["rich_terminal"]["display_required"] is False
 
         detailed = machine.status()
         assert calls == [session.system.cpu]
         assert detailed["forth"] == {"sentinel": True}
         assert "cpu" in detailed
         assert "nic" in detailed
+
+
+def test_ping_reports_only_liveness():
+    with MachineSession.from_bios(BIOS) as session:
+        server = SessionServer(SharedMachine(session), "unused.sock")
+        result = server.dispatch("ping", {})
+
+    assert set(result) == {"time"}
+    assert isinstance(result["time"], float)
 
 
 def test_screen_encodes_snapshot_outside_machine_lock(monkeypatch):
