@@ -20556,10 +20556,15 @@ static bool decode_single_core_register_instruction(
                 return false;
             break;
         case 0x3: {
-            // Admit the unprefixed short equality branch, but keep SKIP and
-            // every other conditional form on the authoritative path.
-            if (subop != CC_AL && subop != CC_EQ)
+            // Admit the unprefixed short Z branches, but keep SKIP and every
+            // other conditional form on the authoritative path.
+            if (
+                subop != CC_AL &&
+                subop != CC_EQ &&
+                subop != CC_NE
+            ) {
                 return false;
+            }
             uint8_t offset = 0;
             if (!read_byte(offset))
                 return false;
@@ -21003,7 +21008,10 @@ static void emit_single_core_jit_instruction(
                 return;
             }
             if (
-                decoded.subop != CC_EQ ||
+                (
+                    decoded.subop != CC_EQ &&
+                    decoded.subop != CC_NE
+                ) ||
                 decoded.taken_cycle_cost != 1
             ) {
                 throw std::logic_error(
@@ -21011,7 +21019,7 @@ static void emit_single_core_jit_instruction(
             }
             emitter.compare_core_byte(
                 single_core_jit_offset(core, core.flag_z),
-                1);
+                decoded.subop == CC_EQ ? 1 : 0);
             {
                 const std::size_t not_taken =
                     emitter.branch32(0x85); // jne
@@ -21449,7 +21457,10 @@ static bool single_core_block_identity_matches(
                 decoded.immediate <= 0xFF;
             const bool valid_short_conditional =
                 decoded.family == 0x3 &&
-                decoded.subop == CC_EQ &&
+                (
+                    decoded.subop == CC_EQ ||
+                    decoded.subop == CC_NE
+                ) &&
                 decoded.encoded_size == 2 &&
                 decoded.cycle_cost == 1 &&
                 decoded.taken_cycle_cost == 1 &&

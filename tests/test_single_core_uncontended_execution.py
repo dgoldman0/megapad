@@ -1073,16 +1073,27 @@ mismatch:
         assert counts["uncontended_jit_steps"] == 4
 
 
-def test_short_equal_branch_sign_extends_and_uses_live_flags_natively(
+@pytest.mark.parametrize(
+    ("mnemonic", "not_taken_flags", "taken_flags"),
+    (
+        ("breq", 0xAA, 0xAB),
+        ("brne", 0xAB, 0xAA),
+    ),
+    ids=("equal", "not-equal"),
+)
+def test_short_z_branch_sign_extends_and_uses_live_flags_natively(
+    mnemonic: str,
+    not_taken_flags: int,
+    taken_flags: int,
 ) -> None:
     system = _system()
     system.load_binary(
         0,
         assemble(
-            """
+            f"""
 loop:
     inc r4
-    breq loop
+    {mnemonic} loop
     inc r5
 """
         ),
@@ -1092,8 +1103,8 @@ loop:
     owner._start_concurrency_profile()
 
     warm_cases = (
-        (0xAA, 3, 2),
-        (0xAB, 0, 3),
+        (not_taken_flags, 3, 2),
+        (taken_flags, 0, 3),
     )
     for flags, expected_pc, expected_cycles in warm_cases:
         system.cpu.pc = 0
@@ -1114,7 +1125,7 @@ loop:
     system.cpu.pc = 0
     system.cpu.regs[4] = 0x1234
     system.cpu.regs[5] = 0x5678
-    system.cpu.flags_unpack(0xAB)
+    system.cpu.flags_unpack(taken_flags)
     taken = system.run_batch_stats(2)
 
     assert taken.instructions_executed == 2
@@ -1123,12 +1134,12 @@ loop:
     assert system.cpu.regs[4] == 0x1235
     assert system.cpu.regs[5] == 0x5678
     assert system.cpu.pc == 0
-    assert system.cpu.flags_pack() == 0xAB
+    assert system.cpu.flags_pack() == taken_flags
 
     system.cpu.pc = 0
     system.cpu.regs[4] = 0x9ABC
     system.cpu.regs[5] = 0xDEF0
-    system.cpu.flags_unpack(0xAA)
+    system.cpu.flags_unpack(not_taken_flags)
     live = system.run_batch_stats(2)
     snapshot = dict(owner._stop_concurrency_profile())
     counts = dict(snapshot["counts"])
@@ -1141,7 +1152,7 @@ loop:
     assert system.cpu.regs[4] == 0x9ABD
     assert system.cpu.regs[5] == 0xDEF0
     assert system.cpu.pc == 3
-    assert system.cpu.flags_pack() == 0xAA
+    assert system.cpu.flags_pack() == not_taken_flags
     assert system.cpu.cycle_count == 10
     assert owner.system_cycles == 10
     _assert_jit_used_when_available(snapshot, counts)
