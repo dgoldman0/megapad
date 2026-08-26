@@ -1258,24 +1258,44 @@ loop:
         assert counts["uncontended_jit_steps"] == 4
 
 
-def test_leading_ldn_executes_natively_with_live_ram_address_and_data(
+@pytest.mark.parametrize(
+    ("mnemonic", "payloads"),
+    (
+        (
+            "ldn",
+            (
+                (0x200, bytes.fromhex("10 32 54 76 98 ba dc fe")),
+                (0x208, bytes.fromhex("11 22 33 44 55 66 77 88")),
+                (0x210, bytes.fromhex("ef cd ab 89 67 45 23 01")),
+                (0x218, bytes.fromhex("08 07 06 05 04 03 02 01")),
+            ),
+        ),
+        (
+            "ld.b",
+            (
+                (0x240, b"\x12"),
+                (0x241, b"\x34"),
+                (0x242, b"\xA5"),
+                (0x243, b"\x3C"),
+            ),
+        ),
+    ),
+    ids=("qword", "byte"),
+)
+def test_leading_direct_read_executes_natively_with_live_ram(
+    mnemonic: str,
+    payloads: tuple[tuple[int, bytes], ...],
 ) -> None:
     system = _system()
     system.load_binary(
         0,
         assemble(
-            """
+            f"""
 loop:
-    ldn r4, r5
+    {mnemonic} r4, r5
     br loop
 """
         ),
-    )
-    payloads = (
-        (0x200, bytes.fromhex("10 32 54 76 98 ba dc fe")),
-        (0x208, bytes.fromhex("11 22 33 44 55 66 77 88")),
-        (0x210, bytes.fromhex("ef cd ab 89 67 45 23 01")),
-        (0x218, bytes.fromhex("08 07 06 05 04 03 02 01")),
     )
     for address, payload in payloads[:2]:
         system.load_binary(address, payload)
@@ -1289,25 +1309,27 @@ loop:
     assert cold.instructions_executed == 2
     assert cold.system_cycles_advanced == 3
     assert cold.per_core_cycles[0] == 3
-    assert system.cpu.regs[4] == 0xFEDC_BA98_7654_3210
+    assert system.cpu.regs[4] == int.from_bytes(payloads[0][1], "little")
 
     system.cpu.regs[5] = payloads[1][0]
     planned = system.run_batch_stats(2)
     assert planned.instructions_executed == 2
     assert planned.system_cycles_advanced == 3
     assert planned.per_core_cycles[0] == 3
-    assert system.cpu.regs[4] == 0x8877_6655_4433_2211
+    assert system.cpu.regs[4] == int.from_bytes(payloads[1][1], "little")
 
     system.load_binary(*payloads[2])
     system.cpu.regs[5] = payloads[2][0]
+    system.cpu.regs[4] = 0xFFFF_FFFF_FFFF_FFFF
     first_native = system.run_batch_stats(2)
     assert first_native.instructions_executed == 2
     assert first_native.system_cycles_advanced == 3
     assert first_native.per_core_cycles[0] == 3
-    assert system.cpu.regs[4] == 0x0123_4567_89AB_CDEF
+    assert system.cpu.regs[4] == int.from_bytes(payloads[2][1], "little")
 
     system.load_binary(*payloads[3])
     system.cpu.regs[5] = payloads[3][0]
+    system.cpu.regs[4] = 0xFFFF_FFFF_FFFF_FFFF
     cached_native = system.run_batch_stats(2)
     snapshot = dict(owner._stop_concurrency_profile())
     counts = dict(snapshot["counts"])
@@ -1316,12 +1338,14 @@ loop:
     assert cached_native.system_cycles_advanced == 3
     assert cached_native.per_core_cycles[0] == 3
     assert counts["uncontended_steps"] == 8
-    assert system.cpu.regs[4] == 0x0102_0304_0506_0708
+    assert system.cpu.regs[4] == int.from_bytes(payloads[3][1], "little")
     assert system.cpu.regs[5] == payloads[3][0]
     assert system.cpu.pc == 0
     assert system.cpu.flags_pack() == 0xAA
     for address, payload in payloads:
-        assert bytes(system.cpu.mem[address:address + 8]) == payload
+        assert bytes(
+            system.cpu.mem[address:address + len(payload)]
+        ) == payload
     assert system.cpu.cycle_count == 12
     assert owner.system_cycles == 12
 

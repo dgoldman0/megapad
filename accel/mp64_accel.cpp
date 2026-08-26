@@ -20605,11 +20605,12 @@ static bool decode_single_core_register_instruction(
             break;
         }
         case 0x5: {
-            // The first memory slice is deliberately only bare, low-register
-            // LDN. Block construction further requires it to be the leading
-            // and only memory instruction, so its dynamic address can be
-            // proven before native entry without partial guest progress.
-            if (subop != 0x0)
+            // Direct reads are deliberately limited to bare, low-register
+            // LDN and LD.B. Block construction further requires one to be
+            // the leading and only memory instruction, so its dynamic
+            // address can be proven before native entry without partial
+            // guest progress.
+            if (subop != 0x0 && subop != 0x6)
                 return false;
             uint8_t operands = 0;
             if (!read_byte(operands))
@@ -21151,14 +21152,17 @@ static void emit_single_core_jit_instruction(
                 emitter.patch32(not_taken, emitter.position());
             }
             return;
-        case 0x5:  // leading LDN from preflighted host memory
-            if (decoded.subop != 0x0) {
+        case 0x5:  // leading direct read from preflighted host memory
+            // The third SysV argument arrives in RDX. Block admission makes
+            // this instruction first, so no earlier emitter can reuse it.
+            if (decoded.subop == 0x0) {  // LDN
+                emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
+            } else if (decoded.subop == 0x6) {  // LD.B
+                emitter.bytes({0x0F, 0xB6, 0x02}); // movzx eax, byte [rdx]
+            } else {
                 throw std::logic_error(
                     "x86-64 JIT received an unsupported memory op");
             }
-            // The third SysV argument arrives in RDX. Block admission makes
-            // this instruction first, so no earlier emitter can reuse it.
-            emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
             emitter.mov_core_from_rax(
                 single_core_jit_register_offset(core, decoded.rd));
             return;
@@ -21604,7 +21608,10 @@ static bool single_core_block_identity_matches(
         } else if (decoded.family == 0x5) {
             if (
                 index != 0 ||
-                decoded.subop != 0x0 ||
+                (
+                    decoded.subop != 0x0 &&
+                    decoded.subop != 0x6
+                ) ||
                 decoded.encoded_size != 2 ||
                 decoded.fetch_hits < 1 ||
                 decoded.fetch_hits > 2 ||
@@ -21777,7 +21784,7 @@ static bool single_core_block_has_leading_memory(
         single_core_decoded_is_memory(block.instructions[0]);
 }
 
-static const uint8_t* preflight_single_core_direct_ldn(
+static const uint8_t* preflight_single_core_direct_read(
         CPUState& core,
         const StepCallbacks& callbacks,
         const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
@@ -21793,7 +21800,10 @@ static const uint8_t* preflight_single_core_direct_ldn(
         block.instructions[0];
     if (
         decoded.family != 0x5 ||
-        decoded.subop != 0x0 ||
+        (
+            decoded.subop != 0x0 &&
+            decoded.subop != 0x6
+        ) ||
         decoded.encoded_size != 2 ||
         decoded.cycle_cost != 1 ||
         decoded.taken_cycle_cost != 0 ||
@@ -21805,6 +21815,12 @@ static const uint8_t* preflight_single_core_direct_ldn(
         return nullptr;
     }
 
+    const uint64_t width =
+        decoded.subop == 0x0 ? 8 : 1;
+    const AccelAccessModel model =
+        decoded.subop == 0x0
+        ? AccelAccessModel::SCALAR
+        : AccelAccessModel::BYTE;
     const uint64_t address = core.regs[decoded.rs];
     const AccelHookContext context{
         callbacks.has_mmio,
@@ -21814,19 +21830,19 @@ static const uint8_t* preflight_single_core_direct_ldn(
     if (!accel_span_is_direct(
             core,
             address,
-            8,
-            AccelAccessModel::SCALAR,
+            width,
+            model,
             context)) {
         return nullptr;
     }
     const DirectMemoryRegion region =
-        resolve_accel_scalar_region(core, address);
+        resolve_accel_region(core, address, model);
     // Keep this first slice on non-wrapping Bank 0. Other apertures retain
-    // authoritative sys_read64 routing until qualified independently.
+    // authoritative sys_read64/sys_read8 routing until qualified separately.
     if (
         region.priority != 3 ||
         region.ptr == nullptr ||
-        region.avail < 8
+        region.avail < width
     ) {
         return nullptr;
     }
@@ -21964,12 +21980,12 @@ try_execute_single_core_decoded_block(
         single_core_block_has_leading_memory(*block);
     const uint8_t* direct_memory = nullptr;
     if (leading_memory) {
-        // The first memory slice has no generated side exit. Prove its
+        // The direct-read slice has no generated side exit. Prove its
         // dynamic address before compilation or entry, and otherwise leave
         // every architectural effect to ordinary step_one().
         if (!native_eligible)
             return run;
-        direct_memory = preflight_single_core_direct_ldn(
+        direct_memory = preflight_single_core_direct_read(
             core,
             callbacks,
             *block);
