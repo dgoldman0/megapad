@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -24,7 +24,12 @@ from rich_terminal import (
 )
 from rich_terminal.output_coordinator import CompositeTerminalView
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
-from rich_terminal.retained_scene import ObjectBounds, RGBA
+from rich_terminal.retained_scene import (
+    ObjectBounds,
+    RGBA,
+    RetainedScene,
+    SceneModelState,
+)
 from rich_terminal.retained_view import (
     DisplayScope,
     GlyphRunDraw,
@@ -148,7 +153,16 @@ def _arm_retained_offer(
         revision,
         TerminalGeometry(2, 2),
         cell,
-        None,
+        SceneModelState(
+            revision=revision,
+            geometry=TerminalGeometry(2, 2),
+            active=RetainedScene(MappingProxyType({})),
+            hidden=None,
+            hidden_kind=None,
+            requirement=None,
+            retained_visible=True,
+            retained_initialized=True,
+        ),
     )
     core = driver.core
     core._retained_enabled = True

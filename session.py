@@ -1076,13 +1076,19 @@ class MachineSession:
         driver = self._rich_terminal_driver
         if cadence is None or driver is None or not driver.core.retained_enabled:
             return False
-        logical = driver.core.output_view
-        if isinstance(logical, CompositeTerminalView) and (
-            logical != self._logical_composite_output
+        current = driver.core.output_view
+        if isinstance(current, CompositeTerminalView) and (
+            current != self._logical_composite_output
         ):
-            self._submit_composite_output(logical)
+            self._submit_composite_output(current)
+        logical = self._logical_composite_output
+        if not self._retained_composite_is_offerable(logical):
+            return False
         offered = cadence.service()
         if offered is None:
+            return False
+        if not self._retained_composite_is_offerable(offered):
+            cadence.revoke_offer(offered)
             return False
         cell = offered.cell
         if cell is None:
@@ -1105,6 +1111,19 @@ class MachineSession:
         self._display_offer = display_offer
         self._display_offer_composite = offered
         return True
+
+    @staticmethod
+    def _retained_composite_is_offerable(
+        view: CompositeTerminalView | None,
+    ) -> bool:
+        """Whether a composite can become a physical retained presentation."""
+
+        if view is None or view.retained is None:
+            return False
+        return bool(
+            view.retained.retained_initialized
+            and view.retained.retained_visible
+        )
 
     @staticmethod
     def _normalize_display_offer_id(offer_id: int) -> int:
@@ -1225,17 +1244,67 @@ class MachineSession:
     def _output_revision_ready(self) -> bool:
         """Require normalized input to name a revision already shown."""
 
+        config = self._rich_terminal_config
+        if config is None or config.retained_policy is None:
+            return True
         cadence = self._display_cadence
         driver = self._rich_terminal_driver
-        if driver is None or not driver.core.retained_enabled:
-            return True
-        if cadence is None:
+        if (
+            driver is None
+            or not driver.core.retained_configured
+            or not driver.core.retained_enabled
+            or cadence is None
+        ):
             return False
-        return (
-            cadence.pending_revision is None
-            and cadence.offered_revision is None
-            and self._display_offer is None
-            and cadence.displayed_revision == driver.core.model_revision
+        if (
+            cadence.pending_revision is not None
+            or cadence.offered_revision is not None
+            or self._display_offer is not None
+            or self._display_offer_composite is not None
+        ):
+            return False
+
+        displayed = self._displayed_composite_output
+        logical = self._logical_composite_output
+        current = driver.core.output_view
+        acknowledged = self._last_acknowledged_display_offer
+        if (
+            displayed is None
+            or logical is None
+            or not isinstance(current, CompositeTerminalView)
+            or acknowledged is None
+            or displayed is not logical
+            or displayed is not current
+            or cadence.displayed_revision != displayed.revision
+            or displayed.revision != driver.core.model_revision
+        ):
+            return False
+        cell = displayed.cell
+        retained = displayed.retained
+        if cell is None or retained is None:
+            return False
+        try:
+            scope = DisplayScope(
+                attachment_epoch=cell.attachment_epoch,
+                session_id=cell.session_id,
+                presentation_epoch=displayed.presentation_epoch,
+                model_revision=displayed.revision,
+                geometry_generation=displayed.geometry.generation,
+                cell_revision=cell.revision,
+                retained_revision=retained.revision,
+            )
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            retained.retained_initialized
+            and retained.retained_visible
+            and acknowledged[1] == scope
+            and self._display_cadence_scope
+            == (
+                scope.attachment_epoch,
+                scope.session_id,
+                scope.presentation_epoch,
+            )
         )
 
     def clear_output(self):
@@ -1365,6 +1434,9 @@ class MachineSession:
             and cadence.pending_revision is not None
             and cadence.offered_revision is None
             and self._display_offer is None
+            and self._retained_composite_is_offerable(
+                self._logical_composite_output
+            )
         )
 
     def _rich_terminal_has_pending_work(self) -> bool:

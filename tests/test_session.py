@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +28,7 @@ from rich_terminal import (
     TerminalView,
 )
 from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.retained_scene import RetainedScene, SceneModelState
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from rich_terminal.update_authority import TerminalGeometry, TerminalUpdateError
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
@@ -108,6 +109,48 @@ def _retained_policy(*, interval_us: int = 0) -> RetainedPolicy:
         client_to_terminal_max_payload=256,
         terminal_to_client_max_payload=256,
         base_max_transaction_bytes=512,
+    )
+
+
+def _retained_state(
+    geometry: TerminalGeometry,
+    revision: int,
+    *,
+    initialized: bool = True,
+    visible: bool = True,
+) -> SceneModelState:
+    return SceneModelState(
+        revision=revision,
+        geometry=geometry,
+        active=RetainedScene(MappingProxyType({})),
+        hidden=None,
+        hidden_kind=None,
+        requirement=None,
+        retained_visible=visible,
+        retained_initialized=initialized,
+    )
+
+
+def _retained_composite(
+    presentation_epoch: int,
+    revision: int,
+    geometry: TerminalGeometry,
+    cell: TerminalView,
+    *,
+    initialized: bool = True,
+    visible: bool = True,
+) -> CompositeTerminalView:
+    return CompositeTerminalView(
+        presentation_epoch,
+        revision,
+        geometry,
+        cell,
+        _retained_state(
+            geometry,
+            revision,
+            initialized=initialized,
+            visible=visible,
+        ),
     )
 
 
@@ -472,6 +515,116 @@ def test_machine_session_presents_cell_views_with_wire_attribute_mapping():
         assert session.revision == before_sync + 1
 
 
+def test_machine_session_retained_input_waits_for_visible_exact_display_ack():
+    policy = _retained_policy()
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        terminal_cols=2,
+        terminal_rows=2,
+    )
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
+    ) as session:
+        driver = session.rich_terminal_driver
+        assert driver is not None
+        assert session.retained_display_required
+        core = driver.core
+        core._state = TerminalState.ACTIVE
+
+        cell = TerminalView(
+            attachment_epoch=driver.attachment_epoch,
+            session_id=7,
+            presentation_epoch=0,
+            revision=1,
+            cols=2,
+            rows=2,
+            cells=(
+                (Cell(ord("A"), 7, 0), Cell(ord("A"), 7, 0)),
+                (Cell(ord("A"), 7, 0), Cell(ord("A"), 7, 0)),
+            ),
+            dirty_spans=(),
+            cursor=Cursor(0, 0, True),
+        )
+        session._receive_terminal_output(cell)
+
+        assert not core.retained_enabled
+        assert not session._output_revision_ready()
+        assert session.send_text("held through discovery") is DriverStatus.BACKPRESSURED
+
+        geometry = TerminalGeometry(2, 2)
+        hidden = _retained_composite(
+            0,
+            1,
+            geometry,
+            cell,
+            initialized=False,
+            visible=False,
+        )
+        core._retained_enabled = True
+        core._coordinator = SimpleNamespace(view=hidden)
+        core._clock = SimpleNamespace(revision=1)
+        session._receive_terminal_output(hidden)
+
+        assert not session._service_display_cadence()
+        assert session.display_offer is None
+        assert session._display_cadence is not None
+        assert session._display_cadence.pending_revision == 1
+        assert not session._display_cadence_has_pending_work()
+        assert not session._output_revision_ready()
+
+        initialized_hidden = _retained_composite(
+            0,
+            2,
+            geometry,
+            cell,
+            visible=False,
+        )
+        core._coordinator.view = initialized_hidden
+        core._clock.revision = 2
+        session._receive_terminal_output(initialized_hidden)
+
+        assert not session._service_display_cadence()
+        assert session.display_offer is None
+        assert session._display_cadence.pending_revision == 2
+        assert not session._output_revision_ready()
+
+        visible = _retained_composite(0, 3, geometry, cell)
+        core._coordinator.view = visible
+        core._clock.revision = 3
+        session._receive_terminal_output(visible)
+
+        assert session._service_display_cadence()
+        offer = session.display_offer
+        assert offer is not None
+        assert offer.offer_id == 1
+        assert offer.retained.retained_initialized
+        assert offer.retained.retained_visible
+        assert not session._output_revision_ready()
+
+        assert session.acknowledge_display_offer(offer.offer_id, offer.scope)
+        assert session.displayed_output_view is visible
+        assert session.last_acknowledged_display_offer == (
+            offer.offer_id,
+            offer.scope,
+        )
+        assert session._output_revision_ready()
+
+
+def test_machine_session_cell_only_rich_config_needs_no_physical_ack():
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    with MachineSession(
+        system,
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(),
+    ) as session:
+        assert not session.retained_display_required
+        assert session._output_revision_ready()
+
+
 def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
     policy = _retained_policy(interval_us=100)
     product = _rich_terminal_policy()
@@ -513,7 +666,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
             cursor=Cursor(0, 0, True),
         )
         geometry = TerminalGeometry(2, 2)
-        first = CompositeTerminalView(0, 1, geometry, cell_one, None)
+        first = _retained_composite(0, 1, geometry, cell_one)
         core = driver.core
         core._retained_enabled = True
         core._coordinator = SimpleNamespace(view=first)
@@ -534,7 +687,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         assert offer.scope.model_revision == 1
         assert offer.cell.lines() == ["AA", "AA"]
         assert isinstance(offer.retained, RetainedDrawPlane)
-        assert not offer.retained.retained_visible
+        assert offer.retained.retained_visible
         assert session.displayed_output_view is None
         assert session.displayed_model_revision is None
         assert session.revision == before_offer_revision
@@ -555,7 +708,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
                 (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
             ),
         )
-        second = CompositeTerminalView(0, 2, geometry, cell_two, None)
+        second = _retained_composite(0, 2, geometry, cell_two)
         core._coordinator.view = second
         core._clock.revision = 2
         session._receive_terminal_output(second)
@@ -611,7 +764,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
                 (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
             ),
         )
-        idle_view = CompositeTerminalView(0, 4, geometry, cell_three, None)
+        idle_view = _retained_composite(0, 4, geometry, cell_three)
         core._coordinator.view = idle_view
         core._clock.revision = 4
         session._receive_terminal_output(idle_view)
@@ -663,12 +816,11 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
             dirty_spans=(),
             cursor=Cursor(0, 0, True),
         )
-        rich = CompositeTerminalView(
+        rich = _retained_composite(
             0,
             1,
             TerminalGeometry(2, 2),
             cell,
-            None,
         )
         core = driver.core
         core._retained_enabled = True
@@ -689,12 +841,11 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
             session.acknowledge_display_offer(offer.offer_id, foreign_scope)
 
         pending_cell = replace(cell, revision=2)
-        pending_rich = CompositeTerminalView(
+        pending_rich = _retained_composite(
             0,
             2,
             TerminalGeometry(2, 2),
             pending_cell,
-            None,
         )
         core._coordinator.view = pending_rich
         core._clock.revision = 2
@@ -732,12 +883,11 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
             )
 
         assert session._display_cadence is not None
-        replacement_rich = CompositeTerminalView(
+        replacement_rich = _retained_composite(
             1,
             1,
             TerminalGeometry(2, 2),
             replacement,
-            None,
         )
         core._retained_enabled = True
         core._coordinator = SimpleNamespace(view=replacement_rich)
@@ -786,12 +936,11 @@ def test_machine_session_offer_does_not_promote_geometry_or_revision_before_ack(
             dirty_spans=(),
             cursor=Cursor(2, 0, True),
         )
-        composite = CompositeTerminalView(
+        composite = _retained_composite(
             0,
             1,
             TerminalGeometry(3, 1),
             cell,
-            None,
         )
         core = driver.core
         core._retained_enabled = True
@@ -847,7 +996,7 @@ def test_machine_session_revokes_and_reoffers_only_the_exact_display_candidate()
             cursor=Cursor(0, 0, True),
         )
         geometry = TerminalGeometry(2, 2)
-        first = CompositeTerminalView(0, 1, geometry, cell, None)
+        first = _retained_composite(0, 1, geometry, cell)
         core = driver.core
         core._retained_enabled = True
         core._coordinator = SimpleNamespace(view=first)
@@ -896,7 +1045,7 @@ def test_machine_session_revokes_and_reoffers_only_the_exact_display_candidate()
                 (Cell(ord("B"), 7, 0), Cell(ord("B"), 7, 0)),
             ),
         )
-        second = CompositeTerminalView(0, 2, geometry, second_cell, None)
+        second = _retained_composite(0, 2, geometry, second_cell)
         core._coordinator.view = second
         core._clock.revision = 2
         session._receive_terminal_output(second)
@@ -928,7 +1077,7 @@ def test_machine_session_revokes_and_reoffers_only_the_exact_display_candidate()
                 (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
             ),
         )
-        before_fallback = CompositeTerminalView(1, 1, geometry, fallback_cell, None)
+        before_fallback = _retained_composite(1, 1, geometry, fallback_cell)
         core._coordinator.view = before_fallback
         core._clock.revision = 1
         session._receive_terminal_output(before_fallback)
