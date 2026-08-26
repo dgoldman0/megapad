@@ -30,6 +30,7 @@ loop:
     mov r7, r6
     mov r11, r3
     inc r10
+    subi r8, 1
     lbr loop
 """
 REGISTER_BLOCK_SLICES = (1, 1, 2, 7, 19, 1_003)
@@ -561,4 +562,84 @@ far:
     # The two cold INC/LBR pairs remain authoritative. Thereafter the
     # +252 and -260 edges each require a complete terminal LBR block.
     assert counts["uncontended_block_steps"] == 996
+    _assert_jit_used_when_available(snapshot, counts)
+
+
+@pytest.mark.parametrize(
+    (
+        "load_instruction",
+        "subi_immediate",
+        "expected_value",
+        "expected_arithmetic_flags",
+        "expected_cycles",
+    ),
+    (
+        (
+            "ldi r4, 1",
+            1,
+            0,
+            0x33,  # G preserved; zero, C/no-borrow, and even parity set.
+            1_332,
+        ),
+        (
+            "ldi r4, 0",
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x34,  # G is preserved; N/P set and C clear on borrow.
+            1_332,
+        ),
+        (
+            "ldi64 r4, 0x8000000000000000",
+            1,
+            0x7FFF_FFFF_FFFF_FFFF,
+            0x3A,  # G preserved; C/no-borrow, overflow, and even parity.
+            1_665,
+        ),
+        (
+            "ldi r4, 0",
+            -128,
+            0x80,
+            0x20,  # G is preserved; all arithmetic flags are clear.
+            1_332,
+        ),
+    ),
+    ids=("zero", "borrow", "signed-overflow", "negative-immediate"),
+)
+def test_subi_executes_with_exact_native_flags(
+    load_instruction: str,
+    subi_immediate: int,
+    expected_value: int,
+    expected_arithmetic_flags: int,
+    expected_cycles: int,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+loop:
+    {load_instruction}
+    subi r4, {subi_immediate}
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    system.cpu.flag_g = 1
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(999)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 999
+    assert stats.system_cycles_advanced == expected_cycles
+    assert stats.per_core_cycles[0] == expected_cycles
+    assert counts["uncontended_steps"] == 999
+    assert system.cpu.regs[4] == expected_value
+    assert system.cpu.pc == 0
+    assert system.cpu.cycle_count == expected_cycles
+    assert system.cpu.flags_pack() & 0x3F == expected_arithmetic_flags
+    assert counts["uncontended_block_steps"] == 998
     _assert_jit_used_when_available(snapshot, counts)

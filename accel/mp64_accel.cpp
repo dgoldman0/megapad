@@ -20586,6 +20586,7 @@ static bool decode_single_core_register_instruction(
                 subop != 0x0 &&  // LDI
                 subop != 0x2 &&  // ADDI
                 subop != 0x4 &&  // ORI
+                subop != 0x7 &&  // SUBI
                 subop != 0xB     // ROLI
             ) {
                 return false;
@@ -20891,7 +20892,7 @@ static void emit_single_core_jit_logic_flags(
         0);
 }
 
-static void emit_single_core_jit_arithmetic_flags(
+static void emit_single_core_jit_addition_flags(
         X86_64BlockEmitter& emitter,
         const CPUState& core) {
     emitter.set_core_byte(
@@ -20899,6 +20900,27 @@ static void emit_single_core_jit_arithmetic_flags(
         single_core_jit_offset(core, core.flag_z));
     emitter.set_core_byte(
         0x92,
+        single_core_jit_offset(core, core.flag_c));
+    emitter.set_core_byte(
+        0x98,
+        single_core_jit_offset(core, core.flag_n));
+    emitter.set_core_byte(
+        0x90,
+        single_core_jit_offset(core, core.flag_v));
+    emitter.set_core_byte(
+        0x9A,
+        single_core_jit_offset(core, core.flag_p));
+}
+
+static void emit_single_core_jit_subtraction_flags(
+        X86_64BlockEmitter& emitter,
+        const CPUState& core) {
+    emitter.set_core_byte(
+        0x94,
+        single_core_jit_offset(core, core.flag_z));
+    // x86 CF means borrow after SUB; the guest C flag means no borrow.
+    emitter.set_core_byte(
+        0x93,
         single_core_jit_offset(core, core.flag_c));
     emitter.set_core_byte(
         0x98,
@@ -20974,7 +20996,7 @@ static void emit_single_core_jit_instruction(
                     });
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_arithmetic_flags(emitter, core);
+                    emit_single_core_jit_addition_flags(emitter, core);
                     return;
                 case 0x4:  // ORI
                     emitter.bytes({0x48, 0x0D});
@@ -20982,6 +21004,17 @@ static void emit_single_core_jit_instruction(
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_logic_flags(emitter, core);
+                    return;
+                case 0x7:  // SUBI
+                    emitter.bytes({
+                        0x48,
+                        0x83,
+                        0xE8,
+                        static_cast<uint8_t>(decoded.immediate),
+                    });
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_subtraction_flags(emitter, core);
                     return;
                 case 0xB:  // ROLI
                     emitter.bytes({
@@ -21007,7 +21040,7 @@ static void emit_single_core_jit_instruction(
                     emitter.bytes({0x48, 0x01, 0xC8});
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_arithmetic_flags(emitter, core);
+                    emit_single_core_jit_addition_flags(emitter, core);
                     return;
                 case 0x6:  // XOR
                     emitter.bytes({0x48, 0x31, 0xC8});
@@ -21304,6 +21337,16 @@ static bool single_core_block_identity_matches(
                 decoded.encoded_size == 11 &&
                 decoded.cycle_cost == 2;
             if (!valid_imm8 && !valid_imm64) {
+                return false;
+            }
+        } else if (
+            decoded.family == 0x6 && decoded.subop == 0x7
+        ) {
+            if (
+                decoded.encoded_size != 3 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate > 0xFF
+            ) {
                 return false;
             }
         } else if (decoded.cycle_cost != 1) {
