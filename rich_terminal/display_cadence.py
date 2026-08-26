@@ -33,9 +33,10 @@ def _integer(name: str, value, *, minimum: int, maximum: int | None = None) -> i
 class DisplayCadenceScheduler:
     """Coalesce committed views without delaying logical protocol service.
 
-    The scheduler retains at most the physically displayed view and one latest
-    pending view.  Session and presentation_epoch transitions are explicit so
-    a stale immutable view cannot re-enter a replacement scope.
+    The scheduler retains at most the acknowledged presented view, one view
+    offered to a physical sink, and one latest pending view.  Session and
+    presentation_epoch transitions are explicit so a stale immutable view
+    cannot re-enter a replacement scope.
     """
 
     def __init__(
@@ -53,14 +54,25 @@ class DisplayCadenceScheduler:
         self._attachment_epoch: int | None = None
         self._session_id: int | None = None
         self._presentation_epoch: int | None = None
-        self._displayed: CompositeTerminalView | None = None
+        self._presented: CompositeTerminalView | None = None
+        self._offered: CompositeTerminalView | None = None
         self._pending: CompositeTerminalView | None = None
         self._last_observed_us: int | None = None
-        self._last_displayed_us: int | None = None
+        self._last_presented_us: int | None = None
+
+    @property
+    def presented_revision(self) -> int | None:
+        return None if self._presented is None else self._presented.revision
 
     @property
     def displayed_revision(self) -> int | None:
-        return None if self._displayed is None else self._displayed.revision
+        """Revision whose physical presentation has been acknowledged."""
+
+        return self.presented_revision
+
+    @property
+    def offered_revision(self) -> int | None:
+        return None if self._offered is None else self._offered.revision
 
     @property
     def pending_revision(self) -> int | None:
@@ -88,9 +100,10 @@ class DisplayCadenceScheduler:
         self._attachment_epoch = attachment
         self._session_id = session
         self._presentation_epoch = 0
-        self._displayed = None
+        self._presented = None
+        self._offered = None
         self._pending = initial_view
-        self._last_displayed_us = None
+        self._last_presented_us = None
 
     def reset_presentation_epoch(
         self,
@@ -117,9 +130,10 @@ class DisplayCadenceScheduler:
         )
 
         self._presentation_epoch = epoch
-        self._displayed = None
+        self._presented = None
+        self._offered = None
         self._pending = initial_view
-        self._last_displayed_us = None
+        self._last_presented_us = None
 
     def submit(self, view: CompositeTerminalView) -> None:
         """Retain the newest current-scope logical view for physical display."""
@@ -136,9 +150,17 @@ class DisplayCadenceScheduler:
             presentation_epoch=current_epoch,
         )
 
-        if view == self._pending or view == self._displayed:
+        if (
+            view == self._pending
+            or view == self._offered
+            or view == self._presented
+        ):
             return
-        newest = self._pending if self._pending is not None else self._displayed
+        newest = self._pending
+        if newest is None:
+            newest = self._offered
+        if newest is None:
+            newest = self._presented
         if newest is not None and view.revision <= newest.revision:
             raise TerminalUpdateError(
                 "same or lower revision cannot replace a different view"
@@ -146,30 +168,64 @@ class DisplayCadenceScheduler:
         self._pending = view
 
     def service(self) -> CompositeTerminalView | None:
-        """Return the newest pending view at its first eligible opportunity."""
+        """Offer the newest eligible pending view to one physical sink."""
 
+        if self._offered is not None:
+            return None
         pending = self._pending
         if pending is None:
             return None
         if self._minimum_interval_us == 0:
-            return self._display(pending, displayed_at_us=None)
+            return self._offer(pending)
 
         now = self._read_monotonic_us()
-        last = self._last_displayed_us
+        last = self._last_presented_us
         if last is not None and now - last < self._minimum_interval_us:
             return None
-        return self._display(pending, displayed_at_us=now)
+        return self._offer(pending)
 
-    def _display(
-        self,
-        view: CompositeTerminalView,
-        *,
-        displayed_at_us: int | None,
-    ) -> CompositeTerminalView:
+    def acknowledge(self, view: CompositeTerminalView) -> None:
+        """Acknowledge physical presentation of the exact outstanding offer."""
+
+        self._validate_offer_argument(view)
+        if view is not self._offered:
+            raise TerminalUpdateError(
+                "view is not the exact outstanding display offer"
+            )
+        presented_at_us = self._read_monotonic_us()
+        self._offered = None
+        self._presented = view
+        self._last_presented_us = presented_at_us
+
+    def revoke_offer(self, view: CompositeTerminalView) -> None:
+        """Requeue an exact unacknowledged offer after its sink is lost."""
+
+        self._validate_offer_argument(view)
+        if view is not self._offered:
+            raise TerminalUpdateError(
+                "view is not the exact outstanding display offer"
+            )
+        self._offered = None
+        if self._pending is None:
+            self._pending = view
+
+    def _offer(self, view: CompositeTerminalView) -> CompositeTerminalView:
         self._pending = None
-        self._displayed = view
-        self._last_displayed_us = displayed_at_us
+        self._offered = view
         return view
+
+    def _validate_offer_argument(self, view: CompositeTerminalView) -> None:
+        if not isinstance(view, CompositeTerminalView):
+            raise TypeError("view must be CompositeTerminalView")
+        current_epoch = self._require_session()
+        assert self._attachment_epoch is not None
+        assert self._session_id is not None
+        self._validate_view(
+            view,
+            attachment_epoch=self._attachment_epoch,
+            session_id=self._session_id,
+            presentation_epoch=current_epoch,
+        )
 
     def _read_monotonic_us(self) -> int:
         observed = _integer("monotonic_us result", self._monotonic_us(), minimum=0)

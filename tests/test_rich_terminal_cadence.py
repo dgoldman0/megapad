@@ -79,7 +79,35 @@ def _view(
     )
 
 
-def test_zero_interval_and_first_view_are_immediately_eligible() -> None:
+def test_service_offers_without_early_display_and_ack_starts_cadence() -> None:
+    clock = [1_000]
+    cadence = DisplayCadenceScheduler(
+        policy=_policy(100), monotonic_us=lambda: clock[0]
+    )
+    first = _view(0, 0)
+    cadence.replace_session(1, 2, first)
+
+    assert cadence.service() is first
+    assert cadence.offered_revision == 0
+    assert cadence.presented_revision is None
+    assert cadence.displayed_revision is None
+
+    latest = _view(0, 1)
+    cadence.submit(latest)
+    clock[0] = 1_100
+    assert cadence.service() is None
+    assert cadence.pending_revision == 1
+
+    cadence.acknowledge(first)
+    assert cadence.presented_revision == 0
+    assert cadence.offered_revision is None
+    clock[0] = 1_199
+    assert cadence.service() is None
+    clock[0] = 1_200
+    assert cadence.service() is latest
+
+
+def test_zero_interval_and_first_view_are_immediately_offerable() -> None:
     clock = [10]
     cadence = DisplayCadenceScheduler(
         policy=_policy(0), monotonic_us=lambda: clock[0]
@@ -89,11 +117,14 @@ def test_zero_interval_and_first_view_are_immediately_eligible() -> None:
 
     assert cadence.pending_revision == 0
     assert cadence.service() is first
-    assert cadence.displayed_revision == 0
+    assert cadence.offered_revision == 0
+    assert cadence.displayed_revision is None
     assert cadence.pending_revision is None
 
     next_view = _view(0, 1)
     cadence.submit(next_view)
+    assert cadence.service() is None
+    cadence.acknowledge(first)
     assert cadence.service() is next_view
 
 
@@ -102,9 +133,11 @@ def test_default_monotonic_clock_is_available_to_production_callers() -> None:
     first = _view(0, 0)
     cadence.replace_session(1, 2, first)
     assert cadence.service() is first
+    cadence.acknowledge(first)
+    assert cadence.presented_revision == 0
 
 
-def test_one_pending_slot_coalesces_to_latest_until_interval_expires() -> None:
+def test_newer_submissions_coalesce_while_one_offer_awaits_ack() -> None:
     clock = [1_000]
     cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: clock[0]
@@ -118,9 +151,12 @@ def test_one_pending_slot_coalesces_to_latest_until_interval_expires() -> None:
     latest = _view(0, 3)
     cadence.submit(skipped)
     cadence.submit(latest)
+    assert cadence.service() is None
+    assert cadence.offered_revision == 1
+    assert cadence.pending_revision == 3
+    cadence.acknowledge(first)
     clock[0] = 1_099
     assert cadence.service() is None
-    assert cadence.pending_revision == 3
     clock[0] = 1_100
     assert cadence.service() is latest
 
@@ -142,13 +178,55 @@ def test_exact_view_retry_is_idempotent_but_foreign_revision_is_rejected() -> No
         cadence.submit(_view(0, 3))
 
 
+def test_ack_requires_exact_offer_and_rejects_stale_or_cross_scope_views() -> None:
+    cadence = DisplayCadenceScheduler(policy=_policy(0), monotonic_us=lambda: 10)
+    offered = _view(0, 1)
+    cadence.replace_session(1, 2, offered)
+    assert cadence.service() is offered
+
+    with pytest.raises(TerminalUpdateError, match="exact outstanding"):
+        cadence.acknowledge(replace(offered))
+    with pytest.raises(TerminalUpdateError, match="exact outstanding"):
+        cadence.acknowledge(_view(0, 2))
+    with pytest.raises(TerminalUpdateError, match="foreign presentation_epoch"):
+        cadence.acknowledge(_view(1, 0))
+    with pytest.raises(TerminalUpdateError, match="foreign session"):
+        cadence.acknowledge(_view(0, 1, attachment_epoch=2, session_id=3))
+
+    cadence.acknowledge(offered)
+    with pytest.raises(TerminalUpdateError, match="exact outstanding"):
+        cadence.acknowledge(offered)
+
+
+def test_revoke_requeues_offer_or_coalesces_it_behind_newer_pending() -> None:
+    cadence = DisplayCadenceScheduler(policy=_policy(0), monotonic_us=lambda: 0)
+    first = _view(0, 1)
+    cadence.replace_session(1, 2, first)
+    assert cadence.service() is first
+    cadence.revoke_offer(first)
+    assert cadence.offered_revision is None
+    assert cadence.pending_revision == 1
+    assert cadence.presented_revision is None
+    assert cadence.service() is first
+
+    cadence.submit(_view(0, 2))
+    latest = _view(0, 3)
+    cadence.submit(latest)
+    cadence.revoke_offer(first)
+    assert cadence.offered_revision is None
+    assert cadence.pending_revision == 3
+    assert cadence.service() is latest
+
+
 def test_clock_rollback_cannot_make_a_pending_view_eligible_early() -> None:
     clock = [1_000]
     cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: clock[0]
     )
-    cadence.replace_session(1, 2, _view(0, 1))
-    assert cadence.service() is not None
+    first = _view(0, 1)
+    cadence.replace_session(1, 2, first)
+    assert cadence.service() is first
+    cadence.acknowledge(first)
     cadence.submit(_view(0, 2))
 
     clock[0] = 1_050
@@ -166,19 +244,27 @@ def test_session_and_epoch_replacement_discard_stale_views_and_reset_eligibility
     cadence = DisplayCadenceScheduler(
         policy=_policy(100), monotonic_us=lambda: clock[0]
     )
-    cadence.replace_session(1, 2, _view(0, 1))
-    assert cadence.service() is not None
+    first = _view(0, 1)
+    cadence.replace_session(1, 2, first)
+    assert cadence.service() is first
+    cadence.acknowledge(first)
     cadence.submit(_view(0, 2))
 
     reset_view = _view(1, 0)
     cadence.reset_presentation_epoch(1, reset_view)
     assert cadence.displayed_revision is None
+    assert cadence.offered_revision is None
+    assert cadence.pending_revision == 0
     assert cadence.service() is reset_view
+    with pytest.raises(TerminalUpdateError, match="foreign presentation_epoch"):
+        cadence.acknowledge(first)
     with pytest.raises(TerminalUpdateError, match="foreign presentation_epoch"):
         cadence.submit(_view(0, 3))
 
     replacement = _view(0, 0, attachment_epoch=2, session_id=3)
     cadence.replace_session(2, 3, replacement)
+    assert cadence.offered_revision is None
+    assert cadence.pending_revision == 0
     assert cadence.service() is replacement
     with pytest.raises(TerminalUpdateError, match="foreign session"):
         cadence.submit(_view(0, 1))
