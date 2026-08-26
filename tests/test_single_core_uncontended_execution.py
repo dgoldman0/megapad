@@ -696,3 +696,67 @@ loop:
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_executions"] == 1
         assert counts["uncontended_jit_steps"] == 5
+
+
+@pytest.mark.parametrize(
+    (
+        "mask",
+        "native_input",
+        "native_pre_flags",
+        "expected_value",
+        "expected_flags",
+    ),
+    (
+        (0x80, 0xFFFF_FFFF_FFFF_FFFF, 0xBF, 0x80, 0xA0),
+        (0xFF, 0x8000_0000_0000_0000, 0xAE, 0, 0xB1),
+    ),
+    ids=("high-bit-mask", "full-byte-mask"),
+)
+def test_andi_executes_natively_with_zero_extended_mask_and_flags(
+    mask: int,
+    native_input: int,
+    native_pre_flags: int,
+    expected_value: int,
+    expected_flags: int,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+loop:
+    andi r4, 0x{mask:02x}
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    warmup = system.run_batch_stats(4)
+    system.cpu.regs[4] = native_input
+    system.cpu.flags_unpack(native_pre_flags)
+    native = system.run_batch_stats(2)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert warmup.instructions_executed == 4
+    assert warmup.system_cycles_advanced == 6
+    assert warmup.per_core_cycles[0] == 6
+    assert native.instructions_executed == 2
+    assert native.system_cycles_advanced == 3
+    assert native.per_core_cycles[0] == 3
+    assert counts["uncontended_steps"] == 6
+    assert counts["uncontended_block_steps"] == 4
+    assert system.cpu.regs[4] == expected_value
+    assert system.cpu.pc == 0
+    assert system.cpu.flags_pack() == expected_flags
+    assert system.cpu.cycle_count == 9
+    assert owner.system_cycles == 9
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_executions"] == 1
+        assert counts["uncontended_jit_steps"] == 2

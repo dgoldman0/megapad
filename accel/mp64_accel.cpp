@@ -20585,6 +20585,7 @@ static bool decode_single_core_register_instruction(
             if (
                 subop != 0x0 &&  // LDI
                 subop != 0x2 &&  // ADDI
+                subop != 0x3 &&  // ANDI
                 subop != 0x4 &&  // ORI
                 subop != 0x7 &&  // SUBI
                 subop != 0x8 &&  // LSLI
@@ -21000,6 +21001,16 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_addition_flags(emitter, core);
                     return;
+                case 0x3:  // ANDI
+                    // AND EAX with a zero-extended imm32. The guest mask is
+                    // an imm8; opcode 83 would sign-extend 0x80..0xff and
+                    // incorrectly retain high register bits.
+                    emitter.byte(0x25);
+                    emitter.u32(static_cast<uint32_t>(decoded.immediate));
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_logic_flags(emitter, core);
+                    return;
                 case 0x4:  // ORI
                     emitter.bytes({0x48, 0x0D});
                     emitter.u32(static_cast<uint32_t>(decoded.immediate));
@@ -21353,6 +21364,18 @@ static bool single_core_block_identity_matches(
                 decoded.encoded_size == 11 &&
                 decoded.cycle_cost == 2;
             if (!valid_imm8 && !valid_imm64) {
+                return false;
+            }
+        } else if (
+            decoded.family == 0x6 && decoded.subop == 0x3
+        ) {
+            if (
+                decoded.encoded_size != 3 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate > 0xFF ||
+                decoded.rd >= 16 ||
+                decoded.rd == block.psel
+            ) {
                 return false;
             }
         } else if (
