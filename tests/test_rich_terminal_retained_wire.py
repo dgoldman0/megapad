@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -457,6 +458,114 @@ def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
     with pytest.raises(RetainedWireError) as scalar:
         decode_region_definition(payload)
     assert scalar.value.code is RetainedWireErrorCode.SCALAR
+
+
+def test_label_object_define_empty_text_has_exact_eighty_byte_payload():
+    definition = ObjectWireDefinition(
+        0x0102030405060708,
+        0x1112131415161718,
+        0x2122232425262728,
+        0x3132333435363738,
+        0,
+        ObjectBounds(0, 1, UINT32_MAX - 1, UINT32_MAX),
+        -7,
+        True,
+        LabelBody(RGBA(0x41, 0x42, 0x43, 0x44), 1, 2, ""),
+    )
+
+    payload = encode_object_definition(definition)
+    expected = struct.pack(
+        "<QQQHHiQQIIII4BHHII",
+        definition.owner_id,
+        definition.owner_generation,
+        definition.object_id,
+        int(ObjectKind.LABEL),
+        1,
+        definition.z_order,
+        definition.region_id,
+        definition.parent_object_id,
+        definition.bounds.left,
+        definition.bounds.top,
+        definition.bounds.right,
+        definition.bounds.bottom,
+        0x41,
+        0x42,
+        0x43,
+        0x44,
+        1,
+        2,
+        0,
+        0,
+    )
+
+    assert len(payload) == 80
+    assert payload == expected
+    assert decode_object_definition(payload) == definition
+
+    # PRESENT_BEGIN declares the complete BEGIN + one 120-byte operation
+    # frame + COMMIT transaction.  PT receives 120 as retained-frame-bytes
+    # and derives this exact 280-byte declaration itself.
+    begin = PresentBegin(
+        1,
+        0,
+        1,
+        280,
+        80,
+        25,
+        0,
+        0,
+        1,
+        CellMode.NONE,
+        PresentRetainedMode.REPLACE_START,
+    )
+    begin_payload = encode_present_begin(begin)
+    assert begin_payload[24:32] == (280).to_bytes(8, "little")
+    assert decode_present_begin(begin_payload) == begin
+
+
+def test_label_object_define_appends_exact_multibyte_scalar_text():
+    text = "λ🙂"
+    definition = ObjectWireDefinition(
+        1,
+        2,
+        3,
+        4,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        5,
+        False,
+        LabelBody(RGBA(1, 2, 3, 255), 0, 1, text, True),
+    )
+
+    payload = encode_object_definition(definition)
+    encoded = text.encode("utf-8")
+    assert len(payload) == 80 + len(encoded)
+    assert payload[72:76] == len(encoded).to_bytes(4, "little")
+    assert payload[76:80] == (1).to_bytes(4, "little")
+    assert payload[80:] == encoded
+    assert decode_object_definition(payload) == definition
+
+
+@pytest.mark.parametrize("bad_text", (b"\0", b"\r", b"\n", b"\xC0\x80"))
+def test_label_object_define_rejects_controls_and_invalid_utf8(bad_text):
+    valid = ObjectWireDefinition(
+        1,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        0,
+        True,
+        LabelBody(RGBA(1, 2, 3, 4), 0, 0, ""),
+    )
+    payload = bytearray(encode_object_definition(valid))
+    payload[72:76] = len(bad_text).to_bytes(4, "little")
+    payload.extend(bad_text)
+
+    with pytest.raises(RetainedWireError) as error:
+        decode_object_definition(payload)
+    assert error.value.code is RetainedWireErrorCode.SCALAR
 
 
 @pytest.mark.parametrize(

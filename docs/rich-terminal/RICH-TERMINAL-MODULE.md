@@ -68,17 +68,17 @@ The module owns:
 * the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
   completion gate;
 * core OWNER_OPEN/OWNER_DROP lifecycle publication and exact RET_RESULT
-  reconciliation; and
-* PRESENT construction for CELL_NONE/DELTA/REPLACE plus fixed retained region
-  DEFINE/REPLACE/DROP operations;
+  reconciliation;
+* PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
+  DEFINE/REPLACE/DROP operations, and typed LABEL DEFINE operations; and
 * close, hard failure, soft cache reset, and fallback.
 
 It does not own consumer focus, host regions, widgets, retained semantic
 objects, owner/item allocation policy, quota derivation, replay planning, or
 the Akashic front/back cell buffers. The core retained writers accept bounded
 wire-neutral intent from a single internal rich-terminal engine; they are not
-an independently discoverable scene or mutation API. Object, resource, and
-series families remain outside the currently implemented writer subset.
+an independently discoverable scene or mutation API. Other object kinds,
+resources, and series remain outside the currently implemented writer subset.
 
 ## 5. Caller-owned capacity
 
@@ -131,12 +131,15 @@ PT-OWNER-DROP       ( owner generation session -- status )
 PT-PRESENT-BEGIN    ( cols rows cell-spans cells retained-ops
                       retained-frame-bytes cell-mode retained-mode session
                       -- status )
-PT-PRESENT-OP       ( type payload-a payload-u session -- status )
 PT-REGION-DEFINE    ( owner generation region x y cols rows z flags session
                       -- status )
 PT-REGION-REPLACE   ( owner generation region x y cols rows z flags session
                       -- status )
 PT-REGION-DROP      ( owner generation region session -- status )
+PT-LABEL-DEFINE     ( owner generation object region parent
+                      left top right bottom z visible
+                      red green blue alpha h-align v-align ellipsize
+                      text-a text-u session -- status )
 PT-PRESENT-COMMIT   ( disposition session -- status )
 
 PT-TX-BEGIN         ( cols rows span-count cell-count session -- status )
@@ -279,9 +282,12 @@ and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
 40-byte headers plus payloads for the declared retained operations. PT
 preflights the complete BEGIN-through-COMMIT byte and sequence budget before it
 emits BEGIN, then checks every operation against the declared count and byte
-sum. The current generic `PT-PRESENT-OP` admission recognizes only the fixed
-REGION_DEFINE/REPLACE/DROP payloads implemented by this module; the typed region
-words keep their raw payload assembly private.
+sum. There is no public raw retained-operation escape hatch. Typed region and
+LABEL words validate semantic arguments and keep their exact message type,
+common prefix, type body, little-endian assembly, and TX scratch private. Empty
+LABEL text is canonical `0 0`; a nonempty source is borrowed only until the
+call returns and must satisfy the negotiated label-byte ceiling, scalar UTF-8
+rules, control exclusions, and disjointness from the session and TX scratch.
 
 The mode constants are `PT-CELL-NONE`, `PT-CELL-DELTA`,
 `PT-CELL-REPLACE`, `PT-RET-NONE`, `PT-RET-DELTA`,
@@ -348,7 +354,9 @@ The lightweight module tests prove:
 9. an ordinary legacy CELL delta after retained enablement interleaves in the
    same transaction-ID and global revision domain.
 
-The current guest module conformance claims only the core owner/region writer
-slice. Object, resource, series, full semantic replay, and end-to-end retained
-resize journeys remain upper-engine follow-on work and must not be advertised
-through this API until implemented and qualified.
+The current end-to-end guest conformance still claims only the core
+owner/region writer slice. The typed LABEL writer is the next lower-stack
+precursor; LABEL replay, other object kinds, resources, series, full semantic
+replay, and retained resize journeys remain upper-engine follow-on work and
+must not be advertised as an end-to-end product path until implemented and
+qualified.

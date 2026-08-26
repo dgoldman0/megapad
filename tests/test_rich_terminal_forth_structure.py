@@ -242,21 +242,113 @@ def test_present_begin_keeps_wire_authority_inside_pt() -> None:
     assert "_PT.S.RET-CAPS 48 + _PT-U64@" in preflight
 
 
-def test_present_body_is_exact_and_currently_region_bounded() -> None:
+def test_present_body_keeps_raw_fixed_operations_private() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    operation = _definition(source, "PT-PRESENT-OP")
+    operation = _definition(source, "_PT-PRESENT-FIXED-OP")
     region = _definition(source, "_PT-PO-REGION?")
+    region_write = _definition(source, "_PT-REGION-WRITE")
+    admit = _definition(source, "_PT-PO-ADMIT")
+    send = _definition(source, "_PT-PO-SEND")
     commit = _definition(source, "PT-PRESENT-COMMIT")
 
-    assert "_PT.S.TX-RET-OPS-DONE" in operation
-    assert "_PT.S.TX-RET-BYTES-DONE" in operation
+    assert re.search(r"^:\s+PT-PRESENT-OP(?:\s|$)", source, re.MULTILINE) is None
+    assert "_PT-PO-ADMIT" in operation
+    assert "_PT-PO-SEND" in operation
+    assert operation.index("_PT-VALID-S?") < operation.index("_PT-PO-SOURCE?")
+    assert operation.index("_PT-OP-LOST?") < operation.index("_PT-PO-SOURCE?")
+    assert "_PT.S.TX-RET-OPS-DONE" in admit
+    assert "_PT.S.TX-RET-BYTES-DONE" in admit
+    assert "_PT.S.TX-RET-OPS-DONE !" in send
+    assert "_PT.S.TX-RET-BYTES-DONE !" in send
     assert "_PT-M-REGION-DEFINE" in region
     assert "_PT-M-REGION-REPLACE" in region
     assert "_PT-M-REGION-DROP" in region
+    assert "_PT-PRESENT-FIXED-OP" in region_write
     assert "_PT.S.TX-RET-OPS @ <>" in commit
     assert "_PT.S.TX-RET-BYTES @ <>" in commit
     assert "PT-RET-REPLACE-START =" in commit
     assert "PT-RET-LAYOUT-START =" in commit
+
+
+def test_typed_label_define_owns_exact_object_wire_assembly() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    label = _definition(source, "PT-LABEL-DEFINE")
+    body = _definition(source, "_PT-LD-DEFINE-BODY")
+    fields = _definition(source, "_PT-LD-FIELDS?")
+    text_source = _definition(source, "_PT-LD-TEXT-SOURCE?")
+    text = _definition(source, "_PT-LD-TEXT?")
+    payload = _definition(source, "_PT-LD-PAYLOAD!")
+    retained_args = _definition(source, "_PT-PB-RET-ARGS?")
+    admit = _definition(source, "_PT-PO-ADMIT")
+    send = _definition(source, "_PT-PO-SEND")
+    scrub = _definition(source, "_PT-LD-SCRUB")
+
+    assert "0x2020 CONSTANT _PT-M-OBJECT-DEFINE" in source
+    assert "_PT-M-OBJECT-DEFINE _PT-PO-TYPE !" in body
+    assert body.index("_PT-PO-ADMIT") < body.index("_PT-LD-PAYLOAD!")
+    assert body.index("_PT-LD-PAYLOAD!") < body.index("_PT-PO-SEND")
+    assert "_PT-FRAME-BEGIN" in admit
+    assert "_PT.S.TX-RET-OPS-DONE !" not in admit
+    assert "_PT.S.TX-RET-BYTES-DONE !" not in admit
+    assert "_PT.S.TX-RET-OPS-DONE !" in send
+    assert "_PT.S.TX-RET-BYTES-DONE !" in send
+
+    # The complete 64-byte common prefix and 16-byte LABEL prefix are packed
+    # by PT; Akashic supplies only typed scalars and the borrowed text span.
+    expected_stores = (
+        "_PT-LD-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-LD-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-LD-OBJECT @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "4 _PT-FRAME-PAYLOAD 24 + W!",
+        "_PT-LD-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!",
+        "_PT-LD-Z @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-LD-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
+        "_PT-LD-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
+        "_PT-LD-LEFT @ _PT-FRAME-PAYLOAD 48 + L!",
+        "_PT-LD-TOP @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-LD-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-LD-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!",
+        "_PT-LD-RED @ _PT-FRAME-PAYLOAD 64 + C!",
+        "_PT-LD-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
+        "_PT-LD-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
+        "_PT-LD-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!",
+        "_PT-LD-H-ALIGN @ _PT-FRAME-PAYLOAD 68 + W!",
+        "_PT-LD-V-ALIGN @ _PT-FRAME-PAYLOAD 70 + W!",
+        "_PT-LD-TEXT-U @ _PT-FRAME-PAYLOAD 72 + L!",
+        "_PT-LD-ELLIPSIZE @ _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-FRAME-PAYLOAD 80 + SWAP MOVE",
+    )
+    for store in expected_stores:
+        assert store in payload
+
+    assert "_PT-LD-TEXT-U @ 80 _PT-UADD?" in fields
+    assert "_PT.S.RET-FORMATS 24 + L@ U>" in fields
+    assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x08 AND" in fields
+    assert body.index("_PT-LD-FIELDS?") < body.index("_PT-PO-ADMIT")
+    assert "DUP 0<> SWAP 1 <> AND" in fields
+    assert fields.count("DUP 0<> SWAP 1 <> AND") == 2
+    assert "_PT-PB-RET-OPS @ 64 _PT-UMUL?" in retained_args
+    assert "_PT-PB-RET-BYTES @ U>" in retained_args
+    assert re.search(r"\bMOD\b", retained_args) is None
+
+    assert "_PT-LD-TEXT-U @ 0= IF" in text_source
+    assert "_PT-LD-TEXT-A @ 0= EXIT" in text_source
+    assert "_PT-RANGE-VALID?" in text_source
+    assert text_source.count("_PT-RANGES-OVERLAP?") == 2
+    assert text.index("_PT-LD-TEXT-U @ 0= IF TRUE EXIT THEN") < (
+        text.index("_PT-UTF8?")
+    )
+    for control in ("DUP 0=", "OVER 10 =", "SWAP 13 ="):
+        assert control in text
+
+    # No payload-sized staging allocation or borrowed text pointer survives
+    # the guarded call.
+    assert "CREATE" not in label + body + payload
+    assert "ALLOT" not in label + body + payload
+    assert "CATCH" in label
+    assert "_PT-LD-SCRUB" in label
+    assert "0 _PT-LD-TEXT-A !" in scrub
+    assert "0 _PT-U8-A !" in scrub
 
 
 def test_retained_completion_is_bounded_without_weakening_legacy_cell() -> None:
