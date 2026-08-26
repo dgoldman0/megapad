@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,14 +19,36 @@ from rich_terminal import (
     EgressWatermarks,
     HostPortLimits,
     TerminalConfig,
+    TerminalState,
     TerminalView,
 )
-from session import MachineSession, RichTerminalSessionConfig
+from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
+from rich_terminal.retained_view import (
+    DisplayScope,
+    RetainedLabelDraw,
+    RetainedRegionDraw,
+    RetainedRootLabelPlane,
+)
+from rich_terminal.update_authority import TerminalGeometry
+from session import (
+    MachineSession,
+    RichTerminalSessionConfig,
+    TerminalCell,
+    TerminalDisplayOffer,
+    TerminalSnapshot,
+)
 from shared_session import (
     PROTOCOL_VERSION,
     SessionClient,
     SessionServer,
     SharedMachine,
+    display_offer_from_wire,
+    display_offer_to_wire,
+    display_scope_from_wire,
+    display_scope_to_wire,
+    retained_root_label_plane_from_wire,
+    retained_root_label_plane_to_wire,
     snapshot_from_wire,
     snapshot_to_wire,
 )
@@ -38,6 +62,7 @@ BIOS = ROOT / "bios.asm"
 def _rich_terminal_config(
     *,
     ansi_history_bytes: int = 32,
+    retained_policy: RetainedPolicy | None = None,
 ) -> RichTerminalSessionConfig:
     return RichTerminalSessionConfig(
         host_limits=HostPortLimits(
@@ -63,7 +88,76 @@ def _rich_terminal_config(
         driver_limits=DriverLimits(4_096, 8),
         ansi_history_bytes=ansi_history_bytes,
         service_batches=2,
+        retained_policy=retained_policy,
     )
+
+
+def _retained_policy() -> RetainedPolicy:
+    return RetainedPolicy(
+        features=RetainedFeature.CORE,
+        max_owner_records=1,
+        max_live_owners=1,
+        max_regions=1,
+        max_resources=0,
+        max_objects=0,
+        max_series=0,
+        max_operations_per_transaction=1,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_label_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=256,
+        base_max_transaction_bytes=512,
+    )
+
+
+def _arm_retained_offer(
+    session: MachineSession,
+    *,
+    char: str = "A",
+    revision: int = 1,
+) -> CompositeTerminalView:
+    driver = session.rich_terminal_driver
+    assert driver is not None
+    cell = TerminalView(
+        attachment_epoch=driver.attachment_epoch,
+        session_id=7,
+        presentation_epoch=0,
+        revision=revision,
+        cols=2,
+        rows=2,
+        cells=(
+            (Cell(ord(char), 7, 0), Cell(ord(char), 7, 0)),
+            (Cell(ord(char), 7, 0), Cell(ord(char), 7, 0)),
+        ),
+        dirty_spans=(),
+        cursor=Cursor(0, 0, True),
+    )
+    composite = CompositeTerminalView(
+        0,
+        revision,
+        TerminalGeometry(2, 2),
+        cell,
+        None,
+    )
+    core = driver.core
+    core._retained_enabled = True
+    core._coordinator = SimpleNamespace(view=composite)
+    core._clock = SimpleNamespace(revision=revision)
+    core._state = TerminalState.ACTIVE
+    session._receive_terminal_output(composite)
+    assert session._service_display_cadence()
+    return composite
 
 
 def wait_until(predicate, timeout=3.0):
@@ -177,6 +271,134 @@ def test_snapshot_wire_round_trip():
         assert restored == original
 
 
+def test_snapshot_wire_preserves_an_invisible_cursor_outside_geometry():
+    snapshot = TerminalSnapshot(
+        1,
+        1,
+        ((TerminalCell(" ", (0, 0, 0), (0, 0, 0), 0),),),
+        cursor_col=(1 << 32) - 1,
+        cursor_row=7,
+        cursor_visible=False,
+        alternate_screen=False,
+    )
+    assert snapshot_from_wire(snapshot_to_wire(snapshot)) == snapshot
+
+    visible = snapshot_to_wire(replace(snapshot, cursor_visible=True))
+    with pytest.raises(ValueError, match="inside the geometry"):
+        snapshot_from_wire(visible)
+
+
+def test_protocol_v3_display_offer_wire_round_trip_is_lossless_and_bounded():
+    scope = DisplayScope(
+        attachment_epoch=3,
+        session_id=5,
+        presentation_epoch=7,
+        model_revision=11,
+        geometry_generation=13,
+        cell_revision=9,
+        retained_revision=11,
+    )
+    label = RetainedLabelDraw(
+        object_id=17,
+        z_order=-2,
+        left=1,
+        top=2,
+        right=3,
+        bottom=4,
+        red=5,
+        green=6,
+        blue=7,
+        alpha=8,
+        horizontal_align=1,
+        vertical_align=2,
+        ellipsize=True,
+        text="visible",
+    )
+    plane = RetainedRootLabelPlane(
+        retained_initialized=True,
+        retained_visible=True,
+        regions=(
+            RetainedRegionDraw(
+                owner_id=19,
+                owner_generation=23,
+                region_id=29,
+                cell_x=1,
+                cell_y=2,
+                cell_cols=3,
+                cell_rows=4,
+                z_order=-1,
+                clipped=True,
+                labels=(label,),
+            ),
+        ),
+    )
+    snapshot = TerminalSnapshot(
+        cols=1,
+        rows=1,
+        cells=((TerminalCell("X", (1, 2, 3), (4, 5, 6), 0x80),),),
+        cursor_col=0,
+        cursor_row=0,
+        cursor_visible=True,
+        alternate_screen=False,
+    )
+    offer = TerminalDisplayOffer((1 << 64) + 31, scope, snapshot, plane)
+
+    assert display_scope_from_wire(display_scope_to_wire(scope)) == scope
+    assert (
+        retained_root_label_plane_from_wire(
+            retained_root_label_plane_to_wire(plane)
+        )
+        == plane
+    )
+    wire = display_offer_to_wire(offer)
+    assert display_offer_from_wire(wire) == offer
+    assert set(wire) == {"offer_id", "scope", "cell", "retained"}
+    assert "composite" not in repr(wire)
+
+
+def test_protocol_v3_display_wire_rejects_bool_in_integer_fields():
+    scope = DisplayScope(1, 2, 0, 0, 0, 0, None)
+    wire_scope = display_scope_to_wire(scope)
+    wire_scope["attachment_epoch"] = True
+    with pytest.raises(TypeError, match="not bool"):
+        display_scope_from_wire(wire_scope)
+
+    snapshot = TerminalSnapshot(
+        1,
+        1,
+        ((TerminalCell(" ", (0, 0, 0), (0, 0, 0), 0),),),
+        0,
+        0,
+        False,
+        False,
+    )
+    offer = TerminalDisplayOffer(
+        1,
+        scope,
+        snapshot,
+        RetainedRootLabelPlane(False, False, ()),
+    )
+    wire_offer = display_offer_to_wire(offer)
+    wire_offer["offer_id"] = True
+    with pytest.raises(TypeError, match="not bool"):
+        display_offer_from_wire(wire_offer)
+
+    wire_offer = display_offer_to_wire(offer)
+    wire_offer["composite"] = {}
+    with pytest.raises(ValueError, match="fields are not exact"):
+        display_offer_from_wire(wire_offer)
+
+    wire_snapshot = snapshot_to_wire(snapshot)
+    wire_snapshot["runs"][0][0] = True
+    with pytest.raises(TypeError, match="not bool"):
+        snapshot_from_wire(wire_snapshot)
+
+    wire_plane = retained_root_label_plane_to_wire(offer.retained)
+    wire_plane["retained_initialized"] = 1
+    with pytest.raises(TypeError, match="must be bool"):
+        retained_root_label_plane_from_wire(wire_plane)
+
+
 def test_shared_screen_round_trips_the_selected_rich_view():
     system = MegapadSystem(
         ram_size=64 * 1024,
@@ -229,6 +451,60 @@ def test_shared_screen_round_trips_the_selected_rich_view():
         assert session.visible_geometry == (2, 2)
         assert (session.terminal.cols, session.terminal.rows) == (4, 1)
         assert machine.status(detailed=False)["terminal"] == [2, 2]
+
+
+def test_shared_screen_tracks_snapshot_and_display_offer_cursors_independently():
+    with MachineSession(
+        MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2),
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=_retained_policy()),
+    ) as session:
+        _arm_retained_offer(session)
+        machine = SharedMachine(session)
+        offer = session.display_offer
+        assert offer is not None
+        revision = session.revision
+
+        baseline = machine.screen(
+            since=revision,
+            since_offer=0,
+            display_authorized=False,
+        )
+        assert baseline == {"changed": False, "revision": revision}
+
+        offered = machine.screen(
+            since=revision,
+            since_offer=0,
+            display_authorized=True,
+        )
+        assert offered["changed"]
+        assert offered["revision"] == revision
+        assert offered["generation"] == 0
+        assert display_offer_from_wire(offered["display_offer"]) == offer
+
+        unchanged = machine.screen(
+            since=revision,
+            since_offer=offer.offer_id,
+            display_authorized=True,
+        )
+        assert unchanged == {
+            "changed": False,
+            "revision": revision,
+            "generation": 0,
+        }
+        ahead_cursor = machine.screen(
+            since=revision,
+            since_offer=offer.offer_id + 1,
+            display_authorized=True,
+        )
+        assert ahead_cursor["changed"]
+        assert ahead_cursor["display_offer"]["offer_id"] == offer.offer_id
+
+        with pytest.raises(TypeError, match="not bool"):
+            machine.screen(since=True)
+        with pytest.raises(TypeError, match="not bool"):
+            machine.screen(since_offer=True)
 
 
 def test_shared_raw_uses_absolute_bounded_cursors_across_reset():
@@ -336,6 +612,321 @@ def test_session_dispatch_rejects_input_from_an_old_reset_generation(tmp_path):
 
         with pytest.raises(ValueError, match="requires generation"):
             server.dispatch("send_key", {"key": "enter"})
+
+
+def test_session_server_display_lease_binds_delivery_present_input_and_takeover(
+    tmp_path,
+    monkeypatch,
+):
+    with MachineSession(
+        MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2),
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=_retained_policy()),
+    ) as session:
+        original_composite = _arm_retained_offer(session)
+        machine = SharedMachine(session)
+        server = SessionServer(machine, str(tmp_path / "unused.sock"))
+        offer = session.display_offer
+        assert offer is not None
+        proof = {
+            "display_offer_id": offer.offer_id,
+            "display_scope": display_scope_to_wire(offer.scope),
+        }
+        generation = 0
+
+        assert server.dispatch("claim_display", {}, connection_id=1) == {
+            "status": "claimed",
+            "claimed": True,
+        }
+        assert server.dispatch("claim_display", {}, connection_id=1)["claimed"]
+        assert server.dispatch("claim_display", {}, connection_id=2) == {
+            "status": "display_busy",
+            "claimed": False,
+        }
+        observer = server.dispatch(
+            "screen",
+            {"since": session.revision, "since_offer": 0},
+            connection_id=2,
+        )
+        assert observer == {"changed": False, "revision": session.revision}
+
+        guessed = server.dispatch(
+            "present",
+            {"generation": generation, **proof},
+            connection_id=1,
+        )
+        assert guessed == {"status": "stale_display", "presented": False}
+        assert session.display_offer is offer
+
+        calls = []
+
+        def send_text(text):
+            calls.append(text)
+            return DriverStatus.PROGRESS
+
+        monkeypatch.setattr(session, "send_text", send_text)
+        before_ack = server.dispatch(
+            "send_text",
+            {"text": "held", "generation": generation, **proof},
+            connection_id=1,
+        )
+        assert before_ack == {"status": "backpressured", "accepted_bytes": 0}
+        assert calls == []
+        nonholder = server.dispatch(
+            "send_text",
+            {"text": "foreign", "generation": generation, **proof},
+            connection_id=2,
+        )
+        assert nonholder == {"status": "stale_display", "accepted_bytes": 0}
+        assert calls == []
+
+        delivered = server.dispatch(
+            "screen",
+            {"since": session.revision, "since_offer": 0},
+            connection_id=1,
+        )
+        assert delivered["changed"]
+        assert display_offer_from_wire(delivered["display_offer"]) == offer
+
+        wrong_scope = display_scope_to_wire(
+            replace(offer.scope, session_id=offer.scope.session_id + 1)
+        )
+        wrong = server.dispatch(
+            "present",
+            {
+                "generation": generation,
+                "display_offer_id": offer.offer_id,
+                "display_scope": wrong_scope,
+            },
+            connection_id=1,
+        )
+        assert wrong == {"status": "stale_display", "presented": False}
+        stale_generation = server.dispatch(
+            "present",
+            {"generation": generation + 1, **proof},
+            connection_id=1,
+        )
+        assert stale_generation == {
+            "status": "stale_generation",
+            "presented": False,
+        }
+        foreign_present = server.dispatch(
+            "present",
+            {"generation": generation, **proof},
+            connection_id=2,
+        )
+        assert foreign_present == {"status": "stale_display", "presented": False}
+
+        before_present_revision = session.revision
+        presented = server.dispatch(
+            "present",
+            {"generation": generation, **proof},
+            connection_id=1,
+        )
+        assert presented == {
+            "status": "presented",
+            "presented": True,
+            "revision": before_present_revision + 1,
+        }
+        assert session.displayed_output_view is original_composite
+        assert session.last_acknowledged_display_offer == (
+            offer.offer_id,
+            offer.scope,
+        )
+        duplicate = server.dispatch(
+            "present",
+            {"generation": generation, **proof},
+            connection_id=1,
+        )
+        assert duplicate == {
+            "status": "duplicate",
+            "presented": True,
+            "revision": presented["revision"],
+        }
+
+        wrong_input = server.dispatch(
+            "send_text",
+            {
+                "text": "stale",
+                "generation": generation,
+                "display_offer_id": offer.offer_id + 1,
+                "display_scope": display_scope_to_wire(offer.scope),
+            },
+            connection_id=1,
+        )
+        assert wrong_input == {"status": "stale_display", "accepted_bytes": 0}
+        accepted = server.dispatch(
+            "send_text",
+            {"text": "owned", "generation": generation, **proof},
+            connection_id=1,
+        )
+        assert accepted == {"status": "progress", "accepted_bytes": 5}
+        assert calls == ["owned"]
+
+        keys = []
+        sizes = []
+        monkeypatch.setattr(
+            session,
+            "send_key",
+            lambda key: keys.append(key) or DriverStatus.PROGRESS,
+        )
+        monkeypatch.setattr(
+            session,
+            "resize",
+            lambda cols, rows: sizes.append((cols, rows)) or DriverStatus.PROGRESS,
+        )
+        assert server.dispatch(
+            "send_key",
+            {"key": "enter", "generation": generation, **proof},
+            connection_id=1,
+        ) == {"status": "progress", "accepted_events": 1}
+        resized = server.dispatch(
+            "resize",
+            {"cols": 3, "rows": 1, "generation": generation, **proof},
+            connection_id=1,
+        )
+        assert resized["status"] == "progress"
+        assert resized["accepted"]
+        assert resized["requested"] == [3, 1]
+        assert keys == ["enter"]
+        assert sizes == [(3, 1)]
+
+        baseline = session.snapshot()
+        acknowledged_revision = session.revision
+        assert server._release_display_holder(1)
+        assert session.display_offer is None
+        assert session.displayed_output_view is None
+        assert session.last_acknowledged_display_offer is None
+        assert session.snapshot() == baseline
+        assert session.revision == acknowledged_revision
+
+        assert server.dispatch("claim_display", {}, connection_id=2)["claimed"]
+        assert session._service_display_cadence()
+        replacement = session.display_offer
+        assert replacement is not None
+        assert replacement.offer_id > offer.offer_id
+        takeover = server.dispatch(
+            "screen",
+            {
+                "since": acknowledged_revision,
+                "since_offer": offer.offer_id,
+            },
+            connection_id=2,
+        )
+        assert takeover["changed"]
+        assert takeover["display_offer"]["offer_id"] == replacement.offer_id
+
+        with pytest.raises(TypeError, match="not bool"):
+            server.dispatch(
+                "present",
+                {
+                    "generation": generation,
+                    "display_offer_id": True,
+                    "display_scope": display_scope_to_wire(replacement.scope),
+                },
+                connection_id=2,
+            )
+
+
+def test_display_holder_disconnect_requeues_for_a_successor(tmp_path):
+    scope = DisplayScope(1, 2, 0, 0, 0, 0, None)
+    snapshot = TerminalSnapshot(
+        1,
+        1,
+        ((TerminalCell("X", (7, 7, 7), (0, 0, 0), 0),),),
+        0,
+        0,
+        True,
+        False,
+    )
+    plane = RetainedRootLabelPlane(False, False, ())
+
+    class LeaseMachine:
+        def __init__(self):
+            self.offer = TerminalDisplayOffer(1, scope, snapshot, plane)
+            self.revoke_calls = 0
+            self.stopped = False
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.stopped = True
+
+        def screen(
+            self,
+            since=-1,
+            *,
+            since_offer=0,
+            display_authorized=False,
+        ):
+            result = {"changed": False, "revision": 0}
+            if display_authorized:
+                result["generation"] = 1
+                if since_offer != self.offer.offer_id:
+                    result["changed"] = True
+                    result["display_offer"] = display_offer_to_wire(self.offer)
+            return result
+
+        def present(self, offer_id, offered_scope, *, generation):
+            assert generation == 1
+            assert (offer_id, offered_scope) == (
+                self.offer.offer_id,
+                self.offer.scope,
+            )
+            return {"status": "presented", "presented": True, "revision": 0}
+
+        def revoke_physical_display(self):
+            self.revoke_calls += 1
+            self.offer = replace(self.offer, offer_id=self.offer.offer_id + 1)
+            return True
+
+    socket_path = tmp_path / "display-takeover.sock"
+    machine = LeaseMachine()
+    server = SessionServer(machine, str(socket_path))
+    try:
+        server.serve_in_thread()
+    except PermissionError:
+        pytest.skip("Unix sockets are unavailable in this sandbox")
+
+    successor = SessionClient(str(socket_path))
+    try:
+        owner = SessionClient(str(socket_path))
+        assert owner.request("claim_display")["claimed"]
+        first = owner.request("screen", since=0, since_offer=0)["display_offer"]
+        assert owner.request(
+            "present",
+            generation=1,
+            display_offer_id=first["offer_id"],
+            display_scope=first["scope"],
+        )["presented"]
+        assert not successor.request("claim_display")["claimed"]
+
+        owner.close()
+        claimed = wait_until(
+            lambda: (
+                result
+                if (result := successor.request("claim_display"))["claimed"]
+                else None
+            )
+        )
+        assert claimed["status"] == "claimed"
+        assert machine.revoke_calls == 1
+        takeover = successor.request(
+            "screen",
+            since=0,
+            since_offer=first["offer_id"],
+        )
+        assert takeover["changed"]
+        assert takeover["revision"] == 0
+        assert takeover["display_offer"]["offer_id"] > first["offer_id"]
+    finally:
+        successor.close()
+        server.stop()
+
+    assert machine.stopped
+    assert not socket_path.exists()
 
 
 @pytest.mark.parametrize("rich_terminal", (None, _rich_terminal_config()))
@@ -475,7 +1066,7 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
 
         lightweight = machine.status(detailed=False)
         assert calls == []
-        assert lightweight["protocol"] == PROTOCOL_VERSION == 2
+        assert lightweight["protocol"] == PROTOCOL_VERSION == 3
         assert "state" in lightweight
         assert "steps" in lightweight
         assert "revision" in lightweight
@@ -529,6 +1120,59 @@ def test_screen_encodes_snapshot_outside_machine_lock(monkeypatch):
         assert failure == []
         assert result[0]["changed"]
         assert snapshot_from_wire(result[0]["snapshot"]).cols == 40
+
+
+def test_screen_encodes_display_offer_outside_machine_lock(monkeypatch):
+    with MachineSession(
+        MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2),
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=_retained_policy()),
+    ) as session:
+        _arm_retained_offer(session)
+        machine = SharedMachine(session)
+        conversion_started = threading.Event()
+        allow_conversion = threading.Event()
+        original = display_offer_to_wire
+
+        def blocking_conversion(offer):
+            conversion_started.set()
+            assert allow_conversion.wait(timeout=2.0)
+            return original(offer)
+
+        monkeypatch.setattr(
+            "shared_session.display_offer_to_wire",
+            blocking_conversion,
+        )
+        result = []
+        failure = []
+
+        def request_screen():
+            try:
+                result.append(
+                    machine.screen(
+                        since=session.revision,
+                        since_offer=0,
+                        display_authorized=True,
+                    )
+                )
+            except BaseException as exc:  # propagate worker failures below
+                failure.append(exc)
+
+        worker = threading.Thread(target=request_screen)
+        worker.start()
+        assert conversion_started.wait(timeout=2.0)
+        acquired = machine.lock.acquire(timeout=0.5)
+        if acquired:
+            machine.lock.release()
+        allow_conversion.set()
+        worker.join(timeout=2.0)
+
+        assert acquired, "display-offer conversion held the machine lock"
+        assert not worker.is_alive()
+        assert failure == []
+        assert result[0]["changed"]
+        assert display_offer_from_wire(result[0]["display_offer"]) == session.display_offer
 
 
 def test_shared_server_clients_control_one_machine(tmp_path):

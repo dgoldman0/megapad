@@ -209,6 +209,19 @@ class DisplayCadenceScheduler:
         if self._pending is None:
             self._pending = view
 
+    def revoke_presented(self, view: CompositeTerminalView) -> None:
+        """Revoke exact physical ownership and make takeover immediately due."""
+
+        self._validate_offer_argument(view)
+        if view is not self._presented:
+            raise TerminalUpdateError(
+                "view is not the exact acknowledged display presentation"
+            )
+        self._presented = None
+        self._last_presented_us = None
+        if self._offered is None and self._pending is None:
+            self._pending = view
+
     def _offer(self, view: CompositeTerminalView) -> CompositeTerminalView:
         self._pending = None
         self._offered = view

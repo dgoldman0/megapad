@@ -648,6 +648,7 @@ def test_machine_session_keeps_last_rich_view_until_a_valid_replacement():
     ) as session:
         driver = session.rich_terminal_driver
         assert driver is not None
+        assert session.retained_display_required
         cell = TerminalView(
             attachment_epoch=driver.attachment_epoch,
             session_id=9,
@@ -912,23 +913,64 @@ def test_machine_session_revokes_and_reoffers_only_the_exact_display_candidate()
             latest_offer.scope,
         )
         assert session.displayed_output_view is second
+        assert session.last_acknowledged_display_offer == (
+            latest_offer.offer_id,
+            latest_offer.scope,
+        )
         assert session.snapshot().lines() == ["BB", "BB"]
 
         fallback_cell = replace(
             second_cell,
-            revision=3,
+            presentation_epoch=1,
+            revision=1,
             cells=(
                 (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
                 (Cell(ord("C"), 7, 0), Cell(ord("C"), 7, 0)),
             ),
         )
-        before_fallback = CompositeTerminalView(0, 3, geometry, fallback_cell, None)
+        before_fallback = CompositeTerminalView(1, 1, geometry, fallback_cell, None)
         core._coordinator.view = before_fallback
-        core._clock.revision = 3
+        core._clock.revision = 1
         session._receive_terminal_output(before_fallback)
         assert session._service_display_cadence()
         abandoned_offer = session.display_offer
         assert abandoned_offer is not None
+        assert abandoned_offer.scope.presentation_epoch == 1
+        assert session.displayed_output_view is None
+        assert session.last_acknowledged_display_offer is None
+
+        observer_baseline = session.snapshot()
+        before_sink_loss_revision = session.revision
+        assert session.revoke_physical_display()
+        assert session.display_offer is None
+        assert session.displayed_output_view is None
+        assert session.last_acknowledged_display_offer is None
+        assert session.snapshot() == observer_baseline
+        assert session.revision == before_sink_loss_revision
+        assert session._display_cadence_has_pending_work()
+
+        assert session._service_display_cadence()
+        takeover_offer = session.display_offer
+        assert takeover_offer is not None
+        assert takeover_offer.offer_id > abandoned_offer.offer_id
+        assert session._display_offer_composite is before_fallback
+        assert session.acknowledge_display_offer(
+            takeover_offer.offer_id,
+            takeover_offer.scope,
+        )
+        assert session.displayed_output_view is before_fallback
+        assert session.snapshot().lines() == ["CC", "CC"]
+
+        presented_baseline = session.snapshot()
+        presented_revision = session.revision
+        assert session.revoke_physical_display()
+        assert session.snapshot() == presented_baseline
+        assert session.revision == presented_revision
+        assert session._service_display_cadence()
+        presented_reoffer = session.display_offer
+        assert presented_reoffer is not None
+        assert presented_reoffer.offer_id > takeover_offer.offer_id
+        assert session._display_offer_composite is before_fallback
 
         core._retained_enabled = False
         core._coordinator = None
@@ -943,6 +985,11 @@ def test_machine_session_revokes_and_reoffers_only_the_exact_display_candidate()
             session.acknowledge_display_offer(
                 abandoned_offer.offer_id,
                 abandoned_offer.scope,
+            )
+        with pytest.raises(TerminalUpdateError, match="stale or outside"):
+            session.acknowledge_display_offer(
+                presented_reoffer.offer_id,
+                presented_reoffer.scope,
             )
 
 

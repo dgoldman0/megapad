@@ -125,7 +125,9 @@ python3 megapad/session_ctl.py capture \
 The default Unix socket is `/tmp/megapad-session-<uid>.sock`, is mode `0600`,
 and can be overridden with `--socket` on all three commands. The protocol is
 newline-delimited JSON over that local socket. Screen reads accept a revision
-number and return no cell payload when nothing has changed.
+number and return no cell payload when nothing has changed. Protocol-v3 display
+holders use the independent `since_offer` cursor so a retained display offer can
+arrive even when that CELL revision is unchanged.
 
 Set `MP64_RUNTIME_NAMESPACE` in the server, controller, and viewer
 environments to use
@@ -141,16 +143,44 @@ viewer and CLI are peers: the server serializes input from both through the
 one terminal owner. Baseline ANSI input enters the UART stream; an active
 rich-terminal attachment instead receives normalized, framed input.
 
-The local control protocol is version 2. `status.generation` identifies the
+The local control protocol is version 3. `status.generation` identifies the
 current successful boot/reset epoch. Every `send_text`, `send_key`, and
 `resize` request must echo that generation; the server returns
 `stale_generation` without mutating the new machine when a request races a
 reset. Input responses report `progress`, `backpressured`, `invalid`, `stale`,
-or `failed` and use all-or-zero `accepted_bytes`, `accepted_events`, or
-`accepted` fields. A rich-terminal resize with `progress` may be an accepted
-latest-wins intent: `requested` is the intent, while `cols`, `rows`, and
-`revision` describe the currently visible snapshot until a replacement
-snapshot commits.
+`failed`, or the nonfatal `stale_display` authorization refusal, and use
+all-or-zero `accepted_bytes`, `accepted_events`, or `accepted` fields. A
+rich-terminal resize with `progress` may be an accepted latest-wins intent:
+`requested` is the intent, while `cols`, `rows`, and `revision` describe the
+currently visible snapshot until a replacement snapshot commits.
+
+A renderer connection first calls `claim_display`. The claim is idempotent for
+that connection and exclusive until disconnect. Only the holder receives a
+`display_offer` from `screen`; ordinary observers retain the existing
+CELL-snapshot response shape. The holder supplies both cursors:
+`since=<CELL revision>` and `since_offer=<positive offer ID>`, with zero as the
+initial offer sentinel. An offer contains only the immutable renderer DTOs:
+its positive `offer_id`, the complete `DisplayScope`, the CELL snapshot, and
+the projected root-LABEL plane. It never contains a `CompositeTerminalView`, a
+hidden retained rebuild target, or model authority.
+
+After drawing the complete offer, the holder calls `present` with the current
+reset `generation`, exact `display_offer_id`, and full `display_scope` returned
+by `screen`. `presented` promotes that physical view and returns its new session
+`revision`; retrying the same delivered proof returns `duplicate`. Guessed,
+foreign, or replaced proofs return `stale_display`, and an old reset generation
+returns `stale_generation`, without failing the machine. Disconnect revokes
+both unacknowledged and acknowledged physical ownership. The last CELL snapshot
+remains available to observers while the newest composite is immediately
+re-offered under a fresh higher offer ID to a successor.
+
+When a retained policy is configured, `send_text`, `send_key`, and `resize`
+also carry the exact acknowledged `display_offer_id` and `display_scope`. A
+nonholder or mismatched proof receives `stale_display`; the holder receives
+ordinary `backpressured` before its current physical ACK. This prevents queued
+input from migrating to a newer view. ANSI sessions and APT sessions without a
+retained policy keep their existing input behavior and do not require a display
+claim or proof.
 
 `raw` uses lifetime-monotonic absolute byte cursors. Its response reports the
 requested slice's `start`, the oldest retained `available_from` offset, the
@@ -225,11 +255,12 @@ projection. It contains:
 - Text extraction and search helpers.
 - JSON, text, and PNG writers.
 
-An active retained session additionally exposes the immutable retained plane
-and global composite revision to the display sink. Text/search helpers and
-CELL-only PNG output may continue to use `TerminalSnapshot`, but shared live
-observation must not discard retained state or treat a CELL-only projection as
-the complete displayed view.
+An active retained session additionally offers the immutable retained plane
+and global composite scope to the exclusive physical display holder. Text/search
+helpers and CELL-only PNG output may continue to use `TerminalSnapshot`, but a
+physical retained display must render and acknowledge the complete
+`TerminalDisplayOffer`; it must not treat a CELL-only projection as the complete
+displayed view.
 
 JSON/cell assertions should be preferred for tests. PNG output is intended for
 visual inspection and build artifacts. Pass `font_path` to `write_png()` when a

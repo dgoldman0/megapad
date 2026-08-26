@@ -218,6 +218,45 @@ def test_revoke_requeues_offer_or_coalesces_it_behind_newer_pending() -> None:
     assert cadence.service() is latest
 
 
+def test_revoke_presented_requires_exact_identity_and_requeues_immediately() -> None:
+    clock = [1_000]
+    cadence = DisplayCadenceScheduler(
+        policy=_policy(100), monotonic_us=lambda: clock[0]
+    )
+    first = _view(0, 1)
+    cadence.replace_session(1, 2, first)
+    assert cadence.service() is first
+    cadence.acknowledge(first)
+
+    with pytest.raises(TerminalUpdateError, match="exact acknowledged"):
+        cadence.revoke_presented(replace(first))
+    cadence.revoke_presented(first)
+    assert cadence.presented_revision is None
+    assert cadence.offered_revision is None
+    assert cadence.pending_revision == 1
+    assert cadence.service() is first
+
+    with pytest.raises(TerminalUpdateError, match="exact acknowledged"):
+        cadence.revoke_presented(first)
+
+
+def test_revoke_presented_preserves_a_newer_pending_view() -> None:
+    cadence = DisplayCadenceScheduler(
+        policy=_policy(100), monotonic_us=lambda: 1_000
+    )
+    first = _view(0, 1)
+    latest = _view(0, 2)
+    cadence.replace_session(1, 2, first)
+    assert cadence.service() is first
+    cadence.acknowledge(first)
+    cadence.submit(latest)
+
+    cadence.revoke_presented(first)
+    assert cadence.presented_revision is None
+    assert cadence.pending_revision == 2
+    assert cadence.service() is latest
+
+
 def test_clock_rollback_cannot_make_a_pending_view_eligible_early() -> None:
     clock = [1_000]
     cadence = DisplayCadenceScheduler(

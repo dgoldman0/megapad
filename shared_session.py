@@ -10,17 +10,82 @@ import socket
 import stat
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from rich_terminal import DriverStatus
+from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
+from rich_terminal.retained_view import (
+    INT32_MAX,
+    INT32_MIN,
+    DisplayScope,
+    RetainedLabelDraw,
+    RetainedRegionDraw,
+    RetainedRootLabelPlane,
+)
+from rich_terminal.update_authority import TerminalUpdateError
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
-from session import MachineSession, TerminalCell, TerminalSnapshot
+from session import (
+    MachineSession,
+    TerminalCell,
+    TerminalDisplayOffer,
+    TerminalSnapshot,
+)
 
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 DEFAULT_SOCKET = shared_session_socket()
 MAX_REQUEST_BYTES = 1 << 20
+
+
+def _wire_object(data, name: str, fields: tuple[str, ...]) -> Mapping[str, Any]:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"{name} must be an object")
+    keys = set(data)
+    expected = set(fields)
+    if keys != expected:
+        missing = sorted(expected - keys)
+        unknown = sorted(keys - expected)
+        raise ValueError(
+            f"{name} fields are not exact; missing={missing}, unknown={unknown}"
+        )
+    return data
+
+
+def _wire_integer(
+    value,
+    name: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer, not bool")
+    try:
+        normalized = operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer") from exc
+    if normalized < minimum or (maximum is not None and normalized > maximum):
+        upper = "unbounded" if maximum is None else str(maximum)
+        raise ValueError(f"{name} must be between {minimum} and {upper}")
+    return int(normalized)
+
+
+def _wire_boolean(value, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be bool")
+    return value
+
+
+def _wire_text(value, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be str")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must contain only Unicode scalar values") from exc
+    return value
 
 
 def _rgb_pack(color: tuple[int, int, int]) -> int:
@@ -67,35 +132,405 @@ def snapshot_to_wire(snapshot: TerminalSnapshot) -> dict:
 
 
 def snapshot_from_wire(data: dict) -> TerminalSnapshot:
-    """Decode a wire snapshot into the immutable public snapshot type."""
-    cols = int(data["cols"])
-    rows = int(data["rows"])
-    flat: list[TerminalCell] = []
-    for run in data["runs"]:
-        count, char, fg, bg, attrs = run
-        cell = TerminalCell(
-            char=str(char),
-            fg=_rgb_unpack(int(fg)),
-            bg=_rgb_unpack(int(bg)),
-            attrs=int(attrs),
-        )
-        flat.extend([cell] * int(count))
+    """Decode a strict wire snapshot into the immutable public snapshot type."""
+
+    wire = _wire_object(
+        data,
+        "snapshot",
+        ("cols", "rows", "cursor", "alternate_screen", "runs"),
+    )
+    cols = _wire_integer(wire["cols"], "snapshot cols", minimum=1)
+    rows = _wire_integer(wire["rows"], "snapshot rows", minimum=1)
     expected = cols * rows
+
+    cursor = wire["cursor"]
+    if not isinstance(cursor, (list, tuple)) or len(cursor) != 3:
+        raise TypeError("snapshot cursor must be a three-item array")
+    cursor_row = _wire_integer(
+        cursor[0], "snapshot cursor row", minimum=0, maximum=UINT32_MAX
+    )
+    cursor_col = _wire_integer(
+        cursor[1], "snapshot cursor col", minimum=0, maximum=UINT32_MAX
+    )
+    cursor_visible = _wire_boolean(cursor[2], "snapshot cursor visible")
+    if cursor_visible and (cursor_row >= rows or cursor_col >= cols):
+        raise ValueError("visible snapshot cursor must be inside the geometry")
+    alternate_screen = _wire_boolean(
+        wire["alternate_screen"], "snapshot alternate_screen"
+    )
+
+    runs = wire["runs"]
+    if not isinstance(runs, (list, tuple)):
+        raise TypeError("snapshot runs must be an array")
+    flat: list[TerminalCell] = []
+    for index, run in enumerate(runs):
+        if not isinstance(run, (list, tuple)) or len(run) != 5:
+            raise TypeError(f"snapshot run {index} must be a five-item array")
+        count = _wire_integer(run[0], f"snapshot run {index} count", minimum=1)
+        char = _wire_text(run[1], f"snapshot run {index} char")
+        if len(char) != 1:
+            raise ValueError(f"snapshot run {index} char must be one character")
+        fg = _wire_integer(
+            run[2], f"snapshot run {index} foreground", minimum=0, maximum=0xFFFFFF
+        )
+        bg = _wire_integer(
+            run[3], f"snapshot run {index} background", minimum=0, maximum=0xFFFFFF
+        )
+        attrs = _wire_integer(
+            run[4], f"snapshot run {index} attrs", minimum=0, maximum=0xFF
+        )
+        if len(flat) + count > expected:
+            raise ValueError("snapshot runs exceed the declared geometry")
+        cell = TerminalCell(
+            char=char,
+            fg=_rgb_unpack(fg),
+            bg=_rgb_unpack(bg),
+            attrs=attrs,
+        )
+        flat.extend([cell] * count)
     if len(flat) != expected:
         raise ValueError(f"snapshot has {len(flat)} cells, expected {expected}")
     cells = tuple(
         tuple(flat[row * cols:(row + 1) * cols])
         for row in range(rows)
     )
-    cursor_row, cursor_col, cursor_visible = data["cursor"]
     return TerminalSnapshot(
         cols=cols,
         rows=rows,
         cells=cells,
-        cursor_col=int(cursor_col),
-        cursor_row=int(cursor_row),
-        cursor_visible=bool(cursor_visible),
-        alternate_screen=bool(data.get("alternate_screen", False)),
+        cursor_col=cursor_col,
+        cursor_row=cursor_row,
+        cursor_visible=cursor_visible,
+        alternate_screen=alternate_screen,
+    )
+
+
+def display_scope_to_wire(scope: DisplayScope) -> dict:
+    """Encode one exact retained-display scope without hidden model state."""
+
+    if not isinstance(scope, DisplayScope):
+        raise TypeError("scope must be DisplayScope")
+    return {
+        "attachment_epoch": scope.attachment_epoch,
+        "session_id": scope.session_id,
+        "presentation_epoch": scope.presentation_epoch,
+        "model_revision": scope.model_revision,
+        "geometry_generation": scope.geometry_generation,
+        "cell_revision": scope.cell_revision,
+        "retained_revision": scope.retained_revision,
+    }
+
+
+def display_scope_from_wire(data: dict) -> DisplayScope:
+    """Decode an exact retained-display scope and re-run all DTO invariants."""
+
+    wire = _wire_object(
+        data,
+        "display scope",
+        (
+            "attachment_epoch",
+            "session_id",
+            "presentation_epoch",
+            "model_revision",
+            "geometry_generation",
+            "cell_revision",
+            "retained_revision",
+        ),
+    )
+    retained_revision = wire["retained_revision"]
+    if retained_revision is not None:
+        retained_revision = _wire_integer(
+            retained_revision,
+            "display scope retained_revision",
+            minimum=0,
+            maximum=UINT64_MAX,
+        )
+    return DisplayScope(
+        attachment_epoch=_wire_integer(
+            wire["attachment_epoch"],
+            "display scope attachment_epoch",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        session_id=_wire_integer(
+            wire["session_id"],
+            "display scope session_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        presentation_epoch=_wire_integer(
+            wire["presentation_epoch"],
+            "display scope presentation_epoch",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        model_revision=_wire_integer(
+            wire["model_revision"],
+            "display scope model_revision",
+            minimum=0,
+            maximum=UINT64_MAX,
+        ),
+        geometry_generation=_wire_integer(
+            wire["geometry_generation"],
+            "display scope geometry_generation",
+            minimum=0,
+            maximum=UINT64_MAX,
+        ),
+        cell_revision=_wire_integer(
+            wire["cell_revision"],
+            "display scope cell_revision",
+            minimum=0,
+            maximum=UINT64_MAX,
+        ),
+        retained_revision=retained_revision,
+    )
+
+
+_LABEL_WIRE_FIELDS = (
+    "object_id",
+    "z_order",
+    "left",
+    "top",
+    "right",
+    "bottom",
+    "red",
+    "green",
+    "blue",
+    "alpha",
+    "horizontal_align",
+    "vertical_align",
+    "ellipsize",
+    "text",
+)
+_REGION_WIRE_FIELDS = (
+    "owner_id",
+    "owner_generation",
+    "region_id",
+    "cell_x",
+    "cell_y",
+    "cell_cols",
+    "cell_rows",
+    "z_order",
+    "clipped",
+    "labels",
+)
+
+
+def retained_root_label_plane_to_wire(plane: RetainedRootLabelPlane) -> dict:
+    """Encode only the immutable renderer-facing root-LABEL draw plane."""
+
+    if not isinstance(plane, RetainedRootLabelPlane):
+        raise TypeError("plane must be RetainedRootLabelPlane")
+    return {
+        "retained_initialized": plane.retained_initialized,
+        "retained_visible": plane.retained_visible,
+        "regions": [
+            {
+                "owner_id": region.owner_id,
+                "owner_generation": region.owner_generation,
+                "region_id": region.region_id,
+                "cell_x": region.cell_x,
+                "cell_y": region.cell_y,
+                "cell_cols": region.cell_cols,
+                "cell_rows": region.cell_rows,
+                "z_order": region.z_order,
+                "clipped": region.clipped,
+                "labels": [
+                    {
+                        "object_id": label.object_id,
+                        "z_order": label.z_order,
+                        "left": label.left,
+                        "top": label.top,
+                        "right": label.right,
+                        "bottom": label.bottom,
+                        "red": label.red,
+                        "green": label.green,
+                        "blue": label.blue,
+                        "alpha": label.alpha,
+                        "horizontal_align": label.horizontal_align,
+                        "vertical_align": label.vertical_align,
+                        "ellipsize": label.ellipsize,
+                        "text": label.text,
+                    }
+                    for label in region.labels
+                ],
+            }
+            for region in plane.regions
+        ],
+    }
+
+
+def retained_root_label_plane_from_wire(data: dict) -> RetainedRootLabelPlane:
+    """Decode the complete root-LABEL draw plane with strict scalar types."""
+
+    wire = _wire_object(
+        data,
+        "retained root-LABEL plane",
+        ("retained_initialized", "retained_visible", "regions"),
+    )
+    regions_wire = wire["regions"]
+    if not isinstance(regions_wire, (list, tuple)):
+        raise TypeError("retained root-LABEL regions must be an array")
+    regions: list[RetainedRegionDraw] = []
+    for region_index, raw_region in enumerate(regions_wire):
+        region = _wire_object(
+            raw_region,
+            f"retained region {region_index}",
+            _REGION_WIRE_FIELDS,
+        )
+        labels_wire = region["labels"]
+        if not isinstance(labels_wire, (list, tuple)):
+            raise TypeError(f"retained region {region_index} labels must be an array")
+        labels: list[RetainedLabelDraw] = []
+        for label_index, raw_label in enumerate(labels_wire):
+            label = _wire_object(
+                raw_label,
+                f"retained region {region_index} LABEL {label_index}",
+                _LABEL_WIRE_FIELDS,
+            )
+            prefix = f"retained region {region_index} LABEL {label_index}"
+            labels.append(
+                RetainedLabelDraw(
+                    object_id=_wire_integer(
+                        label["object_id"],
+                        f"{prefix} object_id",
+                        minimum=1,
+                        maximum=UINT64_MAX,
+                    ),
+                    z_order=_wire_integer(
+                        label["z_order"],
+                        f"{prefix} z_order",
+                        minimum=INT32_MIN,
+                        maximum=INT32_MAX,
+                    ),
+                    left=_wire_integer(
+                        label["left"], f"{prefix} left", minimum=0, maximum=UINT32_MAX
+                    ),
+                    top=_wire_integer(
+                        label["top"], f"{prefix} top", minimum=0, maximum=UINT32_MAX
+                    ),
+                    right=_wire_integer(
+                        label["right"], f"{prefix} right", minimum=0, maximum=UINT32_MAX
+                    ),
+                    bottom=_wire_integer(
+                        label["bottom"], f"{prefix} bottom", minimum=0, maximum=UINT32_MAX
+                    ),
+                    red=_wire_integer(
+                        label["red"], f"{prefix} red", minimum=0, maximum=0xFF
+                    ),
+                    green=_wire_integer(
+                        label["green"], f"{prefix} green", minimum=0, maximum=0xFF
+                    ),
+                    blue=_wire_integer(
+                        label["blue"], f"{prefix} blue", minimum=0, maximum=0xFF
+                    ),
+                    alpha=_wire_integer(
+                        label["alpha"], f"{prefix} alpha", minimum=0, maximum=0xFF
+                    ),
+                    horizontal_align=_wire_integer(
+                        label["horizontal_align"],
+                        f"{prefix} horizontal_align",
+                        minimum=0,
+                        maximum=2,
+                    ),
+                    vertical_align=_wire_integer(
+                        label["vertical_align"],
+                        f"{prefix} vertical_align",
+                        minimum=0,
+                        maximum=2,
+                    ),
+                    ellipsize=_wire_boolean(
+                        label["ellipsize"], f"{prefix} ellipsize"
+                    ),
+                    text=_wire_text(label["text"], f"{prefix} text"),
+                )
+            )
+        prefix = f"retained region {region_index}"
+        regions.append(
+            RetainedRegionDraw(
+                owner_id=_wire_integer(
+                    region["owner_id"],
+                    f"{prefix} owner_id",
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+                owner_generation=_wire_integer(
+                    region["owner_generation"],
+                    f"{prefix} owner_generation",
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+                region_id=_wire_integer(
+                    region["region_id"],
+                    f"{prefix} region_id",
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+                cell_x=_wire_integer(
+                    region["cell_x"], f"{prefix} cell_x", minimum=0, maximum=UINT32_MAX
+                ),
+                cell_y=_wire_integer(
+                    region["cell_y"], f"{prefix} cell_y", minimum=0, maximum=UINT32_MAX
+                ),
+                cell_cols=_wire_integer(
+                    region["cell_cols"],
+                    f"{prefix} cell_cols",
+                    minimum=1,
+                    maximum=UINT32_MAX,
+                ),
+                cell_rows=_wire_integer(
+                    region["cell_rows"],
+                    f"{prefix} cell_rows",
+                    minimum=1,
+                    maximum=UINT32_MAX,
+                ),
+                z_order=_wire_integer(
+                    region["z_order"],
+                    f"{prefix} z_order",
+                    minimum=INT32_MIN,
+                    maximum=INT32_MAX,
+                ),
+                clipped=_wire_boolean(region["clipped"], f"{prefix} clipped"),
+                labels=tuple(labels),
+            )
+        )
+    return RetainedRootLabelPlane(
+        retained_initialized=_wire_boolean(
+            wire["retained_initialized"], "retained root-LABEL initialized"
+        ),
+        retained_visible=_wire_boolean(
+            wire["retained_visible"], "retained root-LABEL visible"
+        ),
+        regions=tuple(regions),
+    )
+
+
+def display_offer_to_wire(offer: TerminalDisplayOffer) -> dict:
+    """Encode one immutable physical offer without model authority objects."""
+
+    if not isinstance(offer, TerminalDisplayOffer):
+        raise TypeError("offer must be TerminalDisplayOffer")
+    return {
+        "offer_id": offer.offer_id,
+        "scope": display_scope_to_wire(offer.scope),
+        "cell": snapshot_to_wire(offer.cell),
+        "retained": retained_root_label_plane_to_wire(offer.retained),
+    }
+
+
+def display_offer_from_wire(data: dict) -> TerminalDisplayOffer:
+    """Decode an exact immutable physical offer from protocol v3."""
+
+    wire = _wire_object(
+        data,
+        "display offer",
+        ("offer_id", "scope", "cell", "retained"),
+    )
+    return TerminalDisplayOffer(
+        offer_id=_wire_integer(wire["offer_id"], "display offer id", minimum=1),
+        scope=display_scope_from_wire(wire["scope"]),
+        cell=snapshot_from_wire(wire["cell"]),
+        retained=retained_root_label_plane_from_wire(wire["retained"]),
     )
 
 
@@ -549,11 +984,26 @@ class SharedMachine:
             self.condition.notify_all()
             return self.status()
 
-    def send_text(self, text: str, *, generation: int | None = None) -> dict:
+    def send_text(
+        self,
+        text: str,
+        *,
+        generation: int | None = None,
+        display_authorized: bool = False,
+        display_lease_ack: tuple[int, DisplayScope] | None = None,
+        display_request_ack: tuple[int, DisplayScope] | None = None,
+    ) -> dict:
         with self.condition:
             byte_count = len(text.encode("utf-8"))
             if not self._generation_current(generation):
                 return {"status": "stale_generation", "accepted_bytes": 0}
+            refusal = self._display_input_refusal(
+                display_authorized=display_authorized,
+                display_lease_ack=display_lease_ack,
+                display_request_ack=display_request_ack,
+            )
+            if refusal is not None:
+                return {"status": refusal, "accepted_bytes": 0}
             status = self._terminal_mutation_status(self.session.send_text(text))
             self.condition.notify_all()
             return {
@@ -563,10 +1013,25 @@ class SharedMachine:
                 ),
             }
 
-    def send_key(self, key: str, *, generation: int | None = None) -> dict:
+    def send_key(
+        self,
+        key: str,
+        *,
+        generation: int | None = None,
+        display_authorized: bool = False,
+        display_lease_ack: tuple[int, DisplayScope] | None = None,
+        display_request_ack: tuple[int, DisplayScope] | None = None,
+    ) -> dict:
         with self.condition:
             if not self._generation_current(generation):
                 return {"status": "stale_generation", "accepted_events": 0}
+            refusal = self._display_input_refusal(
+                display_authorized=display_authorized,
+                display_lease_ack=display_lease_ack,
+                display_request_ack=display_request_ack,
+            )
+            if refusal is not None:
+                return {"status": refusal, "accepted_events": 0}
             status = self._terminal_mutation_status(self.session.send_key(key))
             self.condition.notify_all()
             return {
@@ -580,20 +1045,18 @@ class SharedMachine:
         rows: int,
         *,
         generation: int | None = None,
+        display_authorized: bool = False,
+        display_lease_ack: tuple[int, DisplayScope] | None = None,
+        display_request_ack: tuple[int, DisplayScope] | None = None,
     ) -> dict:
-        cols = int(cols)
-        rows = int(rows)
+        cols = _wire_integer(cols, "terminal cols", minimum=1)
+        rows = _wire_integer(rows, "terminal rows", minimum=1)
         if not self.session.rich_terminal_enabled and not (
             1 <= cols <= 400 and 1 <= rows <= 200
         ):
             raise ValueError("ANSI terminal size must be within 1x1 and 400x200")
         with self.condition:
             current_generation = self._generation_current(generation)
-            status = (
-                self._terminal_mutation_status(self.session.resize(cols, rows))
-                if current_generation
-                else None
-            )
             visible_cols, visible_rows = self.session.visible_geometry
             if not current_generation:
                 return {
@@ -604,6 +1067,22 @@ class SharedMachine:
                     "rows": visible_rows,
                     "revision": self.session.revision,
                 }
+            refusal = self._display_input_refusal(
+                display_authorized=display_authorized,
+                display_lease_ack=display_lease_ack,
+                display_request_ack=display_request_ack,
+            )
+            if refusal is not None:
+                return {
+                    "status": refusal,
+                    "accepted": False,
+                    "requested": [cols, rows],
+                    "cols": visible_cols,
+                    "rows": visible_rows,
+                    "revision": self.session.revision,
+                }
+            status = self._terminal_mutation_status(self.session.resize(cols, rows))
+            visible_cols, visible_rows = self.session.visible_geometry
             self.condition.notify_all()
             return {
                 "status": status.value,
@@ -613,6 +1092,28 @@ class SharedMachine:
                 "rows": visible_rows,
                 "revision": self.session.revision,
             }
+
+    def _display_input_refusal(
+        self,
+        *,
+        display_authorized: bool,
+        display_lease_ack: tuple[int, DisplayScope] | None,
+        display_request_ack: tuple[int, DisplayScope] | None,
+    ) -> str | None:
+        """Gate retained input on the exact physical view this lease ACKed."""
+
+        if not isinstance(display_authorized, bool):
+            raise TypeError("display_authorized must be bool")
+        if not self.session.retained_display_required:
+            return None
+        if not display_authorized:
+            return "stale_display"
+        current_ack = self.session.last_acknowledged_display_offer
+        if current_ack is None or display_lease_ack is None:
+            return DriverStatus.BACKPRESSURED.value
+        if display_request_ack != display_lease_ack or display_lease_ack != current_ack:
+            return "stale_display"
+        return None
 
     def _generation_current(self, generation: int | None) -> bool:
         if generation is None:
@@ -642,21 +1143,75 @@ class SharedMachine:
             self.paused = True
         return normalized
 
-    def screen(self, since: int = -1) -> dict:
+    def screen(
+        self,
+        since: int = -1,
+        *,
+        since_offer: int = 0,
+        display_authorized: bool = False,
+    ) -> dict:
+        since = _wire_integer(since, "screen since", minimum=-1)
+        since_offer = _wire_integer(
+            since_offer, "screen since_offer", minimum=0
+        )
+        if not isinstance(display_authorized, bool):
+            raise TypeError("display_authorized must be bool")
         with self.lock:
             revision = self.session.revision
-            if int(since) == revision:
-                return {"changed": False, "revision": revision}
-            snapshot = self.session.snapshot()
+            snapshot = None if since == revision else self.session.snapshot()
+            generation = self._reset_generation
+            offer = self.session.display_offer if display_authorized else None
+            if offer is not None and offer.offer_id == since_offer:
+                offer = None
 
-        # TerminalSnapshot is immutable.  Keep the machine lock only for the
-        # coherent revision+snapshot capture; RLE and RGB packing can proceed
-        # while the emulator continues running.
-        return {
-            "changed": True,
+        # Both renderer DTOs are immutable.  Keep the machine lock only for a
+        # coherent capture; RLE and rich-plane conversion proceed while the
+        # emulator continues running.
+        result = {
+            "changed": snapshot is not None or offer is not None,
             "revision": revision,
-            "snapshot": snapshot_to_wire(snapshot),
         }
+        if snapshot is not None:
+            result["snapshot"] = snapshot_to_wire(snapshot)
+        if display_authorized:
+            result["generation"] = generation
+            if offer is not None:
+                result["display_offer"] = display_offer_to_wire(offer)
+        return result
+
+    def present(
+        self,
+        offer_id: int,
+        scope: DisplayScope,
+        *,
+        generation: int,
+    ) -> dict:
+        """Atomically ACK one exact retained-display offer at the machine."""
+
+        offer_id = _wire_integer(offer_id, "display offer id", minimum=1)
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        with self.condition:
+            if not self._generation_current(generation):
+                return {"status": "stale_generation", "presented": False}
+            try:
+                changed = self.session.acknowledge_display_offer(offer_id, scope)
+            except TerminalUpdateError:
+                return {"status": "stale_display", "presented": False}
+            self.condition.notify_all()
+            return {
+                "status": "presented" if changed else "duplicate",
+                "presented": True,
+                "revision": self.session.revision,
+            }
+
+    def revoke_physical_display(self) -> bool:
+        """Revoke the exact retained sink and wake cadence for a successor."""
+
+        with self.condition:
+            changed = self.session.revoke_physical_display()
+            self.condition.notify_all()
+            return changed
 
     def text(self, trim_right: bool = True) -> dict:
         with self.lock:
@@ -709,8 +1264,13 @@ class SessionServer:
         self.socket_path = str(Path(socket_path).expanduser())
         self._socket: socket.socket | None = None
         self._stopping = threading.Event()
-        self._clients: set[socket.socket] = set()
+        self._clients: dict[socket.socket, int] = {}
         self._clients_lock = threading.Lock()
+        self._next_connection_id = 1
+        self._display_lock = threading.RLock()
+        self._display_holder: int | None = None
+        self._display_delivered: tuple[int, DisplayScope] | None = None
+        self._display_ack: tuple[int, DisplayScope] | None = None
         self._serve_thread: threading.Thread | None = None
         self._socket_owner: RuntimeOwnershipLock | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -861,17 +1421,19 @@ class SessionServer:
                 except OSError:
                     break
                 with self._clients_lock:
-                    self._clients.add(client)
+                    connection_id = self._next_connection_id
+                    self._next_connection_id += 1
+                    self._clients[client] = connection_id
                 threading.Thread(
                     target=self._handle_client,
-                    args=(client,),
+                    args=(client, connection_id),
                     daemon=True,
                     name="megapad-session-client",
                 ).start()
         finally:
             self.stop()
 
-    def _handle_client(self, client: socket.socket):
+    def _handle_client(self, client: socket.socket, connection_id: int):
         try:
             reader = client.makefile("rb")
             while not self._stopping.is_set():
@@ -884,7 +1446,11 @@ class SessionServer:
                 request = None
                 try:
                     request = json.loads(line)
-                    result = self.dispatch(request.get("method"), request.get("params") or {})
+                    result = self.dispatch(
+                        request.get("method"),
+                        request.get("params") or {},
+                        connection_id=connection_id,
+                    )
                     response = {"id": request.get("id"), "ok": True, "result": result}
                 except Exception as exc:
                     response = {
@@ -894,12 +1460,15 @@ class SessionServer:
                     }
                 self._send(client, response)
         finally:
-            with self._clients_lock:
-                self._clients.discard(client)
             try:
-                client.close()
-            except OSError:
-                pass
+                self._release_display_holder(connection_id)
+            finally:
+                with self._clients_lock:
+                    self._clients.pop(client, None)
+                try:
+                    client.close()
+                except OSError:
+                    pass
 
     @staticmethod
     def _send(client: socket.socket, response: dict):
@@ -921,7 +1490,148 @@ class SessionServer:
             raise ValueError("generation cannot be negative")
         return int(generation)
 
-    def dispatch(self, method: str, params: dict) -> Any:
+    @staticmethod
+    def _required_display_pair(params: Mapping[str, Any]) -> tuple[int, DisplayScope]:
+        if "display_offer_id" not in params or "display_scope" not in params:
+            raise ValueError(
+                "display request requires display_offer_id and display_scope"
+            )
+        return (
+            _wire_integer(
+                params["display_offer_id"], "display_offer_id", minimum=1
+            ),
+            display_scope_from_wire(params["display_scope"]),
+        )
+
+    @classmethod
+    def _optional_display_pair(
+        cls,
+        params: Mapping[str, Any],
+    ) -> tuple[int, DisplayScope] | None:
+        has_id = "display_offer_id" in params
+        has_scope = "display_scope" in params
+        if not has_id and not has_scope:
+            return None
+        if has_id != has_scope:
+            raise ValueError(
+                "display proof requires both display_offer_id and display_scope"
+            )
+        return cls._required_display_pair(params)
+
+    def _claim_display(self, connection_id: int | None) -> dict:
+        if connection_id is None:
+            raise ValueError("claim_display requires a live client connection")
+        normalized = _wire_integer(
+            connection_id, "connection identity", minimum=1
+        )
+        with self._display_lock:
+            if self._stopping.is_set():
+                return {"status": "stopping", "claimed": False}
+            holder = self._display_holder
+            if holder is None:
+                self._display_holder = normalized
+                self._display_delivered = None
+                self._display_ack = None
+                return {"status": "claimed", "claimed": True}
+            if holder == normalized:
+                return {"status": "claimed", "claimed": True}
+            return {"status": "display_busy", "claimed": False}
+
+    def _release_display_holder(self, connection_id: int) -> bool:
+        """Drop one exact lease and requeue all of its physical sink state."""
+
+        normalized = _wire_integer(
+            connection_id, "connection identity", minimum=1
+        )
+        with self._display_lock:
+            if self._display_holder != normalized:
+                return False
+            try:
+                return self.machine.revoke_physical_display()
+            finally:
+                self._display_holder = None
+                self._display_delivered = None
+                self._display_ack = None
+
+    def _screen_for_connection(
+        self,
+        params: Mapping[str, Any],
+        connection_id: int | None,
+    ) -> dict:
+        with self._display_lock:
+            authorized = (
+                connection_id is not None
+                and self._display_holder == connection_id
+            )
+            result = self.machine.screen(
+                params.get("since", -1),
+                since_offer=params.get("since_offer", 0),
+                display_authorized=authorized,
+            )
+            offer = result.get("display_offer")
+            if authorized and offer is not None:
+                self._display_delivered = (
+                    _wire_integer(
+                        offer["offer_id"], "display offer id", minimum=1
+                    ),
+                    display_scope_from_wire(offer["scope"]),
+                )
+            return result
+
+    def _present_for_connection(
+        self,
+        params: Mapping[str, Any],
+        connection_id: int | None,
+    ) -> dict:
+        generation = self._required_generation(params)
+        pair = self._required_display_pair(params)
+        with self._display_lock:
+            if connection_id is None or self._display_holder != connection_id:
+                return {"status": "stale_display", "presented": False}
+            if pair != self._display_delivered:
+                return {"status": "stale_display", "presented": False}
+            result = self.machine.present(
+                pair[0],
+                pair[1],
+                generation=generation,
+            )
+            if result["status"] in {"presented", "duplicate"}:
+                self._display_ack = pair
+            return result
+
+    def _dispatch_terminal_input(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        connection_id: int | None,
+    ) -> dict:
+        generation = self._required_generation(params)
+        request_ack = self._optional_display_pair(params)
+        with self._display_lock:
+            authorized = (
+                connection_id is not None
+                and self._display_holder == connection_id
+            )
+            common = {
+                "generation": generation,
+                "display_authorized": authorized,
+                "display_lease_ack": self._display_ack if authorized else None,
+                "display_request_ack": request_ack,
+            }
+            if method == "send_text":
+                return self.machine.send_text(str(params.get("text", "")), **common)
+            if method == "send_key":
+                return self.machine.send_key(str(params["key"]), **common)
+            assert method == "resize"
+            return self.machine.resize(params["cols"], params["rows"], **common)
+
+    def dispatch(
+        self,
+        method: str,
+        params: dict,
+        *,
+        connection_id: int | None = None,
+    ) -> Any:
         if method == "ping":
             return {"protocol": PROTOCOL_VERSION, "time": time.time()}
         if method == "status":
@@ -948,25 +1658,19 @@ class SessionServer:
         if method == "step":
             return self.machine.step(params.get("count", 1))
         if method == "reset":
-            return self.machine.reset(paused=params.get("paused"))
-        if method == "send_text":
-            return self.machine.send_text(
-                str(params.get("text", "")),
-                generation=self._required_generation(params),
-            )
-        if method == "send_key":
-            return self.machine.send_key(
-                str(params["key"]),
-                generation=self._required_generation(params),
-            )
-        if method == "resize":
-            return self.machine.resize(
-                params["cols"],
-                params["rows"],
-                generation=self._required_generation(params),
-            )
+            with self._display_lock:
+                result = self.machine.reset(paused=params.get("paused"))
+                self._display_delivered = None
+                self._display_ack = None
+                return result
+        if method == "claim_display":
+            return self._claim_display(connection_id)
+        if method == "present":
+            return self._present_for_connection(params, connection_id)
+        if method in {"send_text", "send_key", "resize"}:
+            return self._dispatch_terminal_input(method, params, connection_id)
         if method == "screen":
-            return self.machine.screen(params.get("since", -1))
+            return self._screen_for_connection(params, connection_id)
         if method == "text":
             return self.machine.text(bool(params.get("trim_right", True)))
         if method == "raw":
@@ -988,12 +1692,22 @@ class SessionServer:
         with self._clients_lock:
             clients = list(self._clients)
             self._clients.clear()
-        for client in clients:
-            try:
-                client.close()
-            except OSError:
-                pass
-        self.machine.stop()
+        try:
+            with self._display_lock:
+                try:
+                    if self._display_holder is not None:
+                        self.machine.revoke_physical_display()
+                finally:
+                    self._display_holder = None
+                    self._display_delivered = None
+                    self._display_ack = None
+        finally:
+            for client in clients:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+            self.machine.stop()
 
 
 class SessionClient:

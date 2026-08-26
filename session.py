@@ -658,6 +658,25 @@ class MachineSession:
         return self._display_offer
 
     @property
+    def retained_display_required(self) -> bool:
+        """Whether shared input must be bound to a retained physical display."""
+
+        config = self._rich_terminal_config
+        driver = self._rich_terminal_driver
+        return bool(
+            config is not None
+            and config.retained_policy is not None
+            and driver is not None
+            and driver.core.retained_configured
+        )
+
+    @property
+    def last_acknowledged_display_offer(self) -> tuple[int, DisplayScope] | None:
+        """Exact immutable proof token for the currently owned physical sink."""
+
+        return self._last_acknowledged_display_offer
+
+    @property
     def rich_terminal_state(self) -> TerminalState | None:
         if self._rich_terminal_failure_reason is not None:
             return TerminalState.FAILED
@@ -1032,6 +1051,7 @@ class MachineSession:
                 cell.session_id,
                 initial_view=view,
             )
+            self._displayed_composite_output = None
             self._clear_display_offer_tokens()
         elif view.presentation_epoch == current[2]:
             cadence.submit(view)
@@ -1040,6 +1060,7 @@ class MachineSession:
                 view.presentation_epoch,
                 initial_view=view,
             )
+            self._displayed_composite_output = None
             self._clear_display_offer_tokens()
         else:
             raise TerminalUpdateError(
@@ -1173,6 +1194,33 @@ class MachineSession:
         self._display_offer = None
         self._display_offer_composite = None
         return True
+
+    def revoke_physical_display(self) -> bool:
+        """Revoke all sink state while preserving the CELL observer baseline."""
+
+        cadence = self._display_cadence
+        offered = self._display_offer_composite
+        presented = self._displayed_composite_output
+        if (offered is not None or presented is not None) and cadence is None:
+            raise TerminalUpdateError(
+                "physical display state has no active retained cadence"
+            )
+
+        changed = False
+        if offered is not None:
+            assert cadence is not None
+            cadence.revoke_offer(offered)
+            changed = True
+        self._display_offer = None
+        self._display_offer_composite = None
+
+        if presented is not None:
+            assert cadence is not None
+            cadence.revoke_presented(presented)
+            self._displayed_composite_output = None
+            changed = True
+        self._last_acknowledged_display_offer = None
+        return changed
 
     def _output_revision_ready(self) -> bool:
         """Require normalized input to name a revision already shown."""
