@@ -1353,6 +1353,46 @@ def test_rich_terminal_policy_derives_full_maximum_geometry_contract():
     assert config.driver_limits.pending_outbound_events == 256
 
 
+def test_rich_terminal_policy_derives_transport_from_retained_atomic_frame():
+    product = _rich_terminal_policy()
+    retained = RetainedPolicy(
+        features=RetainedFeature.CORE,
+        max_owner_records=1,
+        max_live_owners=1,
+        max_regions=1,
+        max_resources=0,
+        max_objects=80_000,
+        max_series=0,
+        max_operations_per_transaction=80_001,
+        max_resource_chunk_bytes=0,
+        max_retained_transaction_bytes=10_570_616,
+        total_resource_bytes=0,
+        image_format=0,
+        max_image_width=0,
+        max_image_height=0,
+        max_path_points=0,
+        max_glyph_run_bytes=4,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=320_000,
+        client_to_terminal_max_payload=3_212,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=10_570_616,
+    )
+
+    config = product.configuration(100, 32, retained_policy=retained)
+
+    assert config.retained_policy is retained
+    assert config.terminal_config.max_transaction_bytes == 10_570_616
+    assert config.terminal_config.terminal_receive_credit == 10_570_616
+    assert config.terminal_config.max_feed_bytes == 10_574_712
+    assert config.host_limits.retained_publication_bytes == 10_574_712
+    assert config.host_limits.egress.high_bytes == 21_149_424
+    assert config.host_limits.egress.low_bytes == 10_574_712
+
+
 def test_rich_terminal_policy_configuration_attaches_real_host_port():
     policy = _rich_terminal_policy()
     system = MegapadSystem(

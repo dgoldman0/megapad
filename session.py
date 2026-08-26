@@ -371,7 +371,12 @@ class RichTerminalSessionPolicy:
                 raise ValueError(f"{name} exceeds rich-terminal policy")
             selected[name] = int(normalized)
         transaction_bytes = self.maximum_transaction_bytes
-        publication_bytes = self.retained_publication_bytes
+        if retained_policy is not None:
+            transaction_bytes = max(
+                transaction_bytes,
+                retained_policy.max_retained_transaction_bytes,
+            )
+        publication_bytes = transaction_bytes + CONTROL_RESERVE_BYTES
         return RichTerminalSessionConfig(
             host_limits=HostPortLimits(
                 egress=EgressWatermarks(
