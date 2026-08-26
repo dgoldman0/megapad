@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2644,6 +2644,12 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_continuations",
     "uncontended_callback_errors",
     "uncontended_interrupt_boundaries",
+    "uncontended_block_lookups",
+    "uncontended_block_hits",
+    "uncontended_block_misses",
+    "uncontended_block_builds",
+    "uncontended_block_executions",
+    "uncontended_block_steps",
     "logical_subfrontiers",
     "round_absorptions",
     "worker_waves",
@@ -2835,7 +2841,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 4,
+            native_snapshot["schema_version"] == 5,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2883,6 +2889,12 @@ def _host_profile_probe(
                     "uncontended_continuations",
                     "uncontended_callback_errors",
                     "uncontended_interrupt_boundaries",
+                    "uncontended_block_lookups",
+                    "uncontended_block_hits",
+                    "uncontended_block_misses",
+                    "uncontended_block_builds",
+                    "uncontended_block_executions",
+                    "uncontended_block_steps",
                 )
             )
         ),
@@ -2893,6 +2905,25 @@ def _host_profile_probe(
         "uncontended_interrupts_within_rounds": (
             0 <= native_counts["uncontended_interrupt_boundaries"]
             <= native_counts["uncontended_rounds"]
+        ),
+        "uncontended_block_cache_counts_reconcile": (
+            native_counts["uncontended_block_lookups"]
+            == native_counts["uncontended_block_hits"]
+            + native_counts["uncontended_block_misses"]
+        ),
+        "uncontended_block_builds_within_misses": (
+            native_counts["uncontended_block_builds"]
+            <= native_counts["uncontended_block_misses"]
+        ),
+        "uncontended_block_executions_have_plans": (
+            native_counts["uncontended_block_executions"]
+            <= native_counts["uncontended_block_hits"]
+            + native_counts["uncontended_block_builds"]
+        ),
+        "uncontended_block_steps_within_uncontended_steps": (
+            native_counts["uncontended_block_executions"]
+            <= native_counts["uncontended_block_steps"]
+            <= native_counts["uncontended_steps"]
         ),
         "round_absorptions_match_logical_subfrontiers":
             native_counts["round_absorptions"]
@@ -3027,7 +3058,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 4,
+        "schema_version": 5,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,

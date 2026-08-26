@@ -20,9 +20,12 @@ Version 6 adds host-only private decode/admission-cache counters and the
 single-use micro-oracle proof-reuse count. Architectural state schema 3 and
 the timed-workload semantics remain unchanged.
 
-Version 7 carries native host-profile schema 4. The new exact-singleton
-full-core counters remain zero for this microcore topology; timed-workload and
-architectural-state semantics remain unchanged.
+Version 7 carries native host-profile schema 4 and the exact-singleton
+full-core counters, which remain zero for this microcore topology.
+
+Version 8 carries native host-profile schema 5 and its exact-single-core
+decoded-block counters. Timed-workload and architectural-state semantics
+remain unchanged.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 7
+REPORT_SCHEMA_VERSION = 8
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -340,8 +343,8 @@ def _profile_probe(
         counts["coordinator_boundary_origins"].values()
     )
     validation = {
-        "schema_is_version_4":
-            normalized["schema_version"] == 4,
+        "schema_is_version_5":
+            normalized["schema_version"] == 5,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -373,6 +376,12 @@ def _profile_probe(
                     "uncontended_continuations",
                     "uncontended_callback_errors",
                     "uncontended_interrupt_boundaries",
+                    "uncontended_block_lookups",
+                    "uncontended_block_hits",
+                    "uncontended_block_misses",
+                    "uncontended_block_builds",
+                    "uncontended_block_executions",
+                    "uncontended_block_steps",
                 )
             )
             and normalized["wall_ns"]["uncontended_round"] == 0
@@ -456,7 +465,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 4,
+        "schema_version": 5,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

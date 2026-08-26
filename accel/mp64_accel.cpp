@@ -1894,9 +1894,52 @@ struct CPUState {
         PRIVATE_DECODE_CACHE_ENTRIES>
         private_decode_cache{};
 
+    // Exact-single-full-core decoded blocks are host-only acceleration
+    // plans. A block never spans an architectural I-cache line, and every
+    // use revalidates its complete encoding against the bytes currently
+    // visible in that guest I-cache. Keeping the plan beside the existing
+    // private admission cache gives both accelerators the same invalidation
+    // lifetime without making either one architectural state.
+    static constexpr std::size_t
+        SINGLE_CORE_BLOCK_CACHE_ENTRIES =
+            PRIVATE_DECODE_CACHE_ENTRIES;
+    static constexpr std::size_t
+        SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS =
+            ICACHE_LINE_BYTES;
+    struct SingleCoreDecodedInstruction {
+        uint8_t family = 0;
+        uint8_t subop = 0;
+        uint8_t rd = 0;
+        uint8_t rs = 0;
+        uint8_t encoded_size = 0;
+        uint8_t fetch_hits = 0;
+        uint8_t cycle_cost = 0;
+        uint64_t immediate = 0;
+    };
+    struct SingleCoreDecodedBlockEntry {
+        bool valid = false;
+        uint8_t psel = 0;
+        uint8_t identity_size = 0;
+        uint8_t instruction_count = 0;
+        uint64_t address = 0;
+        std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
+        std::array<
+            SingleCoreDecodedInstruction,
+            SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS>
+            instructions{};
+    };
+    std::array<
+        SingleCoreDecodedBlockEntry,
+        SINGLE_CORE_BLOCK_CACHE_ENTRIES>
+        single_core_block_cache{};
+
     void clear_private_decode_cache() noexcept {
         for (PrivateDecodeCacheEntry& entry :
              private_decode_cache) {
+            entry.valid = false;
+        }
+        for (SingleCoreDecodedBlockEntry& entry :
+             single_core_block_cache) {
             entry.valid = false;
         }
     }
@@ -4023,6 +4066,12 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_continuations = 0;
     uint64_t uncontended_callback_errors = 0;
     uint64_t uncontended_interrupt_boundaries = 0;
+    uint64_t uncontended_block_lookups = 0;
+    uint64_t uncontended_block_hits = 0;
+    uint64_t uncontended_block_misses = 0;
+    uint64_t uncontended_block_builds = 0;
+    uint64_t uncontended_block_executions = 0;
+    uint64_t uncontended_block_steps = 0;
     uint64_t logical_subfrontiers = 0;
     uint64_t round_absorptions = 0;
     uint64_t worker_waves = 0;
@@ -7235,6 +7284,219 @@ static inline void update_flags_cmp(CPUState& s, uint64_t a, uint64_t b,
                                      uint64_t result) {
     update_flags_arith(s, a, b, result, true);
     s.flag_g = (a > b) ? 1 : 0;
+}
+
+// Shared semantics for the non-privileged register/immediate subset used by
+// both the authoritative decoder and the exact-single-core decoded-block
+// executor. Fetch/decode and cycle accounting remain owned by their callers.
+static inline void execute_register_immediate(
+        CPUState& s,
+        uint8_t subop,
+        uint8_t reg,
+        uint64_t immediate) {
+    switch (subop) {
+        case 0x0:  // LDI / EXT.IMM64 LDI
+            s.regs[reg] = immediate;
+            return;
+        case 0x1:  // LHI
+            s.regs[reg] =
+                (s.regs[reg] & 0x0000FFFFFFFFFFFFULL) |
+                ((immediate & 0xFFFF) << 48);
+            return;
+        case 0x2: {  // ADDI
+            const uint64_t operand = sign_extend(immediate, 8);
+            const uint64_t a = s.regs[reg];
+            const uint64_t result = a + s64(operand);
+            update_flags_arith(s, a, operand, result, false);
+            s.regs[reg] = result;
+            return;
+        }
+        case 0x3:  // ANDI
+            s.regs[reg] &= immediate & 0xFF;
+            update_flags_logic(s, s.regs[reg]);
+            return;
+        case 0x4:  // ORI
+            s.regs[reg] |= immediate & 0xFF;
+            update_flags_logic(s, s.regs[reg]);
+            return;
+        case 0x5:  // XORI
+            s.regs[reg] ^= immediate & 0xFF;
+            update_flags_logic(s, s.regs[reg]);
+            return;
+        case 0x6: {  // CMPI
+            const uint64_t operand = sign_extend(immediate, 8);
+            const uint64_t a = s.regs[reg];
+            const uint64_t result = a - s64(operand);
+            update_flags_cmp(s, a, operand, result);
+            return;
+        }
+        case 0x7: {  // SUBI
+            const uint64_t operand = sign_extend(immediate, 8);
+            const uint64_t a = s.regs[reg];
+            const uint64_t result = a - s64(operand);
+            update_flags_arith(s, a, operand, result, true);
+            s.regs[reg] = result;
+            return;
+        }
+        case 0x8:  // LSLI
+            s.regs[reg] <<= immediate & 0xF;
+            return;
+        case 0x9:  // LSRI
+            s.regs[reg] >>= immediate & 0xF;
+            return;
+        case 0xA:  // ASRI
+            s.regs[reg] = static_cast<uint64_t>(
+                s64(s.regs[reg]) >> (immediate & 0xF));
+            return;
+        case 0xB: {  // ROLI
+            const int shift = static_cast<int>(immediate & 0xF);
+            if (shift != 0) {
+                const uint64_t value = s.regs[reg];
+                s.regs[reg] =
+                    (value << shift) |
+                    (value >> (64 - shift));
+            }
+            return;
+        }
+        default:
+            throw std::logic_error(
+                "decoded immediate operation is not register-private");
+    }
+}
+
+static inline void execute_register_alu(
+        CPUState& s,
+        uint8_t subop,
+        uint8_t rd,
+        uint8_t rs) {
+    const uint64_t a = s.regs[rd];
+    const uint64_t b = s.regs[rs];
+    switch (subop) {
+        case 0x0: {  // ADD
+            const uint64_t result = a + b;
+            update_flags_arith(s, a, b, result, false);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x1: {  // ADC
+            const uint64_t operand = b + s.flag_c;
+            const uint64_t result = a + operand;
+            update_flags_arith(s, a, operand, result, false);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x2: {  // SUB
+            const uint64_t result = a - b;
+            update_flags_arith(s, a, b, result, true);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x3: {  // SBB
+            const uint64_t operand = b + (1 - s.flag_c);
+            const uint64_t result = a - operand;
+            update_flags_arith(s, a, operand, result, true);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x4: {  // AND
+            const uint64_t result = a & b;
+            update_flags_logic(s, result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x5: {  // OR
+            const uint64_t result = a | b;
+            update_flags_logic(s, result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x6: {  // XOR
+            const uint64_t result = a ^ b;
+            update_flags_logic(s, result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0x7:  // CMP
+            update_flags_cmp(s, a, b, a - b);
+            return;
+        case 0x8:  // MOV
+            s.regs[rd] = b;
+            return;
+        case 0x9:  // NOT
+            s.regs[rd] = ~b;
+            update_flags_logic(s, s.regs[rd]);
+            return;
+        case 0xA: {  // NEG
+            const uint64_t result = -b;
+            update_flags_arith(s, 0, b, result, true);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0xB: {  // SHL
+            const int shift = b & 63;
+            const uint64_t out_bit =
+                shift ? ((a >> (64 - shift)) & 1) : 0;
+            const uint64_t result = a << shift;
+            s.flag_z = result == 0;
+            s.flag_c = out_bit;
+            s.flag_n = (result >> 63) & 1;
+            s.flag_p = parity8(result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0xC: {  // SHR
+            const int shift = b & 63;
+            const uint64_t out_bit =
+                shift ? ((a >> (shift - 1)) & 1) : 0;
+            const uint64_t result = a >> shift;
+            s.flag_z = result == 0;
+            s.flag_c = out_bit;
+            s.flag_n = (result >> 63) & 1;
+            s.flag_p = parity8(result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0xD: {  // SAR
+            const int shift = b & 63;
+            const uint64_t out_bit =
+                shift ? ((a >> (shift - 1)) & 1) : 0;
+            const uint64_t result =
+                static_cast<uint64_t>(s64(a) >> shift);
+            s.flag_z = result == 0;
+            s.flag_c = out_bit;
+            s.flag_n = (result >> 63) & 1;
+            s.flag_p = parity8(result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0xE: {  // ROL
+            const int shift = b & 63;
+            const uint64_t result =
+                shift
+                ? (a << shift) | (a >> (64 - shift))
+                : a;
+            s.flag_z = result == 0;
+            s.flag_n = (result >> 63) & 1;
+            s.flag_p = parity8(result);
+            s.regs[rd] = result;
+            return;
+        }
+        case 0xF: {  // ROR
+            const int shift = b & 63;
+            const uint64_t result =
+                shift
+                ? (a >> shift) | (a << (64 - shift))
+                : a;
+            s.flag_z = result == 0;
+            s.flag_n = (result >> 63) & 1;
+            s.flag_p = parity8(result);
+            s.regs[rd] = result;
+            return;
+        }
+        default:
+            throw std::logic_error(
+                "decoded ALU operation is invalid");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12674,89 +12936,34 @@ static int step_one(
     case 0x6: {  // IMM
         uint8_t b1 = fetch8(s);
         int rn = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
-        switch (n) {
-            case 0x0: {  // LDI
+        if (n <= 0xB) {
+            uint64_t immediate = b1 & 0xF;
+            if (n == 0x0) {
                 if (s.ext_modifier == 0) {  // EXT.IMM64
-                    uint64_t imm = 0;
-                    for (int i = 0; i < 8; i++)
-                        imm |= (uint64_t)fetch8(s) << (8*i);
-                    s.regs[rn] = imm;
+                    immediate = 0;
+                    for (int index = 0; index < 8; index++) {
+                        immediate |=
+                            static_cast<uint64_t>(fetch8(s)) <<
+                            (8 * index);
+                    }
                 } else {
-                    s.regs[rn] = fetch8(s);
+                    immediate = fetch8(s);
                 }
-                break;
+            } else if (n == 0x1) {
+                const uint8_t lo = fetch8(s);
+                const uint8_t hi = fetch8(s);
+                immediate =
+                    lo | (static_cast<uint64_t>(hi) << 8);
+            } else if (n <= 0x7) {
+                immediate = fetch8(s);
             }
-            case 0x1: {  // LHI
-                uint8_t lo = fetch8(s);
-                uint8_t hi = fetch8(s);
-                uint16_t imm16 = lo | ((uint16_t)hi << 8);
-                s.regs[rn] = (s.regs[rn] & 0x0000FFFFFFFFFFFFULL) | ((uint64_t)imm16 << 48);
-                break;
-            }
-            case 0x2: {  // ADDI
-                uint64_t imm = sign_extend(fetch8(s), 8);
-                uint64_t a = s.regs[rn];
-                uint64_t result = a + s64(imm);
-                update_flags_arith(s, a, imm, result, false);
-                s.regs[rn] = result;
-                break;
-            }
-            case 0x3: {  // ANDI
-                uint8_t imm = fetch8(s);
-                s.regs[rn] &= imm;
-                update_flags_logic(s, s.regs[rn]);
-                break;
-            }
-            case 0x4: {  // ORI
-                uint8_t imm = fetch8(s);
-                s.regs[rn] |= imm;
-                update_flags_logic(s, s.regs[rn]);
-                break;
-            }
-            case 0x5: {  // XORI
-                uint8_t imm = fetch8(s);
-                s.regs[rn] ^= imm;
-                update_flags_logic(s, s.regs[rn]);
-                break;
-            }
-            case 0x6: {  // CMPI
-                uint64_t imm = sign_extend(fetch8(s), 8);
-                uint64_t a = s.regs[rn];
-                uint64_t result = a - s64(imm);
-                update_flags_cmp(s, a, imm, result);
-                break;
-            }
-            case 0x7: {  // SUBI
-                uint64_t imm = sign_extend(fetch8(s), 8);
-                uint64_t a = s.regs[rn];
-                uint64_t result = a - s64(imm);
-                update_flags_arith(s, a, imm, result, true);
-                s.regs[rn] = result;
-                break;
-            }
-            case 0x8: {  // LSLI
-                int imm4 = b1 & 0xF;
-                s.regs[rn] <<= imm4;
-                break;
-            }
-            case 0x9: {  // LSRI
-                int imm4 = b1 & 0xF;
-                s.regs[rn] >>= imm4;
-                break;
-            }
-            case 0xA: {  // ASRI
-                int imm4 = b1 & 0xF;
-                s.regs[rn] = (uint64_t)(s64(s.regs[rn]) >> imm4);
-                break;
-            }
-            case 0xB: {  // ROLI
-                int imm4 = b1 & 0xF;
-                if (imm4) {
-                    uint64_t v = s.regs[rn];
-                    s.regs[rn] = (v << imm4) | (v >> (64 - imm4));
-                }
-                break;
-            }
+            execute_register_immediate(
+                s,
+                static_cast<uint8_t>(n),
+                static_cast<uint8_t>(rn),
+                immediate);
+        } else {
+            switch (n) {
             case 0xC:  // GLO
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.d_reg = s.regs[rn] & 0xFF;
@@ -12773,6 +12980,7 @@ static int step_one(
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.regs[rn] = (s.regs[rn] & ~0xFF00ULL) | (((uint64_t)(s.d_reg & 0xFF)) << 8);
                 break;
+            }
         }
         break;
     }
@@ -12781,123 +12989,11 @@ static int step_one(
         uint8_t b1 = fetch8(s);
         int rd = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
         int rs = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
-        uint64_t a = s.regs[rd];
-        uint64_t b = s.regs[rs];
-        switch (n) {
-            case 0x0: {  // ADD
-                uint64_t r = a + b;
-                update_flags_arith(s, a, b, r, false);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x1: {  // ADC
-                uint64_t r = a + b + s.flag_c;
-                update_flags_arith(s, a, b + s.flag_c, r, false);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x2: {  // SUB
-                uint64_t r = a - b;
-                update_flags_arith(s, a, b, r, true);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x3: {  // SBB
-                uint64_t borrow = 1 - s.flag_c;
-                uint64_t r = a - b - borrow;
-                update_flags_arith(s, a, b + borrow, r, true);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x4: {  // AND
-                uint64_t r = a & b;
-                update_flags_logic(s, r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x5: {  // OR
-                uint64_t r = a | b;
-                update_flags_logic(s, r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x6: {  // XOR
-                uint64_t r = a ^ b;
-                update_flags_logic(s, r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0x7: {  // CMP
-                uint64_t r = a - b;
-                update_flags_cmp(s, a, b, r);
-                break;
-            }
-            case 0x8:  // MOV
-                s.regs[rd] = b;
-                break;
-            case 0x9: {  // NOT
-                s.regs[rd] = ~b;
-                update_flags_logic(s, s.regs[rd]);
-                break;
-            }
-            case 0xA: {  // NEG
-                uint64_t r = -b;  // wraps naturally for uint64_t
-                update_flags_arith(s, 0, b, r, true);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0xB: {  // SHL
-                int shift = b & 63;
-                uint64_t out_bit = shift ? ((a >> (64 - shift)) & 1) : 0;
-                uint64_t r = a << shift;
-                s.flag_z = (r == 0) ? 1 : 0;
-                s.flag_c = out_bit;
-                s.flag_n = (r >> 63) & 1;
-                s.flag_p = parity8(r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0xC: {  // SHR
-                int shift = b & 63;
-                uint64_t out_bit = shift ? ((a >> (shift - 1)) & 1) : 0;
-                uint64_t r = a >> shift;
-                s.flag_z = (r == 0) ? 1 : 0;
-                s.flag_c = out_bit;
-                s.flag_n = (r >> 63) & 1;
-                s.flag_p = parity8(r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0xD: {  // SAR
-                int shift = b & 63;
-                uint64_t out_bit = shift ? ((a >> (shift - 1)) & 1) : 0;
-                uint64_t r = (uint64_t)(s64(a) >> shift);
-                s.flag_z = (r == 0) ? 1 : 0;
-                s.flag_c = out_bit;
-                s.flag_n = (r >> 63) & 1;
-                s.flag_p = parity8(r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0xE: {  // ROL
-                int shift = b & 63;
-                uint64_t r = shift ? ((a << shift) | (a >> (64 - shift))) : a;
-                s.flag_z = (r == 0) ? 1 : 0;
-                s.flag_n = (r >> 63) & 1;
-                s.flag_p = parity8(r);
-                s.regs[rd] = r;
-                break;
-            }
-            case 0xF: {  // ROR
-                int shift = b & 63;
-                uint64_t r = shift ? ((a >> shift) | (a << (64 - shift))) : a;
-                s.flag_z = (r == 0) ? 1 : 0;
-                s.flag_n = (r >> 63) & 1;
-                s.flag_p = parity8(r);
-                s.regs[rd] = r;
-                break;
-            }
-        }
+        execute_register_alu(
+            s,
+            static_cast<uint8_t>(n),
+            static_cast<uint8_t>(rd),
+            static_cast<uint8_t>(rs));
         break;
     }
 
@@ -20275,6 +20371,380 @@ settle_private_core_coordinator_instruction(
         raw);
 }
 
+static std::size_t single_core_block_cache_index(
+        uint64_t address) noexcept {
+    return static_cast<std::size_t>(
+        (address ^ (address >> 7)) &
+        (CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES - 1));
+}
+
+static bool decode_single_core_register_instruction(
+        const CPUState& core,
+        uint64_t address,
+        std::size_t available,
+        CPUState::SingleCoreDecodedInstruction& decoded,
+        std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES>& encoding,
+        uint8_t& encoded_size) {
+    std::size_t consumed = 0;
+    auto read_byte = [&](uint8_t& value) {
+        if (
+            consumed >= available ||
+            consumed >= encoding.size()
+        ) {
+            return false;
+        }
+        const std::optional<uint8_t> observed =
+            private_icache_peek(
+                core,
+                address + static_cast<uint64_t>(consumed));
+        if (!observed.has_value())
+            return false;
+        value = *observed;
+        encoding[consumed++] = value;
+        return true;
+    };
+
+    uint8_t opcode = 0;
+    if (!read_byte(opcode))
+        return false;
+    int family = (opcode >> 4) & 0xF;
+    int subop = opcode & 0xF;
+
+    decoded = CPUState::SingleCoreDecodedInstruction{};
+    decoded.family = static_cast<uint8_t>(family);
+    decoded.subop = static_cast<uint8_t>(subop);
+    decoded.cycle_cost = 1;
+
+    switch (family) {
+        case 0x0:
+            if (subop != 0x1)  // NOP only
+                return false;
+            break;
+        case 0x1:
+        case 0x2:
+            decoded.rd = static_cast<uint8_t>(subop);
+            if (decoded.rd == core.psel)
+                return false;
+            break;
+        case 0x6: {
+            if (
+                subop != 0x2 &&  // ADDI
+                subop != 0x4 &&  // ORI
+                subop != 0xB     // ROLI
+            ) {
+                return false;
+            }
+            uint8_t operands = 0;
+            if (!read_byte(operands))
+                return false;
+            decoded.rd = static_cast<uint8_t>(
+                (operands >> 4) & 0xF);
+            if (decoded.rd == core.psel)
+                return false;
+
+            if (subop <= 0x7) {
+                uint8_t byte = 0;
+                if (!read_byte(byte))
+                    return false;
+                decoded.immediate = byte;
+            } else {
+                decoded.immediate = operands & 0xF;
+            }
+            break;
+        }
+        case 0x7: {
+            if (
+                subop != 0x0 &&  // ADD
+                subop != 0x6 &&  // XOR
+                subop != 0x8     // MOV
+            ) {
+                return false;
+            }
+            uint8_t operands = 0;
+            if (!read_byte(operands))
+                return false;
+            decoded.rd = static_cast<uint8_t>(
+                (operands >> 4) & 0xF);
+            decoded.rs = static_cast<uint8_t>(
+                operands & 0xF);
+            if (decoded.rd == core.psel)
+                return false;
+            break;
+        }
+        default:
+            return false;
+    }
+
+    encoded_size = static_cast<uint8_t>(consumed);
+    decoded.encoded_size = encoded_size;
+    decoded.fetch_hits = static_cast<uint8_t>(
+        1 +
+        (((address & 7) + encoded_size - 1) >> 3));
+    return encoded_size != 0;
+}
+
+static bool single_core_block_identity_matches(
+        const CPUState& core,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint64_t address) {
+    if (
+        !block.valid ||
+        block.address != address ||
+        block.psel != core.psel ||
+        block.identity_size == 0 ||
+        block.identity_size > CPUState::ICACHE_LINE_BYTES ||
+        block.instruction_count < 2 ||
+        block.instruction_count >
+            CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
+    ) {
+        return false;
+    }
+    if (
+        core.profile != CoreProfile::FULL ||
+        !core.icache_enabled
+    ) {
+        return false;
+    }
+    const auto [cache_index, tag] = icache_key(address);
+    const std::size_t line_offset =
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    if (
+        !core.icache_valid[cache_index] ||
+        core.icache_tags[cache_index] != tag ||
+        line_offset + block.identity_size >
+            CPUState::ICACHE_LINE_BYTES ||
+        std::memcmp(
+            core.icache_data[cache_index].data() + line_offset,
+            block.identity.data(),
+            block.identity_size) != 0
+    ) {
+        return false;
+    }
+    std::size_t decoded_size = 0;
+    for (
+        uint8_t index = 0;
+        index < block.instruction_count;
+        index++
+    ) {
+        const uint8_t encoded_size =
+            block.instructions[index].encoded_size;
+        if (
+            encoded_size == 0 ||
+            decoded_size + encoded_size > block.identity_size
+        ) {
+            return false;
+        }
+        decoded_size += encoded_size;
+    }
+    return decoded_size == block.identity_size;
+}
+
+static CPUState::SingleCoreDecodedBlockEntry*
+build_single_core_decoded_block(
+        CPUState& core,
+        uint64_t address) {
+    if (
+        core.profile != CoreProfile::FULL ||
+        !core.icache_enabled ||
+        core.ext_modifier != -1
+    ) {
+        return nullptr;
+    }
+
+    CPUState::SingleCoreDecodedBlockEntry candidate;
+    candidate.address = address;
+    candidate.psel = core.psel;
+    const std::size_t line_capacity =
+        CPUState::ICACHE_LINE_BYTES -
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    std::size_t offset = 0;
+    while (
+        offset < line_capacity &&
+        candidate.instruction_count <
+            CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
+    ) {
+        CPUState::SingleCoreDecodedInstruction decoded;
+        std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES> encoding{};
+        uint8_t encoded_size = 0;
+        if (!decode_single_core_register_instruction(
+                core,
+                address + static_cast<uint64_t>(offset),
+                line_capacity - offset,
+                decoded,
+                encoding,
+                encoded_size)) {
+            break;
+        }
+        std::memcpy(
+            candidate.identity.data() + offset,
+            encoding.data(),
+            encoded_size);
+        candidate.instructions[
+            candidate.instruction_count++] = decoded;
+        offset += encoded_size;
+    }
+
+    // One-instruction plans do not amortize cache validation and dispatch.
+    if (candidate.instruction_count < 2)
+        return nullptr;
+    candidate.identity_size = static_cast<uint8_t>(offset);
+    candidate.valid = true;
+    CPUState::SingleCoreDecodedBlockEntry& destination =
+        core.single_core_block_cache[
+            single_core_block_cache_index(address)];
+    destination = candidate;
+    return &destination;
+}
+
+static void execute_single_core_decoded_instruction(
+        CPUState& core,
+        const CPUState::SingleCoreDecodedInstruction& decoded) {
+    icache_begin_instruction(core);
+    // The complete block is proven resident and byte-identical immediately
+    // before entry. Reproduce the architectural fetch effects directly:
+    // one hit for each aligned eight-byte fetch window touched, no miss, and
+    // bytewise-equivalent PC advancement before the instruction semantics.
+    core.icache_hits += decoded.fetch_hits;
+    pc(core) += decoded.encoded_size;
+
+    switch (decoded.family) {
+        case 0x0:  // NOP
+            break;
+        case 0x1:  // INC
+            core.regs[decoded.rd]++;
+            break;
+        case 0x2:  // DEC
+            core.regs[decoded.rd]--;
+            break;
+        case 0x6:
+            execute_register_immediate(
+                core,
+                decoded.subop,
+                decoded.rd,
+                decoded.immediate);
+            break;
+        case 0x7:
+            execute_register_alu(
+                core,
+                decoded.subop,
+                decoded.rd,
+                decoded.rs);
+            break;
+        default:
+            throw std::logic_error(
+                "single-core block contains an unsupported operation");
+    }
+
+    core.ext_modifier = -1;
+    core.cycle_count += decoded.cycle_cost;
+    if (core.perf_enable)
+        core.perf_cycles += decoded.cycle_cost;
+}
+
+struct SingleCoreDecodedBlockRun {
+    int steps = 0;
+    int64_t cycles = 0;
+    bool interrupt_boundary = false;
+    bool timing_boundary = false;
+};
+
+static SingleCoreDecodedBlockRun
+try_execute_single_core_decoded_block(
+        SystemState& system,
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        int max_steps) {
+    SingleCoreDecodedBlockRun run;
+    if (
+        max_steps <= 0 ||
+        core.profile != CoreProfile::FULL ||
+        !core.icache_enabled ||
+        core.ext_modifier != -1 ||
+        callbacks.bus_access != nullptr
+    ) {
+        return run;
+    }
+
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool profile_enabled = profile.enabled;
+    if (profile_enabled) {
+        host_saturating_increment(
+            profile.uncontended_block_lookups);
+    }
+
+    const uint64_t address = pc(core);
+    CPUState::SingleCoreDecodedBlockEntry* block =
+        &core.single_core_block_cache[
+            single_core_block_cache_index(address)];
+    if (single_core_block_identity_matches(
+            core, *block, address)) {
+        if (profile_enabled) {
+            host_saturating_increment(
+                profile.uncontended_block_hits);
+        }
+    } else {
+        if (profile_enabled) {
+            host_saturating_increment(
+                profile.uncontended_block_misses);
+        }
+        block = build_single_core_decoded_block(
+            core, address);
+        if (block == nullptr)
+            return run;
+        if (profile_enabled) {
+            host_saturating_increment(
+                profile.uncontended_block_builds);
+        }
+    }
+
+    for (
+        uint8_t index = 0;
+        index < block->instruction_count &&
+        run.steps < max_steps;
+        index++
+    ) {
+        if (
+            index != 0 &&
+            pending_enabled_core_interrupt(system, core) >= 0
+        ) {
+            run.interrupt_boundary = true;
+            break;
+        }
+        const CPUState::SingleCoreDecodedInstruction& decoded =
+            block->instructions[index];
+        execute_single_core_decoded_instruction(
+            core,
+            decoded);
+        run.steps++;
+        run.cycles += decoded.cycle_cost;
+
+        if (
+            system.shared_crypto
+                .requires_unbounded_timing_boundary() ||
+            system.shared_nic.has_cycle_dma_work()
+        ) {
+            run.timing_boundary = true;
+            break;
+        }
+    }
+
+    if (profile_enabled && run.steps > 0) {
+        host_saturating_increment(
+            profile.uncontended_block_executions);
+        host_saturating_add(
+            profile.uncontended_block_steps,
+            static_cast<uint64_t>(run.steps));
+    }
+    return run;
+}
+
 struct UncontendedSingleCoreSegment {
     RunResult run{0, 0, RUN_LIMIT, -1};
     bool interrupt_boundary = false;
@@ -20308,6 +20778,30 @@ static void run_uncontended_single_core_segment_impl(
         }
 
         try {
+            if constexpr (!INJECT_FAILURE) {
+                const SingleCoreDecodedBlockRun block_run =
+                    try_execute_single_core_decoded_block(
+                        system,
+                        core,
+                        callbacks,
+                        max_steps - step_index);
+                if (block_run.steps > 0) {
+                    segment.run.total_cycles +=
+                        block_run.cycles;
+                    segment.run.steps_executed +=
+                        block_run.steps;
+                    step_index += block_run.steps - 1;
+                    if (block_run.interrupt_boundary) {
+                        segment.interrupt_boundary = true;
+                        break;
+                    }
+                    if (block_run.timing_boundary) {
+                        segment.crypto_timing_boundary = true;
+                        break;
+                    }
+                    continue;
+                }
+            }
             const int cycles =
                 step_one(core, callbacks);
             if (cycles == 0) {
@@ -23102,6 +23596,18 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_callback_errors;
     counts["uncontended_interrupt_boundaries"] =
         profile.uncontended_interrupt_boundaries;
+    counts["uncontended_block_lookups"] =
+        profile.uncontended_block_lookups;
+    counts["uncontended_block_hits"] =
+        profile.uncontended_block_hits;
+    counts["uncontended_block_misses"] =
+        profile.uncontended_block_misses;
+    counts["uncontended_block_builds"] =
+        profile.uncontended_block_builds;
+    counts["uncontended_block_executions"] =
+        profile.uncontended_block_executions;
+    counts["uncontended_block_steps"] =
+        profile.uncontended_block_steps;
     counts["logical_subfrontiers"] =
         profile.logical_subfrontiers;
     counts["round_absorptions"] =
@@ -23205,7 +23711,7 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict result;
-    result["schema_version"] = 4;
+    result["schema_version"] = 5;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =

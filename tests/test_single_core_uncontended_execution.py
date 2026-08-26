@@ -6,12 +6,28 @@ import pytest
 
 from asm import assemble
 from devices import MMIO_BASE, SYSINFO_BASE
-from megapad64 import IVEC_TIMER
+from megapad64 import IVEC_TIMER, Megapad64 as PythonMegapad64
 from system import MegapadSystem
 
 
 SHARED_WORD = 0x800
 SYSINFO_SINK = MMIO_BASE + SYSINFO_BASE
+REGISTER_BLOCK_SOURCE = """
+loop:
+    inc r4
+    addi r5, 3
+    xor r6, r5
+    nop
+    ori r9, 0x5a
+    roli r6, 7
+    add r4, r5
+    dec r8
+    nop
+    mov r7, r6
+    inc r10
+    br loop
+"""
+REGISTER_BLOCK_SLICES = (1, 3, 7, 19, 1_003)
 
 
 def _system(*, reference: bool = False) -> MegapadSystem:
@@ -30,20 +46,59 @@ def _system(*, reference: bool = False) -> MegapadSystem:
     return system
 
 
-def _core_signature(system: MegapadSystem) -> tuple:
-    cpu = system.cpu
+def _cpu_execution_signature(cpu) -> tuple:
+    if hasattr(cpu, "_cs"):
+        cache_valid, cache_tags, cache_data = cpu._cs.icache_snapshot()
+    else:
+        cache_valid = bytes(cpu._icache_valid)
+        cache_tags = tuple(cpu._icache_tags)
+        cache_data = bytes(cpu._icache_data)
     return (
         tuple(cpu.regs),
         cpu.pc,
+        cpu.psel,
+        cpu.xsel,
+        cpu.spsel,
         cpu.flags_pack(),
         cpu.d_reg,
         cpu.halted,
         cpu.idle,
         cpu.cycle_count,
+        cpu.perf_enable,
+        cpu.perf_cycles,
+        cpu.perf_stalls,
+        cpu.perf_tileops,
+        cpu._ext_modifier,
         bytes(cpu.mem),
+        cpu.icache_hits,
+        cpu.icache_misses,
+        bytes(cache_valid),
+        tuple(cache_tags),
+        bytes(cache_data),
+    )
+
+
+def _core_signature(system: MegapadSystem) -> tuple:
+    cpu_signature = _cpu_execution_signature(system.cpu)
+    return (
+        *cpu_signature[:16],
         system.timer.counter,
         system._native_system.system_cycles,
+        *cpu_signature[16:],
     )
+
+
+def _initialize_register_workload(cpu) -> None:
+    cpu.regs[2] = 4096
+    cpu.regs[15] = 4096
+    cpu.regs[4] = 0x1020_3040
+    cpu.regs[5] = 0xFFFF_FFFF_FFFF_FFF0
+    cpu.regs[6] = 0x55AA
+    cpu.regs[7] = 0xAA55
+    cpu.regs[8] = 2
+    cpu.regs[9] = 0x100
+    cpu.regs[10] = 0xABCD
+    cpu.perf_enable = 1
 
 
 def _run_shared_memory_workload(*, reference: bool) -> tuple:
@@ -88,6 +143,88 @@ def test_single_core_ram_loop_matches_generic_coordinator_reference() -> None:
     assert _run_shared_memory_workload(
         reference=False
     ) == _run_shared_memory_workload(reference=True)
+
+
+def _run_register_block_workload(*, reference: bool) -> tuple:
+    system = _system(reference=reference)
+    system.load_binary(
+        0,
+        assemble(REGISTER_BLOCK_SOURCE),
+    )
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    _initialize_register_workload(system.cpu)
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+
+    batch_signatures = []
+    for budget in REGISTER_BLOCK_SLICES:
+        stats = system.run_batch_stats(budget)
+        batch_signatures.append(
+            (
+                stats.instructions_executed,
+                stats.system_cycles_advanced,
+                stats.per_core_instructions[0],
+                stats.per_core_cycles[0],
+                stats.per_core_dispatches[0],
+                stats.per_core_stop_reasons[0],
+                stats.native_rounds,
+                stats.native_continuations,
+                stats.system_stop_reason,
+            )
+        )
+
+    counts = None
+    if not reference:
+        counts = dict(
+            dict(owner._stop_concurrency_profile())["counts"]
+        )
+    return (
+        tuple(batch_signatures),
+        _core_signature(system),
+        _cpu_execution_signature(system.cpu),
+        counts,
+    )
+
+
+def _run_python_register_workload() -> tuple:
+    cpu = PythonMegapad64(mem_size=4096, num_cores=1)
+    cpu.load_bytes(0, assemble(REGISTER_BLOCK_SOURCE))
+    cpu.pc = 0
+    _initialize_register_workload(cpu)
+    for budget in REGISTER_BLOCK_SLICES:
+        cpu.run(max_steps=budget)
+    return _cpu_execution_signature(cpu)
+
+
+def test_decoded_register_blocks_match_generic_reference_across_slices() -> None:
+    fast_batches, fast_core, fast_cpu, counts = _run_register_block_workload(
+        reference=False
+    )
+    (
+        reference_batches,
+        reference_core,
+        reference_cpu,
+        _,
+    ) = _run_register_block_workload(reference=True)
+
+    assert fast_batches == reference_batches
+    assert fast_core == reference_core
+    assert fast_cpu == reference_cpu == _run_python_register_workload()
+    assert counts is not None
+    assert counts["uncontended_block_lookups"] == (
+        counts["uncontended_block_hits"] +
+        counts["uncontended_block_misses"]
+    )
+    assert counts["uncontended_block_builds"] > 0
+    assert counts["uncontended_block_hits"] > 0
+    assert counts["uncontended_block_executions"] > 0
+    assert counts["uncontended_block_steps"] > (
+        counts["uncontended_block_executions"]
+    )
 
 
 def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
@@ -187,9 +324,9 @@ def test_callback_error_settles_exact_completed_prefix() -> None:
 
     assert fast == reference
     assert fast[0][5] == 2
-    assert fast[6] == 2
-    assert fast[8] == 2
     assert fast[9] == 2
+    assert fast[16] == 2
+    assert fast[17] == 2
 
 
 def test_injected_internal_failure_retains_and_clocks_completed_prefix() -> None:
@@ -247,7 +384,7 @@ loop:
     counts = dict(snapshot["counts"])
     wall_ns = dict(snapshot["wall_ns"])
 
-    assert snapshot["schema_version"] == 4
+    assert snapshot["schema_version"] == 5
     assert counts["uncontended_rounds"] == stats.native_rounds == 3
     assert counts["uncontended_dispatches"] == sum(
         stats.per_core_dispatches
@@ -255,6 +392,7 @@ loop:
     assert counts["uncontended_steps"] == stats.instructions_executed
     assert counts["uncontended_continuations"] == 0
     assert counts["uncontended_callback_errors"] == 0
+    assert counts["uncontended_block_steps"] == 0
     assert counts["logical_subfrontiers"] == 0
     assert counts["worker_commands"] == 0
     assert counts["private_steps"] == 0

@@ -20,7 +20,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
     )
 
     assert report["schema"] == phase0.SCHEMA
-    assert report["schema_version"] == 13
+    assert report["schema_version"] == 14
     assert report["configuration"]["full_core_counts"] == [4]
     assert report["configuration"]["worker_counts"] == [1, 2, 4]
     assert not report["configuration"]["host_profile"]
