@@ -132,7 +132,7 @@ def _retained_policy() -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=0,
@@ -166,7 +166,7 @@ def _complete_retained_policy() -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=8,
-        max_label_bytes=64,
+        max_glyph_run_bytes=64,
         max_samples_per_append=4,
         max_history_per_series=8,
         minimum_presentation_interval_us=0,
@@ -183,6 +183,7 @@ def _negotiate(
     client_credit: int = 256,
     client_max_payload: int = 256,
     retained_policy: RetainedPolicy | None = None,
+    ready_reserved0: int = 0,
 ):
     core = RichTerminalCore(
         _config(),
@@ -212,7 +213,7 @@ def _negotiate(
     client_ready = encoder.encode(
         MessageType.CLIENT_READY,
         READY.pack(
-            1,
+            ready_reserved0,
             client_max_payload,
             0,
             client_credit,
@@ -222,6 +223,15 @@ def _negotiate(
         ),
     )
     return core, offer, request, encoder, client_ready
+
+
+def test_client_ready_reserved_word_is_zero() -> None:
+    core, _offer, request, _encoder, client_ready = _negotiate(
+        ready_reserved0=1,
+    )
+
+    with pytest.raises(TerminalSessionError, match="CLIENT_READY does not match"):
+        core.feed_machine(encode_open(request) + client_ready)
 
 
 def _snapshot_frames(

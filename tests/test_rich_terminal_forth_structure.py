@@ -19,6 +19,44 @@ def _definition(source: str, word: str) -> str:
     return match.group(0)
 
 
+def test_header_ready_and_caps_reserved_fields_are_zero() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    frame_begin = _definition(source, "_PT-FRAME-BEGIN")
+    receive_header = _definition(source, "_PT-RX-HEADER?")
+    send_ready = _definition(source, "_PT-SEND-CLIENT-READY")
+    receive_ready = _definition(source, "_PT-READY-PAYLOAD?")
+    receive_caps = _definition(source, "_PT-RET-CAPS-VALID?")
+
+    assert "0 _PT-F-A @ 4 + C!" in frame_begin
+    assert "_PT-RX-A @ 4 + C@ 0<> OR" in receive_header
+    assert "0 _PT-FRAME-PAYLOAD L!" in send_ready
+    assert "_PT-RX-P @ L@ 0<>" in receive_ready
+    assert "_PT-RV-P @ 4 + W@ 0<>" in receive_caps
+    assert "_PT-RV-P @ 6 + W@ 0<>" in receive_caps
+
+
+def test_glyph_run_discovery_capacity_is_core_owned() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    caps = _definition(source, "_PT-RET-CAPS-VALID?")
+    formats = _definition(source, "_PT-RET-FORMATS-VALID?")
+
+    optional_objects = caps.index("_PT-RV-FEATURES @ 0x1E AND IF")
+    assert caps.index("_PT-RV-P @ 32 + L@ 0=", optional_objects) > optional_objects
+    assert "0x1E AND 0<> _PT-POSITIVE-EXACT?" not in caps
+    glyph_capacity = formats.index("_PT-RF-FORMATS @ 24 + L@ ?DUP IF")
+    assert (
+        formats.index(
+            "_PT-RF-CAPS @ 32 + L@ 0= IF DROP FALSE EXIT THEN",
+            glyph_capacity,
+        )
+        > glyph_capacity
+    )
+    assert formats.index("_PT-RF-FORMATS @ 48 + _PT-U64@ U>", glyph_capacity) > glyph_capacity
+    assert formats.index("280 + _PT-RV-RETMAX @ U>", glyph_capacity) > glyph_capacity
+    instrument = formats.index("_PT-RV-FEATURES @ 0x08 AND IF", glyph_capacity)
+    assert glyph_capacity < instrument
+
+
 def test_retained_discovery_is_explicit_and_scheduled_without_input_starvation() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     discover = _definition(source, "PT-RETAINED-DISCOVER")
@@ -270,72 +308,78 @@ def test_present_body_keeps_raw_fixed_operations_private() -> None:
     assert "PT-RET-LAYOUT-START =" in commit
 
 
-def test_typed_label_define_owns_exact_object_wire_assembly() -> None:
+def test_typed_glyph_run_define_owns_exact_object_wire_assembly() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    label = _definition(source, "PT-LABEL-DEFINE")
-    body = _definition(source, "_PT-LD-DEFINE-BODY")
-    fields = _definition(source, "_PT-LD-FIELDS?")
-    text_source = _definition(source, "_PT-LD-TEXT-SOURCE?")
-    text = _definition(source, "_PT-LD-TEXT?")
-    payload = _definition(source, "_PT-LD-PAYLOAD!")
+    glyph_run = _definition(source, "PT-GLYPH-RUN-DEFINE")
+    body = _definition(source, "_PT-GR-DEFINE-BODY")
+    fields = _definition(source, "_PT-GR-FIELDS?")
+    text_source = _definition(source, "_PT-GR-TEXT-SOURCE?")
+    text = _definition(source, "_PT-GR-TEXT?")
+    payload = _definition(source, "_PT-GR-PAYLOAD!")
     retained_args = _definition(source, "_PT-PB-RET-ARGS?")
     admit = _definition(source, "_PT-PO-ADMIT")
     send = _definition(source, "_PT-PO-SEND")
-    scrub = _definition(source, "_PT-LD-SCRUB")
+    scrub = _definition(source, "_PT-GR-SCRUB")
 
     assert "0x2020 CONSTANT _PT-M-OBJECT-DEFINE" in source
     assert "_PT-M-OBJECT-DEFINE _PT-PO-TYPE !" in body
-    assert body.index("_PT-PO-ADMIT") < body.index("_PT-LD-PAYLOAD!")
-    assert body.index("_PT-LD-PAYLOAD!") < body.index("_PT-PO-SEND")
+    assert body.index("_PT-PO-ADMIT") < body.index("_PT-GR-PAYLOAD!")
+    assert body.index("_PT-GR-PAYLOAD!") < body.index("_PT-PO-SEND")
     assert "_PT-FRAME-BEGIN" in admit
     assert "_PT.S.TX-RET-OPS-DONE !" not in admit
     assert "_PT.S.TX-RET-BYTES-DONE !" not in admit
     assert "_PT.S.TX-RET-OPS-DONE !" in send
     assert "_PT.S.TX-RET-BYTES-DONE !" in send
 
-    # The complete 64-byte common prefix and 16-byte LABEL prefix are packed
-    # by PT; Akashic supplies only typed scalars and the borrowed text span.
+    # The complete 64-byte common prefix and 16-byte GLYPH_RUN prefix are
+    # packed by PT; Akashic supplies typed styling and the borrowed text span.
     expected_stores = (
-        "_PT-LD-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
-        "_PT-LD-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
-        "_PT-LD-OBJECT @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-GR-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-GR-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-GR-OBJECT @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
         "4 _PT-FRAME-PAYLOAD 24 + W!",
-        "_PT-LD-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!",
-        "_PT-LD-Z @ _PT-FRAME-PAYLOAD 28 + L!",
-        "_PT-LD-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
-        "_PT-LD-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
-        "_PT-LD-LEFT @ _PT-FRAME-PAYLOAD 48 + L!",
-        "_PT-LD-TOP @ _PT-FRAME-PAYLOAD 52 + L!",
-        "_PT-LD-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!",
-        "_PT-LD-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!",
-        "_PT-LD-RED @ _PT-FRAME-PAYLOAD 64 + C!",
-        "_PT-LD-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
-        "_PT-LD-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
-        "_PT-LD-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!",
-        "_PT-LD-H-ALIGN @ _PT-FRAME-PAYLOAD 68 + W!",
-        "_PT-LD-V-ALIGN @ _PT-FRAME-PAYLOAD 70 + W!",
-        "_PT-LD-TEXT-U @ _PT-FRAME-PAYLOAD 72 + L!",
-        "_PT-LD-ELLIPSIZE @ _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-GR-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!",
+        "_PT-GR-Z @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-GR-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
+        "_PT-GR-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
+        "_PT-GR-LEFT @ _PT-FRAME-PAYLOAD 48 + L!",
+        "_PT-GR-TOP @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-GR-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-GR-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!",
+        "_PT-GR-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!",
+        "_PT-GR-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
+        "_PT-GR-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
+        "_PT-GR-FG-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!",
+        "_PT-GR-BG-RED @ _PT-FRAME-PAYLOAD 68 + C!",
+        "_PT-GR-BG-GREEN @ _PT-FRAME-PAYLOAD 69 + C!",
+        "_PT-GR-BG-BLUE @ _PT-FRAME-PAYLOAD 70 + C!",
+        "_PT-GR-BG-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!",
+        "_PT-GR-ATTRS @ _PT-FRAME-PAYLOAD 72 + W!",
+        "0 _PT-FRAME-PAYLOAD 74 + W!",
+        "_PT-GR-TEXT-U @ _PT-FRAME-PAYLOAD 76 + L!",
         "_PT-FRAME-PAYLOAD 80 + SWAP MOVE",
     )
     for store in expected_stores:
         assert store in payload
 
-    assert "_PT-LD-TEXT-U @ 80 _PT-UADD?" in fields
+    assert "_PT-GR-TEXT-U @ 80 _PT-UADD?" in fields
     assert "_PT.S.RET-FORMATS 24 + L@ U>" in fields
-    assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x08 AND" in fields
-    assert body.index("_PT-LD-FIELDS?") < body.index("_PT-PO-ADMIT")
+    assert "_PT.S.RET-FORMATS 24 + L@ 0= IF FALSE EXIT THEN" in fields
+    assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x08 AND" not in fields
+    assert "0x006F CONSTANT _PT-GR-ATTR-MASK" in source
+    assert "_PT-GR-ATTRS @ _PT-GR-ATTR-MASK INVERT AND" in fields
+    assert body.index("_PT-GR-FIELDS?") < body.index("_PT-PO-ADMIT")
     assert "DUP 0<> SWAP 1 <> AND" in fields
-    assert fields.count("DUP 0<> SWAP 1 <> AND") == 2
+    assert fields.count("DUP 0<> SWAP 1 <> AND") == 1
     assert "_PT-PB-RET-OPS @ 64 _PT-UMUL?" in retained_args
     assert "_PT-PB-RET-BYTES @ U>" in retained_args
     assert re.search(r"\bMOD\b", retained_args) is None
 
-    assert "_PT-LD-TEXT-U @ 0= IF" in text_source
-    assert "_PT-LD-TEXT-A @ 0= EXIT" in text_source
+    assert "_PT-GR-TEXT-U @ 0= IF" in text_source
+    assert "_PT-GR-TEXT-A @ 0= EXIT" in text_source
     assert "_PT-RANGE-VALID?" in text_source
     assert text_source.count("_PT-RANGES-OVERLAP?") == 2
-    assert text.index("_PT-LD-TEXT-U @ 0= IF TRUE EXIT THEN") < (
+    assert text.index("_PT-GR-TEXT-U @ 0= IF TRUE EXIT THEN") < (
         text.index("_PT-UTF8?")
     )
     for control in ("DUP 0=", "OVER 10 =", "SWAP 13 ="):
@@ -343,11 +387,11 @@ def test_typed_label_define_owns_exact_object_wire_assembly() -> None:
 
     # No payload-sized staging allocation or borrowed text pointer survives
     # the guarded call.
-    assert "CREATE" not in label + body + payload
-    assert "ALLOT" not in label + body + payload
-    assert "CATCH" in label
-    assert "_PT-LD-SCRUB" in label
-    assert "0 _PT-LD-TEXT-A !" in scrub
+    assert "CREATE" not in glyph_run + body + payload
+    assert "ALLOT" not in glyph_run + body + payload
+    assert "CATCH" in glyph_run
+    assert "_PT-GR-SCRUB" in glyph_run
+    assert "0 _PT-GR-TEXT-A !" in scrub
     assert "0 _PT-U8-A !" in scrub
 
 

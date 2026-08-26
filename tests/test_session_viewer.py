@@ -10,7 +10,7 @@ import pytest
 
 import session_viewer
 from display import VirtualTerminal
-from rich_terminal.retained_view import DisplayScope, RetainedRootLabelPlane
+from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
 from session_viewer import (
     DISPLAY_CLAIM_RETRY_SECONDS,
@@ -121,7 +121,7 @@ def _display_offer(offer_id=1, *, char="X"):
         cursor_visible=True,
         alternate_screen=False,
     )
-    plane = RetainedRootLabelPlane(
+    plane = RetainedDrawPlane(
         retained_initialized=True,
         retained_visible=bool(offer_id & 1),
         regions=(),
@@ -677,7 +677,7 @@ def test_periodic_display_reclaim_rejects_malformed_claim():
     assert not keyboard.input_enabled
 
 
-def test_terminal_composition_orders_cell_label_then_cursor(monkeypatch):
+def test_terminal_composition_orders_cell_draw_plane_then_cursor(monkeypatch):
     events = []
     surface = object()
     plane = _display_offer().retained
@@ -713,9 +713,9 @@ def test_terminal_composition_orders_cell_label_then_cursor(monkeypatch):
     def composite(*args):
         assert args[1] is surface
         assert args[2] is plane
-        events.append(("label",))
+        events.append(("draw",))
 
-    monkeypatch.setattr(session_viewer, "composite_root_labels", composite)
+    monkeypatch.setattr(session_viewer, "composite_draw_plane", composite)
 
     assert compose_terminal_frame(
         pygame,
@@ -728,7 +728,7 @@ def test_terminal_composition_orders_cell_label_then_cursor(monkeypatch):
     ) is surface
     assert events == [
         ("cell", False),
-        ("label",),
+        ("draw",),
         ("cursor", surface, (255, 255, 255), (6, 18, 6, 2)),
     ]
 

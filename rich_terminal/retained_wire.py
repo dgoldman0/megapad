@@ -16,8 +16,9 @@ from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
 from .retained_model import OwnerQuotas, RetainedFeature, RetainedPolicy
 from .retained_scene import (
     ExplicitSamples,
+    GLYPH_RUN_ATTRIBUTE_MASK,
     GroupBody,
-    LabelBody,
+    GlyphRunBody,
     MeterBody,
     ObjectBounds,
     ObjectKind,
@@ -50,7 +51,7 @@ _OWNER_ITEM = struct.Struct("<QQQ")
 _OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
 _POLYLINE_BODY = struct.Struct("<II4BI")
 _POINT = struct.Struct("<II")
-_LABEL_BODY = struct.Struct("<4BHHII")
+_GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 _READOUT_BODY = struct.Struct("<8BIIqqII")
 _METER_BODY = struct.Struct("<8BIIqqqQ")
 _STATUS_BODY = struct.Struct("<8BqIIQ")
@@ -303,7 +304,7 @@ class RetainedCaps:
             max_image_width=formats.max_image_width,
             max_image_height=formats.max_image_height,
             max_path_points=formats.max_path_points,
-            max_label_bytes=formats.max_label_bytes,
+            max_glyph_run_bytes=formats.max_glyph_run_bytes,
             max_samples_per_append=formats.max_samples_per_append,
             max_history_per_series=formats.max_history_per_series,
             minimum_presentation_interval_us=formats.minimum_presentation_interval_us,
@@ -323,7 +324,7 @@ class RetainedFormats:
     max_image_width: int
     max_image_height: int
     max_path_points: int
-    max_label_bytes: int
+    max_glyph_run_bytes: int
     max_samples_per_append: int
     max_history_per_series: int
     minimum_presentation_interval_us: int
@@ -338,7 +339,7 @@ class RetainedFormats:
             "max_image_width",
             "max_image_height",
             "max_path_points",
-            "max_label_bytes",
+            "max_glyph_run_bytes",
             "max_samples_per_append",
             "max_history_per_series",
             "minimum_presentation_interval_us",
@@ -654,7 +655,7 @@ class RegionWireDefinition:
 ObjectWireBody = (
     GroupBody
     | PolylineBody
-    | LabelBody
+    | GlyphRunBody
     | ReadoutBody
     | MeterBody
     | StatusBody
@@ -666,7 +667,7 @@ ObjectWireBody = (
 _WIRE_BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PolylineBody: ObjectKind.POLYLINE,
-    LabelBody: ObjectKind.LABEL,
+    GlyphRunBody: ObjectKind.GLYPH_RUN,
     ReadoutBody: ObjectKind.READOUT,
     MeterBody: ObjectKind.METER,
     StatusBody: ObjectKind.STATUS,
@@ -877,7 +878,7 @@ def encode_ret_caps(caps: RetainedCaps) -> bytes:
     if not isinstance(caps, RetainedCaps):
         raise TypeError("caps must be RetainedCaps")
     return _RET_CAPS.pack(
-        RET1_TAG, 1, 0, int(caps.features), caps.max_owner_records,
+        RET1_TAG, 0, 0, int(caps.features), caps.max_owner_records,
         caps.max_live_owners, caps.max_regions, caps.max_resources,
         caps.max_objects, caps.max_series, caps.max_operations_per_transaction,
         caps.max_resource_chunk_bytes, caps.max_retained_transaction_bytes,
@@ -887,9 +888,14 @@ def encode_ret_caps(caps: RetainedCaps) -> bytes:
 
 def decode_ret_caps(payload) -> RetainedCaps:
     raw = _payload(payload, _RET_CAPS.size, "RET_CAPS")
-    tag, major, minor, *values = _RET_CAPS.unpack(raw)
-    if tag != RET1_TAG or (major, minor) != (1, 0):
-        raise RetainedWireError(RetainedWireErrorCode.SCALAR, "RET_CAPS tag/version is invalid")
+    tag, reserved0, reserved1, *values = _RET_CAPS.unpack(raw)
+    if tag != RET1_TAG:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, "RET_CAPS tag is invalid")
+    if reserved0 or reserved1:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "RET_CAPS reserved fields are nonzero",
+        )
     try:
         return RetainedCaps(*values)
     except (TypeError, ValueError) as exc:
@@ -902,7 +908,7 @@ def encode_ret_formats(formats: RetainedFormats) -> bytes:
     return _RET_FORMATS.pack(
         formats.coordinate_format, formats.color_format, formats.image_format,
         formats.max_image_width, formats.max_image_height, formats.max_path_points,
-        formats.max_label_bytes, formats.max_samples_per_append,
+        formats.max_glyph_run_bytes, formats.max_samples_per_append,
         formats.max_history_per_series, formats.minimum_presentation_interval_us,
         formats.total_sample_slots, formats.total_utf8_bytes, 0,
     )
@@ -1134,17 +1140,17 @@ def _encode_object_body(body: ObjectWireBody) -> bytes:
             _POINT.pack_into(result, offset, point.x, point.y)
             offset += _POINT.size
         return bytes(result)
-    if isinstance(body, LabelBody):
+    if isinstance(body, GlyphRunBody):
         text = body.text.encode("utf-8", "strict")
         text_bytes = _integer(
             "text_bytes", len(text), minimum=0, maximum=UINT32_MAX
         )
-        return _LABEL_BODY.pack(
-            *_rgba_values(body.color),
-            body.horizontal_align,
-            body.vertical_align,
+        return _GLYPH_RUN_BODY.pack(
+            *_rgba_values(body.foreground),
+            *_rgba_values(body.background),
+            body.attributes,
+            0,
             text_bytes,
-            int(body.ellipsize),
         ) + text
     if isinstance(body, ReadoutBody):
         unit = body.unit.encode("utf-8", "strict")
@@ -1253,28 +1259,27 @@ def _decode_object_body(kind: ObjectKind, raw: bytes) -> ObjectWireBody:
                 RGBA(*values[2:6]),
                 bool(path_flags),
             )
-        if kind is ObjectKind.LABEL:
-            if len(raw) < _LABEL_BODY.size:
-                _body_size(raw, _LABEL_BODY.size, "LABEL prefix")
-            values = _LABEL_BODY.unpack_from(raw)
-            text_bytes, label_flags = values[6:8]
-            if label_flags & ~0x1:
+        if kind is ObjectKind.GLYPH_RUN:
+            if len(raw) < _GLYPH_RUN_BODY.size:
+                _body_size(raw, _GLYPH_RUN_BODY.size, "GLYPH_RUN prefix")
+            values = _GLYPH_RUN_BODY.unpack_from(raw)
+            attributes, reserved, text_bytes = values[8:11]
+            if attributes & ~GLYPH_RUN_ATTRIBUTE_MASK:
                 raise RetainedWireError(
                     RetainedWireErrorCode.RESERVED,
-                    "LABEL flags contain reserved bits",
+                    "GLYPH_RUN attributes contain unsupported bits",
                 )
-            if values[4] not in (0, 1, 2) or values[5] not in (0, 1, 2):
+            if reserved:
                 raise RetainedWireError(
-                    RetainedWireErrorCode.ENUM,
-                    "LABEL alignment is not canonical",
+                    RetainedWireErrorCode.RESERVED,
+                    "GLYPH_RUN reserved field is nonzero",
                 )
-            _body_size(raw, _LABEL_BODY.size + text_bytes, "LABEL")
-            return LabelBody(
+            _body_size(raw, _GLYPH_RUN_BODY.size + text_bytes, "GLYPH_RUN")
+            return GlyphRunBody(
                 RGBA(*values[:4]),
-                values[4],
-                values[5],
-                _wire_text(raw[_LABEL_BODY.size :], "LABEL text"),
-                bool(label_flags),
+                RGBA(*values[4:8]),
+                attributes,
+                _wire_text(raw[_GLYPH_RUN_BODY.size :], "GLYPH_RUN text"),
             )
         if kind is ObjectKind.READOUT:
             if len(raw) < _READOUT_BODY.size:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
@@ -49,7 +50,7 @@ def _policy(**changes) -> RetainedPolicy:
         "max_image_width": 16,
         "max_image_height": 16,
         "max_path_points": 8,
-        "max_label_bytes": 32,
+        "max_glyph_run_bytes": 32,
         "max_samples_per_append": 4,
         "max_history_per_series": 8,
         "minimum_presentation_interval_us": 16_667,
@@ -123,7 +124,7 @@ def test_policy_rejects_feature_dependency_and_absent_family_capacity():
             max_live_owners=1,
             max_regions=1,
             max_resources=0,
-            max_objects=1,
+            max_objects=0,
             max_series=0,
             max_operations_per_transaction=1,
             max_resource_chunk_bytes=0,
@@ -132,8 +133,8 @@ def test_policy_rejects_feature_dependency_and_absent_family_capacity():
             image_format=0,
             max_image_width=0,
             max_image_height=0,
-            max_path_points=0,
-            max_label_bytes=0,
+            max_path_points=1,
+            max_glyph_run_bytes=0,
             max_samples_per_append=0,
             max_history_per_series=0,
             minimum_presentation_interval_us=0,
@@ -387,7 +388,7 @@ def test_absent_feature_quota_is_rejected_without_mutation():
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=0,
@@ -405,3 +406,18 @@ def test_absent_feature_quota_is_rejected_without_mutation():
 
     assert caught.value.code is OwnerLedgerErrorCode.INVALID
     assert ledger.state is before
+
+    glyph_policy = replace(
+        core_policy,
+        max_objects=2,
+        max_glyph_run_bytes=16,
+        total_utf8_bytes=32,
+        client_to_terminal_max_payload=128,
+    )
+    glyph_ledger = _ledger(glyph_policy)
+    glyph_quotas = OwnerQuotas(1, 0, 1, 0, 0, 16, 0)
+
+    assert (
+        glyph_ledger.open(_identity(2), glyph_quotas)
+        is OwnerOpenDisposition.OPENED
+    )

@@ -18,8 +18,8 @@ from canonical_state import canonical_state, deduplicate_records, owner_key, res
 
 CONTRACT_ID = "APT-1-RETAINED-1-2026-08-24"
 MAGIC = b"\xa5PT1"
-VERSION = 1
 HEADER_BYTES = 40
+RETAINED_TAG = 0x31544552
 CLIENT = "client_to_terminal"
 TERMINAL = "terminal_to_client"
 
@@ -56,7 +56,7 @@ STATUS = {
     "RET_DUPLICATE_ID":4,"RET_IN_USE":5,"RET_BAD_CONTENT":6,"RET_ABORTED":7,
 }
 OBJECT_TYPES = {
-    "GROUP":1,"POLYLINE":2,"IMAGE":3,"LABEL":4,"READOUT":5,"METER":6,
+    "GROUP":1,"POLYLINE":2,"IMAGE":3,"GLYPH_RUN":4,"READOUT":5,"METER":6,
     "STATUS":7,"PLOT":8,"WAVEFORM":9,
 }
 
@@ -86,7 +86,8 @@ PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 PRESENT_COMMIT = struct.Struct("<QII")
 REGION = struct.Struct("<QQQIIIIiI")
 OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
-LABEL_BODY = struct.Struct("<4BHHII")
+GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
+GLYPH_RUN_ATTRIBUTE_MASK = 0x006F
 READOUT_BODY = struct.Struct("<8BIIqqII")
 METER_BODY = struct.Struct("<8BIIqqqQ")
 STATUS_BODY = struct.Struct("<8BqIIQ")
@@ -122,8 +123,8 @@ def _decode_frame(encoded: bytes) -> dict[str, Any]:
     if len(encoded) < HEADER_BYTES:
         _fail("semantic reducer saw a truncated frame")
     values = HEADER.unpack_from(encoded)
-    magic,version,header_bytes,message_type,flags,reserved,payload_bytes,session,sequence,epoch,checksum = values
-    if (magic,version,header_bytes,flags,reserved) != (MAGIC,VERSION,HEADER_BYTES,0,0):
+    magic,reserved0,header_bytes,message_type,flags,reserved,payload_bytes,session,sequence,epoch,checksum = values
+    if (magic,reserved0,header_bytes,flags,reserved) != (MAGIC,0,HEADER_BYTES,0,0):
         _fail("semantic reducer saw an invalid frame header")
     if len(encoded) != HEADER_BYTES + payload_bytes:
         _fail("semantic reducer saw a payload-length mismatch")
@@ -265,11 +266,15 @@ def _decode_object(payload: bytes) -> dict[str, Any]:
         "body_sha3_256":hashlib.sha3_256(body).hexdigest(),"visible":bool(values[4]&1),
     }
     object_type = values[3]
-    if object_type == OBJECT_TYPES["LABEL"]:
-        fields = LABEL_BODY.unpack_from(body)
-        text = body[LABEL_BODY.size:]
-        if len(text) != fields[6]:
-            _fail("LABEL length mismatch")
+    if object_type == OBJECT_TYPES["GLYPH_RUN"]:
+        fields = GLYPH_RUN_BODY.unpack_from(body)
+        text = body[GLYPH_RUN_BODY.size:]
+        if fields[8] & ~GLYPH_RUN_ATTRIBUTE_MASK:
+            _fail("GLYPH_RUN attributes contain unsupported bits")
+        if fields[9] != 0:
+            _fail("GLYPH_RUN reserved field is nonzero")
+        if len(text) != fields[10]:
+            _fail("GLYPH_RUN length mismatch")
         record.update({"text_utf8_hex":text.hex(),"utf8_bytes":len(text)})
     elif object_type == OBJECT_TYPES["READOUT"]:
         fields = READOUT_BODY.unpack_from(body)
@@ -1144,6 +1149,8 @@ def reduce_transcript(meta: dict[str,Any], encoded_frames: Sequence[bytes]) -> d
                 _fail("RET_QUERY length mismatch")
         elif direction == TERMINAL and message == "RET_CAPS":
             values = RET_CAPS.unpack(payload)
+            if values[:3] != (RETAINED_TAG,0,0):
+                _fail("RET_CAPS tag or reserved field mismatch")
             state["_ret_supported"] = bool(values[3] & 1)
         elif direction == TERMINAL and message == "RET_FORMATS":
             RET_FORMATS.unpack(payload)

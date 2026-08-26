@@ -20,10 +20,11 @@ from rich_terminal.retained_view import (
     INT32_MAX,
     INT32_MIN,
     DisplayScope,
-    RetainedLabelDraw,
+    GlyphRunDraw,
+    RetainedDrawPlane,
     RetainedRegionDraw,
-    RetainedRootLabelPlane,
 )
+from rich_terminal.retained_scene import ObjectBounds, RGBA
 from rich_terminal.update_authority import TerminalUpdateError
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import (
@@ -85,6 +86,21 @@ def _wire_text(value, name: str) -> str:
     except UnicodeEncodeError as exc:
         raise ValueError(f"{name} must contain only Unicode scalar values") from exc
     return value
+
+
+def _wire_integer_array(
+    value,
+    name: str,
+    length: int,
+    *,
+    maximum: int = UINT32_MAX,
+) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise TypeError(f"{name} must be an array of {length} integers")
+    return tuple(
+        _wire_integer(item, f"{name}[{index}]", minimum=0, maximum=maximum)
+        for index, item in enumerate(value)
+    )
 
 
 def _rgb_pack(color: tuple[int, int, int]) -> int:
@@ -285,20 +301,13 @@ def display_scope_from_wire(data: dict) -> DisplayScope:
     )
 
 
-_LABEL_WIRE_FIELDS = (
+_DRAW_WIRE_FIELDS = (
     "object_id",
     "z_order",
-    "left",
-    "top",
-    "right",
-    "bottom",
-    "red",
-    "green",
-    "blue",
-    "alpha",
-    "horizontal_align",
-    "vertical_align",
-    "ellipsize",
+    "bounds",
+    "foreground",
+    "background",
+    "attributes",
     "text",
 )
 _REGION_WIRE_FIELDS = (
@@ -311,15 +320,15 @@ _REGION_WIRE_FIELDS = (
     "cell_rows",
     "z_order",
     "clipped",
-    "labels",
+    "draws",
 )
 
 
-def retained_root_label_plane_to_wire(plane: RetainedRootLabelPlane) -> dict:
-    """Encode only the immutable renderer-facing root-LABEL draw plane."""
+def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
+    """Encode only the immutable renderer-facing draw plane."""
 
-    if not isinstance(plane, RetainedRootLabelPlane):
-        raise TypeError("plane must be RetainedRootLabelPlane")
+    if not isinstance(plane, RetainedDrawPlane):
+        raise TypeError("plane must be RetainedDrawPlane")
     return {
         "retained_initialized": plane.retained_initialized,
         "retained_visible": plane.retained_visible,
@@ -334,24 +343,32 @@ def retained_root_label_plane_to_wire(plane: RetainedRootLabelPlane) -> dict:
                 "cell_rows": region.cell_rows,
                 "z_order": region.z_order,
                 "clipped": region.clipped,
-                "labels": [
+                "draws": [
                     {
-                        "object_id": label.object_id,
-                        "z_order": label.z_order,
-                        "left": label.left,
-                        "top": label.top,
-                        "right": label.right,
-                        "bottom": label.bottom,
-                        "red": label.red,
-                        "green": label.green,
-                        "blue": label.blue,
-                        "alpha": label.alpha,
-                        "horizontal_align": label.horizontal_align,
-                        "vertical_align": label.vertical_align,
-                        "ellipsize": label.ellipsize,
-                        "text": label.text,
+                        "object_id": draw.object_id,
+                        "z_order": draw.z_order,
+                        "bounds": [
+                            draw.bounds.left,
+                            draw.bounds.top,
+                            draw.bounds.right,
+                            draw.bounds.bottom,
+                        ],
+                        "foreground": [
+                            draw.foreground.red,
+                            draw.foreground.green,
+                            draw.foreground.blue,
+                            draw.foreground.alpha,
+                        ],
+                        "background": [
+                            draw.background.red,
+                            draw.background.green,
+                            draw.background.blue,
+                            draw.background.alpha,
+                        ],
+                        "attributes": draw.attributes,
+                        "text": draw.text,
                     }
-                    for label in region.labels
+                    for draw in region.draws
                 ],
             }
             for region in plane.regions
@@ -359,17 +376,17 @@ def retained_root_label_plane_to_wire(plane: RetainedRootLabelPlane) -> dict:
     }
 
 
-def retained_root_label_plane_from_wire(data: dict) -> RetainedRootLabelPlane:
-    """Decode the complete root-LABEL draw plane with strict scalar types."""
+def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
+    """Decode the complete draw plane with strict scalar types."""
 
     wire = _wire_object(
         data,
-        "retained root-LABEL plane",
+        "retained draw plane",
         ("retained_initialized", "retained_visible", "regions"),
     )
     regions_wire = wire["regions"]
     if not isinstance(regions_wire, (list, tuple)):
-        raise TypeError("retained root-LABEL regions must be an array")
+        raise TypeError("retained draw regions must be an array")
     regions: list[RetainedRegionDraw] = []
     for region_index, raw_region in enumerate(regions_wire):
         region = _wire_object(
@@ -377,71 +394,46 @@ def retained_root_label_plane_from_wire(data: dict) -> RetainedRootLabelPlane:
             f"retained region {region_index}",
             _REGION_WIRE_FIELDS,
         )
-        labels_wire = region["labels"]
-        if not isinstance(labels_wire, (list, tuple)):
-            raise TypeError(f"retained region {region_index} labels must be an array")
-        labels: list[RetainedLabelDraw] = []
-        for label_index, raw_label in enumerate(labels_wire):
-            label = _wire_object(
-                raw_label,
-                f"retained region {region_index} LABEL {label_index}",
-                _LABEL_WIRE_FIELDS,
+        draws_wire = region["draws"]
+        if not isinstance(draws_wire, (list, tuple)):
+            raise TypeError(f"retained region {region_index} draws must be an array")
+        draws: list[GlyphRunDraw] = []
+        for draw_index, raw_draw in enumerate(draws_wire):
+            draw = _wire_object(
+                raw_draw,
+                f"retained region {region_index} draw {draw_index}",
+                _DRAW_WIRE_FIELDS,
             )
-            prefix = f"retained region {region_index} LABEL {label_index}"
-            labels.append(
-                RetainedLabelDraw(
+            prefix = f"retained region {region_index} draw {draw_index}"
+            bounds = _wire_integer_array(draw["bounds"], f"{prefix} bounds", 4)
+            foreground = _wire_integer_array(
+                draw["foreground"], f"{prefix} foreground", 4, maximum=0xFF
+            )
+            background = _wire_integer_array(
+                draw["background"], f"{prefix} background", 4, maximum=0xFF
+            )
+            draws.append(
+                GlyphRunDraw(
                     object_id=_wire_integer(
-                        label["object_id"],
+                        draw["object_id"],
                         f"{prefix} object_id",
                         minimum=1,
                         maximum=UINT64_MAX,
                     ),
                     z_order=_wire_integer(
-                        label["z_order"],
+                        draw["z_order"],
                         f"{prefix} z_order",
                         minimum=INT32_MIN,
                         maximum=INT32_MAX,
                     ),
-                    left=_wire_integer(
-                        label["left"], f"{prefix} left", minimum=0, maximum=UINT32_MAX
+                    bounds=ObjectBounds(*bounds),
+                    foreground=RGBA(*foreground),
+                    background=RGBA(*background),
+                    attributes=_wire_integer(
+                        draw["attributes"], f"{prefix} attributes", minimum=0,
+                        maximum=0x7F,
                     ),
-                    top=_wire_integer(
-                        label["top"], f"{prefix} top", minimum=0, maximum=UINT32_MAX
-                    ),
-                    right=_wire_integer(
-                        label["right"], f"{prefix} right", minimum=0, maximum=UINT32_MAX
-                    ),
-                    bottom=_wire_integer(
-                        label["bottom"], f"{prefix} bottom", minimum=0, maximum=UINT32_MAX
-                    ),
-                    red=_wire_integer(
-                        label["red"], f"{prefix} red", minimum=0, maximum=0xFF
-                    ),
-                    green=_wire_integer(
-                        label["green"], f"{prefix} green", minimum=0, maximum=0xFF
-                    ),
-                    blue=_wire_integer(
-                        label["blue"], f"{prefix} blue", minimum=0, maximum=0xFF
-                    ),
-                    alpha=_wire_integer(
-                        label["alpha"], f"{prefix} alpha", minimum=0, maximum=0xFF
-                    ),
-                    horizontal_align=_wire_integer(
-                        label["horizontal_align"],
-                        f"{prefix} horizontal_align",
-                        minimum=0,
-                        maximum=2,
-                    ),
-                    vertical_align=_wire_integer(
-                        label["vertical_align"],
-                        f"{prefix} vertical_align",
-                        minimum=0,
-                        maximum=2,
-                    ),
-                    ellipsize=_wire_boolean(
-                        label["ellipsize"], f"{prefix} ellipsize"
-                    ),
-                    text=_wire_text(label["text"], f"{prefix} text"),
+                    text=_wire_text(draw["text"], f"{prefix} text"),
                 )
             )
         prefix = f"retained region {region_index}"
@@ -490,15 +482,15 @@ def retained_root_label_plane_from_wire(data: dict) -> RetainedRootLabelPlane:
                     maximum=INT32_MAX,
                 ),
                 clipped=_wire_boolean(region["clipped"], f"{prefix} clipped"),
-                labels=tuple(labels),
+                draws=tuple(draws),
             )
         )
-    return RetainedRootLabelPlane(
+    return RetainedDrawPlane(
         retained_initialized=_wire_boolean(
-            wire["retained_initialized"], "retained root-LABEL initialized"
+            wire["retained_initialized"], "retained draw initialized"
         ),
         retained_visible=_wire_boolean(
-            wire["retained_visible"], "retained root-LABEL visible"
+            wire["retained_visible"], "retained draw visible"
         ),
         regions=tuple(regions),
     )
@@ -513,7 +505,7 @@ def display_offer_to_wire(offer: TerminalDisplayOffer) -> dict:
         "offer_id": offer.offer_id,
         "scope": display_scope_to_wire(offer.scope),
         "cell": snapshot_to_wire(offer.cell),
-        "retained": retained_root_label_plane_to_wire(offer.retained),
+        "retained": retained_draw_plane_to_wire(offer.retained),
     }
 
 
@@ -529,7 +521,7 @@ def display_offer_from_wire(data: dict) -> TerminalDisplayOffer:
         offer_id=_wire_integer(wire["offer_id"], "display offer id", minimum=1),
         scope=display_scope_from_wire(wire["scope"]),
         cell=snapshot_from_wire(wire["cell"]),
-        retained=retained_root_label_plane_from_wire(wire["retained"]),
+        retained=retained_draw_plane_from_wire(wire["retained"]),
     )
 
 

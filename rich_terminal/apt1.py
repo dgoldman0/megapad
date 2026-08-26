@@ -17,7 +17,6 @@ from enum import Enum, IntEnum
 
 CONTRACT_ID = "APT-1-CELL-1-2026-08-24"
 MAGIC = b"\xa5PT1"
-VERSION = 1
 HEADER_BYTES = 40
 STRUCTURAL_MAX_PAYLOAD = 1_048_576
 MANDATORY_CAPABILITIES = 0x3F
@@ -62,7 +61,6 @@ class MessageType(IntEnum):
 
 class FramingErrorCode(str, Enum):
     BAD_MAGIC = "BAD_MAGIC"
-    BAD_VERSION = "BAD_VERSION"
     BAD_HEADER_SIZE = "BAD_HEADER_SIZE"
     BAD_FLAGS = "BAD_FLAGS"
     BAD_RESERVED = "BAD_RESERVED"
@@ -196,7 +194,7 @@ def encode_frame(frame: Frame, *, max_payload: int = STRUCTURAL_MAX_PAYLOAD) -> 
         raise ValueError("payload exceeds the negotiated maximum")
     prefix = _HEADER_PREFIX.pack(
         MAGIC,
-        VERSION,
+        0,
         HEADER_BYTES,
         frame.message_type,
         0,
@@ -407,7 +405,7 @@ class IncrementalFrameDecoder:
     def _validate_header(self) -> int:
         (
             magic,
-            version,
+            reserved_header,
             header_bytes,
             message_type,
             flags,
@@ -421,8 +419,11 @@ class IncrementalFrameDecoder:
 
         if magic != MAGIC:
             self._fatal(FramingErrorCode.BAD_MAGIC, f"received {magic.hex()}")
-        if version != VERSION:
-            self._fatal(FramingErrorCode.BAD_VERSION, f"received {version}")
+        if reserved_header:
+            self._fatal(
+                FramingErrorCode.BAD_RESERVED,
+                f"header byte 4 received 0x{reserved_header:02x}",
+            )
         if header_bytes != HEADER_BYTES:
             self._fatal(
                 FramingErrorCode.BAD_HEADER_SIZE,
@@ -465,7 +466,7 @@ class IncrementalFrameDecoder:
         raw = bytes(self._buffer)
         (
             _magic,
-            _version,
+            _reserved_header,
             _header_bytes,
             message_type,
             _flags,
@@ -692,7 +693,6 @@ __all__ = [
     "Probe",
     "STRUCTURAL_MAX_PAYLOAD",
     "SessionFramingError",
-    "VERSION",
     "crc32c",
     "encode_frame",
     "encode_offer",

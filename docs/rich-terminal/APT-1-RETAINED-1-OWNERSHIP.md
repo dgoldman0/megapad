@@ -202,7 +202,7 @@ Accounting units are exact:
 
 - one live region/resource/object/series consumes one respective count slot;
 - a resource consumes its declared verified raw byte length;
-- LABEL text consumes its exact UTF-8 payload byte count; a READOUT consumes
+- GLYPH_RUN text consumes its exact UTF-8 payload byte count; a READOUT consumes
   the exact complete formatted UTF-8 byte count for its current value, signs,
   punctuation, percent marker, and unit, with no second charge for the unit;
 - a series consumes its declared history capacity in sample slots, regardless

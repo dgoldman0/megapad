@@ -108,6 +108,31 @@ def test_encoder_matches_the_normative_first_frame():
     assert encoder.next_sequence == 1
 
 
+def test_reserved_header_byte_is_zero_and_nonzero_is_fatal():
+    encoded = encode_frame(
+        Frame(
+            message_type=MessageType.SERVER_READY,
+            session_id=0x0123456789ABCDEF,
+            sequence=0,
+            presentation_epoch=0,
+            payload=b"",
+        )
+    )
+    assert encoded[4] == 0
+
+    malformed = bytearray(encoded)
+    malformed[4] = 1
+    decoder = IncrementalFrameDecoder(
+        0x0123456789ABCDEF,
+        max_payload=1_048_576,
+    )
+    with pytest.raises(SessionFramingError) as caught:
+        decoder.feed(malformed)
+    assert caught.value.code is FramingErrorCode.BAD_RESERVED
+    assert decoder.failed
+    assert decoder.buffered_bytes == 0
+
+
 def test_incremental_decoders_accept_the_full_bidirectional_happy_transcript():
     manifest = _manifest()
     transcript = next(

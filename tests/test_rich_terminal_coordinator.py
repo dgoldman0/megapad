@@ -54,7 +54,7 @@ def _policy() -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=0,

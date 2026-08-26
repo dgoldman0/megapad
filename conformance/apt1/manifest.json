@@ -5,10 +5,10 @@
   "header": {
     "size": 40,
     "magic_hex": "a5505431",
-    "version": 1,
+    "reserved0": 0,
     "layout": [
       "magic[4]",
-      "version:u8",
+      "reserved0:u8",
       "header_bytes:u8",
       "type:u16",
       "flags:u16",
@@ -56,17 +56,17 @@
       "name": "happy_session",
       "file": "happy_session.hex",
       "kind": "happy_path",
-      "full_hex": "a5505431012801000000000020000000efcdab89674523010000000000000000000000009c3b3dba0100000000001000000010000000100002000000020000003f00000000000000a5505431012802000000000020000000efcdab89674523010000000000000000000000005842bf9b0100000000001000000000000000100000100000000000003f00000000000000a5505431012810010000000020000000efcdab8967452301010000000000000000000000b00ba8fd0100000000000000000000000000000002000000020000000200000004000000a550543101280101000000001c000000efcdab89674523010200000000000000000000000aac9e4a00000000000000000200000041000000070001004200000002000800a550543101280101000000001c000000efcdab89674523010300000000000000000000008725ba2801000000000000000200000043000000040000002000000007012000a5505431012802010000000010000000efcdab896745230104000000000000000000000058ab716501000000010000000100000000000000a5505431012811010000000008000000efcdab8967452301050000000000000000000000c7ce95ee0100000000000000a5505431012809000000000014000000efcdab8967452301010000000000000000000000208ee88f0100000000000000000000000100000000000000a5505431012800020000000010000000efcdab8967452301020000000000000000000000a57d660741000000010001000100000000000000a5505431012807000000000010000000efcdab8967452301030000000000000000000000e1e1711f01000000000000000100000000000000a5505431012808000000000008000000efcdab896745230106000000000000000100000094e624020100000000000000a5505431012810010000000020000000efcdab89674523010700000000000000010000007f1e6e8a0100000000000000000000000000000002000000020000000200000004000000a550543101280101000000001c000000efcdab896745230108000000000000000100000018bf3d3b00000000000000000200000041000000070001004200000002000800a550543101280101000000001c000000efcdab89674523010900000000000000010000009536195901000000000000000200000043000000040000002000000007012000a5505431012802010000000010000000efcdab89674523010a0000000000000001000000db098a9201000000010000000100000000000000a5505431012811010000000008000000efcdab89674523010b000000000000000100000060e09fd30100000000000000a5505431012809000000000014000000efcdab896745230104000000000000000100000049df9afe0100000000000000000000000100000000000000",
+      "full_hex": "a5505431002801000000000020000000efcdab8967452301000000000000000000000000550495f30000000000001000000010000000100002000000020000003f00000000000000a5505431002802000000000020000000efcdab8967452301000000000000000000000000917d17d20000000000001000000000000000100000100000000000003f00000000000000a5505431002810010000000020000000efcdab8967452301010000000000000000000000b2e4a6890100000000000000000000000000000002000000020000000200000004000000a550543100280101000000001c000000efcdab89674523010200000000000000000000005108253f00000000000000000200000041000000070001004200000002000800a550543100280101000000001c000000efcdab8967452301030000000000000000000000dc81015d01000000000000000200000043000000040000002000000007012000a5505431002802010000000010000000efcdab89674523010400000000000000000000005cb6587901000000010000000100000000000000a5505431002811010000000008000000efcdab8967452301050000000000000000000000ecdb55330100000000000000a5505431002809000000000014000000efcdab89674523010100000000000000000000008a7a862b0100000000000000000000000100000000000000a5505431002800020000000010000000efcdab8967452301020000000000000000000000a1604f1b41000000010001000100000000000000a5505431002807000000000010000000efcdab8967452301030000000000000000000000e5fc580301000000000000000100000000000000a5505431002808000000000008000000efcdab8967452301060000000000000001000000bff3e4df0100000000000000a5505431002810010000000020000000efcdab89674523010700000000000000010000007df160fe0100000000000000000000000000000002000000020000000200000004000000a550543100280101000000001c000000efcdab8967452301080000000000000001000000431b864e00000000000000000200000041000000070001004200000002000800a550543100280101000000001c000000efcdab8967452301090000000000000001000000ce92a22c01000000000000000200000043000000040000002000000007012000a5505431002802010000000010000000efcdab89674523010a0000000000000001000000df14a38e01000000010000000100000000000000a5505431002811010000000008000000efcdab89674523010b00000000000000010000004bf55f0e0100000000000000a5505431002809000000000014000000efcdab8967452301040000000000000001000000e32bf45a0100000000000000000000000100000000000000",
       "initial_state": "OPENING",
       "frames": [
         {
           "direction": "server_to_client",
           "message": "SERVER_READY",
-          "full_hex": "a5505431012801000000000020000000efcdab89674523010000000000000000000000009c3b3dba0100000000001000000010000000100002000000020000003f00000000000000",
+          "full_hex": "a5505431002801000000000020000000efcdab8967452301000000000000000000000000550495f30000000000001000000010000000100002000000020000003f00000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0001",
               "flags": 0,
@@ -75,10 +75,10 @@
               "session": "0x0123456789abcdef",
               "sequence": 0,
               "presentation_epoch": 0,
-              "crc32c": "0xba3d3b9c"
+              "crc32c": "0xf3950455"
             },
             "payload": {
-              "profile": 1,
+              "reserved0": 0,
               "terminal_receive_max_payload": 1048576,
               "max_transaction_bytes": 1048576,
               "terminal_receive_credit": 1048576,
@@ -96,11 +96,11 @@
         {
           "direction": "client_to_server",
           "message": "CLIENT_READY",
-          "full_hex": "a5505431012802000000000020000000efcdab89674523010000000000000000000000005842bf9b0100000000001000000000000000100000100000000000003f00000000000000",
+          "full_hex": "a5505431002802000000000020000000efcdab8967452301000000000000000000000000917d17d20000000000001000000000000000100000100000000000003f00000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0002",
               "flags": 0,
@@ -109,10 +109,10 @@
               "session": "0x0123456789abcdef",
               "sequence": 0,
               "presentation_epoch": 0,
-              "crc32c": "0x9bbf4258"
+              "crc32c": "0xd2177d91"
             },
             "payload": {
-              "profile": 1,
+              "reserved0": 0,
               "client_receive_max_payload": 1048576,
               "reserved_after_max_payload": 0,
               "client_receive_credit": 1048576,
@@ -130,11 +130,11 @@
         {
           "direction": "client_to_server",
           "message": "SNAPSHOT_BEGIN",
-          "full_hex": "a5505431012810010000000020000000efcdab8967452301010000000000000000000000b00ba8fd0100000000000000000000000000000002000000020000000200000004000000",
+          "full_hex": "a5505431002810010000000020000000efcdab8967452301010000000000000000000000b2e4a6890100000000000000000000000000000002000000020000000200000004000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0110",
               "flags": 0,
@@ -143,7 +143,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 1,
               "presentation_epoch": 0,
-              "crc32c": "0xfda80bb0"
+              "crc32c": "0x89a6e4b2"
             },
             "payload": {
               "transaction_id": 1,
@@ -163,11 +163,11 @@
         {
           "direction": "client_to_server",
           "message": "CELL_SPAN",
-          "full_hex": "a550543101280101000000001c000000efcdab89674523010200000000000000000000000aac9e4a00000000000000000200000041000000070001004200000002000800",
+          "full_hex": "a550543100280101000000001c000000efcdab89674523010200000000000000000000005108253f00000000000000000200000041000000070001004200000002000800",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0101",
               "flags": 0,
@@ -176,7 +176,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 2,
               "presentation_epoch": 0,
-              "crc32c": "0x4a9eac0a"
+              "crc32c": "0x3f250851"
             },
             "payload": {
               "row": 0,
@@ -197,11 +197,11 @@
         {
           "direction": "client_to_server",
           "message": "CELL_SPAN",
-          "full_hex": "a550543101280101000000001c000000efcdab89674523010300000000000000000000008725ba2801000000000000000200000043000000040000002000000007012000",
+          "full_hex": "a550543100280101000000001c000000efcdab8967452301030000000000000000000000dc81015d01000000000000000200000043000000040000002000000007012000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0101",
               "flags": 0,
@@ -210,7 +210,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 3,
               "presentation_epoch": 0,
-              "crc32c": "0x28ba2587"
+              "crc32c": "0x5d0181dc"
             },
             "payload": {
               "row": 1,
@@ -231,11 +231,11 @@
         {
           "direction": "client_to_server",
           "message": "CURSOR",
-          "full_hex": "a5505431012802010000000010000000efcdab896745230104000000000000000000000058ab716501000000010000000100000000000000",
+          "full_hex": "a5505431002802010000000010000000efcdab89674523010400000000000000000000005cb6587901000000010000000100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0102",
               "flags": 0,
@@ -244,7 +244,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 4,
               "presentation_epoch": 0,
-              "crc32c": "0x6571ab58"
+              "crc32c": "0x7958b65c"
             },
             "payload": {"row": 1, "column": 1, "visible": true},
             "state_transition": {
@@ -257,11 +257,11 @@
         {
           "direction": "client_to_server",
           "message": "SNAPSHOT_COMMIT",
-          "full_hex": "a5505431012811010000000008000000efcdab8967452301050000000000000000000000c7ce95ee0100000000000000",
+          "full_hex": "a5505431002811010000000008000000efcdab8967452301050000000000000000000000ecdb55330100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0111",
               "flags": 0,
@@ -270,7 +270,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 5,
               "presentation_epoch": 0,
-              "crc32c": "0xee95cec7"
+              "crc32c": "0x3355dbec"
             },
             "payload": {"transaction_id": 1},
             "state_transition": {
@@ -283,11 +283,11 @@
         {
           "direction": "server_to_client",
           "message": "TX_RESULT",
-          "full_hex": "a5505431012809000000000014000000efcdab8967452301010000000000000000000000208ee88f0100000000000000000000000100000000000000",
+          "full_hex": "a5505431002809000000000014000000efcdab89674523010100000000000000000000008a7a862b0100000000000000000000000100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0009",
               "flags": 0,
@@ -296,7 +296,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 1,
               "presentation_epoch": 0,
-              "crc32c": "0x8fe88e20"
+              "crc32c": "0x2b867a8a"
             },
             "payload": {"transaction_id": 1, "status": 0, "reserved": 0, "model_revision": 1},
             "state_transition": {
@@ -309,11 +309,11 @@
         {
           "direction": "server_to_client",
           "message": "KEY",
-          "full_hex": "a5505431012800020000000010000000efcdab8967452301020000000000000000000000a57d660741000000010001000100000000000000",
+          "full_hex": "a5505431002800020000000010000000efcdab8967452301020000000000000000000000a1604f1b41000000010001000100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0200",
               "flags": 0,
@@ -322,7 +322,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 2,
               "presentation_epoch": 0,
-              "crc32c": "0x07667da5"
+              "crc32c": "0x1b4f60a1"
             },
             "payload": {"key_symbol": 65, "action": 1, "location": 0, "modifiers": 1, "model_revision": 1},
             "state_transition": {
@@ -335,11 +335,11 @@
         {
           "direction": "server_to_client",
           "message": "SOFT_RESET_REQUEST",
-          "full_hex": "a5505431012807000000000010000000efcdab8967452301030000000000000000000000e1e1711f01000000000000000100000000000000",
+          "full_hex": "a5505431002807000000000010000000efcdab8967452301030000000000000000000000e5fc580301000000000000000100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0007",
               "flags": 0,
@@ -348,7 +348,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 3,
               "presentation_epoch": 0,
-              "crc32c": "0x1f71e1e1"
+              "crc32c": "0x0358fce5"
             },
             "payload": {"requested_epoch": 1, "last_revision": 1},
             "state_transition": {
@@ -361,11 +361,11 @@
         {
           "direction": "client_to_server",
           "message": "SOFT_RESET_ACK",
-          "full_hex": "a5505431012808000000000008000000efcdab896745230106000000000000000100000094e624020100000000000000",
+          "full_hex": "a5505431002808000000000008000000efcdab8967452301060000000000000001000000bff3e4df0100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0008",
               "flags": 0,
@@ -374,7 +374,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 6,
               "presentation_epoch": 1,
-              "crc32c": "0x0224e694"
+              "crc32c": "0xdfe4f3bf"
             },
             "payload": {"requested_epoch": 1, "status": 0, "reserved": 0},
             "state_transition": {
@@ -387,11 +387,11 @@
         {
           "direction": "client_to_server",
           "message": "SNAPSHOT_BEGIN",
-          "full_hex": "a5505431012810010000000020000000efcdab89674523010700000000000000010000007f1e6e8a0100000000000000000000000000000002000000020000000200000004000000",
+          "full_hex": "a5505431002810010000000020000000efcdab89674523010700000000000000010000007df160fe0100000000000000000000000000000002000000020000000200000004000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0110",
               "flags": 0,
@@ -400,7 +400,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 7,
               "presentation_epoch": 1,
-              "crc32c": "0x8a6e1e7f"
+              "crc32c": "0xfe60f17d"
             },
             "payload": {"transaction_id": 1, "base_revision": 0, "columns": 2, "rows": 2, "span_count": 2, "cell_count": 4},
             "state_transition": {
@@ -413,11 +413,11 @@
         {
           "direction": "client_to_server",
           "message": "CELL_SPAN",
-          "full_hex": "a550543101280101000000001c000000efcdab896745230108000000000000000100000018bf3d3b00000000000000000200000041000000070001004200000002000800",
+          "full_hex": "a550543100280101000000001c000000efcdab8967452301080000000000000001000000431b864e00000000000000000200000041000000070001004200000002000800",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0101",
               "flags": 0,
@@ -426,7 +426,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 8,
               "presentation_epoch": 1,
-              "crc32c": "0x3b3dbf18"
+              "crc32c": "0x4e861b43"
             },
             "payload": {
               "row": 0,
@@ -447,11 +447,11 @@
         {
           "direction": "client_to_server",
           "message": "CELL_SPAN",
-          "full_hex": "a550543101280101000000001c000000efcdab89674523010900000000000000010000009536195901000000000000000200000043000000040000002000000007012000",
+          "full_hex": "a550543100280101000000001c000000efcdab8967452301090000000000000001000000ce92a22c01000000000000000200000043000000040000002000000007012000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0101",
               "flags": 0,
@@ -460,7 +460,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 9,
               "presentation_epoch": 1,
-              "crc32c": "0x59193695"
+              "crc32c": "0x2ca292ce"
             },
             "payload": {
               "row": 1,
@@ -481,11 +481,11 @@
         {
           "direction": "client_to_server",
           "message": "CURSOR",
-          "full_hex": "a5505431012802010000000010000000efcdab89674523010a0000000000000001000000db098a9201000000010000000100000000000000",
+          "full_hex": "a5505431002802010000000010000000efcdab89674523010a0000000000000001000000df14a38e01000000010000000100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0102",
               "flags": 0,
@@ -494,7 +494,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 10,
               "presentation_epoch": 1,
-              "crc32c": "0x928a09db"
+              "crc32c": "0x8ea314df"
             },
             "payload": {"row": 1, "column": 1, "visible": true},
             "state_transition": {
@@ -507,11 +507,11 @@
         {
           "direction": "client_to_server",
           "message": "SNAPSHOT_COMMIT",
-          "full_hex": "a5505431012811010000000008000000efcdab89674523010b000000000000000100000060e09fd30100000000000000",
+          "full_hex": "a5505431002811010000000008000000efcdab89674523010b00000000000000010000004bf55f0e0100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0111",
               "flags": 0,
@@ -520,7 +520,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 11,
               "presentation_epoch": 1,
-              "crc32c": "0xd39fe060"
+              "crc32c": "0x0e5ff54b"
             },
             "payload": {"transaction_id": 1},
             "state_transition": {
@@ -533,11 +533,11 @@
         {
           "direction": "server_to_client",
           "message": "TX_RESULT",
-          "full_hex": "a5505431012809000000000014000000efcdab896745230104000000000000000100000049df9afe0100000000000000000000000100000000000000",
+          "full_hex": "a5505431002809000000000014000000efcdab8967452301040000000000000001000000e32bf45a0100000000000000000000000100000000000000",
           "expected": {
             "header": {
               "magic": "a5505431",
-              "version": 1,
+              "reserved0": 0,
               "header_bytes": 40,
               "type": "0x0009",
               "flags": 0,
@@ -546,7 +546,7 @@
               "session": "0x0123456789abcdef",
               "sequence": 4,
               "presentation_epoch": 1,
-              "crc32c": "0xfe9adf49"
+              "crc32c": "0x5af42be3"
             },
             "payload": {"transaction_id": 1, "status": 0, "reserved": 0, "model_revision": 1},
             "state_transition": {
@@ -567,13 +567,13 @@
       "name": "bad_crc",
       "file": "bad_crc.hex",
       "kind": "malformed",
-      "full_hex": "a5505431012802000000000020000000efcdab89674523010000000000000000000000005942bf9b0100000000001000000000000000100000100000000000003f00000000000000",
+      "full_hex": "a5505431002802000000000020000000efcdab8967452301000000000000000000000000907d17d20000000000001000000000000000100000100000000000003f00000000000000",
       "context": {"state": "OPENING", "direction": "client_to_server"},
       "expected_error": "BAD_CRC32C",
       "expected_disposition": "terminate session; restore ANSI only after acknowledged close or hard attachment reset",
       "expected_header": {
         "magic": "a5505431",
-        "version": 1,
+        "reserved0": 0,
         "header_bytes": 40,
         "type": "0x0002",
         "flags": 0,
@@ -582,20 +582,20 @@
         "session": "0x0123456789abcdef",
         "sequence": 0,
         "presentation_epoch": 0,
-        "crc32c": "0x9bbf4259"
+        "crc32c": "0xd2177d90"
       }
     },
     {
       "name": "sequence_gap",
       "file": "sequence_gap.hex",
       "kind": "malformed",
-      "full_hex": "a5505431012810010000000020000000efcdab8967452301020000000000000000000000f1675b5d0100000000000000000000000000000002000000020000000200000004000000",
+      "full_hex": "a5505431002810010000000020000000efcdab8967452301020000000000000000000000f38855290100000000000000000000000000000002000000020000000200000004000000",
       "context": {"state": "ACTIVE", "direction": "client_to_server", "expected_sequence": 1, "received_sequence": 2},
       "expected_error": "SEQUENCE_GAP",
       "expected_disposition": "terminate session; restore ANSI only after acknowledged close or hard attachment reset",
       "expected_header": {
         "magic": "a5505431",
-        "version": 1,
+        "reserved0": 0,
         "header_bytes": 40,
         "type": "0x0110",
         "flags": 0,
@@ -604,20 +604,20 @@
         "session": "0x0123456789abcdef",
         "sequence": 2,
         "presentation_epoch": 0,
-        "crc32c": "0x5d5b67f1"
+        "crc32c": "0x295588f3"
       }
     },
     {
       "name": "oversized_length",
       "file": "oversized_length.hex",
       "kind": "malformed",
-      "full_hex": "a5505431012801010000000001001000efcdab896745230101000000000000000000000000000000",
+      "full_hex": "a5505431002801010000000001001000efcdab896745230101000000000000000000000000000000",
       "context": {"declared_payload_length": 1048577, "available_payload_bytes": 0},
       "expected_error": "PAYLOAD_TOO_LARGE",
       "expected_disposition": "reject before payload allocation and terminate session; restore ANSI only after acknowledged close or hard attachment reset",
       "expected_header": {
         "magic": "a5505431",
-        "version": 1,
+        "reserved0": 0,
         "header_bytes": 40,
         "type": "0x0101",
         "flags": 0,
@@ -633,13 +633,13 @@
       "name": "stale_epoch",
       "file": "stale_epoch.hex",
       "kind": "malformed",
-      "full_hex": "a5505431012810010000000020000000efcdab89674523010c00000000000000000000006973ec150100000000000000000000000000000002000000020000000200000004000000",
+      "full_hex": "a5505431002810010000000020000000efcdab89674523010c00000000000000000000006b9ce2610100000000000000000000000000000002000000020000000200000004000000",
       "context": {"state": "ACTIVE", "direction": "client_to_server", "current_epoch": 1, "received_epoch": 0},
       "expected_error": "STALE_PRESENTATION_EPOCH",
       "expected_disposition": "terminate session; restore ANSI only after acknowledged close or hard attachment reset",
       "expected_header": {
         "magic": "a5505431",
-        "version": 1,
+        "reserved0": 0,
         "header_bytes": 40,
         "type": "0x0110",
         "flags": 0,
@@ -648,7 +648,7 @@
         "session": "0x0123456789abcdef",
         "sequence": 12,
         "presentation_epoch": 0,
-        "crc32c": "0x15ec7369"
+        "crc32c": "0x61e29c6b"
       }
     }
   ]

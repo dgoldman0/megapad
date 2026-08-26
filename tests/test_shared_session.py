@@ -24,11 +24,12 @@ from rich_terminal import (
 )
 from rich_terminal.output_coordinator import CompositeTerminalView
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
+from rich_terminal.retained_scene import ObjectBounds, RGBA
 from rich_terminal.retained_view import (
     DisplayScope,
-    RetainedLabelDraw,
+    GlyphRunDraw,
+    RetainedDrawPlane,
     RetainedRegionDraw,
-    RetainedRootLabelPlane,
 )
 from rich_terminal.update_authority import TerminalGeometry
 from session import (
@@ -46,8 +47,8 @@ from shared_session import (
     display_offer_to_wire,
     display_scope_from_wire,
     display_scope_to_wire,
-    retained_root_label_plane_from_wire,
-    retained_root_label_plane_to_wire,
+    retained_draw_plane_from_wire,
+    retained_draw_plane_to_wire,
     snapshot_from_wire,
     snapshot_to_wire,
 )
@@ -108,7 +109,7 @@ def _retained_policy() -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=0,
@@ -297,23 +298,16 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         cell_revision=9,
         retained_revision=11,
     )
-    label = RetainedLabelDraw(
+    draw = GlyphRunDraw(
         object_id=17,
         z_order=-2,
-        left=1,
-        top=2,
-        right=3,
-        bottom=4,
-        red=5,
-        green=6,
-        blue=7,
-        alpha=8,
-        horizontal_align=1,
-        vertical_align=2,
-        ellipsize=True,
+        bounds=ObjectBounds(1, 2, 3, 4),
+        foreground=RGBA(5, 6, 7, 8),
+        background=RGBA(9, 10, 11, 12),
+        attributes=0x40,
         text="visible",
     )
-    plane = RetainedRootLabelPlane(
+    plane = RetainedDrawPlane(
         retained_initialized=True,
         retained_visible=True,
         regions=(
@@ -327,7 +321,7 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
                 cell_rows=4,
                 z_order=-1,
                 clipped=True,
-                labels=(label,),
+                draws=(draw,),
             ),
         ),
     )
@@ -344,15 +338,31 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
 
     assert display_scope_from_wire(display_scope_to_wire(scope)) == scope
     assert (
-        retained_root_label_plane_from_wire(
-            retained_root_label_plane_to_wire(plane)
+        retained_draw_plane_from_wire(
+            retained_draw_plane_to_wire(plane)
         )
         == plane
     )
     wire = display_offer_to_wire(offer)
     assert display_offer_from_wire(wire) == offer
     assert set(wire) == {"offer_id", "scope", "cell", "retained"}
+    wire_draw = wire["retained"]["regions"][0]["draws"][0]
+    assert wire_draw == {
+        "object_id": 17,
+        "z_order": -2,
+        "bounds": [1, 2, 3, 4],
+        "foreground": [5, 6, 7, 8],
+        "background": [9, 10, 11, 12],
+        "attributes": 0x40,
+        "text": "visible",
+    }
+    assert "labels" not in wire["retained"]["regions"][0]
     assert "composite" not in repr(wire)
+
+    unsupported = retained_draw_plane_to_wire(plane)
+    unsupported["regions"][0]["draws"][0]["attributes"] = 0x10
+    with pytest.raises(ValueError, match="unsupported GLYPH_RUN bits"):
+        retained_draw_plane_from_wire(unsupported)
 
 
 def test_display_wire_rejects_bool_in_integer_fields():
@@ -375,7 +385,7 @@ def test_display_wire_rejects_bool_in_integer_fields():
         1,
         scope,
         snapshot,
-        RetainedRootLabelPlane(False, False, ()),
+        RetainedDrawPlane(False, False, ()),
     )
     wire_offer = display_offer_to_wire(offer)
     wire_offer["offer_id"] = True
@@ -392,10 +402,10 @@ def test_display_wire_rejects_bool_in_integer_fields():
     with pytest.raises(TypeError, match="not bool"):
         snapshot_from_wire(wire_snapshot)
 
-    wire_plane = retained_root_label_plane_to_wire(offer.retained)
+    wire_plane = retained_draw_plane_to_wire(offer.retained)
     wire_plane["retained_initialized"] = 1
     with pytest.raises(TypeError, match="must be bool"):
-        retained_root_label_plane_from_wire(wire_plane)
+        retained_draw_plane_from_wire(wire_plane)
 
 
 def test_shared_screen_round_trips_the_selected_rich_view():
@@ -842,7 +852,7 @@ def test_display_holder_disconnect_requeues_for_a_successor(tmp_path):
         True,
         False,
     )
-    plane = RetainedRootLabelPlane(False, False, ())
+    plane = RetainedDrawPlane(False, False, ())
 
     class LeaseMachine:
         def __init__(self):

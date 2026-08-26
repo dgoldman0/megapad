@@ -1,8 +1,8 @@
-"""Renderer-facing root-LABEL projection of one immutable terminal composite.
+"""Renderer-facing generic draw projection of one immutable terminal composite.
 
 The retained scene model deliberately remains richer than any one renderer
-slice.  This module is the fail-closed boundary for the first visible slice: it
-copies only the active, physically visible root LABEL values needed by a view
+slice. This module is the fail-closed boundary for the first visible slice: it
+copies only the active, physically visible root draw values needed by a view
 sink and preserves their exact composite scope and deterministic draw order.
 Hidden rebuild targets never cross this boundary.
 """
@@ -16,10 +16,13 @@ from .apt1 import UINT32_MAX, UINT64_MAX
 from .cell_model import TerminalView
 from .output_coordinator import CompositeTerminalView
 from .retained_scene import (
+    GLYPH_RUN_ATTRIBUTE_MASK,
     GroupBody,
-    LabelBody,
+    GlyphRunBody,
+    ObjectBounds,
     ObjectDefinition,
     OwnerScene,
+    RGBA,
     SceneModelState,
 )
 from .update_authority import TerminalGeometry
@@ -30,7 +33,7 @@ INT32_MAX = (1 << 31) - 1
 
 
 class RetainedViewError(ValueError):
-    """The immutable composite cannot be consumed by the root-LABEL slice."""
+    """The immutable composite cannot be consumed by the draw-plane slice."""
 
 
 def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
@@ -99,22 +102,15 @@ class DisplayScope:
 
 
 @dataclass(frozen=True, slots=True)
-class RetainedLabelDraw:
-    """One visible, parentless LABEL in region-relative UNORM32 geometry."""
+class GlyphRunDraw:
+    """One visible, parentless styled glyph run in UNORM32 geometry."""
 
     object_id: int
     z_order: int
-    left: int
-    top: int
-    right: int
-    bottom: int
-    red: int
-    green: int
-    blue: int
-    alpha: int
-    horizontal_align: int
-    vertical_align: int
-    ellipsize: bool
+    bounds: ObjectBounds
+    foreground: RGBA
+    background: RGBA
+    attributes: int
     text: str
 
     def __post_init__(self) -> None:
@@ -128,40 +124,29 @@ class RetainedLabelDraw:
             "z_order",
             _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
         )
-        for name in ("left", "top", "right", "bottom"):
-            object.__setattr__(
-                self,
-                name,
-                _integer(name, getattr(self, name), minimum=0, maximum=UINT32_MAX),
-            )
-        if self.left >= self.right or self.top >= self.bottom:
-            raise ValueError("LABEL bounds must have positive width and height")
-        for name in ("red", "green", "blue", "alpha"):
-            object.__setattr__(
-                self,
-                name,
-                _integer(name, getattr(self, name), minimum=0, maximum=0xFF),
-            )
-        for name in ("horizontal_align", "vertical_align"):
-            object.__setattr__(
-                self,
-                name,
-                _integer(name, getattr(self, name), minimum=0, maximum=2),
-            )
-        object.__setattr__(self, "ellipsize", _boolean("ellipsize", self.ellipsize))
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        if not isinstance(self.foreground, RGBA) or not isinstance(self.background, RGBA):
+            raise TypeError("glyph-run colors must be RGBA")
+        attributes = _integer(
+            "attributes", self.attributes, minimum=0, maximum=0xFFFF
+        )
+        if attributes & ~GLYPH_RUN_ATTRIBUTE_MASK:
+            raise ValueError("attributes contain unsupported GLYPH_RUN bits")
+        object.__setattr__(self, "attributes", attributes)
         if not isinstance(self.text, str):
             raise TypeError("text must be str")
         if "\0" in self.text or "\r" in self.text or "\n" in self.text:
-            raise ValueError("LABEL text contains NUL, CR, or LF")
+            raise ValueError("glyph-run text contains NUL, CR, or LF")
         try:
             self.text.encode("utf-8", "strict")
         except UnicodeEncodeError as exc:
-            raise ValueError("LABEL text contains a non-scalar surrogate") from exc
+            raise ValueError("glyph-run text contains a non-scalar surrogate") from exc
 
 
 @dataclass(frozen=True, slots=True)
 class RetainedRegionDraw:
-    """One visible region and its sorted root LABEL draw values."""
+    """One visible region and its ordered generic draw values."""
 
     owner_id: int
     owner_generation: int
@@ -172,7 +157,7 @@ class RetainedRegionDraw:
     cell_rows: int
     z_order: int
     clipped: bool
-    labels: tuple[RetainedLabelDraw, ...]
+    draws: tuple[GlyphRunDraw, ...]
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "region_id"):
@@ -198,17 +183,17 @@ class RetainedRegionDraw:
             _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
         )
         object.__setattr__(self, "clipped", _boolean("clipped", self.clipped))
-        labels = tuple(self.labels)
-        if any(not isinstance(label, RetainedLabelDraw) for label in labels):
-            raise TypeError("labels must contain only RetainedLabelDraw values")
-        if tuple(sorted(labels, key=lambda label: (label.z_order, label.object_id))) != labels:
-            raise ValueError("region LABEL values are not in back-to-front order")
-        object.__setattr__(self, "labels", labels)
+        draws = tuple(self.draws)
+        if any(not isinstance(draw, GlyphRunDraw) for draw in draws):
+            raise TypeError("draws must contain only GlyphRunDraw values")
+        if tuple(sorted(draws, key=lambda draw: (draw.z_order, draw.object_id))) != draws:
+            raise ValueError("region draw values are not in back-to-front order")
+        object.__setattr__(self, "draws", draws)
 
 
 @dataclass(frozen=True, slots=True)
-class RetainedRootLabelPlane:
-    """The active root-LABEL draw plane for one composite revision."""
+class RetainedDrawPlane:
+    """The active generic draw plane for one composite revision."""
 
     retained_initialized: bool
     retained_visible: bool
@@ -282,13 +267,13 @@ def _validate_owner_scope(owner_scene: OwnerScene, owner_key: int, view) -> None
         raise RetainedViewError("retained owner is outside the composite scope")
 
 
-def project_composite_root_labels(
+def project_composite_draw_plane(
     view: CompositeTerminalView,
-) -> tuple[DisplayScope, RetainedRootLabelPlane]:
-    """Project one exact composite to the first renderer's root-LABEL DTOs.
+) -> tuple[DisplayScope, RetainedDrawPlane]:
+    """Project one exact composite to generic renderer draw values.
 
-    A physically visible non-LABEL drawing object or a visible nested LABEL is
-    rejected.  Invisible regions, objects, and group cascades do not become
+    A physically visible unsupported drawing object or a visible nested glyph
+    run is rejected. Invisible regions, objects, and group cascades do not become
     draw commands.  The hidden rebuild target is intentionally never visited.
     """
 
@@ -329,11 +314,11 @@ def project_composite_root_labels(
         retained_revision=None if retained is None else retained.revision,
     )
     if retained is None:
-        return scope, RetainedRootLabelPlane(False, False, ())
+        return scope, RetainedDrawPlane(False, False, ())
     if retained.retained_visible and not retained.retained_initialized:
         raise RetainedViewError("retained state is visible before initialization")
     if not retained.retained_visible:
-        return scope, RetainedRootLabelPlane(
+        return scope, RetainedDrawPlane(
             retained.retained_initialized,
             False,
             (),
@@ -365,7 +350,7 @@ def project_composite_root_labels(
         for region in owner_scene.regions.values():
             if not region.visible:
                 continue
-            labels: list[RetainedLabelDraw] = []
+            draws: list[GlyphRunDraw] = []
             for definition in owner_scene.objects.values():
                 if definition.region_id != region.region_id:
                     continue
@@ -373,36 +358,29 @@ def project_composite_root_labels(
                     continue
                 if isinstance(definition.body, GroupBody):
                     continue
-                if not isinstance(definition.body, LabelBody):
+                if not isinstance(definition.body, GlyphRunBody):
                     raise RetainedViewError(
                         f"visible {definition.kind.name} object "
-                        f"{definition.object_id} is unsupported by root-LABEL rendering"
+                        f"{definition.object_id} is unsupported by draw-plane rendering"
                     )
                 if definition.parent_object_id != 0:
                     raise RetainedViewError(
-                        f"visible LABEL object {definition.object_id} is not parentless"
+                        f"visible GLYPH_RUN object {definition.object_id} is not parentless"
                     )
                 bounds = definition.bounds
                 body = definition.body
-                labels.append(
-                    RetainedLabelDraw(
+                draws.append(
+                    GlyphRunDraw(
                         object_id=definition.object_id,
                         z_order=definition.z_order,
-                        left=bounds.left,
-                        top=bounds.top,
-                        right=bounds.right,
-                        bottom=bounds.bottom,
-                        red=body.color.red,
-                        green=body.color.green,
-                        blue=body.color.blue,
-                        alpha=body.color.alpha,
-                        horizontal_align=body.horizontal_align,
-                        vertical_align=body.vertical_align,
-                        ellipsize=body.ellipsize,
+                        bounds=bounds,
+                        foreground=body.foreground,
+                        background=body.background,
+                        attributes=body.attributes,
                         text=body.text,
                     )
                 )
-            labels.sort(key=lambda label: (label.z_order, label.object_id))
+            draws.sort(key=lambda draw: (draw.z_order, draw.object_id))
             projected_regions.append(
                 RetainedRegionDraw(
                     owner_id=owner.owner_id,
@@ -414,14 +392,14 @@ def project_composite_root_labels(
                     cell_rows=region.cell_rows,
                     z_order=region.z_order,
                     clipped=region.clipped,
-                    labels=tuple(labels),
+                    draws=tuple(draws),
                 )
             )
 
     projected_regions.sort(
         key=lambda region: (region.z_order, region.owner_id, region.region_id)
     )
-    return scope, RetainedRootLabelPlane(
+    return scope, RetainedDrawPlane(
         retained_initialized=retained.retained_initialized,
         retained_visible=True,
         regions=tuple(projected_regions),
@@ -430,9 +408,9 @@ def project_composite_root_labels(
 
 __all__ = [
     "DisplayScope",
-    "RetainedLabelDraw",
+    "GlyphRunDraw",
     "RetainedRegionDraw",
-    "RetainedRootLabelPlane",
+    "RetainedDrawPlane",
     "RetainedViewError",
-    "project_composite_root_labels",
+    "project_composite_draw_plane",
 ]

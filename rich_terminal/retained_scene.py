@@ -44,6 +44,13 @@ INT32_MAX = (1 << 31) - 1
 INT64_MIN = -(1 << 63)
 INT64_MAX = (1 << 63) - 1
 
+# GLYPH_RUN is the physically exact styled-cell primitive used by the current
+# rich view.  Blink is deliberately not admitted: it requires a presentation
+# phase/cadence contract that this primitive does not carry.  Rejecting it at
+# every boundary prevents a view from acknowledging pixels that silently omit
+# a requested CELL style.
+GLYPH_RUN_ATTRIBUTE_MASK = 0x006F
+
 
 class SceneErrorCode(str, Enum):
     STATE = "STATE"
@@ -89,7 +96,7 @@ class RebuildRequirement(str, Enum):
 class ObjectKind(IntEnum):
     GROUP = 1
     POLYLINE = 2
-    LABEL = 4
+    GLYPH_RUN = 4
     READOUT = 5
     METER = 6
     STATUS = 7
@@ -265,28 +272,28 @@ class PolylineBody:
 
 
 @dataclass(frozen=True, slots=True)
-class LabelBody:
-    color: RGBA
-    horizontal_align: int
-    vertical_align: int
+class GlyphRunBody:
+    foreground: RGBA
+    background: RGBA
+    attributes: int
     text: str
-    ellipsize: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.color, RGBA):
-            raise TypeError("color must be RGBA")
-        object.__setattr__(
-            self,
-            "horizontal_align",
-            _integer("horizontal_align", self.horizontal_align, minimum=0, maximum=2),
+        if not isinstance(self.foreground, RGBA):
+            raise TypeError("foreground must be RGBA")
+        if not isinstance(self.background, RGBA):
+            raise TypeError("background must be RGBA")
+        attributes = _integer(
+            "attributes", self.attributes, minimum=0, maximum=0xFFFF
         )
+        if attributes & ~GLYPH_RUN_ATTRIBUTE_MASK:
+            raise ValueError("attributes contain unsupported GLYPH_RUN bits")
         object.__setattr__(
             self,
-            "vertical_align",
-            _integer("vertical_align", self.vertical_align, minimum=0, maximum=2),
+            "attributes",
+            attributes,
         )
         _text_bytes("text", self.text)
-        object.__setattr__(self, "ellipsize", _boolean("ellipsize", self.ellipsize))
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +352,7 @@ class ReadoutBody:
         if self.decimal_places:
             minimum += 1 + self.decimal_places
         if minimum > maximum:
-            raise SceneModelError(SceneErrorCode.QUOTA, "readout exceeds label-byte bound")
+            raise SceneModelError(SceneErrorCode.QUOTA, "readout exceeds UTF-8 byte bound")
 
         if self.format is ReadoutFormat.INTEGER:
             fraction = bytearray()
@@ -376,7 +383,7 @@ class ReadoutBody:
             + unit
         )
         if len(result) > maximum:
-            raise SceneModelError(SceneErrorCode.QUOTA, "readout exceeds label-byte bound")
+            raise SceneModelError(SceneErrorCode.QUOTA, "readout exceeds UTF-8 byte bound")
         return result
 
 
@@ -482,7 +489,7 @@ def _validate_series_consumer(body, *, include_zero_line: bool) -> None:
 ObjectBody = (
     GroupBody
     | PolylineBody
-    | LabelBody
+    | GlyphRunBody
     | ReadoutBody
     | MeterBody
     | StatusBody
@@ -494,7 +501,7 @@ ObjectBody = (
 _BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PolylineBody: ObjectKind.POLYLINE,
-    LabelBody: ObjectKind.LABEL,
+    GlyphRunBody: ObjectKind.GLYPH_RUN,
     ReadoutBody: ObjectKind.READOUT,
     MeterBody: ObjectKind.METER,
     StatusBody: ObjectKind.STATUS,
@@ -1397,10 +1404,10 @@ class RetainedSceneModel:
     ) -> OwnerScene:
         utf8_bytes = 0
         for definition in objects.values():
-            if isinstance(definition.body, LabelBody):
+            if isinstance(definition.body, GlyphRunBody):
                 utf8_bytes = _add_usage("UTF-8 usage", utf8_bytes, len(_text_bytes("text", definition.body.text)))
             elif isinstance(definition.body, ReadoutBody):
-                formatted = definition.body.formatted_bytes(self._owners.policy.max_label_bytes)
+                formatted = definition.body.formatted_bytes(self._owners.policy.max_glyph_run_bytes)
                 utf8_bytes = _add_usage("UTF-8 usage", utf8_bytes, len(formatted))
         sample_slots = 0
         for definition in series.values():
@@ -1433,7 +1440,9 @@ class RetainedSceneModel:
     def _validate_object_policy(self, definition: ObjectDefinition) -> None:
         policy = self._owners.policy
         kind = definition.kind
-        if kind in (ObjectKind.GROUP, ObjectKind.POLYLINE):
+        if kind is ObjectKind.GLYPH_RUN:
+            required = RetainedFeature.CORE
+        elif kind in (ObjectKind.GROUP, ObjectKind.POLYLINE):
             required = RetainedFeature.VECTOR
         elif kind in (ObjectKind.PLOT, ObjectKind.WAVEFORM):
             required = RetainedFeature.SERIES
@@ -1443,11 +1452,14 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.FEATURE, f"{kind.name} feature was not advertised")
         if isinstance(definition.body, PolylineBody) and len(definition.body.points) > policy.max_path_points:
             self._fail(SceneErrorCode.QUOTA, "polyline point count exceeds advertised maximum")
-        if isinstance(definition.body, LabelBody) and len(_text_bytes("text", definition.body.text)) > policy.max_label_bytes:
-            self._fail(SceneErrorCode.QUOTA, "label exceeds advertised byte maximum")
+        if isinstance(definition.body, GlyphRunBody):
+            if policy.max_glyph_run_bytes == 0:
+                self._fail(SceneErrorCode.FEATURE, "glyph runs were not advertised")
+            if len(_text_bytes("text", definition.body.text)) > policy.max_glyph_run_bytes:
+                self._fail(SceneErrorCode.QUOTA, "glyph run exceeds advertised byte maximum")
         if isinstance(definition.body, ReadoutBody):
             try:
-                definition.body.formatted_bytes(policy.max_label_bytes)
+                definition.body.formatted_bytes(policy.max_glyph_run_bytes)
             except SceneModelError as exc:
                 self._fail(exc.code, exc.detail)
 
@@ -1538,8 +1550,9 @@ __all__ = [
     "CommitDisposition",
     "ExplicitSamples",
     "GroupBody",
+    "GLYPH_RUN_ATTRIBUTE_MASK",
     "HiddenTargetKind",
-    "LabelBody",
+    "GlyphRunBody",
     "MeterBody",
     "ObjectBounds",
     "ObjectDefinition",

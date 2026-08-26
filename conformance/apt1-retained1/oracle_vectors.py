@@ -212,7 +212,7 @@ FRAME_PATHS = {
 OBJECT_BASE = {
     1: {"object_id":1,"object_type":1,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,4294967295,805306367],"body_sha3_256":"a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a","visible":True},
     2: {"object_id":2,"object_type":2,"flags":1,"z_index":0,"region_id":1,"parent_id":1,"bounds":[0,0,4294967295,4294967295],"body_sha3_256":"0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35","visible":True},
-    3: {"object_id":3,"object_type":4,"flags":1,"z_index":1,"region_id":1,"parent_id":1,"bounds":[0,0,4294967295,4294967295],"body_sha3_256":"f9f8a11d72752416d127506b694235dcd3ed725df6e255033f6cd757e8027ac5","text_utf8_hex":"536f756e644c6162","utf8_bytes":8,"visible":True},
+    3: {"object_id":3,"object_type":4,"flags":1,"z_index":1,"region_id":1,"parent_id":1,"bounds":[0,0,4294967295,4294967295],"body_sha3_256":"b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd","text_utf8_hex":"536f756e644c6162","utf8_bytes":8,"visible":True},
     4: {"object_id":4,"object_type":5,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,4294967295,805306367],"body_sha3_256":"a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8","format":1,"decimal_places":2,"value":-1200,"scale":100,"unit_utf8_hex":"6442","formatted_utf8_hex":"2d31322e30306442","utf8_bytes":8,"visible":True},
     5: {"object_id":5,"object_type":6,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,805306368,4294967295,1207959551],"body_sha3_256":"b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615","value":-1200,"visible":True},
     6: {"object_id":6,"object_type":7,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,1207959552,536870911,1610612735],"body_sha3_256":"f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240","value":0,"visible":True},
@@ -800,9 +800,9 @@ def _apply_expected_effect(name: str, index: int, state: dict[str, Any]) -> None
 
     elif name == "mutation_and_drop_lifecycle":
         if index == 2:
-            label = state["active"]["objects"][scene_key(OWNER_ID,OWNER_GENERATION,3)]
-            label.update({
-                "body_sha3_256":"3144b6bd86758ecf1da3ac4bae802594e48213ecc3f70c13635d38923b112d11",
+            glyph_run = state["active"]["objects"][scene_key(OWNER_ID,OWNER_GENERATION,3)]
+            glyph_run.update({
+                "body_sha3_256":"0928970982e7ad668e9d24fe9d8c214f410b8c967a16fc08fb8490f87ad43413",
                 "text_utf8_hex":"536f756e644c61622061726d6564","utf8_bytes":14,"visible":True,
             })
             state["global_revision"] = 4

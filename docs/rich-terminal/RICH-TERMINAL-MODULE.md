@@ -70,7 +70,7 @@ The module owns:
 * core OWNER_OPEN/OWNER_DROP lifecycle publication and exact RET_RESULT
   reconciliation;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
-  DEFINE/REPLACE/DROP operations, and typed LABEL DEFINE operations; and
+  DEFINE/REPLACE/DROP operations, and typed GLYPH_RUN DEFINE operations; and
 * close, hard failure, soft cache reset, and fallback.
 
 It does not own consumer focus, host regions, widgets, retained semantic
@@ -136,9 +136,10 @@ PT-REGION-DEFINE    ( owner generation region x y cols rows z flags session
 PT-REGION-REPLACE   ( owner generation region x y cols rows z flags session
                       -- status )
 PT-REGION-DROP      ( owner generation region session -- status )
-PT-LABEL-DEFINE     ( owner generation object region parent
+PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       left top right bottom z visible
-                      red green blue alpha h-align v-align ellipsize
+                      fg-red fg-green fg-blue fg-alpha
+                      bg-red bg-green bg-blue bg-alpha attrs
                       text-a text-u session -- status )
 PT-PRESENT-COMMIT   ( disposition session -- status )
 
@@ -283,10 +284,10 @@ and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
 preflights the complete BEGIN-through-COMMIT byte and sequence budget before it
 emits BEGIN, then checks every operation against the declared count and byte
 sum. There is no public raw retained-operation escape hatch. Typed region and
-LABEL words validate semantic arguments and keep their exact message type,
+GLYPH_RUN words validate semantic arguments and keep their exact message type,
 common prefix, type body, little-endian assembly, and TX scratch private. Empty
-LABEL text is canonical `0 0`; a nonempty source is borrowed only until the
-call returns and must satisfy the negotiated label-byte ceiling, scalar UTF-8
+glyph-run text is canonical `0 0`; a nonempty source is borrowed only until the
+call returns and must satisfy the negotiated glyph-run byte ceiling, scalar UTF-8
 rules, control exclusions, and disjointness from the session and TX scratch.
 
 The mode constants are `PT-CELL-NONE`, `PT-CELL-DELTA`,
@@ -355,19 +356,19 @@ The lightweight module tests prove:
    same transaction-ID and global revision domain.
 
 The current end-to-end guest conformance still claims only the core
-owner/region writer slice. The typed LABEL writer is implemented and
-lightweight-qualified as lower-stack plumbing, but it is not yet a visible
-product path. LABEL replay, other object kinds, resources, series, full semantic
+owner/region writer slice. The typed GLYPH_RUN writer and physical compositor
+are lightweight-qualified lower-stack plumbing, but ordinary TUI draw capture
+is not connected yet. Other object kinds, resources, series, full semantic
 replay, and retained resize journeys remain unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 
-The typed LABEL writer, root-LABEL projection, immutable display offer, and
-post-flip acknowledgement path are lower-stack foundation. They prove that a
-nonempty optional plane can survive module, model, session, shared wire, and
-viewer ownership boundaries. They do not complete the vertical because the
-current rich draw plane cannot represent Desk chrome, Pad's editor body, or
-Daybook's calendar and agenda.
+The typed GLYPH_RUN writer, generic draw-plane projection, immutable display
+offer, and post-flip acknowledgement path are lower-stack foundation. They
+prove that a styled background and terminal glyphs can survive module, model,
+session, shared wire, and physical viewer ownership boundaries. They do not
+complete the vertical until the ordinary TUI screen transaction produces the
+plane for Desk, Pad, and Daybook.
 
 The blocking cross-repository slice is the real Desk composition with the
 canonical Pad and Daybook applets both launched and live through their normal
@@ -377,21 +378,22 @@ the ordinary TUI draw lifecycle and cover Desk chrome, UIDL renderers, mounted
 widgets, and applet painting through the shared draw boundary. Applications
 must not construct protocol scenes or select terminal mode.
 
-The minimum generic renderer vocabulary for this composition includes bounded
-nested clip/translation scopes, ordered surfaces with visibility and z-order,
-background/fill rectangles, styled UTF-8 glyph runs using the terminal's
-authoritative font, lines/boxes or repeated glyphs, and selection/invert/caret
-overlays. Atomic bounded replacement and exact post-flip acknowledgement remain
-mandatory. Images, numeric instruments, meters, indicator objects, and series
-are not on this vertical's critical path unless the product composition begins
-to use them.
+The minimum renderer-neutral representation for this composition is the final
+ordered styled-glyph plane emitted by the ordinary screen transaction. Each
+run includes its background, foreground, CELL attributes, exact bounds, and
+UTF-8 scalars; existing TUI clipping, lines, boxes, selection, and caret writes
+are therefore preserved without inventing a GUI scene vocabulary. Atomic
+bounded replacement and exact post-flip acknowledgement remain mandatory.
+Images, numeric instruments, meters, indicator objects, and series are not on
+this vertical's critical path unless the product composition begins to use
+them.
 
 Acceptance requires a complete visible Desk frame, a real Pad edit and visible
 caret/state change, a real Daybook navigation or selection, and the ordinary
 Daybook-to-Pad shared-resource route. CELL remains complete fallback, but a
 frame whose substantive Desk/editor/calendar pixels came only from CELL does
 not prove the rich renderer. Wire bytes, accepted model state, an immutable
-composite, or a root-LABEL pixel overlay do not complete the checkpoint or make
+composite, or one isolated glyph-run overlay do not complete the checkpoint or make
 an unacknowledged revision input-eligible.
 
 The current contract evolves in place; do not add a numbered successor,

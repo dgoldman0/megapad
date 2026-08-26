@@ -6,7 +6,8 @@
 \  word that emits an APT probe or takes raw UART input ownership.  ANSI
 \  remains the baseline before negotiation and after a synchronized close.
 \
-\  Contracts: APT-1-CELL-1-2026-08-24 plus the core owner/region/LABEL subset
+\  Contracts: APT-1-CELL-1-2026-08-24 plus the core owner/region/glyph-run
+\             subset
 \             of APT-1-RETAINED-1-2026-08-24.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 
@@ -35,12 +36,15 @@ PROVIDED rich-terminal.f
 \   +16 value 0                 +24 value 1
 \   +32 value 2                 +40 value 3
 \   +48 data address            +56 data byte count
-\ KEY:     revision=model, v0=symbol, v1=action, v2=location, v3=modifiers.
-\ TEXT:    revision=model, v0=flags, data=UTF-8 bytes.
-\ POINTER: revision=model, v0=x, v1=y, v2=buttons|changed<<16,
-\          v3=modifiers|kind<<16|raw-wheel-x<<32|raw-wheel-y<<48.
-\ RESIZE:  v0=cols, v1=rows, v2=geometry generation (revision is zero).
-\ FOCUS:   revision=model, v0=focused.
+\ KEY:     revision=model, value0=symbol, value1=action,
+\          value2=location, value3=modifiers.
+\ TEXT:    revision=model, value0=flags, data=UTF-8 bytes.
+\ POINTER: revision=model, value0=x, value1=y,
+\          value2=buttons|changed<<16,
+\          value3=modifiers|kind<<16|raw-wheel-x<<32|raw-wheel-y<<48.
+\ RESIZE:  value0=cols, value1=rows, value2=geometry generation
+\          (revision is zero).
+\ FOCUS:   revision=model, value0=focused.
 \ TEXT data remains valid until the next PT-SERVICE for the session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
@@ -907,7 +911,7 @@ VARIABLE _PT-F-TOTAL
     _PT-F-S @ _PT.S.TX-A @ DUP _PT-F-A !
     _PT-F-TOTAL @ 0 FILL
     0x315450A5 _PT-F-A @ L!
-    1 _PT-F-A @ 4 + C!
+    0 _PT-F-A @ 4 + C!                 \ reserved
     _PT-HDR _PT-F-A @ 5 + C!
     _PT-F-TYPE @ _PT-F-A @ 6 + W!
     _PT-F-PAY @ _PT-F-A @ 12 + L!
@@ -944,7 +948,7 @@ VARIABLE _PT-F-DATA
 : _PT-SEND-CLIENT-READY  ( s -- status )
     DUP _PT-F-S !
     _PT-M-CLIENT-READY 32 ROT _PT-FRAME-BEGIN ?DUP IF EXIT THEN
-    1 _PT-FRAME-PAYLOAD L!
+    0 _PT-FRAME-PAYLOAD L!  \ reserved
     _PT-F-S @ _PT.S.CLIENT-MAX-PAY @ _PT-FRAME-PAYLOAD 4 + L!
     _PT-F-S @ _PT.S.LOCAL-GRANT @ _PT-FRAME-PAYLOAD 12 + L!
     _PT-F-S @ _PT.S.MAX-TEXT @ _PT-FRAME-PAYLOAD 16 + L!
@@ -1230,7 +1234,7 @@ VARIABLE _PT-Z-U
 
 : _PT-READY-PAYLOAD?  ( s -- flag )
     _PT-RX-LEN @ 32 <> IF DROP FALSE EXIT THEN
-    _PT-RX-P @ L@ 1 <> IF DROP FALSE EXIT THEN
+    _PT-RX-P @ L@ 0<> IF DROP FALSE EXIT THEN
     _PT-RX-P @ 4 + L@ OVER _PT.S.PEER-MAX-PAY @ <> IF DROP FALSE EXIT THEN
     _PT-RX-P @ 8 + L@ OVER _PT.S.PEER-MAX-TX @ <> IF DROP FALSE EXIT THEN
     _PT-RX-P @ 12 + L@ OVER _PT.S.PEER-GRANT @ <> IF DROP FALSE EXIT THEN
@@ -1708,7 +1712,7 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-S ! _PT-RX-P @ _PT-RV-P !
     _PT-RX-LEN @ 64 <> IF FALSE EXIT THEN
     _PT-RV-P @ L@ _PT-RET1-TAG <> IF FALSE EXIT THEN
-    _PT-RV-P @ 4 + W@ 1 <> _PT-RV-P @ 6 + W@ 0<> OR IF
+    _PT-RV-P @ 4 + W@ 0<> _PT-RV-P @ 6 + W@ 0<> OR IF
         FALSE EXIT
     THEN
     _PT-RV-P @ 8 + _PT-U64@ DUP _PT-RV-FEATURES !
@@ -1726,8 +1730,9 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 64 U< OR IF FALSE EXIT THEN
     _PT-RV-S @ _PT.S.TX-U @ 104 U< IF FALSE EXIT THEN
 
-    _PT-RV-P @ 32 + L@
-    _PT-RV-FEATURES @ 0x1E AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
+    _PT-RV-FEATURES @ 0x1E AND IF
+        _PT-RV-P @ 32 + L@ 0= IF FALSE EXIT THEN
+    THEN
     _PT-RV-P @ 36 + L@
     _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     _PT-RV-P @ 28 + L@
@@ -1780,10 +1785,6 @@ VARIABLE _PT-RF-PIXELS
     _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 20 + L@
     _PT-RV-FEATURES @ 0x02 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
-    _PT-RF-FORMATS @ 24 + L@
-    _PT-RV-FEATURES @ 0x08 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
-    _PT-RF-FORMATS @ 48 + _PT-U64@
-    _PT-RV-FEATURES @ 0x08 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 28 + L@
     _PT-RV-FEATURES @ 0x10 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 32 + L@
@@ -1793,9 +1794,23 @@ VARIABLE _PT-RF-PIXELS
     _PT-RF-FORMATS @ 36 + L@
     _PT-RV-FEATURES @ 0x20 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
 
+    \ GLYPH_RUN belongs to CORE rather than INSTRUMENT.  Its caller-selected
+    \ bound may be zero for an owner/region-only terminal; when positive, one
+    \ complete run must fit the object, aggregate UTF-8, payload, and retained
+    \ transaction bounds.
+    _PT-RF-FORMATS @ 24 + L@ ?DUP IF
+        _PT-RF-CAPS @ 32 + L@ 0= IF DROP FALSE EXIT THEN
+        DUP _PT-RF-FORMATS @ 48 + _PT-U64@ U> IF DROP FALSE EXIT THEN
+        DUP 80 + _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF
+            DROP FALSE EXIT
+        THEN
+        280 + _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
+    ELSE
+        _PT-RF-FORMATS @ 48 + _PT-U64@ IF FALSE EXIT THEN
+        _PT-RV-FEATURES @ 0x08 AND IF FALSE EXIT THEN
+    THEN
+
     _PT-RV-FEATURES @ 0x08 AND IF
-        _PT-RF-FORMATS @ 48 + _PT-U64@
-        _PT-RF-FORMATS @ 24 + L@ U< IF FALSE EXIT THEN
         _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 112 U< IF FALSE EXIT THEN
         _PT-RF-FORMATS @ 24 + L@ 104 +
         _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
@@ -2089,7 +2104,7 @@ VARIABLE _PT-RX-REMAIN
     _PT-RX-A @ 6 + W@ _PT-RX-TYPE !
     _PT-RX-A @ 24 + _PT-U64@ _PT-RX-SEQNO !
     _PT-RX-A @ L@ 0x315450A5 <>
-    _PT-RX-A @ 4 + C@ 1 <> OR
+    _PT-RX-A @ 4 + C@ 0<> OR
     _PT-RX-A @ 5 + C@ _PT-HDR <> OR
     _PT-RX-A @ 8 + W@ 0<> OR
     _PT-RX-A @ 10 + W@ 0<> OR IF
@@ -3254,140 +3269,161 @@ VARIABLE _PT-RDROP-ID
     _PT-M-REGION-DROP _PT-REGION-DROP-PAYLOAD 24
         _PT-RDROP-S @ _PT-PRESENT-FIXED-OP ;
 
-\ LABEL is the first typed generic-object writer.  Its public arguments are
-\ semantic scalars and a borrowed UTF-8 span; the exact APT common prefix and
-\ type body remain private to PT.  Text may be empty (0 0), and a nonempty
-\ source is borrowed only until this call returns.
-VARIABLE _PT-LD-S
-VARIABLE _PT-LD-OWNER
-VARIABLE _PT-LD-GENERATION
-VARIABLE _PT-LD-OBJECT
-VARIABLE _PT-LD-REGION
-VARIABLE _PT-LD-PARENT
-VARIABLE _PT-LD-LEFT
-VARIABLE _PT-LD-TOP
-VARIABLE _PT-LD-RIGHT
-VARIABLE _PT-LD-BOTTOM
-VARIABLE _PT-LD-Z
-VARIABLE _PT-LD-VISIBLE
-VARIABLE _PT-LD-RED
-VARIABLE _PT-LD-GREEN
-VARIABLE _PT-LD-BLUE
-VARIABLE _PT-LD-ALPHA
-VARIABLE _PT-LD-H-ALIGN
-VARIABLE _PT-LD-V-ALIGN
-VARIABLE _PT-LD-ELLIPSIZE
-VARIABLE _PT-LD-TEXT-A
-VARIABLE _PT-LD-TEXT-U
-VARIABLE _PT-LD-PAYLOAD-U
+\ GLYPH_RUN is the complete styled-cell draw primitive.  The renderer fills
+\ the run background and then rasterizes one cell for every UTF-8 codepoint.
+\ Its public arguments are semantic scalars and a borrowed UTF-8 span; the
+\ exact APT common prefix and type body remain private to PT.  When glyph runs
+\ are enabled, text may be empty (0 0); a nonempty source is borrowed only
+\ until this call returns. Blink is not admitted because this primitive carries
+\ no presentation-phase cadence.
+0x006F CONSTANT _PT-GR-ATTR-MASK
+VARIABLE _PT-GR-S
+VARIABLE _PT-GR-OWNER
+VARIABLE _PT-GR-GENERATION
+VARIABLE _PT-GR-OBJECT
+VARIABLE _PT-GR-REGION
+VARIABLE _PT-GR-PARENT
+VARIABLE _PT-GR-LEFT
+VARIABLE _PT-GR-TOP
+VARIABLE _PT-GR-RIGHT
+VARIABLE _PT-GR-BOTTOM
+VARIABLE _PT-GR-Z
+VARIABLE _PT-GR-VISIBLE
+VARIABLE _PT-GR-FG-RED
+VARIABLE _PT-GR-FG-GREEN
+VARIABLE _PT-GR-FG-BLUE
+VARIABLE _PT-GR-FG-ALPHA
+VARIABLE _PT-GR-BG-RED
+VARIABLE _PT-GR-BG-GREEN
+VARIABLE _PT-GR-BG-BLUE
+VARIABLE _PT-GR-BG-ALPHA
+VARIABLE _PT-GR-ATTRS
+VARIABLE _PT-GR-TEXT-A
+VARIABLE _PT-GR-TEXT-U
+VARIABLE _PT-GR-PAYLOAD-U
 
-: _PT-LD-TEXT-SOURCE?  ( -- flag )
-    _PT-LD-TEXT-U @ 0= IF
-        _PT-LD-TEXT-A @ 0= EXIT
+: _PT-GR-TEXT-SOURCE?  ( -- flag )
+    _PT-GR-TEXT-U @ 0= IF
+        _PT-GR-TEXT-A @ 0= EXIT
     THEN
-    _PT-LD-TEXT-A @ _PT-LD-TEXT-U @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
-    _PT-LD-TEXT-A @ _PT-LD-TEXT-U @ _PT-LD-S @ /PT-SESSION
+    _PT-GR-TEXT-A @ _PT-GR-TEXT-U @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
+    _PT-GR-TEXT-A @ _PT-GR-TEXT-U @ _PT-GR-S @ /PT-SESSION
         _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
-    _PT-LD-TEXT-A @ _PT-LD-TEXT-U @ _PT-LD-S @ _PT.S.TX-A @
-        _PT-LD-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? 0= ;
+    _PT-GR-TEXT-A @ _PT-GR-TEXT-U @ _PT-GR-S @ _PT.S.TX-A @
+        _PT-GR-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? 0= ;
 
-: _PT-LD-TEXT?  ( -- flag )
-    _PT-LD-TEXT-SOURCE? 0= IF FALSE EXIT THEN
-    _PT-LD-TEXT-U @ 0= IF TRUE EXIT THEN
-    _PT-LD-TEXT-A @ _PT-LD-TEXT-U @ _PT-UTF8? 0= IF FALSE EXIT THEN
-    _PT-LD-TEXT-U @ 0 ?DO
-        _PT-LD-TEXT-A @ I + C@ DUP 0= OVER 10 = OR SWAP 13 = OR IF
+: _PT-GR-TEXT?  ( -- flag )
+    _PT-GR-TEXT-SOURCE? 0= IF FALSE EXIT THEN
+    _PT-GR-TEXT-U @ 0= IF TRUE EXIT THEN
+    _PT-GR-TEXT-A @ _PT-GR-TEXT-U @ _PT-UTF8? 0= IF FALSE EXIT THEN
+    _PT-GR-TEXT-U @ 0 ?DO
+        _PT-GR-TEXT-A @ I + C@ DUP 0= OVER 10 = OR SWAP 13 = OR IF
             FALSE UNLOOP EXIT
         THEN
     LOOP
     TRUE ;
 
-: _PT-LD-FIELDS?  ( -- flag )
-    _PT-LD-S @ _PT-VALID-S? 0= IF FALSE EXIT THEN
-    _PT-LD-OWNER @ 0= _PT-LD-GENERATION @ 0= OR
-    _PT-LD-OBJECT @ 0= OR _PT-LD-REGION @ 0= OR IF FALSE EXIT THEN
-    _PT-LD-LEFT @ _PT-U32? 0= _PT-LD-TOP @ _PT-U32? 0= OR
-    _PT-LD-RIGHT @ _PT-U32? 0= OR _PT-LD-BOTTOM @ _PT-U32? 0= OR IF
-        FALSE EXIT
-    THEN
-    _PT-LD-LEFT @ _PT-LD-RIGHT @ U< 0=
-    _PT-LD-TOP @ _PT-LD-BOTTOM @ U< 0= OR IF FALSE EXIT THEN
-    _PT-LD-Z @ _PT-I32? 0= IF FALSE EXIT THEN
-    _PT-LD-VISIBLE @ DUP 0<> SWAP 1 <> AND IF FALSE EXIT THEN
-    _PT-LD-RED @ _PT-U8? 0= _PT-LD-GREEN @ _PT-U8? 0= OR
-    _PT-LD-BLUE @ _PT-U8? 0= OR _PT-LD-ALPHA @ _PT-U8? 0= OR IF
-        FALSE EXIT
-    THEN
-    _PT-LD-H-ALIGN @ 2 U> _PT-LD-V-ALIGN @ 2 U> OR IF FALSE EXIT THEN
-    _PT-LD-ELLIPSIZE @ DUP 0<> SWAP 1 <> AND IF FALSE EXIT THEN
-    _PT-LD-TEXT-U @ _PT-U32? 0= IF FALSE EXIT THEN
-    _PT-LD-S @ _PT.S.RET-CAPS 8 + _PT-U64@ 0x08 AND 0= IF FALSE EXIT THEN
-    _PT-LD-TEXT-U @ _PT-LD-S @ _PT.S.RET-FORMATS 24 + L@ U> IF
-        FALSE EXIT
-    THEN
-    _PT-LD-TEXT-U @ 80 _PT-UADD? 0= IF DROP FALSE EXIT THEN
-    _PT-LD-PAYLOAD-U !
-    _PT-LD-TEXT? ;
+: _PT-GR-COLOR?  ( red green blue alpha -- flag )
+    _PT-U8? >R _PT-U8? R> AND >R _PT-U8? R> AND >R _PT-U8? R> AND ;
 
-: _PT-LD-PAYLOAD!  ( -- )
-    _PT-LD-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
-    _PT-LD-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
-    _PT-LD-OBJECT @ _PT-FRAME-PAYLOAD 16 + _PT-U64!
+: _PT-GR-FIELDS?  ( -- flag )
+    _PT-GR-S @ _PT-VALID-S? 0= IF FALSE EXIT THEN
+    _PT-GR-OWNER @ 0= _PT-GR-GENERATION @ 0= OR
+    _PT-GR-OBJECT @ 0= OR _PT-GR-REGION @ 0= OR IF FALSE EXIT THEN
+    _PT-GR-LEFT @ _PT-U32? 0= _PT-GR-TOP @ _PT-U32? 0= OR
+    _PT-GR-RIGHT @ _PT-U32? 0= OR _PT-GR-BOTTOM @ _PT-U32? 0= OR IF
+        FALSE EXIT
+    THEN
+    _PT-GR-LEFT @ _PT-GR-RIGHT @ U< 0=
+    _PT-GR-TOP @ _PT-GR-BOTTOM @ U< 0= OR IF FALSE EXIT THEN
+    _PT-GR-Z @ _PT-I32? 0= IF FALSE EXIT THEN
+    _PT-GR-VISIBLE @ DUP 0<> SWAP 1 <> AND IF FALSE EXIT THEN
+    _PT-GR-FG-RED @ _PT-GR-FG-GREEN @
+    _PT-GR-FG-BLUE @ _PT-GR-FG-ALPHA @ _PT-GR-COLOR? 0= IF
+        FALSE EXIT
+    THEN
+    _PT-GR-BG-RED @ _PT-GR-BG-GREEN @
+    _PT-GR-BG-BLUE @ _PT-GR-BG-ALPHA @ _PT-GR-COLOR? 0= IF
+        FALSE EXIT
+    THEN
+    _PT-GR-ATTRS @ _PT-U16? 0= IF FALSE EXIT THEN
+    _PT-GR-ATTRS @ _PT-GR-ATTR-MASK INVERT AND IF FALSE EXIT THEN
+    _PT-GR-TEXT-U @ _PT-U32? 0= IF FALSE EXIT THEN
+    _PT-GR-S @ _PT.S.RET-FORMATS 24 + L@ 0= IF FALSE EXIT THEN
+    _PT-GR-TEXT-U @ _PT-GR-S @ _PT.S.RET-FORMATS 24 + L@ U> IF
+        FALSE EXIT
+    THEN
+    _PT-GR-TEXT-U @ 80 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-GR-PAYLOAD-U !
+    _PT-GR-TEXT? ;
+
+: _PT-GR-PAYLOAD!  ( -- )
+    _PT-GR-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-GR-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
+    _PT-GR-OBJECT @ _PT-FRAME-PAYLOAD 16 + _PT-U64!
     4 _PT-FRAME-PAYLOAD 24 + W!
-    _PT-LD-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!
-    _PT-LD-Z @ _PT-FRAME-PAYLOAD 28 + L!
-    _PT-LD-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
-    _PT-LD-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
-    _PT-LD-LEFT @ _PT-FRAME-PAYLOAD 48 + L!
-    _PT-LD-TOP @ _PT-FRAME-PAYLOAD 52 + L!
-    _PT-LD-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!
-    _PT-LD-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!
-    _PT-LD-RED @ _PT-FRAME-PAYLOAD 64 + C!
-    _PT-LD-GREEN @ _PT-FRAME-PAYLOAD 65 + C!
-    _PT-LD-BLUE @ _PT-FRAME-PAYLOAD 66 + C!
-    _PT-LD-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!
-    _PT-LD-H-ALIGN @ _PT-FRAME-PAYLOAD 68 + W!
-    _PT-LD-V-ALIGN @ _PT-FRAME-PAYLOAD 70 + W!
-    _PT-LD-TEXT-U @ _PT-FRAME-PAYLOAD 72 + L!
-    _PT-LD-ELLIPSIZE @ _PT-FRAME-PAYLOAD 76 + L!
-    _PT-LD-TEXT-U @ IF
-        _PT-LD-TEXT-A @ _PT-LD-TEXT-U @ _PT-FRAME-PAYLOAD 80 + SWAP MOVE
+    _PT-GR-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!
+    _PT-GR-Z @ _PT-FRAME-PAYLOAD 28 + L!
+    _PT-GR-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
+    _PT-GR-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
+    _PT-GR-LEFT @ _PT-FRAME-PAYLOAD 48 + L!
+    _PT-GR-TOP @ _PT-FRAME-PAYLOAD 52 + L!
+    _PT-GR-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!
+    _PT-GR-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!
+    _PT-GR-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!
+    _PT-GR-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!
+    _PT-GR-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!
+    _PT-GR-FG-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!
+    _PT-GR-BG-RED @ _PT-FRAME-PAYLOAD 68 + C!
+    _PT-GR-BG-GREEN @ _PT-FRAME-PAYLOAD 69 + C!
+    _PT-GR-BG-BLUE @ _PT-FRAME-PAYLOAD 70 + C!
+    _PT-GR-BG-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!
+    _PT-GR-ATTRS @ _PT-FRAME-PAYLOAD 72 + W!
+    0 _PT-FRAME-PAYLOAD 74 + W!
+    _PT-GR-TEXT-U @ _PT-FRAME-PAYLOAD 76 + L!
+    _PT-GR-TEXT-U @ IF
+        _PT-GR-TEXT-A @ _PT-GR-TEXT-U @ _PT-FRAME-PAYLOAD 80 + SWAP MOVE
     THEN ;
 
-: _PT-LD-DEFINE-BODY  ( -- status )
-    _PT-LD-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
-    _PT-LD-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
-    _PT-LD-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+: _PT-GR-DEFINE-BODY  ( -- status )
+    _PT-GR-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-GR-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-GR-FIELDS? 0= IF PT-S-INVALID EXIT THEN
     _PT-M-OBJECT-DEFINE _PT-PO-TYPE !
-    _PT-LD-PAYLOAD-U @ _PT-PO-U !
-    _PT-LD-S @ _PT-PO-S !
+    _PT-GR-PAYLOAD-U @ _PT-PO-U !
+    _PT-GR-S @ _PT-PO-S !
     _PT-PO-ADMIT ?DUP IF EXIT THEN
-    _PT-LD-PAYLOAD!
+    _PT-GR-PAYLOAD!
     _PT-PO-SEND ;
 
-: _PT-LD-SCRUB  ( -- )
-    0 _PT-LD-S ! 0 _PT-LD-OWNER ! 0 _PT-LD-GENERATION !
-    0 _PT-LD-OBJECT ! 0 _PT-LD-REGION ! 0 _PT-LD-PARENT !
-    0 _PT-LD-LEFT ! 0 _PT-LD-TOP ! 0 _PT-LD-RIGHT ! 0 _PT-LD-BOTTOM !
-    0 _PT-LD-Z ! 0 _PT-LD-VISIBLE !
-    0 _PT-LD-RED ! 0 _PT-LD-GREEN ! 0 _PT-LD-BLUE ! 0 _PT-LD-ALPHA !
-    0 _PT-LD-H-ALIGN ! 0 _PT-LD-V-ALIGN ! 0 _PT-LD-ELLIPSIZE !
-    0 _PT-LD-TEXT-A ! 0 _PT-LD-TEXT-U ! 0 _PT-LD-PAYLOAD-U !
+: _PT-GR-SCRUB  ( -- )
+    0 _PT-GR-S ! 0 _PT-GR-OWNER ! 0 _PT-GR-GENERATION !
+    0 _PT-GR-OBJECT ! 0 _PT-GR-REGION ! 0 _PT-GR-PARENT !
+    0 _PT-GR-LEFT ! 0 _PT-GR-TOP ! 0 _PT-GR-RIGHT ! 0 _PT-GR-BOTTOM !
+    0 _PT-GR-Z ! 0 _PT-GR-VISIBLE !
+    0 _PT-GR-FG-RED ! 0 _PT-GR-FG-GREEN !
+    0 _PT-GR-FG-BLUE ! 0 _PT-GR-FG-ALPHA !
+    0 _PT-GR-BG-RED ! 0 _PT-GR-BG-GREEN !
+    0 _PT-GR-BG-BLUE ! 0 _PT-GR-BG-ALPHA !
+    0 _PT-GR-ATTRS !
+    0 _PT-GR-TEXT-A ! 0 _PT-GR-TEXT-U ! 0 _PT-GR-PAYLOAD-U !
     0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
     0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
 
-: PT-LABEL-DEFINE
+: PT-GLYPH-RUN-DEFINE
     ( owner generation object region parent left top right bottom z visible
-      red green blue alpha h-align v-align ellipsize text-a text-u session
-      -- status )
-    _PT-LD-S ! _PT-LD-TEXT-U ! _PT-LD-TEXT-A !
-    _PT-LD-ELLIPSIZE ! _PT-LD-V-ALIGN ! _PT-LD-H-ALIGN !
-    _PT-LD-ALPHA ! _PT-LD-BLUE ! _PT-LD-GREEN ! _PT-LD-RED !
-    _PT-LD-VISIBLE ! _PT-LD-Z ! _PT-LD-BOTTOM ! _PT-LD-RIGHT !
-    _PT-LD-TOP ! _PT-LD-LEFT ! _PT-LD-PARENT ! _PT-LD-REGION !
-    _PT-LD-OBJECT ! _PT-LD-GENERATION ! _PT-LD-OWNER !
-    ['] _PT-LD-DEFINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
-    _PT-LD-SCRUB ;
+      fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+      attrs text-a text-u session -- status )
+    _PT-GR-S ! _PT-GR-TEXT-U ! _PT-GR-TEXT-A ! _PT-GR-ATTRS !
+    _PT-GR-BG-ALPHA ! _PT-GR-BG-BLUE !
+    _PT-GR-BG-GREEN ! _PT-GR-BG-RED !
+    _PT-GR-FG-ALPHA ! _PT-GR-FG-BLUE !
+    _PT-GR-FG-GREEN ! _PT-GR-FG-RED !
+    _PT-GR-VISIBLE ! _PT-GR-Z ! _PT-GR-BOTTOM ! _PT-GR-RIGHT !
+    _PT-GR-TOP ! _PT-GR-LEFT ! _PT-GR-PARENT ! _PT-GR-REGION !
+    _PT-GR-OBJECT ! _PT-GR-GENERATION ! _PT-GR-OWNER !
+    ['] _PT-GR-DEFINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
+    _PT-GR-SCRUB ;
 
 VARIABLE _PT-PC-S
 VARIABLE _PT-PC-DISPOSITION

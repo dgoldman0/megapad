@@ -14,7 +14,7 @@ from rich_terminal.retained_model import OwnerQuotas, RetainedFeature
 from rich_terminal.retained_scene import (
     ExplicitSamples,
     GroupBody,
-    LabelBody,
+    GlyphRunBody,
     ObjectBounds,
     ObjectKind,
     Point,
@@ -203,16 +203,17 @@ def test_reserved_fields_are_strictly_zero(message_type, decode, offset):
     assert caught.value.code is RetainedWireErrorCode.RESERVED
 
 
-def test_query_caps_and_formats_reject_tag_version_feature_and_format_aliases():
+def test_query_caps_and_formats_reject_tag_reserved_feature_and_format_aliases():
     query = bytearray(encode_ret_query())
     query[0] ^= 1
     with pytest.raises(RetainedWireError, match="tag"):
         decode_ret_query(query)
 
     caps = bytearray(_oracle_payloads(RetainedMessageType.RET_CAPS)[0])
-    caps[4:6] = (2).to_bytes(2, "little")
-    with pytest.raises(RetainedWireError, match="version"):
+    caps[4:6] = (1).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError, match="reserved") as caught:
         decode_ret_caps(caps)
+    assert caught.value.code is RetainedWireErrorCode.RESERVED
 
     caps = bytearray(_oracle_payloads(RetainedMessageType.RET_CAPS)[0])
     caps[8:16] = (1 << 6).to_bytes(8, "little")
@@ -460,7 +461,7 @@ def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
     assert scalar.value.code is RetainedWireErrorCode.SCALAR
 
 
-def test_label_object_define_empty_text_has_exact_eighty_byte_payload():
+def test_glyph_run_object_define_empty_text_has_exact_eighty_byte_payload():
     definition = ObjectWireDefinition(
         0x0102030405060708,
         0x1112131415161718,
@@ -470,16 +471,21 @@ def test_label_object_define_empty_text_has_exact_eighty_byte_payload():
         ObjectBounds(0, 1, UINT32_MAX - 1, UINT32_MAX),
         -7,
         True,
-        LabelBody(RGBA(0x41, 0x42, 0x43, 0x44), 1, 2, ""),
+        GlyphRunBody(
+            RGBA(0x41, 0x42, 0x43, 0x44),
+            RGBA(0x45, 0x46, 0x47, 0x48),
+            0x006F,
+            "",
+        ),
     )
 
     payload = encode_object_definition(definition)
     expected = struct.pack(
-        "<QQQHHiQQIIII4BHHII",
+        "<QQQHHiQQIIII4B4BHHI",
         definition.owner_id,
         definition.owner_generation,
         definition.object_id,
-        int(ObjectKind.LABEL),
+        int(ObjectKind.GLYPH_RUN),
         1,
         definition.z_order,
         definition.region_id,
@@ -492,8 +498,11 @@ def test_label_object_define_empty_text_has_exact_eighty_byte_payload():
         0x42,
         0x43,
         0x44,
-        1,
-        2,
+        0x45,
+        0x46,
+        0x47,
+        0x48,
+        0x006F,
         0,
         0,
     )
@@ -523,7 +532,7 @@ def test_label_object_define_empty_text_has_exact_eighty_byte_payload():
     assert decode_present_begin(begin_payload) == begin
 
 
-def test_label_object_define_appends_exact_multibyte_scalar_text():
+def test_glyph_run_object_define_appends_exact_multibyte_scalar_text():
     text = "λ🙂"
     definition = ObjectWireDefinition(
         1,
@@ -534,20 +543,21 @@ def test_label_object_define_appends_exact_multibyte_scalar_text():
         ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
         5,
         False,
-        LabelBody(RGBA(1, 2, 3, 255), 0, 1, text, True),
+        GlyphRunBody(RGBA(1, 2, 3, 255), RGBA(4, 5, 6, 7), 0x41, text),
     )
 
     payload = encode_object_definition(definition)
     encoded = text.encode("utf-8")
     assert len(payload) == 80 + len(encoded)
-    assert payload[72:76] == len(encoded).to_bytes(4, "little")
-    assert payload[76:80] == (1).to_bytes(4, "little")
+    assert payload[72:74] == (0x41).to_bytes(2, "little")
+    assert payload[74:76] == bytes(2)
+    assert payload[76:80] == len(encoded).to_bytes(4, "little")
     assert payload[80:] == encoded
     assert decode_object_definition(payload) == definition
 
 
 @pytest.mark.parametrize("bad_text", (b"\0", b"\r", b"\n", b"\xC0\x80"))
-def test_label_object_define_rejects_controls_and_invalid_utf8(bad_text):
+def test_glyph_run_object_define_rejects_controls_and_invalid_utf8(bad_text):
     valid = ObjectWireDefinition(
         1,
         1,
@@ -557,10 +567,10 @@ def test_label_object_define_rejects_controls_and_invalid_utf8(bad_text):
         ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
         0,
         True,
-        LabelBody(RGBA(1, 2, 3, 4), 0, 0, ""),
+        GlyphRunBody(RGBA(1, 2, 3, 4), RGBA(5, 6, 7, 8), 0, ""),
     )
     payload = bytearray(encode_object_definition(valid))
-    payload[72:76] = len(bad_text).to_bytes(4, "little")
+    payload[76:80] = len(bad_text).to_bytes(4, "little")
     payload.extend(bad_text)
 
     with pytest.raises(RetainedWireError) as error:
@@ -607,6 +617,20 @@ def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
             kinds.add(definition.kind)
             assert encode_object_definition(definition) == payload
 
+    glyph_run = ObjectWireDefinition(
+        1,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        0,
+        True,
+        GlyphRunBody(RGBA(1, 2, 3, 4), RGBA(5, 6, 7, 8), 0x6F, "draw"),
+    )
+    assert decode_object_definition(encode_object_definition(glyph_run)) == glyph_run
+    kinds.add(glyph_run.kind)
+
     assert kinds == set(ObjectKind)
 
 
@@ -635,8 +659,12 @@ def test_variable_payload_codecs_are_structural_not_policy_capped():
     )
     assert decode_object_definition(encode_object_definition(polyline)) == polyline
 
-    label = replace(polyline, object_id=2, body=LabelBody(RGBA(4, 3, 2, 1), 0, 2, "x" * 257))
-    assert decode_object_definition(encode_object_definition(label)) == label
+    glyph_run = replace(
+        polyline,
+        object_id=2,
+        body=GlyphRunBody(RGBA(4, 3, 2, 1), RGBA(1, 2, 3, 4), 0, "x" * 257),
+    )
+    assert decode_object_definition(encode_object_definition(glyph_run)) == glyph_run
 
     uniform = SeriesWireSamples(1, 1, 1, UniformSamples(7, tuple(range(65))))
     assert decode_series_samples(encode_series_samples(uniform)) == uniform
@@ -682,21 +710,56 @@ def test_object_decoders_reject_reserved_bits_enums_text_and_non_exact_bodies():
         decode_object_definition(group + b"\0")
     assert trailing.value.code is RetainedWireErrorCode.PAYLOAD
 
-    label = bytearray(
-        next(
-            payload
-            for payload in _oracle_payloads(RetainedMessageType.OBJECT_DEFINE)
-            if int.from_bytes(payload[24:26], "little") == int(ObjectKind.LABEL)
+    glyph_run = bytearray(
+        encode_object_definition(
+            ObjectWireDefinition(
+                1,
+                1,
+                1,
+                1,
+                0,
+                ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+                0,
+                True,
+                GlyphRunBody(RGBA(1, 2, 3, 4), RGBA(5, 6, 7, 8), 0, "x"),
+            )
         )
     )
-    label[-1] = 0xFF
+    glyph_run[-1] = 0xFF
     with pytest.raises(RetainedWireError) as utf8:
-        decode_object_definition(label)
+        decode_object_definition(glyph_run)
     assert utf8.value.code is RetainedWireErrorCode.SCALAR
 
-    label[24:26] = (3).to_bytes(2, "little")
+    glyph_run = bytearray(
+        encode_object_definition(
+            ObjectWireDefinition(
+                1,
+                1,
+                1,
+                1,
+                0,
+                ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+                0,
+                True,
+                GlyphRunBody(RGBA(1, 2, 3, 4), RGBA(5, 6, 7, 8), 0, "x"),
+            )
+        )
+    )
+    glyph_run[72:74] = (0x10).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as attributes:
+        decode_object_definition(glyph_run)
+    assert attributes.value.code is RetainedWireErrorCode.RESERVED
+
+    glyph_run[72:74] = bytes(2)
+    glyph_run[74:76] = (1).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as reserved:
+        decode_object_definition(glyph_run)
+    assert reserved.value.code is RetainedWireErrorCode.RESERVED
+
+    glyph_run[74:76] = bytes(2)
+    glyph_run[24:26] = (3).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as image:
-        decode_object_definition(label)
+        decode_object_definition(glyph_run)
     assert image.value.code is RetainedWireErrorCode.ENUM
 
 

@@ -566,7 +566,7 @@ class RichTerminalCore:
             max_image_width=policy.max_image_width,
             max_image_height=policy.max_image_height,
             max_path_points=policy.max_path_points,
-            max_label_bytes=policy.max_label_bytes,
+            max_glyph_run_bytes=policy.max_glyph_run_bytes,
             max_samples_per_append=policy.max_samples_per_append,
             max_history_per_series=policy.max_history_per_series,
             minimum_presentation_interval_us=(
@@ -1167,7 +1167,7 @@ class RichTerminalCore:
         self._server_data_grant = record.client_receive_credit
         self._state = TerminalState.OPENING
         ready = _READY.pack(
-            1,
+            0,
             self._config.max_payload,
             self._config.max_transaction_bytes,
             self._config.terminal_receive_credit,
@@ -1424,7 +1424,7 @@ class RichTerminalCore:
         if len(payload) != _READY.size:
             self._fatal("CLIENT_READY payload length is not 32")
         (
-            profile,
+            reserved0,
             client_max_payload,
             reserved_a,
             client_credit,
@@ -1435,7 +1435,7 @@ class RichTerminalCore:
         request = self._open
         assert request is not None
         if (
-            profile != 1
+            reserved0 != 0
             or client_max_payload != request.client_max_payload
             or reserved_a != 0
             or client_credit != request.client_receive_credit

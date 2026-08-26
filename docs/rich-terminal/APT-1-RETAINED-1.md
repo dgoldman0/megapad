@@ -16,7 +16,7 @@ remain fully conforming.
 
 Akashic consumes this profile through one generic, consumer-neutral
 rich-terminal engine. Its UIDL-TUI driver may project semantic UIDL elements
-as regions, vector paths, labels, readouts, meters, status indicators, bounded
+as regions, styled glyph runs, vector paths, readouts, meters, status indicators, bounded
 series, plots, waveforms, images, and display cadence. Another trusted system
 renderer may use the same engine without creating another protocol or session.
 No applet is a direct protocol consumer or determines this profile's semantics
@@ -175,8 +175,8 @@ is invalid before that first reveal.
 | Offset | Field | Type |
 |---:|---|---|
 | 0 | `tag` = `0x31544552` | u32 |
-| 4 | `major` = 1 | u16 |
-| 6 | `minor` = 0 | u16 |
+| 4 | `reserved0` = 0 | u16 |
+| 6 | `reserved1` = 0 | u16 |
 | 8 | `features` | u64 |
 | 16 | `max_owner_records` | u32 |
 | 20 | `max_live_owners` | u32 |
@@ -193,10 +193,10 @@ Feature bits are:
 
 | Bit | Name | Meaning |
 |---:|---|---|
-| 0 | `RET_CORE` | owners, regions, global transactions, hidden rebuild/reveal |
+| 0 | `RET_CORE` | owners, regions, `GLYPH_RUN`, global transactions, hidden rebuild/reveal |
 | 1 | `RET_VECTOR` | `GROUP` and `POLYLINE` objects |
 | 2 | `RET_RGBA_IMAGE` | immutable raw RGBA8 resources and `IMAGE` objects |
-| 3 | `RET_INSTRUMENT` | `LABEL`, `READOUT`, `METER`, and `STATUS` objects |
+| 3 | `RET_INSTRUMENT` | `READOUT`, `METER`, and `STATUS` objects |
 | 4 | `RET_SERIES` | bounded i64 series, `PLOT`, and `WAVEFORM` objects |
 | 5 | `RET_CADENCE` | bounded display cadence and physical coalescing |
 | 6 | reserved `RET_MONO_DRCS` | same-phase addendum; must be zero here |
@@ -210,8 +210,11 @@ also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 All maxima are terminal policy supplied by its caller. This contract does not
 assign desktop-, application-, or implementation-specific numeric caps.
 `max_live_owners <= max_owner_records`. The core owner, region, operation, and
-transaction maxima are positive. Feature-dependent maxima are positive when
-their feature is set and zero only when the corresponding family is absent.
+transaction maxima are positive. Object and glyph-run capacities are
+caller-selected: zero accepts only the owner/region lifecycle, while a positive
+glyph-run bound requires positive object and aggregate UTF-8 capacity.
+Feature-dependent maxima are positive when their feature is set and zero only
+when the corresponding family is absent.
 `max_retained_transaction_bytes` includes frame headers and payloads from
 `PRESENT_BEGIN` through `PRESENT_COMMIT`, and must fit both the base negotiated
 transaction maximum and exact credit policy. It is never inferred from memory
@@ -220,8 +223,9 @@ available at mutation time.
 The retained transaction maximum must admit BEGIN plus COMMIT plus at least one
 maximum-sized operation from every advertised family. The general checked floor
 is `200 + maximum_retained_operation_payload`. Exact family floors are 248 for
-CORE (one REGION), `280 + 8 * max_path_points` for VECTOR,
-`max(304 + max_label_bytes, 312)` for INSTRUMENT, 280 for RGBA_IMAGE, and
+CORE with no objects, `280 + max_glyph_run_bytes` when glyph runs are enabled,
+`280 + 8 * max_path_points` for VECTOR,
+`max(304 + max_glyph_run_bytes, 312)` for INSTRUMENT, 280 for RGBA_IMAGE, and
 `max(240 + 16 * max_samples_per_append, 312)` for SERIES. These are complete
 frame bytes, not payload bytes. Advertising a payload maximum that cannot be
 used in one valid transaction is inconsistent discovery.
@@ -248,7 +252,7 @@ now-forbidden legacy snapshot path.
 | 12 | `max_image_width` | u32 |
 | 16 | `max_image_height` | u32 |
 | 20 | `max_path_points` | u32 |
-| 24 | `max_label_bytes` | u32 |
+| 24 | `max_glyph_run_bytes` | u32 |
 | 28 | `max_samples_per_append` | u32 |
 | 32 | `max_history_per_series` | u32 |
 | 36 | `minimum_presentation_interval_us` | u32 |
@@ -259,14 +263,17 @@ now-forbidden legacy snapshot path.
 `image_format` is 1 for raw row-major sRGB straight-alpha RGBA8 and zero when
 `RET_RGBA_IMAGE` is absent. Image width and height are positive exactly when
 that feature is set. `max_path_points` is positive exactly when VECTOR is set.
-Label and total UTF-8 bounds are positive exactly when INSTRUMENT is set.
+`max_glyph_run_bytes` is positive exactly when glyph-run objects are enabled;
+that requires positive `max_objects` and sufficient aggregate UTF-8 capacity.
+INSTRUMENT also requires that text capacity because READOUT formatting shares
+the same caller-provided bound.
 Samples-per-append, history-per-series, and total sample slots are positive
 exactly when SERIES is set. `minimum_presentation_interval_us` is positive
 exactly when CADENCE is set and otherwise zero. It is a renderer admission
 bound, not a clock source or permission to invent samples.
 
 Advertised maxima must describe at least one usable maximum-sized item:
-`total_utf8_bytes >= max_label_bytes` when INSTRUMENT is set;
+`total_utf8_bytes >= max_glyph_run_bytes` when glyph runs are enabled;
 `max_samples_per_append <= max_history_per_series <= total_sample_slots` when
 SERIES is set; and checked
 `max_image_width * max_image_height * 4 <= total_resource_bytes` when IMAGE is
@@ -283,8 +290,9 @@ Capabilities must also be consistent with both negotiated base payload maxima.
 RET_CORE requires a client-to-terminal payload maximum of at least 64 and a
 terminal-to-client maximum of at least 64. IMAGE requires at least 80 inbound
 bytes and `32 + max_resource_chunk_bytes` must fit. VECTOR requires
-`80 + 8 * max_path_points` to fit. INSTRUMENT requires both
-`80 + max_label_bytes` and `104 + max_label_bytes` to fit and at least 112 bytes
+`80 + 8 * max_path_points` to fit. `80 + max_glyph_run_bytes` must fit when
+glyph runs are enabled. INSTRUMENT also requires
+`104 + max_glyph_run_bytes` to fit and at least 112 bytes
 for the largest fixed body. SERIES requires at least 112 bytes and
 `40 + 16 * max_samples_per_append` to fit, covering explicit samples. All
 arithmetic is checked. A client must treat an inconsistent reply pair as the
@@ -413,7 +421,7 @@ occurs before atomic commit.
 
 Logical scene usage is target-local. For each owner, the active target and a
 committed hidden target independently check region count, object count, series
-count, complete LABEL/READOUT UTF-8 bytes, and declared series history sample
+count, complete GLYPH_RUN/READOUT UTF-8 bytes, and declared series history sample
 slots against the same immutable OWNER_OPEN reservation. Those two logical
 scene ledgers are not summed. A RET_DELTA commit validates the proposed active
 ledger; START/CONTINUE validates the proposed hidden ledger. A drop in a hidden
@@ -597,7 +605,7 @@ validation status and does not authorize old-epoch retry before ACK.
 | 40 | `accepted_bytes` | u64 |
 
 `request_type` is the type being completed. `detail` is zero unless a field
-rule defines a bounded index; no rule in this version does, so senders emit
+rule defines a bounded index; no rule in this contract does, so senders emit
 zero. `item_id` is zero for owner requests. `accepted_bytes` is the committed
 resource byte length only for successful RESOURCE_COMMIT and zero otherwise.
 For resource requests, `owner_id`, `owner_generation`, and `item_id` echo the
@@ -834,7 +842,7 @@ Object type values are:
 | 1 | `GROUP` | VECTOR |
 | 2 | `POLYLINE` | VECTOR |
 | 3 | `IMAGE` | RGBA_IMAGE |
-| 4 | `LABEL` | INSTRUMENT |
+| 4 | `GLYPH_RUN` | CORE |
 | 5 | `READOUT` | INSTRUMENT |
 | 6 | `METER` | INSTRUMENT |
 | 7 | `STATUS` | INSTRUMENT |
@@ -871,25 +879,32 @@ The body is exact `<QIB3x>` (16 bytes): resource ID, fit mode, and opacity.
 Fit 0 stretches, 1 contains, and 2 covers. Opacity is 0..255 and multiplies
 resource alpha. The resource must be the same owner generation and format 1.
 
-### 11.4 LABEL
+### 11.4 GLYPH_RUN
 
-The body begins with exact `<4BHHII>` (16 bytes), followed by `text_bytes` UTF-8:
+The body begins with exact `<4B4BHHI>` (16 bytes), followed by `text_bytes`
+UTF-8:
 
 ```text
-u8  red, green, blue, alpha
-u16 horizontal_align      (0 start, 1 center, 2 end)
-u16 vertical_align        (0 top, 1 middle, 2 bottom)
+u8  foreground_rgba[4]
+u8  background_rgba[4]
+u16 attributes            (CELL bits 0,1,2,3,5,6; all other bits zero)
+u16 reserved = 0
 u32 text_bytes
-u32 label_flags           (bit 0 = ellipsize; other bits zero)
 u8  text[text_bytes]
 ```
 
 Text is well-formed UTF-8 scalar text, contains no CR, LF, or NUL, and is at
-most `max_label_bytes`. Empty text is valid. The terminal's output font
-is authoritative; no font identifier or host-measured glyph metric crosses the
-wire. Font choice does not affect accounting: the exact text byte count
-contributes to the transaction target's post-commit UTF-8 usage and must fit
-that target's copy of the owner reservation under Section 5.
+most `max_glyph_run_bytes`. A zero maximum disables GLYPH_RUN objects entirely;
+when the maximum is positive, empty text is valid and may paint only the run
+background. Each scalar occupies one equal slot across the object's bounds.
+The renderer composites the background, resolves bold, dim, italic, underline,
+reverse, and strike attributes, and rasterizes the glyphs with its authoritative
+terminal font. CELL blink bit 4 is not admitted because GLYPH_RUN carries no
+presentation-phase cadence; a sender requesting it is rejected rather than
+acknowledged with missing styling. No font identifier or host-measured glyph
+metric crosses the wire. Font choice does not affect accounting: the exact text
+byte count contributes to the transaction target's post-commit UTF-8 usage and
+must fit that target's copy of the owner reservation under Section 5.
 
 ### 11.5 READOUT
 
@@ -930,13 +945,14 @@ owner-quota preflight below bounds the representation size.
 Before DEFINE, REPLACE, or OBJECT_SET_VALUE mutates staging, the receiver must
 compute the complete formatted byte length—including minus sign, digits,
 decimal point, percent sign, and unit—using checked arithmetic without first
-allocating an unbounded string. That length must be at most `max_label_bytes`
-and the transaction target's post-commit sum of LABEL text plus complete
+allocating an unbounded string. That length must be at most
+`max_glyph_run_bytes` and the transaction target's post-commit sum of
+GLYPH_RUN text plus complete
 READOUT formatted bytes must fit that target's copy of the owner's
 `utf8_byte_quota`. The complete formatted READOUT consumes target-local usage;
 its unit is not charged a second time. Failure is a transaction error and
 leaves the prior object/value and active or hidden usage unchanged. Unit text
-independently obeys LABEL UTF-8 scalar/control rules.
+independently obeys GLYPH_RUN UTF-8 scalar/control rules.
 
 ### 11.6 METER
 
@@ -1223,15 +1239,14 @@ has been physically composited, flipped, and exactly acknowledged.
 
 CELL remains mandatory complete fallback. Retaining a scene diagnostically,
 promoting a composite, exposing only CELL pixels, or overlaying one retained
-LABEL on a CELL-rendered Desk/editor/calendar does not complete this checkpoint.
+glyph run on a CELL-rendered Desk/editor/calendar does not complete this
+checkpoint.
 Binding-local rich refusal must leave CELL usable, but refused CELL pixels are
 not rich-rendering acceptance evidence.
 
-The checkpoint does not authorize partial capability advertisement.
-`RET_INSTRUMENT` covers LABEL, READOUT, METER, and STATUS together; a terminal
-that negotiates that bit must support the complete family in its semantic model
-and renderer. The checkpoint also does not remove or weaken any production case
-below.
+The checkpoint does not authorize partial capability advertisement. Dormant
+instrument, image, vector, series, resource, and cadence families remain
+unadvertised and are not acceptance prerequisites for this vertical.
 
 ### 16.2 Production qualification
 
@@ -1246,7 +1261,7 @@ The minimum Akashic journey is:
    projection owner without exposing that owner to application code;
 5. build the initial hidden replacement with RET_REPLACE_START followed by at
    least one separate RET_REPLACE_CONTINUE transaction, then reveal regions plus
-   at least one polyline, label, readout, meter, status, bounded series, plot,
+   at least one polyline, glyph run, readout, meter, status, bounded series, plot,
    and waveform;
 6. after RETAINED-1 is enabled, commit a real legacy TX_BEGIN/CELL_SPAN/CURSOR/
    TX_COMMIT delta and prove it shares the global transaction-ID and revision

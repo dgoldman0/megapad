@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from rich_terminal.update_authority import (
@@ -20,7 +22,7 @@ from rich_terminal.retained_scene import (
     CommitDisposition,
     ExplicitSamples,
     GroupBody,
-    LabelBody,
+    GlyphRunBody,
     MeterBody,
     ObjectBounds,
     ObjectDefinition,
@@ -52,6 +54,14 @@ BLACK = RGBA(0, 0, 0, 255)
 GREEN = RGBA(32, 220, 96, 255)
 
 
+def test_glyph_run_body_accepts_only_physically_supported_cell_attribute_bits():
+    assert GlyphRunBody(WHITE, BLACK, 0x6F, "draw").attributes == 0x6F
+    with pytest.raises(ValueError, match="unsupported GLYPH_RUN bits"):
+        GlyphRunBody(WHITE, BLACK, 0x10, "draw")
+    with pytest.raises(ValueError, match="unsupported GLYPH_RUN bits"):
+        GlyphRunBody(WHITE, BLACK, 0x80, "draw")
+
+
 def _policy() -> RetainedPolicy:
     return RetainedPolicy(
         features=(
@@ -75,7 +85,7 @@ def _policy() -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=16,
-        max_label_bytes=64,
+        max_glyph_run_bytes=64,
         max_samples_per_append=8,
         max_history_per_series=16,
         minimum_presentation_interval_us=16_667,
@@ -105,12 +115,18 @@ def _quotas(**changes) -> OwnerQuotas:
     return OwnerQuotas(**values)
 
 
-def _domain(*, quotas: OwnerQuotas | None = None):
+def _domain(
+    *,
+    quotas: OwnerQuotas | None = None,
+    policy: RetainedPolicy | None = None,
+):
     clock = TerminalUpdateAuthority(
         presentation_epoch=3, revision=1, transaction_high_water=1
     )
     owners = OwnerLedger(
-        session_id=SESSION, presentation_epoch=3, policy=_policy()
+        session_id=SESSION,
+        presentation_epoch=3,
+        policy=_policy() if policy is None else policy,
     )
     identity = _owner()
     owners.open(identity, _quotas() if quotas is None else quotas)
@@ -156,7 +172,7 @@ def _stage_complete_target(scene: RetainedSceneModel, owner: OwnerIdentity, poin
     scene.define_object(
         _object(owner, 2, PolylineBody(points, 0x01000000, GREEN), parent=1)
     )
-    scene.define_object(_object(owner, 3, LabelBody(WHITE, 0, 1, "Level"), parent=1))
+    scene.define_object(_object(owner, 3, GlyphRunBody(WHITE, BLACK, 0, "Level"), parent=1))
     scene.define_object(
         _object(
             owner,
@@ -247,7 +263,7 @@ def test_dependency_or_quota_rejection_leaves_scene_and_id_ledger_unchanged():
     scene.define_region(_region(owner))
     scene.define_object(_object(owner, 1, GroupBody()))
     with pytest.raises(SceneModelError) as over_quota:
-        scene.define_object(_object(owner, 2, LabelBody(WHITE, 0, 0, "extra")))
+        scene.define_object(_object(owner, 2, GlyphRunBody(WHITE, BLACK, 0, "extra")))
     assert over_quota.value.code is SceneErrorCode.QUOTA
     with pytest.raises(SceneModelError, match="was rejected"):
         scene.prepare_commit(CommitDisposition.COMMIT)
@@ -256,6 +272,32 @@ def test_dependency_or_quota_rejection_leaves_scene_and_id_ledger_unchanged():
     assert owners.require_live(owner).high_water.object == 0
     scene.reject()
     clock.settle_result(3)
+
+
+def test_zero_glyph_capacity_rejects_even_an_empty_background_paint():
+    policy = replace(
+        _policy(),
+        features=RetainedFeature.CORE,
+        max_path_points=0,
+        max_glyph_run_bytes=0,
+        max_series=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+    )
+    quotas = _quotas(objects=1, series=0, utf8_bytes=0, sample_slots=0)
+    clock, _owners, owner, scene = _domain(policy=policy, quotas=quotas)
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+
+    with pytest.raises(SceneModelError, match="glyph runs were not advertised") as caught:
+        scene.define_object(_object(owner, 1, GlyphRunBody(WHITE, BLACK, 0, "")))
+
+    assert caught.value.code is SceneErrorCode.FEATURE
+    scene.reject()
+    clock.settle_result(2)
 
 
 def test_replace_start_cannot_skip_the_required_continue_reveal_boundary():
@@ -535,7 +577,7 @@ def test_object_replace_and_ordered_drops_recompute_target_usage_without_reusing
 
     _begin(clock, scene, 4, RetainedMode.DELTA)
     scene.replace_object(
-        _object(owner, 3, LabelBody(WHITE, 2, 1, "L"), parent=1)
+        _object(owner, 3, GlyphRunBody(WHITE, BLACK, 0, "L"), parent=1)
     )
     _install(scene, clock, CommitDisposition.COMMIT)
 

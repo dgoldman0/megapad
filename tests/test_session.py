@@ -28,7 +28,7 @@ from rich_terminal import (
     TerminalView,
 )
 from rich_terminal.output_coordinator import CompositeTerminalView
-from rich_terminal.retained_view import DisplayScope, RetainedRootLabelPlane
+from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from rich_terminal.update_authority import TerminalGeometry, TerminalUpdateError
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
 from session import (
@@ -99,7 +99,7 @@ def _retained_policy(*, interval_us: int = 0) -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=interval_us,
@@ -533,7 +533,7 @@ def test_machine_session_coalesces_logical_composites_at_owner_boundaries():
         assert isinstance(offer.scope, DisplayScope)
         assert offer.scope.model_revision == 1
         assert offer.cell.lines() == ["AA", "AA"]
-        assert isinstance(offer.retained, RetainedRootLabelPlane)
+        assert isinstance(offer.retained, RetainedDrawPlane)
         assert not offer.retained.retained_visible
         assert session.displayed_output_view is None
         assert session.displayed_model_revision is None
@@ -1270,7 +1270,7 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=500_000,

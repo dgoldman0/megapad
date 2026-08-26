@@ -161,11 +161,11 @@ CELL-snapshot response shape. The holder supplies both cursors:
 `since=<CELL revision>` and `since_offer=<positive offer ID>`, with zero as the
 initial offer sentinel. An offer contains only the immutable renderer DTOs:
 its positive `offer_id`, the complete `DisplayScope`, the CELL snapshot, and
-the projected rich draw plane. The implementation currently supplies only a
-transitional `RetainedRootLabelPlane`; it must evolve in place into the bounded
-renderer-neutral draw representation needed by Desk, Pad, and Daybook. The
-offer never contains a `CompositeTerminalView`, a hidden retained rebuild
-target, or model authority.
+the projected `RetainedDrawPlane`. Its ordered glyph runs carry exact bounds,
+foreground, background, CELL attributes, and UTF-8 text; the ordinary TUI
+screen transaction must populate that bounded representation for Desk, Pad,
+and Daybook. The offer never contains a `CompositeTerminalView`, a hidden
+retained rebuild target, or model authority.
 
 After drawing the complete offer, the holder calls `present` with the current
 reset `generation`, exact `display_offer_id`, and full `display_scope` returned

@@ -95,7 +95,7 @@ class RetainedPolicy:
     """Caller-supplied RET_CAPS/RET_FORMATS and base transport bounds.
 
     There are intentionally no product defaults.  A caller must choose every
-    capacity, and construction rejects a profile that advertises a maximum it
+    capacity, and construction rejects a policy that advertises a maximum it
     cannot carry in one valid frame/transaction.
     """
 
@@ -114,7 +114,7 @@ class RetainedPolicy:
     max_image_width: int
     max_image_height: int
     max_path_points: int
-    max_label_bytes: int
+    max_glyph_run_bytes: int
     max_samples_per_append: int
     max_history_per_series: int
     minimum_presentation_interval_us: int
@@ -149,7 +149,7 @@ class RetainedPolicy:
             "max_image_width",
             "max_image_height",
             "max_path_points",
-            "max_label_bytes",
+            "max_glyph_run_bytes",
             "max_samples_per_append",
             "max_history_per_series",
             "minimum_presentation_interval_us",
@@ -217,17 +217,6 @@ class RetainedPolicy:
         if self.max_retained_transaction_bytes > self.base_max_transaction_bytes:
             raise ValueError("retained transaction maximum exceeds the base maximum")
 
-        has_objects = bool(
-            features
-            & (
-                RetainedFeature.VECTOR
-                | RetainedFeature.RGBA_IMAGE
-                | RetainedFeature.INSTRUMENT
-                | RetainedFeature.SERIES
-            )
-        )
-        self._require_positive_exact("max_objects", has_objects)
-
         image = bool(features & RetainedFeature.RGBA_IMAGE)
         for name in (
             "max_resources",
@@ -244,8 +233,17 @@ class RetainedPolicy:
         self._require_positive_exact("max_path_points", vector)
 
         instrument = bool(features & RetainedFeature.INSTRUMENT)
-        self._require_positive_exact("max_label_bytes", instrument)
-        self._require_positive_exact("total_utf8_bytes", instrument)
+        glyph_runs = self.max_glyph_run_bytes > 0
+        if glyph_runs and self.max_objects == 0:
+            raise ValueError("glyph-run capacity requires object capacity")
+        if glyph_runs and self.total_utf8_bytes < self.max_glyph_run_bytes:
+            raise ValueError("total UTF-8 capacity cannot admit one maximum glyph run")
+        if not glyph_runs and self.total_utf8_bytes != 0:
+            raise ValueError("UTF-8 capacity requires glyph-run capacity")
+        if (vector or image or instrument) and self.max_objects == 0:
+            raise ValueError("advertised object features require object capacity")
+        if instrument and not glyph_runs:
+            raise ValueError("INSTRUMENT requires glyph-run text capacity")
 
         series = bool(features & RetainedFeature.SERIES)
         self._require_positive_exact("max_series", series)
@@ -256,8 +254,6 @@ class RetainedPolicy:
         cadence = bool(features & RetainedFeature.CADENCE)
         self._require_positive_exact("minimum_presentation_interval_us", cadence)
 
-        if instrument and self.total_utf8_bytes < self.max_label_bytes:
-            raise ValueError("total UTF-8 capacity cannot admit one maximum label")
         if series and not (
             self.max_samples_per_append
             <= self.max_history_per_series
@@ -291,16 +287,20 @@ class RetainedPolicy:
             ) > inbound:
                 raise ValueError("maximum resource chunk exceeds inbound payload")
             operation_payloads.append(80)
+        if glyph_runs:
+            glyph_run_payload = _checked_add(
+                "maximum GLYPH_RUN payload", 80, self.max_glyph_run_bytes
+            )
+            if glyph_run_payload > inbound:
+                raise ValueError("maximum GLYPH_RUN object exceeds inbound payload")
+            operation_payloads.append(glyph_run_payload)
         if instrument:
-            label_payload = _checked_add(
-                "maximum LABEL payload", 80, self.max_label_bytes
-            )
             readout_payload = _checked_add(
-                "maximum READOUT payload", 104, self.max_label_bytes
+                "maximum READOUT payload", 104, self.max_glyph_run_bytes
             )
-            if max(label_payload, readout_payload, 112) > inbound:
+            if max(readout_payload, 112) > inbound:
                 raise ValueError("maximum INSTRUMENT object exceeds inbound payload")
-            operation_payloads.extend((label_payload, readout_payload, 112))
+            operation_payloads.extend((readout_payload, 112))
         if series:
             explicit_payload = _checked_add(
                 "maximum explicit series payload",
@@ -782,9 +782,10 @@ class OwnerLedger:
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.INVALID, "resource quota requires RGBA_IMAGE"
             )
-        if not policy.features & RetainedFeature.INSTRUMENT and quotas.utf8_bytes:
+        if not policy.max_glyph_run_bytes and quotas.utf8_bytes:
             raise OwnerLedgerError(
-                OwnerLedgerErrorCode.INVALID, "UTF-8 quota requires INSTRUMENT"
+                OwnerLedgerErrorCode.INVALID,
+                "UTF-8 quota requires glyph-run capacity",
             )
         if not policy.features & RetainedFeature.SERIES and (
             quotas.series or quotas.sample_slots

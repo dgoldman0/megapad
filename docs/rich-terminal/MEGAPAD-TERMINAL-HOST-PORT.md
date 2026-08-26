@@ -210,23 +210,24 @@ cadence then re-offers it or a newer coalesced candidate without reusing an
 offer identifier.
 
 The compositor uses the CELL canvas as its complete fallback base, draws every
-selected rich region/surface/primitive in deterministic back-to-front order
+selected rich region and glyph run in deterministic back-to-front order
 with straight-alpha source-over blending, and draws the cursor overlay last.
-The current implementation reaches this boundary with a transitional
-root-LABEL-only draw plane; that plane proves immutable-offer and physical-ACK
-mechanics but is not the generic renderer required by the Desk/Pad/Daybook
-vertical.
+The current implementation carries foreground, background, CELL attributes,
+UTF-8 scalars, and exact bounds in that generic run. This proves the physical
+raster and acknowledgement seam; the vertical becomes complete when the
+ordinary TUI screen transaction supplies the full Desk/Pad/Daybook plane.
 
 A region's pixel rectangle is exactly its cell rectangle multiplied by the
 selected cell width and height. For a parentless object's normalized edge, the
 low edge rounds down and the high edge rounds up against that region's pixel
 extent, then clips to the region when clipping is enabled. The terminal font is
-authoritative. LABEL horizontal/vertical alignment is resolved inside the
-clipped object rectangle; nonwrapping text is clipped, with ellipsis applied
-only when the LABEL flag requests it. The generic TUI path must additionally
-carry bounded clips/translations, fills, styled glyph runs, lines/boxes,
-selection or invert/caret overlays, visibility, and z-order so substantive UI
-pixels are rasterized here rather than supplied only by CELL.
+authoritative. Each GLYPH_RUN fills its background and assigns one equal slot
+to each scalar, clips glyph overhang and decorations to that slot, and applies
+their alpha by source-over composition. Bold, dim, italic, underline, reverse,
+and strike are exact; blink is rejected because this draw value has no
+presentation-phase cadence. The ordinary TUI projection resolves existing
+clips, lines, boxes, selection, and caret writes into these runs so substantive
+UI pixels are rasterized here rather than supplied only by CELL.
 
 Cursor blink and other renderer-only overlays do not create cell revisions.
 Unchanged rows may be shared by identity across revisions. A renderer cannot
@@ -271,6 +272,6 @@ The lightweight host-port suite must prove:
     clipping, styling, and z-order once that bounded vocabulary is present.
 
 Cases 9 and 10 are focused seconds-scale units for the current functional
-slice, not full renderer qualification. A CELL-only snapshot round trip or a
-root-LABEL overlay cannot be cited as Desk/Pad/Daybook rich-rendering
+slice, not full renderer qualification. A CELL-only snapshot round trip or one
+isolated glyph-run overlay cannot be cited as Desk/Pad/Daybook rich-rendering
 acceptance.

@@ -1,4 +1,4 @@
-"""Focused immutable root-LABEL renderer-view projection tests."""
+"""Focused immutable renderer draw-plane projection tests."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from rich_terminal.retained_model import OwnerIdentity
 from rich_terminal.retained_scene import (
     GroupBody,
     HiddenTargetKind,
-    LabelBody,
+    GlyphRunBody,
     ObjectBounds,
     ObjectDefinition,
     OwnerScene,
@@ -27,7 +27,7 @@ from rich_terminal.retained_scene import (
 from rich_terminal.retained_view import (
     DisplayScope,
     RetainedViewError,
-    project_composite_root_labels,
+    project_composite_draw_plane,
 )
 from rich_terminal.update_authority import TerminalGeometry
 
@@ -110,7 +110,7 @@ def _owner_scene(owner, regions, objects) -> OwnerScene:
     utf8 = sum(
         len(definition.body.text.encode("utf-8"))
         for definition in objects
-        if isinstance(definition.body, LabelBody)
+        if isinstance(definition.body, GlyphRunBody)
     )
     return OwnerScene(
         owner=owner,
@@ -173,14 +173,14 @@ def test_projection_preserves_global_scope_and_deterministic_draw_order():
                 later_owner,
                 20,
                 3,
-                LabelBody(WHITE, 2, 1, "later"),
+                GlyphRunBody(WHITE, GREEN, 0, "later"),
                 z_order=2,
             ),
             _object(
                 later_owner,
                 10,
                 3,
-                LabelBody(GREEN, 0, 0, "first", True),
+                GlyphRunBody(GREEN, WHITE, 1, "first"),
                 z_order=-2,
             ),
         ],
@@ -190,10 +190,10 @@ def test_projection_preserves_global_scope_and_deterministic_draw_order():
     first_scene = _owner_scene(
         first_owner,
         [first_region],
-        [_object(first_owner, 4, 7, LabelBody(WHITE, 1, 2, "front"))],
+        [_object(first_owner, 4, 7, GlyphRunBody(WHITE, GREEN, 0, "front"))],
     )
 
-    scope, plane = project_composite_root_labels(
+    scope, plane = project_composite_draw_plane(
         _composite([later_scene, first_scene])
     )
 
@@ -207,15 +207,11 @@ def test_projection_preserves_global_scope_and_deterministic_draw_order():
         retained_revision=8,
     )
     assert [region.owner_id for region in plane.regions] == [2, 9]
-    assert [label.object_id for label in plane.regions[1].labels] == [10, 20]
-    first_label = plane.regions[1].labels[0]
-    assert (first_label.text, first_label.ellipsize) == ("first", True)
-    assert (first_label.red, first_label.green, first_label.blue, first_label.alpha) == (
-        20,
-        220,
-        80,
-        255,
-    )
+    assert [draw.object_id for draw in plane.regions[1].draws] == [10, 20]
+    first_draw = plane.regions[1].draws[0]
+    assert (first_draw.text, first_draw.attributes) == ("first", 1)
+    assert first_draw.foreground == GREEN
+    assert first_draw.background == WHITE
 
 
 def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
@@ -227,7 +223,7 @@ def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
         1,
         StatusBody(WHITE, GREEN, 1, 0),
     )
-    hidden_scope, hidden_plane = project_composite_root_labels(
+    hidden_scope, hidden_plane = project_composite_draw_plane(
         _composite([_owner_scene(owner, [region], [unsupported])], visible=False)
     )
 
@@ -241,14 +237,14 @@ def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
         owner,
         3,
         1,
-        LabelBody(WHITE, 0, 0, "not physical"),
+        GlyphRunBody(WHITE, GREEN, 0, "not physical"),
         parent=2,
     )
-    _, visible_plane = project_composite_root_labels(
+    _, visible_plane = project_composite_draw_plane(
         _composite([_owner_scene(owner, [region], [nested, hidden_group])])
     )
     assert len(visible_plane.regions) == 1
-    assert visible_plane.regions[0].labels == ()
+    assert visible_plane.regions[0].draws == ()
 
 
 def test_projection_fails_closed_on_visible_unsupported_and_nested_objects():
@@ -256,7 +252,7 @@ def test_projection_fails_closed_on_visible_unsupported_and_nested_objects():
     region = _region(owner, 1)
     status = _object(owner, 1, 1, StatusBody(WHITE, GREEN, 1, 0))
     with pytest.raises(RetainedViewError, match="visible STATUS"):
-        project_composite_root_labels(
+        project_composite_draw_plane(
             _composite([_owner_scene(owner, [region], [status])])
         )
 
@@ -265,11 +261,11 @@ def test_projection_fails_closed_on_visible_unsupported_and_nested_objects():
         owner,
         3,
         1,
-        LabelBody(WHITE, 0, 0, "nested"),
+        GlyphRunBody(WHITE, GREEN, 0, "nested"),
         parent=2,
     )
     with pytest.raises(RetainedViewError, match="not parentless"):
-        project_composite_root_labels(
+        project_composite_draw_plane(
             _composite([_owner_scene(owner, [region], [nested, group])])
         )
 
@@ -280,7 +276,7 @@ def test_projection_never_traverses_the_hidden_rebuild_target():
     active = _owner_scene(
         owner,
         [region],
-        [_object(owner, 1, 1, LabelBody(WHITE, 0, 0, "active"))],
+        [_object(owner, 1, 1, GlyphRunBody(WHITE, GREEN, 0, "active"))],
     )
     hidden_owner = _owner(6)
     hidden_region = _region(hidden_owner, 1)
@@ -303,11 +299,11 @@ def test_projection_never_traverses_the_hidden_rebuild_target():
         )
     )
 
-    _, plane = project_composite_root_labels(
+    _, plane = project_composite_draw_plane(
         _composite([active], hidden=hidden_scene)
     )
 
-    assert [label.text for label in plane.regions[0].labels] == ["active"]
+    assert [draw.text for draw in plane.regions[0].draws] == ["active"]
 
 
 def test_projection_rejects_forged_plane_types_at_the_sink_boundary():
@@ -316,8 +312,8 @@ def test_projection_rejects_forged_plane_types_at_the_sink_boundary():
     composite = _composite([_owner_scene(owner, [region], [])])
 
     with pytest.raises(TypeError, match="CELL plane"):
-        project_composite_root_labels(replace(composite, cell=object()))
+        project_composite_draw_plane(replace(composite, cell=object()))
     with pytest.raises(TypeError, match="retained plane"):
-        project_composite_root_labels(replace(composite, retained=object()))
+        project_composite_draw_plane(replace(composite, retained=object()))
     with pytest.raises(TypeError, match="geometry"):
-        project_composite_root_labels(replace(composite, geometry=object()))
+        project_composite_draw_plane(replace(composite, geometry=object()))

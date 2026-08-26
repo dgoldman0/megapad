@@ -156,7 +156,7 @@ Every frame has this fixed 40-byte header followed by `payload_length` bytes:
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 4 | Magic `A5 50 54 31`. |
-| 4 | 1 | Version, exactly `1`. |
+| 4 | 1 | Reserved, zero. |
 | 5 | 1 | Header size, exactly `40`. |
 | 6 | 2 | Message type. |
 | 8 | 2 | Flags, zero in APT-1. |
@@ -177,7 +177,7 @@ the final XOR is `FFFFFFFF`. It covers header bytes 0 through 35 followed by
 the payload; the CRC field itself is excluded.
 
 In `OPENING` and `ACTIVE`, magic is required exactly where the next frame
-begins. Bad magic, version, header size, flags, reserved bits, length, CRC,
+begins. Bad magic, header size, flags, nonzero reserved fields, length, CRC,
 session, sequence, or presentation epoch is fatal to that session. An
 implementation may scan for magic to bound diagnostic discard, but it MUST
 NOT resume the damaged session. Discarded binary is never reinterpreted as
@@ -254,7 +254,7 @@ unsent frame/transaction and makes no sequence or model progress.
 `SERVER_READY` (`0001`, terminal to client) has the 32-byte payload:
 
 ```
-u32 profile                 = 1 for CELL-1
+u32 reserved                = 0
 u32 terminal_receive_max_payload
 u32 max_transaction_bytes
 u32 terminal_receive_credit
@@ -267,7 +267,7 @@ u64 capabilities
 direction-specific fields:
 
 ```
-u32 profile                    = 1 for CELL-1
+u32 reserved                    = 0
 u32 client_receive_max_payload
 u32 reserved                   = 0
 u32 client_receive_credit

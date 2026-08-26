@@ -26,7 +26,6 @@ from semantic_reducer import reduce_transcript
 CONTRACT_ID = "APT-1-RETAINED-1-2026-08-24"
 BASE_CONTRACT_ID = "APT-1-CELL-1-2026-08-24"
 MAGIC = b"\xa5PT1"
-VERSION = 1
 HEADER_BYTES = 40
 MAX_PAYLOAD = 1_048_576
 SESSION = 0x0123456789ABCDEF
@@ -127,7 +126,7 @@ OBJECT_TYPES = {
     "GROUP": 1,
     "POLYLINE": 2,
     "IMAGE": 3,
-    "LABEL": 4,
+    "GLYPH_RUN": 4,
     "READOUT": 5,
     "METER": 6,
     "STATUS": 7,
@@ -144,7 +143,7 @@ SERIES_ID = 1
 EXPLICIT_SERIES_ID = 2
 GROUP_ID = 1
 POLYLINE_ID = 2
-LABEL_ID = 3
+GLYPH_RUN_ID = 3
 READOUT_ID = 4
 METER_ID = 5
 STATUS_ID = 6
@@ -178,7 +177,7 @@ FORMAT_VALUES = {
     "max_image_width": 256,
     "max_image_height": 256,
     "max_path_points": 256,
-    "max_label_bytes": 256,
+    "max_glyph_run_bytes": 256,
     "max_samples_per_append": 64,
     "max_history_per_series": 512,
     "minimum_presentation_interval_us": 500_000,
@@ -211,7 +210,7 @@ REGION = struct.Struct("<QQQIIIIiI")
 OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
 POLYLINE_BODY = struct.Struct("<II4BI")
 POINT = struct.Struct("<II")
-LABEL_BODY = struct.Struct("<4BHHII")
+GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 READOUT_BODY = struct.Struct("<8BIIqqII")
 METER_BODY = struct.Struct("<8BIIqqqQ")
 STATUS_BODY = struct.Struct("<8BqIIQ")
@@ -248,7 +247,7 @@ def encode_frame(message: str, payload: bytes, sequence: int, epoch: int) -> byt
         raise ValueError("canonical payload exceeds APT-1's structural maximum")
     prefix = HEADER_PREFIX.pack(
         MAGIC,
-        VERSION,
+        0,
         HEADER_BYTES,
         MESSAGE_TYPES[message],
         0,
@@ -312,7 +311,7 @@ def credit_payload(value: int) -> bytes:
 def caps_payload() -> bytes:
     return RET_CAPS.pack(
         TAG,
-        1,
+        0,
         0,
         FEATURES,
         CAPS_VALUES["max_owner_records"],
@@ -336,7 +335,7 @@ def formats_payload() -> bytes:
         FORMAT_VALUES["max_image_width"],
         FORMAT_VALUES["max_image_height"],
         FORMAT_VALUES["max_path_points"],
-        FORMAT_VALUES["max_label_bytes"],
+        FORMAT_VALUES["max_glyph_run_bytes"],
         FORMAT_VALUES["max_samples_per_append"],
         FORMAT_VALUES["max_history_per_series"],
         FORMAT_VALUES["minimum_presentation_interval_us"],
@@ -507,22 +506,25 @@ def polyline_payload() -> bytes:
     return payload + body
 
 
-def label_payload(text: bytes = b"SoundLab") -> bytes:
-    body = LABEL_BODY.pack(
+def glyph_run_payload(text: bytes = b"SoundLab") -> bytes:
+    body = GLYPH_RUN_BODY.pack(
         0xF0,
         0xF4,
         0xFF,
         0xFF,
-        1,
-        1,
+        0x10,
+        0x18,
+        0x28,
+        0xFF,
+        0,
+        0,
         len(text),
-        1,
     ) + text
     payload = OBJECT_PREFIX.pack(
         OWNER_ID,
         OWNER_GENERATION,
-        LABEL_ID,
-        OBJECT_TYPES["LABEL"],
+        GLYPH_RUN_ID,
+        OBJECT_TYPES["GLYPH_RUN"],
         0x1,
         1,
         REGION_ID,
@@ -931,7 +933,7 @@ def soundlab_initial_replace() -> Scenario:
         explicit_series_payload("SERIES_REPLACE", ((1_000_000, -2_000), (1_750_000, 2_000))),
         ("OBJECT_DEFINE", group_payload()),
         ("OBJECT_DEFINE", polyline_payload()),
-        ("OBJECT_DEFINE", label_payload()),
+        ("OBJECT_DEFINE", glyph_run_payload()),
     )
     continue_operations = (
         ("OBJECT_DEFINE", readout_payload()),
@@ -1021,7 +1023,7 @@ def soundlab_initial_replace() -> Scenario:
                 "objects": [
                     GROUP_ID,
                     POLYLINE_ID,
-                    LABEL_ID,
+                    GLYPH_RUN_ID,
                     READOUT_ID,
                     METER_ID,
                     STATUS_ID,
@@ -1060,7 +1062,7 @@ def soundlab_dynamic_append() -> Scenario:
         ),
         (
             "OBJECT_SET_VISIBILITY",
-            OBJECT_SET_VISIBILITY.pack(OWNER_ID, OWNER_GENERATION, LABEL_ID, 0),
+            OBJECT_SET_VISIBILITY.pack(OWNER_ID, OWNER_GENERATION, GLYPH_RUN_ID, 0),
         ),
         uniform_series_payload("SERIES_APPEND", 2_500_000, (-300, 100)),
         explicit_series_payload("SERIES_APPEND", ((2_500_000, -1_000), (3_250_000, 1_000))),
@@ -1106,7 +1108,7 @@ def soundlab_dynamic_append() -> Scenario:
             "readout_value": -300,
             "meter_value": -300,
             "status_value": 1,
-            "label_visible": False,
+            "glyph_run_visible": False,
             "appended_samples": [
                 {"timestamp_us": 2_500_000, "value": -300},
                 {"timestamp_us": 3_000_000, "value": 100},
@@ -1133,7 +1135,7 @@ def soundlab_dynamic_append() -> Scenario:
 
 def mutation_and_drop_lifecycle() -> Scenario:
     credit_before = 85_078
-    replace_ops = (("OBJECT_REPLACE", label_payload(b"SoundLab armed")),)
+    replace_ops = (("OBJECT_REPLACE", glyph_run_payload(b"SoundLab armed")),)
     replace_tx, replace_bytes = present_transaction(
         start_sequence=48,
         epoch=0,
@@ -1152,7 +1154,7 @@ def mutation_and_drop_lifecycle() -> Scenario:
         ("OBJECT_DROP", OWNER_ITEM.pack(OWNER_ID, OWNER_GENERATION, object_id))
         for object_id in (
             POLYLINE_ID,
-            LABEL_ID,
+            GLYPH_RUN_ID,
             GROUP_ID,
             READOUT_ID,
             METER_ID,
@@ -1180,7 +1182,7 @@ def mutation_and_drop_lifecycle() -> Scenario:
     drop_credit = replace_credit + drop_bytes
     frames = (
         *replace_tx,
-        fs(TERMINAL, "TX_RESULT", 11, 0, TX_RESULT.pack(4, 0, 0, 4), "confirm complete LABEL replacement"),
+        fs(TERMINAL, "TX_RESULT", 11, 0, TX_RESULT.pack(4, 0, 0, 4), "confirm complete GLYPH_RUN replacement"),
         fs(TERMINAL, "CREDIT", 12, 0, credit_payload(replace_credit), "release replacement transaction after TX_RESULT"),
         *drop_tx,
         fs(TERMINAL, "TX_RESULT", 13, 0, TX_RESULT.pack(5, 0, 0, 5), "confirm graph-safe object, series, and region drops"),
@@ -2591,7 +2593,7 @@ def expected_manifest() -> dict[str, Any]:
         "ret_query_unsupported": "the first covering CREDIT is the deterministic negative answer with no retained reply",
         "soundlab_initial_replace": "full SoundLab scene commits hidden through REPLACE_START and REPLACE_CONTINUE, reveals at revision 3, then accepts an unchanged legacy CELL transaction at revision 4",
         "soundlab_dynamic_append": "value and series history change without retransmitting any static definition",
-        "mutation_and_drop_lifecycle": "complete LABEL replacement then graph-safe object, series, and region drops leave exact owner authority live",
+        "mutation_and_drop_lifecycle": "complete GLYPH_RUN replacement then graph-safe object, series, and region drops leave exact owner authority live",
         "mixed_commit_and_rejections": "CELL and retained state commit atomically; retained-only rejections recover, while the final rejected mixed transaction requires SESSION_LOST",
         "legacy_cell_and_replace_continue": "unchanged CELL TX interleaves in the global revision domain before hidden REPLACE_START and REPLACE_CONTINUE reveal",
         "resize_layout_sync": "canonical full-width PRESENT CELL_REPLACE precedes hidden LAYOUT_START and zero-operation LAYOUT_CONTINUE reveal",
@@ -2638,7 +2640,7 @@ def expected_manifest() -> dict[str, Any]:
         "header": {
             "size": HEADER_BYTES,
             "magic_hex": MAGIC.hex(),
-            "version": VERSION,
+            "reserved0": 0,
             "crc": "CRC-32C over header bytes 0..35 followed by payload",
         },
         "canonical_session": f"0x{SESSION:016x}",
@@ -2675,10 +2677,10 @@ def check_equal(label: str, actual: Any, expected: Any) -> None:
 def decode_header(frame: bytes) -> dict[str, int | bytes]:
     if len(frame) < HEADER_BYTES:
         raise ValueError("frame shorter than APT-1 header")
-    magic, version, header_bytes, type_id, flags, reserved, payload_length, session, sequence, epoch, checksum = HEADER.unpack_from(frame)
+    magic, reserved0, header_bytes, type_id, flags, reserved, payload_length, session, sequence, epoch, checksum = HEADER.unpack_from(frame)
     return {
         "magic": magic,
-        "version": version,
+        "reserved0": reserved0,
         "header_bytes": header_bytes,
         "type": type_id,
         "flags": flags,
@@ -2711,7 +2713,7 @@ def validate_frame(label: str, spec: FrameSpec, actual: bytes) -> None:
     check_equal(f"{label} exact bytes", actual, expected)
     header = decode_header(actual)
     check_equal(f"{label} magic", header["magic"], MAGIC)
-    check_equal(f"{label} version", header["version"], VERSION)
+    check_equal(f"{label} reserved0", header["reserved0"], 0)
     check_equal(f"{label} header size", header["header_bytes"], HEADER_BYTES)
     check_equal(f"{label} type", header["type"], MESSAGE_TYPES[spec.message])
     check_equal(f"{label} flags", header["flags"], 0)
@@ -2772,7 +2774,7 @@ def validate_discovery(supported: Scenario, unsupported: Scenario) -> None:
         caps,
         (
             TAG,
-            1,
+            0,
             0,
             FEATURES,
             CAPS_VALUES["max_owner_records"],
@@ -2798,7 +2800,7 @@ def validate_discovery(supported: Scenario, unsupported: Scenario) -> None:
             FORMAT_VALUES["max_image_width"],
             FORMAT_VALUES["max_image_height"],
             FORMAT_VALUES["max_path_points"],
-            FORMAT_VALUES["max_label_bytes"],
+            FORMAT_VALUES["max_glyph_run_bytes"],
             FORMAT_VALUES["max_samples_per_append"],
             FORMAT_VALUES["max_history_per_series"],
             FORMAT_VALUES["minimum_presentation_interval_us"],
@@ -2877,9 +2879,9 @@ def validate_initial_and_dynamic(initial: Scenario, dynamic: Scenario) -> None:
         ],
     )
     check_equal(
-        "dynamic LABEL visibility",
+        "dynamic GLYPH_RUN visibility",
         OBJECT_SET_VISIBILITY.unpack(find_frames(dynamic, "OBJECT_SET_VISIBILITY")[0].payload),
-        (OWNER_ID, OWNER_GENERATION, LABEL_ID, 0),
+        (OWNER_ID, OWNER_GENERATION, GLYPH_RUN_ID, 0),
     )
     uniform_append, explicit_append = find_frames(dynamic, "SERIES_APPEND")
     owner, generation, series, count, mode, first_timestamp = SERIES_SAMPLES.unpack_from(uniform_append.payload)
@@ -2960,7 +2962,7 @@ def validate_object_bodies(initial: Scenario) -> None:
     expected_ids_types = (
         (GROUP_ID, OBJECT_TYPES["GROUP"]),
         (POLYLINE_ID, OBJECT_TYPES["POLYLINE"]),
-        (LABEL_ID, OBJECT_TYPES["LABEL"]),
+        (GLYPH_RUN_ID, OBJECT_TYPES["GLYPH_RUN"]),
         (READOUT_ID, OBJECT_TYPES["READOUT"]),
         (METER_ID, OBJECT_TYPES["METER"]),
         (STATUS_ID, OBJECT_TYPES["STATUS"]),
@@ -2989,11 +2991,23 @@ def validate_object_bodies(initial: Scenario) -> None:
         ((0, 0xFFFFFFFF), (0x7FFFFFFF, 0), (0xFFFFFFFF, 0xBFFFFFFF)),
     )
 
-    label_body = definitions[2].payload[OBJECT_PREFIX.size :]
-    label_values = LABEL_BODY.unpack_from(label_body)
-    check_equal("LABEL alignment/length/flags", label_values[4:], (1, 1, 8, 1))
-    check_equal("LABEL UTF-8", label_body[LABEL_BODY.size :], b"SoundLab")
-    check_equal("LABEL exact body length", len(label_body), LABEL_BODY.size + label_values[6])
+    glyph_run_body = definitions[2].payload[OBJECT_PREFIX.size :]
+    glyph_run_values = GLYPH_RUN_BODY.unpack_from(glyph_run_body)
+    check_equal(
+        "GLYPH_RUN background/attributes/reserved/length",
+        glyph_run_values[4:],
+        (0x10, 0x18, 0x28, 0xFF, 0, 0, 8),
+    )
+    check_equal(
+        "GLYPH_RUN UTF-8",
+        glyph_run_body[GLYPH_RUN_BODY.size :],
+        b"SoundLab",
+    )
+    check_equal(
+        "GLYPH_RUN exact body length",
+        len(glyph_run_body),
+        GLYPH_RUN_BODY.size + glyph_run_values[10],
+    )
 
     readout_body = definitions[3].payload[OBJECT_PREFIX.size :]
     readout_values = READOUT_BODY.unpack_from(readout_body)
@@ -3042,11 +3056,23 @@ def validate_mutation_and_drops(scenario: Scenario) -> None:
     check_equal("mutation/drop transaction count", len((replace, drops)), 2)
     check_equal("replacement body messages", [frame.message for frame in replace], ["PRESENT_BEGIN", "OBJECT_REPLACE", "PRESENT_COMMIT"])
     replacement_prefix = OBJECT_PREFIX.unpack_from(replace[1].payload)
-    check_equal("OBJECT_REPLACE identity/type", (replacement_prefix[2], replacement_prefix[3]), (LABEL_ID, OBJECT_TYPES["LABEL"]))
-    replacement_label = replace[1].payload[OBJECT_PREFIX.size :]
-    replacement_meta = LABEL_BODY.unpack_from(replacement_label)
-    check_equal("OBJECT_REPLACE label bytes", replacement_label[LABEL_BODY.size :], b"SoundLab armed")
-    check_equal("OBJECT_REPLACE exact length", len(replacement_label), LABEL_BODY.size + replacement_meta[6])
+    check_equal(
+        "OBJECT_REPLACE identity/type",
+        (replacement_prefix[2], replacement_prefix[3]),
+        (GLYPH_RUN_ID, OBJECT_TYPES["GLYPH_RUN"]),
+    )
+    replacement_run = replace[1].payload[OBJECT_PREFIX.size :]
+    replacement_meta = GLYPH_RUN_BODY.unpack_from(replacement_run)
+    check_equal(
+        "OBJECT_REPLACE glyph-run bytes",
+        replacement_run[GLYPH_RUN_BODY.size :],
+        b"SoundLab armed",
+    )
+    check_equal(
+        "OBJECT_REPLACE exact length",
+        len(replacement_run),
+        GLYPH_RUN_BODY.size + replacement_meta[10],
+    )
 
     drop_messages = [frame.message for frame in drops]
     check_equal(
@@ -3058,7 +3084,16 @@ def validate_mutation_and_drops(scenario: Scenario) -> None:
     check_equal(
         "dropped object identities",
         object_ids,
-        [POLYLINE_ID, LABEL_ID, GROUP_ID, READOUT_ID, METER_ID, STATUS_ID, PLOT_ID, WAVEFORM_ID],
+        [
+            POLYLINE_ID,
+            GLYPH_RUN_ID,
+            GROUP_ID,
+            READOUT_ID,
+            METER_ID,
+            STATUS_ID,
+            PLOT_ID,
+            WAVEFORM_ID,
+        ],
     )
     series_ids = [OWNER_ITEM.unpack(frame.payload)[2] for frame in drops if frame.message == "SERIES_DROP"]
     check_equal("dropped series identities", series_ids, [SERIES_ID, EXPLICIT_SERIES_ID])
@@ -3459,7 +3494,7 @@ def validate_struct_sizes() -> None:
         "OBJECT_PREFIX": (OBJECT_PREFIX.size, 64),
         "POLYLINE_BODY": (POLYLINE_BODY.size, 16),
         "POINT": (POINT.size, 8),
-        "LABEL_BODY": (LABEL_BODY.size, 16),
+        "GLYPH_RUN_BODY": (GLYPH_RUN_BODY.size, 16),
         "READOUT_BODY": (READOUT_BODY.size, 40),
         "METER_BODY": (METER_BODY.size, 48),
         "STATUS_BODY": (STATUS_BODY.size, 32),

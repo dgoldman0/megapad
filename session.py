@@ -29,8 +29,8 @@ from rich_terminal.display_cadence import DisplayCadenceScheduler
 from rich_terminal.output_coordinator import CompositeTerminalView
 from rich_terminal.retained_view import (
     DisplayScope,
-    RetainedRootLabelPlane,
-    project_composite_root_labels,
+    RetainedDrawPlane,
+    project_composite_draw_plane,
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_model import RetainedPolicy
@@ -197,7 +197,7 @@ class TerminalDisplayOffer:
     offer_id: int
     scope: DisplayScope
     cell: TerminalSnapshot
-    retained: RetainedRootLabelPlane
+    retained: RetainedDrawPlane
 
     def __post_init__(self) -> None:
         if isinstance(self.offer_id, bool):
@@ -213,8 +213,8 @@ class TerminalDisplayOffer:
             raise TypeError("scope must be DisplayScope")
         if not isinstance(self.cell, TerminalSnapshot):
             raise TypeError("cell must be TerminalSnapshot")
-        if not isinstance(self.retained, RetainedRootLabelPlane):
-            raise TypeError("retained must be RetainedRootLabelPlane")
+        if not isinstance(self.retained, RetainedDrawPlane):
+            raise TypeError("retained must be RetainedDrawPlane")
 
 
 @dataclass(frozen=True)
@@ -1090,7 +1090,7 @@ class MachineSession:
                 "cadence offered a composite without a CELL plane"
             )
         try:
-            scope, retained = project_composite_root_labels(offered)
+            scope, retained = project_composite_draw_plane(offered)
             cell_snapshot = self._snapshot_output_view(cell)
             display_offer = TerminalDisplayOffer(
                 offer_id=self._next_display_offer_id,

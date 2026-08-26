@@ -12,8 +12,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from display import VirtualTerminal
-from rich_terminal.pygame_view import composite_root_labels
-from rich_terminal.retained_view import DisplayScope, RetainedRootLabelPlane
+from rich_terminal.pygame_view import composite_draw_plane
+from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from session import TerminalDisplayOffer, TerminalSnapshot
 from shared_session import (
     DEFAULT_SOCKET,
@@ -103,10 +103,10 @@ class _RetainedDisplayState:
         self.since_offer = 0
         self.pending_offer: TerminalDisplayOffer | None = None
         self.pending_generation: int | None = None
-        self.retained_plane: RetainedRootLabelPlane | None = None
+        self.retained_plane: RetainedDrawPlane | None = None
 
     @property
-    def frame_plane(self) -> RetainedRootLabelPlane | None:
+    def frame_plane(self) -> RetainedDrawPlane | None:
         if self.pending_offer is not None:
             return self.pending_offer.retained
         return self.retained_plane
@@ -508,11 +508,11 @@ def compose_terminal_frame(
     cell_width: int,
     cell_height: int,
     *,
-    retained_plane: RetainedRootLabelPlane | None,
+    retained_plane: RetainedDrawPlane | None,
     show_cursor: bool,
     glyph_cache: dict | None = None,
 ):
-    """Render CELL, then root LABELs, then the terminal cursor."""
+    """Render CELL, then retained draws, then the terminal cursor."""
 
     surface = terminal.render(
         pygame_module,
@@ -523,7 +523,7 @@ def compose_terminal_frame(
         _cache=glyph_cache,
     )
     if retained_plane is not None:
-        composite_root_labels(
+        composite_draw_plane(
             pygame_module,
             surface,
             retained_plane,

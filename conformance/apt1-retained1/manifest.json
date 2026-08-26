@@ -5,7 +5,7 @@
   "header": {
     "size": 40,
     "magic_hex": "a5505431",
-    "version": 1,
+    "reserved0": 0,
     "crc": "CRC-32C over header bytes 0..35 followed by payload"
   },
   "canonical_session": "0x0123456789abcdef",
@@ -58,7 +58,7 @@
     "GROUP": 1,
     "POLYLINE": 2,
     "IMAGE": 3,
-    "LABEL": 4,
+    "GLYPH_RUN": 4,
     "READOUT": 5,
     "METER": 6,
     "STATUS": 7,
@@ -86,7 +86,7 @@
     "max_image_width": 256,
     "max_image_height": 256,
     "max_path_points": 256,
-    "max_label_bytes": 256,
+    "max_glyph_run_bytes": 256,
     "max_samples_per_append": 64,
     "max_history_per_series": 512,
     "minimum_presentation_interval_us": 500000,
@@ -157,7 +157,7 @@
       "state_file": "mutation_and_drop_lifecycle.state.json",
       "kind": "mutation_and_drop_commit",
       "frame_count": 20,
-      "invariant": "complete LABEL replacement then graph-safe object, series, and region drops leave exact owner authority live",
+      "invariant": "complete GLYPH_RUN replacement then graph-safe object, series, and region drops leave exact owner authority live",
       "expected_credit_watermarks": [
         85372,
         86236

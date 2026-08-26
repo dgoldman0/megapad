@@ -97,7 +97,7 @@ def _retained_policy() -> RetainedPolicy:
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
-        max_label_bytes=0,
+        max_glyph_run_bytes=0,
         max_samples_per_append=0,
         max_history_per_series=0,
         minimum_presentation_interval_us=0,
@@ -198,7 +198,7 @@ def _open_bytes(
     encoder = FrameEncoder(offer.session_id, max_payload=offer.max_payload)
     ready = encoder.encode(
         MessageType.CLIENT_READY,
-        READY.pack(1, 256, 0, client_credit, 64, 0, 0x3F),
+        READY.pack(0, 256, 0, client_credit, 64, 0, 0x3F),
     )
     return encode_open(request) + ready + _snapshot(encoder), encoder
 

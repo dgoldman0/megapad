@@ -19,7 +19,6 @@ from typing import Any, Iterable
 
 CONTRACT_ID = "APT-1-CELL-1-2026-08-24"
 MAGIC = b"\xa5PT1"
-VERSION = 1
 HEADER_BYTES = 40
 MAX_PAYLOAD = 1_048_576
 SESSION = 0x0123456789ABCDEF
@@ -86,7 +85,7 @@ def encode_frame(
         raise ValueError("canonical payload exceeds the contract maximum")
     prefix = HEADER_PREFIX.pack(
         MAGIC,
-        VERSION,
+        0,
         HEADER_BYTES,
         MESSAGE_TYPES[message],
         0,
@@ -102,7 +101,7 @@ def encode_frame(
 
 def server_ready_payload() -> bytes:
     return READY.pack(
-        1,
+        0,
         MAX_PAYLOAD,
         MAX_PAYLOAD,
         MAX_PAYLOAD,
@@ -114,7 +113,7 @@ def server_ready_payload() -> bytes:
 
 def client_ready_payload() -> bytes:
     return READY.pack(
-        1,
+        0,
         MAX_PAYLOAD,
         0,
         MAX_PAYLOAD,
@@ -165,7 +164,7 @@ class FrameSpec:
 
 def frame_specs() -> tuple[FrameSpec, ...]:
     server_ready = {
-        "profile": 1,
+        "reserved0": 0,
         "terminal_receive_max_payload": MAX_PAYLOAD,
         "max_transaction_bytes": MAX_PAYLOAD,
         "terminal_receive_credit": MAX_PAYLOAD,
@@ -174,7 +173,7 @@ def frame_specs() -> tuple[FrameSpec, ...]:
         "capabilities": f"0x{CAPABILITIES:016x}",
     }
     client_ready = {
-        "profile": 1,
+        "reserved0": 0,
         "client_receive_max_payload": MAX_PAYLOAD,
         "reserved_after_max_payload": 0,
         "client_receive_credit": MAX_PAYLOAD,
@@ -257,7 +256,7 @@ def frame_specs() -> tuple[FrameSpec, ...]:
 def make_oversized_header() -> bytes:
     return HEADER.pack(
         MAGIC,
-        VERSION,
+        0,
         HEADER_BYTES,
         MESSAGE_TYPES["CELL_SPAN"],
         0,
@@ -366,10 +365,10 @@ def read_hex_lines(path: Path) -> tuple[bytes, ...]:
 def decode_header(frame: bytes) -> dict[str, Any]:
     if len(frame) < HEADER_BYTES:
         raise ValueError("frame shorter than the fixed header")
-    magic, version, header_bytes, type_id, flags, reserved, payload_len, session, sequence, epoch, checksum = HEADER.unpack_from(frame)
+    magic, reserved0, header_bytes, type_id, flags, reserved, payload_len, session, sequence, epoch, checksum = HEADER.unpack_from(frame)
     return {
         "magic": magic.hex(),
-        "version": version,
+        "reserved0": reserved0,
         "header_bytes": header_bytes,
         "type": f"0x{type_id:04x}",
         "flags": flags,
@@ -439,7 +438,7 @@ def check_equal(label: str, actual: Any, expected: Any) -> None:
 def validate_frame_bytes(label: str, frame: bytes, *, allow_invalid_crc: bool = False) -> None:
     header = decode_header(frame)
     check_equal(f"{label} magic", header["magic"], MAGIC.hex())
-    check_equal(f"{label} version", header["version"], VERSION)
+    check_equal(f"{label} reserved0", header["reserved0"], 0)
     check_equal(f"{label} header size", header["header_bytes"], HEADER_BYTES)
     check_equal(f"{label} flags", header["flags"], 0)
     check_equal(f"{label} reserved", header["reserved"], 0)
@@ -466,9 +465,9 @@ def validate_manifest_metadata(manifest: dict[str, Any]) -> None:
     expected_header = {
         "size": HEADER_BYTES,
         "magic_hex": MAGIC.hex(),
-        "version": VERSION,
+        "reserved0": 0,
         "layout": [
-            "magic[4]", "version:u8", "header_bytes:u8", "type:u16",
+            "magic[4]", "reserved0:u8", "header_bytes:u8", "type:u16",
             "flags:u16", "reserved:u16", "payload_len:u32", "session:u64",
             "directional_sequence:u64", "presentation_epoch:u32", "crc32c:u32",
         ],
