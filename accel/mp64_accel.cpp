@@ -20632,6 +20632,7 @@ static bool decode_single_core_register_instruction(
             if (
                 subop != 0x0 &&  // ADD
                 subop != 0x6 &&  // XOR
+                subop != 0x7 &&  // CMP
                 subop != 0x8     // MOV
             ) {
                 return false;
@@ -21136,6 +21137,10 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_logic_flags(emitter, core);
                     return;
+                case 0x7:  // CMP
+                    emitter.bytes({0x48, 0x39, 0xC8});
+                    emit_single_core_jit_comparison_flags(emitter, core);
+                    return;
                 case 0x8:  // MOV
                     emitter.bytes({0x49, 0x89, 0x8C, 0x24});
                     emitter.i32(
@@ -21477,6 +21482,19 @@ static bool single_core_block_identity_matches(
                 decoded.encoded_size != 3 ||
                 decoded.cycle_cost != 1 ||
                 decoded.immediate > 0xFF
+            ) {
+                return false;
+            }
+        } else if (
+            decoded.family == 0x7 && decoded.subop == 0x7
+        ) {
+            if (
+                decoded.encoded_size != 2 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate != 0 ||
+                decoded.rd >= 16 ||
+                decoded.rs >= 16 ||
+                decoded.rd == block.psel
             ) {
                 return false;
             }

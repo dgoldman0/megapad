@@ -923,3 +923,66 @@ forward:
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_executions"] == 2
         assert counts["uncontended_jit_steps"] == 4
+
+
+def test_register_cmp_executes_natively_with_exact_comparison_flags(
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    cmp r4, r5
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    warmup = system.run_batch_stats(4)
+    assert warmup.instructions_executed == 4
+    assert warmup.system_cycles_advanced == 6
+    assert warmup.per_core_cycles[0] == 6
+
+    cases = (
+        (1, 1, 0xAC, 0x93),
+        (
+            0x7FFF_FFFF_FFFF_FFFE,
+            0xFFFF_FFFF_FFFF_FF80,
+            0xA3,
+            0x9C,
+        ),
+        (0x8000_0000_0000_0000, 2, 0x95, 0xAA),
+    )
+    for lhs, rhs, pre_flags, expected_flags in cases:
+        system.cpu.pc = 0
+        system.cpu.regs[4] = lhs
+        system.cpu.regs[5] = rhs
+        system.cpu.flags_unpack(pre_flags)
+
+        native = system.run_batch_stats(2)
+
+        assert native.instructions_executed == 2
+        assert native.system_cycles_advanced == 3
+        assert native.per_core_cycles[0] == 3
+        assert system.cpu.regs[4] == lhs
+        assert system.cpu.regs[5] == rhs
+        assert system.cpu.pc == 0
+        assert system.cpu.flags_pack() == expected_flags
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert counts["uncontended_steps"] == 10
+    assert counts["uncontended_block_steps"] == 8
+    assert system.cpu.cycle_count == 15
+    assert owner.system_cycles == 15
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_executions"] == 3
+        assert counts["uncontended_jit_steps"] == 6
