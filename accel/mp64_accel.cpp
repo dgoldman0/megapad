@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
@@ -29,6 +30,29 @@
 #include <thread>
 #include <vector>
 #include <unistd.h>
+#if defined(__SANITIZE_ADDRESS__) || \
+    defined(__SANITIZE_THREAD__) || \
+    defined(__SANITIZE_UNDEFINED__)
+#define MP64_SANITIZER_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || \
+    __has_feature(thread_sanitizer) || \
+    __has_feature(undefined_behavior_sanitizer)
+#define MP64_SANITIZER_BUILD 1
+#else
+#define MP64_SANITIZER_BUILD 0
+#endif
+#else
+#define MP64_SANITIZER_BUILD 0
+#endif
+#if defined(__x86_64__) && !defined(__ILP32__) && \
+    defined(__linux__) && \
+    !MP64_SANITIZER_BUILD
+#include <sys/mman.h>
+#define MP64_HAS_X86_64_JIT 1
+#else
+#define MP64_HAS_X86_64_JIT 0
+#endif
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
@@ -164,7 +188,13 @@ public:
             static_cast<std::size_t>(core_count) *
                 static_cast<std::size_t>(core_count),
             0);
-        ipi_lines_.assign(static_cast<std::size_t>(core_count), 0);
+        ipi_lines_ =
+            std::make_unique<std::atomic<uint8_t>[]>(
+                static_cast<std::size_t>(core_count));
+        for (int core_id = 0; core_id < core_count; core_id++) {
+            ipi_lines_[static_cast<std::size_t>(core_id)].store(
+                0, std::memory_order_relaxed);
+        }
     }
 
     bool send_ipi(int requester_id, int target_id) {
@@ -174,7 +204,8 @@ public:
             requester_id == target_id)
             return false;
         pending_[pending_index_unlocked(target_id, requester_id)] = 1;
-        ipi_lines_[static_cast<std::size_t>(target_id)] = 1;
+        ipi_lines_[static_cast<std::size_t>(target_id)].store(
+            1, std::memory_order_release);
         return true;
     }
 
@@ -187,8 +218,10 @@ public:
             pending_index_unlocked(target_id, source_id);
         const bool was_pending = pending_[index] != 0;
         pending_[index] = 0;
-        if (!has_pending_unlocked(target_id))
-            ipi_lines_[static_cast<std::size_t>(target_id)] = 0;
+        if (!has_pending_unlocked(target_id)) {
+            ipi_lines_[static_cast<std::size_t>(target_id)].store(
+                0, std::memory_order_release);
+        }
         return was_pending;
     }
 
@@ -210,15 +243,29 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         if (!valid_core_unlocked(core_id))
             return false;
-        return ipi_lines_[static_cast<std::size_t>(core_id)] != 0;
+        return ipi_lines_[static_cast<std::size_t>(core_id)].load(
+                   std::memory_order_acquire) != 0;
     }
 
     void set_ipi_line(int core_id, bool asserted) {
         std::lock_guard<std::mutex> guard(mutex_);
         if (!valid_core_unlocked(core_id))
             return;
-        ipi_lines_[static_cast<std::size_t>(core_id)] =
-            asserted ? 1 : 0;
+        ipi_lines_[static_cast<std::size_t>(core_id)].store(
+            asserted ? 1 : 0,
+            std::memory_order_release);
+    }
+
+    // Configuration is immutable after SystemState construction, so this
+    // address remains stable for the router lifetime. The Linux/x86-64 JIT
+    // performs the equivalent acquire observation with an ordinary byte
+    // load, as guaranteed by x86 TSO, without taking the router mutex at
+    // every guest-instruction boundary.
+    const std::atomic<uint8_t>* ipi_line_mirror(
+            int core_id) const noexcept {
+        if (core_id < 0 || core_id >= core_count_)
+            return nullptr;
+        return &ipi_lines_[static_cast<std::size_t>(core_id)];
     }
 
     std::vector<uint64_t> pending_snapshot() const {
@@ -264,7 +311,7 @@ private:
     mutable std::mutex mutex_;
     int core_count_ = 0;
     std::vector<uint8_t> pending_;
-    std::vector<uint8_t> ipi_lines_;
+    std::unique_ptr<std::atomic<uint8_t>[]> ipi_lines_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1650,6 +1697,63 @@ enum class CoreProfile : uint8_t {
     MICRO = 1,
 };
 
+// One immutable W^X mapping owned by a translated block. Code is emitted
+// into an unpublished RW mapping, sealed RX, and only then moved into a live
+// cache entry. Replacement or CPU destruction unmaps it automatically.
+class HostExecutableCode {
+public:
+    HostExecutableCode() = default;
+    HostExecutableCode(void* address, std::size_t size) noexcept
+        : address_(address), size_(size) {}
+    HostExecutableCode(const HostExecutableCode&) = delete;
+    HostExecutableCode& operator=(
+        const HostExecutableCode&) = delete;
+
+    HostExecutableCode(
+            HostExecutableCode&& other) noexcept
+        : address_(other.address_), size_(other.size_) {
+        other.address_ = nullptr;
+        other.size_ = 0;
+    }
+
+    HostExecutableCode& operator=(
+            HostExecutableCode&& other) noexcept {
+        if (this == &other)
+            return *this;
+        reset();
+        address_ = other.address_;
+        size_ = other.size_;
+        other.address_ = nullptr;
+        other.size_ = 0;
+        return *this;
+    }
+
+    ~HostExecutableCode() {
+        reset();
+    }
+
+    explicit operator bool() const noexcept {
+        return address_ != nullptr;
+    }
+
+    void* address() const noexcept {
+        return address_;
+    }
+
+    void reset() noexcept {
+#if MP64_HAS_X86_64_JIT
+        if (address_ != nullptr)
+            ::munmap(address_, size_);
+#endif
+        address_ = nullptr;
+        size_ = 0;
+    }
+
+private:
+    void* address_ = nullptr;
+    std::size_t size_ = 0;
+};
+
 class ResumableBusAccess;
 class ResumableTileAccess;
 
@@ -1918,6 +2022,7 @@ struct CPUState {
     };
     struct SingleCoreDecodedBlockEntry {
         bool valid = false;
+        bool native_compile_checked = false;
         uint8_t psel = 0;
         uint8_t identity_size = 0;
         uint8_t instruction_count = 0;
@@ -1927,6 +2032,7 @@ struct CPUState {
             SingleCoreDecodedInstruction,
             SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS>
             instructions{};
+        HostExecutableCode native_code;
     };
     std::array<
         SingleCoreDecodedBlockEntry,
@@ -4072,6 +4178,11 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_block_builds = 0;
     uint64_t uncontended_block_executions = 0;
     uint64_t uncontended_block_steps = 0;
+    uint64_t uncontended_jit_compile_attempts = 0;
+    uint64_t uncontended_jit_compilations = 0;
+    uint64_t uncontended_jit_compile_failures = 0;
+    uint64_t uncontended_jit_executions = 0;
+    uint64_t uncontended_jit_steps = 0;
     uint64_t logical_subfrontiers = 0;
     uint64_t round_absorptions = 0;
     uint64_t worker_waves = 0;
@@ -20485,6 +20596,522 @@ static bool decode_single_core_register_instruction(
     return encoded_size != 0;
 }
 
+enum class SingleCoreJitCompilation : uint8_t {
+    UNAVAILABLE = 0,
+    COMPILED = 1,
+    FAILED = 2,
+};
+
+using SingleCoreJitFunction = uint64_t (*)(
+    CPUState*,
+    const std::atomic<uint8_t>*);
+
+#if MP64_HAS_X86_64_JIT
+
+static_assert(
+    sizeof(std::atomic<uint8_t>) == sizeof(uint8_t) &&
+        std::atomic<uint8_t>::is_always_lock_free,
+    "x86-64 JIT interrupt polling requires a lock-free byte atomic");
+static_assert(
+    sizeof(void*) == 8 && sizeof(std::size_t) == 8 &&
+        sizeof(bool) == 1,
+    "x86-64 JIT requires the 64-bit SysV data model");
+
+class X86_64BlockEmitter {
+public:
+    void byte(uint8_t value) {
+        code_.push_back(value);
+    }
+
+    void u32(uint32_t value) {
+        for (int shift = 0; shift < 32; shift += 8)
+            byte(static_cast<uint8_t>(value >> shift));
+    }
+
+    void i32(int32_t value) {
+        u32(static_cast<uint32_t>(value));
+    }
+
+    std::size_t position() const noexcept {
+        return code_.size();
+    }
+
+    std::size_t branch32(uint8_t condition) {
+        byte(0x0F);
+        byte(condition);
+        const std::size_t displacement = position();
+        u32(0);
+        return displacement;
+    }
+
+    std::size_t jump32() {
+        byte(0xE9);
+        const std::size_t displacement = position();
+        u32(0);
+        return displacement;
+    }
+
+    void patch32(
+            std::size_t displacement,
+            std::size_t target) {
+        if (
+            displacement + 4 > code_.size() ||
+            target > code_.size() ||
+            target > static_cast<std::size_t>(
+                std::numeric_limits<int32_t>::max())
+        ) {
+            throw std::logic_error(
+                "x86-64 JIT branch target is out of range");
+        }
+        const int64_t relative =
+            static_cast<int64_t>(target) -
+            static_cast<int64_t>(displacement + 4);
+        if (
+            relative < std::numeric_limits<int32_t>::min() ||
+            relative > std::numeric_limits<int32_t>::max()
+        ) {
+            throw std::logic_error(
+                "x86-64 JIT branch displacement is out of range");
+        }
+        const uint32_t encoded = static_cast<uint32_t>(
+            static_cast<int32_t>(relative));
+        for (int index = 0; index < 4; index++) {
+            code_[displacement + static_cast<std::size_t>(index)] =
+                static_cast<uint8_t>(encoded >> (index * 8));
+        }
+    }
+
+    void mov_rax_from_core(int32_t displacement) {
+        bytes({0x49, 0x8B, 0x84, 0x24});
+        i32(displacement);
+    }
+
+    void mov_rcx_from_core(int32_t displacement) {
+        bytes({0x49, 0x8B, 0x8C, 0x24});
+        i32(displacement);
+    }
+
+    void mov_core_from_rax(int32_t displacement) {
+        bytes({0x49, 0x89, 0x84, 0x24});
+        i32(displacement);
+    }
+
+    void add_core_imm8(
+            int32_t displacement,
+            uint8_t immediate) {
+        bytes({0x49, 0x83, 0x84, 0x24});
+        i32(displacement);
+        byte(immediate);
+    }
+
+    void increment_core(int32_t displacement) {
+        bytes({0x49, 0xFF, 0x84, 0x24});
+        i32(displacement);
+    }
+
+    void decrement_core(int32_t displacement) {
+        bytes({0x49, 0xFF, 0x8C, 0x24});
+        i32(displacement);
+    }
+
+    void add_core_rbx(int32_t displacement) {
+        bytes({0x49, 0x01, 0x9C, 0x24});
+        i32(displacement);
+    }
+
+    void add_core_r15(int32_t displacement) {
+        bytes({0x4D, 0x01, 0xBC, 0x24});
+        i32(displacement);
+    }
+
+    void compare_core_byte_zero(int32_t displacement) {
+        bytes({0x41, 0x80, 0xBC, 0x24});
+        i32(displacement);
+        byte(0);
+    }
+
+    void store_core_byte(
+            int32_t displacement,
+            uint8_t value) {
+        bytes({0x41, 0xC6, 0x84, 0x24});
+        i32(displacement);
+        byte(value);
+    }
+
+    void store_core_qword_zero(int32_t displacement) {
+        bytes({0x49, 0xC7, 0x84, 0x24});
+        i32(displacement);
+        u32(0);
+    }
+
+    void set_core_byte(
+            uint8_t condition_opcode,
+            int32_t displacement) {
+        bytes({0x41, 0x0F, condition_opcode, 0x84, 0x24});
+        i32(displacement);
+    }
+
+    void bytes(std::initializer_list<uint8_t> values) {
+        code_.insert(code_.end(), values.begin(), values.end());
+    }
+
+    const std::vector<uint8_t>& code() const noexcept {
+        return code_;
+    }
+
+private:
+    std::vector<uint8_t> code_;
+};
+
+template <typename Field>
+static int32_t single_core_jit_offset(
+        const CPUState& core,
+        const Field& field) {
+    const std::uintptr_t base =
+        reinterpret_cast<std::uintptr_t>(&core);
+    const std::uintptr_t address =
+        reinterpret_cast<std::uintptr_t>(&field);
+    if (address < base) {
+        throw std::logic_error(
+            "CPUState field precedes its x86-64 JIT base");
+    }
+    const std::uintptr_t relative = address - base;
+    if (
+        relative > sizeof(CPUState) ||
+        sizeof(Field) > sizeof(CPUState) - relative
+    ) {
+        throw std::logic_error(
+            "CPUState field exceeds its x86-64 JIT object");
+    }
+    const std::size_t offset = static_cast<std::size_t>(relative);
+    if (offset > static_cast<std::size_t>(
+            std::numeric_limits<int32_t>::max())) {
+        throw std::logic_error(
+            "CPUState field offset exceeds x86-64 displacement range");
+    }
+    return static_cast<int32_t>(offset);
+}
+
+static int32_t single_core_jit_register_offset(
+        const CPUState& core,
+        uint8_t reg) {
+    if (reg >= 32) {
+        throw std::logic_error(
+            "x86-64 JIT register index is out of range");
+    }
+    return single_core_jit_offset(core, core.regs[reg]);
+}
+
+static void emit_single_core_jit_logic_flags(
+        X86_64BlockEmitter& emitter,
+        const CPUState& core) {
+    emitter.set_core_byte(
+        0x94,
+        single_core_jit_offset(core, core.flag_z));
+    emitter.set_core_byte(
+        0x98,
+        single_core_jit_offset(core, core.flag_n));
+    emitter.set_core_byte(
+        0x9A,
+        single_core_jit_offset(core, core.flag_p));
+    emitter.store_core_byte(
+        single_core_jit_offset(core, core.flag_c),
+        0);
+    emitter.store_core_byte(
+        single_core_jit_offset(core, core.flag_v),
+        0);
+}
+
+static void emit_single_core_jit_arithmetic_flags(
+        X86_64BlockEmitter& emitter,
+        const CPUState& core) {
+    emitter.set_core_byte(
+        0x94,
+        single_core_jit_offset(core, core.flag_z));
+    emitter.set_core_byte(
+        0x92,
+        single_core_jit_offset(core, core.flag_c));
+    emitter.set_core_byte(
+        0x98,
+        single_core_jit_offset(core, core.flag_n));
+    emitter.set_core_byte(
+        0x90,
+        single_core_jit_offset(core, core.flag_v));
+    emitter.set_core_byte(
+        0x9A,
+        single_core_jit_offset(core, core.flag_p));
+}
+
+static void emit_single_core_jit_instruction(
+        X86_64BlockEmitter& emitter,
+        const CPUState& core,
+        const CPUState::SingleCoreDecodedInstruction& decoded,
+        uint8_t psel) {
+    emitter.add_core_imm8(
+        single_core_jit_register_offset(core, psel),
+        decoded.encoded_size);
+    emitter.bytes({0x41, 0x83, 0xC7, decoded.fetch_hits});
+
+    switch (decoded.family) {
+        case 0x0:  // NOP
+            return;
+        case 0x1:  // INC
+            emitter.increment_core(
+                single_core_jit_register_offset(core, decoded.rd));
+            return;
+        case 0x2:  // DEC
+            emitter.decrement_core(
+                single_core_jit_register_offset(core, decoded.rd));
+            return;
+        case 0x6:
+            emitter.mov_rax_from_core(
+                single_core_jit_register_offset(core, decoded.rd));
+            switch (decoded.subop) {
+                case 0x2:  // ADDI
+                    emitter.bytes({
+                        0x48,
+                        0x83,
+                        0xC0,
+                        static_cast<uint8_t>(decoded.immediate),
+                    });
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_arithmetic_flags(emitter, core);
+                    return;
+                case 0x4:  // ORI
+                    emitter.bytes({0x48, 0x0D});
+                    emitter.u32(static_cast<uint32_t>(decoded.immediate));
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_logic_flags(emitter, core);
+                    return;
+                case 0xB:  // ROLI
+                    emitter.bytes({
+                        0x48,
+                        0xC1,
+                        0xC0,
+                        static_cast<uint8_t>(decoded.immediate & 0xF),
+                    });
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    return;
+                default:
+                    throw std::logic_error(
+                        "x86-64 JIT received unsupported immediate op");
+            }
+        case 0x7:
+            emitter.mov_rax_from_core(
+                single_core_jit_register_offset(core, decoded.rd));
+            emitter.mov_rcx_from_core(
+                single_core_jit_register_offset(core, decoded.rs));
+            switch (decoded.subop) {
+                case 0x0:  // ADD
+                    emitter.bytes({0x48, 0x01, 0xC8});
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_arithmetic_flags(emitter, core);
+                    return;
+                case 0x6:  // XOR
+                    emitter.bytes({0x48, 0x31, 0xC8});
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_logic_flags(emitter, core);
+                    return;
+                case 0x8:  // MOV
+                    emitter.bytes({0x49, 0x89, 0x8C, 0x24});
+                    emitter.i32(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    return;
+                default:
+                    throw std::logic_error(
+                        "x86-64 JIT received unsupported ALU op");
+            }
+        default:
+            throw std::logic_error(
+                "x86-64 JIT received unsupported instruction family");
+    }
+}
+
+static HostExecutableCode seal_single_core_jit_code(
+        const std::vector<uint8_t>& code) noexcept {
+    if (code.empty())
+        return {};
+    const long page_size_value = ::sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0)
+        return {};
+    const std::size_t page_size =
+        static_cast<std::size_t>(page_size_value);
+    if (code.size() >
+        std::numeric_limits<std::size_t>::max() - (page_size - 1)) {
+        return {};
+    }
+    const std::size_t mapping_size =
+        ((code.size() + page_size - 1) / page_size) * page_size;
+    constexpr int anonymous_mapping = MAP_ANONYMOUS;
+    void* mapping = ::mmap(
+        nullptr,
+        mapping_size,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | anonymous_mapping,
+        -1,
+        0);
+    if (mapping == MAP_FAILED)
+        return {};
+    std::memcpy(mapping, code.data(), code.size());
+    __builtin___clear_cache(
+        static_cast<char*>(mapping),
+        static_cast<char*>(mapping) + code.size());
+    if (::mprotect(
+            mapping,
+            mapping_size,
+            PROT_READ | PROT_EXEC) != 0) {
+        ::munmap(mapping, mapping_size);
+        return {};
+    }
+    return HostExecutableCode(mapping, mapping_size);
+}
+
+static SingleCoreJitCompilation
+compile_single_core_jit_block(
+        const CPUState& core,
+        CPUState::SingleCoreDecodedBlockEntry& block) {
+    try {
+        X86_64BlockEmitter emitter;
+        // ENDBR64 is a no-op on hosts without CET and permits indirect entry
+        // when control-flow enforcement is active.
+        emitter.bytes({0xF3, 0x0F, 0x1E, 0xFA});
+        emitter.bytes({
+            0x53,             // push rbx
+            0x41, 0x54,       // push r12
+            0x41, 0x55,       // push r13
+            0x41, 0x57,       // push r15
+            0x49, 0x89, 0xFC, // mov r12, rdi (CPUState*)
+            0x49, 0x89, 0xF5, // mov r13, rsi (enabled IPI mirror*)
+            0x31, 0xDB,       // xor ebx, ebx (retired steps)
+            0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
+            0x45, 0x31, 0xD2, // xor r10d, r10d (exit reason)
+        });
+
+        std::vector<std::size_t> interrupt_exits;
+        for (
+            uint8_t index = 0;
+            index < block.instruction_count;
+            index++
+        ) {
+            emit_single_core_jit_instruction(
+                emitter,
+                core,
+                block.instructions[index],
+                block.psel);
+            emitter.bytes({0xFF, 0xC3}); // inc ebx
+            emitter.bytes({
+                0x41,
+                0xBB,
+                block.instructions[index].fetch_hits,
+                0x00,
+                0x00,
+                0x00,
+            }); // mov r11d, last instruction's fetch hits
+
+            if (index + 1 < block.instruction_count) {
+                emitter.bytes({0x4D, 0x85, 0xED}); // test r13, r13
+                const std::size_t interrupts_masked =
+                    emitter.branch32(0x84); // je
+                emitter.bytes({
+                    0x41, 0x80, 0x7D, 0x00, 0x00,
+                }); // cmp byte ptr [r13 atomic mirror], 0
+                interrupt_exits.push_back(
+                    emitter.branch32(0x85)); // jne
+                emitter.patch32(
+                    interrupts_masked,
+                    emitter.position());
+            }
+        }
+
+        const std::size_t common_exit = emitter.position();
+        emitter.add_core_r15(
+            single_core_jit_offset(
+                core, core.icache_hits));
+        emitter.add_core_rbx(
+            single_core_jit_offset(
+                core, core.cycle_count));
+        emitter.compare_core_byte_zero(
+            single_core_jit_offset(
+                core, core.perf_enable));
+        const std::size_t perf_disabled =
+            emitter.branch32(0x84); // je
+        emitter.add_core_rbx(
+            single_core_jit_offset(
+                core, core.perf_cycles));
+        emitter.patch32(perf_disabled, emitter.position());
+
+        // Reproduce icache_begin_instruction() for the last retired
+        // instruction. The block was resident, so misses do not change;
+        // undo_hits is the final hit count less the last fetch's hits.
+        emitter.mov_rax_from_core(
+            single_core_jit_offset(
+                core, core.icache_hits));
+        emitter.bytes({0x4C, 0x29, 0xD8}); // sub rax, r11
+        emitter.mov_core_from_rax(
+            single_core_jit_offset(
+                core, core.icache_undo_hits));
+        emitter.mov_rax_from_core(
+            single_core_jit_offset(
+                core, core.icache_misses));
+        emitter.mov_core_from_rax(
+            single_core_jit_offset(
+                core, core.icache_undo_misses));
+        emitter.store_core_byte(
+            single_core_jit_offset(
+                core, core.ifetch_window_valid),
+            0);
+        emitter.store_core_qword_zero(
+            single_core_jit_offset(
+                core, core.icache_undo_count));
+        emitter.bytes({
+            0x89, 0xD8,       // mov eax, ebx
+            0x49, 0xC1, 0xE2, 0x20, // shl r10, 32
+            0x4C, 0x09, 0xD0, // or rax, r10
+            0x41, 0x5F,       // pop r15
+            0x41, 0x5D,       // pop r13
+            0x41, 0x5C,       // pop r12
+            0x5B,             // pop rbx
+            0xC3,             // ret
+        });
+
+        const std::size_t interrupt_exit = emitter.position();
+        for (const std::size_t branch : interrupt_exits)
+            emitter.patch32(branch, interrupt_exit);
+        emitter.bytes({
+            0x41, 0xBA, 0x01, 0x00, 0x00, 0x00,
+        }); // mov r10d, 1
+        const std::size_t interrupt_to_common =
+            emitter.jump32();
+        emitter.patch32(interrupt_to_common, common_exit);
+
+        HostExecutableCode code =
+            seal_single_core_jit_code(emitter.code());
+        if (!code)
+            return SingleCoreJitCompilation::FAILED;
+        block.native_code = std::move(code);
+        return SingleCoreJitCompilation::COMPILED;
+    } catch (const std::bad_alloc&) {
+        block.native_code.reset();
+        return SingleCoreJitCompilation::FAILED;
+    }
+}
+
+#else
+
+static SingleCoreJitCompilation
+compile_single_core_jit_block(
+        const CPUState&,
+        CPUState::SingleCoreDecodedBlockEntry&) noexcept {
+    return SingleCoreJitCompilation::UNAVAILABLE;
+}
+
+#endif
+
 static bool single_core_block_identity_matches(
         const CPUState& core,
         const CPUState::SingleCoreDecodedBlockEntry& block,
@@ -20598,7 +21225,7 @@ build_single_core_decoded_block(
     CPUState::SingleCoreDecodedBlockEntry& destination =
         core.single_core_block_cache[
             single_core_block_cache_index(address)];
-    destination = candidate;
+    destination = std::move(candidate);
     return &destination;
 }
 
@@ -20683,8 +21310,10 @@ try_execute_single_core_decoded_block(
     CPUState::SingleCoreDecodedBlockEntry* block =
         &core.single_core_block_cache[
             single_core_block_cache_index(address)];
-    if (single_core_block_identity_matches(
-            core, *block, address)) {
+    const bool block_cache_hit =
+        single_core_block_identity_matches(
+            core, *block, address);
+    if (block_cache_hit) {
         if (profile_enabled) {
             host_saturating_increment(
                 profile.uncontended_block_hits);
@@ -20704,34 +21333,133 @@ try_execute_single_core_decoded_block(
         }
     }
 
-    for (
-        uint8_t index = 0;
-        index < block->instruction_count &&
-        run.steps < max_steps;
-        index++
-    ) {
-        if (
-            index != 0 &&
-            pending_enabled_core_interrupt(system, core) >= 0
-        ) {
-            run.interrupt_boundary = true;
-            break;
-        }
-        const CPUState::SingleCoreDecodedInstruction& decoded =
-            block->instructions[index];
-        execute_single_core_decoded_instruction(
-            core,
-            decoded);
-        run.steps++;
-        run.cycles += decoded.cycle_cost;
+    const bool timing_active =
+        system.shared_crypto
+            .requires_unbounded_timing_boundary() ||
+        system.shared_nic.has_cycle_dma_work();
+    const bool native_eligible =
+        max_steps >= block->instruction_count &&
+        !timing_active;
 
-        if (
-            system.shared_crypto
-                .requires_unbounded_timing_boundary() ||
-            system.shared_nic.has_cycle_dma_work()
+    // A decoded plan must be observed again before it is compiled. This
+    // keeps one-shot boot/source paths from paying mmap+mprotect churn while
+    // letting the first repeated use compile and immediately enter native
+    // code. Ineligible sliced or timing-active visits do not consume that
+    // opportunity.
+    if (
+        block_cache_hit &&
+        !block->native_compile_checked &&
+        native_eligible
+    ) {
+        const SingleCoreJitCompilation jit_compilation =
+            compile_single_core_jit_block(core, *block);
+        block->native_compile_checked = true;
+        if (profile_enabled) {
+            if (
+                jit_compilation ==
+                    SingleCoreJitCompilation::COMPILED ||
+                jit_compilation ==
+                    SingleCoreJitCompilation::FAILED
+            ) {
+                host_saturating_increment(
+                    profile.uncontended_jit_compile_attempts);
+            }
+            if (
+                jit_compilation ==
+                SingleCoreJitCompilation::COMPILED
+            ) {
+                host_saturating_increment(
+                    profile.uncontended_jit_compilations);
+            } else if (
+                jit_compilation ==
+                SingleCoreJitCompilation::FAILED
+            ) {
+                host_saturating_increment(
+                    profile.uncontended_jit_compile_failures);
+            }
+        }
+    }
+
+    bool native_executed = false;
+    if (
+        block->native_code &&
+        native_eligible
+    ) {
+        const std::atomic<uint8_t>* enabled_ipi_mirror =
+            core.flag_i
+            ? system.shared_interrupts.ipi_line_mirror(
+                  core.core_id)
+            : nullptr;
+        if (!core.flag_i || enabled_ipi_mirror != nullptr) {
+            const SingleCoreJitFunction function =
+                reinterpret_cast<SingleCoreJitFunction>(
+                    block->native_code.address());
+            const uint64_t packed =
+                function(&core, enabled_ipi_mirror);
+            const uint32_t steps =
+                static_cast<uint32_t>(packed);
+            const bool interrupt_boundary =
+                ((packed >> 32) & 1) != 0;
+            if (
+                (packed >> 33) != 0 ||
+                steps == 0 ||
+                steps > block->instruction_count ||
+                (
+                    interrupt_boundary
+                    ? steps >= block->instruction_count
+                    : steps != block->instruction_count
+                )
+            ) {
+                throw std::logic_error(
+                    "single-core JIT returned an invalid completed prefix");
+            }
+            run.steps = static_cast<int>(steps);
+            run.cycles = static_cast<int64_t>(steps);
+            run.interrupt_boundary = interrupt_boundary;
+            // Pure admitted operations cannot activate crypto or NIC work,
+            // and external device mutation is excluded by the execution
+            // admission held around this segment.
+            native_executed = true;
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_jit_executions);
+                host_saturating_add(
+                    profile.uncontended_jit_steps,
+                    steps);
+            }
+        }
+    }
+
+    if (!native_executed) {
+        for (
+            uint8_t index = 0;
+            index < block->instruction_count &&
+            run.steps < max_steps;
+            index++
         ) {
-            run.timing_boundary = true;
-            break;
+            if (
+                index != 0 &&
+                pending_enabled_core_interrupt(system, core) >= 0
+            ) {
+                run.interrupt_boundary = true;
+                break;
+            }
+            const CPUState::SingleCoreDecodedInstruction& decoded =
+                block->instructions[index];
+            execute_single_core_decoded_instruction(
+                core,
+                decoded);
+            run.steps++;
+            run.cycles += decoded.cycle_cost;
+
+            if (
+                system.shared_crypto
+                    .requires_unbounded_timing_boundary() ||
+                system.shared_nic.has_cycle_dma_work()
+            ) {
+                run.timing_boundary = true;
+                break;
+            }
         }
     }
 
@@ -23608,6 +24336,16 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_block_executions;
     counts["uncontended_block_steps"] =
         profile.uncontended_block_steps;
+    counts["uncontended_jit_compile_attempts"] =
+        profile.uncontended_jit_compile_attempts;
+    counts["uncontended_jit_compilations"] =
+        profile.uncontended_jit_compilations;
+    counts["uncontended_jit_compile_failures"] =
+        profile.uncontended_jit_compile_failures;
+    counts["uncontended_jit_executions"] =
+        profile.uncontended_jit_executions;
+    counts["uncontended_jit_steps"] =
+        profile.uncontended_jit_steps;
     counts["logical_subfrontiers"] =
         profile.logical_subfrontiers;
     counts["round_absorptions"] =
@@ -23711,7 +24449,7 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict result;
-    result["schema_version"] = 5;
+    result["schema_version"] = 6;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -23720,6 +24458,11 @@ static py::dict concurrency_profile_snapshot_dict(
         "unbounded_native_system_batch_only";
     result["timing_semantics"] =
         "inclusive_nested_host_wall_nanoseconds";
+#if MP64_HAS_X86_64_JIT
+    result["single_core_jit_backend"] = "x86_64";
+#else
+    result["single_core_jit_backend"] = "unavailable";
+#endif
     result["counts"] = std::move(counts);
     result["wall_ns"] = std::move(wall_ns);
     result["lane_active_ns"] =

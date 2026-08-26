@@ -26,6 +26,10 @@ full-core counters, which remain zero for this microcore topology.
 Version 8 carries native host-profile schema 5 and its exact-single-core
 decoded-block counters. Timed-workload and architectural-state semantics
 remain unchanged.
+
+Version 9 carries native host-profile schema 6 and its exact-single-core JIT
+telemetry. The JIT remains ineligible for this microcore topology; timed and
+architectural-state semantics remain unchanged.
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 8
+REPORT_SCHEMA_VERSION = 9
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -343,8 +347,8 @@ def _profile_probe(
         counts["coordinator_boundary_origins"].values()
     )
     validation = {
-        "schema_is_version_5":
-            normalized["schema_version"] == 5,
+        "schema_is_version_6":
+            normalized["schema_version"] == 6,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -382,6 +386,11 @@ def _profile_probe(
                     "uncontended_block_builds",
                     "uncontended_block_executions",
                     "uncontended_block_steps",
+                    "uncontended_jit_compile_attempts",
+                    "uncontended_jit_compilations",
+                    "uncontended_jit_compile_failures",
+                    "uncontended_jit_executions",
+                    "uncontended_jit_steps",
                 )
             )
             and normalized["wall_ns"]["uncontended_round"] == 0
@@ -465,7 +474,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 5,
+        "schema_version": 6,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

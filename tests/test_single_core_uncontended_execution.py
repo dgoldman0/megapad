@@ -24,10 +24,11 @@ loop:
     dec r8
     nop
     mov r7, r6
+    mov r11, r3
     inc r10
     br loop
 """
-REGISTER_BLOCK_SLICES = (1, 3, 7, 19, 1_003)
+REGISTER_BLOCK_SLICES = (1, 1, 2, 7, 19, 1_003)
 
 
 def _system(*, reference: bool = False) -> MegapadSystem:
@@ -174,19 +175,18 @@ def _run_register_block_workload(*, reference: bool) -> tuple:
                 stats.native_rounds,
                 stats.native_continuations,
                 stats.system_stop_reason,
+                _core_signature(system),
             )
         )
 
-    counts = None
+    profile_snapshot = None
     if not reference:
-        counts = dict(
-            dict(owner._stop_concurrency_profile())["counts"]
-        )
+        profile_snapshot = dict(owner._stop_concurrency_profile())
     return (
         tuple(batch_signatures),
         _core_signature(system),
         _cpu_execution_signature(system.cpu),
-        counts,
+        profile_snapshot,
     )
 
 
@@ -201,9 +201,12 @@ def _run_python_register_workload() -> tuple:
 
 
 def test_decoded_register_blocks_match_generic_reference_across_slices() -> None:
-    fast_batches, fast_core, fast_cpu, counts = _run_register_block_workload(
-        reference=False
-    )
+    (
+        fast_batches,
+        fast_core,
+        fast_cpu,
+        profile_snapshot,
+    ) = _run_register_block_workload(reference=False)
     (
         reference_batches,
         reference_core,
@@ -214,7 +217,9 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
     assert fast_batches == reference_batches
     assert fast_core == reference_core
     assert fast_cpu == reference_cpu == _run_python_register_workload()
-    assert counts is not None
+    assert profile_snapshot is not None
+    assert profile_snapshot["schema_version"] == 6
+    counts = dict(profile_snapshot["counts"])
     assert counts["uncontended_block_lookups"] == (
         counts["uncontended_block_hits"] +
         counts["uncontended_block_misses"]
@@ -225,6 +230,25 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
     assert counts["uncontended_block_steps"] > (
         counts["uncontended_block_executions"]
     )
+    jit_fields = (
+        "uncontended_jit_compile_attempts",
+        "uncontended_jit_compilations",
+        "uncontended_jit_compile_failures",
+        "uncontended_jit_executions",
+        "uncontended_jit_steps",
+    )
+    if profile_snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] > 0
+        assert counts["uncontended_jit_compilations"] > 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] > 0
+        assert counts["uncontended_jit_steps"] > 0
+        assert (
+            counts["uncontended_jit_steps"]
+            <= counts["uncontended_block_steps"]
+        )
+    else:
+        assert all(counts[name] == 0 for name in jit_fields)
 
 
 def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
@@ -384,7 +408,7 @@ loop:
     counts = dict(snapshot["counts"])
     wall_ns = dict(snapshot["wall_ns"])
 
-    assert snapshot["schema_version"] == 5
+    assert snapshot["schema_version"] == 6
     assert counts["uncontended_rounds"] == stats.native_rounds == 3
     assert counts["uncontended_dispatches"] == sum(
         stats.per_core_dispatches
@@ -393,6 +417,11 @@ loop:
     assert counts["uncontended_continuations"] == 0
     assert counts["uncontended_callback_errors"] == 0
     assert counts["uncontended_block_steps"] == 0
+    assert counts["uncontended_jit_compile_attempts"] == 0
+    assert counts["uncontended_jit_compilations"] == 0
+    assert counts["uncontended_jit_compile_failures"] == 0
+    assert counts["uncontended_jit_executions"] == 0
+    assert counts["uncontended_jit_steps"] == 0
     assert counts["logical_subfrontiers"] == 0
     assert counts["worker_commands"] == 0
     assert counts["private_steps"] == 0
