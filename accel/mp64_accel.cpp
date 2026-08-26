@@ -20556,16 +20556,20 @@ static bool decode_single_core_register_instruction(
                 return false;
             break;
         case 0x3: {
-            // Only the unconditional unprefixed short branch is admitted,
-            // and the block builder makes it terminal. Conditional flow
-            // remains with the authoritative executor for now.
-            if (subop != CC_AL)
+            // Admit the unprefixed short equality branch, but keep SKIP and
+            // every other conditional form on the authoritative path.
+            if (subop != CC_AL && subop != CC_EQ)
                 return false;
             uint8_t offset = 0;
             if (!read_byte(offset))
                 return false;
             decoded.immediate = offset;
-            decoded.cycle_cost = 2;
+            if (subop == CC_AL) {
+                decoded.cycle_cost = 2;
+            } else {
+                decoded.cycle_cost = 1;
+                decoded.taken_cycle_cost = 1;
+            }
             break;
         }
         case 0x4: {
@@ -20991,10 +20995,33 @@ static void emit_single_core_jit_instruction(
             emitter.decrement_core(
                 single_core_jit_register_offset(core, decoded.rd));
             return;
-        case 0x3:  // unconditional short BR
-            emitter.add_core_imm8(
-                single_core_jit_register_offset(core, psel),
-                static_cast<uint8_t>(decoded.immediate));
+        case 0x3:  // short BR
+            if (decoded.subop == CC_AL) {
+                emitter.add_core_imm8(
+                    single_core_jit_register_offset(core, psel),
+                    static_cast<uint8_t>(decoded.immediate));
+                return;
+            }
+            if (
+                decoded.subop != CC_EQ ||
+                decoded.taken_cycle_cost != 1
+            ) {
+                throw std::logic_error(
+                    "x86-64 JIT received an unsupported short branch");
+            }
+            emitter.compare_core_byte(
+                single_core_jit_offset(core, core.flag_z),
+                1);
+            {
+                const std::size_t not_taken =
+                    emitter.branch32(0x85); // jne
+                emitter.add_core_imm8(
+                    single_core_jit_register_offset(core, psel),
+                    static_cast<uint8_t>(decoded.immediate));
+                emitter.add_retired_cycles(
+                    decoded.taken_cycle_cost);
+                emitter.patch32(not_taken, emitter.position());
+            }
             return;
         case 0x4:  // long BR
             if (decoded.subop == CC_AL) {
@@ -21420,6 +21447,13 @@ static bool single_core_block_identity_matches(
                 decoded.cycle_cost == 2 &&
                 decoded.taken_cycle_cost == 0 &&
                 decoded.immediate <= 0xFF;
+            const bool valid_short_conditional =
+                decoded.family == 0x3 &&
+                decoded.subop == CC_EQ &&
+                decoded.encoded_size == 2 &&
+                decoded.cycle_cost == 1 &&
+                decoded.taken_cycle_cost == 1 &&
+                decoded.immediate <= 0xFF;
             const bool valid_long_unconditional =
                 decoded.family == 0x4 &&
                 decoded.subop == CC_AL &&
@@ -21440,6 +21474,7 @@ static bool single_core_block_identity_matches(
             if (
                 (
                     !valid_short_unconditional &&
+                    !valid_short_conditional &&
                     !valid_long_unconditional &&
                     !valid_long_conditional
                 ) ||
@@ -21613,8 +21648,12 @@ static uint8_t execute_single_core_decoded_instruction(
         case 0x2:  // DEC
             core.regs[decoded.rd]--;
             break;
-        case 0x3:  // unconditional short BR, from post-fetch PC
-            pc(core) += s64(sign_extend(decoded.immediate, 8));
+        case 0x3:  // short BR, from post-fetch PC
+            if (eval_cond(core, decoded.subop)) {
+                pc(core) += s64(sign_extend(decoded.immediate, 8));
+                actual_cycle_cost = static_cast<uint8_t>(
+                    actual_cycle_cost + decoded.taken_cycle_cost);
+            }
             break;
         case 0x4:  // long BR, from post-fetch PC
             if (eval_cond(core, decoded.subop)) {
