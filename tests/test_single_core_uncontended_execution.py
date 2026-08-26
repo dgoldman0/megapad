@@ -643,3 +643,56 @@ loop:
     assert system.cpu.flags_pack() & 0x3F == expected_arithmetic_flags
     assert counts["uncontended_block_steps"] == 998
     _assert_jit_used_when_available(snapshot, counts)
+
+
+def test_logical_immediate_shifts_preserve_guest_flags_natively() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    lsli r4, 0
+    lsli r5, 15
+    lsri r6, 0
+    lsri r7, 15
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    system.cpu.regs[4] = 0x0123_4567_89AB_CDEF
+    system.cpu.regs[5] = 0x8000_0000_0000_0001
+    system.cpu.regs[6] = 0xFEDC_BA98_7654_3210
+    system.cpu.regs[7] = 0x8000_0000_0000_0000
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    warmup = system.run_batch_stats(10)
+    system.cpu.flags_unpack(0xAB)
+    native = system.run_batch_stats(5)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert warmup.instructions_executed == 10
+    assert warmup.system_cycles_advanced == 12
+    assert warmup.per_core_cycles[0] == 12
+    assert native.instructions_executed == 5
+    assert native.system_cycles_advanced == 6
+    assert native.per_core_cycles[0] == 6
+    assert counts["uncontended_steps"] == 15
+    assert counts["uncontended_block_steps"] == 14
+    assert system.cpu.regs[4] == 0x0123_4567_89AB_CDEF
+    assert system.cpu.regs[5] == 0x0000_2000_0000_0000
+    assert system.cpu.regs[6] == 0xFEDC_BA98_7654_3210
+    assert system.cpu.regs[7] == 0x0000_0000_0004_0000
+    assert system.cpu.pc == 0
+    assert system.cpu.flags_pack() == 0xAB
+    assert system.cpu.cycle_count == 18
+    assert owner.system_cycles == 18
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_executions"] == 1
+        assert counts["uncontended_jit_steps"] == 5

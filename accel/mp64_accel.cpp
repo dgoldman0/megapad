@@ -20587,6 +20587,8 @@ static bool decode_single_core_register_instruction(
                 subop != 0x2 &&  // ADDI
                 subop != 0x4 &&  // ORI
                 subop != 0x7 &&  // SUBI
+                subop != 0x8 &&  // LSLI
+                subop != 0x9 &&  // LSRI
                 subop != 0xB     // ROLI
             ) {
                 return false;
@@ -21016,6 +21018,20 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_subtraction_flags(emitter, core);
                     return;
+                case 0x8:  // LSLI
+                case 0x9: {  // LSRI
+                    const uint8_t modrm =
+                        decoded.subop == 0x8 ? 0xE0 : 0xE8;
+                    emitter.bytes({
+                        0x48,
+                        0xC1,
+                        modrm,
+                        static_cast<uint8_t>(decoded.immediate),
+                    });
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    return;
+                }
                 case 0xB:  // ROLI
                     emitter.bytes({
                         0x48,
@@ -21346,6 +21362,19 @@ static bool single_core_block_identity_matches(
                 decoded.encoded_size != 3 ||
                 decoded.cycle_cost != 1 ||
                 decoded.immediate > 0xFF
+            ) {
+                return false;
+            }
+        } else if (
+            decoded.family == 0x6 &&
+            decoded.subop >= 0x8 && decoded.subop <= 0x9
+        ) {
+            if (
+                decoded.encoded_size != 2 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate > 0xF ||
+                decoded.rd >= 16 ||
+                decoded.rd == block.psel
             ) {
                 return false;
             }
