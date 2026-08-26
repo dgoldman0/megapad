@@ -988,16 +988,47 @@ loop:
         assert counts["uncontended_jit_steps"] == 6
 
 
-def test_register_cmp_drives_long_not_equal_branch_natively(
+@pytest.mark.parametrize(
+    (
+        "mnemonic",
+        "taken_lhs",
+        "taken_rhs",
+        "taken_pre_flags",
+        "taken_expected_flags",
+        "live_rhs",
+        "live_expected_flags",
+    ),
+    (
+        (
+            "lbrne",
+            0x8000_0000_0000_0000,
+            2,
+            0x95,
+            0xAA,
+            7,
+            0x93,
+        ),
+        ("lbrcc", 0, 1, 0xAB, 0x94, 6, 0xA2),
+    ),
+    ids=("not-equal", "carry-clear"),
+)
+def test_register_cmp_drives_long_flag_branch_natively(
+    mnemonic: str,
+    taken_lhs: int,
+    taken_rhs: int,
+    taken_pre_flags: int,
+    taken_expected_flags: int,
+    live_rhs: int,
+    live_expected_flags: int,
 ) -> None:
     system = _system()
     system.load_binary(
         0,
         assemble(
-            """
+            f"""
 loop:
     cmp r4, r5
-    lbrne mismatch
+    {mnemonic} mismatch
     inc r6
 
     .org 0x200
@@ -1029,24 +1060,24 @@ mismatch:
         assert system.cpu.flags_pack() == 0x93
 
     system.cpu.pc = 0
-    system.cpu.regs[4] = 0x8000_0000_0000_0000
-    system.cpu.regs[5] = 2
+    system.cpu.regs[4] = taken_lhs
+    system.cpu.regs[5] = taken_rhs
     system.cpu.regs[6] = 0x5678
-    system.cpu.flags_unpack(0x95)
+    system.cpu.flags_unpack(taken_pre_flags)
     taken = system.run_batch_stats(2)
 
     assert taken.instructions_executed == 2
     assert taken.system_cycles_advanced == 3
     assert taken.per_core_cycles[0] == 3
-    assert system.cpu.regs[4] == 0x8000_0000_0000_0000
-    assert system.cpu.regs[5] == 2
+    assert system.cpu.regs[4] == taken_lhs
+    assert system.cpu.regs[5] == taken_rhs
     assert system.cpu.regs[6] == 0x5678
     assert system.cpu.pc == 0x200
-    assert system.cpu.flags_pack() == 0xAA
+    assert system.cpu.flags_pack() == taken_expected_flags
 
     system.cpu.pc = 0
     system.cpu.regs[4] = 7
-    system.cpu.regs[5] = 7
+    system.cpu.regs[5] = live_rhs
     system.cpu.regs[6] = 0x9ABC
     system.cpu.flags_unpack(0xAC)
     live = system.run_batch_stats(2)
@@ -1059,10 +1090,10 @@ mismatch:
     assert counts["uncontended_steps"] == 8
     assert counts["uncontended_block_steps"] == 6
     assert system.cpu.regs[4] == 7
-    assert system.cpu.regs[5] == 7
+    assert system.cpu.regs[5] == live_rhs
     assert system.cpu.regs[6] == 0x9ABC
     assert system.cpu.pc == 5
-    assert system.cpu.flags_pack() == 0x93
+    assert system.cpu.flags_pack() == live_expected_flags
     assert system.cpu.cycle_count == 9
     assert owner.system_cycles == 9
     _assert_jit_used_when_available(snapshot, counts)

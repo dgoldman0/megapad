@@ -20578,13 +20578,14 @@ static bool decode_single_core_register_instruction(
             break;
         }
         case 0x4: {
-            // Admit the long equality and inequality branches needed by
+            // Admit the long Z branches and carry-clear checks needed by
             // compiled Forth control flow, but keep every other conditional
             // form on the authoritative path for now.
             if (
                 subop != CC_AL &&
                 subop != CC_EQ &&
-                subop != CC_NE
+                subop != CC_NE &&
+                subop != CC_CC
             ) {
                 return false;
             }
@@ -20908,6 +20909,40 @@ static int32_t single_core_jit_register_offset(
     return single_core_jit_offset(core, core.regs[reg]);
 }
 
+struct SingleCoreJitBytePredicate {
+    int32_t displacement = 0;
+    uint8_t expected = 0;
+    bool supported = false;
+};
+
+static SingleCoreJitBytePredicate
+single_core_jit_byte_predicate(
+        const CPUState& core,
+        uint8_t subop) {
+    switch (subop) {
+        case CC_EQ:
+            return {
+                single_core_jit_offset(core, core.flag_z),
+                1,
+                true,
+            };
+        case CC_NE:
+            return {
+                single_core_jit_offset(core, core.flag_z),
+                0,
+                true,
+            };
+        case CC_CC:
+            return {
+                single_core_jit_offset(core, core.flag_c),
+                0,
+                true,
+            };
+        default:
+            return {};
+    }
+}
+
 static void emit_single_core_jit_logic_flags(
         X86_64BlockEmitter& emitter,
         const CPUState& core) {
@@ -21017,9 +21052,19 @@ static void emit_single_core_jit_instruction(
                 throw std::logic_error(
                     "x86-64 JIT received an unsupported short branch");
             }
-            emitter.compare_core_byte(
-                single_core_jit_offset(core, core.flag_z),
-                decoded.subop == CC_EQ ? 1 : 0);
+            {
+                const SingleCoreJitBytePredicate predicate =
+                    single_core_jit_byte_predicate(
+                        core,
+                        decoded.subop);
+                if (!predicate.supported) {
+                    throw std::logic_error(
+                        "x86-64 JIT received an unsupported short branch");
+                }
+                emitter.compare_core_byte(
+                    predicate.displacement,
+                    predicate.expected);
+            }
             {
                 const std::size_t not_taken =
                     emitter.branch32(0x85); // jne
@@ -21042,16 +21087,27 @@ static void emit_single_core_jit_instruction(
             if (
                 (
                     decoded.subop != CC_EQ &&
-                    decoded.subop != CC_NE
+                    decoded.subop != CC_NE &&
+                    decoded.subop != CC_CC
                 ) ||
                 decoded.taken_cycle_cost != 1
             ) {
                 throw std::logic_error(
                     "x86-64 JIT received an unsupported long branch");
             }
-            emitter.compare_core_byte(
-                single_core_jit_offset(core, core.flag_z),
-                decoded.subop == CC_EQ ? 1 : 0);
+            {
+                const SingleCoreJitBytePredicate predicate =
+                    single_core_jit_byte_predicate(
+                        core,
+                        decoded.subop);
+                if (!predicate.supported) {
+                    throw std::logic_error(
+                        "x86-64 JIT received an unsupported long branch");
+                }
+                emitter.compare_core_byte(
+                    predicate.displacement,
+                    predicate.expected);
+            }
             {
                 const std::size_t not_taken =
                     emitter.branch32(0x85); // jne
@@ -21476,7 +21532,8 @@ static bool single_core_block_identity_matches(
                 decoded.family == 0x4 &&
                 (
                     decoded.subop == CC_EQ ||
-                    decoded.subop == CC_NE
+                    decoded.subop == CC_NE ||
+                    decoded.subop == CC_CC
                 ) &&
                 decoded.encoded_size == 3 &&
                 decoded.cycle_cost == 1 &&
