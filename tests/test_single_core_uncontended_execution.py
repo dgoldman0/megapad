@@ -14,6 +14,8 @@ SHARED_WORD = 0x800
 SYSINFO_SINK = MMIO_BASE + SYSINFO_BASE
 REGISTER_BLOCK_SOURCE = """
 loop:
+    ldi64 r13, 0xfedcba98765432a5
+    inc r13
     ldi r12, 0xa5
     inc r12
     inc r4
@@ -451,14 +453,18 @@ loop:
     assert wall_ns["uncontended_dispatch"] > 0
 
 
-def test_unprefixed_ldi_executes_in_repeated_native_block() -> None:
+def _assert_repeated_ldi_block(
+    instruction: str,
+    loaded_value: int,
+    expected_cycles: int,
+) -> None:
     system = _system()
     system.load_binary(
         0,
         assemble(
-            """
+            f"""
 loop:
-    ldi r4, 0xa5
+    {instruction}
     inc r4
     br loop
 """
@@ -474,10 +480,12 @@ loop:
     counts = dict(snapshot["counts"])
 
     assert stats.instructions_executed == 999
+    assert stats.system_cycles_advanced == expected_cycles
+    assert stats.per_core_cycles[0] == expected_cycles
     assert counts["uncontended_steps"] == 999
-    assert system.cpu.regs[4] == 0xA6
+    assert system.cpu.regs[4] == loaded_value + 1
     assert system.cpu.pc == 0
-    assert system.cpu.cycle_count == 1_332
+    assert system.cpu.cycle_count == expected_cycles
     # Only the first cold LDI is authoritative. The resident INC/BR suffix
     # and every subsequent complete LDI/INC/BR loop execute as blocks.
     assert counts["uncontended_block_steps"] == 998
@@ -499,3 +507,15 @@ loop:
         )
     else:
         assert all(counts[name] == 0 for name in jit_fields)
+
+
+def test_unprefixed_ldi_executes_in_repeated_native_block() -> None:
+    _assert_repeated_ldi_block("ldi r4, 0xa5", 0xA5, 1_332)
+
+
+def test_ext_imm64_ldi_executes_in_repeated_native_block() -> None:
+    _assert_repeated_ldi_block(
+        "ldi64 r4, 0xfedcba98765432a5",
+        0xFEDC_BA98_7654_32A5,
+        1_665,
+    )

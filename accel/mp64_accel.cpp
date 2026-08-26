@@ -20522,11 +20522,26 @@ static bool decode_single_core_register_instruction(
         return false;
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
+    bool imm64_prefix = false;
+    if (family == 0xF) {
+        // Keep prefix admission as narrow as the constant-load slice:
+        // F0 is accepted only as EXT.IMM64 immediately before LDI.
+        if (subop != 0x0)
+            return false;
+        uint8_t inner_opcode = 0;
+        if (!read_byte(inner_opcode))
+            return false;
+        family = (inner_opcode >> 4) & 0xF;
+        subop = inner_opcode & 0xF;
+        if (family != 0x6 || subop != 0x0)
+            return false;
+        imm64_prefix = true;
+    }
 
     decoded = CPUState::SingleCoreDecodedInstruction{};
     decoded.family = static_cast<uint8_t>(family);
     decoded.subop = static_cast<uint8_t>(subop);
-    decoded.cycle_cost = 1;
+    decoded.cycle_cost = imm64_prefix ? 2 : 1;
 
     switch (family) {
         case 0x0:
@@ -20569,7 +20584,15 @@ static bool decode_single_core_register_instruction(
             if (decoded.rd == core.psel)
                 return false;
 
-            if (subop <= 0x7) {
+            if (subop == 0x0 && imm64_prefix) {
+                for (int index = 0; index < 8; index++) {
+                    uint8_t byte = 0;
+                    if (!read_byte(byte))
+                        return false;
+                    decoded.immediate |=
+                        static_cast<uint64_t>(byte) << (8 * index);
+                }
+            } else if (subop <= 0x7) {
                 uint8_t byte = 0;
                 if (!read_byte(byte))
                     return false;
@@ -20644,6 +20667,11 @@ public:
 
     void i32(int32_t value) {
         u32(static_cast<uint32_t>(value));
+    }
+
+    void u64(uint64_t value) {
+        u32(static_cast<uint32_t>(value));
+        u32(static_cast<uint32_t>(value >> 32));
     }
 
     std::size_t position() const noexcept {
@@ -20884,10 +20912,19 @@ static void emit_single_core_jit_instruction(
             return;
         case 0x6:
             if (decoded.subop == 0x0) {  // LDI
-                // The admitted unprefixed form has an imm8, so writing EAX
-                // gives the required full-register zero extension compactly.
-                emitter.byte(0xB8); // mov eax, imm32
-                emitter.u32(static_cast<uint32_t>(decoded.immediate));
+                if (decoded.encoded_size == 3) {
+                    // The unprefixed form has an imm8, so writing EAX gives
+                    // the required full-register zero extension compactly.
+                    emitter.byte(0xB8); // mov eax, imm32
+                    emitter.u32(
+                        static_cast<uint32_t>(decoded.immediate));
+                } else if (decoded.encoded_size == 11) {
+                    emitter.bytes({0x48, 0xB8}); // movabs rax, imm64
+                    emitter.u64(decoded.immediate);
+                } else {
+                    throw std::logic_error(
+                        "x86-64 JIT received an invalid LDI encoding");
+                }
                 emitter.mov_core_from_rax(
                     single_core_jit_register_offset(core, decoded.rd));
                 return;
@@ -21223,11 +21260,14 @@ static bool single_core_block_identity_matches(
         } else if (
             decoded.family == 0x6 && decoded.subop == 0x0
         ) {
-            if (
-                decoded.encoded_size != 3 ||
-                decoded.cycle_cost != 1 ||
-                decoded.immediate > 0xFF
-            ) {
+            const bool valid_imm8 =
+                decoded.encoded_size == 3 &&
+                decoded.cycle_cost == 1 &&
+                decoded.immediate <= 0xFF;
+            const bool valid_imm64 =
+                decoded.encoded_size == 11 &&
+                decoded.cycle_cost == 2;
+            if (!valid_imm8 && !valid_imm64) {
                 return false;
             }
         } else if (decoded.cycle_cost != 1) {
