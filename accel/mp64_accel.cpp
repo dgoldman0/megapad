@@ -20524,25 +20524,36 @@ static bool decode_single_core_register_instruction(
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
     bool imm64_prefix = false;
+    bool high_sep_prefix = false;
     if (family == 0xF) {
-        // Keep prefix admission as narrow as the constant-load slice:
-        // F0 is accepted only as EXT.IMM64 immediately before LDI.
-        if (subop != 0x0)
-            return false;
+        const int prefix = subop;
         uint8_t inner_opcode = 0;
         if (!read_byte(inner_opcode))
             return false;
         family = (inner_opcode >> 4) & 0xF;
         subop = inner_opcode & 0xF;
-        if (family != 0x6 || subop != 0x0)
+        if (
+            prefix == 0x0 &&
+            family == 0x6 &&
+            subop == 0x0
+        ) {
+            imm64_prefix = true;
+        } else if (
+            prefix == 0x4 &&
+            family == 0xA
+        ) {
+            // F4 is the canonical REX.N prefix for SEP R16..R31.
+            high_sep_prefix = true;
+        } else {
             return false;
-        imm64_prefix = true;
+        }
     }
 
     decoded = CPUState::SingleCoreDecodedInstruction{};
     decoded.family = static_cast<uint8_t>(family);
     decoded.subop = static_cast<uint8_t>(subop);
-    decoded.cycle_cost = imm64_prefix ? 2 : 1;
+    decoded.cycle_cost =
+        (imm64_prefix || high_sep_prefix) ? 2 : 1;
 
     switch (family) {
         case 0x0:
@@ -20688,6 +20699,10 @@ static bool decode_single_core_register_instruction(
                 return false;
             break;
         }
+        case 0xA:  // SEP
+            decoded.rd = static_cast<uint8_t>(
+                subop | (high_sep_prefix ? 0x10 : 0));
+            break;
         default:
             return false;
     }
@@ -20700,9 +20715,12 @@ static bool decode_single_core_register_instruction(
     return encoded_size != 0;
 }
 
-static bool single_core_decoded_is_terminal_branch(
+static bool single_core_decoded_is_terminal_control(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return decoded.family == 0x3 || decoded.family == 0x4;
+    return
+        decoded.family == 0x3 ||
+        decoded.family == 0x4 ||
+        decoded.family == 0xA;
 }
 
 static bool single_core_decoded_is_memory(
@@ -21301,6 +21319,11 @@ static void emit_single_core_jit_instruction(
                     throw std::logic_error(
                         "x86-64 JIT received unsupported ALU op");
             }
+        case 0xA:  // terminal SEP
+            emitter.store_core_byte(
+                single_core_jit_offset(core, core.psel),
+                decoded.rd);
+            return;
         default:
             throw std::logic_error(
                 "x86-64 JIT received unsupported instruction family");
@@ -21375,12 +21398,12 @@ compile_single_core_jit_block(
             index++
         ) {
             if (
-                single_core_decoded_is_terminal_branch(
+                single_core_decoded_is_terminal_control(
                     block.instructions[index]) &&
                 index + 1 != block.instruction_count
             ) {
                 throw std::logic_error(
-                    "x86-64 JIT received a non-terminal branch");
+                    "x86-64 JIT received non-terminal control flow");
             }
             emit_single_core_jit_instruction(
                 emitter,
@@ -21555,7 +21578,7 @@ static bool single_core_block_identity_matches(
             return false;
         }
         const auto& decoded = block.instructions[index];
-        if (single_core_decoded_is_terminal_branch(decoded)) {
+        if (single_core_decoded_is_terminal_control(decoded)) {
             const bool valid_short_unconditional =
                 decoded.family == 0x3 &&
                 decoded.subop == CC_AL &&
@@ -21592,12 +21615,34 @@ static bool single_core_block_identity_matches(
                 decoded.cycle_cost == 1 &&
                 decoded.taken_cycle_cost == 1 &&
                 decoded.immediate <= 0xFFFF;
+            const bool valid_sep =
+                decoded.family == 0xA &&
+                decoded.rd < 32 &&
+                decoded.rs == 0 &&
+                decoded.subop == (decoded.rd & 0xF) &&
+                decoded.fetch_hits >= 1 &&
+                decoded.fetch_hits <= 2 &&
+                decoded.taken_cycle_cost == 0 &&
+                decoded.immediate == 0 &&
+                (
+                    (
+                        decoded.rd < 16 &&
+                        decoded.encoded_size == 1 &&
+                        decoded.cycle_cost == 1
+                    ) ||
+                    (
+                        decoded.rd >= 16 &&
+                        decoded.encoded_size == 2 &&
+                        decoded.cycle_cost == 2
+                    )
+                );
             if (
                 (
                     !valid_short_unconditional &&
                     !valid_short_conditional &&
                     !valid_long_unconditional &&
-                    !valid_long_conditional
+                    !valid_long_conditional &&
+                    !valid_sep
                 ) ||
                 index + 1 != block.instruction_count
             ) {
@@ -21761,7 +21806,7 @@ build_single_core_decoded_block(
         candidate.instructions[
             candidate.instruction_count++] = decoded;
         offset += encoded_size;
-        if (single_core_decoded_is_terminal_branch(decoded))
+        if (single_core_decoded_is_terminal_control(decoded))
             break;
     }
 
@@ -21782,6 +21827,13 @@ static bool single_core_block_has_leading_memory(
     return
         block.instruction_count != 0 &&
         single_core_decoded_is_memory(block.instructions[0]);
+}
+
+static bool single_core_block_has_terminal_sep(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return
+        block.instruction_count != 0 &&
+        block.instructions[block.instruction_count - 1].family == 0xA;
 }
 
 static const uint8_t* preflight_single_core_direct_read(
@@ -21898,6 +21950,11 @@ static uint8_t execute_single_core_decoded_instruction(
                 decoded.rd,
                 decoded.rs);
             break;
+        case 0xA:  // SEP
+            if (core.priv_level != 0)
+                throw std::runtime_error("TRAP:PRIV_FAULT");
+            core.psel = decoded.rd;
+            break;
         default:
             throw std::logic_error(
                 "single-core block contains an unsupported operation");
@@ -21973,6 +22030,15 @@ try_execute_single_core_decoded_block(
         system.shared_crypto
             .requires_unbounded_timing_boundary() ||
         system.shared_nic.has_cycle_dma_work();
+    if (
+        single_core_block_has_terminal_sep(*block) &&
+        core.priv_level != 0
+    ) {
+        // SEP faults after authoritative fetch/prefix handling. Decline the
+        // complete block before any decoded/native progress so step_one owns
+        // that exact state transition and trap.
+        return run;
+    }
     const bool native_eligible =
         max_steps >= block->instruction_count &&
         !timing_active;
@@ -22095,6 +22161,16 @@ try_execute_single_core_decoded_block(
                             "single-core JIT returned invalid branch state");
                     }
                 }
+                if (terminal.family == 0xA) {
+                    if (
+                        core.psel != terminal.rd ||
+                        core.regs[block->psel] !=
+                            address + block->identity_size
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid SEP state");
+                    }
+                }
             }
             if (cycles != expected_cycles) {
                 throw std::logic_error(
@@ -22103,9 +22179,9 @@ try_execute_single_core_decoded_block(
             run.steps = static_cast<int>(steps);
             run.cycles = static_cast<int64_t>(cycles);
             run.interrupt_boundary = interrupt_boundary;
-            // Admitted register operations and preflighted direct RAM reads
-            // cannot activate crypto or NIC work, and external mutation is
-            // excluded by the execution admission held around this segment.
+            // Admitted register/control operations and preflighted direct
+            // RAM reads cannot activate crypto or NIC work, and external
+            // mutation is excluded by the execution admission held here.
             native_executed = true;
             if (profile_enabled) {
                 host_saturating_increment(
@@ -22120,7 +22196,7 @@ try_execute_single_core_decoded_block(
     if (!native_executed) {
         // A leading memory plan is native-only. Cold, unavailable, failed,
         // or otherwise ineligible visits make zero block progress so the
-        // authoritative fetch/sys_read64 path owns every fallback effect.
+        // authoritative fetch/system-read path owns every fallback effect.
         if (leading_memory)
             return run;
         for (

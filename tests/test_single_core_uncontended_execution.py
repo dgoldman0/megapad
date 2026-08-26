@@ -1363,3 +1363,84 @@ loop:
         assert counts["uncontended_jit_compile_failures"] == 0
         assert counts["uncontended_jit_executions"] == 0
         assert counts["uncontended_jit_steps"] == 0
+
+
+@pytest.mark.parametrize(
+    ("target_reg", "block_size", "cycles_per_pass"),
+    (
+        (5, 2, 2),
+        (20, 3, 3),
+    ),
+    ids=("bare", "canonical-high-register"),
+)
+def test_terminal_sep_executes_natively_with_live_target(
+    target_reg: int,
+    block_size: int,
+    cycles_per_pass: int,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+    inc r4
+    sep r{target_reg}
+"""
+        ),
+    )
+    system.boot(entry=0)
+    system.cpu.flags_unpack(0xAA)
+    original_xsel = system.cpu.xsel
+    original_spsel = system.cpu.spsel
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    targets = (0x180, 0x1A0, 0x1C0, 0x1E0)
+    for pass_index, target in enumerate(targets, start=1):
+        system.cpu.psel = 3
+        system.cpu.pc = 0
+        system.cpu.regs[target_reg] = target
+
+        stats = system.run_batch_stats(2)
+
+        assert stats.instructions_executed == 2
+        assert stats.system_cycles_advanced == cycles_per_pass
+        assert stats.per_core_cycles[0] == cycles_per_pass
+        assert system.cpu.regs[4] == pass_index
+        assert system.cpu.psel == target_reg
+        assert system.cpu.pc == target
+        assert system.cpu.regs[target_reg] == target
+        assert system.cpu.regs[3] == block_size
+        assert system.cpu.flags_pack() == 0xAA
+        assert system.cpu.xsel == original_xsel
+        assert system.cpu.spsel == original_spsel
+
+        if pass_index == 2:
+            planned = dict(owner._concurrency_profile_snapshot())
+            planned_counts = dict(planned["counts"])
+            assert planned_counts["uncontended_jit_compile_attempts"] == 0
+            assert planned_counts["uncontended_jit_compilations"] == 0
+            assert planned_counts["uncontended_jit_compile_failures"] == 0
+            assert planned_counts["uncontended_jit_executions"] == 0
+            assert planned_counts["uncontended_jit_steps"] == 0
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert counts["uncontended_steps"] == 8
+    assert counts["uncontended_block_steps"] == 6
+    expected_cycles = cycles_per_pass * len(targets)
+    assert system.cpu.cycle_count == expected_cycles
+    assert owner.system_cycles == expected_cycles
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
+    else:
+        assert counts["uncontended_jit_compile_attempts"] == 0
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 0
+        assert counts["uncontended_jit_steps"] == 0
