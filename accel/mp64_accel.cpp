@@ -2018,6 +2018,7 @@ struct CPUState {
         uint8_t encoded_size = 0;
         uint8_t fetch_hits = 0;
         uint8_t cycle_cost = 0;
+        uint8_t taken_cycle_cost = 0;
         uint64_t immediate = 0;
     };
     struct SingleCoreDecodedBlockEntry {
@@ -20568,9 +20569,10 @@ static bool decode_single_core_register_instruction(
             break;
         }
         case 0x4: {
-            // As with short BR, admit only the always-taken unprefixed
-            // form and make it terminal in the block builder.
-            if (subop != CC_AL)
+            // Admit the long equality branch needed by compiled Forth
+            // control flow, but keep every other conditional form on the
+            // authoritative path for now.
+            if (subop != CC_AL && subop != CC_EQ)
                 return false;
             uint8_t high = 0;
             uint8_t low = 0;
@@ -20578,7 +20580,12 @@ static bool decode_single_core_register_instruction(
                 return false;
             decoded.immediate =
                 (static_cast<uint64_t>(high) << 8) | low;
-            decoded.cycle_cost = 2;
+            if (subop == CC_AL) {
+                decoded.cycle_cost = 2;
+            } else {
+                decoded.cycle_cost = 1;
+                decoded.taken_cycle_cost = 1;
+            }
             break;
         }
         case 0x6: {
@@ -20798,10 +20805,20 @@ public:
         i32(displacement);
     }
 
-    void compare_core_byte_zero(int32_t displacement) {
+    void compare_core_byte(
+            int32_t displacement,
+            uint8_t value) {
         bytes({0x41, 0x80, 0xBC, 0x24});
         i32(displacement);
-        byte(0);
+        byte(value);
+    }
+
+    void compare_core_byte_zero(int32_t displacement) {
+        compare_core_byte(displacement, 0);
+    }
+
+    void add_retired_cycles(uint8_t cycles) {
+        bytes({0x41, 0x83, 0xC1, cycles});
     }
 
     void store_core_byte(
@@ -20973,11 +20990,35 @@ static void emit_single_core_jit_instruction(
                 single_core_jit_register_offset(core, psel),
                 static_cast<uint8_t>(decoded.immediate));
             return;
-        case 0x4:  // unconditional long BR
-            emitter.add_core_imm32(
-                single_core_jit_register_offset(core, psel),
-                static_cast<uint32_t>(
-                    sign_extend(decoded.immediate, 16)));
+        case 0x4:  // long BR
+            if (decoded.subop == CC_AL) {
+                emitter.add_core_imm32(
+                    single_core_jit_register_offset(core, psel),
+                    static_cast<uint32_t>(
+                        sign_extend(decoded.immediate, 16)));
+                return;
+            }
+            if (
+                decoded.subop != CC_EQ ||
+                decoded.taken_cycle_cost != 1
+            ) {
+                throw std::logic_error(
+                    "x86-64 JIT received an unsupported long branch");
+            }
+            emitter.compare_core_byte(
+                single_core_jit_offset(core, core.flag_z),
+                1);
+            {
+                const std::size_t not_taken =
+                    emitter.branch32(0x85); // jne
+                emitter.add_core_imm32(
+                    single_core_jit_register_offset(core, psel),
+                    static_cast<uint32_t>(
+                        sign_extend(decoded.immediate, 16)));
+                emitter.add_retired_cycles(
+                    decoded.taken_cycle_cost);
+                emitter.patch32(not_taken, emitter.position());
+            }
             return;
         case 0x6:
             if (decoded.subop == 0x0) {  // LDI
@@ -21191,12 +21232,8 @@ compile_single_core_jit_block(
                 block.instructions[index],
                 block.psel);
             emitter.bytes({0xFF, 0xC3}); // inc ebx
-            emitter.bytes({
-                0x41,
-                0x83,
-                0xC1,
-                block.instructions[index].cycle_cost,
-            }); // add r9d, retired instruction cycles
+            emitter.add_retired_cycles(
+                block.instructions[index].cycle_cost);
             emitter.bytes({
                 0x41,
                 0xBB,
@@ -21363,16 +21400,39 @@ static bool single_core_block_identity_matches(
         }
         const auto& decoded = block.instructions[index];
         if (single_core_decoded_is_terminal_branch(decoded)) {
-            const uint8_t expected_size =
-                decoded.family == 0x3 ? 2 : 3;
+            const bool valid_short_unconditional =
+                decoded.family == 0x3 &&
+                decoded.subop == CC_AL &&
+                decoded.encoded_size == 2 &&
+                decoded.cycle_cost == 2 &&
+                decoded.taken_cycle_cost == 0 &&
+                decoded.immediate <= 0xFF;
+            const bool valid_long_unconditional =
+                decoded.family == 0x4 &&
+                decoded.subop == CC_AL &&
+                decoded.encoded_size == 3 &&
+                decoded.cycle_cost == 2 &&
+                decoded.taken_cycle_cost == 0 &&
+                decoded.immediate <= 0xFFFF;
+            const bool valid_long_equal =
+                decoded.family == 0x4 &&
+                decoded.subop == CC_EQ &&
+                decoded.encoded_size == 3 &&
+                decoded.cycle_cost == 1 &&
+                decoded.taken_cycle_cost == 1 &&
+                decoded.immediate <= 0xFFFF;
             if (
-                decoded.subop != CC_AL ||
-                decoded.encoded_size != expected_size ||
-                decoded.cycle_cost != 2 ||
+                (
+                    !valid_short_unconditional &&
+                    !valid_long_unconditional &&
+                    !valid_long_equal
+                ) ||
                 index + 1 != block.instruction_count
             ) {
                 return false;
             }
+        } else if (decoded.taken_cycle_cost != 0) {
+            return false;
         } else if (
             decoded.family == 0x6 && decoded.subop == 0x0
         ) {
@@ -21503,7 +21563,7 @@ build_single_core_decoded_block(
     return &destination;
 }
 
-static void execute_single_core_decoded_instruction(
+static uint8_t execute_single_core_decoded_instruction(
         CPUState& core,
         const CPUState::SingleCoreDecodedInstruction& decoded) {
     icache_begin_instruction(core);
@@ -21514,6 +21574,7 @@ static void execute_single_core_decoded_instruction(
     core.icache_hits += decoded.fetch_hits;
     pc(core) += decoded.encoded_size;
 
+    uint8_t actual_cycle_cost = decoded.cycle_cost;
     switch (decoded.family) {
         case 0x0:  // NOP
             break;
@@ -21526,8 +21587,12 @@ static void execute_single_core_decoded_instruction(
         case 0x3:  // unconditional short BR, from post-fetch PC
             pc(core) += s64(sign_extend(decoded.immediate, 8));
             break;
-        case 0x4:  // unconditional long BR, from post-fetch PC
-            pc(core) += s64(sign_extend(decoded.immediate, 16));
+        case 0x4:  // long BR, from post-fetch PC
+            if (eval_cond(core, decoded.subop)) {
+                pc(core) += s64(sign_extend(decoded.immediate, 16));
+                actual_cycle_cost = static_cast<uint8_t>(
+                    actual_cycle_cost + decoded.taken_cycle_cost);
+            }
             break;
         case 0x6:
             execute_register_immediate(
@@ -21549,9 +21614,10 @@ static void execute_single_core_decoded_instruction(
     }
 
     core.ext_modifier = -1;
-    core.cycle_count += decoded.cycle_cost;
+    core.cycle_count += actual_cycle_cost;
     if (core.perf_enable)
-        core.perf_cycles += decoded.cycle_cost;
+        core.perf_cycles += actual_cycle_cost;
+    return actual_cycle_cost;
 }
 
 struct SingleCoreDecodedBlockRun {
@@ -21698,6 +21764,29 @@ try_execute_single_core_decoded_block(
             uint32_t expected_cycles = 0;
             for (uint32_t index = 0; index < steps; index++)
                 expected_cycles += block->instructions[index].cycle_cost;
+            if (steps == block->instruction_count) {
+                const auto& terminal =
+                    block->instructions[steps - 1];
+                if (terminal.taken_cycle_cost != 0) {
+                    const bool taken =
+                        eval_cond(core, terminal.subop);
+                    if (taken) {
+                        expected_cycles +=
+                            terminal.taken_cycle_cost;
+                    }
+                    uint64_t expected_pc =
+                        address + block->identity_size;
+                    if (taken) {
+                        expected_pc += s64(sign_extend(
+                            terminal.immediate,
+                            terminal.family == 0x3 ? 8 : 16));
+                    }
+                    if (pc(core) != expected_pc) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid branch state");
+                    }
+                }
+            }
             if (cycles != expected_cycles) {
                 throw std::logic_error(
                     "single-core JIT returned an invalid cycle count");
@@ -21735,11 +21824,12 @@ try_execute_single_core_decoded_block(
             }
             const CPUState::SingleCoreDecodedInstruction& decoded =
                 block->instructions[index];
-            execute_single_core_decoded_instruction(
-                core,
-                decoded);
+            const uint8_t actual_cycle_cost =
+                execute_single_core_decoded_instruction(
+                    core,
+                    decoded);
             run.steps++;
-            run.cycles += decoded.cycle_cost;
+            run.cycles += actual_cycle_cost;
 
             if (
                 system.shared_crypto

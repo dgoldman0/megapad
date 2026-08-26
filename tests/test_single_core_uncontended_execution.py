@@ -818,3 +818,108 @@ loop:
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_executions"] == 1
         assert counts["uncontended_jit_steps"] == 2
+
+
+@pytest.mark.parametrize(
+    ("target", "native_z", "native_taken", "taken_pc"),
+    (
+        ("loop", 1, True, 0),
+        ("forward", 1, True, 0x200),
+        ("loop", 0, False, 0),
+    ),
+    ids=(
+        "taken-negative",
+        "taken-positive",
+        "not-taken",
+    ),
+)
+def test_long_equal_branch_uses_live_flags_and_dynamic_cycles_natively(
+    target: str,
+    native_z: int,
+    native_taken: bool,
+    taken_pc: int,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+loop:
+    inc r4
+    lbreq {target}
+    inc r5
+
+    .org 0x200
+forward:
+    nop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    warm_taken = not native_taken
+    warm_z = 1 - native_z
+    warm_flags = 0xAA | warm_z
+    native_flags = 0xAA | native_z
+    warm_pc = taken_pc if warm_taken else 4
+    warm_cycles = 3 if warm_taken else 2
+    native_pc = taken_pc if native_taken else 4
+    native_cycles = 3 if native_taken else 2
+    system.cpu.flags_unpack(warm_flags)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    cold = system.run_batch_stats(2)
+    assert cold.instructions_executed == 2
+    assert cold.system_cycles_advanced == warm_cycles
+    assert cold.per_core_cycles[0] == warm_cycles
+    assert system.cpu.pc == warm_pc
+    assert system.cpu.flags_pack() == warm_flags
+
+    system.cpu.pc = 0
+    decoded = system.run_batch_stats(2)
+    assert decoded.instructions_executed == 2
+    assert decoded.system_cycles_advanced == warm_cycles
+    assert decoded.per_core_cycles[0] == warm_cycles
+    assert system.cpu.pc == warm_pc
+    assert system.cpu.flags_pack() == warm_flags
+
+    system.cpu.pc = 0
+    system.cpu.regs[4] = 0x1234
+    system.cpu.regs[5] = 0x5678
+    system.cpu.flags_unpack(native_flags)
+    native = system.run_batch_stats(2)
+
+    assert native.instructions_executed == 2
+    assert native.system_cycles_advanced == native_cycles
+    assert native.per_core_cycles[0] == native_cycles
+    assert system.cpu.regs[4] == 0x1235
+    assert system.cpu.regs[5] == 0x5678
+    assert system.cpu.pc == native_pc
+    assert system.cpu.flags_pack() == native_flags
+
+    system.cpu.pc = 0
+    system.cpu.regs[4] = 0x9ABC
+    system.cpu.regs[5] = 0xDEF0
+    system.cpu.flags_unpack(warm_flags)
+    live = system.run_batch_stats(2)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert live.instructions_executed == 2
+    assert live.system_cycles_advanced == warm_cycles
+    assert live.per_core_cycles[0] == warm_cycles
+    assert counts["uncontended_steps"] == 8
+    assert counts["uncontended_block_steps"] == 6
+    assert system.cpu.regs[4] == 0x9ABD
+    assert system.cpu.regs[5] == 0xDEF0
+    assert system.cpu.pc == warm_pc
+    assert system.cpu.flags_pack() == warm_flags
+    expected_cycles = warm_cycles * 3 + native_cycles
+    assert system.cpu.cycle_count == expected_cycles
+    assert owner.system_cycles == expected_cycles
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
