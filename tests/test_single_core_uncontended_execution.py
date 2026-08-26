@@ -30,7 +30,7 @@ loop:
     mov r7, r6
     mov r11, r3
     inc r10
-    br loop
+    lbr loop
 """
 REGISTER_BLOCK_SLICES = (1, 1, 2, 7, 19, 1_003)
 
@@ -453,6 +453,27 @@ loop:
     assert wall_ns["uncontended_dispatch"] > 0
 
 
+def _assert_jit_used_when_available(snapshot: dict, counts: dict) -> None:
+    jit_fields = (
+        "uncontended_jit_compile_attempts",
+        "uncontended_jit_compilations",
+        "uncontended_jit_compile_failures",
+        "uncontended_jit_executions",
+        "uncontended_jit_steps",
+    )
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] > 0
+        assert counts["uncontended_jit_compilations"] > 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] > 0
+        assert counts["uncontended_jit_steps"] > 0
+        assert counts["uncontended_jit_steps"] <= (
+            counts["uncontended_block_steps"]
+        )
+    else:
+        assert all(counts[name] == 0 for name in jit_fields)
+
+
 def _assert_repeated_ldi_block(
     instruction: str,
     loaded_value: int,
@@ -489,24 +510,7 @@ loop:
     # Only the first cold LDI is authoritative. The resident INC/BR suffix
     # and every subsequent complete LDI/INC/BR loop execute as blocks.
     assert counts["uncontended_block_steps"] == 998
-    jit_fields = (
-        "uncontended_jit_compile_attempts",
-        "uncontended_jit_compilations",
-        "uncontended_jit_compile_failures",
-        "uncontended_jit_executions",
-        "uncontended_jit_steps",
-    )
-    if snapshot["single_core_jit_backend"] == "x86_64":
-        assert counts["uncontended_jit_compile_attempts"] > 0
-        assert counts["uncontended_jit_compilations"] > 0
-        assert counts["uncontended_jit_compile_failures"] == 0
-        assert counts["uncontended_jit_executions"] > 0
-        assert counts["uncontended_jit_steps"] > 0
-        assert counts["uncontended_jit_steps"] <= (
-            counts["uncontended_block_steps"]
-        )
-    else:
-        assert all(counts[name] == 0 for name in jit_fields)
+    _assert_jit_used_when_available(snapshot, counts)
 
 
 def test_unprefixed_ldi_executes_in_repeated_native_block() -> None:
@@ -519,3 +523,42 @@ def test_ext_imm64_ldi_executes_in_repeated_native_block() -> None:
         0xFEDC_BA98_7654_32A5,
         1_665,
     )
+
+
+def test_unconditional_long_branch_executes_in_native_block() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    inc r4
+    lbr far
+
+    .org 0x100
+far:
+    inc r5
+    lbr loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1_000)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 1_000
+    assert stats.system_cycles_advanced == 1_500
+    assert stats.per_core_cycles[0] == 1_500
+    assert counts["uncontended_steps"] == 1_000
+    assert system.cpu.regs[4] == 250
+    assert system.cpu.regs[5] == 250
+    assert system.cpu.pc == 0
+    assert system.cpu.cycle_count == 1_500
+    # The two cold INC/LBR pairs remain authoritative. Thereafter the
+    # +252 and -260 edges each require a complete terminal LBR block.
+    assert counts["uncontended_block_steps"] == 996
+    _assert_jit_used_when_available(snapshot, counts)

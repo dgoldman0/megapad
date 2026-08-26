@@ -20567,6 +20567,20 @@ static bool decode_single_core_register_instruction(
             decoded.cycle_cost = 2;
             break;
         }
+        case 0x4: {
+            // As with short BR, admit only the always-taken unprefixed
+            // form and make it terminal in the block builder.
+            if (subop != CC_AL)
+                return false;
+            uint8_t high = 0;
+            uint8_t low = 0;
+            if (!read_byte(high) || !read_byte(low))
+                return false;
+            decoded.immediate =
+                (static_cast<uint64_t>(high) << 8) | low;
+            decoded.cycle_cost = 2;
+            break;
+        }
         case 0x6: {
             if (
                 subop != 0x0 &&  // LDI
@@ -20631,6 +20645,11 @@ static bool decode_single_core_register_instruction(
         1 +
         (((address & 7) + encoded_size - 1) >> 3));
     return encoded_size != 0;
+}
+
+static bool single_core_decoded_is_terminal_branch(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return decoded.family == 0x3 || decoded.family == 0x4;
 }
 
 enum class SingleCoreJitCompilation : uint8_t {
@@ -20744,6 +20763,14 @@ public:
         bytes({0x49, 0x83, 0x84, 0x24});
         i32(displacement);
         byte(immediate);
+    }
+
+    void add_core_imm32(
+            int32_t displacement,
+            uint32_t immediate) {
+        bytes({0x49, 0x81, 0x84, 0x24});
+        i32(displacement);
+        u32(immediate);
     }
 
     void increment_core(int32_t displacement) {
@@ -20910,6 +20937,12 @@ static void emit_single_core_jit_instruction(
                 single_core_jit_register_offset(core, psel),
                 static_cast<uint8_t>(decoded.immediate));
             return;
+        case 0x4:  // unconditional long BR
+            emitter.add_core_imm32(
+                single_core_jit_register_offset(core, psel),
+                static_cast<uint32_t>(
+                    sign_extend(decoded.immediate, 16)));
+            return;
         case 0x6:
             if (decoded.subop == 0x0) {  // LDI
                 if (decoded.encoded_size == 3) {
@@ -21065,7 +21098,8 @@ compile_single_core_jit_block(
             index++
         ) {
             if (
-                block.instructions[index].family == 0x3 &&
+                single_core_decoded_is_terminal_branch(
+                    block.instructions[index]) &&
                 index + 1 != block.instruction_count
             ) {
                 throw std::logic_error(
@@ -21248,10 +21282,12 @@ static bool single_core_block_identity_matches(
             return false;
         }
         const auto& decoded = block.instructions[index];
-        if (decoded.family == 0x3) {
+        if (single_core_decoded_is_terminal_branch(decoded)) {
+            const uint8_t expected_size =
+                decoded.family == 0x3 ? 2 : 3;
             if (
                 decoded.subop != CC_AL ||
-                decoded.encoded_size != 2 ||
+                decoded.encoded_size != expected_size ||
                 decoded.cycle_cost != 2 ||
                 index + 1 != block.instruction_count
             ) {
@@ -21324,7 +21360,7 @@ build_single_core_decoded_block(
         candidate.instructions[
             candidate.instruction_count++] = decoded;
         offset += encoded_size;
-        if (decoded.family == 0x3)
+        if (single_core_decoded_is_terminal_branch(decoded))
             break;
     }
 
@@ -21362,6 +21398,9 @@ static void execute_single_core_decoded_instruction(
             break;
         case 0x3:  // unconditional short BR, from post-fetch PC
             pc(core) += s64(sign_extend(decoded.immediate, 8));
+            break;
+        case 0x4:  // unconditional long BR, from post-fetch PC
+            pc(core) += s64(sign_extend(decoded.immediate, 16));
             break;
         case 0x6:
             execute_register_immediate(
