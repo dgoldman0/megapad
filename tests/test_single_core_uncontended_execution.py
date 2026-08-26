@@ -416,12 +416,32 @@ loop:
     assert counts["uncontended_steps"] == stats.instructions_executed
     assert counts["uncontended_continuations"] == 0
     assert counts["uncontended_callback_errors"] == 0
-    assert counts["uncontended_block_steps"] == 0
-    assert counts["uncontended_jit_compile_attempts"] == 0
-    assert counts["uncontended_jit_compilations"] == 0
-    assert counts["uncontended_jit_compile_failures"] == 0
-    assert counts["uncontended_jit_executions"] == 0
-    assert counts["uncontended_jit_steps"] == 0
+    assert system.cpu.regs[4] == 1_252
+    assert system.cpu.pc == 1
+    assert system.cpu.cycle_count == 3_754
+    # The cold INC and the first BR remain authoritative; all subsequent
+    # work requires the two-instruction INC/BR block.
+    assert counts["uncontended_block_steps"] == (
+        counts["uncontended_steps"] - 2
+    )
+    jit_fields = (
+        "uncontended_jit_compile_attempts",
+        "uncontended_jit_compilations",
+        "uncontended_jit_compile_failures",
+        "uncontended_jit_executions",
+        "uncontended_jit_steps",
+    )
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] > 0
+        assert counts["uncontended_jit_compilations"] > 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] > 0
+        assert counts["uncontended_jit_steps"] > 0
+        assert counts["uncontended_jit_steps"] <= (
+            counts["uncontended_block_steps"]
+        )
+    else:
+        assert all(counts[name] == 0 for name in jit_fields)
     assert counts["logical_subfrontiers"] == 0
     assert counts["worker_commands"] == 0
     assert counts["private_steps"] == 0

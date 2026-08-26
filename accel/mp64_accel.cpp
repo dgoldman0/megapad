@@ -20539,6 +20539,19 @@ static bool decode_single_core_register_instruction(
             if (decoded.rd == core.psel)
                 return false;
             break;
+        case 0x3: {
+            // Only the unconditional unprefixed short branch is admitted,
+            // and the block builder makes it terminal. Conditional flow
+            // remains with the authoritative executor for now.
+            if (subop != CC_AL)
+                return false;
+            uint8_t offset = 0;
+            if (!read_byte(offset))
+                return false;
+            decoded.immediate = offset;
+            decoded.cycle_cost = 2;
+            break;
+        }
         case 0x6: {
             if (
                 subop != 0x2 &&  // ADDI
@@ -20714,13 +20727,13 @@ public:
         i32(displacement);
     }
 
-    void add_core_rbx(int32_t displacement) {
-        bytes({0x49, 0x01, 0x9C, 0x24});
+    void add_core_r15(int32_t displacement) {
+        bytes({0x4D, 0x01, 0xBC, 0x24});
         i32(displacement);
     }
 
-    void add_core_r15(int32_t displacement) {
-        bytes({0x4D, 0x01, 0xBC, 0x24});
+    void add_core_r9(int32_t displacement) {
+        bytes({0x4D, 0x01, 0x8C, 0x24});
         i32(displacement);
     }
 
@@ -20863,6 +20876,11 @@ static void emit_single_core_jit_instruction(
             emitter.decrement_core(
                 single_core_jit_register_offset(core, decoded.rd));
             return;
+        case 0x3:  // unconditional short BR
+            emitter.add_core_imm8(
+                single_core_jit_register_offset(core, psel),
+                static_cast<uint8_t>(decoded.immediate));
+            return;
         case 0x6:
             emitter.mov_rax_from_core(
                 single_core_jit_register_offset(core, decoded.rd));
@@ -20989,6 +21007,7 @@ compile_single_core_jit_block(
             0x49, 0x89, 0xF5, // mov r13, rsi (enabled IPI mirror*)
             0x31, 0xDB,       // xor ebx, ebx (retired steps)
             0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
+            0x45, 0x31, 0xC9, // xor r9d, r9d (retired cycles)
             0x45, 0x31, 0xD2, // xor r10d, r10d (exit reason)
         });
 
@@ -20998,12 +21017,25 @@ compile_single_core_jit_block(
             index < block.instruction_count;
             index++
         ) {
+            if (
+                block.instructions[index].family == 0x3 &&
+                index + 1 != block.instruction_count
+            ) {
+                throw std::logic_error(
+                    "x86-64 JIT received a non-terminal branch");
+            }
             emit_single_core_jit_instruction(
                 emitter,
                 core,
                 block.instructions[index],
                 block.psel);
             emitter.bytes({0xFF, 0xC3}); // inc ebx
+            emitter.bytes({
+                0x41,
+                0x83,
+                0xC1,
+                block.instructions[index].cycle_cost,
+            }); // add r9d, retired instruction cycles
             emitter.bytes({
                 0x41,
                 0xBB,
@@ -21032,7 +21064,7 @@ compile_single_core_jit_block(
         emitter.add_core_r15(
             single_core_jit_offset(
                 core, core.icache_hits));
-        emitter.add_core_rbx(
+        emitter.add_core_r9(
             single_core_jit_offset(
                 core, core.cycle_count));
         emitter.compare_core_byte_zero(
@@ -21040,7 +21072,7 @@ compile_single_core_jit_block(
                 core, core.perf_enable));
         const std::size_t perf_disabled =
             emitter.branch32(0x84); // je
-        emitter.add_core_rbx(
+        emitter.add_core_r9(
             single_core_jit_offset(
                 core, core.perf_cycles));
         emitter.patch32(perf_disabled, emitter.position());
@@ -21068,8 +21100,12 @@ compile_single_core_jit_block(
         emitter.store_core_qword_zero(
             single_core_jit_offset(
                 core, core.icache_undo_count));
+        // Return retired steps in bits 0..15, retired cycles in 16..31,
+        // and the interrupt-prefix exit reason in bit 32.
         emitter.bytes({
-            0x89, 0xD8,       // mov eax, ebx
+            0x44, 0x89, 0xC8, // mov eax, r9d (retired cycles)
+            0x48, 0xC1, 0xE0, 0x10, // shl rax, 16
+            0x48, 0x09, 0xD8, // or rax, rbx (retired steps)
             0x49, 0xC1, 0xE2, 0x20, // shl r10, 32
             0x4C, 0x09, 0xD0, // or rax, r10
             0x41, 0x5F,       // pop r15
@@ -21164,6 +21200,19 @@ static bool single_core_block_identity_matches(
         ) {
             return false;
         }
+        const auto& decoded = block.instructions[index];
+        if (decoded.family == 0x3) {
+            if (
+                decoded.subop != CC_AL ||
+                decoded.encoded_size != 2 ||
+                decoded.cycle_cost != 2 ||
+                index + 1 != block.instruction_count
+            ) {
+                return false;
+            }
+        } else if (decoded.cycle_cost != 1) {
+            return false;
+        }
         decoded_size += encoded_size;
     }
     return decoded_size == block.identity_size;
@@ -21215,6 +21264,8 @@ build_single_core_decoded_block(
         candidate.instructions[
             candidate.instruction_count++] = decoded;
         offset += encoded_size;
+        if (decoded.family == 0x3)
+            break;
     }
 
     // One-instruction plans do not amortize cache validation and dispatch.
@@ -21248,6 +21299,9 @@ static void execute_single_core_decoded_instruction(
             break;
         case 0x2:  // DEC
             core.regs[decoded.rd]--;
+            break;
+        case 0x3:  // unconditional short BR, from post-fetch PC
+            pc(core) += s64(sign_extend(decoded.immediate, 8));
             break;
         case 0x6:
             execute_register_immediate(
@@ -21397,7 +21451,9 @@ try_execute_single_core_decoded_block(
             const uint64_t packed =
                 function(&core, enabled_ipi_mirror);
             const uint32_t steps =
-                static_cast<uint32_t>(packed);
+                static_cast<uint32_t>(packed & 0xFFFF);
+            const uint32_t cycles =
+                static_cast<uint32_t>((packed >> 16) & 0xFFFF);
             const bool interrupt_boundary =
                 ((packed >> 32) & 1) != 0;
             if (
@@ -21413,8 +21469,15 @@ try_execute_single_core_decoded_block(
                 throw std::logic_error(
                     "single-core JIT returned an invalid completed prefix");
             }
+            uint32_t expected_cycles = 0;
+            for (uint32_t index = 0; index < steps; index++)
+                expected_cycles += block->instructions[index].cycle_cost;
+            if (cycles != expected_cycles) {
+                throw std::logic_error(
+                    "single-core JIT returned an invalid cycle count");
+            }
             run.steps = static_cast<int>(steps);
-            run.cycles = static_cast<int64_t>(steps);
+            run.cycles = static_cast<int64_t>(cycles);
             run.interrupt_boundary = interrupt_boundary;
             // Pure admitted operations cannot activate crypto or NIC work,
             // and external device mutation is excluded by the execution
