@@ -1444,3 +1444,93 @@ def test_terminal_sep_executes_natively_with_live_target(
         assert counts["uncontended_jit_compile_failures"] == 0
         assert counts["uncontended_jit_executions"] == 0
         assert counts["uncontended_jit_steps"] == 0
+
+
+def test_terminal_byte_store_executes_natively_with_live_operands(
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+    inc r4
+    st.b r5, r6
+"""
+        ),
+    )
+    targets = (0x300, 0x310, 0x320, 0x330)
+    values = (
+        0x0123_4567_89AB_CD11,
+        0xFEDC_BA98_7654_3222,
+        0x1020_3040_5060_70A5,
+        0x8877_6655_4433_223C,
+    )
+    for target in targets:
+        system.load_binary(target, b"\xEE\xEE")
+    system.boot(entry=0)
+    system.cpu.flags_unpack(0xAA)
+    original_xsel = system.cpu.xsel
+    original_psel = system.cpu.psel
+    original_spsel = system.cpu.spsel
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for pass_index, (target, value) in enumerate(
+        zip(targets, values, strict=True),
+        start=1,
+    ):
+        system.cpu.pc = 0
+        system.cpu.regs[5] = target
+        system.cpu.regs[6] = value
+
+        stats = system.run_batch_stats(2)
+
+        assert stats.instructions_executed == 2
+        assert stats.system_cycles_advanced == 2
+        assert stats.per_core_cycles[0] == 2
+        assert system.cpu.regs[4] == pass_index
+        assert system.cpu.regs[5] == target
+        assert system.cpu.regs[6] == value
+        assert system.cpu.pc == 3
+        assert system.cpu.flags_pack() == 0xAA
+        assert system.cpu.xsel == original_xsel
+        assert system.cpu.psel == original_psel
+        assert system.cpu.spsel == original_spsel
+        for target_index, observed_target in enumerate(targets):
+            expected = (
+                values[target_index] & 0xFF
+                if target_index < pass_index
+                else 0xEE
+            )
+            assert system.cpu.mem[observed_target] == expected
+            assert system.cpu.mem[observed_target + 1] == 0xEE
+
+        if pass_index == 2:
+            planned = dict(owner._concurrency_profile_snapshot())
+            planned_counts = dict(planned["counts"])
+            assert planned_counts["uncontended_jit_compile_attempts"] == 0
+            assert planned_counts["uncontended_jit_compilations"] == 0
+            assert planned_counts["uncontended_jit_compile_failures"] == 0
+            assert planned_counts["uncontended_jit_executions"] == 0
+            assert planned_counts["uncontended_jit_steps"] == 0
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert counts["uncontended_steps"] == 8
+    assert system.cpu.cycle_count == 8
+    assert owner.system_cycles == 8
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_steps"] == 4
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
+    else:
+        assert counts["uncontended_block_steps"] == 0
+        assert counts["uncontended_jit_compile_attempts"] == 0
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 0
+        assert counts["uncontended_jit_steps"] == 0

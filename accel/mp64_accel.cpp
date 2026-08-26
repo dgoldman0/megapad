@@ -20617,12 +20617,16 @@ static bool decode_single_core_register_instruction(
         }
         case 0x5: {
             // Direct reads are deliberately limited to bare, low-register
-            // LDN and LD.B. Block construction further requires one to be
-            // the leading and only memory instruction, so its dynamic
-            // address can be proven before native entry without partial
-            // guest progress.
-            if (subop != 0x0 && subop != 0x6)
+            // LDN and LD.B. The first direct write is bare low-register ST.B.
+            // Block construction supplies the distinct leading-read or
+            // stable-address terminal-store proof before either can run.
+            if (
+                subop != 0x0 &&
+                subop != 0x6 &&
+                subop != 0x7
+            ) {
                 return false;
+            }
             uint8_t operands = 0;
             if (!read_byte(operands))
                 return false;
@@ -20728,6 +20732,50 @@ static bool single_core_decoded_is_memory(
     return decoded.family == 0x5;
 }
 
+static bool single_core_decoded_is_direct_read(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return
+        decoded.family == 0x5 &&
+        (decoded.subop == 0x0 || decoded.subop == 0x6);
+}
+
+static bool single_core_decoded_is_terminal_store(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return decoded.family == 0x5 && decoded.subop == 0x7;
+}
+
+static bool single_core_decoded_ends_block(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return
+        single_core_decoded_is_terminal_control(decoded) ||
+        single_core_decoded_is_terminal_store(decoded);
+}
+
+static uint32_t single_core_decoded_register_write_mask(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    bool writes_rd = false;
+    switch (decoded.family) {
+        case 0x1:  // INC
+        case 0x2:  // DEC
+            writes_rd = true;
+            break;
+        case 0x5:  // direct reads, but not ST.B
+            writes_rd = single_core_decoded_is_direct_read(decoded);
+            break;
+        case 0x6:  // immediate operations except CMPI
+            writes_rd = decoded.subop != 0x6;
+            break;
+        case 0x7:  // register operations except CMP
+            writes_rd = decoded.subop != 0x7;
+            break;
+        default:
+            break;
+    }
+    if (!writes_rd || decoded.rd >= 32)
+        return 0;
+    return uint32_t{1} << decoded.rd;
+}
+
 enum class SingleCoreJitCompilation : uint8_t {
     UNAVAILABLE = 0,
     COMPILED = 1,
@@ -20737,7 +20785,7 @@ enum class SingleCoreJitCompilation : uint8_t {
 using SingleCoreJitFunction = uint64_t (*)(
     CPUState*,
     const std::atomic<uint8_t>*,
-    const uint8_t*);
+    uint8_t*);
 
 #if MP64_HAS_X86_64_JIT
 
@@ -21170,13 +21218,18 @@ static void emit_single_core_jit_instruction(
                 emitter.patch32(not_taken, emitter.position());
             }
             return;
-        case 0x5:  // leading direct read from preflighted host memory
-            // The third SysV argument arrives in RDX. Block admission makes
-            // this instruction first, so no earlier emitter can reuse it.
+        case 0x5:  // preflighted direct memory
+            // The third SysV argument arrives in RDX. Current emitters reserve
+            // it across a stable-address prefix for a terminal store.
             if (decoded.subop == 0x0) {  // LDN
                 emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
             } else if (decoded.subop == 0x6) {  // LD.B
                 emitter.bytes({0x0F, 0xB6, 0x02}); // movzx eax, byte [rdx]
+            } else if (decoded.subop == 0x7) {  // ST.B
+                emitter.mov_rax_from_core(
+                    single_core_jit_register_offset(core, decoded.rs));
+                emitter.bytes({0x88, 0x02}); // mov byte [rdx], al
+                return;
             } else {
                 throw std::logic_error(
                     "x86-64 JIT received an unsupported memory op");
@@ -21398,7 +21451,7 @@ compile_single_core_jit_block(
             index++
         ) {
             if (
-                single_core_decoded_is_terminal_control(
+                single_core_decoded_ends_block(
                     block.instructions[index]) &&
                 index + 1 != block.instruction_count
             ) {
@@ -21564,6 +21617,8 @@ static bool single_core_block_identity_matches(
         return false;
     }
     std::size_t decoded_size = 0;
+    uint32_t written_registers = 0;
+    bool memory_seen = false;
     for (
         uint8_t index = 0;
         index < block.instruction_count;
@@ -21651,12 +21706,7 @@ static bool single_core_block_identity_matches(
         } else if (decoded.taken_cycle_cost != 0) {
             return false;
         } else if (decoded.family == 0x5) {
-            if (
-                index != 0 ||
-                (
-                    decoded.subop != 0x0 &&
-                    decoded.subop != 0x6
-                ) ||
+            const bool common_invalid =
                 decoded.encoded_size != 2 ||
                 decoded.fetch_hits < 1 ||
                 decoded.fetch_hits > 2 ||
@@ -21665,10 +21715,25 @@ static bool single_core_block_identity_matches(
                 decoded.rd >= 16 ||
                 decoded.rs >= 16 ||
                 decoded.rd == block.psel ||
-                decoded.rs == block.psel
-            ) {
+                decoded.rs == block.psel;
+            if (common_invalid)
                 return false;
-            }
+            const bool valid_read =
+                single_core_decoded_is_direct_read(decoded) &&
+                index == 0 &&
+                !memory_seen;
+            const bool valid_store =
+                single_core_decoded_is_terminal_store(decoded) &&
+                index != 0 &&
+                index + 1 == block.instruction_count &&
+                !memory_seen &&
+                (
+                    written_registers &
+                    (uint32_t{1} << decoded.rd)
+                ) == 0;
+            if (!valid_read && !valid_store)
+                return false;
+            memory_seen = true;
         } else if (
             decoded.family == 0x6 && decoded.subop == 0x0
         ) {
@@ -21749,6 +21814,8 @@ static bool single_core_block_identity_matches(
         } else if (decoded.cycle_cost != 1) {
             return false;
         }
+        written_registers |=
+            single_core_decoded_register_write_mask(decoded);
         decoded_size += encoded_size;
     }
     return decoded_size == block.identity_size;
@@ -21774,6 +21841,8 @@ build_single_core_decoded_block(
         static_cast<std::size_t>(
             address & (CPUState::ICACHE_LINE_BYTES - 1));
     std::size_t offset = 0;
+    uint32_t written_registers = 0;
+    bool memory_seen = false;
     while (
         offset < line_capacity &&
         candidate.instruction_count <
@@ -21793,11 +21862,29 @@ build_single_core_decoded_block(
                 encoded_size)) {
             break;
         }
-        if (
-            single_core_decoded_is_memory(decoded) &&
-            candidate.instruction_count != 0
-        ) {
-            break;
+        if (single_core_decoded_is_memory(decoded)) {
+            if (single_core_decoded_is_direct_read(decoded)) {
+                if (
+                    candidate.instruction_count != 0 ||
+                    memory_seen
+                ) {
+                    break;
+                }
+            } else if (single_core_decoded_is_terminal_store(decoded)) {
+                if (
+                    candidate.instruction_count == 0 ||
+                    memory_seen ||
+                    (
+                        written_registers &
+                        (uint32_t{1} << decoded.rd)
+                    ) != 0
+                ) {
+                    break;
+                }
+            } else {
+                break;
+            }
+            memory_seen = true;
         }
         std::memcpy(
             candidate.identity.data() + offset,
@@ -21806,7 +21893,9 @@ build_single_core_decoded_block(
         candidate.instructions[
             candidate.instruction_count++] = decoded;
         offset += encoded_size;
-        if (single_core_decoded_is_terminal_control(decoded))
+        written_registers |=
+            single_core_decoded_register_write_mask(decoded);
+        if (single_core_decoded_ends_block(decoded))
             break;
     }
 
@@ -21826,7 +21915,15 @@ static bool single_core_block_has_leading_memory(
         const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
     return
         block.instruction_count != 0 &&
-        single_core_decoded_is_memory(block.instructions[0]);
+        single_core_decoded_is_direct_read(block.instructions[0]);
+}
+
+static bool single_core_block_has_terminal_store(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return
+        block.instruction_count != 0 &&
+        single_core_decoded_is_terminal_store(
+            block.instructions[block.instruction_count - 1]);
 }
 
 static bool single_core_block_has_terminal_sep(
@@ -21836,7 +21933,7 @@ static bool single_core_block_has_terminal_sep(
         block.instructions[block.instruction_count - 1].family == 0xA;
 }
 
-static const uint8_t* preflight_single_core_direct_read(
+static uint8_t* preflight_single_core_direct_read(
         CPUState& core,
         const StepCallbacks& callbacks,
         const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
@@ -21889,8 +21986,8 @@ static const uint8_t* preflight_single_core_direct_read(
     }
     const DirectMemoryRegion region =
         resolve_accel_region(core, address, model);
-    // Keep this first slice on non-wrapping Bank 0. Other apertures retain
-    // authoritative sys_read64/sys_read8 routing until qualified separately.
+    // Keep this direct-memory slice on non-wrapping Bank 0. Other apertures
+    // retain authoritative system-read routing until qualified separately.
     if (
         region.priority != 3 ||
         region.ptr == nullptr ||
@@ -21898,6 +21995,84 @@ static const uint8_t* preflight_single_core_direct_read(
     ) {
         return nullptr;
     }
+    return region.ptr;
+}
+
+static uint8_t* preflight_single_core_direct_byte_store(
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint64_t& guest_address) noexcept {
+    if (
+        core.memory == nullptr ||
+        core.priv_level != 0 ||
+        callbacks.bus_access != nullptr ||
+        block.instruction_count < 2
+    ) {
+        return nullptr;
+    }
+    const CPUState::SingleCoreDecodedInstruction& decoded =
+        block.instructions[block.instruction_count - 1];
+    if (
+        !single_core_decoded_is_terminal_store(decoded) ||
+        decoded.encoded_size != 2 ||
+        decoded.cycle_cost != 1 ||
+        decoded.taken_cycle_cost != 0 ||
+        decoded.immediate != 0 ||
+        decoded.rd >= 16 ||
+        decoded.rs >= 16 ||
+        decoded.rd == block.psel ||
+        decoded.rs == block.psel
+    ) {
+        return nullptr;
+    }
+
+    uint32_t written_registers = 0;
+    for (
+        uint8_t index = 0;
+        index + 1 < block.instruction_count;
+        index++
+    ) {
+        const CPUState::SingleCoreDecodedInstruction& prefix =
+            block.instructions[index];
+        if (single_core_decoded_is_memory(prefix))
+            return nullptr;
+        written_registers |=
+            single_core_decoded_register_write_mask(prefix);
+    }
+    if (
+        (
+            written_registers &
+            (uint32_t{1} << decoded.rd)
+        ) != 0
+    ) {
+        return nullptr;
+    }
+
+    const uint64_t address = core.regs[decoded.rd];
+    const AccelHookContext context{
+        callbacks.has_mmio,
+        callbacks.mmio_start,
+        callbacks.mmio_end,
+    };
+    if (!accel_span_is_direct(
+            core,
+            address,
+            1,
+            AccelAccessModel::BYTE,
+            context)) {
+        return nullptr;
+    }
+    const DirectMemoryRegion region =
+        resolve_accel_byte_region(core, address);
+    if (
+        region.priority != 3 ||
+        region.ptr == nullptr ||
+        region.avail < 1
+    ) {
+        return nullptr;
+    }
+    guest_address = address;
     return region.ptr;
 }
 
@@ -22044,17 +22219,29 @@ try_execute_single_core_decoded_block(
         !timing_active;
     const bool leading_memory =
         single_core_block_has_leading_memory(*block);
-    const uint8_t* direct_memory = nullptr;
-    if (leading_memory) {
-        // The direct-read slice has no generated side exit. Prove its
-        // dynamic address before compilation or entry, and otherwise leave
-        // every architectural effect to ordinary step_one().
+    const bool terminal_store =
+        single_core_block_has_terminal_store(*block);
+    const bool memory_block = leading_memory || terminal_store;
+    uint8_t* direct_memory = nullptr;
+    uint64_t direct_memory_address = 0;
+    if (memory_block) {
+        // The direct-memory slice has no generated side exit. Prove its
+        // dynamic address before compilation or entry; otherwise leave every
+        // architectural effect to ordinary step_one().
         if (!native_eligible)
             return run;
-        direct_memory = preflight_single_core_direct_read(
-            core,
-            callbacks,
-            *block);
+        if (leading_memory) {
+            direct_memory = preflight_single_core_direct_read(
+                core,
+                callbacks,
+                *block);
+        } else {
+            direct_memory = preflight_single_core_direct_byte_store(
+                core,
+                callbacks,
+                *block,
+                direct_memory_address);
+        }
         if (direct_memory == nullptr)
             return run;
     }
@@ -22171,16 +22358,37 @@ try_execute_single_core_decoded_block(
                             "single-core JIT returned invalid SEP state");
                     }
                 }
+                if (single_core_decoded_is_terminal_store(terminal)) {
+                    if (
+                        pc(core) != address + block->identity_size ||
+                        core.regs[terminal.rd] != direct_memory_address
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid store state");
+                    }
+                }
             }
             if (cycles != expected_cycles) {
                 throw std::logic_error(
                     "single-core JIT returned an invalid cycle count");
             }
+            const bool completed_terminal_store =
+                terminal_store &&
+                steps == block->instruction_count;
+            if (completed_terminal_store) {
+                // The raw host write is complete. Reproduce architectural
+                // store invalidation before any subsequent guest fetch; a
+                // prefix IPI exit never reaches this path.
+                icache_invalidate_span(
+                    core,
+                    direct_memory_address,
+                    1);
+            }
             run.steps = static_cast<int>(steps);
             run.cycles = static_cast<int64_t>(cycles);
             run.interrupt_boundary = interrupt_boundary;
             // Admitted register/control operations and preflighted direct
-            // RAM reads cannot activate crypto or NIC work, and external
+            // RAM accesses cannot activate crypto or NIC work, and external
             // mutation is excluded by the execution admission held here.
             native_executed = true;
             if (profile_enabled) {
@@ -22194,10 +22402,10 @@ try_execute_single_core_decoded_block(
     }
 
     if (!native_executed) {
-        // A leading memory plan is native-only. Cold, unavailable, failed,
-        // or otherwise ineligible visits make zero block progress so the
-        // authoritative fetch/system-read path owns every fallback effect.
-        if (leading_memory)
+        // Direct-memory plans are native-only. Cold, unavailable, failed, or
+        // otherwise ineligible visits make zero block progress so ordinary
+        // instruction execution owns every fallback effect.
+        if (memory_block)
             return run;
         for (
             uint8_t index = 0;
