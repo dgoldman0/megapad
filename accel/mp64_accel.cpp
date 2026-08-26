@@ -20556,12 +20556,13 @@ static bool decode_single_core_register_instruction(
                 return false;
             break;
         case 0x3: {
-            // Admit the unprefixed short Z branches, but keep SKIP and every
-            // other conditional form on the authoritative path.
+            // Admit the unprefixed short Z and carry-clear branches, but
+            // keep SKIP and every other conditional form authoritative.
             if (
                 subop != CC_AL &&
                 subop != CC_EQ &&
-                subop != CC_NE
+                subop != CC_NE &&
+                subop != CC_CC
             ) {
                 return false;
             }
@@ -21046,7 +21047,8 @@ static void emit_single_core_jit_instruction(
             if (
                 (
                     decoded.subop != CC_EQ &&
-                    decoded.subop != CC_NE
+                    decoded.subop != CC_NE &&
+                    decoded.subop != CC_CC
                 ) ||
                 decoded.taken_cycle_cost != 1
             ) {
@@ -21522,7 +21524,8 @@ static bool single_core_block_identity_matches(
                 decoded.family == 0x3 &&
                 (
                     decoded.subop == CC_EQ ||
-                    decoded.subop == CC_NE
+                    decoded.subop == CC_NE ||
+                    decoded.subop == CC_CC
                 ) &&
                 decoded.encoded_size == 2 &&
                 decoded.cycle_cost == 1 &&

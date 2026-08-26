@@ -1109,10 +1109,11 @@ mismatch:
     (
         ("breq", 0xAA, 0xAB),
         ("brne", 0xAB, 0xAA),
+        ("brcc", 0xAA, 0xA8),
     ),
-    ids=("equal", "not-equal"),
+    ids=("equal", "not-equal", "carry-clear"),
 )
-def test_short_z_branch_sign_extends_and_uses_live_flags_natively(
+def test_short_byte_flag_branch_sign_extends_and_uses_live_flags_natively(
     mnemonic: str,
     not_taken_flags: int,
     taken_flags: int,
