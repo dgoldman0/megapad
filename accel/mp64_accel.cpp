@@ -20554,6 +20554,7 @@ static bool decode_single_core_register_instruction(
         }
         case 0x6: {
             if (
+                subop != 0x0 &&  // LDI
                 subop != 0x2 &&  // ADDI
                 subop != 0x4 &&  // ORI
                 subop != 0xB     // ROLI
@@ -20882,6 +20883,15 @@ static void emit_single_core_jit_instruction(
                 static_cast<uint8_t>(decoded.immediate));
             return;
         case 0x6:
+            if (decoded.subop == 0x0) {  // LDI
+                // The admitted unprefixed form has an imm8, so writing EAX
+                // gives the required full-register zero extension compactly.
+                emitter.byte(0xB8); // mov eax, imm32
+                emitter.u32(static_cast<uint32_t>(decoded.immediate));
+                emitter.mov_core_from_rax(
+                    single_core_jit_register_offset(core, decoded.rd));
+                return;
+            }
             emitter.mov_rax_from_core(
                 single_core_jit_register_offset(core, decoded.rd));
             switch (decoded.subop) {
@@ -21207,6 +21217,16 @@ static bool single_core_block_identity_matches(
                 decoded.encoded_size != 2 ||
                 decoded.cycle_cost != 2 ||
                 index + 1 != block.instruction_count
+            ) {
+                return false;
+            }
+        } else if (
+            decoded.family == 0x6 && decoded.subop == 0x0
+        ) {
+            if (
+                decoded.encoded_size != 3 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate > 0xFF
             ) {
                 return false;
             }

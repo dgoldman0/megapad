@@ -14,6 +14,8 @@ SHARED_WORD = 0x800
 SYSINFO_SINK = MMIO_BASE + SYSINFO_BASE
 REGISTER_BLOCK_SOURCE = """
 loop:
+    ldi r12, 0xa5
+    inc r12
     inc r4
     addi r5, 3
     xor r6, r5
@@ -447,3 +449,53 @@ loop:
     assert counts["private_steps"] == 0
     assert wall_ns["uncontended_round"] > 0
     assert wall_ns["uncontended_dispatch"] > 0
+
+
+def test_unprefixed_ldi_executes_in_repeated_native_block() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    ldi r4, 0xa5
+    inc r4
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    system.cpu.regs[4] = 0xFFFF_FFFF_FFFF_FF00
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(999)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 999
+    assert counts["uncontended_steps"] == 999
+    assert system.cpu.regs[4] == 0xA6
+    assert system.cpu.pc == 0
+    assert system.cpu.cycle_count == 1_332
+    # Only the first cold LDI is authoritative. The resident INC/BR suffix
+    # and every subsequent complete LDI/INC/BR loop execute as blocks.
+    assert counts["uncontended_block_steps"] == 998
+    jit_fields = (
+        "uncontended_jit_compile_attempts",
+        "uncontended_jit_compilations",
+        "uncontended_jit_compile_failures",
+        "uncontended_jit_executions",
+        "uncontended_jit_steps",
+    )
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] > 0
+        assert counts["uncontended_jit_compilations"] > 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] > 0
+        assert counts["uncontended_jit_steps"] > 0
+        assert counts["uncontended_jit_steps"] <= (
+            counts["uncontended_block_steps"]
+        )
+    else:
+        assert all(counts[name] == 0 for name in jit_fields)
