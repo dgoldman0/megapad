@@ -20604,6 +20604,28 @@ static bool decode_single_core_register_instruction(
             }
             break;
         }
+        case 0x5: {
+            // The first memory slice is deliberately only bare, low-register
+            // LDN. Block construction further requires it to be the leading
+            // and only memory instruction, so its dynamic address can be
+            // proven before native entry without partial guest progress.
+            if (subop != 0x0)
+                return false;
+            uint8_t operands = 0;
+            if (!read_byte(operands))
+                return false;
+            decoded.rd = static_cast<uint8_t>(
+                (operands >> 4) & 0xF);
+            decoded.rs = static_cast<uint8_t>(
+                operands & 0xF);
+            if (
+                decoded.rd == core.psel ||
+                decoded.rs == core.psel
+            ) {
+                return false;
+            }
+            break;
+        }
         case 0x6: {
             if (
                 subop != 0x0 &&  // LDI
@@ -20682,6 +20704,11 @@ static bool single_core_decoded_is_terminal_branch(
     return decoded.family == 0x3 || decoded.family == 0x4;
 }
 
+static bool single_core_decoded_is_memory(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return decoded.family == 0x5;
+}
+
 enum class SingleCoreJitCompilation : uint8_t {
     UNAVAILABLE = 0,
     COMPILED = 1,
@@ -20690,7 +20717,8 @@ enum class SingleCoreJitCompilation : uint8_t {
 
 using SingleCoreJitFunction = uint64_t (*)(
     CPUState*,
-    const std::atomic<uint8_t>*);
+    const std::atomic<uint8_t>*,
+    const uint8_t*);
 
 #if MP64_HAS_X86_64_JIT
 
@@ -21122,6 +21150,17 @@ static void emit_single_core_jit_instruction(
                     decoded.taken_cycle_cost);
                 emitter.patch32(not_taken, emitter.position());
             }
+            return;
+        case 0x5:  // leading LDN from preflighted host memory
+            if (decoded.subop != 0x0) {
+                throw std::logic_error(
+                    "x86-64 JIT received an unsupported memory op");
+            }
+            // The third SysV argument arrives in RDX. Block admission makes
+            // this instruction first, so no earlier emitter can reuse it.
+            emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
+            emitter.mov_core_from_rax(
+                single_core_jit_register_offset(core, decoded.rd));
             return;
         case 0x6:
             if (decoded.subop == 0x0) {  // LDI
@@ -21562,6 +21601,22 @@ static bool single_core_block_identity_matches(
             }
         } else if (decoded.taken_cycle_cost != 0) {
             return false;
+        } else if (decoded.family == 0x5) {
+            if (
+                index != 0 ||
+                decoded.subop != 0x0 ||
+                decoded.encoded_size != 2 ||
+                decoded.fetch_hits < 1 ||
+                decoded.fetch_hits > 2 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate != 0 ||
+                decoded.rd >= 16 ||
+                decoded.rs >= 16 ||
+                decoded.rd == block.psel ||
+                decoded.rs == block.psel
+            ) {
+                return false;
+            }
         } else if (
             decoded.family == 0x6 && decoded.subop == 0x0
         ) {
@@ -21686,6 +21741,12 @@ build_single_core_decoded_block(
                 encoded_size)) {
             break;
         }
+        if (
+            single_core_decoded_is_memory(decoded) &&
+            candidate.instruction_count != 0
+        ) {
+            break;
+        }
         std::memcpy(
             candidate.identity.data() + offset,
             encoding.data(),
@@ -21707,6 +21768,69 @@ build_single_core_decoded_block(
             single_core_block_cache_index(address)];
     destination = std::move(candidate);
     return &destination;
+}
+
+static bool single_core_block_has_leading_memory(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return
+        block.instruction_count != 0 &&
+        single_core_decoded_is_memory(block.instructions[0]);
+}
+
+static const uint8_t* preflight_single_core_direct_ldn(
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    if (
+        core.memory == nullptr ||
+        core.priv_level != 0 ||
+        callbacks.bus_access != nullptr ||
+        block.instruction_count < 2
+    ) {
+        return nullptr;
+    }
+    const CPUState::SingleCoreDecodedInstruction& decoded =
+        block.instructions[0];
+    if (
+        decoded.family != 0x5 ||
+        decoded.subop != 0x0 ||
+        decoded.encoded_size != 2 ||
+        decoded.cycle_cost != 1 ||
+        decoded.taken_cycle_cost != 0 ||
+        decoded.rd >= 16 ||
+        decoded.rs >= 16 ||
+        decoded.rd == block.psel ||
+        decoded.rs == block.psel
+    ) {
+        return nullptr;
+    }
+
+    const uint64_t address = core.regs[decoded.rs];
+    const AccelHookContext context{
+        callbacks.has_mmio,
+        callbacks.mmio_start,
+        callbacks.mmio_end,
+    };
+    if (!accel_span_is_direct(
+            core,
+            address,
+            8,
+            AccelAccessModel::SCALAR,
+            context)) {
+        return nullptr;
+    }
+    const DirectMemoryRegion region =
+        resolve_accel_scalar_region(core, address);
+    // Keep this first slice on non-wrapping Bank 0. Other apertures retain
+    // authoritative sys_read64 routing until qualified independently.
+    if (
+        region.priority != 3 ||
+        region.ptr == nullptr ||
+        region.avail < 8
+    ) {
+        return nullptr;
+    }
+    return region.ptr;
 }
 
 static uint8_t execute_single_core_decoded_instruction(
@@ -21836,6 +21960,22 @@ try_execute_single_core_decoded_block(
     const bool native_eligible =
         max_steps >= block->instruction_count &&
         !timing_active;
+    const bool leading_memory =
+        single_core_block_has_leading_memory(*block);
+    const uint8_t* direct_memory = nullptr;
+    if (leading_memory) {
+        // The first memory slice has no generated side exit. Prove its
+        // dynamic address before compilation or entry, and otherwise leave
+        // every architectural effect to ordinary step_one().
+        if (!native_eligible)
+            return run;
+        direct_memory = preflight_single_core_direct_ldn(
+            core,
+            callbacks,
+            *block);
+        if (direct_memory == nullptr)
+            return run;
+    }
 
     // A decoded plan must be observed again before it is compiled. This
     // keeps one-shot boot/source paths from paying mmap+mprotect churn while
@@ -21891,7 +22031,10 @@ try_execute_single_core_decoded_block(
                 reinterpret_cast<SingleCoreJitFunction>(
                     block->native_code.address());
             const uint64_t packed =
-                function(&core, enabled_ipi_mirror);
+                function(
+                    &core,
+                    enabled_ipi_mirror,
+                    direct_memory);
             const uint32_t steps =
                 static_cast<uint32_t>(packed & 0xFFFF);
             const uint32_t cycles =
@@ -21944,9 +22087,9 @@ try_execute_single_core_decoded_block(
             run.steps = static_cast<int>(steps);
             run.cycles = static_cast<int64_t>(cycles);
             run.interrupt_boundary = interrupt_boundary;
-            // Pure admitted operations cannot activate crypto or NIC work,
-            // and external device mutation is excluded by the execution
-            // admission held around this segment.
+            // Admitted register operations and preflighted direct RAM reads
+            // cannot activate crypto or NIC work, and external mutation is
+            // excluded by the execution admission held around this segment.
             native_executed = true;
             if (profile_enabled) {
                 host_saturating_increment(
@@ -21959,6 +22102,11 @@ try_execute_single_core_decoded_block(
     }
 
     if (!native_executed) {
+        // A leading memory plan is native-only. Cold, unavailable, failed,
+        // or otherwise ineligible visits make zero block progress so the
+        // authoritative fetch/sys_read64 path owns every fallback effect.
+        if (leading_memory)
+            return run;
         for (
             uint8_t index = 0;
             index < block->instruction_count &&

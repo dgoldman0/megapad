@@ -1256,3 +1256,86 @@ loop:
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_executions"] == 2
         assert counts["uncontended_jit_steps"] == 4
+
+
+def test_leading_ldn_executes_natively_with_live_ram_address_and_data(
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    ldn r4, r5
+    br loop
+"""
+        ),
+    )
+    payloads = (
+        (0x200, bytes.fromhex("10 32 54 76 98 ba dc fe")),
+        (0x208, bytes.fromhex("11 22 33 44 55 66 77 88")),
+        (0x210, bytes.fromhex("ef cd ab 89 67 45 23 01")),
+        (0x218, bytes.fromhex("08 07 06 05 04 03 02 01")),
+    )
+    for address, payload in payloads[:2]:
+        system.load_binary(address, payload)
+    system.boot(entry=0)
+    system.cpu.regs[5] = payloads[0][0]
+    system.cpu.flags_unpack(0xAA)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    cold = system.run_batch_stats(2)
+    assert cold.instructions_executed == 2
+    assert cold.system_cycles_advanced == 3
+    assert cold.per_core_cycles[0] == 3
+    assert system.cpu.regs[4] == 0xFEDC_BA98_7654_3210
+
+    system.cpu.regs[5] = payloads[1][0]
+    planned = system.run_batch_stats(2)
+    assert planned.instructions_executed == 2
+    assert planned.system_cycles_advanced == 3
+    assert planned.per_core_cycles[0] == 3
+    assert system.cpu.regs[4] == 0x8877_6655_4433_2211
+
+    system.load_binary(*payloads[2])
+    system.cpu.regs[5] = payloads[2][0]
+    first_native = system.run_batch_stats(2)
+    assert first_native.instructions_executed == 2
+    assert first_native.system_cycles_advanced == 3
+    assert first_native.per_core_cycles[0] == 3
+    assert system.cpu.regs[4] == 0x0123_4567_89AB_CDEF
+
+    system.load_binary(*payloads[3])
+    system.cpu.regs[5] = payloads[3][0]
+    cached_native = system.run_batch_stats(2)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert cached_native.instructions_executed == 2
+    assert cached_native.system_cycles_advanced == 3
+    assert cached_native.per_core_cycles[0] == 3
+    assert counts["uncontended_steps"] == 8
+    assert system.cpu.regs[4] == 0x0102_0304_0506_0708
+    assert system.cpu.regs[5] == payloads[3][0]
+    assert system.cpu.pc == 0
+    assert system.cpu.flags_pack() == 0xAA
+    for address, payload in payloads:
+        assert bytes(system.cpu.mem[address:address + 8]) == payload
+    assert system.cpu.cycle_count == 12
+    assert owner.system_cycles == 12
+
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_steps"] == 4
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
+    else:
+        assert counts["uncontended_block_steps"] == 0
+        assert counts["uncontended_jit_compile_attempts"] == 0
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 0
+        assert counts["uncontended_jit_steps"] == 0
