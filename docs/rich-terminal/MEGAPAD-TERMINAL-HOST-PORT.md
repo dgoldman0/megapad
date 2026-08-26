@@ -209,16 +209,24 @@ composite and advances those boundaries. Sink loss revokes the exact offer;
 cadence then re-offers it or a newer coalesced candidate without reusing an
 offer identifier.
 
-For the first visible root-LABEL checkpoint, the compositor uses the CELL canvas
-as its base, draws retained regions and objects in their defined back-to-front
-order with straight-alpha source-over blending, and draws the cursor overlay
-last. A region's pixel rectangle is exactly its cell rectangle multiplied by
-the selected cell width and height. For a parentless object's normalized edge,
-the low edge rounds down and the high edge rounds up against that region's pixel
+The compositor uses the CELL canvas as its complete fallback base, draws every
+selected rich region/surface/primitive in deterministic back-to-front order
+with straight-alpha source-over blending, and draws the cursor overlay last.
+The current implementation reaches this boundary with a transitional
+root-LABEL-only draw plane; that plane proves immutable-offer and physical-ACK
+mechanics but is not the generic renderer required by the Desk/Pad/Daybook
+vertical.
+
+A region's pixel rectangle is exactly its cell rectangle multiplied by the
+selected cell width and height. For a parentless object's normalized edge, the
+low edge rounds down and the high edge rounds up against that region's pixel
 extent, then clips to the region when clipping is enabled. The terminal font is
 authoritative. LABEL horizontal/vertical alignment is resolved inside the
 clipped object rectangle; nonwrapping text is clipped, with ellipsis applied
-only when the LABEL flag requests it.
+only when the LABEL flag requests it. The generic TUI path must additionally
+carry bounded clips/translations, fills, styled glyph runs, lines/boxes,
+selection or invert/caret overlays, visibility, and z-order so substantive UI
+pixels are rasterized here rather than supplied only by CELL.
 
 Cursor blink and other renderer-only overlays do not create cell revisions.
 Unchanged rows may be shared by identity across revisions. A renderer cannot
@@ -257,9 +265,12 @@ The lightweight host-port suite must prove:
 8. protocol resize either reserves both ingress and geometry or neither;
 9. a nonempty retained plane survives cadence and view publication without
    being reduced to the CELL compatibility snapshot; and
-10. a fixed-font root-region-plus-LABEL fixture changes the expected off-screen
-    pixels after CELL base rendering and before the cursor overlay.
+10. deterministic off-screen fixtures prove that the current rich draw plane
+    changes pixels after CELL base rendering and before the cursor overlay; the
+    generic renderer fixture additionally covers text, background/fill,
+    clipping, styling, and z-order once that bounded vocabulary is present.
 
 Cases 9 and 10 are focused seconds-scale units for the current functional
-slice, not full renderer qualification. A CELL-only snapshot round trip cannot
-be cited as retained compositor acceptance.
+slice, not full renderer qualification. A CELL-only snapshot round trip or a
+root-LABEL overlay cannot be cited as Desk/Pad/Daybook rich-rendering
+acceptance.

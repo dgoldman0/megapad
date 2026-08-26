@@ -588,7 +588,7 @@ def test_label_object_define_rejects_controls_and_invalid_utf8(bad_text):
         (RetainedMessageType.SERIES_DROP, decode_series_drop, encode_series_drop),
     ),
 )
-def test_soundlab_fixed_payload_oracles_round_trip_exactly(message_type, decode, encode):
+def test_fixed_payload_oracles_round_trip_exactly(message_type, decode, encode):
     for payload in _oracle_payloads(message_type):
         assert encode(decode(payload)) == payload
 
@@ -650,7 +650,7 @@ def test_variable_payload_codecs_are_structural_not_policy_capped():
     assert decode_series_samples(encode_series_samples(explicit)) == explicit
 
 
-def test_soundlab_typed_values_enforce_authority_and_scalar_contracts():
+def test_typed_values_enforce_authority_and_scalar_contracts():
     with pytest.raises(ValueError, match="between 1"):
         RetainedItemReference(0, 1, 1)
     with pytest.raises(TypeError, match="must be bool"):

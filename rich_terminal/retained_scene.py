@@ -5,7 +5,7 @@ targets, validates exact owner authority and final references, accounts each
 target independently against OWNER_OPEN reservations, and publishes a prepared
 scene together with its one atomic owner-ledger high-water candidate.
 
-Resource objects and uploads are intentionally not in this layer.  SoundLab
+Resource objects and uploads are intentionally not in this layer.  Retained
 object definitions, scalar/visibility mutations, and bounded series histories
 are complete semantic values; every update preserves the definition-time
 checks below and publishes only through the same immutable transaction seam.
@@ -530,7 +530,7 @@ class ObjectDefinition:
         )
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _BODY_KIND:
-            raise TypeError("body is not a supported SoundLab object body")
+            raise TypeError("body is not a supported retained object body")
 
     @property
     def kind(self) -> ObjectKind:

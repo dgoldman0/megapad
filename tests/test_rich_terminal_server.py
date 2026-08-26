@@ -144,7 +144,7 @@ def _retained_policy() -> RetainedPolicy:
     )
 
 
-def _soundlab_policy() -> RetainedPolicy:
+def _complete_retained_policy() -> RetainedPolicy:
     return RetainedPolicy(
         features=(
             RetainedFeature.CORE
@@ -1356,9 +1356,9 @@ def test_legacy_cell_delta_remains_valid_after_retained_discovery():
     core.settle_result_delivery(2)
 
 
-def test_soundlab_retained_vocabulary_dispatches_through_atomic_composite_views():
+def test_retained_vocabulary_dispatches_through_atomic_composite_views():
     core, encoder, decoder = _open_retained_core(
-        retained_policy=_soundlab_policy()
+        retained_policy=_complete_retained_policy()
     )
     owner = _owner_open(
         objects=4,
@@ -1580,7 +1580,7 @@ def test_soundlab_retained_vocabulary_dispatches_through_atomic_composite_views(
 
 def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
     core, encoder, decoder = _open_retained_core(
-        retained_policy=_soundlab_policy()
+        retained_policy=_complete_retained_policy()
     )
     owner = _owner_open(objects=1)
     opened = core.feed_machine(

@@ -148,7 +148,7 @@ def _install(scene, clock, disposition: CommitDisposition):
     return result
 
 
-def _stage_soundlab_target(scene: RetainedSceneModel, owner: OwnerIdentity, points):
+def _stage_complete_target(scene: RetainedSceneModel, owner: OwnerIdentity, points):
     scene.define_region(_region(owner))
     scene.define_series(SeriesDefinition(owner, 1, 8, TimestampMode.EXPLICIT, 0))
     scene.define_series(SeriesDefinition(owner, 2, 8, TimestampMode.UNIFORM, 1000))
@@ -177,19 +177,19 @@ def _stage_soundlab_target(scene: RetainedSceneModel, owner: OwnerIdentity, poin
     )
 
 
-def _reveal_soundlab(clock, scene, owner):
+def _reveal_complete_target(clock, scene, owner):
     _begin(clock, scene, 2, RetainedMode.REPLACE_START)
-    _stage_soundlab_target(scene, owner, (Point(0, 0), Point(0xFFFFFFFF, 0xFFFFFFFF)))
+    _stage_complete_target(scene, owner, (Point(0, 0), Point(0xFFFFFFFF, 0xFFFFFFFF)))
     _install(scene, clock, CommitDisposition.COMMIT)
     _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
     _install(scene, clock, CommitDisposition.COMMIT_AND_REVEAL)
 
 
-def test_real_soundlab_definition_target_is_hidden_then_atomically_revealed():
+def test_complete_definition_target_is_hidden_then_atomically_revealed():
     clock, owners, owner, scene = _domain()
     caller_points = [Point(0, 0), Point(0xFFFFFFFF, 0xFFFFFFFF)]
     _begin(clock, scene, 2, RetainedMode.REPLACE_START)
-    _stage_soundlab_target(scene, owner, caller_points)
+    _stage_complete_target(scene, owner, caller_points)
 
     before = scene.state
     prepared = scene.prepare_commit(CommitDisposition.COMMIT)
@@ -346,7 +346,7 @@ def test_layout_target_is_copy_on_write_and_active_quota_is_not_double_charged()
 
 def test_owner_retirement_removes_exact_authority_from_active_and_hidden_atomically():
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
 
     resized = TerminalGeometry(20, 10, 1)
     scene.require_layout(resized)
@@ -499,9 +499,9 @@ def test_series_capacity_not_current_samples_consumes_owner_slots():
     clock.settle_result(2)
 
 
-def test_soundlab_value_and_visibility_delta_is_one_immutable_commit():
+def test_value_and_visibility_delta_is_one_immutable_commit():
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     old = scene.state.active
     old_owner = old.owners[owner.owner_id]
     high_water = owners.require_live(owner).high_water
@@ -529,7 +529,7 @@ def test_soundlab_value_and_visibility_delta_is_one_immutable_commit():
 
 def test_object_replace_and_ordered_drops_recompute_target_usage_without_reusing_ids():
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     source = scene.state.active
     high_water = owners.require_live(owner).high_water
 
@@ -577,7 +577,7 @@ def test_object_replace_and_ordered_drops_recompute_target_usage_without_reusing
 )
 def test_drop_defers_surviving_reference_rejection_to_final_graph(drop):
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     source = scene.state.active
     ledger = owners.state
 
@@ -595,7 +595,7 @@ def test_drop_defers_surviving_reference_rejection_to_final_graph(drop):
 
 def test_object_replace_requires_same_type_and_drop_requires_exact_owner():
     clock, _owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
 
     _begin(clock, scene, 4, RetainedMode.DELTA)
     with pytest.raises(SceneModelError) as wrong_type:
@@ -616,7 +616,7 @@ def test_object_replace_requires_same_type_and_drop_requires_exact_owner():
 
 def test_value_or_visibility_failure_poison_delta_without_partial_change():
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     old = scene.state.active
     old_ledger = owners.state
 
@@ -640,7 +640,7 @@ def test_value_or_visibility_failure_poison_delta_without_partial_change():
 
 def test_readout_value_recomputes_complete_utf8_usage_before_staging():
     clock, owners, owner, scene = _domain(quotas=_quotas(utf8_bytes=13))
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     old = scene.state.active
 
     _begin(clock, scene, 4, RetainedMode.DELTA)
@@ -656,7 +656,7 @@ def test_readout_value_recomputes_complete_utf8_usage_before_staging():
 
 def test_explicit_and_uniform_appends_copy_batches_and_evict_exact_oldest():
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     explicit_input = [Sample(10, 1), Sample(20, 2)]
     uniform_input = [3, 4, 5]
     explicit = ExplicitSamples(explicit_input)
@@ -693,7 +693,7 @@ def test_explicit_and_uniform_appends_copy_batches_and_evict_exact_oldest():
 
 def test_series_replace_changes_only_history_not_definition_or_capacity():
     clock, _owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     _begin(clock, scene, 4, RetainedMode.DELTA)
     scene.append_series(owner, 1, ExplicitSamples((Sample(10, 1), Sample(20, 2))))
     scene.append_series(owner, 2, UniformSamples(100, (3, 4)))
@@ -734,7 +734,7 @@ def test_series_replace_changes_only_history_not_definition_or_capacity():
 )
 def test_bad_series_append_is_sticky_and_preserves_committed_history(mutation):
     clock, owners, owner, scene = _domain()
-    _reveal_soundlab(clock, scene, owner)
+    _reveal_complete_target(clock, scene, owner)
     _begin(clock, scene, 4, RetainedMode.DELTA)
     scene.append_series(owner, 1, ExplicitSamples((Sample(10, 1),)))
     _install(scene, clock, CommitDisposition.COMMIT)

@@ -360,46 +360,45 @@ lightweight-qualified as lower-stack plumbing, but it is not yet a visible
 product path. LABEL replay, other object kinds, resources, series, full semantic
 replay, and retained resize journeys remain unqualified.
 
-## 8. First visible development checkpoint
+## 8. Desk, Pad, and Daybook development checkpoint
 
-The next blocking cross-repository slice is one physically visible
-root-region-plus-LABEL journey. Before adding another retained writer, UIDL
-semantic projector, object family, resource path, or series path, the
-implementation must prove all of the following through the production ownership
-boundaries:
+The typed LABEL writer, root-LABEL projection, immutable display offer, and
+post-flip acknowledgement path are lower-stack foundation. They prove that a
+nonempty optional plane can survive module, model, session, shared wire, and
+viewer ownership boundaries. They do not complete the vertical because the
+current rich draw plane cannot represent Desk chrome, Pad's editor body, or
+Daybook's calendar and agenda.
 
-1. system composition loads this module and establishes the ordinary CELL-1
-   plane before retained discovery;
-2. the Akashic engine admits one private owner using count quotas independent of
-   sparse identifier high-water marks;
-3. a hidden `RET_REPLACE_START` contains one current root region and at least one
-   parentless visible LABEL derived from a real UIDL document;
-4. a later `RET_REPLACE_CONTINUE` performs the zero-operation
-   `COMMIT_AND_REVEAL`, with both transactions reconciled through their real
-   `TX_RESULT` completions;
-5. discovery that settles after the desired UIDL candidate exists renegotiates
-   that candidate without another application dirty event, and a recoverable
-   retained-only rejection retries or rebuilds without poisoning CELL fallback;
-6. the immutable composite reaches the production view sink without being
-   reduced to a CELL-only snapshot; and
-7. the viewer composites the LABEL over the CELL plane and only then identifies
-   that global revision as physically displayed and eligible for input.
+The blocking cross-repository slice is the real Desk composition with the
+canonical Pad and Daybook applets both launched and live through their normal
+descriptors, host/UCTX lifecycle, Desk tiling/focus/input loop, unified
+CELL/rich publisher, and physical viewer. The rich plane must be derived from
+the ordinary TUI draw lifecycle and cover Desk chrome, UIDL renderers, mounted
+widgets, and applet painting through the shared draw boundary. Applications
+must not construct protocol scenes or select terminal mode.
 
-Wire bytes, accepted retained model state, an immutable
-`CompositeTerminalView`, or revision assertions alone do not satisfy this
-checkpoint. The LABEL must change pixels in the actual compositor/view path.
-The focused visual fixture is a development checkpoint, not production
-RETAINED-1 qualification. In particular, `RET_INSTRUMENT` represents LABEL,
-READOUT, METER, and STATUS as one capability family; a production policy must
-not advertise that bit until every family member is supported by both the model
-and physical renderer.
+The minimum generic renderer vocabulary for this composition includes bounded
+nested clip/translation scopes, ordered surfaces with visibility and z-order,
+background/fill rectangles, styled UTF-8 glyph runs using the terminal's
+authoritative font, lines/boxes or repeated glyphs, and selection/invert/caret
+overlays. Atomic bounded replacement and exact post-flip acknowledgement remain
+mandatory. Images, numeric instruments, meters, indicator objects, and series
+are not on this vertical's critical path unless the product composition begins
+to use them.
 
-Until this checkpoint is lightweight-green and committed, work remains frozen
-on GROUP/POLYLINE, READOUT/METER/STATUS guest projection, resources/images,
-series/PLOT/WAVEFORM, and broad resize/reset/minimize qualification unless a
-defect in one of those areas directly prevents this exact journey from being
-correct. Permitted pre-checkpoint evidence is limited to seconds-scale
-structural and byte-oracle selectors, focused state-machine units, and a
-deterministic off-screen composite-to-pixels unit. Full renderer, live pygame,
-Desktop, cold-load, sustained-cadence, persistence, and production acceptance
-qualification remain deferred.
+Acceptance requires a complete visible Desk frame, a real Pad edit and visible
+caret/state change, a real Daybook navigation or selection, and the ordinary
+Daybook-to-Pad shared-resource route. CELL remains complete fallback, but a
+frame whose substantive Desk/editor/calendar pixels came only from CELL does
+not prove the rich renderer. Wire bytes, accepted model state, an immutable
+composite, or a root-LABEL pixel overlay do not complete the checkpoint or make
+an unacknowledged revision input-eligible.
+
+The current contract evolves in place; do not add a numbered successor,
+parallel legacy path, Sound Lab fixture, applet-specific scene, or
+renderer-reservation markup. Before vertical acceptance, evidence remains
+limited to seconds-scale structural and byte-oracle selectors, focused state
+machines, and deterministic off-screen compositor units. Full renderer, live
+pygame, Desktop, cold-load, sustained-cadence, persistence, and production
+acceptance qualification remain deferred and sequential under the resource
+gate.

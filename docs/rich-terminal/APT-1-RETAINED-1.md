@@ -1204,30 +1204,34 @@ base optional-skip semantics.
 
 ## 16. Minimum Akashic UIDL conformance journey
 
-### 16.1 First visible implementation checkpoint
+### 16.1 Desk, Pad, and Daybook implementation checkpoint
 
-The production journey below is the final minimum; it is not the order in which
-semantic families should be implemented. Before expanding beyond the first
-root-LABEL slice, the cross-repository implementation must carry one real UIDL
-LABEL through CELL-1 establishment, retained discovery, private owner admission,
-a hidden root-region-plus-LABEL replacement, a separate zero-operation reveal,
-both `TX_RESULT` settlements, immutable composite publication, and the physical
-view sink.
+The blocking vertical uses the real Desk composition with the canonical Pad
+text editor and Daybook calendar both launched and live. It must use their
+unchanged ordinary descriptors, UCTX/UIDL documents, mounted widgets, state,
+Desk tiling/focus/input loop, and normal TUI draw lifecycle. No source-special
+fixture, Sound Lab path, applet scene API, terminal-mode branch, or renderer
+reservation in UIDL may substitute for that composition.
 
-The view sink must actually composite the retained LABEL over the CELL plane at
-the committed global revision. Retaining the scene diagnostically, promoting a
-`CompositeTerminalView`, or exposing only its CELL projection does not complete
-the checkpoint and must not make input eligible for that retained revision.
-Late discovery must reconsider the already-selected desired candidate without a
-new application dirty event. A retained-only rejected transaction follows the
-recoverable rule in Section 15, and a local per-owner capacity refusal leaves
-the mandatory CELL plane usable.
+The generic rich path must carry the substantive Desk chrome, Pad editor, and
+Daybook calendar/agenda state through private owner admission, bounded
+publication, immutable composite selection, and the physical view sink. It must
+show at least one real Pad edit and one real Daybook navigation or selection,
+then preserve the ordinary Daybook-to-Pad shared-resource route. The sink makes
+the selected revision input-eligible only after every nonempty selected plane
+has been physically composited, flipped, and exactly acknowledged.
 
-This focused checkpoint does not authorize partial capability advertisement.
+CELL remains mandatory complete fallback. Retaining a scene diagnostically,
+promoting a composite, exposing only CELL pixels, or overlaying one retained
+LABEL on a CELL-rendered Desk/editor/calendar does not complete this checkpoint.
+Binding-local rich refusal must leave CELL usable, but refused CELL pixels are
+not rich-rendering acceptance evidence.
+
+The checkpoint does not authorize partial capability advertisement.
 `RET_INSTRUMENT` covers LABEL, READOUT, METER, and STATUS together; a terminal
-that negotiates that bit outside a controlled development fixture must support
-the complete family in its semantic model and renderer. The checkpoint also
-does not remove or weaken any production case below.
+that negotiates that bit must support the complete family in its semantic model
+and renderer. The checkpoint also does not remove or weaken any production case
+below.
 
 ### 16.2 Production qualification
 
