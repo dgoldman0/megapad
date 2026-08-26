@@ -20587,6 +20587,7 @@ static bool decode_single_core_register_instruction(
                 subop != 0x2 &&  // ADDI
                 subop != 0x3 &&  // ANDI
                 subop != 0x4 &&  // ORI
+                subop != 0x6 &&  // CMPI
                 subop != 0x7 &&  // SUBI
                 subop != 0x8 &&  // LSLI
                 subop != 0x9 &&  // LSRI
@@ -20936,6 +20937,16 @@ static void emit_single_core_jit_subtraction_flags(
         single_core_jit_offset(core, core.flag_p));
 }
 
+static void emit_single_core_jit_comparison_flags(
+        X86_64BlockEmitter& emitter,
+        const CPUState& core) {
+    emit_single_core_jit_subtraction_flags(emitter, core);
+    // Guest G is unsigned greater-than, matching x86 SETA after CMP.
+    emitter.set_core_byte(
+        0x97,
+        single_core_jit_offset(core, core.flag_g));
+}
+
 static void emit_single_core_jit_instruction(
         X86_64BlockEmitter& emitter,
         const CPUState& core,
@@ -21017,6 +21028,15 @@ static void emit_single_core_jit_instruction(
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_logic_flags(emitter, core);
+                    return;
+                case 0x6:  // CMPI
+                    emitter.bytes({
+                        0x48,
+                        0x83,
+                        0xF8,
+                        static_cast<uint8_t>(decoded.immediate),
+                    });
+                    emit_single_core_jit_comparison_flags(emitter, core);
                     return;
                 case 0x7:  // SUBI
                     emitter.bytes({
@@ -21368,6 +21388,18 @@ static bool single_core_block_identity_matches(
             }
         } else if (
             decoded.family == 0x6 && decoded.subop == 0x3
+        ) {
+            if (
+                decoded.encoded_size != 3 ||
+                decoded.cycle_cost != 1 ||
+                decoded.immediate > 0xFF ||
+                decoded.rd >= 16 ||
+                decoded.rd == block.psel
+            ) {
+                return false;
+            }
+        } else if (
+            decoded.family == 0x6 && decoded.subop == 0x6
         ) {
             if (
                 decoded.encoded_size != 3 ||
