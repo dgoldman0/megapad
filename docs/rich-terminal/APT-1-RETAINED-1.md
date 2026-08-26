@@ -1204,6 +1204,33 @@ base optional-skip semantics.
 
 ## 16. Minimum Akashic UIDL conformance journey
 
+### 16.1 First visible implementation checkpoint
+
+The production journey below is the final minimum; it is not the order in which
+semantic families should be implemented. Before expanding beyond the first
+root-LABEL slice, the cross-repository implementation must carry one real UIDL
+LABEL through CELL-1 establishment, retained discovery, private owner admission,
+a hidden root-region-plus-LABEL replacement, a separate zero-operation reveal,
+both `TX_RESULT` settlements, immutable composite publication, and the physical
+view sink.
+
+The view sink must actually composite the retained LABEL over the CELL plane at
+the committed global revision. Retaining the scene diagnostically, promoting a
+`CompositeTerminalView`, or exposing only its CELL projection does not complete
+the checkpoint and must not make input eligible for that retained revision.
+Late discovery must reconsider the already-selected desired candidate without a
+new application dirty event. A retained-only rejected transaction follows the
+recoverable rule in Section 15, and a local per-owner capacity refusal leaves
+the mandatory CELL plane usable.
+
+This focused checkpoint does not authorize partial capability advertisement.
+`RET_INSTRUMENT` covers LABEL, READOUT, METER, and STATUS together; a terminal
+that negotiates that bit outside a controlled development fixture must support
+the complete family in its semantic model and renderer. The checkpoint also
+does not remove or weaken any production case below.
+
+### 16.2 Production qualification
+
 A production RETAINED-1 qualification must use the real CELL-1 implementation,
 real retained model, caller-provided capacities, and actual UIDL/UCTX lifecycle.
 The minimum Akashic journey is:

@@ -51,9 +51,11 @@ must continue to track host time while the emulator is idle or variably loaded.
 
 Use the shared runtime when a person and an automation client need to watch and
 control the same running machine. One server process owns execution and all
-machine mutations. The pygame viewer only renders revisioned terminal snapshots
+machine mutations. The pygame viewer renders revisioned immutable display views
 and forwards keyboard input, so closing or reconnecting the viewer does not
-reset the guest.
+reset the guest. A baseline view is a CELL snapshot; a rich view preserves the
+CELL and retained planes of one composite revision through the shared-session
+boundary and composites both before acknowledging that revision as displayed.
 
 Start the machine owner from the workspace root:
 
@@ -213,7 +215,8 @@ the visible geometry changes when the required replacement snapshot commits.
 
 ## Observation
 
-`TerminalSnapshot` is immutable. It contains:
+`TerminalSnapshot` is the immutable CELL compatibility and diagnostic
+projection. It contains:
 
 - Terminal dimensions.
 - Every glyph, foreground color, background color, and attribute mask.
@@ -221,6 +224,12 @@ the visible geometry changes when the required replacement snapshot commits.
 - Alternate-screen state.
 - Text extraction and search helpers.
 - JSON, text, and PNG writers.
+
+An active retained session additionally exposes the immutable retained plane
+and global composite revision to the display sink. Text/search helpers and
+CELL-only PNG output may continue to use `TerminalSnapshot`, but shared live
+observation must not discard retained state or treat a CELL-only projection as
+the complete displayed view.
 
 JSON/cell assertions should be preferred for tests. PNG output is intended for
 visual inspection and build artifacts. Pass `font_path` to `write_png()` when a

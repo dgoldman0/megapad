@@ -186,9 +186,29 @@ consumer callback.
 ## 9. View publication
 
 The headless terminal core publishes immutable renderer-neutral views only
-after an ANSI-visible change or an accepted enhanced transaction commit. Each
-view contains attachment epoch, terminal session ID, model revision,
-geometry, persistent rows, dirty spans, and cursor state.
+after an ANSI-visible change or an accepted enhanced transaction commit. ANSI
+and CELL-only views carry attachment epoch, terminal session ID, model revision,
+geometry, persistent rows, dirty spans, and cursor state. A retained-capable
+session publishes one immutable `CompositeTerminalView` containing the global
+revision and geometry plus independently shareable CELL and retained planes.
+
+The production display boundary consumes that composite; it must not project it
+back to `TerminalSnapshot` before presentation. A CELL compatibility snapshot
+may remain available for text extraction and diagnostics, but it is not a rich
+display view. Cadence may select a newer immutable composite, but the session
+does not mark its revision physically displayed or release revision-bound input
+until every nonempty plane has reached the compositor.
+
+For the first visible root-LABEL checkpoint, the compositor uses the CELL canvas
+as its base, draws retained regions and objects in their defined back-to-front
+order with straight-alpha source-over blending, and draws the cursor overlay
+last. A region's pixel rectangle is exactly its cell rectangle multiplied by
+the selected cell width and height. For a parentless object's normalized edge,
+the low edge rounds down and the high edge rounds up against that region's pixel
+extent, then clips to the region when clipping is enabled. The terminal font is
+authoritative. LABEL horizontal/vertical alignment is resolved inside the
+clipped object rectangle; nonwrapping text is clipped, with ellipsis applied
+only when the LABEL flag requests it.
 
 Cursor blink and other renderer-only overlays do not create cell revisions.
 Unchanged rows may be shared by identity across revisions. A renderer cannot
@@ -223,5 +243,13 @@ The lightweight host-port suite must prove:
 4. terminal code is not invoked during settlement;
 5. ingress is applied only at a later scheduler boundary;
 6. stale handles cannot publish after reset or detach; and
-7. geometry has one epoch-qualified application; and
-8. protocol resize either reserves both ingress and geometry or neither.
+7. geometry has one epoch-qualified application;
+8. protocol resize either reserves both ingress and geometry or neither;
+9. a nonempty retained plane survives cadence and view publication without
+   being reduced to the CELL compatibility snapshot; and
+10. a fixed-font root-region-plus-LABEL fixture changes the expected off-screen
+    pixels after CELL base rendering and before the cursor overlay.
+
+Cases 9 and 10 are focused seconds-scale units for the current functional
+slice, not full renderer qualification. A CELL-only snapshot round trip cannot
+be cited as retained compositor acceptance.

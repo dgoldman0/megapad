@@ -46,7 +46,7 @@ or accepting an older component is an authority violation.
 | APT host/driver | Host lease, ingress/egress queues, terminal core, retained renderer | Decode and atomically apply validated ordered frames; publish immutable views | Infer guest owner authority; run guest code; fall back from structural LOST |
 | Guest retained backend | One PT adapter, discovery, sequence/credit, revision/txid allocators, private UCTX bindings, replay plan | Project validated UIDL semantics and serialize all wire operations | Publish itself as an application service; expose wire IDs or mutation calls; allow concurrent frame writers |
 | Generic UIDL host/projectors | Exact host/slot/CINST/UCTX lifecycle, UIDL tree/layout/dirty state, backend-neutral semantic snapshots | Attach, quiesce, project, relayout, and detach through the internal backend | Let application code acquire retained authority; maintain a second app-authored scene; emit protocol frames from callbacks |
-| Renderer/view sink | Immutable committed CELL and retained views plus shared immutable resources | Present/coalesce physical images within cadence rules | Mutate authoritative model; invent samples; release resource backing early |
+| Renderer/view sink | Immutable committed CELL and retained views plus shared immutable resources | Consume every nonempty plane of one displayed revision and present/coalesce physical images within cadence rules | Drop a retained plane while claiming its revision displayed; mutate authoritative model; invent samples; release resource backing early |
 | External attachment owner | Machine/session construction and coordinated reset/detach | Recreate a LOST attachment and its caller-owned capacities | Treat LOST as ANSI-safe fallback |
 
 The foreground single-input-owner assumption of CELL-1 is unchanged. RETAINED-1
@@ -269,6 +269,11 @@ credit/result lifecycle.
 Mixed CELL/retained transactions are globally atomic. No renderer/view sink may
 observe the new CELL plane with the old retained delta, or the reverse. A view
 publication carries the resulting global revision and geometry generation.
+Keeping that composite for diagnostics while physically rendering only its CELL
+plane is also a split observation and does not satisfy publication. The
+displayed revision, cadence timestamp, and input-release boundary advance only
+after the sink has consumed every nonempty plane of the selected immutable
+composite.
 
 ## 8. Semantic resource-source lifetime
 
