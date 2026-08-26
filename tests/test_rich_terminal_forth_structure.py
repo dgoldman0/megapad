@@ -308,9 +308,11 @@ def test_present_body_keeps_raw_fixed_operations_private() -> None:
     assert "PT-RET-LAYOUT-START =" in commit
 
 
-def test_typed_glyph_run_define_owns_exact_object_wire_assembly() -> None:
+def test_typed_glyph_run_writers_own_exact_object_wire_assembly() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    glyph_run = _definition(source, "PT-GLYPH-RUN-DEFINE")
+    define = _definition(source, "PT-GLYPH-RUN-DEFINE")
+    replace = _definition(source, "PT-GLYPH-RUN-REPLACE")
+    glyph_run = _definition(source, "_PT-GLYPH-RUN-WRITE")
     body = _definition(source, "_PT-GR-DEFINE-BODY")
     fields = _definition(source, "_PT-GR-FIELDS?")
     text_source = _definition(source, "_PT-GR-TEXT-SOURCE?")
@@ -322,7 +324,12 @@ def test_typed_glyph_run_define_owns_exact_object_wire_assembly() -> None:
     scrub = _definition(source, "_PT-GR-SCRUB")
 
     assert "0x2020 CONSTANT _PT-M-OBJECT-DEFINE" in source
-    assert "_PT-M-OBJECT-DEFINE _PT-PO-TYPE !" in body
+    assert "0x2021 CONSTANT _PT-M-OBJECT-REPLACE" in source
+    assert "_PT-M-OBJECT-DEFINE _PT-GLYPH-RUN-WRITE" in define
+    assert "_PT-M-OBJECT-REPLACE _PT-GLYPH-RUN-WRITE" in replace
+    assert "_PT-GR-TYPE @ _PT-PO-TYPE !" in body
+    assert "_PT-M-OBJECT-DEFINE =" in body
+    assert "_PT-M-OBJECT-REPLACE =" in body
     assert body.index("_PT-PO-ADMIT") < body.index("_PT-GR-PAYLOAD!")
     assert body.index("_PT-GR-PAYLOAD!") < body.index("_PT-PO-SEND")
     assert "_PT-FRAME-BEGIN" in admit
@@ -391,6 +398,7 @@ def test_typed_glyph_run_define_owns_exact_object_wire_assembly() -> None:
     assert "ALLOT" not in glyph_run + body + payload
     assert "CATCH" in glyph_run
     assert "_PT-GR-SCRUB" in glyph_run
+    assert "0 _PT-GR-TYPE !" in scrub
     assert "0 _PT-GR-TEXT-A !" in scrub
     assert "0 _PT-U8-A !" in scrub
 

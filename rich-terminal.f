@@ -195,6 +195,7 @@ CREATE _PT-OWNER  0 ,
 0x2011 CONSTANT _PT-M-REGION-REPLACE
 0x2012 CONSTANT _PT-M-REGION-DROP
 0x2020 CONSTANT _PT-M-OBJECT-DEFINE
+0x2021 CONSTANT _PT-M-OBJECT-REPLACE
 
 \ Completion request values intentionally expose only the implemented
 \ retained lifecycle and transaction writers, not the private message table.
@@ -3278,6 +3279,7 @@ VARIABLE _PT-RDROP-ID
 \ no presentation-phase cadence.
 0x006F CONSTANT _PT-GR-ATTR-MASK
 VARIABLE _PT-GR-S
+VARIABLE _PT-GR-TYPE
 VARIABLE _PT-GR-OWNER
 VARIABLE _PT-GR-GENERATION
 VARIABLE _PT-GR-OBJECT
@@ -3389,7 +3391,9 @@ VARIABLE _PT-GR-PAYLOAD-U
     _PT-GR-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-GR-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-GR-FIELDS? 0= IF PT-S-INVALID EXIT THEN
-    _PT-M-OBJECT-DEFINE _PT-PO-TYPE !
+    _PT-GR-TYPE @ DUP _PT-M-OBJECT-DEFINE =
+    SWAP _PT-M-OBJECT-REPLACE = OR 0= IF PT-S-INVALID EXIT THEN
+    _PT-GR-TYPE @ _PT-PO-TYPE !
     _PT-GR-PAYLOAD-U @ _PT-PO-U !
     _PT-GR-S @ _PT-PO-S !
     _PT-PO-ADMIT ?DUP IF EXIT THEN
@@ -3397,7 +3401,8 @@ VARIABLE _PT-GR-PAYLOAD-U
     _PT-PO-SEND ;
 
 : _PT-GR-SCRUB  ( -- )
-    0 _PT-GR-S ! 0 _PT-GR-OWNER ! 0 _PT-GR-GENERATION !
+    0 _PT-GR-S ! 0 _PT-GR-TYPE !
+    0 _PT-GR-OWNER ! 0 _PT-GR-GENERATION !
     0 _PT-GR-OBJECT ! 0 _PT-GR-REGION ! 0 _PT-GR-PARENT !
     0 _PT-GR-LEFT ! 0 _PT-GR-TOP ! 0 _PT-GR-RIGHT ! 0 _PT-GR-BOTTOM !
     0 _PT-GR-Z ! 0 _PT-GR-VISIBLE !
@@ -3410,11 +3415,12 @@ VARIABLE _PT-GR-PAYLOAD-U
     0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
     0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
 
-: PT-GLYPH-RUN-DEFINE
+: _PT-GLYPH-RUN-WRITE
     ( owner generation object region parent left top right bottom z visible
       fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
-      attrs text-a text-u session -- status )
-    _PT-GR-S ! _PT-GR-TEXT-U ! _PT-GR-TEXT-A ! _PT-GR-ATTRS !
+      attrs text-a text-u session type -- status )
+    _PT-GR-TYPE ! _PT-GR-S !
+    _PT-GR-TEXT-U ! _PT-GR-TEXT-A ! _PT-GR-ATTRS !
     _PT-GR-BG-ALPHA ! _PT-GR-BG-BLUE !
     _PT-GR-BG-GREEN ! _PT-GR-BG-RED !
     _PT-GR-FG-ALPHA ! _PT-GR-FG-BLUE !
@@ -3424,6 +3430,18 @@ VARIABLE _PT-GR-PAYLOAD-U
     _PT-GR-OBJECT ! _PT-GR-GENERATION ! _PT-GR-OWNER !
     ['] _PT-GR-DEFINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
     _PT-GR-SCRUB ;
+
+: PT-GLYPH-RUN-DEFINE
+    ( owner generation object region parent left top right bottom z visible
+      fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+      attrs text-a text-u session -- status )
+    _PT-M-OBJECT-DEFINE _PT-GLYPH-RUN-WRITE ;
+
+: PT-GLYPH-RUN-REPLACE
+    ( owner generation object region parent left top right bottom z visible
+      fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+      attrs text-a text-u session -- status )
+    _PT-M-OBJECT-REPLACE _PT-GLYPH-RUN-WRITE ;
 
 VARIABLE _PT-PC-S
 VARIABLE _PT-PC-DISPOSITION
