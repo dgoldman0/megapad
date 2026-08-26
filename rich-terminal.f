@@ -1330,8 +1330,9 @@ VARIABLE _PT-CMP-ACCEPTED
     _PT-CMP-GENERATION @ _PT-CMP-S @ _PT.S.COMP-GENERATION !
     TRUE _PT-CMP-S @ _PT.S.COMPLETE? ! ;
 
-: _PT-COMPLETE-RET!  ( request status detail revision owner generation
-                        item accepted-bytes s -- )
+\ Stack: request status detail revision owner generation item
+\        accepted-bytes s --
+: _PT-COMPLETE-RET!
     _PT-CMP-S ! _PT-CMP-ACCEPTED ! _PT-CMP-ITEM !
     _PT-CMP-GENERATION ! _PT-CMP-OWNER ! _PT-CMP-REVISION !
     _PT-CMP-DETAIL ! _PT-CMP-STATUS ! _PT-CMP-REQUEST !
@@ -2604,8 +2605,9 @@ VARIABLE _PT-OO-SAMPLE-SLOTS
     THEN
     TRUE ;
 
-: PT-OWNER-OPEN  ( owner generation region-q resource-q object-q series-q
-                    resource-byte-q utf8-byte-q sample-slot-q session -- status )
+\ Stack: owner generation region-q resource-q object-q series-q
+\        resource-byte-q utf8-byte-q sample-slot-q session -- status
+: PT-OWNER-OPEN
     _PT-OO-S ! _PT-OO-SAMPLE-SLOTS ! _PT-OO-UTF8-BYTES !
     _PT-OO-RESOURCE-BYTES ! _PT-OO-SERIES ! _PT-OO-OBJECTS !
     _PT-OO-RESOURCES ! _PT-OO-REGIONS ! _PT-OO-GENERATION ! _PT-OO-OWNER !
@@ -2949,9 +2951,9 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-RET-MODE @ _PT-FRAME-PAYLOAD 56 + L!
     TRUE _PT-PB-S @ _PT-FRAME-SEND ;
 
-: PT-PRESENT-BEGIN  ( cols rows cell-spans cells retained-ops
-                       retained-frame-bytes cell-mode retained-mode
-                       session -- status )
+\ Stack: cols rows cell-spans cells retained-ops retained-frame-bytes
+\        cell-mode retained-mode session -- status
+: PT-PRESENT-BEGIN
     _PT-PB-S ! _PT-PB-RET-MODE ! _PT-PB-CELL-MODE !
     _PT-PB-RET-BYTES ! _PT-PB-RET-OPS ! _PT-PB-CELLS !
     _PT-PB-SPANS ! _PT-PB-ROWS ! _PT-PB-COLS !
@@ -3222,8 +3224,8 @@ VARIABLE _PT-RG-ROWS
 VARIABLE _PT-RG-Z
 VARIABLE _PT-RG-FLAGS
 
-: _PT-REGION-WRITE  ( owner generation region x y cols rows z flags
-                       session type -- status )
+\ Stack: owner generation region x y cols rows z flags session type -- status
+: _PT-REGION-WRITE
     _PT-RG-TYPE ! _PT-RG-S ! _PT-RG-FLAGS ! _PT-RG-Z ! _PT-RG-ROWS !
     _PT-RG-COLS ! _PT-RG-Y ! _PT-RG-X ! _PT-RG-ID !
     _PT-RG-GENERATION ! _PT-RG-OWNER !
@@ -3245,12 +3247,12 @@ VARIABLE _PT-RG-FLAGS
     _PT-RG-TYPE @ _PT-REGION-PAYLOAD 48 _PT-RG-S @
         _PT-PRESENT-FIXED-OP ;
 
-: PT-REGION-DEFINE  ( owner generation region x y cols rows z flags
-                       session -- status )
+\ Stack: owner generation region x y cols rows z flags session -- status
+: PT-REGION-DEFINE
     _PT-M-REGION-DEFINE _PT-REGION-WRITE ;
 
-: PT-REGION-REPLACE  ( owner generation region x y cols rows z flags
-                        session -- status )
+\ Stack: owner generation region x y cols rows z flags session -- status
+: PT-REGION-REPLACE
     _PT-M-REGION-REPLACE _PT-REGION-WRITE ;
 
 CREATE _PT-REGION-DROP-PAYLOAD 24 ALLOT
@@ -3415,10 +3417,10 @@ VARIABLE _PT-GR-PAYLOAD-U
     0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
     0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
 
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        attrs text-a text-u session type -- status
 : _PT-GLYPH-RUN-WRITE
-    ( owner generation object region parent left top right bottom z visible
-      fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
-      attrs text-a text-u session type -- status )
     _PT-GR-TYPE ! _PT-GR-S !
     _PT-GR-TEXT-U ! _PT-GR-TEXT-A ! _PT-GR-ATTRS !
     _PT-GR-BG-ALPHA ! _PT-GR-BG-BLUE !
@@ -3431,16 +3433,16 @@ VARIABLE _PT-GR-PAYLOAD-U
     ['] _PT-GR-DEFINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
     _PT-GR-SCRUB ;
 
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        attrs text-a text-u session -- status
 : PT-GLYPH-RUN-DEFINE
-    ( owner generation object region parent left top right bottom z visible
-      fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
-      attrs text-a text-u session -- status )
     _PT-M-OBJECT-DEFINE _PT-GLYPH-RUN-WRITE ;
 
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        attrs text-a text-u session -- status
 : PT-GLYPH-RUN-REPLACE
-    ( owner generation object region parent left top right bottom z visible
-      fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
-      attrs text-a text-u session -- status )
     _PT-M-OBJECT-REPLACE _PT-GLYPH-RUN-WRITE ;
 
 VARIABLE _PT-PC-S

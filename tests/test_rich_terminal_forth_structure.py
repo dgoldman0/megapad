@@ -19,6 +19,16 @@ def _definition(source: str, word: str) -> str:
     return match.group(0)
 
 
+def test_parenthetical_comments_close_on_their_physical_source_line() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    unterminated = [
+        (line_number, line)
+        for line_number, line in enumerate(source.splitlines(), start=1)
+        if re.search(r"\([^)]*$", line)
+    ]
+    assert unterminated == []
+
+
 def test_header_ready_and_caps_reserved_fields_are_zero() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     frame_begin = _definition(source, "_PT-FRAME-BEGIN")
