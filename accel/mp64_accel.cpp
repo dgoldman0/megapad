@@ -20646,6 +20646,7 @@ static bool decode_single_core_register_instruction(
         case 0x7: {
             if (
                 subop != 0x0 &&  // ADD
+                subop != 0x2 &&  // SUB
                 subop != 0x6 &&  // XOR
                 subop != 0x7 &&  // CMP
                 subop != 0x8     // MOV
@@ -21230,6 +21231,12 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_addition_flags(emitter, core);
                     return;
+                case 0x2:  // SUB
+                    emitter.bytes({0x48, 0x29, 0xC8});
+                    emitter.mov_core_from_rax(
+                        single_core_jit_register_offset(core, decoded.rd));
+                    emit_single_core_jit_subtraction_flags(emitter, core);
+                    return;
                 case 0x6:  // XOR
                     emitter.bytes({0x48, 0x31, 0xC8});
                     emitter.mov_core_from_rax(
@@ -21600,7 +21607,11 @@ static bool single_core_block_identity_matches(
                 return false;
             }
         } else if (
-            decoded.family == 0x7 && decoded.subop == 0x7
+            decoded.family == 0x7 &&
+            (
+                decoded.subop == 0x2 ||
+                decoded.subop == 0x7
+            )
         ) {
             if (
                 decoded.encoded_size != 2 ||
