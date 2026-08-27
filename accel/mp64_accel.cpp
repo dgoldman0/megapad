@@ -2025,6 +2025,7 @@ struct CPUState {
         bool valid = false;
         bool native_compile_checked = false;
         uint8_t psel = 0;
+        uint8_t spsel = 0;
         uint8_t identity_size = 0;
         uint8_t instruction_count = 0;
         uint64_t address = 0;
@@ -20557,9 +20558,20 @@ static bool decode_single_core_register_instruction(
 
     switch (family) {
         case 0x0:
-            if (subop != 0x1)  // NOP only
-                return false;
-            break;
+            if (subop == 0x1) {  // NOP
+                break;
+            }
+            if (subop == 0xD) {  // bare low-register CALL.L
+                uint8_t operand = 0;
+                if (!read_byte(operand) || (operand & 0xF0) != 0)
+                    return false;
+                decoded.rs = operand & 0xF;
+                if (decoded.rs == core.psel)
+                    return false;
+                decoded.cycle_cost = 2;
+                break;
+            }
+            return false;
         case 0x1:
         case 0x2:
             decoded.rd = static_cast<uint8_t>(subop);
@@ -20724,6 +20736,7 @@ static bool decode_single_core_register_instruction(
 static bool single_core_decoded_is_terminal_control(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
     return
+        (decoded.family == 0x0 && decoded.subop == 0xD) ||
         decoded.family == 0x3 ||
         decoded.family == 0x4 ||
         decoded.family == 0xA;
@@ -20731,7 +20744,14 @@ static bool single_core_decoded_is_terminal_control(
 
 static bool single_core_decoded_is_memory(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return decoded.family == 0x5;
+    return
+        decoded.family == 0x5 ||
+        (decoded.family == 0x0 && decoded.subop == 0xD);
+}
+
+static bool single_core_decoded_is_terminal_long_call(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return decoded.family == 0x0 && decoded.subop == 0xD;
 }
 
 static bool single_core_decoded_is_direct_read(
@@ -20778,6 +20798,45 @@ static uint32_t single_core_decoded_register_write_mask(
     if (!writes_rd || decoded.rd >= 32)
         return 0;
     return uint32_t{1} << decoded.rd;
+}
+
+static bool single_core_resolve_prefix_register(
+        const CPUState& core,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint8_t prefix_count,
+        uint8_t reg,
+        uint64_t& value) noexcept {
+    if (
+        reg >= 32 ||
+        prefix_count > block.instruction_count
+    ) {
+        return false;
+    }
+    value = core.regs[reg];
+    bool known = true;
+    for (uint8_t index = 0; index < prefix_count; index++) {
+        const CPUState::SingleCoreDecodedInstruction& decoded =
+            block.instructions[index];
+        if (
+            (
+                single_core_decoded_register_write_mask(decoded) &
+                (uint32_t{1} << reg)
+            ) == 0
+        ) {
+            continue;
+        }
+        if (
+            decoded.family == 0x6 &&
+            decoded.subop == 0x0 &&
+            decoded.rd == reg
+        ) {
+            value = decoded.immediate;
+            known = true;
+        } else {
+            known = false;
+        }
+    }
+    return known;
 }
 
 enum class SingleCoreJitCompilation : uint8_t {
@@ -20886,6 +20945,11 @@ public:
         i32(displacement);
     }
 
+    void mov_core_from_rcx(int32_t displacement) {
+        bytes({0x49, 0x89, 0x8C, 0x24});
+        i32(displacement);
+    }
+
     void add_core_imm8(
             int32_t displacement,
             uint8_t immediate) {
@@ -20900,6 +20964,14 @@ public:
         bytes({0x49, 0x81, 0x84, 0x24});
         i32(displacement);
         u32(immediate);
+    }
+
+    void sub_core_imm8(
+            int32_t displacement,
+            uint8_t immediate) {
+        bytes({0x49, 0x83, 0xAC, 0x24});
+        i32(displacement);
+        byte(immediate);
     }
 
     void increment_core(int32_t displacement) {
@@ -21119,15 +21191,32 @@ static void emit_single_core_jit_instruction(
         X86_64BlockEmitter& emitter,
         const CPUState& core,
         const CPUState::SingleCoreDecodedInstruction& decoded,
-        uint8_t psel) {
+        uint8_t psel,
+        uint8_t spsel) {
     emitter.add_core_imm8(
         single_core_jit_register_offset(core, psel),
         decoded.encoded_size);
     emitter.bytes({0x41, 0x83, 0xC7, decoded.fetch_hits});
 
     switch (decoded.family) {
-        case 0x0:  // NOP
-            return;
+        case 0x0:
+            if (decoded.subop == 0x1)  // NOP
+                return;
+            if (decoded.subop == 0xD) {  // terminal CALL.L
+                emitter.mov_rcx_from_core(
+                    single_core_jit_register_offset(core, decoded.rs));
+                emitter.mov_rax_from_core(
+                    single_core_jit_register_offset(core, psel));
+                emitter.sub_core_imm8(
+                    single_core_jit_register_offset(core, spsel),
+                    8);
+                emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
+                emitter.mov_core_from_rcx(
+                    single_core_jit_register_offset(core, psel));
+                return;
+            }
+            throw std::logic_error(
+                "x86-64 JIT received an unsupported system op");
         case 0x1:  // INC
             emitter.increment_core(
                 single_core_jit_register_offset(core, decoded.rd));
@@ -21473,7 +21562,8 @@ compile_single_core_jit_block(
                 emitter,
                 core,
                 block.instructions[index],
-                block.psel);
+                block.psel,
+                block.spsel);
             emitter.bytes({0xFF, 0xC3}); // inc ebx
             emitter.add_retired_cycles(
                 block.instructions[index].cycle_cost);
@@ -21597,6 +21687,8 @@ static bool single_core_block_identity_matches(
         !block.valid ||
         block.address != address ||
         block.psel != core.psel ||
+        block.spsel != core.spsel ||
+        block.spsel >= 32 ||
         block.identity_size == 0 ||
         block.identity_size > CPUState::ICACHE_LINE_BYTES ||
         block.instruction_count < 2 ||
@@ -21702,18 +21794,47 @@ static bool single_core_block_identity_matches(
                         decoded.cycle_cost == 2
                     )
                 );
+            uint64_t resolved_call_target = 0;
+            const bool valid_long_call =
+                single_core_decoded_is_terminal_long_call(decoded) &&
+                decoded.rd == 0 &&
+                decoded.rs < 16 &&
+                decoded.rs != block.psel &&
+                decoded.rs != block.spsel &&
+                decoded.encoded_size == 2 &&
+                decoded.fetch_hits >= 1 &&
+                decoded.fetch_hits <= 2 &&
+                decoded.cycle_cost == 2 &&
+                decoded.taken_cycle_cost == 0 &&
+                decoded.immediate == 0 &&
+                index != 0 &&
+                !memory_seen &&
+                block.spsel != block.psel &&
+                (
+                    written_registers &
+                    (uint32_t{1} << block.spsel)
+                ) == 0 &&
+                single_core_resolve_prefix_register(
+                    core,
+                    block,
+                    index,
+                    decoded.rs,
+                    resolved_call_target);
             if (
                 (
                     !valid_short_unconditional &&
                     !valid_short_conditional &&
                     !valid_long_unconditional &&
                     !valid_long_conditional &&
-                    !valid_sep
+                    !valid_sep &&
+                    !valid_long_call
                 ) ||
                 index + 1 != block.instruction_count
             ) {
                 return false;
             }
+            if (valid_long_call)
+                memory_seen = true;
         } else if (decoded.taken_cycle_cost != 0) {
             return false;
         } else if (decoded.family == 0x5) {
@@ -21847,6 +21968,7 @@ build_single_core_decoded_block(
     CPUState::SingleCoreDecodedBlockEntry candidate;
     candidate.address = address;
     candidate.psel = core.psel;
+    candidate.spsel = core.spsel;
     const std::size_t line_capacity =
         CPUState::ICACHE_LINE_BYTES -
         static_cast<std::size_t>(
@@ -21892,6 +22014,30 @@ build_single_core_decoded_block(
                 ) {
                     break;
                 }
+            } else if (
+                single_core_decoded_is_terminal_long_call(decoded)
+            ) {
+                uint64_t resolved_target = 0;
+                if (
+                    candidate.instruction_count == 0 ||
+                    memory_seen ||
+                    candidate.spsel >= 32 ||
+                    candidate.spsel == candidate.psel ||
+                    decoded.rs == candidate.psel ||
+                    decoded.rs == candidate.spsel ||
+                    (
+                        written_registers &
+                        (uint32_t{1} << candidate.spsel)
+                    ) != 0 ||
+                    !single_core_resolve_prefix_register(
+                        core,
+                        candidate,
+                        candidate.instruction_count,
+                        decoded.rs,
+                        resolved_target)
+                ) {
+                    break;
+                }
             } else {
                 break;
             }
@@ -21934,6 +22080,14 @@ static bool single_core_block_has_terminal_store(
     return
         block.instruction_count != 0 &&
         single_core_decoded_is_terminal_store(
+            block.instructions[block.instruction_count - 1]);
+}
+
+static bool single_core_block_has_terminal_long_call(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return
+        block.instruction_count != 0 &&
+        single_core_decoded_is_terminal_long_call(
             block.instructions[block.instruction_count - 1]);
 }
 
@@ -22098,6 +22252,102 @@ static uint8_t* preflight_single_core_direct_store(
     return region.ptr;
 }
 
+static uint8_t* preflight_single_core_direct_long_call(
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint64_t& stack_address,
+        uint64_t& target,
+        uint64_t& return_address) {
+    if (
+        core.memory == nullptr ||
+        core.priv_level != 0 ||
+        callbacks.bus_access != nullptr ||
+        block.instruction_count < 2 ||
+        block.spsel >= 32 ||
+        block.spsel != core.spsel ||
+        block.spsel == block.psel
+    ) {
+        return nullptr;
+    }
+    const uint8_t terminal_index = block.instruction_count - 1;
+    const CPUState::SingleCoreDecodedInstruction& decoded =
+        block.instructions[terminal_index];
+    if (
+        !single_core_decoded_is_terminal_long_call(decoded) ||
+        decoded.rd != 0 ||
+        decoded.rs >= 16 ||
+        decoded.rs == block.psel ||
+        decoded.rs == block.spsel ||
+        decoded.encoded_size != 2 ||
+        decoded.fetch_hits < 1 ||
+        decoded.fetch_hits > 2 ||
+        decoded.cycle_cost != 2 ||
+        decoded.taken_cycle_cost != 0 ||
+        decoded.immediate != 0
+    ) {
+        return nullptr;
+    }
+
+    uint32_t written_registers = 0;
+    for (uint8_t index = 0; index < terminal_index; index++) {
+        const CPUState::SingleCoreDecodedInstruction& prefix =
+            block.instructions[index];
+        if (single_core_decoded_is_memory(prefix))
+            return nullptr;
+        written_registers |=
+            single_core_decoded_register_write_mask(prefix);
+    }
+    if (
+        (
+            written_registers &
+            (uint32_t{1} << block.spsel)
+        ) != 0 ||
+        !single_core_resolve_prefix_register(
+            core,
+            block,
+            terminal_index,
+            decoded.rs,
+            target)
+    ) {
+        return nullptr;
+    }
+
+    // Accelerator hooks run before CALL.L pushes a return address. A match
+    // must remain wholly authoritative even when the hook would later
+    // decline its own transactional shortcut.
+    if (find_accel_hook(core, target) != 0)
+        return nullptr;
+
+    stack_address = core.regs[block.spsel] - 8;
+    return_address = block.address + block.identity_size;
+    const AccelHookContext context{
+        callbacks.has_mmio,
+        callbacks.mmio_start,
+        callbacks.mmio_end,
+    };
+    if (!accel_span_is_direct(
+            core,
+            stack_address,
+            8,
+            AccelAccessModel::SCALAR,
+            context)) {
+        return nullptr;
+    }
+    const DirectMemoryRegion region = resolve_accel_region(
+        core,
+        stack_address,
+        AccelAccessModel::SCALAR);
+    if (
+        region.priority != 3 ||
+        region.ptr == nullptr ||
+        region.avail < 8
+    ) {
+        return nullptr;
+    }
+    return region.ptr;
+}
+
 static uint8_t execute_single_core_decoded_instruction(
         CPUState& core,
         const CPUState::SingleCoreDecodedInstruction& decoded) {
@@ -22243,10 +22493,15 @@ try_execute_single_core_decoded_block(
         single_core_block_has_leading_memory(*block);
     const bool terminal_store =
         single_core_block_has_terminal_store(*block);
-    const bool memory_block = leading_memory || terminal_store;
+    const bool terminal_long_call =
+        single_core_block_has_terminal_long_call(*block);
+    const bool memory_block =
+        leading_memory || terminal_store || terminal_long_call;
     uint8_t* direct_memory = nullptr;
     uint64_t direct_memory_address = 0;
     uint64_t direct_memory_size = 0;
+    uint64_t direct_control_target = 0;
+    uint64_t direct_return_address = 0;
     if (memory_block) {
         // The direct-memory slice has no generated side exit. Prove its
         // dynamic address before compilation or entry; otherwise leave every
@@ -22258,13 +22513,22 @@ try_execute_single_core_decoded_block(
                 core,
                 callbacks,
                 *block);
-        } else {
+        } else if (terminal_store) {
             direct_memory = preflight_single_core_direct_store(
                 core,
                 callbacks,
                 *block,
                 direct_memory_address,
                 direct_memory_size);
+        } else {
+            direct_memory = preflight_single_core_direct_long_call(
+                core,
+                callbacks,
+                *block,
+                direct_memory_address,
+                direct_control_target,
+                direct_return_address);
+            direct_memory_size = 8;
         }
         if (direct_memory == nullptr)
             return run;
@@ -22391,15 +22655,33 @@ try_execute_single_core_decoded_block(
                             "single-core JIT returned invalid store state");
                     }
                 }
+                if (single_core_decoded_is_terminal_long_call(terminal)) {
+                    uint64_t observed_return_address = 0;
+                    std::memcpy(
+                        &observed_return_address,
+                        direct_memory,
+                        sizeof(observed_return_address));
+                    if (
+                        pc(core) != direct_control_target ||
+                        core.regs[block->spsel] !=
+                            direct_memory_address ||
+                        core.regs[terminal.rs] !=
+                            direct_control_target ||
+                        observed_return_address != direct_return_address
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid CALL.L state");
+                    }
+                }
             }
             if (cycles != expected_cycles) {
                 throw std::logic_error(
                     "single-core JIT returned an invalid cycle count");
             }
-            const bool completed_terminal_store =
-                terminal_store &&
+            const bool completed_terminal_write =
+                (terminal_store || terminal_long_call) &&
                 steps == block->instruction_count;
-            if (completed_terminal_store) {
+            if (completed_terminal_write) {
                 // The raw host write is complete. Reproduce architectural
                 // store invalidation before any subsequent guest fetch; a
                 // prefix IPI exit never reaches this path.

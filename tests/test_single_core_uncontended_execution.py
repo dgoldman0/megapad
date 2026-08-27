@@ -1631,3 +1631,126 @@ def test_terminal_scalar_store_executes_natively_with_live_operands(
         assert counts["uncontended_jit_compile_failures"] == 0
         assert counts["uncontended_jit_executions"] == 0
         assert counts["uncontended_jit_steps"] == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "prefix",
+        "constant_target",
+        "return_address",
+        "cycles_per_pass",
+    ),
+    (
+        pytest.param("inc r4", None, 3, 3, id="live-target"),
+        pytest.param(
+            "ldi64 r5, 0x13579bdf2468ace0",
+            0x1357_9BDF_2468_ACE0,
+            13,
+            4,
+            id="loaded-constant-target",
+        ),
+    ),
+)
+def test_terminal_long_call_executes_natively_with_live_target_and_stack(
+    prefix: str,
+    constant_target: int | None,
+    return_address: int,
+    cycles_per_pass: int,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+    {prefix}
+    call.l r5
+    inc r7
+"""
+        ),
+    )
+    stack_tops = (0x900, 0x980, 0xA00, 0xA80)
+    targets = (
+        0x0123_4567_89AB_CDEF,
+        0xFEDC_BA98_7654_3210,
+        0x1020_3040_5060_7080,
+        0x8877_6655_4433_2211,
+    )
+    for stack_top in stack_tops:
+        system.load_binary(stack_top - 9, b"\xEE" * 10)
+    system.boot(entry=0)
+    system.cpu.flags_unpack(0xAA)
+    original_xsel = system.cpu.xsel
+    original_psel = system.cpu.psel
+    original_spsel = system.cpu.spsel
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for pass_index, (stack_top, target) in enumerate(
+        zip(stack_tops, targets, strict=True),
+        start=1,
+    ):
+        system.cpu.pc = 0
+        system.cpu.regs[5] = target
+        system.cpu.regs[original_spsel] = stack_top
+
+        stats = system.run_batch_stats(2)
+
+        assert stats.instructions_executed == 2
+        expected_target = (
+            target if constant_target is None else constant_target
+        )
+        assert stats.system_cycles_advanced == cycles_per_pass
+        assert stats.per_core_cycles[0] == cycles_per_pass
+        assert system.cpu.regs[4] == (
+            pass_index if constant_target is None else 0
+        )
+        assert system.cpu.regs[5] == expected_target
+        assert system.cpu.regs[7] == 0
+        assert system.cpu.pc == expected_target
+        assert system.cpu.regs[original_spsel] == stack_top - 8
+        assert system.cpu.flags_pack() == 0xAA
+        assert system.cpu.xsel == original_xsel
+        assert system.cpu.psel == original_psel
+        assert system.cpu.spsel == original_spsel
+        for stack_index, observed_top in enumerate(stack_tops):
+            expected = (
+                b"\xEE"
+                + return_address.to_bytes(8, "little")
+                + b"\xEE"
+                if stack_index < pass_index
+                else b"\xEE" * 10
+            )
+            assert bytes(
+                system.cpu.mem[observed_top - 9:observed_top + 1]
+            ) == expected
+
+        if pass_index == 2:
+            planned = dict(owner._concurrency_profile_snapshot())
+            planned_counts = dict(planned["counts"])
+            assert planned_counts["uncontended_jit_compile_attempts"] == 0
+            assert planned_counts["uncontended_jit_compilations"] == 0
+            assert planned_counts["uncontended_jit_compile_failures"] == 0
+            assert planned_counts["uncontended_jit_executions"] == 0
+            assert planned_counts["uncontended_jit_steps"] == 0
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert counts["uncontended_steps"] == 8
+    expected_cycles = cycles_per_pass * len(stack_tops)
+    assert system.cpu.cycle_count == expected_cycles
+    assert owner.system_cycles == expected_cycles
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_steps"] == 4
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
+    else:
+        assert counts["uncontended_block_steps"] == 0
+        assert counts["uncontended_jit_compile_attempts"] == 0
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 0
+        assert counts["uncontended_jit_steps"] == 0
