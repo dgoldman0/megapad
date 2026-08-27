@@ -2420,7 +2420,9 @@ loop:
         assert counts["uncontended_jit_steps"] == 0
 
 
-def _run_cross_line_link_loop(*, reference: bool) -> tuple[tuple, dict]:
+def _cross_line_link_loop_system(
+    *, reference: bool
+) -> tuple[MegapadSystem, bytes, int, int]:
     system = _system(reference=reference)
     loop_address = 15
     loop = assemble(
@@ -2452,6 +2454,13 @@ loop:
     assert prime.instructions_executed == 1
     assert system.cpu.pc == 1
     system.cpu.pc = loop_address
+    return system, bytes(loop), loop_address, link_address
+
+
+def _run_cross_line_link_loop(*, reference: bool) -> tuple[tuple, dict]:
+    system, _, loop_address, link_address = (
+        _cross_line_link_loop_system(reference=reference)
+    )
 
     owner = system._native_system
     if not reference:
@@ -2504,6 +2513,69 @@ def test_cross_line_ldn_branch_builds_one_generic_native_block() -> None:
         assert counts["uncontended_jit_compile_failures"] == 0
         assert counts["uncontended_jit_executions"] == 0
         assert counts["uncontended_jit_steps"] == 0
+
+
+@pytest.mark.parametrize(
+    ("changed", "expected_builds", "expected_evictions"),
+    (
+        pytest.param(False, 0, 0, id="same-bytes"),
+        pytest.param(True, 1, 1, id="changed-bytes"),
+    ),
+)
+def test_cross_line_identity_revalidates_second_line_refill(
+    changed: bool,
+    expected_builds: int,
+    expected_evictions: int,
+) -> None:
+    def run(*, reference: bool) -> tuple[tuple, dict]:
+        system, loop, loop_address, link_address = (
+            _cross_line_link_loop_system(reference=reference)
+        )
+        for _ in range(4):
+            warm = system.run_batch_stats(2)
+            assert warm.instructions_executed == 2
+
+        assert loop[1] == 0xDD
+        # The changed form selects R12 instead of R13 as the LDN address.
+        # Both registers retain the self-link, so architectural results stay
+        # comparable while the second-line identity must be replaced.
+        replacement_operand = 0xDC if changed else loop[1]
+        system.cpu.regs[12] = link_address
+        system.cpu.mem_write8(loop_address + 1, replacement_operand)
+        owner = system._native_system
+        if not reference:
+            owner._start_concurrency_profile()
+        for _ in range(4):
+            stats = system.run_batch_stats(2)
+            assert stats.instructions_executed == 2
+            assert stats.system_cycles_advanced == 3
+            assert stats.per_core_cycles[0] == 3
+            assert system.cpu.pc == loop_address
+            assert system.cpu.regs[13] == link_address
+        snapshot = (
+            {} if reference else dict(owner._stop_concurrency_profile())
+        )
+        return _core_signature(system), snapshot
+
+    fast, snapshot = run(reference=False)
+    reference, _ = run(reference=True)
+
+    assert fast == reference
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_steps"] == 8
+    assert counts["uncontended_block_builds"] == expected_builds
+    assert counts["uncontended_block_evictions"] == expected_evictions
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == expected_builds
+        assert counts["uncontended_jit_compilations"] == expected_builds
+        assert counts["uncontended_jit_plan_evictions"] == expected_evictions
+        assert counts["uncontended_jit_executions"] >= 2
+    else:
+        assert counts["uncontended_block_executions"] == 0
+        assert counts["uncontended_jit_compile_attempts"] == 0
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 0
 
 
 @pytest.mark.parametrize(

@@ -170,10 +170,11 @@ multi-memory acceptance motifs.
 ### Guest-cache identity
 
 Block identity records the bounded set of resident guest I-cache lines it
-observed. A matching tag and host-only fill generation provides the hot O(1)
-proof. A refill or restored state performs the exact byte comparison once and
-either refreshes the generation binding or discards the plan. Invalidation,
-rollback, restore, and generation wrap conservatively prevent stale execution.
+observed. A matching tag and host-only slot-mutation generation provides the
+hot O(1) proof. A refill or restored state performs the exact byte comparison
+once and either refreshes the generation binding or discards the plan.
+Invalidation, rollback, restore, and generation wrap conservatively prevent
+stale execution.
 
 ### Block exit
 
@@ -480,8 +481,37 @@ where available, lowered once and entered twice. Its final CPU state, cache
 state, retired instructions, and cycles matched the generic two-core reference.
 That selector passed alongside four focused one-line admission/rejection and
 leading-load instances. Object inspection found no emitted identity-matcher
-call boundary. Per-line generation binding/revalidation and generic
-multi-memory construction remain outstanding, so Element 6 is not complete.
+call boundary. This established the multi-line construction seam without yet
+changing its repeated byte-validation contract.
+
+Second-slice evidence (2026-08-27): the exact-single-owned plan cache now
+carries one monotonic identity epoch and one epoch per direct-mapped guest
+I-cache slot. Each positive and negative entry records only the global epoch
+at which all of its bytes were last proved. Ordinary hits still check every
+touched line's validity and physical tag, then accept when those line epochs
+are no newer than the entry binding; they no longer load or compare identity
+bytes. A newer touched line enters one out-of-line exact comparator. Equal
+bytes refresh the binding, while changed bytes follow the existing rebuild or
+rejection path.
+
+Cache fill/replacement, matching invalidation, instruction rollback, and
+changed replay-checkpoint restoration advance the affected slot. Epochs remain
+host-only and are never checkpointed. Reset and public I-cache restore keep
+their hard plan-discard boundary, and epoch wrap discards all surviving host
+instruction plans before beginning a new monotonic interval. The storage lives
+behind the existing exact-single plan-cache pointer, so multi-core and
+microcore CPU state does not grow. Positive-entry alignment and the shared
+epoch header add 9,224 bytes to that one cache, about 2.9 percent.
+
+Ten focused native-plan, rejection, invalidation, and cross-line instances
+passed serially, followed by the resident-byte cross-line private-fetch oracle.
+The new two-line cases mutate only the continuation line: an identical refill
+retains the decoded/native plan with zero builds or compilations, while a
+changed `LDN` operand produces exactly one replacement and still matches the
+generic-core architectural signature. Object inspection retains only the
+0x148-byte out-of-line exact revalidator; the generation matcher itself is
+inlined. Generic multi-memory construction and its workload evidence remain
+outstanding, so Element 6 is not complete.
 
 ### Element 7 — x86-64 lowering and direct continuation
 
@@ -573,3 +603,5 @@ does not justify keeping the superseded implementation in the final tree.
 | ID | Finding | Disposition |
 |---|---|---|
 | EK-F1 | Focused happy-path coverage does not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias shape, natural-width callback route, or strict-cycle replay form. | Keep construction on the seconds-scale happy-path spine. Add the compact table-driven semantic matrix and fault/alias timing oracles during Element 8 acceptance, or earlier only if one blocks the next production slice. |
+| EK-F2 | Inlined positive and rejection identity checks retain some predicates already proved by their sole admission caller. | Preserve the reviewed contract now; reassess predicate consolidation from object layout and paired measurements after multi-memory construction changes the surrounding hot path. |
+| EK-F3 | The workload-hot rejection matcher remains in a far tail of the 0x1a2a-byte uncontended-round body even after generation checks remove its repeated byte comparison. | Treat code placement as a later measured fine turn. Do not perturb the correct identity contract before longer blocks reduce rejection traffic. |

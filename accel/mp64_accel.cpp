@@ -1819,13 +1819,14 @@ struct CPUState {
     // Exact-single-full-core decoded blocks are host-only acceleration
     // plans. Their contiguous identities are bounded by caller-owned entry
     // storage and may span any resident architectural I-cache lines touched
-    // within that bound. Every use revalidates the complete encoding against
-    // bytes currently visible in the guest I-cache. Failed admissions use a
-    // separate exact inspected-span identity so recurring authoritative
-    // starts do not evict useful positive plans. Both kinds therefore survive
-    // ordinary architectural I-cache invalidation/refill while the admission
-    // cache is conservatively cleared. Reset and discontinuous restore remain
-    // hard host-plan boundaries. None of these caches is architectural state.
+    // within that bound. Every use proves the expected resident tags and
+    // host-only slot epochs. A changed line takes one exact encoding-byte
+    // revalidation before rebinding. Failed admissions use a separate exact
+    // inspected-span identity so recurring authoritative starts do not evict
+    // useful positive plans. Both kinds therefore survive ordinary
+    // architectural I-cache invalidation/refill while the admission cache is
+    // conservatively cleared. Reset and discontinuous restore remain hard
+    // host-plan boundaries. None of these caches is architectural state.
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_CACHE_ENTRIES = 1024;
     static_assert(
@@ -1857,6 +1858,7 @@ struct CPUState {
         // and lets the authoritative C++ boundary reconstruct any completed
         // prefix without walking decoded instructions after native return.
         uint16_t extra_cycle_mask = 0;
+        uint32_t validated_identity_epoch = 0;
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
         std::array<
@@ -1870,10 +1872,18 @@ struct CPUState {
         uint8_t psel = 0;
         uint8_t spsel = 0;
         uint8_t identity_size = 0;
+        uint32_t validated_identity_epoch = 0;
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
     };
     struct SingleCoreExecutionPlanCache {
+        // A single monotonically increasing epoch lets an entry prove that
+        // neither of its at-most-two direct-mapped slots changed since its
+        // last exact validation. These fields exist only for exact-single
+        // owners; other CPU topologies retain only the existing pointer.
+        uint32_t identity_epoch = 0;
+        std::array<uint32_t, ICACHE_LINES>
+            icache_line_identity_epochs{};
         std::array<
             SingleCoreDecodedBlockEntry,
             SINGLE_CORE_BLOCK_CACHE_ENTRIES>
@@ -1914,6 +1924,41 @@ struct CPUState {
     void discard_all_host_instruction_plans() noexcept {
         clear_private_decode_admission_cache();
         discard_single_core_execution_plans();
+    }
+
+    uint32_t advance_single_core_icache_identity_epoch() noexcept {
+        if (!single_core_execution_plan_cache)
+            return 0;
+        SingleCoreExecutionPlanCache& cache =
+            *single_core_execution_plan_cache;
+        if (
+            cache.identity_epoch ==
+            std::numeric_limits<uint32_t>::max()
+        ) {
+            // Epoch comparisons are monotonic only between wraps. No host
+            // plan may survive into the new interval.
+            discard_all_host_instruction_plans();
+            cache.identity_epoch = 0;
+            cache.icache_line_identity_epochs.fill(0);
+        }
+        return ++cache.identity_epoch;
+    }
+
+    void note_single_core_icache_line_mutation(
+            std::size_t index) noexcept {
+        if (!single_core_execution_plan_cache)
+            return;
+        single_core_execution_plan_cache
+            ->icache_line_identity_epochs[index] =
+            advance_single_core_icache_identity_epoch();
+    }
+
+    void reset_single_core_icache_identity_epochs() noexcept {
+        if (!single_core_execution_plan_cache)
+            return;
+        single_core_execution_plan_cache->identity_epoch = 0;
+        single_core_execution_plan_cache
+            ->icache_line_identity_epochs.fill(0);
     }
 
     void register_accel_hook(
@@ -2058,6 +2103,34 @@ struct CPUExecutionCheckpoint {
     }
 
     void restore(CPUState& state) const {
+        if (state.single_core_execution_plan_cache) {
+            for (
+                std::size_t index = 0;
+                index < CPUState::ICACHE_LINES;
+                index++
+            ) {
+                const bool changed =
+                    state.icache_valid[index] !=
+                        icache_valid[index] ||
+                    (
+                        state.icache_valid[index] &&
+                        icache_valid[index] &&
+                        (
+                            state.icache_tags[index] !=
+                                icache_tags[index] ||
+                            state.icache_data[index] !=
+                                icache_data[index]
+                        )
+                    );
+                if (changed) {
+                    // Generation state is deliberately not checkpointed:
+                    // restoring an older architectural tuple is itself a
+                    // new host-visible slot mutation.
+                    state.note_single_core_icache_line_mutation(
+                        index);
+                }
+            }
+        }
         std::copy(regs.begin(), regs.end(), std::begin(state.regs));
         std::copy(acc.begin(), acc.end(), std::begin(state.acc));
         state.tacc = tacc;
@@ -6393,6 +6466,7 @@ static inline void icache_invalidate_span(
         const auto [index, tag] = icache_key(line_address);
         if (s.icache_valid[index] && s.icache_tags[index] == tag) {
             s.icache_valid[index] = 0;
+            s.note_single_core_icache_line_mutation(index);
             invalidated = true;
         }
     }
@@ -6404,7 +6478,20 @@ static inline void icache_invalidate_all(
         CPUState& s,
         bool reset_statistics) {
     s.clear_private_decode_admission_cache();
-    s.icache_valid.fill(0);
+    if (!s.single_core_execution_plan_cache) {
+        s.icache_valid.fill(0);
+    } else {
+        for (
+            std::size_t index = 0;
+            index < CPUState::ICACHE_LINES;
+            index++
+        ) {
+            if (s.icache_valid[index]) {
+                s.icache_valid[index] = 0;
+                s.note_single_core_icache_line_mutation(index);
+            }
+        }
+    }
     s.ifetch_window_valid = false;
     if (reset_statistics) {
         s.icache_hits = 0;
@@ -6416,6 +6503,7 @@ static inline void icache_reset(CPUState& s) {
     s.icache_enabled = s.profile == CoreProfile::FULL ? 1 : 0;
     s.discard_single_core_execution_plans();
     icache_invalidate_all(s, true);
+    s.reset_single_core_icache_identity_epochs();
 }
 
 static inline void mem_write8(CPUState& s, uint64_t addr, uint8_t val) {
@@ -7043,6 +7131,7 @@ static inline void icache_rollback_instruction(CPUState& s) {
         s.icache_valid[undo.index] = undo.valid;
         s.icache_tags[undo.index] = undo.tag;
         s.icache_data[undo.index] = undo.data;
+        s.note_single_core_icache_line_mutation(undo.index);
     }
     s.icache_hits = s.icache_undo_hits;
     s.icache_misses = s.icache_undo_misses;
@@ -7089,6 +7178,7 @@ static inline void load_fetch_window(CPUState& s, uint64_t address) {
         std::memcpy(s.icache_data[index].data() + 8, &hi, 8);
         s.icache_tags[index] = tag;
         s.icache_valid[index] = 1;
+        s.note_single_core_icache_line_mutation(index);
         s.icache_misses++;
     }
 
@@ -20013,14 +20103,16 @@ static std::size_t single_core_block_rejection_cache_index(
         ));
 }
 
-static MP64_ALWAYS_INLINE bool single_core_icache_identity_matches(
-        const CPUState& core,
+static MP64_NOINLINE bool revalidate_single_core_icache_identity(
+        CPUState& core,
         uint64_t address,
         const std::array<
             uint8_t,
             CPUState::ICACHE_LINE_BYTES>& identity,
-        uint8_t identity_size) noexcept {
+        uint8_t identity_size,
+        uint32_t& validated_identity_epoch) noexcept {
     if (
+        !core.single_core_execution_plan_cache ||
         identity_size == 0 ||
         identity_size > identity.size()
     ) {
@@ -20051,8 +20143,12 @@ static MP64_ALWAYS_INLINE bool single_core_icache_identity_matches(
     ) {
         return false;
     }
-    if (first_chunk == identity_size)
+    if (first_chunk == identity_size) {
+        validated_identity_epoch =
+            core.single_core_execution_plan_cache
+                ->identity_epoch;
         return true;
+    }
 
     // The identity storage is no larger than one cache line, so a
     // contiguous span can touch at most one continuation line.
@@ -20066,14 +20162,94 @@ static MP64_ALWAYS_INLINE bool single_core_icache_identity_matches(
         address + static_cast<uint64_t>(first_chunk);
     const auto [second_cache_index, second_tag] =
         icache_key(second_address);
-    return
+    if (
         core.icache_valid[second_cache_index] &&
         core.icache_tags[second_cache_index] == second_tag &&
         std::memcmp(
             core.icache_data[second_cache_index].data(),
             identity.data() + first_chunk,
             static_cast<std::size_t>(identity_size) -
-                first_chunk) == 0;
+                first_chunk) == 0
+    ) {
+        validated_identity_epoch =
+            core.single_core_execution_plan_cache
+                ->identity_epoch;
+        return true;
+    }
+    return false;
+}
+
+static MP64_ALWAYS_INLINE bool
+single_core_icache_identity_generation_matches(
+        CPUState& core,
+        uint64_t address,
+        const std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES>& identity,
+        uint8_t identity_size,
+        uint32_t& validated_identity_epoch) noexcept {
+    if (
+        !core.single_core_execution_plan_cache ||
+        identity_size == 0 ||
+        identity_size > identity.size()
+    ) {
+        return false;
+    }
+
+    const auto [first_cache_index, first_tag] =
+        icache_key(address);
+    if (
+        !core.icache_valid[first_cache_index] ||
+        core.icache_tags[first_cache_index] != first_tag
+    ) {
+        return false;
+    }
+    const std::size_t first_line_offset =
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    const std::size_t first_chunk =
+        std::min<std::size_t>(
+            identity_size,
+            CPUState::ICACHE_LINE_BYTES - first_line_offset);
+    const bool first_generation_matches =
+        core.single_core_execution_plan_cache
+            ->icache_line_identity_epochs[first_cache_index] <=
+        validated_identity_epoch;
+    if (first_chunk == identity_size) {
+        return first_generation_matches ||
+            revalidate_single_core_icache_identity(
+                core,
+                address,
+                identity,
+                identity_size,
+                validated_identity_epoch);
+    }
+
+    // The existing caller-owned identity bound proves that only one
+    // continuation line can be touched. Tag and validity remain part of
+    // every hot proof because generations describe direct-mapped slots.
+    const uint64_t second_address =
+        address + static_cast<uint64_t>(first_chunk);
+    const auto [second_cache_index, second_tag] =
+        icache_key(second_address);
+    if (
+        !core.icache_valid[second_cache_index] ||
+        core.icache_tags[second_cache_index] != second_tag
+    ) {
+        return false;
+    }
+    const bool second_generation_matches =
+        core.single_core_execution_plan_cache
+            ->icache_line_identity_epochs[second_cache_index] <=
+        validated_identity_epoch;
+    return
+        (first_generation_matches && second_generation_matches) ||
+        revalidate_single_core_icache_identity(
+            core,
+            address,
+            identity,
+            identity_size,
+            validated_identity_epoch);
 }
 
 static bool copy_single_core_icache_identity(
@@ -20120,11 +20296,11 @@ static bool copy_single_core_icache_identity(
 }
 
 static bool single_core_block_rejection_matches(
-        const CPUState& core,
+        CPUState& core,
         uint64_t address) noexcept {
     if (!core.single_core_execution_plan_cache)
         return false;
-    const CPUState::SingleCoreBlockRejectionEntry& entry =
+    CPUState::SingleCoreBlockRejectionEntry& entry =
         core.single_core_execution_plan_cache->rejections[
             single_core_block_rejection_cache_index(address)];
     if (
@@ -20139,11 +20315,12 @@ static bool single_core_block_rejection_matches(
     ) {
         return false;
     }
-    return single_core_icache_identity_matches(
+    return single_core_icache_identity_generation_matches(
         core,
         address,
         entry.identity,
-        entry.identity_size);
+        entry.identity_size,
+        entry.validated_identity_epoch);
 }
 
 enum class SingleCoreBlockRejectionStorage : uint8_t {
@@ -20185,6 +20362,8 @@ remember_single_core_block_rejection(
             candidate.identity)) {
         return SingleCoreBlockRejectionStorage::NONRESIDENT;
     }
+    candidate.validated_identity_epoch =
+        core.single_core_execution_plan_cache->identity_epoch;
     candidate.valid = true;
     CPUState::SingleCoreBlockRejectionEntry& destination =
         core.single_core_execution_plan_cache->rejections[
@@ -21435,8 +21614,8 @@ static bool single_core_block_structure_is_valid(
 }
 
 static bool single_core_block_identity_matches(
-        const CPUState& core,
-        const CPUState::SingleCoreDecodedBlockEntry& block,
+        CPUState& core,
+        CPUState::SingleCoreDecodedBlockEntry& block,
         uint64_t address) {
     if (
         !block.valid ||
@@ -21455,11 +21634,12 @@ static bool single_core_block_identity_matches(
     ) {
         return false;
     }
-    return single_core_icache_identity_matches(
+    return single_core_icache_identity_generation_matches(
         core,
         address,
         block.identity,
-        block.identity_size);
+        block.identity_size,
+        block.validated_identity_epoch);
 }
 
 enum class SingleCoreBlockBuildRejection : uint8_t {
@@ -21637,6 +21817,18 @@ build_single_core_decoded_block(
         failure.reason =
             SingleCoreBlockBuildRejection::STRUCTURE;
         failure.identity_size = candidate.identity_size;
+        return nullptr;
+    }
+    if (!revalidate_single_core_icache_identity(
+            core,
+            address,
+            candidate.identity,
+            candidate.identity_size,
+            candidate.validated_identity_epoch)) {
+        // Construction is observational: it may not fill a line or publish
+        // a plan after its resident identity proof has disappeared.
+        failure.reason =
+            SingleCoreBlockBuildRejection::NONRESIDENT;
         return nullptr;
     }
     candidate.valid = true;
@@ -28644,6 +28836,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     data.size());
                 s.ifetch_window_valid = false;
                 s.discard_all_host_instruction_plans();
+                s.reset_single_core_icache_identity_epochs();
             })
         .def_readwrite("priv_level", &CPUState::priv_level)
         .def_readwrite("mpu_base", &CPUState::mpu_base)
