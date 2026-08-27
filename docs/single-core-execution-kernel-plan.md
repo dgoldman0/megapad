@@ -22,8 +22,8 @@ compatibility path. Git history and the independent `main` and
 `rich-terminal-vertical` worktrees provide the comparison boundary; the
 production source tree retains only the implementation moving toward release.
 
-The existing DBT is architecturally correct and modestly faster, but its
-one-memory-operation blocks are too short to amortize admission, generated-code
+The DBT baseline was architecturally correct and modestly faster, but its
+one-memory-operation blocks were too short to amortize admission, generated-code
 entry, interrupt polling, return, and settlement. At the same time, storage and
 round settlement expose larger host costs outside translation. The replacement
 therefore separates machine coordination, MP64 guest semantics, portable block
@@ -51,6 +51,7 @@ reports are intentionally untracked under `/tmp`.
 | Source-load storage | 494 sectors, 252,928 bytes, 15 commands; equivalent immediate replay median 0.472 seconds | Add a bounded canonical synchronous span path without weakening strict DMA |
 | Scalar rejection pressure | 12.57 million hits, 52.6% of all rejection-cache hits | Memory shape is the central translation boundary |
 | Cross-line hot pair | About 4.36 million `LDN R13,R13` executions paired with about 4.39 million unconditional branches | Multi-line identity is a required generic acceptance case |
+| Byte-copy hot pair | 3,432,044 `LD.B R0,[R9]` rejection hits and 3,414,441 `ST.B [R7],R0` hits; about 6.83 million paired instructions are strongly implied | A generic ordered two-span block is the first multi-memory acceptance case |
 
 The storage replay establishes the scale of the byte-state-machine cost; it is
 not by itself an end-to-end savings claim. Profile wall timers are diagnostic
@@ -167,6 +168,15 @@ multi-line acceptance motif, not an app-specific opcode fusion. Common Forth
 stack sequences with multiple loads and a terminal store are the first
 multi-memory acceptance motifs.
 
+Each admitted scalar access has one ordered address recipe: an entry register,
+a constant, or a prior direct-read result, plus a modulo-64-bit addend. The
+recipe capacity derives from the caller-owned identity bound. Preflight resolves
+every recipe through the existing bounded Bank 0 span contract before any
+architectural effect; it reads a prior value only when a later address depends
+on that value. A failed proof makes zero progress, while a completed terminal
+store retains the existing exact invalidation boundary. This is generic dataflow
+metadata, not opcode fusion or a shadow execution engine.
+
 ### Guest-cache identity
 
 Block identity records the bounded set of resident guest I-cache lines it
@@ -205,7 +215,7 @@ the reverted C++ successor-probe loop is not restored.
 | 3 | Native no-event round settlement | Complete |
 | 4 | Algebraic memory foundation | Complete |
 | 5 | Authoritative decoded execution kernel | Complete |
-| 6 | Multi-line and multi-memory block construction | In progress |
+| 6 | Multi-line and multi-memory block construction | Complete |
 | 7 | x86-64 lowering and direct continuation | Pending |
 | 8 | Consolidation and acceptance | Pending |
 
@@ -460,8 +470,8 @@ blocking multi-line construction.
   motifs through generic identity and memory rules.
 - Replace repeated positive and negative identity byte comparisons with the
   generation/revalidation contract.
-- Measure admission, exits, block length, memory shape, and decoded execution
-  before enabling generated lowering.
+- Prove admission, exits, block length, memory shape, and decoded execution
+  with short workload-derived profiles before broader lowering work.
 
 First-slice evidence (2026-08-27): positive and negative block identities now
 walk the resident guest I-cache line chunks touched by the existing
@@ -510,8 +520,42 @@ retains the decoded/native plan with zero builds or compilations, while a
 changed `LDN` operand produces exactly one replacement and still matches the
 generic-core architectural signature. Object inspection retains only the
 0x148-byte out-of-line exact revalidator; the generation matcher itself is
-inlined. Generic multi-memory construction and its workload evidence remain
-outstanding, so Element 6 is not complete.
+inlined.
+
+Completion evidence (2026-08-27): ordinary scalar blocks now carry an ordered,
+caller-bounded address-recipe table derived once during construction. Symbolic
+provenance advances the selected PC before each instruction and follows entry
+registers, constants, moves, affine immediate changes, and prior direct-read
+results. Unsupported multi-source address calculations conservatively end the
+block. Any number of proved reads permitted by the block bound may precede the
+one controlled terminal store; `CALL.L` and `RET.L` retain their separately
+reviewed stack/control rules. The former leading-read-only rule, global
+one-memory exclusion, stable-store-address restriction, two specialized scalar
+preflights, and singular host-pointer selection were deleted.
+
+Preflight walks the access recipes in instruction order and resolves every
+nonwrapping Bank 0 span before native entry. It dereferences an earlier proved
+read only when a later recipe needs that result, which admits pointer chasing
+without interpreting the whole block twice. No write occurs before the
+terminal instruction, external mutation remains excluded by the execution
+lease, and the existing per-instruction interrupt polls still publish exact
+completed prefixes. x86-64 now consumes a table of proved pointers rather than
+one overloaded pointer; the raw terminal write is still invalidated before the
+common exit is published. Recipe storage is a 72-byte parallel table per block,
+adding 73,728 exact-single-only bytes without enlarging the hot block-entry
+stride.
+
+Three workload-derived oracles proved the measured two-instruction byte copy,
+the five-instruction Forth `+` stack sequence, and the three-instruction Forth
+`@` sequence whose second address comes from its first load. Each built once,
+compiled once on x86-64, entered twice with different live addresses and data,
+and exactly matched the generic coordinator's registers, flags, memory, guest
+I-cache state, instruction count, and cycles. The retained self-modifying-store
+oracle now obtains both its destination and byte from preceding loads and still
+invalidates and replaces the victim plan exactly once. The extension rebuilt,
+and those cases plus the existing direct-read, scalar-store, long-call/return,
+cross-line, and dense-slot happy paths passed serially (13 focused instances).
+This completes Element 6 without a BIOS timing or broad-qualification claim.
 
 ### Element 7 — x86-64 lowering and direct continuation
 
@@ -520,8 +564,9 @@ outstanding, so Element 6 is not complete.
   spans and materialize exact completed prefixes at exits.
 - Add direct native continuation only where the block/exit profile proves that
   it removes more work than it introduces.
-- Delete the present one-memory generated ABI, old block cache, rejection path,
-  and unused chaining substrate once the replacement owns production entry.
+- Extract lowering from the mixed execution translation unit behind the stable
+  block/access ABI, deleting displaced inline backend ownership and any unused
+  chaining residue rather than retaining parallel implementations.
 
 ### Element 8 — Consolidation and acceptance
 
@@ -597,6 +642,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D6 | Use focused happy-path construction evidence until the rich-terminal gate permits final qualification. | A green construction selector is not a broad correctness or performance claim; deferred cases remain explicit. |
 | EK-D7 | Judge performance with workload-specific paired evidence and exact equivalence. | No arbitrary universal threshold, historical unpaired median, or sum of inclusive profile timers establishes success. |
 | EK-D8 | Normalize decoded and generated execution into one 16-byte MP64 block exit while retaining a backend-private packed transport. | Common exits remain register-returned; authoritative CPU state and already-known raw-write invalidation are not duplicated into every descriptor. |
+| EK-D9 | Represent scalar block addresses as ordered entry/constant/prior-read recipes and prove every span transactionally before entry. | The capacity derives from block identity, the hot motifs are not fused, no generated memory side exit is added, and a failed proof retires nothing. |
 
 ## Deferred findings ledger
 
@@ -605,3 +651,6 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F1 | Focused happy-path coverage does not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias shape, natural-width callback route, or strict-cycle replay form. | Keep construction on the seconds-scale happy-path spine. Add the compact table-driven semantic matrix and fault/alias timing oracles during Element 8 acceptance, or earlier only if one blocks the next production slice. |
 | EK-F2 | Inlined positive and rejection identity checks retain some predicates already proved by their sole admission caller. | Preserve the reviewed contract now; reassess predicate consolidation from object layout and paired measurements after multi-memory construction changes the surrounding hot path. |
 | EK-F3 | The workload-hot rejection matcher remains in a far tail of the 0x1a2a-byte uncontended-round body even after generation checks remove its repeated byte comparison. | Treat code placement as a later measured fine turn. Do not perturb the correct identity contract before longer blocks reduce rejection traffic. |
+| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Measure the remaining rejection shapes after the new multi-memory blocks are in production. Add generated guards/completed-prefix exits only if retained evidence justifies their entry cost. |
+| EK-F5 | Happy-path construction coverage does not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Add exact zero-progress and completed-prefix oracles during Element 8 acceptance, or earlier only if continuation work changes either contract; do not add construction-only fault hooks now. |
+| EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | Measure the admitted workload motifs after lowering extraction before claiming net speed. Keep the bounded preflight out of line and change it only from paired exact evidence. |

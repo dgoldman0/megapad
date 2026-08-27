@@ -72,6 +72,8 @@ using mp64::machine::region_span_fits;
 using mp64::machine::resolve_memory_span;
 using mp64::cpu::BlockExit;
 using mp64::cpu::BlockExitReason;
+using mp64::cpu::BlockMemoryAddressRecipe;
+using mp64::cpu::BlockMemoryAddressRecipes;
 using mp64::cpu::DecodedInstruction;
 using mp64::cpu::DecodedOperation;
 using mp64::cpu::DecodeResult;
@@ -112,6 +114,12 @@ using mp64::cpu::sign_extend;
 using mp64::cpu::update_flags_arith;
 using mp64::cpu::update_flags_cmp;
 using mp64::cpu::update_flags_logic;
+using mp64::cpu::BLOCK_MEMORY_CONSTANT_SOURCE;
+using mp64::cpu::BLOCK_MEMORY_UNKNOWN_SOURCE;
+using mp64::cpu::block_memory_prior_read_index;
+using mp64::cpu::block_memory_prior_read_source;
+using mp64::cpu::block_memory_source_is_entry_register;
+using mp64::cpu::block_memory_source_is_prior_read;
 
 // ---------------------------------------------------------------------------
 //  Constants — must match megapad64.py exactly
@@ -1846,6 +1854,19 @@ struct CPUState {
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS =
             ICACHE_LINE_BYTES;
+    // Ordinary scalar memory encodings consume at least two identity bytes.
+    // CALL.L also consumes two and RET.L remains exclusive, so this bound is
+    // derived from the caller-owned identity capacity rather than chosen as a
+    // separate execution limit.
+    static constexpr std::size_t
+        SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES =
+            ICACHE_LINE_BYTES / 2;
+    using SingleCoreBlockMemoryAddressRecipes =
+        BlockMemoryAddressRecipes<
+            SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES>;
+    static_assert(
+        sizeof(SingleCoreBlockMemoryAddressRecipes) == 72,
+        "single-core memory recipes must retain compact storage");
     struct SingleCoreDecodedBlockEntry {
         bool valid = false;
         bool native_compile_checked = false;
@@ -1859,6 +1880,9 @@ struct CPUState {
         // prefix without walking decoded instructions after native return.
         uint16_t extra_cycle_mask = 0;
         uint32_t validated_identity_epoch = 0;
+        // Occupies existing alignment padding. Ordinary register/control
+        // entries retain an O(1) memory-shape test on every execution hit.
+        uint8_t direct_memory_access_count = 0;
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
         std::array<
@@ -1867,6 +1891,12 @@ struct CPUState {
             instructions{};
         HostExecutableCode native_code;
     };
+    static_assert(
+        offsetof(
+            SingleCoreDecodedBlockEntry,
+            direct_memory_access_count) == 12 &&
+        offsetof(SingleCoreDecodedBlockEntry, address) == 16,
+        "single-core memory shape must stay in header padding");
     struct SingleCoreBlockRejectionEntry {
         bool valid = false;
         uint8_t psel = 0;
@@ -1892,6 +1922,13 @@ struct CPUState {
             SingleCoreBlockRejectionEntry,
             SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES>
             rejections{};
+        // Multi-memory recipes are cold on register/control blocks. Keep the
+        // parallel bounded table out of every hot block-entry stride while
+        // retaining one exact-single owner and direct cache-index lookup.
+        std::array<
+            SingleCoreBlockMemoryAddressRecipes,
+            SINGLE_CORE_BLOCK_CACHE_ENTRIES>
+            block_memory_addresses{};
     };
     // Only the sole full core in an exact-single topology owns this cache.
     // Multi-core and microcore configurations must not pay per-CPU storage
@@ -20626,6 +20663,147 @@ static bool single_core_resolve_prefix_register(
     return known;
 }
 
+// Construction tracks only the provenance needed to prove later memory
+// addresses. This is deliberately not a second MP64 executor: unsupported
+// value combinations become unknown, while actual register/flag effects stay
+// owned by the shared decoded kernel and the native lowering.
+struct SingleCoreAddressProvenance {
+    std::array<BlockMemoryAddressRecipe, 32> registers{};
+
+    SingleCoreAddressProvenance() noexcept {
+        for (uint8_t reg = 0; reg < registers.size(); reg++) {
+            registers[reg] = {0, reg};
+        }
+    }
+
+    static BlockMemoryAddressRecipe constant(
+            uint64_t value) noexcept {
+        return {value, BLOCK_MEMORY_CONSTANT_SOURCE};
+    }
+
+    static BlockMemoryAddressRecipe unknown() noexcept {
+        return {0, BLOCK_MEMORY_UNKNOWN_SOURCE};
+    }
+
+    void add_to_register(
+            uint8_t reg,
+            uint64_t addend) noexcept {
+        if (reg < registers.size() && registers[reg].known())
+            registers[reg].addend += addend;
+    }
+
+    void advance_program_counter(
+            uint8_t psel,
+            uint8_t encoded_size) noexcept {
+        add_to_register(psel, encoded_size);
+    }
+
+    BlockMemoryAddressRecipe address_for(
+            uint8_t reg) const noexcept {
+        return reg < registers.size()
+            ? registers[reg]
+            : unknown();
+    }
+
+    void apply(
+            const DecodedInstruction& decoded,
+            uint8_t memory_access_index) noexcept {
+        switch (decoded.operation) {
+            case DecodedOperation::LOAD_NATURAL:
+            case DecodedOperation::LOAD_BYTE:
+                registers[decoded.rd] = {
+                    0,
+                    block_memory_prior_read_source(
+                        memory_access_index),
+                };
+                return;
+            case DecodedOperation::STORE_NATURAL:
+            case DecodedOperation::STORE_BYTE:
+            case DecodedOperation::NOP:
+            case DecodedOperation::COMPARE_IMMEDIATE:
+            case DecodedOperation::COMPARE:
+                return;
+            case DecodedOperation::INCREMENT:
+                add_to_register(decoded.rd, 1);
+                return;
+            case DecodedOperation::DECREMENT:
+                add_to_register(decoded.rd, MASK64);
+                return;
+            case DecodedOperation::LOAD_IMMEDIATE:
+                registers[decoded.rd] = constant(decoded.immediate);
+                return;
+            case DecodedOperation::ADD_IMMEDIATE:
+                add_to_register(
+                    decoded.rd,
+                    sign_extend(decoded.immediate, 8));
+                return;
+            case DecodedOperation::SUBTRACT_IMMEDIATE:
+                add_to_register(
+                    decoded.rd,
+                    uint64_t{0} -
+                        sign_extend(decoded.immediate, 8));
+                return;
+            case DecodedOperation::MOVE:
+                registers[decoded.rd] = registers[decoded.rs];
+                return;
+            case DecodedOperation::ADD: {
+                BlockMemoryAddressRecipe first =
+                    registers[decoded.rd];
+                const BlockMemoryAddressRecipe second =
+                    registers[decoded.rs];
+                if (!first.known() || !second.known()) {
+                    registers[decoded.rd] = unknown();
+                } else if (
+                    second.source ==
+                    BLOCK_MEMORY_CONSTANT_SOURCE
+                ) {
+                    first.addend += second.addend;
+                    registers[decoded.rd] = first;
+                } else if (
+                    first.source ==
+                    BLOCK_MEMORY_CONSTANT_SOURCE
+                ) {
+                    const uint64_t constant_addend = first.addend;
+                    first = second;
+                    first.addend += constant_addend;
+                    registers[decoded.rd] = first;
+                } else {
+                    registers[decoded.rd] = unknown();
+                }
+                return;
+            }
+            case DecodedOperation::SUBTRACT: {
+                BlockMemoryAddressRecipe first =
+                    registers[decoded.rd];
+                const BlockMemoryAddressRecipe second =
+                    registers[decoded.rs];
+                if (!first.known() || !second.known()) {
+                    registers[decoded.rd] = unknown();
+                } else if (
+                    second.source ==
+                    BLOCK_MEMORY_CONSTANT_SOURCE
+                ) {
+                    first.addend -= second.addend;
+                    registers[decoded.rd] = first;
+                } else if (first.source == second.source) {
+                    registers[decoded.rd] = constant(
+                        first.addend - second.addend);
+                } else {
+                    registers[decoded.rd] = unknown();
+                }
+                return;
+            }
+            default:
+                break;
+        }
+
+        const uint32_t write_mask =
+            single_core_decoded_register_write_mask(decoded);
+        if (write_mask != 0)
+            registers[decoded.rd] = unknown();
+    }
+};
+
 enum class SingleCoreJitCompilation : uint8_t {
     UNAVAILABLE = 0,
     COMPILED = 1,
@@ -20635,7 +20813,7 @@ enum class SingleCoreJitCompilation : uint8_t {
 using SingleCoreJitFunction = uint64_t (*)(
     CPUState*,
     const std::atomic<uint8_t>*,
-    uint8_t*);
+    uint8_t* const*);
 
 static constexpr uint8_t SINGLE_CORE_JIT_EXIT_INTERRUPT = 1U << 0;
 static constexpr uint8_t SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN = 1U << 1;
@@ -20804,7 +20982,8 @@ static void emit_single_core_jit_instruction(
         const DecodedInstruction& decoded,
         uint64_t instruction_address,
         uint8_t psel,
-        uint8_t spsel) {
+        uint8_t spsel,
+        uint8_t memory_access_index) {
     emitter.add_core_imm8(
         single_core_jit_register_offset(core, psel),
         decoded.encoded_size);
@@ -20819,6 +20998,7 @@ static void emit_single_core_jit_instruction(
         case DecodedOperation::NOP:
             return;
         case DecodedOperation::CALL_LONG:
+            emitter.mov_r8_from_pointer_table(memory_access_index);
             emitter.mov_rcx_from_core(
                 single_core_jit_register_offset(core, decoded.rs));
             emitter.mov_rax_from_core(
@@ -20826,12 +21006,13 @@ static void emit_single_core_jit_instruction(
             emitter.sub_core_imm8(
                 single_core_jit_register_offset(core, spsel),
                 8);
-            emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
+            emitter.bytes({0x49, 0x89, 0x00}); // mov [r8], rax
             emitter.mov_core_from_rcx(
                 single_core_jit_register_offset(core, psel));
             return;
         case DecodedOperation::RETURN_LONG:
-            emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
+            emitter.mov_r8_from_pointer_table(memory_access_index);
+            emitter.bytes({0x49, 0x8B, 0x00}); // mov rax, [r8]
             emitter.add_core_imm8(
                 single_core_jit_register_offset(core, spsel),
                 8);
@@ -20936,12 +21117,16 @@ static void emit_single_core_jit_instruction(
         case DecodedOperation::LOAD_BYTE:
         case DecodedOperation::STORE_NATURAL:
         case DecodedOperation::STORE_BYTE:
-            // The third SysV argument arrives in RDX. Current emitters reserve
-            // it across a stable-address prefix for a terminal store.
+            // The third SysV argument is an ordered table of pointers proved
+            // before entry. Keep address selection out of generated guest
+            // semantics while allowing more than one admitted span.
+            emitter.mov_r8_from_pointer_table(memory_access_index);
             if (decoded.operation == DecodedOperation::LOAD_NATURAL) {
-                emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
+                emitter.bytes({0x49, 0x8B, 0x00}); // mov rax, [r8]
             } else if (decoded.operation == DecodedOperation::LOAD_BYTE) {
-                emitter.bytes({0x0F, 0xB6, 0x02}); // movzx eax, byte [rdx]
+                emitter.bytes({
+                    0x41, 0x0F, 0xB6, 0x00,
+                }); // movzx eax, byte [r8]
             } else {
                 emitter.mov_rax_from_core(
                     single_core_jit_register_offset(core, decoded.rs));
@@ -20949,9 +21134,9 @@ static void emit_single_core_jit_instruction(
                     decoded.operation ==
                     DecodedOperation::STORE_NATURAL
                 ) {
-                    emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
+                    emitter.bytes({0x49, 0x89, 0x00}); // mov [r8], rax
                 } else {
-                    emitter.bytes({0x88, 0x02}); // mov byte [rdx], al
+                    emitter.bytes({0x41, 0x88, 0x00}); // mov byte [r8], al
                 }
                 return;
             }
@@ -21148,6 +21333,7 @@ compile_single_core_jit_block(
 
         std::vector<std::size_t> interrupt_exits;
         uint64_t instruction_address = block.address;
+        uint8_t memory_access_index = 0;
         for (
             uint8_t index = 0;
             index < block.instruction_count;
@@ -21167,7 +21353,10 @@ compile_single_core_jit_block(
                 block.instructions[index],
                 instruction_address,
                 block.psel,
-                block.spsel);
+                block.spsel,
+                memory_access_index);
+            if (single_core_decoded_is_memory(block.instructions[index]))
+                memory_access_index++;
             emitter.bytes({0xFF, 0xC3}); // inc ebx
             emitter.bytes({
                 0x41,
@@ -21338,7 +21527,9 @@ compile_single_core_jit_block(
 // cache entry; hot hits only need to re-prove dynamic architectural identity.
 static bool single_core_block_structure_is_valid(
         const CPUState& core,
-        const CPUState::SingleCoreDecodedBlockEntry& block) {
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        const CPUState::SingleCoreBlockMemoryAddressRecipes&
+            memory_addresses) {
     if (
         block.psel >= 32 ||
         block.spsel >= 32 ||
@@ -21354,6 +21545,8 @@ static bool single_core_block_structure_is_valid(
     uint32_t written_registers = 0;
     uint16_t expected_extra_cycle_mask = 0;
     bool memory_seen = false;
+    uint8_t direct_memory_access_count = 0;
+    SingleCoreAddressProvenance address_provenance;
     for (
         uint8_t index = 0;
         index < block.instruction_count;
@@ -21370,6 +21563,9 @@ static bool single_core_block_structure_is_valid(
         const auto& decoded = block.instructions[index];
         const uint8_t fetch_hits = decoded.fetch_hit_count(
             block.address + static_cast<uint64_t>(decoded_size));
+        address_provenance.advance_program_counter(
+            block.psel,
+            encoded_size);
         if (decoded.cycle_cost == 2) {
             expected_extra_cycle_mask |= static_cast<uint16_t>(
                 uint16_t{1} << index);
@@ -21510,19 +21706,36 @@ static bool single_core_block_structure_is_valid(
                 decoded.rs == block.psel;
             if (common_invalid)
                 return false;
+            if (
+                direct_memory_access_count >=
+                CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES
+            ) {
+                return false;
+            }
+            const uint8_t address_register =
+                single_core_decoded_is_direct_read(decoded)
+                ? decoded.rs
+                : decoded.rd;
+            const BlockMemoryAddressRecipe expected_address =
+                address_provenance.address_for(address_register);
+            const BlockMemoryAddressRecipe published_address =
+                memory_addresses.get(
+                    direct_memory_access_count);
+            if (
+                !expected_address.known() ||
+                published_address.source !=
+                    expected_address.source ||
+                published_address.addend !=
+                    expected_address.addend
+            ) {
+                return false;
+            }
             const bool valid_read =
-                single_core_decoded_is_direct_read(decoded) &&
-                index == 0 &&
-                !memory_seen;
+                single_core_decoded_is_direct_read(decoded);
             const bool valid_store =
                 single_core_decoded_is_terminal_store(decoded) &&
                 index != 0 &&
-                index + 1 == block.instruction_count &&
-                !memory_seen &&
-                (
-                    written_registers &
-                    (uint32_t{1} << decoded.rd)
-                ) == 0;
+                index + 1 == block.instruction_count;
             if (!valid_read && !valid_store)
                 return false;
             memory_seen = true;
@@ -21604,13 +21817,24 @@ static bool single_core_block_structure_is_valid(
         } else if (decoded.cycle_cost != 1) {
             return false;
         }
+        address_provenance.apply(
+            decoded,
+            direct_memory_access_count);
+        if (
+            decoded.is_direct_read() ||
+            decoded.is_direct_store()
+        ) {
+            direct_memory_access_count++;
+        }
         written_registers |=
             single_core_decoded_register_write_mask(decoded);
         decoded_size += encoded_size;
     }
     return
         decoded_size == block.identity_size &&
-        block.extra_cycle_mask == expected_extra_cycle_mask;
+        block.extra_cycle_mask == expected_extra_cycle_mask &&
+        block.direct_memory_access_count ==
+            direct_memory_access_count;
 }
 
 static bool single_core_block_identity_matches(
@@ -21673,6 +21897,8 @@ build_single_core_decoded_block(
     }
 
     CPUState::SingleCoreDecodedBlockEntry candidate;
+    CPUState::SingleCoreBlockMemoryAddressRecipes
+        candidate_memory_addresses;
     candidate.address = address;
     candidate.psel = core.psel;
     candidate.spsel = core.spsel;
@@ -21683,6 +21909,8 @@ build_single_core_decoded_block(
     bool nonresident = false;
     uint32_t written_registers = 0;
     bool memory_seen = false;
+    uint8_t direct_memory_access_count = 0;
+    SingleCoreAddressProvenance address_provenance;
     while (
         offset < identity_capacity &&
         candidate.instruction_count <
@@ -21713,22 +21941,28 @@ build_single_core_decoded_block(
         inspected_size = std::max<std::size_t>(
             inspected_size,
             offset + instruction_inspected_size);
+        address_provenance.advance_program_counter(
+            candidate.psel,
+            decoded.encoded_size);
         if (single_core_decoded_is_memory(decoded)) {
             if (single_core_decoded_is_direct_read(decoded)) {
                 if (
-                    candidate.instruction_count != 0 ||
-                    memory_seen
+                    direct_memory_access_count >=
+                        CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES ||
+                    !address_provenance
+                        .address_for(decoded.rs)
+                        .known()
                 ) {
                     break;
                 }
             } else if (single_core_decoded_is_terminal_store(decoded)) {
                 if (
                     candidate.instruction_count == 0 ||
-                    memory_seen ||
-                    (
-                        written_registers &
-                        (uint32_t{1} << decoded.rd)
-                    ) != 0
+                    direct_memory_access_count >=
+                        CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES ||
+                    !address_provenance
+                        .address_for(decoded.rd)
+                        .known()
                 ) {
                     break;
                 }
@@ -21776,6 +22010,19 @@ build_single_core_decoded_block(
             }
             memory_seen = true;
         }
+        if (
+            single_core_decoded_is_direct_read(decoded) ||
+            single_core_decoded_is_terminal_store(decoded)
+        ) {
+            const uint8_t address_register =
+                single_core_decoded_is_direct_read(decoded)
+                ? decoded.rs
+                : decoded.rd;
+            candidate_memory_addresses.set(
+                direct_memory_access_count,
+                address_provenance.address_for(
+                    address_register));
+        }
         std::memcpy(
             candidate.identity.data() + offset,
             encoding.data(),
@@ -21789,6 +22036,15 @@ build_single_core_decoded_block(
         }
         candidate.instruction_count++;
         offset += encoded_size;
+        address_provenance.apply(
+            decoded,
+            direct_memory_access_count);
+        if (
+            single_core_decoded_is_direct_read(decoded) ||
+            single_core_decoded_is_terminal_store(decoded)
+        ) {
+            direct_memory_access_count++;
+        }
         written_registers |=
             single_core_decoded_register_write_mask(decoded);
         if (single_core_decoded_ends_block(decoded))
@@ -21813,7 +22069,12 @@ build_single_core_decoded_block(
         return nullptr;
     }
     candidate.identity_size = static_cast<uint8_t>(offset);
-    if (!single_core_block_structure_is_valid(core, candidate)) {
+    candidate.direct_memory_access_count =
+        direct_memory_access_count;
+    if (!single_core_block_structure_is_valid(
+            core,
+            candidate,
+            candidate_memory_addresses)) {
         failure.reason =
             SingleCoreBlockBuildRejection::STRUCTURE;
         failure.identity_size = candidate.identity_size;
@@ -21833,18 +22094,20 @@ build_single_core_decoded_block(
     }
     candidate.valid = true;
     assert(core.single_core_execution_plan_cache);
+    const std::size_t cache_index =
+        single_core_block_cache_index(address);
     CPUState::SingleCoreDecodedBlockEntry& destination =
-        core.single_core_execution_plan_cache->blocks[
-            single_core_block_cache_index(address)];
+        core.single_core_execution_plan_cache->blocks[cache_index];
     destination = std::move(candidate);
+    core.single_core_execution_plan_cache
+        ->block_memory_addresses[cache_index] =
+            candidate_memory_addresses;
     return &destination;
 }
 
-static bool single_core_block_has_leading_memory(
+static bool single_core_block_has_direct_memory(
         const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
-    return
-        block.instruction_count != 0 &&
-        single_core_decoded_is_direct_read(block.instructions[0]);
+    return block.direct_memory_access_count != 0;
 }
 
 static bool single_core_block_has_terminal_store(
@@ -21879,138 +22142,148 @@ static bool single_core_block_has_terminal_sep(
             DecodedOperation::SELECT_PROGRAM_COUNTER;
 }
 
-static uint8_t* preflight_single_core_direct_read(
-        CPUState& core,
-        const StepCallbacks& callbacks,
-        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
-    if (
-        core.memory == nullptr ||
-        core.priv_level != 0 ||
-        callbacks.bus_access != nullptr ||
-        block.instruction_count < 2
-    ) {
-        return nullptr;
-    }
-    const DecodedInstruction& decoded =
-        block.instructions[0];
-    if (
-        !single_core_decoded_is_direct_read(decoded) ||
-        decoded.encoded_size != 2 ||
-        decoded.cycle_cost != 1 ||
-        decoded.conditional_taken_cycle_cost() != 0 ||
-        decoded.rd >= 16 ||
-        decoded.rs >= 16 ||
-        decoded.rd == block.psel ||
-        decoded.rs == block.psel
-    ) {
-        return nullptr;
-    }
-
-    const uint64_t width =
-        decoded.operation == DecodedOperation::LOAD_NATURAL ? 8 : 1;
-    const MemoryAccessPolicy policy =
-        decoded.operation == DecodedOperation::LOAD_NATURAL
-        ? MemoryAccessPolicy::SCALAR
-        : MemoryAccessPolicy::SUPERVISOR_BYTE;
-    const uint64_t address = core.regs[decoded.rs];
-    const DirectMemoryContext context{
-        callbacks.has_mmio,
-        callbacks.mmio_start,
-        callbacks.mmio_end,
-    };
-    const ResolvedMemorySpan region = resolve_direct_memory_span(
-        core,
-        address,
-        width,
-        policy,
-        context);
-    // Keep this direct-memory slice on non-wrapping Bank 0. Other apertures
-    // retain authoritative system-read routing until qualified separately.
-    if (region.region != MemoryRegionKind::BANK0) {
-        return nullptr;
-    }
-    return region.data;
-}
-
-static uint8_t* preflight_single_core_direct_store(
+static MP64_NOINLINE bool preflight_single_core_direct_memory(
         CPUState& core,
         const StepCallbacks& callbacks,
         const CPUState::SingleCoreDecodedBlockEntry& block,
-        uint64_t& guest_address,
-        uint64_t& guest_size) noexcept {
+        const CPUState::SingleCoreBlockMemoryAddressRecipes&
+            memory_addresses,
+        std::array<
+            uint8_t*,
+            CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES>&
+            bindings,
+        uint64_t& terminal_write_address,
+        uint64_t& terminal_write_size) noexcept {
     if (
         core.memory == nullptr ||
         core.priv_level != 0 ||
         callbacks.bus_access != nullptr ||
         block.instruction_count < 2
     ) {
-        return nullptr;
-    }
-    const DecodedInstruction& decoded =
-        block.instructions[block.instruction_count - 1];
-    if (
-        !single_core_decoded_is_terminal_store(decoded) ||
-        decoded.encoded_size != 2 ||
-        decoded.cycle_cost != 1 ||
-        decoded.conditional_taken_cycle_cost() != 0 ||
-        decoded.immediate != 0 ||
-        decoded.rd >= 16 ||
-        decoded.rs >= 16 ||
-        decoded.rd == block.psel ||
-        decoded.rs == block.psel
-    ) {
-        return nullptr;
+        return false;
     }
 
-    MemoryAccessPolicy policy = MemoryAccessPolicy::SUPERVISOR_BYTE;
-    if (decoded.operation == DecodedOperation::STORE_NATURAL) {
-        guest_size = 8;
-        policy = MemoryAccessPolicy::SCALAR;
-    } else if (decoded.operation == DecodedOperation::STORE_BYTE) {
-        guest_size = 1;
-    } else {
-        return nullptr;
-    }
-
-    uint32_t written_registers = 0;
-    for (
-        uint8_t index = 0;
-        index + 1 < block.instruction_count;
-        index++
-    ) {
-        const DecodedInstruction& prefix =
-            block.instructions[index];
-        if (single_core_decoded_is_memory(prefix))
-            return nullptr;
-        written_registers |=
-            single_core_decoded_register_write_mask(prefix);
-    }
-    if (
-        (
-            written_registers &
-            (uint32_t{1} << decoded.rd)
-        ) != 0
-    ) {
-        return nullptr;
-    }
-
-    const uint64_t address = core.regs[decoded.rd];
     const DirectMemoryContext context{
         callbacks.has_mmio,
         callbacks.mmio_start,
         callbacks.mmio_end,
     };
-    const ResolvedMemorySpan region = resolve_direct_memory_span(
-        core,
-        address,
-        guest_size,
-        policy,
-        context);
-    if (region.region != MemoryRegionKind::BANK0) {
-        return nullptr;
+    std::array<
+        DecodedOperation,
+        CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES>
+        access_operations;
+    std::array<
+        uint64_t,
+        CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES>
+        read_values;
+    uint16_t valid_read_values = 0;
+    uint8_t access_count = 0;
+
+    for (
+        uint8_t instruction_index = 0;
+        instruction_index < block.instruction_count;
+        instruction_index++
+    ) {
+        const DecodedInstruction& decoded =
+            block.instructions[instruction_index];
+        if (!decoded.is_direct_read() && !decoded.is_direct_store())
+            continue;
+        if (
+            access_count >=
+            CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES
+        ) {
+            return false;
+        }
+
+        const BlockMemoryAddressRecipe recipe =
+            memory_addresses.get(access_count);
+        uint64_t address = 0;
+        if (block_memory_source_is_entry_register(recipe.source)) {
+            address = core.regs[recipe.source] + recipe.addend;
+        } else if (recipe.source == BLOCK_MEMORY_CONSTANT_SOURCE) {
+            address = recipe.addend;
+        } else if (block_memory_source_is_prior_read(recipe.source)) {
+            const uint8_t source_access =
+                block_memory_prior_read_index(recipe.source);
+            if (
+                source_access >= access_count ||
+                bindings[source_access] == nullptr
+            ) {
+                return false;
+            }
+            const uint16_t source_bit = static_cast<uint16_t>(
+                uint16_t{1} << source_access);
+            if ((valid_read_values & source_bit) == 0) {
+                if (
+                    access_operations[source_access] ==
+                    DecodedOperation::LOAD_NATURAL
+                ) {
+                    std::memcpy(
+                        &read_values[source_access],
+                        bindings[source_access],
+                        sizeof(uint64_t));
+                } else if (
+                    access_operations[source_access] ==
+                    DecodedOperation::LOAD_BYTE
+                ) {
+                    read_values[source_access] =
+                        *bindings[source_access];
+                } else {
+                    return false;
+                }
+                valid_read_values |= source_bit;
+            }
+            address = read_values[source_access] + recipe.addend;
+        } else {
+            return false;
+        }
+
+        uint64_t width = 0;
+        MemoryAccessPolicy policy =
+            MemoryAccessPolicy::SUPERVISOR_BYTE;
+        switch (decoded.operation) {
+            case DecodedOperation::LOAD_NATURAL:
+            case DecodedOperation::STORE_NATURAL:
+                width = 8;
+                policy = MemoryAccessPolicy::SCALAR;
+                break;
+            case DecodedOperation::LOAD_BYTE:
+            case DecodedOperation::STORE_BYTE:
+                width = 1;
+                break;
+            default:
+                return false;
+        }
+        const ResolvedMemorySpan region =
+            resolve_direct_memory_span(
+                core,
+                address,
+                width,
+                policy,
+                context);
+        // Keep generated scalar access on bounded, non-wrapping Bank 0.
+        // Other apertures retain authoritative system routing until their
+        // observation and privilege contracts are qualified separately.
+        if (region.region != MemoryRegionKind::BANK0)
+            return false;
+
+        bindings[access_count] = region.data;
+        access_operations[access_count] = decoded.operation;
+        if (decoded.is_direct_store()) {
+            if (
+                instruction_index + 1 !=
+                    block.instruction_count
+            ) {
+                return false;
+            }
+            terminal_write_address = address;
+            terminal_write_size = width;
+        }
+        access_count++;
     }
-    guest_address = address;
-    return region.data;
+    return
+        access_count != 0 &&
+        access_count == block.direct_memory_access_count;
 }
 
 static uint8_t* preflight_single_core_direct_long_call(
@@ -22377,8 +22650,8 @@ execute_single_core_decoded_block_plan(
     const bool native_eligible =
         max_steps >= block->instruction_count &&
         !timing_active;
-    const bool leading_memory =
-        single_core_block_has_leading_memory(*block);
+    const bool direct_memory_block =
+        single_core_block_has_direct_memory(*block);
     const bool terminal_store =
         single_core_block_has_terminal_store(*block);
     const bool terminal_long_call =
@@ -22386,11 +22659,14 @@ execute_single_core_decoded_block_plan(
     const bool terminal_long_return =
         single_core_block_has_terminal_long_return(*block);
     const bool memory_block =
-        leading_memory ||
-        terminal_store ||
+        direct_memory_block ||
         terminal_long_call ||
         terminal_long_return;
-    uint8_t* direct_memory = nullptr;
+    std::array<
+        uint8_t*,
+        CPUState::SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES>
+        direct_memory_bindings;
+    uint8_t* const* direct_memory_table = nullptr;
     uint64_t direct_memory_address = 0;
     uint64_t direct_memory_size = 0;
     uint64_t direct_control_target = 0;
@@ -22401,20 +22677,23 @@ execute_single_core_decoded_block_plan(
         // architectural effect to ordinary step_one().
         if (!native_eligible)
             return exit;
-        if (leading_memory) {
-            direct_memory = preflight_single_core_direct_read(
-                core,
-                callbacks,
-                *block);
-        } else if (terminal_store) {
-            direct_memory = preflight_single_core_direct_store(
+        if (direct_memory_block) {
+            if (!preflight_single_core_direct_memory(
                 core,
                 callbacks,
                 *block,
+                core.single_core_execution_plan_cache
+                    ->block_memory_addresses[
+                        single_core_block_cache_index(
+                            block->address)],
+                direct_memory_bindings,
                 direct_memory_address,
-                direct_memory_size);
+                direct_memory_size)) {
+                return exit;
+            }
         } else if (terminal_long_call) {
-            direct_memory = preflight_single_core_direct_long_call(
+            direct_memory_bindings[0] =
+                preflight_single_core_direct_long_call(
                 core,
                 callbacks,
                 *block,
@@ -22423,7 +22702,8 @@ execute_single_core_decoded_block_plan(
                 direct_return_address);
             direct_memory_size = 8;
         } else {
-            direct_memory = preflight_single_core_direct_long_return(
+            direct_memory_bindings[0] =
+                preflight_single_core_direct_long_return(
                 core,
                 callbacks,
                 *block,
@@ -22431,8 +22711,13 @@ execute_single_core_decoded_block_plan(
                 direct_control_target);
             direct_memory_size = 8;
         }
-        if (direct_memory == nullptr)
+        if (
+            !direct_memory_block &&
+            direct_memory_bindings[0] == nullptr
+        ) {
             return exit;
+        }
+        direct_memory_table = direct_memory_bindings.data();
     }
 
     // A decoded plan must be observed again before it is compiled. This
@@ -22496,7 +22781,7 @@ execute_single_core_decoded_block_plan(
                 function(
                     &core,
                     enabled_ipi_mirror,
-                    direct_memory);
+                    direct_memory_table);
             const uint32_t steps =
                 static_cast<uint32_t>(packed & 0xFFFF);
             const uint64_t exit_flags = packed >> 16;
@@ -22599,7 +22884,7 @@ execute_single_core_decoded_block_plan(
                     uint64_t observed_return_address = 0;
                     std::memcpy(
                         &observed_return_address,
-                        direct_memory,
+                        direct_memory_bindings[0],
                         sizeof(observed_return_address));
                     if (
                         pc(core) != direct_control_target ||

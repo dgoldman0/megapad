@@ -80,6 +80,25 @@ void X86_64BlockEmitter::mov_rcx_from_core(int32_t displacement) {
     i32(displacement);
 }
 
+void X86_64BlockEmitter::mov_r8_from_pointer_table(uint8_t index) {
+    if (index > 15) {
+        throw std::logic_error(
+            "x86-64 pointer-table index exceeds disp8 range");
+    }
+    // The third SysV argument is the table base in RDX. R8 is caller-saved
+    // and otherwise unused by generated MP64 blocks.
+    if (index == 0) {
+        bytes({0x4C, 0x8B, 0x02}); // mov r8, [rdx]
+    } else {
+        bytes({
+            0x4C,
+            0x8B,
+            0x42,
+            static_cast<uint8_t>(index * sizeof(void*)),
+        }); // mov r8, [rdx + index * 8]
+    }
+}
+
 void X86_64BlockEmitter::mov_core_from_rax(int32_t displacement) {
     bytes({0x49, 0x89, 0x84, 0x24});
     i32(displacement);

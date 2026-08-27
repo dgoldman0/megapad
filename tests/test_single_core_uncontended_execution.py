@@ -1421,9 +1421,13 @@ loop:
 def test_terminal_native_store_invalidates_retained_target_plan() -> None:
     system = _system()
     victim_address = 0x100
+    target_descriptor = 0x300
+    value_descriptor = 0x310
+    scratch_target = 0x380
     writer = assemble(
         """
-    inc r4
+    ldn r5, r10
+    ldn r6, r11
     st.b r5, r6
 """
     )
@@ -1445,29 +1449,48 @@ loop:
     assert original[1:] == replacement[1:]
     system.load_binary(0, writer)
     system.load_binary(victim_address, original)
+    system.load_binary(
+        target_descriptor,
+        scratch_target.to_bytes(8, "little"),
+    )
+    system.load_binary(
+        value_descriptor,
+        original[0].to_bytes(8, "little"),
+    )
+    system.load_binary(scratch_target, b"\xEE")
     system.boot(entry=victim_address)
 
     victim_warm = system.run_batch_stats(6)
     assert victim_warm.instructions_executed == 6
     for _ in range(3):
         system.cpu.pc = 0
-        system.cpu.regs[5] = victim_address
-        system.cpu.regs[6] = original[0]
-        writer_warm = system.run_batch_stats(2)
-        assert writer_warm.instructions_executed == 2
+        system.cpu.regs[10] = target_descriptor
+        system.cpu.regs[11] = value_descriptor
+        writer_warm = system.run_batch_stats(3)
+        assert writer_warm.instructions_executed == 3
     system.cpu.pc = victim_address
     victim_refill = system.run_batch_stats(6)
     assert victim_refill.instructions_executed == 6
     original_executions = system.cpu.regs[7]
     assert original_executions == 6
 
+    system.load_binary(
+        target_descriptor,
+        victim_address.to_bytes(8, "little"),
+    )
+    system.load_binary(
+        value_descriptor,
+        replacement[0].to_bytes(8, "little"),
+    )
     owner = system._native_system
     owner._start_concurrency_profile()
     system.cpu.pc = 0
-    system.cpu.regs[5] = victim_address
-    system.cpu.regs[6] = replacement[0]
-    native_write = system.run_batch_stats(2)
-    assert native_write.instructions_executed == 2
+    system.cpu.regs[5] = 0
+    system.cpu.regs[6] = 0
+    system.cpu.regs[10] = target_descriptor
+    system.cpu.regs[11] = value_descriptor
+    native_write = system.run_batch_stats(3)
+    assert native_write.instructions_executed == 3
     system.cpu.pc = victim_address
     changed = system.run_batch_stats(6)
     assert changed.instructions_executed == 6
@@ -1477,14 +1500,18 @@ loop:
 
     assert system.cpu.regs[7] == original_executions
     assert system.cpu.regs[8] == 3
+    assert system.cpu.regs[5] == victim_address
+    assert system.cpu.regs[6] == replacement[0]
     assert system.cpu.mem[victim_address] == replacement[0]
+    assert system.cpu.mem[scratch_target] == original[0]
+    assert counts["uncontended_steps"] == 9
     assert counts["uncontended_block_lookups"] == 5
     assert counts["uncontended_block_misses"] == 3
     assert counts["uncontended_block_hits"] == 2
     assert counts["uncontended_block_builds"] == 1
     assert counts["uncontended_block_evictions"] == 1
     assert counts["uncontended_block_executions"] == 3
-    assert counts["uncontended_block_steps"] == 6
+    assert counts["uncontended_block_steps"] == 7
     if snapshot["single_core_jit_backend"] == "x86_64":
         assert counts["uncontended_jit_compile_attempts"] == 1
         assert counts["uncontended_jit_compilations"] == 1
@@ -1494,7 +1521,7 @@ loop:
         assert counts["uncontended_jit_slot_publications"] == 1
         assert counts["uncontended_jit_slot_rewrites"] == 1
         assert counts["uncontended_jit_executions"] == 2
-        assert counts["uncontended_jit_steps"] == 4
+        assert counts["uncontended_jit_steps"] == 5
     else:
         assert all(
             counts[name] == 0
@@ -2418,6 +2445,241 @@ loop:
         assert counts["uncontended_jit_compile_failures"] == 0
         assert counts["uncontended_jit_executions"] == 0
         assert counts["uncontended_jit_steps"] == 0
+
+
+def _memory_motif_system(
+    source: str,
+    *,
+    reference: bool,
+) -> MegapadSystem:
+    system = _system(reference=reference)
+    system.load_binary(0, assemble("nop"))
+    system.load_binary(1, assemble(source, base_addr=1))
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    prime = system.run_batch_stats(1)
+    assert prime.instructions_executed == 1
+    assert system.cpu.pc == 1
+    return system
+
+
+def _assert_multi_memory_profile(
+    snapshot: dict,
+    *,
+    instruction_count: int,
+) -> None:
+    _assert_block_rejection_profile_reconciles(snapshot)
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_steps"] == 1 + 2 * instruction_count
+    assert counts["uncontended_block_lookups"] == 3
+    assert counts["uncontended_block_hits"] == 2
+    assert counts["uncontended_block_misses"] == 1
+    assert counts["uncontended_block_build_attempts"] == 1
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_evictions"] == 0
+    assert counts["uncontended_block_nonresident_rejections"] == 0
+    assert counts["uncontended_block_zero_instruction_rejections"] == 0
+    assert counts["uncontended_block_one_instruction_rejections"] == 0
+    assert counts["uncontended_block_structure_rejections"] == 0
+    assert counts["uncontended_block_rejection_cache_hits"] == 0
+    assert counts["uncontended_block_rejection_cache_stores"] == 0
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_executions"] == 2
+        assert counts["uncontended_block_steps"] == 2 * instruction_count
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 0
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert counts["uncontended_jit_slot_publications"] == 1
+        assert counts["uncontended_jit_slot_rewrites"] == 0
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 2 * instruction_count
+    else:
+        assert counts["uncontended_block_executions"] == 0
+        assert counts["uncontended_block_steps"] == 0
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+def _run_byte_copy_motif(*, reference: bool) -> tuple[tuple, dict]:
+    system = _memory_motif_system(
+        """
+    ld.b r0, r9
+    st.b r7, r0
+""",
+        reference=reference,
+    )
+    sources = ((0x200, 0x12), (0x220, 0xA5))
+    destinations = (0x300, 0x320)
+    for address, value in sources:
+        system.load_binary(address, bytes((value,)))
+    for address in destinations:
+        system.load_binary(address, b"\xEE")
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    system.cpu.regs[9] = sources[0][0]
+    system.cpu.regs[7] = destinations[0]
+    sliced = system.run_batch_stats(1)
+    assert sliced.instructions_executed == 1
+
+    for (source, value), destination in zip(
+        sources,
+        destinations,
+        strict=True,
+    ):
+        system.cpu.pc = 1
+        system.cpu.regs[0] = 0xFFFF_FFFF_FFFF_FFFF
+        system.cpu.regs[9] = source
+        system.cpu.regs[7] = destination
+        copied = system.run_batch_stats(2)
+        assert copied.instructions_executed == 2
+        assert copied.system_cycles_advanced == 2
+        assert system.cpu.regs[0] == value
+        assert system.cpu.mem[destination] == value
+
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    assert system.cpu.cycle_count == 6
+    assert owner.system_cycles == 6
+    return _core_signature(system), snapshot
+
+
+def test_hot_byte_copy_pair_uses_one_generic_two_span_block() -> None:
+    fast, snapshot = _run_byte_copy_motif(reference=False)
+    reference, _ = _run_byte_copy_motif(reference=True)
+
+    assert fast == reference
+    _assert_multi_memory_profile(snapshot, instruction_count=2)
+
+
+def _run_forth_plus_motif(*, reference: bool) -> tuple[tuple, dict]:
+    system = _memory_motif_system(
+        """
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    add r0, r1
+    str r14, r0
+""",
+        reference=reference,
+    )
+    stacks = (
+        (0x400, 0x1020_3040_5060_7080, 0x0102_0304_0506_0708),
+        (0x480, 0xFEDC_BA98_7654_3210, 0x1111_2222_3333_4444),
+    )
+    for stack, first, second in stacks:
+        system.load_binary(
+            stack,
+            first.to_bytes(8, "little") +
+            second.to_bytes(8, "little"),
+        )
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    system.cpu.regs[14] = stacks[0][0]
+    sliced = system.run_batch_stats(1)
+    assert sliced.instructions_executed == 1
+
+    for stack, first, second in stacks:
+        system.cpu.pc = 1
+        system.cpu.regs[0] = 0
+        system.cpu.regs[1] = 0
+        system.cpu.regs[14] = stack
+        completed = system.run_batch_stats(5)
+        assert completed.instructions_executed == 5
+        assert completed.system_cycles_advanced == 5
+        expected = (first + second) & 0xFFFF_FFFF_FFFF_FFFF
+        assert system.cpu.regs[0] == expected
+        assert system.cpu.regs[1] == first
+        assert system.cpu.regs[14] == stack + 8
+        assert bytes(system.cpu.mem[stack:stack + 8]) == first.to_bytes(
+            8,
+            "little",
+        )
+        assert bytes(system.cpu.mem[stack + 8:stack + 16]) == (
+            expected.to_bytes(8, "little")
+        )
+
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    assert system.cpu.cycle_count == 12
+    assert owner.system_cycles == 12
+    return _core_signature(system), snapshot
+
+
+def test_forth_plus_uses_affine_multi_memory_recipes() -> None:
+    fast, snapshot = _run_forth_plus_motif(reference=False)
+    reference, _ = _run_forth_plus_motif(reference=True)
+
+    assert fast == reference
+    _assert_multi_memory_profile(snapshot, instruction_count=5)
+
+
+def _run_forth_fetch_motif(*, reference: bool) -> tuple[tuple, dict]:
+    system = _memory_motif_system(
+        """
+    ldn r1, r14
+    ldn r0, r1
+    str r14, r0
+""",
+        reference=reference,
+    )
+    cases = (
+        (0x500, 0x600, 0x0123_4567_89AB_CDEF),
+        (0x520, 0x680, 0xFEDC_BA98_7654_3210),
+    )
+    for stack, pointee, value in cases:
+        system.load_binary(stack, pointee.to_bytes(8, "little"))
+        system.load_binary(pointee, value.to_bytes(8, "little"))
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    system.cpu.regs[14] = cases[0][0]
+    sliced = system.run_batch_stats(1)
+    assert sliced.instructions_executed == 1
+
+    for stack, pointee, value in cases:
+        system.cpu.pc = 1
+        system.cpu.regs[0] = 0
+        system.cpu.regs[1] = 0
+        system.cpu.regs[14] = stack
+        completed = system.run_batch_stats(3)
+        assert completed.instructions_executed == 3
+        assert completed.system_cycles_advanced == 3
+        assert system.cpu.regs[0] == value
+        assert system.cpu.regs[1] == pointee
+        assert system.cpu.regs[14] == stack
+        assert bytes(system.cpu.mem[stack:stack + 8]) == value.to_bytes(
+            8,
+            "little",
+        )
+
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    assert system.cpu.cycle_count == 8
+    assert owner.system_cycles == 8
+    return _core_signature(system), snapshot
+
+
+def test_forth_fetch_uses_a_prior_read_address_recipe() -> None:
+    fast, snapshot = _run_forth_fetch_motif(reference=False)
+    reference, _ = _run_forth_fetch_motif(reference=True)
+
+    assert fast == reference
+    _assert_multi_memory_profile(snapshot, instruction_count=3)
 
 
 def _cross_line_link_loop_system(

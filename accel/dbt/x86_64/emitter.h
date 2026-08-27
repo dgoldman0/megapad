@@ -21,6 +21,7 @@ public:
 
     void mov_rax_from_core(int32_t displacement);
     void mov_rcx_from_core(int32_t displacement);
+    void mov_r8_from_pointer_table(uint8_t index);
     void mov_core_from_rax(int32_t displacement);
     void mov_core_from_rcx(int32_t displacement);
     void add_core_imm8(int32_t displacement, uint8_t immediate);
