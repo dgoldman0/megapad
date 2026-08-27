@@ -47,9 +47,9 @@ Version 13 carries native host-profile schema 10 and separates logical
 settlement calls into native no-event and Python event/customization routes.
 The native route remains ineligible for this microcore topology.
 
-Version 15 carries native host-profile schema 13 and its exact-single-core
-positive-cache probe and rejection-hint telemetry. These counters remain zero
-for this microcore topology.
+Version 16 carries native host-profile schema 14 after removal of the rejected
+exact-single rejection-hint experiment. This microcore topology remains
+ineligible for the exact-single path.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 15
+REPORT_SCHEMA_VERSION = 16
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -370,8 +370,8 @@ def _profile_probe(
         "single_core_block_rejection_cache"
     ]
     validation = {
-        "schema_is_version_13":
-            normalized["schema_version"] == 13,
+        "schema_is_version_14":
+            normalized["schema_version"] == 14,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -418,9 +418,6 @@ def _profile_probe(
                     "uncontended_callback_errors",
                     "uncontended_interrupt_boundaries",
                     "uncontended_block_lookups",
-                    "uncontended_block_positive_cache_probes",
-                    "uncontended_block_rejection_hint_probes",
-                    "uncontended_block_rejection_hint_hits",
                     "uncontended_block_hits",
                     "uncontended_block_misses",
                     "uncontended_block_build_attempts",
@@ -459,19 +456,6 @@ def _profile_probe(
         "uncontended_jit_publications_match_compilations": (
             counts["uncontended_jit_slot_publications"]
             == counts["uncontended_jit_compilations"]
-        ),
-        "uncontended_block_lookup_probes_reconcile": (
-            counts["uncontended_block_lookups"]
-            == counts["uncontended_block_positive_cache_probes"]
-            + counts["uncontended_block_rejection_hint_hits"]
-        ),
-        "uncontended_block_rejection_hint_hits_within_probes": (
-            counts["uncontended_block_rejection_hint_hits"]
-            <= counts["uncontended_block_rejection_hint_probes"]
-        ),
-        "uncontended_block_rejection_hint_hits_within_cache_hits": (
-            counts["uncontended_block_rejection_hint_hits"]
-            <= counts["uncontended_block_rejection_cache_hits"]
         ),
         "uncontended_block_build_attempts_reconcile": (
             counts["uncontended_block_build_attempts"]
@@ -596,7 +580,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 13,
+        "schema_version": 14,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

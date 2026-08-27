@@ -63,7 +63,7 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 13
+    assert snapshot["schema_version"] == 14
     metadata = dict(snapshot["single_core_block_rejection_cache"])
     assert metadata == {
         "kind": "direct-mapped-exact-icache-span",
@@ -71,18 +71,6 @@ def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
         "identity_bytes": 16,
     }
     counts = dict(snapshot["counts"])
-    assert counts["uncontended_block_lookups"] == (
-        counts["uncontended_block_positive_cache_probes"]
-        + counts["uncontended_block_rejection_hint_hits"]
-    )
-    assert (
-        counts["uncontended_block_rejection_hint_hits"]
-        <= counts["uncontended_block_rejection_hint_probes"]
-    )
-    assert (
-        counts["uncontended_block_rejection_hint_hits"]
-        <= counts["uncontended_block_rejection_cache_hits"]
-    )
     assert counts["uncontended_block_misses"] == (
         counts["uncontended_block_rejection_cache_hits"]
         + counts["uncontended_block_build_attempts"]
@@ -795,9 +783,6 @@ loop:
     assert system.cpu.pc == 0
     _assert_block_rejection_profile_reconciles(snapshot)
     assert counts["uncontended_block_lookups"] == 8
-    assert counts["uncontended_block_positive_cache_probes"] == 2
-    assert counts["uncontended_block_rejection_hint_probes"] == 6
-    assert counts["uncontended_block_rejection_hint_hits"] == 6
     assert counts["uncontended_block_hits"] == 0
     assert counts["uncontended_block_misses"] == 8
     assert counts["uncontended_block_build_attempts"] == 2
@@ -812,7 +797,10 @@ loop:
     assert counts["uncontended_block_steps"] == 0
 
 
-def _run_self_modifying_rejection_hint(*, reference: bool) -> tuple[tuple, dict]:
+def _run_self_modifying_rejection_cache(
+    *,
+    reference: bool,
+) -> tuple[tuple, dict]:
     system = _system(reference=reference)
     program = assemble(
         """
@@ -856,17 +844,14 @@ loop:
     return _core_signature(system), snapshot
 
 
-def test_rejection_hint_reproves_self_modified_instruction_identity() -> None:
-    fast, snapshot = _run_self_modifying_rejection_hint(reference=False)
-    reference, _ = _run_self_modifying_rejection_hint(reference=True)
+def test_exact_rejection_cache_reproves_self_modified_identity() -> None:
+    fast, snapshot = _run_self_modifying_rejection_cache(reference=False)
+    reference, _ = _run_self_modifying_rejection_cache(reference=True)
 
     assert fast == reference
     _assert_block_rejection_profile_reconciles(snapshot)
     counts = dict(snapshot["counts"])
     assert counts["uncontended_block_lookups"] == 4
-    assert counts["uncontended_block_positive_cache_probes"] == 4
-    assert counts["uncontended_block_rejection_hint_probes"] == 1
-    assert counts["uncontended_block_rejection_hint_hits"] == 0
     assert counts["uncontended_block_rejection_cache_hits"] == 1
     assert counts["uncontended_block_build_attempts"] == 2
     assert counts["uncontended_block_builds"] == 1

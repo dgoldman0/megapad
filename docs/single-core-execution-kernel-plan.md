@@ -839,20 +839,21 @@ Phase 0 evidence had already shown the rejected scalar path falling from
 41.176 MIPS at pre-engine `3f339eb` to 31.887 MIPS at `8eca80f`; the earlier
 decision failed to treat that adverse scenario independently.
 
-Phase 0 schema 22 adds `bios_admission_mix`, a primed 100-instruction circuit
+Phase 0 schema 23 adds `bios_admission_mix`, a primed 100-instruction circuit
 whose unreachable padding fixes every start's I-cache alignment. Per 1,000
 measured instructions it produces exactly 360 lookups, 340 positive block
 hits, 20 rejection-cache hits, 340 executions, 980 block steps, and 20 scalar
 steps with no measured construction or publication. This closely matches the
 canonical BIOS+KDOS profile's 359.506 lookups per 1,000 instructions, 5.774%
 cached-rejection share, and 2.943 block steps per execution without pretending
-to synthesize source-compilation churn. BIOS benchmark schema 7 now reports
+to synthesize source-compilation churn. BIOS benchmark schema 8 now reports
 lookups per 1,000 steps plus cached-rejection and build-attempt shares directly.
 
 Future engine timing decisions use a matrix, never a weighted aggregate:
 
-- at least 50 million instructions per synthetic timing sample on one pinned
-  CPU;
+- an in-process warm-up and at least two seconds per synthetic timing sample
+  on one pinned CPU; the calibrated mix currently needs about 200 million
+  instructions on this host;
 - separate, unprofiled, position-balanced A/B pairs with equal AB and BA
   ordering, followed by a diagnostic profile replay;
 - independent results for the calibrated mix, stable positive blocks, and the
@@ -862,9 +863,21 @@ Future engine timing decisions use a matrix, never a weighted aggregate:
 - a fresh-image Desktop load only after the seconds-scale matrix predicts a
   net win and all architectural/profile oracles agree.
 
-The `4937724` hint is rejected by end-to-end evidence. It remains present only
-long enough to establish the corrected benchmark's before-state and is the
-first rollback target; no more elaborate replacement predictor is inferred.
+The corrected matrix established the `4937724` before-state in ten
+position-balanced pairs per scenario. The hint lost nine of ten stable-positive
+pairs with a 1.09987 median paired wall ratio, lost nine of ten calibrated-mix
+pairs at 1.05927, and won only six of ten rejection-only pairs at 0.98422. The
+intended extreme therefore gained about 1.58% while the common and mixed paths
+lost about 9.99% and 5.93%. All architectural end states were identical.
+
+The hint and its profile fields are now removed rather than retained dormant.
+The normal execution path again matches `8eca80f` exactly; only host-profile
+schema 14 differs so removal is explicit to report consumers. A longer
+200-million-instruction calibrated comparison, with 20 million in-process
+warm-up instructions per sample, measured a 0.99639 median paired wall ratio
+against a clean `8eca80f` build and exact state in every pair. That is rollback
+parity, not a new speed claim. Phase 2 report schema 16 carries the host-profile
+schema update. No replacement predictor is inferred.
 
 Separate rich-host observation (2026-08-27): the retained rich-terminal host
 currently rebuilds and recopies an owner's complete object mapping for each
