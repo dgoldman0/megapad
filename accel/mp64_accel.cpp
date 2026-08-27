@@ -2266,6 +2266,11 @@ struct CPUState {
         uint8_t spsel = 0;
         uint8_t identity_size = 0;
         uint8_t instruction_count = 0;
+        // Bit i records that instruction i has one static cycle beyond the
+        // universal one-cycle base. It occupies the former header padding
+        // and lets the authoritative C++ boundary reconstruct any completed
+        // prefix without walking decoded instructions after native return.
+        uint16_t extra_cycle_mask = 0;
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
         std::array<
@@ -21261,6 +21266,12 @@ using SingleCoreJitFunction = uint64_t (*)(
     const std::atomic<uint8_t>*,
     uint8_t*);
 
+static constexpr uint8_t SINGLE_CORE_JIT_EXIT_INTERRUPT = 1U << 0;
+static constexpr uint8_t SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN = 1U << 1;
+static constexpr uint64_t SINGLE_CORE_JIT_EXIT_KNOWN_FLAGS =
+    SINGLE_CORE_JIT_EXIT_INTERRUPT |
+    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN;
+
 #if MP64_HAS_X86_64_JIT
 
 static_assert(
@@ -21400,11 +21411,6 @@ public:
         i32(displacement);
     }
 
-    void add_core_r9(int32_t displacement) {
-        bytes({0x4D, 0x01, 0x8C, 0x24});
-        i32(displacement);
-    }
-
     void compare_core_byte(
             int32_t displacement,
             uint8_t value) {
@@ -21413,12 +21419,8 @@ public:
         byte(value);
     }
 
-    void compare_core_byte_zero(int32_t displacement) {
-        compare_core_byte(displacement, 0);
-    }
-
-    void add_retired_cycles(uint8_t cycles) {
-        bytes({0x41, 0x83, 0xC1, cycles});
+    void add_exit_flags(uint8_t flags) {
+        bytes({0x41, 0x83, 0xCA, flags});
     }
 
     void store_core_byte(
@@ -21682,8 +21684,8 @@ static void emit_single_core_jit_instruction(
                 emitter.add_core_imm8(
                     single_core_jit_register_offset(core, psel),
                     static_cast<uint8_t>(decoded.immediate));
-                emitter.add_retired_cycles(
-                    decoded.taken_cycle_cost);
+                emitter.add_exit_flags(
+                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN);
                 emitter.patch32(not_taken, emitter.position());
             }
             return;
@@ -21726,8 +21728,8 @@ static void emit_single_core_jit_instruction(
                     single_core_jit_register_offset(core, psel),
                     static_cast<uint32_t>(
                         sign_extend(decoded.immediate, 16)));
-                emitter.add_retired_cycles(
-                    decoded.taken_cycle_cost);
+                emitter.add_exit_flags(
+                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN);
                 emitter.patch32(not_taken, emitter.position());
             }
             return;
@@ -21927,8 +21929,7 @@ compile_single_core_jit_block(
             0x49, 0x89, 0xF5, // mov r13, rsi (enabled IPI mirror*)
             0x31, 0xDB,       // xor ebx, ebx (retired steps)
             0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
-            0x45, 0x31, 0xC9, // xor r9d, r9d (retired cycles)
-            0x45, 0x31, 0xD2, // xor r10d, r10d (exit reason)
+            0x45, 0x31, 0xD2, // xor r10d, r10d (exit flags)
         });
 
         std::vector<std::size_t> interrupt_exits;
@@ -21952,8 +21953,6 @@ compile_single_core_jit_block(
                 block.psel,
                 block.spsel);
             emitter.bytes({0xFF, 0xC3}); // inc ebx
-            emitter.add_retired_cycles(
-                block.instructions[index].cycle_cost);
             emitter.bytes({
                 0x41,
                 0xBB,
@@ -21982,18 +21981,6 @@ compile_single_core_jit_block(
         emitter.add_core_r15(
             single_core_jit_offset(
                 core, core.icache_hits));
-        emitter.add_core_r9(
-            single_core_jit_offset(
-                core, core.cycle_count));
-        emitter.compare_core_byte_zero(
-            single_core_jit_offset(
-                core, core.perf_enable));
-        const std::size_t perf_disabled =
-            emitter.branch32(0x84); // je
-        emitter.add_core_r9(
-            single_core_jit_offset(
-                core, core.perf_cycles));
-        emitter.patch32(perf_disabled, emitter.position());
 
         // Reproduce icache_begin_instruction() for the last retired
         // instruction. The block was resident, so misses do not change;
@@ -22018,13 +22005,12 @@ compile_single_core_jit_block(
         emitter.store_core_qword_zero(
             single_core_jit_offset(
                 core, core.icache_undo_count));
-        // Return retired steps in bits 0..15, retired cycles in 16..31,
-        // and the interrupt-prefix exit reason in bit 32.
+        // Return retired steps in bits 0..15 and exit flags in bits 16..17.
+        // C++ owns cycle/PERF accounting from publication metadata plus the
+        // live conditional-taken result.
         emitter.bytes({
-            0x44, 0x89, 0xC8, // mov eax, r9d (retired cycles)
-            0x48, 0xC1, 0xE0, 0x10, // shl rax, 16
-            0x48, 0x09, 0xD8, // or rax, rbx (retired steps)
-            0x49, 0xC1, 0xE2, 0x20, // shl r10, 32
+            0x89, 0xD8,       // mov eax, ebx (retired steps)
+            0x49, 0xC1, 0xE2, 0x10, // shl r10, 16
             0x4C, 0x09, 0xD0, // or rax, r10
             0x41, 0x5F,       // pop r15
             0x41, 0x5D,       // pop r13
@@ -22037,8 +22023,13 @@ compile_single_core_jit_block(
         for (const std::size_t branch : interrupt_exits)
             emitter.patch32(branch, interrupt_exit);
         emitter.bytes({
-            0x41, 0xBA, 0x01, 0x00, 0x00, 0x00,
-        }); // mov r10d, 1
+            0x41,
+            0xBA,
+            SINGLE_CORE_JIT_EXIT_INTERRUPT,
+            0x00,
+            0x00,
+            0x00,
+        }); // mov r10d, interrupt flag
         const std::size_t interrupt_to_common =
             emitter.jump32();
         emitter.patch32(interrupt_to_common, common_exit);
@@ -22142,6 +22133,7 @@ static bool single_core_block_structure_is_valid(
     }
     std::size_t decoded_size = 0;
     uint32_t written_registers = 0;
+    uint16_t expected_extra_cycle_mask = 0;
     bool memory_seen = false;
     for (
         uint8_t index = 0;
@@ -22157,6 +22149,12 @@ static bool single_core_block_structure_is_valid(
             return false;
         }
         const auto& decoded = block.instructions[index];
+        if (decoded.cycle_cost == 2) {
+            expected_extra_cycle_mask |= static_cast<uint16_t>(
+                uint16_t{1} << index);
+        } else if (decoded.cycle_cost != 1) {
+            return false;
+        }
         if (single_core_decoded_is_terminal_control(decoded)) {
             const bool valid_short_unconditional =
                 decoded.family == 0x3 &&
@@ -22388,7 +22386,9 @@ static bool single_core_block_structure_is_valid(
             single_core_decoded_register_write_mask(decoded);
         decoded_size += encoded_size;
     }
-    return decoded_size == block.identity_size;
+    return
+        decoded_size == block.identity_size &&
+        block.extra_cycle_mask == expected_extra_cycle_mask;
 }
 
 static bool single_core_block_identity_matches(
@@ -22546,8 +22546,14 @@ build_single_core_decoded_block(
             candidate.identity.data() + offset,
             encoding.data(),
             encoded_size);
-        candidate.instructions[
-            candidate.instruction_count++] = decoded;
+        const uint8_t instruction_index =
+            candidate.instruction_count;
+        candidate.instructions[instruction_index] = decoded;
+        if (decoded.cycle_cost == 2) {
+            candidate.extra_cycle_mask |= static_cast<uint16_t>(
+                uint16_t{1} << instruction_index);
+        }
+        candidate.instruction_count++;
         offset += encoded_size;
         written_registers |=
             single_core_decoded_register_write_mask(decoded);
@@ -23316,12 +23322,22 @@ execute_single_core_decoded_block_plan(
                     direct_memory);
             const uint32_t steps =
                 static_cast<uint32_t>(packed & 0xFFFF);
-            const uint32_t cycles =
-                static_cast<uint32_t>((packed >> 16) & 0xFFFF);
+            const uint64_t exit_flags = packed >> 16;
             const bool interrupt_boundary =
-                ((packed >> 32) & 1) != 0;
+                (
+                    exit_flags &
+                    SINGLE_CORE_JIT_EXIT_INTERRUPT
+                ) != 0;
+            const bool conditional_taken =
+                (
+                    exit_flags &
+                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN
+                ) != 0;
             if (
-                (packed >> 33) != 0 ||
+                (
+                    exit_flags &
+                    ~SINGLE_CORE_JIT_EXIT_KNOWN_FLAGS
+                ) != 0 ||
                 steps == 0 ||
                 steps > block->instruction_count ||
                 (
@@ -23333,17 +23349,32 @@ execute_single_core_decoded_block_plan(
                 throw std::logic_error(
                     "single-core JIT returned an invalid completed prefix");
             }
-            uint32_t expected_cycles = 0;
-            for (uint32_t index = 0; index < steps; index++)
-                expected_cycles += block->instructions[index].cycle_cost;
+            if (
+                conditional_taken &&
+                steps != block->instruction_count
+            ) {
+                throw std::logic_error(
+                    "single-core JIT returned conditional-taken on a prefix");
+            }
+            const uint32_t completed_instruction_mask =
+                (uint32_t{1} << steps) - 1;
+            uint32_t cycles =
+                steps + static_cast<uint32_t>(__builtin_popcount(
+                    static_cast<unsigned int>(
+                        block->extra_cycle_mask) &
+                    completed_instruction_mask));
             if (steps == block->instruction_count) {
                 const auto& terminal =
                     block->instructions[steps - 1];
                 if (terminal.taken_cycle_cost != 0) {
                     const bool taken =
                         eval_cond(core, terminal.subop);
+                    if (conditional_taken != taken) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid branch outcome");
+                    }
                     if (taken) {
-                        expected_cycles +=
+                        cycles +=
                             terminal.taken_cycle_cost;
                     }
                     uint64_t expected_pc =
@@ -23357,6 +23388,10 @@ execute_single_core_decoded_block_plan(
                         throw std::logic_error(
                             "single-core JIT returned invalid branch state");
                     }
+                } else if (conditional_taken) {
+                    throw std::logic_error(
+                        "single-core JIT returned conditional-taken for "
+                        "a static-cycle terminal");
                 }
                 if (terminal.family == 0xA) {
                     if (
@@ -23406,10 +23441,9 @@ execute_single_core_decoded_block_plan(
                     }
                 }
             }
-            if (cycles != expected_cycles) {
-                throw std::logic_error(
-                    "single-core JIT returned an invalid cycle count");
-            }
+            core.cycle_count += cycles;
+            if (core.perf_enable)
+                core.perf_cycles += cycles;
             const bool completed_terminal_write =
                 (terminal_store || terminal_long_call) &&
                 steps == block->instruction_count;
