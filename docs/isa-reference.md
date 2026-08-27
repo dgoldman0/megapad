@@ -36,6 +36,27 @@ The indirection through `PSEL`, `XSEL`, and `SPSEL` means any GPR can
 serve as the program counter, data pointer, or stack pointer.  In practice,
 the BIOS sets PSEL=3, XSEL=2, SPSEL=15 and never changes them.
 
+### Instruction fetch and selector aliases
+
+MegaPad retains the 1802 fetch-then-execute register model. Architecturally,
+the complete encoded instruction is fetched first and `R[PSEL]` advances by
+its complete encoded length before its execution effects begin. A REX or other
+modifier prefix and its body are one instruction; there is no architectural
+boundary after the prefix byte. Execution-phase register reads therefore
+observe the post-fetch value when their selected register aliases PSEL.
+
+Effects then occur in the order specified for the instruction. PSEL, XSEL, and
+SPSEL may select the same physical GPR; such an alias does not trap by itself.
+When ordered effects write two selector roles backed by that GPR, the later
+effect determines its final value. This rule describes successful instruction
+execution; the separate trap and fault rules determine failed-instruction
+retirement.
+
+For example, a one-byte `INC R[PSEL]` advances the selected register once for
+fetch and once for INC. A one-byte `DEC R[PSEL]` advances it for fetch and then
+decrements it, returning to the instruction address. Prefix bytes count toward
+the fetch advance in exactly the same way.
+
 > **Register banks:** R0–R15 are addressable in a single instruction byte
 > (register index fits in a 4-bit nibble).  R16–R31 require a 1-byte
 > **REX prefix** (see Family 0xF) which supplies the 5th register bit.
@@ -153,6 +174,33 @@ Single-byte system operations (except CALL.L which is 2 bytes).
 | `0D nn` | **CALL.L Rn** | 2 | Long call: push PC; PC ← R[n].  2 bytes: opcode + register byte.  With REX.S prefix, n extends to 5 bits (R0–R31). |
 | `0E` | **RET.L** | 2 | Long return: PC ← pop from stack. |
 | `0F` | **TRAP** | 3 | Software trap — saves FLAGS+PRIV, escalates to supervisor, enters `IVEC_SW_TRAP` handler. |
+
+`CALL.L` samples its target and return address after the complete fetch but
+before changing the stack:
+
+```text
+target     ← R[n]
+return_pc  ← R[PSEL]
+new_sp     ← R[SPSEL] - 8
+R[SPSEL]   ← new_sp
+M64[new_sp] ← return_pc
+R[PSEL]    ← target
+```
+
+Consequently, `CALL.L R[PSEL]` pushes the post-fetch return address and
+continues at that same address. A REX-prefixed form includes the prefix in that
+address. With distinct selectors, `CALL.L R[SPSEL]` samples the pre-push stack
+pointer. If PSEL and SPSEL alias, the stack calculation observes their shared
+post-fetch value and the final PC assignment is the last register effect.
+
+`RET.L` uses the corresponding ordered successful-return effects:
+
+```text
+stack_address ← R[SPSEL]
+target        ← M64[stack_address]
+R[SPSEL]      ← R[SPSEL] + 8
+R[PSEL]       ← target
+```
 
 ---
 

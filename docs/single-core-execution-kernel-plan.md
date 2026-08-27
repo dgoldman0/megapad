@@ -790,6 +790,14 @@ normal resource gates permit them. This cutoff records engine consolidation,
 the compact permitted semantic/fault matrix, and the already-authorized exact
 BIOS+KDOS comparison only.
 
+Post-cutoff ISA clarification (2026-08-27): the architectural documentation now
+locks the 1802-derived fetch-then-execute rule. A complete encoding, including
+any prefix, advances `R[PSEL]` before execution-phase operands are read;
+selector aliases remain legal and follow the instruction's ordered effects.
+This selects the existing Python/shared-C++ behavior for PSEL aliases. The RTL
+conformance work is intentionally deferred and no emulator, DBT, or RTL source
+changed in this documentation-only decision.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -858,6 +866,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D11 | Close Element 7 without direct native continuation. | The current reworked DBT delivered a material exact-equivalent BIOS+KDOS gain, while measured hot successor edges still require write invalidation or fresh transactional preflight. No chaining state or broader entry/exit ABI is added; reconsideration requires new edge-specific retained evidence. |
 | EK-D12 | Let the authoritative decoder and sole block builder own static candidate validity without replaying their construction policy immediately before publication. | Dynamic cache identity, transactional memory proof, and backend validation remain independent; consolidation removes a duplicate static checker rather than weakening a runtime boundary. |
 | EK-D13 | Close engine consolidation without decomposing the remaining integration monolith. | CPU/machine state, scheduler, callback, snapshot, profile, and pybind extraction is a separate future organization project; broad acceptance remains deferred under the rich-terminal and resource gates. |
+| EK-D14 | Preserve 1802-style complete-fetch-before-execute semantics for every PSEL register alias. | Prefixes are part of one encoding, execution reads the post-fetch PSEL value, selector collisions remain legal and ordered, and RTL conformance is a separate correctness slice rather than an engine change. |
 
 ## Deferred findings ledger
 
@@ -869,4 +878,4 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden the closed engine without new retained remaining-shape evidence and paired exact justification. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |
-| EK-F7 | `CALL.L` with its source aliased to PSEL, especially when PSEL and SPSEL also collide, has different target-sampling or nonblocking-write precedence between the shared emulator semantics and RTL. | Do not choose a new architectural rule during engine consolidation. Exact block lowering already declines semantic selector aliases; qualify the ISA intent and RTL separately before changing either authoritative model. |
+| EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |
