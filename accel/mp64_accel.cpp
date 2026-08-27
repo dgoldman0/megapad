@@ -11379,13 +11379,6 @@ static BigNum gf_sqrmod_sel(const CPUState& s, const BigNum& a, const BigNum& p)
     return bn_sqrmod(a, p);
 }
 
-static int exec_field(CPUState& s) {
-    // Called with op = sub_op & 0xF already extracted by caller
-    // We re-read the op from the caller's context — but actually,
-    // let's take it as a parameter.
-    return 0; // placeholder, see exec_crypto dispatch below
-}
-
 static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
     uint8_t sub_op = fetch8(s);
     int unit = (sub_op >> 4) & 0xF;

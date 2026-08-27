@@ -2,7 +2,7 @@
 
 **Started:** 2026-08-27
 
-**Status:** Active — Element 8 consolidation; broad acceptance still gated
+**Status:** Engine consolidation complete; broad acceptance deferred by gate
 
 **Branch:** `single-core-execution-kernel`
 
@@ -86,10 +86,12 @@ the project-wide qualification gate permits them.
   not create plugin loading, runtime backend registration, or parallel engine
   APIs.
 
-## Target ownership and source shape
+## Execution-kernel ownership and future source shape
 
-The final names may be refined as dependencies become concrete, but the
-ownership boundaries are normative:
+The execution-kernel ownership boundaries are normative. The complete tree
+below also records a longer-term organization direction; entries not needed to
+isolate the production execution kernel are not Element 8 completion
+requirements. Final names may be refined as dependencies become concrete:
 
 ```text
 accel/
@@ -131,10 +133,11 @@ admission, and cache policy stay with the guest architecture until a real
 second consumer proves a broader abstraction.
 
 Source separation is not itself a speed claim. Small hot helpers may remain in
-internal headers when measured inlining requires it. Cold validation, error,
-profile, binding, and device paths should not remain in the hot execution
-translation unit. Cross-translation-unit optimization or LTO is considered
-only from measured evidence, not used to conceal an overly chatty interface.
+internal headers when measured inlining requires it. Moving the remaining CPU
+and machine state, scheduler, callback, snapshot, binding, profile, and device
+integration out of `accel/mp64_accel.cpp` is a separate future organization
+project, not an execution-kernel consolidation or acceptance requirement.
+Cross-translation-unit optimization or LTO remains evidence-driven.
 
 The extraction order must respect present coupling. `CPUState` currently mixes
 architectural state, Python buffer ownership, borrowed devices, I-cache state,
@@ -143,6 +146,9 @@ The executable arena must also outlive every published code handle, and
 strict-cycle replay calls the same authoritative instruction semantics. These
 seams are moved deliberately; the plan does not authorize a bulk textual split
 that forks state or semantics merely to produce the target directory tree.
+The remaining integration ownership is not a temporary second engine or
+compatibility bridge; any wholesale decomposition receives its own scoped plan
+and qualification.
 
 ## Core data contracts
 
@@ -219,7 +225,7 @@ successor-probe loop is not restored.
 | 5 | Authoritative decoded execution kernel | Complete |
 | 6 | Multi-line and multi-memory block construction | Complete |
 | 7 | x86-64 lowering and continuation decision | Complete |
-| 8 | Consolidation and acceptance | In progress |
+| 8 | Consolidation and acceptance | Consolidation complete; broad acceptance deferred |
 
 ### Element 1 — Source ownership and build decomposition
 
@@ -686,10 +692,24 @@ execution kernel. It does not attribute that gain to any one slice, exhaust
 deferred semantic or fault cases, qualify strict-cycle or persistence paths, or
 constitute broad final acceptance.
 
-### Element 8 — Consolidation and acceptance
+The retained comparison command shape used the current checkpoint's schema-4
+harness for each clean detached runtime root after a forced local extension
+build:
+
+```text
+python setup_accel.py build_ext --force --inplace
+taskset -c 3 python /path/to/02c675a/bench_bios_kdos_load.py \
+  --runtime-root /path/to/revision --json --output /path/to/report.json
+```
+
+One warm-up/validation invocation preceded the nine position-balanced recorded
+invocations per revision. Timing invocations omitted `--host-profile`; the two
+profile reports were separate diagnostic replays.
+
+### Element 8 — Consolidation complete; broad acceptance deferred
 
 Entry note (2026-08-27): Element 8 begins from `02c675a`. Consolidation, not
-new execution machinery, is now the active critical path. The authorized
+new execution machinery, became the active critical path. The authorized
 comparison did not lift the project-wide qualification gate; broad acceptance
 remains deferred, and deferred findings are addressed only where the final
 ownership contract or permitted focused acceptance requires them.
@@ -746,16 +766,29 @@ The 29 focused cases pass sequentially. Program-selector CALL aliases are not
 silently assigned emulator-oracle status; their existing RTL disagreement is
 recorded separately as EK-F7.
 
-- Extract Python buffer leases, callback construction, snapshot codecs, and
-  pybind registration only after their machine/CPU owners have stable native
-  headers; avoid a catch-all header that recreates the monolith.
-- Remove temporary extraction bridges, dead profile fields, stale comments,
-  unused includes, and the monolithic source file after its final owner moves.
-- Audit the final target shape against the ownership rules above; no old/new
-  engine selector or duplicate semantics may remain.
-- Refresh focused documentation and the external-worktree comparison commands.
-- Run broad qualification only after the project-wide rich-terminal vertical
-  and normal resource gates permit it.
+Engine-consolidation cutoff (2026-08-27): the four Element 8 slices remove
+duplicate static validation, one-hop semantic wrappers, dead profile state,
+caller-proved admission predicates, and the final unused execution placeholder.
+They also add exact zero-progress and completed-prefix coverage at the
+multi-memory boundaries and close the compact semantic matrix. The production
+path has one semantic decoder, one decoded interpreter, one shared block exit,
+one block-construction and admission route, and one x86-64 lowering owner. No
+old/new engine selector, superseded chaining path, duplicate instruction
+semantics, or temporary engine-extraction bridge remains. A forced sequential
+extension build completed without compiler warnings.
+
+`accel/mp64_accel.cpp` remains the integration owner for mixed `CPUState` and
+`SystemState`, scheduling, Python callbacks, snapshots, and pybind registration.
+Its size and mixed responsibilities are real organization debt, but decomposing
+that integration unit is a separate future organization project rather than a
+condition of this engine replacement.
+
+Broad acceptance is explicitly not complete. Persistence qualification, broad
+integration, Desktop and rich-terminal journeys, and final gate-level
+acceptance remain deferred until the project-wide rich-terminal vertical and
+normal resource gates permit them. This cutoff records engine consolidation,
+the compact permitted semantic/fault matrix, and the already-authorized exact
+BIOS+KDOS comparison only.
 
 ## Construction-time validation policy
 
@@ -776,9 +809,9 @@ load, Desktop, sustained-cadence, live-viewer, full-renderer, enlarged-step, or
 worker-spawning qualification while the rich-terminal vertical gate remains in
 force. Tests run sequentially. Checked-in limits are not raised.
 
-A newly discovered defect interrupts the current element only when the next
-happy-path step cannot be correct without it. Other findings are recorded in
-this document's deferred ledger and left for the appropriate later element.
+A new finding reopens engine consolidation only if it invalidates the
+production kernel contract or makes later broad acceptance impossible. Other
+findings stay in the deferred ledger until their owning gate permits work.
 
 ## Commit discipline
 
@@ -808,7 +841,7 @@ does not justify keeping the superseded implementation in the final tree.
   final broad qualification; final acceptance remains subject to the
   rich-terminal and normal resource gates.
 
-## Initial decision ledger
+## Decision ledger
 
 | ID | Decision | Claim boundary |
 |---|---|---|
@@ -824,15 +857,16 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D10 | Keep the identity-proved PC in x86-64 R9 when its emitted-byte cost is favorable, tolerating at most one byte of growth for the measured short shapes, and no semantic selector alias exists. | Entry identity supplies the exact initial value; every normal or prefix-interrupt exit reaches one materialization point, while costlier or aliased blocks keep the established lowering. |
 | EK-D11 | Close Element 7 without direct native continuation. | The current reworked DBT delivered a material exact-equivalent BIOS+KDOS gain, while measured hot successor edges still require write invalidation or fresh transactional preflight. No chaining state or broader entry/exit ABI is added; reconsideration requires new edge-specific retained evidence. |
 | EK-D12 | Let the authoritative decoder and sole block builder own static candidate validity without replaying their construction policy immediately before publication. | Dynamic cache identity, transactional memory proof, and backend validation remain independent; consolidation removes a duplicate static checker rather than weakening a runtime boundary. |
+| EK-D13 | Close engine consolidation without decomposing the remaining integration monolith. | CPU/machine state, scheduler, callback, snapshot, profile, and pybind extraction is a separate future organization project; broad acceptance remains deferred under the rich-terminal and resource gates. |
 
 ## Deferred findings ledger
 
 | ID | Finding | Disposition |
 |---|---|---|
-| EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the acceptance boundary. |
+| EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the compact consolidation matrix. |
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
-| EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as low priority during consolidation unless a new profile shows it remains material. |
-| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden provenance during consolidation without retained remaining-shape evidence and paired exact justification. |
+| EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as a future measured fine turn, not consolidation work. |
+| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden the closed engine without new retained remaining-shape evidence and paired exact justification. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
-| EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if Element 8 profiling identifies it as material and paired exact evidence supports the change. |
+| EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |
 | EK-F7 | `CALL.L` with its source aliased to PSEL, especially when PSEL and SPSEL also collide, has different target-sampling or nonblocking-write precedence between the shared emulator semantics and RTL. | Do not choose a new architectural rule during engine consolidation. Exact block lowering already declines semantic selector aliases; qualify the ISA intent and RTL separately before changing either authoritative model. |
