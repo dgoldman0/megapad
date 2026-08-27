@@ -21968,43 +21968,20 @@ compile_single_core_jit_block(
 
 #endif
 
-static bool single_core_block_identity_matches(
+// Block metadata has one internal construction path and is immutable after
+// publication. Audit its complete static shape once before it becomes a
+// cache entry; hot hits only need to re-prove dynamic architectural identity.
+static bool single_core_block_structure_is_valid(
         const CPUState& core,
-        const CPUState::SingleCoreDecodedBlockEntry& block,
-        uint64_t address) {
+        const CPUState::SingleCoreDecodedBlockEntry& block) {
     if (
-        !block.valid ||
-        block.address != address ||
-        block.psel != core.psel ||
-        block.spsel != core.spsel ||
+        block.psel >= 32 ||
         block.spsel >= 32 ||
         block.identity_size == 0 ||
         block.identity_size > CPUState::ICACHE_LINE_BYTES ||
         block.instruction_count < 2 ||
         block.instruction_count >
             CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
-    ) {
-        return false;
-    }
-    if (
-        core.profile != CoreProfile::FULL ||
-        !core.icache_enabled
-    ) {
-        return false;
-    }
-    const auto [cache_index, tag] = icache_key(address);
-    const std::size_t line_offset =
-        static_cast<std::size_t>(
-            address & (CPUState::ICACHE_LINE_BYTES - 1));
-    if (
-        !core.icache_valid[cache_index] ||
-        core.icache_tags[cache_index] != tag ||
-        line_offset + block.identity_size >
-            CPUState::ICACHE_LINE_BYTES ||
-        std::memcmp(
-            core.icache_data[cache_index].data() + line_offset,
-            block.identity.data(),
-            block.identity_size) != 0
     ) {
         return false;
     }
@@ -22259,6 +22236,42 @@ static bool single_core_block_identity_matches(
     return decoded_size == block.identity_size;
 }
 
+static bool single_core_block_identity_matches(
+        const CPUState& core,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint64_t address) {
+    if (
+        !block.valid ||
+        block.address != address ||
+        block.psel != core.psel ||
+        block.spsel != core.spsel ||
+        block.psel >= 32 ||
+        block.spsel >= 32 ||
+        block.identity_size == 0 ||
+        block.identity_size > CPUState::ICACHE_LINE_BYTES ||
+        block.instruction_count < 2 ||
+        block.instruction_count >
+            CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS ||
+        core.profile != CoreProfile::FULL ||
+        !core.icache_enabled
+    ) {
+        return false;
+    }
+    const auto [cache_index, tag] = icache_key(address);
+    const std::size_t line_offset =
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    return
+        core.icache_valid[cache_index] &&
+        core.icache_tags[cache_index] == tag &&
+        line_offset + block.identity_size <=
+            CPUState::ICACHE_LINE_BYTES &&
+        std::memcmp(
+            core.icache_data[cache_index].data() + line_offset,
+            block.identity.data(),
+            block.identity_size) == 0;
+}
+
 static CPUState::SingleCoreDecodedBlockEntry*
 build_single_core_decoded_block(
         CPUState& core,
@@ -22381,6 +22394,8 @@ build_single_core_decoded_block(
     if (candidate.instruction_count < 2)
         return nullptr;
     candidate.identity_size = static_cast<uint8_t>(offset);
+    if (!single_core_block_structure_is_valid(core, candidate))
+        return nullptr;
     candidate.valid = true;
     CPUState::SingleCoreDecodedBlockEntry& destination =
         core.single_core_block_cache[
