@@ -44,6 +44,7 @@
 #include "dbt/executable_arena.h"
 #include "dbt/host_jit_config.h"
 #include "dbt/x86_64/emitter.h"
+#include "machine/memory.h"
 #include "machine/settlement.h"
 #include "mp64_crypto.h"
 #include "mp64_fb.h"
@@ -57,6 +58,14 @@ namespace py = pybind11;
 
 using mp64::machine::SystemClock;
 using mp64::machine::UnboundedSettlementRequest;
+using mp64::machine::Bank0Addressing;
+using mp64::machine::GuestMemoryMap;
+using mp64::machine::MemoryAccessPolicy;
+using mp64::machine::MemoryRegionKind;
+using mp64::machine::ResolvedMemorySpan;
+using mp64::machine::region_contains;
+using mp64::machine::region_span_fits;
+using mp64::machine::resolve_memory_span;
 
 // ---------------------------------------------------------------------------
 //  Constants — must match megapad64.py exactly
@@ -123,34 +132,23 @@ static constexpr uint8_t TACC_OWNER_NONE = 31;
 //  Memory mappings
 // ---------------------------------------------------------------------------
 
-struct MemoryMappings {
-    // Bank 0
-    uint8_t* mem = nullptr;
-    uint64_t mem_size = 0;
+struct MemoryMappings : GuestMemoryMap {
+    // Python ownership for Bank 0
     uint64_t mem_capacity = 0;
     std::unique_ptr<py::buffer_info> mem_lease;
     py::object mem_exporter;
 
-    // HBW math RAM (banks 1-3, contiguous)
-    uint8_t* hbw_mem = nullptr;
-    uint64_t hbw_base = 0;
-    uint64_t hbw_size = 0;
+    // Python ownership for HBW math RAM (banks 1-3, contiguous)
     uint64_t hbw_capacity = 0;
     std::unique_ptr<py::buffer_info> hbw_lease;
     py::object hbw_exporter;
 
-    // External memory (HyperRAM / SDRAM)
-    uint8_t* ext_mem = nullptr;
-    uint64_t ext_mem_base = 0;
-    uint64_t ext_mem_size = 0;
+    // Python ownership for external memory (HyperRAM / SDRAM)
     uint64_t ext_mem_capacity = 0;
     std::unique_ptr<py::buffer_info> ext_mem_lease;
     py::object ext_mem_exporter;
 
-    // Dedicated VRAM (framebuffer pixel memory)
-    uint8_t* vram_mem = nullptr;
-    uint64_t vram_base = 0;
-    uint64_t vram_size = 0;
+    // Python ownership for dedicated VRAM (framebuffer pixel memory)
     uint64_t vram_capacity = 0;
     std::unique_ptr<py::buffer_info> vram_lease;
     py::object vram_exporter;
@@ -6318,60 +6316,34 @@ enum StepResult {
 //  Memory access — region-aware (VRAM, XMEM, HBW, Bank 0)
 // ---------------------------------------------------------------------------
 //
-// resolve_mem() maps a unified 64-bit address to a host pointer + region size,
-// matching the RTL address decode in mp64_memory.v.  All scalar accessors
-// route through it so that string instructions (BFILL, BCOPY) and ordinary
-// load/stores work correctly across every memory aperture.
-//
-
-struct MemRegion {
-    uint8_t* buf;
-    uint64_t off;
-    uint64_t size;
-};
-
-static inline bool region_contains(uint64_t base, uint64_t size, uint64_t addr) {
-    // Subtraction after the lower-bound check avoids wrapping base + size.
-    return addr >= base && (addr - base) < size;
-}
-
-static inline bool region_span_fits(uint64_t size, uint64_t off, uint64_t span) {
-    return off < size && span <= (size - off);
-}
-
-static inline MemRegion resolve_mem(CPUState& s, uint64_t addr) {
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr))
-        return {s.memory->vram_mem, addr - s.memory->vram_base, s.memory->vram_size};
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr))
-        return {s.memory->ext_mem, addr - s.memory->ext_mem_base, s.memory->ext_mem_size};
-    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr))
-        return {s.memory->hbw_mem, addr - s.memory->hbw_base, s.memory->hbw_size};
-    if (!s.memory->mem || s.memory->mem_size == 0)
+// The machine memory layer selects the scalar routing policy once and proves
+// the maximum direct extent algebraically. Aperture edges, Bank 0 aliases,
+// and guest-address wrap retain the exact bytewise path below.
+static inline ResolvedMemorySpan resolve_scalar_memory_byte(
+        CPUState& state,
+        uint64_t address) {
+    const ResolvedMemorySpan resolved = resolve_memory_span(
+        *state.memory,
+        address,
+        MemoryAccessPolicy::SCALAR,
+        Bank0Addressing::MODULO_ALIAS);
+    if (!resolved)
         throw std::runtime_error("main memory is not attached");
-    return {s.memory->mem, addr % s.memory->mem_size, s.memory->mem_size};
+    return resolved;
 }
 
-static inline bool resolved_span_is_contiguous(
-        CPUState& s, uint64_t addr, const MemRegion& first, uint64_t span) {
-    if (!region_span_fits(first.size, first.off, span))
-        return false;
-
-    // Region membership can change in either direction inside a scalar
-    // access (for example Bank0 -> HBW or HBW -> Bank0).  Prove every byte
-    // maps to the same host buffer at the next contiguous offset before
-    // taking the memcpy fast path.  Unsigned guest-address addition wraps
-    // naturally, and an offset discontinuity then rejects the fast path.
-    for (uint64_t i = 1; i < span; i++) {
-        const MemRegion next = resolve_mem(s, addr + i);
-        if (next.buf != first.buf || next.off != first.off + i)
-            return false;
-    }
-    return true;
+static inline ResolvedMemorySpan resolve_direct_scalar_memory_span(
+        CPUState& state,
+        uint64_t address) noexcept {
+    return resolve_memory_span(
+        *state.memory,
+        address,
+        MemoryAccessPolicy::SCALAR,
+        Bank0Addressing::BOUNDED);
 }
 
 static inline uint8_t mem_read8(CPUState& s, uint64_t addr) {
-    auto r = resolve_mem(s, addr);
-    return r.buf[r.off];
+    return *resolve_scalar_memory_byte(s, addr).data;
 }
 
 static inline std::pair<std::size_t, uint64_t>
@@ -6429,16 +6401,16 @@ static inline void icache_reset(CPUState& s) {
 }
 
 static inline void mem_write8(CPUState& s, uint64_t addr, uint8_t val) {
-    auto r = resolve_mem(s, addr);
-    r.buf[r.off] = val;
+    *resolve_scalar_memory_byte(s, addr).data = val;
     icache_invalidate_span(s, addr, 1);
 }
 
 static inline uint16_t mem_read16(CPUState& s, uint64_t addr) {
-    auto r = resolve_mem(s, addr);
+    const ResolvedMemorySpan resolved =
+        resolve_direct_scalar_memory_span(s, addr);
     uint16_t v;
-    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 2), 1))
-        std::memcpy(&v, r.buf + r.off, 2);
+    if (__builtin_expect(resolved.covers(2), 1))
+        std::memcpy(&v, resolved.data, 2);
     else {
         v = 0;
         for (int i = 0; i < 2; i++)
@@ -6449,9 +6421,10 @@ static inline uint16_t mem_read16(CPUState& s, uint64_t addr) {
 }
 
 static inline void mem_write16(CPUState& s, uint64_t addr, uint16_t val) {
-    auto r = resolve_mem(s, addr);
-    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 2), 1))
-        std::memcpy(r.buf + r.off, &val, 2);
+    const ResolvedMemorySpan resolved =
+        resolve_direct_scalar_memory_span(s, addr);
+    if (__builtin_expect(resolved.covers(2), 1))
+        std::memcpy(resolved.data, &val, 2);
     else {
         for (int i = 0; i < 2; i++)
             mem_write8(s, addr + static_cast<uint64_t>(i),
@@ -6461,10 +6434,11 @@ static inline void mem_write16(CPUState& s, uint64_t addr, uint16_t val) {
 }
 
 static inline uint32_t mem_read32(CPUState& s, uint64_t addr) {
-    auto r = resolve_mem(s, addr);
+    const ResolvedMemorySpan resolved =
+        resolve_direct_scalar_memory_span(s, addr);
     uint32_t v;
-    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 4), 1))
-        std::memcpy(&v, r.buf + r.off, 4);
+    if (__builtin_expect(resolved.covers(4), 1))
+        std::memcpy(&v, resolved.data, 4);
     else {
         v = 0;
         for (int i = 0; i < 4; i++)
@@ -6475,9 +6449,10 @@ static inline uint32_t mem_read32(CPUState& s, uint64_t addr) {
 }
 
 static inline void mem_write32(CPUState& s, uint64_t addr, uint32_t val) {
-    auto r = resolve_mem(s, addr);
-    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 4), 1))
-        std::memcpy(r.buf + r.off, &val, 4);
+    const ResolvedMemorySpan resolved =
+        resolve_direct_scalar_memory_span(s, addr);
+    if (__builtin_expect(resolved.covers(4), 1))
+        std::memcpy(resolved.data, &val, 4);
     else {
         for (int i = 0; i < 4; i++)
             mem_write8(s, addr + static_cast<uint64_t>(i),
@@ -6487,10 +6462,11 @@ static inline void mem_write32(CPUState& s, uint64_t addr, uint32_t val) {
 }
 
 static inline uint64_t mem_read64(CPUState& s, uint64_t addr) {
-    auto r = resolve_mem(s, addr);
+    const ResolvedMemorySpan resolved =
+        resolve_direct_scalar_memory_span(s, addr);
     uint64_t v;
-    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 8), 1))
-        std::memcpy(&v, r.buf + r.off, 8);
+    if (__builtin_expect(resolved.covers(8), 1))
+        std::memcpy(&v, resolved.data, 8);
     else {
         v = 0;
         for (int i = 0; i < 8; i++)
@@ -6501,9 +6477,10 @@ static inline uint64_t mem_read64(CPUState& s, uint64_t addr) {
 }
 
 static inline void mem_write64(CPUState& s, uint64_t addr, uint64_t val) {
-    auto r = resolve_mem(s, addr);
-    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 8), 1))
-        std::memcpy(r.buf + r.off, &val, 8);
+    const ResolvedMemorySpan resolved =
+        resolve_direct_scalar_memory_span(s, addr);
+    if (__builtin_expect(resolved.covers(8), 1))
+        std::memcpy(resolved.data, &val, 8);
     else {
         for (int i = 0; i < 8; i++)
             mem_write8(s, addr + static_cast<uint64_t>(i),
@@ -11103,9 +11080,10 @@ static int exec_string(CPUState& s, const StepCallbacks& cb) {
         // bounds so an attacker-controlled length cannot wrap off + len and
         // turn a rejected span into an out-of-bounds host memset.
         if (cb.bus_access == nullptr && !s.priv_level && !in_mmio) {
-            auto r = resolve_mem(s, dst);
-            if (r.buf && region_span_fits(r.size, r.off, ln)) {
-                std::memset(r.buf + r.off, fb, (size_t)ln);
+            const ResolvedMemorySpan resolved =
+                resolve_direct_scalar_memory_span(s, dst);
+            if (resolved.covers(ln)) {
+                std::memset(resolved.data, fb, (size_t)ln);
                 icache_invalidate_span(s, dst, ln);
                 s.regs[rd] = dst + ln;
                 s.regs[rs] = 0;

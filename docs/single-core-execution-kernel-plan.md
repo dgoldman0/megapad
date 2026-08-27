@@ -198,7 +198,7 @@ the reverted C++ successor-probe loop is not restored.
 | 1 | Source ownership and build decomposition | Complete |
 | 2 | Bounded synchronous storage transfer | Complete |
 | 3 | Native no-event round settlement | Complete |
-| 4 | Algebraic memory foundation | Pending |
+| 4 | Algebraic memory foundation | In progress |
 | 5 | Authoritative decoded execution kernel | Pending |
 | 6 | Multi-line and multi-memory block construction | Pending |
 | 7 | x86-64 lowering and direct continuation | Pending |
@@ -295,6 +295,20 @@ remains deferred.
 - Preserve modulo Bank 0 aliases and every overlap-priority edge through the
   exact slow path.
 - Remove redundant prove-then-resolve pairs from the hot path.
+
+First-slice evidence (2026-08-27): `accel/machine/memory.h` now owns the pure,
+allocation-free guest-memory map and resolved-span algebra, while Python buffer
+ownership and mapping leases remain in the extension bindings. Scalar and
+supervisor-byte priority are explicit policies rather than an accidental
+property of call order. Natural-width scalar reads and writes select and prove
+one direct extent; aperture crossings, Bank 0 aliases, guest-address wrap, and
+other non-contiguous cases retain exact bytewise resolution. Instruction fills
+and stack traffic inherit the scalar improvement through their authoritative
+accessors. The extension built successfully, and focused scalar aperture-edge,
+Bank 0 wrap, instruction-fill, shared-mapping, and uncontended execution checks
+passed serially (24 passed). Accelerator and DBT preflight consolidation remains
+part of this element; this evidence does not mark it complete or claim an
+end-to-end performance result.
 
 ### Element 5 — Authoritative decoded execution kernel
 
