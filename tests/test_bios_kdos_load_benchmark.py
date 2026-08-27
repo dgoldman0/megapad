@@ -66,6 +66,19 @@ def test_runtime_root_must_contain_the_boot_sources(tmp_path: Path) -> None:
         benchmark._activate_runtime(tmp_path)
 
 
+def test_boot_image_is_byte_reproducible(tmp_path: Path) -> None:
+    runtime = benchmark._activate_runtime(benchmark.ROOT)
+    first = tmp_path / "first.img"
+    second = tmp_path / "second.img"
+
+    first_sources = benchmark._build_boot_image(runtime, first)
+    second_sources = benchmark._build_boot_image(runtime, second)
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_sources["image_sha256"] == second_sources["image_sha256"]
+    assert first_sources["mp64fs_fixture_mtime"] == 0
+
+
 def test_exact_boot_transcript_exposes_any_extra_diagnostic() -> None:
     expected = benchmark._expected_output_lines(1 << 20)
     raw = "\r\n".join(["", *expected, ""])

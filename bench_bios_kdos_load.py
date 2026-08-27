@@ -137,6 +137,8 @@ def _activate_runtime(runtime_root: Path) -> SimpleNamespace:
         MP64FS=diskutil.MP64FS,
         FTYPE_FORTH=diskutil.FTYPE_FORTH,
         FLAG_SYSTEM=diskutil.FLAG_SYSTEM,
+        SECTOR_SIZE=diskutil.SECTOR_SIZE,
+        DIR_ENTRY_SIZE=diskutil.DIR_ENTRY_SIZE,
         pack_forth_source=diskutil.pack_forth_source,
         MachineSession=session.MachineSession,
     )
@@ -203,6 +205,23 @@ def _build_boot_image(runtime: SimpleNamespace, target: Path) -> dict:
         flags=runtime.FLAG_SYSTEM,
     )
     fs.inject_file("autoexec.f", autoexec, ftype=runtime.FTYPE_FORTH)
+
+    # inject_file records the host epoch second.  That timestamp is irrelevant
+    # to execution but KDOS copies the directory into its dictionary cache,
+    # making otherwise identical A/B images and final memory fingerprints
+    # differ.  A benchmark fixture must be byte-reproducible.
+    for name in ("kdos.f", "autoexec.f"):
+        found = fs.find_file(name)
+        if found is None:
+            raise RuntimeError(f"benchmark image lost injected file {name!r}")
+        slot, _entry = found
+        offset = (
+            fs.dir_start * runtime.SECTOR_SIZE
+            + slot * runtime.DIR_ENTRY_SIZE
+            + 36
+        )
+        fs.img[offset : offset + 4] = b"\x00" * 4
+
     fs.save(target)
     return {
         "bios_sha256": _sha256_file(runtime.root / "bios.asm"),
@@ -214,6 +233,7 @@ def _build_boot_image(runtime: SimpleNamespace, target: Path) -> dict:
         "image_sha256": _sha256_file(target),
         "image_bytes": target.stat().st_size,
         "mp64fs_total_sectors": DESKTOP_MP64FS_SECTORS,
+        "mp64fs_fixture_mtime": 0,
     }
 
 
