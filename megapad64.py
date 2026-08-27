@@ -3451,9 +3451,13 @@ class Megapad64:
         elif n == 0xD:  # CALL.L Rn (2 bytes)
             byte1 = self.fetch8()
             rn = (byte1 & 0xF) | (self._rex_s << 4)
+            # CALL samples its source before changing either architectural
+            # stack state or the selected program register.  In particular,
+            # a source aliased to SPSEL names the pre-push stack value.
+            target = self.regs[rn]
             ret_addr = self.pc  # address after CALL.L
             self.push64(ret_addr)
-            self.pc = self.regs[rn]
+            self.pc = target
             return 1
         elif n == 0xE:  # RET.L
             self.pc = self.pop64()
