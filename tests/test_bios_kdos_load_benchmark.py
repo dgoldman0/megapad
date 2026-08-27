@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 4
+    assert benchmark.SCHEMA_VERSION == 5
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -37,9 +37,8 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
             "uncontended_block_misses": 50,
             "uncontended_block_build_attempts": 40,
             "uncontended_block_nonresident_rejections": 3,
-            "uncontended_block_zero_instruction_rejections": 3,
-            "uncontended_block_one_instruction_rejections": 3,
-            "uncontended_block_structure_rejections": 6,
+            "uncontended_block_zero_instruction_rejections": 6,
+            "uncontended_block_one_instruction_rejections": 6,
             "uncontended_block_rejection_cache_hits": 10,
             "uncontended_block_rejection_cache_stores": 12,
             "uncontended_block_rejection_cache_replacements": 5,
@@ -73,9 +72,8 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
         "block_cache_hit_fraction": 0.6,
         "block_rejection_cache_hit_fraction": 0.2,
         "block_build_success_fraction": 0.625,
-        "resident_zero_instruction_rejection_fraction": 0.25,
-        "resident_one_instruction_rejection_fraction": 0.25,
-        "resident_structure_rejection_fraction": 0.5,
+        "resident_zero_instruction_rejection_fraction": 0.5,
+        "resident_one_instruction_rejection_fraction": 0.5,
         "decoded_block_step_fraction": 0.6,
         "jit_step_fraction": 0.4,
         "jit_steps_per_execution": 4.0,
@@ -102,9 +100,8 @@ def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
             "uncontended_block_build_attempts": 40,
             "uncontended_block_builds": 25,
             "uncontended_block_nonresident_rejections": 3,
-            "uncontended_block_zero_instruction_rejections": 3,
-            "uncontended_block_one_instruction_rejections": 3,
-            "uncontended_block_structure_rejections": 6,
+            "uncontended_block_zero_instruction_rejections": 6,
+            "uncontended_block_one_instruction_rejections": 6,
             "uncontended_block_rejection_cache_hits": 10,
             "uncontended_block_rejection_cache_stores": 12,
             "uncontended_block_rejection_cache_replacements": 5,

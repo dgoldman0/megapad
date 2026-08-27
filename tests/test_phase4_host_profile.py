@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 19
+    assert report["schema_version"] == 20
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -32,7 +32,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 11
+        assert probe["schema_version"] == 12
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -108,7 +108,6 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
             "uncontended_block_nonresident_rejections",
             "uncontended_block_zero_instruction_rejections",
             "uncontended_block_one_instruction_rejections",
-            "uncontended_block_structure_rejections",
             "uncontended_block_rejection_cache_hits",
             "uncontended_block_rejection_cache_stores",
             "uncontended_block_rejection_cache_replacements",
@@ -178,11 +177,11 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 19
+    assert report["schema_version"] == 20
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 11
+        assert probe["schema_version"] == 12
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]
@@ -216,13 +215,11 @@ def test_single_core_profile_attributes_work_across_worker_counts():
             + counts["uncontended_block_nonresident_rejections"]
             + counts["uncontended_block_zero_instruction_rejections"]
             + counts["uncontended_block_one_instruction_rejections"]
-            + counts["uncontended_block_structure_rejections"]
         )
         assert (
             counts["uncontended_block_rejection_cache_stores"]
             == counts["uncontended_block_zero_instruction_rejections"]
             + counts["uncontended_block_one_instruction_rejections"]
-            + counts["uncontended_block_structure_rejections"]
         )
         assert (
             counts["uncontended_block_rejection_cache_replacements"]

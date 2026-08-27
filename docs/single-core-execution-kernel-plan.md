@@ -694,6 +694,22 @@ comparison did not lift the project-wide qualification gate; broad acceptance
 remains deferred, and deferred findings are addressed only where the final
 ownership contract or permitted focused acceptance requires them.
 
+The first consolidation slice retires the 313-line structural replay that ran
+after the sole block builder. The authoritative decoder and builder now own
+static construction validity once; dynamic cache identity, transactional
+direct-memory preflight, and backend lowering validation remain at their real
+use boundaries. Eight one-hop decoded-instruction wrappers and the impossible
+structural-rejection profile path are gone, while a compile-time capacity proof
+guards the memory-recipe sentinel encoding. The associated host-profile,
+BIOS-benchmark, and report schemas advance with the dead counter removed.
+
+Construction evidence for this slice is deliberately narrow: the extension
+builds sequentially, 20 focused block/rejection/profile selectors pass, and
+the x86-64 object reports the block builder shrinking from `0x13ef` to `0x0fc0`
+bytes. That object-size observation is consolidation evidence, not a runtime
+speed claim. No BIOS, cold-source, broad, worker-spawning, or rich-terminal
+acceptance run was added.
+
 - Extract Python buffer leases, callback construction, snapshot codecs, and
   pybind registration only after their machine/CPU owners have stable native
   headers; avoid a catch-all header that recreates the monolith.
@@ -771,6 +787,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D9 | Represent scalar block addresses as ordered entry/constant/prior-read recipes and prove every span transactionally before entry. | The capacity derives from block identity, the hot motifs are not fused, no generated memory side exit is added, and a failed proof retires nothing. |
 | EK-D10 | Keep the identity-proved PC in x86-64 R9 when its emitted-byte cost is favorable, tolerating at most one byte of growth for the measured short shapes, and no semantic selector alias exists. | Entry identity supplies the exact initial value; every normal or prefix-interrupt exit reaches one materialization point, while costlier or aliased blocks keep the established lowering. |
 | EK-D11 | Close Element 7 without direct native continuation. | The current reworked DBT delivered a material exact-equivalent BIOS+KDOS gain, while measured hot successor edges still require write invalidation or fresh transactional preflight. No chaining state or broader entry/exit ABI is added; reconsideration requires new edge-specific retained evidence. |
+| EK-D12 | Let the authoritative decoder and sole block builder own static candidate validity without replaying their construction policy immediately before publication. | Dynamic cache identity, transactional memory proof, and backend validation remain independent; consolidation removes a duplicate static checker rather than weakening a runtime boundary. |
 
 ## Deferred findings ledger
 

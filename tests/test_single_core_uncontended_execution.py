@@ -58,7 +58,7 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 11
+    assert snapshot["schema_version"] == 12
     metadata = dict(snapshot["single_core_block_rejection_cache"])
     assert metadata == {
         "kind": "direct-mapped-exact-icache-span",
@@ -75,12 +75,10 @@ def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
         + counts["uncontended_block_nonresident_rejections"]
         + counts["uncontended_block_zero_instruction_rejections"]
         + counts["uncontended_block_one_instruction_rejections"]
-        + counts["uncontended_block_structure_rejections"]
     )
     assert counts["uncontended_block_rejection_cache_stores"] == (
         counts["uncontended_block_zero_instruction_rejections"]
         + counts["uncontended_block_one_instruction_rejections"]
-        + counts["uncontended_block_structure_rejections"]
     )
     assert (
         counts["uncontended_block_rejection_cache_replacements"]
@@ -669,7 +667,6 @@ loop:
     assert counts["uncontended_block_nonresident_rejections"] == 1
     assert counts["uncontended_block_zero_instruction_rejections"] == 0
     assert counts["uncontended_block_one_instruction_rejections"] == 1
-    assert counts["uncontended_block_structure_rejections"] == 0
     assert counts["uncontended_block_rejection_cache_hits"] == 6
     assert counts["uncontended_block_rejection_cache_stores"] == 1
     assert counts["uncontended_block_rejection_cache_replacements"] == 0
@@ -707,7 +704,6 @@ loop:
     assert counts["uncontended_block_nonresident_rejections"] == 1
     assert counts["uncontended_block_zero_instruction_rejections"] == 1
     assert counts["uncontended_block_one_instruction_rejections"] == 1
-    assert counts["uncontended_block_structure_rejections"] == 0
     assert counts["uncontended_block_rejection_cache_hits"] == 5
     assert counts["uncontended_block_rejection_cache_stores"] == 2
     assert counts["uncontended_block_rejection_cache_replacements"] == 0
@@ -893,7 +889,6 @@ loop:
     assert counts["uncontended_block_nonresident_rejections"] == 1
     assert counts["uncontended_block_zero_instruction_rejections"] == 0
     assert counts["uncontended_block_one_instruction_rejections"] == 1
-    assert counts["uncontended_block_structure_rejections"] == 0
     assert counts["uncontended_block_rejection_cache_hits"] == 0
     assert counts["uncontended_block_rejection_cache_stores"] == 1
     assert counts["uncontended_block_rejection_cache_replacements"] == 0
@@ -2485,7 +2480,6 @@ def _assert_multi_memory_profile(
     assert counts["uncontended_block_nonresident_rejections"] == 0
     assert counts["uncontended_block_zero_instruction_rejections"] == 0
     assert counts["uncontended_block_one_instruction_rejections"] == 0
-    assert counts["uncontended_block_structure_rejections"] == 0
     assert counts["uncontended_block_rejection_cache_hits"] == 0
     assert counts["uncontended_block_rejection_cache_stores"] == 0
     if snapshot["single_core_jit_backend"] == "x86_64":
@@ -2759,7 +2753,6 @@ def test_cross_line_ldn_branch_builds_one_generic_native_block() -> None:
     assert counts["uncontended_block_nonresident_rejections"] == 1
     assert counts["uncontended_block_zero_instruction_rejections"] == 0
     assert counts["uncontended_block_one_instruction_rejections"] == 1
-    assert counts["uncontended_block_structure_rejections"] == 0
     assert counts["uncontended_block_rejection_cache_hits"] == 1
     assert counts["uncontended_block_rejection_cache_stores"] == 1
     _assert_jit_used_when_available(snapshot, counts)

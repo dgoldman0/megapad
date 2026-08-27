@@ -97,6 +97,11 @@ struct BlockMemoryAddressRecipe {
 // Capacity remains a property of the caller's bounded block storage.
 template <std::size_t Capacity>
 struct BlockMemoryAddressRecipes {
+    static_assert(
+        Capacity <=
+            BLOCK_MEMORY_CONSTANT_SOURCE -
+                BLOCK_MEMORY_PRIOR_READ_BASE);
+
     std::array<uint64_t, Capacity> addends{};
     std::array<uint8_t, Capacity> sources{};
 

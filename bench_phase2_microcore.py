@@ -70,7 +70,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 13
+REPORT_SCHEMA_VERSION = 14
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -366,8 +366,8 @@ def _profile_probe(
         "single_core_block_rejection_cache"
     ]
     validation = {
-        "schema_is_version_11":
-            normalized["schema_version"] == 11,
+        "schema_is_version_12":
+            normalized["schema_version"] == 12,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -420,7 +420,6 @@ def _profile_probe(
                     "uncontended_block_nonresident_rejections",
                     "uncontended_block_zero_instruction_rejections",
                     "uncontended_block_one_instruction_rejections",
-                    "uncontended_block_structure_rejections",
                     "uncontended_block_rejection_cache_hits",
                     "uncontended_block_rejection_cache_stores",
                     "uncontended_block_rejection_cache_replacements",
@@ -460,13 +459,11 @@ def _profile_probe(
             + counts["uncontended_block_nonresident_rejections"]
             + counts["uncontended_block_zero_instruction_rejections"]
             + counts["uncontended_block_one_instruction_rejections"]
-            + counts["uncontended_block_structure_rejections"]
         ),
         "uncontended_block_rejection_cache_stores_reconcile": (
             counts["uncontended_block_rejection_cache_stores"]
             == counts["uncontended_block_zero_instruction_rejections"]
             + counts["uncontended_block_one_instruction_rejections"]
-            + counts["uncontended_block_structure_rejections"]
         ),
         "uncontended_block_rejection_cache_replacements_within_stores": (
             counts["uncontended_block_rejection_cache_replacements"]
@@ -579,7 +576,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 11,
+        "schema_version": 12,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

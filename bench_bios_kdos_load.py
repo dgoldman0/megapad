@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -262,7 +262,6 @@ def profile_derived(profile: dict | None) -> dict | None:
     resident_rejections = (
         counts["uncontended_block_zero_instruction_rejections"]
         + counts["uncontended_block_one_instruction_rejections"]
-        + counts["uncontended_block_structure_rejections"]
     )
     return {
         "native_settlement_fraction": _ratio(
@@ -294,10 +293,6 @@ def profile_derived(profile: dict | None) -> dict | None:
         ),
         "resident_one_instruction_rejection_fraction": _ratio(
             counts["uncontended_block_one_instruction_rejections"],
-            resident_rejections,
-        ),
-        "resident_structure_rejection_fraction": _ratio(
-            counts["uncontended_block_structure_rejections"],
             resident_rejections,
         ),
         "decoded_block_step_fraction": _ratio(
@@ -372,9 +367,6 @@ def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
     one_rejections = counts[
         "uncontended_block_one_instruction_rejections"
     ]
-    structure_rejections = counts[
-        "uncontended_block_structure_rejections"
-    ]
     stores = counts["uncontended_block_rejection_cache_stores"]
     return {
         "block_rejection_cache_metadata_supported": (
@@ -388,11 +380,9 @@ def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
             + counts["uncontended_block_nonresident_rejections"]
             + zero_rejections
             + one_rejections
-            + structure_rejections
         ),
         "block_rejection_cache_stores_reconcile": (
-            stores
-            == zero_rejections + one_rejections + structure_rejections
+            stores == zero_rejections + one_rejections
         ),
         "block_rejection_cache_replacements_are_bounded": (
             counts["uncontended_block_rejection_cache_replacements"]
@@ -530,7 +520,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 11
+                            host_profile["schema_version"] == 12
                         ),
                         "settlement_routes_reconcile": (
                             profile_counts["settle_round_calls"]
@@ -742,10 +732,9 @@ def print_human(result: dict) -> None:
             f"{counts['uncontended_block_builds']:,}/"
             f"{counts['uncontended_block_build_attempts']:,} builds "
             f"({percent(derived['block_build_success_fraction'])}); "
-            "resident zero/one/structure "
+            "resident zero/one "
             f"{counts['uncontended_block_zero_instruction_rejections']:,}/"
-            f"{counts['uncontended_block_one_instruction_rejections']:,}/"
-            f"{counts['uncontended_block_structure_rejections']:,}"
+            f"{counts['uncontended_block_one_instruction_rejections']:,}"
         )
         print(
             "  DBT compile/arena/publication: "

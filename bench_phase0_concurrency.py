@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2652,7 +2652,6 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_block_nonresident_rejections",
     "uncontended_block_zero_instruction_rejections",
     "uncontended_block_one_instruction_rejections",
-    "uncontended_block_structure_rejections",
     "uncontended_block_rejection_cache_hits",
     "uncontended_block_rejection_cache_stores",
     "uncontended_block_rejection_cache_replacements",
@@ -2900,7 +2899,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 11,
+            native_snapshot["schema_version"] == 12,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3002,7 +3001,6 @@ def _host_profile_probe(
                     "uncontended_block_nonresident_rejections",
                     "uncontended_block_zero_instruction_rejections",
                     "uncontended_block_one_instruction_rejections",
-                    "uncontended_block_structure_rejections",
                     "uncontended_block_rejection_cache_hits",
                     "uncontended_block_rejection_cache_stores",
                     "uncontended_block_rejection_cache_replacements",
@@ -3054,7 +3052,6 @@ def _host_profile_probe(
             + native_counts[
                 "uncontended_block_one_instruction_rejections"
             ]
-            + native_counts["uncontended_block_structure_rejections"]
         ),
         "uncontended_block_rejection_cache_stores_reconcile": (
             native_counts["uncontended_block_rejection_cache_stores"]
@@ -3064,7 +3061,6 @@ def _host_profile_probe(
             + native_counts[
                 "uncontended_block_one_instruction_rejections"
             ]
-            + native_counts["uncontended_block_structure_rejections"]
         ),
         "uncontended_block_rejection_cache_replacements_within_stores": (
             native_counts[
@@ -3277,7 +3273,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 11,
+        "schema_version": 12,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
