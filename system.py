@@ -1389,10 +1389,17 @@ class MegapadSystem:
         self.bus.register(self.wots, externally_clocked=True)
         self.bus.set_tick_driver(self.advance_system_cycles)
 
-        # Wire storage DMA to shared memory
-        self.storage._mem_read = self._raw_mem_read
-        self.storage._mem_write = self._raw_mem_write
-        self.storage._mem_span_valid = self._raw_mem_span_valid
+        # Wire the ordinary storage controller to one identity-checked system
+        # memory capability. Strict-cycle and customized callback paths retain
+        # their byte-visible DMA state machine.
+        self.storage._bind_system_memory(
+            read_byte=self._raw_mem_read,
+            write_byte=self._raw_mem_write,
+            span_valid=self._raw_mem_span_valid,
+            memory_scope=self._storage_dma_memory_use,
+            read_span=self._raw_mem_read_span,
+            write_span=self._raw_mem_write_span,
+        )
         self.audio._mem_read = self._raw_mem_read
         self.audio._mem_span_valid = self._raw_mem_span_valid
 
@@ -2360,6 +2367,18 @@ class MegapadSystem:
     #  Raw memory helpers (bypass MMIO, for DMA)
     # -----------------------------------------------------------------
 
+    def _storage_dma_memory_use(self):
+        """Borrow the active guest batch's mapping ownership for storage."""
+        if not self._native_system.native_batch_active:
+            # Direct host-issued commands retain the synchronous byte path.
+            # Entering a fresh shared scope here would release the GIL while
+            # BUSY is published, adding cross-thread observability that the
+            # ordinary host API did not previously have.
+            raise RuntimeError(
+                "bounded storage DMA requires an active native system batch"
+            )
+        return _cpu_memory_use(self.cpu)
+
     def _any_nic_rx(self) -> bool:
         """Check if C++ NIC has RX data available."""
         return self.cores[0]._cs.nic_has_rx()
@@ -2427,25 +2446,61 @@ class MegapadSystem:
             return self._ext_mem[addr - self.ext_mem_base]
         return self._shared_mem[addr % self.ram_size]
 
-    def _raw_mem_span_valid(self, addr: int, count: int) -> bool:
-        """Require one complete DMA span inside one physical memory window."""
+    def _raw_mem_window(
+        self, addr: int, count: int
+    ) -> Optional[tuple[bytearray, int]]:
+        """Resolve one bounded span wholly inside one physical bytearray."""
         addr = u64(addr)
         if count <= 0:
-            return False
+            return None
         end = addr + count
         if end > (1 << 64):
-            return False
+            return None
         regions = [
-            (0, self.ram_size),
+            (0, self.ram_size, self._shared_mem),
         ]
         if self.hbw_size > 0:
-            regions.append((HBW_BASE, self.hbw_end))
+            regions.append((HBW_BASE, self.hbw_end, self._hbw_mem))
         if self.ext_mem_size > 0:
-            regions.append((self.ext_mem_base, self.ext_mem_end))
+            regions.append(
+                (self.ext_mem_base, self.ext_mem_end, self._ext_mem)
+            )
         if self.vram_size > 0:
-            regions.append((self.vram_base, self.vram_end))
-        return sum(base <= addr and end <= limit
-                   for base, limit in regions) == 1
+            regions.append((self.vram_base, self.vram_end, self._vram_mem))
+        matches = [
+            (base, memory)
+            for base, limit, memory in regions
+            if base <= addr and end <= limit
+        ]
+        if len(matches) != 1:
+            return None
+        base, memory = matches[0]
+        return memory, addr - base
+
+    def _raw_mem_span_valid(self, addr: int, count: int) -> bool:
+        """Require one complete DMA span inside one physical memory window."""
+        return self._raw_mem_window(addr, count) is not None
+
+    def _raw_mem_read_span(self, addr: int, count: int) -> bytes:
+        resolved = self._raw_mem_window(addr, count)
+        if resolved is None:
+            raise ValueError("storage DMA read span is outside system memory")
+        memory, offset = resolved
+        return bytes(memoryview(memory)[offset:offset + count])
+
+    def _raw_mem_write_span(
+        self,
+        addr: int,
+        payload: bytes | bytearray | memoryview,
+    ) -> None:
+        count = len(payload)
+        resolved = self._raw_mem_window(addr, count)
+        if resolved is None:
+            raise ValueError("storage DMA write span is outside system memory")
+        memory, offset = resolved
+        # Every native memory exporter remains pinned for system lifetime;
+        # equal-length replacement copies bytes without resizing the bytearray.
+        memory[offset:offset + count] = payload
 
     def _raw_mem_write(self, addr: int, val: int):
         addr = u64(addr)

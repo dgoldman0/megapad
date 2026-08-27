@@ -25,7 +25,7 @@ import socket
 import time
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, ContextManager, Optional, TYPE_CHECKING
 from collections import deque
 
 if TYPE_CHECKING:
@@ -574,6 +574,18 @@ class StorageDMABeat:
     write_data: int = 0
 
 
+@dataclass(frozen=True)
+class _StorageSystemMemoryBinding:
+    """Identity-checked direct memory capability owned by MegapadSystem."""
+
+    read_byte: Callable[[int], int]
+    write_byte: Callable[[int, int], None]
+    span_valid: Callable[[int, int], bool]
+    memory_scope: Callable[[], ContextManager[object]]
+    read_span: Callable[[int, int], bytes]
+    write_span: Callable[[int, bytes | bytearray | memoryview], None]
+
+
 class Storage(Device):
     """Block device backed by a host file.
 
@@ -624,6 +636,9 @@ class Storage(Device):
         self._mem_read: Optional[callable] = None
         self._mem_write: Optional[callable] = None
         self._mem_span_valid: Optional[callable] = None
+        self._system_memory_binding: Optional[
+            _StorageSystemMemoryBinding
+        ] = None
         self._cycle_mutation_guard: Optional[callable] = None
         self._stall_release_guard: Optional[callable] = None
 
@@ -635,6 +650,7 @@ class Storage(Device):
         self._faults: list[StorageFault] = []
         self._strict_cycle_submission: bool = False
         self._dma_async: bool = False
+        self._immediate_span_eligible: bool = False
         self._dma_phase: Optional[str] = None
         self._dma_sector_index: int = 0
         self._dma_byte_index: int = 0
@@ -750,6 +766,7 @@ class Storage(Device):
 
     def _clear_dma_fsm(self):
         self._dma_async = False
+        self._immediate_span_eligible = False
         self._dma_phase = None
         self._dma_sector_index = 0
         self._dma_byte_index = 0
@@ -757,6 +774,74 @@ class Storage(Device):
         self._dma_write_sector = bytearray()
         self._dma_read_port_prefix = bytearray()
         self._dma_pending = None
+
+    def _bind_system_memory(
+        self,
+        *,
+        read_byte: Callable[[int], int],
+        write_byte: Callable[[int, int], None],
+        span_valid: Callable[[int, int], bool],
+        memory_scope: Callable[[], ContextManager[object]],
+        read_span: Callable[[int, int], bytes],
+        write_span: Callable[
+            [int, bytes | bytearray | memoryview], None
+        ],
+    ) -> None:
+        """Bind the system's direct, bounded, non-reentrant DMA capability.
+
+        Standalone devices and callers that replace any scalar callback keep
+        using the observable byte state machine. The span operations are an
+        optimization capability, not a second controller interface.
+        """
+        if self.busy:
+            raise RuntimeError(
+                "cannot replace storage memory bindings during a command"
+            )
+        binding = _StorageSystemMemoryBinding(
+            read_byte=read_byte,
+            write_byte=write_byte,
+            span_valid=span_valid,
+            memory_scope=memory_scope,
+            read_span=read_span,
+            write_span=write_span,
+        )
+        self._mem_read = binding.read_byte
+        self._mem_write = binding.write_byte
+        self._mem_span_valid = binding.span_valid
+        self._system_memory_binding = binding
+
+    def _current_system_memory_binding(
+        self,
+    ) -> Optional[_StorageSystemMemoryBinding]:
+        binding = self._system_memory_binding
+        if (
+            binding is None
+            or self._mem_read is not binding.read_byte
+            or self._mem_write is not binding.write_byte
+            or self._mem_span_valid is not binding.span_valid
+        ):
+            return None
+        return binding
+
+    def _current_immediate_span_binding(
+        self,
+        request: tuple[int, int, int, int, int],
+    ) -> Optional[_StorageSystemMemoryBinding]:
+        binding = self._current_system_memory_binding()
+        if (
+            not self._immediate_span_eligible
+            or self._dma_async
+            or self._stalled
+            or self._faults
+            or binding is None
+            or type(self) is not Storage
+            or type(self._image_data) is not bytearray
+            or self.on_dma_read is not None
+            or self.on_dma_write is not None
+            or not self._request_is_current(request)
+        ):
+            return None
+        return binding
 
     def _require_cycle_mutation_allowed(self):
         guard = self._cycle_mutation_guard
@@ -1028,6 +1113,19 @@ class Storage(Device):
         self._dma_async = bool(
             self._strict_cycle_submission
         )
+        # Capture eligibility before accept/start faults can be consumed. A
+        # stalled or otherwise fault-configured command must not become a
+        # bulk transfer merely because its one-shot fault is no longer queued
+        # when the command resumes.
+        self._immediate_span_eligible = bool(
+            not self._dma_async
+            and not self._faults
+            and type(self) is Storage
+            and type(self._image_data) is bytearray
+            and self.on_dma_read is None
+            and self.on_dma_write is None
+            and self._current_system_memory_binding() is not None
+        )
         request = (
             command,
             self.sector_num,
@@ -1079,6 +1177,7 @@ class Storage(Device):
                 continue
             if fault.byte_index is not None and fault.byte_index != byte_index:
                 continue
+            self._immediate_span_eligible = False
             return self._faults.pop(index)
         return None
 
@@ -1198,9 +1297,123 @@ class Storage(Device):
         self._dma_write_sector = bytearray()
         self._dma_read_port_prefix = bytearray()
         self._dma_pending = None
+        if self._try_immediate_span_dma(request, phase):
+            return
         self._stage_next_dma_beat()
         if not self._dma_async:
             self._drain_dma_immediate()
+
+    def _try_immediate_span_dma(
+        self,
+        request: tuple[int, int, int, int, int],
+        phase: str,
+    ) -> bool:
+        """Complete one canonical synchronous transfer with bounded copies."""
+        binding = self._current_immediate_span_binding(request)
+        if binding is None:
+            return False
+
+        try:
+            memory_scope = binding.memory_scope()
+        except Exception:
+            return False
+        with memory_scope:
+            return self._try_immediate_span_dma_in_scope(request, phase)
+
+    def _try_immediate_span_dma_in_scope(
+        self,
+        request: tuple[int, int, int, int, int],
+        phase: str,
+    ) -> bool:
+        """Revalidate and copy while memory ownership and the GIL are held."""
+        binding = self._current_immediate_span_binding(request)
+        if binding is None:
+            return False
+
+        command, sector, dma_addr, count, _generation = request
+        if (
+            (phase == "read" and command != STORAGE_CMD_READ)
+            or (phase == "write" and command != STORAGE_CMD_WRITE)
+            or phase not in {"read", "write"}
+        ):
+            return False
+
+        nbytes = count * SECTOR_SIZE
+        max_token = 0xFFFF_FFFF_FFFF_FFFF
+        if (
+            nbytes <= 0
+            or self._dma_next_token > max_token - nbytes + 1
+        ):
+            # The byte FSM publishes the exact completed prefix if its token
+            # identity space is exhausted partway through a request.
+            return False
+
+        media_start = sector * SECTOR_SIZE
+        media_end = media_start + nbytes
+        if media_end > len(self._image_data):
+            return False
+
+        if phase == "read":
+            payload = memoryview(self._image_data)[media_start:media_end]
+            # Match the byte callback's MAY_HAVE_APPLIED boundary. The bound
+            # system copy is equal-length and non-reentrant, but an unexpected
+            # host failure is still reported conservatively.
+            self._active_effect = True
+            try:
+                binding.write_span(dma_addr, payload)
+            except Exception:
+                if self._request_is_current(request):
+                    # The byte path allocates its first token before invoking
+                    # the failing scalar callback.
+                    self._dma_next_token += 1
+                    self.data_port_buf = bytearray()
+                    self.data_port_pos = 0
+                    self._complete(
+                        STORAGE_RESULT_DMA_FAILURE
+                        | STORAGE_RESULT_PARTIAL,
+                        0,
+                    )
+                return True
+            if not self._request_is_current(request):
+                return True
+            self._dma_next_token += nbytes
+            self.data_port_buf = bytearray(payload)
+            self.data_port_pos = 0
+        else:
+            try:
+                payload = binding.read_span(dma_addr, nbytes)
+            except Exception:
+                if self._request_is_current(request):
+                    self._dma_next_token += 1
+                    self._complete(STORAGE_RESULT_DMA_FAILURE, 0)
+                return True
+            if not isinstance(payload, bytes) or len(payload) != nbytes:
+                if self._request_is_current(request):
+                    self._dma_next_token += 1
+                    self._complete(STORAGE_RESULT_DMA_FAILURE, 0)
+                return True
+            if not self._request_is_current(request):
+                return True
+            # Successful scalar reads consume every token before the final
+            # media effect becomes externally complete.
+            self._dma_next_token += nbytes
+            self._active_effect = True
+            try:
+                self._image_data[media_start:media_end] = payload
+            except Exception:
+                if self._request_is_current(request):
+                    self._complete(
+                        STORAGE_RESULT_INTERNAL
+                        | STORAGE_RESULT_PARTIAL,
+                        0,
+                    )
+                return True
+            if not self._request_is_current(request):
+                return True
+
+        self._active_transferred = count
+        self._complete(STORAGE_RESULT_OK, count)
+        return True
 
     def _publish_read_prefix(self):
         self.data_port_buf = bytearray(

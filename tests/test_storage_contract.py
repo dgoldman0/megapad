@@ -8,8 +8,11 @@ import sys
 
 import pytest
 
+from asm import assemble
 from devices import (
+    MMIO_BASE,
     SECTOR_SIZE,
+    STORAGE_BASE,
     STORAGE_CAPS,
     STORAGE_CAP_COMPLETION,
     STORAGE_CAP_FLUSH,
@@ -240,6 +243,73 @@ def test_successful_write_and_read_publish_one_completion_each(tmp_path):
     assert device.completion == 2
     assert device.transferred == 2
     assert memory[2048:2048 + len(first)] == first
+
+
+def test_system_guest_guarded_storage_uses_bounded_span_path(tmp_path):
+    path = tmp_path / "canonical-span.img"
+    nbytes = 2 * SECTOR_SIZE
+    disk_payload = bytes((index * 11 + 3) & 0xFF for index in range(nbytes))
+    path.write_bytes(disk_payload + b"\x00" * nbytes)
+    system = MegapadSystem(
+        ram_size=4096,
+        storage_image=str(path),
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=1,
+    )
+    system.load_binary(0, assemble("st.b r1, r2\nhalt"))
+    system.boot(entry=0)
+    device = system.storage
+    generation = device.media_generation
+    dma_addr = 256
+    first_token = device._dma_next_token
+
+    def reject_byte_fsm():
+        pytest.fail("canonical synchronous storage used the byte DMA FSM")
+
+    device._drain_dma_immediate = reject_byte_fsm
+    _program(device, sector=0, dma=dma_addr, count=2)
+    _write_le(device, 0x20, generation, 4)
+    system.cpu.regs[1] = MMIO_BASE + STORAGE_BASE + 0x24
+    system.cpu.regs[2] = STORAGE_CMD_READ
+    read_command = system.run_batch_stats(1)
+
+    assert read_command.instructions_executed == 1
+    assert system._shared_mem[dma_addr:dma_addr + nbytes] == disk_payload
+    assert device.data_port_buf == disk_payload
+    assert device.data_port_pos == 0
+    assert device.result == STORAGE_RESULT_OK
+    assert device.transferred == 2
+    assert device.completion == 1
+    assert device._dma_next_token == first_token + nbytes
+    assert not device.busy
+    assert device._dma_phase is None
+    assert device._dma_pending is None
+
+    memory_payload = bytes(
+        (index * 13 + 5) & 0xFF for index in range(nbytes)
+    )
+    system._shared_mem[dma_addr:dma_addr + nbytes] = memory_payload
+    _program(device, sector=2, dma=dma_addr, count=2)
+    _write_le(device, 0x20, generation, 4)
+    system.cpu.pc = 0
+    system.cpu.regs[2] = STORAGE_CMD_WRITE
+    write_command = system.run_batch_stats(1)
+
+    assert write_command.instructions_executed == 1
+    assert device._image_data[nbytes:2 * nbytes] == memory_payload
+    assert device.data_port_buf == disk_payload
+    assert device.data_port_pos == 0
+    assert device.result == STORAGE_RESULT_OK
+    assert device.transferred == 2
+    assert device.completion == 2
+    assert device._dma_next_token == first_token + 2 * nbytes
+    assert not device.busy
+    assert device._dma_phase is None
+    assert device._dma_pending is None
 
 
 def test_guarded_commands_succeed_only_for_the_bound_generation(tmp_path):

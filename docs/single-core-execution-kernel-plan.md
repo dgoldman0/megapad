@@ -196,7 +196,7 @@ the reverted C++ successor-probe loop is not restored.
 | Element | Scope | Status |
 |---|---|---|
 | 1 | Source ownership and build decomposition | Complete |
-| 2 | Bounded synchronous storage transfer | Pending |
+| 2 | Bounded synchronous storage transfer | Complete |
 | 3 | Native no-event round settlement | Pending |
 | 4 | Algebraic memory foundation | Pending |
 | 5 | Authoritative decoded execution kernel | Pending |
@@ -236,6 +236,19 @@ deselected). This construction check is not a performance qualification claim.
   wrapped callbacks, re-entry observers, unusual mappings, and media changes.
 - Preserve command completion, transferred-sector accounting, and memory
   mutation order at the public command boundary.
+
+Completion evidence (2026-08-27): ordinary guarded storage commands issued by
+an active native system batch can now copy one caller-sized transfer through
+the already-proved physical memory window while holding the batch's mapping
+ownership. Exact scalar callback identity, current media/request identity, no
+fault history, ordinary timing mode, standard media ownership, and token-space
+headroom are all required. Direct host commands, strict-cycle DMA, faults and
+stalls, wrappers, observers, subclasses, and unusual configurations retain the
+byte FSM. Successful bulk transfers preserve DATA publication, completion,
+sector progress, and byte-equivalent DMA token advancement. The focused guest
+guarded span path, ordinary callback fallback, and configured-HBW routing
+selectors passed serially (3 passed, 32 deselected). Performance qualification
+remains deferred.
 
 ### Element 3 — Native no-event round settlement
 
