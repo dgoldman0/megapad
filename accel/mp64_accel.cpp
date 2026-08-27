@@ -1767,8 +1767,12 @@ private:
 };
 
 // Exact-single execution owns one direct-mapped decoded-block table. Give
-// each table index one host page in a bounded arena, so publishing replacement
-// code never allocates, changes VMA permissions, or unmaps on the hot path.
+// each table index one stable, cache-line-aligned slot in a bounded dense
+// arena, so publishing replacement code never allocates, changes VMA
+// permissions, or unmaps on the hot path. Twenty-one 64-byte lines cover the
+// current emitter's audited maximum with headroom while rotating successive
+// entry points through every conventional 64-set L1I index instead of placing
+// every function at the same host-page offset.
 // Linux exposes the same memfd through separate RW/non-executable and
 // RO/executable MAP_SHARED aliases; no virtual mapping is W+X. The arena is
 // host-only, never exposed to the guest, and rewritten only while the native
@@ -1778,6 +1782,15 @@ private:
 // inherited shared aliases.
 class HostExecutableArena {
 public:
+    static constexpr std::size_t SLOT_CACHE_LINE_BYTES = 64;
+    static constexpr std::size_t SLOT_CACHE_LINES = 21;
+    static constexpr std::size_t FIXED_SLOT_BYTES =
+        SLOT_CACHE_LINE_BYTES * SLOT_CACHE_LINES;
+    static_assert(
+        FIXED_SLOT_BYTES % 16 == 0 &&
+        (SLOT_CACHE_LINES & 1U) != 0,
+        "dense x86-64 JIT slots must remain aligned and set-rotating");
+
     HostExecutableArena() = default;
     HostExecutableArena(const HostExecutableArena&) = delete;
     HostExecutableArena& operator=(
@@ -1801,18 +1814,17 @@ public:
 
         allocation_attempted = true;
         state_ = State::FAILED;
-        const long page_size_value = ::sysconf(_SC_PAGESIZE);
-        if (page_size_value <= 0 || slot_count == 0)
+        if (slot_count == 0)
             return false;
-        const std::size_t slot_bytes =
-            static_cast<std::size_t>(page_size_value);
         if (
             slot_count >
-            std::numeric_limits<std::size_t>::max() / slot_bytes
+            std::numeric_limits<std::size_t>::max() /
+                FIXED_SLOT_BYTES
         ) {
             return false;
         }
-        const std::size_t mapped_bytes = slot_count * slot_bytes;
+        const std::size_t mapped_bytes =
+            slot_count * FIXED_SLOT_BYTES;
         if (
             mapped_bytes >
             static_cast<std::size_t>(
@@ -1822,9 +1834,9 @@ public:
         }
 
         try {
-            published_slots_.assign(slot_count, 0);
+            published_slot_sizes_.assign(slot_count, 0);
         } catch (const std::bad_alloc&) {
-            published_slots_.clear();
+            published_slot_sizes_.clear();
             return false;
         }
 
@@ -1839,7 +1851,7 @@ public:
                 MFD_CLOEXEC));
         }
         if (descriptor < 0) {
-            published_slots_.clear();
+            published_slot_sizes_.clear();
             return false;
         }
         if (
@@ -1848,7 +1860,7 @@ public:
                 static_cast<off_t>(mapped_bytes)) != 0
         ) {
             ::close(descriptor);
-            published_slots_.clear();
+            published_slot_sizes_.clear();
             return false;
         }
 
@@ -1861,7 +1873,7 @@ public:
             0);
         if (writable == MAP_FAILED) {
             ::close(descriptor);
-            published_slots_.clear();
+            published_slot_sizes_.clear();
             return false;
         }
         void* executable = ::mmap(
@@ -1874,14 +1886,14 @@ public:
         ::close(descriptor);
         if (executable == MAP_FAILED) {
             ::munmap(writable, mapped_bytes);
-            published_slots_.clear();
+            published_slot_sizes_.clear();
             return false;
         }
 
         writable_ = static_cast<uint8_t*>(writable);
         executable_ = static_cast<uint8_t*>(executable);
         slot_count_ = slot_count;
-        slot_bytes_ = slot_bytes;
+        slot_bytes_ = FIXED_SLOT_BYTES;
         mapped_bytes_ = mapped_bytes;
         state_ = State::READY;
         allocated = true;
@@ -1909,13 +1921,24 @@ public:
         const std::size_t offset = slot * slot_bytes_;
         uint8_t* const writable = writable_ + offset;
         uint8_t* const executable = executable_ + offset;
+        const std::size_t prior_size =
+            published_slot_sizes_[slot];
         std::memcpy(writable, code.data(), code.size());
+        if (prior_size > code.size()) {
+            std::memset(
+                writable + code.size(),
+                0xCC,
+                prior_size - code.size());
+        }
         std::atomic_thread_fence(std::memory_order_release);
+        const std::size_t synchronized_size =
+            std::max(prior_size, code.size());
         __builtin___clear_cache(
             reinterpret_cast<char*>(executable),
-            reinterpret_cast<char*>(executable + code.size()));
-        rewrote_slot = published_slots_[slot] != 0;
-        published_slots_[slot] = 1;
+            reinterpret_cast<char*>(
+                executable + synchronized_size));
+        rewrote_slot = prior_size != 0;
+        published_slot_sizes_[slot] = code.size();
         return HostExecutableCode(executable);
 #else
         (void)slot;
@@ -1963,7 +1986,7 @@ private:
         slot_count_ = 0;
         slot_bytes_ = 0;
         mapped_bytes_ = 0;
-        published_slots_.clear();
+        published_slot_sizes_.clear();
         state_ = State::UNINITIALIZED;
     }
 
@@ -1973,7 +1996,7 @@ private:
     std::size_t slot_count_ = 0;
     std::size_t slot_bytes_ = 0;
     std::size_t mapped_bytes_ = 0;
-    std::vector<uint8_t> published_slots_;
+    std::vector<std::size_t> published_slot_sizes_;
 };
 
 class ResumableBusAccess;

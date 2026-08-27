@@ -527,6 +527,7 @@ loop:
         assert storage["ready"]
         assert not storage["failed"]
         assert storage["slot_count"] == 1_024
+        assert storage["slot_bytes"] == 1_344
         assert storage["slot_bytes"] > counts[
             "uncontended_jit_max_code_bytes"
         ]
@@ -1042,6 +1043,113 @@ loop:
         assert storage["mapped_bytes_per_alias"] == (
             storage["slot_count"] * storage["slot_bytes"]
         )
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_dense_jit_slot_accepts_maximal_register_cmp_line() -> None:
+    system = _system()
+    maximal_line = assemble("cmp r4, r5\n" * 8)
+    assert len(maximal_line) == 16
+    system.load_binary(0, maximal_line)
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for _ in range(3):
+        system.cpu.pc = 0
+        stats = system.run_batch_stats(8)
+        assert stats.instructions_executed == 8
+        assert stats.system_cycles_advanced == 8
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.pc == 16
+    assert system.cpu.cycle_count == 24
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        storage = dict(snapshot["single_core_jit_storage"])
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_max_code_bytes"] == 1_009
+        assert storage["slot_bytes"] == 1_344
+        assert counts["uncontended_jit_max_code_bytes"] < (
+            storage["slot_bytes"]
+        )
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_dense_neighbor_slot_survives_shorter_rewrite() -> None:
+    system = MegapadSystem(
+        ram_size=1 << 16,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=1,
+    )
+    first_address = 0x810
+    neighbor_address = 0x4080
+    original = assemble(
+        """
+loop:
+    inc r4
+    br loop
+"""
+    )
+    replacement = assemble(
+        """
+loop:
+    nop
+    br loop
+"""
+    )
+    neighbor = assemble(
+        """
+loop:
+    inc r5
+    br loop
+"""
+    )
+    assert len(original) == len(replacement) == len(neighbor)
+    system.load_binary(first_address, original)
+    system.load_binary(neighbor_address, neighbor)
+    system.boot(entry=first_address)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for address in (first_address, neighbor_address):
+        system.cpu.pc = address
+        stats = system.run_batch_stats(6)
+        assert stats.instructions_executed == 6
+    system.cpu.mem_write8(first_address, replacement[0])
+    system.cpu.pc = first_address
+    rewritten = system.run_batch_stats(6)
+    assert rewritten.instructions_executed == 6
+    system.cpu.pc = neighbor_address
+    retained = system.run_batch_stats(6)
+    assert retained.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[4] == 3
+    assert system.cpu.regs[5] == 6
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compilations"] == 3
+        assert counts["uncontended_jit_slot_publications"] == 3
+        assert counts["uncontended_jit_slot_rewrites"] == 1
+        storage = dict(snapshot["single_core_jit_storage"])
+        assert storage["slot_bytes"] == 1_344
     else:
         assert all(
             counts[name] == 0
