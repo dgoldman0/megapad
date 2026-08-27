@@ -1121,11 +1121,11 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
 
             detailed = machine.status()
             first = detailed["host_profile"]
-            assert first["schema_version"] == 10
+            assert first["schema_version"] == 11
             assert first["enabled"]
             assert first["generation"] > 0
             assert first["single_core_block_rejection_cache"] == {
-                "kind": "direct-mapped-exact-icache-suffix",
+                "kind": "direct-mapped-exact-icache-span",
                 "entries": 512,
                 "identity_bytes": 16,
             }

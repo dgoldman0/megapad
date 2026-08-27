@@ -93,7 +93,7 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
 def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
     profile = {
         "single_core_block_rejection_cache": {
-            "kind": "direct-mapped-exact-icache-suffix",
+            "kind": "direct-mapped-exact-icache-span",
             "entries": 512,
             "identity_bytes": 16,
         },

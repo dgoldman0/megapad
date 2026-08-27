@@ -2900,7 +2900,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 10,
+            native_snapshot["schema_version"] == 11,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2954,9 +2954,9 @@ def _host_profile_probe(
                 and not jit_storage["failed"]
             )
         ),
-        "single_core_block_rejection_cache_is_bounded_exact_suffix": (
+        "single_core_block_rejection_cache_is_bounded_exact_span": (
             block_rejection_cache["kind"]
-            == "direct-mapped-exact-icache-suffix"
+            == "direct-mapped-exact-icache-span"
             and block_rejection_cache["entries"] == 512
             and block_rejection_cache["identity_bytes"] == 16
         ),
@@ -3277,7 +3277,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 10,
+        "schema_version": 11,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,

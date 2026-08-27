@@ -204,7 +204,7 @@ the reverted C++ successor-probe loop is not restored.
 | 3 | Native no-event round settlement | Complete |
 | 4 | Algebraic memory foundation | Complete |
 | 5 | Authoritative decoded execution kernel | Complete |
-| 6 | Multi-line and multi-memory block construction | Pending |
+| 6 | Multi-line and multi-memory block construction | In progress |
 | 7 | x86-64 lowering and direct continuation | Pending |
 | 8 | Consolidation and acceptance | Pending |
 
@@ -461,6 +461,27 @@ blocking multi-line construction.
   generation/revalidation contract.
 - Measure admission, exits, block length, memory shape, and decoded execution
   before enabling generated lowering.
+
+First-slice evidence (2026-08-27): positive and negative block identities now
+walk the resident guest I-cache line chunks touched by the existing
+caller-owned 16-byte identity storage. Construction no longer treats the
+starting line suffix as a block limit, and rejection entries retain the exact
+fully inspected span rather than the rest of one line. A missing continuation
+line is reported separately and never installs a partial rejection. This is a
+generic bounded identity change: it adds no two-line block type, capacity
+increase, opcode fusion, or x86-64 special case. Host-profile schema 11 names
+the resulting rejection identity an exact I-cache span.
+
+A focused motif placed `LDN R13,R13; BR` across a guest I-cache line boundary,
+primed only the first line, and then executed four two-instruction passes. The
+first nonresident admission remained unstored; ordinary architectural fetch
+made the second line resident; one portable block was subsequently built and,
+where available, lowered once and entered twice. Its final CPU state, cache
+state, retired instructions, and cycles matched the generic two-core reference.
+That selector passed alongside four focused one-line admission/rejection and
+leading-load instances. Object inspection found no emitted identity-matcher
+call boundary. Per-line generation binding/revalidation and generic
+multi-memory construction remain outstanding, so Element 6 is not complete.
 
 ### Element 7 — x86-64 lowering and direct continuation
 

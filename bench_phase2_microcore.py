@@ -366,8 +366,8 @@ def _profile_probe(
         "single_core_block_rejection_cache"
     ]
     validation = {
-        "schema_is_version_10":
-            normalized["schema_version"] == 10,
+        "schema_is_version_11":
+            normalized["schema_version"] == 11,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -382,9 +382,9 @@ def _profile_probe(
             normalized["timing_semantics"]
             == "inclusive_nested_host_wall_nanoseconds"
         ),
-        "single_core_block_rejection_cache_is_bounded_exact_suffix": (
+        "single_core_block_rejection_cache_is_bounded_exact_span": (
             block_rejection_cache["kind"]
-            == "direct-mapped-exact-icache-suffix"
+            == "direct-mapped-exact-icache-span"
             and block_rejection_cache["entries"] == 512
             and block_rejection_cache["identity_bytes"] == 16
         ),
@@ -579,7 +579,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 10,
+        "schema_version": 11,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

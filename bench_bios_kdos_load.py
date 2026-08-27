@@ -378,7 +378,7 @@ def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
     stores = counts["uncontended_block_rejection_cache_stores"]
     return {
         "block_rejection_cache_metadata_supported": (
-            metadata["kind"] == "direct-mapped-exact-icache-suffix"
+            metadata["kind"] == "direct-mapped-exact-icache-span"
             and metadata["entries"] == 512
             and metadata["identity_bytes"] == 16
         ),
@@ -530,7 +530,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 10
+                            host_profile["schema_version"] == 11
                         ),
                         "settlement_routes_reconcile": (
                             profile_counts["settle_round_calls"]

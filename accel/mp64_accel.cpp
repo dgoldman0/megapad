@@ -1817,14 +1817,15 @@ struct CPUState {
         private_decode_cache{};
 
     // Exact-single-full-core decoded blocks are host-only acceleration
-    // plans. A block never spans an architectural I-cache line, and every
-    // use revalidates its complete encoding against the bytes currently
-    // visible in that guest I-cache. Failed admissions use a separate exact
-    // suffix identity so recurring authoritative starts do not evict useful
-    // positive plans. Both kinds therefore survive ordinary architectural
-    // I-cache invalidation/refill while the admission cache is conservatively
-    // cleared. Reset and discontinuous restore remain hard host-plan
-    // boundaries. None of these caches is architectural state.
+    // plans. Their contiguous identities are bounded by caller-owned entry
+    // storage and may span any resident architectural I-cache lines touched
+    // within that bound. Every use revalidates the complete encoding against
+    // bytes currently visible in the guest I-cache. Failed admissions use a
+    // separate exact inspected-span identity so recurring authoritative
+    // starts do not evict useful positive plans. Both kinds therefore survive
+    // ordinary architectural I-cache invalidation/refill while the admission
+    // cache is conservatively cleared. Reset and discontinuous restore remain
+    // hard host-plan boundaries. None of these caches is architectural state.
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_CACHE_ENTRIES = 1024;
     static_assert(
@@ -20012,6 +20013,112 @@ static std::size_t single_core_block_rejection_cache_index(
         ));
 }
 
+static MP64_ALWAYS_INLINE bool single_core_icache_identity_matches(
+        const CPUState& core,
+        uint64_t address,
+        const std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES>& identity,
+        uint8_t identity_size) noexcept {
+    if (
+        identity_size == 0 ||
+        identity_size > identity.size()
+    ) {
+        return false;
+    }
+
+    const auto [first_cache_index, first_tag] =
+        icache_key(address);
+    if (
+        !core.icache_valid[first_cache_index] ||
+        core.icache_tags[first_cache_index] != first_tag
+    ) {
+        return false;
+    }
+    const std::size_t first_line_offset =
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    const std::size_t first_chunk =
+        std::min<std::size_t>(
+            identity_size,
+            CPUState::ICACHE_LINE_BYTES - first_line_offset);
+    if (
+        std::memcmp(
+            core.icache_data[first_cache_index].data() +
+                first_line_offset,
+            identity.data(),
+            first_chunk) != 0
+    ) {
+        return false;
+    }
+    if (first_chunk == identity_size)
+        return true;
+
+    // The identity storage is no larger than one cache line, so a
+    // contiguous span can touch at most one continuation line.
+    static_assert(
+        std::tuple_size<
+            std::array<
+                uint8_t,
+                CPUState::ICACHE_LINE_BYTES>>::value <=
+        CPUState::ICACHE_LINE_BYTES);
+    const uint64_t second_address =
+        address + static_cast<uint64_t>(first_chunk);
+    const auto [second_cache_index, second_tag] =
+        icache_key(second_address);
+    return
+        core.icache_valid[second_cache_index] &&
+        core.icache_tags[second_cache_index] == second_tag &&
+        std::memcmp(
+            core.icache_data[second_cache_index].data(),
+            identity.data() + first_chunk,
+            static_cast<std::size_t>(identity_size) -
+                first_chunk) == 0;
+}
+
+static bool copy_single_core_icache_identity(
+        const CPUState& core,
+        uint64_t address,
+        uint8_t identity_size,
+        std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES>& identity) noexcept {
+    if (
+        identity_size == 0 ||
+        identity_size > identity.size()
+    ) {
+        return false;
+    }
+
+    std::size_t copied = 0;
+    uint64_t current = address;
+    while (copied < identity_size) {
+        const auto [cache_index, tag] =
+            icache_key(current);
+        if (
+            !core.icache_valid[cache_index] ||
+            core.icache_tags[cache_index] != tag
+        ) {
+            return false;
+        }
+        const std::size_t line_offset =
+            static_cast<std::size_t>(
+                current &
+                (CPUState::ICACHE_LINE_BYTES - 1));
+        const std::size_t chunk =
+            std::min<std::size_t>(
+                static_cast<std::size_t>(identity_size) - copied,
+                CPUState::ICACHE_LINE_BYTES - line_offset);
+        std::memcpy(
+            identity.data() + copied,
+            core.icache_data[cache_index].data() + line_offset,
+            chunk);
+        copied += chunk;
+        current += static_cast<uint64_t>(chunk);
+    }
+    return true;
+}
+
 static bool single_core_block_rejection_matches(
         const CPUState& core,
         uint64_t address) noexcept {
@@ -20026,25 +20133,17 @@ static bool single_core_block_rejection_matches(
         entry.psel != core.psel ||
         entry.spsel != core.spsel ||
         entry.identity_size == 0 ||
-        entry.identity_size > CPUState::ICACHE_LINE_BYTES ||
+        entry.identity_size > entry.identity.size() ||
         core.profile != CoreProfile::FULL ||
         !core.icache_enabled
     ) {
         return false;
     }
-    const auto [cache_index, tag] = icache_key(address);
-    const std::size_t line_offset =
-        static_cast<std::size_t>(
-            address & (CPUState::ICACHE_LINE_BYTES - 1));
-    return
-        core.icache_valid[cache_index] &&
-        core.icache_tags[cache_index] == tag &&
-        entry.identity_size ==
-            CPUState::ICACHE_LINE_BYTES - line_offset &&
-        std::memcmp(
-            core.icache_data[cache_index].data() + line_offset,
-            entry.identity.data(),
-            entry.identity_size) == 0;
+    return single_core_icache_identity_matches(
+        core,
+        address,
+        entry.identity,
+        entry.identity_size);
 }
 
 enum class SingleCoreBlockRejectionStorage : uint8_t {
@@ -20056,7 +20155,8 @@ enum class SingleCoreBlockRejectionStorage : uint8_t {
 static SingleCoreBlockRejectionStorage
 remember_single_core_block_rejection(
         CPUState& core,
-        uint64_t address) noexcept {
+        uint64_t address,
+        uint8_t identity_size) noexcept {
     if (
         core.profile != CoreProfile::FULL ||
         !core.icache_enabled ||
@@ -20066,26 +20166,25 @@ remember_single_core_block_rejection(
     ) {
         return SingleCoreBlockRejectionStorage::NONRESIDENT;
     }
-    const auto [cache_index, tag] = icache_key(address);
     if (
-        !core.icache_valid[cache_index] ||
-        core.icache_tags[cache_index] != tag
+        identity_size == 0 ||
+        identity_size >
+            CPUState::ICACHE_LINE_BYTES
     ) {
         return SingleCoreBlockRejectionStorage::NONRESIDENT;
     }
-    const std::size_t line_offset =
-        static_cast<std::size_t>(
-            address & (CPUState::ICACHE_LINE_BYTES - 1));
     CPUState::SingleCoreBlockRejectionEntry candidate;
     candidate.address = address;
     candidate.psel = core.psel;
     candidate.spsel = core.spsel;
-    candidate.identity_size = static_cast<uint8_t>(
-        CPUState::ICACHE_LINE_BYTES - line_offset);
-    std::memcpy(
-        candidate.identity.data(),
-        core.icache_data[cache_index].data() + line_offset,
-        candidate.identity_size);
+    candidate.identity_size = identity_size;
+    if (!copy_single_core_icache_identity(
+            core,
+            address,
+            identity_size,
+            candidate.identity)) {
+        return SingleCoreBlockRejectionStorage::NONRESIDENT;
+    }
     candidate.valid = true;
     CPUState::SingleCoreBlockRejectionEntry& destination =
         core.single_core_execution_plan_cache->rejections[
@@ -20103,6 +20202,7 @@ struct SingleCoreObservationalDecodeReader {
     std::size_t available = 0;
     std::array<uint8_t, CPUState::ICACHE_LINE_BYTES>* encoding = nullptr;
     std::size_t consumed = 0;
+    bool nonresident = false;
 
     bool read(uint8_t& value) {
         if (
@@ -20115,8 +20215,10 @@ struct SingleCoreObservationalDecodeReader {
         const std::optional<uint8_t> observed = private_icache_peek(
             *core,
             address + static_cast<uint64_t>(consumed));
-        if (!observed.has_value())
+        if (!observed.has_value()) {
+            nonresident = true;
             return false;
+        }
         value = *observed;
         (*encoding)[consumed++] = value;
         return true;
@@ -20234,15 +20336,23 @@ static bool decode_single_core_block_instruction(
         std::array<
             uint8_t,
             CPUState::ICACHE_LINE_BYTES>& encoding,
-        uint8_t& encoded_size) {
+        uint8_t& encoded_size,
+        uint8_t& inspected_size,
+        bool& nonresident) {
+    encoded_size = 0;
+    inspected_size = 0;
+    nonresident = false;
     SingleCoreObservationalDecodeReader reader{
         &core,
         address,
         available,
         &encoding,
         0,
+        false,
     };
     const DecodeResult result = decode_instruction(reader);
+    inspected_size = static_cast<uint8_t>(reader.consumed);
+    nonresident = reader.nonresident;
     if (
         result.status != DecodeStatus::DECODED ||
         result.bytes_consumed == 0 ||
@@ -21054,7 +21164,7 @@ static bool single_core_block_structure_is_valid(
         block.psel >= 32 ||
         block.spsel >= 32 ||
         block.identity_size == 0 ||
-        block.identity_size > CPUState::ICACHE_LINE_BYTES ||
+        block.identity_size > block.identity.size() ||
         block.instruction_count < 2 ||
         block.instruction_count >
             CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
@@ -21336,7 +21446,7 @@ static bool single_core_block_identity_matches(
         block.psel >= 32 ||
         block.spsel >= 32 ||
         block.identity_size == 0 ||
-        block.identity_size > CPUState::ICACHE_LINE_BYTES ||
+        block.identity_size > block.identity.size() ||
         block.instruction_count < 2 ||
         block.instruction_count >
             CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS ||
@@ -21345,19 +21455,11 @@ static bool single_core_block_identity_matches(
     ) {
         return false;
     }
-    const auto [cache_index, tag] = icache_key(address);
-    const std::size_t line_offset =
-        static_cast<std::size_t>(
-            address & (CPUState::ICACHE_LINE_BYTES - 1));
-    return
-        core.icache_valid[cache_index] &&
-        core.icache_tags[cache_index] == tag &&
-        line_offset + block.identity_size <=
-            CPUState::ICACHE_LINE_BYTES &&
-        std::memcmp(
-            core.icache_data[cache_index].data() + line_offset,
-            block.identity.data(),
-            block.identity_size) == 0;
+    return single_core_icache_identity_matches(
+        core,
+        address,
+        block.identity,
+        block.identity_size);
 }
 
 enum class SingleCoreBlockBuildRejection : uint8_t {
@@ -21365,20 +21467,28 @@ enum class SingleCoreBlockBuildRejection : uint8_t {
     ZERO_INSTRUCTION = 1,
     ONE_INSTRUCTION = 2,
     STRUCTURE = 3,
+    NONRESIDENT = 4,
+};
+
+struct SingleCoreBlockBuildFailure {
+    SingleCoreBlockBuildRejection reason =
+        SingleCoreBlockBuildRejection::NONE;
+    uint8_t identity_size = 0;
 };
 
 static MP64_NOINLINE CPUState::SingleCoreDecodedBlockEntry*
 build_single_core_decoded_block(
         CPUState& core,
         uint64_t address,
-        SingleCoreBlockBuildRejection& rejection) {
-    rejection = SingleCoreBlockBuildRejection::NONE;
+        SingleCoreBlockBuildFailure& failure) {
+    failure = {};
     if (
         core.profile != CoreProfile::FULL ||
         !core.icache_enabled ||
         core.ext_modifier != -1
     ) {
-        rejection = SingleCoreBlockBuildRejection::STRUCTURE;
+        failure.reason =
+            SingleCoreBlockBuildRejection::STRUCTURE;
         return nullptr;
     }
 
@@ -21386,15 +21496,15 @@ build_single_core_decoded_block(
     candidate.address = address;
     candidate.psel = core.psel;
     candidate.spsel = core.spsel;
-    const std::size_t line_capacity =
-        CPUState::ICACHE_LINE_BYTES -
-        static_cast<std::size_t>(
-            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    const std::size_t identity_capacity =
+        candidate.identity.size();
     std::size_t offset = 0;
+    std::size_t inspected_size = 0;
+    bool nonresident = false;
     uint32_t written_registers = 0;
     bool memory_seen = false;
     while (
-        offset < line_capacity &&
+        offset < identity_capacity &&
         candidate.instruction_count <
             CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
     ) {
@@ -21403,15 +21513,26 @@ build_single_core_decoded_block(
             uint8_t,
             CPUState::ICACHE_LINE_BYTES> encoding{};
         uint8_t encoded_size = 0;
+        uint8_t instruction_inspected_size = 0;
+        bool instruction_nonresident = false;
         if (!decode_single_core_block_instruction(
                 core,
                 address + static_cast<uint64_t>(offset),
-                line_capacity - offset,
+                identity_capacity - offset,
                 decoded,
                 encoding,
-                encoded_size)) {
+                encoded_size,
+                instruction_inspected_size,
+                instruction_nonresident)) {
+            inspected_size = std::max<std::size_t>(
+                inspected_size,
+                offset + instruction_inspected_size);
+            nonresident = instruction_nonresident;
             break;
         }
+        inspected_size = std::max<std::size_t>(
+            inspected_size,
+            offset + instruction_inspected_size);
         if (single_core_decoded_is_memory(decoded)) {
             if (single_core_decoded_is_direct_read(decoded)) {
                 if (
@@ -21496,14 +21617,26 @@ build_single_core_decoded_block(
 
     // One-instruction plans do not amortize cache validation and dispatch.
     if (candidate.instruction_count < 2) {
-        rejection = candidate.instruction_count == 0
-            ? SingleCoreBlockBuildRejection::ZERO_INSTRUCTION
-            : SingleCoreBlockBuildRejection::ONE_INSTRUCTION;
+        failure.reason = nonresident
+            ? SingleCoreBlockBuildRejection::NONRESIDENT
+            : (
+                candidate.instruction_count == 0
+                ? SingleCoreBlockBuildRejection::ZERO_INSTRUCTION
+                : SingleCoreBlockBuildRejection::ONE_INSTRUCTION
+            );
+        if (!nonresident) {
+            failure.identity_size = static_cast<uint8_t>(
+                std::min<std::size_t>(
+                    inspected_size,
+                    candidate.identity.size()));
+        }
         return nullptr;
     }
     candidate.identity_size = static_cast<uint8_t>(offset);
     if (!single_core_block_structure_is_valid(core, candidate)) {
-        rejection = SingleCoreBlockBuildRejection::STRUCTURE;
+        failure.reason =
+            SingleCoreBlockBuildRejection::STRUCTURE;
+        failure.identity_size = candidate.identity_size;
         return nullptr;
     }
     candidate.valid = true;
@@ -21938,14 +22071,18 @@ admit_single_core_decoded_block(
         const bool evicts_block = block->valid;
         const bool evicts_native_plan =
             static_cast<bool>(block->native_code);
-        SingleCoreBlockBuildRejection build_rejection =
-            SingleCoreBlockBuildRejection::NONE;
+        SingleCoreBlockBuildFailure build_failure;
         block = build_single_core_decoded_block(
-            core, address, build_rejection);
+            core, address, build_failure);
         if (block == nullptr) {
             const SingleCoreBlockRejectionStorage storage =
-                remember_single_core_block_rejection(
-                    core, address);
+                build_failure.reason ==
+                        SingleCoreBlockBuildRejection::NONRESIDENT
+                    ? SingleCoreBlockRejectionStorage::NONRESIDENT
+                    : remember_single_core_block_rejection(
+                        core,
+                        address,
+                        build_failure.identity_size);
             if (profile_enabled) {
                 if (
                     storage ==
@@ -21966,7 +22103,7 @@ admit_single_core_decoded_block(
                             profile
                                 .uncontended_block_rejection_cache_replacements);
                     }
-                    switch (build_rejection) {
+                    switch (build_failure.reason) {
                         case SingleCoreBlockBuildRejection::ZERO_INSTRUCTION:
                             host_saturating_increment(
                                 profile
@@ -21979,6 +22116,7 @@ admit_single_core_decoded_block(
                             break;
                         case SingleCoreBlockBuildRejection::NONE:
                         case SingleCoreBlockBuildRejection::STRUCTURE:
+                        case SingleCoreBlockBuildRejection::NONRESIDENT:
                             host_saturating_increment(
                                 profile
                                     .uncontended_block_structure_rejections);
@@ -25457,14 +25595,14 @@ static py::dict concurrency_profile_snapshot_dict(
 
     py::dict block_rejection_cache;
     block_rejection_cache["kind"] =
-        "direct-mapped-exact-icache-suffix";
+        "direct-mapped-exact-icache-span";
     block_rejection_cache["entries"] =
         CPUState::SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES;
     block_rejection_cache["identity_bytes"] =
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 10;
+    result["schema_version"] = 11;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =

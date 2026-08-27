@@ -58,10 +58,10 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 10
+    assert snapshot["schema_version"] == 11
     metadata = dict(snapshot["single_core_block_rejection_cache"])
     assert metadata == {
-        "kind": "direct-mapped-exact-icache-suffix",
+        "kind": "direct-mapped-exact-icache-span",
         "entries": 512,
         "identity_bytes": 16,
     }
@@ -2412,6 +2412,92 @@ loop:
         assert counts["uncontended_jit_executions"] == 2
         assert counts["uncontended_jit_steps"] == 4
     else:
+        assert counts["uncontended_block_steps"] == 0
+        assert counts["uncontended_jit_compile_attempts"] == 0
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 0
+        assert counts["uncontended_jit_steps"] == 0
+
+
+def _run_cross_line_link_loop(*, reference: bool) -> tuple[tuple, dict]:
+    system = _system(reference=reference)
+    loop_address = 15
+    loop = assemble(
+        """
+loop:
+    ldn r13, r13
+    br loop
+""",
+        base_addr=loop_address,
+    )
+    assert bytes(loop) == bytes.fromhex("50 dd 30 fc")
+    system.load_binary(0, assemble("nop"))
+    system.load_binary(loop_address, loop)
+    link_address = 0x200
+    system.load_binary(
+        link_address,
+        link_address.to_bytes(8, "little"),
+    )
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    system.cpu.regs[13] = link_address
+
+    # Populate only the starting guest I-cache line. The first loop visit
+    # must decline without retaining an identity that can mask the plan after
+    # architectural execution fills the following line.
+    prime = system.run_batch_stats(1)
+    assert prime.instructions_executed == 1
+    assert system.cpu.pc == 1
+    system.cpu.pc = loop_address
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    for _ in range(4):
+        stats = system.run_batch_stats(2)
+        assert stats.instructions_executed == 2
+        assert stats.system_cycles_advanced == 3
+        assert stats.per_core_cycles[0] == 3
+        assert system.cpu.pc == loop_address
+        assert system.cpu.regs[13] == link_address
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    return _core_signature(system), snapshot
+
+
+def test_cross_line_ldn_branch_builds_one_generic_native_block() -> None:
+    fast, snapshot = _run_cross_line_link_loop(reference=False)
+    reference, _ = _run_cross_line_link_loop(reference=True)
+
+    assert fast == reference
+    counts = dict(snapshot["counts"])
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_steps"] == 8
+    assert counts["uncontended_block_lookups"] == 6
+    assert counts["uncontended_block_hits"] == 2
+    assert counts["uncontended_block_misses"] == 4
+    assert counts["uncontended_block_build_attempts"] == 3
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_nonresident_rejections"] == 1
+    assert counts["uncontended_block_zero_instruction_rejections"] == 0
+    assert counts["uncontended_block_one_instruction_rejections"] == 1
+    assert counts["uncontended_block_structure_rejections"] == 0
+    assert counts["uncontended_block_rejection_cache_hits"] == 1
+    assert counts["uncontended_block_rejection_cache_stores"] == 1
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_executions"] == 2
+        assert counts["uncontended_block_steps"] == 4
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
+    else:
+        assert counts["uncontended_block_executions"] == 0
         assert counts["uncontended_block_steps"] == 0
         assert counts["uncontended_jit_compile_attempts"] == 0
         assert counts["uncontended_jit_compilations"] == 0
