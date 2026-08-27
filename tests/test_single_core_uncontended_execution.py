@@ -49,6 +49,10 @@ JIT_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_max_code_bytes",
     "uncontended_jit_executions",
     "uncontended_jit_steps",
+    "uncontended_jit_chain_entries",
+    "uncontended_jit_chained_blocks",
+    "uncontended_jit_chained_steps",
+    "uncontended_jit_chain_probes",
 )
 JIT_PROFILE_WALL_FIELDS = (
     "uncontended_jit_compile",
@@ -58,7 +62,7 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 9
+    assert snapshot["schema_version"] == 10
     metadata = dict(snapshot["single_core_block_rejection_cache"])
     assert metadata == {
         "kind": "direct-mapped-exact-icache-suffix",
@@ -1157,6 +1161,65 @@ loop:
         )
 
 
+def test_warm_compiled_ring_chains_with_exact_budget_and_cycles() -> None:
+    system = _system()
+    program = assemble(
+        """
+.org 0
+first:
+    inc r4
+    lbr second
+.org 0x20
+second:
+    inc r5
+    lbr first
+"""
+    )
+    system.load_binary(0, program)
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(128)
+    assert warm.instructions_executed == 128
+    system.cpu.regs[4] = 0
+    system.cpu.regs[5] = 0
+    system.cpu.pc = 0
+    cycles_before = system.cpu.cycle_count
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1_000)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 1_000
+    assert stats.system_cycles_advanced == 1_500
+    assert system.cpu.cycle_count - cycles_before == 1_500
+    assert system.cpu.pc == 0
+    assert system.cpu.regs[4] == 250
+    assert system.cpu.regs[5] == 250
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_lookups"] == 1
+        assert counts["uncontended_block_hits"] == 1
+        assert counts["uncontended_block_misses"] == 0
+        assert counts["uncontended_block_executions"] == 500
+        assert counts["uncontended_block_steps"] == 1_000
+        assert counts["uncontended_jit_executions"] == 500
+        assert counts["uncontended_jit_steps"] == 1_000
+        assert counts["uncontended_jit_chain_entries"] == 1
+        assert counts["uncontended_jit_chained_blocks"] == 499
+        assert counts["uncontended_jit_chained_steps"] == 998
+        assert counts["uncontended_jit_chain_probes"] == 499
+        assert counts["uncontended_jit_executions"] == (
+            counts["uncontended_jit_chain_entries"]
+            + counts["uncontended_jit_chained_blocks"]
+        )
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
 def test_warm_boot_reuses_arena_after_invalidating_native_plans() -> None:
     system = _system()
     first_address = 0
@@ -1260,14 +1323,14 @@ loop:
     counts = dict(snapshot["counts"])
 
     assert system.cpu.regs[4] == 6
-    assert counts["uncontended_block_lookups"] == 8
     assert counts["uncontended_block_misses"] == 5
-    assert counts["uncontended_block_hits"] == 3
     assert counts["uncontended_block_builds"] == 1
     assert counts["uncontended_block_executions"] == 4
     assert counts["uncontended_block_steps"] == 8
     assert counts["uncontended_block_evictions"] == 0
     if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_block_lookups"] == 7
+        assert counts["uncontended_block_hits"] == 2
         assert counts["uncontended_jit_compile_attempts"] == 1
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_compile_failures"] == 0
@@ -1277,7 +1340,13 @@ loop:
         assert counts["uncontended_jit_slot_rewrites"] == 0
         assert counts["uncontended_jit_executions"] == 3
         assert counts["uncontended_jit_steps"] == 6
+        assert counts["uncontended_jit_chain_entries"] == 2
+        assert counts["uncontended_jit_chained_blocks"] == 1
+        assert counts["uncontended_jit_chained_steps"] == 2
+        assert counts["uncontended_jit_chain_probes"] == 1
     else:
+        assert counts["uncontended_block_lookups"] == 8
+        assert counts["uncontended_block_hits"] == 3
         assert all(
             counts[name] == 0
             for name in JIT_PROFILE_COUNT_FIELDS

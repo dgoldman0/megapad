@@ -42,6 +42,10 @@ These fields remain zero for this microcore topology.
 Version 12 carries native host-profile schema 9 and its exact-single-core
 decoded-block rejection-cache geometry and admission telemetry. These fields
 remain zero for this microcore topology.
+
+Version 13 carries native host-profile schema 10 and its exact-single-core
+compiled-block chaining telemetry. These fields remain zero for this
+microcore topology.
 """
 
 from __future__ import annotations
@@ -66,7 +70,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 12
+REPORT_SCHEMA_VERSION = 13
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -362,8 +366,8 @@ def _profile_probe(
         "single_core_block_rejection_cache"
     ]
     validation = {
-        "schema_is_version_9":
-            normalized["schema_version"] == 9,
+        "schema_is_version_10":
+            normalized["schema_version"] == 10,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -428,6 +432,10 @@ def _profile_probe(
                     "uncontended_jit_max_code_bytes",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
+                    "uncontended_jit_chain_entries",
+                    "uncontended_jit_chained_blocks",
+                    "uncontended_jit_chained_steps",
+                    "uncontended_jit_chain_probes",
                 )
             )
             and normalized["wall_ns"]["uncontended_round"] == 0
@@ -567,7 +575,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 9,
+        "schema_version": 10,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

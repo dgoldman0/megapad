@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -304,6 +304,14 @@ def profile_derived(profile: dict | None) -> dict | None:
             counts["uncontended_jit_steps"],
             counts["uncontended_jit_executions"],
         ),
+        "jit_blocks_per_chain_entry": _ratio(
+            counts["uncontended_jit_executions"],
+            counts["uncontended_jit_chain_entries"],
+        ),
+        "jit_chained_block_fraction": _ratio(
+            counts["uncontended_jit_chained_blocks"],
+            counts["uncontended_jit_executions"],
+        ),
         "jit_compile_us_per_attempt": (
             None
             if counts["uncontended_jit_compile_attempts"] == 0
@@ -522,7 +530,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 9
+                            host_profile["schema_version"] == 10
                         ),
                         "host_profile_frozen": not host_profile["enabled"],
                         "profiled_steps_match_run": (
@@ -533,6 +541,24 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                                 "uncontended_jit_slot_publications"
                             ]
                             == profile_counts["uncontended_jit_compilations"]
+                        ),
+                        "jit_chain_executions_reconcile": (
+                            profile_counts["uncontended_jit_executions"]
+                            == profile_counts[
+                                "uncontended_jit_chain_entries"
+                            ]
+                            + profile_counts[
+                                "uncontended_jit_chained_blocks"
+                            ]
+                        ),
+                        "jit_chain_probes_cover_successes": (
+                            profile_counts[
+                                "uncontended_jit_chained_blocks"
+                            ]
+                            <= profile_counts[
+                                "uncontended_jit_chain_probes"
+                            ]
+                            <= profile_counts["uncontended_jit_executions"]
                         ),
                         "fresh_jit_arena_is_single_and_bounded": (
                             (
@@ -705,6 +731,7 @@ def print_human(result: dict) -> None:
             "  DBT: "
             f"{counts['uncontended_jit_compilations']:,} compilations; "
             f"{counts['uncontended_jit_steps']:,} JIT steps; "
+            f"{counts['uncontended_jit_chained_blocks']:,} chained blocks; "
             f"{counts['uncontended_block_evictions']:,} block evictions; "
             f"{counts['uncontended_jit_plan_evictions']:,} plan evictions; "
             f"{counts['uncontended_jit_slot_rewrites']:,} slot rewrites"

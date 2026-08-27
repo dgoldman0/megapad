@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2671,6 +2671,10 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_max_code_bytes",
     "uncontended_jit_executions",
     "uncontended_jit_steps",
+    "uncontended_jit_chain_entries",
+    "uncontended_jit_chained_blocks",
+    "uncontended_jit_chained_steps",
+    "uncontended_jit_chain_probes",
     "logical_subfrontiers",
     "round_absorptions",
     "worker_waves",
@@ -2897,7 +2901,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 9,
+            native_snapshot["schema_version"] == 10,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3019,6 +3023,10 @@ def _host_profile_probe(
                     "uncontended_jit_max_code_bytes",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
+                    "uncontended_jit_chain_entries",
+                    "uncontended_jit_chained_blocks",
+                    "uncontended_jit_chained_steps",
+                    "uncontended_jit_chain_probes",
                 )
             )
         ),
@@ -3086,6 +3094,7 @@ def _host_profile_probe(
             native_counts["uncontended_block_executions"]
             <= native_counts["uncontended_block_hits"]
             + native_counts["uncontended_block_builds"]
+            + native_counts["uncontended_jit_chained_blocks"]
         ),
         "uncontended_block_steps_within_uncontended_steps": (
             native_counts["uncontended_block_executions"]
@@ -3135,6 +3144,21 @@ def _host_profile_probe(
             native_counts["uncontended_jit_executions"]
             <= native_counts["uncontended_jit_steps"]
             <= native_counts["uncontended_block_steps"]
+        ),
+        "uncontended_jit_chain_executions_reconcile": (
+            native_counts["uncontended_jit_executions"]
+            == native_counts["uncontended_jit_chain_entries"]
+            + native_counts["uncontended_jit_chained_blocks"]
+        ),
+        "uncontended_jit_chain_probes_cover_successes": (
+            native_counts["uncontended_jit_chained_blocks"]
+            <= native_counts["uncontended_jit_chain_probes"]
+            <= native_counts["uncontended_jit_executions"]
+        ),
+        "uncontended_jit_chained_steps_are_bounded": (
+            native_counts["uncontended_jit_chained_blocks"]
+            <= native_counts["uncontended_jit_chained_steps"]
+            <= native_counts["uncontended_jit_steps"]
         ),
         "round_absorptions_match_logical_subfrontiers":
             native_counts["round_absorptions"]
@@ -3269,7 +3293,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 9,
+        "schema_version": 10,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
@@ -3284,6 +3308,14 @@ def _host_profile_probe(
                     native_counts["uncontended_steps"],
                     returned_instructions,
                 ),
+            "uncontended_jit_blocks_per_chain_entry": _optional_ratio(
+                native_counts["uncontended_jit_executions"],
+                native_counts["uncontended_jit_chain_entries"],
+            ),
+            "uncontended_jit_chained_block_fraction": _optional_ratio(
+                native_counts["uncontended_jit_chained_blocks"],
+                native_counts["uncontended_jit_executions"],
+            ),
             "worker_commands_per_wave": _optional_ratio(
                 native_counts["worker_commands"],
                 native_counts["worker_waves"],
