@@ -8,7 +8,7 @@ import pytest
 
 from asm import assemble
 from devices import MMIO_BASE, SYSINFO_BASE
-from megapad64 import IVEC_TIMER, Megapad64 as PythonMegapad64
+from megapad64 import IVEC_IPI, IVEC_TIMER, Megapad64 as PythonMegapad64
 from system import MegapadSystem
 
 
@@ -36,6 +36,10 @@ loop:
     lbr loop
 """
 REGISTER_BLOCK_SLICES = (1, 1, 2, 7, 19, 1_003)
+BYTE_COPY_MOTIF_SOURCE = """
+    ld.b r0, r9
+    st.b r7, r0
+"""
 JIT_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_compile_attempts",
     "uncontended_jit_compilations",
@@ -2563,10 +2567,7 @@ def _assert_multi_memory_profile(
 
 def _run_byte_copy_motif(*, reference: bool) -> tuple[tuple, dict]:
     system = _memory_motif_system(
-        """
-    ld.b r0, r9
-    st.b r7, r0
-""",
+        BYTE_COPY_MOTIF_SOURCE,
         reference=reference,
     )
     sources = ((0x200, 0x12), (0x220, 0xA5))
@@ -2613,6 +2614,130 @@ def test_hot_byte_copy_pair_uses_one_generic_two_span_block() -> None:
 
     assert fast == reference
     _assert_multi_memory_profile(snapshot, instruction_count=2)
+
+
+def _warmed_byte_copy_system(*, reference: bool) -> MegapadSystem:
+    system = _memory_motif_system(
+        BYTE_COPY_MOTIF_SOURCE,
+        reference=reference,
+    )
+    system.load_binary(0x200, b"\x12")
+    system.load_binary(0x300, b"\xEE")
+    for _ in range(2):
+        system.cpu.pc = 1
+        system.cpu.regs[9] = 0x200
+        system.cpu.regs[7] = 0x300
+        warm = system.run_batch_stats(2)
+        assert warm.instructions_executed == 2
+        assert warm.system_cycles_advanced == 2
+    return system
+
+
+def _run_later_span_alias_fallback(
+    *,
+    reference: bool,
+) -> tuple[tuple, dict]:
+    system = _warmed_byte_copy_system(reference=reference)
+    system.load_binary(0x220, b"\xA5")
+    system.load_binary(0x320, b"\xEE")
+    system.cpu.pc = 1
+    system.cpu.regs[0] = 0
+    system.cpu.regs[9] = 0x220
+    system.cpu.regs[7] = len(system.cpu.mem) + 0x320
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(2)
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+
+    assert stats.instructions_executed == 2
+    assert stats.system_cycles_advanced == 2
+    assert system.cpu.regs[0] == 0xA5
+    assert system.cpu.regs[9] == 0x220
+    assert system.cpu.regs[7] == len(system.cpu.mem) + 0x320
+    assert system.cpu.pc == 5
+    assert system.cpu.mem[0x320] == 0xA5
+    return _core_signature(system), snapshot
+
+
+def test_later_span_preflight_failure_makes_zero_block_progress() -> None:
+    fast, snapshot = _run_later_span_alias_fallback(reference=False)
+    reference, _ = _run_later_span_alias_fallback(reference=True)
+
+    assert fast == reference
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_steps"] == 2
+    assert counts["uncontended_block_lookups"] == 2
+    assert counts["uncontended_block_hits"] == 1
+    assert counts["uncontended_block_executions"] == 0
+    assert counts["uncontended_block_steps"] == 0
+    assert counts["uncontended_jit_executions"] == 0
+    assert counts["uncontended_jit_steps"] == 0
+
+
+def test_native_multi_memory_ipi_exit_publishes_exact_prefix() -> None:
+    system = _warmed_byte_copy_system(reference=False)
+    owner = system._native_system
+    if (
+        owner._concurrency_profile_snapshot()[
+            "single_core_jit_backend"
+        ] != "x86_64"
+    ):
+        pytest.skip("native completed-prefix oracle requires x86-64")
+
+    source = 0x220
+    destination = 0x320
+    system.load_binary(source, b"\xA5")
+    system.load_binary(destination, b"\xEE")
+    system.cpu.pc = 1
+    system.cpu.regs[0] = 0
+    system.cpu.regs[9] = source
+    system.cpu.regs[7] = destination
+    system.cpu.flag_i = True
+    deliveries: list[tuple[int, tuple]] = []
+
+    def observe_ipi(vector: int) -> None:
+        deliveries.append((vector, _core_signature(system)))
+        owner.set_ipi_line(0, False)
+        system.cpu.flag_i = False
+        system.cpu.halted = True
+
+    system.cpu._trap = observe_ipi
+    owner._start_concurrency_profile()
+    owner._inject_uncontended_ipi_at_next_native_entry()
+
+    stats = system.run_batch_stats(2)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    reference = _warmed_byte_copy_system(reference=True)
+    reference.load_binary(source, b"\xA5")
+    reference.load_binary(destination, b"\xEE")
+    reference.cpu.pc = 1
+    reference.cpu.regs[0] = 0
+    reference.cpu.regs[9] = source
+    reference.cpu.regs[7] = destination
+    reference.cpu.flag_i = True
+    reference_stats = reference.run_batch_stats(1)
+
+    assert reference_stats.instructions_executed == 1
+    assert deliveries == [(IVEC_IPI, _core_signature(reference))]
+    assert stats.instructions_executed == 1
+    assert stats.system_cycles_advanced == 1
+    assert system.cpu.regs[0] == 0xA5
+    assert system.cpu.pc == 3
+    assert system.cpu.mem[destination] == 0xEE
+    assert counts["uncontended_steps"] == 1
+    assert counts["uncontended_interrupt_boundaries"] == 1
+    assert counts["uncontended_block_lookups"] == 1
+    assert counts["uncontended_block_hits"] == 1
+    assert counts["uncontended_block_executions"] == 1
+    assert counts["uncontended_block_steps"] == 1
+    assert counts["uncontended_jit_executions"] == 1
+    assert counts["uncontended_jit_steps"] == 1
 
 
 def _run_forth_plus_motif(*, reference: bool) -> tuple[tuple, dict]:

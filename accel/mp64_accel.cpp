@@ -5361,10 +5361,11 @@ struct SystemState {
     // while the coordinator owns scheduler_mutex.
     ConcurrencyProfileCounters concurrency_profile{};
     bool concurrency_profile_batch_active = false;
-    // Test-only host fault seam for the exact-singleton coordinator. A
-    // positive value fails after that many successful native step_one calls
-    // and resets itself before throwing.
-    int64_t uncontended_failure_after_native_steps = -1;
+    // Test-only exact-singleton injection seam. Negative disables it, zero
+    // asserts an IPI after the next warm native-block admission, and a
+    // positive value fails after that many successful native step_one calls.
+    // Every armed mode resets itself before publishing its injected event.
+    int64_t uncontended_test_injection = -1;
     std::atomic<bool> native_batch_active{false};
     std::atomic<bool> cycle_execution_pending{false};
     int advertised_core_count = 0;
@@ -22167,9 +22168,9 @@ static void run_uncontended_single_core_segment_impl(
             segment.run.steps_executed++;
             if constexpr (INJECT_FAILURE) {
                 if (
-                    --system.uncontended_failure_after_native_steps == 0
+                    --system.uncontended_test_injection == 0
                 ) {
-                    system.uncontended_failure_after_native_steps = -1;
+                    system.uncontended_test_injection = -1;
                     throw std::runtime_error(
                         "injected uncontended single-core "
                         "scheduler failure");
@@ -22215,18 +22216,76 @@ static void run_uncontended_single_core_segment_impl(
     }
 }
 
+static MP64_NOINLINE void
+run_uncontended_single_core_ipi_injection(
+        SystemState& system,
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        int max_steps,
+        UncontendedSingleCoreSegment& segment) {
+    system.uncontended_test_injection = -1;
+    const SingleCoreDecodedBlockAdmission admission =
+        admit_single_core_decoded_block(
+            system,
+            core,
+            callbacks,
+            max_steps);
+    if (
+        !core.flag_i ||
+        admission.block == nullptr ||
+        !admission.cache_hit ||
+        !admission.block->native_code ||
+        max_steps < admission.block->instruction_count
+    ) {
+        throw std::runtime_error(
+            "uncontended IPI injection requires an interrupt-enabled "
+            "warm native block");
+    }
+
+    // Admission has already passed the scheduler's pending-interrupt check.
+    // Assert the real router mirror before entry so the generated poll after
+    // instruction one must publish an exact completed prefix.
+    system.shared_interrupts.set_ipi_line(core.core_id, true);
+    const BlockExit exit = execute_single_core_decoded_block_plan(
+        system,
+        core,
+        callbacks,
+        max_steps,
+        admission.block,
+        admission.cache_hit);
+    if (
+        exit.reason != BlockExitReason::INTERRUPT_BOUNDARY ||
+        exit.completed_instructions == 0 ||
+        exit.completed_instructions >=
+            admission.block->instruction_count
+    ) {
+        throw std::logic_error(
+            "uncontended IPI injection did not produce a native prefix");
+    }
+    segment.run.total_cycles = static_cast<int64_t>(
+        exit.completed_cycles);
+    segment.run.steps_executed = static_cast<int64_t>(
+        exit.completed_instructions);
+    segment.interrupt_boundary = true;
+}
+
 static void run_uncontended_single_core_segment(
         SystemState& system,
         CPUState& core,
         const StepCallbacks& callbacks,
         int max_steps,
         UncontendedSingleCoreSegment& segment) {
-    if (system.uncontended_failure_after_native_steps > 0) {
-        run_uncontended_single_core_segment_impl<true>(
+    if (system.uncontended_test_injection < 0) {
+        run_uncontended_single_core_segment_impl<false>(
             system, core, callbacks, max_steps, segment);
         return;
     }
-    run_uncontended_single_core_segment_impl<false>(
+    if (system.uncontended_test_injection == 0) {
+        run_uncontended_single_core_ipi_injection(
+            system, core, callbacks, max_steps, segment);
+        return;
+    }
+    run_uncontended_single_core_segment_impl<true>(
         system, core, callbacks, max_steps, segment);
 }
 
@@ -30045,9 +30104,32 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "uncontended failure injection requires an "
                         "exactly single-core system");
                 }
-                system.uncontended_failure_after_native_steps = steps;
+                system.uncontended_test_injection = steps;
             },
             py::arg("steps"))
+        .def(
+            "_inject_uncontended_ipi_at_next_native_entry",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(
+                        system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "uncontended IPI injection cannot change "
+                        "during an active native batch");
+                }
+                if (
+                    system.execution_cores.size() != 1 ||
+                    system.cores.size() != 1 ||
+                    !system.cluster_states.empty()
+                ) {
+                    throw std::runtime_error(
+                        "uncontended IPI injection requires an "
+                        "exactly single-core system");
+                }
+                system.uncontended_test_injection = 0;
+            })
         .def(
             "_run_private_full_core_commands",
             [](SystemState& system,

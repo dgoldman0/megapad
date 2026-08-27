@@ -720,6 +720,18 @@ the existing rejection-entry coverage. The sequential extension build and 12
 focused selector, collision, refill, and cross-line cases pass; this is a
 caller-contract cleanup, not an identity-policy change.
 
+The third consolidation slice resolves EK-F5 with two exact multi-memory
+boundaries. A warmed byte-copy block whose later store uses an architectural
+Bank-0 alias now proves that bounded direct-span preflight makes zero block or
+JIT progress before ordinary execution performs the exact aliased load/store.
+A one-shot, out-of-line diagnostic asserts the real IPI router line after warm
+block admission; the unchanged generated poll retires exactly the first load,
+publishes its one-instruction/one-cycle prefix, and leaves the terminal store
+untouched before normal interrupt settlement. The diagnostic adds no generated
+entry branch and changes no DBT ABI. The sequential build and 13 focused
+preflight, multi-memory, callback-prefix, interrupt, store, CALL, and RET cases
+pass.
+
 - Extract Python buffer leases, callback construction, snapshot codecs, and
   pybind registration only after their machine/CPU owners have stable native
   headers; avoid a catch-all header that recreates the monolith.
@@ -807,5 +819,5 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
 | EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as low priority during consolidation unless a new profile shows it remains material. |
 | EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden provenance during consolidation without retained remaining-shape evidence and paired exact justification. |
-| EK-F5 | Happy-path construction coverage does not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Add exact zero-progress and completed-prefix oracles during permitted Element 8 acceptance; continuation is no longer a condition on this work. |
+| EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if Element 8 profiling identifies it as material and paired exact evidence supports the change. |
