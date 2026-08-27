@@ -707,6 +707,12 @@ loop:
 
     assert system.cpu.regs[4] == 0
     assert system.cpu.regs[5] == 3
+    assert counts["uncontended_block_lookups"] == 8
+    assert counts["uncontended_block_misses"] == 6
+    assert counts["uncontended_block_hits"] == 2
+    assert counts["uncontended_block_builds"] == 2
+    assert counts["uncontended_block_executions"] == 4
+    assert counts["uncontended_block_steps"] == 8
     assert counts["uncontended_block_evictions"] == 0
     if snapshot["single_core_jit_backend"] == "x86_64":
         assert counts["uncontended_jit_compile_attempts"] == 2
@@ -717,9 +723,210 @@ loop:
         assert counts["uncontended_jit_arena_allocation_failures"] == 0
         assert counts["uncontended_jit_slot_publications"] == 2
         assert counts["uncontended_jit_slot_rewrites"] == 1
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
         storage = dict(snapshot["single_core_jit_storage"])
         assert storage["ready"]
         assert not storage["failed"]
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+@pytest.mark.parametrize(
+    "invalidation",
+    ("same-byte-write", "invalidate-all"),
+)
+def test_native_plan_survives_architectural_icache_refill(
+    invalidation: str,
+) -> None:
+    system = _system()
+    program = assemble(
+        """
+loop:
+    inc r4
+    br loop
+"""
+    )
+    system.load_binary(0, program)
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    first = system.run_batch_stats(6)
+    assert first.instructions_executed == 6
+    if invalidation == "same-byte-write":
+        system.cpu.mem_write8(0, program[0])
+    else:
+        system.cpu._cs.icache_control_write(3)
+    second = system.run_batch_stats(6)
+    assert second.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[4] == 6
+    assert counts["uncontended_block_lookups"] == 8
+    assert counts["uncontended_block_misses"] == 5
+    assert counts["uncontended_block_hits"] == 3
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_executions"] == 4
+    assert counts["uncontended_block_steps"] == 8
+    assert counts["uncontended_block_evictions"] == 0
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 0
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_slot_publications"] == 1
+        assert counts["uncontended_jit_slot_rewrites"] == 0
+        assert counts["uncontended_jit_executions"] == 3
+        assert counts["uncontended_jit_steps"] == 6
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_changed_code_replaces_retained_native_plan_after_refill() -> None:
+    system = _system()
+    original = assemble(
+        """
+loop:
+    inc r4
+    br loop
+"""
+    )
+    replacement = assemble(
+        """
+loop:
+    inc r5
+    br loop
+"""
+    )
+    assert len(original) == len(replacement)
+    assert original[1:] == replacement[1:]
+    system.load_binary(0, original)
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    first = system.run_batch_stats(6)
+    assert first.instructions_executed == 6
+    system.cpu.mem_write8(0, replacement[0])
+    second = system.run_batch_stats(6)
+    assert second.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[4] == 3
+    assert system.cpu.regs[5] == 3
+    assert counts["uncontended_block_lookups"] == 8
+    assert counts["uncontended_block_misses"] == 6
+    assert counts["uncontended_block_hits"] == 2
+    assert counts["uncontended_block_builds"] == 2
+    assert counts["uncontended_block_executions"] == 4
+    assert counts["uncontended_block_steps"] == 8
+    assert counts["uncontended_block_evictions"] == 1
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 2
+        assert counts["uncontended_jit_compilations"] == 2
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 1
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_slot_publications"] == 2
+        assert counts["uncontended_jit_slot_rewrites"] == 1
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_terminal_native_store_invalidates_retained_target_plan() -> None:
+    system = _system()
+    victim_address = 0x100
+    writer = assemble(
+        """
+    inc r4
+    st.b r5, r6
+"""
+    )
+    original = assemble(
+        """
+loop:
+    inc r7
+    br loop
+"""
+    )
+    replacement = assemble(
+        """
+loop:
+    inc r8
+    br loop
+"""
+    )
+    assert len(original) == len(replacement)
+    assert original[1:] == replacement[1:]
+    system.load_binary(0, writer)
+    system.load_binary(victim_address, original)
+    system.boot(entry=victim_address)
+
+    victim_warm = system.run_batch_stats(6)
+    assert victim_warm.instructions_executed == 6
+    for _ in range(3):
+        system.cpu.pc = 0
+        system.cpu.regs[5] = victim_address
+        system.cpu.regs[6] = original[0]
+        writer_warm = system.run_batch_stats(2)
+        assert writer_warm.instructions_executed == 2
+    system.cpu.pc = victim_address
+    victim_refill = system.run_batch_stats(6)
+    assert victim_refill.instructions_executed == 6
+    original_executions = system.cpu.regs[7]
+    assert original_executions == 6
+
+    owner = system._native_system
+    owner._start_concurrency_profile()
+    system.cpu.pc = 0
+    system.cpu.regs[5] = victim_address
+    system.cpu.regs[6] = replacement[0]
+    native_write = system.run_batch_stats(2)
+    assert native_write.instructions_executed == 2
+    system.cpu.pc = victim_address
+    changed = system.run_batch_stats(6)
+    assert changed.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[7] == original_executions
+    assert system.cpu.regs[8] == 3
+    assert system.cpu.mem[victim_address] == replacement[0]
+    assert counts["uncontended_block_lookups"] == 5
+    assert counts["uncontended_block_misses"] == 3
+    assert counts["uncontended_block_hits"] == 2
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_evictions"] == 1
+    assert counts["uncontended_block_executions"] == 3
+    assert counts["uncontended_block_steps"] == 6
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 1
+        assert counts["uncontended_jit_arena_allocations"] == 0
+        assert counts["uncontended_jit_slot_publications"] == 1
+        assert counts["uncontended_jit_slot_rewrites"] == 1
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 4
     else:
         assert all(
             counts[name] == 0

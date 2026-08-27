@@ -1714,8 +1714,8 @@ enum class CoreProfile : uint8_t {
 
 // One non-owning reference into the system-owned exact-single JIT arena.
 // Code is fully emitted through the arena's RW alias before its distinct RX
-// address is published here. Cache invalidation drops the reference; only the
-// arena owns and ultimately unmaps executable storage.
+// address is published here. A hard execution-plan discard drops the
+// reference; only the arena owns and ultimately unmaps executable storage.
 class HostExecutableCode {
 public:
     HostExecutableCode() = default;
@@ -2216,9 +2216,10 @@ struct CPUState {
     // Exact-single-full-core decoded blocks are host-only acceleration
     // plans. A block never spans an architectural I-cache line, and every
     // use revalidates its complete encoding against the bytes currently
-    // visible in that guest I-cache. Keeping the plan beside the existing
-    // private admission cache gives both accelerators the same invalidation
-    // lifetime without making either one architectural state.
+    // visible in that guest I-cache. These plans therefore survive ordinary
+    // architectural I-cache invalidation/refill while the admission cache is
+    // conservatively cleared. Reset and discontinuous restore remain hard
+    // host-plan boundaries. Neither cache is architectural state.
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_CACHE_ENTRIES =
             PRIVATE_DECODE_CACHE_ENTRIES;
@@ -2256,17 +2257,25 @@ struct CPUState {
         SINGLE_CORE_BLOCK_CACHE_ENTRIES>
         single_core_block_cache{};
 
-    void clear_private_decode_cache() noexcept {
+    void clear_private_decode_admission_cache() noexcept {
         for (PrivateDecodeCacheEntry& entry :
              private_decode_cache) {
             entry.valid = false;
         }
+    }
+
+    void discard_single_core_execution_plans() noexcept {
         for (SingleCoreDecodedBlockEntry& entry :
              single_core_block_cache) {
             entry.valid = false;
             entry.native_compile_checked = false;
             entry.native_code.reset();
         }
+    }
+
+    void discard_all_host_instruction_plans() noexcept {
+        clear_private_decode_admission_cache();
+        discard_single_core_execution_plans();
     }
 
     void register_accel_hook(
@@ -6733,13 +6742,13 @@ static inline void icache_invalidate_span(
         }
     }
     if (invalidated)
-        s.clear_private_decode_cache();
+        s.clear_private_decode_admission_cache();
 }
 
 static inline void icache_invalidate_all(
         CPUState& s,
         bool reset_statistics) {
-    s.clear_private_decode_cache();
+    s.clear_private_decode_admission_cache();
     s.icache_valid.fill(0);
     s.ifetch_window_valid = false;
     if (reset_statistics) {
@@ -6750,6 +6759,7 @@ static inline void icache_invalidate_all(
 
 static inline void icache_reset(CPUState& s) {
     s.icache_enabled = s.profile == CoreProfile::FULL ? 1 : 0;
+    s.discard_single_core_execution_plans();
     icache_invalidate_all(s, true);
 }
 
@@ -22958,10 +22968,10 @@ try_execute_single_core_decoded_block(
     }
 
     // A decoded plan must be observed again before it is compiled. This
-    // keeps one-shot boot/source paths from paying mmap+mprotect churn while
-    // letting the first repeated use compile and immediately enter native
-    // code. Ineligible sliced or timing-active visits do not consume that
-    // opportunity.
+    // keeps one-shot boot/source paths from allocating and publishing host
+    // code, while the first repeated use compiles and immediately enters
+    // native code. Ineligible sliced or timing-active visits do not consume
+    // that opportunity.
     if (
         block_cache_hit &&
         !block->native_compile_checked &&
@@ -29251,7 +29261,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     data.data(),
                     data.size());
                 s.ifetch_window_valid = false;
-                s.clear_private_decode_cache();
+                s.discard_all_host_instruction_plans();
             })
         .def_readwrite("priv_level", &CPUState::priv_level)
         .def_readwrite("mpu_base", &CPUState::mpu_base)
