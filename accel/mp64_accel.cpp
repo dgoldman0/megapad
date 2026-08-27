@@ -4502,10 +4502,6 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_jit_max_code_bytes = 0;
     uint64_t uncontended_jit_executions = 0;
     uint64_t uncontended_jit_steps = 0;
-    uint64_t uncontended_jit_chain_entries = 0;
-    uint64_t uncontended_jit_chained_blocks = 0;
-    uint64_t uncontended_jit_chained_steps = 0;
-    uint64_t uncontended_jit_chain_probes = 0;
     uint64_t logical_subfrontiers = 0;
     uint64_t round_absorptions = 0;
     uint64_t worker_waves = 0;
@@ -23198,201 +23194,6 @@ admit_single_core_decoded_block(
     return admission;
 }
 
-// Execute one already-published block and settle its complete architectural
-// boundary before any successor can run. Keeping this validation in C++ lets
-// the dispatcher chain compiled blocks without making generated code
-// authoritative for cycles, conditional outcomes, memory invalidation, or
-// selector state.
-static bool execute_single_core_compiled_block(
-        SystemState& system,
-        CPUState& core,
-        const CPUState::SingleCoreDecodedBlockEntry& block,
-        uint8_t* direct_memory,
-        uint64_t direct_memory_address,
-        uint64_t direct_memory_size,
-        uint64_t direct_control_target,
-        uint64_t direct_return_address,
-        bool terminal_store,
-        bool terminal_long_call,
-        bool terminal_long_return,
-        SingleCoreDecodedBlockRun& run) {
-    if (!block.native_code)
-        return false;
-
-    const std::atomic<uint8_t>* enabled_ipi_mirror =
-        core.flag_i
-        ? system.shared_interrupts.ipi_line_mirror(
-              core.core_id)
-        : nullptr;
-    if (core.flag_i && enabled_ipi_mirror == nullptr)
-        return false;
-
-    const SingleCoreJitFunction function =
-        reinterpret_cast<SingleCoreJitFunction>(
-            block.native_code.address());
-    const uint64_t packed =
-        function(
-            &core,
-            enabled_ipi_mirror,
-            direct_memory);
-    const uint32_t steps =
-        static_cast<uint32_t>(packed & 0xFFFF);
-    const uint64_t exit_flags = packed >> 16;
-    const bool interrupt_boundary =
-        (
-            exit_flags &
-            SINGLE_CORE_JIT_EXIT_INTERRUPT
-        ) != 0;
-    const bool conditional_taken =
-        (
-            exit_flags &
-            SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN
-        ) != 0;
-    if (
-        (
-            exit_flags &
-            ~SINGLE_CORE_JIT_EXIT_KNOWN_FLAGS
-        ) != 0 ||
-        steps == 0 ||
-        steps > block.instruction_count ||
-        (
-            interrupt_boundary
-            ? steps >= block.instruction_count
-            : steps != block.instruction_count
-        )
-    ) {
-        throw std::logic_error(
-            "single-core JIT returned an invalid completed prefix");
-    }
-    if (
-        conditional_taken &&
-        steps != block.instruction_count
-    ) {
-        throw std::logic_error(
-            "single-core JIT returned conditional-taken on a prefix");
-    }
-
-    const uint32_t completed_instruction_mask =
-        (uint32_t{1} << steps) - 1;
-    uint32_t cycles =
-        steps + static_cast<uint32_t>(__builtin_popcount(
-            static_cast<unsigned int>(
-                block.extra_cycle_mask) &
-            completed_instruction_mask));
-    const uint64_t address = block.address;
-    if (steps == block.instruction_count) {
-        const auto& terminal =
-            block.instructions[steps - 1];
-        if (terminal.taken_cycle_cost != 0) {
-            const bool taken =
-                eval_cond(core, terminal.subop);
-            if (conditional_taken != taken) {
-                throw std::logic_error(
-                    "single-core JIT returned invalid branch outcome");
-            }
-            if (taken)
-                cycles += terminal.taken_cycle_cost;
-            uint64_t expected_pc =
-                address + block.identity_size;
-            if (taken) {
-                expected_pc += s64(sign_extend(
-                    terminal.immediate,
-                    terminal.family == 0x3 ? 8 : 16));
-            }
-            if (pc(core) != expected_pc) {
-                throw std::logic_error(
-                    "single-core JIT returned invalid branch state");
-            }
-        } else if (conditional_taken) {
-            throw std::logic_error(
-                "single-core JIT returned conditional-taken for "
-                "a static-cycle terminal");
-        }
-        if (terminal.family == 0xA) {
-            if (
-                core.psel != terminal.rd ||
-                core.regs[block.psel] !=
-                    address + block.identity_size
-            ) {
-                throw std::logic_error(
-                    "single-core JIT returned invalid SEP state");
-            }
-        }
-        if (single_core_decoded_is_terminal_store(terminal)) {
-            if (
-                pc(core) != address + block.identity_size ||
-                core.regs[terminal.rd] != direct_memory_address
-            ) {
-                throw std::logic_error(
-                    "single-core JIT returned invalid store state");
-            }
-        }
-        if (single_core_decoded_is_terminal_long_call(terminal)) {
-            uint64_t observed_return_address = 0;
-            std::memcpy(
-                &observed_return_address,
-                direct_memory,
-                sizeof(observed_return_address));
-            if (
-                pc(core) != direct_control_target ||
-                core.regs[block.spsel] !=
-                    direct_memory_address ||
-                core.regs[terminal.rs] !=
-                    direct_control_target ||
-                observed_return_address != direct_return_address
-            ) {
-                throw std::logic_error(
-                    "single-core JIT returned invalid CALL.L state");
-            }
-        }
-        if (single_core_decoded_is_terminal_long_return(terminal)) {
-            if (
-                pc(core) != direct_control_target ||
-                core.regs[block.spsel] !=
-                    direct_memory_address + 8
-            ) {
-                throw std::logic_error(
-                    "single-core JIT returned invalid RET.L state");
-            }
-        }
-    }
-
-    core.cycle_count += cycles;
-    if (core.perf_enable)
-        core.perf_cycles += cycles;
-    const bool completed_terminal_write =
-        (terminal_store || terminal_long_call) &&
-        steps == block.instruction_count;
-    if (completed_terminal_write) {
-        // The raw host write is complete. Reproduce architectural store
-        // invalidation before any subsequent guest fetch; a prefix IPI exit
-        // never reaches this path.
-        icache_invalidate_span(
-            core,
-            direct_memory_address,
-            direct_memory_size);
-    }
-
-    run.steps = static_cast<int>(steps);
-    run.cycles = static_cast<int64_t>(cycles);
-    run.interrupt_boundary = interrupt_boundary;
-    ConcurrencyProfileCounters& profile =
-        system.concurrency_profile;
-    if (profile.enabled) {
-        host_saturating_increment(
-            profile.uncontended_jit_executions);
-        host_saturating_add(
-            profile.uncontended_jit_steps,
-            steps);
-        host_saturating_increment(
-            profile.uncontended_block_executions);
-        host_saturating_add(
-            profile.uncontended_block_steps,
-            steps);
-    }
-    return true;
-}
-
 static MP64_NOINLINE SingleCoreDecodedBlockRun
 execute_single_core_decoded_block_plan(
         SystemState& system,
@@ -23405,6 +23206,7 @@ execute_single_core_decoded_block_plan(
     ConcurrencyProfileCounters& profile =
         system.concurrency_profile;
     const bool profile_enabled = profile.enabled;
+    const uint64_t address = block->address;
     const bool timing_active =
         system.shared_crypto
             .requires_unbounded_timing_boundary() ||
@@ -23522,131 +23324,176 @@ execute_single_core_decoded_block_plan(
         }
     }
 
-    const bool native_executed =
-        native_eligible &&
-        execute_single_core_compiled_block(
-            system,
-            core,
-            *block,
-            direct_memory,
-            direct_memory_address,
-            direct_memory_size,
-            direct_control_target,
-            direct_return_address,
-            terminal_store,
-            terminal_long_call,
-            terminal_long_return,
-            run);
-
-    if (native_executed) {
-        if (profile_enabled) {
-            host_saturating_increment(
-                profile.uncontended_jit_chain_entries);
-        }
-
-        // A successor is chained only when it is already a fully validated,
-        // published register/control block. Misses return to ordinary
-        // admission so compilation, rejection storage, and every exceptional
-        // path retain their existing owner. The live PC selects either side
-        // of a conditional branch without a patched target or stale link.
-        const CPUState::SingleCoreDecodedBlockEntry* current = block;
-        bool current_is_memory = memory_block;
-        while (
-            !run.interrupt_boundary &&
-            run.steps < max_steps
-        ) {
+    bool native_executed = false;
+    if (
+        block->native_code &&
+        native_eligible
+    ) {
+        const std::atomic<uint8_t>* enabled_ipi_mirror =
+            core.flag_i
+            ? system.shared_interrupts.ipi_line_mirror(
+                  core.core_id)
+            : nullptr;
+        if (!core.flag_i || enabled_ipi_mirror != nullptr) {
+            const SingleCoreJitFunction function =
+                reinterpret_cast<SingleCoreJitFunction>(
+                    block->native_code.address());
+            const uint64_t packed =
+                function(
+                    &core,
+                    enabled_ipi_mirror,
+                    direct_memory);
+            const uint32_t steps =
+                static_cast<uint32_t>(packed & 0xFFFF);
+            const uint64_t exit_flags = packed >> 16;
+            const bool interrupt_boundary =
+                (
+                    exit_flags &
+                    SINGLE_CORE_JIT_EXIT_INTERRUPT
+                ) != 0;
+            const bool conditional_taken =
+                (
+                    exit_flags &
+                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN
+                ) != 0;
             if (
-                current_is_memory ||
-                single_core_block_has_terminal_sep(*current)
+                (
+                    exit_flags &
+                    ~SINGLE_CORE_JIT_EXIT_KNOWN_FLAGS
+                ) != 0 ||
+                steps == 0 ||
+                steps > block->instruction_count ||
+                (
+                    interrupt_boundary
+                    ? steps >= block->instruction_count
+                    : steps != block->instruction_count
+                )
             ) {
-                break;
-            }
-            if (pending_enabled_core_interrupt(system, core) >= 0) {
-                run.interrupt_boundary = true;
-                break;
+                throw std::logic_error(
+                    "single-core JIT returned an invalid completed prefix");
             }
             if (
-                system.shared_crypto
-                    .requires_unbounded_timing_boundary() ||
-                system.shared_nic.has_cycle_dma_work()
+                conditional_taken &&
+                steps != block->instruction_count
             ) {
-                run.timing_boundary = true;
-                break;
+                throw std::logic_error(
+                    "single-core JIT returned conditional-taken on a prefix");
             }
-
+            const uint32_t completed_instruction_mask =
+                (uint32_t{1} << steps) - 1;
+            uint32_t cycles =
+                steps + static_cast<uint32_t>(__builtin_popcount(
+                    static_cast<unsigned int>(
+                        block->extra_cycle_mask) &
+                    completed_instruction_mask));
+            if (steps == block->instruction_count) {
+                const auto& terminal =
+                    block->instructions[steps - 1];
+                if (terminal.taken_cycle_cost != 0) {
+                    const bool taken =
+                        eval_cond(core, terminal.subop);
+                    if (conditional_taken != taken) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid branch outcome");
+                    }
+                    if (taken) {
+                        cycles +=
+                            terminal.taken_cycle_cost;
+                    }
+                    uint64_t expected_pc =
+                        address + block->identity_size;
+                    if (taken) {
+                        expected_pc += s64(sign_extend(
+                            terminal.immediate,
+                            terminal.family == 0x3 ? 8 : 16));
+                    }
+                    if (pc(core) != expected_pc) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid branch state");
+                    }
+                } else if (conditional_taken) {
+                    throw std::logic_error(
+                        "single-core JIT returned conditional-taken for "
+                        "a static-cycle terminal");
+                }
+                if (terminal.family == 0xA) {
+                    if (
+                        core.psel != terminal.rd ||
+                        core.regs[block->psel] !=
+                            address + block->identity_size
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid SEP state");
+                    }
+                }
+                if (single_core_decoded_is_terminal_store(terminal)) {
+                    if (
+                        pc(core) != address + block->identity_size ||
+                        core.regs[terminal.rd] != direct_memory_address
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid store state");
+                    }
+                }
+                if (single_core_decoded_is_terminal_long_call(terminal)) {
+                    uint64_t observed_return_address = 0;
+                    std::memcpy(
+                        &observed_return_address,
+                        direct_memory,
+                        sizeof(observed_return_address));
+                    if (
+                        pc(core) != direct_control_target ||
+                        core.regs[block->spsel] !=
+                            direct_memory_address ||
+                        core.regs[terminal.rs] !=
+                            direct_control_target ||
+                        observed_return_address != direct_return_address
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid CALL.L state");
+                    }
+                }
+                if (single_core_decoded_is_terminal_long_return(terminal)) {
+                    if (
+                        pc(core) != direct_control_target ||
+                        core.regs[block->spsel] !=
+                            direct_memory_address + 8
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid RET.L state");
+                    }
+                }
+            }
+            core.cycle_count += cycles;
+            if (core.perf_enable)
+                core.perf_cycles += cycles;
+            const bool completed_terminal_write =
+                (terminal_store || terminal_long_call) &&
+                steps == block->instruction_count;
+            if (completed_terminal_write) {
+                // The raw host write is complete. Reproduce architectural
+                // store invalidation before any subsequent guest fetch; a
+                // prefix IPI exit never reaches this path.
+                icache_invalidate_span(
+                    core,
+                    direct_memory_address,
+                    direct_memory_size);
+            }
+            run.steps = static_cast<int>(steps);
+            run.cycles = static_cast<int64_t>(cycles);
+            run.interrupt_boundary = interrupt_boundary;
+            // Admitted register/control operations and preflighted direct
+            // RAM accesses cannot activate crypto or NIC work, and external
+            // mutation is excluded by the execution admission held here.
+            native_executed = true;
             if (profile_enabled) {
                 host_saturating_increment(
-                    profile.uncontended_jit_chain_probes);
-            }
-            const uint64_t successor_address = pc(core);
-            CPUState::SingleCoreDecodedBlockEntry* successor =
-                &core.single_core_execution_plan_cache->blocks[
-                    single_core_block_cache_index(
-                        successor_address)];
-            if (
-                !successor->native_code ||
-                !single_core_block_identity_matches(
-                    core,
-                    *successor,
-                    successor_address)
-            ) {
-                break;
-            }
-
-            const bool successor_leading_memory =
-                single_core_block_has_leading_memory(*successor);
-            const bool successor_terminal_store =
-                single_core_block_has_terminal_store(*successor);
-            const bool successor_terminal_long_call =
-                single_core_block_has_terminal_long_call(*successor);
-            const bool successor_terminal_long_return =
-                single_core_block_has_terminal_long_return(*successor);
-            const bool successor_is_memory =
-                successor_leading_memory ||
-                successor_terminal_store ||
-                successor_terminal_long_call ||
-                successor_terminal_long_return;
-            const int remaining_steps = max_steps - run.steps;
-            if (
-                successor_is_memory ||
-                single_core_block_has_terminal_sep(*successor) ||
-                remaining_steps < successor->instruction_count
-            ) {
-                break;
-            }
-
-            SingleCoreDecodedBlockRun successor_run;
-            if (!execute_single_core_compiled_block(
-                    system,
-                    core,
-                    *successor,
-                    nullptr,
-                    0,
-                    0,
-                    0,
-                    0,
-                    false,
-                    false,
-                    false,
-                    successor_run)) {
-                break;
-            }
-            run.steps += successor_run.steps;
-            run.cycles += successor_run.cycles;
-            run.interrupt_boundary =
-                successor_run.interrupt_boundary;
-            if (profile_enabled) {
-                host_saturating_increment(
-                    profile.uncontended_jit_chained_blocks);
+                    profile.uncontended_jit_executions);
                 host_saturating_add(
-                    profile.uncontended_jit_chained_steps,
-                    static_cast<uint64_t>(
-                        successor_run.steps));
+                    profile.uncontended_jit_steps,
+                    steps);
             }
-            current = successor;
-            current_is_memory = false;
         }
-        return run;
     }
 
     if (!native_executed) {
@@ -26613,14 +26460,6 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_jit_executions;
     counts["uncontended_jit_steps"] =
         profile.uncontended_jit_steps;
-    counts["uncontended_jit_chain_entries"] =
-        profile.uncontended_jit_chain_entries;
-    counts["uncontended_jit_chained_blocks"] =
-        profile.uncontended_jit_chained_blocks;
-    counts["uncontended_jit_chained_steps"] =
-        profile.uncontended_jit_chained_steps;
-    counts["uncontended_jit_chain_probes"] =
-        profile.uncontended_jit_chain_probes;
     counts["logical_subfrontiers"] =
         profile.logical_subfrontiers;
     counts["round_absorptions"] =
@@ -26759,7 +26598,7 @@ static py::dict concurrency_profile_snapshot_dict(
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 10;
+    result["schema_version"] = 9;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
