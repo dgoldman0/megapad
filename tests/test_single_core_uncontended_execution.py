@@ -63,7 +63,7 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 12
+    assert snapshot["schema_version"] == 13
     metadata = dict(snapshot["single_core_block_rejection_cache"])
     assert metadata == {
         "kind": "direct-mapped-exact-icache-span",
@@ -71,6 +71,18 @@ def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
         "identity_bytes": 16,
     }
     counts = dict(snapshot["counts"])
+    assert counts["uncontended_block_lookups"] == (
+        counts["uncontended_block_positive_cache_probes"]
+        + counts["uncontended_block_rejection_hint_hits"]
+    )
+    assert (
+        counts["uncontended_block_rejection_hint_hits"]
+        <= counts["uncontended_block_rejection_hint_probes"]
+    )
+    assert (
+        counts["uncontended_block_rejection_hint_hits"]
+        <= counts["uncontended_block_rejection_cache_hits"]
+    )
     assert counts["uncontended_block_misses"] == (
         counts["uncontended_block_rejection_cache_hits"]
         + counts["uncontended_block_build_attempts"]
@@ -783,6 +795,9 @@ loop:
     assert system.cpu.pc == 0
     _assert_block_rejection_profile_reconciles(snapshot)
     assert counts["uncontended_block_lookups"] == 8
+    assert counts["uncontended_block_positive_cache_probes"] == 2
+    assert counts["uncontended_block_rejection_hint_probes"] == 6
+    assert counts["uncontended_block_rejection_hint_hits"] == 6
     assert counts["uncontended_block_hits"] == 0
     assert counts["uncontended_block_misses"] == 8
     assert counts["uncontended_block_build_attempts"] == 2
@@ -795,6 +810,72 @@ loop:
     assert counts["uncontended_block_rejection_cache_replacements"] == 0
     assert counts["uncontended_block_executions"] == 0
     assert counts["uncontended_block_steps"] == 0
+
+
+def _run_self_modifying_rejection_hint(*, reference: bool) -> tuple[tuple, dict]:
+    system = _system(reference=reference)
+    program = assemble(
+        """
+loop:
+    st.b r5, r6
+    br loop
+"""
+    )
+    replacement_opcode = assemble("add r5, r6")[0]
+    assert program[0] != replacement_opcode
+    assert program[1] == assemble("add r5, r6")[1]
+    scratch = 0x80
+    system.load_binary(0, program)
+    system.load_binary(scratch, b"\xEE")
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    system.cpu.regs[5] = scratch
+    system.cpu.regs[6] = replacement_opcode
+
+    warm = system.run_batch_stats(4)
+    assert warm.instructions_executed == 4
+    assert system.cpu.mem[0] == program[0]
+    assert system.cpu.mem[scratch] == replacement_opcode
+
+    system.cpu.pc = 0
+    system.cpu.regs[5] = 0
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    changed = system.run_batch_stats(6)
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+
+    assert changed.instructions_executed == 6
+    assert system.cpu.mem[0] == replacement_opcode
+    assert system.cpu.regs[5] == 2 * replacement_opcode
+    assert system.cpu.pc == 0
+    return _core_signature(system), snapshot
+
+
+def test_rejection_hint_reproves_self_modified_instruction_identity() -> None:
+    fast, snapshot = _run_self_modifying_rejection_hint(reference=False)
+    reference, _ = _run_self_modifying_rejection_hint(reference=True)
+
+    assert fast == reference
+    _assert_block_rejection_profile_reconciles(snapshot)
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_block_lookups"] == 4
+    assert counts["uncontended_block_positive_cache_probes"] == 4
+    assert counts["uncontended_block_rejection_hint_probes"] == 1
+    assert counts["uncontended_block_rejection_hint_hits"] == 0
+    assert counts["uncontended_block_rejection_cache_hits"] == 1
+    assert counts["uncontended_block_build_attempts"] == 2
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_nonresident_rejections"] == 1
+    assert counts["uncontended_block_one_instruction_rejections"] == 0
+    assert counts["uncontended_block_rejection_cache_stores"] == 0
+    assert counts["uncontended_block_rejection_cache_replacements"] == 0
+    assert counts["uncontended_block_executions"] == 2
+    assert counts["uncontended_block_steps"] == 4
 
 
 def test_exact_rejection_cache_classifies_zero_instruction_starts() -> None:

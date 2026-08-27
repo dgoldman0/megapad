@@ -790,6 +790,43 @@ normal resource gates permit them. This cutoff records engine consolidation,
 the compact permitted semantic/fault matrix, and the already-authorized exact
 BIOS+KDOS comparison only.
 
+Post-cutoff rejection-admission correction (2026-08-27): a focused
+shared-memory replay exposed a scalar region with 100,000 block lookups, zero
+block builds, and 99,994 exact rejection-cache hits. Every instruction still
+probed the positive table before reaching that known negative entry. The
+uncontended segment now retains a non-authoritative bitmap, derived from the
+existing bounded rejection-cache geometry, for entries already proved exact
+in that segment. A hinted start tries the existing exact rejection matcher
+first; address, PSEL/SPSEL, resident tags, generations, and bytes remain the
+authority. A mismatch clears the hint and follows ordinary positive-first
+admission. Interrupt checks, scalar `step_one` execution, timing boundaries,
+and all persistent plan state are unchanged. There is no global
+rejection-first policy, cached scalar executor, identity relaxation, or new
+engine mode. Host-profile schema 13 records positive probes and rejection-hint
+probes/hits with exact reconciliation.
+
+An adjacent same-host, CPU-3 characterization used 1,000,000 instructions,
+two 100,000-instruction warm-ups, and seven unprofiled repetitions per motif.
+The shared-memory median moved from 28.142171 to 31.912840 MIPS, a 13.399%
+increase; private compute moved from 186.965970 to 196.627274 MIPS, so this
+sample found no positive-block regression. These short, non-position-balanced
+construction measurements reject a local regression and justify the bounded
+change; they are not a new canonical BIOS, Desktop, or release speed claim.
+The separate accounting replay recorded 994,999 exact hint hits from 994,999
+hint probes and only 5,001 positive probes across 1,000,000 shared-memory
+lookups. Private compute used no hint and retained positive-first admission.
+Focused rejection identity, refill, selector, collision, changed-byte, and
+self-modification cases remained green; the self-modifying case proves that a
+stale hint declines before the replacement positive block executes.
+
+Separate rich-host observation (2026-08-27): the retained rich-terminal host
+currently rebuilds and recopies an owner's complete object mapping for each
+`OBJECT_DEFINE`, making the 23,520-glyph Desktop hidden build quadratic. This
+host-model performance defect is recorded only; correction is deferred until
+after the execution-kernel refinement is merged and the rich-terminal vertical
+again owns the critical path. It does not reopen engine consolidation or
+justify a renderer-specific guest workaround.
+
 Post-cutoff ISA clarification (2026-08-27): the architectural documentation now
 locks the 1802-derived fetch-then-execute rule. A complete encoding, including
 any prefix, advances `R[PSEL]` before execution-phase operands are read;
@@ -867,6 +904,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D12 | Let the authoritative decoder and sole block builder own static candidate validity without replaying their construction policy immediately before publication. | Dynamic cache identity, transactional memory proof, and backend validation remain independent; consolidation removes a duplicate static checker rather than weakening a runtime boundary. |
 | EK-D13 | Close engine consolidation without decomposing the remaining integration monolith. | CPU/machine state, scheduler, callback, snapshot, profile, and pybind extraction is a separate future organization project; broad acceptance remains deferred under the rich-terminal and resource gates. |
 | EK-D14 | Preserve 1802-style complete-fetch-before-execute semantics for every PSEL register alias. | Prefixes are part of one encoding, execution reads the post-fetch PSEL value, selector collisions remain legal and ordered, and RTL conformance is a separate correctness slice rather than an engine change. |
+| EK-D15 | Let a segment-local, rejection-indexed hint change probe order only after that segment has observed an exact resident rejection. | The persistent exact rejection entry remains authoritative; a mismatch forgets the hint and restores positive-first admission, while interrupts, scalar execution, identity proof, and persistent cache ownership remain unchanged. |
 
 ## Deferred findings ledger
 
@@ -874,7 +912,7 @@ does not justify keeping the superseded implementation in the final tree.
 |---|---|---|
 | EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the compact consolidation matrix. |
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
-| EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as a future measured fine turn, not consolidation work. |
+| EK-F3 | The rejection matcher remained behind a redundant positive-cache probe even in scalar regions whose starts repeatedly matched exact resident rejections. | Resolved at the measured boundary by EK-D15. A segment-local hint bypasses the positive probe only after an exact rejection has already been observed; the matcher itself, persistent cache, and positive-first default remain unchanged. |
 | EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden the closed engine without new retained remaining-shape evidence and paired exact justification. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |

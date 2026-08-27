@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -276,6 +276,18 @@ def profile_derived(profile: dict | None) -> dict | None:
             counts["uncontended_block_hits"],
             counts["uncontended_block_lookups"],
         ),
+        "block_positive_cache_probe_fraction": _ratio(
+            counts["uncontended_block_positive_cache_probes"],
+            counts["uncontended_block_lookups"],
+        ),
+        "block_rejection_hint_probe_fraction": _ratio(
+            counts["uncontended_block_rejection_hint_probes"],
+            counts["uncontended_block_lookups"],
+        ),
+        "block_rejection_hint_hit_fraction": _ratio(
+            counts["uncontended_block_rejection_hint_hits"],
+            counts["uncontended_block_rejection_hint_probes"],
+        ),
         "block_rejection_cache_hit_fraction": _ratio(
             counts["uncontended_block_rejection_cache_hits"],
             (
@@ -373,6 +385,19 @@ def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
             metadata["kind"] == "direct-mapped-exact-icache-span"
             and metadata["entries"] == 512
             and metadata["identity_bytes"] == 16
+        ),
+        "block_lookup_probes_reconcile": (
+            counts["uncontended_block_lookups"]
+            == counts["uncontended_block_positive_cache_probes"]
+            + counts["uncontended_block_rejection_hint_hits"]
+        ),
+        "block_rejection_hint_hits_within_probes": (
+            counts["uncontended_block_rejection_hint_hits"]
+            <= counts["uncontended_block_rejection_hint_probes"]
+        ),
+        "block_rejection_hint_hits_within_cache_hits": (
+            counts["uncontended_block_rejection_hint_hits"]
+            <= counts["uncontended_block_rejection_cache_hits"]
         ),
         "block_build_attempts_reconcile": (
             attempts
@@ -520,7 +545,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 12
+                            host_profile["schema_version"] == 13
                         ),
                         "settlement_routes_reconcile": (
                             profile_counts["settle_round_calls"]
@@ -726,6 +751,13 @@ def print_human(result: dict) -> None:
         )
         print(
             "  DBT block admission: "
+            f"{counts['uncontended_block_rejection_hint_hits']:,}/"
+            f"{counts['uncontended_block_rejection_hint_probes']:,} "
+            "rejection-hint hits "
+            f"({percent(derived['block_rejection_hint_hit_fraction'])}); "
+            f"{counts['uncontended_block_positive_cache_probes']:,}/"
+            f"{counts['uncontended_block_lookups']:,} positive-cache probes "
+            f"({percent(derived['block_positive_cache_probe_fraction'])}); "
             f"{counts['uncontended_block_rejection_cache_hits']:,} "
             "rejection-cache hits "
             f"({percent(derived['block_rejection_cache_hit_fraction'])}); "

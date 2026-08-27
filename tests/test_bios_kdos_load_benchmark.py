@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 5
+    assert benchmark.SCHEMA_VERSION == 6
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -34,6 +34,9 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
             "settle_round_python_calls": 25,
             "uncontended_block_hits": 75,
             "uncontended_block_lookups": 125,
+            "uncontended_block_positive_cache_probes": 120,
+            "uncontended_block_rejection_hint_probes": 8,
+            "uncontended_block_rejection_hint_hits": 5,
             "uncontended_block_misses": 50,
             "uncontended_block_build_attempts": 40,
             "uncontended_block_nonresident_rejections": 3,
@@ -70,6 +73,9 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
         "native_settlement_fraction": 0.75,
         "python_settlement_fraction": 0.25,
         "block_cache_hit_fraction": 0.6,
+        "block_positive_cache_probe_fraction": 0.96,
+        "block_rejection_hint_probe_fraction": 0.064,
+        "block_rejection_hint_hit_fraction": 0.625,
         "block_rejection_cache_hit_fraction": 0.2,
         "block_build_success_fraction": 0.625,
         "resident_zero_instruction_rejection_fraction": 0.5,
@@ -96,6 +102,10 @@ def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
             "identity_bytes": 16,
         },
         "counts": {
+            "uncontended_block_lookups": 125,
+            "uncontended_block_positive_cache_probes": 120,
+            "uncontended_block_rejection_hint_probes": 8,
+            "uncontended_block_rejection_hint_hits": 5,
             "uncontended_block_misses": 50,
             "uncontended_block_build_attempts": 40,
             "uncontended_block_builds": 25,
@@ -112,6 +122,9 @@ def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
 
     assert validation == {
         "block_rejection_cache_metadata_supported": True,
+        "block_lookup_probes_reconcile": True,
+        "block_rejection_hint_hits_within_probes": True,
+        "block_rejection_hint_hits_within_cache_hits": True,
         "block_build_attempts_reconcile": True,
         "block_rejection_cache_stores_reconcile": True,
         "block_rejection_cache_replacements_are_bounded": True,

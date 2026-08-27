@@ -4149,6 +4149,9 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_callback_errors = 0;
     uint64_t uncontended_interrupt_boundaries = 0;
     uint64_t uncontended_block_lookups = 0;
+    uint64_t uncontended_block_positive_cache_probes = 0;
+    uint64_t uncontended_block_rejection_hint_probes = 0;
+    uint64_t uncontended_block_rejection_hint_hits = 0;
     uint64_t uncontended_block_hits = 0;
     uint64_t uncontended_block_misses = 0;
     uint64_t uncontended_block_build_attempts = 0;
@@ -21521,6 +21524,49 @@ static uint8_t execute_single_core_decoded_instruction(
 struct SingleCoreDecodedBlockAdmission {
     CPUState::SingleCoreDecodedBlockEntry* block = nullptr;
     bool cache_hit = false;
+    bool exact_rejection = false;
+};
+
+struct SingleCoreRecentRejectionHints {
+    static constexpr std::size_t WORD_BITS = 64;
+    static constexpr std::size_t WORDS =
+        CPUState::SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES /
+        WORD_BITS;
+    static_assert(
+        CPUState::SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES %
+            WORD_BITS == 0);
+
+    std::array<uint64_t, WORDS> slots{};
+
+    // This segment-local bitmap is only a probe-order hint. The persistent
+    // rejection entry still has to match its exact address, selectors,
+    // resident tags, generations, and bytes before it can bypass a positive
+    // cache probe. Collisions therefore affect cost, never authority.
+    MP64_ALWAYS_INLINE bool may_contain(
+            uint64_t address) const noexcept {
+        const std::size_t index =
+            single_core_block_rejection_cache_index(address);
+        return (
+            slots[index / WORD_BITS] &
+            (uint64_t{1} << (index % WORD_BITS))
+        ) != 0;
+    }
+
+    MP64_ALWAYS_INLINE void remember(
+            uint64_t address) noexcept {
+        const std::size_t index =
+            single_core_block_rejection_cache_index(address);
+        slots[index / WORD_BITS] |=
+            uint64_t{1} << (index % WORD_BITS);
+    }
+
+    MP64_ALWAYS_INLINE void forget(
+            uint64_t address) noexcept {
+        const std::size_t index =
+            single_core_block_rejection_cache_index(address);
+        slots[index / WORD_BITS] &=
+            ~(uint64_t{1} << (index % WORD_BITS));
+    }
 };
 
 // Keep admission inline and its rare decoder out of line. Cached rejection
@@ -21531,7 +21577,8 @@ admit_single_core_decoded_block(
         SystemState& system,
         CPUState& core,
         const StepCallbacks& callbacks,
-        int max_steps) {
+        int max_steps,
+        bool probe_rejection_first) {
     SingleCoreDecodedBlockAdmission admission;
     if (
         max_steps <= 0 ||
@@ -21555,6 +21602,39 @@ admit_single_core_decoded_block(
     }
 
     const uint64_t address = pc(core);
+    bool rejection_probed = false;
+    if (probe_rejection_first) {
+        rejection_probed = true;
+        if (profile_enabled) {
+            host_saturating_increment(
+                profile
+                    .uncontended_block_rejection_hint_probes);
+        }
+        // The deterministic builder cannot publish both a positive plan and
+        // a rejection for the same exact address/selectors/bytes; successful
+        // positive construction also invalidates the keyed rejection. A
+        // matching rejection can therefore bypass the positive table, while
+        // any stale or colliding hint falls through to the normal authority.
+        if (single_core_block_rejection_matches(core, address)) {
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_block_misses);
+                host_saturating_increment(
+                    profile
+                        .uncontended_block_rejection_cache_hits);
+                host_saturating_increment(
+                    profile
+                        .uncontended_block_rejection_hint_hits);
+            }
+            admission.exact_rejection = true;
+            return admission;
+        }
+    }
+
+    if (profile_enabled) {
+        host_saturating_increment(
+            profile.uncontended_block_positive_cache_probes);
+    }
     CPUState::SingleCoreDecodedBlockEntry* block =
         &core.single_core_execution_plan_cache->blocks[
             single_core_block_cache_index(address)];
@@ -21571,12 +21651,16 @@ admit_single_core_decoded_block(
             host_saturating_increment(
                 profile.uncontended_block_misses);
         }
-        if (single_core_block_rejection_matches(core, address)) {
+        if (
+            !rejection_probed &&
+            single_core_block_rejection_matches(core, address)
+        ) {
             if (profile_enabled) {
                 host_saturating_increment(
                     profile
                         .uncontended_block_rejection_cache_hits);
             }
+            admission.exact_rejection = true;
             return admission;
         }
         if (profile_enabled) {
@@ -21643,6 +21727,9 @@ admit_single_core_decoded_block(
                     }
                 }
             }
+            admission.exact_rejection =
+                storage !=
+                    SingleCoreBlockRejectionStorage::NONRESIDENT;
             return admission;
         }
         CPUState::SingleCoreBlockRejectionEntry& rejection =
@@ -22079,6 +22166,7 @@ static void run_uncontended_single_core_segment_impl(
         const StepCallbacks& callbacks,
         int max_steps,
         UncontendedSingleCoreSegment& segment) {
+    SingleCoreRecentRejectionHints recent_rejections;
     for (int step_index = 0;
          step_index < max_steps;
          step_index++) {
@@ -22100,12 +22188,24 @@ static void run_uncontended_single_core_segment_impl(
 
         try {
             if constexpr (!INJECT_FAILURE) {
+                const uint64_t admission_address = pc(core);
+                const bool probe_rejection_first =
+                    recent_rejections.may_contain(
+                        admission_address);
                 const SingleCoreDecodedBlockAdmission admission =
                     admit_single_core_decoded_block(
                         system,
                         core,
                         callbacks,
-                        max_steps - step_index);
+                        max_steps - step_index,
+                        probe_rejection_first);
+                if (admission.exact_rejection) {
+                    recent_rejections.remember(
+                        admission_address);
+                } else if (probe_rejection_first) {
+                    recent_rejections.forget(
+                        admission_address);
+                }
                 if (admission.block != nullptr) {
                     const BlockExit block_exit =
                         execute_single_core_decoded_block_plan(
@@ -22222,7 +22322,8 @@ run_uncontended_single_core_ipi_injection(
             system,
             core,
             callbacks,
-            max_steps);
+            max_steps,
+            false);
     if (
         !core.flag_i ||
         admission.block == nullptr ||
@@ -25005,6 +25106,12 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_interrupt_boundaries;
     counts["uncontended_block_lookups"] =
         profile.uncontended_block_lookups;
+    counts["uncontended_block_positive_cache_probes"] =
+        profile.uncontended_block_positive_cache_probes;
+    counts["uncontended_block_rejection_hint_probes"] =
+        profile.uncontended_block_rejection_hint_probes;
+    counts["uncontended_block_rejection_hint_hits"] =
+        profile.uncontended_block_rejection_hint_hits;
     counts["uncontended_block_hits"] =
         profile.uncontended_block_hits;
     counts["uncontended_block_misses"] =
@@ -25197,7 +25304,7 @@ static py::dict concurrency_profile_snapshot_dict(
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 12;
+    result["schema_version"] = 13;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =

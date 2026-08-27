@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2646,6 +2646,9 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_callback_errors",
     "uncontended_interrupt_boundaries",
     "uncontended_block_lookups",
+    "uncontended_block_positive_cache_probes",
+    "uncontended_block_rejection_hint_probes",
+    "uncontended_block_rejection_hint_hits",
     "uncontended_block_hits",
     "uncontended_block_misses",
     "uncontended_block_build_attempts",
@@ -2899,7 +2902,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 12,
+            native_snapshot["schema_version"] == 13,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2995,6 +2998,9 @@ def _host_profile_probe(
                     "uncontended_callback_errors",
                     "uncontended_interrupt_boundaries",
                     "uncontended_block_lookups",
+                    "uncontended_block_positive_cache_probes",
+                    "uncontended_block_rejection_hint_probes",
+                    "uncontended_block_rejection_hint_hits",
                     "uncontended_block_hits",
                     "uncontended_block_misses",
                     "uncontended_block_build_attempts",
@@ -3035,6 +3041,25 @@ def _host_profile_probe(
             native_counts["uncontended_block_lookups"]
             == native_counts["uncontended_block_hits"]
             + native_counts["uncontended_block_misses"]
+        ),
+        "uncontended_block_lookup_probes_reconcile": (
+            native_counts["uncontended_block_lookups"]
+            == native_counts[
+                "uncontended_block_positive_cache_probes"
+            ]
+            + native_counts[
+                "uncontended_block_rejection_hint_hits"
+            ]
+        ),
+        "uncontended_block_rejection_hint_hits_within_probes": (
+            native_counts["uncontended_block_rejection_hint_hits"]
+            <= native_counts["uncontended_block_rejection_hint_probes"]
+        ),
+        "uncontended_block_rejection_hint_hits_within_cache_hits": (
+            native_counts["uncontended_block_rejection_hint_hits"]
+            <= native_counts[
+                "uncontended_block_rejection_cache_hits"
+            ]
         ),
         "uncontended_block_builds_within_misses": (
             native_counts["uncontended_block_builds"]
@@ -3273,7 +3298,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 12,
+        "schema_version": 13,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
@@ -3287,6 +3312,29 @@ def _host_profile_probe(
                 _optional_ratio(
                     native_counts["uncontended_steps"],
                     returned_instructions,
+                ),
+            "uncontended_block_positive_cache_probe_fraction":
+                _optional_ratio(
+                    native_counts[
+                        "uncontended_block_positive_cache_probes"
+                    ],
+                    native_counts["uncontended_block_lookups"],
+                ),
+            "uncontended_block_rejection_hint_probe_fraction":
+                _optional_ratio(
+                    native_counts[
+                        "uncontended_block_rejection_hint_probes"
+                    ],
+                    native_counts["uncontended_block_lookups"],
+                ),
+            "uncontended_block_rejection_hint_hit_fraction":
+                _optional_ratio(
+                    native_counts[
+                        "uncontended_block_rejection_hint_hits"
+                    ],
+                    native_counts[
+                        "uncontended_block_rejection_hint_probes"
+                    ],
                 ),
             "worker_commands_per_wave": _optional_ratio(
                 native_counts["worker_commands"],

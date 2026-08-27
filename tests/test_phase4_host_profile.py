@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 20
+    assert report["schema_version"] == 21
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -32,7 +32,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 12
+        assert probe["schema_version"] == 13
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -104,6 +104,9 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert native["wall_ns"]["uncontended_round"] == 0
         assert native["wall_ns"]["uncontended_dispatch"] == 0
         for name in (
+            "uncontended_block_positive_cache_probes",
+            "uncontended_block_rejection_hint_probes",
+            "uncontended_block_rejection_hint_hits",
             "uncontended_block_build_attempts",
             "uncontended_block_nonresident_rejections",
             "uncontended_block_zero_instruction_rejections",
@@ -153,6 +156,18 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
             ratios["uncontended_step_fraction_of_returned_instructions"]
             == 0
         )
+        assert (
+            ratios["uncontended_block_positive_cache_probe_fraction"]
+            is None
+        )
+        assert (
+            ratios["uncontended_block_rejection_hint_probe_fraction"]
+            is None
+        )
+        assert (
+            ratios["uncontended_block_rejection_hint_hit_fraction"]
+            is None
+        )
         assert ratios["worker_commands_per_wave"] is not None
         assert ratios["worker_wave_bypass_fraction"] > 0
         assert ratios["private_steps_per_worker_command"] is not None
@@ -177,11 +192,11 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 20
+    assert report["schema_version"] == 21
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 12
+        assert probe["schema_version"] == 13
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]
@@ -209,6 +224,19 @@ def test_single_core_profile_attributes_work_across_worker_counts():
             "entries": 512,
             "identity_bytes": 16,
         }
+        assert (
+            counts["uncontended_block_lookups"]
+            == counts["uncontended_block_positive_cache_probes"]
+            + counts["uncontended_block_rejection_hint_hits"]
+        )
+        assert (
+            counts["uncontended_block_rejection_hint_hits"]
+            <= counts["uncontended_block_rejection_hint_probes"]
+        )
+        assert (
+            counts["uncontended_block_rejection_hint_hits"]
+            <= counts["uncontended_block_rejection_cache_hits"]
+        )
         assert (
             counts["uncontended_block_build_attempts"]
             == counts["uncontended_block_builds"]
@@ -278,6 +306,27 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         assert (
             ratios["uncontended_step_fraction_of_returned_instructions"]
             == 1
+        )
+        assert (
+            ratios["uncontended_block_positive_cache_probe_fraction"]
+            == phase0._optional_ratio(
+                counts["uncontended_block_positive_cache_probes"],
+                counts["uncontended_block_lookups"],
+            )
+        )
+        assert (
+            ratios["uncontended_block_rejection_hint_probe_fraction"]
+            == phase0._optional_ratio(
+                counts["uncontended_block_rejection_hint_probes"],
+                counts["uncontended_block_lookups"],
+            )
+        )
+        assert (
+            ratios["uncontended_block_rejection_hint_hit_fraction"]
+            == phase0._optional_ratio(
+                counts["uncontended_block_rejection_hint_hits"],
+                counts["uncontended_block_rejection_hint_probes"],
+            )
         )
 
 
