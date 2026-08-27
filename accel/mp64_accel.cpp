@@ -44,6 +44,7 @@
 #include "dbt/executable_arena.h"
 #include "dbt/host_jit_config.h"
 #include "dbt/x86_64/emitter.h"
+#include "cpu/mp64/decode.h"
 #include "cpu/mp64/semantics.h"
 #include "machine/memory.h"
 #include "machine/settlement.h"
@@ -67,6 +68,11 @@ using mp64::machine::ResolvedMemorySpan;
 using mp64::machine::region_contains;
 using mp64::machine::region_span_fits;
 using mp64::machine::resolve_memory_span;
+using mp64::cpu::DecodedInstruction;
+using mp64::cpu::DecodedOperation;
+using mp64::cpu::DecodeResult;
+using mp64::cpu::DecodeStatus;
+using mp64::cpu::decode_instruction;
 using mp64::cpu::CC_AL;
 using mp64::cpu::CC_BNQ;
 using mp64::cpu::CC_BQ;
@@ -1829,17 +1835,6 @@ struct CPUState {
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS =
             ICACHE_LINE_BYTES;
-    struct SingleCoreDecodedInstruction {
-        uint8_t family = 0;
-        uint8_t subop = 0;
-        uint8_t rd = 0;
-        uint8_t rs = 0;
-        uint8_t encoded_size = 0;
-        uint8_t fetch_hits = 0;
-        uint8_t cycle_cost = 0;
-        uint8_t taken_cycle_cost = 0;
-        uint64_t immediate = 0;
-    };
     struct SingleCoreDecodedBlockEntry {
         bool valid = false;
         bool native_compile_checked = false;
@@ -1855,7 +1850,7 @@ struct CPUState {
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
         std::array<
-            SingleCoreDecodedInstruction,
+            DecodedInstruction,
             SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS>
             instructions{};
         HostExecutableCode native_code;
@@ -12188,6 +12183,169 @@ struct PrivateInstructionProof {
     bool micro_native_private = false;
 };
 
+struct AuthoritativeInstructionReader {
+    CPUState& state;
+
+    MP64_ALWAYS_INLINE bool read(uint8_t& value) {
+        value = fetch8(state);
+        return true;
+    }
+
+    MP64_ALWAYS_INLINE void observe_prefix(uint8_t modifier) {
+        state.ext_modifier = modifier;
+    }
+};
+
+// Execute an already-fetched semantic instruction. Fetch accounting and PC
+// advancement belong to the caller, while this function owns the one MP64
+// definition of every instruction admitted by the shared decoder.
+static int execute_decoded_instruction_effect(
+        CPUState& state,
+        const StepCallbacks& callbacks,
+        const DecodedInstruction& decoded) {
+    int cycles = decoded.cycle_cost;
+    switch (decoded.operation) {
+        case DecodedOperation::NOP:
+            break;
+        case DecodedOperation::CALL_LONG: {
+            const uint64_t target = state.regs[decoded.rs];
+            const int hook = find_accel_hook(state, target);
+            if (hook != 0 && callbacks.bus_access == nullptr) {
+                const DirectMemoryContext context = {
+                    callbacks.has_mmio,
+                    callbacks.mmio_start,
+                    callbacks.mmio_end,
+                };
+                const AccelHookResult result =
+                    execute_accel_hook(state, hook, context);
+                if (result.handled) {
+                    // The decoded base includes the ordinary CALL stack
+                    // cycle. An accepted hook performs no push and replaces
+                    // that cycle with its architected shortcut cost.
+                    return cycles - 1 + result.extra_cycles;
+                }
+            }
+            const uint64_t return_address = pc(state);
+            sys_push64(state, callbacks, return_address);
+            pc(state) = target;
+            break;
+        }
+        case DecodedOperation::RETURN_LONG:
+            pc(state) = sys_pop64(state, callbacks);
+            break;
+        case DecodedOperation::INCREMENT:
+            state.regs[decoded.rd]++;
+            break;
+        case DecodedOperation::DECREMENT:
+            state.regs[decoded.rd]--;
+            break;
+        case DecodedOperation::BRANCH_SHORT:
+            if (eval_cond(state, decoded.subop())) {
+                pc(state) += s64(sign_extend(decoded.immediate, 8));
+                cycles += decoded.conditional_taken_cycle_cost();
+            }
+            break;
+        case DecodedOperation::BRANCH_LONG:
+            if (eval_cond(state, decoded.subop())) {
+                pc(state) += s64(sign_extend(decoded.immediate, 16));
+                cycles += decoded.conditional_taken_cycle_cost();
+            }
+            break;
+        case DecodedOperation::LOAD_NATURAL: {
+            const uint64_t address = state.regs[decoded.rs];
+            state.regs[decoded.rd] =
+                sys_read64(state, callbacks, address);
+            break;
+        }
+        case DecodedOperation::STORE_NATURAL: {
+            const uint64_t address = state.regs[decoded.rd];
+            const uint64_t value = state.regs[decoded.rs];
+            sys_write64(state, callbacks, address, value);
+            break;
+        }
+        case DecodedOperation::LOAD_BYTE: {
+            const uint64_t address = state.regs[decoded.rs];
+            state.regs[decoded.rd] =
+                sys_read8(state, callbacks, address);
+            break;
+        }
+        case DecodedOperation::STORE_BYTE: {
+            const uint64_t address = state.regs[decoded.rd];
+            const uint8_t value = static_cast<uint8_t>(
+                state.regs[decoded.rs]);
+            sys_write8(state, callbacks, address, value);
+            break;
+        }
+        case DecodedOperation::LOAD_IMMEDIATE:
+        case DecodedOperation::LOAD_HIGH_IMMEDIATE:
+        case DecodedOperation::ADD_IMMEDIATE:
+        case DecodedOperation::AND_IMMEDIATE:
+        case DecodedOperation::OR_IMMEDIATE:
+        case DecodedOperation::XOR_IMMEDIATE:
+        case DecodedOperation::COMPARE_IMMEDIATE:
+        case DecodedOperation::SUBTRACT_IMMEDIATE:
+        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_ARITHMETIC_IMMEDIATE:
+        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
+            execute_register_immediate(
+                state,
+                decoded.subop(),
+                decoded.rd,
+                decoded.immediate);
+            break;
+        case DecodedOperation::ADD:
+        case DecodedOperation::ADD_WITH_CARRY:
+        case DecodedOperation::SUBTRACT:
+        case DecodedOperation::SUBTRACT_WITH_BORROW:
+        case DecodedOperation::BITWISE_AND:
+        case DecodedOperation::BITWISE_OR:
+        case DecodedOperation::BITWISE_XOR:
+        case DecodedOperation::COMPARE:
+        case DecodedOperation::MOVE:
+        case DecodedOperation::BITWISE_NOT:
+        case DecodedOperation::NEGATE:
+        case DecodedOperation::SHIFT_LEFT:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL:
+        case DecodedOperation::SHIFT_RIGHT_ARITHMETIC:
+        case DecodedOperation::ROTATE_LEFT:
+        case DecodedOperation::ROTATE_RIGHT:
+            execute_register_alu(
+                state,
+                decoded.subop(),
+                decoded.rd,
+                decoded.rs);
+            break;
+        case DecodedOperation::SELECT_PROGRAM_COUNTER:
+            if (state.priv_level != 0)
+                throw std::runtime_error("TRAP:PRIV_FAULT");
+            state.psel = decoded.rd;
+            break;
+        case DecodedOperation::INVALID:
+        default:
+            throw std::logic_error(
+                "shared MP64 decoder produced an invalid operation");
+    }
+    return cycles;
+}
+
+static void commit_decoded_instruction(
+        CPUState& state,
+        const DecodedInstruction& decoded,
+        int cycles) {
+    state.ext_modifier = -1;
+    state.cycle_count += cycles;
+    if (state.perf_enable) {
+        state.perf_cycles += cycles;
+        if (
+            (decoded.is_direct_read() || decoded.is_direct_store()) &&
+            cycles > 1
+        ) {
+            state.perf_stalls += cycles - 1;
+        }
+    }
+}
+
 static int step_one(
         CPUState& s,
         const StepCallbacks& cb,
@@ -12241,70 +12399,57 @@ static int step_one(
         throw std::runtime_error("EXT_ISA_FALLBACK");
 
     icache_begin_instruction(s);
-    uint64_t pc_start = pc(s);  // save so we can rewind for MEX_FALLBACK
-    uint8_t byte0 = fetch8(s);
-    int f = (byte0 >> 4) & 0xF;
-    int n = byte0 & 0xF;
-    int cycles = 1;
+    const uint64_t pc_start = pc(s);  // rewind boundary for MEX_FALLBACK
+    AuthoritativeInstructionReader instruction_reader{s};
+    const DecodeResult decode = decode_instruction(
+        instruction_reader,
+        s.ext_modifier);
+    if (decode.status == DecodeStatus::UNAVAILABLE) {
+        throw std::logic_error(
+            "architectural MP64 instruction reader became unavailable");
+    }
+    if (decode.status == DecodeStatus::ILLEGAL_DOUBLE_PREFIX) {
+        throw std::runtime_error(
+            "TRAP:ILLEGAL_OP:Double EXT prefix");
+    }
+    if (decode.status == DecodeStatus::DECODED) {
+        const int decoded_cycles = execute_decoded_instruction_effect(
+            s,
+            cb,
+            decode.instruction);
+        commit_decoded_instruction(
+            s,
+            decode.instruction,
+            decoded_cycles);
+        return decoded_cycles;
+    }
 
-    // EXT prefix
+    const int f = decode.family;
+    const int n = decode.subop;
+    int cycles = decode.bytes_consumed;
+
+    // Extension engines retain their specialized tail decoders. The shared
+    // decoder has already consumed either the standalone header or its
+    // modifier plus header in exact architectural order.
     if (f == 0xF) {
-        // EXT.STRING (F9) — execute natively
-        if (n == 0x9) {
+        if (n == 0x9)
             cycles += exec_string(s, cb);
-            s.ext_modifier = -1;
-            s.cycle_count += cycles;
-            return cycles;
-        }
-        // EXT.DICT (FA) — execute natively
-        if (n == 0xA) {
+        else if (n == 0xA)
             cycles += exec_dict(s, cb);
-            s.ext_modifier = -1;
-            s.cycle_count += cycles;
-            return cycles;
-        }
-        // EXT.CRYPTO (FB) — execute natively
-        if (n == 0xB) {
+        else if (n == 0xB)
             cycles += exec_crypto(s, cb);
-            s.ext_modifier = -1;
-            s.cycle_count += cycles;
-            return cycles;
-        }
-        s.ext_modifier = n;
-        byte0 = fetch8(s);
-        f = (byte0 >> 4) & 0xF;
-        n = byte0 & 0xF;
-        cycles++;
-        // REX + EXT.STRING — execute natively with REX bits active
-        if (f == 0xF && n == 0x9) {
-            cycles += exec_string(s, cb);
-            s.ext_modifier = -1;
-            s.cycle_count += cycles;
-            return cycles;
-        }
-        // REX + EXT.DICT — execute natively with REX bits active
-        if (f == 0xF && n == 0xA) {
-            cycles += exec_dict(s, cb);
-            s.ext_modifier = -1;
-            s.cycle_count += cycles;
-            return cycles;
-        }
-        // REX + EXT.CRYPTO — execute natively with REX bits active
-        if (f == 0xF && n == 0xB) {
-            cycles += exec_crypto(s, cb);
-            s.ext_modifier = -1;
-            s.cycle_count += cycles;
-            return cycles;
-        }
-        if (f == 0xF)
-            throw std::runtime_error("TRAP:ILLEGAL_OP:Double EXT prefix");
+        else
+            throw std::logic_error(
+                "shared MP64 decoder deferred an invalid extension");
+        s.ext_modifier = -1;
+        s.cycle_count += cycles;
+        return cycles;
     }
 
     switch (f) {
     case 0x0: {  // SYS
         switch (n) {
             case 0x0: s.idle = true; break;
-            case 0x1: break;  // NOP
             case 0x2: s.halted = true; break;
             case 0x3: /* RESET — leave to Python */ throw std::runtime_error("TRAP:RESET"); break;
             case 0x4: {  // RTI
@@ -12354,83 +12499,24 @@ static int step_one(
                 s.q_out = 0; break;
             case 0xB: s.flag_i = 1; break;  // EI
             case 0xC: s.flag_i = 0; break;  // DI
-            case 0xD: {  // CALL.L
-                uint8_t b1 = fetch8(s);
-                int rn = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
-                uint64_t target = s.regs[rn];
-                // Check accelerator hooks BEFORE pushing return address
-                int hook = find_accel_hook(s, target);
-                if (hook && cb.bus_access == nullptr) {
-                    const DirectMemoryContext context = {
-                        cb.has_mmio,
-                        cb.mmio_start,
-                        cb.mmio_end,
-                    };
-                    const AccelHookResult result =
-                        execute_accel_hook(s, hook, context);
-                    if (result.handled) {
-                        // Don't push a return address for an accepted shortcut:
-                        // PC remains after CALL.L and the BIOS word is skipped.
-                        cycles += result.extra_cycles;
-                        break;
-                    }
-                }
-                // Unsafe, unsupported, or non-equivalent shortcuts fall
-                // through transactionally to the ordinary BIOS call.
-                uint64_t ret_addr = pc(s);
-                sys_push64(s, cb, ret_addr);
-                pc(s) = target;
-                cycles++;
-                break;
-            }
-            case 0xE: {  // RET.L
-                pc(s) = sys_pop64(s, cb);
-                cycles++;
-                break;
-            }
             case 0xF:  // TRAP
                 throw std::runtime_error("TRAP:SW_TRAP");
                 break;
+            default:
+                throw std::logic_error(
+                    "shared MP64 decoder deferred an owned system op");
         }
         break;
     }
 
-    case 0x1: {  // INC Rn
-        int rn_inc = n | (rex_n(s.ext_modifier) << 4);
-        s.regs[rn_inc]++;
-        break;
-    }
-
-    case 0x2: {  // DEC Rn
-        int rn_dec = n | (rex_n(s.ext_modifier) << 4);
-        s.regs[rn_dec]--;
-        break;
-    }
-
-    case 0x3: {  // BR (short branch) / SKIP
-        if (s.ext_modifier == 6) {  // SKIP mode
-            if (eval_cond(s, n)) {
-                int skip = next_instruction_size(s);
-                pc(s) += skip;
-                cycles++;
-            }
-        } else {
-            uint8_t off_byte = fetch8(s);
-            int64_t offset = s64(sign_extend(off_byte, 8));
-            if (eval_cond(s, n)) {
-                pc(s) += offset;
-                cycles++;
-            }
+    case 0x3: {  // EXT.SKIP
+        if (s.ext_modifier != 6) {
+            throw std::logic_error(
+                "shared MP64 decoder deferred an ordinary branch");
         }
-        break;
-    }
-
-    case 0x4: {  // LBR (long branch)
-        uint8_t hi = fetch8(s);
-        uint8_t lo = fetch8(s);
-        int64_t offset = s64(sign_extend(((uint16_t)hi << 8) | lo, 16));
         if (eval_cond(s, n)) {
-            pc(s) += offset;
+            const int skip = next_instruction_size(s);
+            pc(s) += skip;
             cycles++;
         }
         break;
@@ -12441,9 +12527,6 @@ static int step_one(
         int rd = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
         int rs = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
         switch (n) {
-            case 0x0:   // LDN
-                s.regs[rd] = sys_read64(s, cb, s.regs[rs]);
-                break;
             case 0x1:   // LDA
                 s.regs[rd] = sys_read64(s, cb, s.regs[rs]);
                 s.regs[rs] += 8;
@@ -12455,18 +12538,9 @@ static int step_one(
                 s.regs[rd] = sys_read64(s, cb, rx(s));
                 rx(s) += 8;
                 break;
-            case 0x4:   // STR
-                sys_write64(s, cb, s.regs[rd], s.regs[rs]);
-                break;
             case 0x5:   // STXD
                 sys_write64(s, cb, rx(s), s.regs[rd]);
                 rx(s) -= 8;
-                break;
-            case 0x6:   // LD.B
-                s.regs[rd] = sys_read8(s, cb, s.regs[rs]);
-                break;
-            case 0x7:   // ST.B
-                sys_write8(s, cb, s.regs[rd], s.regs[rs] & 0xFF);
                 break;
             case 0x8:   // LD.H
                 s.regs[rd] = sys_read16(s, cb, s.regs[rs]);
@@ -12496,41 +12570,19 @@ static int step_one(
                 cycles++;
                 break;
             }
+            default:
+                throw std::logic_error(
+                    "shared MP64 decoder deferred an owned memory op");
         }
         break;
     }
 
     case 0x6: {  // IMM
-        uint8_t b1 = fetch8(s);
-        int rn = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
-        if (n <= 0xB) {
-            uint64_t immediate = b1 & 0xF;
-            if (n == 0x0) {
-                if (s.ext_modifier == 0) {  // EXT.IMM64
-                    immediate = 0;
-                    for (int index = 0; index < 8; index++) {
-                        immediate |=
-                            static_cast<uint64_t>(fetch8(s)) <<
-                            (8 * index);
-                    }
-                } else {
-                    immediate = fetch8(s);
-                }
-            } else if (n == 0x1) {
-                const uint8_t lo = fetch8(s);
-                const uint8_t hi = fetch8(s);
-                immediate =
-                    lo | (static_cast<uint64_t>(hi) << 8);
-            } else if (n <= 0x7) {
-                immediate = fetch8(s);
-            }
-            execute_register_immediate(
-                s,
-                static_cast<uint8_t>(n),
-                static_cast<uint8_t>(rn),
-                immediate);
-        } else {
-            switch (n) {
+        const uint8_t operands = fetch8(s);
+        const int rn =
+            ((operands >> 4) & 0xF) |
+            (rex_d(s.ext_modifier) << 4);
+        switch (n) {
             case 0xC:  // GLO
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.d_reg = s.regs[rn] & 0xFF;
@@ -12547,20 +12599,10 @@ static int step_one(
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.regs[rn] = (s.regs[rn] & ~0xFF00ULL) | (((uint64_t)(s.d_reg & 0xFF)) << 8);
                 break;
-            }
+            default:
+                throw std::logic_error(
+                    "shared MP64 decoder deferred an owned immediate op");
         }
-        break;
-    }
-
-    case 0x7: {  // ALU
-        uint8_t b1 = fetch8(s);
-        int rd = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
-        int rs = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
-        execute_register_alu(
-            s,
-            static_cast<uint8_t>(n),
-            static_cast<uint8_t>(rd),
-            static_cast<uint8_t>(rs));
         break;
     }
 
@@ -12689,11 +12731,6 @@ static int step_one(
         }
         break;
     }
-
-    case 0xA:  // SEP Rn
-        if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-        s.psel = n | (rex_n(s.ext_modifier) << 4);
-        break;
 
     case 0xB:  // SEX Rn
         if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
@@ -12870,7 +12907,8 @@ static int step_one(
     }
 
     default:
-        break;
+        throw std::logic_error(
+            "shared MP64 decoder deferred an owned instruction family");
     }
 
     // Clear EXT modifier
@@ -20098,328 +20136,206 @@ remember_single_core_block_rejection(
         : SingleCoreBlockRejectionStorage::STORED;
 }
 
-static bool decode_single_core_register_instruction(
+struct SingleCoreObservationalDecodeReader {
+    const CPUState* core = nullptr;
+    uint64_t address = 0;
+    std::size_t available = 0;
+    std::array<uint8_t, CPUState::ICACHE_LINE_BYTES>* encoding = nullptr;
+    std::size_t consumed = 0;
+
+    bool read(uint8_t& value) {
+        if (
+            consumed >= available ||
+            encoding == nullptr ||
+            consumed >= encoding->size()
+        ) {
+            return false;
+        }
+        const std::optional<uint8_t> observed = private_icache_peek(
+            *core,
+            address + static_cast<uint64_t>(consumed));
+        if (!observed.has_value())
+            return false;
+        value = *observed;
+        (*encoding)[consumed++] = value;
+        return true;
+    }
+
+    void observe_prefix(uint8_t) noexcept {}
+};
+
+static bool single_core_decoded_encoding_is_admissible(
+        const CPUState& core,
+        const DecodedInstruction& decoded,
+        const std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES>& encoding) noexcept {
+    const bool prefixed = decoded.has_trait(
+        mp64::cpu::PREFIXED_ENCODING);
+    if (decoded.has_trait(mp64::cpu::NONCANONICAL_ENCODING))
+        return false;
+
+    switch (decoded.operation) {
+        case DecodedOperation::NOP:
+            return !prefixed;
+        case DecodedOperation::CALL_LONG:
+            return
+                !prefixed &&
+                decoded.rs < 16 &&
+                decoded.rs != core.psel;
+        case DecodedOperation::RETURN_LONG:
+            return !prefixed;
+        case DecodedOperation::INCREMENT:
+        case DecodedOperation::DECREMENT:
+            return
+                !prefixed &&
+                decoded.rd < 16 &&
+                decoded.rd != core.psel;
+        case DecodedOperation::BRANCH_SHORT:
+        case DecodedOperation::BRANCH_LONG:
+            return
+                !prefixed &&
+                (
+                    decoded.subop() == CC_AL ||
+                    decoded.subop() == CC_EQ ||
+                    decoded.subop() == CC_NE ||
+                    decoded.subop() == CC_CC
+                );
+        case DecodedOperation::LOAD_NATURAL:
+        case DecodedOperation::STORE_NATURAL:
+        case DecodedOperation::LOAD_BYTE:
+        case DecodedOperation::STORE_BYTE:
+            return
+                !prefixed &&
+                decoded.rd < 16 &&
+                decoded.rs < 16 &&
+                decoded.rd != core.psel &&
+                decoded.rs != core.psel;
+        case DecodedOperation::LOAD_IMMEDIATE:
+        case DecodedOperation::ADD_IMMEDIATE:
+        case DecodedOperation::AND_IMMEDIATE:
+        case DecodedOperation::OR_IMMEDIATE:
+        case DecodedOperation::COMPARE_IMMEDIATE:
+        case DecodedOperation::SUBTRACT_IMMEDIATE:
+        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
+        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
+            if (decoded.rd >= 16 || decoded.rd == core.psel)
+                return false;
+            if (!prefixed)
+                return true;
+            return
+                decoded.operation == DecodedOperation::LOAD_IMMEDIATE &&
+                decoded.encoded_size == 11 &&
+                encoding[0] == 0xF0;
+        case DecodedOperation::ADD:
+        case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_XOR:
+        case DecodedOperation::COMPARE:
+        case DecodedOperation::MOVE:
+            return
+                !prefixed &&
+                decoded.rd < 16 &&
+                decoded.rs < 16 &&
+                decoded.rd != core.psel;
+        case DecodedOperation::SELECT_PROGRAM_COUNTER:
+            if (!prefixed)
+                return decoded.rd < 16 && decoded.encoded_size == 1;
+            return
+                decoded.rd >= 16 &&
+                decoded.encoded_size == 2 &&
+                encoding[0] == 0xF4;
+        case DecodedOperation::LOAD_HIGH_IMMEDIATE:
+        case DecodedOperation::XOR_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_ARITHMETIC_IMMEDIATE:
+        case DecodedOperation::ADD_WITH_CARRY:
+        case DecodedOperation::SUBTRACT_WITH_BORROW:
+        case DecodedOperation::BITWISE_AND:
+        case DecodedOperation::BITWISE_OR:
+        case DecodedOperation::BITWISE_NOT:
+        case DecodedOperation::NEGATE:
+        case DecodedOperation::SHIFT_LEFT:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL:
+        case DecodedOperation::SHIFT_RIGHT_ARITHMETIC:
+        case DecodedOperation::ROTATE_LEFT:
+        case DecodedOperation::ROTATE_RIGHT:
+        case DecodedOperation::INVALID:
+        default:
+            return false;
+    }
+}
+
+static bool decode_single_core_block_instruction(
         const CPUState& core,
         uint64_t address,
         std::size_t available,
-        CPUState::SingleCoreDecodedInstruction& decoded,
+        DecodedInstruction& decoded,
         std::array<
             uint8_t,
             CPUState::ICACHE_LINE_BYTES>& encoding,
         uint8_t& encoded_size) {
-    std::size_t consumed = 0;
-    auto read_byte = [&](uint8_t& value) {
-        if (
-            consumed >= available ||
-            consumed >= encoding.size()
-        ) {
-            return false;
-        }
-        const std::optional<uint8_t> observed =
-            private_icache_peek(
-                core,
-                address + static_cast<uint64_t>(consumed));
-        if (!observed.has_value())
-            return false;
-        value = *observed;
-        encoding[consumed++] = value;
-        return true;
+    SingleCoreObservationalDecodeReader reader{
+        &core,
+        address,
+        available,
+        &encoding,
+        0,
     };
-
-    uint8_t opcode = 0;
-    if (!read_byte(opcode))
+    const DecodeResult result = decode_instruction(reader);
+    if (
+        result.status != DecodeStatus::DECODED ||
+        result.bytes_consumed == 0 ||
+        result.bytes_consumed != reader.consumed ||
+        !single_core_decoded_encoding_is_admissible(
+            core,
+            result.instruction,
+            encoding)
+    ) {
         return false;
-    int family = (opcode >> 4) & 0xF;
-    int subop = opcode & 0xF;
-    bool imm64_prefix = false;
-    bool high_sep_prefix = false;
-    if (family == 0xF) {
-        const int prefix = subop;
-        uint8_t inner_opcode = 0;
-        if (!read_byte(inner_opcode))
-            return false;
-        family = (inner_opcode >> 4) & 0xF;
-        subop = inner_opcode & 0xF;
-        if (
-            prefix == 0x0 &&
-            family == 0x6 &&
-            subop == 0x0
-        ) {
-            imm64_prefix = true;
-        } else if (
-            prefix == 0x4 &&
-            family == 0xA
-        ) {
-            // F4 is the canonical REX.N prefix for SEP R16..R31.
-            high_sep_prefix = true;
-        } else {
-            return false;
-        }
     }
-
-    decoded = CPUState::SingleCoreDecodedInstruction{};
-    decoded.family = static_cast<uint8_t>(family);
-    decoded.subop = static_cast<uint8_t>(subop);
-    decoded.cycle_cost =
-        (imm64_prefix || high_sep_prefix) ? 2 : 1;
-
-    switch (family) {
-        case 0x0:
-            if (subop == 0x1) {  // NOP
-                break;
-            }
-            if (subop == 0xD) {  // bare low-register CALL.L
-                uint8_t operand = 0;
-                if (!read_byte(operand) || (operand & 0xF0) != 0)
-                    return false;
-                decoded.rs = operand & 0xF;
-                if (decoded.rs == core.psel)
-                    return false;
-                decoded.cycle_cost = 2;
-                break;
-            }
-            if (subop == 0xE) {  // RET.L
-                decoded.cycle_cost = 2;
-                break;
-            }
-            return false;
-        case 0x1:
-        case 0x2:
-            decoded.rd = static_cast<uint8_t>(subop);
-            if (decoded.rd == core.psel)
-                return false;
-            break;
-        case 0x3: {
-            // Admit the unprefixed short Z and carry-clear branches, but
-            // keep SKIP and every other conditional form authoritative.
-            if (
-                subop != CC_AL &&
-                subop != CC_EQ &&
-                subop != CC_NE &&
-                subop != CC_CC
-            ) {
-                return false;
-            }
-            uint8_t offset = 0;
-            if (!read_byte(offset))
-                return false;
-            decoded.immediate = offset;
-            if (subop == CC_AL) {
-                decoded.cycle_cost = 2;
-            } else {
-                decoded.cycle_cost = 1;
-                decoded.taken_cycle_cost = 1;
-            }
-            break;
-        }
-        case 0x4: {
-            // Admit the long Z branches and carry-clear checks needed by
-            // compiled Forth control flow, but keep every other conditional
-            // form on the authoritative path for now.
-            if (
-                subop != CC_AL &&
-                subop != CC_EQ &&
-                subop != CC_NE &&
-                subop != CC_CC
-            ) {
-                return false;
-            }
-            uint8_t high = 0;
-            uint8_t low = 0;
-            if (!read_byte(high) || !read_byte(low))
-                return false;
-            decoded.immediate =
-                (static_cast<uint64_t>(high) << 8) | low;
-            if (subop == CC_AL) {
-                decoded.cycle_cost = 2;
-            } else {
-                decoded.cycle_cost = 1;
-                decoded.taken_cycle_cost = 1;
-            }
-            break;
-        }
-        case 0x5: {
-            // Direct reads are deliberately limited to bare, low-register
-            // LDN and LD.B. Direct writes are deliberately limited to bare,
-            // low-register STR and ST.B. Block construction supplies the
-            // distinct leading-read or stable-address terminal-store proof
-            // before either can run.
-            if (
-                subop != 0x0 &&
-                subop != 0x4 &&
-                subop != 0x6 &&
-                subop != 0x7
-            ) {
-                return false;
-            }
-            uint8_t operands = 0;
-            if (!read_byte(operands))
-                return false;
-            decoded.rd = static_cast<uint8_t>(
-                (operands >> 4) & 0xF);
-            decoded.rs = static_cast<uint8_t>(
-                operands & 0xF);
-            if (
-                decoded.rd == core.psel ||
-                decoded.rs == core.psel
-            ) {
-                return false;
-            }
-            break;
-        }
-        case 0x6: {
-            if (
-                subop != 0x0 &&  // LDI
-                subop != 0x2 &&  // ADDI
-                subop != 0x3 &&  // ANDI
-                subop != 0x4 &&  // ORI
-                subop != 0x6 &&  // CMPI
-                subop != 0x7 &&  // SUBI
-                subop != 0x8 &&  // LSLI
-                subop != 0x9 &&  // LSRI
-                subop != 0xB     // ROLI
-            ) {
-                return false;
-            }
-            uint8_t operands = 0;
-            if (!read_byte(operands))
-                return false;
-            decoded.rd = static_cast<uint8_t>(
-                (operands >> 4) & 0xF);
-            if (decoded.rd == core.psel)
-                return false;
-
-            if (subop == 0x0 && imm64_prefix) {
-                for (int index = 0; index < 8; index++) {
-                    uint8_t byte = 0;
-                    if (!read_byte(byte))
-                        return false;
-                    decoded.immediate |=
-                        static_cast<uint64_t>(byte) << (8 * index);
-                }
-            } else if (subop <= 0x7) {
-                uint8_t byte = 0;
-                if (!read_byte(byte))
-                    return false;
-                decoded.immediate = byte;
-            } else {
-                decoded.immediate = operands & 0xF;
-            }
-            break;
-        }
-        case 0x7: {
-            if (
-                subop != 0x0 &&  // ADD
-                subop != 0x2 &&  // SUB
-                subop != 0x6 &&  // XOR
-                subop != 0x7 &&  // CMP
-                subop != 0x8     // MOV
-            ) {
-                return false;
-            }
-            uint8_t operands = 0;
-            if (!read_byte(operands))
-                return false;
-            decoded.rd = static_cast<uint8_t>(
-                (operands >> 4) & 0xF);
-            decoded.rs = static_cast<uint8_t>(
-                operands & 0xF);
-            if (decoded.rd == core.psel)
-                return false;
-            break;
-        }
-        case 0xA:  // SEP
-            decoded.rd = static_cast<uint8_t>(
-                subop | (high_sep_prefix ? 0x10 : 0));
-            break;
-        default:
-            return false;
-    }
-
-    encoded_size = static_cast<uint8_t>(consumed);
-    decoded.encoded_size = encoded_size;
-    decoded.fetch_hits = static_cast<uint8_t>(
-        1 +
-        (((address & 7) + encoded_size - 1) >> 3));
-    return encoded_size != 0;
+    decoded = result.instruction;
+    encoded_size = result.bytes_consumed;
+    return true;
 }
 
 static bool single_core_decoded_is_terminal_control(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return
-        (
-            decoded.family == 0x0 &&
-            (decoded.subop == 0xD || decoded.subop == 0xE)
-        ) ||
-        decoded.family == 0x3 ||
-        decoded.family == 0x4 ||
-        decoded.family == 0xA;
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.is_terminal_control();
 }
 
 static bool single_core_decoded_is_memory(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return
-        decoded.family == 0x5 ||
-        (
-            decoded.family == 0x0 &&
-            (decoded.subop == 0xD || decoded.subop == 0xE)
-        );
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.is_memory();
 }
 
 static bool single_core_decoded_is_terminal_long_call(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return decoded.family == 0x0 && decoded.subop == 0xD;
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.operation == DecodedOperation::CALL_LONG;
 }
 
 static bool single_core_decoded_is_terminal_long_return(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return decoded.family == 0x0 && decoded.subop == 0xE;
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.operation == DecodedOperation::RETURN_LONG;
 }
 
 static bool single_core_decoded_is_direct_read(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return
-        decoded.family == 0x5 &&
-        (decoded.subop == 0x0 || decoded.subop == 0x6);
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.is_direct_read();
 }
 
 static bool single_core_decoded_is_terminal_store(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return
-        decoded.family == 0x5 &&
-        (decoded.subop == 0x4 || decoded.subop == 0x7);
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.is_direct_store();
 }
 
 static bool single_core_decoded_ends_block(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return
-        single_core_decoded_is_terminal_control(decoded) ||
-        single_core_decoded_is_terminal_store(decoded);
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.ends_block();
 }
 
 static uint32_t single_core_decoded_register_write_mask(
-        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    bool writes_rd = false;
-    switch (decoded.family) {
-        case 0x1:  // INC
-        case 0x2:  // DEC
-            writes_rd = true;
-            break;
-        case 0x5:  // direct reads, but not ST.B
-            writes_rd = single_core_decoded_is_direct_read(decoded);
-            break;
-        case 0x6:  // immediate operations except CMPI
-            writes_rd = decoded.subop != 0x6;
-            break;
-        case 0x7:  // register operations except CMP
-            writes_rd = decoded.subop != 0x7;
-            break;
-        default:
-            break;
-    }
-    if (!writes_rd || decoded.rd >= 32)
-        return 0;
-    return uint32_t{1} << decoded.rd;
+        const DecodedInstruction& decoded) noexcept {
+    return decoded.register_write_mask();
 }
 
 static bool single_core_resolve_prefix_register(
@@ -20437,7 +20353,7 @@ static bool single_core_resolve_prefix_register(
     value = core.regs[reg];
     bool known = true;
     for (uint8_t index = 0; index < prefix_count; index++) {
-        const CPUState::SingleCoreDecodedInstruction& decoded =
+        const DecodedInstruction& decoded =
             block.instructions[index];
         if (
             (
@@ -20448,8 +20364,7 @@ static bool single_core_resolve_prefix_register(
             continue;
         }
         if (
-            decoded.family == 0x6 &&
-            decoded.subop == 0x0 &&
+            decoded.operation == DecodedOperation::LOAD_IMMEDIATE &&
             decoded.rd == reg
         ) {
             value = decoded.immediate;
@@ -20636,52 +20551,53 @@ static void emit_single_core_jit_comparison_flags(
 static void emit_single_core_jit_instruction(
         X86_64BlockEmitter& emitter,
         const CPUState& core,
-        const CPUState::SingleCoreDecodedInstruction& decoded,
+        const DecodedInstruction& decoded,
+        uint64_t instruction_address,
         uint8_t psel,
         uint8_t spsel) {
     emitter.add_core_imm8(
         single_core_jit_register_offset(core, psel),
         decoded.encoded_size);
-    emitter.bytes({0x41, 0x83, 0xC7, decoded.fetch_hits});
+    emitter.bytes({
+        0x41,
+        0x83,
+        0xC7,
+        decoded.fetch_hit_count(instruction_address),
+    });
 
-    switch (decoded.family) {
-        case 0x0:
-            if (decoded.subop == 0x1)  // NOP
-                return;
-            if (decoded.subop == 0xD) {  // terminal CALL.L
-                emitter.mov_rcx_from_core(
-                    single_core_jit_register_offset(core, decoded.rs));
-                emitter.mov_rax_from_core(
-                    single_core_jit_register_offset(core, psel));
-                emitter.sub_core_imm8(
-                    single_core_jit_register_offset(core, spsel),
-                    8);
-                emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
-                emitter.mov_core_from_rcx(
-                    single_core_jit_register_offset(core, psel));
-                return;
-            }
-            if (decoded.subop == 0xE) {  // terminal RET.L
-                emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
-                emitter.add_core_imm8(
-                    single_core_jit_register_offset(core, spsel),
-                    8);
-                emitter.mov_core_from_rax(
-                    single_core_jit_register_offset(core, psel));
-                return;
-            }
-            throw std::logic_error(
-                "x86-64 JIT received an unsupported system op");
-        case 0x1:  // INC
+    switch (decoded.operation) {
+        case DecodedOperation::NOP:
+            return;
+        case DecodedOperation::CALL_LONG:
+            emitter.mov_rcx_from_core(
+                single_core_jit_register_offset(core, decoded.rs));
+            emitter.mov_rax_from_core(
+                single_core_jit_register_offset(core, psel));
+            emitter.sub_core_imm8(
+                single_core_jit_register_offset(core, spsel),
+                8);
+            emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
+            emitter.mov_core_from_rcx(
+                single_core_jit_register_offset(core, psel));
+            return;
+        case DecodedOperation::RETURN_LONG:
+            emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
+            emitter.add_core_imm8(
+                single_core_jit_register_offset(core, spsel),
+                8);
+            emitter.mov_core_from_rax(
+                single_core_jit_register_offset(core, psel));
+            return;
+        case DecodedOperation::INCREMENT:
             emitter.increment_core(
                 single_core_jit_register_offset(core, decoded.rd));
             return;
-        case 0x2:  // DEC
+        case DecodedOperation::DECREMENT:
             emitter.decrement_core(
                 single_core_jit_register_offset(core, decoded.rd));
             return;
-        case 0x3:  // short BR
-            if (decoded.subop == CC_AL) {
+        case DecodedOperation::BRANCH_SHORT:
+            if (decoded.subop() == CC_AL) {
                 emitter.add_core_imm8(
                     single_core_jit_register_offset(core, psel),
                     static_cast<uint8_t>(decoded.immediate));
@@ -20689,11 +20605,11 @@ static void emit_single_core_jit_instruction(
             }
             if (
                 (
-                    decoded.subop != CC_EQ &&
-                    decoded.subop != CC_NE &&
-                    decoded.subop != CC_CC
+                    decoded.subop() != CC_EQ &&
+                    decoded.subop() != CC_NE &&
+                    decoded.subop() != CC_CC
                 ) ||
-                decoded.taken_cycle_cost != 1
+                decoded.conditional_taken_cycle_cost() != 1
             ) {
                 throw std::logic_error(
                     "x86-64 JIT received an unsupported short branch");
@@ -20702,7 +20618,7 @@ static void emit_single_core_jit_instruction(
                 const SingleCoreJitBytePredicate predicate =
                     single_core_jit_byte_predicate(
                         core,
-                        decoded.subop);
+                        decoded.subop());
                 if (!predicate.supported) {
                     throw std::logic_error(
                         "x86-64 JIT received an unsupported short branch");
@@ -20722,8 +20638,8 @@ static void emit_single_core_jit_instruction(
                 emitter.patch32(not_taken, emitter.position());
             }
             return;
-        case 0x4:  // long BR
-            if (decoded.subop == CC_AL) {
+        case DecodedOperation::BRANCH_LONG:
+            if (decoded.subop() == CC_AL) {
                 emitter.add_core_imm32(
                     single_core_jit_register_offset(core, psel),
                     static_cast<uint32_t>(
@@ -20732,11 +20648,11 @@ static void emit_single_core_jit_instruction(
             }
             if (
                 (
-                    decoded.subop != CC_EQ &&
-                    decoded.subop != CC_NE &&
-                    decoded.subop != CC_CC
+                    decoded.subop() != CC_EQ &&
+                    decoded.subop() != CC_NE &&
+                    decoded.subop() != CC_CC
                 ) ||
-                decoded.taken_cycle_cost != 1
+                decoded.conditional_taken_cycle_cost() != 1
             ) {
                 throw std::logic_error(
                     "x86-64 JIT received an unsupported long branch");
@@ -20745,7 +20661,7 @@ static void emit_single_core_jit_instruction(
                 const SingleCoreJitBytePredicate predicate =
                     single_core_jit_byte_predicate(
                         core,
-                        decoded.subop);
+                        decoded.subop());
                 if (!predicate.supported) {
                     throw std::logic_error(
                         "x86-64 JIT received an unsupported long branch");
@@ -20766,34 +20682,42 @@ static void emit_single_core_jit_instruction(
                 emitter.patch32(not_taken, emitter.position());
             }
             return;
-        case 0x5:  // preflighted direct memory
+        case DecodedOperation::LOAD_NATURAL:
+        case DecodedOperation::LOAD_BYTE:
+        case DecodedOperation::STORE_NATURAL:
+        case DecodedOperation::STORE_BYTE:
             // The third SysV argument arrives in RDX. Current emitters reserve
             // it across a stable-address prefix for a terminal store.
-            if (decoded.subop == 0x0) {  // LDN
+            if (decoded.operation == DecodedOperation::LOAD_NATURAL) {
                 emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
-            } else if (decoded.subop == 0x6) {  // LD.B
+            } else if (decoded.operation == DecodedOperation::LOAD_BYTE) {
                 emitter.bytes({0x0F, 0xB6, 0x02}); // movzx eax, byte [rdx]
-            } else if (
-                decoded.subop == 0x4 ||  // STR
-                decoded.subop == 0x7     // ST.B
-            ) {
+            } else {
                 emitter.mov_rax_from_core(
                     single_core_jit_register_offset(core, decoded.rs));
-                if (decoded.subop == 0x4) {
+                if (
+                    decoded.operation ==
+                    DecodedOperation::STORE_NATURAL
+                ) {
                     emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
                 } else {
                     emitter.bytes({0x88, 0x02}); // mov byte [rdx], al
                 }
                 return;
-            } else {
-                throw std::logic_error(
-                    "x86-64 JIT received an unsupported memory op");
             }
             emitter.mov_core_from_rax(
                 single_core_jit_register_offset(core, decoded.rd));
             return;
-        case 0x6:
-            if (decoded.subop == 0x0) {  // LDI
+        case DecodedOperation::LOAD_IMMEDIATE:
+        case DecodedOperation::ADD_IMMEDIATE:
+        case DecodedOperation::AND_IMMEDIATE:
+        case DecodedOperation::OR_IMMEDIATE:
+        case DecodedOperation::COMPARE_IMMEDIATE:
+        case DecodedOperation::SUBTRACT_IMMEDIATE:
+        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
+        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
+            if (decoded.operation == DecodedOperation::LOAD_IMMEDIATE) {
                 if (decoded.encoded_size == 3) {
                     // The unprefixed form has an imm8, so writing EAX gives
                     // the required full-register zero extension compactly.
@@ -20813,8 +20737,8 @@ static void emit_single_core_jit_instruction(
             }
             emitter.mov_rax_from_core(
                 single_core_jit_register_offset(core, decoded.rd));
-            switch (decoded.subop) {
-                case 0x2:  // ADDI
+            switch (decoded.operation) {
+                case DecodedOperation::ADD_IMMEDIATE:
                     emitter.bytes({
                         0x48,
                         0x83,
@@ -20825,7 +20749,7 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_addition_flags(emitter, core);
                     return;
-                case 0x3:  // ANDI
+                case DecodedOperation::AND_IMMEDIATE:
                     // AND EAX with a zero-extended imm32. The guest mask is
                     // an imm8; opcode 83 would sign-extend 0x80..0xff and
                     // incorrectly retain high register bits.
@@ -20835,14 +20759,14 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_logic_flags(emitter, core);
                     return;
-                case 0x4:  // ORI
+                case DecodedOperation::OR_IMMEDIATE:
                     emitter.bytes({0x48, 0x0D});
                     emitter.u32(static_cast<uint32_t>(decoded.immediate));
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_logic_flags(emitter, core);
                     return;
-                case 0x6:  // CMPI
+                case DecodedOperation::COMPARE_IMMEDIATE:
                     emitter.bytes({
                         0x48,
                         0x83,
@@ -20851,7 +20775,7 @@ static void emit_single_core_jit_instruction(
                     });
                     emit_single_core_jit_comparison_flags(emitter, core);
                     return;
-                case 0x7:  // SUBI
+                case DecodedOperation::SUBTRACT_IMMEDIATE:
                     emitter.bytes({
                         0x48,
                         0x83,
@@ -20862,10 +20786,13 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_subtraction_flags(emitter, core);
                     return;
-                case 0x8:  // LSLI
-                case 0x9: {  // LSRI
+                case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+                case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE: {
                     const uint8_t modrm =
-                        decoded.subop == 0x8 ? 0xE0 : 0xE8;
+                        decoded.operation ==
+                                DecodedOperation::SHIFT_LEFT_IMMEDIATE
+                            ? 0xE0
+                            : 0xE8;
                     emitter.bytes({
                         0x48,
                         0xC1,
@@ -20876,7 +20803,7 @@ static void emit_single_core_jit_instruction(
                         single_core_jit_register_offset(core, decoded.rd));
                     return;
                 }
-                case 0xB:  // ROLI
+                case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
                     emitter.bytes({
                         0x48,
                         0xC1,
@@ -20888,53 +20815,57 @@ static void emit_single_core_jit_instruction(
                     return;
                 default:
                     throw std::logic_error(
-                        "x86-64 JIT received unsupported immediate op");
+                        "x86-64 JIT received an unsupported immediate op");
             }
-        case 0x7:
+        case DecodedOperation::ADD:
+        case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_XOR:
+        case DecodedOperation::COMPARE:
+        case DecodedOperation::MOVE:
             emitter.mov_rax_from_core(
                 single_core_jit_register_offset(core, decoded.rd));
             emitter.mov_rcx_from_core(
                 single_core_jit_register_offset(core, decoded.rs));
-            switch (decoded.subop) {
-                case 0x0:  // ADD
+            switch (decoded.operation) {
+                case DecodedOperation::ADD:
                     emitter.bytes({0x48, 0x01, 0xC8});
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_addition_flags(emitter, core);
                     return;
-                case 0x2:  // SUB
+                case DecodedOperation::SUBTRACT:
                     emitter.bytes({0x48, 0x29, 0xC8});
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_subtraction_flags(emitter, core);
                     return;
-                case 0x6:  // XOR
+                case DecodedOperation::BITWISE_XOR:
                     emitter.bytes({0x48, 0x31, 0xC8});
                     emitter.mov_core_from_rax(
                         single_core_jit_register_offset(core, decoded.rd));
                     emit_single_core_jit_logic_flags(emitter, core);
                     return;
-                case 0x7:  // CMP
+                case DecodedOperation::COMPARE:
                     emitter.bytes({0x48, 0x39, 0xC8});
                     emit_single_core_jit_comparison_flags(emitter, core);
                     return;
-                case 0x8:  // MOV
+                case DecodedOperation::MOVE:
                     emitter.bytes({0x49, 0x89, 0x8C, 0x24});
                     emitter.i32(
                         single_core_jit_register_offset(core, decoded.rd));
                     return;
                 default:
                     throw std::logic_error(
-                        "x86-64 JIT received unsupported ALU op");
+                        "x86-64 JIT received an unsupported ALU op");
             }
-        case 0xA:  // terminal SEP
+        case DecodedOperation::SELECT_PROGRAM_COUNTER:
             emitter.store_core_byte(
                 single_core_jit_offset(core, core.psel),
                 decoded.rd);
             return;
         default:
             throw std::logic_error(
-                "x86-64 JIT received unsupported instruction family");
+                "x86-64 JIT received an unsupported semantic operation");
     }
 }
 
@@ -20966,6 +20897,7 @@ compile_single_core_jit_block(
         });
 
         std::vector<std::size_t> interrupt_exits;
+        uint64_t instruction_address = block.address;
         for (
             uint8_t index = 0;
             index < block.instruction_count;
@@ -20983,17 +20915,21 @@ compile_single_core_jit_block(
                 emitter,
                 core,
                 block.instructions[index],
+                instruction_address,
                 block.psel,
                 block.spsel);
             emitter.bytes({0xFF, 0xC3}); // inc ebx
             emitter.bytes({
                 0x41,
                 0xBB,
-                block.instructions[index].fetch_hits,
+                block.instructions[index].fetch_hit_count(
+                    instruction_address),
                 0x00,
                 0x00,
                 0x00,
             }); // mov r11d, last instruction's fetch hits
+            instruction_address +=
+                block.instructions[index].encoded_size;
 
             if (index + 1 < block.instruction_count) {
                 emitter.bytes({0x4D, 0x85, 0xED}); // test r13, r13
@@ -21182,6 +21118,8 @@ static bool single_core_block_structure_is_valid(
             return false;
         }
         const auto& decoded = block.instructions[index];
+        const uint8_t fetch_hits = decoded.fetch_hit_count(
+            block.address + static_cast<uint64_t>(decoded_size));
         if (decoded.cycle_cost == 2) {
             expected_extra_cycle_mask |= static_cast<uint16_t>(
                 uint16_t{1} << index);
@@ -21190,49 +21128,50 @@ static bool single_core_block_structure_is_valid(
         }
         if (single_core_decoded_is_terminal_control(decoded)) {
             const bool valid_short_unconditional =
-                decoded.family == 0x3 &&
-                decoded.subop == CC_AL &&
+                decoded.operation == DecodedOperation::BRANCH_SHORT &&
+                decoded.subop() == CC_AL &&
                 decoded.encoded_size == 2 &&
                 decoded.cycle_cost == 2 &&
-                decoded.taken_cycle_cost == 0 &&
+                decoded.conditional_taken_cycle_cost() == 0 &&
                 decoded.immediate <= 0xFF;
             const bool valid_short_conditional =
-                decoded.family == 0x3 &&
+                decoded.operation == DecodedOperation::BRANCH_SHORT &&
                 (
-                    decoded.subop == CC_EQ ||
-                    decoded.subop == CC_NE ||
-                    decoded.subop == CC_CC
+                    decoded.subop() == CC_EQ ||
+                    decoded.subop() == CC_NE ||
+                    decoded.subop() == CC_CC
                 ) &&
                 decoded.encoded_size == 2 &&
                 decoded.cycle_cost == 1 &&
-                decoded.taken_cycle_cost == 1 &&
+                decoded.conditional_taken_cycle_cost() == 1 &&
                 decoded.immediate <= 0xFF;
             const bool valid_long_unconditional =
-                decoded.family == 0x4 &&
-                decoded.subop == CC_AL &&
+                decoded.operation == DecodedOperation::BRANCH_LONG &&
+                decoded.subop() == CC_AL &&
                 decoded.encoded_size == 3 &&
                 decoded.cycle_cost == 2 &&
-                decoded.taken_cycle_cost == 0 &&
+                decoded.conditional_taken_cycle_cost() == 0 &&
                 decoded.immediate <= 0xFFFF;
             const bool valid_long_conditional =
-                decoded.family == 0x4 &&
+                decoded.operation == DecodedOperation::BRANCH_LONG &&
                 (
-                    decoded.subop == CC_EQ ||
-                    decoded.subop == CC_NE ||
-                    decoded.subop == CC_CC
+                    decoded.subop() == CC_EQ ||
+                    decoded.subop() == CC_NE ||
+                    decoded.subop() == CC_CC
                 ) &&
                 decoded.encoded_size == 3 &&
                 decoded.cycle_cost == 1 &&
-                decoded.taken_cycle_cost == 1 &&
+                decoded.conditional_taken_cycle_cost() == 1 &&
                 decoded.immediate <= 0xFFFF;
             const bool valid_sep =
-                decoded.family == 0xA &&
+                decoded.operation ==
+                    DecodedOperation::SELECT_PROGRAM_COUNTER &&
                 decoded.rd < 32 &&
                 decoded.rs == 0 &&
-                decoded.subop == (decoded.rd & 0xF) &&
-                decoded.fetch_hits >= 1 &&
-                decoded.fetch_hits <= 2 &&
-                decoded.taken_cycle_cost == 0 &&
+                decoded.subop() == (decoded.rd & 0xF) &&
+                fetch_hits >= 1 &&
+                fetch_hits <= 2 &&
+                decoded.conditional_taken_cycle_cost() == 0 &&
                 decoded.immediate == 0 &&
                 (
                     (
@@ -21254,10 +21193,10 @@ static bool single_core_block_structure_is_valid(
                 decoded.rs != block.psel &&
                 decoded.rs != block.spsel &&
                 decoded.encoded_size == 2 &&
-                decoded.fetch_hits >= 1 &&
-                decoded.fetch_hits <= 2 &&
+                fetch_hits >= 1 &&
+                fetch_hits <= 2 &&
                 decoded.cycle_cost == 2 &&
-                decoded.taken_cycle_cost == 0 &&
+                decoded.conditional_taken_cycle_cost() == 0 &&
                 decoded.immediate == 0 &&
                 index != 0 &&
                 !memory_seen &&
@@ -21277,9 +21216,9 @@ static bool single_core_block_structure_is_valid(
                 decoded.rd == 0 &&
                 decoded.rs == 0 &&
                 decoded.encoded_size == 1 &&
-                decoded.fetch_hits == 1 &&
+                fetch_hits == 1 &&
                 decoded.cycle_cost == 2 &&
-                decoded.taken_cycle_cost == 0 &&
+                decoded.conditional_taken_cycle_cost() == 0 &&
                 decoded.immediate == 0 &&
                 index != 0 &&
                 !memory_seen &&
@@ -21304,13 +21243,15 @@ static bool single_core_block_structure_is_valid(
             }
             if (valid_long_call || valid_long_return)
                 memory_seen = true;
-        } else if (decoded.taken_cycle_cost != 0) {
+        } else if (decoded.conditional_taken_cycle_cost() != 0) {
             return false;
-        } else if (decoded.family == 0x5) {
+        } else if (
+            decoded.is_direct_read() || decoded.is_direct_store()
+        ) {
             const bool common_invalid =
                 decoded.encoded_size != 2 ||
-                decoded.fetch_hits < 1 ||
-                decoded.fetch_hits > 2 ||
+                fetch_hits < 1 ||
+                fetch_hits > 2 ||
                 decoded.cycle_cost != 1 ||
                 decoded.immediate != 0 ||
                 decoded.rd >= 16 ||
@@ -21336,7 +21277,7 @@ static bool single_core_block_structure_is_valid(
                 return false;
             memory_seen = true;
         } else if (
-            decoded.family == 0x6 && decoded.subop == 0x0
+            decoded.operation == DecodedOperation::LOAD_IMMEDIATE
         ) {
             const bool valid_imm8 =
                 decoded.encoded_size == 3 &&
@@ -21349,7 +21290,7 @@ static bool single_core_block_structure_is_valid(
                 return false;
             }
         } else if (
-            decoded.family == 0x6 && decoded.subop == 0x3
+            decoded.operation == DecodedOperation::AND_IMMEDIATE
         ) {
             if (
                 decoded.encoded_size != 3 ||
@@ -21361,7 +21302,7 @@ static bool single_core_block_structure_is_valid(
                 return false;
             }
         } else if (
-            decoded.family == 0x6 && decoded.subop == 0x6
+            decoded.operation == DecodedOperation::COMPARE_IMMEDIATE
         ) {
             if (
                 decoded.encoded_size != 3 ||
@@ -21373,7 +21314,7 @@ static bool single_core_block_structure_is_valid(
                 return false;
             }
         } else if (
-            decoded.family == 0x6 && decoded.subop == 0x7
+            decoded.operation == DecodedOperation::SUBTRACT_IMMEDIATE
         ) {
             if (
                 decoded.encoded_size != 3 ||
@@ -21383,11 +21324,8 @@ static bool single_core_block_structure_is_valid(
                 return false;
             }
         } else if (
-            decoded.family == 0x7 &&
-            (
-                decoded.subop == 0x2 ||
-                decoded.subop == 0x7
-            )
+            decoded.operation == DecodedOperation::SUBTRACT ||
+            decoded.operation == DecodedOperation::COMPARE
         ) {
             if (
                 decoded.encoded_size != 2 ||
@@ -21400,8 +21338,9 @@ static bool single_core_block_structure_is_valid(
                 return false;
             }
         } else if (
-            decoded.family == 0x6 &&
-            decoded.subop >= 0x8 && decoded.subop <= 0x9
+            decoded.operation == DecodedOperation::SHIFT_LEFT_IMMEDIATE ||
+            decoded.operation ==
+                DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE
         ) {
             if (
                 decoded.encoded_size != 2 ||
@@ -21498,12 +21437,12 @@ build_single_core_decoded_block(
         candidate.instruction_count <
             CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
     ) {
-        CPUState::SingleCoreDecodedInstruction decoded;
+        DecodedInstruction decoded;
         std::array<
             uint8_t,
             CPUState::ICACHE_LINE_BYTES> encoding{};
         uint8_t encoded_size = 0;
-        if (!decode_single_core_register_instruction(
+        if (!decode_single_core_block_instruction(
                 core,
                 address + static_cast<uint64_t>(offset),
                 line_capacity - offset,
@@ -21650,7 +21589,8 @@ static bool single_core_block_has_terminal_sep(
         const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
     return
         block.instruction_count != 0 &&
-        block.instructions[block.instruction_count - 1].family == 0xA;
+        block.instructions[block.instruction_count - 1].operation ==
+            DecodedOperation::SELECT_PROGRAM_COUNTER;
 }
 
 static uint8_t* preflight_single_core_direct_read(
@@ -21665,17 +21605,13 @@ static uint8_t* preflight_single_core_direct_read(
     ) {
         return nullptr;
     }
-    const CPUState::SingleCoreDecodedInstruction& decoded =
+    const DecodedInstruction& decoded =
         block.instructions[0];
     if (
-        decoded.family != 0x5 ||
-        (
-            decoded.subop != 0x0 &&
-            decoded.subop != 0x6
-        ) ||
+        !single_core_decoded_is_direct_read(decoded) ||
         decoded.encoded_size != 2 ||
         decoded.cycle_cost != 1 ||
-        decoded.taken_cycle_cost != 0 ||
+        decoded.conditional_taken_cycle_cost() != 0 ||
         decoded.rd >= 16 ||
         decoded.rs >= 16 ||
         decoded.rd == block.psel ||
@@ -21685,9 +21621,9 @@ static uint8_t* preflight_single_core_direct_read(
     }
 
     const uint64_t width =
-        decoded.subop == 0x0 ? 8 : 1;
+        decoded.operation == DecodedOperation::LOAD_NATURAL ? 8 : 1;
     const MemoryAccessPolicy policy =
-        decoded.subop == 0x0
+        decoded.operation == DecodedOperation::LOAD_NATURAL
         ? MemoryAccessPolicy::SCALAR
         : MemoryAccessPolicy::SUPERVISOR_BYTE;
     const uint64_t address = core.regs[decoded.rs];
@@ -21724,13 +21660,13 @@ static uint8_t* preflight_single_core_direct_store(
     ) {
         return nullptr;
     }
-    const CPUState::SingleCoreDecodedInstruction& decoded =
+    const DecodedInstruction& decoded =
         block.instructions[block.instruction_count - 1];
     if (
         !single_core_decoded_is_terminal_store(decoded) ||
         decoded.encoded_size != 2 ||
         decoded.cycle_cost != 1 ||
-        decoded.taken_cycle_cost != 0 ||
+        decoded.conditional_taken_cycle_cost() != 0 ||
         decoded.immediate != 0 ||
         decoded.rd >= 16 ||
         decoded.rs >= 16 ||
@@ -21741,10 +21677,10 @@ static uint8_t* preflight_single_core_direct_store(
     }
 
     MemoryAccessPolicy policy = MemoryAccessPolicy::SUPERVISOR_BYTE;
-    if (decoded.subop == 0x4) {
+    if (decoded.operation == DecodedOperation::STORE_NATURAL) {
         guest_size = 8;
         policy = MemoryAccessPolicy::SCALAR;
-    } else if (decoded.subop == 0x7) {
+    } else if (decoded.operation == DecodedOperation::STORE_BYTE) {
         guest_size = 1;
     } else {
         return nullptr;
@@ -21756,7 +21692,7 @@ static uint8_t* preflight_single_core_direct_store(
         index + 1 < block.instruction_count;
         index++
     ) {
-        const CPUState::SingleCoreDecodedInstruction& prefix =
+        const DecodedInstruction& prefix =
             block.instructions[index];
         if (single_core_decoded_is_memory(prefix))
             return nullptr;
@@ -21810,8 +21746,12 @@ static uint8_t* preflight_single_core_direct_long_call(
         return nullptr;
     }
     const uint8_t terminal_index = block.instruction_count - 1;
-    const CPUState::SingleCoreDecodedInstruction& decoded =
+    const DecodedInstruction& decoded =
         block.instructions[terminal_index];
+    const uint64_t instruction_address =
+        block.address + block.identity_size - decoded.encoded_size;
+    const uint8_t fetch_hits =
+        decoded.fetch_hit_count(instruction_address);
     if (
         !single_core_decoded_is_terminal_long_call(decoded) ||
         decoded.rd != 0 ||
@@ -21819,10 +21759,10 @@ static uint8_t* preflight_single_core_direct_long_call(
         decoded.rs == block.psel ||
         decoded.rs == block.spsel ||
         decoded.encoded_size != 2 ||
-        decoded.fetch_hits < 1 ||
-        decoded.fetch_hits > 2 ||
+        fetch_hits < 1 ||
+        fetch_hits > 2 ||
         decoded.cycle_cost != 2 ||
-        decoded.taken_cycle_cost != 0 ||
+        decoded.conditional_taken_cycle_cost() != 0 ||
         decoded.immediate != 0
     ) {
         return nullptr;
@@ -21830,7 +21770,7 @@ static uint8_t* preflight_single_core_direct_long_call(
 
     uint32_t written_registers = 0;
     for (uint8_t index = 0; index < terminal_index; index++) {
-        const CPUState::SingleCoreDecodedInstruction& prefix =
+        const DecodedInstruction& prefix =
             block.instructions[index];
         if (single_core_decoded_is_memory(prefix))
             return nullptr;
@@ -21895,16 +21835,18 @@ static uint8_t* preflight_single_core_direct_long_return(
         return nullptr;
     }
     const uint8_t terminal_index = block.instruction_count - 1;
-    const CPUState::SingleCoreDecodedInstruction& decoded =
+    const DecodedInstruction& decoded =
         block.instructions[terminal_index];
+    const uint64_t instruction_address =
+        block.address + block.identity_size - decoded.encoded_size;
     if (
         !single_core_decoded_is_terminal_long_return(decoded) ||
         decoded.rd != 0 ||
         decoded.rs != 0 ||
         decoded.encoded_size != 1 ||
-        decoded.fetch_hits != 1 ||
+        decoded.fetch_hit_count(instruction_address) != 1 ||
         decoded.cycle_cost != 2 ||
-        decoded.taken_cycle_cost != 0 ||
+        decoded.conditional_taken_cycle_cost() != 0 ||
         decoded.immediate != 0
     ) {
         return nullptr;
@@ -21912,7 +21854,7 @@ static uint8_t* preflight_single_core_direct_long_return(
 
     uint32_t written_registers = 0;
     for (uint8_t index = 0; index < terminal_index; index++) {
-        const CPUState::SingleCoreDecodedInstruction& prefix =
+        const DecodedInstruction& prefix =
             block.instructions[index];
         if (single_core_decoded_is_memory(prefix))
             return nullptr;
@@ -21949,68 +21891,21 @@ static uint8_t* preflight_single_core_direct_long_return(
 
 static uint8_t execute_single_core_decoded_instruction(
         CPUState& core,
-        const CPUState::SingleCoreDecodedInstruction& decoded) {
+        const StepCallbacks& callbacks,
+        const DecodedInstruction& decoded) {
     icache_begin_instruction(core);
     // The complete block is proven resident and byte-identical immediately
     // before entry. Reproduce the architectural fetch effects directly:
     // one hit for each aligned eight-byte fetch window touched, no miss, and
     // bytewise-equivalent PC advancement before the instruction semantics.
-    core.icache_hits += decoded.fetch_hits;
+    core.icache_hits += decoded.fetch_hit_count(pc(core));
     pc(core) += decoded.encoded_size;
-
-    uint8_t actual_cycle_cost = decoded.cycle_cost;
-    switch (decoded.family) {
-        case 0x0:  // NOP
-            break;
-        case 0x1:  // INC
-            core.regs[decoded.rd]++;
-            break;
-        case 0x2:  // DEC
-            core.regs[decoded.rd]--;
-            break;
-        case 0x3:  // short BR, from post-fetch PC
-            if (eval_cond(core, decoded.subop)) {
-                pc(core) += s64(sign_extend(decoded.immediate, 8));
-                actual_cycle_cost = static_cast<uint8_t>(
-                    actual_cycle_cost + decoded.taken_cycle_cost);
-            }
-            break;
-        case 0x4:  // long BR, from post-fetch PC
-            if (eval_cond(core, decoded.subop)) {
-                pc(core) += s64(sign_extend(decoded.immediate, 16));
-                actual_cycle_cost = static_cast<uint8_t>(
-                    actual_cycle_cost + decoded.taken_cycle_cost);
-            }
-            break;
-        case 0x6:
-            execute_register_immediate(
-                core,
-                decoded.subop,
-                decoded.rd,
-                decoded.immediate);
-            break;
-        case 0x7:
-            execute_register_alu(
-                core,
-                decoded.subop,
-                decoded.rd,
-                decoded.rs);
-            break;
-        case 0xA:  // SEP
-            if (core.priv_level != 0)
-                throw std::runtime_error("TRAP:PRIV_FAULT");
-            core.psel = decoded.rd;
-            break;
-        default:
-            throw std::logic_error(
-                "single-core block contains an unsupported operation");
-    }
-
-    core.ext_modifier = -1;
-    core.cycle_count += actual_cycle_cost;
-    if (core.perf_enable)
-        core.perf_cycles += actual_cycle_cost;
-    return actual_cycle_cost;
+    const int actual_cycle_cost = execute_decoded_instruction_effect(
+        core,
+        callbacks,
+        decoded);
+    commit_decoded_instruction(core, decoded, actual_cycle_cost);
+    return static_cast<uint8_t>(actual_cycle_cost);
 }
 
 struct SingleCoreDecodedBlockRun {
@@ -22363,23 +22258,26 @@ execute_single_core_decoded_block_plan(
             if (steps == block->instruction_count) {
                 const auto& terminal =
                     block->instructions[steps - 1];
-                if (terminal.taken_cycle_cost != 0) {
+                if (terminal.conditional_taken_cycle_cost() != 0) {
                     const bool taken =
-                        eval_cond(core, terminal.subop);
+                        eval_cond(core, terminal.subop());
                     if (conditional_taken != taken) {
                         throw std::logic_error(
                             "single-core JIT returned invalid branch outcome");
                     }
                     if (taken) {
                         cycles +=
-                            terminal.taken_cycle_cost;
+                            terminal.conditional_taken_cycle_cost();
                     }
                     uint64_t expected_pc =
                         address + block->identity_size;
                     if (taken) {
                         expected_pc += s64(sign_extend(
                             terminal.immediate,
-                            terminal.family == 0x3 ? 8 : 16));
+                            terminal.operation ==
+                                    DecodedOperation::BRANCH_SHORT
+                                ? 8
+                                : 16));
                     }
                     if (pc(core) != expected_pc) {
                         throw std::logic_error(
@@ -22390,7 +22288,10 @@ execute_single_core_decoded_block_plan(
                         "single-core JIT returned conditional-taken for "
                         "a static-cycle terminal");
                 }
-                if (terminal.family == 0xA) {
+                if (
+                    terminal.operation ==
+                    DecodedOperation::SELECT_PROGRAM_COUNTER
+                ) {
                     if (
                         core.psel != terminal.rd ||
                         core.regs[block->psel] !=
@@ -22489,11 +22390,12 @@ execute_single_core_decoded_block_plan(
                 run.interrupt_boundary = true;
                 break;
             }
-            const CPUState::SingleCoreDecodedInstruction& decoded =
+            const DecodedInstruction& decoded =
                 block->instructions[index];
             const uint8_t actual_cycle_cost =
                 execute_single_core_decoded_instruction(
                     core,
+                    callbacks,
                     decoded);
             run.steps++;
             run.cycles += actual_cycle_cost;

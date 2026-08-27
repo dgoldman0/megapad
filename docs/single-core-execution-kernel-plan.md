@@ -103,7 +103,7 @@ accel/
 
   cpu/mp64/
     state.h                    architectural full/micro CPU state
-    decode.h/.cpp              sole MP64 decoder
+    decode.h + decode_impl.h   sole MP64 decoder; inlined reader template
     semantics.h                shared instruction definitions and effects
     interpreter.cpp            authoritative decoded execution
     icache.h/.cpp              guest I-cache behavior and identity generations
@@ -349,6 +349,36 @@ extension built successfully, and focused exact-single/generic/Python state,
 microcore REX/scalar, and native SUBI flag comparisons passed serially (6
 passed). Decoder and exit ownership remain in progress.
 
+Second-slice evidence (2026-08-27): `accel/cpu/mp64/decode.h` and its internal
+template implementation now own the sole semantic decoder for ordinary
+architectural execution and exact-single block construction. The compact
+16-byte decoded record carries the semantic operation, resolved registers,
+immediate, encoded length, cycle cost, and traits. Architectural `fetch8` and
+observational guest-I-cache readers instantiate that same decoder directly, so
+the hot path does not pay a function-pointer call per byte. Prefix observation,
+illegal double-prefix timing, incomplete observational reads, and specialized
+F9--FB engine handoff remain explicit decode outcomes.
+
+The migrated `step_one` instruction families and the decoded C++ fallback now
+execute one shared effect function. x86-64 lowering and block validation also
+dispatch on semantic operations rather than independently interpreting raw
+opcode families; raw subops remain only where their encoded condition or ALU
+selector is architecturally meaningful. The former DBT-only instruction record
+and decoder, and the duplicated migrated cases in `step_one`, were deleted.
+Exact-single admission remains a separate policy over the shared decoded form
+and preserves the pre-existing admitted instruction set; policy-only scanners
+for microcore routing, SKIP sizing, and specialized systems do not execute a
+second definition of those semantics. Fetch-hit accounting is derived from the
+instruction start and encoded length rather than stored as parallel metadata.
+
+The extension rebuilt successfully after the semantic-lowering conversion,
+and the focused Python/microcore oracle, encoded-length and cross-line decode,
+decoded/native execution, direct load/store, CALL.L/RET.L, branch, SEP, and
+strict multicycle-boundary spine passed serially (26 passed). Shared block-exit
+ownership and the remaining specialized interpreter families are still part of
+this element; this is construction evidence, not broad qualification or a
+performance claim.
+
 ### Element 6 — Multi-line and multi-memory block construction
 
 - Build caller-bounded blocks across the resident guest-cache lines needed by
@@ -446,4 +476,6 @@ does not justify keeping the superseded implementation in the final tree.
 
 ## Deferred findings ledger
 
-No deferred findings are recorded at plan creation.
+| ID | Finding | Disposition |
+|---|---|---|
+| EK-F1 | Focused happy-path coverage does not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias shape, natural-width callback route, or strict-cycle replay form. | Keep construction on the seconds-scale happy-path spine. Add the compact table-driven semantic matrix and fault/alias timing oracles during Element 8 acceptance, or earlier only if one blocks the next production slice. |
