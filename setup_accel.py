@@ -72,6 +72,7 @@ ext = Extension(
     depends=[
         "accel/cpu/mp64/decode.h",
         "accel/cpu/mp64/decode_impl.h",
+        "accel/cpu/mp64/interpreter.h",
         "accel/cpu/mp64/semantics.h",
         "accel/dbt/executable_arena.h",
         "accel/dbt/host_jit_config.h",

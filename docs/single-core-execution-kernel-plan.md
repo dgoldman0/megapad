@@ -105,7 +105,7 @@ accel/
     state.h                    architectural full/micro CPU state
     decode.h + decode_impl.h   sole MP64 decoder; inlined reader template
     semantics.h                shared instruction definitions and effects
-    interpreter.cpp            authoritative decoded execution
+    interpreter.h              inlined authoritative decoded effects
     icache.h/.cpp              guest I-cache behavior and identity generations
     block_ir.h/.cpp            bounded multi-memory blocks and exit descriptors
     block_cache.h/.cpp         admission, rejection, and identity revalidation
@@ -378,6 +378,25 @@ strict multicycle-boundary spine passed serially (26 passed). Shared block-exit
 ownership and the remaining specialized interpreter families are still part of
 this element; this is construction evidence, not broad qualification or a
 performance claim.
+
+Third-slice evidence (2026-08-27):
+`accel/cpu/mp64/interpreter.h` now owns the authoritative decoded effect switch
+behind a compile-time machine-operations policy. MP64 keeps register, branch,
+flag, CALL.L/RET.L stack ordering, and privilege semantics; the local adapter
+supplies only existing memory/callback and accelerator-hook boundaries while
+`CPUState` and `StepCallbacks` remain coupled inside the monolith. This is an
+in-place ownership extraction, not a second interpreter API or selectable
+execution route.
+
+The template and its local adapter are forced inline because an initial build
+exposed that ordinary header extraction created a new 5.4-KiB out-of-line call
+per decoded guest instruction. Final object inspection found no decoded-effect
+or adapter symbol and no relocation to such a boundary, restoring the prior
+hot-path call shape. The deleted monolithic switch was not retained. The
+extension rebuilt successfully, and the focused semantic/native, memory,
+CALL.L/RET.L, branch, SEP, strict-cycle, accepted-hook, and byte-MMIO spine
+passed serially (29 passed). Retirement and shared block-exit ownership remain
+in progress.
 
 ### Element 6 — Multi-line and multi-memory block construction
 

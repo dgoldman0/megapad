@@ -45,6 +45,7 @@
 #include "dbt/host_jit_config.h"
 #include "dbt/x86_64/emitter.h"
 #include "cpu/mp64/decode.h"
+#include "cpu/mp64/interpreter.h"
 #include "cpu/mp64/semantics.h"
 #include "machine/memory.h"
 #include "machine/settlement.h"
@@ -72,7 +73,9 @@ using mp64::cpu::DecodedInstruction;
 using mp64::cpu::DecodedOperation;
 using mp64::cpu::DecodeResult;
 using mp64::cpu::DecodeStatus;
+using mp64::cpu::DecodedCallAcceleration;
 using mp64::cpu::decode_instruction;
+using mp64::cpu::execute_decoded_instruction;
 using mp64::cpu::CC_AL;
 using mp64::cpu::CC_BNQ;
 using mp64::cpu::CC_BQ;
@@ -12196,137 +12199,55 @@ struct AuthoritativeInstructionReader {
     }
 };
 
-// Execute an already-fetched semantic instruction. Fetch accounting and PC
-// advancement belong to the caller, while this function owns the one MP64
-// definition of every instruction admitted by the shared decoder.
-static int execute_decoded_instruction_effect(
+// Bind the portable decoded interpreter to the current machine-owned memory,
+// stack, and acceleration boundaries. CPUState and StepCallbacks remain local
+// to this translation unit until their later ownership extractions.
+struct AuthoritativeDecodedOperations {
+    CPUState& state;
+    const StepCallbacks& callbacks;
+
+    MP64_ALWAYS_INLINE DecodedCallAcceleration
+    accelerate_call(uint64_t target) {
+        const int hook = find_accel_hook(state, target);
+        if (hook == 0 || callbacks.bus_access != nullptr)
+            return {};
+        const DirectMemoryContext context = {
+            callbacks.has_mmio,
+            callbacks.mmio_start,
+            callbacks.mmio_end,
+        };
+        const AccelHookResult result =
+            execute_accel_hook(state, hook, context);
+        return {result.handled, result.extra_cycles};
+    }
+
+    MP64_ALWAYS_INLINE uint64_t read64(uint64_t address) {
+        return sys_read64(state, callbacks, address);
+    }
+
+    MP64_ALWAYS_INLINE void write64(
+            uint64_t address,
+            uint64_t value) {
+        sys_write64(state, callbacks, address, value);
+    }
+
+    MP64_ALWAYS_INLINE uint8_t read8(uint64_t address) {
+        return sys_read8(state, callbacks, address);
+    }
+
+    MP64_ALWAYS_INLINE void write8(
+            uint64_t address,
+            uint8_t value) {
+        sys_write8(state, callbacks, address, value);
+    }
+};
+
+static MP64_ALWAYS_INLINE int execute_authoritative_decoded_instruction(
         CPUState& state,
         const StepCallbacks& callbacks,
         const DecodedInstruction& decoded) {
-    int cycles = decoded.cycle_cost;
-    switch (decoded.operation) {
-        case DecodedOperation::NOP:
-            break;
-        case DecodedOperation::CALL_LONG: {
-            const uint64_t target = state.regs[decoded.rs];
-            const int hook = find_accel_hook(state, target);
-            if (hook != 0 && callbacks.bus_access == nullptr) {
-                const DirectMemoryContext context = {
-                    callbacks.has_mmio,
-                    callbacks.mmio_start,
-                    callbacks.mmio_end,
-                };
-                const AccelHookResult result =
-                    execute_accel_hook(state, hook, context);
-                if (result.handled) {
-                    // The decoded base includes the ordinary CALL stack
-                    // cycle. An accepted hook performs no push and replaces
-                    // that cycle with its architected shortcut cost.
-                    return cycles - 1 + result.extra_cycles;
-                }
-            }
-            const uint64_t return_address = pc(state);
-            sys_push64(state, callbacks, return_address);
-            pc(state) = target;
-            break;
-        }
-        case DecodedOperation::RETURN_LONG:
-            pc(state) = sys_pop64(state, callbacks);
-            break;
-        case DecodedOperation::INCREMENT:
-            state.regs[decoded.rd]++;
-            break;
-        case DecodedOperation::DECREMENT:
-            state.regs[decoded.rd]--;
-            break;
-        case DecodedOperation::BRANCH_SHORT:
-            if (eval_cond(state, decoded.subop())) {
-                pc(state) += s64(sign_extend(decoded.immediate, 8));
-                cycles += decoded.conditional_taken_cycle_cost();
-            }
-            break;
-        case DecodedOperation::BRANCH_LONG:
-            if (eval_cond(state, decoded.subop())) {
-                pc(state) += s64(sign_extend(decoded.immediate, 16));
-                cycles += decoded.conditional_taken_cycle_cost();
-            }
-            break;
-        case DecodedOperation::LOAD_NATURAL: {
-            const uint64_t address = state.regs[decoded.rs];
-            state.regs[decoded.rd] =
-                sys_read64(state, callbacks, address);
-            break;
-        }
-        case DecodedOperation::STORE_NATURAL: {
-            const uint64_t address = state.regs[decoded.rd];
-            const uint64_t value = state.regs[decoded.rs];
-            sys_write64(state, callbacks, address, value);
-            break;
-        }
-        case DecodedOperation::LOAD_BYTE: {
-            const uint64_t address = state.regs[decoded.rs];
-            state.regs[decoded.rd] =
-                sys_read8(state, callbacks, address);
-            break;
-        }
-        case DecodedOperation::STORE_BYTE: {
-            const uint64_t address = state.regs[decoded.rd];
-            const uint8_t value = static_cast<uint8_t>(
-                state.regs[decoded.rs]);
-            sys_write8(state, callbacks, address, value);
-            break;
-        }
-        case DecodedOperation::LOAD_IMMEDIATE:
-        case DecodedOperation::LOAD_HIGH_IMMEDIATE:
-        case DecodedOperation::ADD_IMMEDIATE:
-        case DecodedOperation::AND_IMMEDIATE:
-        case DecodedOperation::OR_IMMEDIATE:
-        case DecodedOperation::XOR_IMMEDIATE:
-        case DecodedOperation::COMPARE_IMMEDIATE:
-        case DecodedOperation::SUBTRACT_IMMEDIATE:
-        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
-        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
-        case DecodedOperation::SHIFT_RIGHT_ARITHMETIC_IMMEDIATE:
-        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
-            execute_register_immediate(
-                state,
-                decoded.subop(),
-                decoded.rd,
-                decoded.immediate);
-            break;
-        case DecodedOperation::ADD:
-        case DecodedOperation::ADD_WITH_CARRY:
-        case DecodedOperation::SUBTRACT:
-        case DecodedOperation::SUBTRACT_WITH_BORROW:
-        case DecodedOperation::BITWISE_AND:
-        case DecodedOperation::BITWISE_OR:
-        case DecodedOperation::BITWISE_XOR:
-        case DecodedOperation::COMPARE:
-        case DecodedOperation::MOVE:
-        case DecodedOperation::BITWISE_NOT:
-        case DecodedOperation::NEGATE:
-        case DecodedOperation::SHIFT_LEFT:
-        case DecodedOperation::SHIFT_RIGHT_LOGICAL:
-        case DecodedOperation::SHIFT_RIGHT_ARITHMETIC:
-        case DecodedOperation::ROTATE_LEFT:
-        case DecodedOperation::ROTATE_RIGHT:
-            execute_register_alu(
-                state,
-                decoded.subop(),
-                decoded.rd,
-                decoded.rs);
-            break;
-        case DecodedOperation::SELECT_PROGRAM_COUNTER:
-            if (state.priv_level != 0)
-                throw std::runtime_error("TRAP:PRIV_FAULT");
-            state.psel = decoded.rd;
-            break;
-        case DecodedOperation::INVALID:
-        default:
-            throw std::logic_error(
-                "shared MP64 decoder produced an invalid operation");
-    }
-    return cycles;
+    AuthoritativeDecodedOperations operations{state, callbacks};
+    return execute_decoded_instruction(state, operations, decoded);
 }
 
 static void commit_decoded_instruction(
@@ -12413,7 +12334,8 @@ static int step_one(
             "TRAP:ILLEGAL_OP:Double EXT prefix");
     }
     if (decode.status == DecodeStatus::DECODED) {
-        const int decoded_cycles = execute_decoded_instruction_effect(
+        const int decoded_cycles =
+            execute_authoritative_decoded_instruction(
             s,
             cb,
             decode.instruction);
@@ -21900,7 +21822,8 @@ static uint8_t execute_single_core_decoded_instruction(
     // bytewise-equivalent PC advancement before the instruction semantics.
     core.icache_hits += decoded.fetch_hit_count(pc(core));
     pc(core) += decoded.encoded_size;
-    const int actual_cycle_cost = execute_decoded_instruction_effect(
+    const int actual_cycle_cost =
+        execute_authoritative_decoded_instruction(
         core,
         callbacks,
         decoded);
