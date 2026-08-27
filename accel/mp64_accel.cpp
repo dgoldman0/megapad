@@ -45,6 +45,13 @@
 #else
 #define MP64_SANITIZER_BUILD 0
 #endif
+#if defined(__GNUC__) || defined(__clang__)
+#define MP64_ALWAYS_INLINE inline __attribute__((always_inline))
+#define MP64_NOINLINE __attribute__((noinline))
+#else
+#define MP64_ALWAYS_INLINE inline
+#define MP64_NOINLINE
+#endif
 #if defined(__x86_64__) && !defined(__ILP32__) && \
     defined(__linux__) && \
     !MP64_SANITIZER_BUILD
@@ -22427,7 +22434,7 @@ enum class SingleCoreBlockBuildRejection : uint8_t {
     STRUCTURE = 3,
 };
 
-static CPUState::SingleCoreDecodedBlockEntry*
+static MP64_NOINLINE CPUState::SingleCoreDecodedBlockEntry*
 build_single_core_decoded_block(
         CPUState& core,
         uint64_t address,
@@ -23010,13 +23017,21 @@ struct SingleCoreDecodedBlockRun {
     bool timing_boundary = false;
 };
 
-static SingleCoreDecodedBlockRun
-try_execute_single_core_decoded_block(
+struct SingleCoreDecodedBlockAdmission {
+    CPUState::SingleCoreDecodedBlockEntry* block = nullptr;
+    bool cache_hit = false;
+};
+
+// Keep admission inline and its rare decoder out of line. Cached rejection
+// hits can then fall back to step_one() without entering the large dynamic
+// preflight/native-execution routine or reserving its stack frame.
+static MP64_ALWAYS_INLINE SingleCoreDecodedBlockAdmission
+admit_single_core_decoded_block(
         SystemState& system,
         CPUState& core,
         const StepCallbacks& callbacks,
         int max_steps) {
-    SingleCoreDecodedBlockRun run;
+    SingleCoreDecodedBlockAdmission admission;
     if (
         max_steps <= 0 ||
         core.profile != CoreProfile::FULL ||
@@ -23027,7 +23042,7 @@ try_execute_single_core_decoded_block(
         !core.single_core_execution_plan_cache ||
         callbacks.bus_access != nullptr
     ) {
-        return run;
+        return admission;
     }
 
     ConcurrencyProfileCounters& profile =
@@ -23061,7 +23076,7 @@ try_execute_single_core_decoded_block(
                     profile
                         .uncontended_block_rejection_cache_hits);
             }
-            return run;
+            return admission;
         }
         if (profile_enabled) {
             host_saturating_increment(
@@ -23118,7 +23133,7 @@ try_execute_single_core_decoded_block(
                     }
                 }
             }
-            return run;
+            return admission;
         }
         CPUState::SingleCoreBlockRejectionEntry& rejection =
             core.single_core_execution_plan_cache->rejections[
@@ -23145,6 +23160,24 @@ try_execute_single_core_decoded_block(
         }
     }
 
+    admission.block = block;
+    admission.cache_hit = block_cache_hit;
+    return admission;
+}
+
+static MP64_NOINLINE SingleCoreDecodedBlockRun
+execute_single_core_decoded_block_plan(
+        SystemState& system,
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        int max_steps,
+        CPUState::SingleCoreDecodedBlockEntry* block,
+        bool block_cache_hit) {
+    SingleCoreDecodedBlockRun run;
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool profile_enabled = profile.enabled;
+    const uint64_t address = block->address;
     const bool timing_active =
         system.shared_crypto
             .requires_unbounded_timing_boundary() ||
@@ -23489,27 +23522,37 @@ static void run_uncontended_single_core_segment_impl(
 
         try {
             if constexpr (!INJECT_FAILURE) {
-                const SingleCoreDecodedBlockRun block_run =
-                    try_execute_single_core_decoded_block(
+                const SingleCoreDecodedBlockAdmission admission =
+                    admit_single_core_decoded_block(
                         system,
                         core,
                         callbacks,
                         max_steps - step_index);
-                if (block_run.steps > 0) {
-                    segment.run.total_cycles +=
-                        block_run.cycles;
-                    segment.run.steps_executed +=
-                        block_run.steps;
-                    step_index += block_run.steps - 1;
-                    if (block_run.interrupt_boundary) {
-                        segment.interrupt_boundary = true;
-                        break;
+                if (admission.block != nullptr) {
+                    const SingleCoreDecodedBlockRun block_run =
+                        execute_single_core_decoded_block_plan(
+                            system,
+                            core,
+                            callbacks,
+                            max_steps - step_index,
+                            admission.block,
+                            admission.cache_hit);
+                    if (block_run.steps > 0) {
+                        segment.run.total_cycles +=
+                            block_run.cycles;
+                        segment.run.steps_executed +=
+                            block_run.steps;
+                        step_index += block_run.steps - 1;
+                        if (block_run.interrupt_boundary) {
+                            segment.interrupt_boundary = true;
+                            break;
+                        }
+                        if (block_run.timing_boundary) {
+                            segment.crypto_timing_boundary = true;
+                            break;
+                        }
+                        continue;
                     }
-                    if (block_run.timing_boundary) {
-                        segment.crypto_timing_boundary = true;
-                        break;
-                    }
-                    continue;
                 }
             }
             const int cycles =
