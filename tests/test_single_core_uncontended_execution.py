@@ -526,7 +526,7 @@ loop:
         assert storage["w_x_model"] == "distinct-rw-and-rx-aliases"
         assert storage["ready"]
         assert not storage["failed"]
-        assert storage["slot_count"] == 128
+        assert storage["slot_count"] == 1_024
         assert storage["slot_bytes"] > counts[
             "uncontended_jit_max_code_bytes"
         ]
@@ -931,6 +931,56 @@ loop:
             wall_ns[name] == 0
             for name in JIT_PROFILE_WALL_FIELDS
         )
+
+
+def test_expanded_direct_map_retains_a_prior_128_entry_collision() -> None:
+    system = _system()
+    first_address = 0
+    prior_128_collision = 0x81
+    system.load_binary(
+        first_address,
+        assemble(
+            """
+loop:
+    inc r4
+    br loop
+"""
+        ),
+    )
+    system.load_binary(
+        prior_128_collision,
+        assemble(
+            """
+loop:
+    inc r5
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=first_address)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for address in (
+        first_address,
+        prior_128_collision,
+        first_address,
+    ):
+        system.cpu.pc = address
+        stats = system.run_batch_stats(6)
+        assert stats.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[4] == 6
+    assert system.cpu.regs[5] == 3
+    assert counts["uncontended_block_builds"] == 2
+    assert counts["uncontended_block_evictions"] == 0
+    assert counts["uncontended_jit_plan_evictions"] == 0
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        storage = dict(snapshot["single_core_jit_storage"])
+        assert storage["slot_count"] == 1_024
 
 
 def test_reusable_jit_arena_bounds_alternating_collision_churn() -> None:

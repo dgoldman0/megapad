@@ -2223,8 +2223,13 @@ struct CPUState {
     // cleared. Reset and discontinuous restore remain hard host-plan
     // boundaries. None of these caches is architectural state.
     static constexpr std::size_t
-        SINGLE_CORE_BLOCK_CACHE_ENTRIES =
-            PRIVATE_DECODE_CACHE_ENTRIES;
+        SINGLE_CORE_BLOCK_CACHE_ENTRIES = 1024;
+    static_assert(
+        (
+            SINGLE_CORE_BLOCK_CACHE_ENTRIES &
+            (SINGLE_CORE_BLOCK_CACHE_ENTRIES - 1)
+        ) == 0,
+        "single-core block cache must have power-of-two geometry");
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES = 512;
     static_assert(
@@ -2262,10 +2267,6 @@ struct CPUState {
             instructions{};
         HostExecutableCode native_code;
     };
-    std::array<
-        SingleCoreDecodedBlockEntry,
-        SINGLE_CORE_BLOCK_CACHE_ENTRIES>
-        single_core_block_cache{};
     struct SingleCoreBlockRejectionEntry {
         bool valid = false;
         uint8_t psel = 0;
@@ -2274,10 +2275,21 @@ struct CPUState {
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
     };
-    std::array<
-        SingleCoreBlockRejectionEntry,
-        SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES>
-        single_core_block_rejection_cache{};
+    struct SingleCoreExecutionPlanCache {
+        std::array<
+            SingleCoreDecodedBlockEntry,
+            SINGLE_CORE_BLOCK_CACHE_ENTRIES>
+            blocks{};
+        std::array<
+            SingleCoreBlockRejectionEntry,
+            SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES>
+            rejections{};
+    };
+    // Only the sole full core in an exact-single topology owns this cache.
+    // Multi-core and microcore configurations must not pay per-CPU storage
+    // for an execution path they cannot enter.
+    std::unique_ptr<SingleCoreExecutionPlanCache>
+        single_core_execution_plan_cache;
 
     void clear_private_decode_admission_cache() noexcept {
         for (PrivateDecodeCacheEntry& entry :
@@ -2287,14 +2299,16 @@ struct CPUState {
     }
 
     void discard_single_core_execution_plans() noexcept {
+        if (!single_core_execution_plan_cache)
+            return;
         for (SingleCoreDecodedBlockEntry& entry :
-             single_core_block_cache) {
+             single_core_execution_plan_cache->blocks) {
             entry.valid = false;
             entry.native_compile_checked = false;
             entry.native_code.reset();
         }
         for (SingleCoreBlockRejectionEntry& entry :
-             single_core_block_rejection_cache) {
+             single_core_execution_plan_cache->rejections) {
             entry.valid = false;
         }
     }
@@ -5207,6 +5221,11 @@ struct SystemState {
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
+        }
+        if (all_core_count == 1) {
+            cores.front()->single_core_execution_plan_cache =
+                std::make_unique<
+                    CPUState::SingleCoreExecutionPlanCache>();
         }
         micro_cores.reserve(static_cast<std::size_t>(micro_core_count));
         for (int index = 0; index < micro_core_count; index++) {
@@ -20779,8 +20798,10 @@ static std::size_t single_core_block_rejection_cache_index(
 static bool single_core_block_rejection_matches(
         const CPUState& core,
         uint64_t address) noexcept {
+    if (!core.single_core_execution_plan_cache)
+        return false;
     const CPUState::SingleCoreBlockRejectionEntry& entry =
-        core.single_core_block_rejection_cache[
+        core.single_core_execution_plan_cache->rejections[
             single_core_block_rejection_cache_index(address)];
     if (
         !entry.valid ||
@@ -20823,7 +20844,8 @@ remember_single_core_block_rejection(
         core.profile != CoreProfile::FULL ||
         !core.icache_enabled ||
         core.psel >= 32 ||
-        core.spsel >= 32
+        core.spsel >= 32 ||
+        !core.single_core_execution_plan_cache
     ) {
         return SingleCoreBlockRejectionStorage::NONRESIDENT;
     }
@@ -20849,7 +20871,7 @@ remember_single_core_block_rejection(
         candidate.identity_size);
     candidate.valid = true;
     CPUState::SingleCoreBlockRejectionEntry& destination =
-        core.single_core_block_rejection_cache[
+        core.single_core_execution_plan_cache->rejections[
             single_core_block_rejection_cache_index(address)];
     const bool replaced = destination.valid;
     destination = candidate;
@@ -22539,8 +22561,9 @@ build_single_core_decoded_block(
         return nullptr;
     }
     candidate.valid = true;
+    assert(core.single_core_execution_plan_cache);
     CPUState::SingleCoreDecodedBlockEntry& destination =
-        core.single_core_block_cache[
+        core.single_core_execution_plan_cache->blocks[
             single_core_block_cache_index(address)];
     destination = std::move(candidate);
     return &destination;
@@ -23001,6 +23024,7 @@ try_execute_single_core_decoded_block(
         core.ext_modifier != -1 ||
         core.psel >= 32 ||
         core.spsel >= 32 ||
+        !core.single_core_execution_plan_cache ||
         callbacks.bus_access != nullptr
     ) {
         return run;
@@ -23016,7 +23040,7 @@ try_execute_single_core_decoded_block(
 
     const uint64_t address = pc(core);
     CPUState::SingleCoreDecodedBlockEntry* block =
-        &core.single_core_block_cache[
+        &core.single_core_execution_plan_cache->blocks[
             single_core_block_cache_index(address)];
     const bool block_cache_hit =
         single_core_block_identity_matches(
@@ -23097,7 +23121,7 @@ try_execute_single_core_decoded_block(
             return run;
         }
         CPUState::SingleCoreBlockRejectionEntry& rejection =
-            core.single_core_block_rejection_cache[
+            core.single_core_execution_plan_cache->rejections[
                 single_core_block_rejection_cache_index(address)];
         if (
             rejection.valid &&
