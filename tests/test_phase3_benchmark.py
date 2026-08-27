@@ -20,7 +20,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
     )
 
     assert report["schema"] == phase0.SCHEMA
-    assert report["schema_version"] == 21
+    assert report["schema_version"] == 22
     assert report["configuration"]["full_core_counts"] == [4]
     assert report["configuration"]["worker_counts"] == [1, 2, 4]
     assert not report["configuration"]["host_profile"]
@@ -34,6 +34,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
     assert fixture_hash == phase0._json_sha256(fixture_manifest)
     assert set(fixture_manifest["assembled_programs"]) == {
         "private_compute",
+        "bios_admission_mix",
         "shared_memory",
         "mmio_poll",
         "timer_interrupt",

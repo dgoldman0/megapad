@@ -2,7 +2,7 @@
 
 **Started:** 2026-08-27
 
-**Status:** Engine consolidation complete; broad acceptance deferred by gate
+**Status:** Engine performance correction active after failed Desktop acceptance
 
 **Branch:** `single-core-execution-kernel`
 
@@ -819,6 +819,53 @@ Focused rejection identity, refill, selector, collision, changed-byte, and
 self-modification cases remained green; the self-modifying case proves that a
 stale hint declines before the replacement positive block executes.
 
+Desktop acceptance reversal (2026-08-27): the ordinary Akashic-main Desktop
+smoke invalidated that correction and its supporting synthetic evidence. At
+`4937724`, the journey reached the 420-second ceiling after 12,460,500,000
+instructions, or 29.648797 Msteps/s. The parent `8eca80f` had completed in
+402.21 seconds at 31.628999 Msteps/s, while the retained pre-engine control
+completed in 346.77 seconds at 37.944459 Msteps/s. The hint therefore reduced
+Desktop throughput another 6.261% and left the engine 21.863% below the
+pre-engine control. RSS was unchanged. The failed journey stopped while Agent
+was still processing `daybook.source`; it never reached the later composer and
+File Explorer legs.
+
+The former synthetic justification compared mutually exclusive extrema:
+`private_compute` was one five-instruction positive block, while
+`shared_memory` was effectively all exact rejection. Its timed samples were
+only about 5--36 milliseconds, all baseline samples preceded all candidate
+samples, and substantial within-run frequency drift was visible. Existing
+Phase 0 evidence had already shown the rejected scalar path falling from
+41.176 MIPS at pre-engine `3f339eb` to 31.887 MIPS at `8eca80f`; the earlier
+decision failed to treat that adverse scenario independently.
+
+Phase 0 schema 22 adds `bios_admission_mix`, a primed 100-instruction circuit
+whose unreachable padding fixes every start's I-cache alignment. Per 1,000
+measured instructions it produces exactly 360 lookups, 340 positive block
+hits, 20 rejection-cache hits, 340 executions, 980 block steps, and 20 scalar
+steps with no measured construction or publication. This closely matches the
+canonical BIOS+KDOS profile's 359.506 lookups per 1,000 instructions, 5.774%
+cached-rejection share, and 2.943 block steps per execution without pretending
+to synthesize source-compilation churn. BIOS benchmark schema 7 now reports
+lookups per 1,000 steps plus cached-rejection and build-attempt shares directly.
+
+Future engine timing decisions use a matrix, never a weighted aggregate:
+
+- at least 50 million instructions per synthetic timing sample on one pinned
+  CPU;
+- separate, unprofiled, position-balanced A/B pairs with equal AB and BA
+  ordering, followed by a diagnostic profile replay;
+- independent results for the calibrated mix, stable positive blocks, and the
+  rejected scalar path; a gain in one cannot cancel a regression in another;
+- a position-balanced canonical BIOS+KDOS source-load comparison for real
+  compilation/churn behavior; and
+- a fresh-image Desktop load only after the seconds-scale matrix predicts a
+  net win and all architectural/profile oracles agree.
+
+The `4937724` hint is rejected by end-to-end evidence. It remains present only
+long enough to establish the corrected benchmark's before-state and is the
+first rollback target; no more elaborate replacement predictor is inferred.
+
 Separate rich-host observation (2026-08-27): the retained rich-terminal host
 currently rebuilds and recopies an owner's complete object mapping for each
 `OBJECT_DEFINE`, making the 23,520-glyph Desktop hidden build quadratic. This
@@ -905,6 +952,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D13 | Close engine consolidation without decomposing the remaining integration monolith. | CPU/machine state, scheduler, callback, snapshot, profile, and pybind extraction is a separate future organization project; broad acceptance remains deferred under the rich-terminal and resource gates. |
 | EK-D14 | Preserve 1802-style complete-fetch-before-execute semantics for every PSEL register alias. | Prefixes are part of one encoding, execution reads the post-fetch PSEL value, selector collisions remain legal and ordered, and RTL conformance is a separate correctness slice rather than an engine change. |
 | EK-D15 | Let a segment-local, rejection-indexed hint change probe order only after that segment has observed an exact resident rejection. | The persistent exact rejection entry remains authoritative; a mismatch forgets the hint and restores positive-first admission, while interrupts, scalar execution, identity proof, and persistent cache ownership remain unchanged. |
+| EK-D16 | Reject EK-D15 after the ordinary Desktop smoke and replace its two-extrema evidence with a production-calibrated matrix. | The hint's exactness was not sufficient evidence of profitability: it taxed every positive admission, regressed Desktop throughput by 6.261%, and timed out the journey. A future admission change must win the calibrated mix, stable-positive, rejected-scalar, and real BIOS+KDOS comparisons independently before another Desktop run. |
 
 ## Deferred findings ledger
 
@@ -912,7 +960,7 @@ does not justify keeping the superseded implementation in the final tree.
 |---|---|---|
 | EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the compact consolidation matrix. |
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
-| EK-F3 | The rejection matcher remained behind a redundant positive-cache probe even in scalar regions whose starts repeatedly matched exact resident rejections. | Resolved at the measured boundary by EK-D15. A segment-local hint bypasses the positive probe only after an exact rejection has already been observed; the matcher itself, persistent cache, and positive-first default remain unchanged. |
+| EK-F3 | The rejection matcher remains behind a positive-cache probe in scalar regions whose starts repeatedly match exact resident rejections. | EK-D15's segment hint is rejected by EK-D16: optimizing the rejection-only extreme imposed a larger production cost. Restore the simpler positive-first path and leave this local inefficiency open unless representative mixed evidence supports a correction that does not tax the common path. |
 | EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden the closed engine without new retained remaining-shape evidence and paired exact justification. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |

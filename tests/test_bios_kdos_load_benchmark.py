@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 6
+    assert benchmark.SCHEMA_VERSION == 7
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -73,6 +73,9 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
         "native_settlement_fraction": 0.75,
         "python_settlement_fraction": 0.25,
         "block_cache_hit_fraction": 0.6,
+        "block_lookups_per_1000_steps": 125.0,
+        "block_rejection_hit_fraction_of_lookups": 0.08,
+        "block_build_attempt_fraction_of_lookups": 0.32,
         "block_positive_cache_probe_fraction": 0.96,
         "block_rejection_hint_probe_fraction": 0.064,
         "block_rejection_hint_hit_fraction": 0.625,

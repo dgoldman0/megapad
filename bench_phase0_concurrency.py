@@ -20,6 +20,7 @@ Default coverage:
 
 * 1, 2, and 4 full cores;
 * private register/ALU work;
+* a BIOS-calibrated mix of short positive blocks and exact rejections;
 * same-address shared-memory pressure;
 * mixed native and Python-dispatched MMIO polling;
 * periodic timer interrupts; and
@@ -91,7 +92,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -335,6 +336,19 @@ COVERAGE_METADATA = {
             ),
         },
         {
+            "scenario": "bios_admission_mix",
+            "classification": "production_calibrated_diagnostic",
+            "covers": (
+                "steady exact-single block-admission density and the mixed "
+                "positive/rejection proportions observed during the canonical "
+                "BIOS+KDOS source load"
+            ),
+            "does_not_claim": (
+                "source-compilation churn, a complete Desktop instruction "
+                "mix, or a replacement for the real BIOS+KDOS gate"
+            ),
+        },
+        {
             "scenario": "shared_memory",
             "classification": "diagnostic_baseline",
             "covers": "same-address shared-memory access pressure",
@@ -406,6 +420,74 @@ loop:
     addi r7, 1
     br loop
 """
+
+
+def _bios_admission_mix_source() -> str:
+    """Build one exact 100-instruction mixed-admission circuit.
+
+    Thirty three-instruction and four two-instruction positive blocks are
+    followed by one short and one long standalone branch. The standalone
+    branches are authoritative one-instruction build rejections. Repeating
+    this circuit ten times therefore matches the production 1,000-step
+    scheduler segment with 360 admissions, 340 positive blocks, and 20 exact
+    rejection hits after the workload is primed. Unreachable NOP padding keeps
+    every start eight-byte aligned so an accidental instruction/I-cache-line
+    crossing cannot change the calibrated admission shape.
+    """
+
+    three_step_labels = [f"mix_three_{index:02d}" for index in range(30)]
+    two_step_labels = [f"mix_two_{index:02d}" for index in range(4)]
+    labels = [
+        *three_step_labels,
+        *two_step_labels,
+        "mix_short_rejection",
+        "mix_long_rejection",
+    ]
+    lines: list[str] = []
+    for index, label in enumerate(labels):
+        next_label = labels[(index + 1) % len(labels)]
+        lines.append(f"{label}:")
+        if label in three_step_labels:
+            lines.extend(
+                (
+                    "    inc r4",
+                    "    xor r6, r4",
+                    f"    br {next_label}",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                )
+            )
+        elif label in two_step_labels:
+            lines.extend(
+                (
+                    "    inc r4",
+                    f"    br {next_label}",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                )
+            )
+        elif label == "mix_short_rejection":
+            lines.extend(
+                (
+                    f"    br {next_label}",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                    "    nop",
+                )
+            )
+        else:
+            lines.append(f"    lbr {next_label}")
+    return "\n".join(lines) + "\n"
+
+
+BIOS_ADMISSION_MIX = _bios_admission_mix_source()
 
 SHARED_MEMORY = """
 loop:
@@ -764,6 +846,48 @@ def build_private_compute(
     return Workload(system)
 
 
+def build_bios_admission_mix(
+    num_cores: int,
+    worker_count: int = 1,
+) -> Workload:
+    system, _ = _base_system(
+        num_cores,
+        BIOS_ADMISSION_MIX,
+        worker_count=worker_count,
+    )
+    prime_target = 1_000 * num_cores
+    primed = system.run_batch(prime_target)
+    if primed != prime_target:
+        raise RuntimeError(
+            "mixed-admission cache prime returned "
+            f"{primed:,} instructions, expected {prime_target:,}"
+        )
+    return Workload(
+        system,
+        metrics={
+            "calibration": "canonical_bios_kdos_steady_admission",
+            "circuit_instructions": 100,
+            "production_segment_instructions": 1_000,
+            "primed_aggregate_instructions": primed,
+            "expected_per_core_per_segment": {
+                "block_lookups": 360,
+                "positive_block_hits": 340,
+                "rejection_cache_hits": 20,
+                "block_executions": 340,
+                "block_steps": 980,
+                "scalar_steps": 20,
+            },
+            "reference_bios_kdos_profile": {
+                "lookups_per_1000_steps": 359.506,
+                "positive_hit_fraction": 0.91704,
+                "rejection_hit_fraction": 0.05774,
+                "build_attempt_fraction": 0.02522,
+                "block_steps_per_execution": 2.943,
+            },
+        },
+    )
+
+
 def build_shared_memory(
     num_cores: int,
     worker_count: int = 1,
@@ -952,6 +1076,16 @@ SCENARIOS = {
             build_private_compute,
         ),
         Scenario(
+            "bios_admission_mix",
+            "Short positive blocks and persistent branch rejections in the "
+            "steady proportions observed during BIOS+KDOS source loading.",
+            "The primed circuit isolates admission cost and does not model "
+            "source-compilation churn or the complete Desktop code mix.",
+            "production_calibrated_diagnostic",
+            "BIOS-calibrated steady mixed block admission",
+            build_bios_admission_mix,
+        ),
+        Scenario(
             "shared_memory",
             "All cores repeatedly write and read the same shared RAM word.",
             "The unbounded coordinator orders shared accesses but deliberately "
@@ -1045,9 +1179,10 @@ def _fixture_manifest(strict_dma_bytes: int) -> dict:
     )
     manifest = {
         "schema": "megapad.phase3-benchmark-fixtures",
-        "schema_version": 1,
+        "schema_version": 2,
         "assembled_programs": {
             "private_compute": _assembled_fixture(PRIVATE_COMPUTE),
+            "bios_admission_mix": _assembled_fixture(BIOS_ADMISSION_MIX),
             "shared_memory": _assembled_fixture(SHARED_MEMORY),
             "mmio_poll": _assembled_fixture(MMIO_POLL),
             "timer_interrupt": _assembled_fixture(TIMER_INTERRUPT),

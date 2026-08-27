@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -274,6 +274,21 @@ def profile_derived(profile: dict | None) -> dict | None:
         ),
         "block_cache_hit_fraction": _ratio(
             counts["uncontended_block_hits"],
+            counts["uncontended_block_lookups"],
+        ),
+        "block_lookups_per_1000_steps": (
+            None
+            if counts["uncontended_steps"] == 0
+            else counts["uncontended_block_lookups"]
+            / counts["uncontended_steps"]
+            * 1_000
+        ),
+        "block_rejection_hit_fraction_of_lookups": _ratio(
+            counts["uncontended_block_rejection_cache_hits"],
+            counts["uncontended_block_lookups"],
+        ),
+        "block_build_attempt_fraction_of_lookups": _ratio(
+            counts["uncontended_block_build_attempts"],
             counts["uncontended_block_lookups"],
         ),
         "block_positive_cache_probe_fraction": _ratio(
@@ -733,6 +748,9 @@ def print_human(result: dict) -> None:
         def percent(value: float | None) -> str:
             return "n/a" if value is None else f"{value:.1%}"
 
+        def decimal(value: float | None) -> str:
+            return "n/a" if value is None else f"{value:.3f}"
+
         print(
             "  settlement: "
             f"{counts['settle_round_calls']:,} logical; "
@@ -751,6 +769,11 @@ def print_human(result: dict) -> None:
         )
         print(
             "  DBT block admission: "
+            f"{decimal(derived['block_lookups_per_1000_steps'])} "
+            "lookups/1k; "
+            "cached rejection/build-attempt shares "
+            f"{percent(derived['block_rejection_hit_fraction_of_lookups'])}/"
+            f"{percent(derived['block_build_attempt_fraction_of_lookups'])}; "
             f"{counts['uncontended_block_rejection_hint_hits']:,}/"
             f"{counts['uncontended_block_rejection_hint_probes']:,} "
             "rejection-hint hits "

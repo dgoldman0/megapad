@@ -4,6 +4,48 @@ import bench_phase0_concurrency as phase0
 from devices import SECTOR_SIZE
 
 
+def test_bios_admission_mix_matches_production_profile_shape_exactly():
+    accounting, probe = phase0._accounting_probe(
+        phase0.SCENARIOS["bios_admission_mix"],
+        1,
+        1_000,
+        host_profile=True,
+    )
+
+    assert probe is not None
+    assert all(probe["validation"].values())
+    counts = probe["native_snapshot"]["counts"]
+    assert counts["uncontended_steps"] == 1_000
+    assert counts["uncontended_block_lookups"] == 360
+    assert counts["uncontended_block_positive_cache_probes"] == 342
+    assert counts["uncontended_block_rejection_hint_probes"] == 18
+    assert counts["uncontended_block_rejection_hint_hits"] == 18
+    assert counts["uncontended_block_hits"] == 340
+    assert counts["uncontended_block_misses"] == 20
+    assert counts["uncontended_block_rejection_cache_hits"] == 20
+    assert counts["uncontended_block_build_attempts"] == 0
+    assert counts["uncontended_block_builds"] == 0
+    assert counts["uncontended_block_evictions"] == 0
+    assert counts["uncontended_block_executions"] == 340
+    assert counts["uncontended_block_steps"] == 980
+    assert counts["uncontended_jit_compilations"] == 0
+    assert counts["uncontended_jit_slot_publications"] == 0
+    assert (
+        counts["uncontended_steps"]
+        - counts["uncontended_block_steps"]
+        == 20
+    )
+    metrics = accounting["observation"]["workload_metrics"]
+    assert metrics["expected_per_core_per_segment"] == {
+        "block_lookups": 360,
+        "positive_block_hits": 340,
+        "rejection_cache_hits": 20,
+        "block_executions": 340,
+        "block_steps": 980,
+        "scalar_steps": 20,
+    }
+
+
 def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
     parser = phase0.build_parser()
     assert not parser.parse_args([]).host_profile
@@ -21,7 +63,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 21
+    assert report["schema_version"] == 22
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -192,7 +234,7 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 21
+    assert report["schema_version"] == 22
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
