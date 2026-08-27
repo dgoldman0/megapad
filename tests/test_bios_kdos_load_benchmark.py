@@ -1,0 +1,86 @@
+from pathlib import Path
+
+import pytest
+
+import bench_bios_kdos_load as benchmark
+
+
+def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
+    args = benchmark.build_parser().parse_args([])
+
+    assert args.runtime_root == benchmark.ROOT
+    assert not args.host_profile
+    assert args.max_steps == 2_000_000_000
+    assert args.timeout == 120.0
+    assert args.batch_steps == 500_000
+    assert args.ram_kib == 1024
+    assert args.ext_mem_mib == 128
+    assert args.vram_mib == 4
+    assert (args.cols, args.rows) == (280, 84)
+
+
+@pytest.mark.parametrize("option", ("--max-steps", "--timeout", "--batch-steps"))
+def test_parser_rejects_nonpositive_execution_bounds(option: str) -> None:
+    with pytest.raises(SystemExit):
+        benchmark.build_parser().parse_args([option, "0"])
+
+
+def test_profile_derivation_exposes_coverage_churn_and_mapping_cost() -> None:
+    profile = {
+        "counts": {
+            "uncontended_block_hits": 75,
+            "uncontended_block_lookups": 100,
+            "uncontended_block_steps": 600,
+            "uncontended_steps": 1_000,
+            "uncontended_jit_steps": 400,
+            "uncontended_jit_executions": 100,
+            "uncontended_jit_compile_attempts": 10,
+            "uncontended_jit_compilations": 8,
+            "uncontended_block_evictions": 20,
+            "uncontended_block_builds": 25,
+            "uncontended_jit_mapping_evictions": 4,
+        },
+        "wall_ns": {
+            "uncontended_jit_compile": 2_000_000,
+            "uncontended_jit_mapping": 800_000,
+        },
+    }
+
+    derived = benchmark.profile_derived(profile)
+
+    assert derived == {
+        "block_cache_hit_fraction": 0.75,
+        "decoded_block_step_fraction": 0.6,
+        "jit_step_fraction": 0.4,
+        "jit_steps_per_execution": 4.0,
+        "jit_compile_us_per_attempt": 200.0,
+        "jit_mapping_us_per_compilation": 100.0,
+        "jit_mapping_fraction_of_compile_time": 0.4,
+        "block_evictions_per_build": 0.8,
+        "mapping_evictions_per_compilation": 0.5,
+    }
+
+
+def test_runtime_root_must_contain_the_boot_sources(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="missing"):
+        benchmark._activate_runtime(tmp_path)
+
+
+def test_exact_boot_transcript_exposes_any_extra_diagnostic() -> None:
+    expected = benchmark._expected_output_lines(1 << 20)
+    raw = "\r\n".join(["", *expected, ""])
+
+    assert benchmark._output_lines(raw) == expected
+
+    damaged = raw.replace(
+        " Running autoexec.f...",
+        "Stack overflow\r\n Running autoexec.f...",
+    )
+    assert benchmark._output_lines(damaged) != expected
+
+
+def test_expected_boot_transcript_binds_configured_ram_and_boundary() -> None:
+    lines = benchmark._expected_output_lines(2 << 20)
+
+    assert "RAM: 00200000 bytes" in lines
+    assert lines[-2:] == [benchmark.COMPLETION_MARKER, "> "]
