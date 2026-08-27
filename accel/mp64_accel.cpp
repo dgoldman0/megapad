@@ -20571,6 +20571,10 @@ static bool decode_single_core_register_instruction(
                 decoded.cycle_cost = 2;
                 break;
             }
+            if (subop == 0xE) {  // RET.L
+                decoded.cycle_cost = 2;
+                break;
+            }
             return false;
         case 0x1:
         case 0x2:
@@ -20736,7 +20740,10 @@ static bool decode_single_core_register_instruction(
 static bool single_core_decoded_is_terminal_control(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
     return
-        (decoded.family == 0x0 && decoded.subop == 0xD) ||
+        (
+            decoded.family == 0x0 &&
+            (decoded.subop == 0xD || decoded.subop == 0xE)
+        ) ||
         decoded.family == 0x3 ||
         decoded.family == 0x4 ||
         decoded.family == 0xA;
@@ -20746,12 +20753,20 @@ static bool single_core_decoded_is_memory(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
     return
         decoded.family == 0x5 ||
-        (decoded.family == 0x0 && decoded.subop == 0xD);
+        (
+            decoded.family == 0x0 &&
+            (decoded.subop == 0xD || decoded.subop == 0xE)
+        );
 }
 
 static bool single_core_decoded_is_terminal_long_call(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
     return decoded.family == 0x0 && decoded.subop == 0xD;
+}
+
+static bool single_core_decoded_is_terminal_long_return(
+        const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
+    return decoded.family == 0x0 && decoded.subop == 0xE;
 }
 
 static bool single_core_decoded_is_direct_read(
@@ -21212,6 +21227,15 @@ static void emit_single_core_jit_instruction(
                     8);
                 emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
                 emitter.mov_core_from_rcx(
+                    single_core_jit_register_offset(core, psel));
+                return;
+            }
+            if (decoded.subop == 0xE) {  // terminal RET.L
+                emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
+                emitter.add_core_imm8(
+                    single_core_jit_register_offset(core, spsel),
+                    8);
+                emitter.mov_core_from_rax(
                     single_core_jit_register_offset(core, psel));
                 return;
             }
@@ -21820,6 +21844,22 @@ static bool single_core_block_identity_matches(
                     index,
                     decoded.rs,
                     resolved_call_target);
+            const bool valid_long_return =
+                single_core_decoded_is_terminal_long_return(decoded) &&
+                decoded.rd == 0 &&
+                decoded.rs == 0 &&
+                decoded.encoded_size == 1 &&
+                decoded.fetch_hits == 1 &&
+                decoded.cycle_cost == 2 &&
+                decoded.taken_cycle_cost == 0 &&
+                decoded.immediate == 0 &&
+                index != 0 &&
+                !memory_seen &&
+                block.spsel != block.psel &&
+                (
+                    written_registers &
+                    (uint32_t{1} << block.spsel)
+                ) == 0;
             if (
                 (
                     !valid_short_unconditional &&
@@ -21827,13 +21867,14 @@ static bool single_core_block_identity_matches(
                     !valid_long_unconditional &&
                     !valid_long_conditional &&
                     !valid_sep &&
-                    !valid_long_call
+                    !valid_long_call &&
+                    !valid_long_return
                 ) ||
                 index + 1 != block.instruction_count
             ) {
                 return false;
             }
-            if (valid_long_call)
+            if (valid_long_call || valid_long_return)
                 memory_seen = true;
         } else if (decoded.taken_cycle_cost != 0) {
             return false;
@@ -22038,6 +22079,21 @@ build_single_core_decoded_block(
                 ) {
                     break;
                 }
+            } else if (
+                single_core_decoded_is_terminal_long_return(decoded)
+            ) {
+                if (
+                    candidate.instruction_count == 0 ||
+                    memory_seen ||
+                    candidate.spsel >= 32 ||
+                    candidate.spsel == candidate.psel ||
+                    (
+                        written_registers &
+                        (uint32_t{1} << candidate.spsel)
+                    ) != 0
+                ) {
+                    break;
+                }
             } else {
                 break;
             }
@@ -22088,6 +22144,14 @@ static bool single_core_block_has_terminal_long_call(
     return
         block.instruction_count != 0 &&
         single_core_decoded_is_terminal_long_call(
+            block.instructions[block.instruction_count - 1]);
+}
+
+static bool single_core_block_has_terminal_long_return(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return
+        block.instruction_count != 0 &&
+        single_core_decoded_is_terminal_long_return(
             block.instructions[block.instruction_count - 1]);
 }
 
@@ -22348,6 +22412,86 @@ static uint8_t* preflight_single_core_direct_long_call(
     return region.ptr;
 }
 
+static uint8_t* preflight_single_core_direct_long_return(
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint64_t& stack_address,
+        uint64_t& target) noexcept {
+    if (
+        core.memory == nullptr ||
+        core.priv_level != 0 ||
+        callbacks.bus_access != nullptr ||
+        block.instruction_count < 2 ||
+        block.spsel >= 32 ||
+        block.spsel != core.spsel ||
+        block.spsel == block.psel
+    ) {
+        return nullptr;
+    }
+    const uint8_t terminal_index = block.instruction_count - 1;
+    const CPUState::SingleCoreDecodedInstruction& decoded =
+        block.instructions[terminal_index];
+    if (
+        !single_core_decoded_is_terminal_long_return(decoded) ||
+        decoded.rd != 0 ||
+        decoded.rs != 0 ||
+        decoded.encoded_size != 1 ||
+        decoded.fetch_hits != 1 ||
+        decoded.cycle_cost != 2 ||
+        decoded.taken_cycle_cost != 0 ||
+        decoded.immediate != 0
+    ) {
+        return nullptr;
+    }
+
+    uint32_t written_registers = 0;
+    for (uint8_t index = 0; index < terminal_index; index++) {
+        const CPUState::SingleCoreDecodedInstruction& prefix =
+            block.instructions[index];
+        if (single_core_decoded_is_memory(prefix))
+            return nullptr;
+        written_registers |=
+            single_core_decoded_register_write_mask(prefix);
+    }
+    if (
+        (
+            written_registers &
+            (uint32_t{1} << block.spsel)
+        ) != 0
+    ) {
+        return nullptr;
+    }
+
+    stack_address = core.regs[block.spsel];
+    const AccelHookContext context{
+        callbacks.has_mmio,
+        callbacks.mmio_start,
+        callbacks.mmio_end,
+    };
+    if (!accel_span_is_direct(
+            core,
+            stack_address,
+            8,
+            AccelAccessModel::SCALAR,
+            context)) {
+        return nullptr;
+    }
+    const DirectMemoryRegion region = resolve_accel_region(
+        core,
+        stack_address,
+        AccelAccessModel::SCALAR);
+    if (
+        region.priority != 3 ||
+        region.ptr == nullptr ||
+        region.avail < 8
+    ) {
+        return nullptr;
+    }
+    std::memcpy(&target, region.ptr, sizeof(target));
+    return region.ptr;
+}
+
 static uint8_t execute_single_core_decoded_instruction(
         CPUState& core,
         const CPUState::SingleCoreDecodedInstruction& decoded) {
@@ -22495,8 +22639,13 @@ try_execute_single_core_decoded_block(
         single_core_block_has_terminal_store(*block);
     const bool terminal_long_call =
         single_core_block_has_terminal_long_call(*block);
+    const bool terminal_long_return =
+        single_core_block_has_terminal_long_return(*block);
     const bool memory_block =
-        leading_memory || terminal_store || terminal_long_call;
+        leading_memory ||
+        terminal_store ||
+        terminal_long_call ||
+        terminal_long_return;
     uint8_t* direct_memory = nullptr;
     uint64_t direct_memory_address = 0;
     uint64_t direct_memory_size = 0;
@@ -22520,7 +22669,7 @@ try_execute_single_core_decoded_block(
                 *block,
                 direct_memory_address,
                 direct_memory_size);
-        } else {
+        } else if (terminal_long_call) {
             direct_memory = preflight_single_core_direct_long_call(
                 core,
                 callbacks,
@@ -22528,6 +22677,14 @@ try_execute_single_core_decoded_block(
                 direct_memory_address,
                 direct_control_target,
                 direct_return_address);
+            direct_memory_size = 8;
+        } else {
+            direct_memory = preflight_single_core_direct_long_return(
+                core,
+                callbacks,
+                *block,
+                direct_memory_address,
+                direct_control_target);
             direct_memory_size = 8;
         }
         if (direct_memory == nullptr)
@@ -22671,6 +22828,16 @@ try_execute_single_core_decoded_block(
                     ) {
                         throw std::logic_error(
                             "single-core JIT returned invalid CALL.L state");
+                    }
+                }
+                if (single_core_decoded_is_terminal_long_return(terminal)) {
+                    if (
+                        pc(core) != direct_control_target ||
+                        core.regs[block->spsel] !=
+                            direct_memory_address + 8
+                    ) {
+                        throw std::logic_error(
+                            "single-core JIT returned invalid RET.L state");
                     }
                 }
             }
