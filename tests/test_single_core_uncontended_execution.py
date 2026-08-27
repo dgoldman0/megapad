@@ -223,7 +223,7 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
     assert fast_core == reference_core
     assert fast_cpu == reference_cpu == _run_python_register_workload()
     assert profile_snapshot is not None
-    assert profile_snapshot["schema_version"] == 6
+    assert profile_snapshot["schema_version"] == 7
     counts = dict(profile_snapshot["counts"])
     assert counts["uncontended_block_lookups"] == (
         counts["uncontended_block_hits"] +
@@ -239,6 +239,7 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
         "uncontended_jit_compile_attempts",
         "uncontended_jit_compilations",
         "uncontended_jit_compile_failures",
+        "uncontended_jit_mapping_evictions",
         "uncontended_jit_executions",
         "uncontended_jit_steps",
     )
@@ -246,6 +247,7 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
         assert counts["uncontended_jit_compile_attempts"] > 0
         assert counts["uncontended_jit_compilations"] > 0
         assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_mapping_evictions"] == 0
         assert counts["uncontended_jit_executions"] > 0
         assert counts["uncontended_jit_steps"] > 0
         assert (
@@ -413,7 +415,7 @@ loop:
     counts = dict(snapshot["counts"])
     wall_ns = dict(snapshot["wall_ns"])
 
-    assert snapshot["schema_version"] == 6
+    assert snapshot["schema_version"] == 7
     assert counts["uncontended_rounds"] == stats.native_rounds == 3
     assert counts["uncontended_dispatches"] == sum(
         stats.per_core_dispatches
@@ -440,18 +442,69 @@ loop:
         assert counts["uncontended_jit_compile_attempts"] > 0
         assert counts["uncontended_jit_compilations"] > 0
         assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_mapping_evictions"] == 0
         assert counts["uncontended_jit_executions"] > 0
         assert counts["uncontended_jit_steps"] > 0
         assert counts["uncontended_jit_steps"] <= (
             counts["uncontended_block_steps"]
         )
+        assert 0 < wall_ns["uncontended_jit_mapping"] <= (
+            wall_ns["uncontended_jit_compile"]
+        )
     else:
         assert all(counts[name] == 0 for name in jit_fields)
+        assert wall_ns["uncontended_jit_compile"] == 0
+        assert wall_ns["uncontended_jit_mapping"] == 0
+    assert counts["uncontended_block_evictions"] == 0
     assert counts["logical_subfrontiers"] == 0
     assert counts["worker_commands"] == 0
     assert counts["private_steps"] == 0
     assert wall_ns["uncontended_round"] > 0
     assert wall_ns["uncontended_dispatch"] > 0
+
+
+def test_host_profile_attributes_direct_mapped_translation_evictions() -> None:
+    system = _system()
+    block = assemble(
+        """
+loop:
+    inc r4
+    br loop
+"""
+    )
+    first_address = 0
+    colliding_address = 0x4000
+    system.load_binary(first_address, block)
+    system.load_binary(colliding_address, block)
+    system.boot(entry=first_address)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for address in (
+        first_address,
+        colliding_address,
+        first_address,
+    ):
+        system.cpu.pc = address
+        stats = system.run_batch_stats(6)
+        assert stats.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+    wall_ns = dict(snapshot["wall_ns"])
+
+    assert counts["uncontended_block_evictions"] == 2
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compilations"] == 3
+        assert counts["uncontended_jit_mapping_evictions"] == 2
+        assert 0 < wall_ns["uncontended_jit_mapping"] <= (
+            wall_ns["uncontended_jit_compile"]
+        )
+    else:
+        assert counts["uncontended_jit_compilations"] == 0
+        assert counts["uncontended_jit_mapping_evictions"] == 0
+        assert wall_ns["uncontended_jit_compile"] == 0
+        assert wall_ns["uncontended_jit_mapping"] == 0
 
 
 def _assert_jit_used_when_available(snapshot: dict, counts: dict) -> None:

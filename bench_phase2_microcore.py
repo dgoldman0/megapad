@@ -30,6 +30,10 @@ remain unchanged.
 Version 9 carries native host-profile schema 6 and its exact-single-core JIT
 telemetry. The JIT remains ineligible for this microcore topology; timed and
 architectural-state semantics remain unchanged.
+
+Version 10 carries native host-profile schema 7 and its exact-single-core
+translation eviction and compilation/mapping timing telemetry. These fields
+remain zero for this microcore topology.
 """
 
 from __future__ import annotations
@@ -54,7 +58,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 9
+REPORT_SCHEMA_VERSION = 10
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -347,8 +351,8 @@ def _profile_probe(
         counts["coordinator_boundary_origins"].values()
     )
     validation = {
-        "schema_is_version_6":
-            normalized["schema_version"] == 6,
+        "schema_is_version_7":
+            normalized["schema_version"] == 7,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -384,17 +388,21 @@ def _profile_probe(
                     "uncontended_block_hits",
                     "uncontended_block_misses",
                     "uncontended_block_builds",
+                    "uncontended_block_evictions",
                     "uncontended_block_executions",
                     "uncontended_block_steps",
                     "uncontended_jit_compile_attempts",
                     "uncontended_jit_compilations",
                     "uncontended_jit_compile_failures",
+                    "uncontended_jit_mapping_evictions",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
                 )
             )
             and normalized["wall_ns"]["uncontended_round"] == 0
             and normalized["wall_ns"]["uncontended_dispatch"] == 0
+            and normalized["wall_ns"]["uncontended_jit_compile"] == 0
+            and normalized["wall_ns"]["uncontended_jit_mapping"] == 0
         ),
         "absorptions_match_subfrontiers":
             counts["round_absorptions"]
@@ -474,7 +482,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 6,
+        "schema_version": 7,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

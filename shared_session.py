@@ -534,10 +534,14 @@ class SharedMachine:
         *,
         idle_tick_cycles: int = 200_000,
         idle_sleep_s: float = 0.002,
+        host_profile: bool = False,
     ):
+        if not isinstance(host_profile, bool):
+            raise TypeError("host_profile must be a boolean")
         self.session = session
         self.idle_tick_cycles = int(idle_tick_cycles)
         self.idle_sleep_s = float(idle_sleep_s)
+        self._host_profile_enabled = host_profile
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.paused = False
@@ -555,6 +559,8 @@ class SharedMachine:
             if self._thread is not None:
                 return
             self.session.boot()
+            if self._host_profile_enabled:
+                self.session.system.start_host_profile()
             self._reset_generation += 1
             self._thread = threading.Thread(
                 target=self._run_loop,
@@ -871,6 +877,8 @@ class SharedMachine:
                     },
                 }
             )
+            if self._host_profile_enabled:
+                result["host_profile"] = system.host_profile_snapshot()
             return result
 
     def network(self) -> dict:
@@ -960,6 +968,8 @@ class SharedMachine:
                 raise TypeError("reset paused must be a boolean or null")
             try:
                 self.session.reset()
+                if self._host_profile_enabled:
+                    self.session.system.start_host_profile()
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 self.paused = True

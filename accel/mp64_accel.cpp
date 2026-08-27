@@ -4178,11 +4178,13 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_block_hits = 0;
     uint64_t uncontended_block_misses = 0;
     uint64_t uncontended_block_builds = 0;
+    uint64_t uncontended_block_evictions = 0;
     uint64_t uncontended_block_executions = 0;
     uint64_t uncontended_block_steps = 0;
     uint64_t uncontended_jit_compile_attempts = 0;
     uint64_t uncontended_jit_compilations = 0;
     uint64_t uncontended_jit_compile_failures = 0;
+    uint64_t uncontended_jit_mapping_evictions = 0;
     uint64_t uncontended_jit_executions = 0;
     uint64_t uncontended_jit_steps = 0;
     uint64_t logical_subfrontiers = 0;
@@ -4234,6 +4236,8 @@ struct ConcurrencyProfileCounters {
     uint64_t scheduler_round_ns = 0;
     uint64_t uncontended_round_ns = 0;
     uint64_t uncontended_dispatch_ns = 0;
+    uint64_t uncontended_jit_compile_ns = 0;
+    uint64_t uncontended_jit_mapping_ns = 0;
     uint64_t logical_subfrontier_ns = 0;
     uint64_t round_absorption_ns = 0;
     uint64_t worker_wave_ns = 0;
@@ -21508,7 +21512,12 @@ static void emit_single_core_jit_instruction(
 }
 
 static HostExecutableCode seal_single_core_jit_code(
-        const std::vector<uint8_t>& code) noexcept {
+        const std::vector<uint8_t>& code,
+        bool profile_enabled,
+        uint64_t* mapping_ns) noexcept {
+    HostProfileWallTimer mapping_timer(
+        profile_enabled,
+        mapping_ns);
     if (code.empty())
         return {};
     const long page_size_value = ::sysconf(_SC_PAGESIZE);
@@ -21549,7 +21558,13 @@ static HostExecutableCode seal_single_core_jit_code(
 static SingleCoreJitCompilation
 compile_single_core_jit_block(
         const CPUState& core,
-        CPUState::SingleCoreDecodedBlockEntry& block) {
+        CPUState::SingleCoreDecodedBlockEntry& block,
+        bool profile_enabled,
+        uint64_t* compile_ns,
+        uint64_t* mapping_ns) {
+    HostProfileWallTimer compile_timer(
+        profile_enabled,
+        compile_ns);
     try {
         X86_64BlockEmitter emitter;
         // ENDBR64 is a no-op on hosts without CET and permits indirect entry
@@ -21681,7 +21696,10 @@ compile_single_core_jit_block(
         emitter.patch32(interrupt_to_common, common_exit);
 
         HostExecutableCode code =
-            seal_single_core_jit_code(emitter.code());
+            seal_single_core_jit_code(
+                emitter.code(),
+                profile_enabled,
+                mapping_ns);
         if (!code)
             return SingleCoreJitCompilation::FAILED;
         block.native_code = std::move(code);
@@ -21697,7 +21715,10 @@ compile_single_core_jit_block(
 static SingleCoreJitCompilation
 compile_single_core_jit_block(
         const CPUState&,
-        CPUState::SingleCoreDecodedBlockEntry&) noexcept {
+        CPUState::SingleCoreDecodedBlockEntry&,
+        bool,
+        uint64_t*,
+        uint64_t*) noexcept {
     return SingleCoreJitCompilation::UNAVAILABLE;
 }
 
@@ -22607,6 +22628,9 @@ try_execute_single_core_decoded_block(
             host_saturating_increment(
                 profile.uncontended_block_misses);
         }
+        const bool evicts_block = block->valid;
+        const bool evicts_mapping =
+            static_cast<bool>(block->native_code);
         block = build_single_core_decoded_block(
             core, address);
         if (block == nullptr)
@@ -22614,6 +22638,14 @@ try_execute_single_core_decoded_block(
         if (profile_enabled) {
             host_saturating_increment(
                 profile.uncontended_block_builds);
+            if (evicts_block) {
+                host_saturating_increment(
+                    profile.uncontended_block_evictions);
+            }
+            if (evicts_mapping) {
+                host_saturating_increment(
+                    profile.uncontended_jit_mapping_evictions);
+            }
         }
     }
 
@@ -22702,7 +22734,12 @@ try_execute_single_core_decoded_block(
         native_eligible
     ) {
         const SingleCoreJitCompilation jit_compilation =
-            compile_single_core_jit_block(core, *block);
+            compile_single_core_jit_block(
+                core,
+                *block,
+                profile_enabled,
+                &profile.uncontended_jit_compile_ns,
+                &profile.uncontended_jit_mapping_ns);
         block->native_compile_checked = true;
         if (profile_enabled) {
             if (
@@ -25782,6 +25819,8 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_block_misses;
     counts["uncontended_block_builds"] =
         profile.uncontended_block_builds;
+    counts["uncontended_block_evictions"] =
+        profile.uncontended_block_evictions;
     counts["uncontended_block_executions"] =
         profile.uncontended_block_executions;
     counts["uncontended_block_steps"] =
@@ -25792,6 +25831,8 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_jit_compilations;
     counts["uncontended_jit_compile_failures"] =
         profile.uncontended_jit_compile_failures;
+    counts["uncontended_jit_mapping_evictions"] =
+        profile.uncontended_jit_mapping_evictions;
     counts["uncontended_jit_executions"] =
         profile.uncontended_jit_executions;
     counts["uncontended_jit_steps"] =
@@ -25866,6 +25907,10 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_round_ns;
     wall_ns["uncontended_dispatch"] =
         profile.uncontended_dispatch_ns;
+    wall_ns["uncontended_jit_compile"] =
+        profile.uncontended_jit_compile_ns;
+    wall_ns["uncontended_jit_mapping"] =
+        profile.uncontended_jit_mapping_ns;
     wall_ns["logical_subfrontier"] =
         profile.logical_subfrontier_ns;
     wall_ns["round_absorption"] =
@@ -25899,7 +25944,7 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict result;
-    result["schema_version"] = 6;
+    result["schema_version"] = 7;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =

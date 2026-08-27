@@ -2463,6 +2463,27 @@ class MegapadSystem:
         """Fixed host-execution lane count for this native system."""
         return int(self._native_system.worker_count)
 
+    def start_host_profile(self) -> dict:
+        """Start a fresh opt-in host-only native execution profile."""
+        with self._scheduler_lock:
+            return dict(
+                self._native_system._start_concurrency_profile()
+            )
+
+    def stop_host_profile(self) -> dict:
+        """Freeze and return the active host-only execution profile."""
+        with self._scheduler_lock:
+            return dict(
+                self._native_system._stop_concurrency_profile()
+            )
+
+    def host_profile_snapshot(self) -> dict:
+        """Return the current host-only profile without changing it."""
+        with self._scheduler_lock:
+            return dict(
+                self._native_system._concurrency_profile_snapshot()
+            )
+
     @property
     def _scheduler_cursor(self) -> int:
         """Compatibility view of the native scheduler's next core."""

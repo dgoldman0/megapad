@@ -1099,6 +1099,7 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
         assert "forth" not in lightweight
         assert "cpu" not in lightweight
         assert "nic" not in lightweight
+        assert "host_profile" not in lightweight
         assert lightweight["rich_terminal"]["display_required"] is False
 
         detailed = machine.status()
@@ -1106,6 +1107,31 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
         assert detailed["forth"] == {"sentinel": True}
         assert "cpu" in detailed
         assert "nic" in detailed
+        assert "host_profile" not in detailed
+
+
+def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
+    with MachineSession.from_bios(BIOS) as session:
+        machine = SharedMachine(session, host_profile=True)
+        machine.paused = True
+        machine.start()
+        try:
+            lightweight = machine.status(detailed=False)
+            assert "host_profile" not in lightweight
+
+            detailed = machine.status()
+            first = detailed["host_profile"]
+            assert first["schema_version"] == 7
+            assert first["enabled"]
+            assert first["generation"] > 0
+
+            reset = machine.reset(paused=True)
+            restarted = reset["host_profile"]
+            assert restarted["enabled"]
+            assert restarted["generation"] == first["generation"] + 1
+            assert restarted["counts"]["batches"] == 0
+        finally:
+            machine.stop()
 
 
 def test_ping_reports_only_liveness():

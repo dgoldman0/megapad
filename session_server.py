@@ -103,6 +103,14 @@ def main() -> int:
         action="store_true",
         help="attach the optional pygame PCM16 playback sink",
     )
+    parser.add_argument(
+        "--host-profile",
+        action="store_true",
+        help=(
+            "include opt-in host execution attribution in detailed status; "
+            "profiling adds overhead"
+        ),
+    )
     parser.add_argument("--paused", action="store_true")
     args = parser.parse_args()
 
@@ -163,7 +171,10 @@ def main() -> int:
         session.system.audio.on_submit = audio_sink.submit
         session.system.audio.on_stop = audio_sink.stop
         session.system.audio.on_playing = audio_sink.is_playing
-    machine = SharedMachine(session)
+    machine = SharedMachine(
+        session,
+        host_profile=args.host_profile,
+    )
     machine.paused = args.paused
     server = SessionServer(machine, args.socket)
 

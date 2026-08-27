@@ -1321,7 +1321,7 @@ def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
     )
     with (
         patch("session_server.MachineSession.from_bios") as from_bios,
-        patch("session_server.SharedMachine"),
+        patch("session_server.SharedMachine") as shared_machine,
         patch("session_server.SessionServer"),
         patch("session_server.signal.signal"),
     ):
@@ -1330,6 +1330,23 @@ def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
     assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
     assert from_bios.call_args.kwargs["lanes"] == 4
     assert from_bios.call_args.kwargs["rich_terminal"] is None
+    assert shared_machine.call_args.kwargs["host_profile"] is False
+
+
+def test_session_server_can_opt_into_host_profile_status(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["session_server.py", "--host-profile"],
+    )
+    with (
+        patch("session_server.MachineSession.from_bios"),
+        patch("session_server.SharedMachine") as shared_machine,
+        patch("session_server.SessionServer"),
+        patch("session_server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+
+    assert shared_machine.call_args.kwargs["host_profile"] is True
 
 
 def test_rich_terminal_policy_derives_full_maximum_geometry_contract():
