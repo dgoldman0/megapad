@@ -44,6 +44,7 @@
 #include "dbt/executable_arena.h"
 #include "dbt/host_jit_config.h"
 #include "dbt/x86_64/emitter.h"
+#include "cpu/mp64/semantics.h"
 #include "machine/memory.h"
 #include "machine/settlement.h"
 #include "mp64_crypto.h"
@@ -66,6 +67,36 @@ using mp64::machine::ResolvedMemorySpan;
 using mp64::machine::region_contains;
 using mp64::machine::region_span_fits;
 using mp64::machine::resolve_memory_span;
+using mp64::cpu::CC_AL;
+using mp64::cpu::CC_BNQ;
+using mp64::cpu::CC_BQ;
+using mp64::cpu::CC_CC;
+using mp64::cpu::CC_CS;
+using mp64::cpu::CC_EF;
+using mp64::cpu::CC_EQ;
+using mp64::cpu::CC_GT;
+using mp64::cpu::CC_LE;
+using mp64::cpu::CC_MI;
+using mp64::cpu::CC_NE;
+using mp64::cpu::CC_NV;
+using mp64::cpu::CC_PL;
+using mp64::cpu::CC_SAT;
+using mp64::cpu::CC_VC;
+using mp64::cpu::CC_VS;
+using mp64::cpu::eval_cond;
+using mp64::cpu::execute_register_alu;
+using mp64::cpu::execute_register_immediate;
+using mp64::cpu::flags_pack;
+using mp64::cpu::flags_unpack;
+using mp64::cpu::parity8;
+using mp64::cpu::rex_d;
+using mp64::cpu::rex_n;
+using mp64::cpu::rex_s;
+using mp64::cpu::s64;
+using mp64::cpu::sign_extend;
+using mp64::cpu::update_flags_arith;
+using mp64::cpu::update_flags_cmp;
+using mp64::cpu::update_flags_logic;
 
 // ---------------------------------------------------------------------------
 //  Constants — must match megapad64.py exactly
@@ -80,12 +111,6 @@ static constexpr bool crc_mode_valid(uint64_t mode) noexcept {
         mode == 4 || mode == 5 || mode == 6
     );
 }
-
-// Condition codes
-enum CC {
-    CC_AL=0, CC_EQ, CC_NE, CC_CS, CC_CC, CC_MI, CC_PL, CC_VS,
-    CC_VC, CC_GT, CC_LE, CC_BQ, CC_BNQ, CC_SAT, CC_EF, CC_NV
-};
 
 // CSR addresses
 enum CSR {
@@ -6270,31 +6295,6 @@ static inline void require_unsealed_system_mappings(
             "SystemState mappings are sealed after the first core borrow");
 }
 
-static inline uint64_t u64(uint64_t v) { return v; }  // native 64-bit
-static inline int64_t  s64(uint64_t v) { return static_cast<int64_t>(v); }
-
-static inline uint64_t sign_extend(uint64_t val, int bits) {
-    uint64_t mask = (1ULL << bits) - 1;
-    val &= mask;
-    if (val & (1ULL << (bits - 1)))
-        val |= ~mask;  // sign extend
-    return val;
-}
-
-static inline uint8_t parity8(uint64_t val) {
-    uint8_t b = val & 0xFF;
-    b ^= b >> 4;
-    b ^= b >> 2;
-    b ^= b >> 1;
-    return (b & 1) ^ 1;
-}
-
-// REX prefix helpers — extract register extension bits from ext_modifier.
-// ext_modifier values 1-5 are REX prefixes; 0 is EXT.IMM64, 6 is SKIP, -1 is none.
-static inline int rex_s(int m) { return (m >= 1 && m <= 5) ? (m & 1) : 0; }
-static inline int rex_d(int m) { return (m >= 1 && m <= 5) ? ((m >> 1) & 1) : 0; }
-static inline int rex_n(int m) { return (m >= 1 && m <= 5) ? ((m >> 2) & 1) : 0; }
-
 // ---------------------------------------------------------------------------
 //  Trap signaling
 // ---------------------------------------------------------------------------
@@ -7139,298 +7139,6 @@ static inline uint64_t pop64(CPUState& s) {
     uint64_t val = mem_read64(s, sp(s));
     sp(s) += 8;
     return val;
-}
-
-// ---------------------------------------------------------------------------
-//  Flags
-// ---------------------------------------------------------------------------
-
-static inline uint8_t flags_pack(const CPUState& s) {
-    return s.flag_z | (s.flag_c<<1) | (s.flag_n<<2) | (s.flag_v<<3) |
-           (s.flag_p<<4) | (s.flag_g<<5) | (s.flag_i<<6) | (s.flag_s<<7);
-}
-
-static inline void flags_unpack(CPUState& s, uint8_t val) {
-    s.flag_z = (val>>0)&1; s.flag_c = (val>>1)&1;
-    s.flag_n = (val>>2)&1; s.flag_v = (val>>3)&1;
-    s.flag_p = (val>>4)&1; s.flag_g = (val>>5)&1;
-    s.flag_i = (val>>6)&1; s.flag_s = (val>>7)&1;
-}
-
-static inline bool eval_cond(const CPUState& s, int cc) {
-    switch (cc) {
-        case CC_AL: return true;
-        case CC_EQ: return s.flag_z == 1;
-        case CC_NE: return s.flag_z == 0;
-        case CC_CS: return s.flag_c == 1;
-        case CC_CC: return s.flag_c == 0;
-        case CC_MI: return s.flag_n == 1;
-        case CC_PL: return s.flag_n == 0;
-        case CC_VS: return s.flag_v == 1;
-        case CC_VC: return s.flag_v == 0;
-        case CC_GT: return s.flag_g == 1;
-        case CC_LE: return s.flag_g == 0;
-        case CC_BQ: return s.q_out == 1;
-        case CC_BNQ:return s.q_out == 0;
-        case CC_SAT:return s.flag_s == 1;
-        case CC_EF: return s.ef_flags != 0;
-        case CC_NV: return false;
-        default:    return false;
-    }
-}
-
-static inline void update_flags_arith(CPUState& s, uint64_t a, uint64_t b,
-                                       uint64_t result, bool is_sub) {
-    s.flag_z = (result == 0) ? 1 : 0;
-    s.flag_n = (result >> 63) & 1;
-    s.flag_p = parity8(result);
-    if (is_sub) {
-        s.flag_c = (a >= b) ? 1 : 0;
-    } else {
-        // Detect carry out: unsigned overflow
-        s.flag_c = (result < a || result < b) ? 1 : 0;
-        // More precise: check if a+b > MASK64
-        // Python does: 1 if (a+b) > MASK64
-        // In C++, if a+b wraps, result < a
-        // But with b potentially modified by carry, let's use __int128
-        __uint128_t wide = (__uint128_t)a + (__uint128_t)b;
-        s.flag_c = (wide > MASK64) ? 1 : 0;
-    }
-    int64_t sa = s64(a), sb = s64(b), sr = s64(result);
-    if (is_sub) {
-        s.flag_v = ((sa >= 0 && sb < 0 && sr < 0) ||
-                    (sa < 0 && sb >= 0 && sr >= 0)) ? 1 : 0;
-    } else {
-        s.flag_v = ((sa >= 0 && sb >= 0 && sr < 0) ||
-                    (sa < 0 && sb < 0 && sr >= 0)) ? 1 : 0;
-    }
-}
-
-static inline void update_flags_logic(CPUState& s, uint64_t result) {
-    s.flag_z = (result == 0) ? 1 : 0;
-    s.flag_n = (result >> 63) & 1;
-    s.flag_p = parity8(result);
-    s.flag_c = 0;
-    s.flag_v = 0;
-}
-
-static inline void update_flags_cmp(CPUState& s, uint64_t a, uint64_t b,
-                                     uint64_t result) {
-    update_flags_arith(s, a, b, result, true);
-    s.flag_g = (a > b) ? 1 : 0;
-}
-
-// Shared semantics for the non-privileged register/immediate subset used by
-// both the authoritative decoder and the exact-single-core decoded-block
-// executor. Fetch/decode and cycle accounting remain owned by their callers.
-static inline void execute_register_immediate(
-        CPUState& s,
-        uint8_t subop,
-        uint8_t reg,
-        uint64_t immediate) {
-    switch (subop) {
-        case 0x0:  // LDI / EXT.IMM64 LDI
-            s.regs[reg] = immediate;
-            return;
-        case 0x1:  // LHI
-            s.regs[reg] =
-                (s.regs[reg] & 0x0000FFFFFFFFFFFFULL) |
-                ((immediate & 0xFFFF) << 48);
-            return;
-        case 0x2: {  // ADDI
-            const uint64_t operand = sign_extend(immediate, 8);
-            const uint64_t a = s.regs[reg];
-            const uint64_t result = a + s64(operand);
-            update_flags_arith(s, a, operand, result, false);
-            s.regs[reg] = result;
-            return;
-        }
-        case 0x3:  // ANDI
-            s.regs[reg] &= immediate & 0xFF;
-            update_flags_logic(s, s.regs[reg]);
-            return;
-        case 0x4:  // ORI
-            s.regs[reg] |= immediate & 0xFF;
-            update_flags_logic(s, s.regs[reg]);
-            return;
-        case 0x5:  // XORI
-            s.regs[reg] ^= immediate & 0xFF;
-            update_flags_logic(s, s.regs[reg]);
-            return;
-        case 0x6: {  // CMPI
-            const uint64_t operand = sign_extend(immediate, 8);
-            const uint64_t a = s.regs[reg];
-            const uint64_t result = a - s64(operand);
-            update_flags_cmp(s, a, operand, result);
-            return;
-        }
-        case 0x7: {  // SUBI
-            const uint64_t operand = sign_extend(immediate, 8);
-            const uint64_t a = s.regs[reg];
-            const uint64_t result = a - s64(operand);
-            update_flags_arith(s, a, operand, result, true);
-            s.regs[reg] = result;
-            return;
-        }
-        case 0x8:  // LSLI
-            s.regs[reg] <<= immediate & 0xF;
-            return;
-        case 0x9:  // LSRI
-            s.regs[reg] >>= immediate & 0xF;
-            return;
-        case 0xA:  // ASRI
-            s.regs[reg] = static_cast<uint64_t>(
-                s64(s.regs[reg]) >> (immediate & 0xF));
-            return;
-        case 0xB: {  // ROLI
-            const int shift = static_cast<int>(immediate & 0xF);
-            if (shift != 0) {
-                const uint64_t value = s.regs[reg];
-                s.regs[reg] =
-                    (value << shift) |
-                    (value >> (64 - shift));
-            }
-            return;
-        }
-        default:
-            throw std::logic_error(
-                "decoded immediate operation is not register-private");
-    }
-}
-
-static inline void execute_register_alu(
-        CPUState& s,
-        uint8_t subop,
-        uint8_t rd,
-        uint8_t rs) {
-    const uint64_t a = s.regs[rd];
-    const uint64_t b = s.regs[rs];
-    switch (subop) {
-        case 0x0: {  // ADD
-            const uint64_t result = a + b;
-            update_flags_arith(s, a, b, result, false);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x1: {  // ADC
-            const uint64_t operand = b + s.flag_c;
-            const uint64_t result = a + operand;
-            update_flags_arith(s, a, operand, result, false);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x2: {  // SUB
-            const uint64_t result = a - b;
-            update_flags_arith(s, a, b, result, true);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x3: {  // SBB
-            const uint64_t operand = b + (1 - s.flag_c);
-            const uint64_t result = a - operand;
-            update_flags_arith(s, a, operand, result, true);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x4: {  // AND
-            const uint64_t result = a & b;
-            update_flags_logic(s, result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x5: {  // OR
-            const uint64_t result = a | b;
-            update_flags_logic(s, result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x6: {  // XOR
-            const uint64_t result = a ^ b;
-            update_flags_logic(s, result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0x7:  // CMP
-            update_flags_cmp(s, a, b, a - b);
-            return;
-        case 0x8:  // MOV
-            s.regs[rd] = b;
-            return;
-        case 0x9:  // NOT
-            s.regs[rd] = ~b;
-            update_flags_logic(s, s.regs[rd]);
-            return;
-        case 0xA: {  // NEG
-            const uint64_t result = -b;
-            update_flags_arith(s, 0, b, result, true);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0xB: {  // SHL
-            const int shift = b & 63;
-            const uint64_t out_bit =
-                shift ? ((a >> (64 - shift)) & 1) : 0;
-            const uint64_t result = a << shift;
-            s.flag_z = result == 0;
-            s.flag_c = out_bit;
-            s.flag_n = (result >> 63) & 1;
-            s.flag_p = parity8(result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0xC: {  // SHR
-            const int shift = b & 63;
-            const uint64_t out_bit =
-                shift ? ((a >> (shift - 1)) & 1) : 0;
-            const uint64_t result = a >> shift;
-            s.flag_z = result == 0;
-            s.flag_c = out_bit;
-            s.flag_n = (result >> 63) & 1;
-            s.flag_p = parity8(result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0xD: {  // SAR
-            const int shift = b & 63;
-            const uint64_t out_bit =
-                shift ? ((a >> (shift - 1)) & 1) : 0;
-            const uint64_t result =
-                static_cast<uint64_t>(s64(a) >> shift);
-            s.flag_z = result == 0;
-            s.flag_c = out_bit;
-            s.flag_n = (result >> 63) & 1;
-            s.flag_p = parity8(result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0xE: {  // ROL
-            const int shift = b & 63;
-            const uint64_t result =
-                shift
-                ? (a << shift) | (a >> (64 - shift))
-                : a;
-            s.flag_z = result == 0;
-            s.flag_n = (result >> 63) & 1;
-            s.flag_p = parity8(result);
-            s.regs[rd] = result;
-            return;
-        }
-        case 0xF: {  // ROR
-            const int shift = b & 63;
-            const uint64_t result =
-                shift
-                ? (a >> shift) | (a << (64 - shift))
-                : a;
-            s.flag_z = result == 0;
-            s.flag_n = (result >> 63) & 1;
-            s.flag_p = parity8(result);
-            s.regs[rd] = result;
-            return;
-        }
-        default:
-            throw std::logic_error(
-                "decoded ALU operation is invalid");
-    }
 }
 
 // ---------------------------------------------------------------------------

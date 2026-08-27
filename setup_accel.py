@@ -70,6 +70,7 @@ ext = Extension(
         "accel/machine/settlement.cpp",
     ],
     depends=[
+        "accel/cpu/mp64/semantics.h",
         "accel/dbt/executable_arena.h",
         "accel/dbt/host_jit_config.h",
         "accel/dbt/x86_64/emitter.h",

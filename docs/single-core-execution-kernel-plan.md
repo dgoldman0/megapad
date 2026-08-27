@@ -199,7 +199,7 @@ the reverted C++ successor-probe loop is not restored.
 | 2 | Bounded synchronous storage transfer | Complete |
 | 3 | Native no-event round settlement | Complete |
 | 4 | Algebraic memory foundation | Complete |
-| 5 | Authoritative decoded execution kernel | Pending |
+| 5 | Authoritative decoded execution kernel | In progress |
 | 6 | Multi-line and multi-memory block construction | Pending |
 | 7 | x86-64 lowering and direct continuation | Pending |
 | 8 | Consolidation and acceptance | Pending |
@@ -338,6 +338,16 @@ Full performance qualification remains deferred.
 - Keep microcore oracle/fallback behavior and strict-cycle ownership intact.
 - Delete superseded decode and decoded-block execution code as each family
   moves to the new kernel.
+
+First-slice evidence (2026-08-27): the condition-code vocabulary, prefix
+register selection, sign extension, flag packing/evaluation/update rules, and
+complete immediate/register ALU effects now have one inline owner in
+`accel/cpu/mp64/semantics.h`. Their former monolithic definitions were deleted;
+the universal interpreter and exact-single decoded executor consume the same
+implementation without exposing or relocating the mixed `CPUState`. The
+extension built successfully, and focused exact-single/generic/Python state,
+microcore REX/scalar, and native SUBI flag comparisons passed serially (6
+passed). Decoder and exit ownership remain in progress.
 
 ### Element 6 — Multi-line and multi-memory block construction
 
