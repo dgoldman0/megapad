@@ -159,10 +159,15 @@ for line in banner.split('\n'):
     print(f"    {line}")
 
 # ═══════════════════════════════════════════════════════════════
-#  3. Load KDOS (JIT OFF) — measure cycles, HERE, dictionary
+#  3. Load KDOS with its production-owned JIT policy
 # ═══════════════════════════════════════════════════════════════
 def load_kdos(jit_on=False):
-    """Boot BIOS, optionally enable JIT, load KDOS, return stats."""
+    """Boot BIOS, optionally enable JIT early, load KDOS, return stats.
+
+    KDOS itself executes JIT-ON near the beginning of kdos.f and JIT-OFF only
+    at its tail.  ``jit_on`` therefore changes a tiny preamble only; it is not
+    a guest-JIT-off versus guest-JIT-on KDOS comparison.
+    """
     sys_obj = make_system()
     buf = capture_uart(sys_obj)
     sys_obj.load_binary(0, bios_code)
@@ -254,27 +259,26 @@ def print_kdos_stats(s, label):
     print(f"  Dictionary used:     {fmt_bytes(s['dict_used'])}")
     print(f"  RAM high-water:      0x{s['ram_hw']:X} ({fmt_bytes(s['ram_hw'])})")
     print(f"  JIT enabled var:     {s['jit_enabled']}")
-    if s['jit_on']:
-        print(f"  JIT inlines:         {s['jit_inlines']}")
-        print(f"  JIT folds:           {s['jit_folds']}")
-        print(f"  JIT peepholes:       {s['jit_peepholes']}")
-        print(f"  JIT bytes saved:     {fmt_bytes(s['jit_bytes_saved'])}")
+    print(f"  JIT inlines:         {s['jit_inlines']}")
+    print(f"  JIT folds:           {s['jit_folds']}")
+    print(f"  JIT peepholes:       {s['jit_peepholes']}")
+    print(f"  JIT bytes saved:     {fmt_bytes(s['jit_bytes_saved'])}")
 
-print("\nLoading KDOS (JIT OFF)...")
+print("\nLoading KDOS (production KDOS-owned JIT-ON)...")
 stats_off = load_kdos(jit_on=False)
-print_kdos_stats(stats_off, "JIT OFF")
+print_kdos_stats(stats_off, "KDOS-owned JIT-ON")
 
-print("\nLoading KDOS (JIT ON)...")
+print("\nLoading KDOS (redundant early JIT-ON preamble)...")
 stats_on = load_kdos(jit_on=True)
-print_kdos_stats(stats_on, "JIT ON")
+print_kdos_stats(stats_on, "early + KDOS JIT-ON")
 
 # ═══════════════════════════════════════════════════════════════
 #  4. Comparison
 # ═══════════════════════════════════════════════════════════════
 print(f"\n{'═'*70}")
-print(f"  Comparison: JIT OFF vs JIT ON")
+print(f"  Comparison: production policy vs redundant early JIT-ON")
 print(f"{'═'*70}")
-print(f"  {'':30s} {'JIT OFF':>14s} {'JIT ON':>14s} {'Delta':>14s}")
+print(f"  {'':30s} {'Production':>14s} {'Early ON':>14s} {'Delta':>14s}")
 print(f"  {'─'*72}")
 
 def cmp_row(label, off_val, on_val, fmt_fn=str):
@@ -297,7 +301,7 @@ if stats_on['jit_bytes_saved']:
     else:
         print(f"    → JIT makes dictionary LARGER (inlines expand more than saves)")
 
-print(f"\n  Cycle speedup from JIT-at-load: ", end="")
+print(f"\n  Cycle delta from redundant early JIT-ON: ", end="")
 if stats_on['cycles_kdos'] < stats_off['cycles_kdos']:
     pct = (1 - stats_on['cycles_kdos'] / stats_off['cycles_kdos']) * 100
     print(f"{pct:.1f}% fewer cycles")

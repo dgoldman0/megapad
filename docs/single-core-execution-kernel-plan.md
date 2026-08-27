@@ -879,6 +879,58 @@ against a clean `8eca80f` build and exact state in every pair. That is rollback
 parity, not a new speed claim. Phase 2 report schema 16 carries the host-profile
 schema update. No replacement predictor is inferred.
 
+The next production-prefix measurement exposed a second calibration gap. The
+Phase 0 circuits are raw MP64 assembly and never boot the BIOS, so
+`bios_admission_mix` reproduces host-admission ratios but does not exercise the
+BIOS compile-time Forth JIT. Production `kdos.f` executes `JIT-ON` before its
+own compilation, evaluates the complete Desktop autoexec under that policy,
+and reaches `JIT-OFF` only after autoexec returns. Because `DESK-RUN` remains
+live, an ordinary Desktop smoke is expected to retain guest JIT state one.
+The pre-engine and refined revisions have byte-identical BIOS, KDOS,
+networking, and standard-autoexec sources. A fresh-image 700-million-step
+pre-roll followed by an exact 500-million-step Akashic source window confirmed
+identical PC, cycles, HERE, LATEST, image hash, and guest-JIT counters across
+the revisions, including guest JIT state one. Guest-JIT configuration is
+therefore not the A/B difference.
+
+That real source window is substantially harsher than BIOS+KDOS: 553.467 host
+block lookups per 1,000 guest steps, a 19.136% cached-rejection share, a 3.073%
+build-attempt share, and 1,222,363 block builds with 1,222,361 evictions. Of
+216,495,983 successful positive admissions, 92,388,072 made zero block
+progress, while native execution still covered 69.321% of guest steps. The
+refined engine won the first 700 million steps but lost the following source
+window to the pre-engine control; a globally enabled or disabled host JIT is
+therefore not a sufficient answer.
+
+`bench_guest_jit_source_load.py` adds a seconds-scale synthetic gate for this
+missing shape. It boots production BIOS+KDOS, enters the external userland
+dictionary, explicitly fixes guest JIT on and resets its counters, then pauses
+at a `KEY` boundary. Setup is excluded from timing. The measured phase compiles
+2,048 deterministic Forth bodies plus external data definitions, string
+literals, literal folds, and sparse bigrams into external RAM, then runs two
+million iterations combining an external-memory load/update/store word with a
+guest-JIT-emitted scalar fallback word before returning through KDOS's final
+`JIT-OFF`. Its report binds source, image, accelerator, guest-JIT, dictionary,
+and host-profile identities. This is a source-churn and
+external-memory diagnostic, not a replacement for the canonical BIOS+KDOS or
+Desktop gates. The older `bench_bios_kdos_profile.py` labels are corrected:
+its former “JIT OFF” case also executes KDOS's internal `JIT-ON` and was never
+a valid off/on comparison.
+
+The default generated fixture completes 859,562,672 measured steps and its
+guest compiler records 27,278 inlines, 1,281 folds, and 137 peepholes. A
+separate profiled replay measured 521.699 host lookups per 1,000 steps, 21.486%
+cached rejections, 2.873% build attempts, 2.806 steps per block execution, and
+74.199% native-JIT step coverage. Those values are materially closer to the
+real source window than either former Phase 0 extreme, while the remaining
+zero-progress and compilation-rate differences are explicit. One adjacent
+unprofiled characterization measured 41.758 Msteps/s at the refined engine
+and 39.328 Msteps/s at the pre-engine control, even though the real
+700M--1.2B Desktop window favored the control. This is useful disagreement:
+the generated gate, rejected-scalar gate, canonical BIOS+KDOS gate, and
+fresh-image production prefix remain independent requirements. No synthetic
+score is allowed to average away an adverse result.
+
 Separate rich-host observation (2026-08-27): the retained rich-terminal host
 currently rebuilds and recopies an owner's complete object mapping for each
 `OBJECT_DEFINE`, making the 23,520-glyph Desktop hidden build quadratic. This
