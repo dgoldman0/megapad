@@ -6332,6 +6332,19 @@ static inline ResolvedMemorySpan resolve_scalar_memory_byte(
     return resolved;
 }
 
+static inline ResolvedMemorySpan resolve_supervisor_memory_byte(
+        CPUState& state,
+        uint64_t address) {
+    const ResolvedMemorySpan resolved = resolve_memory_span(
+        *state.memory,
+        address,
+        MemoryAccessPolicy::SUPERVISOR_BYTE,
+        Bank0Addressing::MODULO_ALIAS);
+    if (!resolved)
+        throw std::runtime_error("main memory is not attached");
+    return resolved;
+}
+
 static inline ResolvedMemorySpan resolve_direct_scalar_memory_span(
         CPUState& state,
         uint64_t address) noexcept {
@@ -6552,7 +6565,7 @@ static inline int find_accel_hook(CPUState& s, uint64_t target) {
     return 0;
 }
 
-struct AccelHookContext {
+struct DirectMemoryContext {
     bool has_mmio;
     uint64_t mmio_start;
     uint64_t mmio_end;
@@ -6561,17 +6574,6 @@ struct AccelHookContext {
 struct AccelHookResult {
     bool handled;
     int extra_cycles;
-};
-
-struct DirectMemoryRegion {
-    uint8_t* ptr;
-    uint64_t avail;
-    int priority;
-};
-
-enum class AccelAccessModel {
-    SCALAR,
-    BYTE,
 };
 
 // The native renderer rejects framebuffer dimensions beyond 4096×4096.
@@ -6584,61 +6586,8 @@ static constexpr uint64_t MAX_ACCEL_STRING_GLYPHS = 4096;
 static constexpr uint64_t MAX_ACCEL_HOOK_EXTRA_CYCLES =
     static_cast<uint64_t>(std::numeric_limits<int>::max()) - 2;
 
-// Scalar loads/stores use resolve_mem(), whose overlap priority is
-// VRAM -> external memory -> HBW -> Bank 0.
-static inline DirectMemoryRegion resolve_accel_scalar_region(
-        CPUState& s, uint64_t addr) {
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
-        uint64_t off = addr - s.memory->vram_base;
-        return {s.memory->vram_mem + off, s.memory->vram_size - off, 0};
-    }
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
-        uint64_t off = addr - s.memory->ext_mem_base;
-        return {s.memory->ext_mem + off, s.memory->ext_mem_size - off, 1};
-    }
-    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
-        uint64_t off = addr - s.memory->hbw_base;
-        return {s.memory->hbw_mem + off, s.memory->hbw_size - off, 2};
-    }
-    if (s.memory->mem && addr < s.memory->mem_size)
-        return {s.memory->mem + addr, s.memory->mem_size - addr, 3};
-    return {nullptr, 0, 4};
-}
-
-// Byte instructions have an explicit supervisor-mode routing order in
-// sys_read8()/sys_write8(): HBW -> external memory -> VRAM -> Bank 0.
-static inline DirectMemoryRegion resolve_accel_byte_region(
-        CPUState& s, uint64_t addr) {
-    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
-        uint64_t off = addr - s.memory->hbw_base;
-        return {s.memory->hbw_mem + off, s.memory->hbw_size - off, 0};
-    }
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr))
-        return {
-            s.memory->ext_mem + (addr - s.memory->ext_mem_base),
-            s.memory->ext_mem_size - (addr - s.memory->ext_mem_base),
-            1,
-        };
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr))
-        return {
-            s.memory->vram_mem + (addr - s.memory->vram_base),
-            s.memory->vram_size - (addr - s.memory->vram_base),
-            2,
-        };
-    if (s.memory->mem && addr < s.memory->mem_size)
-        return {s.memory->mem + addr, s.memory->mem_size - addr, 3};
-    return {nullptr, 0, 4};
-}
-
-static inline DirectMemoryRegion resolve_accel_region(
-        CPUState& s, uint64_t addr, AccelAccessModel model) {
-    return model == AccelAccessModel::SCALAR
-        ? resolve_accel_scalar_region(s, addr)
-        : resolve_accel_byte_region(s, addr);
-}
-
-static inline bool accel_span_overlaps_mmio(
-        uint64_t addr, uint64_t size, const AccelHookContext& context) {
+static inline bool direct_memory_span_overlaps_mmio(
+        uint64_t addr, uint64_t size, const DirectMemoryContext& context) {
     if (!context.has_mmio || context.mmio_start >= context.mmio_end ||
         size == 0)
         return false;
@@ -6648,80 +6597,34 @@ static inline bool accel_span_overlaps_mmio(
     return addr < context.mmio_end && last >= context.mmio_start;
 }
 
-static inline bool guest_region_intersects_span(
-        uint64_t region_base,
-        uint64_t region_size,
-        uint64_t span_base,
-        uint64_t span_size) {
-    if (region_size == 0 || span_size == 0)
-        return false;
-    const uint64_t region_last = region_base + region_size - 1;
-    const uint64_t span_last = span_base + span_size - 1;
-    return region_base <= span_last && span_base <= region_last;
-}
-
-static inline bool higher_priority_region_intersects_span(
+static inline ResolvedMemorySpan resolve_direct_memory_span(
         CPUState& s,
         uint64_t addr,
         uint64_t size,
-        AccelAccessModel model,
-        int selected_priority) {
-    if (model == AccelAccessModel::SCALAR) {
-        if (selected_priority > 0 &&
-            guest_region_intersects_span(
-                s.memory->vram_base, s.memory->vram_size, addr, size))
-            return true;
-        if (selected_priority > 1 &&
-            guest_region_intersects_span(
-                s.memory->ext_mem_base, s.memory->ext_mem_size, addr, size))
-            return true;
-        if (selected_priority > 2 &&
-            guest_region_intersects_span(
-                s.memory->hbw_base, s.memory->hbw_size, addr, size))
-            return true;
-    } else {
-        if (selected_priority > 0 &&
-            guest_region_intersects_span(
-                s.memory->hbw_base, s.memory->hbw_size, addr, size))
-            return true;
-        if (selected_priority > 1 &&
-            guest_region_intersects_span(
-                s.memory->ext_mem_base, s.memory->ext_mem_size, addr, size))
-            return true;
-        if (selected_priority > 2 &&
-            guest_region_intersects_span(
-                s.memory->vram_base, s.memory->vram_size, addr, size))
-            return true;
-    }
-    return false;
-}
-
-static inline bool accel_span_is_direct(
-        CPUState& s,
-        uint64_t addr,
-        uint64_t size,
-        AccelAccessModel model,
-        const AccelHookContext& context) {
-    if (size == 0)
-        return true;
+        MemoryAccessPolicy policy,
+        const DirectMemoryContext& context) noexcept {
+    if (s.memory == nullptr || size == 0)
+        return {};
     if (size - 1 > MASK64 - addr ||
-        accel_span_overlaps_mmio(addr, size, context))
-        return false;
-    const auto region = resolve_accel_region(s, addr, model);
-    return region.ptr && size <= region.avail &&
-        !higher_priority_region_intersects_span(
-            s, addr, size, model, region.priority);
+        direct_memory_span_overlaps_mmio(addr, size, context))
+        return {};
+    const ResolvedMemorySpan resolved = resolve_memory_span(
+        *s.memory,
+        addr,
+        policy,
+        Bank0Addressing::BOUNDED);
+    return resolved.covers(size) ? resolved : ResolvedMemorySpan{};
 }
 
 static inline bool accel_stack_is_direct(
-        CPUState& s, uint64_t cells, const AccelHookContext& context) {
+        CPUState& s, uint64_t cells, const DirectMemoryContext& context) {
     return !s.priv_level &&
-        accel_span_is_direct(
+        static_cast<bool>(resolve_direct_memory_span(
             s,
             s.regs[14],
             cells * 8,
-            AccelAccessModel::SCALAR,
-            context);
+            MemoryAccessPolicy::SCALAR,
+            context));
 }
 
 // Peek first and consume only after the complete operation has passed
@@ -6756,10 +6659,6 @@ static inline void write_rgb565_le(uint8_t* ptr, uint16_t value) {
     ptr[1] = static_cast<uint8_t>(value >> 8);
 }
 
-static inline uint8_t read_accel_byte(CPUState& s, uint64_t addr) {
-    return *resolve_accel_byte_region(s, addr).ptr;
-}
-
 static inline bool host_spans_overlap(
         const uint8_t* first,
         uint64_t first_size,
@@ -6772,7 +6671,7 @@ static inline bool host_spans_overlap(
 
 // RECT-FILL ( addr stride w h color16 -- )
 static AccelHookResult accel_rect_fill(
-        CPUState& s, const AccelHookContext& context) {
+        CPUState& s, const DirectMemoryContext& context) {
     if (!accel_stack_is_direct(s, 5, context))
         return {false, 0};
 
@@ -6795,11 +6694,11 @@ static AccelHookResult accel_rect_fill(
     const uint64_t row_bytes = w * 2;
     uint64_t row_addr = addr;
     for (uint64_t row = 0; row < h; row++) {
-        if (!accel_span_is_direct(
+        if (!resolve_direct_memory_span(
                 s,
                 row_addr,
                 row_bytes,
-                AccelAccessModel::SCALAR,
+                MemoryAccessPolicy::SCALAR,
                 context))
             return {false, 0};
         row_addr += stride;
@@ -6807,9 +6706,14 @@ static AccelHookResult accel_rect_fill(
 
     consume_data(s, 5);
     for (uint64_t row = 0; row < h; row++) {
-        auto region = resolve_accel_scalar_region(s, addr);
+        const ResolvedMemorySpan region = resolve_direct_memory_span(
+            s,
+            addr,
+            row_bytes,
+            MemoryAccessPolicy::SCALAR,
+            context);
         for (uint64_t col = 0; col < w; col++)
-            write_rgb565_le(region.ptr + col * 2, color16);
+            write_rgb565_le(region.data + col * 2, color16);
         icache_invalidate_span(s, addr, row_bytes);
         addr += stride;
     }
@@ -6818,7 +6722,7 @@ static AccelHookResult accel_rect_fill(
 
 // BLIT-GLYPH ( glyph-addr pixel-addr stride fg16 -- )
 static AccelHookResult accel_blit_glyph(
-        CPUState& s, const AccelHookContext& context) {
+        CPUState& s, const DirectMemoryContext& context) {
     if (!accel_stack_is_direct(s, 4, context))
         return {false, 0};
 
@@ -6831,33 +6735,32 @@ static AccelHookResult accel_blit_glyph(
         consume_data(s, 4);
         return {true, 1};
     }
-    if (!accel_span_is_direct(
-            s,
-            glyph_addr,
-            8,
-            AccelAccessModel::BYTE,
-            context))
+    const ResolvedMemorySpan font_region = resolve_direct_memory_span(
+        s,
+        glyph_addr,
+        8,
+        MemoryAccessPolicy::SUPERVISOR_BYTE,
+        context);
+    if (!font_region)
         return {false, 0};
 
     // Read 8 font bytes from guest memory
     uint8_t font_rows[8];
-    for (int i = 0; i < 8; i++)
-        font_rows[i] = read_accel_byte(s, glyph_addr + i);
-    const auto font_region = resolve_accel_byte_region(s, glyph_addr);
+    std::memcpy(font_rows, font_region.data, sizeof(font_rows));
 
     uint64_t row_addr = pixel_addr;
     for (int row = 0; row < 8; row++) {
-        if (!accel_span_is_direct(
+        const ResolvedMemorySpan output_region =
+            resolve_direct_memory_span(
                 s,
                 row_addr,
                 16,
-                AccelAccessModel::SCALAR,
-                context))
+                MemoryAccessPolicy::SCALAR,
+                context);
+        if (!output_region)
             return {false, 0};
-        const auto output_region =
-            resolve_accel_scalar_region(s, row_addr);
         if (host_spans_overlap(
-                font_region.ptr, 8, output_region.ptr, 16))
+                font_region.data, 8, output_region.data, 16))
             return {false, 0};
         row_addr += stride;
     }
@@ -6867,10 +6770,15 @@ static AccelHookResult accel_blit_glyph(
     for (int row = 0; row < 8; row++) {
         uint8_t bits = font_rows[row];
         if (bits) {  // skip empty rows entirely
-            auto region = resolve_accel_scalar_region(s, pixel_addr);
+            const ResolvedMemorySpan region = resolve_direct_memory_span(
+                s,
+                pixel_addr,
+                16,
+                MemoryAccessPolicy::SCALAR,
+                context);
             for (int col = 0; col < 8; col++) {
                 if (bits & 0x80) {
-                    write_rgb565_le(region.ptr + col * 2, fg16);
+                    write_rgb565_le(region.data + col * 2, fg16);
                     icache_invalidate_span(
                         s,
                         pixel_addr + static_cast<uint64_t>(col) * 2,
@@ -6887,7 +6795,7 @@ static AccelHookResult accel_blit_glyph(
 // VRAM-COPY ( src dst stride w h -- )
 // Copy a w×h byte rectangle within VRAM.  Overlap-safe (memmove per row).
 static AccelHookResult accel_vram_copy(
-        CPUState& s, const AccelHookContext& context) {
+        CPUState& s, const DirectMemoryContext& context) {
     if (!accel_stack_is_direct(s, 5, context))
         return {false, 0};
 
@@ -6918,15 +6826,22 @@ static AccelHookResult accel_vram_copy(
     uint64_t check_src = src_row;
     uint64_t check_dst = dst_row;
     for (uint64_t row = 0; row < h; row++) {
-        if (!accel_span_is_direct(
-                s, check_src, w, AccelAccessModel::BYTE, context) ||
-            !accel_span_is_direct(
-                s, check_dst, w, AccelAccessModel::BYTE, context))
+        const ResolvedMemorySpan sr = resolve_direct_memory_span(
+            s,
+            check_src,
+            w,
+            MemoryAccessPolicy::SUPERVISOR_BYTE,
+            context);
+        const ResolvedMemorySpan dr = resolve_direct_memory_span(
+            s,
+            check_dst,
+            w,
+            MemoryAccessPolicy::SUPERVISOR_BYTE,
+            context);
+        if (!sr || !dr)
             return {false, 0};
-        const auto sr = resolve_accel_byte_region(s, check_src);
-        const auto dr = resolve_accel_byte_region(s, check_dst);
-        if (sr.ptr != dr.ptr &&
-            host_spans_overlap(sr.ptr, w, dr.ptr, w))
+        if (sr.data != dr.data &&
+            host_spans_overlap(sr.data, w, dr.data, w))
             return {false, 0};
         if (backward) {
             check_src -= stride;
@@ -6939,9 +6854,19 @@ static AccelHookResult accel_vram_copy(
 
     consume_data(s, 5);
     for (uint64_t row = 0; row < h; row++) {
-        const auto sr = resolve_accel_byte_region(s, src_row);
-        const auto dr = resolve_accel_byte_region(s, dst_row);
-        std::memmove(dr.ptr, sr.ptr, static_cast<size_t>(w));
+        const ResolvedMemorySpan sr = resolve_direct_memory_span(
+            s,
+            src_row,
+            w,
+            MemoryAccessPolicy::SUPERVISOR_BYTE,
+            context);
+        const ResolvedMemorySpan dr = resolve_direct_memory_span(
+            s,
+            dst_row,
+            w,
+            MemoryAccessPolicy::SUPERVISOR_BYTE,
+            context);
+        std::memmove(dr.data, sr.data, static_cast<size_t>(w));
         icache_invalidate_span(s, dst_row, w);
         if (backward) {
             src_row -= stride;
@@ -6957,7 +6882,7 @@ static AccelHookResult accel_vram_copy(
 // BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
 // Render a string of 8×8 glyphs.  Foreground-only (transparent bg).
 static AccelHookResult accel_blit_string(
-        CPUState& s, const AccelHookContext& context) {
+        CPUState& s, const DirectMemoryContext& context) {
     if (!accel_stack_is_direct(s, 6, context))
         return {false, 0};
 
@@ -6975,45 +6900,50 @@ static AccelHookResult accel_blit_string(
 
     int cycle_cost = 0;
     if (len > MAX_ACCEL_STRING_GLYPHS ||
-        !checked_accel_cycle_cost(120, len, 1, 10, cycle_cost) ||
-        !accel_span_is_direct(
-            s, c_addr, len, AccelAccessModel::BYTE, context))
+        !checked_accel_cycle_cost(120, len, 1, 10, cycle_cost))
+        return {false, 0};
+    const ResolvedMemorySpan chars_region = resolve_direct_memory_span(
+        s,
+        c_addr,
+        len,
+        MemoryAccessPolicy::SUPERVISOR_BYTE,
+        context);
+    if (!chars_region)
         return {false, 0};
 
     // Every character maps into the fixed 0x20..0xFF font table.  Proving the
     // whole table direct also lets us reject output/input aliasing up front,
     // so drawing cannot change a later character or glyph behind preflight.
     static constexpr uint64_t FONT_TABLE_BYTES = (0x100 - 0x20) * 8;
-    if (!accel_span_is_direct(
-            s,
-            font_base,
-            FONT_TABLE_BYTES,
-            AccelAccessModel::BYTE,
-            context))
+    const ResolvedMemorySpan font_region = resolve_direct_memory_span(
+        s,
+        font_base,
+        FONT_TABLE_BYTES,
+        MemoryAccessPolicy::SUPERVISOR_BYTE,
+        context);
+    if (!font_region)
         return {false, 0};
-    const auto chars_region = resolve_accel_byte_region(s, c_addr);
-    const auto font_region = resolve_accel_byte_region(s, font_base);
 
     // Validate every potential output row before committing.
     uint64_t glyph_pixel_addr = pixel_addr;
     for (uint64_t i = 0; i < len; i++) {
         uint64_t row_addr = glyph_pixel_addr;
         for (int row = 0; row < 8; row++) {
-            if (!accel_span_is_direct(
+            const ResolvedMemorySpan output_region =
+                resolve_direct_memory_span(
                     s,
                     row_addr,
                     16,
-                    AccelAccessModel::SCALAR,
-                    context))
+                    MemoryAccessPolicy::SCALAR,
+                    context);
+            if (!output_region)
                 return {false, 0};
-            const auto output_region =
-                resolve_accel_scalar_region(s, row_addr);
             if (host_spans_overlap(
-                    chars_region.ptr, len, output_region.ptr, 16) ||
+                    chars_region.data, len, output_region.data, 16) ||
                 host_spans_overlap(
-                    font_region.ptr,
+                    font_region.data,
                     FONT_TABLE_BYTES,
-                    output_region.ptr,
+                    output_region.data,
                     16))
                 return {false, 0};
             row_addr += stride;
@@ -7023,25 +6953,33 @@ static AccelHookResult accel_blit_string(
 
     consume_data(s, 6);
     for (uint64_t i = 0; i < len; i++) {
-        uint8_t ch = read_accel_byte(s, c_addr + i);
+        uint8_t ch = chars_region.data[i];
         if (ch < 0x20) ch = 0x20;
-        const uint64_t glyph_addr =
-            font_base + static_cast<uint64_t>(ch - 0x20) * 8;
+        const uint64_t glyph_offset =
+            static_cast<uint64_t>(ch - 0x20) * 8;
 
         // Read 8 font bytes
         uint8_t font_rows[8];
-        for (int r = 0; r < 8; r++)
-            font_rows[r] = read_accel_byte(s, glyph_addr + r);
+        std::memcpy(
+            font_rows,
+            font_region.data + glyph_offset,
+            sizeof(font_rows));
 
         // Blit 8×8 glyph
         uint64_t pa = pixel_addr;
         for (int row = 0; row < 8; row++) {
             uint8_t bits = font_rows[row];
             if (bits) {
-                auto region = resolve_accel_scalar_region(s, pa);
+                const ResolvedMemorySpan region =
+                    resolve_direct_memory_span(
+                        s,
+                        pa,
+                        16,
+                        MemoryAccessPolicy::SCALAR,
+                        context);
                 for (int col = 0; col < 8; col++) {
                     if (bits & 0x80) {
-                        write_rgb565_le(region.ptr + col * 2, fg16);
+                        write_rgb565_le(region.data + col * 2, fg16);
                         icache_invalidate_span(
                             s,
                             pa + static_cast<uint64_t>(col) * 2,
@@ -7060,7 +6998,7 @@ static AccelHookResult accel_blit_string(
 static AccelHookResult execute_accel_hook(
         CPUState& s,
         int hook_id,
-        const AccelHookContext& context) {
+        const DirectMemoryContext& context) {
     switch (hook_id) {
         case 1: return accel_rect_fill(s, context);
         case 2: return accel_blit_glyph(s, context);
@@ -10063,16 +10001,8 @@ static inline uint8_t sys_read8(
             throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
-        return s.memory->hbw_mem[addr - s.memory->hbw_base];
     }
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
-        return s.memory->ext_mem[addr - s.memory->ext_mem_base];
-    }
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
-        return s.memory->vram_mem[addr - s.memory->vram_base];
-    }
-    return mem_read8(s, addr);
+    return *resolve_supervisor_memory_byte(s, addr).data;
 }
 
 static inline bool write_native_nic_bytes(
@@ -10165,22 +10095,9 @@ static inline void sys_write8(
             throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
-        s.memory->hbw_mem[addr - s.memory->hbw_base] = val;
-        icache_invalidate_span(s, addr, 1);
-        return;
     }
-    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
-        s.memory->ext_mem[addr - s.memory->ext_mem_base] = val;
-        icache_invalidate_span(s, addr, 1);
-        return;
-    }
-    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
-        s.memory->vram_mem[addr - s.memory->vram_base] = val;
-        icache_invalidate_span(s, addr, 1);
-        return;
-    }
-    mem_write8(s, addr, val);
+    *resolve_supervisor_memory_byte(s, addr).data = val;
+    icache_invalidate_span(s, addr, 1);
 }
 
 static inline void preflight_sysinfo_fallback_span(
@@ -10654,32 +10571,7 @@ static inline uint8_t direct_system_memory_read8(
         CPUState& s,
         uint64_t address) {
     preflight_resumable_bus_access(s, address);
-    if (!s.priv_level &&
-        s.memory->hbw_mem &&
-        region_contains(
-            s.memory->hbw_base,
-            s.memory->hbw_size,
-            address)) {
-        return s.memory->hbw_mem[
-            address - s.memory->hbw_base];
-    }
-    if (s.memory->ext_mem &&
-        region_contains(
-            s.memory->ext_mem_base,
-            s.memory->ext_mem_size,
-            address)) {
-        return s.memory->ext_mem[
-            address - s.memory->ext_mem_base];
-    }
-    if (s.memory->vram_mem &&
-        region_contains(
-            s.memory->vram_base,
-            s.memory->vram_size,
-            address)) {
-        return s.memory->vram_mem[
-            address - s.memory->vram_base];
-    }
-    return mem_read8(s, address);
+    return *resolve_supervisor_memory_byte(s, address).data;
 }
 
 static inline void direct_system_memory_write8(
@@ -10687,38 +10579,8 @@ static inline void direct_system_memory_write8(
         uint64_t address,
         uint8_t value) {
     preflight_resumable_bus_access(s, address);
-    if (!s.priv_level &&
-        s.memory->hbw_mem &&
-        region_contains(
-            s.memory->hbw_base,
-            s.memory->hbw_size,
-            address)) {
-        s.memory->hbw_mem[
-            address - s.memory->hbw_base] = value;
-        icache_invalidate_span(s, address, 1);
-        return;
-    }
-    if (s.memory->ext_mem &&
-        region_contains(
-            s.memory->ext_mem_base,
-            s.memory->ext_mem_size,
-            address)) {
-        s.memory->ext_mem[
-            address - s.memory->ext_mem_base] = value;
-        icache_invalidate_span(s, address, 1);
-        return;
-    }
-    if (s.memory->vram_mem &&
-        region_contains(
-            s.memory->vram_base,
-            s.memory->vram_size,
-            address)) {
-        s.memory->vram_mem[
-            address - s.memory->vram_base] = value;
-        icache_invalidate_span(s, address, 1);
-        return;
-    }
-    mem_write8(s, address, value);
+    *resolve_supervisor_memory_byte(s, address).data = value;
+    icache_invalidate_span(s, address, 1);
 }
 
 struct DmaTargetAccess {
@@ -12791,7 +12653,7 @@ static int step_one(
                 // Check accelerator hooks BEFORE pushing return address
                 int hook = find_accel_hook(s, target);
                 if (hook && cb.bus_access == nullptr) {
-                    const AccelHookContext context = {
+                    const DirectMemoryContext context = {
                         cb.has_mmio,
                         cb.mmio_start,
                         cb.mmio_end,
@@ -22116,36 +21978,28 @@ static uint8_t* preflight_single_core_direct_read(
 
     const uint64_t width =
         decoded.subop == 0x0 ? 8 : 1;
-    const AccelAccessModel model =
+    const MemoryAccessPolicy policy =
         decoded.subop == 0x0
-        ? AccelAccessModel::SCALAR
-        : AccelAccessModel::BYTE;
+        ? MemoryAccessPolicy::SCALAR
+        : MemoryAccessPolicy::SUPERVISOR_BYTE;
     const uint64_t address = core.regs[decoded.rs];
-    const AccelHookContext context{
+    const DirectMemoryContext context{
         callbacks.has_mmio,
         callbacks.mmio_start,
         callbacks.mmio_end,
     };
-    if (!accel_span_is_direct(
-            core,
-            address,
-            width,
-            model,
-            context)) {
-        return nullptr;
-    }
-    const DirectMemoryRegion region =
-        resolve_accel_region(core, address, model);
+    const ResolvedMemorySpan region = resolve_direct_memory_span(
+        core,
+        address,
+        width,
+        policy,
+        context);
     // Keep this direct-memory slice on non-wrapping Bank 0. Other apertures
     // retain authoritative system-read routing until qualified separately.
-    if (
-        region.priority != 3 ||
-        region.ptr == nullptr ||
-        region.avail < width
-    ) {
+    if (region.region != MemoryRegionKind::BANK0) {
         return nullptr;
     }
-    return region.ptr;
+    return region.data;
 }
 
 static uint8_t* preflight_single_core_direct_store(
@@ -22178,10 +22032,10 @@ static uint8_t* preflight_single_core_direct_store(
         return nullptr;
     }
 
-    AccelAccessModel model = AccelAccessModel::BYTE;
+    MemoryAccessPolicy policy = MemoryAccessPolicy::SUPERVISOR_BYTE;
     if (decoded.subop == 0x4) {
         guest_size = 8;
-        model = AccelAccessModel::SCALAR;
+        policy = MemoryAccessPolicy::SCALAR;
     } else if (decoded.subop == 0x7) {
         guest_size = 1;
     } else {
@@ -22211,30 +22065,22 @@ static uint8_t* preflight_single_core_direct_store(
     }
 
     const uint64_t address = core.regs[decoded.rd];
-    const AccelHookContext context{
+    const DirectMemoryContext context{
         callbacks.has_mmio,
         callbacks.mmio_start,
         callbacks.mmio_end,
     };
-    if (!accel_span_is_direct(
-            core,
-            address,
-            guest_size,
-            model,
-            context)) {
-        return nullptr;
-    }
-    const DirectMemoryRegion region =
-        resolve_accel_region(core, address, model);
-    if (
-        region.priority != 3 ||
-        region.ptr == nullptr ||
-        region.avail < guest_size
-    ) {
+    const ResolvedMemorySpan region = resolve_direct_memory_span(
+        core,
+        address,
+        guest_size,
+        policy,
+        context);
+    if (region.region != MemoryRegionKind::BANK0) {
         return nullptr;
     }
     guest_address = address;
-    return region.ptr;
+    return region.data;
 }
 
 static uint8_t* preflight_single_core_direct_long_call(
@@ -22306,31 +22152,21 @@ static uint8_t* preflight_single_core_direct_long_call(
 
     stack_address = core.regs[block.spsel] - 8;
     return_address = block.address + block.identity_size;
-    const AccelHookContext context{
+    const DirectMemoryContext context{
         callbacks.has_mmio,
         callbacks.mmio_start,
         callbacks.mmio_end,
     };
-    if (!accel_span_is_direct(
-            core,
-            stack_address,
-            8,
-            AccelAccessModel::SCALAR,
-            context)) {
-        return nullptr;
-    }
-    const DirectMemoryRegion region = resolve_accel_region(
+    const ResolvedMemorySpan region = resolve_direct_memory_span(
         core,
         stack_address,
-        AccelAccessModel::SCALAR);
-    if (
-        region.priority != 3 ||
-        region.ptr == nullptr ||
-        region.avail < 8
-    ) {
+        8,
+        MemoryAccessPolicy::SCALAR,
+        context);
+    if (region.region != MemoryRegionKind::BANK0) {
         return nullptr;
     }
-    return region.ptr;
+    return region.data;
 }
 
 static uint8_t* preflight_single_core_direct_long_return(
@@ -22385,32 +22221,22 @@ static uint8_t* preflight_single_core_direct_long_return(
     }
 
     stack_address = core.regs[block.spsel];
-    const AccelHookContext context{
+    const DirectMemoryContext context{
         callbacks.has_mmio,
         callbacks.mmio_start,
         callbacks.mmio_end,
     };
-    if (!accel_span_is_direct(
-            core,
-            stack_address,
-            8,
-            AccelAccessModel::SCALAR,
-            context)) {
-        return nullptr;
-    }
-    const DirectMemoryRegion region = resolve_accel_region(
+    const ResolvedMemorySpan region = resolve_direct_memory_span(
         core,
         stack_address,
-        AccelAccessModel::SCALAR);
-    if (
-        region.priority != 3 ||
-        region.ptr == nullptr ||
-        region.avail < 8
-    ) {
+        8,
+        MemoryAccessPolicy::SCALAR,
+        context);
+    if (region.region != MemoryRegionKind::BANK0) {
         return nullptr;
     }
-    std::memcpy(&target, region.ptr, sizeof(target));
-    return region.ptr;
+    std::memcpy(&target, region.data, sizeof(target));
+    return region.data;
 }
 
 static uint8_t execute_single_core_decoded_instruction(

@@ -198,7 +198,7 @@ the reverted C++ successor-probe loop is not restored.
 | 1 | Source ownership and build decomposition | Complete |
 | 2 | Bounded synchronous storage transfer | Complete |
 | 3 | Native no-event round settlement | Complete |
-| 4 | Algebraic memory foundation | In progress |
+| 4 | Algebraic memory foundation | Complete |
 | 5 | Authoritative decoded execution kernel | Pending |
 | 6 | Multi-line and multi-memory block construction | Pending |
 | 7 | x86-64 lowering and direct continuation | Pending |
@@ -309,6 +309,25 @@ Bank 0 wrap, instruction-fill, shared-mapping, and uncontended execution checks
 passed serially (24 passed). Accelerator and DBT preflight consolidation remains
 part of this element; this evidence does not mark it complete or claim an
 end-to-end performance result.
+
+Completion evidence (2026-08-27): accelerator hooks and exact-single DBT
+preflight now consume the same resolved-span contract. The parallel
+`DirectMemoryRegion`/`AccelAccessModel` resolver family and its hand-written
+higher-priority intersection scans were deleted. Each of the four current DBT
+memory shapes obtains its host pointer from its single admission proof while
+retaining the supervisor-only, no-bus, full-span MMIO rejection, bounded
+Bank 0, and Bank-0-only lowering gates. Accelerator drawing and copying retain
+their all-rows-before-mutation transaction boundary, but reuse admitted input
+and font spans instead of resolving each byte again.
+
+The ordinary and strict-bus byte paths now also use the explicit
+supervisor-byte policy after their existing MMIO, bus, HBW privilege, and MPU
+checks. DMA, TACC, and storage remain outside this resolver because their
+target-selection and observation contracts differ; this is deliberate policy
+separation, not a legacy implementation. The extension built successfully,
+and focused accelerator-hook, leading native read, terminal native store,
+long-call/return, and aperture-edge oracle checks passed serially (24 passed).
+Full performance qualification remains deferred.
 
 ### Element 5 — Authoritative decoded execution kernel
 
