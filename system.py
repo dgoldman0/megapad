@@ -73,6 +73,12 @@ from rich_terminal.transport import HostPortLimits, TerminalHostLease
 # positive production batches remain owned unconditionally by the native
 # system scheduler.
 _CANONICAL_STEP = Megapad64.step
+_CANONICAL_DEVICE_BUS_REGISTER = DeviceBus.register
+_CANONICAL_DEVICE_BUS_SET_TICK_DRIVER = DeviceBus.set_tick_driver
+_CANONICAL_DEVICE_BUS_TICK = DeviceBus.tick
+_CANONICAL_DEVICE_BUS_TICK_REGISTERED = DeviceBus.tick_registered_devices
+_CANONICAL_CLOCK_TOPOLOGY_BEGIN = DeviceBus._begin_clock_topology_use
+_CANONICAL_CLOCK_TOPOLOGY_END = DeviceBus._end_clock_topology_use
 
 # ---------------------------------------------------------------------------
 #  Memory map constants
@@ -2806,6 +2812,77 @@ class MegapadSystem:
                 return False
         return True
 
+    def _native_no_event_settlement_eligible(self, topology_owner) -> bool:
+        """Prove that a successful singleton round has no Python clock work."""
+        if type(self) is not MegapadSystem:
+            return False
+        if (
+            self.num_full_cores != 1
+            or self.num_cores != 1
+            or self.num_clusters != 0
+        ):
+            return False
+        if "_settle_native_system_round" in vars(self):
+            return False
+        if "_deliver_pending_interrupts" in vars(self):
+            return False
+        if "_advance_system_cycles_locked" in vars(self):
+            return False
+        bus = self.bus
+        if type(bus) is not DeviceBus:
+            return False
+        if any(
+            name in vars(bus)
+            for name in (
+                "register",
+                "set_tick_driver",
+                "tick",
+                "tick_registered_devices",
+                "_begin_clock_topology_use",
+                "_end_clock_topology_use",
+            )
+        ):
+            return False
+        if (
+            getattr(type(bus), "register", None)
+            is not _CANONICAL_DEVICE_BUS_REGISTER
+            or getattr(type(bus), "set_tick_driver", None)
+            is not _CANONICAL_DEVICE_BUS_SET_TICK_DRIVER
+            or getattr(type(bus), "tick", None)
+            is not _CANONICAL_DEVICE_BUS_TICK
+            or getattr(type(bus), "tick_registered_devices", None)
+            is not _CANONICAL_DEVICE_BUS_TICK_REGISTERED
+            or getattr(type(bus), "_begin_clock_topology_use", None)
+            is not _CANONICAL_CLOCK_TOPOLOGY_BEGIN
+            or getattr(type(bus), "_end_clock_topology_use", None)
+            is not _CANONICAL_CLOCK_TOPOLOGY_END
+        ):
+            return False
+        if bus._clock_topology_owner is not topology_owner:
+            return False
+        if bus._clocked_devices:
+            return False
+        if (
+            getattr(type(self), "_settle_native_system_round", None)
+            is not _CANONICAL_SYSTEM_SETTLEMENT
+            or getattr(type(self), "_deliver_pending_interrupts", None)
+            is not _CANONICAL_INTERRUPT_DELIVERY
+            or getattr(type(self), "_advance_system_cycles_locked", None)
+            is not _CANONICAL_SYSTEM_ADVANCE_LOCKED
+        ):
+            return False
+        tick_driver = bus._tick_driver
+        if (
+            getattr(tick_driver, "__self__", None) is not self
+            or getattr(tick_driver, "__func__", None)
+            is not _CANONICAL_SYSTEM_ADVANCE
+        ):
+            return False
+        return (
+            type(self.timer) is CppTimerProxy
+            and self.timer._cs is self.cpu._cs
+        )
+
     def _prepare_native_system_batch(self) -> None:
         """Apply wake checks for every native execution core."""
         for cpu in self.cores:
@@ -3045,15 +3122,29 @@ class MegapadSystem:
             )
             for cpu in self.cores
         ]
-        result = self._native_system.run_full_core_batch(
-            n,
-            callback_sets,
-            self._prepare_native_system_batch,
-            self._settle_native_core_continuation,
-            self._settle_native_core_dispatch_error,
-            self._settle_native_system_round,
-            1000,
-        )
+        topology_owner = self.bus._begin_clock_topology_use()
+        try:
+            native_no_event_settlement_proved = (
+                _CANONICAL_NO_EVENT_SETTLEMENT_PROOF(
+                    self, topology_owner
+                )
+            )
+            if not native_no_event_settlement_proved:
+                self.bus._end_clock_topology_use(topology_owner)
+                topology_owner = None
+            result = self._native_system.run_full_core_batch(
+                n,
+                callback_sets,
+                self._prepare_native_system_batch,
+                self._settle_native_core_continuation,
+                self._settle_native_core_dispatch_error,
+                self._settle_native_system_round,
+                1000,
+                native_no_event_settlement_proved,
+            )
+        finally:
+            if topology_owner is not None:
+                self.bus._end_clock_topology_use(topology_owner)
         stop_reason = str(result.system_stop_reason)
         if "." in stop_reason:
             stop_reason = stop_reason.rsplit(".", 1)[-1]
@@ -3518,3 +3609,12 @@ class MegapadSystem:
             lines.append(f"  Spinlocks: locked={locked} "
                          f"owners={[self.spinlock.owner[i] for i in locked]}")
         return "\n".join(lines)
+
+
+_CANONICAL_SYSTEM_SETTLEMENT = MegapadSystem._settle_native_system_round
+_CANONICAL_INTERRUPT_DELIVERY = MegapadSystem._deliver_pending_interrupts
+_CANONICAL_SYSTEM_ADVANCE = MegapadSystem.advance_system_cycles
+_CANONICAL_SYSTEM_ADVANCE_LOCKED = MegapadSystem._advance_system_cycles_locked
+_CANONICAL_NO_EVENT_SETTLEMENT_PROOF = (
+    MegapadSystem._native_no_event_settlement_eligible
+)

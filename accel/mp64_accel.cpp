@@ -44,6 +44,7 @@
 #include "dbt/executable_arena.h"
 #include "dbt/host_jit_config.h"
 #include "dbt/x86_64/emitter.h"
+#include "machine/settlement.h"
 #include "mp64_crypto.h"
 #include "mp64_fb.h"
 #include "mp64_nic.h"
@@ -53,6 +54,9 @@
 #include "mp64_uart.h"
 
 namespace py = pybind11;
+
+using mp64::machine::SystemClock;
+using mp64::machine::UnboundedSettlementRequest;
 
 // ---------------------------------------------------------------------------
 //  Constants — must match megapad64.py exactly
@@ -298,159 +302,6 @@ private:
     int core_count_ = 0;
     std::vector<uint8_t> pending_;
     std::unique_ptr<std::atomic<uint8_t>[]> ipi_lines_;
-};
-
-// ---------------------------------------------------------------------------
-//  System virtual time and deterministic event horizons
-// ---------------------------------------------------------------------------
-
-class SystemClock {
-public:
-    static constexpr int EVENT_TIMER = 0;
-    static constexpr int EVENT_FRAMEBUFFER = 1;
-    static constexpr int EVENT_RTC = 2;
-    static constexpr int EVENT_INTERRUPT = 3;
-    static constexpr int EVENT_EXTERNAL = 4;
-    static constexpr int EVENT_SOURCE_COUNT = 5;
-
-    struct Snapshot {
-        uint64_t cycles;
-        bool has_deadline;
-        uint64_t earliest_deadline;
-        uint64_t source_mask;
-        std::array<uint64_t, EVENT_SOURCE_COUNT> deadlines;
-        uint64_t active_sources;
-    };
-
-    uint64_t cycles() const {
-        std::lock_guard<std::mutex> guard(mutex_);
-        return cycles_;
-    }
-
-    void advance_by(
-            uint64_t delta,
-            TimerDevice& timer,
-            FramebufferDevice& framebuffer,
-            RTCDevice& rtc,
-            CryptoDevices& crypto) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        advance_by_unlocked(delta, timer, framebuffer, rtc, crypto);
-    }
-
-    void advance_to(
-            uint64_t target,
-            TimerDevice& timer,
-            FramebufferDevice& framebuffer,
-            RTCDevice& rtc,
-            CryptoDevices& crypto) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        if (target < cycles_)
-            throw std::invalid_argument(
-                "system cycle target cannot move backwards");
-        advance_by_unlocked(
-            target - cycles_, timer, framebuffer, rtc, crypto);
-    }
-
-    void set_event_deadline(int source_id, uint64_t deadline) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        validate_source(source_id);
-        if (deadline < cycles_)
-            throw std::invalid_argument(
-                "event deadline cannot precede current system time");
-        deadlines_[static_cast<std::size_t>(source_id)] = deadline;
-        active_sources_ |= uint64_t{1} << source_id;
-    }
-
-    void clear_event_deadline(int source_id) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        validate_source(source_id);
-        active_sources_ &= ~(uint64_t{1} << source_id);
-    }
-
-    Snapshot snapshot() const {
-        std::lock_guard<std::mutex> guard(mutex_);
-        if (active_sources_ == 0)
-            return {
-                cycles_, false, 0, 0, deadlines_, active_sources_
-            };
-
-        const uint64_t earliest = earliest_deadline_unlocked();
-        uint64_t mask = 0;
-        for (int source_id = 0;
-             source_id < EVENT_SOURCE_COUNT;
-             source_id++) {
-            const uint64_t source_bit = uint64_t{1} << source_id;
-            if (!(active_sources_ & source_bit))
-                continue;
-            const uint64_t deadline =
-                deadlines_[static_cast<std::size_t>(source_id)];
-            if (deadline == earliest)
-                mask |= source_bit;
-        }
-        return {
-            cycles_,
-            true,
-            earliest,
-            mask,
-            deadlines_,
-            active_sources_,
-        };
-    }
-
-private:
-    static void validate_source(int source_id) {
-        if (source_id < 0 || source_id >= EVENT_SOURCE_COUNT)
-            throw std::invalid_argument(
-                "system event source must be between 0 and 4");
-    }
-
-    uint64_t earliest_deadline_unlocked() const {
-        uint64_t earliest = std::numeric_limits<uint64_t>::max();
-        for (int source_id = 0;
-             source_id < EVENT_SOURCE_COUNT;
-             source_id++) {
-            const uint64_t source_bit = uint64_t{1} << source_id;
-            if (!(active_sources_ & source_bit))
-                continue;
-            earliest = std::min(
-                earliest,
-                deadlines_[static_cast<std::size_t>(source_id)]);
-        }
-        return earliest;
-    }
-
-    void advance_by_unlocked(
-            uint64_t delta,
-            TimerDevice& timer,
-            FramebufferDevice& framebuffer,
-            RTCDevice& rtc,
-            CryptoDevices& crypto) {
-        if (delta == 0)
-            return;
-        if (cycles_ > std::numeric_limits<uint64_t>::max() - delta)
-            throw std::overflow_error("system cycle counter overflow");
-        const uint64_t target = cycles_ + delta;
-        if (active_sources_ != 0 &&
-            target > earliest_deadline_unlocked()) {
-            throw std::invalid_argument(
-                "system clock advance cannot cross the event horizon");
-        }
-
-        // Preserve the current DeviceBus tick order and call shape.  The
-        // future scheduler will stop at event horizons before invoking this
-        // operation; this ownership slice deliberately does not reinterpret
-        // legacy Python instruction counts as system cycles.
-        timer.tick(delta);
-        framebuffer.tick(delta);
-        rtc.tick(delta);
-        crypto.tick(delta);
-        cycles_ = target;
-    }
-
-    mutable std::mutex mutex_;
-    uint64_t cycles_ = 0;
-    std::array<uint64_t, EVENT_SOURCE_COUNT> deadlines_{};
-    uint64_t active_sources_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -4209,6 +4060,8 @@ struct ConcurrencyProfileCounters {
     uint64_t checkpoint_restores = 0;
     uint64_t coordinator_boundaries = 0;
     uint64_t settle_round_calls = 0;
+    uint64_t settle_round_native_calls = 0;
+    uint64_t settle_round_python_calls = 0;
     std::array<
         uint64_t,
         PRIVATE_CORE_STOP_REASON_COUNT>
@@ -6276,6 +6129,46 @@ acquire_system_clock_advance_use(SystemState& system) {
     py::gil_scoped_release release;
     return std::make_unique<SharedMemoryUseGuard>(
         system.shared_memory);
+}
+
+static void advance_system_clock_by_locked(
+        SystemState& system,
+        uint64_t delta) {
+    const bool batch_active =
+        system.native_batch_active.load(
+            std::memory_order_acquire);
+    if (!batch_active && system.has_cycle_execution_pending()) {
+        throw std::runtime_error(
+            "system time cannot advance while cycle execution is suspended");
+    }
+    const uint64_t current = system.shared_clock.cycles();
+    if (delta > std::numeric_limits<uint64_t>::max() - current) {
+        throw std::overflow_error("system cycle counter overflow");
+    }
+    const uint64_t target = current + delta;
+    if (!batch_active && delta != 0) {
+        const std::optional<uint64_t> external_cycle =
+            system.external_events.next_cycle();
+        const std::optional<uint64_t> before_cycle =
+            system.external_events.next_before_cycle();
+        if (external_cycle.has_value() &&
+            *external_cycle <= target) {
+            throw std::runtime_error(
+                "system time cannot cross a pending external event");
+        }
+        if (before_cycle.has_value() && *before_cycle < target) {
+            throw std::runtime_error(
+                "system time cannot cross replayed pre-batch ingress");
+        }
+    }
+    auto memory_guard = acquire_system_clock_advance_use(system);
+    system.main_bus.validate_clock_target(target);
+    system.shared_clock.advance_by(
+        delta,
+        system.shared_timer,
+        system.shared_fb,
+        system.shared_rtc,
+        system.shared_crypto);
 }
 
 class PythonMemoryUseScope {
@@ -14833,6 +14726,33 @@ static int pending_enabled_core_interrupt(
     return -1;
 }
 
+static bool unbounded_settlement_requires_python_interrupt(
+        const SystemState& system,
+        uint64_t elapsed_cycles) {
+    bool timer_pending = system.shared_timer.irq_pending;
+    if (!timer_pending) {
+        const std::optional<uint64_t> timer_delta =
+            system.shared_timer.next_irq_assertion_delta();
+        timer_pending =
+            timer_delta.has_value() &&
+            *timer_delta <= elapsed_cycles;
+    }
+
+    for (const CPUState* core : system.execution_cores) {
+        if (core->halted || !core->flag_i)
+            continue;
+        // Unbounded settlement deliberately delivers the shared timer before
+        // examining IPI lines. An idle core is eligible for that timer trap.
+        if (timer_pending)
+            return true;
+        if (!core->idle &&
+            system.shared_interrupts.ipi_line(core->core_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static PendingClusterRequest classify_pending_cluster_request(
         SystemState& system,
         CPUState& core,
@@ -15236,7 +15156,8 @@ struct DeferredClusterRequest {
 
 static void service_unbounded_native_dma(
     SystemState& system,
-    const std::function<void(int64_t, bool, bool, bool)>& settle_round);
+    const std::function<
+        void(const UnboundedSettlementRequest&)>& settle_round);
 
 static SystemBatchResult run_native_system_batch(
         SystemState& system,
@@ -15246,7 +15167,8 @@ static SystemBatchResult run_native_system_batch(
         const py::function& settle_continuation,
         const py::function& settle_dispatch_error,
         const py::function& settle_round,
-        int max_dispatch_steps) {
+        int max_dispatch_steps,
+        bool native_no_event_settlement_proved) {
     const std::size_t core_count =
         system.execution_cores.size();
     SystemBatchResult result;
@@ -15310,11 +15232,13 @@ static SystemBatchResult run_native_system_batch(
     HostProfileWallTimer batch_timer(
         host_profile_enabled,
         &profile.batch_total_ns);
-    auto profiled_settle_round = [&](
-            int64_t cycles,
-            bool deliver_interrupts,
-            bool batch_end,
-            bool record_boundary) {
+    auto profiled_settle_round = [&system,
+                                  &settle_round,
+                                  &profile,
+                                  host_profile_enabled,
+                                  native_no_event_settlement_proved](
+            const UnboundedSettlementRequest& request,
+            bool direct_topology) {
         if (host_profile_enabled) {
             host_saturating_increment(
                 profile.settle_round_calls);
@@ -15322,11 +15246,41 @@ static SystemBatchResult run_native_system_batch(
         HostProfileWallTimer settle_timer(
             host_profile_enabled,
             &profile.settle_round_ns);
+
+        const bool direct_no_event =
+            native_no_event_settlement_proved &&
+            direct_topology &&
+            system.shared_timer.enabled &&
+            request.permits_native_no_event() &&
+            !unbounded_settlement_requires_python_interrupt(
+                system,
+                static_cast<uint64_t>(request.cycles()));
+        if (direct_no_event) {
+            if (host_profile_enabled) {
+                host_saturating_increment(
+                    profile.settle_round_native_calls);
+            }
+            advance_system_clock_by_locked(
+                system,
+                static_cast<uint64_t>(request.cycles()));
+            return;
+        }
+
+        if (host_profile_enabled) {
+            host_saturating_increment(
+                profile.settle_round_python_calls);
+        }
         settle_round(
-            cycles,
-            deliver_interrupts,
-            batch_end,
-            record_boundary);
+            request.cycles(),
+            request.advances_clock(),
+            request.drains_uart(),
+            request.delivers_interrupts());
+    };
+    auto profiled_dma_settlement = [&profiled_settle_round](
+            const UnboundedSettlementRequest& request) {
+        profiled_settle_round(
+            request,
+            /*direct_topology=*/false);
     };
 
     // Wake checks are a Python compatibility boundary, but execute while the
@@ -15347,7 +15301,7 @@ static SystemBatchResult run_native_system_batch(
     // that an all-idle/all-halted CPU topology has no progress to make.
     service_unbounded_native_dma(
         system,
-        profiled_settle_round);
+        profiled_dma_settlement);
 
     const bool any_active = std::any_of(
         system.execution_cores.begin(),
@@ -15472,10 +15426,9 @@ static SystemBatchResult run_native_system_batch(
             // Settle those prefixes, all earlier successful boundaries,
             // and all prior sub-frontiers in this scheduler round.
             profiled_settle_round(
-                outcome.cycles,
-                true,
-                true,
-                false);
+                UnboundedSettlementRequest::failure_prefix(
+                    outcome.cycles),
+                /*direct_topology=*/false);
             throw;
         }
 
@@ -15489,13 +15442,12 @@ static SystemBatchResult run_native_system_batch(
         // physical cohort or cache/shared sub-frontier, is the unbounded
         // scheduler's clock, device, and interrupt boundary.
         profiled_settle_round(
-            outcome.cycles,
-            true,
-            false,
-            true);
+            UnboundedSettlementRequest::successful_round(
+                outcome.cycles),
+            uncontended_single_full_core);
         service_unbounded_native_dma(
             system,
-            profiled_settle_round);
+            profiled_dma_settlement);
         result.rounds++;
 
         if (outcome.steps != 0)
@@ -15522,7 +15474,8 @@ static SystemBatchResult run_native_system_batch(
     }
 
     profiled_settle_round(
-        0, false, true, false);
+        UnboundedSettlementRequest::batch_end(),
+        /*direct_topology=*/false);
     result.system_cycles_advanced =
         system.shared_clock.cycles() -
         clock_start;
@@ -17135,7 +17088,7 @@ static void settle_unbounded_native_clock_to(
         SystemState& system,
         uint64_t target_cycle,
         const std::function<
-            void(int64_t, bool, bool, bool)>& settle_round) {
+            void(const UnboundedSettlementRequest&)>& settle_round) {
     uint64_t current_cycle = system.shared_clock.cycles();
     if (target_cycle < current_cycle) {
         throw std::logic_error(
@@ -17150,10 +17103,8 @@ static void settle_unbounded_native_clock_to(
         // advances all registered clocks/devices and delivers any interrupt
         // made visible by the fabric interval.
         settle_round(
-            static_cast<int64_t>(delta),
-            true,
-            false,
-            true);
+            UnboundedSettlementRequest::dma_frontier(
+                static_cast<int64_t>(delta)));
         const uint64_t expected = current_cycle + delta;
         if (system.shared_clock.cycles() != expected) {
             throw std::runtime_error(
@@ -17186,7 +17137,7 @@ unbounded_wots_accept_deadline(
 static void service_unbounded_native_dma(
         SystemState& system,
         const std::function<
-            void(int64_t, bool, bool, bool)>& settle_round) {
+            void(const UnboundedSettlementRequest&)>& settle_round) {
     if (system.has_cycle_execution_pending()) {
         throw std::runtime_error(
             "ordinary DMA service cannot take strict-cycle ownership");
@@ -26017,6 +25968,10 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.coordinator_boundaries;
     counts["settle_round_calls"] =
         profile.settle_round_calls;
+    counts["settle_round_native_calls"] =
+        profile.settle_round_native_calls;
+    counts["settle_round_python_calls"] =
+        profile.settle_round_python_calls;
     counts["private_stop_reasons"] =
         std::move(private_stop_reasons);
     counts["worker_bypass_stop_reasons"] =
@@ -26109,7 +26064,7 @@ static py::dict concurrency_profile_snapshot_dict(
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 9;
+    result["schema_version"] = 10;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -33377,53 +33332,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](SystemState& system, uint64_t delta) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                if (system.has_cycle_execution_pending() &&
-                    !system.native_batch_active.load(
-                        std::memory_order_acquire)) {
-                    throw std::runtime_error(
-                        "system time cannot advance while cycle "
-                        "execution is suspended");
-                }
-                const uint64_t current =
-                    system.shared_clock.cycles();
-                if (delta >
-                    std::numeric_limits<uint64_t>::max() - current) {
-                    throw std::overflow_error(
-                        "system cycle counter overflow");
-                }
-                const uint64_t target = current + delta;
-                const std::optional<uint64_t> external_cycle =
-                    system.external_events.next_cycle();
-                const std::optional<uint64_t> before_cycle =
-                    system.external_events.next_before_cycle();
-                if (!system.native_batch_active.load(
-                        std::memory_order_acquire) &&
-                    delta != 0 &&
-                    external_cycle.has_value() &&
-                    *external_cycle <= target) {
-                    throw std::runtime_error(
-                        "system time cannot cross a pending external "
-                        "event");
-                }
-                if (!system.native_batch_active.load(
-                        std::memory_order_acquire) &&
-                    delta != 0 &&
-                    before_cycle.has_value() &&
-                    *before_cycle < target) {
-                    throw std::runtime_error(
-                        "system time cannot cross replayed pre-batch "
-                        "ingress");
-                }
-                auto memory_guard =
-                    acquire_system_clock_advance_use(system);
-                system.main_bus.validate_clock_target(
-                    target);
-                system.shared_clock.advance_by(
-                    delta,
-                    system.shared_timer,
-                    system.shared_fb,
-                    system.shared_rtc,
-                    system.shared_crypto);
+                advance_system_clock_by_locked(system, delta);
             },
             py::arg("delta"))
         .def(
@@ -33861,15 +33770,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     system.shared_clock.cycles();
                 service_unbounded_native_dma(
                     system,
-                    [&](int64_t cycles,
-                        bool advance_clock,
-                        bool drain_uart,
-                        bool deliver_interrupts) {
+                    [&](const UnboundedSettlementRequest& request) {
                         settle_round(
-                            cycles,
-                            advance_clock,
-                            drain_uart,
-                            deliver_interrupts);
+                            request.cycles(),
+                            request.advances_clock(),
+                            request.drains_uart(),
+                            request.delivers_interrupts());
                     });
                 return system.shared_clock.cycles() - clock_start;
             },
@@ -33883,7 +33789,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                py::function settle_continuation,
                py::function settle_dispatch_error,
                py::function settle_round,
-               int max_dispatch_steps) {
+               int max_dispatch_steps,
+               bool native_no_event_settlement_proved) {
                 std::vector<StepCallbacks> callbacks =
                     build_system_step_callbacks(
                         system,
@@ -33907,7 +33814,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     settle_continuation,
                     settle_dispatch_error,
                     settle_round,
-                    max_dispatch_steps);
+                    max_dispatch_steps,
+                    native_no_event_settlement_proved);
             },
             py::arg("max_steps"),
             py::arg("callback_sets"),
@@ -33915,7 +33823,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::arg("settle_continuation"),
             py::arg("settle_dispatch_error"),
             py::arg("settle_round"),
-            py::arg("max_dispatch_steps") = 1000)
+            py::arg("max_dispatch_steps"),
+            py::arg("native_no_event_settlement_proved"))
         .def(
             "run_full_core_cycle_batch",
             [](SystemState& system,

@@ -197,7 +197,7 @@ the reverted C++ successor-probe loop is not restored.
 |---|---|---|
 | 1 | Source ownership and build decomposition | Complete |
 | 2 | Bounded synchronous storage transfer | Complete |
-| 3 | Native no-event round settlement | Pending |
+| 3 | Native no-event round settlement | Complete |
 | 4 | Algebraic memory foundation | Pending |
 | 5 | Authoritative decoded execution kernel | Pending |
 | 6 | Multi-line and multi-memory block construction | Pending |
@@ -260,6 +260,30 @@ remains deferred.
   batch-end UART delivery.
 - Preserve timer/IPI ordering, callback exceptions, public round counts, and
   exact cycle advancement.
+
+Completion evidence (2026-08-27): the system clock and typed unbounded-round
+request now live under `accel/machine/settlement.*`, replacing the former
+four-position boolean settlement call inside the unbounded scheduler. At each
+unchanged 1,000-instruction exact-single boundary, the scheduler uses the same
+mapping lease, clock validation, and native timer/framebuffer/RTC/crypto tick
+order directly when no enabled timer or IPI can be delivered. Timer/IPI
+boundaries, exception prefixes, native DMA frontiers, and batch-end UART
+publication retain Python custody; strict-cycle execution is unchanged.
+
+Admission is recomputed for every batch and requires the canonical system,
+bus, tick driver, timer proxy, callback methods, singleton topology, and an
+empty Python-clocked-device list. The bus clock topology is frozen for the
+duration of an admitted direct-settlement batch so that proof cannot become
+stale during a callback or GIL-free native interval; fallback batches retain
+their existing ability to extend the clock topology. Host diagnostics now
+distinguish logical settlement boundaries, direct native settlements, and
+Python settlement calls. Focused
+positive checks proved three direct boundaries plus one UART boundary for a
+2,503-instruction singleton batch, timer and IPI delivery at their existing
+boundaries, exact `[1000, 1000, 1]` fallback ticks for a Python-clocked
+extension, fallback topology extension, one batch-end UART publication, and
+exact native device cycles (11 passed serially). Full performance qualification
+remains deferred.
 
 ### Element 4 — Algebraic memory foundation
 

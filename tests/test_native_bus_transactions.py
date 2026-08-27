@@ -872,6 +872,7 @@ def test_direct_native_batch_rejects_active_grant_before_guest_mutation():
             system._settle_native_core_dispatch_error,
             system._settle_native_system_round,
             1000,
+            False,
         )
 
     assert (

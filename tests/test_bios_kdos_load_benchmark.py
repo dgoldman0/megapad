@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 3
+    assert benchmark.SCHEMA_VERSION == 4
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -29,6 +29,9 @@ def test_parser_rejects_nonpositive_execution_bounds(option: str) -> None:
 def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
     profile = {
         "counts": {
+            "settle_round_calls": 100,
+            "settle_round_native_calls": 75,
+            "settle_round_python_calls": 25,
             "uncontended_block_hits": 75,
             "uncontended_block_lookups": 125,
             "uncontended_block_misses": 50,
@@ -65,6 +68,8 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
     derived = benchmark.profile_derived(profile)
 
     assert derived == {
+        "native_settlement_fraction": 0.75,
+        "python_settlement_fraction": 0.25,
         "block_cache_hit_fraction": 0.6,
         "block_rejection_cache_hit_fraction": 0.2,
         "block_build_success_fraction": 0.625,

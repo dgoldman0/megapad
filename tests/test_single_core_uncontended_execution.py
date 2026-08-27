@@ -58,7 +58,7 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 9
+    assert snapshot["schema_version"] == 10
     metadata = dict(snapshot["single_core_block_rejection_cache"])
     assert metadata == {
         "kind": "direct-mapped-exact-icache-suffix",
@@ -363,6 +363,75 @@ def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
     assert profile_counts["uncontended_interrupt_boundaries"] == 1
     assert profile_counts["uncontended_dispatches"] == 2
     assert profile_counts["uncontended_steps"] == 3
+    assert profile_counts["settle_round_calls"] == 3
+    assert profile_counts["settle_round_native_calls"] == 1
+    assert profile_counts["settle_round_python_calls"] == 2
+
+
+def test_timer_match_inside_round_uses_exact_python_interrupt_boundary() -> None:
+    system = _system()
+    system.load_binary(0, assemble("\n".join(["nop"] * 2_001)))
+    system.boot(entry=0)
+    system.cpu.flag_i = True
+    system.timer.counter = 0
+    system.timer.compare = 1_500
+    system.timer.control = 0x03
+    deliveries: list[tuple[int, int, int]] = []
+
+    def observe_trap(vector: int) -> None:
+        deliveries.append(
+            (
+                vector,
+                int(system._native_system.system_cycles),
+                int(system.cpu.cycle_count),
+            )
+        )
+        system.timer.irq_pending = False
+        system.cpu.flag_i = False
+
+    system.cpu._trap = observe_trap
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(2_001)
+    counts = dict(owner._stop_concurrency_profile()["counts"])
+
+    assert deliveries == [(IVEC_TIMER, 2_000, 2_000)]
+    assert stats.instructions_executed == 2_001
+    assert stats.native_rounds == 3
+    assert stats.system_cycles_advanced == 2_001
+    assert owner.system_cycles == 2_001
+    assert system.timer.counter == 2_001
+    assert counts["settle_round_calls"] == 4
+    assert counts["settle_round_native_calls"] == 2
+    assert counts["settle_round_python_calls"] == 2
+
+
+def test_wrapped_clock_settlement_retains_the_python_round_boundary() -> None:
+    system = _system()
+    system.load_binary(0, assemble("\n".join(["nop"] * 1_001)))
+    system.boot(entry=0)
+    advances: list[int] = []
+    canonical_advance = system._advance_system_cycles_locked
+
+    def observed_advance(cycles: int) -> None:
+        advances.append(cycles)
+        canonical_advance(cycles)
+
+    system._advance_system_cycles_locked = observed_advance
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1_001)
+    counts = dict(owner._stop_concurrency_profile()["counts"])
+
+    assert advances == [1_000, 1]
+    assert stats.instructions_executed == 1_001
+    assert stats.system_cycles_advanced == 1_001
+    assert owner.system_cycles == 1_001
+    assert counts["settle_round_calls"] == 3
+    assert counts["settle_round_native_calls"] == 0
+    assert counts["settle_round_python_calls"] == 3
 
 
 class _CallbackFailure(RuntimeError):
@@ -469,6 +538,7 @@ loop:
         ),
     )
     system.boot(entry=0)
+    system.timer.control = 1
     owner = system._native_system
     owner._start_concurrency_profile()
 
@@ -485,9 +555,15 @@ loop:
     assert counts["uncontended_steps"] == stats.instructions_executed
     assert counts["uncontended_continuations"] == 0
     assert counts["uncontended_callback_errors"] == 0
+    assert counts["settle_round_calls"] == 4
+    assert counts["settle_round_native_calls"] == 3
+    assert counts["settle_round_python_calls"] == 1
     assert system.cpu.regs[4] == 1_252
     assert system.cpu.pc == 1
     assert system.cpu.cycle_count == 3_754
+    assert stats.system_cycles_advanced == 3_754
+    assert owner.system_cycles == 3_754
+    assert system.timer.counter == 3_754
     # The cold INC and the first BR remain authoritative; all subsequent
     # work requires the two-instruction INC/BR block.
     assert counts["uncontended_block_steps"] == (

@@ -42,6 +42,10 @@ These fields remain zero for this microcore topology.
 Version 12 carries native host-profile schema 9 and its exact-single-core
 decoded-block rejection-cache geometry and admission telemetry. These fields
 remain zero for this microcore topology.
+
+Version 13 carries native host-profile schema 10 and separates logical
+settlement calls into native no-event and Python event/customization routes.
+The native route remains ineligible for this microcore topology.
 """
 
 from __future__ import annotations
@@ -66,7 +70,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 12
+REPORT_SCHEMA_VERSION = 13
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -362,8 +366,8 @@ def _profile_probe(
         "single_core_block_rejection_cache"
     ]
     validation = {
-        "schema_is_version_9":
-            normalized["schema_version"] == 9,
+        "schema_is_version_10":
+            normalized["schema_version"] == 10,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -391,6 +395,14 @@ def _profile_probe(
         "rounds_match_public_accounting":
             counts["scheduler_rounds"]
             == int(stats.native_rounds),
+        "settlement_routes_reconcile": (
+            counts["settle_round_calls"]
+            == counts["settle_round_native_calls"]
+            + counts["settle_round_python_calls"]
+        ),
+        "native_settlement_is_ineligible_for_micro_topology": (
+            counts["settle_round_native_calls"] == 0
+        ),
         "uncontended_path_is_ineligible_for_micro_topology": (
             all(
                 counts[name] == 0
@@ -567,7 +579,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 9,
+        "schema_version": 10,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

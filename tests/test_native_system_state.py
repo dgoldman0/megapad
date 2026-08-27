@@ -635,6 +635,45 @@ def test_native_system_batch_rejects_uart_observer_reentry() -> None:
     assert system._native_system.native_batch_runs == native_runs_before + 1
 
 
+def test_native_system_batch_publishes_one_uart_batch_at_batch_end() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+    ldi64 r1, {MMIO_BASE + UART_BASE}
+    ldi r2, 0x41
+    st.b r1, r2
+    ldi r2, 0x42
+    st.b r1, r2
+    idl
+"""
+        ),
+    )
+    system.cpu.pc = 0
+    published = []
+    system.uart.on_tx_batch = published.append
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(6)
+    counts = dict(owner._stop_concurrency_profile()["counts"])
+
+    assert stats.instructions_executed == 6
+    assert published == [b"AB"]
+    assert bytes(system.uart.tx_buffer) == b"AB"
+    assert counts["settle_round_calls"] == 2
+    assert counts["settle_round_native_calls"] == 1
+    assert counts["settle_round_python_calls"] == 1
+
+
 def test_native_system_batch_rejects_mid_dispatch_deadline_mutation() -> None:
     system = MegapadSystem(
         ram_size=4096,

@@ -5163,6 +5163,23 @@ class DeviceBus:
         self.devices: list[Device] = []
         self._clocked_devices: list[Device] = []
         self._tick_driver = None
+        self._clock_topology_owner = None
+
+    def _begin_clock_topology_use(self):
+        """Freeze clock ownership across one scheduler-owned native batch."""
+        if self._clock_topology_owner is not None:
+            raise RuntimeError(
+                "device clock topology cannot change during a native batch"
+            )
+        owner = object()
+        self._clock_topology_owner = owner
+        return owner
+
+    def _end_clock_topology_use(self, owner) -> None:
+        """Release the scheduler's clock-topology proof."""
+        if self._clock_topology_owner is not owner:
+            raise RuntimeError("device clock topology owner does not match")
+        self._clock_topology_owner = None
 
     def register(
         self,
@@ -5175,6 +5192,10 @@ class DeviceBus:
         Clock ownership is fixed at registration. Devices whose time is
         advanced by another authoritative clock must opt out explicitly.
         """
+        if self._clock_topology_owner is not None:
+            raise RuntimeError(
+                "device clock topology cannot change during a native batch"
+            )
         self.devices.append(device)
         if (
             not externally_clocked
@@ -5184,6 +5205,10 @@ class DeviceBus:
 
     def set_tick_driver(self, driver):
         """Install one authoritative system-time driver."""
+        if self._clock_topology_owner is not None:
+            raise RuntimeError(
+                "device clock topology cannot change during a native batch"
+            )
         self._tick_driver = driver
 
     def tick_registered_devices(self, cycles: int) -> None:

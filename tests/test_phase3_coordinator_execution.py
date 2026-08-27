@@ -677,6 +677,7 @@ def test_exact_cycle_ceiling_does_not_mask_callback_failure() -> None:
             system._settle_native_core_dispatch_error,
             lambda *args: settled_rounds.append(args),
             1000,
+            False,
         )
 
     assert raised.value is failure

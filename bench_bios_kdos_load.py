@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -265,6 +265,14 @@ def profile_derived(profile: dict | None) -> dict | None:
         + counts["uncontended_block_structure_rejections"]
     )
     return {
+        "native_settlement_fraction": _ratio(
+            counts["settle_round_native_calls"],
+            counts["settle_round_calls"],
+        ),
+        "python_settlement_fraction": _ratio(
+            counts["settle_round_python_calls"],
+            counts["settle_round_calls"],
+        ),
         "block_cache_hit_fraction": _ratio(
             counts["uncontended_block_hits"],
             counts["uncontended_block_lookups"],
@@ -522,7 +530,16 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 9
+                            host_profile["schema_version"] == 10
+                        ),
+                        "settlement_routes_reconcile": (
+                            profile_counts["settle_round_calls"]
+                            == profile_counts[
+                                "settle_round_native_calls"
+                            ]
+                            + profile_counts[
+                                "settle_round_python_calls"
+                            ]
                         ),
                         "host_profile_frozen": not host_profile["enabled"],
                         "profiled_steps_match_run": (
@@ -701,6 +718,14 @@ def print_human(result: dict) -> None:
         def percent(value: float | None) -> str:
             return "n/a" if value is None else f"{value:.1%}"
 
+        print(
+            "  settlement: "
+            f"{counts['settle_round_calls']:,} logical; "
+            f"{counts['settle_round_native_calls']:,} native "
+            f"({percent(derived['native_settlement_fraction'])}); "
+            f"{counts['settle_round_python_calls']:,} Python "
+            f"({percent(derived['python_settlement_fraction'])})"
+        )
         print(
             "  DBT: "
             f"{counts['uncontended_jit_compilations']:,} compilations; "

@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2695,6 +2695,8 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "checkpoint_restores",
     "coordinator_boundaries",
     "settle_round_calls",
+    "settle_round_native_calls",
+    "settle_round_python_calls",
 )
 
 _CONCURRENCY_PROFILE_COUNT_MAP_FIELDS = (
@@ -2898,7 +2900,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 9,
+            native_snapshot["schema_version"] == 10,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3187,6 +3189,11 @@ def _host_profile_probe(
             == native_counts["scheduler_rounds"]
             + native_counts["batches"]
         ),
+        "settle_round_routes_reconcile": (
+            native_counts["settle_round_calls"]
+            == native_counts["settle_round_native_calls"]
+            + native_counts["settle_round_python_calls"]
+        ),
         "classification_covers_private_steps":
             total_classification_calls
             >= native_counts["private_steps"],
@@ -3270,7 +3277,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 9,
+        "schema_version": 10,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
