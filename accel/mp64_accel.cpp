@@ -21311,11 +21311,15 @@ static MP64_NOINLINE bool preflight_single_core_direct_memory(
                 width,
                 policy,
                 context);
-        // Keep generated scalar access on bounded, non-wrapping Bank 0.
-        // Other apertures retain authoritative system routing until their
-        // observation and privilege contracts are qualified separately.
-        if (region.region != MemoryRegionKind::BANK0)
+        // Bank 0 and external RAM are both pinned, directly contiguous
+        // scalar apertures under the system's exclusive execution admission.
+        // HBW and VRAM retain their distinct observation/timing contracts.
+        if (
+            region.region != MemoryRegionKind::BANK0 &&
+            region.region != MemoryRegionKind::EXTERNAL
+        ) {
             return false;
+        }
 
         bindings[access_count] = region.data;
         access_operations[access_count] = decoded.operation;

@@ -41,6 +41,10 @@ BYTE_COPY_MOTIF_SOURCE = """
     ld.b r0, r9
     st.b r7, r0
 """
+NATURAL_COPY_MOTIF_SOURCE = """
+    ldn r0, r9
+    str r7, r0
+"""
 JIT_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_compile_attempts",
     "uncontended_jit_compilations",
@@ -91,13 +95,17 @@ def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
     )
 
 
-def _system(*, reference: bool = False) -> MegapadSystem:
+def _system(
+    *,
+    reference: bool = False,
+    ext_mem_size: int = 0,
+) -> MegapadSystem:
     system = MegapadSystem(
         ram_size=4096,
         num_cores=2 if reference else 1,
         num_clusters=0,
         hbw_size=0,
-        ext_mem_size=0,
+        ext_mem_size=ext_mem_size,
         vram_size=0,
         worker_count=1,
     )
@@ -2695,8 +2703,12 @@ def _memory_motif_system(
     source: str,
     *,
     reference: bool,
+    ext_mem_size: int = 0,
 ) -> MegapadSystem:
-    system = _system(reference=reference)
+    system = _system(
+        reference=reference,
+        ext_mem_size=ext_mem_size,
+    )
     system.load_binary(0, assemble("nop"))
     system.load_binary(1, assemble(source, base_addr=1))
     system.boot(entry=0)
@@ -2799,6 +2811,150 @@ def test_hot_byte_copy_pair_uses_one_generic_two_span_block() -> None:
 
     assert fast == reference
     _assert_multi_memory_profile(snapshot, instruction_count=2)
+
+
+def _run_external_copy_motif(
+    *,
+    reference: bool,
+    width: int,
+) -> tuple[tuple, dict]:
+    assert width in (1, 8)
+    system = _memory_motif_system(
+        (
+            BYTE_COPY_MOTIF_SOURCE
+            if width == 1
+            else NATURAL_COPY_MOTIF_SOURCE
+        ),
+        reference=reference,
+        ext_mem_size=4096,
+    )
+    base = system.ext_mem_base
+    values = (
+        (0x12, 0xA5)
+        if width == 1
+        else (
+            0x0123_4567_89AB_CDEF,
+            0xFEDC_BA98_7654_3210,
+        )
+    )
+    sources = tuple(
+        (base + offset, value)
+        for offset, value in zip((0x101, 0x121), values, strict=True)
+    )
+    destinations = (base + 0x203, base + 0x223)
+    for address, value in sources:
+        system.load_binary(address, value.to_bytes(width, "little"))
+    for address in destinations:
+        system.load_binary(address, b"\xEE" * width)
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    system.cpu.regs[9] = sources[0][0]
+    system.cpu.regs[7] = destinations[0]
+    sliced = system.run_batch_stats(1)
+    assert sliced.instructions_executed == 1
+
+    for (source, value), destination in zip(
+        sources,
+        destinations,
+        strict=True,
+    ):
+        system.cpu.pc = 1
+        system.cpu.regs[0] = 0xFFFF_FFFF_FFFF_FFFF
+        system.cpu.regs[9] = source
+        system.cpu.regs[7] = destination
+        copied = system.run_batch_stats(2)
+        assert copied.instructions_executed == 2
+        assert copied.system_cycles_advanced == 2
+        assert system.cpu.regs[0] == value
+        assert bytes(
+            system._ext_mem[
+                destination - base:destination - base + width
+            ]
+        ) == value.to_bytes(width, "little")
+
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    assert system.cpu.cycle_count == 6
+    assert owner.system_cycles == 6
+    signature = (
+        _core_signature(system),
+        bytes(system._ext_mem),
+    )
+    return signature, snapshot
+
+
+def test_hot_external_byte_copy_uses_one_generic_two_span_block() -> None:
+    fast, snapshot = _run_external_copy_motif(reference=False, width=1)
+    reference, _ = _run_external_copy_motif(reference=True, width=1)
+
+    assert fast == reference
+    _assert_multi_memory_profile(snapshot, instruction_count=2)
+
+
+def test_hot_unaligned_external_natural_copy_uses_native_block() -> None:
+    fast, snapshot = _run_external_copy_motif(reference=False, width=8)
+    reference, _ = _run_external_copy_motif(reference=True, width=8)
+
+    assert fast == reference
+    _assert_multi_memory_profile(snapshot, instruction_count=2)
+
+
+def _run_external_natural_cross_aperture(
+    *,
+    reference: bool,
+) -> tuple[tuple, dict]:
+    system = _memory_motif_system(
+        NATURAL_COPY_MOTIF_SOURCE,
+        reference=reference,
+        ext_mem_size=4096,
+    )
+    base = system.ext_mem_base
+    source = base + len(system._ext_mem) - 4
+    destination = base + 0x303
+    external_tail = bytes.fromhex("10 32 54 76")
+    system.load_binary(source, external_tail)
+    system.load_binary(destination, b"\xEE" * 8)
+    expected = external_tail + bytes(system.cpu.mem[:4])
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    system.cpu.regs[0] = 0
+    system.cpu.regs[9] = source
+    system.cpu.regs[7] = destination
+    copied = system.run_batch_stats(2)
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+
+    assert copied.instructions_executed == 2
+    assert copied.system_cycles_advanced == 2
+    assert system.cpu.regs[0] == int.from_bytes(expected, "little")
+    assert bytes(
+        system._ext_mem[
+            destination - base:destination - base + 8
+        ]
+    ) == expected
+    signature = (
+        _core_signature(system),
+        bytes(system._ext_mem),
+    )
+    return signature, snapshot
+
+
+def test_external_natural_cross_aperture_declines_native_preflight() -> None:
+    fast, snapshot = _run_external_natural_cross_aperture(reference=False)
+    reference, _ = _run_external_natural_cross_aperture(reference=True)
+
+    assert fast == reference
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_steps"] == 2
+    assert counts["uncontended_block_steps"] == 0
+    assert counts["uncontended_jit_executions"] == 0
+    assert counts["uncontended_jit_steps"] == 0
 
 
 def _warmed_byte_copy_system(*, reference: bool) -> MegapadSystem:

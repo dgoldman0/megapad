@@ -931,6 +931,46 @@ the generated gate, rejected-scalar gate, canonical BIOS+KDOS gate, and
 fresh-image production prefix remain independent requirements. No synthetic
 score is allowed to average away an adverse result.
 
+External-RAM admission correction and production acceptance (2026-08-27):
+the representative fixture exposed a mismatch between memory resolution and
+native entry preflight. `resolve_direct_memory_span` already proves a complete,
+non-wrapping span and distinguishes pinned external RAM from Bank 0, HBW, VRAM,
+and MMIO. The final block preflight nevertheless accepted only Bank 0. Akashic
+places its userland dictionary, compiled bodies, and much of its working data
+in external RAM, so a valid positive block could be found or built and then
+make zero progress on every attempted entry. In the exact 700M--1.2B Desktop
+source window, 92,388,072 of 216,495,983 positive admissions made zero progress
+(42.674%), leaving native-JIT coverage at 69.321%.
+
+The production correction admits a resolved `EXTERNAL` scalar span at the same
+preflight boundary as Bank 0. It does not admit HBW or VRAM, relax full-span or
+MMIO checks, add a memory side exit, change timing, or broaden the instruction
+set. Exact native-versus-generic tests cover byte traffic, unaligned natural
+loads/stores, and a natural access crossing the external aperture; the crossing
+case must decline native entry and retain authoritative bytewise routing. In a
+diagnostic replay of the same Desktop window, zero-progress positives fell to
+1,219,086 of 166,794,121 (0.731%), native-JIT coverage rose to 92.072%, and
+lookups fell from 553.467 to 409.026 per 1,000 guest steps. PC, cycles,
+HERE/LATEST, pristine image hash, and all guest-JIT counters remained exact.
+
+The independent guest-JIT source fixture then improved from 41.758 to 56.167
+Msteps/s with the same 859,562,672 measured steps, external dictionary hash,
+and guest-JIT result. Its timed wall interval fell from 20.584 to 15.304
+seconds. Three ordinary BIOS+KDOS source loads completed in 1.439--1.562
+seconds with exact state and transcript; their 1.528-second median is below
+both the retained refined-engine median of 2.041 seconds and pre-engine median
+of 2.546 seconds. This benchmark compiles under KDOS's internal `JIT-ON` and
+records state zero only after KDOS returns through its final `JIT-OFF`.
+
+Finally, a fresh canonical Akashic-main Desktop source smoke passed all normal
+applet interactions after 12,851,500,000 steps in 261.57 seconds. The prior
+refined-engine smoke took 402.21 seconds and the retained pre-engine control
+took 346.77 seconds. The exact bounded prefix, rather than those historical
+full-run step totals, is the causal A/B proof; the completed smoke is the
+production-path acceptance. The correction stops here. Remaining unsupported
+guest-JIT-emitted opcodes and rejection costs are not expanded speculatively
+after the smallest demonstrated fix cleared every independent gate.
+
 Separate rich-host observation (2026-08-27): the retained rich-terminal host
 currently rebuilds and recopies an owner's complete object mapping for each
 `OBJECT_DEFINE`, making the 23,520-glyph Desktop hidden build quadratic. This
@@ -1018,6 +1058,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D14 | Preserve 1802-style complete-fetch-before-execute semantics for every PSEL register alias. | Prefixes are part of one encoding, execution reads the post-fetch PSEL value, selector collisions remain legal and ordered, and RTL conformance is a separate correctness slice rather than an engine change. |
 | EK-D15 | Let a segment-local, rejection-indexed hint change probe order only after that segment has observed an exact resident rejection. | The persistent exact rejection entry remains authoritative; a mismatch forgets the hint and restores positive-first admission, while interrupts, scalar execution, identity proof, and persistent cache ownership remain unchanged. |
 | EK-D16 | Reject EK-D15 after the ordinary Desktop smoke and replace its two-extrema evidence with a production-calibrated matrix. | The hint's exactness was not sufficient evidence of profitability: it taxed every positive admission, regressed Desktop throughput by 6.261%, and timed out the journey. A future admission change must win the calibrated mix, stable-positive, rejected-scalar, and real BIOS+KDOS comparisons independently before another Desktop run. |
+| EK-D17 | Admit resolver-proved external-RAM scalar spans at native block entry. | External RAM shares Bank 0's pinned, directly contiguous execution contract, while full-span, MMIO, aperture-priority, timing, and I-cache invalidation checks remain authoritative; HBW and VRAM are not admitted. |
 
 ## Deferred findings ledger
 
