@@ -7,7 +7,7 @@ Megapad-64 development environment:
 2. **Assembler** (`asm.py`) — translate assembly source to machine code
 3. **Disk Utility** (`diskutil.py`) — create and manage MP64FS disk images
 4. **Test Suite** (`test_megapad64.py`, `test_system.py`) — verify everything works
-5. **C++ Accelerator** (`accel/mp64_accel.cpp`) — optional 63× speedup
+5. **C++ Accelerator** (`accel/`) — optional multi-source execution kernel
 
 The core tools are pure Python 3 with no external dependencies.
 The optional C++ accelerator requires CPython 3.12 and pybind11.
@@ -621,7 +621,7 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | File | Purpose |
 |------|---------|
 | `megapad64.py` | CPU and tile-engine emulator |
-| `accel/mp64_accel.cpp` | Optional pybind11 CPU fast path |
+| `accel/` | Optional multi-source pybind11 execution kernel |
 | `accel_wrapper.py` | Drop-in wrapper for the C++ CPU core |
 | `system.py` | SoC/device/memory integration and batched execution |
 | `cli.py` | Boot modes, debug monitor, and headless terminal server |

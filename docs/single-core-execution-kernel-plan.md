@@ -195,7 +195,7 @@ the reverted C++ successor-probe loop is not restored.
 
 | Element | Scope | Status |
 |---|---|---|
-| 1 | Source ownership and build decomposition | Pending |
+| 1 | Source ownership and build decomposition | Complete |
 | 2 | Bounded synchronous storage transfer | Pending |
 | 3 | Native no-event round settlement | Pending |
 | 4 | Algebraic memory foundation | Pending |
@@ -217,6 +217,14 @@ the reverted C++ successor-probe loop is not restored.
   `accel/mp64_accel.cpp` translation unit.
 - End with one extension module, no duplicate implementations, and a materially
   smaller hot execution translation unit.
+
+Completion evidence (2026-08-27): the extension build now compiles the module,
+bounded W^X arena, and x86-64 emitter as three translation units. The former
+arena and emitter definitions were deleted from `mp64_accel.cpp`; the tiny
+code-handle operations remain inline at their hot call sites. The extension
+built and imported successfully, and the focused arena publication/execution
+and maximal emitted-register-block selectors passed serially (2 passed, 55
+deselected). This construction check is not a performance qualification claim.
 
 ### Element 2 — Bounded synchronous storage transfer
 
