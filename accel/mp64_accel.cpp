@@ -20334,8 +20334,6 @@ static bool copy_single_core_icache_identity(
 static bool single_core_block_rejection_matches(
         CPUState& core,
         uint64_t address) noexcept {
-    if (!core.single_core_execution_plan_cache)
-        return false;
     CPUState::SingleCoreBlockRejectionEntry& entry =
         core.single_core_execution_plan_cache->rejections[
             single_core_block_rejection_cache_index(address)];
@@ -20345,9 +20343,7 @@ static bool single_core_block_rejection_matches(
         entry.psel != core.psel ||
         entry.spsel != core.spsel ||
         entry.identity_size == 0 ||
-        entry.identity_size > entry.identity.size() ||
-        core.profile != CoreProfile::FULL ||
-        !core.icache_enabled
+        entry.identity_size > entry.identity.size()
     ) {
         return false;
     }
@@ -20370,15 +20366,6 @@ remember_single_core_block_rejection(
         CPUState& core,
         uint64_t address,
         uint8_t identity_size) noexcept {
-    if (
-        core.profile != CoreProfile::FULL ||
-        !core.icache_enabled ||
-        core.psel >= 32 ||
-        core.spsel >= 32 ||
-        !core.single_core_execution_plan_cache
-    ) {
-        return SingleCoreBlockRejectionStorage::NONRESIDENT;
-    }
     if (
         identity_size == 0 ||
         identity_size >
@@ -20937,15 +20924,11 @@ static bool single_core_block_identity_matches(
         block.address != address ||
         block.psel != core.psel ||
         block.spsel != core.spsel ||
-        block.psel >= 32 ||
-        block.spsel >= 32 ||
         block.identity_size == 0 ||
         block.identity_size > block.identity.size() ||
         block.instruction_count < 2 ||
         block.instruction_count >
-            CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS ||
-        core.profile != CoreProfile::FULL ||
-        !core.icache_enabled
+            CPUState::SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS
     ) {
         return false;
     }

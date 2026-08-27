@@ -710,6 +710,16 @@ bytes. That object-size observation is consolidation evidence, not a runtime
 speed claim. No BIOS, cold-source, broad, worker-spawning, or rich-terminal
 acceptance run was added.
 
+The second consolidation slice resolves EK-F2 at the sole admission boundary.
+Positive-hit, rejection-hit, and rejection-store helpers no longer repeat the
+FULL-profile, enabled-I-cache, selector-range, or plan-cache predicates already
+proved by their only caller. Exact address and selector equality, resident
+I-cache tags, per-slot epochs, bounded identity spans, and cold byte
+revalidation remain unchanged. A new positive-entry selector oracle complements
+the existing rejection-entry coverage. The sequential extension build and 12
+focused selector, collision, refill, and cross-line cases pass; this is a
+caller-contract cleanup, not an identity-policy change.
+
 - Extract Python buffer leases, callback construction, snapshot codecs, and
   pybind registration only after their machine/CPU owners have stable native
   headers; avoid a catch-all header that recreates the monolith.
@@ -794,7 +804,7 @@ does not justify keeping the superseded implementation in the final tree.
 | ID | Finding | Disposition |
 |---|---|---|
 | EK-F1 | Focused happy-path coverage does not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias shape, natural-width callback route, or strict-cycle replay form. | Keep construction on the seconds-scale happy-path spine. Add the compact table-driven semantic matrix and fault/alias timing oracles during Element 8 acceptance, or earlier only if one blocks the next production slice. |
-| EK-F2 | Inlined positive and rejection identity checks retain some predicates already proved by their sole admission caller. | Reassess them during consolidation and remove only predicates whose redundancy follows from the final caller contract; do not weaken dynamic identity validation. |
+| EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
 | EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as low priority during consolidation unless a new profile shows it remains material. |
 | EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden provenance during consolidation without retained remaining-shape evidence and paired exact justification. |
 | EK-F5 | Happy-path construction coverage does not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Add exact zero-progress and completed-prefix oracles during permitted Element 8 acceptance; continuation is no longer a condition on this work. |

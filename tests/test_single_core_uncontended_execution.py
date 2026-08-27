@@ -848,6 +848,63 @@ loop:
     assert counts["uncontended_block_rejection_cache_replacements"] == 1
 
 
+@pytest.mark.parametrize("selector", ("psel", "spsel"))
+def test_decoded_block_identity_includes_active_selectors(
+    selector: str,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    inc r4
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(6)
+    assert warm.instructions_executed == 6
+    if selector == "psel":
+        system.cpu.psel = 2
+        system.cpu.pc = 0
+    else:
+        system.cpu.spsel = 14
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(4)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 4
+    assert system.cpu.pc == 0
+    assert system.cpu.regs[4] == 5
+    assert counts["uncontended_block_lookups"] == 2
+    assert counts["uncontended_block_hits"] == 1
+    assert counts["uncontended_block_misses"] == 1
+    assert counts["uncontended_block_build_attempts"] == 1
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_evictions"] == 1
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 1
+        assert counts["uncontended_jit_arena_allocations"] == 0
+        assert counts["uncontended_jit_slot_publications"] == 1
+        assert counts["uncontended_jit_slot_rewrites"] == 1
+        assert counts["uncontended_jit_executions"] == 1
+        assert counts["uncontended_jit_steps"] == 2
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
 def test_changed_bytes_replace_exact_rejection_with_decoded_block() -> None:
     system = _system()
     rejected = assemble(
