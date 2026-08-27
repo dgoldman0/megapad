@@ -42,8 +42,7 @@
 #include <pybind11/numpy.h>
 
 #include "dbt/executable_arena.h"
-#include "dbt/host_jit_config.h"
-#include "dbt/x86_64/emitter.h"
+#include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
 #include "cpu/mp64/decode.h"
 #include "cpu/mp64/interpreter.h"
@@ -59,6 +58,7 @@
 #include "mp64_uart.h"
 
 namespace py = pybind11;
+namespace mp64_x86_64 = mp64::dbt::x86_64;
 
 using mp64::machine::SystemClock;
 using mp64::machine::UnboundedSettlementRequest;
@@ -20810,28 +20810,6 @@ enum class SingleCoreJitCompilation : uint8_t {
     FAILED = 2,
 };
 
-using SingleCoreJitFunction = uint64_t (*)(
-    CPUState*,
-    const std::atomic<uint8_t>*,
-    uint8_t* const*);
-
-static constexpr uint8_t SINGLE_CORE_JIT_EXIT_INTERRUPT = 1U << 0;
-static constexpr uint8_t SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN = 1U << 1;
-static constexpr uint64_t SINGLE_CORE_JIT_EXIT_KNOWN_FLAGS =
-    SINGLE_CORE_JIT_EXIT_INTERRUPT |
-    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN;
-
-#if MP64_HAS_X86_64_JIT
-
-static_assert(
-    sizeof(std::atomic<uint8_t>) == sizeof(uint8_t) &&
-        std::atomic<uint8_t>::is_always_lock_free,
-    "x86-64 JIT interrupt polling requires a lock-free byte atomic");
-static_assert(
-    sizeof(void*) == 8 && sizeof(std::size_t) == 8 &&
-        sizeof(bool) == 1,
-    "x86-64 JIT requires the 64-bit SysV data model");
-
 template <typename Field>
 static int32_t single_core_jit_offset(
         const CPUState& core,
@@ -20861,587 +20839,69 @@ static int32_t single_core_jit_offset(
     return static_cast<int32_t>(offset);
 }
 
-static int32_t single_core_jit_register_offset(
-        const CPUState& core,
-        uint8_t reg) {
-    if (reg >= 32) {
-        throw std::logic_error(
-            "x86-64 JIT register index is out of range");
+static mp64_x86_64::CoreStateLayout
+build_single_core_jit_layout(const CPUState& core) {
+    mp64_x86_64::CoreStateLayout layout;
+    layout.object_size = sizeof(CPUState);
+    for (std::size_t index = 0; index < layout.registers.size(); index++) {
+        layout.registers[index] =
+            single_core_jit_offset(core, core.regs[index]);
     }
-    return single_core_jit_offset(core, core.regs[reg]);
+    layout.program_counter_selector =
+        single_core_jit_offset(core, core.psel);
+    layout.flag_z = single_core_jit_offset(core, core.flag_z);
+    layout.flag_c = single_core_jit_offset(core, core.flag_c);
+    layout.flag_n = single_core_jit_offset(core, core.flag_n);
+    layout.flag_v = single_core_jit_offset(core, core.flag_v);
+    layout.flag_p = single_core_jit_offset(core, core.flag_p);
+    layout.flag_g = single_core_jit_offset(core, core.flag_g);
+    layout.icache_hits =
+        single_core_jit_offset(core, core.icache_hits);
+    layout.icache_misses =
+        single_core_jit_offset(core, core.icache_misses);
+    layout.ifetch_window_valid =
+        single_core_jit_offset(core, core.ifetch_window_valid);
+    layout.icache_undo_count =
+        single_core_jit_offset(core, core.icache_undo_count);
+    layout.icache_undo_hits =
+        single_core_jit_offset(core, core.icache_undo_hits);
+    layout.icache_undo_misses =
+        single_core_jit_offset(core, core.icache_undo_misses);
+    return layout;
 }
 
-struct SingleCoreJitBytePredicate {
-    int32_t displacement = 0;
-    uint8_t expected = 0;
-    bool supported = false;
-};
-
-static SingleCoreJitBytePredicate
-single_core_jit_byte_predicate(
-        const CPUState& core,
-        uint8_t subop) {
-    switch (subop) {
-        case CC_EQ:
-            return {
-                single_core_jit_offset(core, core.flag_z),
-                1,
-                true,
-            };
-        case CC_NE:
-            return {
-                single_core_jit_offset(core, core.flag_z),
-                0,
-                true,
-            };
-        case CC_CC:
-            return {
-                single_core_jit_offset(core, core.flag_c),
-                0,
-                true,
-            };
-        default:
-            return {};
-    }
+static const mp64_x86_64::CoreStateLayout&
+single_core_jit_layout(const CPUState& core) {
+    // CPUState's member layout is invariant across objects. Build and validate
+    // the backend contract once instead of reconstructing it for every block.
+    static const mp64_x86_64::CoreStateLayout layout =
+        build_single_core_jit_layout(core);
+    return layout;
 }
 
-static void emit_single_core_jit_logic_flags(
-        X86_64BlockEmitter& emitter,
-        const CPUState& core) {
-    emitter.set_core_byte(
-        0x94,
-        single_core_jit_offset(core, core.flag_z));
-    emitter.set_core_byte(
-        0x98,
-        single_core_jit_offset(core, core.flag_n));
-    emitter.set_core_byte(
-        0x9A,
-        single_core_jit_offset(core, core.flag_p));
-    emitter.store_core_byte(
-        single_core_jit_offset(core, core.flag_c),
-        0);
-    emitter.store_core_byte(
-        single_core_jit_offset(core, core.flag_v),
-        0);
-}
-
-static void emit_single_core_jit_addition_flags(
-        X86_64BlockEmitter& emitter,
-        const CPUState& core) {
-    emitter.set_core_byte(
-        0x94,
-        single_core_jit_offset(core, core.flag_z));
-    emitter.set_core_byte(
-        0x92,
-        single_core_jit_offset(core, core.flag_c));
-    emitter.set_core_byte(
-        0x98,
-        single_core_jit_offset(core, core.flag_n));
-    emitter.set_core_byte(
-        0x90,
-        single_core_jit_offset(core, core.flag_v));
-    emitter.set_core_byte(
-        0x9A,
-        single_core_jit_offset(core, core.flag_p));
-}
-
-static void emit_single_core_jit_subtraction_flags(
-        X86_64BlockEmitter& emitter,
-        const CPUState& core) {
-    emitter.set_core_byte(
-        0x94,
-        single_core_jit_offset(core, core.flag_z));
-    // x86 CF means borrow after SUB; the guest C flag means no borrow.
-    emitter.set_core_byte(
-        0x93,
-        single_core_jit_offset(core, core.flag_c));
-    emitter.set_core_byte(
-        0x98,
-        single_core_jit_offset(core, core.flag_n));
-    emitter.set_core_byte(
-        0x90,
-        single_core_jit_offset(core, core.flag_v));
-    emitter.set_core_byte(
-        0x9A,
-        single_core_jit_offset(core, core.flag_p));
-}
-
-static void emit_single_core_jit_comparison_flags(
-        X86_64BlockEmitter& emitter,
-        const CPUState& core) {
-    emit_single_core_jit_subtraction_flags(emitter, core);
-    // Guest G is unsigned greater-than, matching x86 SETA after CMP.
-    emitter.set_core_byte(
-        0x97,
-        single_core_jit_offset(core, core.flag_g));
-}
-
-static void emit_single_core_jit_instruction(
-        X86_64BlockEmitter& emitter,
-        const CPUState& core,
-        const DecodedInstruction& decoded,
-        uint64_t instruction_address,
-        uint8_t psel,
-        uint8_t spsel,
-        uint8_t memory_access_index) {
-    emitter.add_core_imm8(
-        single_core_jit_register_offset(core, psel),
-        decoded.encoded_size);
-    emitter.bytes({
-        0x41,
-        0x83,
-        0xC7,
-        decoded.fetch_hit_count(instruction_address),
-    });
-
-    switch (decoded.operation) {
-        case DecodedOperation::NOP:
-            return;
-        case DecodedOperation::CALL_LONG:
-            emitter.mov_r8_from_pointer_table(memory_access_index);
-            emitter.mov_rcx_from_core(
-                single_core_jit_register_offset(core, decoded.rs));
-            emitter.mov_rax_from_core(
-                single_core_jit_register_offset(core, psel));
-            emitter.sub_core_imm8(
-                single_core_jit_register_offset(core, spsel),
-                8);
-            emitter.bytes({0x49, 0x89, 0x00}); // mov [r8], rax
-            emitter.mov_core_from_rcx(
-                single_core_jit_register_offset(core, psel));
-            return;
-        case DecodedOperation::RETURN_LONG:
-            emitter.mov_r8_from_pointer_table(memory_access_index);
-            emitter.bytes({0x49, 0x8B, 0x00}); // mov rax, [r8]
-            emitter.add_core_imm8(
-                single_core_jit_register_offset(core, spsel),
-                8);
-            emitter.mov_core_from_rax(
-                single_core_jit_register_offset(core, psel));
-            return;
-        case DecodedOperation::INCREMENT:
-            emitter.increment_core(
-                single_core_jit_register_offset(core, decoded.rd));
-            return;
-        case DecodedOperation::DECREMENT:
-            emitter.decrement_core(
-                single_core_jit_register_offset(core, decoded.rd));
-            return;
-        case DecodedOperation::BRANCH_SHORT:
-            if (decoded.subop() == CC_AL) {
-                emitter.add_core_imm8(
-                    single_core_jit_register_offset(core, psel),
-                    static_cast<uint8_t>(decoded.immediate));
-                return;
-            }
-            if (
-                (
-                    decoded.subop() != CC_EQ &&
-                    decoded.subop() != CC_NE &&
-                    decoded.subop() != CC_CC
-                ) ||
-                decoded.conditional_taken_cycle_cost() != 1
-            ) {
-                throw std::logic_error(
-                    "x86-64 JIT received an unsupported short branch");
-            }
-            {
-                const SingleCoreJitBytePredicate predicate =
-                    single_core_jit_byte_predicate(
-                        core,
-                        decoded.subop());
-                if (!predicate.supported) {
-                    throw std::logic_error(
-                        "x86-64 JIT received an unsupported short branch");
-                }
-                emitter.compare_core_byte(
-                    predicate.displacement,
-                    predicate.expected);
-            }
-            {
-                const std::size_t not_taken =
-                    emitter.branch32(0x85); // jne
-                emitter.add_core_imm8(
-                    single_core_jit_register_offset(core, psel),
-                    static_cast<uint8_t>(decoded.immediate));
-                emitter.add_exit_flags(
-                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN);
-                emitter.patch32(not_taken, emitter.position());
-            }
-            return;
-        case DecodedOperation::BRANCH_LONG:
-            if (decoded.subop() == CC_AL) {
-                emitter.add_core_imm32(
-                    single_core_jit_register_offset(core, psel),
-                    static_cast<uint32_t>(
-                        sign_extend(decoded.immediate, 16)));
-                return;
-            }
-            if (
-                (
-                    decoded.subop() != CC_EQ &&
-                    decoded.subop() != CC_NE &&
-                    decoded.subop() != CC_CC
-                ) ||
-                decoded.conditional_taken_cycle_cost() != 1
-            ) {
-                throw std::logic_error(
-                    "x86-64 JIT received an unsupported long branch");
-            }
-            {
-                const SingleCoreJitBytePredicate predicate =
-                    single_core_jit_byte_predicate(
-                        core,
-                        decoded.subop());
-                if (!predicate.supported) {
-                    throw std::logic_error(
-                        "x86-64 JIT received an unsupported long branch");
-                }
-                emitter.compare_core_byte(
-                    predicate.displacement,
-                    predicate.expected);
-            }
-            {
-                const std::size_t not_taken =
-                    emitter.branch32(0x85); // jne
-                emitter.add_core_imm32(
-                    single_core_jit_register_offset(core, psel),
-                    static_cast<uint32_t>(
-                        sign_extend(decoded.immediate, 16)));
-                emitter.add_exit_flags(
-                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN);
-                emitter.patch32(not_taken, emitter.position());
-            }
-            return;
-        case DecodedOperation::LOAD_NATURAL:
-        case DecodedOperation::LOAD_BYTE:
-        case DecodedOperation::STORE_NATURAL:
-        case DecodedOperation::STORE_BYTE:
-            // The third SysV argument is an ordered table of pointers proved
-            // before entry. Keep address selection out of generated guest
-            // semantics while allowing more than one admitted span.
-            emitter.mov_r8_from_pointer_table(memory_access_index);
-            if (decoded.operation == DecodedOperation::LOAD_NATURAL) {
-                emitter.bytes({0x49, 0x8B, 0x00}); // mov rax, [r8]
-            } else if (decoded.operation == DecodedOperation::LOAD_BYTE) {
-                emitter.bytes({
-                    0x41, 0x0F, 0xB6, 0x00,
-                }); // movzx eax, byte [r8]
-            } else {
-                emitter.mov_rax_from_core(
-                    single_core_jit_register_offset(core, decoded.rs));
-                if (
-                    decoded.operation ==
-                    DecodedOperation::STORE_NATURAL
-                ) {
-                    emitter.bytes({0x49, 0x89, 0x00}); // mov [r8], rax
-                } else {
-                    emitter.bytes({0x41, 0x88, 0x00}); // mov byte [r8], al
-                }
-                return;
-            }
-            emitter.mov_core_from_rax(
-                single_core_jit_register_offset(core, decoded.rd));
-            return;
-        case DecodedOperation::LOAD_IMMEDIATE:
-        case DecodedOperation::ADD_IMMEDIATE:
-        case DecodedOperation::AND_IMMEDIATE:
-        case DecodedOperation::OR_IMMEDIATE:
-        case DecodedOperation::COMPARE_IMMEDIATE:
-        case DecodedOperation::SUBTRACT_IMMEDIATE:
-        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
-        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
-        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
-            if (decoded.operation == DecodedOperation::LOAD_IMMEDIATE) {
-                if (decoded.encoded_size == 3) {
-                    // The unprefixed form has an imm8, so writing EAX gives
-                    // the required full-register zero extension compactly.
-                    emitter.byte(0xB8); // mov eax, imm32
-                    emitter.u32(
-                        static_cast<uint32_t>(decoded.immediate));
-                } else if (decoded.encoded_size == 11) {
-                    emitter.bytes({0x48, 0xB8}); // movabs rax, imm64
-                    emitter.u64(decoded.immediate);
-                } else {
-                    throw std::logic_error(
-                        "x86-64 JIT received an invalid LDI encoding");
-                }
-                emitter.mov_core_from_rax(
-                    single_core_jit_register_offset(core, decoded.rd));
-                return;
-            }
-            emitter.mov_rax_from_core(
-                single_core_jit_register_offset(core, decoded.rd));
-            switch (decoded.operation) {
-                case DecodedOperation::ADD_IMMEDIATE:
-                    emitter.bytes({
-                        0x48,
-                        0x83,
-                        0xC0,
-                        static_cast<uint8_t>(decoded.immediate),
-                    });
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_addition_flags(emitter, core);
-                    return;
-                case DecodedOperation::AND_IMMEDIATE:
-                    // AND EAX with a zero-extended imm32. The guest mask is
-                    // an imm8; opcode 83 would sign-extend 0x80..0xff and
-                    // incorrectly retain high register bits.
-                    emitter.byte(0x25);
-                    emitter.u32(static_cast<uint32_t>(decoded.immediate));
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_logic_flags(emitter, core);
-                    return;
-                case DecodedOperation::OR_IMMEDIATE:
-                    emitter.bytes({0x48, 0x0D});
-                    emitter.u32(static_cast<uint32_t>(decoded.immediate));
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_logic_flags(emitter, core);
-                    return;
-                case DecodedOperation::COMPARE_IMMEDIATE:
-                    emitter.bytes({
-                        0x48,
-                        0x83,
-                        0xF8,
-                        static_cast<uint8_t>(decoded.immediate),
-                    });
-                    emit_single_core_jit_comparison_flags(emitter, core);
-                    return;
-                case DecodedOperation::SUBTRACT_IMMEDIATE:
-                    emitter.bytes({
-                        0x48,
-                        0x83,
-                        0xE8,
-                        static_cast<uint8_t>(decoded.immediate),
-                    });
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_subtraction_flags(emitter, core);
-                    return;
-                case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
-                case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE: {
-                    const uint8_t modrm =
-                        decoded.operation ==
-                                DecodedOperation::SHIFT_LEFT_IMMEDIATE
-                            ? 0xE0
-                            : 0xE8;
-                    emitter.bytes({
-                        0x48,
-                        0xC1,
-                        modrm,
-                        static_cast<uint8_t>(decoded.immediate),
-                    });
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    return;
-                }
-                case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
-                    emitter.bytes({
-                        0x48,
-                        0xC1,
-                        0xC0,
-                        static_cast<uint8_t>(decoded.immediate & 0xF),
-                    });
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    return;
-                default:
-                    throw std::logic_error(
-                        "x86-64 JIT received an unsupported immediate op");
-            }
-        case DecodedOperation::ADD:
-        case DecodedOperation::SUBTRACT:
-        case DecodedOperation::BITWISE_XOR:
-        case DecodedOperation::COMPARE:
-        case DecodedOperation::MOVE:
-            emitter.mov_rax_from_core(
-                single_core_jit_register_offset(core, decoded.rd));
-            emitter.mov_rcx_from_core(
-                single_core_jit_register_offset(core, decoded.rs));
-            switch (decoded.operation) {
-                case DecodedOperation::ADD:
-                    emitter.bytes({0x48, 0x01, 0xC8});
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_addition_flags(emitter, core);
-                    return;
-                case DecodedOperation::SUBTRACT:
-                    emitter.bytes({0x48, 0x29, 0xC8});
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_subtraction_flags(emitter, core);
-                    return;
-                case DecodedOperation::BITWISE_XOR:
-                    emitter.bytes({0x48, 0x31, 0xC8});
-                    emitter.mov_core_from_rax(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    emit_single_core_jit_logic_flags(emitter, core);
-                    return;
-                case DecodedOperation::COMPARE:
-                    emitter.bytes({0x48, 0x39, 0xC8});
-                    emit_single_core_jit_comparison_flags(emitter, core);
-                    return;
-                case DecodedOperation::MOVE:
-                    emitter.bytes({0x49, 0x89, 0x8C, 0x24});
-                    emitter.i32(
-                        single_core_jit_register_offset(core, decoded.rd));
-                    return;
-                default:
-                    throw std::logic_error(
-                        "x86-64 JIT received an unsupported ALU op");
-            }
-        case DecodedOperation::SELECT_PROGRAM_COUNTER:
-            emitter.store_core_byte(
-                single_core_jit_offset(core, core.psel),
-                decoded.rd);
-            return;
-        default:
-            throw std::logic_error(
-                "x86-64 JIT received an unsupported semantic operation");
-    }
-}
-
-static SingleCoreJitCompilation
+static MP64_NOINLINE SingleCoreJitCompilation
 compile_single_core_jit_block(
         SystemState& system,
         const CPUState& core,
         CPUState::SingleCoreDecodedBlockEntry& block,
         ConcurrencyProfileCounters& profile) {
+    if (!mp64_x86_64::lowering_available())
+        return SingleCoreJitCompilation::UNAVAILABLE;
     const bool profile_enabled = profile.enabled;
     HostProfileWallTimer compile_timer(
         profile_enabled,
         &profile.uncontended_jit_compile_ns);
     try {
-        X86_64BlockEmitter emitter;
-        // ENDBR64 is a no-op on hosts without CET and permits indirect entry
-        // when control-flow enforcement is active.
-        emitter.bytes({0xF3, 0x0F, 0x1E, 0xFA});
-        emitter.bytes({
-            0x53,             // push rbx
-            0x41, 0x54,       // push r12
-            0x41, 0x55,       // push r13
-            0x41, 0x57,       // push r15
-            0x49, 0x89, 0xFC, // mov r12, rdi (CPUState*)
-            0x49, 0x89, 0xF5, // mov r13, rsi (enabled IPI mirror*)
-            0x31, 0xDB,       // xor ebx, ebx (retired steps)
-            0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
-            0x45, 0x31, 0xD2, // xor r10d, r10d (exit flags)
-        });
-
-        std::vector<std::size_t> interrupt_exits;
-        uint64_t instruction_address = block.address;
-        uint8_t memory_access_index = 0;
-        for (
-            uint8_t index = 0;
-            index < block.instruction_count;
-            index++
-        ) {
-            if (
-                single_core_decoded_ends_block(
-                    block.instructions[index]) &&
-                index + 1 != block.instruction_count
-            ) {
-                throw std::logic_error(
-                    "x86-64 JIT received non-terminal control flow");
-            }
-            emit_single_core_jit_instruction(
-                emitter,
-                core,
-                block.instructions[index],
-                instruction_address,
-                block.psel,
-                block.spsel,
-                memory_access_index);
-            if (single_core_decoded_is_memory(block.instructions[index]))
-                memory_access_index++;
-            emitter.bytes({0xFF, 0xC3}); // inc ebx
-            emitter.bytes({
-                0x41,
-                0xBB,
-                block.instructions[index].fetch_hit_count(
-                    instruction_address),
-                0x00,
-                0x00,
-                0x00,
-            }); // mov r11d, last instruction's fetch hits
-            instruction_address +=
-                block.instructions[index].encoded_size;
-
-            if (index + 1 < block.instruction_count) {
-                emitter.bytes({0x4D, 0x85, 0xED}); // test r13, r13
-                const std::size_t interrupts_masked =
-                    emitter.branch32(0x84); // je
-                emitter.bytes({
-                    0x41, 0x80, 0x7D, 0x00, 0x00,
-                }); // cmp byte ptr [r13 atomic mirror], 0
-                interrupt_exits.push_back(
-                    emitter.branch32(0x85)); // jne
-                emitter.patch32(
-                    interrupts_masked,
-                    emitter.position());
-            }
-        }
-
-        const std::size_t common_exit = emitter.position();
-        emitter.add_core_r15(
-            single_core_jit_offset(
-                core, core.icache_hits));
-
-        // Reproduce icache_begin_instruction() for the last retired
-        // instruction. The block was resident, so misses do not change;
-        // undo_hits is the final hit count less the last fetch's hits.
-        emitter.mov_rax_from_core(
-            single_core_jit_offset(
-                core, core.icache_hits));
-        emitter.bytes({0x4C, 0x29, 0xD8}); // sub rax, r11
-        emitter.mov_core_from_rax(
-            single_core_jit_offset(
-                core, core.icache_undo_hits));
-        emitter.mov_rax_from_core(
-            single_core_jit_offset(
-                core, core.icache_misses));
-        emitter.mov_core_from_rax(
-            single_core_jit_offset(
-                core, core.icache_undo_misses));
-        emitter.store_core_byte(
-            single_core_jit_offset(
-                core, core.ifetch_window_valid),
-            0);
-        emitter.store_core_qword_zero(
-            single_core_jit_offset(
-                core, core.icache_undo_count));
-        // Return retired steps in bits 0..15 and exit flags in bits 16..17.
-        // C++ owns cycle/PERF accounting from publication metadata plus the
-        // live conditional-taken result.
-        emitter.bytes({
-            0x89, 0xD8,       // mov eax, ebx (retired steps)
-            0x49, 0xC1, 0xE2, 0x10, // shl r10, 16
-            0x4C, 0x09, 0xD0, // or rax, r10
-            0x41, 0x5F,       // pop r15
-            0x41, 0x5D,       // pop r13
-            0x41, 0x5C,       // pop r12
-            0x5B,             // pop rbx
-            0xC3,             // ret
-        });
-
-        const std::size_t interrupt_exit = emitter.position();
-        for (const std::size_t branch : interrupt_exits)
-            emitter.patch32(branch, interrupt_exit);
-        emitter.bytes({
-            0x41,
-            0xBA,
-            SINGLE_CORE_JIT_EXIT_INTERRUPT,
-            0x00,
-            0x00,
-            0x00,
-        }); // mov r10d, interrupt flag
-        const std::size_t interrupt_to_common =
-            emitter.jump32();
-        emitter.patch32(interrupt_to_common, common_exit);
-
+        mp64_x86_64::BlockView lowering_block;
+        lowering_block.address = block.address;
+        lowering_block.instructions = block.instructions.data();
+        lowering_block.instruction_count = block.instruction_count;
+        lowering_block.psel = block.psel;
+        lowering_block.spsel = block.spsel;
+        std::vector<uint8_t> lowered_code =
+            mp64_x86_64::lower_block(
+                single_core_jit_layout(core),
+                lowering_block);
         bool allocation_attempted = false;
         bool arena_allocated = false;
         bool arena_ready = false;
@@ -21482,7 +20942,7 @@ compile_single_core_jit_block(
                 &profile.uncontended_jit_publication_ns);
             code = jit_arena.publish(
                 single_core_block_cache_index(block.address),
-                emitter.code(),
+                lowered_code,
                 rewrote_slot);
         }
         if (!code)
@@ -21496,10 +20956,10 @@ compile_single_core_jit_block(
             }
             host_saturating_add(
                 profile.uncontended_jit_code_bytes,
-                static_cast<uint64_t>(emitter.code().size()));
+                static_cast<uint64_t>(lowered_code.size()));
             profile.uncontended_jit_max_code_bytes = std::max(
                 profile.uncontended_jit_max_code_bytes,
-                static_cast<uint64_t>(emitter.code().size()));
+                static_cast<uint64_t>(lowered_code.size()));
         }
         block.native_code = std::move(code);
         return SingleCoreJitCompilation::COMPILED;
@@ -21508,19 +20968,6 @@ compile_single_core_jit_block(
         return SingleCoreJitCompilation::FAILED;
     }
 }
-
-#else
-
-static SingleCoreJitCompilation
-compile_single_core_jit_block(
-        SystemState&,
-        const CPUState&,
-        CPUState::SingleCoreDecodedBlockEntry&,
-        ConcurrencyProfileCounters&) noexcept {
-    return SingleCoreJitCompilation::UNAVAILABLE;
-}
-
-#endif
 
 // Block metadata has one internal construction path and is immutable after
 // publication. Audit its complete static shape once before it becomes a
@@ -22774,8 +22221,8 @@ execute_single_core_decoded_block_plan(
                   core.core_id)
             : nullptr;
         if (!core.flag_i || enabled_ipi_mirror != nullptr) {
-            const SingleCoreJitFunction function =
-                reinterpret_cast<SingleCoreJitFunction>(
+            const mp64_x86_64::BlockEntry function =
+                reinterpret_cast<mp64_x86_64::BlockEntry>(
                     block->native_code.address());
             const uint64_t packed =
                 function(
@@ -22783,22 +22230,26 @@ execute_single_core_decoded_block_plan(
                     enabled_ipi_mirror,
                     direct_memory_table);
             const uint32_t steps =
-                static_cast<uint32_t>(packed & 0xFFFF);
-            const uint64_t exit_flags = packed >> 16;
+                static_cast<uint32_t>(
+                    packed &
+                    mp64_x86_64::
+                        NATIVE_BLOCK_COMPLETED_INSTRUCTION_MASK);
+            const uint64_t exit_flags =
+                packed >> mp64_x86_64::NATIVE_BLOCK_EXIT_SHIFT;
             const bool interrupt_boundary =
                 (
                     exit_flags &
-                    SINGLE_CORE_JIT_EXIT_INTERRUPT
+                    mp64_x86_64::NATIVE_BLOCK_EXIT_INTERRUPT
                 ) != 0;
             const bool conditional_taken =
                 (
                     exit_flags &
-                    SINGLE_CORE_JIT_EXIT_CONDITIONAL_TAKEN
+                    mp64_x86_64::NATIVE_BLOCK_EXIT_CONDITIONAL_TAKEN
                 ) != 0;
             if (
                 (
                     exit_flags &
-                    ~SINGLE_CORE_JIT_EXIT_KNOWN_FLAGS
+                    ~mp64_x86_64::NATIVE_BLOCK_EXIT_KNOWN_FLAGS
                 ) != 0 ||
                 steps == 0 ||
                 steps > block->instruction_count ||
@@ -26050,15 +25501,15 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict jit_storage;
-#if MP64_HAS_X86_64_JIT
-    jit_storage["kind"] =
-        "memfd-dual-mapped-fixed-slots";
-    jit_storage["w_x_model"] =
-        "distinct-rw-and-rx-aliases";
-#else
-    jit_storage["kind"] = "unavailable";
-    jit_storage["w_x_model"] = "unavailable";
-#endif
+    if (mp64_x86_64::lowering_available()) {
+        jit_storage["kind"] =
+            "memfd-dual-mapped-fixed-slots";
+        jit_storage["w_x_model"] =
+            "distinct-rw-and-rx-aliases";
+    } else {
+        jit_storage["kind"] = "unavailable";
+        jit_storage["w_x_model"] = "unavailable";
+    }
     jit_storage["ready"] =
         system.single_core_jit_arena.ready();
     jit_storage["failed"] =
@@ -26088,11 +25539,10 @@ static py::dict concurrency_profile_snapshot_dict(
         "unbounded_native_system_batch_only";
     result["timing_semantics"] =
         "inclusive_nested_host_wall_nanoseconds";
-#if MP64_HAS_X86_64_JIT
-    result["single_core_jit_backend"] = "x86_64";
-#else
-    result["single_core_jit_backend"] = "unavailable";
-#endif
+    result["single_core_jit_backend"] =
+        mp64_x86_64::lowering_available()
+            ? "x86_64"
+            : "unavailable";
     result["counts"] = std::move(counts);
     result["wall_ns"] = std::move(wall_ns);
     result["single_core_jit_storage"] =

@@ -21,7 +21,7 @@ public:
 
     void mov_rax_from_core(int32_t displacement);
     void mov_rcx_from_core(int32_t displacement);
-    void mov_r8_from_pointer_table(uint8_t index);
+    void mov_r8_from_pointer_table(std::size_t index);
     void mov_core_from_rax(int32_t displacement);
     void mov_core_from_rcx(int32_t displacement);
     void add_core_imm8(int32_t displacement, uint8_t immediate);
@@ -37,7 +37,7 @@ public:
     void set_core_byte(uint8_t condition_opcode, int32_t displacement);
 
     void bytes(std::initializer_list<uint8_t> values);
-    const std::vector<uint8_t>& code() const noexcept;
+    std::vector<uint8_t> release_code() noexcept;
 
 private:
     std::vector<uint8_t> code_;

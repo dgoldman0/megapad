@@ -67,6 +67,7 @@ ext = Extension(
         "accel/mp64_accel.cpp",
         "accel/dbt/executable_arena.cpp",
         "accel/dbt/x86_64/emitter.cpp",
+        "accel/dbt/x86_64/lowering.cpp",
         "accel/machine/settlement.cpp",
     ],
     depends=[
@@ -78,6 +79,7 @@ ext = Extension(
         "accel/dbt/executable_arena.h",
         "accel/dbt/host_jit_config.h",
         "accel/dbt/x86_64/emitter.h",
+        "accel/dbt/x86_64/lowering.h",
         "accel/machine/memory.h",
         "accel/machine/settlement.h",
         "accel/mp64_crypto.h",

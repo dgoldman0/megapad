@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 void X86_64BlockEmitter::byte(uint8_t value) {
     code_.push_back(value);
@@ -80,22 +81,30 @@ void X86_64BlockEmitter::mov_rcx_from_core(int32_t displacement) {
     i32(displacement);
 }
 
-void X86_64BlockEmitter::mov_r8_from_pointer_table(uint8_t index) {
-    if (index > 15) {
+void X86_64BlockEmitter::mov_r8_from_pointer_table(
+        std::size_t index) {
+    if (
+        index > static_cast<std::size_t>(
+            std::numeric_limits<int32_t>::max()) / sizeof(void*)
+    ) {
         throw std::logic_error(
-            "x86-64 pointer-table index exceeds disp8 range");
+            "x86-64 pointer-table index exceeds displacement range");
     }
     // The third SysV argument is the table base in RDX. R8 is caller-saved
     // and otherwise unused by generated MP64 blocks.
     if (index == 0) {
         bytes({0x4C, 0x8B, 0x02}); // mov r8, [rdx]
-    } else {
+    } else if (index <= 15) {
         bytes({
             0x4C,
             0x8B,
             0x42,
             static_cast<uint8_t>(index * sizeof(void*)),
-        }); // mov r8, [rdx + index * 8]
+        }); // mov r8, [rdx + disp8]
+    } else {
+        bytes({0x4C, 0x8B, 0x82});
+        i32(static_cast<int32_t>(index * sizeof(void*)));
+        // mov r8, [rdx + disp32]
     }
 }
 
@@ -187,6 +196,6 @@ void X86_64BlockEmitter::bytes(
     code_.insert(code_.end(), values.begin(), values.end());
 }
 
-const std::vector<uint8_t>& X86_64BlockEmitter::code() const noexcept {
-    return code_;
+std::vector<uint8_t> X86_64BlockEmitter::release_code() noexcept {
+    return std::move(code_);
 }

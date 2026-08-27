@@ -116,7 +116,7 @@ accel/
     executable_arena.h/.cpp    bounded W^X code ownership
     x86_64/
       emitter.h/.cpp           x86-64 byte emission
-      lowering.cpp             MP64 block IR to x86-64 machine code
+      lowering.h/.cpp          MP64 block IR to x86-64 machine code
 
   mp64_*.h                     existing device models, moved only when separately justified
 ```
@@ -216,7 +216,7 @@ the reverted C++ successor-probe loop is not restored.
 | 4 | Algebraic memory foundation | Complete |
 | 5 | Authoritative decoded execution kernel | Complete |
 | 6 | Multi-line and multi-memory block construction | Complete |
-| 7 | x86-64 lowering and direct continuation | Pending |
+| 7 | x86-64 lowering and direct continuation | In progress |
 | 8 | Consolidation and acceptance | Pending |
 
 ### Element 1 — Source ownership and build decomposition
@@ -567,6 +567,31 @@ This completes Element 6 without a BIOS timing or broad-qualification claim.
 - Extract lowering from the mixed execution translation unit behind the stable
   block/access ABI, deleting displaced inline backend ownership and any unused
   chaining residue rather than retaining parallel implementations.
+
+First-slice evidence (2026-08-27): all MP64-to-x86 byte generation now has one
+owner in `dbt/x86_64/lowering.cpp`. The CPU integration supplies a non-owning
+decoded-block view and one cached, checked displacement table; the backend sees
+neither `CPUState` nor `SystemState`. Its opaque entry ABI, packed-return
+constants, host availability, layout completeness checks, instruction operand
+bounds, prologue, per-instruction lowering, interrupt branches, and common exit
+are owned together. Arena allocation/publication, profile accounting, cache
+slot selection, code-handle lifetime, architectural return validation, cycle
+settlement, and write invalidation remain with the execution kernel. The old
+emitter include, inline lowering functions, host-config branch, duplicated
+unavailable stub, and CPU-named native function type were deleted from the
+mixed translation unit.
+
+The compiler/publication wrapper is deliberately out of line. Before this
+split GCC folded it into the hot decoded-block executor, whose main and cold
+bodies were `0x279f` and `0x887` bytes. They are now `0x151f` and `0x510`; the
+separate compiler wrapper is `0x6d3` plus a `0x7f` cold clone, and the lowering
+object has the sole `lower_block` implementation. `mp64_accel.o` has no emitter
+reference. The dense block still publishes exactly 1,009 bytes, and 14 focused
+serial cases cover register/flag execution, both branch widths, multi-memory
+byte and natural-width paths, high-register `SEP`, `CALL.L`, and `RET.L`. This
+is source-ownership and object-layout evidence, not a wall-time claim. Direct
+continuation remains pending measured evidence from the longer production
+blocks.
 
 ### Element 8 — Consolidation and acceptance
 
