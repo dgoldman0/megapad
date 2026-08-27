@@ -76,8 +76,11 @@ using mp64::cpu::DecodedInstruction;
 using mp64::cpu::DecodedOperation;
 using mp64::cpu::DecodeResult;
 using mp64::cpu::DecodeStatus;
+using mp64::cpu::InstructionHeader;
+using mp64::cpu::InstructionHeaderStatus;
 using mp64::cpu::DecodedCallAcceleration;
 using mp64::cpu::decode_instruction;
+using mp64::cpu::decode_instruction_header;
 using mp64::cpu::execute_decoded_instruction;
 using mp64::cpu::CC_AL;
 using mp64::cpu::CC_BNQ;
@@ -7357,11 +7360,63 @@ static int crypto_instruction_size(uint8_t sub_op) {
     }
 }
 
+// Header classifiers share opcode/prefix interpretation while retaining
+// their own byte source. The source returns false when its particular
+// observational boundary cannot provide a byte; no architectural prefix
+// state is mutated by these readers.
+template <typename ReadByte>
+struct ObservationalInstructionHeaderReader {
+    ReadByte& read_byte;
+    uint64_t next_address;
+
+    MP64_ALWAYS_INLINE bool read(uint8_t& value) {
+        if (!read_byte(next_address, value))
+            return false;
+        ++next_address;
+        return true;
+    }
+
+    MP64_ALWAYS_INLINE void observe_prefix(uint8_t) const noexcept {}
+};
+
+struct PrivateInstructionPrefixAdmission {
+    constexpr bool operator()(uint8_t subop) const noexcept {
+        return subop <= 0x6 || subop == 0x8;
+    }
+};
+
 static int next_instruction_size(CPUState& s) {
     // SKIP performs its own cache lookup for the target instruction.
     s.ifetch_window_valid = false;
-    uint8_t peek = icache_read_byte(s, pc(s));
-    int f = (peek >> 4) & 0xF;
+    const uint64_t address = pc(s);
+    auto read_byte = [&](uint64_t byte_address, uint8_t& value) {
+        value = icache_read_byte(s, byte_address);
+        return true;
+    };
+    ObservationalInstructionHeaderReader<decltype(read_byte)> reader{
+        read_byte,
+        address,
+    };
+    const InstructionHeader header =
+        decode_instruction_header(reader);
+    if (header.status == InstructionHeaderStatus::EXTENSION_ENGINE) {
+        if (header.subop == 0x9 || header.subop == 0xA)
+            return header.has_prefix() ? 4 : 3;
+        if (header.subop == 0xB) {
+            uint8_t crypto_sub =
+                icache_read_byte(
+                    s,
+                    address + header.bytes_consumed);
+            return
+                header.prefix_size +
+                crypto_instruction_size(crypto_sub);
+        }
+    }
+    if (header.has_prefix())
+        return 1;  // retain the existing shallow estimate otherwise
+
+    const int f = header.family;
+    const uint8_t peek = header.opcode;
     // Estimate: most instructions are 1 or 2 bytes
     switch (f) {
         case 0x0: { // SYS
@@ -7391,29 +7446,8 @@ static int next_instruction_size(CPUState& s) {
         }
         case 0xD: return 2;  // CSR
         case 0xE: return 2;  // MEX
-        case 0xF: {
-            int sub = peek & 0xF;
-            if (sub == 0x9 || sub == 0xA)
-                return 3;
-            if (sub == 0xB) {
-                uint8_t crypto_sub =
-                    icache_read_byte(s, pc(s) + 1);
-                return crypto_instruction_size(crypto_sub);
-            }
-            uint8_t next = icache_read_byte(s, pc(s) + 1);
-            int next_family = (next >> 4) & 0xF;
-            int next_sub = next & 0xF;
-            if (next_family == 0xF &&
-                (next_sub == 0x9 || next_sub == 0xA)) {
-                return 4;
-            }
-            if (next_family == 0xF && next_sub == 0xB) {
-                uint8_t crypto_sub =
-                    icache_read_byte(s, pc(s) + 2);
-                return 1 + crypto_instruction_size(crypto_sub);
-            }
-            return 1;  // retain the existing shallow estimate otherwise
-        }
+        case 0xF:
+            return 1;
         default: return 1;
     }
 }
@@ -11946,33 +11980,36 @@ static SystemInstructionTraits native_tacc_instruction_traits(
 
 static SystemInstructionTraits classify_system_instruction(
         CPUState& state) {
-    uint64_t address = pc(state);
-    uint64_t opcode_address = address;
-    uint8_t opcode =
-        icache_peek_byte_without_accounting(state, address);
-    int family = (opcode >> 4) & 0xF;
-    int subop = opcode & 0xF;
-    int modifier = -1;
-
-    if (family == 0xF) {
-        if (subop == 0x9 || subop == 0xA)
-            return {true, false};
-        if (subop == 0xB)
-            return {true, false};
-
-        modifier = subop;
-        opcode_address = address + 1;
-        opcode =
-            icache_peek_byte_without_accounting(
-                state,
-                opcode_address);
-        family = (opcode >> 4) & 0xF;
-        subop = opcode & 0xF;
-        if (family == 0xF && (subop == 0x9 || subop == 0xA))
-            return {true, false};
-        if (family == 0xF && subop == 0xB)
-            return {true, false};
+    const uint64_t address = pc(state);
+    auto read_byte = [&](uint64_t byte_address, uint8_t& value) {
+        value = icache_peek_byte_without_accounting(
+            state, byte_address);
+        return true;
+    };
+    ObservationalInstructionHeaderReader<decltype(read_byte)> reader{
+        read_byte,
+        address,
+    };
+    const InstructionHeader header =
+        decode_instruction_header(reader);
+    if (
+        header.status ==
+        InstructionHeaderStatus::EXTENSION_ENGINE
+    ) {
+        return {true, false};
     }
+    if (
+        header.status !=
+        InstructionHeaderStatus::ORDINARY
+    ) {
+        return {};
+    }
+
+    const uint64_t opcode_address =
+        address + header.prefix_size;
+    const int family = header.family;
+    const int subop = header.subop;
+    const int modifier = header.modifier;
 
     if (family == 0x0) {
         switch (subop) {
@@ -12154,33 +12191,37 @@ static bool micro_instruction_requires_python_oracle(CPUState& state) {
     if (state.priv_level != 0)
         return true;
 
-    uint64_t address = pc(state);
+    const uint64_t address = pc(state);
     if (micro_instruction_fetch_uses_python_route(address))
         return true;
-    uint8_t opcode = mem_read8(state, address);
-    int family = (opcode >> 4) & 0xF;
-    int subop = opcode & 0xF;
-    int modifier = -1;
-
-    // F0-F8 are modifiers (including REX).  Classify the instruction they
-    // prefix without consuming either byte.  The self-contained extended
-    // engines are absent or cluster-shared on a micro-core.
-    if (family == 0xF) {
-        if (subop == 0x9 || subop == 0xA || subop == 0xB)
-            return true;
-        modifier = subop;
-        opcode = mem_read8(state, address + 1);
-        family = (opcode >> 4) & 0xF;
-        subop = opcode & 0xF;
-        if (
-            family == 0xF &&
-            (subop == 0x9 || subop == 0xA || subop == 0xB)
-        ) {
-            return true;
-        }
+    auto read_byte = [&](uint64_t byte_address, uint8_t& value) {
+        value = mem_read8(state, byte_address);
+        return true;
+    };
+    ObservationalInstructionHeaderReader<decltype(read_byte)> reader{
+        read_byte,
+        address,
+    };
+    const InstructionHeader header =
+        decode_instruction_header(reader);
+    if (
+        header.status ==
+        InstructionHeaderStatus::EXTENSION_ENGINE
+    ) {
+        return true;
+    }
+    if (
+        header.status !=
+        InstructionHeaderStatus::ORDINARY
+    ) {
+        // Non-engine double prefixes remain owned by authoritative decode,
+        // which raises the established illegal-prefix trap.
+        return false;
     }
     return micro_decoded_instruction_requires_python_oracle(
-        family, subop, modifier);
+        header.family,
+        header.subop,
+        header.modifier);
 }
 
 struct PrivateInstructionProof {
@@ -13079,7 +13120,8 @@ static PrivateInstructionDisposition
 classify_private_full_core_instruction(
         const CPUState& state,
         int* cache_identity_size = nullptr,
-        bool* cacheable = nullptr) {
+        bool* cacheable = nullptr,
+        uint8_t* first_opcode = nullptr) {
     if (cache_identity_size != nullptr)
         *cache_identity_size = 0;
     if (cacheable != nullptr)
@@ -13094,44 +13136,39 @@ classify_private_full_core_instruction(
 
     const uint64_t instruction_address =
         state.regs[state.psel];
-    const std::optional<uint8_t> first =
-        private_icache_peek(
-            state, instruction_address);
-    if (!first.has_value()) {
+    auto read_byte = [&](uint64_t address, uint8_t& value) {
+        const std::optional<uint8_t> observed =
+            private_icache_peek(state, address);
+        if (!observed.has_value())
+            return false;
+        value = *observed;
+        return true;
+    };
+    ObservationalInstructionHeaderReader<decltype(read_byte)> reader{
+        read_byte,
+        instruction_address,
+    };
+    const InstructionHeader header =
+        decode_instruction_header(
+            reader,
+            PrivateInstructionPrefixAdmission{});
+    if (first_opcode != nullptr)
+        *first_opcode = header.first_opcode;
+    if (header.status == InstructionHeaderStatus::UNAVAILABLE) {
         return PrivateInstructionDisposition::
             ICACHE_BOUNDARY;
     }
-
-    uint8_t opcode = *first;
-    int family = (opcode >> 4) & 0xF;
-    int subop = opcode & 0xF;
-    int modifier = -1;
-    int prefix_length = 0;
-
-    if (family == 0xF) {
-        // F9-FB enter engines that may access shared memory. F0-F6 and F8
-        // are the only accepted single-instruction modifiers; F7 remains
-        // reserved. Reserved and double-prefix forms stay on the coordinator.
-        if (subop == 0x7 || subop >= 0x9)
-            return PrivateInstructionDisposition::
-                SHARED_INSTRUCTION;
-        modifier = subop;
-        prefix_length = 1;
-        const std::optional<uint8_t> following =
-            private_icache_peek(
-                state, instruction_address + 1);
-        if (!following.has_value()) {
-            return PrivateInstructionDisposition::
-                ICACHE_BOUNDARY;
-        }
-        opcode = *following;
-        family = (opcode >> 4) & 0xF;
-        subop = opcode & 0xF;
-        if (family == 0xF) {
-            return PrivateInstructionDisposition::
-                SHARED_INSTRUCTION;
-        }
+    if (header.status != InstructionHeaderStatus::ORDINARY) {
+        // Extension engines, reserved scheduler prefixes, and double-prefix
+        // forms remain coordinator boundaries.
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
     }
+
+    const int family = header.family;
+    const int subop = header.subop;
+    const int modifier = header.modifier;
+    const int prefix_length = header.prefix_size;
 
     int instruction_length = 0;
     bool private_instruction = false;
@@ -13275,7 +13312,7 @@ classify_private_micro_core_instruction(
             SHARED_INSTRUCTION;
     }
 
-    uint64_t instruction_address =
+    const uint64_t instruction_address =
         state.regs[state.psel];
     if (
         micro_instruction_fetch_uses_python_route(
@@ -13284,33 +13321,27 @@ classify_private_micro_core_instruction(
         return PrivateInstructionDisposition::
             SHARED_INSTRUCTION;
     }
-    uint8_t opcode =
-        mem_read8(state, instruction_address);
-    int family = (opcode >> 4) & 0xF;
-    int subop = opcode & 0xF;
-    int modifier = -1;
-    int prefix_length = 0;
-
-    if (family == 0xF) {
-        // The reduced core accepts the same single ordinary modifier set as
-        // the full core. Extended engines, the reserved F7 encoding, and a
-        // second prefix remain coordinator/oracle boundaries.
-        if (subop == 0x7 || subop >= 0x9) {
-            return PrivateInstructionDisposition::
-                SHARED_INSTRUCTION;
-        }
-        modifier = subop;
-        prefix_length = 1;
-        instruction_address++;
-        opcode = mem_read8(
-            state, instruction_address);
-        family = (opcode >> 4) & 0xF;
-        subop = opcode & 0xF;
-        if (family == 0xF) {
-            return PrivateInstructionDisposition::
-                SHARED_INSTRUCTION;
-        }
+    auto read_byte = [&](uint64_t address, uint8_t& value) {
+        value = mem_read8(state, address);
+        return true;
+    };
+    ObservationalInstructionHeaderReader<decltype(read_byte)> reader{
+        read_byte,
+        instruction_address,
+    };
+    const InstructionHeader header =
+        decode_instruction_header(
+            reader,
+            PrivateInstructionPrefixAdmission{});
+    if (header.status != InstructionHeaderStatus::ORDINARY) {
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
     }
+
+    const int family = header.family;
+    const int subop = header.subop;
+    const int modifier = header.modifier;
+    const int prefix_length = header.prefix_size;
 
     // Proof reuse may bypass the second oracle decode in step_one. Make the
     // private-admission subset structural: an encoding still owned by the
@@ -13486,20 +13517,21 @@ classify_private_core_instruction(
 
 static bool classify_strict_cycle_private_one_cycle(
         const CPUState& state) {
+    uint8_t opcode = 0;
     if (
-        classify_private_full_core_instruction(state) !=
+        classify_private_full_core_instruction(
+            state,
+            nullptr,
+            nullptr,
+            &opcode) !=
         PrivateInstructionDisposition::EXECUTE_PRIVATE
     ) {
         return false;
     }
-
-    const std::optional<uint8_t> first =
-        private_icache_peek(
-            state, state.regs[state.psel]);
-    if (!first.has_value())
+    const int family = (opcode >> 4) & 0xF;
+    if (family == 0xF)
         return false;
-    const int family = (*first >> 4) & 0xF;
-    const int subop = *first & 0xF;
+    const int subop = opcode & 0xF;
 
     // Prefix decode itself costs a cycle. Taken short/long branches likewise
     // cost two cycles and remain on the resumable coordinator path. The list
@@ -14345,30 +14377,34 @@ static PendingClusterRequest classify_pending_cluster_request(
             }
             return mem_read8(core, byte_address);
         };
-    uint8_t opcode =
-        read_instruction_byte(address);
-    int family = (opcode >> 4) & 0xF;
-    int subop = opcode & 0xF;
-    int modifier = -1;
-    int prefix_length = 0;
-    int decoded_length = 0;
-
-    // Every F-family opcode other than the three self-contained engines is a
-    // modifier in the Python reduced-core oracle. Preserve it as part of the
-    // exact request identity while classifying the following instruction.
+    auto read_header_byte =
+        [&](uint64_t byte_address, uint8_t& value) {
+            value = read_instruction_byte(byte_address);
+            return true;
+        };
+    ObservationalInstructionHeaderReader<decltype(read_header_byte)> reader{
+        read_header_byte,
+        instruction_address,
+    };
+    const InstructionHeader header =
+        decode_instruction_header(reader);
     if (
-        family == 0xF &&
-        subop != 0x9 &&
-        subop != 0xA &&
-        subop != 0xB
+        header.status != InstructionHeaderStatus::ORDINARY &&
+        header.status !=
+            InstructionHeaderStatus::EXTENSION_ENGINE
     ) {
-        modifier = subop;
-        prefix_length = 1;
-        address++;
-        opcode = read_instruction_byte(address);
-        family = (opcode >> 4) & 0xF;
-        subop = opcode & 0xF;
+        // A non-engine double prefix has no cluster resource; authoritative
+        // execution remains responsible for its illegal-prefix trap.
+        return request;
     }
+
+    address = instruction_address + header.prefix_size;
+    const uint8_t opcode = header.opcode;
+    const int family = header.family;
+    const int subop = header.subop;
+    const int modifier = header.modifier;
+    const int prefix_length = header.prefix_size;
+    int decoded_length = 0;
 
     switch (family) {
         case 0x0:

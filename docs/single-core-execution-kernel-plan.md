@@ -203,7 +203,7 @@ the reverted C++ successor-probe loop is not restored.
 | 2 | Bounded synchronous storage transfer | Complete |
 | 3 | Native no-event round settlement | Complete |
 | 4 | Algebraic memory foundation | Complete |
-| 5 | Authoritative decoded execution kernel | In progress |
+| 5 | Authoritative decoded execution kernel | Complete |
 | 6 | Multi-line and multi-memory block construction | Pending |
 | 7 | x86-64 lowering and direct continuation | Pending |
 | 8 | Consolidation and acceptance | Pending |
@@ -421,8 +421,35 @@ boundary before exit publication rather than adding payload and a branch to
 every short-block return. Object inspection confirmed the register ABI and a
 single range check for the common completion/limit reasons. The focused sliced
 decoded, dynamic-branch, SEP, store-invalidation, CALL.L, interrupt, and timer
-boundary spine passed serially (11 passed). Remaining observational policy
-parsers keep this element in progress.
+boundary spine passed serially (11 passed). Observational policy-parser
+consolidation remained for the final slice.
+
+Completion evidence (2026-08-27): semantic decoding and every observational
+opcode scanner now share the same header-only parser for opcode families,
+F9--FB engine recognition, modifiers, and double-prefix classification. The
+parser reads no operands and accepts a caller-owned prefix-admission policy, so
+SKIP sizing, non-accounting system classification, microcore oracle routing,
+resident-only full-core admission, reduced-core private admission, strict-cycle
+eligibility, and cluster resource arbitration retain their distinct fetch and
+ownership contracts without retaining copied prefix loops.
+
+Architectural decoding follows every non-engine modifier and publishes a
+prefix before fetching byte two. Private scheduling deliberately admits only
+F0--F6 and F8 and rejects other scheduler-private shapes after byte one. The
+strict one-cycle classifier reuses the already-observed physical opcode instead
+of peeking a second time, while cluster classification keeps operand tails
+effective-opcode-relative and exact request identity original-PC-relative.
+An initial aggregate handoff to strict classification was rejected after
+object inspection showed it inflated the common full-private classifier by
+about 38 percent. Narrowing that handoff to the one physical opcode byte strict
+classification needs produced a 0x511-byte classifier, below the 0x5c2-byte
+pre-migration body. Template and reader-adapter inspection found no emitted
+header-parser call or function boundary. The extension rebuilt successfully;
+23 focused semantic
+decoder/executor instances and 17 focused private, micro, SKIP, system/TACC,
+strict-cycle, and cluster-policy instances passed serially. Element 5 is now
+complete; broad prefix/fault matrices remain deferred under EK-F1 rather than
+blocking multi-line construction.
 
 ### Element 6 — Multi-line and multi-memory block construction
 
