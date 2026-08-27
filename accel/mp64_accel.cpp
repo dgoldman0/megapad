@@ -20617,11 +20617,13 @@ static bool decode_single_core_register_instruction(
         }
         case 0x5: {
             // Direct reads are deliberately limited to bare, low-register
-            // LDN and LD.B. The first direct write is bare low-register ST.B.
-            // Block construction supplies the distinct leading-read or
-            // stable-address terminal-store proof before either can run.
+            // LDN and LD.B. Direct writes are deliberately limited to bare,
+            // low-register STR and ST.B. Block construction supplies the
+            // distinct leading-read or stable-address terminal-store proof
+            // before either can run.
             if (
                 subop != 0x0 &&
+                subop != 0x4 &&
                 subop != 0x6 &&
                 subop != 0x7
             ) {
@@ -20741,7 +20743,9 @@ static bool single_core_decoded_is_direct_read(
 
 static bool single_core_decoded_is_terminal_store(
         const CPUState::SingleCoreDecodedInstruction& decoded) noexcept {
-    return decoded.family == 0x5 && decoded.subop == 0x7;
+    return
+        decoded.family == 0x5 &&
+        (decoded.subop == 0x4 || decoded.subop == 0x7);
 }
 
 static bool single_core_decoded_ends_block(
@@ -21225,10 +21229,17 @@ static void emit_single_core_jit_instruction(
                 emitter.bytes({0x48, 0x8B, 0x02}); // mov rax, [rdx]
             } else if (decoded.subop == 0x6) {  // LD.B
                 emitter.bytes({0x0F, 0xB6, 0x02}); // movzx eax, byte [rdx]
-            } else if (decoded.subop == 0x7) {  // ST.B
+            } else if (
+                decoded.subop == 0x4 ||  // STR
+                decoded.subop == 0x7     // ST.B
+            ) {
                 emitter.mov_rax_from_core(
                     single_core_jit_register_offset(core, decoded.rs));
-                emitter.bytes({0x88, 0x02}); // mov byte [rdx], al
+                if (decoded.subop == 0x4) {
+                    emitter.bytes({0x48, 0x89, 0x02}); // mov [rdx], rax
+                } else {
+                    emitter.bytes({0x88, 0x02}); // mov byte [rdx], al
+                }
                 return;
             } else {
                 throw std::logic_error(
@@ -21998,11 +22009,12 @@ static uint8_t* preflight_single_core_direct_read(
     return region.ptr;
 }
 
-static uint8_t* preflight_single_core_direct_byte_store(
+static uint8_t* preflight_single_core_direct_store(
         CPUState& core,
         const StepCallbacks& callbacks,
         const CPUState::SingleCoreDecodedBlockEntry& block,
-        uint64_t& guest_address) noexcept {
+        uint64_t& guest_address,
+        uint64_t& guest_size) noexcept {
     if (
         core.memory == nullptr ||
         core.priv_level != 0 ||
@@ -22024,6 +22036,16 @@ static uint8_t* preflight_single_core_direct_byte_store(
         decoded.rd == block.psel ||
         decoded.rs == block.psel
     ) {
+        return nullptr;
+    }
+
+    AccelAccessModel model = AccelAccessModel::BYTE;
+    if (decoded.subop == 0x4) {
+        guest_size = 8;
+        model = AccelAccessModel::SCALAR;
+    } else if (decoded.subop == 0x7) {
+        guest_size = 1;
+    } else {
         return nullptr;
     }
 
@@ -22058,17 +22080,17 @@ static uint8_t* preflight_single_core_direct_byte_store(
     if (!accel_span_is_direct(
             core,
             address,
-            1,
-            AccelAccessModel::BYTE,
+            guest_size,
+            model,
             context)) {
         return nullptr;
     }
     const DirectMemoryRegion region =
-        resolve_accel_byte_region(core, address);
+        resolve_accel_region(core, address, model);
     if (
         region.priority != 3 ||
         region.ptr == nullptr ||
-        region.avail < 1
+        region.avail < guest_size
     ) {
         return nullptr;
     }
@@ -22224,6 +22246,7 @@ try_execute_single_core_decoded_block(
     const bool memory_block = leading_memory || terminal_store;
     uint8_t* direct_memory = nullptr;
     uint64_t direct_memory_address = 0;
+    uint64_t direct_memory_size = 0;
     if (memory_block) {
         // The direct-memory slice has no generated side exit. Prove its
         // dynamic address before compilation or entry; otherwise leave every
@@ -22236,11 +22259,12 @@ try_execute_single_core_decoded_block(
                 callbacks,
                 *block);
         } else {
-            direct_memory = preflight_single_core_direct_byte_store(
+            direct_memory = preflight_single_core_direct_store(
                 core,
                 callbacks,
                 *block,
-                direct_memory_address);
+                direct_memory_address,
+                direct_memory_size);
         }
         if (direct_memory == nullptr)
             return run;
@@ -22382,7 +22406,7 @@ try_execute_single_core_decoded_block(
                 icache_invalidate_span(
                     core,
                     direct_memory_address,
-                    1);
+                    direct_memory_size);
             }
             run.steps = static_cast<int>(steps);
             run.cycles = static_cast<int64_t>(cycles);
