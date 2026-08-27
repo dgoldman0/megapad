@@ -44,6 +44,7 @@
 #include "dbt/executable_arena.h"
 #include "dbt/host_jit_config.h"
 #include "dbt/x86_64/emitter.h"
+#include "cpu/mp64/block_ir.h"
 #include "cpu/mp64/decode.h"
 #include "cpu/mp64/interpreter.h"
 #include "cpu/mp64/semantics.h"
@@ -69,6 +70,8 @@ using mp64::machine::ResolvedMemorySpan;
 using mp64::machine::region_contains;
 using mp64::machine::region_span_fits;
 using mp64::machine::resolve_memory_span;
+using mp64::cpu::BlockExit;
+using mp64::cpu::BlockExitReason;
 using mp64::cpu::DecodedInstruction;
 using mp64::cpu::DecodedOperation;
 using mp64::cpu::DecodeResult;
@@ -21831,13 +21834,6 @@ static uint8_t execute_single_core_decoded_instruction(
     return static_cast<uint8_t>(actual_cycle_cost);
 }
 
-struct SingleCoreDecodedBlockRun {
-    int steps = 0;
-    int64_t cycles = 0;
-    bool interrupt_boundary = false;
-    bool timing_boundary = false;
-};
-
 struct SingleCoreDecodedBlockAdmission {
     CPUState::SingleCoreDecodedBlockEntry* block = nullptr;
     bool cache_hit = false;
@@ -21986,7 +21982,7 @@ admit_single_core_decoded_block(
     return admission;
 }
 
-static MP64_NOINLINE SingleCoreDecodedBlockRun
+static MP64_NOINLINE BlockExit
 execute_single_core_decoded_block_plan(
         SystemState& system,
         CPUState& core,
@@ -21994,7 +21990,7 @@ execute_single_core_decoded_block_plan(
         int max_steps,
         CPUState::SingleCoreDecodedBlockEntry* block,
         bool block_cache_hit) {
-    SingleCoreDecodedBlockRun run;
+    BlockExit exit;
     ConcurrencyProfileCounters& profile =
         system.concurrency_profile;
     const bool profile_enabled = profile.enabled;
@@ -22010,7 +22006,7 @@ execute_single_core_decoded_block_plan(
         // SEP faults after authoritative fetch/prefix handling. Decline the
         // complete block before any decoded/native progress so step_one owns
         // that exact state transition and trap.
-        return run;
+        return exit;
     }
     const bool native_eligible =
         max_steps >= block->instruction_count &&
@@ -22038,7 +22034,7 @@ execute_single_core_decoded_block_plan(
         // dynamic address before compilation or entry; otherwise leave every
         // architectural effect to ordinary step_one().
         if (!native_eligible)
-            return run;
+            return exit;
         if (leading_memory) {
             direct_memory = preflight_single_core_direct_read(
                 core,
@@ -22070,7 +22066,7 @@ execute_single_core_decoded_block_plan(
             direct_memory_size = 8;
         }
         if (direct_memory == nullptr)
-            return run;
+            return exit;
     }
 
     // A decoded plan must be observed again before it is compiled. This
@@ -22269,17 +22265,19 @@ execute_single_core_decoded_block_plan(
                 (terminal_store || terminal_long_call) &&
                 steps == block->instruction_count;
             if (completed_terminal_write) {
-                // The raw host write is complete. Reproduce architectural
-                // store invalidation before any subsequent guest fetch; a
+                // The raw host write is complete. Settle its architectural
+                // I-cache invalidation before publishing the common exit; a
                 // prefix IPI exit never reaches this path.
                 icache_invalidate_span(
                     core,
                     direct_memory_address,
                     direct_memory_size);
             }
-            run.steps = static_cast<int>(steps);
-            run.cycles = static_cast<int64_t>(cycles);
-            run.interrupt_boundary = interrupt_boundary;
+            exit.completed_instructions = steps;
+            exit.completed_cycles = cycles;
+            exit.reason = interrupt_boundary
+                ? BlockExitReason::INTERRUPT_BOUNDARY
+                : BlockExitReason::BLOCK_COMPLETE;
             // Admitted register/control operations and preflighted direct
             // RAM accesses cannot activate crypto or NIC work, and external
             // mutation is excluded by the execution admission held here.
@@ -22299,18 +22297,20 @@ execute_single_core_decoded_block_plan(
         // otherwise ineligible visits make zero block progress so ordinary
         // instruction execution owns every fallback effect.
         if (memory_block)
-            return run;
+            return exit;
         for (
             uint8_t index = 0;
             index < block->instruction_count &&
-            run.steps < max_steps;
+            exit.completed_instructions <
+                static_cast<uint32_t>(max_steps);
             index++
         ) {
             if (
                 index != 0 &&
                 pending_enabled_core_interrupt(system, core) >= 0
             ) {
-                run.interrupt_boundary = true;
+                exit.reason =
+                    BlockExitReason::INTERRUPT_BOUNDARY;
                 break;
             }
             const DecodedInstruction& decoded =
@@ -22320,28 +22320,37 @@ execute_single_core_decoded_block_plan(
                     core,
                     callbacks,
                     decoded);
-            run.steps++;
-            run.cycles += actual_cycle_cost;
+            exit.completed_instructions++;
+            exit.completed_cycles += actual_cycle_cost;
 
             if (
                 system.shared_crypto
                     .requires_unbounded_timing_boundary() ||
                 system.shared_nic.has_cycle_dma_work()
             ) {
-                run.timing_boundary = true;
+                exit.reason = BlockExitReason::TIMING_BOUNDARY;
                 break;
             }
         }
     }
 
-    if (profile_enabled && run.steps > 0) {
+    if (
+        exit.reason == BlockExitReason::NOT_EXECUTED &&
+        exit.completed_instructions != 0
+    ) {
+        exit.reason =
+            exit.completed_instructions == block->instruction_count
+                ? BlockExitReason::BLOCK_COMPLETE
+                : BlockExitReason::INSTRUCTION_LIMIT;
+    }
+    if (profile_enabled && exit.completed_instructions > 0) {
         host_saturating_increment(
             profile.uncontended_block_executions);
         host_saturating_add(
             profile.uncontended_block_steps,
-            static_cast<uint64_t>(run.steps));
+            exit.completed_instructions);
     }
-    return run;
+    return exit;
 }
 
 struct UncontendedSingleCoreSegment {
@@ -22385,7 +22394,7 @@ static void run_uncontended_single_core_segment_impl(
                         callbacks,
                         max_steps - step_index);
                 if (admission.block != nullptr) {
-                    const SingleCoreDecodedBlockRun block_run =
+                    const BlockExit block_exit =
                         execute_single_core_decoded_block_plan(
                             system,
                             core,
@@ -22393,21 +22402,39 @@ static void run_uncontended_single_core_segment_impl(
                             max_steps - step_index,
                             admission.block,
                             admission.cache_hit);
-                    if (block_run.steps > 0) {
+                    assert(block_exit.valid());
+                    if (block_exit.completed_instructions > 0) {
                         segment.run.total_cycles +=
-                            block_run.cycles;
+                            static_cast<int64_t>(
+                                block_exit.completed_cycles);
                         segment.run.steps_executed +=
-                            block_run.steps;
-                        step_index += block_run.steps - 1;
-                        if (block_run.interrupt_boundary) {
+                            block_exit.completed_instructions;
+                        step_index += static_cast<int>(
+                            block_exit.completed_instructions - 1);
+                        if (
+                            block_exit.reason ==
+                                BlockExitReason::BLOCK_COMPLETE ||
+                            block_exit.reason ==
+                                BlockExitReason::INSTRUCTION_LIMIT
+                        ) {
+                            continue;
+                        }
+                        if (
+                            block_exit.reason ==
+                            BlockExitReason::INTERRUPT_BOUNDARY
+                        ) {
                             segment.interrupt_boundary = true;
                             break;
                         }
-                        if (block_run.timing_boundary) {
+                        if (
+                            block_exit.reason ==
+                            BlockExitReason::TIMING_BOUNDARY
+                        ) {
                             segment.crypto_timing_boundary = true;
                             break;
                         }
-                        continue;
+                        throw std::logic_error(
+                            "decoded block returned an invalid exit reason");
                     }
                 }
             }

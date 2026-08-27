@@ -178,10 +178,14 @@ rollback, restore, and generation wrap conservatively prevent stale execution.
 ### Block exit
 
 Decoded and generated blocks return one shared exit description: completed
-instruction and cycle counts, exit reason, next architectural PC/selector
-state, interrupt or timing boundary, and any store range requiring guest-cache
-invalidation. This replaces backend-specific post-return settlement and lets
-the scheduler handle one explicit contract.
+instruction and cycle counts plus the interrupt, timing, limit, or completion
+reason. The next architectural PC/selector state is materialized directly in
+the authoritative CPU state and is not duplicated into the descriptor on every
+short block exit. Raw generated writes are invalidated inside the execution
+kernel before exit publication, where their address and width are already
+known, instead of inflating every common exit with rare mutation metadata. This
+replaces backend-specific post-return settlement and lets the scheduler handle
+one explicit contract without adding redundant hot-path copies.
 
 ### Host backend
 
@@ -398,6 +402,28 @@ CALL.L/RET.L, branch, SEP, strict-cycle, accepted-hook, and byte-MMIO spine
 passed serially (29 passed). Retirement and shared block-exit ownership remain
 in progress.
 
+Fourth-slice evidence (2026-08-27): `accel/cpu/mp64/block_ir.h` now owns the
+shared block-exit reason and result used by decoded C++ and normalized generated
+execution. The former backend-shaped `SingleCoreDecodedBlockRun` was deleted.
+Complete blocks, caller-budget prefixes, between-instruction interrupts, timing
+boundaries, and no-progress declines are now explicit outcomes with one set of
+completed instruction/cycle counts. CPU/PERF mutation remains execution-kernel
+owned, while the scheduler aggregates the reported delta exactly once.
+
+The x86-64 function retains its private packed RAX token for completed-prefix
+and conditional-branch reconstruction; C++ validates that token before
+publishing the portable exit. The shared result is deliberately 16 bytes, so
+the SysV boundary returns it in RAX/RDX and keeps all six execution arguments
+in registers. This improves on the removed 24-byte hidden structure-return
+boundary. Architectural PC/selector state remains materialized in `CPUState`,
+and rare raw store/CALL.L I-cache invalidation remains at the known write
+boundary before exit publication rather than adding payload and a branch to
+every short-block return. Object inspection confirmed the register ABI and a
+single range check for the common completion/limit reasons. The focused sliced
+decoded, dynamic-branch, SEP, store-invalidation, CALL.L, interrupt, and timer
+boundary spine passed serially (11 passed). Remaining observational policy
+parsers keep this element in progress.
+
 ### Element 6 — Multi-line and multi-memory block construction
 
 - Build caller-bounded blocks across the resident guest-cache lines needed by
@@ -492,6 +518,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D5 | Make guest-cache identity a generic caller-bounded line set. | The observed two-line `LDN+BR` pair is an acceptance motif, not a hard-coded capacity or app-specific fusion. |
 | EK-D6 | Use focused happy-path construction evidence until the rich-terminal gate permits final qualification. | A green construction selector is not a broad correctness or performance claim; deferred cases remain explicit. |
 | EK-D7 | Judge performance with workload-specific paired evidence and exact equivalence. | No arbitrary universal threshold, historical unpaired median, or sum of inclusive profile timers establishes success. |
+| EK-D8 | Normalize decoded and generated execution into one 16-byte MP64 block exit while retaining a backend-private packed transport. | Common exits remain register-returned; authoritative CPU state and already-known raw-write invalidation are not duplicated into every descriptor. |
 
 ## Deferred findings ledger
 

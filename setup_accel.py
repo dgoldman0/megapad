@@ -70,6 +70,7 @@ ext = Extension(
         "accel/machine/settlement.cpp",
     ],
     depends=[
+        "accel/cpu/mp64/block_ir.h",
         "accel/cpu/mp64/decode.h",
         "accel/cpu/mp64/decode_impl.h",
         "accel/cpu/mp64/interpreter.h",
