@@ -128,6 +128,117 @@ void emit_comparison_flags(
     emitter.set_core_byte(0x97, layout.flag_g);
 }
 
+bool operation_uses_program_counter_operand(
+        const DecodedInstruction& decoded,
+        uint8_t psel,
+        uint8_t spsel) noexcept {
+    switch (decoded.operation) {
+        case DecodedOperation::NOP:
+        case DecodedOperation::BRANCH_SHORT:
+        case DecodedOperation::BRANCH_LONG:
+        case DecodedOperation::SELECT_PROGRAM_COUNTER:
+            return false;
+        case DecodedOperation::CALL_LONG:
+            return
+                spsel == psel ||
+                decoded.rs == psel ||
+                decoded.rs == spsel;
+        case DecodedOperation::RETURN_LONG:
+            return spsel == psel;
+        case DecodedOperation::INCREMENT:
+        case DecodedOperation::DECREMENT:
+        case DecodedOperation::LOAD_IMMEDIATE:
+        case DecodedOperation::ADD_IMMEDIATE:
+        case DecodedOperation::AND_IMMEDIATE:
+        case DecodedOperation::OR_IMMEDIATE:
+        case DecodedOperation::COMPARE_IMMEDIATE:
+        case DecodedOperation::SUBTRACT_IMMEDIATE:
+        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
+        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
+            return decoded.rd == psel;
+        case DecodedOperation::LOAD_NATURAL:
+        case DecodedOperation::LOAD_BYTE:
+        case DecodedOperation::STORE_NATURAL:
+        case DecodedOperation::STORE_BYTE:
+        case DecodedOperation::ADD:
+        case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_XOR:
+        case DecodedOperation::COMPARE:
+        case DecodedOperation::MOVE:
+            return decoded.rd == psel || decoded.rs == psel;
+        default:
+            return true;
+    }
+}
+
+bool should_keep_program_counter_live(const BlockView& block) noexcept {
+    for (std::size_t index = 0; index < block.instruction_count; index++) {
+        if (operation_uses_program_counter_operand(
+                block.instructions[index],
+                block.psel,
+                block.spsel)) {
+            return false;
+        }
+    }
+
+    // A core-memory PC adjustment is nine bytes; the R9 form is four. Entry
+    // address materialization plus the one common spill costs fourteen bytes
+    // below 4 GiB and eighteen above it. Control transfers avoid one more PC
+    // adjustment or replacement. Select the mode only when its emitted shape
+    // is strictly smaller, rather than imposing a separate block-size rule.
+    int64_t saved_bytes =
+        static_cast<int64_t>(block.instruction_count) * 5 -
+        (
+            block.address <= std::numeric_limits<uint32_t>::max()
+                ? 14
+                : 18
+        );
+    const DecodedOperation terminal =
+        block.instructions[block.instruction_count - 1].operation;
+    if (
+        terminal == DecodedOperation::BRANCH_SHORT ||
+        terminal == DecodedOperation::BRANCH_LONG
+    ) {
+        saved_bytes += 5;
+    } else if (terminal == DecodedOperation::CALL_LONG) {
+        saved_bytes += 16;
+    } else if (terminal == DecodedOperation::RETURN_LONG) {
+        saved_bytes += 8;
+    }
+    return saved_bytes > 0;
+}
+
+void emit_program_counter_add_imm8(
+        X86_64BlockEmitter& emitter,
+        const CoreStateLayout& layout,
+        uint8_t psel,
+        uint8_t immediate,
+        bool program_counter_live) {
+    if (program_counter_live) {
+        emitter.add_r9_imm8(immediate);
+    } else {
+        emitter.add_core_imm8(
+            layout.registers[psel],
+            immediate);
+    }
+}
+
+void emit_program_counter_add_imm32(
+        X86_64BlockEmitter& emitter,
+        const CoreStateLayout& layout,
+        uint8_t psel,
+        uint32_t immediate,
+        bool program_counter_live) {
+    if (program_counter_live) {
+        emitter.add_r9_imm32(immediate);
+    } else {
+        emitter.add_core_imm32(
+            layout.registers[psel],
+            immediate);
+    }
+}
+
 void emit_instruction(
         X86_64BlockEmitter& emitter,
         const CoreStateLayout& layout,
@@ -135,10 +246,14 @@ void emit_instruction(
         uint64_t instruction_address,
         uint8_t psel,
         uint8_t spsel,
-        std::size_t memory_access_index) {
-    emitter.add_core_imm8(
-        layout.registers[psel],
-        decoded.encoded_size);
+        std::size_t memory_access_index,
+        bool program_counter_live) {
+    emit_program_counter_add_imm8(
+        emitter,
+        layout,
+        psel,
+        decoded.encoded_size,
+        program_counter_live);
     emitter.bytes({
         0x41,
         0x83,
@@ -151,17 +266,28 @@ void emit_instruction(
             return;
         case DecodedOperation::CALL_LONG:
             emitter.mov_r8_from_pointer_table(memory_access_index);
-            emitter.mov_rcx_from_core(layout.registers[decoded.rs]);
-            emitter.mov_rax_from_core(layout.registers[psel]);
-            emitter.sub_core_imm8(layout.registers[spsel], 8);
-            emitter.bytes({0x49, 0x89, 0x00}); // mov [r8], rax
-            emitter.mov_core_from_rcx(layout.registers[psel]);
+            if (program_counter_live) {
+                emitter.sub_core_imm8(layout.registers[spsel], 8);
+                emitter.bytes({0x4D, 0x89, 0x08}); // mov [r8], r9
+                emitter.mov_r9_from_core(layout.registers[decoded.rs]);
+            } else {
+                emitter.mov_rcx_from_core(layout.registers[decoded.rs]);
+                emitter.mov_rax_from_core(layout.registers[psel]);
+                emitter.sub_core_imm8(layout.registers[spsel], 8);
+                emitter.bytes({0x49, 0x89, 0x00}); // mov [r8], rax
+                emitter.mov_core_from_rcx(layout.registers[psel]);
+            }
             return;
         case DecodedOperation::RETURN_LONG:
             emitter.mov_r8_from_pointer_table(memory_access_index);
-            emitter.bytes({0x49, 0x8B, 0x00}); // mov rax, [r8]
-            emitter.add_core_imm8(layout.registers[spsel], 8);
-            emitter.mov_core_from_rax(layout.registers[psel]);
+            if (program_counter_live) {
+                emitter.bytes({0x4D, 0x8B, 0x08}); // mov r9, [r8]
+                emitter.add_core_imm8(layout.registers[spsel], 8);
+            } else {
+                emitter.bytes({0x49, 0x8B, 0x00}); // mov rax, [r8]
+                emitter.add_core_imm8(layout.registers[spsel], 8);
+                emitter.mov_core_from_rax(layout.registers[psel]);
+            }
             return;
         case DecodedOperation::INCREMENT:
             emitter.increment_core(layout.registers[decoded.rd]);
@@ -171,9 +297,12 @@ void emit_instruction(
             return;
         case DecodedOperation::BRANCH_SHORT:
             if (decoded.subop() == CC_AL) {
-                emitter.add_core_imm8(
-                    layout.registers[psel],
-                    static_cast<uint8_t>(decoded.immediate));
+                emit_program_counter_add_imm8(
+                    emitter,
+                    layout,
+                    psel,
+                    static_cast<uint8_t>(decoded.immediate),
+                    program_counter_live);
                 return;
             }
             if (
@@ -201,9 +330,12 @@ void emit_instruction(
             {
                 const std::size_t not_taken =
                     emitter.branch32(0x85); // jne
-                emitter.add_core_imm8(
-                    layout.registers[psel],
-                    static_cast<uint8_t>(decoded.immediate));
+                emit_program_counter_add_imm8(
+                    emitter,
+                    layout,
+                    psel,
+                    static_cast<uint8_t>(decoded.immediate),
+                    program_counter_live);
                 emitter.add_exit_flags(
                     NATIVE_BLOCK_EXIT_CONDITIONAL_TAKEN);
                 emitter.patch32(not_taken, emitter.position());
@@ -211,10 +343,13 @@ void emit_instruction(
             return;
         case DecodedOperation::BRANCH_LONG:
             if (decoded.subop() == CC_AL) {
-                emitter.add_core_imm32(
-                    layout.registers[psel],
+                emit_program_counter_add_imm32(
+                    emitter,
+                    layout,
+                    psel,
                     static_cast<uint32_t>(
-                        cpu::sign_extend(decoded.immediate, 16)));
+                        cpu::sign_extend(decoded.immediate, 16)),
+                    program_counter_live);
                 return;
             }
             if (
@@ -242,10 +377,13 @@ void emit_instruction(
             {
                 const std::size_t not_taken =
                     emitter.branch32(0x85); // jne
-                emitter.add_core_imm32(
-                    layout.registers[psel],
+                emit_program_counter_add_imm32(
+                    emitter,
+                    layout,
+                    psel,
                     static_cast<uint32_t>(
-                        cpu::sign_extend(decoded.immediate, 16)));
+                        cpu::sign_extend(decoded.immediate, 16)),
+                    program_counter_live);
                 emitter.add_exit_flags(
                     NATIVE_BLOCK_EXIT_CONDITIONAL_TAKEN);
                 emitter.patch32(not_taken, emitter.position());
@@ -448,6 +586,8 @@ std::vector<uint8_t> lower_block(
             "x86-64 JIT received an invalid MP64 block view");
     }
     validate_layout(layout);
+    const bool program_counter_live =
+        should_keep_program_counter_live(block);
 
     X86_64BlockEmitter emitter;
     // ENDBR64 is a no-op on hosts without CET and permits indirect entry
@@ -464,6 +604,8 @@ std::vector<uint8_t> lower_block(
         0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
         0x45, 0x31, 0xD2, // xor r10d, r10d (exit flags)
     });
+    if (program_counter_live)
+        emitter.mov_r9_immediate(block.address);
 
     std::vector<std::size_t> interrupt_exits;
     uint64_t instruction_address = block.address;
@@ -491,7 +633,8 @@ std::vector<uint8_t> lower_block(
             instruction_address,
             block.psel,
             block.spsel,
-            memory_access_index);
+            memory_access_index,
+            program_counter_live);
         if (decoded.is_memory())
             memory_access_index++;
         emitter.bytes({0xFF, 0xC3}); // inc ebx
@@ -519,6 +662,10 @@ std::vector<uint8_t> lower_block(
     }
 
     const std::size_t common_exit = emitter.position();
+    if (program_counter_live) {
+        emitter.mov_core_from_r9(
+            layout.registers[block.psel]);
+    }
     emitter.add_core_r15(layout.icache_hits);
 
     // Reproduce icache_begin_instruction() for the last retired instruction.

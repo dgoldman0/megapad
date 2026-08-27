@@ -21,9 +21,14 @@ public:
 
     void mov_rax_from_core(int32_t displacement);
     void mov_rcx_from_core(int32_t displacement);
+    void mov_r9_from_core(int32_t displacement);
+    void mov_r9_immediate(uint64_t immediate);
     void mov_r8_from_pointer_table(std::size_t index);
     void mov_core_from_rax(int32_t displacement);
     void mov_core_from_rcx(int32_t displacement);
+    void mov_core_from_r9(int32_t displacement);
+    void add_r9_imm8(uint8_t immediate);
+    void add_r9_imm32(uint32_t immediate);
     void add_core_imm8(int32_t displacement, uint8_t immediate);
     void add_core_imm32(int32_t displacement, uint32_t immediate);
     void sub_core_imm8(int32_t displacement, uint8_t immediate);

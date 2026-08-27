@@ -1151,7 +1151,9 @@ def test_dense_jit_slot_accepts_maximal_register_cmp_line() -> None:
         assert counts["uncontended_jit_compile_attempts"] == 1
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_compile_failures"] == 0
-        assert counts["uncontended_jit_max_code_bytes"] == 1_009
+        # Eight resident PC advances use R9 and one common spill instead of
+        # eight core-memory read/modify/write encodings.
+        assert counts["uncontended_jit_max_code_bytes"] == 983
         assert storage["slot_bytes"] == 1_344
         assert counts["uncontended_jit_max_code_bytes"] < (
             storage["slot_bytes"]

@@ -81,6 +81,21 @@ void X86_64BlockEmitter::mov_rcx_from_core(int32_t displacement) {
     i32(displacement);
 }
 
+void X86_64BlockEmitter::mov_r9_from_core(int32_t displacement) {
+    bytes({0x4D, 0x8B, 0x8C, 0x24});
+    i32(displacement);
+}
+
+void X86_64BlockEmitter::mov_r9_immediate(uint64_t immediate) {
+    if (immediate <= std::numeric_limits<uint32_t>::max()) {
+        bytes({0x41, 0xB9}); // mov r9d, imm32 (zero extending)
+        u32(static_cast<uint32_t>(immediate));
+    } else {
+        bytes({0x49, 0xB9}); // movabs r9, imm64
+        u64(immediate);
+    }
+}
+
 void X86_64BlockEmitter::mov_r8_from_pointer_table(
         std::size_t index) {
     if (
@@ -116,6 +131,20 @@ void X86_64BlockEmitter::mov_core_from_rax(int32_t displacement) {
 void X86_64BlockEmitter::mov_core_from_rcx(int32_t displacement) {
     bytes({0x49, 0x89, 0x8C, 0x24});
     i32(displacement);
+}
+
+void X86_64BlockEmitter::mov_core_from_r9(int32_t displacement) {
+    bytes({0x4D, 0x89, 0x8C, 0x24});
+    i32(displacement);
+}
+
+void X86_64BlockEmitter::add_r9_imm8(uint8_t immediate) {
+    bytes({0x49, 0x83, 0xC1, immediate});
+}
+
+void X86_64BlockEmitter::add_r9_imm32(uint32_t immediate) {
+    bytes({0x49, 0x81, 0xC1});
+    u32(immediate);
 }
 
 void X86_64BlockEmitter::add_core_imm8(
