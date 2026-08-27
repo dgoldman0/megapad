@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2654,7 +2654,13 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_compile_attempts",
     "uncontended_jit_compilations",
     "uncontended_jit_compile_failures",
-    "uncontended_jit_mapping_evictions",
+    "uncontended_jit_plan_evictions",
+    "uncontended_jit_arena_allocations",
+    "uncontended_jit_arena_allocation_failures",
+    "uncontended_jit_slot_publications",
+    "uncontended_jit_slot_rewrites",
+    "uncontended_jit_code_bytes",
+    "uncontended_jit_max_code_bytes",
     "uncontended_jit_executions",
     "uncontended_jit_steps",
     "logical_subfrontiers",
@@ -2700,7 +2706,8 @@ _CONCURRENCY_PROFILE_WALL_FIELDS = (
     "uncontended_round",
     "uncontended_dispatch",
     "uncontended_jit_compile",
-    "uncontended_jit_mapping",
+    "uncontended_jit_arena_allocation",
+    "uncontended_jit_publication",
     "logical_subfrontier",
     "round_absorption",
     "worker_wave",
@@ -2723,6 +2730,7 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
     raw = dict(owner._concurrency_profile_snapshot())
     raw_counts = dict(raw["counts"])
     raw_wall = dict(raw["wall_ns"])
+    raw_jit_storage = dict(raw["single_core_jit_storage"])
     counts = {
         name: int(raw_counts[name])
         for name in _CONCURRENCY_PROFILE_COUNT_FIELDS
@@ -2758,6 +2766,17 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
         "single_core_jit_backend": str(
             raw["single_core_jit_backend"]
         ),
+        "single_core_jit_storage": {
+            "kind": str(raw_jit_storage["kind"]),
+            "w_x_model": str(raw_jit_storage["w_x_model"]),
+            "ready": bool(raw_jit_storage["ready"]),
+            "failed": bool(raw_jit_storage["failed"]),
+            "slot_count": int(raw_jit_storage["slot_count"]),
+            "slot_bytes": int(raw_jit_storage["slot_bytes"]),
+            "mapped_bytes_per_alias": int(
+                raw_jit_storage["mapped_bytes_per_alias"]
+            ),
+        },
         "counts": counts,
         "wall_ns": wall_ns,
         "lane_active_ns": [
@@ -2808,6 +2827,10 @@ def _host_profile_probe(
     """Build compact structural attribution and cross-layer reconciliations."""
     native_counts = native_snapshot["counts"]
     native_wall = native_snapshot["wall_ns"]
+    jit_storage = native_snapshot["single_core_jit_storage"]
+    jit_backend_available = (
+        native_snapshot["single_core_jit_backend"] == "x86_64"
+    )
     scheduler = accounting["scheduler_provenance"]
     worker = accounting["host_worker_diagnostics"]["deltas"]
     worker_lanes = worker["lanes"]
@@ -2853,7 +2876,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 7,
+            native_snapshot["schema_version"] == 8,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2866,6 +2889,47 @@ def _host_profile_probe(
         "native_profile_timers_are_inclusive_nested_wall_time":
             native_snapshot["timing_semantics"]
             == "inclusive_nested_host_wall_nanoseconds",
+        "single_core_jit_storage_backend_matches": (
+            (
+                jit_storage["kind"]
+                == "memfd-dual-mapped-fixed-slots"
+                and jit_storage["w_x_model"]
+                == "distinct-rw-and-rx-aliases"
+            )
+            if jit_backend_available
+            else (
+                jit_storage["kind"] == "unavailable"
+                and jit_storage["w_x_model"] == "unavailable"
+            )
+        ),
+        "single_core_jit_storage_geometry_is_bounded": (
+            (
+                jit_backend_available
+                and not jit_storage["failed"]
+                and jit_storage["slot_count"] > 0
+                and jit_storage["slot_bytes"] > 0
+                and jit_storage["mapped_bytes_per_alias"]
+                == jit_storage["slot_count"]
+                * jit_storage["slot_bytes"]
+                and native_counts["uncontended_jit_max_code_bytes"]
+                <= jit_storage["slot_bytes"]
+            )
+            if jit_storage["ready"]
+            else (
+                jit_storage["slot_count"] == 0
+                and jit_storage["slot_bytes"] == 0
+                and jit_storage["mapped_bytes_per_alias"] == 0
+                and native_counts["uncontended_jit_max_code_bytes"] == 0
+            )
+        ),
+        "single_core_jit_use_has_ready_storage": (
+            native_counts["uncontended_jit_slot_publications"] == 0
+            or (
+                jit_backend_available
+                and jit_storage["ready"]
+                and not jit_storage["failed"]
+            )
+        ),
         "native_batches_match_accounting": (
             native_counts["batches"]
             == scheduler["native_system_batch_calls"]
@@ -2911,7 +2975,13 @@ def _host_profile_probe(
                     "uncontended_jit_compile_attempts",
                     "uncontended_jit_compilations",
                     "uncontended_jit_compile_failures",
-                    "uncontended_jit_mapping_evictions",
+                    "uncontended_jit_plan_evictions",
+                    "uncontended_jit_arena_allocations",
+                    "uncontended_jit_arena_allocation_failures",
+                    "uncontended_jit_slot_publications",
+                    "uncontended_jit_slot_rewrites",
+                    "uncontended_jit_code_bytes",
+                    "uncontended_jit_max_code_bytes",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
                 )
@@ -2938,8 +3008,8 @@ def _host_profile_probe(
             native_counts["uncontended_block_evictions"]
             <= native_counts["uncontended_block_builds"]
         ),
-        "uncontended_jit_mapping_evictions_within_builds": (
-            native_counts["uncontended_jit_mapping_evictions"]
+        "uncontended_jit_plan_evictions_within_builds": (
+            native_counts["uncontended_jit_plan_evictions"]
             <= native_counts["uncontended_block_builds"]
         ),
         "uncontended_block_executions_have_plans": (
@@ -2957,8 +3027,30 @@ def _host_profile_probe(
             == native_counts["uncontended_jit_compilations"]
             + native_counts["uncontended_jit_compile_failures"]
         ),
-        "uncontended_jit_mapping_time_within_compile_time": (
-            native_wall["uncontended_jit_mapping"]
+        "uncontended_jit_publications_match_compilations": (
+            native_counts["uncontended_jit_slot_publications"]
+            == native_counts["uncontended_jit_compilations"]
+        ),
+        "uncontended_jit_rewrites_within_publications": (
+            native_counts["uncontended_jit_slot_rewrites"]
+            <= native_counts["uncontended_jit_slot_publications"]
+        ),
+        "uncontended_jit_arena_allocations_within_attempts": (
+            native_counts["uncontended_jit_arena_allocations"]
+            <= native_counts["uncontended_jit_compile_attempts"]
+        ),
+        "uncontended_jit_arena_failures_within_attempts": (
+            native_counts[
+                "uncontended_jit_arena_allocation_failures"
+            ]
+            <= native_counts["uncontended_jit_compile_attempts"]
+        ),
+        "uncontended_jit_arena_allocation_time_within_compile_time": (
+            native_wall["uncontended_jit_arena_allocation"]
+            <= native_wall["uncontended_jit_compile"]
+        ),
+        "uncontended_jit_publication_time_within_compile_time": (
+            native_wall["uncontended_jit_publication"]
             <= native_wall["uncontended_jit_compile"]
         ),
         "uncontended_jit_attempts_within_block_hits": (
@@ -3107,7 +3199,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 7,
+        "schema_version": 8,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,

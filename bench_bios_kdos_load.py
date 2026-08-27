@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -283,23 +283,44 @@ def profile_derived(profile: dict | None) -> dict | None:
             / counts["uncontended_jit_compile_attempts"]
             / 1_000
         ),
-        "jit_mapping_us_per_compilation": (
+        "jit_arena_allocation_us_per_attempt": (
+            None
+            if (
+                counts["uncontended_jit_arena_allocations"]
+                + counts["uncontended_jit_arena_allocation_failures"]
+            ) == 0
+            else wall_ns["uncontended_jit_arena_allocation"]
+            / (
+                counts["uncontended_jit_arena_allocations"]
+                + counts["uncontended_jit_arena_allocation_failures"]
+            )
+            / 1_000
+        ),
+        "jit_publication_us_per_compilation": (
             None
             if counts["uncontended_jit_compilations"] == 0
-            else wall_ns["uncontended_jit_mapping"]
+            else wall_ns["uncontended_jit_publication"]
             / counts["uncontended_jit_compilations"]
             / 1_000
         ),
-        "jit_mapping_fraction_of_compile_time": _ratio(
-            wall_ns["uncontended_jit_mapping"],
+        "jit_publication_fraction_of_compile_time": _ratio(
+            wall_ns["uncontended_jit_publication"],
             wall_ns["uncontended_jit_compile"],
         ),
         "block_evictions_per_build": _ratio(
             counts["uncontended_block_evictions"],
             counts["uncontended_block_builds"],
         ),
-        "mapping_evictions_per_compilation": _ratio(
-            counts["uncontended_jit_mapping_evictions"],
+        "plan_evictions_per_compilation": _ratio(
+            counts["uncontended_jit_plan_evictions"],
+            counts["uncontended_jit_compilations"],
+        ),
+        "slot_rewrites_per_publication": _ratio(
+            counts["uncontended_jit_slot_rewrites"],
+            counts["uncontended_jit_slot_publications"],
+        ),
+        "average_jit_code_bytes": _ratio(
+            counts["uncontended_jit_code_bytes"],
             counts["uncontended_jit_compilations"],
         ),
     }
@@ -422,14 +443,49 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 ),
             }
             if host_profile is not None:
+                profile_counts = host_profile["counts"]
+                jit_storage = host_profile["single_core_jit_storage"]
+                jit_available = (
+                    host_profile["single_core_jit_backend"] == "x86_64"
+                )
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 7
+                            host_profile["schema_version"] == 8
                         ),
                         "host_profile_frozen": not host_profile["enabled"],
                         "profiled_steps_match_run": (
-                            host_profile["counts"]["uncontended_steps"] == steps
+                            profile_counts["uncontended_steps"] == steps
+                        ),
+                        "jit_publications_match_compilations": (
+                            profile_counts[
+                                "uncontended_jit_slot_publications"
+                            ]
+                            == profile_counts["uncontended_jit_compilations"]
+                        ),
+                        "fresh_jit_arena_is_single_and_bounded": (
+                            (
+                                jit_storage["ready"]
+                                and not jit_storage["failed"]
+                                and profile_counts[
+                                    "uncontended_jit_arena_allocations"
+                                ]
+                                == 1
+                                and profile_counts[
+                                    "uncontended_jit_arena_allocation_failures"
+                                ]
+                                == 0
+                                and jit_storage["slot_count"] > 0
+                                and jit_storage["mapped_bytes_per_alias"]
+                                == jit_storage["slot_count"]
+                                * jit_storage["slot_bytes"]
+                                and profile_counts[
+                                    "uncontended_jit_max_code_bytes"
+                                ]
+                                <= jit_storage["slot_bytes"]
+                            )
+                            if jit_available
+                            else not jit_storage["ready"]
                         ),
                     }
                 )
@@ -571,12 +627,14 @@ def print_human(result: dict) -> None:
             f"{counts['uncontended_jit_compilations']:,} compilations; "
             f"{counts['uncontended_jit_steps']:,} JIT steps; "
             f"{counts['uncontended_block_evictions']:,} block evictions; "
-            f"{counts['uncontended_jit_mapping_evictions']:,} mapping evictions"
+            f"{counts['uncontended_jit_plan_evictions']:,} plan evictions; "
+            f"{counts['uncontended_jit_slot_rewrites']:,} slot rewrites"
         )
         print(
-            "  DBT compile/mapping: "
+            "  DBT compile/arena/publication: "
             f"{wall_ns['uncontended_jit_compile'] / 1e9:.3f}s / "
-            f"{wall_ns['uncontended_jit_mapping'] / 1e9:.3f}s"
+            f"{wall_ns['uncontended_jit_arena_allocation'] / 1e9:.3f}s / "
+            f"{wall_ns['uncontended_jit_publication'] / 1e9:.3f}s"
         )
     failed = [name for name, ok in result["validation"].items() if not ok]
     if failed:

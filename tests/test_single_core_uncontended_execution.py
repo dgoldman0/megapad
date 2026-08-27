@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from asm import assemble
@@ -34,6 +36,25 @@ loop:
     lbr loop
 """
 REGISTER_BLOCK_SLICES = (1, 1, 2, 7, 19, 1_003)
+JIT_PROFILE_COUNT_FIELDS = (
+    "uncontended_jit_compile_attempts",
+    "uncontended_jit_compilations",
+    "uncontended_jit_compile_failures",
+    "uncontended_jit_plan_evictions",
+    "uncontended_jit_arena_allocations",
+    "uncontended_jit_arena_allocation_failures",
+    "uncontended_jit_slot_publications",
+    "uncontended_jit_slot_rewrites",
+    "uncontended_jit_code_bytes",
+    "uncontended_jit_max_code_bytes",
+    "uncontended_jit_executions",
+    "uncontended_jit_steps",
+)
+JIT_PROFILE_WALL_FIELDS = (
+    "uncontended_jit_compile",
+    "uncontended_jit_arena_allocation",
+    "uncontended_jit_publication",
+)
 
 
 def _system(*, reference: bool = False) -> MegapadSystem:
@@ -223,7 +244,7 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
     assert fast_core == reference_core
     assert fast_cpu == reference_cpu == _run_python_register_workload()
     assert profile_snapshot is not None
-    assert profile_snapshot["schema_version"] == 7
+    assert profile_snapshot["schema_version"] == 8
     counts = dict(profile_snapshot["counts"])
     assert counts["uncontended_block_lookups"] == (
         counts["uncontended_block_hits"] +
@@ -235,19 +256,26 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
     assert counts["uncontended_block_steps"] > (
         counts["uncontended_block_executions"]
     )
-    jit_fields = (
-        "uncontended_jit_compile_attempts",
-        "uncontended_jit_compilations",
-        "uncontended_jit_compile_failures",
-        "uncontended_jit_mapping_evictions",
-        "uncontended_jit_executions",
-        "uncontended_jit_steps",
-    )
     if profile_snapshot["single_core_jit_backend"] == "x86_64":
         assert counts["uncontended_jit_compile_attempts"] > 0
         assert counts["uncontended_jit_compilations"] > 0
         assert counts["uncontended_jit_compile_failures"] == 0
-        assert counts["uncontended_jit_mapping_evictions"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 0
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert (
+            counts["uncontended_jit_slot_publications"]
+            == counts["uncontended_jit_compilations"]
+        )
+        assert (
+            0 <= counts["uncontended_jit_slot_rewrites"]
+            <= counts["uncontended_jit_slot_publications"]
+        )
+        assert (
+            counts["uncontended_jit_code_bytes"]
+            >= counts["uncontended_jit_max_code_bytes"]
+            > 0
+        )
         assert counts["uncontended_jit_executions"] > 0
         assert counts["uncontended_jit_steps"] > 0
         assert (
@@ -255,7 +283,10 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
             <= counts["uncontended_block_steps"]
         )
     else:
-        assert all(counts[name] == 0 for name in jit_fields)
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
 
 
 def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
@@ -415,7 +446,7 @@ loop:
     counts = dict(snapshot["counts"])
     wall_ns = dict(snapshot["wall_ns"])
 
-    assert snapshot["schema_version"] == 7
+    assert snapshot["schema_version"] == 8
     assert counts["uncontended_rounds"] == stats.native_rounds == 3
     assert counts["uncontended_dispatches"] == sum(
         stats.per_core_dispatches
@@ -431,30 +462,67 @@ loop:
     assert counts["uncontended_block_steps"] == (
         counts["uncontended_steps"] - 2
     )
-    jit_fields = (
-        "uncontended_jit_compile_attempts",
-        "uncontended_jit_compilations",
-        "uncontended_jit_compile_failures",
-        "uncontended_jit_executions",
-        "uncontended_jit_steps",
-    )
     if snapshot["single_core_jit_backend"] == "x86_64":
         assert counts["uncontended_jit_compile_attempts"] > 0
         assert counts["uncontended_jit_compilations"] > 0
         assert counts["uncontended_jit_compile_failures"] == 0
-        assert counts["uncontended_jit_mapping_evictions"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 0
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert (
+            counts["uncontended_jit_slot_publications"]
+            == counts["uncontended_jit_compilations"]
+        )
+        assert counts["uncontended_jit_slot_rewrites"] == 0
+        assert (
+            counts["uncontended_jit_code_bytes"]
+            >= counts["uncontended_jit_max_code_bytes"]
+            > 0
+        )
         assert counts["uncontended_jit_executions"] > 0
         assert counts["uncontended_jit_steps"] > 0
         assert counts["uncontended_jit_steps"] <= (
             counts["uncontended_block_steps"]
         )
-        assert 0 < wall_ns["uncontended_jit_mapping"] <= (
+        assert 0 < wall_ns["uncontended_jit_arena_allocation"] <= (
             wall_ns["uncontended_jit_compile"]
         )
+        assert 0 < wall_ns["uncontended_jit_publication"] <= (
+            wall_ns["uncontended_jit_compile"]
+        )
+        storage = dict(snapshot["single_core_jit_storage"])
+        assert storage["kind"] == "memfd-dual-mapped-fixed-slots"
+        assert storage["w_x_model"] == "distinct-rw-and-rx-aliases"
+        assert storage["ready"]
+        assert not storage["failed"]
+        assert storage["slot_count"] == 128
+        assert storage["slot_bytes"] > counts[
+            "uncontended_jit_max_code_bytes"
+        ]
+        assert storage["mapped_bytes_per_alias"] == (
+            storage["slot_count"] * storage["slot_bytes"]
+        )
+        mapping_permissions = {
+            line.split()[1]
+            for line in Path("/proc/self/maps").read_text(
+                encoding="ascii"
+            ).splitlines()
+            if "mp64-single-core-jit" in line
+        }
+        assert {"rw-s", "r-xs"} <= mapping_permissions
+        assert all(
+            not ("w" in permissions and "x" in permissions)
+            for permissions in mapping_permissions
+        )
     else:
-        assert all(counts[name] == 0 for name in jit_fields)
-        assert wall_ns["uncontended_jit_compile"] == 0
-        assert wall_ns["uncontended_jit_mapping"] == 0
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+        assert all(
+            wall_ns[name] == 0
+            for name in JIT_PROFILE_WALL_FIELDS
+        )
     assert counts["uncontended_block_evictions"] == 0
     assert counts["logical_subfrontiers"] == 0
     assert counts["worker_commands"] == 0
@@ -465,17 +533,24 @@ loop:
 
 def test_host_profile_attributes_direct_mapped_translation_evictions() -> None:
     system = _system()
-    block = assemble(
+    first_block = assemble(
         """
 loop:
     inc r4
     br loop
 """
     )
+    colliding_block = assemble(
+        """
+loop:
+    inc r5
+    br loop
+"""
+    )
     first_address = 0
-    colliding_address = 0x4000
-    system.load_binary(first_address, block)
-    system.load_binary(colliding_address, block)
+    colliding_address = 0x810
+    system.load_binary(first_address, first_block)
+    system.load_binary(colliding_address, colliding_block)
     system.boot(entry=first_address)
     owner = system._native_system
     owner._start_concurrency_profile()
@@ -493,39 +568,191 @@ loop:
     counts = dict(snapshot["counts"])
     wall_ns = dict(snapshot["wall_ns"])
 
+    assert system.cpu.regs[4] == 6
+    assert system.cpu.regs[5] == 3
     assert counts["uncontended_block_evictions"] == 2
     if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 3
         assert counts["uncontended_jit_compilations"] == 3
-        assert counts["uncontended_jit_mapping_evictions"] == 2
-        assert 0 < wall_ns["uncontended_jit_mapping"] <= (
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 2
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert counts["uncontended_jit_slot_publications"] == 3
+        assert counts["uncontended_jit_slot_rewrites"] == 2
+        assert counts["uncontended_jit_code_bytes"] > 0
+        assert counts["uncontended_jit_max_code_bytes"] > 0
+        assert 0 < wall_ns["uncontended_jit_arena_allocation"] <= (
+            wall_ns["uncontended_jit_compile"]
+        )
+        assert 0 < wall_ns["uncontended_jit_publication"] <= (
             wall_ns["uncontended_jit_compile"]
         )
     else:
-        assert counts["uncontended_jit_compilations"] == 0
-        assert counts["uncontended_jit_mapping_evictions"] == 0
-        assert wall_ns["uncontended_jit_compile"] == 0
-        assert wall_ns["uncontended_jit_mapping"] == 0
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+        assert all(
+            wall_ns[name] == 0
+            for name in JIT_PROFILE_WALL_FIELDS
+        )
+
+
+def test_reusable_jit_arena_bounds_alternating_collision_churn() -> None:
+    system = _system()
+    first_address = 0
+    colliding_address = 0x810
+    system.load_binary(
+        first_address,
+        assemble(
+            """
+loop:
+    inc r4
+    br loop
+"""
+        ),
+    )
+    system.load_binary(
+        colliding_address,
+        assemble(
+            """
+loop:
+    inc r5
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=first_address)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+    visit_count = 32
+
+    for visit in range(visit_count):
+        system.cpu.pc = (
+            first_address if visit % 2 == 0 else colliding_address
+        )
+        stats = system.run_batch_stats(6)
+        assert stats.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[4] == 3 * (visit_count // 2)
+    assert system.cpu.regs[5] == 3 * (visit_count // 2)
+    assert counts["uncontended_block_evictions"] == visit_count - 1
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == visit_count
+        assert counts["uncontended_jit_compilations"] == visit_count
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == visit_count - 1
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert counts["uncontended_jit_slot_publications"] == visit_count
+        assert counts["uncontended_jit_slot_rewrites"] == visit_count - 1
+        assert counts["uncontended_jit_code_bytes"] > 0
+        assert counts["uncontended_jit_max_code_bytes"] > 0
+        storage = dict(snapshot["single_core_jit_storage"])
+        assert storage["ready"]
+        assert not storage["failed"]
+        assert storage["mapped_bytes_per_alias"] == (
+            storage["slot_count"] * storage["slot_bytes"]
+        )
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_warm_boot_reuses_arena_after_invalidating_native_plans() -> None:
+    system = _system()
+    first_address = 0
+    colliding_address = 0x810
+    system.load_binary(
+        first_address,
+        assemble(
+            """
+loop:
+    inc r4
+    br loop
+"""
+        ),
+    )
+    system.load_binary(
+        colliding_address,
+        assemble(
+            """
+loop:
+    inc r5
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=first_address)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    first = system.run_batch_stats(6)
+    assert first.instructions_executed == 6
+    assert system.cpu.regs[4] == 3
+    assert system.cpu.regs[5] == 0
+
+    system.boot(entry=colliding_address)
+    second = system.run_batch_stats(6)
+    assert second.instructions_executed == 6
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.regs[4] == 0
+    assert system.cpu.regs[5] == 3
+    assert counts["uncontended_block_evictions"] == 0
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 2
+        assert counts["uncontended_jit_compilations"] == 2
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_plan_evictions"] == 0
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert counts["uncontended_jit_slot_publications"] == 2
+        assert counts["uncontended_jit_slot_rewrites"] == 1
+        storage = dict(snapshot["single_core_jit_storage"])
+        assert storage["ready"]
+        assert not storage["failed"]
+    else:
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
 
 
 def _assert_jit_used_when_available(snapshot: dict, counts: dict) -> None:
-    jit_fields = (
-        "uncontended_jit_compile_attempts",
-        "uncontended_jit_compilations",
-        "uncontended_jit_compile_failures",
-        "uncontended_jit_executions",
-        "uncontended_jit_steps",
-    )
     if snapshot["single_core_jit_backend"] == "x86_64":
         assert counts["uncontended_jit_compile_attempts"] > 0
         assert counts["uncontended_jit_compilations"] > 0
         assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_arena_allocations"] == 1
+        assert counts["uncontended_jit_arena_allocation_failures"] == 0
+        assert (
+            counts["uncontended_jit_slot_publications"]
+            == counts["uncontended_jit_compilations"]
+        )
+        assert (
+            counts["uncontended_jit_code_bytes"]
+            >= counts["uncontended_jit_max_code_bytes"]
+            > 0
+        )
         assert counts["uncontended_jit_executions"] > 0
         assert counts["uncontended_jit_steps"] > 0
         assert counts["uncontended_jit_steps"] <= (
             counts["uncontended_block_steps"]
         )
     else:
-        assert all(counts[name] == 0 for name in jit_fields)
+        assert all(
+            counts[name] == 0
+            for name in JIT_PROFILE_COUNT_FIELDS
+        )
 
 
 def _assert_repeated_ldi_block(

@@ -1121,7 +1121,7 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
 
             detailed = machine.status()
             first = detailed["host_profile"]
-            assert first["schema_version"] == 7
+            assert first["schema_version"] == 8
             assert first["enabled"]
             assert first["generation"] > 0
 

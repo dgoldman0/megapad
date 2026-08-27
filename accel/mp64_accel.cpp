@@ -48,8 +48,23 @@
 #if defined(__x86_64__) && !defined(__ILP32__) && \
     defined(__linux__) && \
     !MP64_SANITIZER_BUILD
+#include <cerrno>
+#if __has_include(<linux/memfd.h>)
+#include <linux/memfd.h>
+#endif
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+#if defined(SYS_memfd_create)
 #define MP64_HAS_X86_64_JIT 1
+#else
+#define MP64_HAS_X86_64_JIT 0
+#endif
 #else
 #define MP64_HAS_X86_64_JIT 0
 #endif
@@ -1697,23 +1712,23 @@ enum class CoreProfile : uint8_t {
     MICRO = 1,
 };
 
-// One immutable W^X mapping owned by a translated block. Code is emitted
-// into an unpublished RW mapping, sealed RX, and only then moved into a live
-// cache entry. Replacement or CPU destruction unmaps it automatically.
+// One non-owning reference into the system-owned exact-single JIT arena.
+// Code is fully emitted through the arena's RW alias before its distinct RX
+// address is published here. Cache invalidation drops the reference; only the
+// arena owns and ultimately unmaps executable storage.
 class HostExecutableCode {
 public:
     HostExecutableCode() = default;
-    HostExecutableCode(void* address, std::size_t size) noexcept
-        : address_(address), size_(size) {}
+    explicit HostExecutableCode(void* address) noexcept
+        : address_(address) {}
     HostExecutableCode(const HostExecutableCode&) = delete;
     HostExecutableCode& operator=(
         const HostExecutableCode&) = delete;
 
     HostExecutableCode(
             HostExecutableCode&& other) noexcept
-        : address_(other.address_), size_(other.size_) {
+        : address_(other.address_) {
         other.address_ = nullptr;
-        other.size_ = 0;
     }
 
     HostExecutableCode& operator=(
@@ -1722,15 +1737,11 @@ public:
             return *this;
         reset();
         address_ = other.address_;
-        size_ = other.size_;
         other.address_ = nullptr;
-        other.size_ = 0;
         return *this;
     }
 
-    ~HostExecutableCode() {
-        reset();
-    }
+    ~HostExecutableCode() = default;
 
     explicit operator bool() const noexcept {
         return address_ != nullptr;
@@ -1741,17 +1752,221 @@ public:
     }
 
     void reset() noexcept {
-#if MP64_HAS_X86_64_JIT
-        if (address_ != nullptr)
-            ::munmap(address_, size_);
-#endif
         address_ = nullptr;
-        size_ = 0;
     }
 
 private:
     void* address_ = nullptr;
-    std::size_t size_ = 0;
+};
+
+// Exact-single execution owns one direct-mapped decoded-block table. Give
+// each table index one host page in a bounded arena, so publishing replacement
+// code never allocates, changes VMA permissions, or unmaps on the hot path.
+// Linux exposes the same memfd through separate RW/non-executable and
+// RO/executable MAP_SHARED aliases; no virtual mapping is W+X. The arena is
+// host-only, never exposed to the guest, and rewritten only while the native
+// scheduler has exclusive execution ownership.
+// A live arena is process-local native state: as with a live native worker
+// pool, construct a fresh SystemState after fork rather than continuing with
+// inherited shared aliases.
+class HostExecutableArena {
+public:
+    HostExecutableArena() = default;
+    HostExecutableArena(const HostExecutableArena&) = delete;
+    HostExecutableArena& operator=(
+        const HostExecutableArena&) = delete;
+
+    ~HostExecutableArena() {
+        reset();
+    }
+
+    bool ensure(
+            std::size_t slot_count,
+            bool& allocation_attempted,
+            bool& allocated) {
+        allocation_attempted = false;
+        allocated = false;
+#if MP64_HAS_X86_64_JIT
+        if (state_ == State::READY)
+            return slot_count == slot_count_;
+        if (state_ == State::FAILED)
+            return false;
+
+        allocation_attempted = true;
+        state_ = State::FAILED;
+        const long page_size_value = ::sysconf(_SC_PAGESIZE);
+        if (page_size_value <= 0 || slot_count == 0)
+            return false;
+        const std::size_t slot_bytes =
+            static_cast<std::size_t>(page_size_value);
+        if (
+            slot_count >
+            std::numeric_limits<std::size_t>::max() / slot_bytes
+        ) {
+            return false;
+        }
+        const std::size_t mapped_bytes = slot_count * slot_bytes;
+        if (
+            mapped_bytes >
+            static_cast<std::size_t>(
+                std::numeric_limits<off_t>::max())
+        ) {
+            return false;
+        }
+
+        try {
+            published_slots_.assign(slot_count, 0);
+        } catch (const std::bad_alloc&) {
+            published_slots_.clear();
+            return false;
+        }
+
+        int descriptor = static_cast<int>(::syscall(
+            SYS_memfd_create,
+            "mp64-single-core-jit",
+            MFD_CLOEXEC | MFD_EXEC));
+        if (descriptor < 0 && errno == EINVAL) {
+            descriptor = static_cast<int>(::syscall(
+                SYS_memfd_create,
+                "mp64-single-core-jit",
+                MFD_CLOEXEC));
+        }
+        if (descriptor < 0) {
+            published_slots_.clear();
+            return false;
+        }
+        if (
+            ::ftruncate(
+                descriptor,
+                static_cast<off_t>(mapped_bytes)) != 0
+        ) {
+            ::close(descriptor);
+            published_slots_.clear();
+            return false;
+        }
+
+        void* writable = ::mmap(
+            nullptr,
+            mapped_bytes,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            descriptor,
+            0);
+        if (writable == MAP_FAILED) {
+            ::close(descriptor);
+            published_slots_.clear();
+            return false;
+        }
+        void* executable = ::mmap(
+            nullptr,
+            mapped_bytes,
+            PROT_READ | PROT_EXEC,
+            MAP_SHARED,
+            descriptor,
+            0);
+        ::close(descriptor);
+        if (executable == MAP_FAILED) {
+            ::munmap(writable, mapped_bytes);
+            published_slots_.clear();
+            return false;
+        }
+
+        writable_ = static_cast<uint8_t*>(writable);
+        executable_ = static_cast<uint8_t*>(executable);
+        slot_count_ = slot_count;
+        slot_bytes_ = slot_bytes;
+        mapped_bytes_ = mapped_bytes;
+        state_ = State::READY;
+        allocated = true;
+        return true;
+#else
+        (void)slot_count;
+        return false;
+#endif
+    }
+
+    HostExecutableCode publish(
+            std::size_t slot,
+            const std::vector<uint8_t>& code,
+            bool& rewrote_slot) noexcept {
+        rewrote_slot = false;
+#if MP64_HAS_X86_64_JIT
+        if (
+            state_ != State::READY ||
+            slot >= slot_count_ ||
+            code.empty() ||
+            code.size() > slot_bytes_
+        ) {
+            return {};
+        }
+        const std::size_t offset = slot * slot_bytes_;
+        uint8_t* const writable = writable_ + offset;
+        uint8_t* const executable = executable_ + offset;
+        std::memcpy(writable, code.data(), code.size());
+        std::atomic_thread_fence(std::memory_order_release);
+        __builtin___clear_cache(
+            reinterpret_cast<char*>(executable),
+            reinterpret_cast<char*>(executable + code.size()));
+        rewrote_slot = published_slots_[slot] != 0;
+        published_slots_[slot] = 1;
+        return HostExecutableCode(executable);
+#else
+        (void)slot;
+        (void)code;
+        return {};
+#endif
+    }
+
+    bool ready() const noexcept {
+        return state_ == State::READY;
+    }
+
+    bool failed() const noexcept {
+        return state_ == State::FAILED;
+    }
+
+    std::size_t slot_count() const noexcept {
+        return slot_count_;
+    }
+
+    std::size_t slot_bytes() const noexcept {
+        return slot_bytes_;
+    }
+
+    std::size_t mapped_bytes() const noexcept {
+        return mapped_bytes_;
+    }
+
+private:
+    enum class State : uint8_t {
+        UNINITIALIZED = 0,
+        READY = 1,
+        FAILED = 2,
+    };
+
+    void reset() noexcept {
+#if MP64_HAS_X86_64_JIT
+        if (writable_ != nullptr)
+            ::munmap(writable_, mapped_bytes_);
+        if (executable_ != nullptr)
+            ::munmap(executable_, mapped_bytes_);
+#endif
+        writable_ = nullptr;
+        executable_ = nullptr;
+        slot_count_ = 0;
+        slot_bytes_ = 0;
+        mapped_bytes_ = 0;
+        published_slots_.clear();
+        state_ = State::UNINITIALIZED;
+    }
+
+    State state_ = State::UNINITIALIZED;
+    uint8_t* writable_ = nullptr;
+    uint8_t* executable_ = nullptr;
+    std::size_t slot_count_ = 0;
+    std::size_t slot_bytes_ = 0;
+    std::size_t mapped_bytes_ = 0;
+    std::vector<uint8_t> published_slots_;
 };
 
 class ResumableBusAccess;
@@ -2049,6 +2264,8 @@ struct CPUState {
         for (SingleCoreDecodedBlockEntry& entry :
              single_core_block_cache) {
             entry.valid = false;
+            entry.native_compile_checked = false;
+            entry.native_code.reset();
         }
     }
 
@@ -4184,7 +4401,13 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_jit_compile_attempts = 0;
     uint64_t uncontended_jit_compilations = 0;
     uint64_t uncontended_jit_compile_failures = 0;
-    uint64_t uncontended_jit_mapping_evictions = 0;
+    uint64_t uncontended_jit_plan_evictions = 0;
+    uint64_t uncontended_jit_arena_allocations = 0;
+    uint64_t uncontended_jit_arena_allocation_failures = 0;
+    uint64_t uncontended_jit_slot_publications = 0;
+    uint64_t uncontended_jit_slot_rewrites = 0;
+    uint64_t uncontended_jit_code_bytes = 0;
+    uint64_t uncontended_jit_max_code_bytes = 0;
     uint64_t uncontended_jit_executions = 0;
     uint64_t uncontended_jit_steps = 0;
     uint64_t logical_subfrontiers = 0;
@@ -4237,7 +4460,8 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_round_ns = 0;
     uint64_t uncontended_dispatch_ns = 0;
     uint64_t uncontended_jit_compile_ns = 0;
-    uint64_t uncontended_jit_mapping_ns = 0;
+    uint64_t uncontended_jit_arena_allocation_ns = 0;
+    uint64_t uncontended_jit_publication_ns = 0;
     uint64_t logical_subfrontier_ns = 0;
     uint64_t round_absorption_ns = 0;
     uint64_t worker_wave_ns = 0;
@@ -5329,6 +5553,9 @@ struct SystemState {
     SystemClock shared_clock{};
     ExternalEventInbox external_events{};
     MainBusArbiter main_bus{};
+    // Declared before CPU ownership so reverse destruction drops every
+    // non-owning block-cache reference before the arena unmaps its aliases.
+    HostExecutableArena single_core_jit_arena{};
     // Cluster-local arbitration state is declared before CPU ownership so
     // reduced CPU views are destroyed before the shared arbiters they use.
     std::vector<ClusterState> cluster_states;
@@ -21511,60 +21738,16 @@ static void emit_single_core_jit_instruction(
     }
 }
 
-static HostExecutableCode seal_single_core_jit_code(
-        const std::vector<uint8_t>& code,
-        bool profile_enabled,
-        uint64_t* mapping_ns) noexcept {
-    HostProfileWallTimer mapping_timer(
-        profile_enabled,
-        mapping_ns);
-    if (code.empty())
-        return {};
-    const long page_size_value = ::sysconf(_SC_PAGESIZE);
-    if (page_size_value <= 0)
-        return {};
-    const std::size_t page_size =
-        static_cast<std::size_t>(page_size_value);
-    if (code.size() >
-        std::numeric_limits<std::size_t>::max() - (page_size - 1)) {
-        return {};
-    }
-    const std::size_t mapping_size =
-        ((code.size() + page_size - 1) / page_size) * page_size;
-    constexpr int anonymous_mapping = MAP_ANONYMOUS;
-    void* mapping = ::mmap(
-        nullptr,
-        mapping_size,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | anonymous_mapping,
-        -1,
-        0);
-    if (mapping == MAP_FAILED)
-        return {};
-    std::memcpy(mapping, code.data(), code.size());
-    __builtin___clear_cache(
-        static_cast<char*>(mapping),
-        static_cast<char*>(mapping) + code.size());
-    if (::mprotect(
-            mapping,
-            mapping_size,
-            PROT_READ | PROT_EXEC) != 0) {
-        ::munmap(mapping, mapping_size);
-        return {};
-    }
-    return HostExecutableCode(mapping, mapping_size);
-}
-
 static SingleCoreJitCompilation
 compile_single_core_jit_block(
+        SystemState& system,
         const CPUState& core,
         CPUState::SingleCoreDecodedBlockEntry& block,
-        bool profile_enabled,
-        uint64_t* compile_ns,
-        uint64_t* mapping_ns) {
+        ConcurrencyProfileCounters& profile) {
+    const bool profile_enabled = profile.enabled;
     HostProfileWallTimer compile_timer(
         profile_enabled,
-        compile_ns);
+        &profile.uncontended_jit_compile_ns);
     try {
         X86_64BlockEmitter emitter;
         // ENDBR64 is a no-op on hosts without CET and permits indirect entry
@@ -21695,13 +21878,65 @@ compile_single_core_jit_block(
             emitter.jump32();
         emitter.patch32(interrupt_to_common, common_exit);
 
-        HostExecutableCode code =
-            seal_single_core_jit_code(
-                emitter.code(),
+        bool allocation_attempted = false;
+        bool arena_allocated = false;
+        bool arena_ready = false;
+        HostExecutableArena& jit_arena =
+            system.single_core_jit_arena;
+        if (jit_arena.ready() || jit_arena.failed()) {
+            arena_ready = jit_arena.ensure(
+                CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES,
+                allocation_attempted,
+                arena_allocated);
+        } else {
+            HostProfileWallTimer allocation_timer(
                 profile_enabled,
-                mapping_ns);
+                &profile.uncontended_jit_arena_allocation_ns);
+            arena_ready = jit_arena.ensure(
+                CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES,
+                allocation_attempted,
+                arena_allocated);
+        }
+        if (profile_enabled && allocation_attempted) {
+            if (arena_allocated) {
+                host_saturating_increment(
+                    profile.uncontended_jit_arena_allocations);
+            } else {
+                host_saturating_increment(
+                    profile
+                        .uncontended_jit_arena_allocation_failures);
+            }
+        }
+        if (!arena_ready)
+            return SingleCoreJitCompilation::FAILED;
+
+        bool rewrote_slot = false;
+        HostExecutableCode code;
+        {
+            HostProfileWallTimer publication_timer(
+                profile_enabled,
+                &profile.uncontended_jit_publication_ns);
+            code = jit_arena.publish(
+                single_core_block_cache_index(block.address),
+                emitter.code(),
+                rewrote_slot);
+        }
         if (!code)
             return SingleCoreJitCompilation::FAILED;
+        if (profile_enabled) {
+            host_saturating_increment(
+                profile.uncontended_jit_slot_publications);
+            if (rewrote_slot) {
+                host_saturating_increment(
+                    profile.uncontended_jit_slot_rewrites);
+            }
+            host_saturating_add(
+                profile.uncontended_jit_code_bytes,
+                static_cast<uint64_t>(emitter.code().size()));
+            profile.uncontended_jit_max_code_bytes = std::max(
+                profile.uncontended_jit_max_code_bytes,
+                static_cast<uint64_t>(emitter.code().size()));
+        }
         block.native_code = std::move(code);
         return SingleCoreJitCompilation::COMPILED;
     } catch (const std::bad_alloc&) {
@@ -21714,11 +21949,10 @@ compile_single_core_jit_block(
 
 static SingleCoreJitCompilation
 compile_single_core_jit_block(
+        SystemState&,
         const CPUState&,
         CPUState::SingleCoreDecodedBlockEntry&,
-        bool,
-        uint64_t*,
-        uint64_t*) noexcept {
+        ConcurrencyProfileCounters&) noexcept {
     return SingleCoreJitCompilation::UNAVAILABLE;
 }
 
@@ -22629,7 +22863,7 @@ try_execute_single_core_decoded_block(
                 profile.uncontended_block_misses);
         }
         const bool evicts_block = block->valid;
-        const bool evicts_mapping =
+        const bool evicts_native_plan =
             static_cast<bool>(block->native_code);
         block = build_single_core_decoded_block(
             core, address);
@@ -22642,9 +22876,9 @@ try_execute_single_core_decoded_block(
                 host_saturating_increment(
                     profile.uncontended_block_evictions);
             }
-            if (evicts_mapping) {
+            if (evicts_native_plan) {
                 host_saturating_increment(
-                    profile.uncontended_jit_mapping_evictions);
+                    profile.uncontended_jit_plan_evictions);
             }
         }
     }
@@ -22735,11 +22969,10 @@ try_execute_single_core_decoded_block(
     ) {
         const SingleCoreJitCompilation jit_compilation =
             compile_single_core_jit_block(
+                system,
                 core,
                 *block,
-                profile_enabled,
-                &profile.uncontended_jit_compile_ns,
-                &profile.uncontended_jit_mapping_ns);
+                profile);
         block->native_compile_checked = true;
         if (profile_enabled) {
             if (
@@ -25831,8 +26064,20 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_jit_compilations;
     counts["uncontended_jit_compile_failures"] =
         profile.uncontended_jit_compile_failures;
-    counts["uncontended_jit_mapping_evictions"] =
-        profile.uncontended_jit_mapping_evictions;
+    counts["uncontended_jit_plan_evictions"] =
+        profile.uncontended_jit_plan_evictions;
+    counts["uncontended_jit_arena_allocations"] =
+        profile.uncontended_jit_arena_allocations;
+    counts["uncontended_jit_arena_allocation_failures"] =
+        profile.uncontended_jit_arena_allocation_failures;
+    counts["uncontended_jit_slot_publications"] =
+        profile.uncontended_jit_slot_publications;
+    counts["uncontended_jit_slot_rewrites"] =
+        profile.uncontended_jit_slot_rewrites;
+    counts["uncontended_jit_code_bytes"] =
+        profile.uncontended_jit_code_bytes;
+    counts["uncontended_jit_max_code_bytes"] =
+        profile.uncontended_jit_max_code_bytes;
     counts["uncontended_jit_executions"] =
         profile.uncontended_jit_executions;
     counts["uncontended_jit_steps"] =
@@ -25909,8 +26154,10 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_dispatch_ns;
     wall_ns["uncontended_jit_compile"] =
         profile.uncontended_jit_compile_ns;
-    wall_ns["uncontended_jit_mapping"] =
-        profile.uncontended_jit_mapping_ns;
+    wall_ns["uncontended_jit_arena_allocation"] =
+        profile.uncontended_jit_arena_allocation_ns;
+    wall_ns["uncontended_jit_publication"] =
+        profile.uncontended_jit_publication_ns;
     wall_ns["logical_subfrontier"] =
         profile.logical_subfrontier_ns;
     wall_ns["round_absorption"] =
@@ -25943,8 +26190,29 @@ static py::dict concurrency_profile_snapshot_dict(
         std::move(
             coordinator_boundary_origin_ns);
 
+    py::dict jit_storage;
+#if MP64_HAS_X86_64_JIT
+    jit_storage["kind"] =
+        "memfd-dual-mapped-fixed-slots";
+    jit_storage["w_x_model"] =
+        "distinct-rw-and-rx-aliases";
+#else
+    jit_storage["kind"] = "unavailable";
+    jit_storage["w_x_model"] = "unavailable";
+#endif
+    jit_storage["ready"] =
+        system.single_core_jit_arena.ready();
+    jit_storage["failed"] =
+        system.single_core_jit_arena.failed();
+    jit_storage["slot_count"] =
+        system.single_core_jit_arena.slot_count();
+    jit_storage["slot_bytes"] =
+        system.single_core_jit_arena.slot_bytes();
+    jit_storage["mapped_bytes_per_alias"] =
+        system.single_core_jit_arena.mapped_bytes();
+
     py::dict result;
-    result["schema_version"] = 7;
+    result["schema_version"] = 8;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -25960,6 +26228,8 @@ static py::dict concurrency_profile_snapshot_dict(
 #endif
     result["counts"] = std::move(counts);
     result["wall_ns"] = std::move(wall_ns);
+    result["single_core_jit_storage"] =
+        std::move(jit_storage);
     result["lane_active_ns"] =
         std::move(lane_active_ns);
     return result;

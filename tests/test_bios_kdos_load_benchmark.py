@@ -8,6 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
+    assert benchmark.SCHEMA_VERSION == 2
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -25,7 +26,7 @@ def test_parser_rejects_nonpositive_execution_bounds(option: str) -> None:
         benchmark.build_parser().parse_args([option, "0"])
 
 
-def test_profile_derivation_exposes_coverage_churn_and_mapping_cost() -> None:
+def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
     profile = {
         "counts": {
             "uncontended_block_hits": 75,
@@ -38,11 +39,17 @@ def test_profile_derivation_exposes_coverage_churn_and_mapping_cost() -> None:
             "uncontended_jit_compilations": 8,
             "uncontended_block_evictions": 20,
             "uncontended_block_builds": 25,
-            "uncontended_jit_mapping_evictions": 4,
+            "uncontended_jit_plan_evictions": 4,
+            "uncontended_jit_arena_allocations": 1,
+            "uncontended_jit_arena_allocation_failures": 0,
+            "uncontended_jit_slot_publications": 8,
+            "uncontended_jit_slot_rewrites": 3,
+            "uncontended_jit_code_bytes": 1_600,
         },
         "wall_ns": {
             "uncontended_jit_compile": 2_000_000,
-            "uncontended_jit_mapping": 800_000,
+            "uncontended_jit_arena_allocation": 80_000,
+            "uncontended_jit_publication": 400_000,
         },
     }
 
@@ -54,10 +61,13 @@ def test_profile_derivation_exposes_coverage_churn_and_mapping_cost() -> None:
         "jit_step_fraction": 0.4,
         "jit_steps_per_execution": 4.0,
         "jit_compile_us_per_attempt": 200.0,
-        "jit_mapping_us_per_compilation": 100.0,
-        "jit_mapping_fraction_of_compile_time": 0.4,
+        "jit_arena_allocation_us_per_attempt": 80.0,
+        "jit_publication_us_per_compilation": 50.0,
+        "jit_publication_fraction_of_compile_time": 0.2,
         "block_evictions_per_build": 0.8,
-        "mapping_evictions_per_compilation": 0.5,
+        "plan_evictions_per_compilation": 0.5,
+        "slot_rewrites_per_publication": 0.375,
+        "average_jit_code_bytes": 200.0,
     }
 
 

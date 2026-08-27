@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 16
+    assert report["schema_version"] == 17
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -32,13 +32,14 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 7
+        assert probe["schema_version"] == 8
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
 
         native = probe["native_snapshot"]
         counts = native["counts"]
+        jit_storage = native["single_core_jit_storage"]
         assert not native["enabled"]
         assert native["generation"] > 0
         assert counts["batches"] == accounting["execution"]["run_batch_calls"]
@@ -99,6 +100,24 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert native["wall_ns"]["frontier_fast_path"] > 0
         assert native["wall_ns"]["uncontended_round"] == 0
         assert native["wall_ns"]["uncontended_dispatch"] == 0
+        for name in (
+            "uncontended_jit_plan_evictions",
+            "uncontended_jit_arena_allocations",
+            "uncontended_jit_arena_allocation_failures",
+            "uncontended_jit_slot_publications",
+            "uncontended_jit_slot_rewrites",
+            "uncontended_jit_code_bytes",
+            "uncontended_jit_max_code_bytes",
+        ):
+            assert counts[name] == 0
+        assert native["wall_ns"][
+            "uncontended_jit_arena_allocation"
+        ] == 0
+        assert native["wall_ns"]["uncontended_jit_publication"] == 0
+        assert not jit_storage["ready"]
+        assert jit_storage["slot_count"] == 0
+        assert jit_storage["slot_bytes"] == 0
+        assert jit_storage["mapped_bytes_per_alias"] == 0
 
         callbacks = probe["python_callbacks"]
         assert callbacks["mmio_read_calls"] > 0
@@ -143,14 +162,15 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 16
+    assert report["schema_version"] == 17
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 7
+        assert probe["schema_version"] == 8
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]
+        jit_storage = native["single_core_jit_storage"]
         accounting = result["accounting_probe"]
         returned = accounting[
             "aggregate_instructions_from_per_core"
@@ -166,6 +186,48 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         assert counts["private_steps"] == 0
         assert native["wall_ns"]["uncontended_round"] > 0
         assert native["wall_ns"]["uncontended_dispatch"] > 0
+        assert (
+            counts["uncontended_jit_slot_publications"]
+            == counts["uncontended_jit_compilations"]
+        )
+        assert (
+            counts["uncontended_jit_slot_rewrites"]
+            <= counts["uncontended_jit_slot_publications"]
+        )
+        assert (
+            counts["uncontended_jit_plan_evictions"]
+            <= counts["uncontended_block_builds"]
+        )
+        assert (
+            counts["uncontended_jit_arena_allocations"]
+            <= counts["uncontended_jit_compile_attempts"]
+        )
+        assert (
+            counts["uncontended_jit_arena_allocation_failures"]
+            <= counts["uncontended_jit_compile_attempts"]
+        )
+        assert (
+            native["wall_ns"]["uncontended_jit_arena_allocation"]
+            <= native["wall_ns"]["uncontended_jit_compile"]
+        )
+        assert (
+            native["wall_ns"]["uncontended_jit_publication"]
+            <= native["wall_ns"]["uncontended_jit_compile"]
+        )
+        if counts["uncontended_jit_slot_publications"] > 0:
+            assert jit_storage["ready"]
+            assert not jit_storage["failed"]
+            assert jit_storage["slot_count"] > 0
+            assert jit_storage["slot_bytes"] > 0
+            assert (
+                jit_storage["mapped_bytes_per_alias"]
+                == jit_storage["slot_count"]
+                * jit_storage["slot_bytes"]
+            )
+            assert (
+                counts["uncontended_jit_max_code_bytes"]
+                <= jit_storage["slot_bytes"]
+            )
 
         ratios = probe["structural_ratios"]
         assert ratios["uncontended_steps_per_dispatch"] > 0
