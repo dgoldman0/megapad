@@ -2,13 +2,14 @@
 
 **Started:** 2026-08-27
 
-**Status:** Active — construction qualification only
+**Status:** Active — Element 8 consolidation; broad acceptance still gated
 
 **Branch:** `single-core-execution-kernel`
 
 **Isolated worktree:** `.worktrees/megapad-single-core-execution-kernel`
 
-**Correct DBT baseline:** `72e1122adaac3de2bc23d235e58063cd179d43ce`
+**Old DBT comparison baseline:**
+`72e1122adaac3de2bc23d235e58063cd179d43ce`
 
 **External comparison snapshots:** `main` at
 `b399bd066d9ecdc87bf445dee6fd8e615255e61d`; `rich-terminal-vertical` at
@@ -201,10 +202,11 @@ one explicit contract without adding redundant hot-path copies.
 ### Host backend
 
 The x86-64 backend lowers block IR without owning MP64 decoding, guest-cache
-identity, scheduling, or Python callbacks. It keeps profitable guest registers,
-PC, and flags live across the block and materializes them at exact exits. Direct
-continuation is considered only after blocks are long enough to amortize it;
-the reverted C++ successor-probe loop is not restored.
+identity, scheduling, or Python callbacks. It keeps profitable guest state live
+across the block and materializes it at exact exits. Element 7 declined direct
+continuation because the measured successor edges do not amortize the required
+invalidation, preflight, and broader entry/exit state; the reverted C++
+successor-probe loop is not restored.
 
 ## Fixed implementation elements
 
@@ -216,8 +218,8 @@ the reverted C++ successor-probe loop is not restored.
 | 4 | Algebraic memory foundation | Complete |
 | 5 | Authoritative decoded execution kernel | Complete |
 | 6 | Multi-line and multi-memory block construction | Complete |
-| 7 | x86-64 lowering and direct continuation | In progress |
-| 8 | Consolidation and acceptance | Pending |
+| 7 | x86-64 lowering and continuation decision | Complete |
+| 8 | Consolidation and acceptance | In progress |
 
 ### Element 1 — Source ownership and build decomposition
 
@@ -557,7 +559,7 @@ and those cases plus the existing direct-read, scalar-store, long-call/return,
 cross-line, and dense-slot happy paths passed serially (13 focused instances).
 This completes Element 6 without a BIOS timing or broad-qualification claim.
 
-### Element 7 — x86-64 lowering and direct continuation
+### Element 7 — x86-64 lowering and continuation decision
 
 - Lower the proved block IR into the retained bounded W^X arena.
 - Keep guest registers, flags, fetch accounting, and PC live across useful
@@ -590,8 +592,8 @@ reference. The dense block still publishes exactly 1,009 bytes, and 14 focused
 serial cases cover register/flag execution, both branch widths, multi-memory
 byte and natural-width paths, high-register `SEP`, `CALL.L`, and `RET.L`. This
 is source-ownership and object-layout evidence, not a wall-time claim. Direct
-continuation remains pending measured evidence from the longer production
-blocks.
+continuation was deferred to the production comparison rather than presumed to
+be part of the lowering extraction.
 
 Second-slice evidence (2026-08-27): profitable generated blocks now
 materialize their identity-proved entry PC in caller-saved x86-64 `R9`, advance
@@ -644,7 +646,53 @@ dropped the two-instruction branch tail and regressed to an 84.846404-ms
 median, which is why the byte-cost gate retains the previously measured shape
 for one byte of tolerated growth.
 
+Element 7 completion evidence (2026-08-27): a narrowly authorized, sequential
+BIOS+KDOS source-load checkpoint compared clean detached builds using the same
+Python, compiler, `-march=native`, `-O3`, canonical schema-4 harness, and host
+CPU 3. One excluded warm-up and validation run per revision preceded nine
+position-balanced unprofiled rounds.
+
+| Revision | Median wall | Median throughput |
+|---|---:|---:|
+| Pre-DBT `3f339eb` | 2.914373 s | 32.858 Msteps/s |
+| Old DBT baseline `72e1122` | 2.658675 s | 36.018 Msteps/s |
+| Current reworked DBT `02c675a` | 1.540888 s | 62.147 Msteps/s |
+
+The current reworked DBT used 41.821% less median paired wall time and
+delivered 71.883% more paired throughput than the old DBT baseline; it was
+faster in all nine pairs. Against pre-DBT execution it used 43.216% less wall
+time and delivered 76.105% more throughput, again faster in all nine pairs.
+All 27 recorded reports retired exactly 95,760,826 instructions in 111,708,049
+cycles and matched the complete error-free transcript, HERE/LATEST values,
+idle and guest-JIT-tail state, boot-image and dictionary hashes, and every
+harness validation.
+
+Separate diagnostic replays, which are not timing evidence, show the current
+JIT step fraction rising from 73.857% to 96.830%, guest steps per native
+execution from 2.462 to 2.946, block misses falling from 24,932,919 to
+2,856,084, and rejection-cache hits falling from 23,909,300 to 1,987,915.
+Compilation and publication remained about 54 ms total.
+
+Element 7 is complete without direct native continuation. The measured hot
+successor edges still owe either terminal-write I-cache invalidation or fresh
+transactional memory preflight, so continuation would broaden the entry/exit
+ABI and aggregation state without evidence that it pays for itself. It is
+explicitly declined, not pending. Any future proposal requires new
+edge-specific retained evidence and paired exact comparison; the reverted
+successor-probe design is not restored.
+
+This checkpoint establishes an exact-equivalent end-to-end gain for the current
+execution kernel. It does not attribute that gain to any one slice, exhaust
+deferred semantic or fault cases, qualify strict-cycle or persistence paths, or
+constitute broad final acceptance.
+
 ### Element 8 — Consolidation and acceptance
+
+Entry note (2026-08-27): Element 8 begins from `02c675a`. Consolidation, not
+new execution machinery, is now the active critical path. The authorized
+comparison did not lift the project-wide qualification gate; broad acceptance
+remains deferred, and deferred findings are addressed only where the final
+ownership contract or permitted focused acceptance requires them.
 
 - Extract Python buffer leases, callback construction, snapshot codecs, and
   pybind registration only after their machine/CPU owners have stable native
@@ -702,9 +750,11 @@ does not justify keeping the superseded implementation in the final tree.
   production speedup claim.
 - Storage replay time, settlement timer time, and other inclusive components
   are not added together as a projected total saving.
-- The first permitted canonical acceptance compares the final implementation
-  against the preserved `72e1122` DBT baseline and an appropriate external
-  pre-DBT worktree revision, with exact state and transcript equivalence.
+- The authorized pre-Element-8 checkpoint compared the current reworked DBT
+  against the old `72e1122` DBT baseline and pre-DBT `3f339eb`, with exact
+  state and transcript equivalence. It is an execution-kernel checkpoint, not
+  final broad qualification; final acceptance remains subject to the
+  rich-terminal and normal resource gates.
 
 ## Initial decision ledger
 
@@ -720,15 +770,15 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D8 | Normalize decoded and generated execution into one 16-byte MP64 block exit while retaining a backend-private packed transport. | Common exits remain register-returned; authoritative CPU state and already-known raw-write invalidation are not duplicated into every descriptor. |
 | EK-D9 | Represent scalar block addresses as ordered entry/constant/prior-read recipes and prove every span transactionally before entry. | The capacity derives from block identity, the hot motifs are not fused, no generated memory side exit is added, and a failed proof retires nothing. |
 | EK-D10 | Keep the identity-proved PC in x86-64 R9 when its emitted-byte cost is favorable, tolerating at most one byte of growth for the measured short shapes, and no semantic selector alias exists. | Entry identity supplies the exact initial value; every normal or prefix-interrupt exit reaches one materialization point, while costlier or aliased blocks keep the established lowering. |
+| EK-D11 | Close Element 7 without direct native continuation. | The current reworked DBT delivered a material exact-equivalent BIOS+KDOS gain, while measured hot successor edges still require write invalidation or fresh transactional preflight. No chaining state or broader entry/exit ABI is added; reconsideration requires new edge-specific retained evidence. |
 
 ## Deferred findings ledger
 
 | ID | Finding | Disposition |
 |---|---|---|
 | EK-F1 | Focused happy-path coverage does not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias shape, natural-width callback route, or strict-cycle replay form. | Keep construction on the seconds-scale happy-path spine. Add the compact table-driven semantic matrix and fault/alias timing oracles during Element 8 acceptance, or earlier only if one blocks the next production slice. |
-| EK-F2 | Inlined positive and rejection identity checks retain some predicates already proved by their sole admission caller. | Preserve the reviewed contract now; reassess predicate consolidation from object layout and paired measurements after multi-memory construction changes the surrounding hot path. |
-| EK-F3 | The workload-hot rejection matcher remains in a far tail of the 0x1a2a-byte uncontended-round body even after generation checks remove its repeated byte comparison. | Treat code placement as a later measured fine turn. Do not perturb the correct identity contract before longer blocks reduce rejection traffic. |
-| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Measure the remaining rejection shapes after the new multi-memory blocks are in production. Add generated guards/completed-prefix exits only if retained evidence justifies their entry cost. |
-| EK-F5 | Happy-path construction coverage does not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Add exact zero-progress and completed-prefix oracles during Element 8 acceptance, or earlier only if continuation work changes either contract; do not add construction-only fault hooks now. |
-| EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | Measure the admitted workload motifs after lowering extraction before claiming net speed. Keep the bounded preflight out of line and change it only from paired exact evidence. |
-| EK-F7 | The measured Forth `+` loop cannot use the current native-entry ABI for direct continuation: one edge owes terminal-write invalidation and the other owes a new three-span preflight table. | Do not recreate dispatcher-mediated chaining or add successor ABI state from this motif. Reconsider continuation only after broader production block/exit evidence identifies edges that can preserve identity, step budget, cycles, and settlement more cheaply than returning. |
+| EK-F2 | Inlined positive and rejection identity checks retain some predicates already proved by their sole admission caller. | Reassess them during consolidation and remove only predicates whose redundancy follows from the final caller contract; do not weaken dynamic identity validation. |
+| EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as low priority during consolidation unless a new profile shows it remains material. |
+| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden provenance during consolidation without retained remaining-shape evidence and paired exact justification. |
+| EK-F5 | Happy-path construction coverage does not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Add exact zero-progress and completed-prefix oracles during permitted Element 8 acceptance; continuation is no longer a condition on this work. |
+| EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if Element 8 profiling identifies it as material and paired exact evidence supports the change. |
