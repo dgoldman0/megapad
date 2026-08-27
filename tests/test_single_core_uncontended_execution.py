@@ -14,6 +14,7 @@ from system import MegapadSystem
 
 SHARED_WORD = 0x800
 SYSINFO_SINK = MMIO_BASE + SYSINFO_BASE
+NATURAL_CALLBACK_BASE = MMIO_BASE + 0x1_0000
 REGISTER_BLOCK_SOURCE = """
 loop:
     ldi64 r13, 0xfedcba98765432a5
@@ -491,6 +492,124 @@ def test_callback_error_settles_exact_completed_prefix() -> None:
     assert fast[9] == 2
     assert fast[16] == 2
     assert fast[17] == 2
+
+
+def _run_natural_callback_success(
+    operation: str,
+    *,
+    reference: bool,
+) -> tuple:
+    system = _system(reference=reference)
+    system.load_binary(0, assemble(operation))
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+
+    events: list[tuple] = []
+    value = 0x8877_6655_4433_2211
+    if operation.startswith("ldn"):
+        system.cpu.regs[4] = 0xDEAD_BEEF
+        system.cpu.regs[5] = NATURAL_CALLBACK_BASE
+
+        def read_byte(address: int) -> int:
+            events.append(("read", address))
+            offset = address - NATURAL_CALLBACK_BASE
+            return (value >> (8 * offset)) & 0xFF
+
+        system.cpu._mmio_read8 = read_byte
+    else:
+        system.cpu.regs[4] = NATURAL_CALLBACK_BASE
+        system.cpu.regs[5] = value
+
+        def write_byte(address: int, byte: int) -> None:
+            events.append(("write", address, byte))
+
+        system.cpu._mmio_write8 = write_byte
+
+    stats = system.run_batch_stats(1)
+    stats_signature = (
+        stats.instructions_executed,
+        stats.system_cycles_advanced,
+        stats.per_core_instructions[0],
+        stats.per_core_cycles[0],
+    )
+    return tuple(events), _core_signature(system), stats_signature
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        pytest.param("ldn r4, r5", id="load"),
+        pytest.param("str r4, r5", id="store"),
+    ),
+)
+def test_natural_width_callbacks_preserve_little_endian_byte_order(
+    operation: str,
+) -> None:
+    fast = _run_natural_callback_success(operation, reference=False)
+    reference = _run_natural_callback_success(operation, reference=True)
+
+    assert fast == reference
+    events, state, stats = fast
+    value = 0x8877_6655_4433_2211
+    if operation.startswith("ldn"):
+        assert events == tuple(
+            ("read", NATURAL_CALLBACK_BASE + offset)
+            for offset in range(8)
+        )
+        assert state[0][4] == value
+    else:
+        assert events == tuple(
+            (
+                "write",
+                NATURAL_CALLBACK_BASE + offset,
+                (value >> (8 * offset)) & 0xFF,
+            )
+            for offset in range(8)
+        )
+    assert stats == (1, 1, 1, 1)
+
+
+def _run_prefixed_natural_callback_failure(*, reference: bool) -> tuple:
+    system = _system(reference=reference)
+    system.load_binary(0, assemble("ldn r16, r17"))
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    system.cpu.regs[16] = 0xDEAD_BEEF_CAFE_BABE
+    system.cpu.regs[17] = NATURAL_CALLBACK_BASE
+    failure = _CallbackFailure("prefixed natural-width read")
+    addresses: list[int] = []
+
+    def fail_later_byte(address: int) -> int:
+        addresses.append(address)
+        if address == NATURAL_CALLBACK_BASE + 3:
+            raise failure
+        return address - NATURAL_CALLBACK_BASE
+
+    system.cpu._mmio_read8 = fail_later_byte
+    with pytest.raises(_CallbackFailure) as raised:
+        system.run_batch_stats(1)
+    assert raised.value is failure
+    return tuple(addresses), _core_signature(system)
+
+
+def test_prefixed_natural_read_failure_stops_at_exact_callback_byte() -> None:
+    fast = _run_prefixed_natural_callback_failure(reference=False)
+    reference = _run_prefixed_natural_callback_failure(reference=True)
+
+    assert fast == reference
+    addresses, state = fast
+    assert addresses == tuple(
+        NATURAL_CALLBACK_BASE + offset for offset in range(4)
+    )
+    assert state[0][16] == 0xDEAD_BEEF_CAFE_BABE
+    assert state[0][3] == 3
+    assert state[9] == 0
+    assert state[16] == 0
+    assert state[17] == 0
 
 
 def test_injected_internal_failure_retains_and_clocks_completed_prefix() -> None:

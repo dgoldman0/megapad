@@ -732,6 +732,20 @@ entry branch and changes no DBT ABI. The sequential build and 13 focused
 preflight, multi-memory, callback-prefix, interrupt, store, CALL, and RET cases
 pass.
 
+The fourth consolidation slice resolves EK-F1 at a compact, evidence-driven
+boundary rather than expanding it into an opcode cross-product. All sixteen
+short-branch conditions now compare the authoritative native executor with the
+Python model. `CALL.L` through a distinct stack selector proves that its target
+is sampled before the push; this also corrected the Python model's former
+post-push read. Ordinary return and failing CALL/RET stack accesses pin the
+architectural mutation order. Natural-width callback tests prove eight ordered
+little-endian reads and writes plus a later-byte failure through a high-register
+prefix. Four representative one-cycle decoded forms compare exact strict-cycle
+state and timing with unbounded execution under an explicit one-lane scheduler.
+The 29 focused cases pass sequentially. Program-selector CALL aliases are not
+silently assigned emulator-oracle status; their existing RTL disagreement is
+recorded separately as EK-F7.
+
 - Extract Python buffer leases, callback construction, snapshot codecs, and
   pybind registration only after their machine/CPU owners have stable native
   headers; avoid a catch-all header that recreates the monolith.
@@ -815,9 +829,10 @@ does not justify keeping the superseded implementation in the final tree.
 
 | ID | Finding | Disposition |
 |---|---|---|
-| EK-F1 | Focused happy-path coverage does not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias shape, natural-width callback route, or strict-cycle replay form. | Keep construction on the seconds-scale happy-path spine. Add the compact table-driven semantic matrix and fault/alias timing oracles during Element 8 acceptance, or earlier only if one blocks the next production slice. |
+| EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the acceptance boundary. |
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
 | EK-F3 | The rejection matcher remains in a far tail of the uncontended-round body, although the canonical diagnostic now records only 1,987,915 rejection-cache hits. | Treat placement as low priority during consolidation unless a new profile shows it remains material. |
 | EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden provenance during consolidation without retained remaining-shape evidence and paired exact justification. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if Element 8 profiling identifies it as material and paired exact evidence supports the change. |
+| EK-F7 | `CALL.L` with its source aliased to PSEL, especially when PSEL and SPSEL also collide, has different target-sampling or nonblocking-write precedence between the shared emulator semantics and RTL. | Do not choose a new architectural rule during engine consolidation. Exact block lowering already declines semantic selector aliases; qualify the ISA intent and RTL separately before changing either authoritative model. |

@@ -69,6 +69,7 @@ def _system(
     code: bytes,
     *,
     cores: int = 1,
+    worker_count: int | None = None,
     realtime_clock: bool = False,
     storage_image: str | None = None,
     cold_instruction_cache: bool = False,
@@ -80,6 +81,7 @@ def _system(
         hbw_size=0,
         ext_mem_size=0,
         vram_size=0,
+        worker_count=worker_count,
         realtime_clock=realtime_clock,
         storage_image=storage_image,
     )
@@ -88,6 +90,84 @@ def _system(
     if not cold_instruction_cache:
         _prime_instruction_cache(system, 0, len(code))
     return system
+
+
+def _one_cycle_semantic_state(system: MegapadSystem) -> tuple:
+    cpu = system.cpu
+    return (
+        tuple(cpu.regs),
+        cpu.psel,
+        cpu.xsel,
+        cpu.spsel,
+        cpu.flags_pack(),
+        cpu.d_reg,
+        cpu.q_out,
+        cpu.t_reg,
+        cpu.ef_flags,
+        cpu.halted,
+        cpu.idle,
+        cpu.cycle_count,
+        cpu.perf_cycles,
+        cpu.perf_stalls,
+        cpu._ext_modifier,
+        bytes(cpu.mem),
+        system.timer.counter,
+        system._native_system.system_cycles,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "registers", "flags"),
+    (
+        pytest.param("inc r4", ((4, 0x1234),), 0xA4, id="unary-register"),
+        pytest.param(
+            "addi r4, 7",
+            ((4, 0x1234),),
+            0xA4,
+            id="immediate",
+        ),
+        pytest.param(
+            "xor r4, r5",
+            ((4, 0xAAAA), (5, 0x0F0F)),
+            0xA4,
+            id="register-alu",
+        ),
+        pytest.param("breq 5", (), 0xA4, id="branch-not-taken"),
+    ),
+)
+def test_shared_one_cycle_forms_match_unbounded_execution(
+    source: str,
+    registers: tuple[tuple[int, int], ...],
+    flags: int,
+) -> None:
+    code = assemble(source)
+    strict = _system(code, worker_count=1)
+    unbounded = _system(code, worker_count=1)
+    for system in (strict, unbounded):
+        system.cpu.flags_unpack(flags)
+        system.cpu.q_out = 1
+        system.cpu.ef_flags = 0x3
+        for register, value in registers:
+            system.cpu.regs[register] = value
+
+    strict_stats = strict.run_cycle_batch(1, max_instructions=1)
+    unbounded_stats = unbounded.run_batch_stats(1)
+
+    assert (
+        strict_stats.instructions_executed,
+        strict_stats.system_cycles_advanced,
+        strict_stats.per_core_instructions,
+        strict_stats.per_core_cycles,
+    ) == (1, 1, (1,), (1,))
+    assert (
+        unbounded_stats.instructions_executed,
+        unbounded_stats.system_cycles_advanced,
+        unbounded_stats.per_core_instructions,
+        unbounded_stats.per_core_cycles,
+    ) == (1, 1, (1,), (1,))
+    assert _one_cycle_semantic_state(strict) == _one_cycle_semantic_state(
+        unbounded
+    )
 
 
 def _write_wots_context_address(system: MegapadSystem, address: int) -> None:
