@@ -57,6 +57,37 @@ JIT_PROFILE_WALL_FIELDS = (
 )
 
 
+def _assert_block_rejection_profile_reconciles(snapshot: dict) -> None:
+    assert snapshot["schema_version"] == 9
+    metadata = dict(snapshot["single_core_block_rejection_cache"])
+    assert metadata == {
+        "kind": "direct-mapped-exact-icache-suffix",
+        "entries": 512,
+        "identity_bytes": 16,
+    }
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_block_misses"] == (
+        counts["uncontended_block_rejection_cache_hits"]
+        + counts["uncontended_block_build_attempts"]
+    )
+    assert counts["uncontended_block_build_attempts"] == (
+        counts["uncontended_block_builds"]
+        + counts["uncontended_block_nonresident_rejections"]
+        + counts["uncontended_block_zero_instruction_rejections"]
+        + counts["uncontended_block_one_instruction_rejections"]
+        + counts["uncontended_block_structure_rejections"]
+    )
+    assert counts["uncontended_block_rejection_cache_stores"] == (
+        counts["uncontended_block_zero_instruction_rejections"]
+        + counts["uncontended_block_one_instruction_rejections"]
+        + counts["uncontended_block_structure_rejections"]
+    )
+    assert (
+        counts["uncontended_block_rejection_cache_replacements"]
+        <= counts["uncontended_block_rejection_cache_stores"]
+    )
+
+
 def _system(*, reference: bool = False) -> MegapadSystem:
     system = MegapadSystem(
         ram_size=4096,
@@ -244,7 +275,7 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
     assert fast_core == reference_core
     assert fast_cpu == reference_cpu == _run_python_register_workload()
     assert profile_snapshot is not None
-    assert profile_snapshot["schema_version"] == 8
+    _assert_block_rejection_profile_reconciles(profile_snapshot)
     counts = dict(profile_snapshot["counts"])
     assert counts["uncontended_block_lookups"] == (
         counts["uncontended_block_hits"] +
@@ -446,7 +477,7 @@ loop:
     counts = dict(snapshot["counts"])
     wall_ns = dict(snapshot["wall_ns"])
 
-    assert snapshot["schema_version"] == 8
+    _assert_block_rejection_profile_reconciles(snapshot)
     assert counts["uncontended_rounds"] == stats.native_rounds == 3
     assert counts["uncontended_dispatches"] == sum(
         stats.per_core_dispatches
@@ -529,6 +560,309 @@ loop:
     assert counts["private_steps"] == 0
     assert wall_ns["uncontended_round"] > 0
     assert wall_ns["uncontended_dispatch"] > 0
+
+
+def test_exact_rejection_cache_skips_repeated_one_instruction_builds() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(8)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 8
+    assert system.cpu.pc == 0
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 8
+    assert counts["uncontended_block_hits"] == 0
+    assert counts["uncontended_block_misses"] == 8
+    assert counts["uncontended_block_build_attempts"] == 2
+    assert counts["uncontended_block_builds"] == 0
+    assert counts["uncontended_block_nonresident_rejections"] == 1
+    assert counts["uncontended_block_zero_instruction_rejections"] == 0
+    assert counts["uncontended_block_one_instruction_rejections"] == 1
+    assert counts["uncontended_block_structure_rejections"] == 0
+    assert counts["uncontended_block_rejection_cache_hits"] == 6
+    assert counts["uncontended_block_rejection_cache_stores"] == 1
+    assert counts["uncontended_block_rejection_cache_replacements"] == 0
+    assert counts["uncontended_block_executions"] == 0
+    assert counts["uncontended_block_steps"] == 0
+
+
+def test_exact_rejection_cache_classifies_zero_instruction_starts() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    ei
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(8)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 8
+    assert system.cpu.pc == 0
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 8
+    assert counts["uncontended_block_misses"] == 8
+    assert counts["uncontended_block_build_attempts"] == 3
+    assert counts["uncontended_block_builds"] == 0
+    assert counts["uncontended_block_nonresident_rejections"] == 1
+    assert counts["uncontended_block_zero_instruction_rejections"] == 1
+    assert counts["uncontended_block_one_instruction_rejections"] == 1
+    assert counts["uncontended_block_structure_rejections"] == 0
+    assert counts["uncontended_block_rejection_cache_hits"] == 5
+    assert counts["uncontended_block_rejection_cache_stores"] == 2
+    assert counts["uncontended_block_rejection_cache_replacements"] == 0
+
+
+def test_exact_rejection_survives_same_byte_icache_refill() -> None:
+    system = _system()
+    program = assemble(
+        """
+loop:
+    br loop
+"""
+    )
+    system.load_binary(0, program)
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(4)
+    assert warm.instructions_executed == 4
+    system.cpu.mem_write8(0, program[0])
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(4)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 4
+    assert system.cpu.pc == 0
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 4
+    assert counts["uncontended_block_misses"] == 4
+    assert counts["uncontended_block_build_attempts"] == 1
+    assert counts["uncontended_block_nonresident_rejections"] == 1
+    assert counts["uncontended_block_rejection_cache_hits"] == 3
+    assert counts["uncontended_block_rejection_cache_stores"] == 0
+    assert counts["uncontended_block_rejection_cache_replacements"] == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "boundary",
+        "expected_attempts",
+        "expected_nonresident",
+        "expected_hits",
+    ),
+    (
+        pytest.param("boot", 2, 1, 2, id="boot"),
+        pytest.param("icache-restore", 1, 0, 3, id="icache-restore"),
+    ),
+)
+def test_hard_plan_boundaries_clear_exact_rejections(
+    boundary: str,
+    expected_attempts: int,
+    expected_nonresident: int,
+    expected_hits: int,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(4)
+    assert warm.instructions_executed == 4
+    hot_icache = system.cpu._cs.icache_snapshot()
+    if boundary == "boot":
+        system.boot(entry=0)
+    else:
+        system.cpu._cs.icache_restore(*hot_icache)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(4)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 4
+    assert system.cpu.pc == 0
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 4
+    assert counts["uncontended_block_misses"] == 4
+    assert counts["uncontended_block_build_attempts"] == expected_attempts
+    assert (
+        counts["uncontended_block_nonresident_rejections"]
+        == expected_nonresident
+    )
+    assert counts["uncontended_block_one_instruction_rejections"] == 1
+    assert (
+        counts["uncontended_block_rejection_cache_hits"]
+        == expected_hits
+    )
+    assert counts["uncontended_block_rejection_cache_stores"] == 1
+    assert counts["uncontended_block_rejection_cache_replacements"] == 0
+
+
+@pytest.mark.parametrize("selector", ("psel", "spsel"))
+def test_exact_rejection_identity_includes_active_selectors(
+    selector: str,
+) -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(4)
+    assert warm.instructions_executed == 4
+    if selector == "psel":
+        system.cpu.psel = 4
+        system.cpu.pc = 0
+    else:
+        system.cpu.spsel = 14
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 1
+    assert system.cpu.pc == 0
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 1
+    assert counts["uncontended_block_misses"] == 1
+    assert counts["uncontended_block_build_attempts"] == 1
+    assert counts["uncontended_block_nonresident_rejections"] == 0
+    assert counts["uncontended_block_one_instruction_rejections"] == 1
+    assert counts["uncontended_block_rejection_cache_hits"] == 0
+    assert counts["uncontended_block_rejection_cache_stores"] == 1
+    assert counts["uncontended_block_rejection_cache_replacements"] == 1
+
+
+def test_changed_bytes_replace_exact_rejection_with_decoded_block() -> None:
+    system = _system()
+    rejected = assemble(
+        """
+loop:
+    br loop
+"""
+    )
+    replacement = assemble(
+        """
+loop:
+    inc r4
+    br loop
+"""
+    )
+    system.load_binary(0, rejected)
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(4)
+    assert warm.instructions_executed == 4
+    for offset, value in enumerate(replacement):
+        system.cpu.mem_write8(offset, value)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(6)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert stats.instructions_executed == 6
+    assert system.cpu.regs[4] == 3
+    assert system.cpu.pc == 0
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 4
+    assert counts["uncontended_block_hits"] == 1
+    assert counts["uncontended_block_misses"] == 3
+    assert counts["uncontended_block_build_attempts"] == 3
+    assert counts["uncontended_block_builds"] == 1
+    assert counts["uncontended_block_nonresident_rejections"] == 1
+    assert counts["uncontended_block_zero_instruction_rejections"] == 0
+    assert counts["uncontended_block_one_instruction_rejections"] == 1
+    assert counts["uncontended_block_structure_rejections"] == 0
+    assert counts["uncontended_block_rejection_cache_hits"] == 0
+    assert counts["uncontended_block_rejection_cache_stores"] == 1
+    assert counts["uncontended_block_rejection_cache_replacements"] == 0
+    assert counts["uncontended_block_executions"] == 2
+    assert counts["uncontended_block_steps"] == 4
+
+
+def test_direct_mapped_rejection_cache_reports_bounded_collisions() -> None:
+    system = _system()
+    first_address = 0
+    colliding_address = 0x204
+    one_instruction_loop = assemble(
+        """
+loop:
+    br loop
+"""
+    )
+    system.load_binary(first_address, one_instruction_loop)
+    system.load_binary(colliding_address, one_instruction_loop)
+    system.boot(entry=first_address)
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    for address in (
+        first_address,
+        colliding_address,
+        first_address,
+    ):
+        system.cpu.pc = address
+        stats = system.run_batch_stats(2)
+        assert stats.instructions_executed == 2
+
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    assert system.cpu.pc == first_address
+    _assert_block_rejection_profile_reconciles(snapshot)
+    assert counts["uncontended_block_lookups"] == 6
+    assert counts["uncontended_block_misses"] == 6
+    assert counts["uncontended_block_build_attempts"] == 5
+    assert counts["uncontended_block_builds"] == 0
+    assert counts["uncontended_block_nonresident_rejections"] == 2
+    assert counts["uncontended_block_one_instruction_rejections"] == 3
+    assert counts["uncontended_block_rejection_cache_hits"] == 1
+    assert counts["uncontended_block_rejection_cache_stores"] == 3
+    assert counts["uncontended_block_rejection_cache_replacements"] == 2
 
 
 def test_host_profile_attributes_direct_mapped_translation_evictions() -> None:

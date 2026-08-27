@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2647,6 +2647,14 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_block_lookups",
     "uncontended_block_hits",
     "uncontended_block_misses",
+    "uncontended_block_build_attempts",
+    "uncontended_block_nonresident_rejections",
+    "uncontended_block_zero_instruction_rejections",
+    "uncontended_block_one_instruction_rejections",
+    "uncontended_block_structure_rejections",
+    "uncontended_block_rejection_cache_hits",
+    "uncontended_block_rejection_cache_stores",
+    "uncontended_block_rejection_cache_replacements",
     "uncontended_block_builds",
     "uncontended_block_evictions",
     "uncontended_block_executions",
@@ -2731,6 +2739,9 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
     raw_counts = dict(raw["counts"])
     raw_wall = dict(raw["wall_ns"])
     raw_jit_storage = dict(raw["single_core_jit_storage"])
+    raw_block_rejection_cache = dict(
+        raw["single_core_block_rejection_cache"]
+    )
     counts = {
         name: int(raw_counts[name])
         for name in _CONCURRENCY_PROFILE_COUNT_FIELDS
@@ -2775,6 +2786,13 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
             "slot_bytes": int(raw_jit_storage["slot_bytes"]),
             "mapped_bytes_per_alias": int(
                 raw_jit_storage["mapped_bytes_per_alias"]
+            ),
+        },
+        "single_core_block_rejection_cache": {
+            "kind": str(raw_block_rejection_cache["kind"]),
+            "entries": int(raw_block_rejection_cache["entries"]),
+            "identity_bytes": int(
+                raw_block_rejection_cache["identity_bytes"]
             ),
         },
         "counts": counts,
@@ -2828,6 +2846,9 @@ def _host_profile_probe(
     native_counts = native_snapshot["counts"]
     native_wall = native_snapshot["wall_ns"]
     jit_storage = native_snapshot["single_core_jit_storage"]
+    block_rejection_cache = native_snapshot[
+        "single_core_block_rejection_cache"
+    ]
     jit_backend_available = (
         native_snapshot["single_core_jit_backend"] == "x86_64"
     )
@@ -2876,7 +2897,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 8,
+            native_snapshot["schema_version"] == 9,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2930,6 +2951,12 @@ def _host_profile_probe(
                 and not jit_storage["failed"]
             )
         ),
+        "single_core_block_rejection_cache_is_bounded_exact_suffix": (
+            block_rejection_cache["kind"]
+            == "direct-mapped-exact-icache-suffix"
+            and block_rejection_cache["entries"] == 512
+            and block_rejection_cache["identity_bytes"] == 16
+        ),
         "native_batches_match_accounting": (
             native_counts["batches"]
             == scheduler["native_system_batch_calls"]
@@ -2968,6 +2995,14 @@ def _host_profile_probe(
                     "uncontended_block_lookups",
                     "uncontended_block_hits",
                     "uncontended_block_misses",
+                    "uncontended_block_build_attempts",
+                    "uncontended_block_nonresident_rejections",
+                    "uncontended_block_zero_instruction_rejections",
+                    "uncontended_block_one_instruction_rejections",
+                    "uncontended_block_structure_rejections",
+                    "uncontended_block_rejection_cache_hits",
+                    "uncontended_block_rejection_cache_stores",
+                    "uncontended_block_rejection_cache_replacements",
                     "uncontended_block_builds",
                     "uncontended_block_evictions",
                     "uncontended_block_executions",
@@ -3003,6 +3038,41 @@ def _host_profile_probe(
         "uncontended_block_builds_within_misses": (
             native_counts["uncontended_block_builds"]
             <= native_counts["uncontended_block_misses"]
+        ),
+        "uncontended_block_build_attempts_reconcile": (
+            native_counts["uncontended_block_build_attempts"]
+            == native_counts["uncontended_block_builds"]
+            + native_counts[
+                "uncontended_block_nonresident_rejections"
+            ]
+            + native_counts[
+                "uncontended_block_zero_instruction_rejections"
+            ]
+            + native_counts[
+                "uncontended_block_one_instruction_rejections"
+            ]
+            + native_counts["uncontended_block_structure_rejections"]
+        ),
+        "uncontended_block_rejection_cache_stores_reconcile": (
+            native_counts["uncontended_block_rejection_cache_stores"]
+            == native_counts[
+                "uncontended_block_zero_instruction_rejections"
+            ]
+            + native_counts[
+                "uncontended_block_one_instruction_rejections"
+            ]
+            + native_counts["uncontended_block_structure_rejections"]
+        ),
+        "uncontended_block_rejection_cache_replacements_within_stores": (
+            native_counts[
+                "uncontended_block_rejection_cache_replacements"
+            ]
+            <= native_counts["uncontended_block_rejection_cache_stores"]
+        ),
+        "uncontended_block_miss_paths_reconcile": (
+            native_counts["uncontended_block_rejection_cache_hits"]
+            + native_counts["uncontended_block_build_attempts"]
+            == native_counts["uncontended_block_misses"]
         ),
         "uncontended_block_evictions_within_builds": (
             native_counts["uncontended_block_evictions"]
@@ -3199,7 +3269,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 8,
+        "schema_version": 9,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,

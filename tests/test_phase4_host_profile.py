@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 17
+    assert report["schema_version"] == 18
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -32,7 +32,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 8
+        assert probe["schema_version"] == 9
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -40,6 +40,9 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         native = probe["native_snapshot"]
         counts = native["counts"]
         jit_storage = native["single_core_jit_storage"]
+        block_rejection_cache = native[
+            "single_core_block_rejection_cache"
+        ]
         assert not native["enabled"]
         assert native["generation"] > 0
         assert counts["batches"] == accounting["execution"]["run_batch_calls"]
@@ -101,6 +104,14 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert native["wall_ns"]["uncontended_round"] == 0
         assert native["wall_ns"]["uncontended_dispatch"] == 0
         for name in (
+            "uncontended_block_build_attempts",
+            "uncontended_block_nonresident_rejections",
+            "uncontended_block_zero_instruction_rejections",
+            "uncontended_block_one_instruction_rejections",
+            "uncontended_block_structure_rejections",
+            "uncontended_block_rejection_cache_hits",
+            "uncontended_block_rejection_cache_stores",
+            "uncontended_block_rejection_cache_replacements",
             "uncontended_jit_plan_evictions",
             "uncontended_jit_arena_allocations",
             "uncontended_jit_arena_allocation_failures",
@@ -110,6 +121,11 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
             "uncontended_jit_max_code_bytes",
         ):
             assert counts[name] == 0
+        assert block_rejection_cache == {
+            "kind": "direct-mapped-exact-icache-suffix",
+            "entries": 512,
+            "identity_bytes": 16,
+        }
         assert native["wall_ns"][
             "uncontended_jit_arena_allocation"
         ] == 0
@@ -162,15 +178,18 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 17
+    assert report["schema_version"] == 18
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 8
+        assert probe["schema_version"] == 9
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]
         jit_storage = native["single_core_jit_storage"]
+        block_rejection_cache = native[
+            "single_core_block_rejection_cache"
+        ]
         accounting = result["accounting_probe"]
         returned = accounting[
             "aggregate_instructions_from_per_core"
@@ -186,6 +205,34 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         assert counts["private_steps"] == 0
         assert native["wall_ns"]["uncontended_round"] > 0
         assert native["wall_ns"]["uncontended_dispatch"] > 0
+        assert block_rejection_cache == {
+            "kind": "direct-mapped-exact-icache-suffix",
+            "entries": 512,
+            "identity_bytes": 16,
+        }
+        assert (
+            counts["uncontended_block_build_attempts"]
+            == counts["uncontended_block_builds"]
+            + counts["uncontended_block_nonresident_rejections"]
+            + counts["uncontended_block_zero_instruction_rejections"]
+            + counts["uncontended_block_one_instruction_rejections"]
+            + counts["uncontended_block_structure_rejections"]
+        )
+        assert (
+            counts["uncontended_block_rejection_cache_stores"]
+            == counts["uncontended_block_zero_instruction_rejections"]
+            + counts["uncontended_block_one_instruction_rejections"]
+            + counts["uncontended_block_structure_rejections"]
+        )
+        assert (
+            counts["uncontended_block_rejection_cache_replacements"]
+            <= counts["uncontended_block_rejection_cache_stores"]
+        )
+        assert (
+            counts["uncontended_block_rejection_cache_hits"]
+            + counts["uncontended_block_build_attempts"]
+            == counts["uncontended_block_misses"]
+        )
         assert (
             counts["uncontended_jit_slot_publications"]
             == counts["uncontended_jit_compilations"]

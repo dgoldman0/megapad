@@ -38,6 +38,10 @@ remain zero for this microcore topology.
 Version 11 carries native host-profile schema 8 and its exact-single-core
 arena allocation, slot publication, code-size, and plan-eviction telemetry.
 These fields remain zero for this microcore topology.
+
+Version 12 carries native host-profile schema 9 and its exact-single-core
+decoded-block rejection-cache geometry and admission telemetry. These fields
+remain zero for this microcore topology.
 """
 
 from __future__ import annotations
@@ -62,7 +66,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 11
+REPORT_SCHEMA_VERSION = 12
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -354,9 +358,12 @@ def _profile_probe(
     coordinator_origin_total = sum(
         counts["coordinator_boundary_origins"].values()
     )
+    block_rejection_cache = normalized[
+        "single_core_block_rejection_cache"
+    ]
     validation = {
-        "schema_is_version_8":
-            normalized["schema_version"] == 8,
+        "schema_is_version_9":
+            normalized["schema_version"] == 9,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -370,6 +377,12 @@ def _profile_probe(
         "timers_are_inclusive_nested_wall_time": (
             normalized["timing_semantics"]
             == "inclusive_nested_host_wall_nanoseconds"
+        ),
+        "single_core_block_rejection_cache_is_bounded_exact_suffix": (
+            block_rejection_cache["kind"]
+            == "direct-mapped-exact-icache-suffix"
+            and block_rejection_cache["entries"] == 512
+            and block_rejection_cache["identity_bytes"] == 16
         ),
         "one_native_batch":
             counts["batches"] == 1,
@@ -391,6 +404,14 @@ def _profile_probe(
                     "uncontended_block_lookups",
                     "uncontended_block_hits",
                     "uncontended_block_misses",
+                    "uncontended_block_build_attempts",
+                    "uncontended_block_nonresident_rejections",
+                    "uncontended_block_zero_instruction_rejections",
+                    "uncontended_block_one_instruction_rejections",
+                    "uncontended_block_structure_rejections",
+                    "uncontended_block_rejection_cache_hits",
+                    "uncontended_block_rejection_cache_stores",
+                    "uncontended_block_rejection_cache_replacements",
                     "uncontended_block_builds",
                     "uncontended_block_evictions",
                     "uncontended_block_executions",
@@ -420,6 +441,29 @@ def _profile_probe(
         "uncontended_jit_publications_match_compilations": (
             counts["uncontended_jit_slot_publications"]
             == counts["uncontended_jit_compilations"]
+        ),
+        "uncontended_block_build_attempts_reconcile": (
+            counts["uncontended_block_build_attempts"]
+            == counts["uncontended_block_builds"]
+            + counts["uncontended_block_nonresident_rejections"]
+            + counts["uncontended_block_zero_instruction_rejections"]
+            + counts["uncontended_block_one_instruction_rejections"]
+            + counts["uncontended_block_structure_rejections"]
+        ),
+        "uncontended_block_rejection_cache_stores_reconcile": (
+            counts["uncontended_block_rejection_cache_stores"]
+            == counts["uncontended_block_zero_instruction_rejections"]
+            + counts["uncontended_block_one_instruction_rejections"]
+            + counts["uncontended_block_structure_rejections"]
+        ),
+        "uncontended_block_rejection_cache_replacements_within_stores": (
+            counts["uncontended_block_rejection_cache_replacements"]
+            <= counts["uncontended_block_rejection_cache_stores"]
+        ),
+        "uncontended_block_miss_paths_reconcile": (
+            counts["uncontended_block_rejection_cache_hits"]
+            + counts["uncontended_block_build_attempts"]
+            == counts["uncontended_block_misses"]
         ),
         "uncontended_jit_rewrites_within_publications": (
             counts["uncontended_jit_slot_rewrites"]
@@ -523,7 +567,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 8,
+        "schema_version": 9,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

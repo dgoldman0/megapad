@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -259,10 +259,38 @@ def profile_derived(profile: dict | None) -> dict | None:
         return None
     counts = profile["counts"]
     wall_ns = profile["wall_ns"]
+    resident_rejections = (
+        counts["uncontended_block_zero_instruction_rejections"]
+        + counts["uncontended_block_one_instruction_rejections"]
+        + counts["uncontended_block_structure_rejections"]
+    )
     return {
         "block_cache_hit_fraction": _ratio(
             counts["uncontended_block_hits"],
             counts["uncontended_block_lookups"],
+        ),
+        "block_rejection_cache_hit_fraction": _ratio(
+            counts["uncontended_block_rejection_cache_hits"],
+            (
+                counts["uncontended_block_rejection_cache_hits"]
+                + counts["uncontended_block_build_attempts"]
+            ),
+        ),
+        "block_build_success_fraction": _ratio(
+            counts["uncontended_block_builds"],
+            counts["uncontended_block_build_attempts"],
+        ),
+        "resident_zero_instruction_rejection_fraction": _ratio(
+            counts["uncontended_block_zero_instruction_rejections"],
+            resident_rejections,
+        ),
+        "resident_one_instruction_rejection_fraction": _ratio(
+            counts["uncontended_block_one_instruction_rejections"],
+            resident_rejections,
+        ),
+        "resident_structure_rejection_fraction": _ratio(
+            counts["uncontended_block_structure_rejections"],
+            resident_rejections,
         ),
         "decoded_block_step_fraction": _ratio(
             counts["uncontended_block_steps"],
@@ -322,6 +350,49 @@ def profile_derived(profile: dict | None) -> dict | None:
         "average_jit_code_bytes": _ratio(
             counts["uncontended_jit_code_bytes"],
             counts["uncontended_jit_compilations"],
+        ),
+    }
+
+
+def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
+    counts = profile["counts"]
+    metadata = profile["single_core_block_rejection_cache"]
+    attempts = counts["uncontended_block_build_attempts"]
+    zero_rejections = counts[
+        "uncontended_block_zero_instruction_rejections"
+    ]
+    one_rejections = counts[
+        "uncontended_block_one_instruction_rejections"
+    ]
+    structure_rejections = counts[
+        "uncontended_block_structure_rejections"
+    ]
+    stores = counts["uncontended_block_rejection_cache_stores"]
+    return {
+        "block_rejection_cache_metadata_supported": (
+            metadata["kind"] == "direct-mapped-exact-icache-suffix"
+            and metadata["entries"] == 512
+            and metadata["identity_bytes"] == 16
+        ),
+        "block_build_attempts_reconcile": (
+            attempts
+            == counts["uncontended_block_builds"]
+            + counts["uncontended_block_nonresident_rejections"]
+            + zero_rejections
+            + one_rejections
+            + structure_rejections
+        ),
+        "block_rejection_cache_stores_reconcile": (
+            stores
+            == zero_rejections + one_rejections + structure_rejections
+        ),
+        "block_rejection_cache_replacements_are_bounded": (
+            counts["uncontended_block_rejection_cache_replacements"]
+            <= stores
+        ),
+        "block_rejection_activity_reconciles_with_misses": (
+            counts["uncontended_block_rejection_cache_hits"] + attempts
+            == counts["uncontended_block_misses"]
         ),
     }
 
@@ -451,7 +522,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 8
+                            host_profile["schema_version"] == 9
                         ),
                         "host_profile_frozen": not host_profile["enabled"],
                         "profiled_steps_match_run": (
@@ -488,6 +559,9 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                             else not jit_storage["ready"]
                         ),
                     }
+                )
+                validation.update(
+                    _profile_rejection_cache_validation(host_profile)
                 )
 
             measurement = {
@@ -622,6 +696,11 @@ def print_human(result: dict) -> None:
     if profile is not None:
         counts = profile["counts"]
         wall_ns = profile["wall_ns"]
+        derived = result["host_profile_derived"]
+
+        def percent(value: float | None) -> str:
+            return "n/a" if value is None else f"{value:.1%}"
+
         print(
             "  DBT: "
             f"{counts['uncontended_jit_compilations']:,} compilations; "
@@ -629,6 +708,19 @@ def print_human(result: dict) -> None:
             f"{counts['uncontended_block_evictions']:,} block evictions; "
             f"{counts['uncontended_jit_plan_evictions']:,} plan evictions; "
             f"{counts['uncontended_jit_slot_rewrites']:,} slot rewrites"
+        )
+        print(
+            "  DBT block admission: "
+            f"{counts['uncontended_block_rejection_cache_hits']:,} "
+            "rejection-cache hits "
+            f"({percent(derived['block_rejection_cache_hit_fraction'])}); "
+            f"{counts['uncontended_block_builds']:,}/"
+            f"{counts['uncontended_block_build_attempts']:,} builds "
+            f"({percent(derived['block_build_success_fraction'])}); "
+            "resident zero/one/structure "
+            f"{counts['uncontended_block_zero_instruction_rejections']:,}/"
+            f"{counts['uncontended_block_one_instruction_rejections']:,}/"
+            f"{counts['uncontended_block_structure_rejections']:,}"
         )
         print(
             "  DBT compile/arena/publication: "

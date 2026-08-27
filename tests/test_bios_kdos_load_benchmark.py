@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 2
+    assert benchmark.SCHEMA_VERSION == 3
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -30,7 +30,16 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
     profile = {
         "counts": {
             "uncontended_block_hits": 75,
-            "uncontended_block_lookups": 100,
+            "uncontended_block_lookups": 125,
+            "uncontended_block_misses": 50,
+            "uncontended_block_build_attempts": 40,
+            "uncontended_block_nonresident_rejections": 3,
+            "uncontended_block_zero_instruction_rejections": 3,
+            "uncontended_block_one_instruction_rejections": 3,
+            "uncontended_block_structure_rejections": 6,
+            "uncontended_block_rejection_cache_hits": 10,
+            "uncontended_block_rejection_cache_stores": 12,
+            "uncontended_block_rejection_cache_replacements": 5,
             "uncontended_block_steps": 600,
             "uncontended_steps": 1_000,
             "uncontended_jit_steps": 400,
@@ -56,7 +65,12 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
     derived = benchmark.profile_derived(profile)
 
     assert derived == {
-        "block_cache_hit_fraction": 0.75,
+        "block_cache_hit_fraction": 0.6,
+        "block_rejection_cache_hit_fraction": 0.2,
+        "block_build_success_fraction": 0.625,
+        "resident_zero_instruction_rejection_fraction": 0.25,
+        "resident_one_instruction_rejection_fraction": 0.25,
+        "resident_structure_rejection_fraction": 0.5,
         "decoded_block_step_fraction": 0.6,
         "jit_step_fraction": 0.4,
         "jit_steps_per_execution": 4.0,
@@ -68,6 +82,38 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
         "plan_evictions_per_compilation": 0.5,
         "slot_rewrites_per_publication": 0.375,
         "average_jit_code_bytes": 200.0,
+    }
+
+
+def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
+    profile = {
+        "single_core_block_rejection_cache": {
+            "kind": "direct-mapped-exact-icache-suffix",
+            "entries": 512,
+            "identity_bytes": 16,
+        },
+        "counts": {
+            "uncontended_block_misses": 50,
+            "uncontended_block_build_attempts": 40,
+            "uncontended_block_builds": 25,
+            "uncontended_block_nonresident_rejections": 3,
+            "uncontended_block_zero_instruction_rejections": 3,
+            "uncontended_block_one_instruction_rejections": 3,
+            "uncontended_block_structure_rejections": 6,
+            "uncontended_block_rejection_cache_hits": 10,
+            "uncontended_block_rejection_cache_stores": 12,
+            "uncontended_block_rejection_cache_replacements": 5,
+        },
+    }
+
+    validation = benchmark._profile_rejection_cache_validation(profile)
+
+    assert validation == {
+        "block_rejection_cache_metadata_supported": True,
+        "block_build_attempts_reconcile": True,
+        "block_rejection_cache_stores_reconcile": True,
+        "block_rejection_cache_replacements_are_bounded": True,
+        "block_rejection_activity_reconciles_with_misses": True,
     }
 
 

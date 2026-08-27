@@ -2216,13 +2216,23 @@ struct CPUState {
     // Exact-single-full-core decoded blocks are host-only acceleration
     // plans. A block never spans an architectural I-cache line, and every
     // use revalidates its complete encoding against the bytes currently
-    // visible in that guest I-cache. These plans therefore survive ordinary
-    // architectural I-cache invalidation/refill while the admission cache is
-    // conservatively cleared. Reset and discontinuous restore remain hard
-    // host-plan boundaries. Neither cache is architectural state.
+    // visible in that guest I-cache. Failed admissions use a separate exact
+    // suffix identity so recurring authoritative starts do not evict useful
+    // positive plans. Both kinds therefore survive ordinary architectural
+    // I-cache invalidation/refill while the admission cache is conservatively
+    // cleared. Reset and discontinuous restore remain hard host-plan
+    // boundaries. None of these caches is architectural state.
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_CACHE_ENTRIES =
             PRIVATE_DECODE_CACHE_ENTRIES;
+    static constexpr std::size_t
+        SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES = 512;
+    static_assert(
+        (
+            SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES &
+            (SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES - 1)
+        ) == 0,
+        "single-core block rejection cache must have power-of-two geometry");
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS =
             ICACHE_LINE_BYTES;
@@ -2256,6 +2266,18 @@ struct CPUState {
         SingleCoreDecodedBlockEntry,
         SINGLE_CORE_BLOCK_CACHE_ENTRIES>
         single_core_block_cache{};
+    struct SingleCoreBlockRejectionEntry {
+        bool valid = false;
+        uint8_t psel = 0;
+        uint8_t spsel = 0;
+        uint8_t identity_size = 0;
+        uint64_t address = 0;
+        std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
+    };
+    std::array<
+        SingleCoreBlockRejectionEntry,
+        SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES>
+        single_core_block_rejection_cache{};
 
     void clear_private_decode_admission_cache() noexcept {
         for (PrivateDecodeCacheEntry& entry :
@@ -2270,6 +2292,10 @@ struct CPUState {
             entry.valid = false;
             entry.native_compile_checked = false;
             entry.native_code.reset();
+        }
+        for (SingleCoreBlockRejectionEntry& entry :
+             single_core_block_rejection_cache) {
+            entry.valid = false;
         }
     }
 
@@ -4403,7 +4429,15 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_block_lookups = 0;
     uint64_t uncontended_block_hits = 0;
     uint64_t uncontended_block_misses = 0;
+    uint64_t uncontended_block_build_attempts = 0;
     uint64_t uncontended_block_builds = 0;
+    uint64_t uncontended_block_nonresident_rejections = 0;
+    uint64_t uncontended_block_zero_instruction_rejections = 0;
+    uint64_t uncontended_block_one_instruction_rejections = 0;
+    uint64_t uncontended_block_structure_rejections = 0;
+    uint64_t uncontended_block_rejection_cache_hits = 0;
+    uint64_t uncontended_block_rejection_cache_stores = 0;
+    uint64_t uncontended_block_rejection_cache_replacements = 0;
     uint64_t uncontended_block_evictions = 0;
     uint64_t uncontended_block_executions = 0;
     uint64_t uncontended_block_steps = 0;
@@ -20732,6 +20766,98 @@ static std::size_t single_core_block_cache_index(
         (CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES - 1));
 }
 
+static std::size_t single_core_block_rejection_cache_index(
+        uint64_t address) noexcept {
+    return static_cast<std::size_t>(
+        (address ^ (address >> 7)) &
+        (
+            CPUState::SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES -
+            1
+        ));
+}
+
+static bool single_core_block_rejection_matches(
+        const CPUState& core,
+        uint64_t address) noexcept {
+    const CPUState::SingleCoreBlockRejectionEntry& entry =
+        core.single_core_block_rejection_cache[
+            single_core_block_rejection_cache_index(address)];
+    if (
+        !entry.valid ||
+        entry.address != address ||
+        entry.psel != core.psel ||
+        entry.spsel != core.spsel ||
+        entry.identity_size == 0 ||
+        entry.identity_size > CPUState::ICACHE_LINE_BYTES ||
+        core.profile != CoreProfile::FULL ||
+        !core.icache_enabled
+    ) {
+        return false;
+    }
+    const auto [cache_index, tag] = icache_key(address);
+    const std::size_t line_offset =
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    return
+        core.icache_valid[cache_index] &&
+        core.icache_tags[cache_index] == tag &&
+        entry.identity_size ==
+            CPUState::ICACHE_LINE_BYTES - line_offset &&
+        std::memcmp(
+            core.icache_data[cache_index].data() + line_offset,
+            entry.identity.data(),
+            entry.identity_size) == 0;
+}
+
+enum class SingleCoreBlockRejectionStorage : uint8_t {
+    NONRESIDENT = 0,
+    STORED = 1,
+    REPLACED = 2,
+};
+
+static SingleCoreBlockRejectionStorage
+remember_single_core_block_rejection(
+        CPUState& core,
+        uint64_t address) noexcept {
+    if (
+        core.profile != CoreProfile::FULL ||
+        !core.icache_enabled ||
+        core.psel >= 32 ||
+        core.spsel >= 32
+    ) {
+        return SingleCoreBlockRejectionStorage::NONRESIDENT;
+    }
+    const auto [cache_index, tag] = icache_key(address);
+    if (
+        !core.icache_valid[cache_index] ||
+        core.icache_tags[cache_index] != tag
+    ) {
+        return SingleCoreBlockRejectionStorage::NONRESIDENT;
+    }
+    const std::size_t line_offset =
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1));
+    CPUState::SingleCoreBlockRejectionEntry candidate;
+    candidate.address = address;
+    candidate.psel = core.psel;
+    candidate.spsel = core.spsel;
+    candidate.identity_size = static_cast<uint8_t>(
+        CPUState::ICACHE_LINE_BYTES - line_offset);
+    std::memcpy(
+        candidate.identity.data(),
+        core.icache_data[cache_index].data() + line_offset,
+        candidate.identity_size);
+    candidate.valid = true;
+    CPUState::SingleCoreBlockRejectionEntry& destination =
+        core.single_core_block_rejection_cache[
+            single_core_block_rejection_cache_index(address)];
+    const bool replaced = destination.valid;
+    destination = candidate;
+    return replaced
+        ? SingleCoreBlockRejectionStorage::REPLACED
+        : SingleCoreBlockRejectionStorage::STORED;
+}
+
 static bool decode_single_core_register_instruction(
         const CPUState& core,
         uint64_t address,
@@ -22272,15 +22398,25 @@ static bool single_core_block_identity_matches(
             block.identity_size) == 0;
 }
 
+enum class SingleCoreBlockBuildRejection : uint8_t {
+    NONE = 0,
+    ZERO_INSTRUCTION = 1,
+    ONE_INSTRUCTION = 2,
+    STRUCTURE = 3,
+};
+
 static CPUState::SingleCoreDecodedBlockEntry*
 build_single_core_decoded_block(
         CPUState& core,
-        uint64_t address) {
+        uint64_t address,
+        SingleCoreBlockBuildRejection& rejection) {
+    rejection = SingleCoreBlockBuildRejection::NONE;
     if (
         core.profile != CoreProfile::FULL ||
         !core.icache_enabled ||
         core.ext_modifier != -1
     ) {
+        rejection = SingleCoreBlockBuildRejection::STRUCTURE;
         return nullptr;
     }
 
@@ -22391,11 +22527,17 @@ build_single_core_decoded_block(
     }
 
     // One-instruction plans do not amortize cache validation and dispatch.
-    if (candidate.instruction_count < 2)
+    if (candidate.instruction_count < 2) {
+        rejection = candidate.instruction_count == 0
+            ? SingleCoreBlockBuildRejection::ZERO_INSTRUCTION
+            : SingleCoreBlockBuildRejection::ONE_INSTRUCTION;
         return nullptr;
+    }
     candidate.identity_size = static_cast<uint8_t>(offset);
-    if (!single_core_block_structure_is_valid(core, candidate))
+    if (!single_core_block_structure_is_valid(core, candidate)) {
+        rejection = SingleCoreBlockBuildRejection::STRUCTURE;
         return nullptr;
+    }
     candidate.valid = true;
     CPUState::SingleCoreDecodedBlockEntry& destination =
         core.single_core_block_cache[
@@ -22857,6 +22999,8 @@ try_execute_single_core_decoded_block(
         core.profile != CoreProfile::FULL ||
         !core.icache_enabled ||
         core.ext_modifier != -1 ||
+        core.psel >= 32 ||
+        core.spsel >= 32 ||
         callbacks.bus_access != nullptr
     ) {
         return run;
@@ -22887,13 +23031,82 @@ try_execute_single_core_decoded_block(
             host_saturating_increment(
                 profile.uncontended_block_misses);
         }
+        if (single_core_block_rejection_matches(core, address)) {
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile
+                        .uncontended_block_rejection_cache_hits);
+            }
+            return run;
+        }
+        if (profile_enabled) {
+            host_saturating_increment(
+                profile.uncontended_block_build_attempts);
+        }
         const bool evicts_block = block->valid;
         const bool evicts_native_plan =
             static_cast<bool>(block->native_code);
+        SingleCoreBlockBuildRejection build_rejection =
+            SingleCoreBlockBuildRejection::NONE;
         block = build_single_core_decoded_block(
-            core, address);
-        if (block == nullptr)
+            core, address, build_rejection);
+        if (block == nullptr) {
+            const SingleCoreBlockRejectionStorage storage =
+                remember_single_core_block_rejection(
+                    core, address);
+            if (profile_enabled) {
+                if (
+                    storage ==
+                    SingleCoreBlockRejectionStorage::NONRESIDENT
+                ) {
+                    host_saturating_increment(
+                        profile
+                            .uncontended_block_nonresident_rejections);
+                } else {
+                    host_saturating_increment(
+                        profile
+                            .uncontended_block_rejection_cache_stores);
+                    if (
+                        storage ==
+                        SingleCoreBlockRejectionStorage::REPLACED
+                    ) {
+                        host_saturating_increment(
+                            profile
+                                .uncontended_block_rejection_cache_replacements);
+                    }
+                    switch (build_rejection) {
+                        case SingleCoreBlockBuildRejection::ZERO_INSTRUCTION:
+                            host_saturating_increment(
+                                profile
+                                    .uncontended_block_zero_instruction_rejections);
+                            break;
+                        case SingleCoreBlockBuildRejection::ONE_INSTRUCTION:
+                            host_saturating_increment(
+                                profile
+                                    .uncontended_block_one_instruction_rejections);
+                            break;
+                        case SingleCoreBlockBuildRejection::NONE:
+                        case SingleCoreBlockBuildRejection::STRUCTURE:
+                            host_saturating_increment(
+                                profile
+                                    .uncontended_block_structure_rejections);
+                            break;
+                    }
+                }
+            }
             return run;
+        }
+        CPUState::SingleCoreBlockRejectionEntry& rejection =
+            core.single_core_block_rejection_cache[
+                single_core_block_rejection_cache_index(address)];
+        if (
+            rejection.valid &&
+            rejection.address == address &&
+            rejection.psel == core.psel &&
+            rejection.spsel == core.spsel
+        ) {
+            rejection.valid = false;
+        }
         if (profile_enabled) {
             host_saturating_increment(
                 profile.uncontended_block_builds);
@@ -26075,8 +26288,24 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_block_hits;
     counts["uncontended_block_misses"] =
         profile.uncontended_block_misses;
+    counts["uncontended_block_build_attempts"] =
+        profile.uncontended_block_build_attempts;
     counts["uncontended_block_builds"] =
         profile.uncontended_block_builds;
+    counts["uncontended_block_nonresident_rejections"] =
+        profile.uncontended_block_nonresident_rejections;
+    counts["uncontended_block_zero_instruction_rejections"] =
+        profile.uncontended_block_zero_instruction_rejections;
+    counts["uncontended_block_one_instruction_rejections"] =
+        profile.uncontended_block_one_instruction_rejections;
+    counts["uncontended_block_structure_rejections"] =
+        profile.uncontended_block_structure_rejections;
+    counts["uncontended_block_rejection_cache_hits"] =
+        profile.uncontended_block_rejection_cache_hits;
+    counts["uncontended_block_rejection_cache_stores"] =
+        profile.uncontended_block_rejection_cache_stores;
+    counts["uncontended_block_rejection_cache_replacements"] =
+        profile.uncontended_block_rejection_cache_replacements;
     counts["uncontended_block_evictions"] =
         profile.uncontended_block_evictions;
     counts["uncontended_block_executions"] =
@@ -26236,8 +26465,16 @@ static py::dict concurrency_profile_snapshot_dict(
     jit_storage["mapped_bytes_per_alias"] =
         system.single_core_jit_arena.mapped_bytes();
 
+    py::dict block_rejection_cache;
+    block_rejection_cache["kind"] =
+        "direct-mapped-exact-icache-suffix";
+    block_rejection_cache["entries"] =
+        CPUState::SINGLE_CORE_BLOCK_REJECTION_CACHE_ENTRIES;
+    block_rejection_cache["identity_bytes"] =
+        CPUState::ICACHE_LINE_BYTES;
+
     py::dict result;
-    result["schema_version"] = 8;
+    result["schema_version"] = 9;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -26255,6 +26492,8 @@ static py::dict concurrency_profile_snapshot_dict(
     result["wall_ns"] = std::move(wall_ns);
     result["single_core_jit_storage"] =
         std::move(jit_storage);
+    result["single_core_block_rejection_cache"] =
+        std::move(block_rejection_cache);
     result["lane_active_ns"] =
         std::move(lane_active_ns);
     return result;
