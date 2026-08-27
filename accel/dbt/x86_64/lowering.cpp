@@ -182,17 +182,18 @@ bool should_keep_program_counter_live(const BlockView& block) noexcept {
         }
     }
 
-    // A core-memory PC adjustment is nine bytes; the R9 form is four. Entry
-    // address materialization plus the one common spill costs fourteen bytes
-    // below 4 GiB and eighteen above it. Control transfers avoid one more PC
-    // adjustment or replacement. Select the mode only when its emitted shape
-    // is strictly smaller, rather than imposing a separate block-size rule.
+    // A core-memory PC adjustment is eight bytes; the R9 form is four. Entry
+    // address materialization plus the one common spill costs thirteen bytes
+    // below 4 GiB and seventeen above it. Control transfers avoid one more PC
+    // adjustment or replacement. Permit at most one byte of growth so the
+    // previously measured two-instruction branch tail and three-instruction
+    // straight-line shapes retain their lower-traffic register PC form.
     int64_t saved_bytes =
-        static_cast<int64_t>(block.instruction_count) * 5 -
+        static_cast<int64_t>(block.instruction_count) * 4 -
         (
             block.address <= std::numeric_limits<uint32_t>::max()
-                ? 14
-                : 18
+                ? 13
+                : 17
         );
     const DecodedOperation terminal =
         block.instructions[block.instruction_count - 1].operation;
@@ -200,13 +201,13 @@ bool should_keep_program_counter_live(const BlockView& block) noexcept {
         terminal == DecodedOperation::BRANCH_SHORT ||
         terminal == DecodedOperation::BRANCH_LONG
     ) {
-        saved_bytes += 5;
+        saved_bytes += 4;
     } else if (terminal == DecodedOperation::CALL_LONG) {
-        saved_bytes += 16;
+        saved_bytes += 14;
     } else if (terminal == DecodedOperation::RETURN_LONG) {
-        saved_bytes += 8;
+        saved_bytes += 7;
     }
-    return saved_bytes > 0;
+    return saved_bytes >= -1;
 }
 
 void emit_program_counter_add_imm8(
@@ -542,8 +543,8 @@ void emit_instruction(
                     emit_comparison_flags(emitter, layout);
                     return;
                 case DecodedOperation::MOVE:
-                    emitter.bytes({0x49, 0x89, 0x8C, 0x24});
-                    emitter.i32(layout.registers[decoded.rd]);
+                    emitter.mov_core_from_rcx(
+                        layout.registers[decoded.rd]);
                     return;
                 default:
                     throw std::logic_error(
@@ -595,11 +596,7 @@ std::vector<uint8_t> lower_block(
     emitter.bytes({0xF3, 0x0F, 0x1E, 0xFA});
     emitter.bytes({
         0x53,             // push rbx
-        0x41, 0x54,       // push r12
-        0x41, 0x55,       // push r13
         0x41, 0x57,       // push r15
-        0x49, 0x89, 0xFC, // mov r12, rdi (CPU state*)
-        0x49, 0x89, 0xF5, // mov r13, rsi (enabled IPI mirror*)
         0x31, 0xDB,       // xor ebx, ebx (retired steps)
         0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
         0x45, 0x31, 0xD2, // xor r10d, r10d (exit flags)
@@ -649,12 +646,12 @@ std::vector<uint8_t> lower_block(
         instruction_address += decoded.encoded_size;
 
         if (index + 1 < block.instruction_count) {
-            emitter.bytes({0x4D, 0x85, 0xED}); // test r13, r13
+            emitter.bytes({0x48, 0x85, 0xF6}); // test rsi, rsi
             const std::size_t interrupts_masked =
                 emitter.branch32(0x84); // je
             emitter.bytes({
-                0x41, 0x80, 0x7D, 0x00, 0x00,
-            }); // cmp byte ptr [r13 atomic mirror], 0
+                0x80, 0x3E, 0x00,
+            }); // cmp byte ptr [rsi atomic mirror], 0
             interrupt_exits.push_back(
                 emitter.branch32(0x85)); // jne
             emitter.patch32(interrupts_masked, emitter.position());
@@ -687,8 +684,6 @@ std::vector<uint8_t> lower_block(
         NATIVE_BLOCK_EXIT_SHIFT, // shl r10, 16
         0x4C, 0x09, 0xD0, // or rax, r10
         0x41, 0x5F,       // pop r15
-        0x41, 0x5D,       // pop r13
-        0x41, 0x5C,       // pop r12
         0x5B,             // pop rbx
         0xC3,             // ret
     });

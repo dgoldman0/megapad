@@ -72,17 +72,17 @@ void X86_64BlockEmitter::patch32(
 }
 
 void X86_64BlockEmitter::mov_rax_from_core(int32_t displacement) {
-    bytes({0x49, 0x8B, 0x84, 0x24});
+    bytes({0x48, 0x8B, 0x87});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::mov_rcx_from_core(int32_t displacement) {
-    bytes({0x49, 0x8B, 0x8C, 0x24});
+    bytes({0x48, 0x8B, 0x8F});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::mov_r9_from_core(int32_t displacement) {
-    bytes({0x4D, 0x8B, 0x8C, 0x24});
+    bytes({0x4C, 0x8B, 0x8F});
     i32(displacement);
 }
 
@@ -124,17 +124,17 @@ void X86_64BlockEmitter::mov_r8_from_pointer_table(
 }
 
 void X86_64BlockEmitter::mov_core_from_rax(int32_t displacement) {
-    bytes({0x49, 0x89, 0x84, 0x24});
+    bytes({0x48, 0x89, 0x87});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::mov_core_from_rcx(int32_t displacement) {
-    bytes({0x49, 0x89, 0x8C, 0x24});
+    bytes({0x48, 0x89, 0x8F});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::mov_core_from_r9(int32_t displacement) {
-    bytes({0x4D, 0x89, 0x8C, 0x24});
+    bytes({0x4C, 0x89, 0x8F});
     i32(displacement);
 }
 
@@ -150,7 +150,7 @@ void X86_64BlockEmitter::add_r9_imm32(uint32_t immediate) {
 void X86_64BlockEmitter::add_core_imm8(
         int32_t displacement,
         uint8_t immediate) {
-    bytes({0x49, 0x83, 0x84, 0x24});
+    bytes({0x48, 0x83, 0x87});
     i32(displacement);
     byte(immediate);
 }
@@ -158,7 +158,7 @@ void X86_64BlockEmitter::add_core_imm8(
 void X86_64BlockEmitter::add_core_imm32(
         int32_t displacement,
         uint32_t immediate) {
-    bytes({0x49, 0x81, 0x84, 0x24});
+    bytes({0x48, 0x81, 0x87});
     i32(displacement);
     u32(immediate);
 }
@@ -166,30 +166,30 @@ void X86_64BlockEmitter::add_core_imm32(
 void X86_64BlockEmitter::sub_core_imm8(
         int32_t displacement,
         uint8_t immediate) {
-    bytes({0x49, 0x83, 0xAC, 0x24});
+    bytes({0x48, 0x83, 0xAF});
     i32(displacement);
     byte(immediate);
 }
 
 void X86_64BlockEmitter::increment_core(int32_t displacement) {
-    bytes({0x49, 0xFF, 0x84, 0x24});
+    bytes({0x48, 0xFF, 0x87});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::decrement_core(int32_t displacement) {
-    bytes({0x49, 0xFF, 0x8C, 0x24});
+    bytes({0x48, 0xFF, 0x8F});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::add_core_r15(int32_t displacement) {
-    bytes({0x4D, 0x01, 0xBC, 0x24});
+    bytes({0x4C, 0x01, 0xBF});
     i32(displacement);
 }
 
 void X86_64BlockEmitter::compare_core_byte(
         int32_t displacement,
         uint8_t value) {
-    bytes({0x41, 0x80, 0xBC, 0x24});
+    bytes({0x80, 0xBF});
     i32(displacement);
     byte(value);
 }
@@ -201,14 +201,14 @@ void X86_64BlockEmitter::add_exit_flags(uint8_t flags) {
 void X86_64BlockEmitter::store_core_byte(
         int32_t displacement,
         uint8_t value) {
-    bytes({0x41, 0xC6, 0x84, 0x24});
+    bytes({0xC6, 0x87});
     i32(displacement);
     byte(value);
 }
 
 void X86_64BlockEmitter::store_core_qword_zero(
         int32_t displacement) {
-    bytes({0x49, 0xC7, 0x84, 0x24});
+    bytes({0x48, 0xC7, 0x87});
     i32(displacement);
     u32(0);
 }
@@ -216,7 +216,7 @@ void X86_64BlockEmitter::store_core_qword_zero(
 void X86_64BlockEmitter::set_core_byte(
         uint8_t condition_opcode,
         int32_t displacement) {
-    bytes({0x41, 0x0F, condition_opcode, 0x84, 0x24});
+    bytes({0x0F, condition_opcode, 0x87});
     i32(displacement);
 }
 

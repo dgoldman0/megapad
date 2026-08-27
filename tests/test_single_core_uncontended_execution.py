@@ -1151,9 +1151,10 @@ def test_dense_jit_slot_accepts_maximal_register_cmp_line() -> None:
         assert counts["uncontended_jit_compile_attempts"] == 1
         assert counts["uncontended_jit_compilations"] == 1
         assert counts["uncontended_jit_compile_failures"] == 0
-        # Eight resident PC advances use R9 and one common spill instead of
-        # eight core-memory read/modify/write encodings.
-        assert counts["uncontended_jit_max_code_bytes"] == 983
+        # Eight resident PC advances use R9, while the entry ABI keeps the
+        # core and IPI pointers in RDI/RSI instead of copying them into a
+        # larger callee-saved frame.
+        assert counts["uncontended_jit_max_code_bytes"] == 834
         assert storage["slot_bytes"] == 1_344
         assert counts["uncontended_jit_max_code_bytes"] < (
             storage["slot_bytes"]
