@@ -8,8 +8,10 @@ namespace {
 template <typename Reader>
 class DecodeCursor {
 public:
-    explicit DecodeCursor(Reader& reader) noexcept
-        : reader_(reader) {}
+    explicit DecodeCursor(
+            Reader& reader,
+            uint8_t consumed = 0) noexcept
+        : reader_(reader), consumed_(consumed) {}
 
     bool read(uint8_t& value) {
         if (
@@ -19,10 +21,6 @@ public:
         }
         ++consumed_;
         return true;
-    }
-
-    void observe_prefix(uint8_t modifier) const {
-        reader_.observe_prefix(modifier);
     }
 
     uint8_t consumed() const noexcept {
@@ -87,13 +85,82 @@ DecodedOperation alu_operation(uint8_t subop) noexcept {
 
 }  // namespace
 
+template <typename Reader, typename PrefixAdmission>
+inline InstructionHeader decode_instruction_header(
+        Reader& reader,
+        PrefixAdmission prefix_admission,
+        int initial_modifier) {
+    InstructionHeader header;
+    header.modifier = initial_modifier;
+
+    const auto read = [&](uint8_t& value) {
+        if (!reader.read(value))
+            return false;
+        ++header.bytes_consumed;
+        return true;
+    };
+
+    uint8_t opcode = 0;
+    if (!read(opcode))
+        return header;
+
+    header.first_opcode = opcode;
+    header.opcode = opcode;
+    header.family = static_cast<uint8_t>(opcode >> 4);
+    header.subop = static_cast<uint8_t>(opcode & 0x0F);
+    if (header.family != 0xF) {
+        header.status = InstructionHeaderStatus::ORDINARY;
+        return header;
+    }
+
+    if (is_extension_engine(header.subop)) {
+        header.status =
+            InstructionHeaderStatus::EXTENSION_ENGINE;
+        return header;
+    }
+    if (!prefix_admission(header.subop)) {
+        header.status =
+            InstructionHeaderStatus::PREFIX_REJECTED;
+        return header;
+    }
+
+    header.prefix_size = 1;
+    header.modifier = header.subop;
+    reader.observe_prefix(header.subop);
+
+    if (!read(opcode))
+        return header;
+
+    header.opcode = opcode;
+    header.family = static_cast<uint8_t>(opcode >> 4);
+    header.subop = static_cast<uint8_t>(opcode & 0x0F);
+    if (header.family != 0xF) {
+        header.status = InstructionHeaderStatus::ORDINARY;
+        return header;
+    }
+    header.status = is_extension_engine(header.subop)
+        ? InstructionHeaderStatus::EXTENSION_ENGINE
+        : InstructionHeaderStatus::ILLEGAL_DOUBLE_PREFIX;
+    return header;
+}
+
 template <typename Reader>
 DecodeResult decode_instruction(
         Reader& reader,
         int initial_modifier) {
     DecodeResult result;
-    result.modifier = initial_modifier;
-    DecodeCursor<Reader> cursor(reader);
+    const InstructionHeader header =
+        decode_instruction_header(
+            reader,
+            AcceptAnyInstructionPrefix{},
+            initial_modifier);
+    result.family = header.family;
+    result.subop = header.subop;
+    result.modifier = header.modifier;
+    result.bytes_consumed = header.bytes_consumed;
+    result.prefix_size = header.prefix_size;
+    DecodeCursor<Reader> cursor(
+        reader, header.bytes_consumed);
 
     const auto unavailable = [&]() {
         result.status = DecodeStatus::UNAVAILABLE;
@@ -106,40 +173,33 @@ DecodeResult decode_instruction(
         return result;
     };
 
-    uint8_t opcode = 0;
-    if (!cursor.read(opcode))
+    if (header.status == InstructionHeaderStatus::UNAVAILABLE)
         return unavailable();
-
-    result.family = static_cast<uint8_t>(opcode >> 4);
-    result.subop = static_cast<uint8_t>(opcode & 0x0F);
-
-    bool parsed_prefix = false;
-    if (result.family == 0xF) {
-        // F9-FB are extension-engine headers, not modifiers. Their engines
-        // own all tail decoding.
-        if (is_extension_engine(result.subop))
-            return deferred();
-
-        parsed_prefix = true;
-        result.prefix_size = 1;
-        result.modifier = result.subop;
-        cursor.observe_prefix(result.subop);
-
-        if (!cursor.read(opcode))
-            return unavailable();
-        result.family = static_cast<uint8_t>(opcode >> 4);
-        result.subop = static_cast<uint8_t>(opcode & 0x0F);
-
-        if (result.family == 0xF) {
-            // A modifier may prefix an extension engine, which will consume
-            // its own tail. Any other second F-family byte is illegal.
-            if (is_extension_engine(result.subop))
-                return deferred();
-            result.status = DecodeStatus::ILLEGAL_DOUBLE_PREFIX;
-            result.bytes_consumed = cursor.consumed();
-            return result;
-        }
+    if (
+        header.status ==
+        InstructionHeaderStatus::EXTENSION_ENGINE
+    ) {
+        return deferred();
     }
+    if (
+        header.status ==
+        InstructionHeaderStatus::ILLEGAL_DOUBLE_PREFIX
+    ) {
+        result.status = DecodeStatus::ILLEGAL_DOUBLE_PREFIX;
+        return result;
+    }
+    if (
+        header.status ==
+        InstructionHeaderStatus::PREFIX_REJECTED
+    ) {
+        // The semantic decoder admits every architectural modifier. This can
+        // only be produced by an inconsistent parser policy.
+        result.status = DecodeStatus::DEFERRED;
+        return result;
+    }
+
+    const uint8_t opcode = header.opcode;
+    const bool parsed_prefix = header.has_prefix();
 
     DecodedInstruction decoded;
     decoded.opcode = opcode;

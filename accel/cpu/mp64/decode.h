@@ -146,6 +146,40 @@ enum class DecodeStatus : uint8_t {
     ILLEGAL_DOUBLE_PREFIX,
 };
 
+enum class InstructionHeaderStatus : uint8_t {
+    ORDINARY = 0,
+    EXTENSION_ENGINE,
+    UNAVAILABLE,
+    PREFIX_REJECTED,
+    ILLEGAL_DOUBLE_PREFIX,
+};
+
+// The header stage owns only opcode-family and modifier interpretation. It
+// intentionally stops before operands so observational callers can share the
+// architectural prefix rules without inheriting operand fetches, cache
+// residency requirements, or fault behavior from the semantic decoder.
+struct InstructionHeader {
+    InstructionHeaderStatus status =
+        InstructionHeaderStatus::UNAVAILABLE;
+    uint8_t first_opcode = 0;
+    uint8_t opcode = 0;
+    uint8_t family = 0;
+    uint8_t subop = 0;
+    int modifier = -1;
+    uint8_t bytes_consumed = 0;
+    uint8_t prefix_size = 0;
+
+    constexpr bool has_prefix() const noexcept {
+        return prefix_size != 0;
+    }
+};
+
+struct AcceptAnyInstructionPrefix {
+    constexpr bool operator()(uint8_t) const noexcept {
+        return true;
+    }
+};
+
 struct DecodeResult {
     DecodedInstruction instruction{};
     DecodeStatus status = DecodeStatus::UNAVAILABLE;
@@ -159,6 +193,18 @@ struct DecodeResult {
         return status == DecodeStatus::DECODED;
     }
 };
+
+// Reader supplies bool read(uint8_t&) and void observe_prefix(uint8_t).
+// PrefixAdmission is consulted before the reader observes or fetches beyond
+// a prefix, allowing private classifiers to reject reserved/shared prefixes
+// without changing their established cache-observation boundary.
+template <
+    typename Reader,
+    typename PrefixAdmission = AcceptAnyInstructionPrefix>
+InstructionHeader decode_instruction_header(
+    Reader& reader,
+    PrefixAdmission prefix_admission = {},
+    int initial_modifier = -1);
 
 // Reader supplies bool read(uint8_t&) and void observe_prefix(uint8_t).
 // Keeping the implementation templated lets the hot architectural reader
