@@ -336,6 +336,15 @@ class MenuDraw:
             raise ValueError("menu entry order is duplicated")
         if tuple(sorted(entries, key=_semantic_order_key)) != entries:
             raise ValueError("menu entries are not in semantic order")
+        if (
+            sum(
+                isinstance(entry, MenuItemDraw)
+                and bool(entry.state & ControlState.SELECTED)
+                for entry in entries
+            )
+            > 1
+        ):
+            raise ValueError("MENU has multiple selected items")
         object.__setattr__(self, "entries", entries)
 
 
@@ -384,7 +393,31 @@ class MenuBarDraw:
             raise ValueError("menu order is duplicated")
         if tuple(sorted(menus, key=_semantic_order_key)) != menus:
             raise ValueError("menus are not in semantic order")
+        if sum(bool(menu.state & ControlState.OPEN) for menu in menus) > 1:
+            raise ValueError("MENU_BAR has multiple open menus")
+        if sum(bool(menu.state & ControlState.SELECTED) for menu in menus) > 1:
+            raise ValueError("MENU_BAR has multiple selected menus")
+        control_ids = {self.control_id}
+        for menu in menus:
+            descendants = (menu.control_id,) + tuple(
+                entry.control_id for entry in menu.entries
+            )
+            descendant_ids = set(descendants)
+            if (
+                len(descendant_ids) != len(descendants)
+                or control_ids & descendant_ids
+            ):
+                raise ValueError("MENU_BAR control IDs are duplicated")
+            control_ids.update(descendant_ids)
         object.__setattr__(self, "menus", menus)
+
+
+def _menu_bar_control_ids(menu_bar: MenuBarDraw) -> set[int]:
+    control_ids = {menu_bar.control_id}
+    for menu in menu_bar.menus:
+        control_ids.add(menu.control_id)
+        control_ids.update(entry.control_id for entry in menu.entries)
+    return control_ids
 
 
 RetainedDraw = GlyphRunDraw | MenuBarDraw
@@ -476,6 +509,17 @@ class RetainedDrawPlane:
             raise ValueError("a hidden retained plane cannot contain draw regions")
         if self.retained_visible and not self.retained_initialized:
             raise ValueError("an uninitialized retained plane cannot be visible")
+        control_ids_by_owner: dict[tuple[int, int], set[int]] = {}
+        for region in regions:
+            owner = region.owner_id, region.owner_generation
+            owner_control_ids = control_ids_by_owner.setdefault(owner, set())
+            for draw in region.draws:
+                if not isinstance(draw, MenuBarDraw):
+                    continue
+                draw_control_ids = _menu_bar_control_ids(draw)
+                if owner_control_ids & draw_control_ids:
+                    raise ValueError("owner semantic control IDs are duplicated")
+                owner_control_ids.update(draw_control_ids)
         object.__setattr__(self, "regions", regions)
 
 

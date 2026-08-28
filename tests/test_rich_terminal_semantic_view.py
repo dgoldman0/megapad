@@ -29,8 +29,11 @@ from rich_terminal.retained_scene import (
 from rich_terminal.retained_view import (
     GlyphRunDraw,
     MenuBarDraw,
+    MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    RetainedDrawPlane,
+    RetainedRegionDraw,
     RetainedViewError,
     project_composite_draw_plane,
 )
@@ -320,6 +323,120 @@ def test_projection_preserves_semantics_and_orders_draw_families_deterministical
     )
     with pytest.raises(FrozenInstanceError):
         file_menu.label = "forged"
+
+
+def _menu_item_draw(
+    control_id: int,
+    *,
+    order: int,
+    selected: bool = False,
+) -> MenuItemDraw:
+    state = ControlState.VISIBLE | ControlState.ENABLED
+    if selected:
+        state |= ControlState.SELECTED
+    return MenuItemDraw(control_id, state, order, f"Item {control_id}", "")
+
+
+def _menu_draw(
+    control_id: int,
+    *,
+    order: int,
+    state: ControlState | None = None,
+    entries=(),
+) -> MenuDraw:
+    if state is None:
+        state = ControlState.VISIBLE | ControlState.ENABLED
+    return MenuDraw(control_id, state, order, f"Menu {control_id}", tuple(entries))
+
+
+def _menu_bar_draw(control_id: int, *, z_order: int = 0, menus=()) -> MenuBarDraw:
+    return MenuBarDraw(
+        control_id,
+        ControlState.VISIBLE | ControlState.ENABLED,
+        0,
+        z_order,
+        FULL_BOUNDS,
+        tuple(menus),
+    )
+
+
+def test_semantic_draw_dtos_reject_multiple_selected_items():
+    open_state = ControlState.VISIBLE | ControlState.ENABLED | ControlState.OPEN
+
+    with pytest.raises(ValueError, match="multiple selected items"):
+        _menu_draw(
+            10,
+            order=0,
+            state=open_state,
+            entries=(
+                _menu_item_draw(11, order=0, selected=True),
+                _menu_item_draw(12, order=1, selected=True),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("exclusive_state", "message"),
+    (
+        (ControlState.OPEN, "multiple open menus"),
+        (ControlState.SELECTED, "multiple selected menus"),
+    ),
+)
+def test_semantic_draw_dtos_reject_ambiguous_menu_state(
+    exclusive_state: ControlState,
+    message: str,
+):
+    menu_state = ControlState.VISIBLE | ControlState.ENABLED | exclusive_state
+
+    with pytest.raises(ValueError, match=message):
+        _menu_bar_draw(
+            1,
+            menus=(
+                _menu_draw(2, order=0, state=menu_state),
+                _menu_draw(3, order=1, state=menu_state),
+            ),
+        )
+
+
+def test_semantic_draw_dtos_reject_duplicate_ids_within_a_menu_tree():
+    open_state = ControlState.VISIBLE | ControlState.ENABLED | ControlState.OPEN
+
+    with pytest.raises(ValueError, match="control IDs are duplicated"):
+        _menu_bar_draw(
+            1,
+            menus=(
+                _menu_draw(
+                    2,
+                    order=0,
+                    state=open_state,
+                    entries=(_menu_item_draw(1, order=0),),
+                ),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="control IDs are duplicated"):
+        _menu_bar_draw(
+            1,
+            menus=(
+                _menu_draw(
+                    2,
+                    order=0,
+                    state=open_state,
+                    entries=(
+                        _menu_item_draw(3, order=0),
+                        _menu_item_draw(3, order=1),
+                    ),
+                ),
+            ),
+        )
+
+
+def test_semantic_draw_plane_rejects_duplicate_ids_across_owner_regions():
+    first = RetainedRegionDraw(7, 2, 1, 0, 0, 1, 1, 0, False, (_menu_bar_draw(1),))
+    second = RetainedRegionDraw(7, 2, 2, 1, 0, 1, 1, 1, False, (_menu_bar_draw(1),))
+
+    with pytest.raises(ValueError, match="owner semantic control IDs are duplicated"):
+        RetainedDrawPlane(True, True, (first, second))
 
 
 def test_projection_applies_closed_open_and_visible_control_cascades():
