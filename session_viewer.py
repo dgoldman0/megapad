@@ -12,7 +12,13 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from display import VirtualTerminal
-from rich_terminal.pygame_view import composite_draw_plane
+from rich_terminal.pygame_view import (
+    CompositeDrawResult,
+    ControlHitTarget,
+    ControlIdentity,
+    composite_draw_plane,
+    composite_draw_plane_result,
+)
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from session import TerminalDisplayOffer, TerminalSnapshot
 from shared_session import (
@@ -41,6 +47,15 @@ def _nonnegative_wire_integer(value, name: str) -> int:
     if normalized < 0:
         raise ValueError(f"{name} cannot be negative")
     return int(normalized)
+
+
+def _host_integer(value, name: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer, not bool")
+    try:
+        return int(operator.index(value))
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer") from exc
 
 
 def _display_claimed(response) -> bool:
@@ -104,6 +119,11 @@ class _RetainedDisplayState:
         self.pending_offer: TerminalDisplayOffer | None = None
         self.pending_generation: int | None = None
         self.retained_plane: RetainedDrawPlane | None = None
+        self._pending_hit_token: tuple[int, DisplayScope] | None = None
+        self._pending_hit_targets: tuple[ControlHitTarget, ...] = ()
+        self._pending_hit_map_rendered = False
+        self._hit_map_token: tuple[int, DisplayScope] | None = None
+        self._hit_targets: tuple[ControlHitTarget, ...] = ()
 
     @property
     def frame_plane(self) -> RetainedDrawPlane | None:
@@ -111,22 +131,99 @@ class _RetainedDisplayState:
             return self.pending_offer.retained
         return self.retained_plane
 
+    @property
+    def hit_map_token(self) -> tuple[int, DisplayScope] | None:
+        """Exact physically acknowledged offer/scope owning the hit map."""
+
+        return self._hit_map_token
+
+    @property
+    def hit_targets(self) -> tuple[ControlHitTarget, ...]:
+        """Only the immutable map promoted by accepted physical presentation."""
+
+        return self._hit_targets
+
+    @staticmethod
+    def _offer_token(offer: TerminalDisplayOffer) -> tuple[int, DisplayScope]:
+        return offer.offer_id, offer.scope
+
+    @staticmethod
+    def _validated_hits(hit_targets) -> tuple[ControlHitTarget, ...]:
+        targets = tuple(hit_targets)
+        if any(not isinstance(target, ControlHitTarget) for target in targets):
+            raise TypeError("hit_targets must contain only ControlHitTarget values")
+        return targets
+
+    def _clear_hit_maps(self) -> None:
+        self._pending_hit_token = None
+        self._pending_hit_targets = ()
+        self._pending_hit_map_rendered = False
+        self._hit_map_token = None
+        self._hit_targets = ()
+
     def reset(self) -> None:
         """Drop visual candidates while preserving the last physical ACK cursor."""
 
         self.pending_offer = None
         self.pending_generation = None
         self.retained_plane = None
+        self._clear_hit_maps()
 
     def stage(self, offer: TerminalDisplayOffer, generation: int) -> None:
         if not isinstance(offer, TerminalDisplayOffer):
             raise TypeError("offer must be TerminalDisplayOffer")
-        if self.since_offer and offer.offer_id <= self.since_offer:
+        pending_cursor = (
+            0 if self.pending_offer is None else self.pending_offer.offer_id
+        )
+        if offer.offer_id <= max(self.since_offer, pending_cursor):
             raise RuntimeError("display offer did not advance the acknowledged cursor")
-        self.pending_offer = offer
-        self.pending_generation = _nonnegative_wire_integer(
+        normalized_generation = _nonnegative_wire_integer(
             generation, "display offer generation"
         )
+        self.pending_offer = offer
+        self.pending_generation = normalized_generation
+        # Delivery of a newer candidate invalidates the older frame as local
+        # input authority before the candidate is drawn or physically ACKed.
+        self._hit_map_token = None
+        self._hit_targets = ()
+        self._pending_hit_token = self._offer_token(offer)
+        self._pending_hit_targets = ()
+        self._pending_hit_map_rendered = False
+
+    def stage_frame_hit_map(
+        self,
+        offer: TerminalDisplayOffer,
+        hit_targets,
+    ) -> None:
+        """Bind off-screen geometry to the exact pending offer, never authority."""
+
+        if not isinstance(offer, TerminalDisplayOffer):
+            raise TypeError("offer must be TerminalDisplayOffer")
+        token = self._offer_token(offer)
+        if self.pending_offer is None or token != self._offer_token(
+            self.pending_offer
+        ):
+            raise RuntimeError("hit map does not belong to the pending offer")
+        if token != self._pending_hit_token:
+            raise RuntimeError("pending hit-map token is inconsistent")
+        self._pending_hit_targets = self._validated_hits(hit_targets)
+        self._pending_hit_map_rendered = True
+
+    def hit_test(
+        self,
+        x: int,
+        y: int,
+        *,
+        display_token: tuple[int, DisplayScope] | None,
+    ) -> ControlHitTarget | None:
+        """Hit-test only when the input proof and physical map token agree."""
+
+        if display_token is None or display_token != self._hit_map_token:
+            return None
+        for target in reversed(self._hit_targets):
+            if target.rect.contains(x, y):
+                return target
+        return None
 
     def finish_presentation(self, response) -> int | None:
         offer = self.pending_offer
@@ -136,10 +233,24 @@ class _RetainedDisplayState:
         if revision is None:
             self.reset()
             return None
+        token = self._offer_token(offer)
+        if (
+            self._pending_hit_token != token
+            or not self._pending_hit_map_rendered
+        ):
+            self.reset()
+            raise RuntimeError(
+                "presented hit map was not rendered for its exact offer"
+            )
         self.since_offer = offer.offer_id
         self.retained_plane = offer.retained
+        self._hit_map_token = token
+        self._hit_targets = self._pending_hit_targets
         self.pending_offer = None
         self.pending_generation = None
+        self._pending_hit_token = None
+        self._pending_hit_targets = ()
+        self._pending_hit_map_rendered = False
         return revision
 
 
@@ -356,6 +467,31 @@ class _GuestKeyboardForwarder:
         self._request_input("send_text", text=event.text)
         return True
 
+    def activate_control(
+        self,
+        target: ControlHitTarget,
+        *,
+        modifiers: int = 0,
+    ) -> bool:
+        """Forward one renderer-qualified ACTIVATE intent with display proof."""
+
+        if not isinstance(target, ControlHitTarget):
+            raise TypeError("target must be ControlHitTarget")
+        normalized_modifiers = _nonnegative_wire_integer(
+            modifiers, "control modifiers"
+        )
+        if normalized_modifiers > 0x3F:
+            raise ValueError("control modifiers contain reserved APT-1 bits")
+        identity = target.identity
+        self._request_input(
+            "send_control_event",
+            owner_id=identity.owner_id,
+            owner_generation=identity.owner_generation,
+            control_id=identity.control_id,
+            modifiers=normalized_modifiers,
+        )
+        return True
+
     def reset(self) -> None:
         self.suppressed_text_keys.clear()
 
@@ -365,6 +501,124 @@ class _GuestKeyboardForwarder:
 
     def report_error(self, message: str) -> None:
         self.last_error = str(message)
+
+
+class _SemanticPointerInteractor:
+    """Resolve clicks exclusively through one physically ACKed semantic map."""
+
+    def __init__(
+        self,
+        display_state: _RetainedDisplayState,
+        keyboard: _GuestKeyboardForwarder,
+    ) -> None:
+        if not isinstance(display_state, _RetainedDisplayState):
+            raise TypeError("display_state must be _RetainedDisplayState")
+        if not isinstance(keyboard, _GuestKeyboardForwarder):
+            raise TypeError("keyboard must be _GuestKeyboardForwarder")
+        self.display_state = display_state
+        self.keyboard = keyboard
+        self._observed_token: tuple[int, DisplayScope] | None = None
+        self._hovered: ControlIdentity | None = None
+        self._pressed_target: ControlHitTarget | None = None
+        self._pressed_token: tuple[int, DisplayScope] | None = None
+
+    def _authority_token(self) -> tuple[int, DisplayScope] | None:
+        display_ack = self.keyboard.display_ack
+        if display_ack is None or display_ack != self.display_state.hit_map_token:
+            return None
+        return display_ack
+
+    def _synchronize(self) -> tuple[int, DisplayScope] | None:
+        token = self._authority_token()
+        if token != self._observed_token:
+            self._hovered = None
+            self._pressed_target = None
+            self._pressed_token = None
+            self._observed_token = token
+        return token
+
+    @property
+    def hovered(self) -> ControlIdentity | None:
+        self._synchronize()
+        return self._hovered
+
+    @property
+    def pressed(self) -> ControlIdentity | None:
+        self._synchronize()
+        if self._pressed_target is None:
+            return None
+        return self._pressed_target.identity
+
+    def clear(self) -> None:
+        """Drop renderer-local focus state without altering guest semantics."""
+
+        self._hovered = None
+        self._pressed_target = None
+        self._pressed_token = None
+        self._observed_token = self._authority_token()
+
+    @staticmethod
+    def _point_and_extent(position, terminal_size) -> tuple[int, int, int, int]:
+        try:
+            x_value, y_value = position
+        except (TypeError, ValueError) as exc:
+            raise TypeError("position must be a two-item coordinate") from exc
+        try:
+            width_value, height_value = terminal_size
+        except (TypeError, ValueError) as exc:
+            raise TypeError("terminal_size must be a two-item extent") from exc
+        x = _host_integer(x_value, "pointer x")
+        y = _host_integer(y_value, "pointer y")
+        width = _nonnegative_wire_integer(width_value, "terminal width")
+        height = _nonnegative_wire_integer(height_value, "terminal height")
+        return x, y, width, height
+
+    def _target_at(self, position, terminal_size) -> ControlHitTarget | None:
+        token = self._synchronize()
+        x, y, width, height = self._point_and_extent(position, terminal_size)
+        if x < 0 or y < 0 or x >= width or y >= height:
+            return None
+        return self.display_state.hit_test(
+            x,
+            y,
+            display_token=token,
+        )
+
+    def move(self, position, terminal_size) -> ControlHitTarget | None:
+        target = self._target_at(position, terminal_size)
+        self._hovered = None if target is None else target.identity
+        return target
+
+    def left_down(self, position, terminal_size) -> bool:
+        target = self._target_at(position, terminal_size)
+        self._hovered = None if target is None else target.identity
+        self._pressed_target = target
+        self._pressed_token = self._authority_token() if target is not None else None
+        return target is not None
+
+    def left_up(
+        self,
+        position,
+        terminal_size,
+        *,
+        modifiers: int,
+    ) -> bool:
+        target = self._target_at(position, terminal_size)
+        pressed = self._pressed_target
+        pressed_token = self._pressed_token
+        current_token = self._authority_token()
+        self._pressed_target = None
+        self._pressed_token = None
+        self._hovered = None if target is None else target.identity
+        if (
+            target is None
+            or pressed is None
+            or target != pressed
+            or pressed_token != current_token
+        ):
+            return False
+        self.keyboard.activate_control(target, modifiers=modifiers)
+        return True
 
 
 def _retry_display_claim(
@@ -501,6 +755,39 @@ def _accept_status_update(
     return revision, refresh_required
 
 
+def _paint_terminal_cursor(
+    pygame_module,
+    surface,
+    terminal: VirtualTerminal,
+    cell_width: int,
+    cell_height: int,
+    *,
+    show_cursor: bool,
+) -> None:
+    with terminal._lock:
+        cursor_visible = terminal.cursor_visible
+        cursor_col = terminal.cx
+        cursor_row = terminal.cy
+        cols = terminal.cols
+        rows = terminal.rows
+    if (
+        show_cursor
+        and cursor_visible
+        and 0 <= cursor_col < cols
+        and 0 <= cursor_row < rows
+    ):
+        pygame_module.draw.rect(
+            surface,
+            (255, 255, 255),
+            (
+                cursor_col * cell_width,
+                cursor_row * cell_height + cell_height - 2,
+                cell_width,
+                2,
+            ),
+        )
+
+
 def compose_terminal_frame(
     pygame_module,
     terminal: VirtualTerminal,
@@ -531,29 +818,64 @@ def compose_terminal_frame(
             cell_width,
             cell_height,
         )
-    with terminal._lock:
-        cursor_visible = terminal.cursor_visible
-        cursor_col = terminal.cx
-        cursor_row = terminal.cy
-        cols = terminal.cols
-        rows = terminal.rows
-    if (
-        show_cursor
-        and cursor_visible
-        and 0 <= cursor_col < cols
-        and 0 <= cursor_row < rows
-    ):
-        pygame_module.draw.rect(
-            surface,
-            (255, 255, 255),
-            (
-                cursor_col * cell_width,
-                cursor_row * cell_height + cell_height - 2,
-                cell_width,
-                2,
-            ),
-        )
+    _paint_terminal_cursor(
+        pygame_module,
+        surface,
+        terminal,
+        cell_width,
+        cell_height,
+        show_cursor=show_cursor,
+    )
     return surface
+
+
+def compose_terminal_frame_result(
+    pygame_module,
+    terminal: VirtualTerminal,
+    font,
+    cell_width: int,
+    cell_height: int,
+    *,
+    retained_plane: RetainedDrawPlane | None,
+    show_cursor: bool,
+    glyph_cache: dict | None = None,
+    control_font=None,
+    hovered: ControlIdentity | None = None,
+    pressed: ControlIdentity | None = None,
+) -> CompositeDrawResult:
+    """Render the complete frame and return hits from that exact paint pass."""
+
+    surface = terminal.render(
+        pygame_module,
+        font,
+        cell_width,
+        cell_height,
+        show_cursor=False,
+        _cache=glyph_cache,
+    )
+    hit_targets: tuple[ControlHitTarget, ...] = ()
+    if retained_plane is not None:
+        retained_result = composite_draw_plane_result(
+            pygame_module,
+            surface,
+            retained_plane,
+            font,
+            cell_width,
+            cell_height,
+            control_font=control_font,
+            hovered=hovered,
+            pressed=pressed,
+        )
+        hit_targets = retained_result.hit_targets
+    _paint_terminal_cursor(
+        pygame_module,
+        surface,
+        terminal,
+        cell_width,
+        cell_height,
+        show_cursor=show_cursor,
+    )
+    return CompositeDrawResult(surface, hit_targets)
 
 
 def draw_flip_and_present(
@@ -680,9 +1002,24 @@ def main() -> int:
 
     glyph_cache = {}
     running = True
+    semantic_pointer = _SemanticPointerInteractor(
+        display_state,
+        guest_keyboard,
+    )
+
+    def interaction_context():
+        pending = display_state.pending_offer
+        pending_token = None if pending is None else (pending.offer_id, pending.scope)
+        return (
+            guest_keyboard.generation,
+            pending_token,
+            display_state.hit_map_token,
+            guest_keyboard.display_ack,
+        )
 
     def accept_screen_update(update: dict) -> bool:
         nonlocal revision
+        prior_context = interaction_context()
         revision, resized = _accept_screen_update(
             update,
             display_holder=display_holder,
@@ -691,6 +1028,8 @@ def main() -> int:
             display_state=display_state,
             revision=revision,
         )
+        if resized or interaction_context() != prior_context:
+            semantic_pointer.clear()
         return resized
 
     def make_window():
@@ -708,6 +1047,7 @@ def main() -> int:
         nonlocal revision
         nonlocal screen_refresh_required
 
+        prior_context = interaction_context()
         revision, refresh_required = _accept_status_update(
             latest,
             keyboard=guest_keyboard,
@@ -717,6 +1057,8 @@ def main() -> int:
         screen_refresh_required = (
             screen_refresh_required or refresh_required
         )
+        if interaction_context() != prior_context:
+            semantic_pointer.clear()
         status = latest
 
     def request_control(method: str, **params):
@@ -789,9 +1131,36 @@ def main() -> int:
                 elif event.type == pygame.KEYUP:
                     keys_down.discard(event.key)
                     guest_keyboard.key_up(event)
-                elif event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
-                    keys_down.clear()
-                    guest_keyboard.reset()
+                elif event.type == getattr(pygame, "MOUSEMOTION", -1):
+                    semantic_pointer.move(
+                        event.pos,
+                        (terminal.cols * cell_w, terminal.rows * cell_h),
+                    )
+                elif (
+                    event.type == getattr(pygame, "MOUSEBUTTONDOWN", -1)
+                    and event.button == 1
+                ):
+                    semantic_pointer.left_down(
+                        event.pos,
+                        (terminal.cols * cell_w, terminal.rows * cell_h),
+                    )
+                elif (
+                    event.type == getattr(pygame, "MOUSEBUTTONUP", -1)
+                    and event.button == 1
+                ):
+                    semantic_pointer.left_up(
+                        event.pos,
+                        (terminal.cols * cell_w, terminal.rows * cell_h),
+                        modifiers=_pygame_apt_modifiers(pygame, event),
+                    )
+                elif event.type in {
+                    getattr(pygame, "WINDOWFOCUSLOST", -1),
+                    getattr(pygame, "WINDOWFOCUSGAINED", -2),
+                }:
+                    semantic_pointer.clear()
+                    if event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+                        keys_down.clear()
+                        guest_keyboard.reset()
 
             if not running:
                 break
@@ -802,6 +1171,7 @@ def main() -> int:
                 not display_holder
                 and now - last_claim_attempt >= DISPLAY_CLAIM_RETRY_SECONDS
             ):
+                prior_holder = display_holder
                 display_holder, revision, refresh_required = (
                     _retry_display_claim(
                         client,
@@ -811,6 +1181,8 @@ def main() -> int:
                     )
                 )
                 last_claim_attempt = now
+                if display_holder != prior_holder:
+                    semantic_pointer.clear()
                 if display_holder:
                     screen_refresh_required = (
                         screen_refresh_required or refresh_required
@@ -840,10 +1212,12 @@ def main() -> int:
                 else display_state.pending_generation
             )
             frame_plane = display_state.frame_plane
+            rendered_hit_targets: tuple[ControlHitTarget, ...] | None = None
 
             def draw_frame() -> None:
+                nonlocal rendered_hit_targets
                 screen.fill((0, 0, 0))
-                terminal_surface = compose_terminal_frame(
+                frame_result = compose_terminal_frame_result(
                     pygame,
                     terminal,
                     font,
@@ -852,8 +1226,12 @@ def main() -> int:
                     retained_plane=frame_plane,
                     show_cursor=cursor_blink,
                     glyph_cache=glyph_cache,
+                    control_font=status_font,
+                    hovered=semantic_pointer.hovered,
+                    pressed=semantic_pointer.pressed,
                 )
-                screen.blit(terminal_surface, (0, 0))
+                rendered_hit_targets = frame_result.hit_targets
+                screen.blit(frame_result.surface, (0, 0))
                 y = terminal.rows * cell_h
                 pygame.draw.rect(
                     screen,
@@ -880,6 +1258,11 @@ def main() -> int:
                     status_text += f"  {guest_keyboard.last_error}"
                 label = status_font.render(status_text, True, state_color)
                 screen.blit(label, (8, y + (status_h - label.get_height()) // 2))
+                if frame_offer is not None:
+                    display_state.stage_frame_hit_map(
+                        frame_offer,
+                        rendered_hit_targets,
+                    )
 
             presentation = draw_flip_and_present(
                 pygame,
@@ -902,6 +1285,7 @@ def main() -> int:
                 else:
                     revision = -1
                     screen_refresh_required = True
+                    semantic_pointer.clear()
                     guest_keyboard.clear_display_context(
                         waiting=guest_keyboard.display_required
                     )
@@ -964,6 +1348,24 @@ def _configure_keyboard(pygame) -> None:
 def _pygame_event_mods(pygame, event) -> int:
     mods = getattr(event, "mod", None)
     return pygame.key.get_mods() if mods is None else mods
+
+
+def _pygame_apt_modifiers(pygame, event) -> int:
+    """Map host masks to APT Shift/Ctrl/Alt/Super/Caps/Num bits 0..5."""
+
+    host_modifiers = _pygame_event_mods(pygame, event)
+    normalized = 0
+    for host_name, apt_bit in (
+        ("KMOD_SHIFT", 0),
+        ("KMOD_CTRL", 1),
+        ("KMOD_ALT", 2),
+        ("KMOD_GUI", 3),
+        ("KMOD_CAPS", 4),
+        ("KMOD_NUM", 5),
+    ):
+        if host_modifiers & getattr(pygame, host_name, 0):
+            normalized |= 1 << apt_bit
+    return normalized
 
 
 def _pygame_character_name(pygame, event) -> str | None:

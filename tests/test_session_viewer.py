@@ -334,6 +334,7 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     assert state.retained_plane is None
 
     state.stage(first, 7)
+    state.stage_frame_hit_map(first, ())
     assert state.finish_presentation(
         {"status": "presented", "presented": True, "revision": 11}
     ) == 11
@@ -355,6 +356,7 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     assert state.retained_plane is None
 
     state.stage(second, 9)
+    state.stage_frame_hit_map(second, ())
     assert state.finish_presentation(
         {"status": "duplicate", "presented": True, "revision": 12}
     ) == 12
@@ -381,6 +383,7 @@ def test_retained_display_reset_clears_fallback_and_input_context():
     state = _RetainedDisplayState()
     offer = _display_offer(1)
     state.stage(offer, 3)
+    state.stage_frame_hit_map(offer, ())
     state.finish_presentation(
         {"status": "presented", "presented": True, "revision": 4}
     )
@@ -414,6 +417,7 @@ def test_screen_cell_fallback_clears_plane_but_offer_cell_wins_when_present():
     state = _RetainedDisplayState()
     acknowledged = _display_offer(1, char="A")
     state.stage(acknowledged, 3)
+    state.stage_frame_hit_map(acknowledged, ())
     state.finish_presentation(
         {"status": "presented", "presented": True, "revision": 4}
     )
@@ -527,6 +531,7 @@ def test_status_invalidation_forces_refresh_before_another_flip():
     state = _RetainedDisplayState()
     offer = _display_offer(1)
     state.stage(offer, 1)
+    state.stage_frame_hit_map(offer, ())
     state.finish_presentation(
         {"status": "presented", "presented": True, "revision": 3}
     )
@@ -625,6 +630,7 @@ def test_periodic_display_reclaim_transitions_busy_observer_to_holder():
     state = _RetainedDisplayState()
     acknowledged = _display_offer(1)
     state.stage(acknowledged, 4)
+    state.stage_frame_hit_map(acknowledged, ())
     state.finish_presentation(
         {"status": "presented", "presented": True, "revision": 5}
     )
