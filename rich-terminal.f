@@ -417,6 +417,14 @@ _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP 0 0 EXIT THEN
     _PT.S.RET-FORMATS 64 ;
 
+\ The negotiated client-to-terminal payload ceiling is scalar admission data,
+\ not a borrowed session address.  Consumers need it for semantic families
+\ such as CONTROLS whose variable text has no separate format-specific cap.
+\ Zero is the closed, invalid, and not-yet-active result.
+: PT-OUTBOUND-MAX-PAYLOAD@  ( session -- bytes )
+    DUP PT-ACTIVE? 0= IF DROP 0 EXIT THEN
+    _PT.S.PEER-MAX-PAY @ ;
+
 : _PT-RET-RECORDS-CLEAR  ( s -- )
     DUP _PT.S.RET-CAPS 64 0 FILL
     _PT.S.RET-FORMATS 64 0 FILL ;

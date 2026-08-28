@@ -287,10 +287,13 @@ def test_retained_records_and_legacy_snapshot_are_lifecycle_gated() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     caps = _definition(source, "PT-RETAINED-CAPS@")
     formats = _definition(source, "PT-RETAINED-FORMATS@")
+    outbound = _definition(source, "PT-OUTBOUND-MAX-PAYLOAD@")
     begin = _definition(source, "_PT-BEGIN-TX")
 
     assert "PT-RETAINED-AVAILABLE?" in caps
     assert "PT-RETAINED-AVAILABLE?" in formats
+    assert "PT-ACTIVE? 0= IF DROP 0 EXIT THEN" in outbound
+    assert "_PT.S.PEER-MAX-PAY @" in outbound
     assert "_PT.S.RET-STATE @ _PT-RD-AVAILABLE =" in begin
     assert "PT-S-UNSUPPORTED EXIT" in begin
 

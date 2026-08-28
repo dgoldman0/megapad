@@ -131,6 +131,7 @@ PT-RETAINED-STATE@     ( session -- state )
 PT-RETAINED-AVAILABLE? ( session -- flag )
 PT-RETAINED-CAPS@      ( session -- a u )
 PT-RETAINED-FORMATS@   ( session -- a u )
+PT-OUTBOUND-MAX-PAYLOAD@ ( session -- bytes )
 
 PT-COMPLETION-POLL  ( completion session -- status has-completion )
 
@@ -213,6 +214,11 @@ publishes `PT-RET-ST-AVAILABLE` only after validating one adjacent exact
 CAPS/FORMATS pair and then receiving the covering CREDIT. The raw record
 accessors return `0 0` unless that public state is currently AVAILABLE; close,
 loss, ANSI state, and reset therefore cannot expose stale records.
+`PT-OUTBOUND-MAX-PAYLOAD@` returns the negotiated client-to-terminal scalar
+ceiling while the session is active (including resynchronization) and zero
+otherwise. It exposes no borrowed session storage and lets an upper engine
+preflight variable-payload families that intentionally define no private text
+cap.
 
 The public retained states are `PT-RET-ST-PENDING`,
 `PT-RET-ST-QUERYING`, `PT-RET-ST-AVAILABLE`,
