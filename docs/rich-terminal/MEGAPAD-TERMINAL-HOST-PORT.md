@@ -106,6 +106,52 @@ A valid in-contract publication must not raise into scheduler settlement.
 Consumer failures are recorded as terminal-session failures and processed
 after the machine boundary.
 
+### 4.1 Physical UART status and evidence boundary
+
+Physical UART TX status is **OPEN**. The Python and native accelerator UARTs
+implement BIOS writes to `TX_FLUSH` at `+06` and the RAM ring descriptor at
+`+08` through `+0F` by copying a complete batch directly into host storage.
+They report TX ready/empty without elapsed line time, and their `BAUD_LO` and
+`BAUD_HI` bytes do not pace TX or RX. The enhanced host port and viewer consume
+those completed batches in process.
+
+The integrated `mp64_uart` RTL instead implements only `TX_DATA`, `RX_DATA`,
+`STATUS`, and `CONTROL` at `+00` through `+03`. It has a real 8N1 shift path
+fixed by the SoC instance to 115,200 baud, but it has no ring descriptor,
+`TX_FLUSH`, or DMA reader. BIOS `EMIT` writes only the caller-owned RAM ring and
+BIOS `TX-FLUSH` writes `+06`; `rich-terminal.f` reaches that same path through
+`TYPE TX-FLUSH`. Consequently the emulator and native viewer can carry APT and
+exercise the model/compositor, while the current BIOS rich-terminal path sends
+no bytes to the physical RTL TX pin. Emulator/native viewer success is not
+physical-UART evidence and proves neither baud timing nor board-level
+backpressure.
+
+The physical TX seam is closed before any faster-rate work. The preferred
+unreleased-system direction is for the architectural BIOS path to poll real
+`TX_READY` and write `TX_DATA` directly, keeping host batching behind the
+emulator boundary instead of retaining guest-visible ring-only registers. If
+the ring is retained instead, a real bounded DMA reader and its completion and
+fault semantics must exist in the RTL. Either route must first prove ordinary
+ANSI and APT bytes on the physical pin at 115,200 baud.
+
+Only after that baseline works may MegaPad add the optional 1,000,000-baud
+profile. At the current 100 MHz SoC clock its integer divisor is exactly 100;
+115,200 uses divisor 868 (approximately 115,207 baud). The existing two stored
+baud bytes cannot encode either 115,200 or 1,000,000 as a numeric rate and are
+not a suitable control. A two-value rate-profile selector is the smaller
+interface; an arbitrary divisor design instead needs shadow registers plus one
+atomic apply operation. In both designs the status boundary must mean physical
+line idle (FIFO empty and shifter idle), not the RTL's current FIFO-only
+`TX_EMPTY` bit.
+
+Reset, ANSI, probe/offer/accept, and the future rate-switch exchange start at
+115,200. The faster profile is explicitly advertised and accepted, then
+applied by both endpoints only at an acknowledged physical-line-idle boundary.
+Close finishes at the active rate and returns to 115,200 at the corresponding
+idle boundary; hard attachment/link reset also restores 115,200. The exact
+current APT-1 negotiation grammar has no rate field, so a silent divisor write
+or an emulator-only setting is not a conforming dual-rate implementation.
+
 ## 5. Terminal consumption
 
 Terminal code polls accepted batches outside scheduler settlement. Polling
@@ -214,8 +260,16 @@ selected rich region and glyph run in deterministic back-to-front order
 with straight-alpha source-over blending, and draws the cursor overlay last.
 The current implementation carries foreground, background, CELL attributes,
 UTF-8 scalars, and exact bounds in that generic run. This proves the physical
-raster and acknowledgement seam; the vertical becomes complete when the
-ordinary TUI screen transaction supplies the full Desk/Pad/Daybook plane.
+raster and acknowledgement seam and keeps a complete styled-terminal fallback.
+It does not complete the rich vertical, even when the ordinary TUI screen
+transaction supplies the full Desk/Pad/Daybook GLYPH_RUN plane.
+
+The next view slice must carry at least one ordinary semantic control from the
+same UIDL/TUI lifecycle without letting applets author protocol scenes. The
+selected renderer renders that control, and normalized input may activate it
+only against the exact selected revision after the complete physical composite
+has been acknowledged. Acceptance observes the resulting normal application
+state change; a glyph imitation of a menu or button is still fallback output.
 
 A region's pixel rectangle is exactly its cell rectangle multiplied by the
 selected cell width and height. For a parentless object's normalized edge, the
@@ -272,6 +326,9 @@ The lightweight host-port suite must prove:
     clipping, styling, and z-order once that bounded vocabulary is present.
 
 Cases 9 and 10 are focused seconds-scale units for the current functional
-slice, not full renderer qualification. A CELL-only snapshot round trip or one
-isolated glyph-run overlay cannot be cited as Desk/Pad/Daybook rich-rendering
-acceptance.
+slice, not full renderer qualification. A CELL-only snapshot round trip, one
+isolated glyph-run overlay, or even a complete GLYPH_RUN-only screen cannot be
+cited as Desk/Pad/Daybook semantic-rich-rendering acceptance. That acceptance
+also requires a real semantic control, its physical revision acknowledgement,
+and revision-bound normalized activation through the ordinary application
+lifecycle.

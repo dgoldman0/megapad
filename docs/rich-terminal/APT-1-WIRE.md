@@ -128,6 +128,19 @@ sequence and completes `CLOSE_ACK`; if that cannot complete within another
 queues drained before ANSI is allowed to consume again. Loading the module
 alone emits no probe.
 
+The exact probe, offer, and accept grammar above contains no baud-rate field
+and this contract does not authorize an implicit rate change at `OPEN`. On a
+physical MegaPad UART, reset, ANSI fallback, and this negotiation remain at the
+baseline 115,200 baud. A future optional 1,000,000-baud profile must be an
+explicitly discovered and accepted extension after the real BIOS-to-RTL TX
+path works at the baseline rate. Its switch exchange remains at 115,200 until
+the final acknowledged switch boundary; both endpoints then apply the selected
+rate only after the transmitting FIFO and shift register are idle. Framed
+close completes at the active rate and returns both endpoints to 115,200 at an
+equally explicit idle boundary. Link reset always restores 115,200. A timeout
+or ambiguous switch requires hard link reset rather than guessing which rate
+owns the stream.
+
 ## 4. Session states
 
 Both implementations expose these conceptual states:
@@ -617,6 +630,10 @@ remain outside the CELL-1 implementation gate. The optional additive contract
 `1000`–`1003`, `2000`–`2024`, `3000`–`3003`, and `8000`–`8002` only after its
 deterministic discovery succeeds. Every other reserved ID keeps the behavior
 defined here; in particular, a sender may not infer a payload from its range.
+The `4000`–`4FFF` reservation is the next required rich-terminal product
+vertical, but neither CELL-1 nor RETAINED-1 currently defines it. A complete
+styled-cell or GLYPH_RUN screen is therefore a foundation and fallback, not
+evidence that semantic controls have crossed the rich path.
 
 ## 17. Conformance vectors
 

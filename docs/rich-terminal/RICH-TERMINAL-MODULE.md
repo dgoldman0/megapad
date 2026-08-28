@@ -356,19 +356,24 @@ The lightweight module tests prove:
    same transaction-ID and global revision domain.
 
 The current end-to-end guest conformance still claims only the core
-owner/region writer slice. The typed GLYPH_RUN writer and physical compositor
-are lightweight-qualified lower-stack plumbing, but ordinary TUI draw capture
-is not connected yet. Other object kinds, resources, series, full semantic
-replay, and retained resize journeys remain unqualified.
+owner/region and typed GLYPH_RUN writer slice. The GLYPH_RUN path and physical
+compositor are lightweight-qualified lower-stack plumbing. Even when an upper
+layer supplies a complete styled-glyph screen through that path, it proves the
+rich transport and complete terminal fallback, not the semantic-control
+vertical. No menu, button, selector, or other high-level control family is
+defined or qualified by this slice. Other object kinds, resources, series,
+semantic controls, full semantic replay, and retained resize journeys remain
+unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 
 The typed GLYPH_RUN writer, generic draw-plane projection, immutable display
 offer, and post-flip acknowledgement path are lower-stack foundation. They
 prove that a styled background and terminal glyphs can survive module, model,
-session, shared wire, and physical viewer ownership boundaries. They do not
-complete the vertical until the ordinary TUI screen transaction produces the
-plane for Desk, Pad, and Daybook.
+session, shared wire, and physical viewer ownership boundaries. A complete
+GLYPH_RUN projection remains the renderer-neutral styled-terminal fallback; it
+does not complete the rich vertical, even when the ordinary TUI screen
+transaction supplies every visible Desk, Pad, and Daybook cell.
 
 The blocking cross-repository slice is the real Desk composition with the
 canonical Pad and Daybook applets both launched and live through their normal
@@ -378,23 +383,31 @@ the ordinary TUI draw lifecycle and cover Desk chrome, UIDL renderers, mounted
 widgets, and applet painting through the shared draw boundary. Applications
 must not construct protocol scenes or select terminal mode.
 
-The minimum renderer-neutral representation for this composition is the final
-ordered styled-glyph plane emitted by the ordinary screen transaction. Each
-run includes its background, foreground, CELL attributes, exact bounds, and
-UTF-8 scalars; existing TUI clipping, lines, boxes, selection, and caret writes
-are therefore preserved without inventing a GUI scene vocabulary. Atomic
-bounded replacement and exact post-flip acknowledgement remain mandatory.
+The next required renderer-neutral projection is a semantic-control slice from
+that same ordinary lifecycle. It must preserve a real control's semantic kind,
+identity, state, bounds, focus/selection state, label or value, and activation
+binding without exposing APT IDs to the application or asking the applet to
+author a renderer scene. The selected renderer owns its representation,
+clipping, allocation, rasterization, and composition. GLYPH_RUN remains the
+complete visual fallback for content that has no richer projection, but
+drawing a menu or button only as glyphs does not satisfy this semantic slice.
 Images, numeric instruments, meters, indicator objects, and series are not on
 this vertical's critical path unless the product composition begins to use
 them.
 
 Acceptance requires a complete visible Desk frame, a real Pad edit and visible
 caret/state change, a real Daybook navigation or selection, and the ordinary
-Daybook-to-Pad shared-resource route. CELL remains complete fallback, but a
-frame whose substantive Desk/editor/calendar pixels came only from CELL does
-not prove the rich renderer. Wire bytes, accepted model state, an immutable
-composite, or one isolated glyph-run overlay do not complete the checkpoint or make
-an unacknowledged revision input-eligible.
+Daybook-to-Pad shared-resource route. At least one ordinary semantic control
+from that composition must also be projected as a control, visibly rendered
+through the selected rich renderer, and activated through normalized input
+bound to its exact displayed revision. That revision becomes input-eligible
+only after the complete composite containing the control is physically
+presented and exactly acknowledged; the resulting ordinary application state
+change must then be visible. CELL remains complete fallback, but a frame whose
+substantive Desk/editor/calendar pixels came only from CELL does not prove the
+rich renderer. Wire bytes, accepted model state, an immutable composite, a
+GLYPH_RUN-only screen, or one isolated glyph-run overlay do not complete the
+checkpoint.
 
 The current contract evolves in place; do not add a numbered successor,
 parallel legacy path, Sound Lab fixture, applet-specific scene, or

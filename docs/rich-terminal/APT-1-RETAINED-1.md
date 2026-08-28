@@ -16,11 +16,14 @@ remain fully conforming.
 
 Akashic consumes this profile through one generic, consumer-neutral
 rich-terminal engine. Its UIDL-TUI driver may project semantic UIDL elements
-as regions, styled glyph runs, vector paths, readouts, meters, status indicators, bounded
-series, plots, waveforms, images, and display cadence. Another trusted system
-renderer may use the same engine without creating another protocol or session.
-No applet is a direct protocol consumer or determines this profile's semantics
-or limits.
+as regions, styled glyph runs, vector paths, readouts, meters, status
+indicators, bounded series, plots, waveforms, images, and display cadence.
+These are retained output materializations, not semantic menu, button,
+selector, or activation controls. Reducing a UIDL control to a GLYPH_RUN keeps
+the mandatory visual fallback but does not preserve its high-level control
+semantics. Another trusted system renderer may use the same engine without
+creating another protocol or session. No applet is a direct protocol consumer
+or determines this profile's semantics or limits.
 
 The profile is deliberately not a canvas command stream. Owners define a
 bounded terminal-side materialization. A successful update commit atomically
@@ -849,6 +852,12 @@ Object type values are:
 | 8 | `PLOT` | SERIES |
 | 9 | `WAVEFORM` | SERIES |
 
+No object type in this table defines a semantic UI control. The APT-1 base
+contract reserves `4000` through `4FFF` for a future semantic-control family,
+but reservation does not define its wire values, discovery, ownership,
+activation, or input/revision rules. RETAINED-1 and a complete GLYPH_RUN screen
+therefore cannot, by themselves, satisfy the semantic-control vertical.
+
 ### 11.1 GROUP
 
 GROUP has no type body; payload length is exactly 64. It establishes a nested
@@ -1229,24 +1238,37 @@ Desk tiling/focus/input loop, and normal TUI draw lifecycle. No source-special
 fixture, Sound Lab path, applet scene API, terminal-mode branch, or renderer
 reservation in UIDL may substitute for that composition.
 
+This checkpoint requires an in-place additive semantic-control contract before
+it can pass. At least one ordinary control from the real composition must cross
+the generic UIDL projection with semantic kind, identity, state, bounds,
+focus/selection state, label or value, and activation binding intact. The
+terminal selects its visual representation; neither the applet nor UIDL may
+carry a protocol object ID, terminal buffer reservation, or renderer-specific
+scene description. This document records that gate but does not define or
+implement the reserved control family.
+
 The generic rich path must carry the substantive Desk chrome, Pad editor, and
 Daybook calendar/agenda state through private owner admission, bounded
 publication, immutable composite selection, and the physical view sink. It must
 show at least one real Pad edit and one real Daybook navigation or selection,
-then preserve the ordinary Daybook-to-Pad shared-resource route. The sink makes
-the selected revision input-eligible only after every nonempty selected plane
-has been physically composited, flipped, and exactly acknowledged.
+then preserve the ordinary Daybook-to-Pad shared-resource route. The required
+semantic control must be visibly rendered from that projection and activated
+by normalized input bound to the exact selected revision. The sink makes that
+revision input-eligible only after every nonempty selected plane has been
+physically composited, flipped, and exactly acknowledged; acceptance also
+observes the resulting ordinary application-state change.
 
 CELL remains mandatory complete fallback. Retaining a scene diagnostically,
-promoting a composite, exposing only CELL pixels, or overlaying one retained
-glyph run on a CELL-rendered Desk/editor/calendar does not complete this
-checkpoint.
+promoting a composite, exposing only CELL pixels, projecting the whole screen
+only as GLYPH_RUN output, or overlaying one retained glyph run on a
+CELL-rendered Desk/editor/calendar does not complete this checkpoint.
 Binding-local rich refusal must leave CELL usable, but refused CELL pixels are
 not rich-rendering acceptance evidence.
 
-The checkpoint does not authorize partial capability advertisement. Dormant
-instrument, image, vector, series, resource, and cadence families remain
-unadvertised and are not acceptance prerequisites for this vertical.
+The checkpoint does not authorize partial capability advertisement. The
+semantic-control extension is a required next slice; dormant instrument,
+image, vector, series, resource, and cadence families remain unadvertised and
+are not acceptance prerequisites for this vertical.
 
 ### 16.2 Production qualification
 

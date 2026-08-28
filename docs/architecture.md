@@ -161,29 +161,67 @@ layer converts to `TrapError(IVEC_BUS_FAULT)`.
 
 ## UART (Serial Port)
 
-The UART provides terminal I/O — it's how the user types at the Forth REPL
-and sees output.  It has a transmit buffer and a receive FIFO.
+The UART provides terminal I/O — it is how the user types at the Forth REPL
+and sees output. The table records the current emulator/native host facade used
+by BIOS. Offsets `+00` through `+03` have corresponding RTL registers; the
+batching offsets `+04` through `+0F` do not currently exist in the integrated
+RTL and must not be treated as a common hardware contract.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
 | TX_DATA | `+0x00` | W | Write a byte to transmit. |
 | RX_DATA | `+0x01` | R | Read next byte from receive FIFO. |
-| STATUS | `+0x02` | R | **bit 0:** TX ready (always 1).  **bit 1:** RX data available.  **bit 5:** TX empty. |
+| STATUS | `+0x02` | R | **bit 0:** TX ready. **bit 1:** RX data available. **bit 5:** TX empty. The emulator reports ready and empty immediately; RTL derives bits 0 and 5 from its TX FIFO. |
 | CONTROL | `+0x03` | RW | **bit 0:** RX IRQ enable.  **bit 1:** TX IRQ enable. |
-| BAUD_LO | `+0x04` | RW | Baud rate low byte (cosmetic — the emulated UART is always instant). |
-| BAUD_HI | `+0x05` | RW | Baud rate high byte. |
+| BAUD_LO | `+0x04` | RW | Stored emulator byte only; it does not pace TX or RX and has no RTL register. |
+| BAUD_HI | `+0x05` | RW | Stored emulator byte only; it does not pace TX or RX and has no RTL register. |
 | TX_FLUSH | `+0x06` | W | Drain the TX ring buffer (triggers batch output callback). |
 | TX_RING_BASE | `+0x08`–`+0x0F` | W | 64-bit LE pointer to the TX ring descriptor in RAM. |
 
-**BIOS words:** `KEY` reads from RX_DATA (blocking), `KEY?` checks
-STATUS bit 1, `EMIT` appends to a 4096-byte TX ring buffer in RAM
-(flushed automatically when full, or explicitly via `TX-FLUSH`).
+**BIOS words:** `KEY` reads from RX_DATA (blocking), `KEY?` checks STATUS bit
+1, and the current `EMIT` appends only to a 4096-byte TX ring in RAM. The ring
+is flushed automatically when full or explicitly through `TX-FLUSH`.
 
-> **Hardware note:** The TX ring buffer is an *emulator-side* optimisation.
-> On real hardware MMIO stores are single bus cycles, so the per-byte cost
-> is negligible and the ring provides no speedup.  For FPGA/ASIC targets a
-> DMA engine wired to TX_FLUSH would be needed to make the buffer useful.
-> The layout (head + contiguous 4 KB data) is already DMA-friendly.
+### Current physical-TX gap
+
+Physical UART TX status is **OPEN**. The Python and native accelerator devices
+implement `TX_FLUSH` and `TX_RING_BASE` by copying the BIOS ring into a host
+batch; their TX path is untimed and their stored baud bytes are inert. The
+emulator rich-terminal viewer consumes those in-process batches directly, so
+successful emulator/native rendering is not evidence of physical-UART byte
+delivery, baud timing, or line backpressure.
+
+The integrated `mp64_uart` RTL has only `TX_DATA`, `RX_DATA`, `STATUS`, and
+`CONTROL`. Its SoC instance fixes a real 8N1 serializer at 115,200 baud and has
+no ring registers or DMA interface. Because BIOS `EMIT` never writes
+`TX_DATA`, and both BIOS `TX-FLUSH` and `rich-terminal.f` ultimately write the
+unimplemented `+06` register, the current physical RTL TX pin receives none of
+that output. RTL `TX_EMPTY` is also only FIFO-empty; it may assert while the
+shift register is still transmitting and is not a physical line-idle boundary.
+
+Close this seam at 115,200 before changing rate. The preferred direction for
+the unreleased architecture is a BIOS hardware path that polls `TX_READY` and
+writes `TX_DATA`, while emulator batching remains a host implementation detail.
+Retaining the guest-visible ring instead requires a real bounded DMA reader,
+completion behavior, and fault semantics in RTL. Either design must first show
+ordinary ANSI and APT bytes on the physical pin.
+
+### Dual-rate direction
+
+After physical TX works, a baseline 115,200 / fast 1,000,000 baud selector is
+feasible without a clock change. At the current 100 MHz clock the integer
+divisors are 868 (approximately 115,207 baud) and exactly 100. The current two
+emulator baud bytes cannot represent either rate numerically, so they must not
+be promoted as the control. Prefer an atomic two-profile selector; if arbitrary
+rates are required later, use a sufficiently wide shadow divisor plus an
+explicit apply operation.
+
+Reset and ANSI negotiation use 115,200. A future APT extension must explicitly
+advertise and accept the fast profile while still at 115,200, wait for a true
+FIFO-and-shifter-idle boundary, then switch both endpoints. Close returns to
+115,200 after its acknowledged idle boundary, and hard link reset always
+restores 115,200. The current exact APT-1 offer/accept grammar contains no rate
+field, so an unnegotiated divisor write is not compatible dual-rate support.
 
 ---
 
