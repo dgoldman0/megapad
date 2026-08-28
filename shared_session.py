@@ -679,15 +679,20 @@ class SharedMachine:
         try:
             entry = int(cpu.mem_read64(latest_variable))
             here = int(cpu.mem_read64(here_variable))
-            while entry and entry not in seen and len(words) < 16_384:
+            upper = here
+            while entry and entry not in seen:
+                if entry >= upper or entry + 9 > upper:
+                    return words, 0
                 seen.add(entry)
                 flags_len = int(cpu.mem_read8(entry + 8))
                 name_len = flags_len & 0x7F
+                code = entry + 9 + name_len
+                if code > upper:
+                    return words, 0
                 name = bytes(
                     int(cpu.mem_read8(entry + 9 + index))
                     for index in range(name_len)
                 ).decode("ascii", errors="replace")
-                code = entry + 9 + name_len
                 word = {"name": name, "header": entry, "code": code}
                 prefix = bytes(int(cpu.mem_read8(code + index)) for index in range(3))
                 suffix = bytes(
@@ -701,7 +706,11 @@ class SharedMachine:
                     word["data_address"] = data_address
                     word["value"] = int(cpu.mem_read64(data_address))
                 words.append(word)
-                entry = int(cpu.mem_read64(entry))
+                next_entry = int(cpu.mem_read64(entry))
+                if next_entry and next_entry >= entry:
+                    return words, 0
+                upper = entry
+                entry = next_entry
         except (IndexError, RuntimeError, ValueError):
             return words, 0
         return words, here

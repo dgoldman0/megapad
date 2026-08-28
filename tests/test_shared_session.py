@@ -1110,6 +1110,89 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
         assert "host_profile" not in detailed
 
 
+def test_forth_diagnostics_reach_words_beyond_the_old_depth_ceiling():
+    stride = 48
+    base = 0x100
+    latest_variable = 0x20
+    here_variable = 0x28
+    names = ["ANCIENT-CURRENT", "ANCIENT-TARGET"] + ["N"] * 16_384
+    here = base + len(names) * stride
+    data_stack = here + 0x40
+    return_stack = here + 0x80
+    memory = bytearray(here + 0x100)
+
+    def write64(address, value):
+        memory[address:address + 8] = int(value).to_bytes(8, "little")
+
+    locations = {}
+    previous = 0
+    for index, name in enumerate(names):
+        header = base + index * stride
+        encoded = name.encode("ascii")
+        write64(header, previous)
+        memory[header + 8] = len(encoded)
+        memory[header + 9:header + 9 + len(encoded)] = encoded
+        locations.setdefault(name, (header, header + 9 + len(encoded)))
+        previous = header
+
+    write64(latest_variable, previous)
+    write64(here_variable, here)
+    current_header, current_code = locations["ANCIENT-CURRENT"]
+    target_header, target_code = locations["ANCIENT-TARGET"]
+    write64(return_stack, target_code + 2)
+
+    def read8(address):
+        if not 0 <= address < len(memory):
+            raise IndexError(address)
+        return memory[address]
+
+    def read64(address):
+        if not 0 <= address <= len(memory) - 8:
+            raise IndexError(address)
+        return int.from_bytes(memory[address:address + 8], "little")
+
+    registers = [0] * 32
+    registers[3] = current_code + 1
+    registers[14] = data_stack
+    registers[15] = return_stack
+    cpu = SimpleNamespace(
+        mem_read8=read8,
+        mem_read64=read64,
+        regs=registers,
+        pc=0,
+    )
+    machine = object.__new__(SharedMachine)
+    machine.lock = threading.RLock()
+    machine.session = SimpleNamespace(
+        bios_labels={
+            "var_latest": latest_variable,
+            "var_here": here_variable,
+        },
+        system=SimpleNamespace(cpu=cpu),
+    )
+
+    named = machine.forth(["ancient-target"])
+    detailed = machine._forth_diagnostics(cpu)
+
+    assert named["words"]["ANCIENT-TARGET"] == {
+        "name": "ANCIENT-TARGET",
+        "header": target_header,
+        "code": target_code,
+    }
+    assert detailed["word"] == {
+        "name": "ANCIENT-CURRENT",
+        "header": current_header,
+        "code": current_code,
+        "offset": 1,
+    }
+    assert detailed["return_words"][0] == {
+        "name": "ANCIENT-TARGET",
+        "header": target_header,
+        "code": target_code,
+        "offset": 2,
+    }
+
+
 def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
     with MachineSession.from_bios(BIOS) as session:
         machine = SharedMachine(session, host_profile=True)
