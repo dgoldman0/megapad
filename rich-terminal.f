@@ -6,8 +6,8 @@
 \  word that emits an APT probe or takes raw UART input ownership.  ANSI
 \  remains the baseline before negotiation and after a synchronized close.
 \
-\  Contracts: APT-1-CELL-1-2026-08-24 plus the core owner/region/glyph-run
-\             subset
+\  Contracts: APT-1-CELL-1-2026-08-24 plus the core
+\             owner/region/glyph-run/control transport subset
 \             of APT-1-RETAINED-1-2026-08-24.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 
@@ -45,6 +45,8 @@ PROVIDED rich-terminal.f
 \ RESIZE:  value0=cols, value1=rows, value2=geometry generation
 \          (revision is zero).
 \ FOCUS:   revision=model, value0=focused.
+\ CONTROL: revision=model, value0=owner, value1=owner generation,
+\          value2=control ID, value3=event kind|modifiers<<16.
 \ TEXT data remains valid until the next PT-SERVICE for the session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
@@ -60,6 +62,21 @@ PROVIDED rich-terminal.f
 0x0202 CONSTANT PT-EVENT-POINTER
 0x0203 CONSTANT PT-EVENT-RESIZE
 0x0204 CONSTANT PT-EVENT-FOCUS
+0x0205 CONSTANT PT-EVENT-CONTROL
+
+\ RETAINED-1 semantic menu values accepted by the typed control API.
+1 CONSTANT PT-CONTROL-MENU-BAR
+2 CONSTANT PT-CONTROL-MENU
+3 CONSTANT PT-CONTROL-MENU-ITEM
+4 CONSTANT PT-CONTROL-MENU-SEPARATOR
+
+0x01 CONSTANT PT-CONTROL-VISIBLE
+0x02 CONSTANT PT-CONTROL-ENABLED
+0x04 CONSTANT PT-CONTROL-OPEN
+0x08 CONSTANT PT-CONTROL-SELECTED
+0x10 CONSTANT PT-CONTROL-CHECKED
+
+1 CONSTANT PT-CONTROL-ACTIVATE
 
 : PT-EVENT-TYPE@      ( event -- u )       @ ;
 : PT-EVENT-REVISION@  ( event -- u )   8 + @ ;
@@ -68,6 +85,13 @@ PROVIDED rich-terminal.f
 : PT-EVENT-VALUE2@    ( event -- u )  32 + @ ;
 : PT-EVENT-VALUE3@    ( event -- u )  40 + @ ;
 : PT-EVENT-DATA@      ( event -- a u ) DUP 48 + @ SWAP 56 + @ ;
+
+\ Typed CONTROL_EVENT accessors keep descriptor packing private to PT.
+: PT-CONTROL-EVENT-OWNER@      ( event -- u )  16 + @ ;
+: PT-CONTROL-EVENT-GENERATION@ ( event -- u )  24 + @ ;
+: PT-CONTROL-EVENT-ID@         ( event -- u )  32 + @ ;
+: PT-CONTROL-EVENT-KIND@       ( event -- u )  40 + @ 0xFFFF AND ;
+: PT-CONTROL-EVENT-MODIFIERS@  ( event -- u )  40 + @ 16 RSHIFT 0xFFFF AND ;
 
 \ PT-COMPLETION-POLL writes this fixed, byte-copyable descriptor:
 \   +0  completion kind          +8  completed wire request type
@@ -146,6 +170,8 @@ PROVIDED rich-terminal.f
 1048576  CONSTANT _PT-MAX-PAYLOAD
 4096     CONSTANT _PT-CONTROL-RESERVE
 0x3F     CONSTANT _PT-CAPS
+0x100    CONSTANT _PT-RET-CONTROLS
+0x13F    CONSTANT _PT-RET-FEATURE-MASK
 250      CONSTANT _PT-TIMEOUT-MS
 3        CONSTANT _PT-PROBE-LIMIT
 256      CONSTANT _PT-SERVICE-BYTES
@@ -185,6 +211,7 @@ CREATE _PT-OWNER  0 ,
 0x0202 CONSTANT _PT-M-POINTER
 0x0203 CONSTANT _PT-M-RESIZE
 0x0204 CONSTANT _PT-M-FOCUS
+0x0205 CONSTANT _PT-M-CONTROL-EVENT
 0x8000 CONSTANT _PT-M-RET-QUERY
 0x8001 CONSTANT _PT-M-RET-CAPS
 0x8002 CONSTANT _PT-M-RET-FORMATS
@@ -196,6 +223,9 @@ CREATE _PT-OWNER  0 ,
 0x2012 CONSTANT _PT-M-REGION-DROP
 0x2020 CONSTANT _PT-M-OBJECT-DEFINE
 0x2021 CONSTANT _PT-M-OBJECT-REPLACE
+0x4000 CONSTANT _PT-M-CONTROL-DEFINE
+0x4001 CONSTANT _PT-M-CONTROL-REPLACE
+0x4002 CONSTANT _PT-M-CONTROL-DROP
 
 \ Completion request values intentionally expose only the implemented
 \ retained lifecycle and transaction writers, not the private message table.
@@ -490,6 +520,10 @@ VARIABLE _PT-U64-A
     _PT-U64-A ! _PT-U64-V !
     _PT-U64-V @ _PT-U64-A @ L!
     _PT-U64-V @ 32 RSHIFT _PT-U64-A @ 4 + L! ;
+
+: _PT-RET-CONTROLS?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROLS AND 0<> ;
 
 : _PT-I32@  ( a -- n )
     L@ DUP 0x80000000 AND IF 0xFFFFFFFF00000000 OR THEN ;
@@ -1177,7 +1211,8 @@ VARIABLE _PT-RX-DATA?
     DUP _PT-M-TEXT = IF DROP TRUE EXIT THEN
     DUP _PT-M-POINTER = IF DROP TRUE EXIT THEN
     DUP _PT-M-RESIZE = IF DROP TRUE EXIT THEN
-    _PT-M-FOCUS = ;
+    DUP _PT-M-FOCUS = IF DROP TRUE EXIT THEN
+    _PT-M-CONTROL-EVENT = ;
 
 : _PT-TO-ANSI  ( s -- )
     DUP _PT-RET-RESET
@@ -1718,7 +1753,7 @@ VARIABLE _PT-RV-TOTAL
         FALSE EXIT
     THEN
     _PT-RV-P @ 8 + _PT-U64@ DUP _PT-RV-FEATURES !
-    DUP 0x3F INVERT AND IF DROP FALSE EXIT THEN
+    DUP _PT-RET-FEATURE-MASK INVERT AND IF DROP FALSE EXIT THEN
     DUP 1 AND 0= IF DROP FALSE EXIT THEN
     DUP 0x10 AND SWAP 0x08 AND 0= AND IF FALSE EXIT THEN
 
@@ -1732,7 +1767,7 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 64 U< OR IF FALSE EXIT THEN
     _PT-RV-S @ _PT.S.TX-U @ 104 U< IF FALSE EXIT THEN
 
-    _PT-RV-FEATURES @ 0x1E AND IF
+    _PT-RV-FEATURES @ 0x11E AND IF
         _PT-RV-P @ 32 + L@ 0= IF FALSE EXIT THEN
     THEN
     _PT-RV-P @ 36 + L@
@@ -1748,6 +1783,12 @@ VARIABLE _PT-RV-TOTAL
         _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 80 U< IF FALSE EXIT THEN
         _PT-RV-P @ 44 + L@ 32 +
         _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
+    THEN
+    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND IF
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 80 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 40 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.TX-U @ 120 U< IF FALSE EXIT THEN
+        _PT-RV-RETMAX @ 280 U< IF FALSE EXIT THEN
     THEN
 
     12 _PT-RV-S @ _PT.S.COLS @ 8 * +
@@ -1808,8 +1849,10 @@ VARIABLE _PT-RF-PIXELS
         THEN
         280 + _PT-RV-RETMAX @ U> IF FALSE EXIT THEN
     ELSE
-        _PT-RF-FORMATS @ 48 + _PT-U64@ IF FALSE EXIT THEN
         _PT-RV-FEATURES @ 0x08 AND IF FALSE EXIT THEN
+        _PT-RF-FORMATS @ 48 + _PT-U64@
+        _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0<>
+        _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     THEN
 
     _PT-RV-FEATURES @ 0x08 AND IF
@@ -2060,6 +2103,33 @@ VARIABLE _PT-RSZ-BASE
     THEN
     _PT-ACCEPT-EVENT ;
 
+: _PT-DISPATCH-CONTROL-EVENT  ( s -- status )
+    DUP _PT-INPUT-STATE? 0= IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    \ A crossed input is discarded once close has become irrevocable.  Before
+    \ that boundary, only a positively discovered RET_CONTROLS session may
+    \ admit this additive event family.
+    DUP _PT.S.STATE @ PT-ST-CLOSING <>
+    OVER _PT.S.CLOSE-PENDING? @ 0= AND IF
+        DUP _PT-RET-CONTROLS? 0= IF
+            6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+        THEN
+    THEN
+    _PT-RX-LEN @ 40 <> IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ _PT-U64@ 0=
+    _PT-RX-P @ 8 + _PT-U64@ 0= OR
+    _PT-RX-P @ 16 + _PT-U64@ 0= OR
+    _PT-RX-P @ 24 + W@ PT-CONTROL-ACTIVATE <> OR
+    _PT-RX-P @ 26 + W@ 0x3F INVERT AND 0<> OR
+    _PT-RX-P @ 28 + L@ 0<> OR
+    _PT-RX-P @ 32 + _PT-U64@ _PT-RX-S @ _PT.S.REVISION @ <> OR IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-ACCEPT-EVENT ;
+
 : _PT-DISPATCH  ( s -- status )
     DUP _PT-RET-CHECK-ADJACENCY
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
@@ -2088,6 +2158,9 @@ VARIABLE _PT-RSZ-BASE
     _PT-RX-TYPE @ _PT-M-POINTER = IF _PT-DISPATCH-POINTER EXIT THEN
     _PT-RX-TYPE @ _PT-M-RESIZE = IF _PT-DISPATCH-RESIZE EXIT THEN
     _PT-RX-TYPE @ _PT-M-FOCUS = IF _PT-DISPATCH-FOCUS EXIT THEN
+    _PT-RX-TYPE @ _PT-M-CONTROL-EVENT = IF
+        _PT-DISPATCH-CONTROL-EVENT EXIT
+    THEN
     _PT-RX-TYPE @ 0x8000 AND IF
         _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA EXIT
     THEN
@@ -2518,7 +2591,15 @@ VARIABLE _PT-EP-TYPE
     THEN
     _PT-EP-TYPE @ _PT-M-FOCUS = IF
         _PT-EP-P @ 8 + _PT-U64@ _PT-EP-DST @ 8 + !
-        _PT-EP-P @ C@ _PT-EP-DST @ 16 + !
+        _PT-EP-P @ C@ _PT-EP-DST @ 16 + ! EXIT
+    THEN
+    _PT-EP-TYPE @ _PT-M-CONTROL-EVENT = IF
+        _PT-EP-P @ 32 + _PT-U64@ _PT-EP-DST @ 8 + !
+        _PT-EP-P @ _PT-U64@ _PT-EP-DST @ 16 + !
+        _PT-EP-P @ 8 + _PT-U64@ _PT-EP-DST @ 24 + !
+        _PT-EP-P @ 16 + _PT-U64@ _PT-EP-DST @ 32 + !
+        _PT-EP-P @ 24 + W@
+        _PT-EP-P @ 26 + W@ 16 LSHIFT OR _PT-EP-DST @ 40 + !
     THEN ;
 
 : PT-EVENT-POLL  ( event session -- status has-event )
@@ -3444,6 +3525,207 @@ VARIABLE _PT-GR-PAYLOAD-U
 \        attrs text-a text-u session -- status
 : PT-GLYPH-RUN-REPLACE
     _PT-M-OBJECT-REPLACE _PT-GLYPH-RUN-WRITE ;
+
+\ Semantic controls are a separate retained identity namespace, but consume
+\ the owner's shared object and UTF-8 quotas at the terminal.  PT validates
+\ each complete record-local shape and owns exact wire packing.  It deliberately
+\ does not impose a private label, shortcut, or control-count ceiling.
+VARIABLE _PT-CT-S
+VARIABLE _PT-CT-TYPE
+VARIABLE _PT-CT-OWNER
+VARIABLE _PT-CT-GENERATION
+VARIABLE _PT-CT-ID
+VARIABLE _PT-CT-KIND
+VARIABLE _PT-CT-STATE
+VARIABLE _PT-CT-Z
+VARIABLE _PT-CT-REGION
+VARIABLE _PT-CT-PARENT
+VARIABLE _PT-CT-ORDER
+VARIABLE _PT-CT-LEFT
+VARIABLE _PT-CT-TOP
+VARIABLE _PT-CT-RIGHT
+VARIABLE _PT-CT-BOTTOM
+VARIABLE _PT-CT-LABEL-A
+VARIABLE _PT-CT-LABEL-U
+VARIABLE _PT-CT-SHORTCUT-A
+VARIABLE _PT-CT-SHORTCUT-U
+VARIABLE _PT-CT-PAYLOAD-U
+VARIABLE _PT-CT-TA
+VARIABLE _PT-CT-TU
+
+: _PT-CT-TEXT?  ( a u -- flag )
+    _PT-CT-TU ! _PT-CT-TA !
+    _PT-CT-TU @ 0= IF _PT-CT-TA @ 0= EXIT THEN
+    _PT-CT-TA @ _PT-CT-TU @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
+    _PT-CT-TA @ _PT-CT-TU @ _PT-CT-S @ /PT-SESSION
+        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-CT-TA @ _PT-CT-TU @ _PT-CT-S @ _PT.S.TX-A @
+        _PT-CT-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-CT-TA @ _PT-CT-TU @ _PT-UTF8? 0= IF FALSE EXIT THEN
+    _PT-CT-TU @ 0 ?DO
+        _PT-CT-TA @ I + C@ DUP 32 U< SWAP 127 = OR IF
+            FALSE UNLOOP EXIT
+        THEN
+    LOOP
+    TRUE ;
+
+: _PT-CT-ROOT-BOUNDS?  ( -- flag )
+    _PT-CT-LEFT @ _PT-CT-RIGHT @ U<
+    _PT-CT-TOP @ _PT-CT-BOTTOM @ U< AND ;
+
+: _PT-CT-DESCENDANT?  ( -- flag )
+    _PT-CT-PARENT @ 0<> _PT-CT-Z @ 0= AND
+    _PT-CT-LEFT @ _PT-CT-TOP @ OR
+    _PT-CT-RIGHT @ OR _PT-CT-BOTTOM @ OR 0= AND ;
+
+: _PT-CT-KIND?  ( -- flag )
+    _PT-CT-KIND @ PT-CONTROL-MENU-BAR = IF
+        _PT-CT-PARENT @ IF FALSE EXIT THEN
+        _PT-CT-ORDER @ IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ _PT-CT-SHORTCUT-U @ OR IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x03 INVERT AND IF FALSE EXIT THEN
+        _PT-CT-ROOT-BOUNDS? EXIT
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-MENU = IF
+        _PT-CT-DESCENDANT? 0= IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ 0= IF FALSE EXIT THEN
+        _PT-CT-SHORTCUT-U @ IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x0F INVERT AND 0= EXIT
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-MENU-ITEM = IF
+        _PT-CT-DESCENDANT? 0= IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ 0= IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x1B INVERT AND 0= EXIT
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-MENU-SEPARATOR = IF
+        _PT-CT-DESCENDANT? 0= IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ _PT-CT-SHORTCUT-U @ OR IF FALSE EXIT THEN
+        _PT-CT-STATE @ PT-CONTROL-VISIBLE INVERT AND 0= EXIT
+    THEN
+    FALSE ;
+
+: _PT-CT-FIELDS?  ( -- flag )
+    _PT-CT-OWNER @ 0= _PT-CT-GENERATION @ 0= OR
+    _PT-CT-ID @ 0= OR _PT-CT-REGION @ 0= OR IF FALSE EXIT THEN
+    _PT-CT-KIND @ _PT-U16? 0= _PT-CT-STATE @ _PT-U16? 0= OR
+    _PT-CT-Z @ _PT-I32? 0= OR IF FALSE EXIT THEN
+    _PT-CT-ORDER @ _PT-U32? 0=
+    _PT-CT-LEFT @ _PT-U32? 0= OR
+    _PT-CT-TOP @ _PT-U32? 0= OR
+    _PT-CT-RIGHT @ _PT-U32? 0= OR
+    _PT-CT-BOTTOM @ _PT-U32? 0= OR IF FALSE EXIT THEN
+    _PT-CT-LABEL-U @ _PT-U32? 0=
+    _PT-CT-SHORTCUT-U @ _PT-U32? 0= OR IF FALSE EXIT THEN
+    _PT-CT-STATE @ 0x1F INVERT AND IF FALSE EXIT THEN
+    _PT-CT-STATE @ PT-CONTROL-OPEN PT-CONTROL-SELECTED OR AND IF
+        _PT-CT-STATE @ PT-CONTROL-VISIBLE PT-CONTROL-ENABLED OR AND
+        PT-CONTROL-VISIBLE PT-CONTROL-ENABLED OR <> IF FALSE EXIT THEN
+    THEN
+    _PT-CT-KIND? 0= IF FALSE EXIT THEN
+    _PT-CT-LABEL-U @ 80 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-CT-SHORTCUT-U @ _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    DUP _PT-CT-PAYLOAD-U !
+    _PT-CT-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
+    _PT-CT-LABEL-A @ _PT-CT-LABEL-U @ _PT-CT-TEXT? 0= IF FALSE EXIT THEN
+    _PT-CT-SHORTCUT-A @ _PT-CT-SHORTCUT-U @ _PT-CT-TEXT? ;
+
+: _PT-CT-PAYLOAD!  ( -- )
+    _PT-CT-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-CT-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
+    _PT-CT-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!
+    _PT-CT-KIND @ _PT-FRAME-PAYLOAD 24 + W!
+    _PT-CT-STATE @ _PT-FRAME-PAYLOAD 26 + W!
+    _PT-CT-Z @ _PT-FRAME-PAYLOAD 28 + L!
+    _PT-CT-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
+    _PT-CT-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
+    _PT-CT-ORDER @ _PT-FRAME-PAYLOAD 48 + L!
+    _PT-CT-LEFT @ _PT-FRAME-PAYLOAD 52 + L!
+    _PT-CT-TOP @ _PT-FRAME-PAYLOAD 56 + L!
+    _PT-CT-RIGHT @ _PT-FRAME-PAYLOAD 60 + L!
+    _PT-CT-BOTTOM @ _PT-FRAME-PAYLOAD 64 + L!
+    _PT-CT-LABEL-U @ _PT-FRAME-PAYLOAD 68 + L!
+    _PT-CT-SHORTCUT-U @ _PT-FRAME-PAYLOAD 72 + L!
+    0 _PT-FRAME-PAYLOAD 76 + L!
+    _PT-CT-LABEL-U @ IF
+        _PT-CT-LABEL-A @ _PT-CT-LABEL-U @
+        _PT-FRAME-PAYLOAD 80 + SWAP MOVE
+    THEN
+    _PT-CT-SHORTCUT-U @ IF
+        _PT-CT-SHORTCUT-A @ _PT-CT-SHORTCUT-U @
+        _PT-FRAME-PAYLOAD 80 + _PT-CT-LABEL-U @ + SWAP MOVE
+    THEN ;
+
+: _PT-CT-DEFINE-BODY  ( -- status )
+    _PT-CT-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-CT-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-CT-S @ _PT-RET-CONTROLS? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-CT-TYPE @ DUP _PT-M-CONTROL-DEFINE =
+    SWAP _PT-M-CONTROL-REPLACE = OR 0= IF PT-S-INVALID EXIT THEN
+    _PT-CT-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    _PT-CT-TYPE @ _PT-PO-TYPE !
+    _PT-CT-PAYLOAD-U @ _PT-PO-U !
+    _PT-CT-S @ _PT-PO-S !
+    _PT-PO-ADMIT ?DUP IF EXIT THEN
+    _PT-CT-PAYLOAD!
+    _PT-PO-SEND ;
+
+: _PT-CT-SCRUB  ( -- )
+    0 _PT-CT-S ! 0 _PT-CT-TYPE !
+    0 _PT-CT-OWNER ! 0 _PT-CT-GENERATION ! 0 _PT-CT-ID !
+    0 _PT-CT-KIND ! 0 _PT-CT-STATE ! 0 _PT-CT-Z !
+    0 _PT-CT-REGION ! 0 _PT-CT-PARENT ! 0 _PT-CT-ORDER !
+    0 _PT-CT-LEFT ! 0 _PT-CT-TOP ! 0 _PT-CT-RIGHT ! 0 _PT-CT-BOTTOM !
+    0 _PT-CT-LABEL-A ! 0 _PT-CT-LABEL-U !
+    0 _PT-CT-SHORTCUT-A ! 0 _PT-CT-SHORTCUT-U !
+    0 _PT-CT-PAYLOAD-U ! 0 _PT-CT-TA ! 0 _PT-CT-TU !
+    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
+    0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
+
+\ Stack: owner generation control kind state z region parent order
+\        left top right bottom label-a label-u shortcut-a shortcut-u
+\        session type -- status
+: _PT-CONTROL-WRITE
+    _PT-CT-TYPE ! _PT-CT-S !
+    _PT-CT-SHORTCUT-U ! _PT-CT-SHORTCUT-A !
+    _PT-CT-LABEL-U ! _PT-CT-LABEL-A !
+    _PT-CT-BOTTOM ! _PT-CT-RIGHT ! _PT-CT-TOP ! _PT-CT-LEFT !
+    _PT-CT-ORDER ! _PT-CT-PARENT ! _PT-CT-REGION ! _PT-CT-Z !
+    _PT-CT-STATE ! _PT-CT-KIND ! _PT-CT-ID !
+    _PT-CT-GENERATION ! _PT-CT-OWNER !
+    ['] _PT-CT-DEFINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
+    _PT-CT-SCRUB ;
+
+\ Stack: owner generation control kind state z region parent order
+\        left top right bottom label-a label-u shortcut-a shortcut-u
+\        session -- status
+: PT-CONTROL-DEFINE
+    _PT-M-CONTROL-DEFINE _PT-CONTROL-WRITE ;
+
+\ Stack: owner generation control kind state z region parent order
+\        left top right bottom label-a label-u shortcut-a shortcut-u
+\        session -- status
+: PT-CONTROL-REPLACE
+    _PT-M-CONTROL-REPLACE _PT-CONTROL-WRITE ;
+
+VARIABLE _PT-CD-S
+VARIABLE _PT-CD-OWNER
+VARIABLE _PT-CD-GENERATION
+VARIABLE _PT-CD-ID
+: PT-CONTROL-DROP  ( owner generation control session -- status )
+    _PT-CD-S ! _PT-CD-ID ! _PT-CD-GENERATION ! _PT-CD-OWNER !
+    _PT-CD-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-CD-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-CD-S @ _PT-RET-CONTROLS? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-CD-OWNER @ 0= _PT-CD-GENERATION @ 0= OR
+    _PT-CD-ID @ 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-M-CONTROL-DROP _PT-PO-TYPE !
+    24 _PT-PO-U !
+    _PT-CD-S @ _PT-PO-S !
+    _PT-PO-ADMIT ?DUP IF EXIT THEN
+    _PT-CD-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-CD-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
+    _PT-CD-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!
+    _PT-PO-SEND ;
 
 VARIABLE _PT-PC-S
 VARIABLE _PT-PC-DISPOSITION

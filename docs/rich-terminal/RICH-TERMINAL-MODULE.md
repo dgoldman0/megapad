@@ -62,7 +62,8 @@ The module owns:
 * session ID, sequence, wire `presentation_epoch`, and credit accounting;
 * one non-nested outgoing transaction;
 * replace-all snapshot transmission;
-* normalized key, text, pointer, focus, and resize event decoding;
+* normalized key, text, pointer, focus, resize, and semantic-control event
+  decoding;
 * explicitly requested RETAINED-1 discovery, exact CAPS/FORMATS validation,
   and lifecycle-bounded access to the accepted records;
 * the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
@@ -70,7 +71,8 @@ The module owns:
 * core OWNER_OPEN/OWNER_DROP lifecycle publication and exact RET_RESULT
   reconciliation;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
-  DEFINE/REPLACE/DROP operations, and typed GLYPH_RUN DEFINE operations; and
+  DEFINE/REPLACE/DROP operations, typed GLYPH_RUN DEFINE/REPLACE operations,
+  and typed semantic-control DEFINE/REPLACE/DROP operations; and
 * close, hard failure, soft cache reset, and fallback.
 
 It does not own consumer focus, host regions, widgets, retained semantic
@@ -80,13 +82,14 @@ wire-neutral intent from a single internal rich-terminal engine; they are not
 an independently discoverable scene or mutation API. Other object kinds,
 resources, and series remain outside the currently implemented writer subset.
 
-The in-place RETAINED-1 contract now defines feature bit 8 `RET_CONTROLS`,
-typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR mutations, and revision-bound
-`CONTROL_EVENT ACTIVATE`. This is a protocol contract, not a claim that the
-checked-in module implements it. The module must keep the bit clear until its
-typed control writers, independent CONTROL high-water validation, shared
-object/UTF-8 quota accounting, event decoder, and physical-acknowledgement gate
-all land. It must not expose a raw `4000`-family frame escape hatch as a bridge.
+The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
+typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
+revision-bound `CONTROL_EVENT ACTIVATE`. This completes only the MegaPad guest
+transport boundary. Independent CONTROL high-water validation, shared
+object/UTF-8 quota accounting, semantic routing, and the physical-display
+acknowledgement gate remain above or across that boundary. A terminal may offer
+the feature only when those authorities are present. The module exposes no raw
+`4000`-family frame escape hatch.
 
 ## 5. Caller-owned capacity
 
@@ -149,6 +152,18 @@ PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       fg-red fg-green fg-blue fg-alpha
                       bg-red bg-green bg-blue bg-alpha attrs
                       text-a text-u session -- status )
+PT-GLYPH-RUN-REPLACE ( owner generation object region parent
+                       left top right bottom z visible
+                       fg-red fg-green fg-blue fg-alpha
+                       bg-red bg-green bg-blue bg-alpha attrs
+                       text-a text-u session -- status )
+PT-CONTROL-DEFINE   ( owner generation control kind state z region parent order
+                      left top right bottom label-a label-u shortcut-a
+                      shortcut-u session -- status )
+PT-CONTROL-REPLACE  ( owner generation control kind state z region parent order
+                      left top right bottom label-a label-u shortcut-a
+                      shortcut-u session -- status )
+PT-CONTROL-DROP     ( owner generation control session -- status )
 PT-PRESENT-COMMIT   ( disposition session -- status )
 
 PT-TX-BEGIN         ( cols rows span-count cell-count session -- status )
@@ -160,6 +175,11 @@ PT-TX-COMMIT        ( session -- status )
 PT-TX-ABORT         ( reason session -- status )
 
 PT-EVENT-POLL       ( event session -- status has-event )
+PT-CONTROL-EVENT-OWNER@      ( event -- owner )
+PT-CONTROL-EVENT-GENERATION@ ( event -- generation )
+PT-CONTROL-EVENT-ID@         ( event -- control )
+PT-CONTROL-EVENT-KIND@       ( event -- kind )
+PT-CONTROL-EVENT-MODIFIERS@  ( event -- modifiers )
 PT-LEGACY-POLL      ( session -- byte has-byte )
 PT-CLOSE            ( reason session -- status )
 ```
@@ -291,12 +311,17 @@ and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
 40-byte headers plus payloads for the declared retained operations. PT
 preflights the complete BEGIN-through-COMMIT byte and sequence budget before it
 emits BEGIN, then checks every operation against the declared count and byte
-sum. There is no public raw retained-operation escape hatch. Typed region and
-GLYPH_RUN words validate semantic arguments and keep their exact message type,
-common prefix, type body, little-endian assembly, and TX scratch private. Empty
-glyph-run text is canonical `0 0`; a nonempty source is borrowed only until the
-call returns and must satisfy the negotiated glyph-run byte ceiling, scalar UTF-8
-rules, control exclusions, and disjointness from the session and TX scratch.
+sum. There is no public raw retained-operation escape hatch. Typed region,
+GLYPH_RUN, and semantic-control words validate semantic arguments and keep
+their exact message type, common prefix, type body, little-endian assembly, and
+TX scratch private. Empty glyph-run text is canonical `0 0`; a nonempty source
+is borrowed only until the call returns and must satisfy the negotiated
+glyph-run byte ceiling, scalar UTF-8 rules, control exclusions, and
+disjointness from the session and TX scratch. Control labels and shortcuts use
+the same borrowed-span discipline, reject C0 and DEL, and are bounded by the
+caller-provided TX scratch, exact negotiated payload and declared transaction
+bytes, plus the owner's terminal-side aggregate UTF-8 quota. No separate
+control-text capacity is introduced.
 
 The mode constants are `PT-CELL-NONE`, `PT-CELL-DELTA`,
 `PT-CELL-REPLACE`, `PT-RET-NONE`, `PT-RET-DELTA`,
@@ -361,22 +386,26 @@ The lightweight module tests prove:
    commit a hidden PRESENT containing a real fixed region, and poll the shared
    TX_RESULT completion; and
 9. an ordinary legacy CELL delta after retained enablement interleaves in the
-   same transaction-ID and global revision domain.
+   same transaction-ID and global revision domain; and
+10. focused structural locks pin RET_CONTROLS discovery consistency, exact
+    CONTROL DEFINE/REPLACE/DROP packing and transaction admission order, and
+    typed revision-bound CONTROL_EVENT decoding.
 
 The current end-to-end **guest** conformance still claims only the core
-owner/region and typed GLYPH_RUN writer slice. Separately, focused host-side
-units now qualify the retained semantic-control model and wire, generic menu
-projection, modern Pygame compositor, shared viewer transport, and
-revision-bound `CONTROL_EVENT` path through exact post-flip display
-acknowledgement. Those are real lower-stack rungs, but they do not prove that a
-guest emitted a control or that an ordinary UIDL action received one.
+owner/region and typed GLYPH_RUN journey. `rich-terminal.f` now owns the
+byte-exact semantic-control writers and typed `CONTROL_EVENT` decoder, while
+focused host-side units qualify the retained semantic-control model and wire,
+generic menu projection, modern Pygame compositor, shared viewer transport,
+and revision-bound event path through exact post-flip display acknowledgement.
+Those are real lower-stack rungs, but they do not prove that an ordinary guest
+menu emitted a control or that its UIDL action received one.
 
-The open seam is narrower and explicit: `rich-terminal.f` does not yet expose
-typed CONTROL writers or decode `CONTROL_EVENT`, and Akashic does not yet map
-its ordinary high-level menu lifecycle into this retained family. Until both
-exist, there is no end-to-end semantic-control journey. Other object kinds,
-resources, series, full semantic replay, and retained resize journeys likewise
-remain unqualified.
+The open seam is narrower and explicit: Akashic must map its ordinary
+high-level menu lifecycle through these typed PT words and route the typed
+activation back to the same authoritative action path. Until that exists,
+there is no end-to-end semantic-control journey. Other object kinds, resources,
+series, full semantic replay, and retained resize journeys likewise remain
+unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 

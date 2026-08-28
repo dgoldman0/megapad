@@ -50,7 +50,7 @@ def test_glyph_run_discovery_capacity_is_core_owned() -> None:
     caps = _definition(source, "_PT-RET-CAPS-VALID?")
     formats = _definition(source, "_PT-RET-FORMATS-VALID?")
 
-    optional_objects = caps.index("_PT-RV-FEATURES @ 0x1E AND IF")
+    optional_objects = caps.index("_PT-RV-FEATURES @ 0x11E AND IF")
     assert caps.index("_PT-RV-P @ 32 + L@ 0=", optional_objects) > optional_objects
     assert "0x1E AND 0<> _PT-POSITIVE-EXACT?" not in caps
     glyph_capacity = formats.index("_PT-RF-FORMATS @ 24 + L@ ?DUP IF")
@@ -65,6 +65,28 @@ def test_glyph_run_discovery_capacity_is_core_owned() -> None:
     assert formats.index("280 + _PT-RV-RETMAX @ U>", glyph_capacity) > glyph_capacity
     instrument = formats.index("_PT-RV-FEATURES @ 0x08 AND IF", glyph_capacity)
     assert glyph_capacity < instrument
+
+
+def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    caps = _definition(source, "_PT-RET-CAPS-VALID?")
+    formats = _definition(source, "_PT-RET-FORMATS-VALID?")
+
+    assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
+    assert "0x13F    CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "_PT-RET-FEATURE-MASK INVERT AND" in caps
+    assert "_PT-RV-FEATURES @ 0x11E AND IF" in caps
+    controls = caps.index("_PT-RV-FEATURES @ _PT-RET-CONTROLS AND IF")
+    assert caps.index("_PT.S.PEER-MAX-PAY @ 80 U<", controls) > controls
+    assert caps.index("_PT.S.CLIENT-MAX-PAY @ 40 U<", controls) > controls
+    assert caps.index("_PT.S.TX-U @ 120 U<", controls) > controls
+    assert caps.index("_PT-RV-RETMAX @ 280 U<", controls) > controls
+
+    no_glyph = formats.index("_PT-RF-FORMATS @ 24 + L@ ?DUP IF")
+    assert formats.index("_PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0<>", no_glyph) > (
+        no_glyph
+    )
+    assert formats.index("_PT-POSITIVE-EXACT?", no_glyph) > no_glyph
 
 
 def test_retained_discovery_is_explicit_and_scheduled_without_input_starvation() -> None:
@@ -411,6 +433,122 @@ def test_typed_glyph_run_writers_own_exact_object_wire_assembly() -> None:
     assert "0 _PT-GR-TYPE !" in scrub
     assert "0 _PT-GR-TEXT-A !" in scrub
     assert "0 _PT-U8-A !" in scrub
+
+
+def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    define = _definition(source, "PT-CONTROL-DEFINE")
+    replace = _definition(source, "PT-CONTROL-REPLACE")
+    drop = _definition(source, "PT-CONTROL-DROP")
+    write = _definition(source, "_PT-CONTROL-WRITE")
+    body = _definition(source, "_PT-CT-DEFINE-BODY")
+    fields = _definition(source, "_PT-CT-FIELDS?")
+    kinds = _definition(source, "_PT-CT-KIND?")
+    text = _definition(source, "_PT-CT-TEXT?")
+    payload = _definition(source, "_PT-CT-PAYLOAD!")
+    scrub = _definition(source, "_PT-CT-SCRUB")
+
+    assert "0x4000 CONSTANT _PT-M-CONTROL-DEFINE" in source
+    assert "0x4001 CONSTANT _PT-M-CONTROL-REPLACE" in source
+    assert "0x4002 CONSTANT _PT-M-CONTROL-DROP" in source
+    assert "_PT-M-CONTROL-DEFINE _PT-CONTROL-WRITE" in define
+    assert "_PT-M-CONTROL-REPLACE _PT-CONTROL-WRITE" in replace
+    assert "_PT-RET-CONTROLS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
+    assert body.index("_PT-PO-ADMIT") < body.index("_PT-CT-PAYLOAD!")
+    assert body.index("_PT-CT-PAYLOAD!") < body.index("_PT-PO-SEND")
+
+    expected_stores = (
+        "_PT-CT-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-CT-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-CT-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-CT-KIND @ _PT-FRAME-PAYLOAD 24 + W!",
+        "_PT-CT-STATE @ _PT-FRAME-PAYLOAD 26 + W!",
+        "_PT-CT-Z @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-CT-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
+        "_PT-CT-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
+        "_PT-CT-ORDER @ _PT-FRAME-PAYLOAD 48 + L!",
+        "_PT-CT-LEFT @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-CT-TOP @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-CT-RIGHT @ _PT-FRAME-PAYLOAD 60 + L!",
+        "_PT-CT-BOTTOM @ _PT-FRAME-PAYLOAD 64 + L!",
+        "_PT-CT-LABEL-U @ _PT-FRAME-PAYLOAD 68 + L!",
+        "_PT-CT-SHORTCUT-U @ _PT-FRAME-PAYLOAD 72 + L!",
+        "0 _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-FRAME-PAYLOAD 80 + SWAP MOVE",
+        "_PT-FRAME-PAYLOAD 80 + _PT-CT-LABEL-U @ + SWAP MOVE",
+    )
+    for store in expected_stores:
+        assert store in payload
+
+    assert "_PT-CT-LABEL-U @ 80 _PT-UADD?" in fields
+    assert "_PT-CT-SHORTCUT-U @ _PT-UADD?" in fields
+    assert "_PT.S.PEER-MAX-PAY @ U>" in fields
+    assert "_PT-CT-STATE @ 0x1F INVERT AND" in fields
+    assert "PT-CONTROL-OPEN PT-CONTROL-SELECTED OR AND" in fields
+    for kind in (
+        "PT-CONTROL-MENU-BAR",
+        "PT-CONTROL-MENU",
+        "PT-CONTROL-MENU-ITEM",
+        "PT-CONTROL-MENU-SEPARATOR",
+    ):
+        assert kind in kinds
+    assert "_PT-CT-ROOT-BOUNDS?" in kinds
+    assert kinds.count("_PT-CT-DESCENDANT?") == 3
+
+    assert "_PT-UTF8?" in text
+    assert "DUP 32 U< SWAP 127 = OR" in text
+    assert text.count("_PT-RANGES-OVERLAP?") == 2
+    assert "CATCH" in write
+    assert "_PT-CT-SCRUB" in write
+    assert "CREATE" not in write + body + payload
+    assert "ALLOT" not in write + body + payload
+    assert "0 _PT-CT-LABEL-A !" in scrub
+    assert "0 _PT-CT-SHORTCUT-A !" in scrub
+
+    assert "_PT-M-CONTROL-DROP _PT-PO-TYPE !" in drop
+    assert "24 _PT-PO-U !" in drop
+    assert drop.index("_PT-PO-ADMIT") < drop.index("_PT-FRAME-PAYLOAD _PT-U64!")
+    assert drop.index("_PT-FRAME-PAYLOAD 16 + _PT-U64!") < drop.index(
+        "_PT-PO-SEND"
+    )
+
+
+def test_control_event_is_feature_revision_and_type_checked() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    input_types = _definition(source, "_PT-INPUT-TYPE?")
+    dispatch = _definition(source, "_PT-DISPATCH-CONTROL-EVENT")
+    route = _definition(source, "_PT-DISPATCH")
+    describe = _definition(source, "_PT-EVENT-DESCRIBE")
+
+    assert "0x0205 CONSTANT PT-EVENT-CONTROL" in source
+    assert "_PT-M-CONTROL-EVENT =" in input_types
+    assert "_PT-M-CONTROL-EVENT" in route
+    assert "_PT-RET-CONTROLS? 0=" in dispatch
+    assert "_PT-RX-LEN @ 40 <>" in dispatch
+    assert dispatch.count("_PT-U64@ 0=") == 3
+    assert "W@ PT-CONTROL-ACTIVATE <>" in dispatch
+    assert "W@ 0x3F INVERT AND 0<>" in dispatch
+    assert "_PT-RX-P @ 28 + L@ 0<>" in dispatch
+    assert "_PT.S.REVISION @ <>" in dispatch
+    assert "_PT-ACCEPT-EVENT" in dispatch
+
+    for mapping in (
+        "_PT-EP-P @ 32 + _PT-U64@ _PT-EP-DST @ 8 + !",
+        "_PT-EP-P @ _PT-U64@ _PT-EP-DST @ 16 + !",
+        "_PT-EP-P @ 8 + _PT-U64@ _PT-EP-DST @ 24 + !",
+        "_PT-EP-P @ 16 + _PT-U64@ _PT-EP-DST @ 32 + !",
+        "_PT-EP-P @ 26 + W@ 16 LSHIFT OR _PT-EP-DST @ 40 + !",
+    ):
+        assert mapping in describe
+
+    for accessor in (
+        "PT-CONTROL-EVENT-OWNER@",
+        "PT-CONTROL-EVENT-GENERATION@",
+        "PT-CONTROL-EVENT-ID@",
+        "PT-CONTROL-EVENT-KIND@",
+        "PT-CONTROL-EVENT-MODIFIERS@",
+    ):
+        assert _definition(source, accessor)
 
 
 def test_retained_completion_is_bounded_without_weakening_legacy_cell() -> None:

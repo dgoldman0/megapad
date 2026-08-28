@@ -32,7 +32,7 @@ def test_semantic_lower_stack_does_not_hide_the_open_uidl_vertical() -> None:
     # The semantic family and its projection now exist, while glyph transport
     # remains only the complete visual fallback.  Keep those two claims moving
     # together as later control families and renderers land.
-    assert "typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR mutations" in module
+    assert "typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers" in module
     assert "GLYPH_RUN remains the complete visual" in module
     assert "drawing a menu only as" in module
     assert "This profile defines the required first in-place semantic-control" in retained
@@ -43,10 +43,13 @@ def test_semantic_lower_stack_does_not_hide_the_open_uidl_vertical() -> None:
     assert "def _project_menu_bar" in projection
     assert "is unsupported by draw-plane rendering" in projection
     assert "modern Pygame compositor" in module
-    assert "The open seam is narrower and explicit" in module
-    assert "`rich-terminal.f` does not yet expose" in module
-    assert "does not yet map" in module
+    assert "byte-exact semantic-control writers" in module
+    assert "Akashic must map its ordinary" in module
     assert "renderer-owned code-native" in module
+    assert "PT-CONTROL-DEFINE" in guest
+    assert "PT-CONTROL-REPLACE" in guest
+    assert "PT-CONTROL-DROP" in guest
+    assert "PT-CONTROL-EVENT-OWNER@" in guest
     assert "def require_interactable_control" in scene
     assert "class ControlHitTarget" in compositor
     assert "class CompositeDrawResult" in compositor
