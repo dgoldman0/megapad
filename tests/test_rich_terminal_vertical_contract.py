@@ -14,8 +14,8 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_glyph_plane_is_not_recorded_as_semantic_vertical_completion() -> None:
-    """Keep implementation status and the normative acceptance gate aligned."""
+def test_semantic_lower_stack_does_not_hide_the_open_uidl_vertical() -> None:
+    """Keep implemented lower rungs and the remaining guest seam explicit."""
 
     module = _read(RICH_DOCS / "RICH-TERMINAL-MODULE.md")
     retained = _read(RICH_DOCS / "APT-1-RETAINED-1.md")
@@ -23,6 +23,11 @@ def test_glyph_plane_is_not_recorded_as_semantic_vertical_completion() -> None:
     host_port = _read(RICH_DOCS / "MEGAPAD-TERMINAL-HOST-PORT.md")
     guest = _read(ROOT / "rich-terminal.f")
     projection = _read(ROOT / "rich_terminal" / "retained_view.py")
+    scene = _read(ROOT / "rich_terminal" / "retained_scene.py")
+    compositor = _read(ROOT / "rich_terminal" / "pygame_view.py")
+    server = _read(ROOT / "rich_terminal" / "server.py")
+    session = _read(ROOT / "session.py")
+    viewer = _read(ROOT / "session_viewer.py")
 
     # The semantic family and its projection now exist, while glyph transport
     # remains only the complete visual fallback.  Keep those two claims moving
@@ -37,6 +42,26 @@ def test_glyph_plane_is_not_recorded_as_semantic_vertical_completion() -> None:
     assert "class MenuBarDraw" in projection
     assert "def _project_menu_bar" in projection
     assert "is unsupported by draw-plane rendering" in projection
+    assert "modern Pygame compositor" in module
+    assert "The open seam is narrower and explicit" in module
+    assert "`rich-terminal.f` does not yet expose" in module
+    assert "does not yet map" in module
+    assert "renderer-owned code-native" in module
+    assert "def require_interactable_control" in scene
+    assert "class ControlHitTarget" in compositor
+    assert "class CompositeDrawResult" in compositor
+    assert "def composite_draw_plane_result" in compositor
+    assert "def _paint_menu_bar" in compositor
+    assert "_ACCENT = (78, 139, 246, 255)" in compositor
+    assert "def send_control_event" in server
+    assert "MessageType.CONTROL_EVENT" in server
+    assert 'pygame.font.SysFont("sans"' in viewer
+    assert "def stage_frame_hit_map" in viewer
+    assert "def finish_presentation" in viewer
+    assert "class _SemanticPointerInteractor" in viewer
+    assert "presented hit map was not rendered for its exact offer" in viewer
+    assert "def _acknowledged_output_scope" in session
+    assert "def send_control_event" in session
 
     object_table = retained.split("Object type values are:", 1)[1].split(
         "### 11.1 GROUP", 1

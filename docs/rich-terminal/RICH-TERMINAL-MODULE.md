@@ -363,16 +363,20 @@ The lightweight module tests prove:
 9. an ordinary legacy CELL delta after retained enablement interleaves in the
    same transaction-ID and global revision domain.
 
-The current end-to-end guest conformance still claims only the core
-owner/region and typed GLYPH_RUN writer slice. The GLYPH_RUN path and physical
-compositor are lightweight-qualified lower-stack plumbing. Even when an upper
-layer supplies a complete styled-glyph screen through that path, it proves the
-rich transport and complete terminal fallback, not the semantic-control
-vertical. RETAINED-1 now defines the first semantic menu family, but no module
-writer, model, renderer, event path, or end-to-end control journey is qualified
-by the current implementation slice. Other object kinds, resources, series,
-full semantic replay, and retained resize journeys likewise remain
-unqualified.
+The current end-to-end **guest** conformance still claims only the core
+owner/region and typed GLYPH_RUN writer slice. Separately, focused host-side
+units now qualify the retained semantic-control model and wire, generic menu
+projection, modern Pygame compositor, shared viewer transport, and
+revision-bound `CONTROL_EVENT` path through exact post-flip display
+acknowledgement. Those are real lower-stack rungs, but they do not prove that a
+guest emitted a control or that an ordinary UIDL action received one.
+
+The open seam is narrower and explicit: `rich-terminal.f` does not yet expose
+typed CONTROL writers or decode `CONTROL_EVENT`, and Akashic does not yet map
+its ordinary high-level menu lifecycle into this retained family. Until both
+exist, there is no end-to-end semantic-control journey. Other object kinds,
+resources, series, full semantic replay, and retained resize journeys likewise
+remain unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 
@@ -392,9 +396,9 @@ the ordinary TUI draw lifecycle and cover Desk chrome, UIDL renderers, mounted
 widgets, and applet painting through the shared draw boundary. Applications
 must not construct protocol scenes or select terminal mode.
 
-The next required renderer-neutral projection implements RETAINED-1's
-`RET_CONTROLS` menu slice from that same ordinary lifecycle. It must preserve a
-real MENU_BAR/MENU/MENU_ITEM hierarchy, independent control identity, canonical
+The next required cross-repository bridge maps RETAINED-1's `RET_CONTROLS`
+menu slice from that same ordinary lifecycle. It must preserve a real
+MENU_BAR/MENU/MENU_ITEM hierarchy, independent control identity, canonical
 state and order, optional bounds, selection/open state, label/shortcut, and
 activation binding without exposing APT IDs to the application or asking the
 applet to author a renderer scene. The selected renderer owns its menu
@@ -405,6 +409,15 @@ fallback for content that has no richer projection, but drawing a menu only as
 glyphs does not satisfy this semantic slice. Images, numeric instruments,
 meters, indicator objects, and series are not on this vertical's critical path
 unless the product composition begins to use them.
+
+The early physical renderer deliberately exposes the product direction rather
+than postponing visual judgment until Desktop acceptance: a clean deep-neutral
+surface, restrained blue accent, proportional sans-serif control typography,
+rounded menu and popup geometry, clear hover/pressed/selected/disabled states,
+shortcuts, separators, and checked items. These are renderer-owned code-native
+primitives and fonts, not bitmap fixtures and not a return to the text-only
+CELL look. The visual system may be refined as real UIDL menus arrive, while
+the semantic records remain renderer-neutral.
 
 Acceptance requires a complete visible Desk frame, a real Pad edit and visible
 caret/state change, a real Daybook navigation or selection, and the ordinary
