@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from megapad64 import Megapad64Error
 from rich_terminal import DriverStatus
 from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
 from rich_terminal.retained_view import (
@@ -674,52 +675,140 @@ class SharedMachine:
         if latest_variable is None or here_variable is None:
             return [], 0
 
+        # Scalar CPU reads alias unmapped addresses into Bank 0, so validate
+        # headers against the only two regions where Forth may build words.
+        # ENTER/LEAVE-USERLAND can make the link chain alternate between them.
+        system = self.session.system
+        regions = [("ram", 0, int(system.ram_size))]
+        if system.ext_mem_size:
+            regions.append(
+                ("ext", int(system.ext_mem_base), int(system.ext_mem_end))
+            )
+
+        def containing_region(address: int, count: int):
+            if address < 0 or count < 0:
+                return None
+            end = address + count
+            if end < address or end > 1 << 64:
+                return None
+            matches = [
+                region
+                for region in regions
+                if region[1] <= address and end <= region[2]
+            ]
+            return matches[0] if len(matches) == 1 else None
+
         words = []
         seen = set()
         try:
             entry = int(cpu.mem_read64(latest_variable))
             here = int(cpu.mem_read64(here_variable))
-            upper = here
-            while entry and entry not in seen:
-                if entry >= upper or entry + 9 > upper:
+            active_regions = [
+                region
+                for region in regions
+                if region[1] <= here < region[2]
+            ]
+            if not active_regions:
+                active_regions = [
+                    region for region in regions if here == region[2]
+                ]
+            if len(active_regions) != 1:
+                return [], 0
+            ceilings = {name: limit for name, _base, limit in regions}
+            ceilings[active_regions[0][0]] = here
+            while entry:
+                if entry in seen:
+                    return words, 0
+                region = containing_region(entry, 9)
+                if region is None:
+                    return words, 0
+                region_name, _region_base, _region_limit = region
+                upper = ceilings[region_name]
+                if entry + 9 > upper:
                     return words, 0
                 seen.add(entry)
                 flags_len = int(cpu.mem_read8(entry + 8))
                 name_len = flags_len & 0x7F
                 code = entry + 9 + name_len
-                if code > upper:
+                if (
+                    code > upper
+                    or containing_region(entry, 9 + name_len) != region
+                ):
                     return words, 0
                 name = bytes(
                     int(cpu.mem_read8(entry + 9 + index))
                     for index in range(name_len)
                 ).decode("ascii", errors="replace")
-                word = {"name": name, "header": entry, "code": code}
-                prefix = bytes(int(cpu.mem_read8(code + index)) for index in range(3))
-                suffix = bytes(
-                    int(cpu.mem_read8(code + 11 + index)) for index in range(6)
-                )
-                if prefix == b"\xf0\x60\x10" and suffix == b"\x67\xe0\x08\x54\xe1\x0e":
-                    data_address = sum(
-                        int(cpu.mem_read8(code + 3 + index)) << (index * 8)
-                        for index in range(8)
+                word = {
+                    "name": name,
+                    "header": entry,
+                    "code": code,
+                    "_region": region_name,
+                    "_upper": upper,
+                }
+                if code + 17 <= upper:
+                    prefix = bytes(
+                        int(cpu.mem_read8(code + index)) for index in range(3)
                     )
-                    word["data_address"] = data_address
-                    word["value"] = int(cpu.mem_read64(data_address))
+                    suffix = bytes(
+                        int(cpu.mem_read8(code + 11 + index))
+                        for index in range(6)
+                    )
+                    if (
+                        prefix == b"\xf0\x60\x10"
+                        and suffix == b"\x67\xe0\x08\x54\xe1\x0e"
+                    ):
+                        data_address = sum(
+                            int(cpu.mem_read8(code + 3 + index)) << (index * 8)
+                            for index in range(8)
+                        )
+                        if containing_region(data_address, 8) is not None:
+                            word["data_address"] = data_address
+                            word["value"] = int(cpu.mem_read64(data_address))
                 words.append(word)
+                ceilings[region_name] = entry
                 next_entry = int(cpu.mem_read64(entry))
-                if next_entry and next_entry >= entry:
-                    return words, 0
-                upper = entry
                 entry = next_entry
-        except (IndexError, RuntimeError, ValueError):
+        except (IndexError, Megapad64Error, RuntimeError, ValueError):
             return words, 0
+
+        # The physical end safely bounds an inactive region during traversal,
+        # but it is too broad for instruction-address lookup.  KDOS records
+        # each inactive dictionary's exact saved HERE before switching banks.
+        saved_here_words = {
+            "ram": "SYS-HERE-SAVE",
+            "ext": "U-DICT-HERE",
+        }
+        active_region = active_regions[0][0]
+        for region_name, base, limit in regions:
+            if region_name == active_region:
+                continue
+            newest = next(
+                (word for word in words if word["_region"] == region_name),
+                None,
+            )
+            saved_candidates = [
+                word
+                for word in words
+                # KDOS owns the oldest Bank-0 definition; later shadows are
+                # ordinary Forth words, not dictionary-switch state.
+                if word["_region"] == "ram"
+                and word["name"].upper() == saved_here_words[region_name]
+                and "value" in word
+            ]
+            saved = int(saved_candidates[-1]["value"]) if saved_candidates else 0
+            if newest is None or saved == 0:
+                continue
+            if not (base <= saved <= limit and newest["code"] <= saved):
+                return words, 0
+            newest["_upper"] = saved
         return words, here
 
     @staticmethod
     def _forth_word_at(words: list[dict], here: int, address: int) -> dict | None:
-        upper = here
-        for word in sorted(words, key=lambda item: item["code"], reverse=True):
+        for word in words:
             code = word["code"]
+            upper = word.get("_upper", here)
             if code <= address < upper:
                 return {
                     "name": word["name"],
@@ -727,7 +816,6 @@ class SharedMachine:
                     "code": code,
                     "offset": address - code,
                 }
-            upper = code
         return None
 
     def _forth_diagnostics(self, cpu) -> dict:
@@ -770,7 +858,11 @@ class SharedMachine:
             for word in words:
                 key = word["name"].upper()
                 if key in wanted and key not in found:
-                    found[key] = word
+                    found[key] = {
+                        field: value
+                        for field, value in word.items()
+                        if not field.startswith("_")
+                    }
             return {"here": here, "words": found}
 
     def peek(self, address: int, count: int = 1) -> dict:

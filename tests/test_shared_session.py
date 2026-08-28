@@ -1168,7 +1168,13 @@ def test_forth_diagnostics_reach_words_beyond_the_old_depth_ceiling():
             "var_latest": latest_variable,
             "var_here": here_variable,
         },
-        system=SimpleNamespace(cpu=cpu),
+        system=SimpleNamespace(
+            cpu=cpu,
+            ram_size=len(memory),
+            ext_mem_size=0,
+            ext_mem_base=0,
+            ext_mem_end=0,
+        ),
     )
 
     named = machine.forth(["ancient-target"])
@@ -1191,6 +1197,185 @@ def test_forth_diagnostics_reach_words_beyond_the_old_depth_ceiling():
         "code": target_code,
         "offset": 2,
     }
+
+
+def test_forth_diagnostics_follow_cross_bank_links_without_aliasing_gaps():
+    ram_size = 0x1000
+    ext_base = ram_size
+    ext_size = 0x1000
+    latest_variable = 0x20
+    here_variable = 0x28
+    data_stack = 0x80
+    return_stack = 0xC0
+    ram = bytearray(ram_size)
+    external = bytearray(ext_size)
+    reads = []
+
+    def resolve(address, count):
+        if 0 <= address and address + count <= ram_size:
+            return ram, address
+        if ext_base <= address and address + count <= ext_base + ext_size:
+            return external, address - ext_base
+        raise IndexError(address)
+
+    def write64(address, value):
+        memory, offset = resolve(address, 8)
+        memory[offset:offset + 8] = int(value).to_bytes(8, "little")
+
+    def write_word(header, link, name, variable_value=None):
+        encoded = name.encode("ascii")
+        memory, offset = resolve(header, 9 + len(encoded))
+        memory[offset:offset + 8] = int(link).to_bytes(8, "little")
+        memory[offset + 8] = len(encoded)
+        memory[offset + 9:offset + 9 + len(encoded)] = encoded
+        code = header + 9 + len(encoded)
+        if variable_value is not None:
+            data_address = code + 17
+            memory, offset = resolve(code, 17)
+            memory[offset:offset + 3] = b"\xf0\x60\x10"
+            memory[offset + 3:offset + 11] = data_address.to_bytes(8, "little")
+            memory[offset + 11:offset + 17] = b"\x67\xe0\x08\x54\xe1\x0e"
+            write64(data_address, variable_value)
+        return code
+
+    def read8(address):
+        reads.append((address, 1))
+        memory, offset = resolve(address, 1)
+        return memory[offset]
+
+    def read64(address):
+        reads.append((address, 8))
+        memory, offset = resolve(address, 8)
+        return int.from_bytes(memory[offset:offset + 8], "little")
+
+    old_header = 0x80
+    system_here_header = 0x100
+    saved_here_header = 0x180
+    external_header = ext_base + 0x100
+    shadow_header = ext_base + 0x200
+    current_header = 0x300
+    system_here = 0x380
+    user_here = ext_base + 0x300
+    shadow_here = ext_base + 0x280
+    old_code = write_word(old_header, 0, "BANK-OLD")
+    write_word(system_here_header, old_header, "SYS-HERE-SAVE", system_here)
+    write_word(
+        saved_here_header,
+        system_here_header,
+        "U-DICT-HERE",
+        user_here,
+    )
+    external_code = write_word(
+        external_header,
+        saved_here_header,
+        "EXT-MIDDLE",
+    )
+    write_word(shadow_header, external_header, "U-DICT-HERE", shadow_here)
+    current_code = write_word(current_header, shadow_header, "BANK-CURRENT")
+    write64(latest_variable, current_header)
+    write64(here_variable, system_here)
+    write64(return_stack, old_code + 2)
+
+    registers = [0] * 32
+    registers[3] = external_code + 1
+    registers[14] = data_stack
+    registers[15] = return_stack
+    cpu = SimpleNamespace(
+        mem_read8=read8,
+        mem_read64=read64,
+        regs=registers,
+        pc=0,
+    )
+    machine = object.__new__(SharedMachine)
+    machine.lock = threading.RLock()
+    machine.session = SimpleNamespace(
+        bios_labels={
+            "var_latest": latest_variable,
+            "var_here": here_variable,
+        },
+        system=SimpleNamespace(
+            cpu=cpu,
+            ram_size=ram_size,
+            ext_mem_size=ext_size,
+            ext_mem_base=ext_base,
+            ext_mem_end=ext_base + ext_size,
+        ),
+    )
+
+    named = machine.forth(["bank-current", "ext-middle", "bank-old"])
+    detailed = machine._forth_diagnostics(cpu)
+
+    assert set(named["words"]) == {"BANK-CURRENT", "EXT-MIDDLE", "BANK-OLD"}
+    assert named["words"]["BANK-CURRENT"]["code"] == current_code
+    assert detailed["word"] == {
+        "name": "EXT-MIDDLE",
+        "header": external_header,
+        "code": external_code,
+        "offset": 1,
+    }
+    assert detailed["return_words"][0] == {
+        "name": "BANK-OLD",
+        "header": old_header,
+        "code": old_code,
+        "offset": 2,
+    }
+
+    write64(current_header, external_header)
+    write64(shadow_header, current_header)
+    write64(latest_variable, shadow_header)
+    write64(here_variable, system_here)
+    left_userland, bank_here = machine._forth_dictionary(cpu)
+    external_word = next(
+        word for word in left_userland if word["header"] == shadow_header
+    )
+
+    assert bank_here == system_here
+    assert external_word["_upper"] == user_here
+    assert machine._forth_word_at(left_userland, bank_here, user_here + 8) is None
+
+    write64(here_variable, user_here)
+    reentered_userland, external_here = machine._forth_dictionary(cpu)
+    bank_word = next(
+        word for word in reentered_userland if word["name"] == "BANK-CURRENT"
+    )
+
+    assert external_here == user_here
+    assert bank_word["_upper"] == system_here
+    assert (
+        machine._forth_word_at(reentered_userland, external_here, system_here + 8)
+        is None
+    )
+
+    write64(latest_variable, current_header)
+    write64(current_header, shadow_header)
+    write64(shadow_header, external_header)
+    write64(external_header, saved_here_header)
+    write64(here_variable, system_here)
+
+    gap_address = 0x8000
+    write64(current_header, gap_address)
+    reads.clear()
+    partial, incomplete_here = machine._forth_dictionary(cpu)
+
+    assert [word["name"] for word in partial] == ["BANK-CURRENT"]
+    assert incomplete_here == 0
+    assert all(address != gap_address for address, _count in reads)
+
+    overlapping_address = current_header + 0x40
+    write64(current_header, overlapping_address)
+    reads.clear()
+    partial, incomplete_here = machine._forth_dictionary(cpu)
+
+    assert [word["name"] for word in partial] == ["BANK-CURRENT"]
+    assert incomplete_here == 0
+    assert all(address != overlapping_address for address, _count in reads)
+
+    write64(current_header, external_header)
+    write64(external_header, current_header)
+    partial, incomplete_here = machine._forth_dictionary(cpu)
+
+    assert [word["name"] for word in partial] == ["BANK-CURRENT", "EXT-MIDDLE"]
+    assert incomplete_here == 0
 
 
 def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
