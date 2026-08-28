@@ -24,17 +24,18 @@ def test_glyph_plane_is_not_recorded_as_semantic_vertical_completion() -> None:
     guest = _read(ROOT / "rich-terminal.f")
     projection = _read(ROOT / "rich_terminal" / "retained_view.py")
 
-    # This is a guard for an open checkpoint, not a permanent ban on controls.
-    # When the semantic family lands, its implementation and these status
-    # assertions must move together instead of relabeling the glyph fallback.
-    assert "No menu, button, selector, or other high-level control family" in module
-    assert "GLYPH_RUN-only screen" in module
-    assert "At least one ordinary semantic control" in module
-    assert "This document records that gate but does not define or" in retained
-    assert "implement the reserved control family" in retained
-    assert "`4000`–`4FFF` | Future semantic controls." in wire
+    # The semantic family and its projection now exist, while glyph transport
+    # remains only the complete visual fallback.  Keep those two claims moving
+    # together as later control families and renderers land.
+    assert "typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR mutations" in module
+    assert "GLYPH_RUN remains the complete visual" in module
+    assert "drawing a menu only as" in module
+    assert "This profile defines the required first in-place semantic-control" in retained
+    assert "`4000`–`4FFF` | Semantic controls reserved for additive profiles." in wire
     assert "complete GLYPH_RUN-only screen cannot be" in host_port
     assert "PT-GLYPH-RUN-DEFINE" in guest
+    assert "class MenuBarDraw" in projection
+    assert "def _project_menu_bar" in projection
     assert "is unsupported by draw-plane rendering" in projection
 
     object_table = retained.split("Object type values are:", 1)[1].split(
