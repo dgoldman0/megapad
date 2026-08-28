@@ -1246,12 +1246,12 @@ class MachineSession:
         self._last_acknowledged_display_offer = None
         return changed
 
-    def _output_revision_ready(self) -> bool:
-        """Require normalized input to name a revision already shown."""
+    def _acknowledged_output_scope(self) -> DisplayScope | None:
+        """Return the exact current physically acknowledged retained scope."""
 
         config = self._rich_terminal_config
         if config is None or config.retained_policy is None:
-            return True
+            return None
         cadence = self._display_cadence
         driver = self._rich_terminal_driver
         if (
@@ -1260,14 +1260,14 @@ class MachineSession:
             or not driver.core.retained_enabled
             or cadence is None
         ):
-            return False
+            return None
         if (
             cadence.pending_revision is not None
             or cadence.offered_revision is not None
             or self._display_offer is not None
             or self._display_offer_composite is not None
         ):
-            return False
+            return None
 
         displayed = self._displayed_composite_output
         logical = self._logical_composite_output
@@ -1283,11 +1283,11 @@ class MachineSession:
             or cadence.displayed_revision != displayed.revision
             or displayed.revision != driver.core.model_revision
         ):
-            return False
+            return None
         cell = displayed.cell
         retained = displayed.retained
         if cell is None or retained is None:
-            return False
+            return None
         try:
             scope = DisplayScope(
                 attachment_epoch=cell.attachment_epoch,
@@ -1299,8 +1299,8 @@ class MachineSession:
                 retained_revision=retained.revision,
             )
         except (TypeError, ValueError):
-            return False
-        return bool(
+            return None
+        if not (
             retained.retained_initialized
             and retained.retained_visible
             and acknowledged[1] == scope
@@ -1310,7 +1310,17 @@ class MachineSession:
                 scope.session_id,
                 scope.presentation_epoch,
             )
-        )
+        ):
+            return None
+        return scope
+
+    def _output_revision_ready(self) -> bool:
+        """Require normalized input to name a revision already shown."""
+
+        config = self._rich_terminal_config
+        if config is None or config.retained_policy is None:
+            return True
+        return self._acknowledged_output_scope() is not None
 
     def clear_output(self):
         self.raw_output.clear()
@@ -1736,6 +1746,32 @@ class MachineSession:
         if not self._output_revision_ready():
             return DriverStatus.BACKPRESSURED
         return driver.send_key(symbol, modifiers=modifiers)
+
+    def send_control_event(
+        self,
+        owner_id: int,
+        owner_generation: int,
+        control_id: int,
+        *,
+        modifiers: int = 0,
+    ) -> DriverStatus:
+        """Activate one semantic control in the exact acknowledged display scope."""
+
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return DriverStatus.INVALID
+        scope = self._acknowledged_output_scope()
+        if scope is None:
+            return DriverStatus.BACKPRESSURED
+        return driver.send_control_event(
+            owner_id,
+            owner_generation,
+            control_id,
+            modifiers=modifiers,
+            model_revision=scope.model_revision,
+        )
 
     def send_pointer(
         self,
