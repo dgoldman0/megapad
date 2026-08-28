@@ -71,6 +71,7 @@ from .retained_model import (
 )
 from .retained_scene import (
     CommitDisposition,
+    ControlDefinition,
     ObjectDefinition,
     RegionDefinition,
     RetainedMode,
@@ -90,6 +91,9 @@ from .retained_wire import (
     RetainedMessageType,
     RetainedResult,
     RetainedWireError,
+    decode_control_definition,
+    decode_control_drop,
+    decode_control_replace,
     decode_object_definition,
     decode_object_drop,
     decode_object_replace,
@@ -167,6 +171,9 @@ _RETAINED_PRESENT_OPERATION_TYPES = frozenset(
         RetainedMessageType.SERIES_APPEND,
         RetainedMessageType.SERIES_REPLACE,
         RetainedMessageType.SERIES_DROP,
+        RetainedMessageType.CONTROL_DEFINE,
+        RetainedMessageType.CONTROL_REPLACE,
+        RetainedMessageType.CONTROL_DROP,
     }
 )
 
@@ -2041,6 +2048,12 @@ class RichTerminalCore:
                 operation = decode_series_replace(frame.payload)
             elif message_type is RetainedMessageType.SERIES_DROP:
                 operation = decode_series_drop(frame.payload)
+            elif message_type is RetainedMessageType.CONTROL_DEFINE:
+                operation = decode_control_definition(frame.payload)
+            elif message_type is RetainedMessageType.CONTROL_REPLACE:
+                operation = decode_control_replace(frame.payload)
+            elif message_type is RetainedMessageType.CONTROL_DROP:
+                operation = decode_control_drop(frame.payload)
             else:  # The caller admits only _RETAINED_PRESENT_OPERATION_TYPES.
                 self._fatal("retained mutation dispatch table is incomplete")
         except RetainedWireError:
@@ -2126,6 +2139,29 @@ class RichTerminalCore:
                 model.replace_series(owner, operation.series_id, operation.batch)
             elif message_type is RetainedMessageType.SERIES_DROP:
                 model.drop_series(owner, operation.item_id)
+            elif message_type in {
+                RetainedMessageType.CONTROL_DEFINE,
+                RetainedMessageType.CONTROL_REPLACE,
+            }:
+                definition = ControlDefinition(
+                    owner=owner,
+                    control_id=operation.control_id,
+                    kind=operation.kind,
+                    state=operation.state,
+                    z_order=operation.z_order,
+                    region_id=operation.region_id,
+                    parent_control_id=operation.parent_control_id,
+                    order=operation.order,
+                    bounds=operation.bounds,
+                    label=operation.label,
+                    shortcut=operation.shortcut,
+                )
+                if message_type is RetainedMessageType.CONTROL_DEFINE:
+                    model.define_control(definition)
+                else:
+                    model.replace_control(definition)
+            elif message_type is RetainedMessageType.CONTROL_DROP:
+                model.drop_control(owner, operation.item_id)
         except (SceneModelError, TypeError, ValueError):
             self._discard_transaction_status = 2
 
