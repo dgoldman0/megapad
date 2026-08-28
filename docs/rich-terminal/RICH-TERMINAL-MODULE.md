@@ -80,6 +80,14 @@ wire-neutral intent from a single internal rich-terminal engine; they are not
 an independently discoverable scene or mutation API. Other object kinds,
 resources, and series remain outside the currently implemented writer subset.
 
+The in-place RETAINED-1 contract now defines feature bit 8 `RET_CONTROLS`,
+typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR mutations, and revision-bound
+`CONTROL_EVENT ACTIVATE`. This is a protocol contract, not a claim that the
+checked-in module implements it. The module must keep the bit clear until its
+typed control writers, independent CONTROL high-water validation, shared
+object/UTF-8 quota accounting, event decoder, and physical-acknowledgement gate
+all land. It must not expose a raw `4000`-family frame escape hatch as a bridge.
+
 ## 5. Caller-owned capacity
 
 Initialization receives caller-owned frame scratch storage, incoming parser
@@ -360,9 +368,10 @@ owner/region and typed GLYPH_RUN writer slice. The GLYPH_RUN path and physical
 compositor are lightweight-qualified lower-stack plumbing. Even when an upper
 layer supplies a complete styled-glyph screen through that path, it proves the
 rich transport and complete terminal fallback, not the semantic-control
-vertical. No menu, button, selector, or other high-level control family is
-defined or qualified by this slice. Other object kinds, resources, series,
-semantic controls, full semantic replay, and retained resize journeys remain
+vertical. RETAINED-1 now defines the first semantic menu family, but no module
+writer, model, renderer, event path, or end-to-end control journey is qualified
+by the current implementation slice. Other object kinds, resources, series,
+full semantic replay, and retained resize journeys likewise remain
 unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
@@ -383,17 +392,19 @@ the ordinary TUI draw lifecycle and cover Desk chrome, UIDL renderers, mounted
 widgets, and applet painting through the shared draw boundary. Applications
 must not construct protocol scenes or select terminal mode.
 
-The next required renderer-neutral projection is a semantic-control slice from
-that same ordinary lifecycle. It must preserve a real control's semantic kind,
-identity, state, bounds, focus/selection state, label or value, and activation
-binding without exposing APT IDs to the application or asking the applet to
-author a renderer scene. The selected renderer owns its representation,
-clipping, allocation, rasterization, and composition. GLYPH_RUN remains the
-complete visual fallback for content that has no richer projection, but
-drawing a menu or button only as glyphs does not satisfy this semantic slice.
-Images, numeric instruments, meters, indicator objects, and series are not on
-this vertical's critical path unless the product composition begins to use
-them.
+The next required renderer-neutral projection implements RETAINED-1's
+`RET_CONTROLS` menu slice from that same ordinary lifecycle. It must preserve a
+real MENU_BAR/MENU/MENU_ITEM hierarchy, independent control identity, canonical
+state and order, optional bounds, selection/open state, label/shortcut, and
+activation binding without exposing APT IDs to the application or asking the
+applet to author a renderer scene. The selected renderer owns its menu
+geometry, clipping, rasterization, and hit testing. It may publish
+`CONTROL_EVENT ACTIVATE` only after the exact visible/enabled composite revision
+has been physically acknowledged. GLYPH_RUN remains the complete visual
+fallback for content that has no richer projection, but drawing a menu only as
+glyphs does not satisfy this semantic slice. Images, numeric instruments,
+meters, indicator objects, and series are not on this vertical's critical path
+unless the product composition begins to use them.
 
 Acceptance requires a complete visible Desk frame, a real Pad edit and visible
 caret/state change, a real Daybook navigation or selection, and the ordinary

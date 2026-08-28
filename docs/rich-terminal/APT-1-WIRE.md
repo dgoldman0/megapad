@@ -13,8 +13,9 @@ field is explicitly signed.
 APT-1 is an optional, negotiated rich-terminal protocol over the existing
 ordered MegaPad UART byte stream. CELL-1 is its first mandatory profile. It
 provides transactional styled cells and normalized terminal input; retained
-resources, plots, images, controls, and animation are not part of this
-revision.
+resources, plots, images, controls, and animation are not part of the mandatory
+CELL-1 profile. The in-place additive RETAINED-1 contract defines selected
+families only after its separate deterministic discovery succeeds.
 
 APT-1 selects a mode of one terminal session. It does not create, address, or
 expose an application presentation, document, scene service, broker, or
@@ -257,7 +258,8 @@ only when its contract names each exact type, direction, payload length, and
 termination purpose. It does not enlarge the 4,096-byte reserve. RETAINED-1
 adds only `RET_RESULT` (`000a`), `OWNER_DROP` (`000b`), and `RESOURCE_ABORT`
 (`000c`) under `APT-1-RETAINED-1.md` Section 17. Its discovery, resource data,
-PRESENT, object, region, and series frames remain ordinary data.
+PRESENT, object, region, series, semantic-control, and `CONTROL_EVENT` frames
+remain ordinary data.
 
 Credit exhaustion is backpressure, not loss. The sender retains the exact
 unsent frame/transaction and makes no sequence or model progress.
@@ -476,6 +478,38 @@ SNAPSHOT_BEGIN after its discovery.
 `FOCUS` (`0204`) payload is `u8 focused`, seven zero bytes, and `u64
 model_revision`. `focused` is zero or one.
 
+`CONTROL_EVENT` (`0205`) is defined only when the additive RETAINED-1 profile
+has been successfully discovered with feature bit 8 `RET_CONTROLS`. Its exact
+40-byte payload is `<QQQHHIQ>`:
+
+```text
+u64 owner_id
+u64 owner_generation
+u64 control_id
+u16 event_kind             (1 = ACTIVATE)
+u16 modifiers
+u32 reserved               = 0
+u64 model_revision
+```
+
+All other event-kind values are invalid in the first control slice. Modifier
+bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps Lock 4, and Num Lock 5; all
+other bits are zero. The identity is normalized routing and freshness data,
+not application authority. The terminal may emit ACTIVATE only for an exact
+current active CONTROL record whose kind is activatable and whose complete
+ancestor chain is visible and enabled under the canonical RETAINED-1 menu
+rules.
+
+`model_revision` must be the exact current global revision of the complete
+composite containing the renderer-hit-tested control, after that same revision
+was physically presented and acknowledged. A hidden, superseded, disabled,
+invisible, or not-yet-acknowledged control cannot produce this event. If a
+newer logical revision awaits display, the terminal retains/backpressures
+bounded raw intent until that exact current revision is presented or the intent
+becomes stale. The terminal does not mutate control state when it emits the
+event; the client revalidates the tuple and revision and routes activation to
+its authoritative UI model.
+
 ## 13. Reset and close
 
 `SOFT_RESET_REQUEST` (`0007`, terminal to client) contains `u32
@@ -621,19 +655,33 @@ Message ranges are reserved as follows:
 | `1000`–`1FFF` | Future resources. |
 | `2000`–`2FFF` | Future retained objects and regions. |
 | `3000`–`3FFF` | Future series and animation. |
-| `4000`–`4FFF` | Future semantic controls. |
+| `4000`–`4FFF` | Semantic controls reserved for additive profiles. |
 | `8000`–`FFFF` | Skippable optional extensions. |
 
 Reservation does not define a payload or grant a capability. Those families
 remain outside the CELL-1 implementation gate. The optional additive contract
 `APT-1-RETAINED-1-2026-08-24` defines selected IDs in `000a`–`000c`,
-`1000`–`1003`, `2000`–`2024`, `3000`–`3003`, and `8000`–`8002` only after its
-deterministic discovery succeeds. Every other reserved ID keeps the behavior
-defined here; in particular, a sender may not infer a payload from its range.
-The `4000`–`4FFF` reservation is the next required rich-terminal product
-vertical, but neither CELL-1 nor RETAINED-1 currently defines it. A complete
+`0205`, `1000`–`1003`, `2000`–`2024`, `3000`–`3003`, `4000`–`4002`, and
+`8000`–`8002` only after its deterministic discovery succeeds. Feature bit 8
+`RET_CONTROLS` gates `CONTROL_DEFINE`, `CONTROL_REPLACE`, `CONTROL_DROP`, and
+`CONTROL_EVENT`; `4003`–`4FFF` remains reserved. Every other reserved ID keeps
+the behavior defined here; in particular, a sender may not infer a payload
+from its range. CELL-1 alone still defines no semantic controls. A complete
 styled-cell or GLYPH_RUN screen is therefore a foundation and fallback, not
-evidence that semantic controls have crossed the rich path.
+evidence that the retained semantic-control family crossed the rich path.
+
+The retained control mutations use `CONTROL_DEFINE` (`4000`),
+`CONTROL_REPLACE` (`4001`), and `CONTROL_DROP` (`4002`). DEFINE and REPLACE
+begin with the exact 80-byte prefix `<QQQHHiQQIIIIIIII>` carrying owner ID,
+owner generation, independent control ID, kind, state, z-order, region ID,
+parent control ID, sibling order, optional UNORM32 bounds, label byte count,
+shortcut byte count, and zero reserved; label bytes then shortcut bytes follow
+without padding. DROP is exact `<QQQ>`. RETAINED-1 Section 9.1 defines the
+canonical MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR graph and state rules.
+Controls have an independent ID high-water but share each owner's existing
+object-count and aggregate UTF-8 quotas. Negotiated inbound payload and
+transaction bounds are the only additional size limits; no fixed control count
+or control-string maximum is introduced.
 
 ## 17. Conformance vectors
 
