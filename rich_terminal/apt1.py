@@ -57,6 +57,7 @@ class MessageType(IntEnum):
     POINTER = 0x0202
     RESIZE = 0x0203
     FOCUS = 0x0204
+    CONTROL_EVENT = 0x0205
 
 
 class FramingErrorCode(str, Enum):

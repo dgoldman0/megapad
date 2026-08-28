@@ -15,6 +15,9 @@ from enum import Enum, IntEnum
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
 from .retained_model import OwnerQuotas, RetainedFeature, RetainedPolicy
 from .retained_scene import (
+    CONTROL_STATE_MASK,
+    ControlKind,
+    ControlState,
     ExplicitSamples,
     GLYPH_RUN_ATTRIBUTE_MASK,
     GroupBody,
@@ -37,6 +40,7 @@ from .retained_scene import (
 
 
 RET1_TAG = 0x31544552
+_RETAINED_FEATURE_MASK = 0x13F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -63,6 +67,8 @@ _SERIES_DEFINITION = struct.Struct("<QQQIIQ")
 _SERIES_SAMPLES = struct.Struct("<QQQIIQ")
 _EXPLICIT_SAMPLE = struct.Struct("<Qq")
 _UNIFORM_SAMPLE = struct.Struct("<q")
+_CONTROL_PREFIX = struct.Struct("<QQQHHiQQIIIIIIII")
+_CONTROL_EVENT = struct.Struct("<QQQHHIQ")
 
 
 class RetainedMessageType(IntEnum):
@@ -88,6 +94,9 @@ class RetainedMessageType(IntEnum):
     SERIES_APPEND = 0x3001
     SERIES_REPLACE = 0x3002
     SERIES_DROP = 0x3003
+    CONTROL_DEFINE = 0x4000
+    CONTROL_REPLACE = 0x4001
+    CONTROL_DROP = 0x4002
     RET_QUERY = 0x8000
     RET_CAPS = 0x8001
     RET_FORMATS = 0x8002
@@ -122,6 +131,10 @@ class PresentRetainedMode(IntEnum):
 class PresentDisposition(IntEnum):
     COMMIT = 0
     COMMIT_AND_REVEAL = 1
+
+
+class ControlEventKind(IntEnum):
+    ACTIVATE = 1
 
 
 class RetainedWireErrorCode(str, Enum):
@@ -213,6 +226,17 @@ def _checked_multiply(name: str, left: int, right: int) -> int:
     return left * right
 
 
+def _control_text_bytes(name: str, text: str) -> bytes:
+    if not isinstance(text, str):
+        raise TypeError(f"{name} must be str")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in text):
+        raise ValueError(f"{name} contains a control character")
+    try:
+        return text.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} contains a non-scalar surrogate") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class RetainedQuery:
     pass
@@ -239,7 +263,7 @@ class RetainedCaps:
             features = RetainedFeature(operator.index(self.features))
         except (TypeError, ValueError) as exc:
             raise TypeError("features must be RetainedFeature-compatible") from exc
-        if int(features) & ~0x3F:
+        if int(features) & ~_RETAINED_FEATURE_MASK:
             raise ValueError("features contain reserved RETAINED-1 bits")
         if not features & RetainedFeature.CORE:
             raise ValueError("RETAINED-1 requires CORE")
@@ -277,6 +301,8 @@ class RetainedCaps:
             or self.max_retained_transaction_bytes == 0
         ):
             raise ValueError("CORE maxima must be positive")
+        if features & RetainedFeature.CONTROLS and self.max_objects == 0:
+            raise ValueError("CONTROLS requires object capacity")
 
     def policy(
         self,
@@ -678,7 +704,7 @@ _WIRE_BODY_KIND = {
 
 @dataclass(frozen=True, slots=True)
 class RetainedItemReference:
-    """Exact owner-scoped REGION/OBJECT/SERIES drop payload."""
+    """Exact owner-scoped REGION/OBJECT/SERIES/CONTROL drop payload."""
 
     owner_id: int
     owner_generation: int
@@ -691,6 +717,162 @@ class RetainedItemReference:
                 name,
                 _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ControlWireDefinition:
+    """Complete semantic control definition before session binding."""
+
+    owner_id: int
+    owner_generation: int
+    control_id: int
+    kind: ControlKind
+    state: ControlState
+    z_order: int
+    region_id: int
+    parent_control_id: int
+    order: int
+    bounds: ObjectBounds | None
+    label: str
+    shortcut: str
+
+    def __post_init__(self) -> None:
+        for name, minimum in (
+            ("owner_id", 1),
+            ("owner_generation", 1),
+            ("control_id", 1),
+            ("region_id", 1),
+            ("parent_control_id", 0),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=UINT64_MAX),
+            )
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer(
+                "z_order",
+                self.z_order,
+                minimum=-(1 << 31),
+                maximum=(1 << 31) - 1,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "order",
+            _integer("order", self.order, minimum=0, maximum=UINT32_MAX),
+        )
+        kind = _enum("kind", ControlKind, self.kind)
+        object.__setattr__(self, "kind", kind)
+
+        if isinstance(self.state, bool):
+            raise TypeError("state must not be bool")
+        try:
+            state_bits = operator.index(self.state)
+        except TypeError as exc:
+            raise TypeError("state must be ControlState-compatible") from exc
+        if not 0 <= state_bits <= UINT16_MAX:
+            raise ValueError("state must fit u16")
+        state = ControlState(state_bits)
+        if int(state) & ~int(CONTROL_STATE_MASK):
+            raise ValueError("state contains reserved CONTROL-1 bits")
+        object.__setattr__(self, "state", state)
+
+        if self.bounds is not None and not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds or None")
+        label = _control_text_bytes("label", self.label)
+        shortcut = _control_text_bytes("shortcut", self.shortcut)
+
+        allowed = {
+            ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
+            ControlKind.MENU: (
+                ControlState.VISIBLE
+                | ControlState.ENABLED
+                | ControlState.OPEN
+                | ControlState.SELECTED
+            ),
+            ControlKind.MENU_ITEM: (
+                ControlState.VISIBLE
+                | ControlState.ENABLED
+                | ControlState.SELECTED
+                | ControlState.CHECKED
+            ),
+            ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
+        }[kind]
+        if int(state) & ~int(allowed):
+            raise ValueError(f"state contains bits not defined for {kind.name}")
+        if state & (ControlState.OPEN | ControlState.SELECTED) and not (
+            state & ControlState.VISIBLE and state & ControlState.ENABLED
+        ):
+            raise ValueError("open or selected controls must be visible and enabled")
+
+        if kind is ControlKind.MENU_BAR:
+            if self.parent_control_id or self.order or self.bounds is None:
+                raise ValueError("MENU_BAR requires root order zero and positive bounds")
+            if label or shortcut:
+                raise ValueError("MENU_BAR carries no label or shortcut")
+        else:
+            if self.parent_control_id == 0 or self.bounds is not None or self.z_order != 0:
+                raise ValueError(
+                    f"{kind.name} requires a parent and renderer-owned geometry"
+                )
+            if kind in (ControlKind.MENU, ControlKind.MENU_ITEM):
+                if not label:
+                    raise ValueError(f"{kind.name} requires a nonempty label")
+            elif label or shortcut:
+                raise ValueError("MENU_SEPARATOR carries no label or shortcut")
+            if kind is ControlKind.MENU and shortcut:
+                raise ValueError("MENU carries no shortcut")
+
+    @property
+    def visible(self) -> bool:
+        return bool(self.state & ControlState.VISIBLE)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.state & ControlState.ENABLED)
+
+
+@dataclass(frozen=True, slots=True)
+class ControlEvent:
+    """Revision-bound semantic activation emitted by the terminal."""
+
+    owner_id: int
+    owner_generation: int
+    control_id: int
+    event_kind: ControlEventKind
+    modifiers: int
+    model_revision: int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "control_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+        object.__setattr__(
+            self,
+            "event_kind",
+            _enum("event_kind", ControlEventKind, self.event_kind),
+        )
+        object.__setattr__(
+            self,
+            "modifiers",
+            _integer("modifiers", self.modifiers, minimum=0, maximum=0x3F),
+        )
+        object.__setattr__(
+            self,
+            "model_revision",
+            _integer(
+                "model_revision",
+                self.model_revision,
+                minimum=0,
+                maximum=UINT64_MAX,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1111,6 +1293,16 @@ def _wire_text(raw: bytes, name: str) -> str:
     return text
 
 
+def _wire_control_text(raw: bytes, name: str) -> str:
+    text = _wire_text(raw, name)
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in text):
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            f"{name} contains a control character",
+        )
+    return text
+
+
 def _body_size(raw: bytes, expected: int, name: str) -> None:
     if len(raw) != expected:
         raise RetainedWireError(
@@ -1497,6 +1689,173 @@ def decode_object_drop(payload) -> RetainedItemReference:
     return _decode_item_reference(payload, "OBJECT_DROP")
 
 
+def encode_control_definition(definition: ControlWireDefinition) -> bytes:
+    if not isinstance(definition, ControlWireDefinition):
+        raise TypeError("definition must be ControlWireDefinition")
+    label = _control_text_bytes("label", definition.label)
+    shortcut = _control_text_bytes("shortcut", definition.shortcut)
+    label_bytes = _integer(
+        "label_bytes", len(label), minimum=0, maximum=UINT32_MAX
+    )
+    shortcut_bytes = _integer(
+        "shortcut_bytes", len(shortcut), minimum=0, maximum=UINT32_MAX
+    )
+    if definition.bounds is None:
+        bounds = (0, 0, 0, 0)
+    else:
+        bounds = (
+            definition.bounds.left,
+            definition.bounds.top,
+            definition.bounds.right,
+            definition.bounds.bottom,
+        )
+    return _CONTROL_PREFIX.pack(
+        definition.owner_id,
+        definition.owner_generation,
+        definition.control_id,
+        int(definition.kind),
+        int(definition.state),
+        definition.z_order,
+        definition.region_id,
+        definition.parent_control_id,
+        definition.order,
+        *bounds,
+        label_bytes,
+        shortcut_bytes,
+        0,
+    ) + label + shortcut
+
+
+def decode_control_definition(payload) -> ControlWireDefinition:
+    raw = _variable_payload(payload, _CONTROL_PREFIX.size, "CONTROL definition")
+    values = _CONTROL_PREFIX.unpack_from(raw)
+    if not values[0] or not values[1] or not values[2] or not values[6]:
+        raise RetainedWireError(
+            RetainedWireErrorCode.SCALAR,
+            "CONTROL owner, generation, control, and region IDs must be nonzero",
+        )
+    try:
+        kind = ControlKind(values[3])
+    except ValueError as exc:
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            f"control kind {values[3]} is not canonical",
+        ) from exc
+    if values[4] & ~int(CONTROL_STATE_MASK):
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "CONTROL state contains reserved bits",
+        )
+    if values[15]:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "CONTROL reserved field is nonzero",
+        )
+    label_bytes, shortcut_bytes = values[13:15]
+    expected = _checked_add(
+        "CONTROL payload bytes",
+        _CONTROL_PREFIX.size,
+        label_bytes,
+        shortcut_bytes,
+    )
+    _body_size(raw, expected, "CONTROL definition")
+    raw_bounds = values[9:13]
+    try:
+        bounds = None if raw_bounds == (0, 0, 0, 0) else ObjectBounds(*raw_bounds)
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+    text_offset = _CONTROL_PREFIX.size
+    label = _wire_control_text(
+        raw[text_offset : text_offset + label_bytes], "CONTROL label"
+    )
+    text_offset += label_bytes
+    shortcut = _wire_control_text(
+        raw[text_offset : text_offset + shortcut_bytes], "CONTROL shortcut"
+    )
+    try:
+        return ControlWireDefinition(
+            owner_id=values[0],
+            owner_generation=values[1],
+            control_id=values[2],
+            kind=kind,
+            state=ControlState(values[4]),
+            z_order=values[5],
+            region_id=values[6],
+            parent_control_id=values[7],
+            order=values[8],
+            bounds=bounds,
+            label=label,
+            shortcut=shortcut,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
+def encode_control_replace(definition: ControlWireDefinition) -> bytes:
+    return encode_control_definition(definition)
+
+
+def decode_control_replace(payload) -> ControlWireDefinition:
+    return decode_control_definition(payload)
+
+
+def encode_control_drop(reference: RetainedItemReference) -> bytes:
+    return _encode_item_reference(reference, "CONTROL_DROP")
+
+
+def decode_control_drop(payload) -> RetainedItemReference:
+    return _decode_item_reference(payload, "CONTROL_DROP")
+
+
+def encode_control_event(event: ControlEvent) -> bytes:
+    if not isinstance(event, ControlEvent):
+        raise TypeError("event must be ControlEvent")
+    return _CONTROL_EVENT.pack(
+        event.owner_id,
+        event.owner_generation,
+        event.control_id,
+        int(event.event_kind),
+        event.modifiers,
+        0,
+        event.model_revision,
+    )
+
+
+def decode_control_event(payload) -> ControlEvent:
+    raw = _payload(payload, _CONTROL_EVENT.size, "CONTROL_EVENT")
+    owner_id, generation, control_id, event_kind, modifiers, reserved, revision = (
+        _CONTROL_EVENT.unpack(raw)
+    )
+    if reserved:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "CONTROL_EVENT reserved field is nonzero",
+        )
+    if modifiers & ~0x3F:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "CONTROL_EVENT modifiers contain reserved bits",
+        )
+    try:
+        kind = ControlEventKind(event_kind)
+    except ValueError as exc:
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            f"CONTROL_EVENT kind {event_kind} is not canonical",
+        ) from exc
+    try:
+        return ControlEvent(
+            owner_id,
+            generation,
+            control_id,
+            kind,
+            modifiers,
+            revision,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
 def encode_series_definition(definition: SeriesWireDefinition) -> bytes:
     if not isinstance(definition, SeriesWireDefinition):
         raise TypeError("definition must be SeriesWireDefinition")
@@ -1648,19 +2007,24 @@ def decode_series_drop(payload) -> RetainedItemReference:
 
 
 __all__ = [
-    "CellMode", "ObjectSetValue", "ObjectSetVisibility", "ObjectWireBody",
+    "CellMode", "ControlEvent", "ControlEventKind", "ControlKind", "ControlState",
+    "ControlWireDefinition", "ObjectSetValue", "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
     "RetainedResult", "RetainedWireError", "RetainedWireErrorCode",
+    "decode_control_definition", "decode_control_drop", "decode_control_event",
+    "decode_control_replace",
     "decode_object_definition", "decode_object_drop", "decode_object_replace",
     "decode_object_set_value", "decode_object_set_visibility", "decode_owner_drop",
     "decode_owner_open", "decode_present_begin", "decode_present_commit",
     "decode_region_definition", "decode_region_drop", "decode_region_replace",
     "decode_ret_caps", "decode_ret_formats", "decode_ret_query", "decode_ret_result",
     "decode_series_append", "decode_series_definition", "decode_series_drop",
-    "decode_series_replace", "decode_series_samples", "encode_object_definition",
+    "decode_series_replace", "decode_series_samples", "encode_control_definition",
+    "encode_control_drop", "encode_control_event", "encode_control_replace",
+    "encode_object_definition",
     "encode_object_drop", "encode_object_replace", "encode_object_set_value",
     "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open",
     "encode_present_begin", "encode_present_commit", "encode_region_definition",
