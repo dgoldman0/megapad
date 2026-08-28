@@ -315,6 +315,22 @@ def test_present_begin_keeps_wire_authority_inside_pt() -> None:
     assert "_PT.S.RET-CAPS 48 + _PT-U64@" in preflight
 
 
+def test_replace_start_can_refresh_live_or_pending_retained_state() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    retained_args = _definition(source, "_PT-PB-RET-ARGS?")
+
+    replace_start = retained_args.index("PT-RET-REPLACE-START = IF")
+    replace_continue = retained_args.index("PT-RET-REPLACE-CONTINUE = IF")
+    replace_branch = retained_args[replace_start:replace_continue]
+
+    assert "TRUE EXIT" in replace_branch
+    assert "_PT-RB-REPLACE-REQUIRED" not in replace_branch
+    assert "_PT-RB-NONE = AND EXIT" in retained_args[:replace_start]
+    assert "_PT-RB-REPLACE-PENDING = EXIT" in retained_args[replace_continue:]
+    assert "_PT-RB-LAYOUT-REQUIRED = EXIT" in retained_args[replace_continue:]
+    assert "_PT-RB-LAYOUT-PENDING =" in retained_args[replace_continue:]
+
+
 def test_present_body_keeps_raw_fixed_operations_private() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     operation = _definition(source, "_PT-PRESENT-FIXED-OP")

@@ -245,6 +245,69 @@ def test_complete_definition_target_is_hidden_then_atomically_revealed():
     assert scene.state.hidden is None
 
 
+def test_live_replace_start_restarts_hidden_target_without_disturbing_active_scene():
+    clock, owners, owner, scene = _domain()
+    _reveal_complete_target(clock, scene, owner)
+    active = scene.state.active
+
+    _begin(clock, scene, 4, RetainedMode.REPLACE_START)
+    scene.define_region(replace(_region(owner), region_id=2))
+    scene.define_object(
+        replace(
+            _object(owner, 9, GlyphRunBody(WHITE, BLACK, 0, "older")),
+            region_id=2,
+        )
+    )
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    older_hidden = scene.state.hidden
+    assert older_hidden is not None
+    assert scene.state.active is active
+    assert set(older_hidden.owners[owner.owner_id].regions) == {2}
+    assert set(older_hidden.owners[owner.owner_id].objects) == {9}
+
+    _begin(clock, scene, 5, RetainedMode.REPLACE_START)
+    scene.define_region(replace(_region(owner), region_id=3))
+    scene.define_object(
+        replace(
+            _object(owner, 10, GlyphRunBody(WHITE, BLACK, 0, "newest")),
+            region_id=3,
+        )
+    )
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    newest_hidden = scene.state.hidden
+    assert newest_hidden is not None and newest_hidden is not older_hidden
+    assert scene.state.active is active
+    assert set(newest_hidden.owners[owner.owner_id].regions) == {3}
+    assert set(newest_hidden.owners[owner.owner_id].objects) == {10}
+    assert owners.require_live(owner).high_water.region == 3
+    assert owners.require_live(owner).high_water.object == 10
+
+    _begin(clock, scene, 6, RetainedMode.REPLACE_CONTINUE)
+    _install(scene, clock, CommitDisposition.COMMIT_AND_REVEAL)
+
+    assert scene.state.active is newest_hidden
+    assert scene.state.hidden is None
+    assert set(scene.state.active.owners[owner.owner_id].regions) == {3}
+    assert set(scene.state.active.owners[owner.owner_id].objects) == {10}
+
+
+def test_replace_start_promotes_layout_requirement_to_replacement_pending():
+    clock, _owners, owner, scene = _domain()
+    _reveal_complete_target(clock, scene, owner)
+    resized = TerminalGeometry(20, 10, 1)
+    scene.require_layout(resized)
+    assert scene.state.requirement is RebuildRequirement.LAYOUT
+
+    _begin(clock, scene, 4, RetainedMode.REPLACE_START, resized)
+    scene.define_region(replace(_region(owner, generation=1), region_id=2))
+    _install(scene, clock, CommitDisposition.COMMIT)
+
+    assert scene.state.hidden is not None
+    assert scene.state.requirement is RebuildRequirement.REPLACE
+
+
 def test_dependency_or_quota_rejection_leaves_scene_and_id_ledger_unchanged():
     clock, owners, owner, scene = _domain(quotas=_quotas(objects=1))
     initial_scene = scene.state

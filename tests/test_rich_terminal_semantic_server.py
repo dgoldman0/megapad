@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import struct
 
 from rich_terminal.apt1 import (
@@ -376,3 +377,76 @@ def test_present_ingress_defines_replaces_and_drops_semantic_controls() -> None:
     assert 4 not in controls
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.control == 4
+
+
+def test_present_ingress_restarts_live_hidden_replacement_before_reveal() -> None:
+    core, encoder, decoder = _visible_control_core()
+    initial = core.retained_state
+    assert initial is not None
+    active = initial.active
+    visible_enabled = ControlState.VISIBLE | ControlState.ENABLED
+
+    older_region = RegionWireDefinition(7, 1, 2, 0, 0, 2, 2, 0, 0x3)
+    older_bar = replace(
+        _control(5, ControlKind.MENU_BAR, visible_enabled),
+        region_id=2,
+    )
+    _commit(
+        core,
+        encoder,
+        decoder,
+        transaction_id=4,
+        mode=PresentRetainedMode.REPLACE_START,
+        operations=(
+            (RetainedMessageType.REGION_DEFINE, encode_region_definition(older_region)),
+            (RetainedMessageType.CONTROL_DEFINE, encode_control_definition(older_bar)),
+        ),
+    )
+
+    state = core.retained_state
+    assert state is not None and state.hidden is not None
+    older_hidden = state.hidden
+    assert state.active is active
+    assert set(older_hidden.owners[7].controls) == {5}
+
+    newest_region = RegionWireDefinition(7, 1, 3, 0, 0, 2, 2, 0, 0x3)
+    newest_bar = replace(
+        _control(6, ControlKind.MENU_BAR, visible_enabled),
+        region_id=3,
+    )
+    _commit(
+        core,
+        encoder,
+        decoder,
+        transaction_id=5,
+        mode=PresentRetainedMode.REPLACE_START,
+        operations=(
+            (RetainedMessageType.REGION_DEFINE, encode_region_definition(newest_region)),
+            (RetainedMessageType.CONTROL_DEFINE, encode_control_definition(newest_bar)),
+        ),
+    )
+
+    state = core.retained_state
+    assert state is not None and state.hidden is not None
+    newest_hidden = state.hidden
+    assert state.active is active
+    assert newest_hidden is not older_hidden
+    assert set(newest_hidden.owners[7].controls) == {6}
+    assert core.owner_state is not None
+    assert core.owner_state.records[7].high_water.region == 3
+    assert core.owner_state.records[7].high_water.control == 6
+
+    _commit(
+        core,
+        encoder,
+        decoder,
+        transaction_id=6,
+        mode=PresentRetainedMode.REPLACE_CONTINUE,
+        disposition=PresentDisposition.COMMIT_AND_REVEAL,
+    )
+
+    state = core.retained_state
+    assert state is not None
+    assert state.active is newest_hidden
+    assert state.hidden is None
+    assert set(state.active.owners[7].controls) == {6}

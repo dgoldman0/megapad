@@ -410,8 +410,11 @@ charged until commit or abort exactly as in CELL-1.
 
 Values outside these enums are transaction errors. A BEGIN with both modes zero
 is invalid. A DELTA cannot run while a hidden replacement/layout is pending or
-while reset/resize requires rebuild. START is invalid if its matching rebuild is
-not required. Initial successful discovery, soft-reset replay, and resize
+while reset/resize requires rebuild. `RET_REPLACE_START` may begin or restart a
+full hidden replacement in any retained state, including while replacement or
+layout work is pending; full replacement is also a valid stronger response to a
+required layout rebuild. `RET_LAYOUT_START` is invalid unless a layout rebuild is
+required. Initial successful discovery, soft-reset replay, and resize
 respectively establish the required initial-replacement, replacement, or layout
 condition. CONTINUE is invalid without the matching hidden target.
 

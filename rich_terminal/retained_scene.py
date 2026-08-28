@@ -1036,8 +1036,6 @@ class RetainedSceneModel:
                 raise SceneModelError(SceneErrorCode.STATE, "DELTA cannot target a rebuilding model")
             candidate = state.active
         elif selected_mode is RetainedMode.REPLACE_START:
-            if state.requirement is not RebuildRequirement.REPLACE:
-                raise SceneModelError(SceneErrorCode.STATE, "replacement rebuild is not required")
             candidate = RetainedScene(MappingProxyType({}))
         elif selected_mode is RetainedMode.REPLACE_CONTINUE:
             if state.hidden is None or state.hidden_kind is not HiddenTargetKind.REPLACE:
@@ -1509,6 +1507,11 @@ class RetainedSceneModel:
                 revision=revision,
                 hidden=candidate,
                 hidden_kind=kind,
+                requirement=(
+                    RebuildRequirement.REPLACE
+                    if kind is HiddenTargetKind.REPLACE
+                    else RebuildRequirement.LAYOUT
+                ),
             )
         prepared = PreparedSceneInstall(
             state, ledger, staging.lease, self._token, old, staging
