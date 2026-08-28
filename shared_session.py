@@ -22,10 +22,14 @@ from rich_terminal.retained_view import (
     INT32_MIN,
     DisplayScope,
     GlyphRunDraw,
+    MenuBarDraw,
+    MenuDraw,
+    MenuItemDraw,
+    MenuSeparatorDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
 )
-from rich_terminal.retained_scene import ObjectBounds, RGBA
+from rich_terminal.retained_scene import ControlState, ObjectBounds, RGBA
 from rich_terminal.update_authority import TerminalUpdateError
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import (
@@ -303,6 +307,7 @@ def display_scope_from_wire(data: dict) -> DisplayScope:
 
 
 _DRAW_WIRE_FIELDS = (
+    "kind",
     "object_id",
     "z_order",
     "bounds",
@@ -310,6 +315,37 @@ _DRAW_WIRE_FIELDS = (
     "background",
     "attributes",
     "text",
+)
+_MENU_BAR_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "z_order",
+    "bounds",
+    "menus",
+)
+_MENU_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "label",
+    "entries",
+)
+_MENU_ITEM_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "label",
+    "shortcut",
+)
+_MENU_SEPARATOR_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
 )
 _REGION_WIRE_FIELDS = (
     "owner_id",
@@ -323,6 +359,84 @@ _REGION_WIRE_FIELDS = (
     "clipped",
     "draws",
 )
+
+
+def _menu_entry_to_wire(entry: MenuItemDraw | MenuSeparatorDraw) -> dict:
+    if isinstance(entry, MenuItemDraw):
+        return {
+            "kind": "menu_item",
+            "control_id": entry.control_id,
+            "state": int(entry.state),
+            "order": entry.order,
+            "label": entry.label,
+            "shortcut": entry.shortcut,
+        }
+    if isinstance(entry, MenuSeparatorDraw):
+        return {
+            "kind": "menu_separator",
+            "control_id": entry.control_id,
+            "state": int(entry.state),
+            "order": entry.order,
+        }
+    raise TypeError("menu entries must be MenuItemDraw or MenuSeparatorDraw")
+
+
+def _menu_to_wire(menu: MenuDraw) -> dict:
+    if not isinstance(menu, MenuDraw):
+        raise TypeError("menu must be MenuDraw")
+    return {
+        "kind": "menu",
+        "control_id": menu.control_id,
+        "state": int(menu.state),
+        "order": menu.order,
+        "label": menu.label,
+        "entries": [_menu_entry_to_wire(entry) for entry in menu.entries],
+    }
+
+
+def _retained_draw_to_wire(draw: GlyphRunDraw | MenuBarDraw) -> dict:
+    if isinstance(draw, GlyphRunDraw):
+        return {
+            "kind": "glyph_run",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": [
+                draw.bounds.left,
+                draw.bounds.top,
+                draw.bounds.right,
+                draw.bounds.bottom,
+            ],
+            "foreground": [
+                draw.foreground.red,
+                draw.foreground.green,
+                draw.foreground.blue,
+                draw.foreground.alpha,
+            ],
+            "background": [
+                draw.background.red,
+                draw.background.green,
+                draw.background.blue,
+                draw.background.alpha,
+            ],
+            "attributes": draw.attributes,
+            "text": draw.text,
+        }
+    if isinstance(draw, MenuBarDraw):
+        return {
+            "kind": "menu_bar",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": [
+                draw.bounds.left,
+                draw.bounds.top,
+                draw.bounds.right,
+                draw.bounds.bottom,
+            ],
+            "menus": [_menu_to_wire(menu) for menu in draw.menus],
+        }
+    raise TypeError("retained draw must be GlyphRunDraw or MenuBarDraw")
 
 
 def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
@@ -344,37 +458,161 @@ def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
                 "cell_rows": region.cell_rows,
                 "z_order": region.z_order,
                 "clipped": region.clipped,
-                "draws": [
-                    {
-                        "object_id": draw.object_id,
-                        "z_order": draw.z_order,
-                        "bounds": [
-                            draw.bounds.left,
-                            draw.bounds.top,
-                            draw.bounds.right,
-                            draw.bounds.bottom,
-                        ],
-                        "foreground": [
-                            draw.foreground.red,
-                            draw.foreground.green,
-                            draw.foreground.blue,
-                            draw.foreground.alpha,
-                        ],
-                        "background": [
-                            draw.background.red,
-                            draw.background.green,
-                            draw.background.blue,
-                            draw.background.alpha,
-                        ],
-                        "attributes": draw.attributes,
-                        "text": draw.text,
-                    }
-                    for draw in region.draws
-                ],
+                "draws": [_retained_draw_to_wire(draw) for draw in region.draws],
             }
             for region in plane.regions
         ],
     }
+
+
+def _control_state_from_wire(value, name: str) -> ControlState:
+    return ControlState(
+        _wire_integer(value, name, minimum=0, maximum=0xFFFF)
+    )
+
+
+def _menu_entry_from_wire(data, name: str) -> MenuItemDraw | MenuSeparatorDraw:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"{name} must be an object")
+    kind = data.get("kind")
+    if kind == "menu_item":
+        wire = _wire_object(data, name, _MENU_ITEM_WIRE_FIELDS)
+        return MenuItemDraw(
+            control_id=_wire_integer(
+                wire["control_id"],
+                f"{name} control_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            state=_control_state_from_wire(wire["state"], f"{name} state"),
+            order=_wire_integer(
+                wire["order"],
+                f"{name} order",
+                minimum=0,
+                maximum=UINT32_MAX,
+            ),
+            label=_wire_text(wire["label"], f"{name} label"),
+            shortcut=_wire_text(wire["shortcut"], f"{name} shortcut"),
+        )
+    if kind == "menu_separator":
+        wire = _wire_object(data, name, _MENU_SEPARATOR_WIRE_FIELDS)
+        return MenuSeparatorDraw(
+            control_id=_wire_integer(
+                wire["control_id"],
+                f"{name} control_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            state=_control_state_from_wire(wire["state"], f"{name} state"),
+            order=_wire_integer(
+                wire["order"],
+                f"{name} order",
+                minimum=0,
+                maximum=UINT32_MAX,
+            ),
+        )
+    raise ValueError(f"{name} kind is not a semantic menu entry")
+
+
+def _menu_from_wire(data, name: str) -> MenuDraw:
+    wire = _wire_object(data, name, _MENU_WIRE_FIELDS)
+    if wire["kind"] != "menu":
+        raise ValueError(f"{name} kind must be menu")
+    entries_wire = wire["entries"]
+    if not isinstance(entries_wire, (list, tuple)):
+        raise TypeError(f"{name} entries must be an array")
+    return MenuDraw(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(
+            wire["order"],
+            f"{name} order",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        label=_wire_text(wire["label"], f"{name} label"),
+        entries=tuple(
+            _menu_entry_from_wire(entry, f"{name} entry {entry_index}")
+            for entry_index, entry in enumerate(entries_wire)
+        ),
+    )
+
+
+def _retained_draw_from_wire(data, name: str) -> GlyphRunDraw | MenuBarDraw:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"{name} must be an object")
+    kind = data.get("kind")
+    if kind == "glyph_run":
+        wire = _wire_object(data, name, _DRAW_WIRE_FIELDS)
+        bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        foreground = _wire_integer_array(
+            wire["foreground"], f"{name} foreground", 4, maximum=0xFF
+        )
+        background = _wire_integer_array(
+            wire["background"], f"{name} background", 4, maximum=0xFF
+        )
+        return GlyphRunDraw(
+            object_id=_wire_integer(
+                wire["object_id"],
+                f"{name} object_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(*bounds),
+            foreground=RGBA(*foreground),
+            background=RGBA(*background),
+            attributes=_wire_integer(
+                wire["attributes"],
+                f"{name} attributes",
+                minimum=0,
+                maximum=0x7F,
+            ),
+            text=_wire_text(wire["text"], f"{name} text"),
+        )
+    if kind == "menu_bar":
+        wire = _wire_object(data, name, _MENU_BAR_WIRE_FIELDS)
+        bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        menus_wire = wire["menus"]
+        if not isinstance(menus_wire, (list, tuple)):
+            raise TypeError(f"{name} menus must be an array")
+        return MenuBarDraw(
+            control_id=_wire_integer(
+                wire["control_id"],
+                f"{name} control_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            state=_control_state_from_wire(wire["state"], f"{name} state"),
+            order=_wire_integer(
+                wire["order"],
+                f"{name} order",
+                minimum=0,
+                maximum=UINT32_MAX,
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(*bounds),
+            menus=tuple(
+                _menu_from_wire(menu, f"{name} menu {menu_index}")
+                for menu_index, menu in enumerate(menus_wire)
+            ),
+        )
+    raise ValueError(f"{name} kind is not a retained draw kind")
 
 
 def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
@@ -398,45 +636,13 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
         draws_wire = region["draws"]
         if not isinstance(draws_wire, (list, tuple)):
             raise TypeError(f"retained region {region_index} draws must be an array")
-        draws: list[GlyphRunDraw] = []
-        for draw_index, raw_draw in enumerate(draws_wire):
-            draw = _wire_object(
+        draws = [
+            _retained_draw_from_wire(
                 raw_draw,
                 f"retained region {region_index} draw {draw_index}",
-                _DRAW_WIRE_FIELDS,
             )
-            prefix = f"retained region {region_index} draw {draw_index}"
-            bounds = _wire_integer_array(draw["bounds"], f"{prefix} bounds", 4)
-            foreground = _wire_integer_array(
-                draw["foreground"], f"{prefix} foreground", 4, maximum=0xFF
-            )
-            background = _wire_integer_array(
-                draw["background"], f"{prefix} background", 4, maximum=0xFF
-            )
-            draws.append(
-                GlyphRunDraw(
-                    object_id=_wire_integer(
-                        draw["object_id"],
-                        f"{prefix} object_id",
-                        minimum=1,
-                        maximum=UINT64_MAX,
-                    ),
-                    z_order=_wire_integer(
-                        draw["z_order"],
-                        f"{prefix} z_order",
-                        minimum=INT32_MIN,
-                        maximum=INT32_MAX,
-                    ),
-                    bounds=ObjectBounds(*bounds),
-                    foreground=RGBA(*foreground),
-                    background=RGBA(*background),
-                    attributes=_wire_integer(
-                        draw["attributes"], f"{prefix} attributes", minimum=0,
-                        maximum=0x7F,
-                    ),
-                    text=_wire_text(draw["text"], f"{prefix} text"),
-                )
-            )
+            for draw_index, raw_draw in enumerate(draws_wire)
+        ]
         prefix = f"retained region {region_index}"
         regions.append(
             RetainedRegionDraw(

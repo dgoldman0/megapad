@@ -362,6 +362,7 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
     assert set(wire) == {"offer_id", "scope", "cell", "retained"}
     wire_draw = wire["retained"]["regions"][0]["draws"][0]
     assert wire_draw == {
+        "kind": "glyph_run",
         "object_id": 17,
         "z_order": -2,
         "bounds": [1, 2, 3, 4],
