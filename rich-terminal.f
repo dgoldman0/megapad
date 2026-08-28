@@ -665,26 +665,39 @@ VARIABLE _PT-I-S
     1 _PT-I-S @ _PT.S.NEXT-TXID !
     PT-S-OK ;
 
+\ Read-only overlap check for authority queries.  Unlike the general helper,
+\ this word keeps no module scratch that a hostile candidate could alias.
+: _PT-RANGES-OVERLAP-READONLY?  ( a u b v -- flag )
+    2OVER + 2 PICK U> >R
+    + SWAP DROP SWAP U>
+    R> AND ;
+
 \ A composed adapter may own additional caller-provided storage beside a live
 \ PT session.  PT retains the exact geometry of all four of its borrowed
 \ spans, so it is the only module that can prove such storage does not alias
-\ the session record or any RX, TX, or event backing.  This predicate performs
-\ no caller-visible storage writes and exposes no borrowed address.
-VARIABLE _PT-SD-A
-VARIABLE _PT-SD-U
-VARIABLE _PT-SD-S
+\ the session record or any RX, TX, or event backing.  The query is stack-only:
+\ malformed or aliased input cannot overwrite validation scratch before being
+\ rejected, and no borrowed address survives the call.
 : PT-STORAGE-DISJOINT?  ( a u session -- flag )
-    _PT-SD-S ! _PT-SD-U ! _PT-SD-A !
-    _PT-SD-S @ _PT-VALID-S? 0= IF FALSE EXIT THEN
-    _PT-SD-A @ _PT-SD-U @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
-    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ /PT-SESSION
-        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
-    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ _PT.S.RX-A @
-        _PT-SD-S @ _PT.S.RX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
-    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ _PT.S.TX-A @
-        _PT-SD-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
-    _PT-SD-A @ _PT-SD-U @ _PT-SD-S @ _PT.S.EVENT-A @
-        _PT-SD-S @ _PT.S.EVENT-U @ _PT-RANGES-OVERLAP? 0= ;
+    DUP _PT-VALID-S? 0= IF DROP 2DROP FALSE EXIT THEN
+    >R
+    2DUP _PT-RANGE-VALID? 0= IF 2DROP R> DROP FALSE EXIT THEN
+    2DUP R@ /PT-SESSION _PT-RANGES-OVERLAP-READONLY? IF
+        2DROP R> DROP FALSE EXIT
+    THEN
+    2DUP R@ _PT.S.RX-A @ R@ _PT.S.RX-U @
+        _PT-RANGES-OVERLAP-READONLY? IF
+        2DROP R> DROP FALSE EXIT
+    THEN
+    2DUP R@ _PT.S.TX-A @ R@ _PT.S.TX-U @
+        _PT-RANGES-OVERLAP-READONLY? IF
+        2DROP R> DROP FALSE EXIT
+    THEN
+    2DUP R@ _PT.S.EVENT-A @ R@ _PT.S.EVENT-U @
+        _PT-RANGES-OVERLAP-READONLY? IF
+        2DROP R> DROP FALSE EXIT
+    THEN
+    2DROP R> DROP TRUE ;
 
 \ =====================================================================
 \  Atomic UART publication and fixed-width negotiation encoding

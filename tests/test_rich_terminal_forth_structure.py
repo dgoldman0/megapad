@@ -577,6 +577,7 @@ def test_retained_completion_is_bounded_without_weakening_legacy_cell() -> None:
 def test_composed_storage_can_be_proven_disjoint_from_every_pt_borrow() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     predicate = _definition(source, "PT-STORAGE-DISJOINT?")
+    overlap = _definition(source, "_PT-RANGES-OVERLAP-READONLY?")
 
     assert "_PT-VALID-S?" in predicate
     assert "_PT-RANGE-VALID?" in predicate
@@ -586,10 +587,15 @@ def test_composed_storage_can_be_proven_disjoint_from_every_pt_borrow() -> None:
     assert "_PT.S.TX-U @" in predicate
     assert "_PT.S.EVENT-A @" in predicate
     assert "_PT.S.EVENT-U @" in predicate
-    assert predicate.count("_PT-RANGES-OVERLAP?") == 4
-    assert "!" not in predicate.replace("_PT-SD-S !", "").replace(
-        "_PT-SD-U !", ""
-    ).replace("_PT-SD-A !", "")
+    assert predicate.count("_PT-RANGES-OVERLAP-READONLY?") == 4
+    assert "_PT-RANGES-OVERLAP?" not in predicate
+    assert "!" not in predicate
+    assert "VARIABLE _PT-SD-" not in source
+    assert "!" not in overlap
+    assert "VARIABLE" not in overlap
+    assert "2OVER + 2 PICK U> >R" in overlap
+    assert "+ SWAP DROP SWAP U>" in overlap
+    assert "R> AND" in overlap
 
 
 def test_owner_lifecycle_uses_ret_result_and_shared_drop_tx_result() -> None:
