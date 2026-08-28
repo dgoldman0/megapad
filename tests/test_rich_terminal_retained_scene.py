@@ -422,9 +422,15 @@ def test_flat_glyph_staging_reuses_one_private_map_and_freezes_once(monkeypatch)
     frozen_object_counts = []
     original_make_owner_scene = scene._make_owner_scene
 
-    def counted_make_owner_scene(owner_identity, regions, objects, series):
+    def counted_make_owner_scene(owner_identity, regions, objects, series, controls):
         frozen_object_counts.append(len(objects))
-        return original_make_owner_scene(owner_identity, regions, objects, series)
+        return original_make_owner_scene(
+            owner_identity,
+            regions,
+            objects,
+            series,
+            controls,
+        )
 
     text_calls = 0
     original_text_bytes = retained_scene_module._text_bytes

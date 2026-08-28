@@ -14,8 +14,8 @@ checks below and publishes only through the same immutable transaction seam.
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass, replace
-from enum import Enum, IntEnum
+from dataclasses import dataclass, field, replace
+from enum import Enum, IntEnum, IntFlag
 from types import MappingProxyType
 from typing import Mapping
 
@@ -104,6 +104,34 @@ class ObjectKind(IntEnum):
     WAVEFORM = 9
 
 
+class ControlKind(IntEnum):
+    """Renderer-neutral semantic controls in the first CONTROL-1 family."""
+
+    MENU_BAR = 1
+    MENU = 2
+    MENU_ITEM = 3
+    MENU_SEPARATOR = 4
+
+
+class ControlState(IntFlag):
+    """Authoritative guest state; transient hover/press state stays terminal-owned."""
+
+    VISIBLE = 1 << 0
+    ENABLED = 1 << 1
+    OPEN = 1 << 2
+    SELECTED = 1 << 3
+    CHECKED = 1 << 4
+
+
+CONTROL_STATE_MASK = (
+    ControlState.VISIBLE
+    | ControlState.ENABLED
+    | ControlState.OPEN
+    | ControlState.SELECTED
+    | ControlState.CHECKED
+)
+
+
 class ReadoutFormat(IntEnum):
     INTEGER = 0
     FIXED = 1
@@ -142,6 +170,15 @@ def _text_bytes(name: str, text: str) -> bytes:
         return text.encode("utf-8", "strict")
     except UnicodeEncodeError as exc:
         raise ValueError(f"{name} contains a non-scalar surrogate") from exc
+
+
+def _control_text_bytes(name: str, text: str) -> bytes:
+    """Return clean single-line semantic text for renderer-owned controls."""
+
+    encoded = _text_bytes(name, text)
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in text):
+        raise ValueError(f"{name} contains a control character")
+    return encoded
 
 
 def _add_usage(name: str, left: int, right: int) -> int:
@@ -545,6 +582,116 @@ class ObjectDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ControlDefinition:
+    """One semantic control node whose visual representation belongs to the view.
+
+    MENU_BAR alone carries an anchor rectangle and z order.  Its MENU and entry
+    descendants carry semantic ordering and state, leaving typography, padding,
+    popup geometry, clipping, and hit targets to the selected renderer.
+    """
+
+    owner: OwnerIdentity
+    control_id: int
+    kind: ControlKind
+    state: ControlState
+    z_order: int
+    region_id: int
+    parent_control_id: int
+    order: int
+    bounds: ObjectBounds | None
+    label: str
+    shortcut: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner, OwnerIdentity):
+            raise TypeError("owner must be OwnerIdentity")
+        for name, minimum, maximum in (
+            ("control_id", 1, UINT64_MAX),
+            ("region_id", 1, UINT64_MAX),
+            ("parent_control_id", 0, UINT64_MAX),
+            ("order", 0, UINT32_MAX),
+            ("z_order", INT32_MIN, INT32_MAX),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=maximum),
+            )
+        if isinstance(self.kind, bool):
+            raise TypeError("kind must not be bool")
+        try:
+            kind = ControlKind(self.kind)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("kind is not a CONTROL-1 control kind") from exc
+        object.__setattr__(self, "kind", kind)
+        if isinstance(self.state, bool):
+            raise TypeError("state must not be bool")
+        try:
+            state_bits = operator.index(self.state)
+        except TypeError as exc:
+            raise TypeError("state must be ControlState-compatible") from exc
+        if state_bits < 0 or state_bits > 0xFFFF:
+            raise ValueError("state must fit u16")
+        state = ControlState(state_bits)
+        if int(state) & ~int(CONTROL_STATE_MASK):
+            raise ValueError("state contains reserved CONTROL-1 bits")
+        object.__setattr__(self, "state", state)
+        if self.bounds is not None and not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds or None")
+        label = _control_text_bytes("label", self.label)
+        shortcut = _control_text_bytes("shortcut", self.shortcut)
+
+        allowed = {
+            ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
+            ControlKind.MENU: (
+                ControlState.VISIBLE
+                | ControlState.ENABLED
+                | ControlState.OPEN
+                | ControlState.SELECTED
+            ),
+            ControlKind.MENU_ITEM: (
+                ControlState.VISIBLE
+                | ControlState.ENABLED
+                | ControlState.SELECTED
+                | ControlState.CHECKED
+            ),
+            ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
+        }[kind]
+        if int(state) & ~int(allowed):
+            raise ValueError(f"state contains bits not defined for {kind.name}")
+        if state & (ControlState.OPEN | ControlState.SELECTED) and not (
+            state & ControlState.VISIBLE and state & ControlState.ENABLED
+        ):
+            raise ValueError("open or selected controls must be visible and enabled")
+
+        if kind is ControlKind.MENU_BAR:
+            if self.parent_control_id or self.order or self.bounds is None:
+                raise ValueError("MENU_BAR requires root order zero and positive bounds")
+            if label or shortcut:
+                raise ValueError("MENU_BAR carries no label or shortcut")
+        else:
+            if self.parent_control_id == 0 or self.bounds is not None or self.z_order != 0:
+                raise ValueError(
+                    f"{kind.name} requires a parent and renderer-owned geometry"
+                )
+            if kind in (ControlKind.MENU, ControlKind.MENU_ITEM):
+                if not label:
+                    raise ValueError(f"{kind.name} requires a nonempty label")
+            elif label or shortcut:
+                raise ValueError("MENU_SEPARATOR carries no label or shortcut")
+            if kind is ControlKind.MENU and shortcut:
+                raise ValueError("MENU carries no shortcut")
+
+    @property
+    def visible(self) -> bool:
+        return bool(self.state & ControlState.VISIBLE)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.state & ControlState.ENABLED)
+
+
+@dataclass(frozen=True, slots=True)
 class Sample:
     timestamp_us: int
     value: int
@@ -676,6 +823,9 @@ class OwnerScene:
     objects: Mapping[int, ObjectDefinition]
     series: Mapping[int, SeriesDefinition]
     usage: SceneUsage
+    controls: Mapping[int, ControlDefinition] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,6 +860,7 @@ class _MutableOwnerScene:
     regions: dict[int, RegionDefinition]
     objects: dict[int, ObjectDefinition]
     series: dict[int, SeriesDefinition]
+    controls: dict[int, ControlDefinition]
     usage: SceneUsage
 
 
@@ -797,6 +948,66 @@ class RetainedSceneModel:
     @property
     def transaction_open(self) -> bool:
         return self._staging is not None
+
+    def require_interactable_control(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+    ) -> ControlDefinition:
+        """Resolve one exact active semantic target without mutating guest state."""
+
+        try:
+            self._owners.require_live(owner)
+            normalized_id = _integer(
+                "control_id", control_id, minimum=1, maximum=UINT64_MAX
+            )
+        except OwnerLedgerError as exc:
+            raise SceneModelError(SceneErrorCode.AUTHORITY, str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
+        state = self._state
+        if not state.retained_initialized or not state.retained_visible:
+            raise SceneModelError(SceneErrorCode.STATE, "semantic controls are not visible")
+        owner_scene = state.active.owners.get(owner.owner_id)
+        if owner_scene is None or owner_scene.owner != owner:
+            raise SceneModelError(SceneErrorCode.AUTHORITY, "control owner is not active")
+        definition = owner_scene.controls.get(normalized_id)
+        if definition is None:
+            raise SceneModelError(SceneErrorCode.MISSING_ID, "control ID is not active")
+        region = owner_scene.regions.get(definition.region_id)
+        if region is None or not region.visible:
+            raise SceneModelError(SceneErrorCode.BOUNDS, "control region is not visible")
+        if definition.kind not in (ControlKind.MENU, ControlKind.MENU_ITEM):
+            raise SceneModelError(SceneErrorCode.STATE, "control kind is not activatable")
+        if not definition.visible or not definition.enabled:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+
+        parent = owner_scene.controls.get(definition.parent_control_id)
+        expected_parent = (
+            ControlKind.MENU_BAR
+            if definition.kind is ControlKind.MENU
+            else ControlKind.MENU
+        )
+        if (
+            parent is None
+            or parent.kind is not expected_parent
+            or not parent.visible
+            or not parent.enabled
+        ):
+            raise SceneModelError(SceneErrorCode.GRAPH, "control ancestry is not interactive")
+        if definition.kind is ControlKind.MENU:
+            return definition
+        if not parent.state & ControlState.OPEN:
+            raise SceneModelError(SceneErrorCode.STATE, "menu item belongs to a closed menu")
+        root = owner_scene.controls.get(parent.parent_control_id)
+        if (
+            root is None
+            or root.kind is not ControlKind.MENU_BAR
+            or not root.visible
+            or not root.enabled
+        ):
+            raise SceneModelError(SceneErrorCode.GRAPH, "menu item root is not interactive")
+        return definition
 
     def begin(
         self,
@@ -931,6 +1142,56 @@ class RetainedSceneModel:
         owner_scene.objects[definition.object_id] = definition
         self._commit_operation(staging, owner_scene, usage)
 
+    def define_control(self, definition: ControlDefinition) -> None:
+        staging = self._require_mutable_staging()
+        if not isinstance(definition, ControlDefinition):
+            self._fail(SceneErrorCode.STATE, "control must be ControlDefinition")
+        self._require_owner(definition.owner)
+        owner_scene = self._owner_builder(staging, definition.owner)
+        if definition.control_id in owner_scene.controls:
+            self._fail(SceneErrorCode.DUPLICATE_ID, "control ID already exists in target")
+        self._validate_control_policy(definition)
+        self._validate_control_dependencies(owner_scene, definition)
+        self._stage_new_id(
+            staging,
+            definition.owner,
+            ItemNamespace.CONTROL,
+            definition.control_id,
+        )
+        usage = self._usage_after(
+            owner_scene,
+            object_delta=1,
+            utf8_add=self._control_utf8_bytes(definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.controls[definition.control_id] = definition
+        self._commit_operation(staging, owner_scene, usage)
+
+    def replace_control(self, definition: ControlDefinition) -> None:
+        staging = self._require_mutable_staging()
+        if not isinstance(definition, ControlDefinition):
+            self._fail(SceneErrorCode.STATE, "control must be ControlDefinition")
+        self._require_owner(definition.owner)
+        owner_scene = self._owner_builder(staging, definition.owner)
+        current = owner_scene.controls.get(definition.control_id)
+        if current is None:
+            self._fail(SceneErrorCode.MISSING_ID, "control replacement ID is absent")
+        if definition.kind is not current.kind:
+            self._fail(
+                SceneErrorCode.STATE,
+                "control replacement cannot change the semantic kind",
+            )
+        self._validate_control_policy(definition)
+        self._validate_control_dependencies(owner_scene, definition)
+        usage = self._usage_after(
+            owner_scene,
+            utf8_remove=self._control_utf8_bytes(current),
+            utf8_add=self._control_utf8_bytes(definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.controls[definition.control_id] = definition
+        self._commit_operation(staging, owner_scene, usage)
+
     def define_series(self, definition: SeriesDefinition) -> None:
         staging = self._require_mutable_staging()
         if not isinstance(definition, SeriesDefinition):
@@ -993,6 +1254,28 @@ class RetainedSceneModel:
         )
         self._admit_operation(staging, owner_scene, usage)
         del owner_scene.objects[normalized_id]
+        self._commit_operation(staging, owner_scene, usage)
+
+    def drop_control(self, owner: OwnerIdentity, control_id: int) -> None:
+        staging = self._require_mutable_staging()
+        self._require_owner(owner)
+        try:
+            normalized_id = _integer(
+                "control_id", control_id, minimum=1, maximum=UINT64_MAX
+            )
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
+        owner_scene = self._owner_builder(staging, owner)
+        definition = owner_scene.controls.get(normalized_id)
+        if definition is None:
+            self._fail(SceneErrorCode.MISSING_ID, "control drop ID is absent")
+        usage = self._usage_after(
+            owner_scene,
+            object_delta=-1,
+            utf8_remove=self._control_utf8_bytes(definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        del owner_scene.controls[normalized_id]
         self._commit_operation(staging, owner_scene, usage)
 
     def drop_series(self, owner: OwnerIdentity, series_id: int) -> None:
@@ -1436,7 +1719,7 @@ class RetainedSceneModel:
     ) -> _MutableOwnerScene:
         current = staging.owners.get(owner.owner_id)
         if current is None:
-            mutable = _MutableOwnerScene(owner, {}, {}, {}, SceneUsage())
+            mutable = _MutableOwnerScene(owner, {}, {}, {}, {}, SceneUsage())
             staging.owners[owner.owner_id] = mutable
             return mutable
         if current.owner != owner:
@@ -1448,6 +1731,7 @@ class RetainedSceneModel:
             dict(current.regions),
             dict(current.objects),
             dict(current.series),
+            dict(current.controls),
             current.usage,
         )
         staging.owners[owner.owner_id] = mutable
@@ -1465,6 +1749,12 @@ class RetainedSceneModel:
             except SceneModelError as exc:
                 self._fail(exc.code, exc.detail)
         return 0
+
+    @staticmethod
+    def _control_utf8_bytes(definition: ControlDefinition) -> int:
+        return len(_control_text_bytes("label", definition.label)) + len(
+            _control_text_bytes("shortcut", definition.shortcut)
+        )
 
     def _usage_after(
         self,
@@ -1540,6 +1830,7 @@ class RetainedSceneModel:
                         owner_scene.regions,
                         owner_scene.objects,
                         owner_scene.series,
+                        owner_scene.controls,
                     )
                 except SceneModelError as exc:
                     self._fail(exc.code, exc.detail)
@@ -1560,6 +1851,7 @@ class RetainedSceneModel:
         regions: Mapping[int, RegionDefinition],
         objects: Mapping[int, ObjectDefinition],
         series: Mapping[int, SeriesDefinition],
+        controls: Mapping[int, ControlDefinition],
     ) -> OwnerScene:
         utf8_bytes = 0
         for definition in objects.values():
@@ -1568,16 +1860,29 @@ class RetainedSceneModel:
                 utf8_bytes,
                 self._object_utf8_bytes(definition),
             )
+        for definition in controls.values():
+            utf8_bytes = _add_usage(
+                "UTF-8 usage",
+                utf8_bytes,
+                self._control_utf8_bytes(definition),
+            )
         sample_slots = 0
         for definition in series.values():
             sample_slots = _add_usage("sample-slot usage", sample_slots, definition.history_capacity)
-        usage = SceneUsage(len(regions), len(objects), len(series), utf8_bytes, sample_slots)
+        usage = SceneUsage(
+            len(regions),
+            len(objects) + len(controls),
+            len(series),
+            utf8_bytes,
+            sample_slots,
+        )
         return OwnerScene(
             owner,
             MappingProxyType(dict(regions)),
             MappingProxyType(dict(objects)),
             MappingProxyType(dict(series)),
             usage,
+            MappingProxyType(dict(controls)),
         )
 
     def _validate_usage(self, owner: OwnerIdentity, usage: SceneUsage) -> None:
@@ -1621,6 +1926,36 @@ class RetainedSceneModel:
             except SceneModelError as exc:
                 self._fail(exc.code, exc.detail)
 
+    def _validate_control_policy(self, definition: ControlDefinition) -> None:
+        if not self._owners.policy.features & RetainedFeature.CONTROLS:
+            self._fail(SceneErrorCode.FEATURE, "semantic controls were not advertised")
+
+    def _validate_control_dependencies(
+        self,
+        owner_scene: OwnerScene | _MutableOwnerScene,
+        definition: ControlDefinition,
+    ) -> None:
+        if definition.region_id not in owner_scene.regions:
+            self._fail(
+                SceneErrorCode.GRAPH,
+                "control region must be defined before the dependent control",
+            )
+        if definition.kind is ControlKind.MENU_BAR:
+            return
+        parent = owner_scene.controls.get(definition.parent_control_id)
+        expected = (
+            ControlKind.MENU_BAR
+            if definition.kind is ControlKind.MENU
+            else ControlKind.MENU
+        )
+        if parent is None or parent.kind is not expected:
+            self._fail(
+                SceneErrorCode.GRAPH,
+                f"{definition.kind.name} parent must be a live {expected.name}",
+            )
+        if parent.region_id != definition.region_id:
+            self._fail(SceneErrorCode.GRAPH, "control parent belongs to another region")
+
     def _validate_object_dependencies(
         self,
         owner_scene: OwnerScene | _MutableOwnerScene,
@@ -1659,7 +1994,9 @@ class RetainedSceneModel:
     def _validate_scene(self, scene: RetainedScene) -> None:
         for owner_scene in scene.owners.values():
             self._validate_usage(owner_scene.owner, owner_scene.usage)
-            for definition in owner_scene.objects.values():
+            for object_key, definition in owner_scene.objects.items():
+                if object_key != definition.object_id or definition.owner != owner_scene.owner:
+                    self._fail(SceneErrorCode.GRAPH, "object map key or owner is invalid")
                 if definition.region_id not in owner_scene.regions:
                     self._fail(SceneErrorCode.GRAPH, "object refers to an absent region")
                 parent_id = definition.parent_object_id
@@ -1672,16 +2009,60 @@ class RetainedSceneModel:
                 if isinstance(definition.body, (PlotBody, WaveformBody)) and definition.body.series_id not in owner_scene.series:
                     self._fail(SceneErrorCode.GRAPH, "object refers to an absent series")
 
-            # Iterative traversal avoids coupling valid nesting depth to the
-            # Python call stack.  Each chain is bounded by object quota.
+            # Resolve every parent chain once.  The prior per-object walk was
+            # worst-case quadratic for a valid deep GROUP tree.
+            completed: set[int] = set()
             for object_id in owner_scene.objects:
-                seen: set[int] = set()
+                if object_id in completed:
+                    continue
+                path: set[int] = set()
                 current = object_id
-                while current:
-                    if current in seen:
+                while current and current not in completed:
+                    if current in path:
                         self._fail(SceneErrorCode.GRAPH, "object parent graph contains a cycle")
-                    seen.add(current)
+                    path.add(current)
                     current = owner_scene.objects[current].parent_object_id
+                completed.update(path)
+
+            sibling_orders: set[tuple[int, int]] = set()
+            open_menu_by_bar: set[int] = set()
+            selected_menu_by_bar: set[int] = set()
+            selected_item_by_menu: set[int] = set()
+            for control_key, definition in owner_scene.controls.items():
+                if (
+                    control_key != definition.control_id
+                    or definition.owner != owner_scene.owner
+                ):
+                    self._fail(SceneErrorCode.GRAPH, "control map key or owner is invalid")
+                if definition.region_id not in owner_scene.regions:
+                    self._fail(SceneErrorCode.GRAPH, "control refers to an absent region")
+                self._validate_control_policy(definition)
+                self._validate_control_dependencies(owner_scene, definition)
+                if definition.kind is ControlKind.MENU_BAR:
+                    continue
+                order_key = (definition.parent_control_id, definition.order)
+                if order_key in sibling_orders:
+                    self._fail(SceneErrorCode.GRAPH, "control sibling order is duplicated")
+                sibling_orders.add(order_key)
+                if definition.kind is ControlKind.MENU:
+                    if definition.state & ControlState.OPEN:
+                        if definition.parent_control_id in open_menu_by_bar:
+                            self._fail(SceneErrorCode.GRAPH, "MENU_BAR has multiple open menus")
+                        open_menu_by_bar.add(definition.parent_control_id)
+                    if definition.state & ControlState.SELECTED:
+                        if definition.parent_control_id in selected_menu_by_bar:
+                            self._fail(
+                                SceneErrorCode.GRAPH,
+                                "MENU_BAR has multiple selected menus",
+                            )
+                        selected_menu_by_bar.add(definition.parent_control_id)
+                elif (
+                    definition.kind is ControlKind.MENU_ITEM
+                    and definition.state & ControlState.SELECTED
+                ):
+                    if definition.parent_control_id in selected_item_by_menu:
+                        self._fail(SceneErrorCode.GRAPH, "MENU has multiple selected items")
+                    selected_item_by_menu.add(definition.parent_control_id)
 
     def _require_staging(self) -> _SceneStaging:
         if self._staging is None:
@@ -1708,6 +2089,10 @@ class RetainedSceneModel:
 
 __all__ = [
     "CommitDisposition",
+    "CONTROL_STATE_MASK",
+    "ControlDefinition",
+    "ControlKind",
+    "ControlState",
     "ExplicitSamples",
     "GroupBody",
     "GLYPH_RUN_ATTRIBUTE_MASK",

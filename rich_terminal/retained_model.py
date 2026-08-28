@@ -26,6 +26,7 @@ class RetainedFeature(IntFlag):
     INSTRUMENT = 1 << 3
     SERIES = 1 << 4
     CADENCE = 1 << 5
+    CONTROLS = 1 << 8
 
 
 _ALL_FEATURES = (
@@ -35,6 +36,7 @@ _ALL_FEATURES = (
     | RetainedFeature.INSTRUMENT
     | RetainedFeature.SERIES
     | RetainedFeature.CADENCE
+    | RetainedFeature.CONTROLS
 )
 
 
@@ -43,6 +45,7 @@ class ItemNamespace(str, Enum):
     RESOURCE = "RESOURCE"
     OBJECT = "OBJECT"
     SERIES = "SERIES"
+    CONTROL = "CONTROL"
 
 
 class OwnerLedgerErrorCode(str, Enum):
@@ -233,14 +236,17 @@ class RetainedPolicy:
         self._require_positive_exact("max_path_points", vector)
 
         instrument = bool(features & RetainedFeature.INSTRUMENT)
+        controls = bool(features & RetainedFeature.CONTROLS)
         glyph_runs = self.max_glyph_run_bytes > 0
         if glyph_runs and self.max_objects == 0:
             raise ValueError("glyph-run capacity requires object capacity")
         if glyph_runs and self.total_utf8_bytes < self.max_glyph_run_bytes:
             raise ValueError("total UTF-8 capacity cannot admit one maximum glyph run")
-        if not glyph_runs and self.total_utf8_bytes != 0:
-            raise ValueError("UTF-8 capacity requires glyph-run capacity")
-        if (vector or image or instrument) and self.max_objects == 0:
+        if controls and self.total_utf8_bytes == 0:
+            raise ValueError("CONTROLS requires aggregate UTF-8 capacity")
+        if not glyph_runs and not controls and self.total_utf8_bytes != 0:
+            raise ValueError("UTF-8 capacity requires glyph-run or control capacity")
+        if (vector or image or instrument or controls) and self.max_objects == 0:
             raise ValueError("advertised object features require object capacity")
         if instrument and not glyph_runs:
             raise ValueError("INSTRUMENT requires glyph-run text capacity")
@@ -294,6 +300,10 @@ class RetainedPolicy:
             if glyph_run_payload > inbound:
                 raise ValueError("maximum GLYPH_RUN object exceeds inbound payload")
             operation_payloads.append(glyph_run_payload)
+        if controls:
+            if inbound < 80:
+                raise ValueError("CONTROLS requires an 80-byte inbound payload")
+            operation_payloads.append(80)
         if instrument:
             readout_payload = _checked_add(
                 "maximum READOUT payload", 104, self.max_glyph_run_bytes
@@ -479,6 +489,7 @@ class ItemHighWater:
     resource: int = 0
     object: int = 0
     series: int = 0
+    control: int = 0
 
     def value(self, namespace: ItemNamespace) -> int:
         if not isinstance(namespace, ItemNamespace):
@@ -782,10 +793,14 @@ class OwnerLedger:
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.INVALID, "resource quota requires RGBA_IMAGE"
             )
-        if not policy.max_glyph_run_bytes and quotas.utf8_bytes:
+        if (
+            not policy.max_glyph_run_bytes
+            and not (policy.features & RetainedFeature.CONTROLS)
+            and quotas.utf8_bytes
+        ):
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.INVALID,
-                "UTF-8 quota requires glyph-run capacity",
+                "UTF-8 quota requires glyph-run or control capacity",
             )
         if not policy.features & RetainedFeature.SERIES and (
             quotas.series or quotas.sample_slots
