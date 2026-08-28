@@ -1347,6 +1347,68 @@ class SharedMachine:
                 "accepted_events": 1 if status is DriverStatus.PROGRESS else 0,
             }
 
+    def send_control_event(
+        self,
+        owner_id: int,
+        owner_generation: int,
+        control_id: int,
+        *,
+        modifiers: int = 0,
+        generation: int | None = None,
+        display_authorized: bool = False,
+        display_lease_ack: tuple[int, DisplayScope] | None = None,
+        display_request_ack: tuple[int, DisplayScope] | None = None,
+    ) -> dict:
+        """Forward one owner-qualified activation under the display lease."""
+
+        normalized_owner = _wire_integer(
+            owner_id,
+            "semantic control owner_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        normalized_owner_generation = _wire_integer(
+            owner_generation,
+            "semantic control owner_generation",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        normalized_control = _wire_integer(
+            control_id,
+            "semantic control control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        normalized_modifiers = _wire_integer(
+            modifiers,
+            "semantic control modifiers",
+            minimum=0,
+            maximum=0x3F,
+        )
+        with self.condition:
+            if not self._generation_current(generation):
+                return {"status": "stale_generation", "accepted_events": 0}
+            refusal = self._display_input_refusal(
+                display_authorized=display_authorized,
+                display_lease_ack=display_lease_ack,
+                display_request_ack=display_request_ack,
+            )
+            if refusal is not None:
+                return {"status": refusal, "accepted_events": 0}
+            status = self._terminal_mutation_status(
+                self.session.send_control_event(
+                    normalized_owner,
+                    normalized_owner_generation,
+                    normalized_control,
+                    modifiers=normalized_modifiers,
+                )
+            )
+            self.condition.notify_all()
+            return {
+                "status": status.value,
+                "accepted_events": 1 if status is DriverStatus.PROGRESS else 0,
+            }
+
     def resize(
         self,
         cols: int,
@@ -1913,8 +1975,26 @@ class SessionServer:
         params: Mapping[str, Any],
         connection_id: int | None,
     ) -> dict:
+        if method == "send_control_event":
+            params = _wire_object(
+                params,
+                "semantic control input",
+                (
+                    "generation",
+                    "display_offer_id",
+                    "display_scope",
+                    "owner_id",
+                    "owner_generation",
+                    "control_id",
+                    "modifiers",
+                ),
+            )
         generation = self._required_generation(params)
-        request_ack = self._optional_display_pair(params)
+        request_ack = (
+            self._required_display_pair(params)
+            if method == "send_control_event"
+            else self._optional_display_pair(params)
+        )
         with self._display_lock:
             authorized = (
                 connection_id is not None
@@ -1930,6 +2010,14 @@ class SessionServer:
                 return self.machine.send_text(str(params.get("text", "")), **common)
             if method == "send_key":
                 return self.machine.send_key(str(params["key"]), **common)
+            if method == "send_control_event":
+                return self.machine.send_control_event(
+                    params["owner_id"],
+                    params["owner_generation"],
+                    params["control_id"],
+                    modifiers=params["modifiers"],
+                    **common,
+                )
             assert method == "resize"
             return self.machine.resize(params["cols"], params["rows"], **common)
 
@@ -1975,7 +2063,7 @@ class SessionServer:
             return self._claim_display(connection_id)
         if method == "present":
             return self._present_for_connection(params, connection_id)
-        if method in {"send_text", "send_key", "resize"}:
+        if method in {"send_text", "send_key", "send_control_event", "resize"}:
             return self._dispatch_terminal_input(method, params, connection_id)
         if method == "screen":
             return self._screen_for_connection(params, connection_id)
