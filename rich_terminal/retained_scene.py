@@ -1176,18 +1176,14 @@ class RetainedSceneModel:
         current = owner_scene.controls.get(definition.control_id)
         if current is None:
             self._fail(SceneErrorCode.MISSING_ID, "control replacement ID is absent")
-        if definition.kind is not current.kind:
+        if replace(definition, state=current.state) != current:
             self._fail(
                 SceneErrorCode.STATE,
-                "control replacement cannot change the semantic kind",
+                "control replacement may change only the control state",
             )
         self._validate_control_policy(definition)
         self._validate_control_dependencies(owner_scene, definition)
-        usage = self._usage_after(
-            owner_scene,
-            utf8_remove=self._control_utf8_bytes(current),
-            utf8_add=self._control_utf8_bytes(definition),
-        )
+        usage = owner_scene.usage
         self._admit_operation(staging, owner_scene, usage)
         owner_scene.controls[definition.control_id] = definition
         self._commit_operation(staging, owner_scene, usage)

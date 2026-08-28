@@ -211,6 +211,7 @@ def test_semantic_menu_is_accounted_frozen_and_replaced_as_control_state():
     scene.replace_control(replace(current, state=current.state | ControlState.CHECKED))
     _install(clock, scene, CommitDisposition.COMMIT)
     assert scene.state.active.owners[owner.owner_id].controls[5].state & ControlState.CHECKED
+    exact_usage = scene.state.active.owners[owner.owner_id].usage
 
     _begin(clock, scene, 5, RetainedMode.DELTA)
     menu = scene.state.active.owners[owner.owner_id].controls[2]
@@ -219,6 +220,23 @@ def test_semantic_menu_is_accounted_frozen_and_replaced_as_control_state():
     assert scene.require_interactable_control(owner, 2).label == "File"
     with pytest.raises(SceneModelError, match="closed menu"):
         scene.require_interactable_control(owner, 3)
+
+    _begin(clock, scene, 6, RetainedMode.DELTA)
+    current = scene.state.active.owners[owner.owner_id].controls[5]
+    with pytest.raises(SceneModelError, match="only the control state"):
+        scene.replace_control(replace(current, label="Changed"))
+    rejected = scene.reject()
+    clock.settle_result(rejected.transaction_id)
+    assert scene.state.active.owners[owner.owner_id].usage == exact_usage
+    assert scene.state.active.owners[owner.owner_id].controls[5].label == "Close"
+
+    _begin(clock, scene, 7, RetainedMode.DELTA)
+    current = scene.state.active.owners[owner.owner_id].controls[5]
+    with pytest.raises(SceneModelError, match="only the control state"):
+        scene.replace_control(replace(current, order=current.order + 1))
+    rejected = scene.reject()
+    clock.settle_result(rejected.transaction_id)
+    assert scene.state.active.owners[owner.owner_id].usage == exact_usage
 
 
 def test_control_tree_rejects_wrong_parent_duplicate_order_and_two_open_menus():

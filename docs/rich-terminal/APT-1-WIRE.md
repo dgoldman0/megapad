@@ -676,8 +676,10 @@ begin with the exact 80-byte prefix `<QQQHHiQQIIIIIIII>` carrying owner ID,
 owner generation, independent control ID, kind, state, z-order, region ID,
 parent control ID, sibling order, optional UNORM32 bounds, label byte count,
 shortcut byte count, and zero reserved; label bytes then shortcut bytes follow
-without padding. DROP is exact `<QQQ>`. RETAINED-1 Section 9.1 defines the
-canonical MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR graph and state rules.
+without padding. REPLACE resends that complete record, but all non-state fields
+must exactly match the retained control; only `state` may change. DROP is exact
+`<QQQ>`. RETAINED-1 Section 9.1 defines the canonical
+MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR graph and state rules.
 Controls have an independent ID high-water but share each owner's existing
 object-count and aggregate UTF-8 quotas. Negotiated inbound payload and
 transaction bounds are the only additional size limits; no fixed control count

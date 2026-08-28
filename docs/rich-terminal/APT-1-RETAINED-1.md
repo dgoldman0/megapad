@@ -916,8 +916,10 @@ acyclic without a separate depth or control-count limit.
 `CONTROL_DEFINE` requires a nonzero ID strictly greater than the owner's prior
 CONTROL high-water. That high-water is independent of the OBJECT high-water;
 equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
-requires an existing exact-target control, preserves its kind, and replaces
-the complete state, hierarchy, order, optional bounds, label, and shortcut.
+requires an existing exact-target control and resends its complete wire record,
+but every field except `state` must exactly match the retained definition. Only
+the state may change. The proposed state still undergoes the normal control
+policy, dependency, and final-graph validation.
 `CONTROL_DROP <QQQ>` names owner, generation, and control ID. A surviving child
 of a dropped control makes commit invalid. IDs are not reused within an owner
 generation.
