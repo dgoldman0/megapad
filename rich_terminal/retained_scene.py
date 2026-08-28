@@ -696,14 +696,34 @@ class SceneModelState:
 
 
 @dataclass(slots=True)
+class _MutableOwnerScene:
+    """One transaction-private copy-on-write owner target.
+
+    Published ``OwnerScene`` maps remain immutable.  The first operation for an
+    owner copies those maps once into this private builder; later operations
+    mutate the same dictionaries and update exact aggregate usage in constant
+    time.  ``prepare_commit`` audits and freezes the builder into fresh mapping
+    proxies before a prepared value can escape the model.
+    """
+
+    owner: OwnerIdentity
+    regions: dict[int, RegionDefinition]
+    objects: dict[int, ObjectDefinition]
+    series: dict[int, SeriesDefinition]
+    usage: SceneUsage
+
+
+@dataclass(slots=True)
 class _SceneStaging:
     lease: TransactionLease
     mode: RetainedMode
     geometry: TerminalGeometry
-    candidate: RetainedScene
+    source: RetainedScene
+    owners: dict[int, OwnerScene | _MutableOwnerScene]
     item_advances: list[tuple[OwnerIdentity, ItemNamespace, int]]
     staged_high_water: dict[tuple[int, ItemNamespace], int]
     operation_count: int
+    frozen: RetainedScene | None = None
     rejected: bool = False
     prepared: bool = False
 
@@ -820,7 +840,16 @@ class RetainedSceneModel:
             if state.hidden is None or state.hidden_kind is not HiddenTargetKind.LAYOUT:
                 raise SceneModelError(SceneErrorCode.STATE, "no hidden layout target exists")
             candidate = state.hidden
-        self._staging = _SceneStaging(lease, selected_mode, geometry, candidate, [], {}, 0)
+        self._staging = _SceneStaging(
+            lease=lease,
+            mode=selected_mode,
+            geometry=geometry,
+            source=candidate,
+            owners=dict(candidate.owners),
+            item_advances=[],
+            staged_high_water={},
+            operation_count=0,
+        )
 
     def define_region(self, region: RegionDefinition) -> None:
         staging = self._require_mutable_staging()
@@ -831,13 +860,14 @@ class RetainedSceneModel:
             region.validate_geometry(staging.geometry)
         except SceneModelError as exc:
             self._fail(exc.code, exc.detail)
-        owner_scene = self._owner_scene(staging.candidate, region.owner)
+        owner_scene = self._owner_builder(staging, region.owner)
         if region.region_id in owner_scene.regions:
             self._fail(SceneErrorCode.DUPLICATE_ID, "region ID already exists in target")
         self._stage_new_id(staging, region.owner, ItemNamespace.REGION, region.region_id)
-        regions = dict(owner_scene.regions)
-        regions[region.region_id] = region
-        self._install_owner_candidate(staging, owner_scene, regions=regions)
+        usage = self._usage_after(owner_scene, region_delta=1)
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.regions[region.region_id] = region
+        self._commit_operation(staging, owner_scene, usage)
 
     def replace_region(self, region: RegionDefinition) -> None:
         staging = self._require_mutable_staging()
@@ -848,34 +878,40 @@ class RetainedSceneModel:
             region.validate_geometry(staging.geometry)
         except SceneModelError as exc:
             self._fail(exc.code, exc.detail)
-        owner_scene = self._owner_scene(staging.candidate, region.owner)
+        owner_scene = self._owner_builder(staging, region.owner)
         if region.region_id not in owner_scene.regions:
             self._fail(SceneErrorCode.MISSING_ID, "region replacement ID is absent")
-        regions = dict(owner_scene.regions)
-        regions[region.region_id] = region
-        self._install_owner_candidate(staging, owner_scene, regions=regions)
+        usage = owner_scene.usage
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.regions[region.region_id] = region
+        self._commit_operation(staging, owner_scene, usage)
 
     def define_object(self, definition: ObjectDefinition) -> None:
         staging = self._require_mutable_staging()
         if not isinstance(definition, ObjectDefinition):
             self._fail(SceneErrorCode.STATE, "object must be ObjectDefinition")
         self._require_owner(definition.owner)
-        owner_scene = self._owner_scene(staging.candidate, definition.owner)
+        owner_scene = self._owner_builder(staging, definition.owner)
         if definition.object_id in owner_scene.objects:
             self._fail(SceneErrorCode.DUPLICATE_ID, "object ID already exists in target")
         self._validate_object_policy(definition)
         self._validate_object_dependencies(owner_scene, definition)
         self._stage_new_id(staging, definition.owner, ItemNamespace.OBJECT, definition.object_id)
-        objects = dict(owner_scene.objects)
-        objects[definition.object_id] = definition
-        self._install_owner_candidate(staging, owner_scene, objects=objects)
+        usage = self._usage_after(
+            owner_scene,
+            object_delta=1,
+            utf8_add=self._object_utf8_bytes(definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.objects[definition.object_id] = definition
+        self._commit_operation(staging, owner_scene, usage)
 
     def replace_object(self, definition: ObjectDefinition) -> None:
         staging = self._require_mutable_staging()
         if not isinstance(definition, ObjectDefinition):
             self._fail(SceneErrorCode.STATE, "object must be ObjectDefinition")
         self._require_owner(definition.owner)
-        owner_scene = self._owner_scene(staging.candidate, definition.owner)
+        owner_scene = self._owner_builder(staging, definition.owner)
         current = owner_scene.objects.get(definition.object_id)
         if current is None:
             self._fail(SceneErrorCode.MISSING_ID, "object replacement ID is absent")
@@ -886,16 +922,21 @@ class RetainedSceneModel:
             )
         self._validate_object_policy(definition)
         self._validate_object_dependencies(owner_scene, definition)
-        objects = dict(owner_scene.objects)
-        objects[definition.object_id] = definition
-        self._install_owner_candidate(staging, owner_scene, objects=objects)
+        usage = self._usage_after(
+            owner_scene,
+            utf8_remove=self._object_utf8_bytes(current),
+            utf8_add=self._object_utf8_bytes(definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.objects[definition.object_id] = definition
+        self._commit_operation(staging, owner_scene, usage)
 
     def define_series(self, definition: SeriesDefinition) -> None:
         staging = self._require_mutable_staging()
         if not isinstance(definition, SeriesDefinition):
             self._fail(SceneErrorCode.STATE, "series must be SeriesDefinition")
         self._require_owner(definition.owner)
-        owner_scene = self._owner_scene(staging.candidate, definition.owner)
+        owner_scene = self._owner_builder(staging, definition.owner)
         if definition.series_id in owner_scene.series:
             self._fail(SceneErrorCode.DUPLICATE_ID, "series ID already exists in target")
         policy = self._owners.policy
@@ -906,9 +947,14 @@ class RetainedSceneModel:
         if definition.samples:
             self._fail(SceneErrorCode.STATE, "SERIES_DEFINE history must begin empty")
         self._stage_new_id(staging, definition.owner, ItemNamespace.SERIES, definition.series_id)
-        series = dict(owner_scene.series)
-        series[definition.series_id] = definition
-        self._install_owner_candidate(staging, owner_scene, series=series)
+        usage = self._usage_after(
+            owner_scene,
+            series_delta=1,
+            sample_slots_add=definition.history_capacity,
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.series[definition.series_id] = definition
+        self._commit_operation(staging, owner_scene, usage)
 
     def drop_region(self, owner: OwnerIdentity, region_id: int) -> None:
         staging = self._require_mutable_staging()
@@ -919,12 +965,13 @@ class RetainedSceneModel:
             )
         except (TypeError, ValueError) as exc:
             self._fail(SceneErrorCode.STATE, str(exc))
-        owner_scene = self._owner_scene(staging.candidate, owner)
+        owner_scene = self._owner_builder(staging, owner)
         if normalized_id not in owner_scene.regions:
             self._fail(SceneErrorCode.MISSING_ID, "region drop ID is absent")
-        regions = dict(owner_scene.regions)
-        del regions[normalized_id]
-        self._install_owner_candidate(staging, owner_scene, regions=regions)
+        usage = self._usage_after(owner_scene, region_delta=-1)
+        self._admit_operation(staging, owner_scene, usage)
+        del owner_scene.regions[normalized_id]
+        self._commit_operation(staging, owner_scene, usage)
 
     def drop_object(self, owner: OwnerIdentity, object_id: int) -> None:
         staging = self._require_mutable_staging()
@@ -935,12 +982,18 @@ class RetainedSceneModel:
             )
         except (TypeError, ValueError) as exc:
             self._fail(SceneErrorCode.STATE, str(exc))
-        owner_scene = self._owner_scene(staging.candidate, owner)
-        if normalized_id not in owner_scene.objects:
+        owner_scene = self._owner_builder(staging, owner)
+        definition = owner_scene.objects.get(normalized_id)
+        if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "object drop ID is absent")
-        objects = dict(owner_scene.objects)
-        del objects[normalized_id]
-        self._install_owner_candidate(staging, owner_scene, objects=objects)
+        usage = self._usage_after(
+            owner_scene,
+            object_delta=-1,
+            utf8_remove=self._object_utf8_bytes(definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        del owner_scene.objects[normalized_id]
+        self._commit_operation(staging, owner_scene, usage)
 
     def drop_series(self, owner: OwnerIdentity, series_id: int) -> None:
         staging = self._require_mutable_staging()
@@ -951,12 +1004,18 @@ class RetainedSceneModel:
             )
         except (TypeError, ValueError) as exc:
             self._fail(SceneErrorCode.STATE, str(exc))
-        owner_scene = self._owner_scene(staging.candidate, owner)
-        if normalized_id not in owner_scene.series:
+        owner_scene = self._owner_builder(staging, owner)
+        definition = owner_scene.series.get(normalized_id)
+        if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "series drop ID is absent")
-        series = dict(owner_scene.series)
-        del series[normalized_id]
-        self._install_owner_candidate(staging, owner_scene, series=series)
+        usage = self._usage_after(
+            owner_scene,
+            series_delta=-1,
+            sample_slots_remove=definition.history_capacity,
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        del owner_scene.series[normalized_id]
+        self._commit_operation(staging, owner_scene, usage)
 
     def set_object_value(
         self, owner: OwnerIdentity, object_id: int, value: int
@@ -972,7 +1031,7 @@ class RetainedSceneModel:
             )
         except (TypeError, ValueError) as exc:
             self._fail(SceneErrorCode.STATE, str(exc))
-        owner_scene = self._owner_scene(staging.candidate, owner)
+        owner_scene = self._owner_builder(staging, owner)
         definition = owner_scene.objects.get(normalized_id)
         if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "object value target is absent")
@@ -988,9 +1047,15 @@ class RetainedSceneModel:
             replacement_body = replace(body, value=normalized_value)
         except (TypeError, ValueError) as exc:
             self._fail(SceneErrorCode.BOUNDS, str(exc))
-        objects = dict(owner_scene.objects)
-        objects[normalized_id] = replace(definition, body=replacement_body)
-        self._install_owner_candidate(staging, owner_scene, objects=objects)
+        replacement_definition = replace(definition, body=replacement_body)
+        usage = self._usage_after(
+            owner_scene,
+            utf8_remove=self._object_utf8_bytes(definition),
+            utf8_add=self._object_utf8_bytes(replacement_definition),
+        )
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.objects[normalized_id] = replacement_definition
+        self._commit_operation(staging, owner_scene, usage)
 
     def set_object_visibility(
         self, owner: OwnerIdentity, object_id: int, visible: bool
@@ -1005,13 +1070,14 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.STATE, str(exc))
         if not isinstance(visible, bool):
             self._fail(SceneErrorCode.STATE, "visibility must be bool")
-        owner_scene = self._owner_scene(staging.candidate, owner)
+        owner_scene = self._owner_builder(staging, owner)
         definition = owner_scene.objects.get(normalized_id)
         if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "object visibility target is absent")
-        objects = dict(owner_scene.objects)
-        objects[normalized_id] = replace(definition, visible=visible)
-        self._install_owner_candidate(staging, owner_scene, objects=objects)
+        usage = owner_scene.usage
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.objects[normalized_id] = replace(definition, visible=visible)
+        self._commit_operation(staging, owner_scene, usage)
 
     def append_series(
         self, owner: OwnerIdentity, series_id: int, batch: SeriesBatch
@@ -1039,7 +1105,7 @@ class RetainedSceneModel:
             )
         except (TypeError, ValueError) as exc:
             self._fail(SceneErrorCode.STATE, str(exc))
-        owner_scene = self._owner_scene(staging.candidate, owner)
+        owner_scene = self._owner_builder(staging, owner)
         definition = owner_scene.series.get(normalized_id)
         if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "series mutation target is absent")
@@ -1059,9 +1125,10 @@ class RetainedSceneModel:
             combined = definition.samples + samples
             history = combined[-definition.history_capacity :]
         replacement_series = replace(definition, samples=history)
-        series = dict(owner_scene.series)
-        series[normalized_id] = replacement_series
-        self._install_owner_candidate(staging, owner_scene, series=series)
+        usage = owner_scene.usage
+        self._admit_operation(staging, owner_scene, usage)
+        owner_scene.series[normalized_id] = replacement_series
+        self._commit_operation(staging, owner_scene, usage)
 
     def _normalize_series_batch(
         self, definition: SeriesDefinition, batch: SeriesBatch
@@ -1117,12 +1184,13 @@ class RetainedSceneModel:
         if staging.mode is RetainedMode.DELTA and staging.operation_count == 0:
             self._fail(SceneErrorCode.STATE, "DELTA requires at least one operation")
 
-        self._validate_scene(staging.candidate)
+        candidate = self._freeze_staging(staging)
+        self._validate_scene(candidate)
         if (
             selected is CommitDisposition.COMMIT_AND_REVEAL
             and staging.mode in (RetainedMode.LAYOUT_START, RetainedMode.LAYOUT_CONTINUE)
         ):
-            for owner_scene in staging.candidate.owners.values():
+            for owner_scene in candidate.owners.values():
                 if any(
                     region.geometry_generation != staging.geometry.generation
                     for region in owner_scene.regions.values()
@@ -1139,12 +1207,12 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.STATE, str(exc))
         old = self._state
         if staging.mode is RetainedMode.DELTA:
-            state = replace(old, revision=revision, active=staging.candidate)
+            state = replace(old, revision=revision, active=candidate)
         elif selected is CommitDisposition.COMMIT_AND_REVEAL:
             state = SceneModelState(
                 revision,
                 staging.geometry,
-                staging.candidate,
+                candidate,
                 None,
                 None,
                 None,
@@ -1160,7 +1228,7 @@ class RetainedSceneModel:
             state = replace(
                 old,
                 revision=revision,
-                hidden=staging.candidate,
+                hidden=candidate,
                 hidden_kind=kind,
             )
         prepared = PreparedSceneInstall(
@@ -1361,39 +1429,130 @@ class RetainedSceneModel:
         staging.staged_high_water[key] = item_id
         staging.item_advances.append((owner, namespace, item_id))
 
-    def _install_owner_candidate(
+    def _owner_builder(
         self,
         staging: _SceneStaging,
-        prior: OwnerScene,
+        owner: OwnerIdentity,
+    ) -> _MutableOwnerScene:
+        current = staging.owners.get(owner.owner_id)
+        if current is None:
+            mutable = _MutableOwnerScene(owner, {}, {}, {}, SceneUsage())
+            staging.owners[owner.owner_id] = mutable
+            return mutable
+        if current.owner != owner:
+            self._fail(SceneErrorCode.AUTHORITY, "scene owner generation mismatch")
+        if isinstance(current, _MutableOwnerScene):
+            return current
+        mutable = _MutableOwnerScene(
+            current.owner,
+            dict(current.regions),
+            dict(current.objects),
+            dict(current.series),
+            current.usage,
+        )
+        staging.owners[owner.owner_id] = mutable
+        return mutable
+
+    def _object_utf8_bytes(self, definition: ObjectDefinition) -> int:
+        body = definition.body
+        if isinstance(body, GlyphRunBody):
+            return len(_text_bytes("text", body.text))
+        if isinstance(body, ReadoutBody):
+            try:
+                return len(
+                    body.formatted_bytes(self._owners.policy.max_glyph_run_bytes)
+                )
+            except SceneModelError as exc:
+                self._fail(exc.code, exc.detail)
+        return 0
+
+    def _usage_after(
+        self,
+        owner_scene: _MutableOwnerScene,
         *,
-        regions: Mapping[int, RegionDefinition] | None = None,
-        objects: Mapping[int, ObjectDefinition] | None = None,
-        series: Mapping[int, SeriesDefinition] | None = None,
-    ) -> None:
+        region_delta: int = 0,
+        object_delta: int = 0,
+        series_delta: int = 0,
+        utf8_remove: int = 0,
+        utf8_add: int = 0,
+        sample_slots_remove: int = 0,
+        sample_slots_add: int = 0,
+    ) -> SceneUsage:
+        prior = owner_scene.usage
+        regions = prior.regions + region_delta
+        objects = prior.objects + object_delta
+        series = prior.series + series_delta
+        if (
+            regions < 0
+            or objects < 0
+            or series < 0
+            or utf8_remove > prior.utf8_bytes
+            or sample_slots_remove > prior.sample_slots
+        ):
+            self._fail(SceneErrorCode.STATE, "retained staging usage is inconsistent")
         try:
-            candidate = self._make_owner_scene(
-                prior.owner,
-                prior.regions if regions is None else regions,
-                prior.objects if objects is None else objects,
-                prior.series if series is None else series,
+            utf8_bytes = _add_usage(
+                "UTF-8 usage",
+                prior.utf8_bytes - utf8_remove,
+                utf8_add,
+            )
+            sample_slots = _add_usage(
+                "sample-slot usage",
+                prior.sample_slots - sample_slots_remove,
+                sample_slots_add,
             )
         except SceneModelError as exc:
             self._fail(exc.code, exc.detail)
-        self._validate_usage(candidate)
-        owners = dict(staging.candidate.owners)
-        owners[prior.owner.owner_id] = candidate
-        staging.candidate = RetainedScene(MappingProxyType(owners))
-        staging.operation_count += 1
-        if staging.operation_count > self._owners.policy.max_operations_per_transaction:
+        return SceneUsage(regions, objects, series, utf8_bytes, sample_slots)
+
+    def _admit_operation(
+        self,
+        staging: _SceneStaging,
+        owner_scene: _MutableOwnerScene,
+        usage: SceneUsage,
+    ) -> None:
+        self._validate_usage(owner_scene.owner, usage)
+        if staging.operation_count >= self._owners.policy.max_operations_per_transaction:
             self._fail(SceneErrorCode.QUOTA, "operation count exceeds caller policy")
 
-    def _owner_scene(self, scene: RetainedScene, owner: OwnerIdentity) -> OwnerScene:
-        current = scene.owners.get(owner.owner_id)
-        if current is not None:
-            if current.owner != owner:
-                self._fail(SceneErrorCode.AUTHORITY, "scene owner generation mismatch")
-            return current
-        return self._make_owner_scene(owner, {}, {}, {})
+    @staticmethod
+    def _commit_operation(
+        staging: _SceneStaging,
+        owner_scene: _MutableOwnerScene,
+        usage: SceneUsage,
+    ) -> None:
+        owner_scene.usage = usage
+        staging.operation_count += 1
+
+    def _freeze_staging(self, staging: _SceneStaging) -> RetainedScene:
+        if staging.frozen is not None:
+            return staging.frozen
+        if staging.operation_count == 0:
+            staging.frozen = staging.source
+            return staging.source
+
+        owners: dict[int, OwnerScene] = {}
+        for owner_id, owner_scene in staging.owners.items():
+            if isinstance(owner_scene, _MutableOwnerScene):
+                try:
+                    frozen_owner = self._make_owner_scene(
+                        owner_scene.owner,
+                        owner_scene.regions,
+                        owner_scene.objects,
+                        owner_scene.series,
+                    )
+                except SceneModelError as exc:
+                    self._fail(exc.code, exc.detail)
+                if frozen_owner.usage != owner_scene.usage:
+                    self._fail(
+                        SceneErrorCode.STATE,
+                        "retained staging usage does not match its frozen target",
+                    )
+                owners[owner_id] = frozen_owner
+            else:
+                owners[owner_id] = owner_scene
+        staging.frozen = RetainedScene(MappingProxyType(dict(owners)))
+        return staging.frozen
 
     def _make_owner_scene(
         self,
@@ -1404,11 +1563,11 @@ class RetainedSceneModel:
     ) -> OwnerScene:
         utf8_bytes = 0
         for definition in objects.values():
-            if isinstance(definition.body, GlyphRunBody):
-                utf8_bytes = _add_usage("UTF-8 usage", utf8_bytes, len(_text_bytes("text", definition.body.text)))
-            elif isinstance(definition.body, ReadoutBody):
-                formatted = definition.body.formatted_bytes(self._owners.policy.max_glyph_run_bytes)
-                utf8_bytes = _add_usage("UTF-8 usage", utf8_bytes, len(formatted))
+            utf8_bytes = _add_usage(
+                "UTF-8 usage",
+                utf8_bytes,
+                self._object_utf8_bytes(definition),
+            )
         sample_slots = 0
         for definition in series.values():
             sample_slots = _add_usage("sample-slot usage", sample_slots, definition.history_capacity)
@@ -1421,11 +1580,10 @@ class RetainedSceneModel:
             usage,
         )
 
-    def _validate_usage(self, scene: OwnerScene) -> None:
-        record = self._require_owner(scene.owner)
+    def _validate_usage(self, owner: OwnerIdentity, usage: SceneUsage) -> None:
+        record = self._require_owner(owner)
         assert isinstance(record.quotas, OwnerQuotas)
         quota = record.quotas
-        usage = scene.usage
         checks = (
             (usage.regions, quota.regions, "region"),
             (usage.objects, quota.objects, "object"),
@@ -1464,7 +1622,9 @@ class RetainedSceneModel:
                 self._fail(exc.code, exc.detail)
 
     def _validate_object_dependencies(
-        self, owner_scene: OwnerScene, definition: ObjectDefinition
+        self,
+        owner_scene: OwnerScene | _MutableOwnerScene,
+        definition: ObjectDefinition,
     ) -> None:
         if definition.region_id not in owner_scene.regions:
             self._fail(
@@ -1498,7 +1658,7 @@ class RetainedSceneModel:
 
     def _validate_scene(self, scene: RetainedScene) -> None:
         for owner_scene in scene.owners.values():
-            self._validate_usage(owner_scene)
+            self._validate_usage(owner_scene.owner, owner_scene.usage)
             for definition in owner_scene.objects.values():
                 if definition.region_id not in owner_scene.regions:
                     self._fail(SceneErrorCode.GRAPH, "object refers to an absent region")

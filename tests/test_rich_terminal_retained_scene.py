@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+import rich_terminal.retained_scene as retained_scene_module
 from rich_terminal.update_authority import (
     TerminalUpdateAuthority,
     TerminalGeometry,
@@ -274,6 +275,26 @@ def test_dependency_or_quota_rejection_leaves_scene_and_id_ledger_unchanged():
     clock.settle_result(3)
 
 
+def test_operation_limit_admits_exact_boundary_then_rejects_next_operation():
+    policy = replace(_policy(), max_operations_per_transaction=1)
+    clock, owners, owner, scene = _domain(policy=policy)
+    initial_scene = scene.state
+    initial_ledger = owners.state
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+
+    with pytest.raises(SceneModelError, match="operation count") as capacity:
+        scene.define_object(_object(owner, 1, GroupBody()))
+
+    assert capacity.value.code is SceneErrorCode.QUOTA
+    assert scene.state is initial_scene
+    assert owners.state is initial_ledger
+    assert owners.require_live(owner).high_water.region == 0
+    assert owners.require_live(owner).high_water.object == 0
+    scene.reject()
+    clock.settle_result(2)
+
+
 def test_zero_glyph_capacity_rejects_even_an_empty_background_paint():
     policy = replace(
         _policy(),
@@ -384,6 +405,82 @@ def test_layout_target_is_copy_on_write_and_active_quota_is_not_double_charged()
     _install(scene, clock, CommitDisposition.COMMIT_AND_REVEAL)
     assert scene.state.retained_visible
     assert scene.state.active.owners[owner.owner_id].regions[1].geometry_generation == 1
+
+
+def test_flat_glyph_staging_reuses_one_private_map_and_freezes_once(monkeypatch):
+    object_count = 64
+    policy = replace(
+        _policy(),
+        max_objects=object_count,
+        max_operations_per_transaction=object_count + 1,
+        total_utf8_bytes=object_count,
+    )
+    clock, _owners, owner, scene = _domain(
+        policy=policy,
+        quotas=_quotas(objects=object_count, utf8_bytes=object_count),
+    )
+    frozen_object_counts = []
+    original_make_owner_scene = scene._make_owner_scene
+
+    def counted_make_owner_scene(owner_identity, regions, objects, series):
+        frozen_object_counts.append(len(objects))
+        return original_make_owner_scene(owner_identity, regions, objects, series)
+
+    text_calls = 0
+    original_text_bytes = retained_scene_module._text_bytes
+
+    def counted_text_bytes(name, text):
+        nonlocal text_calls
+        text_calls += 1
+        return original_text_bytes(name, text)
+
+    monkeypatch.setattr(scene, "_make_owner_scene", counted_make_owner_scene)
+    monkeypatch.setattr(retained_scene_module, "_text_bytes", counted_text_bytes)
+
+    source = scene.state
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    staging = scene._staging
+    assert staging is not None
+    mutable_owner = staging.owners[owner.owner_id]
+    mutable_objects = mutable_owner.objects
+
+    for object_id in range(1, object_count + 1):
+        scene.define_object(
+            _object(owner, object_id, GlyphRunBody(WHITE, BLACK, 0, "x"))
+        )
+        assert staging.owners[owner.owner_id] is mutable_owner
+        assert mutable_owner.objects is mutable_objects
+
+    assert scene.state is source
+    assert frozen_object_counts == []
+    prepared = scene.prepare_commit(CommitDisposition.COMMIT)
+    assert frozen_object_counts == [object_count]
+    assert text_calls <= 8 * object_count
+
+    hidden = prepared.state.hidden
+    assert hidden is not None
+    frozen_owner = hidden.owners[owner.owner_id]
+    assert frozen_owner.usage.objects == object_count
+    assert frozen_owner.usage.utf8_bytes == object_count
+    with pytest.raises(TypeError):
+        frozen_owner.objects[object_count + 1] = frozen_owner.objects[object_count]
+    with pytest.raises(TypeError):
+        hidden.owners[owner.owner_id + 1] = frozen_owner
+    # The prepared mapping owns a copy rather than a live proxy over the
+    # transaction builder retained by the prepared capability.
+    mutable_objects[object_count + 1] = frozen_owner.objects[object_count]
+    assert object_count + 1 not in frozen_owner.objects
+    del mutable_objects[object_count + 1]
+
+    repeated = scene.prepare_commit(CommitDisposition.COMMIT)
+    assert repeated.state.hidden is hidden
+    assert frozen_object_counts == [object_count]
+
+    result = scene.install_prepared(prepared)
+    clock.settle_result(result.transaction_id)
+    assert scene.state.hidden is hidden
+    assert frozen_object_counts == [object_count]
 
 
 def test_owner_retirement_removes_exact_authority_from_active_and_hidden_atomically():
@@ -692,6 +789,26 @@ def test_readout_value_recomputes_complete_utf8_usage_before_staging():
     assert quota.value.code is SceneErrorCode.QUOTA
     assert scene.state.active is old
     assert owners.require_live(owner).quotas.utf8_bytes == 13
+    scene.reject()
+    clock.settle_result(4)
+
+
+def test_readout_value_text_bound_failure_is_sticky_before_staged_object_mutation():
+    policy = replace(_policy(), max_glyph_run_bytes=8)
+    clock, owners, owner, scene = _domain(policy=policy)
+    _reveal_complete_target(clock, scene, owner)
+    old = scene.state.active
+
+    _begin(clock, scene, 4, RetainedMode.DELTA)
+    with pytest.raises(SceneModelError, match="readout exceeds UTF-8 byte bound") as bound:
+        scene.set_object_value(owner, 4, -(1 << 63))
+
+    assert bound.value.code is SceneErrorCode.QUOTA
+    with pytest.raises(SceneModelError, match="was rejected"):
+        scene.set_object_visibility(owner, 3, False)
+    assert scene.state.active is old
+    assert old.owners[owner.owner_id].objects[4].body.value == -125
+    assert owners.require_live(owner).high_water.object == 8
     scene.reject()
     clock.settle_result(4)
 
