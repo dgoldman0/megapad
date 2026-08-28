@@ -67,6 +67,7 @@ from .retained_model import (
     OwnerLedgerErrorCode,
     OwnerLedgerState,
     OwnerQuotas,
+    RetainedFeature,
     RetainedPolicy,
 )
 from .retained_scene import (
@@ -82,6 +83,8 @@ from .retained_scene import (
 )
 from .retained_wire import (
     CellMode,
+    ControlEvent,
+    ControlEventKind,
     PresentBegin,
     PresentDisposition,
     PresentRetainedMode,
@@ -109,6 +112,7 @@ from .retained_wire import (
     decode_series_definition,
     decode_series_drop,
     decode_series_replace,
+    encode_control_event,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_result,
@@ -935,6 +939,80 @@ class RichTerminalCore:
         if encoded is not None:
             self._pointer_buttons = normalized_buttons
         return encoded
+
+    def send_control_event(
+        self,
+        owner_id: int,
+        owner_generation: int,
+        control_id: int,
+        *,
+        model_revision: int,
+        event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
+        modifiers: int = 0,
+    ) -> OutboundBytes | None:
+        """Encode one revision-attested semantic-control intent.
+
+        The caller proves physical presentation before reaching this method.
+        This boundary independently requires that proof to name the exact
+        current model revision and that the target remains interactable.  It
+        never speculates about or mutates guest-owned control state.
+        """
+
+        self._require_active_model()
+        policy = self._session_retained_policy
+        if (
+            not self._retained_enabled
+            or policy is None
+            or not policy.features & RetainedFeature.CONTROLS
+        ):
+            raise TerminalSessionError(
+                "semantic control input requires active RET_CONTROLS"
+            )
+
+        clock = self._require_clock()
+        revision = _integer(
+            "model_revision",
+            model_revision,
+            minimum=0,
+            maximum=UINT64_MAX,
+        )
+        if revision != clock.revision:
+            raise TerminalSessionError(
+                "semantic control input revision is not the current model revision"
+            )
+        session_id = self._session_id
+        if session_id is None:
+            raise TerminalSessionError(
+                "semantic control input has no active session identity"
+            )
+
+        event = ControlEvent(
+            owner_id=owner_id,
+            owner_generation=owner_generation,
+            control_id=control_id,
+            event_kind=event_kind,
+            modifiers=modifiers,
+            model_revision=revision,
+        )
+        owner = OwnerIdentity(
+            session_id=session_id,
+            presentation_epoch=clock.presentation_epoch,
+            owner_id=event.owner_id,
+            owner_generation=event.owner_generation,
+        )
+        try:
+            self._require_retained_model().require_interactable_control(
+                owner,
+                event.control_id,
+            )
+        except SceneModelError as exc:
+            raise TerminalSessionError(
+                f"semantic control target is not interactable: {exc}"
+            ) from exc
+        return self._encode_data(
+            MessageType.CONTROL_EVENT,
+            encode_control_event(event),
+        )
 
     def send_focus(self, focused: bool) -> OutboundBytes | None:
         """Encode one normalized focus transition."""
