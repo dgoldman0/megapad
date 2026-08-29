@@ -4,9 +4,9 @@
 
 **Status:** Engine performance correction active after failed Desktop acceptance
 
-**Branch:** `single-core-execution-kernel`
+**Branch:** `single-core-dbt-throughput`
 
-**Isolated worktree:** `.worktrees/megapad-single-core-execution-kernel`
+**Isolated worktree:** `.worktrees/megapad-single-core-dbt-throughput`
 
 **Old DBT comparison baseline:**
 `72e1122adaac3de2bc23d235e58063cd179d43ce`
@@ -209,10 +209,13 @@ one explicit contract without adding redundant hot-path copies.
 
 The x86-64 backend lowers block IR without owning MP64 decoding, guest-cache
 identity, scheduling, or Python callbacks. It keeps profitable guest state live
-across the block and materializes it at exact exits. Element 7 declined direct
-continuation because the measured successor edges do not amortize the required
-invalidation, preflight, and broader entry/exit state; the reverted C++
-successor-probe loop is not restored.
+across the block and materializes it at exact exits. Element 7 originally
+declined direct continuation because its measured edges did not amortize the
+required invalidation, preflight, and broader entry/exit state; the reverted
+C++ successor-probe loop is not restored. EK-D24 later authorized one narrower
+experiment using exact profiled register/control edges. That experiment emits
+the source and target into one generated region rather than returning to C++
+and probing a second native slot.
 
 ## Fixed implementation elements
 
@@ -1207,6 +1210,84 @@ register, memory ordering, interrupt point, cycle count, BIOS ABI, checkpoint,
 or RTL requirement. Its fingerprints are not execution authority, and no
 generated block is linked or entered differently by this slice.
 
+### Fuse exact native pairs into host regions
+
+Commit `04e4898` implements the narrow experiment authorized by EK-D24. A
+source-owned region copies one eligible native source and its exact target into
+one separately published W^X host-code slot. The pair has one generated
+prologue, entry, return, and C++ settlement. It does not jump between ordinary
+native slots and does not restore the rejected C++ successor-probe loop. An
+internal source-PC guard, an immediate target-identity proof before entry, the
+normal source identity proof, and an exact final-PC check keep both copied
+blocks subordinate to the existing admission authority.
+
+Eligibility is intentionally narrow. The source must end in straight
+fallthrough or an unconditional short/long branch; both source and target must
+already have native helper-free register/control plans, use the same PSEL and
+SPSEL, and leave compiled PSEL unchanged. Memory, helpers, `EXT.DICT`,
+`CALL.L`, `RET.L`, `SEP`, active timing, interrupt-enabled entry, insufficient
+combined budget, conditional source control, or either block writing its
+compiled PSEL prevents region entry. The generated pair settles the sum of the
+two blocks' fetched instructions, completed steps, static cycles, and any
+supported target conditional-taken cycle cost exactly once.
+
+Positive and negative pair decisions have exact lifetimes. A positive
+descriptor records the complete target address, selectors, identity bytes, and
+validated identity epoch. An ineligible target, a final base-lowering
+rejection, or a failed pair lowering/publication is likewise bound to that
+exact target identity, avoiding repeated associative probes while the target
+is unchanged. A mutation or unprovable identity clears the decision and
+retries; a globally failed region arena remains terminal. Fingerprints are not
+execution authority. Schema 17 separately reports region compilation, entry,
+logical-block, step, target-identity-miss, native-entry, and native-return
+counts, so eliminating host transitions cannot be hidden inside the older
+logical JIT totals.
+
+The focused exact selectors establish the mechanical result. A warmed
+1,000-step two-block ring retains 500 logical JIT executions and 1,000 JIT
+steps while reducing physical native entries/returns from 500 to 250 through
+250 regions. The warmed BIOS-admission fixture retains 340 logical JIT
+executions and 980 JIT steps while reducing physical native entries/returns
+from 340 to 170 and positive-plan lookups from 360 to 190 through 170 regions.
+A conditional native control reports 400 physical native entries and zero
+regions with the feature both enabled and disabled. All three replays report
+zero target-identity misses and zero timed compilation attempts.
+
+The same-binary synthetic A/B crossed the enabled treatment between two
+physical system instances on every round, pinned the process to one host CPU,
+disabled cyclic GC during timing, gave each arm an equal warm-up in its final
+mode, reversed workload and arm order, and timed eight paired rounds. Each ring
+and BIOS arm ran 10,000,000 guest steps per round; the no-region conditional
+control ran 9,999,996. Raw paired ratios are the decision evidence; division by
+the control ratio is only a secondary drift diagnostic.
+
+The ring reached median wall rates of 161.427 Msteps/s enabled and 105.160
+Msteps/s disabled, with a 1.5328x paired wall geomean and a 1.5330x process-CPU
+geomean; enabled won all eight samples. The BIOS mix reached 167.058 and
+111.142 Msteps/s, respectively, with 1.5028x wall and 1.5028x process-CPU
+geomeans; enabled again won all eight. The no-region control was neutral:
+128.472 versus 128.512 Msteps/s, a 1.0021x wall geomean, a 1.0021x process-CPU
+geomean, and four wins in eight. Control-normalized wall diagnostics were
+1.5296x for the ring and 1.4996x for the BIOS mix. The two physical instances
+had identical architectural-state hashes after all crossed warm and timed
+steps, and fresh enabled/disabled replay pairs remained identical after the
+counter checks.
+
+This is sufficient to retain the implementation as a provisional engine
+candidate rather than reject the mechanism as happened with the old chaining
+loop. It is not yet production-retention evidence: these motifs isolate hot
+region behavior and BIOS-shaped admission but do not include a real source-mode
+BIOS+KDOS load or the complete Desktop mix. EK-F10 therefore remains open until
+the active vertical and resource gates permit that representative same-binary
+exact-equivalent A/B.
+
+The region arena, descriptors, identities, and toggle are host-emulator
+implementation. They change no MP64 instruction, guest-visible dictionary or
+instruction-cache capacity/replacement rule, cycle charge, fault order,
+interrupt point, memory order, BIOS ABI, snapshot state, or RTL requirement.
+Changing any of those would be a hardware-design change; reducing the number
+of host x86 entries and C++ settlements while reproducing them exactly is not.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1286,6 +1367,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D22 | Resolve one complete nonempty `EXT.DICT` counted-name span before copying its bytes. | Only supervisor non-journaled ordinary memory takes the direct path; byte routing, faults, callbacks, dynamic cycle charge, the architectural cache, BIOS, and RTL remain unchanged. |
 | EK-D23 | Reject the segment-local `EXT.DICT` terminal continuation after exact counters improved but position-balanced control-normalized timing did not. | Avoid retaining host dispatch complexity from a synthetic lookup-count win; the existing authoritative helper boundary and every guest hardware contract remain unchanged. |
 | EK-D24 | Measure eligible native successor edges with a bounded set-local Space-Saving host profile before building another continuation path. | Full admitted bytes remain the exact internal identity; fingerprints are report-only, all helper/memory/timing/interrupt/segment boundaries break adjacency, and schema 16 telemetry does not authorize execution or alter hardware. |
+| EK-D25 | Reopen EK-D11 only for exact two-block generated regions and retain that implementation as a provisional host candidate after its crossed same-binary synthetic A/B won materially. | The candidate removes host x86 entry/return and C++ settlement work without changing guest behavior or hardware. Its private A/B toggle remains only through representative source-mode qualification; production retention is deferred to EK-F10. |
 
 ## Deferred findings ledger
 
@@ -1300,4 +1382,4 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |
 | EK-F8 | Four-way host caches collapse two-to-four-way conflict motifs but add work to a set that cycles through five or more live identities. | Retain the bounded implementation as the first profiled candidate, expose exact geometry/churn counters, and decide any associativity or capacity adjustment from a position-balanced cold source-load profile once the rich-terminal gate permits it. |
 | EK-F9 | A decoded native prefix followed by `EXT.DICT` still performs another ordinary admission whose start normally matches an exact rejection. | The local terminal continuation removed that admission but regressed the control-normalized paired timing by 1.78%. Leave the boundary explicit unless a future design eliminates more than the lookup while preserving helper, interrupt, fault, and successor-edge barriers. |
-| EK-F10 | Focused successor profiles prove that eligible native edges exist, but do not establish their concentration in the real BIOS+KDOS source-load journey. | Use schema 16 on the representative source path when the active vertical gate permits it; synthetic region A/B may reject an implementation, but cannot by itself justify production retention. |
+| EK-F10 | Schema 17 focused profiles and the synthetic region A/B prove that exact generated pairs are active and materially profitable on the two-block ring and BIOS-calibrated admission mix, but do not establish edge concentration or net source-load benefit in the real BIOS+KDOS journey. | When the active vertical and resource gates permit it, run a source-mode representative BIOS+KDOS same-binary exact-equivalent A/B. Synthetic evidence can reject the mechanism and supports provisional retention here, but it cannot authorize final production retention or removal of the temporary private A/B toggle. |
