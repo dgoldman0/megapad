@@ -36,40 +36,46 @@ Each entry is a linked list node:
 
 ---
 
-## Hardware Lookup Cache and the Growth Boundary
+## Hardware Cache and BIOS Index — Locked Target
 
-`find_word` uses `EXT.DICT` as a cache in front of the authoritative linked
-list. For names of at most 31 bytes it builds an uppercase counted string and
-executes `DFIND`; a hit returns the entry directly. A miss walks backward from
-`LATEST`, then attempts `DINS` after finding the word. New definitions also
-attempt to seed their latest binding. Longer names remain valid but always use
-the linked-list path.
+The in-progress dictionary-acceleration implementation keeps the linked
+dictionary authoritative and adds two bounded acceleration layers. Names of at
+most 31 bytes first probe the per-core
+`EXT.DICT` cache. A cache miss probes the caller-backed BIOS index, which also
+covers names through the dictionary header's 127-byte limit. An exact positive
+result demand-fills the hardware cache when eligible. An authoritative empty
+index slot proves a negative lookup; an absent, rebuilding, or saturated index
+falls back to the latest-first linked chain.
 
-The hardware cache has 64 sets and four ways, for 256 entries total. `DINS`
-updates an existing match or occupies an empty way. A full set with no matching
-entry reports overflow and does not evict an older entry. This is
-correctness-safe because the linked dictionary remains authoritative, but it
-does not give cold source loading a size-independent lookup cost: once sets
-fill, uncached names can repeatedly traverse an increasingly long latest-first
-chain. The encoding and original design discussion are in
-[`SoC-hardening.md` Section 3](SoC-hardening.md#3-forth-dictionary-search-engine--isa-extension-extdict-prefix-fa).
+The hardware cache is 256 sets by four ways, for 1,024 entries. Each set has a
+deterministic round-robin replacement cursor: matching insertions update in
+place, an invalid way is preferred, and a full set replaces at the cursor.
+New definitions update an already resident binding but do not allocate a line
+merely because they were compiled. `DCLR` and CPU reset clear both entries and
+replacement state. The cache is a working set, not a partial registry whose
+contents become permanent after boot.
 
-A 2026-08-29 cold-source measurement made the scale risk concrete. Akashic
-`77f1af9` running on MegaPad `35e52bb` loaded and compiled 3,277,942 source
-bytes in 27 nearly equal chunks from a 32 MiB stored-codec MP64FS image. The
-first nine chunks used 2.4015 billion guest instructions for 1,101,557 bytes,
-or 2,180 instructions per byte. The final nine used 5.9995 billion for
-1,072,108 bytes, or 5,596 instructions per byte: 2.57 times the normalized
-cost despite containing fewer bytes. Chunk 1 used 1,604 instructions per byte
-while the nearly equal-sized chunk 22 used 7,960, a 4.96-times difference.
+KDOS supplies a power-of-two open-addressed index from external memory. The
+canonical 128 MiB arrangement selects 65,536 16-byte slots (1 MiB), keeping the
+measured 30,598-entry Desktop dictionary below 47% load. The caller-bounded
+BIOS interface accepts other valid capacities, and a system without sufficient
+external memory remains correct through the linked fallback.
 
-That observation proves strong order-dependent or module-dependent growth; it
-does not prove that dictionary traversal causes all of it. Token mix and
-load-time initialization differ between chunks. Before selecting a remedy,
-instrument `DFIND` requests, hits and misses, `DINS` overflows, linked-list
-entries visited, and load-time execution by module. Cache replacement or a
-larger/indexed lookup structure can then be evaluated against a validated
-compiled-dictionary or restorable-image path without weakening source boot.
+Definition publication upserts the side index. `MARKER`, `FORGET`, and
+transactional compiler rollback use `DICT-ROLLBACK` to publish `HERE` and
+`LATEST` together, clear `EXT.DICT`, and rebuild the index newest-first. Raw
+`LATEST` mutation is unsupported because it could leave a forgotten binding in
+an accelerator.
+
+The sizing profile, exact cache replacement rules, side-index publication and
+fallback protocol, and deferred multicore RTL requirements are authoritative
+in [`dictionary-acceleration.md`](dictionary-acceleration.md). The original
+cold-source timing observation remains useful context: the first nine of 27
+chunks used 2.4015 billion guest instructions for 1,101,557 source bytes, while
+the final nine used 5.9995 billion for 1,072,108 bytes. The dedicated profile
+then attributed at least 10.69 billion guest instructions in the source-load
+interval to linked-node base-loop work and showed that negative lookups remain
+dominant even with an almost ideal positive cache.
 
 ---
 

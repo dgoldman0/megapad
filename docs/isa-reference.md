@@ -851,13 +851,38 @@ With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
 
 ### EXT.DICT — Dictionary Search Engine (FA)
 
-Self-contained 3-byte instruction for Forth dictionary search.
+Self-contained 3-byte instructions for the per-core Forth positive-binding
+cache.
 
 **Encoding:** `FA <sub-op> <reg-byte>`
 
-Details TBD — the dictionary search engine accelerates FIND and
-vocabulary traversal.  See `docs/architecture.md` for the high-level
-description.
+- `FA` — EXT.DICT prefix
+- `<sub-op>` — operation selector
+- `<reg-byte>` — `[Rd:4][Rs:4]`; canonical zero for `DCLR`
+
+| Sub-op | Mnemonic | Operation |
+|--------|----------|-----------|
+| `0x00` | **DFIND** Rd, Rs | Look up the counted name at Rs; on hit set Rd to its binding and Z=1, otherwise Rd=0 and Z=0. |
+| `0x01` | **DINS** Rd, Rs | Demand-fill or update the name with binding Rd; replace deterministically if the set is full; Z=1,V=0. |
+| `0x02` | **DDEL** Rs | Invalidate a matching line; Z reports whether one was found. |
+| `0x03` | **DCLR** | Invalidate every line and reset all replacement cursors. Canonical encoding is `FA 03 00`. |
+| `0x04` | **DUPD** Rd, Rs | Update a matching line only; never allocate or move the cursor; Z reports whether one was found and V=0. |
+| `0x05`–`0x0F` | *(reserved)* | Trap as `ILLEGAL_OP`. |
+
+Names are counted strings limited to 31 bytes and hashed with uppercase
+FNV-1a32. The cache is 256 sets by four ways; the low eight hash bits select a
+set. Each set has a two-bit cursor. A matching DINS updates in place without
+moving the cursor; otherwise the lowest invalid way is filled and the cursor
+moves past it; otherwise the cursor-selected way is replaced and the cursor
+advances modulo four. DFIND, DUPD, and DDEL never move the cursor. Reset and
+DCLR set every cursor to zero.
+
+`DINS` is a core-local demand fill. `DUPD` is the definition-publication
+operation and is the only insert-like operation broadcast to peer full cores;
+peers update matches but do not allocate. Micro-cores trap every EXT.DICT
+sub-op. See [`dictionary-acceleration.md`](dictionary-acceleration.md) for the
+BIOS side index, rollback rules, measured sizing, and deferred RTL coherence
+requirements.
 
 ### EXT.CRYPTO — Core Crypto ISA (FB)
 

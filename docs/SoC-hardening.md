@@ -468,8 +468,15 @@ No Python fallback needed.  1715/1715 tests pass.
 **Priority: high — unique competitive advantage**  
 **Topology: CPU-internal (per-CPU BRAM hash table)**
 
-A hardware-accelerated `FIND` encoded as a 2–3 byte ISA instruction,
-replacing linked-list traversal with a 2-cycle hash lookup.
+**Status:** the 2026-08-29 capacity and policy revision is locked for host and
+BIOS implementation. RTL work is assigned separately. The authoritative
+contract and measurement are in
+[`dictionary-acceleration.md`](dictionary-acceleration.md).
+
+A hardware-accelerated positive working set is paired with a caller-backed
+BIOS index. The hardware keeps hot bindings per core; the index makes both
+positive cache misses and negative lookups independent of linked-dictionary
+depth. The linked list remains the semantic authority and fail-safe fallback.
 
 ### Motivation
 
@@ -500,67 +507,69 @@ If all threads are interpreting/compiling Forth, they all call `FIND`
 on every word.  A single-ported hash table becomes a serialisation
 point on the hottest path.
 
-Each CPU has its own BRAM-backed hash table (~4 BRAM36).  INSERT
-broadcasts to all copies via a lightweight sideband bus (infrequent;
-during compilation only).  FIND is entirely CPU-local — zero bus
-traffic, zero contention.
+Each CPU has its own BRAM-backed hash table. `DFIND` and demand-fill `DINS`
+are entirely local, with zero shared-bus traffic. Definition publication uses
+`DUPD`, a distinct update-existing-only coherence event; it never allocates a
+missing peer line. This avoids turning one core's working set into every
+core's working set while still preventing stale shadowed bindings.
 
 ### Encoding: EXT.DICT (prefix FA)
 
-Two- or three-byte instructions: `FA <sub-op>` or `FA <sub-op> <reg-byte>`.
+All currently implemented instructions are three bytes:
+`FA <sub-op> <reg-byte>`.
 
 | Sub-op | Mnemonic | Encoding | Semantics |
 |--------|----------|----------|-----------|
 | 00 | DFIND | FA 00 DR | Rs=counted-string addr → Rd=XT; Z=found |
 | 01 | DINS  | FA 01 DR | Insert: Rs=name addr, Rd=XT to store |
 | 02 | DDEL  | FA 02 0R | Delete entry by name at Rs |
-| 03 | DCLR  | FA 03    | Clear entire hash table (2-byte instruction) |
-| 04–0F | *(reserved)* | | Future: vocab select, iteration, stats |
+| 03 | DCLR  | FA 03 00 | Clear entries and replacement cursors |
+| 04 | DUPD  | FA 04 DR | Update matching binding only; never allocate |
+| 05–0F | *(reserved)* | | Future: vocab select, iteration, stats |
 
 **Register conventions:**
 - Rs = address of counted string (name to find/insert/delete)
 - Rd = XT result (DFIND) or XT to store (DINS)
-- Z flag = found (DFIND), success (DINS/DDEL)
-- Overflow flag = all ways full on INSERT (software falls back to
-  linked-list for that word)
+- Z flag = found (`DFIND`), success (`DINS`/`DDEL`), or matched (`DUPD`)
+- V flag = zero for all completed cache operations; `DINS` replaces a line
+  rather than reporting capacity overflow
 
 **Execution model:**
 - DFIND: 2-cycle stall — cycle 1 hashes the name (read from memory
   via CPU bus master), cycle 2 reads all 4 ways and compares.
-- DINS: 3–4 cycles — hash + find empty way + write entry.
+- DINS/DUPD: hash + compare + optional write.
 - DDEL: 2 cycles — hash + invalidate matching entry.
-- DCLR: 1 cycle — bulk-zero all valid bits.
+- DCLR: bulk-zero all valid bits and replacement cursors.
 
 ### Hash table structure
 
-- 256-entry, 4-way set-associative.
-- Each entry: 32-bit hash + 64-bit NFA + 64-bit XT + 5-bit name_len
-  + 31-byte name — fits in ~4 BRAM36 blocks per CPU.
-- hash[7:0] selects set (64 sets × 4 ways).
+- 1,024-entry, 4-way set-associative: 256 sets by four ways.
+- Each entry: valid bit + 32-bit hash + 64-bit binding/entry address + 5-bit
+  name length + 31-byte name. The logical fields total 350 bits; pack to 384 bits
+  (48 bytes) for about 48 KiB per CPU.
+- hash[7:0] selects the set.
 - On FIND, all 4 ways are read and compared in parallel.
-- On INSERT collision (all 4 ways full), overflow flag is set;
-  software falls back to linked-list search for that word.
+- Each set has a two-bit round-robin cursor. A matching insert updates without
+  moving it; otherwise the lowest invalid way is used and the cursor advances
+  past it; otherwise the cursor-selected way is replaced and the cursor
+  advances modulo four. Delete does not move it. Clear and reset set it to
+  zero.
 
-### INSERT broadcast
+### Definition coherence
 
-When any CPU executes DINS, the SoC fans the entry out to all other
-CPUs' hash tables via a shared `dict_insert_broadcast` sideband bus
-(hash + NFA + XT + name, active for 1 cycle).  Each CPU's dict engine
-snoops the broadcast and writes the entry into its own table.
+`DINS` is a local demand fill and is not broadcast. `DUPD` is broadcast as a
+totally ordered definition-publication event. Every cache updates a matching
+line in place; no cache allocates on a `DUPD` miss or changes its replacement
+cursor. Backpressure prevents event loss, and simultaneous publishers have a
+deterministic order. `DCLR` used by rollback is global before the forgotten
+dictionary storage can be reused.
 
-Broadcast is infrequent (only on new definitions during compilation),
-so bus bandwidth is negligible.  A simple valid + ack handshake
-prevents data loss if two CPUs INSERT on the same cycle.
+### Hash and rollback
 
-### Open questions
-
-- Vocabulary support: ALSO/ONLY search order means multiple logical
-  tables or a priority chain.  Could use hash tag bits to encode
-  vocabulary ID, or a small vocab-select CSR.
-- Forgetting words (FORGET/MARKER) needs DDEL or bulk invalidation.
-  DCLR + re-insert from linked list is the safe fallback.
-- Hash function: FNV-1a or CRC-based?  Must be cheap in gates (~30
-  LUTs) and deterministic across all copies.
+FNV-1a is computed over uppercase bytes with 32-bit truncation after every
+multiply. `MARKER`, `FORGET`, and transactional rollback use the BIOS-owned
+`DICT-ROLLBACK` path, which globally clears the cache and rebuilds the side
+index. Raw `LATEST` mutation is unsupported.
 
 ### Micro-core behaviour
 
@@ -570,49 +579,44 @@ if needed, they use software linked-list FIND.
 
 ### RTL implementation notes
 
-- New sub-module `mp64_dict.v`, instantiated inside `mp64_cpu.v`
-  (tightly coupled, like the string engine and multiplier).
+- Update `mp64_dict.v`, instantiated inside `mp64_cpu.v` (tightly coupled,
+  like the string engine and multiplier).
 - Interface: `start`, `op[3:0]`, `name_addr`, `name_len`, `xt_in`,
   `done`, `xt_out`, `found`, `overflow`, bus master signals for
   name read, BRAM ports for hash table.
 - 4 parallel comparators (one per way) for single-cycle match.
-- INSERT broadcast: sideband port out (to SoC fabric) + snoop port
-  in (from SoC fabric).  ~20 wires each direction.
+- Coherence sideband: operation kind, valid/ready backpressure, and enough
+  payload for `DUPD` and global clear. Demand-fill `DINS` stays local.
 - CPU decode: when `ibuf[0] == 8'hFA`, enter `CPU_DICT` stall state.
   On `dict_done`, resume fetch, write Rd and flags.
-- Area: ~300 LUTs + ~4 BRAM36 per big-core instance.  Zero for
-  micro-cores (gated out with `generate if`).
+- The former 64-set estimate is obsolete; synthesis must report the actual
+  256-set storage and fabric cost. Micro-cores remain gated out.
 
 ### Emulator implementation notes
 
-- New dispatch case in `megapad64.py` CPU loop for opcode 0xFA.
-- Backed by a Python `dict` mapping name_bytes → (NFA, XT).
-  DFIND: `self.dict_table.get(name, None)` — O(1), accurate model.
-  DINS: `self.dict_table[name] = (nfa, xt)`.
-  DDEL: `del self.dict_table[name]`.
-  DCLR: `self.dict_table.clear()`.
-- Set Z flag and Rd register from result.
-- Micro-core flag: raise `ILLEGAL_OP` trap if `self.is_micro`.
-- Single instance per emulated CPU is fine (no contention in
-  single-threaded Python).
+- Python and native C++ use the exact 256-by-four table and cursor rules, not
+  an unbounded host dictionary.
+- Full-set replacement, update-without-cursor-motion, deletion, clear, reset,
+  and checkpoint rollback must remain reference/native identical.
+- Micro-cores continue to raise `ILLEGAL_OP`.
 
-### C++ accelerator — DONE (2026-03-09)
+### Native accelerator
 
-All four EXT.DICT sub-ops (DFIND, DINS, DDEL, DCLR) execute natively
-in `mp64_accel.cpp::exec_dict()`.  The C++ `CPUState` carries the
-64×4 hash table (`DictEntry dict_table[64][4]`) with inline FNV-1a
-hashing — no Python fallback needed.  `accel_wrapper.py::_reset_state()`
-calls `dict_clear()`.  1715/1715 tests pass.
+All EXT.DICT sub-ops execute in `mp64_accel.cpp::exec_dict()`; no Python
+fallback is allowed for an operation which can mutate cache state. Private or
+JIT checkpoint paths which cannot execute EXT.DICT must not copy the enlarged
+48 KiB table unnecessarily. Any checkpoint which can execute it captures both
+entries and replacement cursors.
 
 **Implementation status across layers:**
 
 | Layer | Status | Notes |
 |-------|--------|-------|
-| RTL (`mp64_dict.v`) | ✅ Complete | 490 lines, 4-way SA, FNV-1a, BRAM |
-| Python emulator (`megapad64.py`) | ✅ Complete | 64×4 hash table, FNV-1a 32-bit |
-| C++ accelerator (`mp64_accel.cpp`) | ✅ **Complete** | Native 64×4 hash table, FNV-1a 32-bit |
-| Tests (`test_megapad64.py::test_ext_dict`) | ✅ Complete | 7 sub-tests, native C++ path |
-| BIOS usage | ✅ Active | `find_word` → DFIND fast path; DINS on cache miss |
+| RTL (`mp64_dict.v` plus coherence fabric) | Deferred | Must implement the locked 256×4 replacement/coherence contract |
+| Python emulator (`megapad64.py`) | In progress | Exact bounded reference model |
+| C++ accelerator (`mp64_accel.cpp`) | In progress | Exact native parity model |
+| BIOS/KDOS | In progress | Demand fill, caller-backed index, atomic rollback |
+| Qualification | Pending | Focused host/BIOS first; RTL and broad acceptance deferred |
 
 ---
 
@@ -802,25 +806,25 @@ a general-purpose facility for any bounded-size resource pool.
 byte-at-a-time loop), arena descriptor pool, network RX ring slot
 tracking.
 
-##### 2. Dictionary Hash Helper (uses RORI)
+##### 2. Dictionary Hash Helper
 
 The EXT.DICT hardware cache uses FNV-1a hashing internally.  Exposing
 a matching software hash word lets Forth code pre-compute hashes for
 batch lookups, compile-time constant folding, and hash-table data
-structures outside the dictionary.  RORI provides the
-rotate-XOR-accumulate pattern common to all high-quality non-crypto
-hashes.
+structures outside the dictionary. Exact parity requires multiplication by
+the FNV prime and truncation to 32 bits after every byte; a rotate/XOR
+approximation is not the same hash and must not be used for dictionary state.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `HASH-NAME` | `( c-addr u -- hash )` | FNV-1a hash of the counted string, matching the EXT.DICT internal algorithm.  Uses RORI for the multiply-by-prime step (shift-add approximation). |
-| `HASH-STEP` | `( hash c -- hash' )` | Single-byte hash accumulate: XOR byte into hash, rotate-add.  Building block for user hash tables. |
+| `HASH-NAME` | `( c-addr u -- hash )` | Uppercase FNV-1a32 matching EXT.DICT exactly. |
+| `HASH-STEP` | `( hash c -- hash' )` | XOR one byte, multiply by `0x01000193`, then retain the low 32 bits. |
 
 **Implementation sketch:**
 
 ```forth
 : HASH-STEP  ( hash c -- hash' )
-  XOR  DUP 5 RORI  XOR ;        \ rotate-xor fold
+  XOR  $01000193 *  $FFFFFFFF AND ;
 
 : HASH-NAME  ( c-addr u -- hash )
   $811C9DC5  -ROT                 \ FNV offset basis
@@ -1644,37 +1648,40 @@ Matches standard Forth CMOVE stack contract.
 
 ### A.3  EXT.DICT — Dictionary Search Operations (prefix FA)
 
-Two- or three-byte instructions: `FA <sub-op>` or `FA <sub-op> <reg-byte>`.
+Three-byte instructions: `FA <sub-op> <reg-byte>`. `DCLR` consumes a
+canonical zero register byte even though it has no register operand.
 
 | Encoding | Mnemonic | Cycles | Semantics |
 |----------|----------|--------|-----------|
 | `FA 00 DR` | **DFIND Rd, Rs** | 2 | Hash M[Rs] (counted string), look up in BRAM table.  Rd←XT, Z=found. |
-| `FA 01 DR` | **DINS Rd, Rs** | 3–4 | Insert: Rs=name addr, Rd=XT to store.  Z=success, V=overflow. |
+| `FA 01 DR` | **DINS Rd, Rs** | 3–4 | Demand-fill/update: Rs=name addr, Rd=binding to store. Always succeeds and may replace. |
 | `FA 02 0R` | **DDEL Rs** | 2 | Delete entry by name at Rs.  Z=found-and-deleted. |
-| `FA 03` | **DCLR** | 1 | Clear entire hash table.  2-byte instruction. |
-| `FA 04`–`0F` | *(reserved)* | | Future: vocab select, iteration, stats. |
+| `FA 03 00` | **DCLR** | model-defined | Clear all entries and per-set cursors. |
+| `FA 04 DR` | **DUPD Rd, Rs** | 3–4 | Update matching binding only; never allocate or move replacement state. |
+| `FA 05`–`0F` | *(reserved)* | | Future: vocab select, iteration, stats. |
 
 **Pipeline:** CPU enters `CPU_DICT` stall state.  Dict sub-module
 reads name bytes via CPU bus master (cycle 1: hash), then accesses
 BRAM (cycle 2: 4-way parallel compare).  Resume fetch on `dict_done`.
 
-**Hash table:** 256-entry, 4-way set-associative.  Per entry:
-32-bit hash + 64-bit NFA + 64-bit XT + 5-bit name_len + 31-byte name.
-~4 BRAM36 per big-core instance.
+**Hash table:** 1,024-entry, 4-way set-associative (256 sets). Per entry:
+valid + 32-bit hash + 64-bit binding + 5-bit name length + 31-byte name.
+Each set has a two-bit deterministic round-robin replacement cursor. Exact
+state transitions are in
+[`dictionary-acceleration.md`](dictionary-acceleration.md).
 
-**INSERT broadcast:** On DINS, the SoC fans the entry to all other
-CPUs via `dict_insert_broadcast` sideband (hash + NFA + XT + name,
-1 cycle).  Valid + ack handshake prevents collision on simultaneous
-DINS from two cores.
+**Coherence:** DINS is a core-local demand fill. DUPD is a totally ordered,
+backpressured update-existing-only broadcast. DCLR used for rollback is
+global. Peers never allocate or move a cursor for a DUPD miss.
 
 **Flags:**
 - DFIND: Z=1 if found (Rd valid); Z=0 if miss (Rd undefined).
-- DINS: Z=1 success; V=1 if all 4 ways full (overflow, software
-  fallback).
+- DINS: Z=1 and V=0, including full-set replacement.
 - DDEL: Z=1 if entry was found and deleted.
+- DUPD: Z=1 if a matching line was updated; V=0; a miss changes no state.
 
-**Instruction length:** 3 bytes (DFIND, DINS, DDEL) or 2 bytes (DCLR).
-+1 byte with REX prefix where applicable.
+**Instruction length:** 3 bytes for every current sub-op; +1 byte with REX
+where applicable.
 
 **Micro-cores:** `ILLEGAL_OP` trap.  Software linked-list FIND fallback.
 
@@ -1810,7 +1817,8 @@ Family fully packed.  All 16 sub-ops allocated.
 | DFIND | FA 00 DR | 3 | 4 |
 | DINS | FA 01 DR | 3 | 4 |
 | DDEL | FA 02 0R | 3 | 4 |
-| DCLR | FA 03 | 2 | — |
+| DCLR | FA 03 00 | 3 | — |
+| DUPD | FA 04 DR | 3 | 4 |
 | POPCNT | C8 DR | 2 | 3 |
 | CLZ | C9 DR | 2 | 3 |
 | CTZ | CA DR | 2 | 3 |
@@ -1820,7 +1828,7 @@ Family fully packed.  All 16 sub-ops allocated.
 | BSWAP | CE DR | 2 | 3 |
 | RORI | CF Rn imm8 | 3 | 4 |
 
-**Total new instructions: 17** (5 string + 4 dict + 8 bitfield).
+**Total new instructions: 18** (5 string + 5 dict + 8 bitfield).
 
 ---
 
@@ -1859,21 +1867,11 @@ elif ext_op == 0xF9:
 elif ext_op == 0xFA:
     sub = ibuf[1]
     rd, rs = (ibuf[2] >> 4) & 0xF, ibuf[2] & 0xF
-    if sub == 0x00:    # DFIND
-        name = read_counted_string(R[rs])
-        entry = dict_table.get(name)
-        Z = (entry is not None)
-        if Z: R[rd] = entry.xt
-    elif sub == 0x01:  # DINS
-        name = read_counted_string(R[rs])
-        dict_table[name] = DictEntry(nfa=R[rs], xt=R[rd])
-        Z = 1  # V=1 if overflow
-    elif sub == 0x02:  # DDEL
-        name = read_counted_string(R[rs])
-        Z = name in dict_table
-        if Z: del dict_table[name]
-    elif sub == 0x03:  # DCLR
-        dict_table.clear()
+    # Execute against the bounded 256-set x 4-way table. DINS uses the
+    # deterministic cursor replacement contract; DUPD (0x04) only updates
+    # a matching line. DCLR (0x03) also resets all cursors. See the
+    # authoritative dictionary-acceleration contract for exact transitions.
+    execute_bounded_dict_op(sub, rd, rs)
 
 # --- Bitfield (C8–CF) ---
 # In MULDIV family dispatch, after C0–C7:
@@ -2536,12 +2534,12 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 ### §3 — Forth Dictionary Search Engine (EXT.DICT, prefix FA)
 
-- [x] ISA encoding designed (FA 00–03)
-- [x] RTL implemented (`mp64_dict.v`, 490 lines, 4-way SA, FNV-1a)
-- [x] Emulator implemented (`megapad64.py`, Python dict fallback)
-- [x] BIOS using hardware: `find_word` → DFIND fast path, DINS on miss
-- [x] Tests passing (7 sub-tests)
-- [x] C++ accelerator (`mp64_accel.cpp`) — native `exec_dict()` + dict_table (2026-03-09)
+- [x] Revised ISA and cache contract locked (FA 00–04, 256 sets × 4 ways)
+- [x] Profile-guided 1,024-entry capacity and caller-backed BIOS index designed
+- [ ] Python and native C++ bounded replacement models plus focused parity tests
+- [ ] BIOS demand fill, update-existing publication, side index, and rollback
+- [ ] RTL replacement geometry and coherent DINS/DUPD/DCLR fabric (separate team)
+- [ ] Layer-appropriate focused and acceptance qualification
 
 ### §4 — Other Accelerator Ideas
 
@@ -2610,7 +2608,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 - [x] A.1: EXT prefix slot map (F9, FA, FB allocated)
 - [x] A.2: EXT.STRING encoding spec (F9 00–04)
-- [x] A.3: EXT.DICT encoding spec (FA 00–03)
+- [x] A.3: EXT.DICT encoding spec (FA 00–04)
 - [x] A.4: Bitfield ALU encoding spec (C8–CF)
 - [x] A.5: Complete Family 0xC map
 - [x] A.6: Instruction length summary
