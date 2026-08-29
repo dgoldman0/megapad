@@ -114,7 +114,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (480 words):
+**BIOS v1.0** (481 words):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -430,6 +430,7 @@ Character & utility words (§1):
 
 BIOS additions:
 - `LATEST` ( -- addr ): push address of most recent dictionary entry
+- `LATEST!` ( entry -- ): coherently publish a replacement dictionary head without changing HERE
 - `DICT-INDEX!` / `DICT-INDEX@`: bind and inspect the caller-backed dictionary index
 - `DICT-ROLLBACK`: atomically restore a validated HERE/LATEST checkpoint and repair accelerators
 
@@ -553,7 +554,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 480 words) is the **permanent,
+The BIOS Forth (v1.0, 481 words) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -561,7 +562,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 480 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 481 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE

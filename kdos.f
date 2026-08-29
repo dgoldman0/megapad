@@ -46,7 +46,7 @@ JIT-ON
 \  COMPARE, ABORT, ABORT", LEAVE, EVALUATE, EVALUATE-CHECKED,
 \  EVALUATE-FINISH, EVALUATOR-RESET, EVALUATOR-UNWIND, EVAL-STATUS,
 \  EVAL-LINE, EVAL-COLUMN, EVAL-DEPTH, EVAL-THROW, EVAL-TOKEN,
-\  DICT-INDEX!, DICT-INDEX@, DICT-ROLLBACK,
+\  DICT-INDEX!, DICT-INDEX@, DICT-ROLLBACK, LATEST!,
 \  FIND, SOURCE, >IN, >NUMBER,
 \  VALUE, TO, DOES>, POSTPONE, RECURSE, COUNT, WITHIN, U<, U>, 2/,
 \  CHAR, [CHAR], 2>R, 2R>, 2R@, QUIT, plus the v0.5 set.
@@ -558,7 +558,9 @@ VARIABLE R-NEW     \ new requested size (rounded)
 \  operation, then clears the hardware cache and rebuilds the side index.
 \  Its two-cell checkpoint can reclaim only one contiguous active dictionary
 \  zone; mixed Bank-0/userland histories are rejected before mutation.
-\  Raw access to the BIOS LATEST cell is deliberately not exposed.
+\  LATEST! remains the coherent one-cell head-publication API for loaders and
+\  other low-level dictionary owners. Snapshot rollback uses the two-cell API
+\  because changing the head alone deliberately leaves HERE unchanged.
 
 \ MARKER ( "name" -- )
 \   Create a checkpoint word.  Executing it later forgets everything

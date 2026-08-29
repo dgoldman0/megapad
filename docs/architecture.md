@@ -1038,7 +1038,7 @@ the correct default for pre-privilege firmware.
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │  BIOS  (bios.asm)                               │
-│  Subroutine-threaded Forth, 480 dictionary words │
+│  Subroutine-threaded Forth, 481 dictionary words │
 │  Disk I/O, FSLOAD, UART, timer, tile engine      │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
@@ -1264,7 +1264,7 @@ DMA, and reliability specifications.
 | CPU emulator | `megapad64.py` | — | Full ISA + extended tile engine implementation |
 | System glue | `system.py` | — | Heterogeneous SoC, MMIO, mailbox IPI, spinlocks, shared native execution state |
 | Devices | `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
-| BIOS | `bios.asm` | — | Forth interpreter, boot, multicore, 480 dictionary words |
+| BIOS | `bios.asm` | — | Forth interpreter, boot, multicore, 481 dictionary words |
 | OS core | `kdos.f` | — | Bank 0 buffers, kernels, TUI, FS, crypto, module loading, PQC, multicore |
 | Networking | `networking.f` | — | Userland Ethernet through TLS, sockets, and UDP data-port transport |
 | Tools | `tools.f` | — | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |

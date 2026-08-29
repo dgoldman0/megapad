@@ -4400,6 +4400,104 @@ class TestBIOS(unittest.TestCase):
             r"\[DICT-ROLLBACK-INVALID\s+-1\s+-1\s+42\s+\]",
         )
 
+    def test_latest_store_publishes_backward_and_forward_coherently(self):
+        """LATEST! repairs hot/indexed shadows without changing HERE."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE LS-HERE VARIABLE LS-OLD VARIABLE LS-NEW",
+            "0x100000 1024 DICT-INDEX! DROP",
+            ": LS-SHADOW 17 ;",
+            "LATEST LS-OLD !",
+            ": LS-SHADOW 29 ;",
+            "LATEST LS-NEW !",
+            "LS-SHADOW DROP",  # demand-fill the newer hardware binding
+            "HERE LS-HERE !",
+            "LS-OLD @ LATEST!",
+            'CR ." [LATEST-BACKWARD " '
+            'HERE LS-HERE @ = . LATEST LS-OLD @ = . '
+            'LS-SHADOW . DICT-INDEX@ . DROP DROP DROP ." ]"',
+            "LS-NEW @ LATEST!",
+            'CR ." [LATEST-FORWARD " '
+            'HERE LS-HERE @ = . LATEST LS-NEW @ = . '
+            'LS-SHADOW . DICT-INDEX@ . DROP DROP DROP ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[LATEST-BACKWARD\s+-1\s+-1\s+17\s+3\s+\]",
+        )
+        self.assertRegex(
+            text,
+            r"\[LATEST-FORWARD\s+-1\s+-1\s+29\s+3\s+\]",
+        )
+
+    def test_latest_store_stabilizes_unbound_and_saturated_indexes(self):
+        """LATEST! leaves either a stable fallback or rebuilt saturation."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE LSU-HERE VARIABLE LSU-HEAD",
+            ": LSU-ONE 101 ; : LSU-TWO 202 ;",
+            "HERE LSU-HERE ! LATEST LSU-HEAD !",
+            "0 0 DICT-INDEX! DROP",
+            "LSU-HEAD @ LATEST!",
+            'CR ." [LATEST-UNBOUND " '
+            'HERE LSU-HERE @ = . LSU-ONE . LSU-TWO . '
+            'DICT-INDEX@ . . . . ." ]"',
+            "0x100000 1 DICT-INDEX! DROP",
+            "LSU-HEAD @ LATEST!",
+            'CR ." [LATEST-SATURATED " '
+            'HERE LSU-HERE @ = . LSU-ONE . LSU-TWO . '
+            'DICT-INDEX@ . . . . ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[LATEST-UNBOUND\s+-1\s+101\s+202\s+0\s+0\s+0\s+0\s+\]",
+        )
+        self.assertRegex(
+            text,
+            r"\[LATEST-SATURATED\s+-1\s+101\s+202\s+9\s+1\s+1\s+1048576\s+\]",
+        )
+
+    def test_latest_store_rejects_cycle_without_partial_publication(self):
+        """A cyclic replacement faults before head, cache, or index mutation."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE LSC-HERE VARIABLE LSC-HEAD VARIABLE LSC-CYCLE",
+            "0x100000 1024 DICT-INDEX! DROP",
+            ": LSC-HOT 73 ;",
+            "LSC-HOT DROP",  # retain a hot binding across the rejected call
+            "LATEST LSC-HEAD !",
+            "HERE LSC-CYCLE ! LSC-CYCLE @ , 1 C, 88 C,",
+            "HERE LSC-HERE !",
+            "LSC-CYCLE @ LATEST!",
+            'CR ." [LATEST-CYCLE " '
+            'HERE LSC-HERE @ = . LATEST LSC-HEAD @ = . '
+            'LSC-HOT . DICT-INDEX@ . DROP DROP DROP ." ]"',
+        ])
+        self.assertIn("dictionary overflow", text)
+        self.assertRegex(
+            text,
+            r"\[LATEST-CYCLE\s+-1\s+-1\s+73\s+3\s+\]",
+        )
+
+    def test_latest_store_accepts_empty_chain_without_changing_here(self):
+        """Zero is the valid empty dictionary head and leaves HERE intact."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE LSE-HERE VARIABLE LSE-HEAD VARIABLE LSE-ZERO",
+            ": LSE-ROUNDTRIP "
+            "0 LATEST! LATEST 0= LSE-ZERO ! LSE-HEAD @ LATEST! ;",
+            "HERE LSE-HERE ! LATEST LSE-HEAD !",
+            "0x100000 1024 DICT-INDEX! DROP",
+            "LSE-ROUNDTRIP",
+            'CR ." [LATEST-EMPTY " '
+            'LSE-ZERO @ . HERE LSE-HERE @ = . LATEST LSE-HEAD @ = . '
+            'DICT-INDEX@ . DROP DROP DROP ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[LATEST-EMPTY\s+-1\s+-1\s+-1\s+3\s+\]",
+        )
+
     def test_dictionary_rejects_names_over_127_without_header(self):
         """Every native definer rejects 128-byte names before publication."""
         name = "N" * 128
@@ -5474,7 +5572,8 @@ class TestBIOSTACC(unittest.TestCase):
         """WOTS appends after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
-            ("d_wots_chain", "d_dict_rollback"),
+            ("d_wots_chain", "d_latest_store"),
+            ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
             ("d_dict_index_store", "d_dict_fault_xt_store"),
@@ -5510,7 +5609,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 480)
+        self.assertEqual(len(seen), 481)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -15250,7 +15349,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 480)
+        self.assertEqual(len(seen), 481)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -16796,6 +16895,7 @@ class TestBIOSEntropyFill(unittest.TestCase):
             "little",
         )
         dictionary_acceleration_chain = (
+            ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
             ("d_dict_index_store", "d_dict_fault_xt_store"),
@@ -16830,7 +16930,7 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
-        self.assertEqual(wots_previous, labels["d_dict_rollback"])
+        self.assertEqual(wots_previous, labels["d_latest_store"])
         for current, previous in dictionary_acceleration_chain:
             link = int.from_bytes(
                 self._bios_harness.bios_code[

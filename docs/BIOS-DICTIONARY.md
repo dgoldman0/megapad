@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **480** entries.  The numbered
+The `bios.asm` dictionary link chain contains **481** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -73,9 +73,10 @@ non-wrapping, and contained in advertised external memory.
 
 Definition publication upserts the side index. `MARKER`, `FORGET`, and
 transactional compiler rollback use `DICT-ROLLBACK` to publish `HERE` and
-`LATEST` together, clear `EXT.DICT`, and rebuild the index newest-first. Raw
-`LATEST` mutation is unsupported because it could leave a forgotten binding in
-an accelerator.
+`LATEST` together, clear `EXT.DICT`, and rebuild the index newest-first.
+`LATEST!` preserves the compatible one-cell head setter for low-level loaders:
+it leaves `HERE` unchanged while validating the replacement chain, globally
+clearing `EXT.DICT`, and rebuilding the index under the dictionary epoch.
 
 The sizing profile, exact cache replacement rules, side-index publication and
 fallback protocol, and deferred multicore RTL requirements are authoritative
@@ -937,19 +938,20 @@ initialization, lifetime, or freedom from application-level aliases.
 | 475 | `DICT-LIMIT@` | `( -- limit )` | | Return the active exclusive external dictionary limit, or zero when disabled |
 | 476 | `DICT-FAULT-XT!` | `( xt -- )` | | Install the dictionary-fault callback used by the checked allocator |
 
-### Dictionary Acceleration Control (3 words)
+### Dictionary Acceleration Control (4 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 477 | `DICT-INDEX!` | `( base slots -- status )` | | Install/rebuild or disable the caller-backed dictionary index; invalid arguments leave the prior binding unchanged |
 | 478 | `DICT-INDEX@` | `( -- base slots count flags )` | | Return bounded index geometry, occupied-slot count, and publication flags |
 | 479 | `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | | Validate a contiguous-zone checkpoint, globally clear cached bindings, atomically publish HERE/LATEST, and rebuild the side index |
+| 480 | `LATEST!` | `( entry -- )` | | Publish any valid terminating dictionary head without changing HERE, globally clear cached bindings, and rebuild the side index |
 
 ### Checked WOTS Chain (1 word)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 480 | `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | | Check capability and complete arguments, run the 64-bit Bank 0 DMA/shared-Keccak chain under crypto guard 8, stage 16 result bytes, prove `CLEAR` reached `IDLE`, then publish and release |
+| 481 | `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | | Check capability and complete arguments, run the 64-bit Bank 0 DMA/shared-Keccak chain under crypto guard 8, stage 16 result bytes, prove `CLEAR` reached `IDLE`, then publish and release |
 
 `context-64` is exactly `PK.seed[16] || ADRS[32] || node[16]`. `start` and
 `steps` are each 0..15; when `steps` is nonzero their widened sum is at most
@@ -1006,9 +1008,9 @@ machine reset.
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
 | Dictionary Bounds and Fault Control | 5 |
-| Dictionary Acceleration Control | 3 |
+| Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **387** |
+| **Catalogued subtotal** | **388** |
 
 ### All Immediate Words (34)
 
@@ -1020,7 +1022,7 @@ The complete authoritative link chain is the `.dq` chain in `bios.asm`.
 The checked WOTS word closes the newest appended segment:
 
 ```
-WOTS-CHAIN → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
+WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
 → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
 → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 → TACC-CLEAR → TACC-TRY → TAMAC → CALLER-SPAN-STATUS

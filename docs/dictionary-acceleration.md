@@ -156,8 +156,12 @@ marks the index non-authoritative, globally clears `EXT.DICT`, publishes both
 dictionary pointers, clears the side index, and rebuilds newest-to-oldest. It
 marks the index authoritative only if the complete rebuild succeeds. `MARKER`,
 `FORGET`, and transactional compiler rollback must use this operation; a raw
-store to `var_latest` is not a supported rollback path. This prevents a
-forgotten entry from surviving as a hardware-cache or side-index hit.
+store to `var_latest` is not a supported rollback path. `LATEST! ( entry -- )`
+remains the compatible low-level head-publication word: it leaves `HERE`
+unchanged, globally clears cached bindings, and rebuilds the side index from
+any valid terminating replacement chain under the same epoch. This prevents a
+removed entry from surviving as a hardware-cache or side-index hit while
+preserving loaders that intentionally publish a forward-linked image chain.
 
 The two-cell checkpoint rewinds one contiguous active dictionary zone. Every
 removed header must lie in `[saved-HERE,current-HERE)`, and no retained header

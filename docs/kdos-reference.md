@@ -544,7 +544,9 @@ Bank-0 or userland exhaustion; checked evaluation reports that as status 5 in
 `EVAL-S-THROW`.
 
 `MARKER`, `FORGET`, and checked compiler owners pass their saved pair to
-`DICT-ROLLBACK`; raw `LATEST` stores are unsupported. The two-cell checkpoint
+`DICT-ROLLBACK`; direct stores to the private `var_latest` cell are unsupported.
+Low-level owners that intentionally change only the dictionary head use the
+coherent `LATEST!` word, which leaves `HERE` unchanged. The two-cell checkpoint
 can reclaim only one contiguous active dictionary zone. If definitions made
 after the checkpoint cross between Bank 0 and userland, rollback rejects the
 pair before changing `HERE`, `LATEST`, the cache, or the index. Use separate

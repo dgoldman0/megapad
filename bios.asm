@@ -3018,6 +3018,133 @@ w_dict_index_fetch:
     str r14, r1
     ret.l
 
+; Validate one linked dictionary header before following it.  R9 is the entry
+; address and R0 returns its link.  A header may live in any advertised
+; readable physical-memory window, but its complete link/flags/name span must
+; fit within one window and linked entries must have a non-empty name.  Preserve
+; the proposed LATEST and both cycle-walk cursors used by w_latest_store.
+dict_chain_node_link:
+    subi r15, 24
+    str r15, r7
+    mov r11, r15
+    addi r11, 8
+    str r11, r10
+    addi r11, 8
+    str r11, r13
+
+    ; First prove that link and flags/length are readable before inspecting
+    ; either field.  disk_dma_span_status accepts Bank 0 plus advertised XMEM,
+    ; HBW, and VRAM and rejects wrapping or cross-window spans.
+    ldi r10, 9
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne dict_fault
+
+    mov r11, r9
+    addi r11, 8
+    ld.b r1, r11
+    andi r1, 0x7F
+    cmpi r1, 0
+    lbreq dict_fault
+
+    ; Then prove the exact header, rather than a worst-case 136-byte span, so
+    ; a short valid header at the end of a physical window remains accepted.
+    mov r10, r1
+    addi r10, 9
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne dict_fault
+    ldn r0, r9
+
+    mov r11, r15
+    addi r11, 16
+    ldn r13, r11
+    subi r11, 8
+    ldn r10, r11
+    ldn r7, r15
+    addi r15, 24
+    ret.l
+
+; LATEST! ( entry -- )
+; Preserve the historical one-cell dictionary-head setter ABI while making
+; every successful publication coherent with both acceleration layers.  The
+; caller may supply any valid terminating chain: an ancestor (hide/rollback),
+; a newly linked prefix (image splice), or an otherwise independent chain.
+; HERE is deliberately neither validated against nor changed with this API;
+; callers that restore allocation state must use DICT-ROLLBACK instead.
+w_latest_store:
+    ldn r7, r14               ; proposed dictionary head (zero is empty)
+    mov r13, r7               ; tortoise validates every retained node
+    mov r10, r7               ; hare proves that the chain terminates
+
+.latest_store_validate:
+    cmpi r13, 0
+    lbreq .latest_store_valid
+    mov r9, r13
+    ldi64 r11, dict_chain_node_link
+    call.l r11
+    mov r13, r0
+
+    cmpi r10, 0
+    lbreq .latest_store_validate
+    mov r9, r10
+    ldi64 r11, dict_chain_node_link
+    call.l r11
+    mov r10, r0
+    cmpi r10, 0
+    lbreq .latest_store_validate
+    mov r9, r10
+    ldi64 r11, dict_chain_node_link
+    call.l r11
+    mov r10, r0
+
+    cmpi r13, 0
+    lbreq .latest_store_validate
+    cmp r13, r10
+    lbreq dict_fault           ; proposed dictionary chain is cyclic
+    lbr .latest_store_validate
+
+.latest_store_valid:
+    addi r14, 8               ; consume only after validation succeeds
+    ldi64 r11, dict_epoch_begin
+    call.l r11
+
+    ; While the epoch is odd, force every reader to the linked/no-fill path,
+    ; globally invalidate stale hardware bindings, and publish the new head.
+    ldi64 r11, var_dict_index_flags
+    ldn r1, r11
+    andi r1, 0xFD             ; clear AUTHORITATIVE
+    ori r1, 0x04              ; set BUILDING/publication barrier
+    str r11, r1
+    dclr
+    ldi64 r11, var_latest
+    str r11, r7
+
+    ; Rebuild newest-first when caller storage is bound.  Saturation is a
+    ; successful non-authoritative publication; with no binding, linked lookup
+    ; is already the complete stable representation.
+    ldi64 r11, var_dict_index_flags
+    ldn r1, r11
+    andi r1, 0x01
+    cmpi r1, 0
+    lbrne .latest_store_rebuild
+    ldi r1, 0
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    lbr .latest_store_done
+.latest_store_rebuild:
+    ldi r1, 0x05              ; BOUND | BUILDING
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    ldi64 r11, dict_index_rebuild
+    call.l r11
+.latest_store_done:
+    ldi64 r11, dict_epoch_end
+    call.l r11
+    ret.l
+
 ; DICT-ROLLBACK ( saved-here saved-latest -- )
 ; Validate both targets and prove saved-latest is an ancestor before mutating
 ; any accelerator or dictionary state.  Invalid pairs use the existing
@@ -22726,10 +22853,19 @@ d_dict_rollback:
     call.l r11
     ret.l
 
+; === LATEST! ===
+d_latest_store:
+    .dq d_dict_rollback
+    .db 7
+    .ascii "LATEST!"
+    ldi64 r11, w_latest_store
+    call.l r11
+    ret.l
+
 ; === WOTS-CHAIN ===
 latest_entry:
 d_wots_chain:
-    .dq d_dict_rollback
+    .dq d_latest_store
     .db 10
     .ascii "WOTS-CHAIN"
     ldi64 r11, w_wots_chain

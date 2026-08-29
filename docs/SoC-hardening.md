@@ -570,7 +570,9 @@ dictionary storage can be reused.
 FNV-1a is computed over uppercase bytes with 32-bit truncation after every
 multiply. `MARKER`, `FORGET`, and transactional rollback use the BIOS-owned
 `DICT-ROLLBACK` path, which globally clears the cache and rebuilds the side
-index. Raw `LATEST` mutation is unsupported.
+index. Low-level one-cell head publication uses BIOS `LATEST!`, which performs
+the same cache clear and index rebuild without changing `HERE`; direct writes
+to the private `var_latest` cell remain unsupported.
 
 ### Micro-core behaviour
 
