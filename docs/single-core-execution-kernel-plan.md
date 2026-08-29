@@ -1042,6 +1042,32 @@ destination/source aliasing, selected-PC input, and preserved flag bits. The
 78-case exact-single selector passes; production source-load attribution
 remains deferred with the vertical gate.
 
+### Profile-guided indexed-address coverage
+
+The dictionary index then supplied the evidence previously required by EK-F4:
+its byte loops form addresses as `entry base + entry index + constant` before
+ordinary `LD.B`. Address recipes now conservatively carry at most two distinct
+entry-register sources in canonical order plus a wrapping 64-bit addend. The
+existing constant and single entry/prior-read forms remain unchanged. Duplicate
+sources, loaded-value composition, a third source, and nonconstant subtraction
+become unknown and end construction as before.
+
+Preflight resolves both entry values before native entry and sends only the
+final modulo-64-bit address through the unchanged width, MMIO, aperture, and
+ordinary-RAM span proof. Generated code still receives only the proven host
+pointer by access index; its ABI and hot block-entry stride do not grow. The
+parallel eight-access recipe table grows from 72 to 80 bytes, or 32 KiB across
+the 4,096-entry host cache.
+
+A position-balanced `MOV; ADD; LD.B; INC; LBR` motif improved from
+64.4--75.3 Msteps/s at the `AND` parent to 104.2--107.3 Msteps/s, halving
+native admissions while keeping all five guest instructions native. Focused
+oracles prove ordinary and wrapping sums, exact-single/generic equivalence,
+the prior-read and affine Forth forms, zero-progress fallback, and external
+aperture rejection. The full 79-case exact-single selector passes. This is a
+host proof optimization over existing MP64 `ADD` and `LD.B` semantics, not a
+new indexed-load opcode or hardware addressing mode.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1116,6 +1142,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D17 | Admit resolver-proved external-RAM scalar spans at native block entry. | External RAM shares Bank 0's pinned, directly contiguous execution contract, while full-span, MMIO, aperture-priority, timing, and I-cache invalidation checks remain authoritative; HBW and VRAM are not admitted. |
 | EK-D18 | Replace the exact-single host plan and rejection direct maps with bounded four-way tables and stable physical JIT slots. | These caches remain host-only and disposable; the guest-visible 1,024-entry `EXT.DICT` cache, architectural state, timing, snapshots, and RTL contract do not change. Full source-load retention still requires the deferred production A/B. |
 | EK-D19 | Admit and lower an opcode only through the existing shared decoded semantic before crediting it as DBT coverage. | Register `AND` is the first slice: its ISA, flags, timing, Python behavior, and hardware contract predate this host-only coverage change. |
+| EK-D20 | Represent a profiled base-plus-index scalar address with two distinct block-entry sources and a wrapping addend. | Preflight still proves the complete ordinary-RAM span before native entry; generated memory operations and the MP64 ISA gain no addressing mode or unchecked host access. |
 
 ## Deferred findings ledger
 
@@ -1124,7 +1151,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the compact consolidation matrix. |
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
 | EK-F3 | The rejection matcher remains behind a positive-cache probe in scalar regions whose starts repeatedly match exact resident rejections. | EK-D15's segment hint is rejected by EK-D16: optimizing the rejection-only extreme imposed a larger production cost. Restore the simpler positive-first path and leave this local inefficiency open unless representative mixed evidence supports a correction that does not tax the common path. |
-| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden the closed engine without new retained remaining-shape evidence and paired exact justification. |
+| EK-F4 | Address provenance deliberately represented one entry, constant, or prior-read source plus an addend, so the dictionary index's independent base-plus-index calculation ended construction before `LD.B`. | Resolved by EK-D20 after the new dictionary profile supplied a concrete hot shape and the paired indexed-load motif showed a material exact-equivalent gain. Broader source algebra remains excluded. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |
 | EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |

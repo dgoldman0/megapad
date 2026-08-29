@@ -46,11 +46,14 @@ static_assert(std::is_trivially_copyable_v<BlockExit>);
 static_assert(sizeof(BlockExit) == 16);
 
 // A memory address admitted into a portable block is expressed from state
-// available before that block starts. Entry-register and constant sources are
-// direct. A prior-read source names an earlier item in the same ordered access
-// table; preflight may inspect that already-proved ordinary-RAM value when a
-// later address depends on it. Unknown provenance is construction-only and
-// must never be published as an executable recipe.
+// available before that block starts. One entry-register, constant, or
+// prior-read source remains direct. A second source may name one distinct
+// entry register, which admits base-plus-index addressing without adding
+// coefficients or composing loaded values. BLOCK_MEMORY_CONSTANT_SOURCE also
+// denotes an absent variable term. A prior-read source names an earlier item
+// in the same ordered access table; preflight may inspect that already-proved
+// ordinary-RAM value when a later address depends on it. Unknown provenance is
+// construction-only and must never be published as an executable recipe.
 inline constexpr uint8_t BLOCK_MEMORY_ENTRY_REGISTER_LIMIT = 32;
 inline constexpr uint8_t BLOCK_MEMORY_PRIOR_READ_BASE = 0x80;
 inline constexpr uint8_t BLOCK_MEMORY_CONSTANT_SOURCE = 0xFE;
@@ -83,16 +86,27 @@ constexpr uint8_t block_memory_prior_read_index(
 struct BlockMemoryAddressRecipe {
     uint64_t addend = 0;
     uint8_t source = BLOCK_MEMORY_UNKNOWN_SOURCE;
+    uint8_t second_source = BLOCK_MEMORY_CONSTANT_SOURCE;
 
     constexpr bool known() const noexcept {
+        if (source == BLOCK_MEMORY_CONSTANT_SOURCE) {
+            return second_source == BLOCK_MEMORY_CONSTANT_SOURCE;
+        }
+        if (block_memory_source_is_prior_read(source)) {
+            return second_source == BLOCK_MEMORY_CONSTANT_SOURCE;
+        }
+        if (!block_memory_source_is_entry_register(source))
+            return false;
         return
-            block_memory_source_is_entry_register(source) ||
-            block_memory_source_is_prior_read(source) ||
-            source == BLOCK_MEMORY_CONSTANT_SOURCE;
+            second_source == BLOCK_MEMORY_CONSTANT_SOURCE ||
+            (
+                block_memory_source_is_entry_register(second_source) &&
+                source < second_source
+            );
     }
 };
 
-// Keep the published table compact: its structure-of-arrays layout costs nine
+// Keep the published table compact: its structure-of-arrays layout costs ten
 // bytes per possible access instead of padding every recipe to sixteen bytes.
 // Capacity remains a property of the caller's bounded block storage.
 template <std::size_t Capacity>
@@ -104,9 +118,11 @@ struct BlockMemoryAddressRecipes {
 
     std::array<uint64_t, Capacity> addends{};
     std::array<uint8_t, Capacity> sources{};
+    std::array<uint8_t, Capacity> second_sources{};
 
     BlockMemoryAddressRecipes() noexcept {
         sources.fill(BLOCK_MEMORY_UNKNOWN_SOURCE);
+        second_sources.fill(BLOCK_MEMORY_UNKNOWN_SOURCE);
     }
 
     constexpr void set(
@@ -114,16 +130,22 @@ struct BlockMemoryAddressRecipes {
             BlockMemoryAddressRecipe recipe) noexcept {
         addends[index] = recipe.addend;
         sources[index] = recipe.source;
+        second_sources[index] = recipe.second_source;
     }
 
     constexpr BlockMemoryAddressRecipe get(
             std::size_t index) const noexcept {
-        return {addends[index], sources[index]};
+        return {
+            addends[index],
+            sources[index],
+            second_sources[index],
+        };
     }
 };
 
 static_assert(std::is_standard_layout_v<BlockMemoryAddressRecipe>);
 static_assert(std::is_trivially_copyable_v<BlockMemoryAddressRecipe>);
+static_assert(sizeof(BlockMemoryAddressRecipe) == 16);
 static_assert(
     std::is_standard_layout_v<BlockMemoryAddressRecipes<1>>);
 static_assert(

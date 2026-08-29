@@ -1887,7 +1887,7 @@ struct CPUState {
         BlockMemoryAddressRecipes<
             SINGLE_CORE_BLOCK_MAX_MEMORY_ACCESSES>;
     static_assert(
-        sizeof(SingleCoreBlockMemoryAddressRecipes) == 72,
+        sizeof(SingleCoreBlockMemoryAddressRecipes) == 80,
         "single-core memory recipes must retain compact storage");
     struct SingleCoreDecodedBlockEntry {
         bool valid = false;
@@ -20812,17 +20812,43 @@ struct SingleCoreAddressProvenance {
 
     SingleCoreAddressProvenance() noexcept {
         for (uint8_t reg = 0; reg < registers.size(); reg++) {
-            registers[reg] = {0, reg};
+            registers[reg] = {
+                0,
+                reg,
+                BLOCK_MEMORY_CONSTANT_SOURCE,
+            };
         }
     }
 
     static BlockMemoryAddressRecipe constant(
             uint64_t value) noexcept {
-        return {value, BLOCK_MEMORY_CONSTANT_SOURCE};
+        return {
+            value,
+            BLOCK_MEMORY_CONSTANT_SOURCE,
+            BLOCK_MEMORY_CONSTANT_SOURCE,
+        };
     }
 
     static BlockMemoryAddressRecipe unknown() noexcept {
-        return {0, BLOCK_MEMORY_UNKNOWN_SOURCE};
+        return {
+            0,
+            BLOCK_MEMORY_UNKNOWN_SOURCE,
+            BLOCK_MEMORY_UNKNOWN_SOURCE,
+        };
+    }
+
+    static bool is_constant(
+            const BlockMemoryAddressRecipe& recipe) noexcept {
+        return
+            recipe.source == BLOCK_MEMORY_CONSTANT_SOURCE &&
+            recipe.second_source == BLOCK_MEMORY_CONSTANT_SOURCE;
+    }
+
+    static bool is_single_entry_source(
+            const BlockMemoryAddressRecipe& recipe) noexcept {
+        return
+            block_memory_source_is_entry_register(recipe.source) &&
+            recipe.second_source == BLOCK_MEMORY_CONSTANT_SOURCE;
     }
 
     void add_to_register(
@@ -20855,6 +20881,7 @@ struct SingleCoreAddressProvenance {
                     0,
                     block_memory_prior_read_source(
                         memory_access_index),
+                    BLOCK_MEMORY_CONSTANT_SOURCE,
                 };
                 return;
             case DecodedOperation::STORE_NATURAL:
@@ -20893,19 +20920,28 @@ struct SingleCoreAddressProvenance {
                     registers[decoded.rs];
                 if (!first.known() || !second.known()) {
                     registers[decoded.rd] = unknown();
-                } else if (
-                    second.source ==
-                    BLOCK_MEMORY_CONSTANT_SOURCE
-                ) {
+                } else if (is_constant(second)) {
                     first.addend += second.addend;
                     registers[decoded.rd] = first;
-                } else if (
-                    first.source ==
-                    BLOCK_MEMORY_CONSTANT_SOURCE
-                ) {
+                } else if (is_constant(first)) {
                     const uint64_t constant_addend = first.addend;
                     first = second;
                     first.addend += constant_addend;
+                    registers[decoded.rd] = first;
+                } else if (
+                    is_single_entry_source(first) &&
+                    is_single_entry_source(second) &&
+                    first.source != second.source
+                ) {
+                    const uint8_t first_source = first.source;
+                    const uint8_t second_source = second.source;
+                    first.addend += second.addend;
+                    first.source = std::min(
+                        first_source,
+                        second_source);
+                    first.second_source = std::max(
+                        first_source,
+                        second_source);
                     registers[decoded.rd] = first;
                 } else {
                     registers[decoded.rd] = unknown();
@@ -20919,13 +20955,13 @@ struct SingleCoreAddressProvenance {
                     registers[decoded.rs];
                 if (!first.known() || !second.known()) {
                     registers[decoded.rd] = unknown();
-                } else if (
-                    second.source ==
-                    BLOCK_MEMORY_CONSTANT_SOURCE
-                ) {
+                } else if (is_constant(second)) {
                     first.addend -= second.addend;
                     registers[decoded.rd] = first;
-                } else if (first.source == second.source) {
+                } else if (
+                    first.source == second.source &&
+                    first.second_source == second.second_source
+                ) {
                     registers[decoded.rd] = constant(
                         first.addend - second.addend);
                 } else {
@@ -21559,6 +21595,8 @@ static MP64_NOINLINE bool preflight_single_core_direct_memory(
 
         const BlockMemoryAddressRecipe recipe =
             memory_addresses.get(access_count);
+        if (!recipe.known())
+            return false;
         uint64_t address = 0;
         if (block_memory_source_is_entry_register(recipe.source)) {
             address = core.regs[recipe.source] + recipe.addend;
@@ -21598,6 +21636,13 @@ static MP64_NOINLINE bool preflight_single_core_direct_memory(
             address = read_values[source_access] + recipe.addend;
         } else {
             return false;
+        }
+        if (recipe.second_source != BLOCK_MEMORY_CONSTANT_SOURCE) {
+            if (!block_memory_source_is_entry_register(
+                    recipe.second_source)) {
+                return false;
+            }
+            address += core.regs[recipe.second_source];
         }
 
         uint64_t width = 0;

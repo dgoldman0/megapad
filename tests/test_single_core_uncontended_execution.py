@@ -3020,6 +3020,70 @@ def test_hot_byte_copy_pair_uses_one_generic_two_span_block() -> None:
     _assert_multi_memory_profile(snapshot, instruction_count=2)
 
 
+def _run_indexed_byte_copy_motif(*, reference: bool) -> tuple[tuple, dict]:
+    system = _memory_motif_system(
+        """
+    addi r9, 3
+    add r9, r10
+    ld.b r0, r9
+    st.b r7, r0
+""",
+        reference=reference,
+    )
+    cases = (
+        (0x180, 0x7D, 0x200, 0x12, 0x300),
+        (
+            (1 << 64) - 1 - 0x100,
+            0x33E,
+            0x240,
+            0xA5,
+            0x320,
+        ),
+    )
+    for _, _, source, value, destination in cases:
+        system.load_binary(source, bytes((value,)))
+        system.load_binary(destination, b"\xEE")
+
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+    system.cpu.regs[9] = cases[0][0]
+    system.cpu.regs[10] = cases[0][1]
+    sliced = system.run_batch_stats(1)
+    assert sliced.instructions_executed == 1
+
+    for base, index, source, value, destination in cases:
+        system.cpu.pc = 1
+        system.cpu.regs[0] = 0xFFFF_FFFF_FFFF_FFFF
+        system.cpu.regs[7] = destination
+        system.cpu.regs[9] = base
+        system.cpu.regs[10] = index
+        copied = system.run_batch_stats(4)
+        assert copied.instructions_executed == 4
+        assert copied.system_cycles_advanced == 4
+        assert system.cpu.regs[0] == value
+        assert system.cpu.regs[7] == destination
+        assert system.cpu.regs[9] == source
+        assert system.cpu.regs[10] == index
+        assert system.cpu.mem[destination] == value
+
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    assert system.cpu.cycle_count == 10
+    assert owner.system_cycles == 10
+    return _core_signature(system), snapshot
+
+
+def test_indexed_byte_copy_uses_two_entry_sources_and_wrapping_addend(
+) -> None:
+    fast, snapshot = _run_indexed_byte_copy_motif(reference=False)
+    reference, _ = _run_indexed_byte_copy_motif(reference=True)
+
+    assert fast == reference
+    _assert_multi_memory_profile(snapshot, instruction_count=4)
+
+
 def _run_external_copy_motif(
     *,
     reference: bool,
