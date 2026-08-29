@@ -987,6 +987,8 @@ VARIABLE _PT-F-A
 VARIABLE _PT-F-TYPE
 VARIABLE _PT-F-PAY
 VARIABLE _PT-F-TOTAL
+VARIABLE _PT-F-DATA
+VARIABLE _PT-F-FLUSH
 
 : _PT-FRAME-BEGIN  ( type payload-u s -- status )
     _PT-F-S ! _PT-F-PAY ! _PT-F-TYPE !
@@ -1013,9 +1015,7 @@ VARIABLE _PT-F-TOTAL
     _PT-F-S @ _PT.S.EPOCH @ _PT-F-A @ 32 + L!
     PT-S-OK ;
 
-VARIABLE _PT-F-DATA
-: _PT-FRAME-SEND  ( data? s -- status )
-    _PT-F-S ! _PT-F-DATA !
+: _PT-FRAME-PUBLISH  ( -- status )
     _PT-F-DATA @ IF
         _PT-F-S @ _PT.S.PEER-SENT @ _PT-F-TOTAL @ +
         _PT-F-S @ _PT.S.PEER-SENT @ U< IF
@@ -1025,7 +1025,8 @@ VARIABLE _PT-F-DATA
     THEN
     _PT-F-A @ _PT-F-PAY @ _PT-FRAME-CRC _PT-F-A @ 36 + L!
     UART-ACQUIRE
-    _PT-F-A @ _PT-F-TOTAL @ TYPE TX-FLUSH
+    _PT-F-A @ _PT-F-TOTAL @ TYPE
+    _PT-F-FLUSH @ IF TX-FLUSH THEN
     UART-RELEASE
     _PT-F-DATA @ IF
         _PT-F-S @ _PT.S.PEER-SENT @ _PT-F-TOTAL @ +
@@ -1035,6 +1036,18 @@ VARIABLE _PT-F-DATA
         1+ _PT-F-S @ _PT.S.TX-SEQ !
     ELSE DROP THEN
     PT-S-OK ;
+
+\ Standalone protocol and commit frames drain the UART ring immediately.
+\ Transaction BEGIN/body frames may remain queued; the BIOS ring drains
+\ automatically when full, and the exact COMMIT or ABORT boundary flushes its
+\ ordered tail while holding the same UART lock as the boundary-frame write.
+: _PT-FRAME-SEND  ( data? s -- status )
+    _PT-F-S ! _PT-F-DATA ! TRUE _PT-F-FLUSH !
+    _PT-FRAME-PUBLISH ;
+
+: _PT-FRAME-QUEUE  ( data? s -- status )
+    _PT-F-S ! _PT-F-DATA ! FALSE _PT-F-FLUSH !
+    _PT-FRAME-PUBLISH ;
 
 : _PT-FRAME-PAYLOAD  ( -- a )  _PT-F-A @ _PT-HDR + ;
 
@@ -2891,7 +2904,7 @@ VARIABLE _PT-B-CELL-BYTES
     _PT-B-ROWS @ _PT-FRAME-PAYLOAD 20 + L!
     _PT-B-SPANS @ _PT-FRAME-PAYLOAD 24 + L!
     _PT-B-CELLS @ _PT-FRAME-PAYLOAD 28 + L!
-    TRUE _PT-B-S @ _PT-FRAME-SEND ;
+    TRUE _PT-B-S @ _PT-FRAME-QUEUE ;
 
 : _PT-BEGIN-TX  ( cols rows span-count cell-count snapshot? session -- status )
     _PT-B-S ! _PT-B-SNAPSHOT ! _PT-B-CELLS ! _PT-B-SPANS !
@@ -3088,7 +3101,7 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-RET-OPS @ _PT-FRAME-PAYLOAD 48 + L!
     _PT-PB-CELL-MODE @ _PT-FRAME-PAYLOAD 52 + L!
     _PT-PB-RET-MODE @ _PT-FRAME-PAYLOAD 56 + L!
-    TRUE _PT-PB-S @ _PT-FRAME-SEND ;
+    TRUE _PT-PB-S @ _PT-FRAME-QUEUE ;
 
 \ Stack: cols rows cell-spans cells retained-ops retained-frame-bytes
 \        cell-mode retained-mode session -- status
@@ -3230,7 +3243,7 @@ VARIABLE _PT-C-INDEX
     6 + _PT-C-ATTRS @ SWAP W!
     _PT-C-S @ _PT.S.SPAN-REMAIN @ 1- DUP
     _PT-C-S @ _PT.S.SPAN-REMAIN ! IF PT-S-OK EXIT THEN
-    TRUE _PT-C-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
+    TRUE _PT-C-S @ _PT-FRAME-QUEUE ?DUP IF EXIT THEN
     _PT-C-S @ _PT.S.TX-SPANS-DONE @ 1+
         _PT-C-S @ _PT.S.TX-SPANS-DONE !
     _PT-C-S @ _PT.S.TX-CELLS-DONE @ _PT-FRAME-PAYLOAD 8 + L@ +
@@ -3270,7 +3283,7 @@ VARIABLE _PT-CUR-VISIBLE
     _PT-CUR-ROW @ _PT-FRAME-PAYLOAD L!
     _PT-CUR-COL @ _PT-FRAME-PAYLOAD 4 + L!
     _PT-CUR-VISIBLE @ _PT-FRAME-PAYLOAD 8 + C!
-    TRUE _PT-CUR-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
+    TRUE _PT-CUR-S @ _PT-FRAME-QUEUE ?DUP IF EXIT THEN
     TRUE _PT-CUR-S @ _PT.S.CURSOR-DONE? ! PT-S-OK ;
 
 VARIABLE _PT-PO-TYPE
@@ -3335,7 +3348,7 @@ VARIABLE _PT-PO-NEXT-BYTES
     _PT-PO-TYPE @ _PT-PO-U @ _PT-PO-S @ _PT-FRAME-BEGIN ;
 
 : _PT-PO-SEND  ( -- status )
-    TRUE _PT-PO-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
+    TRUE _PT-PO-S @ _PT-FRAME-QUEUE ?DUP IF EXIT THEN
     _PT-PO-NEXT-OPS @ _PT-PO-S @ _PT.S.TX-RET-OPS-DONE !
     _PT-PO-NEXT-BYTES @ _PT-PO-S @ _PT.S.TX-RET-BYTES-DONE !
     PT-S-OK ;

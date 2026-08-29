@@ -66,6 +66,54 @@ def test_frame_crc_prefers_checked_hardware_crc32c_without_stealing_owner() -> N
     assert "0xFFFFFFFF XOR" in frame_crc
 
 
+def test_transaction_frames_batch_until_an_atomic_protocol_boundary() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    publish = _definition(source, "_PT-FRAME-PUBLISH")
+    send = _definition(source, "_PT-FRAME-SEND")
+    queue = _definition(source, "_PT-FRAME-QUEUE")
+
+    write = publish.index("_PT-F-A @ _PT-F-TOTAL @ TYPE")
+    flush = publish.index("_PT-F-FLUSH @ IF TX-FLUSH THEN")
+    release = publish.index("UART-RELEASE")
+    assert publish.index("UART-ACQUIRE") < write < flush < release
+    assert "TRUE _PT-F-FLUSH !" in send
+    assert "FALSE _PT-F-FLUSH !" in queue
+
+    buffered = (
+        "_PT-EMIT-BEGIN",
+        "_PT-PB-EMIT",
+        "PT-CELL",
+        "PT-CURSOR",
+        "_PT-PO-SEND",
+    )
+    for word in buffered:
+        definition = _definition(source, word)
+        assert "_PT-FRAME-QUEUE" in definition
+        assert "_PT-FRAME-SEND" not in definition
+    assert source.count("_PT-FRAME-QUEUE") == len(buffered) + 1
+
+    for word in (
+        "_PT-SEND-CLIENT-READY",
+        "_PT-SEND-CREDIT",
+        "_PT-SEND-CLOSE",
+        "_PT-SEND-CLOSE-ACK",
+        "_PT-SEND-ABORT",
+        "_PT-SEND-RESET-ACK",
+        "_PT-SEND-RET-QUERY",
+        "_PT-SEND-FATAL-ERROR",
+        "PT-OWNER-OPEN",
+        "PT-OWNER-DROP",
+        "PT-PRESENT-COMMIT",
+        "_PT-COMMIT",
+    ):
+        definition = _definition(source, word)
+        assert "_PT-FRAME-SEND" in definition
+        assert "_PT-FRAME-QUEUE" not in definition
+
+    negotiation = _definition(source, "_PT-W-PUBLISH")
+    assert "TYPE TX-FLUSH" in negotiation
+
+
 def test_glyph_run_discovery_capacity_is_core_owned() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     caps = _definition(source, "_PT-RET-CAPS-VALID?")
