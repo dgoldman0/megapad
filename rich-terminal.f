@@ -575,6 +575,10 @@ VARIABLE _PT-CA
 VARIABLE _PT-CU
 VARIABLE _PT-CC
 VARIABLE _PT-CI
+\ The checked hardware CRC engine is the normal APT framing path.  Keep the
+\ software implementation as a contention/capability fallback: another KDOS
+\ task may legitimately own the per-core CRC transaction, and framing must not
+\ steal or disturb that owner merely to make progress on the UART stream.
 : _PT-CRC-RANGE  ( crc a u -- crc' )
     _PT-CU ! _PT-CA ! _PT-CC ! 0 _PT-CI !
     BEGIN _PT-CI @ _PT-CU @ U< WHILE
@@ -595,11 +599,44 @@ VARIABLE _PT-CI
 
 VARIABLE _PT-CRC-A
 VARIABLE _PT-CRC-U
-: _PT-FRAME-CRC  ( frame payload-u -- crc )
+
+: _PT-CRC-FEED?  ( a u -- status )
+    BEGIN DUP 8 >= WHILE
+        OVER @ CRC-FEED ?DUP IF
+            >R 2DROP R> EXIT
+        THEN
+        SWAP 8 + SWAP 8 -
+    REPEAT
+    BEGIN DUP WHILE
+        OVER C@ CRC-FEED-BYTE ?DUP IF
+            >R 2DROP R> EXIT
+        THEN
+        SWAP 1+ SWAP 1-
+    REPEAT
+    2DROP 0 ;
+
+: _PT-FRAME-CRC-HARDWARE?  ( frame payload-u -- crc status )
     _PT-CRC-U ! _PT-CRC-A !
-    0xFFFFFFFF _PT-CRC-A @ 36 _PT-CRC-RANGE
-    _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-RANGE
-    0xFFFFFFFF XOR ;
+    5 CRC-MODE! ?DUP IF 0 SWAP EXIT THEN
+    0xFFFFFFFF CRC-INIT! ?DUP IF
+        >R CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    _PT-CRC-A @ 36 _PT-CRC-FEED? ?DUP IF
+        >R CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-FEED? ?DUP IF
+        >R CRC-FINAL@ DROP 0 R> EXIT
+    THEN
+    CRC-FINAL@ 0 ;
+
+: _PT-FRAME-CRC  ( frame payload-u -- crc )
+    _PT-FRAME-CRC-HARDWARE? ?DUP IF
+        2DROP
+        0xFFFFFFFF _PT-CRC-A @ 36 _PT-CRC-RANGE
+        _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-RANGE
+        0xFFFFFFFF XOR
+        EXIT
+    THEN ;
 
 \ =====================================================================
 \  Initialization: validates all borrowed storage without side effects

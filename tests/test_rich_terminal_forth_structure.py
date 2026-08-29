@@ -45,6 +45,27 @@ def test_header_ready_and_caps_reserved_fields_are_zero() -> None:
     assert "_PT-RV-P @ 6 + W@ 0<>" in receive_caps
 
 
+def test_frame_crc_prefers_checked_hardware_crc32c_without_stealing_owner() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    feed = _definition(source, "_PT-CRC-FEED?")
+    hardware = _definition(source, "_PT-FRAME-CRC-HARDWARE?")
+    frame_crc = _definition(source, "_PT-FRAME-CRC")
+
+    assert "OVER @ CRC-FEED ?DUP IF" in feed
+    assert "OVER C@ CRC-FEED-BYTE ?DUP IF" in feed
+    assert "5 CRC-MODE! ?DUP IF 0 SWAP EXIT THEN" in hardware
+    assert "0xFFFFFFFF CRC-INIT! ?DUP IF" in hardware
+    assert "_PT-CRC-A @ 36 _PT-CRC-FEED?" in hardware
+    assert "_PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-FEED?" in hardware
+    assert hardware.count("CRC-FINAL@ DROP 0 R> EXIT") == 3
+    assert "CRC-FINAL@ 0" in hardware
+
+    assert "_PT-FRAME-CRC-HARDWARE? ?DUP IF" in frame_crc
+    assert "0xFFFFFFFF _PT-CRC-A @ 36 _PT-CRC-RANGE" in frame_crc
+    assert "_PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-RANGE" in frame_crc
+    assert "0xFFFFFFFF XOR" in frame_crc
+
+
 def test_glyph_run_discovery_capacity_is_core_owned() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     caps = _definition(source, "_PT-RET-CAPS-VALID?")
