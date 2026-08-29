@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 8
+    assert benchmark.SCHEMA_VERSION == 9
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -91,11 +91,20 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
     }
 
 
-def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
+def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
     profile = {
+        "single_core_block_cache": {
+            "kind": "set-associative-exact-icache-span",
+            "sets": 1_024,
+            "ways": 4,
+            "entries": 4_096,
+            "identity_bytes": 16,
+        },
         "single_core_block_rejection_cache": {
-            "kind": "direct-mapped-exact-icache-span",
-            "entries": 512,
+            "kind": "set-associative-exact-icache-span",
+            "sets": 512,
+            "ways": 4,
+            "entries": 2_048,
             "identity_bytes": 16,
         },
         "counts": {
@@ -112,9 +121,10 @@ def test_profile_rejection_cache_metadata_and_counters_reconcile() -> None:
         },
     }
 
-    validation = benchmark._profile_rejection_cache_validation(profile)
+    validation = benchmark._profile_cache_validation(profile)
 
     assert validation == {
+        "block_cache_metadata_supported": True,
         "block_rejection_cache_metadata_supported": True,
         "block_build_attempts_reconcile": True,
         "block_rejection_cache_stores_reconcile": True,

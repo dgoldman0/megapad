@@ -41,13 +41,14 @@ private:
     void* address_ = nullptr;
 };
 
-// Exact-single execution owns one direct-mapped decoded-block table. Each
-// table index gets one stable, cache-line-aligned slot in this bounded dense
-// arena, so replacement code never allocates or changes VMA permissions on
-// the hot path. Linux maps the same memfd through separate RW and RX aliases;
-// no virtual mapping is writable and executable at the same time. Publication
-// requires exclusive native-scheduler ownership. The arena is process-local:
-// construct fresh system state after fork rather than using inherited aliases.
+// Exact-single execution owns one bounded set-associative decoded-block table.
+// Each physical table slot gets one stable, cache-line-aligned slot in this
+// dense arena, so replacement code never allocates or changes VMA permissions
+// on the hot path. Linux maps the same memfd through separate RW and RX
+// aliases; no virtual mapping is writable and executable at the same time.
+// Publication requires exclusive native-scheduler ownership. The arena is
+// process-local: construct fresh system state after fork rather than using
+// inherited aliases.
 class HostExecutableArena {
 public:
     static constexpr std::size_t SLOT_CACHE_LINE_BYTES = 64;

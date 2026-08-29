@@ -50,6 +50,10 @@ The native route remains ineligible for this microcore topology.
 Version 16 carries native host-profile schema 14 after removal of the rejected
 exact-single rejection-hint experiment. This microcore topology remains
 ineligible for the exact-single path.
+
+Version 17 carries native host-profile schema 15 and the bounded four-way
+positive-plan and exact-rejection cache geometry. This microcore topology
+remains ineligible for both caches.
 """
 
 from __future__ import annotations
@@ -74,7 +78,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 16
+REPORT_SCHEMA_VERSION = 17
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -366,12 +370,13 @@ def _profile_probe(
     coordinator_origin_total = sum(
         counts["coordinator_boundary_origins"].values()
     )
+    block_cache = normalized["single_core_block_cache"]
     block_rejection_cache = normalized[
         "single_core_block_rejection_cache"
     ]
     validation = {
-        "schema_is_version_14":
-            normalized["schema_version"] == 14,
+        "schema_is_version_15":
+            normalized["schema_version"] == 15,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -386,10 +391,20 @@ def _profile_probe(
             normalized["timing_semantics"]
             == "inclusive_nested_host_wall_nanoseconds"
         ),
-        "single_core_block_rejection_cache_is_bounded_exact_span": (
+        "single_core_block_cache_is_bounded_set_associative_exact_span": (
+            block_cache["kind"]
+            == "set-associative-exact-icache-span"
+            and block_cache["sets"] == 1_024
+            and block_cache["ways"] == 4
+            and block_cache["entries"] == 4_096
+            and block_cache["identity_bytes"] == 16
+        ),
+        "single_core_block_rejection_cache_is_bounded_set_associative_exact_span": (
             block_rejection_cache["kind"]
-            == "direct-mapped-exact-icache-span"
-            and block_rejection_cache["entries"] == 512
+            == "set-associative-exact-icache-span"
+            and block_rejection_cache["sets"] == 512
+            and block_rejection_cache["ways"] == 4
+            and block_rejection_cache["entries"] == 2_048
             and block_rejection_cache["identity_bytes"] == 16
         ),
         "one_native_batch":
@@ -580,7 +595,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 14,
+        "schema_version": 15,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

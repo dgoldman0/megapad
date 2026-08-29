@@ -92,7 +92,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
 
@@ -2876,6 +2876,7 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
     raw_counts = dict(raw["counts"])
     raw_wall = dict(raw["wall_ns"])
     raw_jit_storage = dict(raw["single_core_jit_storage"])
+    raw_block_cache = dict(raw["single_core_block_cache"])
     raw_block_rejection_cache = dict(
         raw["single_core_block_rejection_cache"]
     )
@@ -2925,8 +2926,17 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
                 raw_jit_storage["mapped_bytes_per_alias"]
             ),
         },
+        "single_core_block_cache": {
+            "kind": str(raw_block_cache["kind"]),
+            "sets": int(raw_block_cache["sets"]),
+            "ways": int(raw_block_cache["ways"]),
+            "entries": int(raw_block_cache["entries"]),
+            "identity_bytes": int(raw_block_cache["identity_bytes"]),
+        },
         "single_core_block_rejection_cache": {
             "kind": str(raw_block_rejection_cache["kind"]),
+            "sets": int(raw_block_rejection_cache["sets"]),
+            "ways": int(raw_block_rejection_cache["ways"]),
             "entries": int(raw_block_rejection_cache["entries"]),
             "identity_bytes": int(
                 raw_block_rejection_cache["identity_bytes"]
@@ -2983,6 +2993,7 @@ def _host_profile_probe(
     native_counts = native_snapshot["counts"]
     native_wall = native_snapshot["wall_ns"]
     jit_storage = native_snapshot["single_core_jit_storage"]
+    block_cache = native_snapshot["single_core_block_cache"]
     block_rejection_cache = native_snapshot[
         "single_core_block_rejection_cache"
     ]
@@ -3034,7 +3045,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 14,
+            native_snapshot["schema_version"] == 15,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3088,10 +3099,20 @@ def _host_profile_probe(
                 and not jit_storage["failed"]
             )
         ),
-        "single_core_block_rejection_cache_is_bounded_exact_span": (
+        "single_core_block_cache_is_bounded_set_associative_exact_span": (
+            block_cache["kind"]
+            == "set-associative-exact-icache-span"
+            and block_cache["sets"] == 1_024
+            and block_cache["ways"] == 4
+            and block_cache["entries"] == 4_096
+            and block_cache["identity_bytes"] == 16
+        ),
+        "single_core_block_rejection_cache_is_bounded_set_associative_exact_span": (
             block_rejection_cache["kind"]
-            == "direct-mapped-exact-icache-span"
-            and block_rejection_cache["entries"] == 512
+            == "set-associative-exact-icache-span"
+            and block_rejection_cache["sets"] == 512
+            and block_rejection_cache["ways"] == 4
+            and block_rejection_cache["entries"] == 2_048
             and block_rejection_cache["identity_bytes"] == 16
         ),
         "native_batches_match_accounting": (
@@ -3408,7 +3429,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 14,
+        "schema_version": 15,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,

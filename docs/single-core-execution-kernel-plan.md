@@ -987,6 +987,42 @@ This selects the existing Python/shared-C++ behavior for PSEL aliases. The RTL
 conformance work is intentionally deferred and no emulator, DBT, or RTL source
 changed in this documentation-only decision.
 
+### Post-dictionary profile: bounded host-plan associativity
+
+The 2026-08-29 Desktop dictionary profile exposed a separate host-engine
+problem after the architectural `EXT.DICT` repair. The exact-single path built
+19,711,250 decoded plans and evicted 19,710,226 of them, compiled 8,537,037
+native plans and evicted 8,536,586, and stored 21,753,554 exact rejections while
+replacing 21,753,042. It republished 2.67 GB of generated code. Those tables
+were direct-mapped host memoization structures; they are unrelated to the
+guest-visible 1,024-entry `EXT.DICT` hardware cache.
+
+The first bounded correction retains the existing hashes and makes decoded
+plans 1,024 sets by four ways (4,096 entries) and exact rejections 512 sets by
+four ways (2,048 entries). A stale entry with the same address and selector
+identity is replaced first, then the lowest invalid way, then an insertion-only
+round-robin victim. Hits do not mutate recency state. Way-major physical slots
+give every plan and memory recipe one stable index, and every such index owns
+one fixed executable-arena slot. Failed construction still leaves a prior
+positive plan untouched.
+
+This is entirely host-only storage. It is neither checkpointed nor included in
+architectural hashes, and reset, discontinuous restore, and identity-epoch wrap
+discard it. No opcode, cycle, guest I-cache, `EXT.DICT`, BIOS, RTL, or snapshot
+contract changes. Host-profile schema 15 publishes both geometries explicitly
+so later profiles cannot confuse the two cache families.
+
+Seconds-scale position-balanced motifs established the intended boundary. Four
+same-set positive plans ran at 79.4--87.6 Msteps/s versus 17.3--17.7 for the
+direct-mapped parent, and two same-set exact rejections ran at 28.2--28.6 versus
+10.1--10.3. A stable primary-way plan remained inside the parent run-to-run
+range. Deliberate five-entry cyclic thrash was slower than the direct-mapped
+parent because it pays the bounded way search without retaining an entry; that
+case remains an explicit warning against claiming a production win from the
+microbenchmarks. The focused 76-case exact-single suite and ten profile-schema
+units pass. Cold source-load and Desktop A/B remain deferred by the active
+rich-terminal vertical gate.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1059,6 +1095,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D15 | Let a segment-local, rejection-indexed hint change probe order only after that segment has observed an exact resident rejection. | The persistent exact rejection entry remains authoritative; a mismatch forgets the hint and restores positive-first admission, while interrupts, scalar execution, identity proof, and persistent cache ownership remain unchanged. |
 | EK-D16 | Reject EK-D15 after the ordinary Desktop smoke and replace its two-extrema evidence with a production-calibrated matrix. | The hint's exactness was not sufficient evidence of profitability: it taxed every positive admission, regressed Desktop throughput by 6.261%, and timed out the journey. A future admission change must win the calibrated mix, stable-positive, rejected-scalar, and real BIOS+KDOS comparisons independently before another Desktop run. |
 | EK-D17 | Admit resolver-proved external-RAM scalar spans at native block entry. | External RAM shares Bank 0's pinned, directly contiguous execution contract, while full-span, MMIO, aperture-priority, timing, and I-cache invalidation checks remain authoritative; HBW and VRAM are not admitted. |
+| EK-D18 | Replace the exact-single host plan and rejection direct maps with bounded four-way tables and stable physical JIT slots. | These caches remain host-only and disposable; the guest-visible 1,024-entry `EXT.DICT` cache, architectural state, timing, snapshots, and RTL contract do not change. Full source-load retention still requires the deferred production A/B. |
 
 ## Deferred findings ledger
 
@@ -1071,3 +1108,4 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |
 | EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |
+| EK-F8 | Four-way host caches collapse two-to-four-way conflict motifs but add work to a set that cycles through five or more live identities. | Retain the bounded implementation as the first profiled candidate, expose exact geometry/churn counters, and decide any associativity or capacity adjustment from a position-balanced cold source-load profile once the rich-terminal gate permits it. |

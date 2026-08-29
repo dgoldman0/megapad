@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -372,9 +372,10 @@ def profile_derived(profile: dict | None) -> dict | None:
     }
 
 
-def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
+def _profile_cache_validation(profile: dict) -> dict[str, bool]:
     counts = profile["counts"]
-    metadata = profile["single_core_block_rejection_cache"]
+    block_metadata = profile["single_core_block_cache"]
+    rejection_metadata = profile["single_core_block_rejection_cache"]
     attempts = counts["uncontended_block_build_attempts"]
     zero_rejections = counts[
         "uncontended_block_zero_instruction_rejections"
@@ -384,10 +385,21 @@ def _profile_rejection_cache_validation(profile: dict) -> dict[str, bool]:
     ]
     stores = counts["uncontended_block_rejection_cache_stores"]
     return {
+        "block_cache_metadata_supported": (
+            block_metadata["kind"]
+            == "set-associative-exact-icache-span"
+            and block_metadata["sets"] == 1_024
+            and block_metadata["ways"] == 4
+            and block_metadata["entries"] == 4_096
+            and block_metadata["identity_bytes"] == 16
+        ),
         "block_rejection_cache_metadata_supported": (
-            metadata["kind"] == "direct-mapped-exact-icache-span"
-            and metadata["entries"] == 512
-            and metadata["identity_bytes"] == 16
+            rejection_metadata["kind"]
+            == "set-associative-exact-icache-span"
+            and rejection_metadata["sets"] == 512
+            and rejection_metadata["ways"] == 4
+            and rejection_metadata["entries"] == 2_048
+            and rejection_metadata["identity_bytes"] == 16
         ),
         "block_build_attempts_reconcile": (
             attempts
@@ -535,7 +547,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 14
+                            host_profile["schema_version"] == 15
                         ),
                         "settlement_routes_reconcile": (
                             profile_counts["settle_round_calls"]
@@ -583,7 +595,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                     }
                 )
                 validation.update(
-                    _profile_rejection_cache_validation(host_profile)
+                    _profile_cache_validation(host_profile)
                 )
 
             measurement = {
