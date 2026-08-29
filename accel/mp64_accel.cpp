@@ -10976,7 +10976,7 @@ static int exec_string(CPUState& s, const StepCallbacks& cb) {
 //  Encoding: FA <sub-op> <reg-byte[Rd:4][Rs:4]>
 //  REX extends Rd/Rs to R16-R31 via ext_modifier set before entry.
 //
-//  Hash table: 64 sets × 4 ways, FNV-1a 32-bit hash.
+//  Hash table: 256 sets × 4 ways, FNV-1a 32-bit hash.
 //  Name is a counted string in memory: 1 byte len (5-bit) + len name bytes.
 
 static inline uint32_t fnv1a_32(const uint8_t* data, size_t len) {
@@ -10992,8 +10992,39 @@ static inline int dict_read_name(CPUState& s, const StepCallbacks& cb,
                                   uint8_t& out_len, uint32_t& out_hash) {
     uint8_t raw_len = sys_read8(s, cb, addr) & 0x1F;  // 5-bit, max 31
     out_len = raw_len;
-    for (int i = 0; i < raw_len; i++)
-        out_name[i] = sys_read8(s, cb, addr + 1 + i);
+    if (raw_len == 0) {
+        out_hash = 0x811C9DC5u;
+        return 2;
+    }
+    bool direct = false;
+    // Keep the counted-length access on the authoritative route. In the
+    // ordinary supervisor case, prove the complete span under the same byte
+    // routing policy before replacing the remaining per-byte resolutions.
+    if (
+        !s.priv_level &&
+        cb.bus_access == nullptr
+    ) {
+        const uint64_t span_size = 1 + static_cast<uint64_t>(raw_len);
+        const DirectMemoryContext context{
+            cb.has_mmio,
+            cb.mmio_start,
+            cb.mmio_end,
+        };
+        const ResolvedMemorySpan span = resolve_direct_memory_span(
+            s,
+            addr,
+            span_size,
+            MemoryAccessPolicy::SUPERVISOR_BYTE,
+            context);
+        if (span) {
+            std::memcpy(out_name, span.data + 1, raw_len);
+            direct = true;
+        }
+    }
+    if (!direct) {
+        for (uint64_t i = 0; i < raw_len; i++)
+            out_name[i] = sys_read8(s, cb, addr + 1 + i);
+    }
     out_hash = fnv1a_32(out_name, raw_len);
     return 2 + raw_len;  // 1 len byte + N name bytes + 1 hash cycle
 }

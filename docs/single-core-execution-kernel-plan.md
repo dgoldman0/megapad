@@ -1106,6 +1106,33 @@ decoder and adds an x86-64 implementation; it adds no opcode, addressing mode,
 architectural cache, register, cycle rule, BIOS ABI, snapshot field, or RTL
 requirement.
 
+### Resolve dictionary names as proved spans
+
+The authoritative `EXT.DICT` helper formerly routed the length byte and every
+name byte independently through generic system-memory resolution. It now keeps
+the counted-length read on that exact route, returns the already-optimal empty
+name immediately, and in supervisor non-journaled execution proves the whole
+nonempty counted string once under the same supervisor-byte aperture order.
+Only then does it copy the name bytes from the resolved host span.
+
+User mode, resumable or strict-cycle bus access, MMIO overlap, guest-address
+wrap, Bank 0 aliasing, aperture crossings, and any incomplete proof retain the
+original bytewise path. The FNV result, cache lookup or mutation, flags, and
+the helper's `length + 2` cycle charge are unchanged. Bank 0, external RAM,
+wrap, external-end, MMIO-order, MPU first-fault, empty-name, and checkpointed
+strict-replay oracles pass in the complete 23-case focused EXT.DICT file.
+
+Position-balanced `DFIND; LBR` hit loops show the intended name-length scaling.
+A six-byte Bank 0 name improved from 15.54--15.75 to 19.20--20.04 Msteps/s.
+For a 31-byte name, Bank 0 improved from 5.45--5.49 to 15.78--16.26 Msteps/s
+and external RAM from 6.19--6.22 to 16.12--16.28 Msteps/s. These are focused
+helper measurements rather than a production source-load claim.
+
+The change is a host memory-resolution optimization, not a hardware feature.
+The architectural 256-by-four `EXT.DICT` table, counted-string format, FNV
+hash, replacement policy, opcode behavior, cycles, BIOS ABI, snapshots, and
+RTL requirements remain exactly as before.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1182,6 +1209,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D19 | Admit and lower an opcode only through the existing shared decoded semantic before crediting it as DBT coverage. | Register `AND` is the first slice: its ISA, flags, timing, Python behavior, and hardware contract predate this host-only coverage change. |
 | EK-D20 | Represent a profiled base-plus-index scalar address with two distinct block-entry sources and a wrapping addend. | Preflight still proves the complete ordinary-RAM span before native entry; generated memory operations and the MP64 ISA gain no addressing mode or unchecked host access. |
 | EK-D21 | Lower the existing four-cycle `UMUL` semantic and settle complete blocks from a precomputed static cycle total. | Two cycle bitplanes retain exact interrupt-prefix timing, while the ordinary complete path gains no extra per-block bitplane check; the ISA, RTL, architectural state, and timing contract are unchanged. |
+| EK-D22 | Resolve one complete nonempty `EXT.DICT` counted-name span before copying its bytes. | Only supervisor non-journaled ordinary memory takes the direct path; byte routing, faults, callbacks, dynamic cycle charge, the architectural cache, BIOS, and RTL remain unchanged. |
 
 ## Deferred findings ledger
 

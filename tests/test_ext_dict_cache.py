@@ -8,10 +8,13 @@ import pytest
 
 from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
+from devices import MMIO_BASE
 from megapad64 import (
     DICT_NUM_SETS,
     DICT_NUM_WAYS,
+    IVEC_PRIV_FAULT,
     Megapad64 as PythonMegapad64,
+    TrapError,
 )
 from system import MegapadSystem
 
@@ -40,6 +43,8 @@ _CODE = b"".join(_INSTRUCTIONS)
 _NAME_BASE = 0x1000
 _NAME_STRIDE = 0x40
 _STRICT_MUTATOR_PC = 0x200
+_SPAN_CODE_BASE = 0x100
+_SPAN_NAME = b"\x00Span\xff"
 
 # Every name hashes to set 0x5e when all eight low FNV-1a bits are used.
 _SET_COLLIDERS = (
@@ -167,6 +172,173 @@ def _find(cpu, name: bytes, address: int) -> int | None:
         return int(cpu.regs[1])
     assert cpu.regs[1] == 0
     return None
+
+
+def _run_dict_name_span_workload(cpu_type, region: str) -> tuple:
+    cpu = _new_cpu(cpu_type)
+    payload = bytes((0xE0 | len(_SPAN_NAME),)) + _SPAN_NAME
+    if region == "bank0":
+        address = _NAME_BASE
+        cpu.load_bytes(address, payload)
+    else:
+        aperture = bytearray(0x80)
+        address = 0x10_0000 + 0x20
+        aperture[0x20:0x20 + len(payload)] = payload
+        cpu.attach_ext_mem(aperture, 0x10_0000, len(aperture))
+
+    inserted = _insert(cpu, _SPAN_NAME, address, 0xCAFE)
+    found = _find(cpu, _SPAN_NAME, address)
+    return inserted, found, cpu.cycle_count, cpu.flags_pack()
+
+
+@pytest.mark.parametrize("region", ("bank0", "external"))
+def test_dict_name_span_contiguous_memory_matches_python(region: str) -> None:
+    observed = tuple(
+        _run_dict_name_span_workload(cpu_type, region)
+        for cpu_type in (PythonMegapad64, NativeMegapad64)
+    )
+    assert observed == (
+        (len(_SPAN_NAME) + 3, 0xCAFE, 2 * (len(_SPAN_NAME) + 3), 0x01),
+    ) * 2
+
+
+def test_dict_name_span_empty_name_keeps_one_byte_path() -> None:
+    observed = []
+    for cpu_type in (PythonMegapad64, NativeMegapad64):
+        cpu = _new_cpu(cpu_type)
+        cpu.load_bytes(_NAME_BASE, b"\xe0")
+        inserted = _insert(cpu, b"", _NAME_BASE, 0xC0DE)
+        found = _find(cpu, b"", _NAME_BASE)
+        observed.append(
+            (inserted, found, cpu.cycle_count, cpu.flags_pack())
+        )
+
+    assert observed == [(3, 0xC0DE, 6, 0x01)] * 2
+
+
+def _run_cross_span_name_workload(cpu_type, layout: str) -> tuple:
+    cpu = cpu_type(mem_size=0x4000)
+    cpu.load_bytes(_SPAN_CODE_BASE, _CODE)
+    if layout == "bank0-wrap":
+        address = len(cpu.mem) - 1
+        cpu.mem[-1] = 0xE0 | len(_SPAN_NAME)
+        cpu.mem[:len(_SPAN_NAME)] = _SPAN_NAME
+    else:
+        aperture = bytearray(0x20)
+        cpu.attach_ext_mem(aperture, 0x10_0000, len(aperture))
+        address = 0x10_0000 + len(aperture) - 1
+        aperture[-1] = 0xE0 | len(_SPAN_NAME)
+        bank0_offset = (address + 1) % len(cpu.mem)
+        cpu.mem[bank0_offset:bank0_offset + len(_SPAN_NAME)] = _SPAN_NAME
+
+    insert_cycles = _execute(
+        cpu, _SPAN_CODE_BASE + _DINS_PC, address, 0xBEEF
+    )
+    cpu.regs[1] = 0
+    find_cycles = _execute(cpu, _SPAN_CODE_BASE + _DFIND_PC, address)
+    return (
+        insert_cycles,
+        find_cycles,
+        cpu.regs[1],
+        cpu.flag_z,
+        cpu.cycle_count,
+    )
+
+
+@pytest.mark.parametrize("layout", ("bank0-wrap", "external-end"))
+def test_dict_name_span_cross_boundary_fallback_matches_python(
+    layout: str,
+) -> None:
+    expected_cycles = len(_SPAN_NAME) + 3
+    observed = tuple(
+        _run_cross_span_name_workload(cpu_type, layout)
+        for cpu_type in (PythonMegapad64, NativeMegapad64)
+    )
+    assert observed == (
+        (expected_cycles, expected_cycles, 0xBEEF, 1, 2 * expected_cycles),
+    ) * 2
+
+
+def test_dict_name_span_mmio_fallback_reads_each_byte_at_same_cost() -> None:
+    direct = _new_cpu(NativeMegapad64)
+    direct.load_bytes(
+        _NAME_BASE,
+        bytes((len(_SPAN_NAME),)) + _SPAN_NAME,
+    )
+    _insert(direct, _SPAN_NAME, _NAME_BASE, 0xA55A)
+    assert _find(direct, _SPAN_NAME, _NAME_BASE) == 0xA55A
+
+    fallback = _new_cpu(NativeMegapad64)
+    address = MMIO_BASE + 0x10_000
+    payload = bytes((0xE0 | len(_SPAN_NAME),)) + _SPAN_NAME
+    reads: list[int] = []
+
+    def read_mmio(byte_address: int) -> int:
+        reads.append(byte_address)
+        return payload[byte_address - address]
+
+    fallback._mmio_read8 = read_mmio
+    _insert(fallback, _SPAN_NAME, address, 0xA55A)
+    assert _find(fallback, _SPAN_NAME, address) == 0xA55A
+    expected_reads = [address + index for index in range(len(payload))]
+    assert reads == expected_reads * 2
+    assert fallback.cycle_count == direct.cycle_count == (
+        2 * (len(_SPAN_NAME) + 3)
+    )
+
+
+def test_dict_name_span_user_fallback_checks_each_mpu_byte() -> None:
+    cpu = _new_cpu(NativeMegapad64)
+    address = _NAME_BASE
+    cpu.load_bytes(
+        address,
+        bytes((len(_SPAN_NAME),)) + _SPAN_NAME,
+    )
+    cpu.regs[9] = address
+    cpu.pc = _DFIND_PC
+    cpu.priv_level = 1
+    cpu.mpu_base = address
+    cpu.mpu_limit = address + 3
+
+    with pytest.raises(TrapError) as raised:
+        cpu.step()
+
+    assert raised.value.ivec_id == IVEC_PRIV_FAULT
+    assert cpu.trap_addr == address + 3
+    assert cpu.cycle_count == 0
+
+
+def test_dict_name_span_strict_replay_stays_bytewise_and_checkpointed() -> None:
+    system = _new_cycle_system(assemble("dfind r1, r9"))
+    cpu = system.cpu
+    address = _NAME_BASE
+    cpu.load_bytes(
+        address,
+        bytes((len(_SPAN_NAME),)) + _SPAN_NAME,
+    )
+    _insert(cpu, _SPAN_NAME, address, 0x5AA5)
+    cpu.regs[9] = address
+    cpu.pc = _STRICT_MUTATOR_PC
+    cycles_before = cpu.cycle_count
+    saw_suspension = False
+
+    for _ in range(64):
+        result = system.run_cycle_batch(1, max_instructions=1)
+        if result.instructions_executed:
+            break
+        saw_suspension = True
+        assert result.system_stop_reason == "cycle_limit"
+        assert cpu.pc == _STRICT_MUTATOR_PC
+        assert cpu.cycle_count == cycles_before
+        assert system._native_system.cycle_execution_pending
+    else:
+        pytest.fail("sliced EXT.DICT lookup did not retire")
+
+    assert saw_suspension
+    assert cpu.regs[1] == 0x5AA5
+    assert cpu.flag_z == 1
+    assert cpu.cycle_count > cycles_before + len(_SPAN_NAME) + 3
+    assert not system._native_system.cycle_execution_pending
 
 
 @pytest.mark.parametrize("cpu_type", FULL_CORE_TYPES)
