@@ -137,6 +137,13 @@ ICACHE_LINE_BYTES = 16
 ICACHE_NUM_LINES  = 256
 ICACHE_INDEX_MASK = ICACHE_NUM_LINES - 1
 
+# Full-core EXT.DICT cache geometry.  The hardware-facing model retains
+# complete names so a hash collision cannot produce a false binding.
+DICT_NUM_SETS  = 256
+DICT_NUM_WAYS  = 4
+DICT_SET_MASK  = DICT_NUM_SETS - 1
+DICT_MAX_NAME  = 31
+
 # Cluster-level IVT / Barrier CSRs (§6.3)
 CSR_CL_IVTBASE     = 0x73   # Cluster shared IVT base address
 CSR_BARRIER_ARRIVE = 0x74   # R/W: per-core barrier arrive bitmask (cluster)
@@ -953,13 +960,16 @@ class Megapad64:
         self.gf_prev_lo:   int = 0     # 256-bit previous result (low)  for FCMOV/FMAC/MACR
         self.gf_prev_hi:   int = 0     # 256-bit previous result (high) for MACR
 
-        # EXT.DICT hardware dictionary hash table (behavioural model)
-        # 64 sets × 4 ways.  Each entry:
+        # EXT.DICT hardware dictionary cache (behavioural model).
+        # 256 sets × 4 ways.  Each entry:
         #   (valid, hash32, name_len, name_bytes, xt)
         self._dict_table: list[list[tuple[bool, int, int, bytes, int]]] = [
-            [(False, 0, 0, b"", 0) for _ in range(4)]
-            for _ in range(64)
+            [(False, 0, 0, b"", 0) for _ in range(DICT_NUM_WAYS)]
+            for _ in range(DICT_NUM_SETS)
         ]
+        # Each set independently selects its next full-set victim.  Hits,
+        # matching updates, and deletes leave this cursor unchanged.
+        self._dict_next_victim: list[int] = [0] * DICT_NUM_SETS
 
         # Extended memory regions (attached by system.py)
         self._vram_mem: Optional[bytearray] = None
@@ -2641,7 +2651,7 @@ class Megapad64:
         """Execute EXT.DICT (FA) instruction.
 
         Encoding: FA <sub-op> <reg-byte>
-        Sub-ops: 00=DFIND, 01=DINS, 02=DDEL, 03=DCLR
+        Sub-ops: 00=DFIND, 01=DINS, 02=DDEL, 03=DCLR, 04=DUPD
         reg-byte: [Rd:4][Rs:4]  (REX extends to R16-R31)
         """
         sub_op = self.fetch8()
@@ -2657,13 +2667,15 @@ class Megapad64:
             return self._dict_delete(rd, rs)
         elif sub_op == 0x03:
             return self._dict_clear()
+        elif sub_op == 0x04:
+            return self._dict_update(rd, rs)
         else:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.DICT sub-op {sub_op:#x} reserved")
 
     def _dict_read_name(self, addr: int) -> tuple[bytes, int]:
         """Read a counted-string from memory, return (name_bytes, cycles)."""
-        nlen = self.mem_read8(addr) & 0x1F  # 5-bit, max 31
+        nlen = self.mem_read8(addr) & DICT_MAX_NAME
         name = bytes(self.mem_read8(u64(addr + 1 + i)) for i in range(nlen))
         return name, 2 + nlen  # 1 for len byte + nlen name bytes + 1 hash
 
@@ -2672,7 +2684,7 @@ class Megapad64:
         addr = self.regs[rs]
         name, cycles = self._dict_read_name(addr)
         h = self._fnv1a_32(name)
-        set_idx = h & 0x3F
+        set_idx = h & DICT_SET_MASK
         for valid, way_h, way_nlen, way_name, way_xt in self._dict_table[set_idx]:
             if valid and way_h == h and way_nlen == len(name) and way_name == name:
                 self.regs[rd] = way_xt & MASK64
@@ -2690,7 +2702,7 @@ class Megapad64:
         xt = self.regs[rd]
         name, cycles = self._dict_read_name(addr)
         h = self._fnv1a_32(name)
-        set_idx = h & 0x3F
+        set_idx = h & DICT_SET_MASK
         ways = self._dict_table[set_idx]
         # Update existing match
         for i, (valid, way_h, way_nlen, way_name, _) in enumerate(ways):
@@ -2703,12 +2715,21 @@ class Megapad64:
         for i, (valid, *_rest) in enumerate(ways):
             if not valid:
                 ways[i] = (True, h, len(name), name, xt & MASK64)
+                self._dict_next_victim[set_idx] = (
+                    (i + 1) % DICT_NUM_WAYS
+                )
                 self.flag_z = 1
                 self.flag_v = 0
                 return cycles
-        # Set full — overflow
-        self.flag_z = 0
-        self.flag_v = 1
+        # A full set replaces its round-robin victim.  Capacity is not an
+        # insertion failure: DINS always publishes the requested binding.
+        victim = self._dict_next_victim[set_idx]
+        ways[victim] = (True, h, len(name), name, xt & MASK64)
+        self._dict_next_victim[set_idx] = (
+            (victim + 1) % DICT_NUM_WAYS
+        )
+        self.flag_z = 1
+        self.flag_v = 0
         return cycles
 
     def _dict_delete(self, rd: int, rs: int) -> int:
@@ -2716,7 +2737,7 @@ class Megapad64:
         addr = self.regs[rs]
         name, cycles = self._dict_read_name(addr)
         h = self._fnv1a_32(name)
-        set_idx = h & 0x3F
+        set_idx = h & DICT_SET_MASK
         ways = self._dict_table[set_idx]
         for i, (valid, way_h, way_nlen, way_name, _) in enumerate(ways):
             if valid and way_h == h and way_nlen == len(name) and way_name == name:
@@ -2728,10 +2749,29 @@ class Megapad64:
 
     def _dict_clear(self) -> int:
         """DCLR: clear entire hash table."""
-        for s in range(64):
-            for w in range(4):
+        for s in range(DICT_NUM_SETS):
+            for w in range(DICT_NUM_WAYS):
                 self._dict_table[s][w] = (False, 0, 0, b"", 0)
-        return 66  # ~64 cycles for bulk clear
+            self._dict_next_victim[s] = 0
+        return 66  # preserve the existing emulator bulk-clear latency
+
+    def _dict_update(self, rd: int, rs: int) -> int:
+        """DUPD: update XT only when the named line is already resident."""
+        addr = self.regs[rs]
+        xt = self.regs[rd]
+        name, cycles = self._dict_read_name(addr)
+        h = self._fnv1a_32(name)
+        set_idx = h & DICT_SET_MASK
+        ways = self._dict_table[set_idx]
+        for i, (valid, way_h, way_nlen, way_name, _) in enumerate(ways):
+            if valid and way_h == h and way_nlen == len(name) and way_name == name:
+                ways[i] = (True, h, len(name), name, xt & MASK64)
+                self.flag_z = 1
+                self.flag_v = 0
+                return cycles
+        self.flag_z = 0
+        self.flag_v = 0
+        return cycles
 
     # -- EXT.CRYPTO (prefix FB) --
 
@@ -5147,6 +5187,7 @@ class Megapad64:
         self.qos_weight = 0
         self.qos_bwlimit = 0
         self._icache_reset()
+        self._dict_clear()
         # Note: core_id and num_cores are NOT reset — they are hardware-fixed
 
     # -- Instruction size helper (for SKIP) --

@@ -1701,8 +1701,8 @@ struct CPUState {
     // EXT prefix
     int ext_modifier;   // -1 = none
 
-    // EXT.DICT hardware dictionary cache (64 sets × 4 ways)
-    static constexpr int DICT_SETS = 64;
+    // EXT.DICT hardware dictionary cache (256 sets × 4 ways)
+    static constexpr int DICT_SETS = 256;
     static constexpr int DICT_WAYS = 4;
     static constexpr int DICT_MAX_NAME = 31;
     struct DictEntry {
@@ -1712,10 +1712,12 @@ struct CPUState {
         uint8_t  name[31];  // max 31 bytes (5-bit length)
         uint64_t xt;
     };
-    DictEntry dict_table[64][4];  // zero-initialized by default
+    DictEntry dict_table[DICT_SETS][DICT_WAYS];
+    uint8_t dict_next_victim[DICT_SETS];
 
     void dict_clear_all() {
         std::memset(dict_table, 0, sizeof(dict_table));
+        std::memset(dict_next_victim, 0, sizeof(dict_next_victim));
     }
 
     // EXT.CRYPTO CRC state for accelerated full cores (Appendix B, §B.3)
@@ -2081,6 +2083,14 @@ struct CPUState {
     X(BigNum, gf_prev_hi)
 
 struct CPUExecutionCheckpoint {
+    struct DictionaryCacheState {
+        std::array<
+            std::array<CPUState::DictEntry, CPUState::DICT_WAYS>,
+            CPUState::DICT_SETS
+        > table{};
+        std::array<uint8_t, CPUState::DICT_SETS> next_victim{};
+    };
+
     std::array<uint64_t, 32> regs{};
     std::array<uint64_t, 4> acc{};
     std::array<uint8_t, TACC_IMAGE_BYTES> tacc{};
@@ -2093,17 +2103,20 @@ struct CPUExecutionCheckpoint {
         std::array<uint8_t, CPUState::ICACHE_LINE_BYTES>,
         CPUState::ICACHE_LINES
     > icache_data{};
-    std::array<
-        std::array<CPUState::DictEntry, CPUState::DICT_WAYS>,
-        CPUState::DICT_SETS
-    > dict_table{};
+    // Keep EXT.DICT's 48 KiB table in an optional allocation.  Only a
+    // resumable DINS/DDEL/DCLR/DUPD captures it; read-only instructions,
+    // interrupt entry, and private worker spans neither allocate nor copy
+    // dictionary state.
+    std::unique_ptr<DictionaryCacheState> dictionary_cache;
 
 #define MP64_DECLARE_CHECKPOINT_FIELD(type, name) type name{};
     MP64_EXECUTION_CHECKPOINT_SCALARS(
         MP64_DECLARE_CHECKPOINT_FIELD)
 #undef MP64_DECLARE_CHECKPOINT_FIELD
 
-    explicit CPUExecutionCheckpoint(const CPUState& state) {
+    explicit CPUExecutionCheckpoint(
+            const CPUState& state,
+            bool capture_dictionary = false) {
         std::copy(
             std::begin(state.regs),
             std::end(state.regs),
@@ -2125,10 +2138,18 @@ struct CPUExecutionCheckpoint {
             std::begin(state.port_map),
             std::end(state.port_map),
             port_map.begin());
-        std::memcpy(
-            dict_table.data(),
-            state.dict_table,
-            sizeof(state.dict_table));
+        if (capture_dictionary) {
+            dictionary_cache =
+                std::make_unique<DictionaryCacheState>();
+            std::memcpy(
+                dictionary_cache->table.data(),
+                state.dict_table,
+                sizeof(state.dict_table));
+            std::copy(
+                std::begin(state.dict_next_victim),
+                std::end(state.dict_next_victim),
+                dictionary_cache->next_victim.begin());
+        }
         icache_valid = state.icache_valid;
         icache_tags = state.icache_tags;
         icache_data = state.icache_data;
@@ -2183,10 +2204,16 @@ struct CPUExecutionCheckpoint {
             port_map.begin(),
             port_map.end(),
             std::begin(state.port_map));
-        std::memcpy(
-            state.dict_table,
-            dict_table.data(),
-            sizeof(state.dict_table));
+        if (dictionary_cache) {
+            std::memcpy(
+                state.dict_table,
+                dictionary_cache->table.data(),
+                sizeof(state.dict_table));
+            std::copy(
+                dictionary_cache->next_victim.begin(),
+                dictionary_cache->next_victim.end(),
+                std::begin(state.dict_next_victim));
+        }
         state.icache_valid = icache_valid;
         state.icache_tags = icache_tags;
         state.icache_data = icache_data;
@@ -2236,10 +2263,11 @@ struct ResumableInstruction {
     explicit ResumableInstruction(
             const CPUState& state,
             uint64_t start_cycle_value,
+            bool capture_dictionary,
             CycleOperationKind kind_value =
                 CycleOperationKind::GUEST_INSTRUCTION,
             int interrupt_vector_value = -1)
-        : checkpoint(state),
+        : checkpoint(state, capture_dictionary),
           start_cycle(start_cycle_value),
           kind(kind_value),
           interrupt_vector(interrupt_vector_value) {}
@@ -10933,7 +10961,7 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
         uint8_t nlen;
         uint32_t h;
         int cycles = dict_read_name(s, cb, addr, name, nlen, h);
-        int set_idx = h & 0x3F;
+        int set_idx = h & (CPUState::DICT_SETS - 1);
         for (int w = 0; w < CPUState::DICT_WAYS; w++) {
             auto& e = s.dict_table[set_idx][w];
             if (e.valid && e.hash == h && e.name_len == nlen
@@ -10957,7 +10985,7 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
         uint8_t nlen;
         uint32_t h;
         int cycles = dict_read_name(s, cb, addr, name, nlen, h);
-        int set_idx = h & 0x3F;
+        int set_idx = h & (CPUState::DICT_SETS - 1);
         auto* ways = s.dict_table[set_idx];
         // Update existing match
         for (int w = 0; w < CPUState::DICT_WAYS; w++) {
@@ -10979,14 +11007,28 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
                 e.name_len = nlen;
                 std::memcpy(e.name, name, nlen);
                 e.xt = xt;
+                s.dict_next_victim[set_idx] =
+                    static_cast<uint8_t>(
+                        (w + 1) % CPUState::DICT_WAYS);
                 s.flag_z = 1;
                 s.flag_v = 0;
                 return cycles;
             }
         }
-        // Set full — overflow
-        s.flag_z = 0;
-        s.flag_v = 1;
+        // A full set replaces its round-robin victim.  Capacity is not an
+        // insertion failure: DINS always publishes the requested binding.
+        int victim = s.dict_next_victim[set_idx];
+        auto& e = ways[victim];
+        e.valid = true;
+        e.hash = h;
+        e.name_len = nlen;
+        std::memcpy(e.name, name, nlen);
+        e.xt = xt;
+        s.dict_next_victim[set_idx] =
+            static_cast<uint8_t>(
+                (victim + 1) % CPUState::DICT_WAYS);
+        s.flag_z = 1;
+        s.flag_v = 0;
         return cycles;
     }
 
@@ -10996,7 +11038,7 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
         uint8_t nlen;
         uint32_t h;
         int cycles = dict_read_name(s, cb, addr, name, nlen, h);
-        int set_idx = h & 0x3F;
+        int set_idx = h & (CPUState::DICT_SETS - 1);
         auto* ways = s.dict_table[set_idx];
         for (int w = 0; w < CPUState::DICT_WAYS; w++) {
             auto& e = ways[w];
@@ -11016,7 +11058,31 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
 
     case 0x03: { // DCLR — clear entire hash table
         s.dict_clear_all();
-        return 66;  // ~64 cycles for bulk clear
+        return 66;  // preserve the existing emulator bulk-clear latency
+    }
+
+    case 0x04: { // DUPD — update XT only when the name is already resident
+        uint64_t addr = s.regs[rs];
+        uint64_t xt   = s.regs[rd];
+        uint8_t name[31];
+        uint8_t nlen;
+        uint32_t h;
+        int cycles = dict_read_name(s, cb, addr, name, nlen, h);
+        int set_idx = h & (CPUState::DICT_SETS - 1);
+        auto* ways = s.dict_table[set_idx];
+        for (int w = 0; w < CPUState::DICT_WAYS; w++) {
+            auto& e = ways[w];
+            if (e.valid && e.hash == h && e.name_len == nlen
+                && std::memcmp(e.name, name, nlen) == 0) {
+                e.xt = xt;
+                s.flag_z = 1;
+                s.flag_v = 0;
+                return cycles;
+            }
+        }
+        s.flag_z = 0;
+        s.flag_v = 0;
+        return cycles;
     }
 
     default:
@@ -11732,6 +11798,7 @@ struct SystemInstructionTraits {
     uint8_t tacc_timed_format_ew = 0;
     bool tacc_timed_format_signed = false;
     bool tacc_timed_external_phy = false;
+    bool mutates_dictionary_cache = false;
 };
 
 static bool tacc_mode_is_legal(const CPUState& state) noexcept {
@@ -12117,7 +12184,16 @@ static SystemInstructionTraits classify_system_instruction(
         header.status ==
         InstructionHeaderStatus::EXTENSION_ENGINE
     ) {
-        return {true, false};
+        SystemInstructionTraits traits{true, false};
+        if (header.subop == 0xA) {
+            const uint8_t dict_subop =
+                icache_peek_byte_without_accounting(
+                    state,
+                    address + header.bytes_consumed);
+            traits.mutates_dictionary_cache =
+                dict_subop >= 0x01 && dict_subop <= 0x04;
+        }
+        return traits;
     }
     if (
         header.status !=
@@ -13908,7 +13984,7 @@ static PrivateCoreResult execute_private_core_command_body(
             checkpoint_started =
                 std::chrono::steady_clock::now();
         }
-        command_checkpoint.emplace(core);
+        command_checkpoint.emplace(core, false);
         if constexpr (HOST_PROFILE) {
             command.host_telemetry->
                 checkpoint_captures = 1;
@@ -15628,7 +15704,8 @@ static CycleCoreProgress run_cycle_core_once(
             cycle_state.instruction =
                 std::make_unique<ResumableInstruction>(
                     core,
-                    cycle_state.ready_cycle);
+                    cycle_state.ready_cycle,
+                    traits.mutates_dictionary_cache);
             system.cycle_execution_pending.store(
                 true,
                 std::memory_order_release);
@@ -18137,6 +18214,7 @@ static bool accept_cycle_interrupts(
             std::make_unique<ResumableInstruction>(
                 *system.cores[index],
                 cycle,
+                false,
                 CycleOperationKind::INTERRUPT_ENTRY,
                 selected[index]);
         accepted = true;
@@ -18353,7 +18431,8 @@ static uint64_t run_strict_cycle_private_prefix(
     for (int core_index : candidates) {
         candidate_checkpoints.emplace_back(
             *system.cores[
-                static_cast<std::size_t>(core_index)]);
+                static_cast<std::size_t>(core_index)],
+            false);
     }
 
     try {

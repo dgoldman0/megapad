@@ -83,6 +83,7 @@ STRING_SUB = {
 # EXT.DICT sub-op map (prefix FA)
 DICT_SUB = {
     "dfind": 0x00, "dins": 0x01, "ddel": 0x02, "dclr": 0x03,
+    "dupd": 0x04,
 }
 
 # EXT.CRYPTO sub-op map (prefix FB)
