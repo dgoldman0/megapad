@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -33,6 +33,14 @@ DEFAULT_VRAM_MIB = 4
 DEFAULT_COLS = 280
 DEFAULT_ROWS = 84
 DESKTOP_MP64FS_SECTORS = 65536
+
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND = (
+    "bounded-set-associative-space-saving"
+)
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE = (
+    "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+    "within-one-uncontended-segment"
+)
 
 
 def _positive_int(value: str) -> int:
@@ -376,6 +384,27 @@ def _profile_cache_validation(profile: dict) -> dict[str, bool]:
     counts = profile["counts"]
     block_metadata = profile["single_core_block_cache"]
     rejection_metadata = profile["single_core_block_rejection_cache"]
+    successor_metadata = profile["single_core_jit_successor_profile"]
+    successor_edges = successor_metadata["edges"]
+    successor_observations = successor_metadata["observations"]
+    successor_replacements = successor_metadata["replacements"]
+    successor_saturated = successor_metadata["counter_saturated"]
+    successor_order = sorted(
+        successor_edges,
+        key=lambda edge: (
+            -edge["estimated_count"],
+            edge["source_address"],
+            edge["source_identity_fingerprint"],
+            edge["target_address"],
+            edge["target_identity_fingerprint"],
+            edge["source_psel"],
+            edge["source_spsel"],
+            edge["target_psel"],
+            edge["target_spsel"],
+            edge["source_identity_size"],
+            edge["target_identity_size"],
+        ),
+    )
     attempts = counts["uncontended_block_build_attempts"]
     zero_rejections = counts[
         "uncontended_block_zero_instruction_rejections"
@@ -400,6 +429,45 @@ def _profile_cache_validation(profile: dict) -> dict[str, bool]:
             and rejection_metadata["ways"] == 4
             and rejection_metadata["entries"] == 2_048
             and rejection_metadata["identity_bytes"] == 16
+        ),
+        "jit_successor_profile_metadata_supported": (
+            successor_metadata["kind"]
+            == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND
+            and successor_metadata["scope"]
+            == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE
+            and successor_metadata["sets"] == 1_024
+            and successor_metadata["ways"] == 8
+            and successor_metadata["entries"] == 8_192
+            == successor_metadata["sets"] * successor_metadata["ways"]
+        ),
+        "jit_successor_profile_counters_are_bounded": (
+            0
+            <= successor_replacements
+            <= successor_observations
+            <= successor_metadata["candidate_block_completions"]
+            and len(successor_edges) <= successor_metadata["entries"]
+            and bool(successor_edges) == (successor_observations > 0)
+        ),
+        "jit_successor_profile_exactness_is_explicit": (
+            successor_metadata["exact"]
+            == (successor_replacements == 0 and not successor_saturated)
+        ),
+        "jit_successor_profile_edges_are_valid": (
+            all(
+                edge["estimated_count"] >= 1
+                and 0 <= edge["max_overcount"] <= edge["estimated_count"]
+                for edge in successor_edges
+            )
+            and (
+                successor_saturated
+                or sum(
+                    edge["estimated_count"] for edge in successor_edges
+                )
+                == successor_observations
+            )
+        ),
+        "jit_successor_profile_order_is_deterministic": (
+            successor_edges == successor_order
         ),
         "block_build_attempts_reconcile": (
             attempts
@@ -547,7 +615,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 15
+                            host_profile["schema_version"] == 16
                         ),
                         "settlement_routes_reconcile": (
                             profile_counts["settle_round_calls"]

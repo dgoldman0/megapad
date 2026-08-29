@@ -54,6 +54,10 @@ ineligible for the exact-single path.
 Version 17 carries native host-profile schema 15 and the bounded four-way
 positive-plan and exact-rejection cache geometry. This microcore topology
 remains ineligible for both caches.
+
+Version 18 carries native host-profile schema 16 and its bounded successor-edge
+telemetry. This microcore topology remains ineligible for the exact-single JIT,
+so its successor profile is required to be exact and empty.
 """
 
 from __future__ import annotations
@@ -78,9 +82,26 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 17
+REPORT_SCHEMA_VERSION = 18
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
+
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY = {
+    "kind": "bounded-set-associative-space-saving",
+    "scope": (
+        "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+        "within-one-uncontended-segment"
+    ),
+    "sets": 1_024,
+    "ways": 8,
+    "entries": 8_192,
+    "candidate_block_completions": 0,
+    "observations": 0,
+    "replacements": 0,
+    "exact": True,
+    "counter_saturated": False,
+    "edges": [],
+}
 
 RAM_SIZE = 1 << 16
 CODE_BASE = 0x100
@@ -374,9 +395,12 @@ def _profile_probe(
     block_rejection_cache = normalized[
         "single_core_block_rejection_cache"
     ]
+    jit_successor_profile = normalized[
+        "single_core_jit_successor_profile"
+    ]
     validation = {
-        "schema_is_version_15":
-            normalized["schema_version"] == 15,
+        "schema_is_version_16":
+            normalized["schema_version"] == 16,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -406,6 +430,20 @@ def _profile_probe(
             and block_rejection_cache["ways"] == 4
             and block_rejection_cache["entries"] == 2_048
             and block_rejection_cache["identity_bytes"] == 16
+        ),
+        "single_core_jit_successor_profile_geometry_is_bounded": (
+            jit_successor_profile["kind"]
+            == "bounded-set-associative-space-saving"
+            and jit_successor_profile["scope"]
+            == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY["scope"]
+            and jit_successor_profile["sets"] == 1_024
+            and jit_successor_profile["ways"] == 8
+            and jit_successor_profile["entries"] == 8_192
+            == jit_successor_profile["sets"]
+            * jit_successor_profile["ways"]
+        ),
+        "single_core_jit_successor_profile_is_exactly_empty_for_micro_topology": (
+            jit_successor_profile == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY
         ),
         "one_native_batch":
             counts["batches"] == 1,
@@ -595,7 +633,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 15,
+        "schema_version": 16,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

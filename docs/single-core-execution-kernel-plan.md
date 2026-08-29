@@ -1166,6 +1166,47 @@ never proposed a guest opcode, cache rule, timing change, BIOS ABI, or RTL
 change. Any future successor-edge profiler must also classify an authoritative
 extension helper as a barrier rather than infer a native edge across it.
 
+### Measure native successor edges without chaining
+
+Host-profile schema 16 adds a bounded exact-single JIT successor profile before
+another chaining experiment is attempted. It observes only consecutive,
+complete x86-64 executions of helper-free register/control blocks within one
+uncontended segment. Scalar or interpreted execution, memory operations,
+`CALL.L`, `RET.L`, `SEP`, `EXT.DICT`, interrupt prefixes, timing exits, faults,
+and segment boundaries all clear the predecessor. Straight fallthrough remains
+eligible; requiring a terminal branch would hide exactly the region shapes the
+profile is intended to measure.
+
+The table is allocated only when host profiling starts. Its 1,024 source sets
+match the positive host-plan cache, and eight ways derive from four resident
+source identities times at most two direct successors per register/control
+block. Each set uses deterministic Space-Saving replacement: a new edge takes
+an invalid way when one exists, otherwise replaces the lowest estimate with
+`minimum + 1` and records `minimum` as its maximum overcount. Snapshot metadata
+publishes observations, replacements, saturation, and whether the reported
+counts are exact. The compact FNV-1a fingerprint is only a report and ordering
+field; record equality compares the complete admitted identity bytes, address,
+and selectors, so a fingerprint collision cannot leave an inexact profile
+marked exact. Disabled execution has no per-scalar successor branch: segment
+dispatch selects a profiling or nonprofiling loop specialization once.
+
+Focused evidence validates the boundary rather than claiming a production
+distribution. One 1,000-instruction warmed two-block ring produces exactly 500
+candidate completions and 499 edges; splitting the same work across two batch
+segments produces 498, proving there is no inferred cross-segment edge. The
+warmed BIOS-admission fixture produces 340 candidates and 330 exact observations
+across 33 equally hot straight-line edges with no replacement. BIOS-shaped
+`EXT.DICT` and native-memory rings retain candidates on their register/control
+halves but report zero edges across the helper or memory block. The full
+88-case exact-single selector and focused schema consumers pass. A real
+source-load edge distribution and any region-retention claim remain deferred
+by the rich-terminal vertical gate.
+
+This telemetry is host-only. It changes no MP64 opcode, architectural cache,
+register, memory ordering, interrupt point, cycle count, BIOS ABI, checkpoint,
+or RTL requirement. Its fingerprints are not execution authority, and no
+generated block is linked or entered differently by this slice.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1244,6 +1285,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D21 | Lower the existing four-cycle `UMUL` semantic and settle complete blocks from a precomputed static cycle total. | Two cycle bitplanes retain exact interrupt-prefix timing, while the ordinary complete path gains no extra per-block bitplane check; the ISA, RTL, architectural state, and timing contract are unchanged. |
 | EK-D22 | Resolve one complete nonempty `EXT.DICT` counted-name span before copying its bytes. | Only supervisor non-journaled ordinary memory takes the direct path; byte routing, faults, callbacks, dynamic cycle charge, the architectural cache, BIOS, and RTL remain unchanged. |
 | EK-D23 | Reject the segment-local `EXT.DICT` terminal continuation after exact counters improved but position-balanced control-normalized timing did not. | Avoid retaining host dispatch complexity from a synthetic lookup-count win; the existing authoritative helper boundary and every guest hardware contract remain unchanged. |
+| EK-D24 | Measure eligible native successor edges with a bounded set-local Space-Saving host profile before building another continuation path. | Full admitted bytes remain the exact internal identity; fingerprints are report-only, all helper/memory/timing/interrupt/segment boundaries break adjacency, and schema 16 telemetry does not authorize execution or alter hardware. |
 
 ## Deferred findings ledger
 
@@ -1258,3 +1300,4 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |
 | EK-F8 | Four-way host caches collapse two-to-four-way conflict motifs but add work to a set that cycles through five or more live identities. | Retain the bounded implementation as the first profiled candidate, expose exact geometry/churn counters, and decide any associativity or capacity adjustment from a position-balanced cold source-load profile once the rich-terminal gate permits it. |
 | EK-F9 | A decoded native prefix followed by `EXT.DICT` still performs another ordinary admission whose start normally matches an exact rejection. | The local terminal continuation removed that admission but regressed the control-normalized paired timing by 1.78%. Leave the boundary explicit unless a future design eliminates more than the lookup while preserving helper, interrupt, fault, and successor-edge barriers. |
+| EK-F10 | Focused successor profiles prove that eligible native edges exist, but do not establish their concentration in the real BIOS+KDOS source-load journey. | Use schema 16 on the representative source path when the active vertical gate permits it; synthetic region A/B may reject an implementation, but cannot by itself justify production retention. |

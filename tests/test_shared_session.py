@@ -1390,7 +1390,7 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
 
             detailed = machine.status()
             first = detailed["host_profile"]
-            assert first["schema_version"] == 15
+            assert first["schema_version"] == 16
             assert first["enabled"]
             assert first["generation"] > 0
             assert first["single_core_block_cache"] == {
@@ -1407,12 +1407,32 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
                 "entries": 2_048,
                 "identity_bytes": 16,
             }
+            assert first["single_core_jit_successor_profile"] == {
+                "kind": "bounded-set-associative-space-saving",
+                "scope": (
+                    "consecutive-complete-helper-free-register-control-"
+                    "x86_64-blocks-within-one-uncontended-segment"
+                ),
+                "sets": 1_024,
+                "ways": 8,
+                "entries": 8_192,
+                "candidate_block_completions": 0,
+                "observations": 0,
+                "replacements": 0,
+                "exact": True,
+                "counter_saturated": False,
+                "edges": [],
+            }
 
             reset = machine.reset(paused=True)
             restarted = reset["host_profile"]
             assert restarted["enabled"]
             assert restarted["generation"] == first["generation"] + 1
             assert restarted["counts"]["batches"] == 0
+            assert (
+                restarted["single_core_jit_successor_profile"]
+                == first["single_core_jit_successor_profile"]
+            )
         finally:
             machine.stop()
 

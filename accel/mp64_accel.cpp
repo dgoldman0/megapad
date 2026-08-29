@@ -4214,7 +4214,51 @@ struct WorkerWaveHostTiming {
     uint64_t gather_ns = 0;
 };
 
+struct SingleCoreJitSuccessorKey {
+    uint64_t address = 0;
+    uint64_t identity_fingerprint = 0;
+    uint8_t psel = 0;
+    uint8_t spsel = 0;
+    uint8_t identity_size = 0;
+    std::array<uint8_t, CPUState::ICACHE_LINE_BYTES> identity{};
+
+    bool operator==(
+            const SingleCoreJitSuccessorKey& other) const noexcept {
+        return
+            address == other.address &&
+            identity_fingerprint == other.identity_fingerprint &&
+            psel == other.psel &&
+            spsel == other.spsel &&
+            identity_size == other.identity_size &&
+            std::equal(
+                identity.begin(),
+                identity.begin() + identity_size,
+                other.identity.begin());
+    }
+};
+
+struct SingleCoreJitSuccessorRecord {
+    bool valid = false;
+    SingleCoreJitSuccessorKey source{};
+    SingleCoreJitSuccessorKey target{};
+    uint64_t estimated_count = 0;
+    uint64_t max_overcount = 0;
+};
+
 struct ConcurrencyProfileCounters {
+    static constexpr std::size_t
+        SINGLE_CORE_JIT_SUCCESSOR_SETS = 1024;
+    static constexpr std::size_t
+        SINGLE_CORE_JIT_SUCCESSOR_WAYS = 8;
+    static constexpr std::size_t
+        SINGLE_CORE_JIT_SUCCESSOR_ENTRIES =
+            SINGLE_CORE_JIT_SUCCESSOR_SETS *
+            SINGLE_CORE_JIT_SUCCESSOR_WAYS;
+    static_assert(
+        SINGLE_CORE_JIT_SUCCESSOR_SETS ==
+            CPUState::SINGLE_CORE_BLOCK_CACHE_SETS,
+        "successor profile source sets must match the block cache");
+
     bool enabled = false;
     uint64_t generation = 0;
 
@@ -4253,6 +4297,17 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_jit_max_code_bytes = 0;
     uint64_t uncontended_jit_executions = 0;
     uint64_t uncontended_jit_steps = 0;
+    uint64_t single_core_jit_successor_candidate_block_completions = 0;
+    uint64_t single_core_jit_successor_observations = 0;
+    uint64_t single_core_jit_successor_replacements = 0;
+    bool single_core_jit_successor_counter_saturated = false;
+    bool single_core_jit_successor_predecessor_valid = false;
+    SingleCoreJitSuccessorKey single_core_jit_successor_predecessor{};
+    // This bounded table is diagnostic storage, not execution state. Keep it
+    // allocation-free until an explicit host-profile session starts so the
+    // ordinary emulator and its exact-single fast path pay no resident cost.
+    std::vector<SingleCoreJitSuccessorRecord>
+        single_core_jit_successor_records;
     uint64_t logical_subfrontiers = 0;
     uint64_t round_absorptions = 0;
     uint64_t worker_waves = 0;
@@ -4330,15 +4385,18 @@ struct ConcurrencyProfileCounters {
         HOST_PROFILE_MAX_LANES>
         lane_active_ns{};
 
-    void start_session() noexcept {
+    void start_session() {
         const uint64_t next_generation =
             generation ==
                 std::numeric_limits<uint64_t>::max()
             ? generation
             : generation + 1;
-        *this = ConcurrencyProfileCounters{};
-        generation = next_generation;
-        enabled = true;
+        ConcurrencyProfileCounters next;
+        next.single_core_jit_successor_records.resize(
+            SINGLE_CORE_JIT_SUCCESSOR_ENTRIES);
+        next.generation = next_generation;
+        next.enabled = true;
+        *this = std::move(next);
     }
 };
 
@@ -20291,6 +20349,221 @@ static constexpr std::size_t single_core_block_cache_slot(
         way * CPUState::SINGLE_CORE_BLOCK_CACHE_SETS + set;
 }
 
+static uint64_t single_core_jit_successor_identity_fingerprint(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    // FNV-1a gives reports and deterministic ranking a compact identity. The
+    // profiler still stores and compares every admitted byte, so a hash
+    // collision cannot merge records or leave an inexact table marked exact.
+    // Address remains explicit so identical code at distinct guest locations
+    // stays distinguishable without reversing the hash.
+    uint64_t fingerprint = UINT64_C(14695981039346656037);
+    const auto mix = [&fingerprint](uint8_t byte) noexcept {
+        fingerprint ^= byte;
+        fingerprint *= UINT64_C(1099511628211);
+    };
+    mix(block.psel);
+    mix(block.spsel);
+    mix(block.identity_size);
+    for (uint8_t index = 0; index < block.identity_size; index++)
+        mix(block.identity[index]);
+    return fingerprint;
+}
+
+static SingleCoreJitSuccessorKey single_core_jit_successor_key(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return {
+        block.address,
+        single_core_jit_successor_identity_fingerprint(block),
+        block.psel,
+        block.spsel,
+        block.identity_size,
+        block.identity,
+    };
+}
+
+static void single_core_jit_successor_saturating_increment(
+        uint64_t& destination,
+        bool& counter_saturated) noexcept {
+    if (destination == std::numeric_limits<uint64_t>::max()) {
+        counter_saturated = true;
+        return;
+    }
+    destination++;
+}
+
+static bool single_core_jit_successor_record_matches(
+        const SingleCoreJitSuccessorRecord& record,
+        const SingleCoreJitSuccessorKey& source,
+        const SingleCoreJitSuccessorKey& target) noexcept {
+    return
+        record.valid &&
+        record.source == source &&
+        record.target == target;
+}
+
+static void record_single_core_jit_successor(
+        ConcurrencyProfileCounters& profile,
+        const SingleCoreJitSuccessorKey& source,
+        const SingleCoreJitSuccessorKey& target) noexcept {
+    bool& counter_saturated =
+        profile.single_core_jit_successor_counter_saturated;
+    single_core_jit_successor_saturating_increment(
+        profile.single_core_jit_successor_observations,
+        counter_saturated);
+
+    std::vector<SingleCoreJitSuccessorRecord>& records =
+        profile.single_core_jit_successor_records;
+    if (
+        records.size() !=
+            ConcurrencyProfileCounters::
+                SINGLE_CORE_JIT_SUCCESSOR_ENTRIES
+    ) {
+        // An enabled session always owns the complete table. If that internal
+        // invariant is ever broken, retain architectural execution and mark
+        // the diagnostic result as inexact instead of throwing from the
+        // emulator's native fast path.
+        counter_saturated = true;
+        return;
+    }
+
+    const std::size_t set = single_core_block_cache_set(
+        source.address);
+    std::size_t empty_way =
+        ConcurrencyProfileCounters::
+            SINGLE_CORE_JIT_SUCCESSOR_WAYS;
+    std::size_t minimum_way = 0;
+    uint64_t minimum_count =
+        std::numeric_limits<uint64_t>::max();
+    for (
+        std::size_t way = 0;
+        way < ConcurrencyProfileCounters::
+            SINGLE_CORE_JIT_SUCCESSOR_WAYS;
+        way++
+    ) {
+        const std::size_t slot =
+            way * ConcurrencyProfileCounters::
+                SINGLE_CORE_JIT_SUCCESSOR_SETS + set;
+        SingleCoreJitSuccessorRecord& record = records[slot];
+        if (single_core_jit_successor_record_matches(
+                record, source, target)) {
+            single_core_jit_successor_saturating_increment(
+                record.estimated_count,
+                counter_saturated);
+            return;
+        }
+        if (!record.valid) {
+            if (
+                empty_way ==
+                    ConcurrencyProfileCounters::
+                        SINGLE_CORE_JIT_SUCCESSOR_WAYS
+            ) {
+                empty_way = way;
+            }
+            continue;
+        }
+        // The first minimum way wins ties. Together with fixed source sets,
+        // this makes replacement independent of pointer or allocation order.
+        if (record.estimated_count < minimum_count) {
+            minimum_count = record.estimated_count;
+            minimum_way = way;
+        }
+    }
+
+    const bool replacing =
+        empty_way ==
+            ConcurrencyProfileCounters::
+                SINGLE_CORE_JIT_SUCCESSOR_WAYS;
+    const std::size_t destination_way =
+        replacing ? minimum_way : empty_way;
+    const std::size_t destination_slot =
+        destination_way *
+            ConcurrencyProfileCounters::
+                SINGLE_CORE_JIT_SUCCESSOR_SETS +
+        set;
+    SingleCoreJitSuccessorRecord& destination =
+        records[destination_slot];
+    if (!replacing) {
+        destination = {
+            true,
+            source,
+            target,
+            1,
+            0,
+        };
+        return;
+    }
+
+    single_core_jit_successor_saturating_increment(
+        profile.single_core_jit_successor_replacements,
+        counter_saturated);
+    uint64_t replacement_count = minimum_count;
+    single_core_jit_successor_saturating_increment(
+        replacement_count,
+        counter_saturated);
+    destination = {
+        true,
+        source,
+        target,
+        replacement_count,
+        minimum_count,
+    };
+}
+
+static bool is_single_core_jit_successor_candidate(
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        const BlockExit& exit) noexcept {
+    if (
+        exit.reason != BlockExitReason::BLOCK_COMPLETE ||
+        exit.completed_instructions != block.instruction_count ||
+        block.instruction_count < 2 ||
+        block.identity_size == 0 ||
+        block.identity_size > block.identity.size()
+    ) {
+        return false;
+    }
+    for (
+        uint8_t index = 0;
+        index < block.instruction_count;
+        index++
+    ) {
+        const DecodedInstruction& decoded = block.instructions[index];
+        if (
+            decoded.is_memory() ||
+            decoded.operation ==
+                DecodedOperation::SELECT_PROGRAM_COUNTER
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void profile_single_core_jit_successor_completion(
+        ConcurrencyProfileCounters& profile,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        const BlockExit& exit) noexcept {
+    if (!is_single_core_jit_successor_candidate(
+            block, exit)) {
+        profile.single_core_jit_successor_predecessor_valid = false;
+        return;
+    }
+
+    single_core_jit_successor_saturating_increment(
+        profile
+            .single_core_jit_successor_candidate_block_completions,
+        profile.single_core_jit_successor_counter_saturated);
+    const SingleCoreJitSuccessorKey current =
+        single_core_jit_successor_key(block);
+    if (profile.single_core_jit_successor_predecessor_valid) {
+        record_single_core_jit_successor(
+            profile,
+            profile.single_core_jit_successor_predecessor,
+            current);
+    }
+    profile.single_core_jit_successor_predecessor = current;
+    profile.single_core_jit_successor_predecessor_valid = true;
+}
+
 static std::size_t single_core_block_entry_slot(
         const CPUState& core,
         const CPUState::SingleCoreDecodedBlockEntry* block) noexcept {
@@ -22439,6 +22712,10 @@ execute_single_core_decoded_block_plan(
                 host_saturating_add(
                     profile.uncontended_jit_steps,
                     steps);
+                profile_single_core_jit_successor_completion(
+                    profile,
+                    *block,
+                    exit);
             }
         }
     }
@@ -22500,6 +22777,10 @@ execute_single_core_decoded_block_plan(
         host_saturating_add(
             profile.uncontended_block_steps,
             exit.completed_instructions);
+        if (!native_executed) {
+            profile.single_core_jit_successor_predecessor_valid =
+                false;
+        }
     }
     return exit;
 }
@@ -22510,7 +22791,7 @@ struct UncontendedSingleCoreSegment {
     bool crypto_timing_boundary = false;
 };
 
-template <bool INJECT_FAILURE>
+template <bool INJECT_FAILURE, bool PROFILE_SUCCESSORS>
 static void run_uncontended_single_core_segment_impl(
         SystemState& system,
         CPUState& core,
@@ -22588,6 +22869,15 @@ static void run_uncontended_single_core_segment_impl(
                             "decoded block returned an invalid exit reason");
                     }
                 }
+            }
+            // Reaching step_one means this guest instruction was scalar or
+            // interpreted (including helper, memory, and SEP boundaries).
+            // No later native block in this segment is adjacent to a prior
+            // successor candidate across that architectural instruction.
+            if constexpr (PROFILE_SUCCESSORS) {
+                system.concurrency_profile
+                    .single_core_jit_successor_predecessor_valid =
+                        false;
             }
             const int cycles =
                 step_one(core, callbacks);
@@ -22700,14 +22990,21 @@ run_uncontended_single_core_ipi_injection(
     segment.interrupt_boundary = true;
 }
 
-static void run_uncontended_single_core_segment(
+template <bool PROFILE_SUCCESSORS>
+static void run_uncontended_single_core_segment_profile_mode(
         SystemState& system,
         CPUState& core,
         const StepCallbacks& callbacks,
         int max_steps,
         UncontendedSingleCoreSegment& segment) {
+    if constexpr (PROFILE_SUCCESSORS) {
+        system.concurrency_profile
+            .single_core_jit_successor_predecessor_valid = false;
+    }
     if (system.uncontended_test_injection < 0) {
-        run_uncontended_single_core_segment_impl<false>(
+        run_uncontended_single_core_segment_impl<
+            false,
+            PROFILE_SUCCESSORS>(
             system, core, callbacks, max_steps, segment);
         return;
     }
@@ -22716,7 +23013,24 @@ static void run_uncontended_single_core_segment(
             system, core, callbacks, max_steps, segment);
         return;
     }
-    run_uncontended_single_core_segment_impl<true>(
+    run_uncontended_single_core_segment_impl<
+        true,
+        PROFILE_SUCCESSORS>(
+        system, core, callbacks, max_steps, segment);
+}
+
+static void run_uncontended_single_core_segment(
+        SystemState& system,
+        CPUState& core,
+        const StepCallbacks& callbacks,
+        int max_steps,
+        UncontendedSingleCoreSegment& segment) {
+    if (system.concurrency_profile.enabled) {
+        run_uncontended_single_core_segment_profile_mode<true>(
+            system, core, callbacks, max_steps, segment);
+        return;
+    }
+    run_uncontended_single_core_segment_profile_mode<false>(
         system, core, callbacks, max_steps, segment);
 }
 
@@ -25375,6 +25689,126 @@ static const char* private_full_core_stop_reason_name(
     return "unknown";
 }
 
+static py::dict single_core_jit_successor_profile_snapshot_dict(
+        const ConcurrencyProfileCounters& profile) {
+    std::vector<const SingleCoreJitSuccessorRecord*> ordered_records;
+    ordered_records.reserve(
+        profile.single_core_jit_successor_records.size());
+    for (
+        const SingleCoreJitSuccessorRecord& record :
+        profile.single_core_jit_successor_records
+    ) {
+        if (record.valid)
+            ordered_records.push_back(&record);
+    }
+    std::sort(
+        ordered_records.begin(),
+        ordered_records.end(),
+        [](const SingleCoreJitSuccessorRecord* first,
+           const SingleCoreJitSuccessorRecord* second) {
+            if (
+                first->estimated_count !=
+                    second->estimated_count
+            ) {
+                return
+                    first->estimated_count >
+                    second->estimated_count;
+            }
+            if (first->source.address != second->source.address) {
+                return first->source.address < second->source.address;
+            }
+            if (
+                first->source.identity_fingerprint !=
+                    second->source.identity_fingerprint
+            ) {
+                return
+                    first->source.identity_fingerprint <
+                    second->source.identity_fingerprint;
+            }
+            if (first->target.address != second->target.address) {
+                return first->target.address < second->target.address;
+            }
+            if (
+                first->target.identity_fingerprint !=
+                    second->target.identity_fingerprint
+            ) {
+                return
+                    first->target.identity_fingerprint <
+                    second->target.identity_fingerprint;
+            }
+            if (first->source.psel != second->source.psel)
+                return first->source.psel < second->source.psel;
+            if (first->source.spsel != second->source.spsel)
+                return first->source.spsel < second->source.spsel;
+            if (first->target.psel != second->target.psel)
+                return first->target.psel < second->target.psel;
+            if (first->target.spsel != second->target.spsel)
+                return first->target.spsel < second->target.spsel;
+            if (
+                first->source.identity_size !=
+                    second->source.identity_size
+            ) {
+                return
+                    first->source.identity_size <
+                    second->source.identity_size;
+            }
+            return
+                first->target.identity_size <
+                second->target.identity_size;
+        });
+
+    py::list edges;
+    for (const SingleCoreJitSuccessorRecord* record : ordered_records) {
+        py::dict edge;
+        edge["source_address"] = record->source.address;
+        edge["source_psel"] = record->source.psel;
+        edge["source_spsel"] = record->source.spsel;
+        edge["source_identity_size"] =
+            record->source.identity_size;
+        edge["source_identity_fingerprint"] =
+            record->source.identity_fingerprint;
+        edge["target_address"] = record->target.address;
+        edge["target_psel"] = record->target.psel;
+        edge["target_spsel"] = record->target.spsel;
+        edge["target_identity_size"] =
+            record->target.identity_size;
+        edge["target_identity_fingerprint"] =
+            record->target.identity_fingerprint;
+        edge["estimated_count"] = record->estimated_count;
+        edge["max_overcount"] = record->max_overcount;
+        edges.append(std::move(edge));
+    }
+
+    py::dict result;
+    result["kind"] = "bounded-set-associative-space-saving";
+    result["scope"] =
+        "consecutive-complete-helper-free-register-control-x86_64-"
+        "blocks-within-one-uncontended-segment";
+    result["sets"] =
+        ConcurrencyProfileCounters::
+            SINGLE_CORE_JIT_SUCCESSOR_SETS;
+    result["ways"] =
+        ConcurrencyProfileCounters::
+            SINGLE_CORE_JIT_SUCCESSOR_WAYS;
+    result["entries"] =
+        ConcurrencyProfileCounters::
+            SINGLE_CORE_JIT_SUCCESSOR_ENTRIES;
+    result["candidate_block_completions"] =
+        profile
+            .single_core_jit_successor_candidate_block_completions;
+    result["observations"] =
+        profile.single_core_jit_successor_observations;
+    result["replacements"] =
+        profile.single_core_jit_successor_replacements;
+    result["exact"] =
+        profile.single_core_jit_successor_replacements == 0 &&
+        !profile.single_core_jit_successor_counter_saturated;
+    result["counter_saturated"] =
+        profile.single_core_jit_successor_counter_saturated;
+    result["edges"] = std::move(edges);
+    return result;
+}
+
 static py::dict concurrency_profile_snapshot_dict(
         const SystemState& system) {
     const ConcurrencyProfileCounters& profile =
@@ -25651,7 +26085,7 @@ static py::dict concurrency_profile_snapshot_dict(
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 15;
+    result["schema_version"] = 16;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -25672,6 +26106,8 @@ static py::dict concurrency_profile_snapshot_dict(
         std::move(block_cache);
     result["single_core_block_rejection_cache"] =
         std::move(block_rejection_cache);
+    result["single_core_jit_successor_profile"] =
+        single_core_jit_successor_profile_snapshot_dict(profile);
     result["lane_active_ns"] =
         std::move(lane_active_ns);
     return result;

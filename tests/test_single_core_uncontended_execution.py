@@ -67,7 +67,7 @@ JIT_PROFILE_WALL_FIELDS = (
 
 
 def _assert_block_cache_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 15
+    assert snapshot["schema_version"] == 16
     assert dict(snapshot["single_core_block_cache"]) == {
         "kind": "set-associative-exact-icache-span",
         "sets": 1_024,
@@ -104,6 +104,30 @@ def _assert_block_cache_profile_reconciles(snapshot: dict) -> None:
         counts["uncontended_block_rejection_cache_replacements"]
         <= counts["uncontended_block_rejection_cache_stores"]
     )
+    successor_profile = dict(
+        snapshot["single_core_jit_successor_profile"]
+    )
+    assert successor_profile["kind"] == (
+        "bounded-set-associative-space-saving"
+    )
+    assert successor_profile["scope"] == (
+        "consecutive-complete-helper-free-register-control-x86_64-"
+        "blocks-within-one-uncontended-segment"
+    )
+    assert successor_profile["sets"] == 1_024
+    assert successor_profile["ways"] == 8
+    assert successor_profile["entries"] == 8_192
+    assert successor_profile["candidate_block_completions"] >= (
+        successor_profile["observations"]
+    )
+    assert successor_profile["replacements"] <= (
+        successor_profile["observations"]
+    )
+    assert successor_profile["exact"] == (
+        successor_profile["replacements"] == 0
+        and not successor_profile["counter_saturated"]
+    )
+    assert isinstance(successor_profile["edges"], list)
 
 
 def _system(
@@ -2445,6 +2469,233 @@ far:
     # +252 and -260 edges each require a complete terminal LBR block.
     assert counts["uncontended_block_steps"] == 996
     _assert_jit_used_when_available(snapshot, counts)
+
+
+def test_jit_successor_profile_counts_warm_two_block_ring_exactly() -> None:
+    system = _system()
+    program = assemble(
+        """
+first:
+    inc r4
+    br second
+second:
+    inc r5
+    br first
+"""
+    )
+    assert len(program) == 6
+    system.load_binary(0, program)
+    system.boot(entry=0)
+
+    warm = system.run_batch_stats(16)
+    assert warm.instructions_executed == 16
+    assert system.cpu.pc == 0
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1_000)
+    snapshot = dict(owner._stop_concurrency_profile())
+    _assert_block_cache_profile_reconciles(snapshot)
+    successor_profile = dict(
+        snapshot["single_core_jit_successor_profile"]
+    )
+
+    assert stats.instructions_executed == 1_000
+    assert system.cpu.pc == 0
+    if snapshot["single_core_jit_backend"] != "x86_64":
+        assert successor_profile["candidate_block_completions"] == 0
+        assert successor_profile["observations"] == 0
+        assert successor_profile["edges"] == []
+        return
+
+    assert successor_profile["candidate_block_completions"] == 500
+    assert successor_profile["observations"] == 499
+    assert successor_profile["replacements"] == 0
+    assert successor_profile["exact"]
+    assert not successor_profile["counter_saturated"]
+    edges = {
+        (edge["source_address"], edge["target_address"]): dict(edge)
+        for edge in successor_profile["edges"]
+    }
+    assert set(edges) == {(0, 3), (3, 0)}
+    assert edges[(0, 3)]["estimated_count"] == 250
+    assert edges[(3, 0)]["estimated_count"] == 249
+    edge_fields = {
+        "source_address",
+        "source_psel",
+        "source_spsel",
+        "source_identity_size",
+        "source_identity_fingerprint",
+        "target_address",
+        "target_psel",
+        "target_spsel",
+        "target_identity_size",
+        "target_identity_fingerprint",
+        "estimated_count",
+        "max_overcount",
+    }
+    assert all(set(edge) == edge_fields for edge in edges.values())
+    assert all(edge["max_overcount"] == 0 for edge in edges.values())
+    assert all(
+        edge["source_psel"] == edge["target_psel"] == 3
+        and edge["source_spsel"] == edge["target_spsel"] == 15
+        and edge["source_identity_size"] == 3
+        and edge["target_identity_size"] == 3
+        and edge["source_identity_fingerprint"] != 0
+        and edge["target_identity_fingerprint"] != 0
+        for edge in edges.values()
+    )
+    assert (
+        edges[(0, 3)]["source_identity_fingerprint"]
+        == edges[(3, 0)]["target_identity_fingerprint"]
+    )
+    assert (
+        edges[(0, 3)]["target_identity_fingerprint"]
+        == edges[(3, 0)]["source_identity_fingerprint"]
+    )
+
+
+def test_jit_successor_profile_does_not_bridge_batch_segments() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+first:
+    inc r4
+    br second
+second:
+    inc r5
+    br first
+"""
+        ),
+    )
+    system.boot(entry=0)
+    assert system.run_batch_stats(16).instructions_executed == 16
+    assert system.cpu.pc == 0
+
+    owner = system._native_system
+    owner._start_concurrency_profile()
+    assert system.run_batch_stats(500).instructions_executed == 500
+    assert system.cpu.pc == 0
+    assert system.run_batch_stats(500).instructions_executed == 500
+    assert system.cpu.pc == 0
+    snapshot = dict(owner._stop_concurrency_profile())
+    successor_profile = dict(
+        snapshot["single_core_jit_successor_profile"]
+    )
+
+    if snapshot["single_core_jit_backend"] != "x86_64":
+        assert successor_profile["candidate_block_completions"] == 0
+        assert successor_profile["observations"] == 0
+        assert successor_profile["edges"] == []
+        return
+
+    assert successor_profile["candidate_block_completions"] == 500
+    assert successor_profile["observations"] == 498
+    assert successor_profile["replacements"] == 0
+    assert successor_profile["exact"]
+    edges = {
+        (edge["source_address"], edge["target_address"]): dict(edge)
+        for edge in successor_profile["edges"]
+    }
+    assert edges[(0, 3)]["estimated_count"] == 250
+    assert edges[(3, 0)]["estimated_count"] == 248
+
+
+def test_jit_successor_profile_stops_at_ext_dict_bios_shape() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    mov r13, r15
+    addi r13, 16
+    dfind r0, r13
+    br loop
+"""
+        ),
+    )
+    system.load_binary(0x210, b"\x01X")
+    system.boot(entry=0)
+    system.cpu.regs[15] = 0x200
+
+    warm = system.run_batch_stats(40)
+    assert warm.instructions_executed == 40
+    assert system.cpu.pc == 0
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1_000)
+    snapshot = dict(owner._stop_concurrency_profile())
+    _assert_block_cache_profile_reconciles(snapshot)
+    successor_profile = dict(
+        snapshot["single_core_jit_successor_profile"]
+    )
+
+    assert stats.instructions_executed == 1_000
+    assert system.cpu.pc == 0
+    assert successor_profile["observations"] == 0
+    assert successor_profile["replacements"] == 0
+    assert successor_profile["exact"]
+    assert not successor_profile["counter_saturated"]
+    assert successor_profile["edges"] == []
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        counts = dict(snapshot["counts"])
+        assert successor_profile["candidate_block_completions"] == 250
+        assert counts["uncontended_jit_executions"] == 250
+        assert counts["uncontended_jit_steps"] == 500
+    else:
+        assert successor_profile["candidate_block_completions"] == 0
+
+
+def test_jit_successor_profile_does_not_cross_native_memory_block() -> None:
+    system = _system()
+    system.load_binary(
+        0,
+        assemble(
+            """
+first:
+    inc r4
+    br memory
+memory:
+    ld.b r5, r9
+    br first
+"""
+        ),
+    )
+    system.load_binary(0x200, b"\xA5")
+    system.boot(entry=0)
+    system.cpu.regs[9] = 0x200
+
+    warm = system.run_batch_stats(16)
+    assert warm.instructions_executed == 16
+    assert system.cpu.pc == 0
+    owner = system._native_system
+    owner._start_concurrency_profile()
+
+    stats = system.run_batch_stats(1_000)
+    snapshot = dict(owner._stop_concurrency_profile())
+    _assert_block_cache_profile_reconciles(snapshot)
+    successor_profile = dict(
+        snapshot["single_core_jit_successor_profile"]
+    )
+
+    assert stats.instructions_executed == 1_000
+    assert system.cpu.pc == 0
+    assert successor_profile["observations"] == 0
+    assert successor_profile["replacements"] == 0
+    assert successor_profile["exact"]
+    assert not successor_profile["counter_saturated"]
+    assert successor_profile["edges"] == []
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        counts = dict(snapshot["counts"])
+        assert successor_profile["candidate_block_completions"] == 250
+        assert counts["uncontended_jit_executions"] == 500
+        assert counts["uncontended_jit_steps"] == 1_000
+    else:
+        assert successor_profile["candidate_block_completions"] == 0
 
 
 @pytest.mark.parametrize(

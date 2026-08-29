@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 9
+    assert benchmark.SCHEMA_VERSION == 10
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -107,6 +107,37 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
             "entries": 2_048,
             "identity_bytes": 16,
         },
+        "single_core_jit_successor_profile": {
+            "kind": "bounded-set-associative-space-saving",
+            "scope": (
+                "consecutive-complete-helper-free-register-control-x86_64-"
+                "blocks-within-one-uncontended-segment"
+            ),
+            "sets": 1_024,
+            "ways": 8,
+            "entries": 8_192,
+            "candidate_block_completions": 4,
+            "observations": 3,
+            "replacements": 0,
+            "exact": True,
+            "counter_saturated": False,
+            "edges": [
+                {
+                    "source_address": 0x100,
+                    "source_psel": 0,
+                    "source_spsel": 0,
+                    "source_identity_size": 4,
+                    "source_identity_fingerprint": 0x1234,
+                    "target_address": 0x104,
+                    "target_psel": 0,
+                    "target_spsel": 0,
+                    "target_identity_size": 4,
+                    "target_identity_fingerprint": 0x5678,
+                    "estimated_count": 3,
+                    "max_overcount": 0,
+                }
+            ],
+        },
         "counts": {
             "uncontended_block_lookups": 125,
             "uncontended_block_misses": 50,
@@ -126,6 +157,11 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
     assert validation == {
         "block_cache_metadata_supported": True,
         "block_rejection_cache_metadata_supported": True,
+        "jit_successor_profile_metadata_supported": True,
+        "jit_successor_profile_counters_are_bounded": True,
+        "jit_successor_profile_exactness_is_explicit": True,
+        "jit_successor_profile_edges_are_valid": True,
+        "jit_successor_profile_order_is_deterministic": True,
         "block_build_attempts_reconcile": True,
         "block_rejection_cache_stores_reconcile": True,
         "block_rejection_cache_replacements_are_bounded": True,

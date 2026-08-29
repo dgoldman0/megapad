@@ -4,6 +4,24 @@ import bench_phase0_concurrency as phase0
 from devices import SECTOR_SIZE
 
 
+EMPTY_JIT_SUCCESSOR_PROFILE = {
+    "kind": "bounded-set-associative-space-saving",
+    "scope": (
+        "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+        "within-one-uncontended-segment"
+    ),
+    "sets": 1_024,
+    "ways": 8,
+    "entries": 8_192,
+    "candidate_block_completions": 0,
+    "observations": 0,
+    "replacements": 0,
+    "exact": True,
+    "counter_saturated": False,
+    "edges": [],
+}
+
+
 def test_bios_admission_mix_matches_production_profile_shape_exactly():
     accounting, probe = phase0._accounting_probe(
         phase0.SCENARIOS["bios_admission_mix"],
@@ -27,6 +45,23 @@ def test_bios_admission_mix_matches_production_profile_shape_exactly():
     assert counts["uncontended_block_steps"] == 980
     assert counts["uncontended_jit_compilations"] == 0
     assert counts["uncontended_jit_slot_publications"] == 0
+    successor = probe["native_snapshot"][
+        "single_core_jit_successor_profile"
+    ]
+    assert successor["candidate_block_completions"] == 340
+    assert successor["observations"] == 330
+    assert successor["replacements"] == 0
+    assert successor["exact"]
+    assert not successor["counter_saturated"]
+    assert len(successor["edges"]) == 33
+    assert sum(
+        edge["estimated_count"] for edge in successor["edges"]
+    ) == 330
+    assert all(
+        edge["estimated_count"] == 10
+        and edge["max_overcount"] == 0
+        for edge in successor["edges"]
+    )
     assert (
         counts["uncontended_steps"]
         - counts["uncontended_block_steps"]
@@ -60,7 +95,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 24
+    assert report["schema_version"] == 25
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -71,7 +106,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 15
+        assert probe["schema_version"] == 16
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -82,6 +117,9 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         block_cache = native["single_core_block_cache"]
         block_rejection_cache = native[
             "single_core_block_rejection_cache"
+        ]
+        jit_successor_profile = native[
+            "single_core_jit_successor_profile"
         ]
         assert not native["enabled"]
         assert native["generation"] > 0
@@ -174,6 +212,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
             "entries": 2_048,
             "identity_bytes": 16,
         }
+        assert jit_successor_profile == EMPTY_JIT_SUCCESSOR_PROFILE
         assert native["wall_ns"][
             "uncontended_jit_arena_allocation"
         ] == 0
@@ -226,11 +265,11 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 24
+    assert report["schema_version"] == 25
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 15
+        assert probe["schema_version"] == 16
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]
@@ -238,6 +277,9 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         block_cache = native["single_core_block_cache"]
         block_rejection_cache = native[
             "single_core_block_rejection_cache"
+        ]
+        jit_successor_profile = native[
+            "single_core_jit_successor_profile"
         ]
         accounting = result["accounting_probe"]
         returned = accounting[
@@ -268,6 +310,30 @@ def test_single_core_profile_attributes_work_across_worker_counts():
             "entries": 2_048,
             "identity_bytes": 16,
         }
+        assert {
+            name: jit_successor_profile[name]
+            for name in ("kind", "scope", "sets", "ways", "entries")
+        } == {
+            "kind": "bounded-set-associative-space-saving",
+            "scope": (
+                "consecutive-complete-helper-free-register-control-x86_64-"
+                "blocks-within-one-uncontended-segment"
+            ),
+            "sets": 1_024,
+            "ways": 8,
+            "entries": 8_192,
+        }
+        assert (
+            0
+            <= jit_successor_profile["replacements"]
+            <= jit_successor_profile["observations"]
+            <= jit_successor_profile["candidate_block_completions"]
+        )
+        assert len(jit_successor_profile["edges"]) <= 8_192
+        assert jit_successor_profile["exact"] == (
+            jit_successor_profile["replacements"] == 0
+            and not jit_successor_profile["counter_saturated"]
+        )
         assert (
             counts["uncontended_block_build_attempts"]
             == counts["uncontended_block_builds"]

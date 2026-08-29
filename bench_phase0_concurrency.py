@@ -92,9 +92,34 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
+
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND = (
+    "bounded-set-associative-space-saving"
+)
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE = (
+    "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+    "within-one-uncontended-segment"
+)
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SETS = 1_024
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_WAYS = 8
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_ENTRIES = 8_192
+SINGLE_CORE_JIT_SUCCESSOR_EDGE_FIELDS = (
+    "source_address",
+    "source_psel",
+    "source_spsel",
+    "source_identity_size",
+    "source_identity_fingerprint",
+    "target_address",
+    "target_psel",
+    "target_spsel",
+    "target_identity_size",
+    "target_identity_fingerprint",
+    "estimated_count",
+    "max_overcount",
+)
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -2880,6 +2905,12 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
     raw_block_rejection_cache = dict(
         raw["single_core_block_rejection_cache"]
     )
+    raw_jit_successor_profile = dict(
+        raw["single_core_jit_successor_profile"]
+    )
+    raw_jit_successor_edges = [
+        dict(raw_edge) for raw_edge in raw_jit_successor_profile["edges"]
+    ]
     counts = {
         name: int(raw_counts[name])
         for name in _CONCURRENCY_PROFILE_COUNT_FIELDS
@@ -2942,12 +2973,121 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
                 raw_block_rejection_cache["identity_bytes"]
             ),
         },
+        "single_core_jit_successor_profile": {
+            "kind": str(raw_jit_successor_profile["kind"]),
+            "scope": str(raw_jit_successor_profile["scope"]),
+            "sets": int(raw_jit_successor_profile["sets"]),
+            "ways": int(raw_jit_successor_profile["ways"]),
+            "entries": int(raw_jit_successor_profile["entries"]),
+            "candidate_block_completions": int(
+                raw_jit_successor_profile[
+                    "candidate_block_completions"
+                ]
+            ),
+            "observations": int(
+                raw_jit_successor_profile["observations"]
+            ),
+            "replacements": int(
+                raw_jit_successor_profile["replacements"]
+            ),
+            "exact": bool(raw_jit_successor_profile["exact"]),
+            "counter_saturated": bool(
+                raw_jit_successor_profile["counter_saturated"]
+            ),
+            "edges": [
+                {
+                    name: int(raw_edge[name])
+                    for name in SINGLE_CORE_JIT_SUCCESSOR_EDGE_FIELDS
+                }
+                for raw_edge in raw_jit_successor_edges
+            ],
+        },
         "counts": counts,
         "wall_ns": wall_ns,
         "lane_active_ns": [
             int(value) for value in raw["lane_active_ns"]
         ],
     }
+
+
+def _single_core_jit_successor_profile_validation(
+    profile: dict,
+    *,
+    require_empty: bool,
+) -> dict[str, bool]:
+    """Validate bounded successor telemetry without interpreting it as ABI."""
+    edges = profile["edges"]
+    observations = profile["observations"]
+    replacements = profile["replacements"]
+    counter_saturated = profile["counter_saturated"]
+    estimates = [edge["estimated_count"] for edge in edges]
+    edge_order = sorted(
+        edges,
+        key=lambda edge: (
+            -edge["estimated_count"],
+            edge["source_address"],
+            edge["source_identity_fingerprint"],
+            edge["target_address"],
+            edge["target_identity_fingerprint"],
+            edge["source_psel"],
+            edge["source_spsel"],
+            edge["target_psel"],
+            edge["target_spsel"],
+            edge["source_identity_size"],
+            edge["target_identity_size"],
+        ),
+    )
+    validation = {
+        "single_core_jit_successor_profile_geometry_supported": (
+            profile["kind"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND
+            and profile["scope"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE
+            and profile["sets"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SETS
+            and profile["ways"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_WAYS
+            and profile["entries"]
+            == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_ENTRIES
+            == profile["sets"] * profile["ways"]
+        ),
+        "single_core_jit_successor_profile_counters_are_bounded": (
+            0
+            <= replacements
+            <= observations
+            <= profile["candidate_block_completions"]
+            and len(edges) <= profile["entries"]
+            and bool(edges) == (observations > 0)
+        ),
+        "single_core_jit_successor_profile_exactness_is_explicit": (
+            profile["exact"]
+            == (replacements == 0 and not counter_saturated)
+        ),
+        "single_core_jit_successor_profile_edges_are_valid": (
+            all(
+                edge["estimated_count"] >= 1
+                and 0 <= edge["max_overcount"] <= edge["estimated_count"]
+                for edge in edges
+            )
+            and (counter_saturated or sum(estimates) == observations)
+        ),
+        "single_core_jit_successor_profile_order_is_deterministic": (
+            edges == edge_order
+        ),
+    }
+    if require_empty:
+        validation[
+            "single_core_jit_successor_profile_is_exactly_empty_when_ineligible"
+        ] = profile == {
+            "kind": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND,
+            "scope": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE,
+            "sets": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SETS,
+            "ways": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_WAYS,
+            "entries": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_ENTRIES,
+            "candidate_block_completions": 0,
+            "observations": 0,
+            "replacements": 0,
+            "exact": True,
+            "counter_saturated": False,
+            "edges": [],
+        }
+    return validation
 
 
 def _freeze_python_callback_profile(profile: dict) -> dict:
@@ -2997,6 +3137,9 @@ def _host_profile_probe(
     block_rejection_cache = native_snapshot[
         "single_core_block_rejection_cache"
     ]
+    jit_successor_profile = native_snapshot[
+        "single_core_jit_successor_profile"
+    ]
     jit_backend_available = (
         native_snapshot["single_core_jit_backend"] == "x86_64"
     )
@@ -3045,7 +3188,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 15,
+            native_snapshot["schema_version"] == 16,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3427,9 +3570,17 @@ def _host_profile_probe(
             )
         ),
     }
+    validation.update(
+        _single_core_jit_successor_profile_validation(
+            jit_successor_profile,
+            require_empty=(
+                native_counts["uncontended_jit_executions"] == 0
+            ),
+        )
+    )
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 15,
+        "schema_version": 16,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
