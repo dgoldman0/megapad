@@ -114,7 +114,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (472 words):
+**BIOS v1.0** (480 words):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -128,6 +128,9 @@ PORTS                          \ List all port bindings
   variants, plus the diagnostic raw words DISK-SEC!, DISK-DMA!, DISK-N!,
   DISK-READ, DISK-WRITE, and DISK-FLUSH
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
+- **Dictionary acceleration**: 1,024-entry replacement-cache ISA, caller-backed
+  BIOS index control, demand-fill/update-existing publication, and validated
+  atomic rollback through `DICT-ROLLBACK`
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 - **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
 - **Checked SHA-3 / SHAKE / raw Keccak**: SHA3-BEGIN, SHA3-UPDATE,
@@ -427,6 +430,8 @@ Character & utility words (§1):
 
 BIOS additions:
 - `LATEST` ( -- addr ): push address of most recent dictionary entry
+- `DICT-INDEX!` / `DICT-INDEX@`: bind and inspect the caller-backed dictionary index
+- `DICT-ROLLBACK`: atomically restore a validated HERE/LATEST checkpoint and repair accelerators
 
 Deferred to future version:
 - Command history (`HIST`, `!!`, `!n`): requires EVALUATE (not in BIOS)
@@ -548,7 +553,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 472 words) is the **permanent,
+The BIOS Forth (v1.0, 480 words) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -556,7 +561,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 472 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 480 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE

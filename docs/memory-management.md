@@ -70,12 +70,15 @@ The Forth dictionary grows upward from `HERE`.  Every `:` definition,
 `CREATE`, `VARIABLE`, or `ALLOT` advances `HERE`.
 
 - **Lifetime:** permanent until `MARKER` or `FORGET`.
-- **Reclaim:** `MARKER` saves HERE/LATEST; executing the marker word
-  rewinds the dictionary to that point.  `FORGET name` rewinds to
-  `name` and unlinks everything after it.
+- **Reclaim:** `MARKER` saves HERE/LATEST; executing the marker word passes
+  that pair to BIOS `DICT-ROLLBACK`. `FORGET name` rolls back to `name` and
+  unlinks everything after it. Both clear cached bindings and rebuild the
+  caller-backed index.
 - **Region:** Bank 0 (system dictionary) or External RAM (userland
   dictionary, see §6).
-- **Cost:** O(1) per allocation, O(1) reclaim via marker.
+- **Cost:** O(1) per allocation. Rollback is O(dictionary entries + index
+  capacity), because it validates the chain, clears the bounded table, and
+  rebuilds latest-first.
 
 ```forth
 VARIABLE MY-DATA          \ 8 bytes at HERE, permanent
@@ -364,6 +367,12 @@ sector-rounded transfer allocations and release them after evaluation,
 including the guarded THROW path; compiled definitions remain in the userland
 dictionary rather than in those temporary buffers.
 
+A `HERE/LATEST` checkpoint owns one contiguous active zone. Every definition
+removed by `DICT-ROLLBACK` must lie between its saved and current `HERE`, and
+no retained header may lie there. If post-checkpoint definitions cross between
+Bank 0 and userland, rollback rejects the pair before mutation; keep separate
+markers or compiler transactions on the two sides of a zone transition.
+
 The BIOS owns the write boundary, not just the reporting words. Before each
 atomic emitted span writes, it proves that complete span fits within the
 inclusive base and exclusive limit by subtraction. Exact fit is valid; an
@@ -545,7 +554,9 @@ KDOS splits XMEM into two zones:
 ```
 XMEM region:
   ┌──────────────────────────────┐  EXT-MEM-BASE
-  │  Pre-init XBUF/loader spans  │
+  │  BIOS dictionary index       │  capacity-derived, permanent
+  ├──────────────────────────────┤
+  │  Other pre-init XBUF/loader  │
   ├──────────────────────────────┤  U-DICT-BASE
   │  Userland dictionary         │  ← HERE when ULAND=1
   │  (capacity-derived)          │
@@ -555,11 +566,14 @@ XMEM region:
   └──────────────────────────────┘  XMEM-LIMIT
 ```
 
-`XMEM-FLOOR` protects the earlier kernel allocations and dictionary from
-`XMEM-RESET`. The userland interval is sealed at `ENTER-USERLAND` time and is
-not reclaimable by the XMEM allocator. `LEAVE-USERLAND` disables the active
-BIOS bounds and switches `HERE` back to Bank 0 without affecting either XMEM
-side.
+The one-shot KDOS initializer reserves at most 1/128 of free XMEM for the BIOS
+dictionary index, rounded down to a power-of-two number of 16-byte slots. The
+canonical 128 MiB arrangement uses 1 MiB. `XMEM-FLOOR` protects that table,
+later kernel allocations, and the dictionary from `XMEM-RESET`. The userland
+interval is sealed at `ENTER-USERLAND` time and is not reclaimable by the XMEM
+allocator. `LEAVE-USERLAND` disables the active BIOS bounds and switches
+`HERE` back to Bank 0 without affecting either XMEM side. `XMEM-INIT` is a
+boot-only one-shot; use `XMEM-RESET` for the supported post-boot reset.
 
 The module registry deliberately does not live in either XMEM zone.  Its
 stable exact-ID entries and any grown bucket vector use the Bank 0 heap through
@@ -596,7 +610,7 @@ Bank 0 dictionary space), then advances the floor:
 
 | Strategy | Word | Cost | Scope |
 |----------|------|------|-------|
-| Dictionary rewind | `CLEAN` (marker word) | O(1) | Everything after marker |
+| Dictionary rewind | `CLEAN` (marker word) | O(dictionary + index capacity) | Contiguous active-zone history after marker |
 | Individual heap free | `addr FREE` | O(n) | One block |
 | Arena destroy | `arena ARENA-DESTROY` | O(1) | Entire arena |
 | Arena reset | `arena ARENA-RESET` | O(1) | All arena allocs (keeps backing) |

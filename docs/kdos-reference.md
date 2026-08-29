@@ -497,7 +497,8 @@ userland zone.  System words remain accessible.
 | System RAM | `0x00000 .. HERE` | BIOS + KDOS core dictionary |
 | System heap | cold aligned `HERE+32 KiB .. 0x7F000` | Explicit Bank 0 `DMA-ALLOCATE` / `DMA-FREE` blocks |
 | Stacks | `0x80000 .. 0xFFFFF` | Data stack + return stack |
-| Pre-init XMEM | `EXT-MEM-BASE .. U-DICT-BASE` | Persistent kernel objects and reclaimable loader buffers allocated before the partition |
+| BIOS dictionary index | `EXT-MEM-BASE .. index-end` | Permanent capacity-derived open-addressed table; 1 MiB/65,536 slots in the canonical 128 MiB arrangement |
+| Other pre-init XMEM | `index-end .. U-DICT-BASE` | Persistent kernel objects and reclaimable loader buffers allocated before the partition |
 | Userland dict | `U-DICT-BASE .. U-DICT-LIMIT` | User word definitions + data; inclusive base, exclusive limit |
 | XMEM general | `U-DICT-LIMIT .. XMEM-LIMIT` | `XMEM-ALLOT` bump capacity plus safe reclaimed blocks below the dictionary base |
 
@@ -524,6 +525,12 @@ BIOS validates the candidate physical interval before KDOS publishes any
 partition cell; `USERLAND-INIT` leaves that low-level bound disarmed until the
 actual `ENTER-USERLAND` transition.
 
+Before that partition, KDOS's one-shot index initializer reserves at most
+1/128 of free XMEM, rounded down to a power-of-two count of 16-byte slots. It
+uses checked allocation, advances `XMEM-FLOOR`, and leaves linked lookup active
+if no table can be allocated. `XMEM-INIT` is itself one-shot; `XMEM-RESET`, not
+reinitialization, is the supported allocator reset after boot.
+
 The BIOS words `DICT-BOUNDS!`, `DICT-BOUNDS-OFF`, `DICT-BASE@`,
 `DICT-LIMIT@`, and `DICT-FAULT-XT!` enforce the interval. They are the
 low-level transition seam used by KDOS, not a second allocator API. Every
@@ -535,6 +542,13 @@ owners still roll back their transaction checkpoint after a failure. Under a
 surrounding `CATCH`, the KDOS fault hook throws standard code `-8` for either
 Bank-0 or userland exhaustion; checked evaluation reports that as status 5 in
 `EVAL-S-THROW`.
+
+`MARKER`, `FORGET`, and checked compiler owners pass their saved pair to
+`DICT-ROLLBACK`; raw `LATEST` stores are unsupported. The two-cell checkpoint
+can reclaim only one contiguous active dictionary zone. If definitions made
+after the checkpoint cross between Bank 0 and userland, rollback rejects the
+pair before changing `HERE`, `LATEST`, the cache, or the index. Use separate
+checkpoints on each side of a zone transition.
 
 `XMEM-FREE-BLOCK` accepts only spans wholly below the current XMEM high-water
 mark, then applies the dictionary-overlap check after initialization. This
@@ -878,11 +892,11 @@ both restore the exact caller source.  Status 5 remains sticky while enclosing
 evaluators unwind, preventing either the failed source tail or an enclosing
 line tail from executing.
 
-Dictionary changes are not automatically transactional.  A caller that
-snapshots `HERE` and `LATEST` must restore both on failure, then call
-`EVALUATOR-RESET`.  That order is intentional: reset clears compiler
+Dictionary changes are not automatically transactional. A caller that
+snapshots `HERE` and `LATEST` must pass that pair to `DICT-ROLLBACK` on failure,
+then call `EVALUATOR-RESET`. That order is intentional: reset clears compiler
 bookkeeping but does not move the dictionary pointers or disturb an enclosing
-`EVALUATE` frame.  The last status and diagnostics survive reset so the UI can
+`EVALUATE` frame. The last status and diagnostics survive reset so the UI can
 present them afterward.
 Like `EVALUATE`, source-level data-stack effects are preserved.
 

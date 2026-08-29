@@ -468,9 +468,9 @@ No Python fallback needed.  1715/1715 tests pass.
 **Priority: high — unique competitive advantage**  
 **Topology: CPU-internal (per-CPU BRAM hash table)**
 
-**Status:** the 2026-08-29 capacity and policy revision is locked for host and
-BIOS implementation. RTL work is assigned separately. The authoritative
-contract and measurement are in
+**Status:** the 2026-08-29 capacity and policy revision is implemented in the
+host models and BIOS/KDOS sources. RTL work is assigned separately. The
+authoritative contract and measurement are in
 [`dictionary-acceleration.md`](dictionary-acceleration.md).
 
 A hardware-accelerated positive working set is paired with a caller-backed
@@ -531,8 +531,9 @@ All currently implemented instructions are three bytes:
 - Rs = address of counted string (name to find/insert/delete)
 - Rd = XT result (DFIND) or XT to store (DINS)
 - Z flag = found (`DFIND`), success (`DINS`/`DDEL`), or matched (`DUPD`)
-- V flag = zero for all completed cache operations; `DINS` replaces a line
-  rather than reporting capacity overflow
+- `DFIND`, `DINS`, and `DUPD` clear V; `DINS` replaces a line rather than
+  reporting capacity overflow. `DDEL` changes only Z and `DCLR` preserves
+  flags.
 
 **Execution model:**
 - DFIND: 2-cycle stall — cycle 1 hashes the name (read from memory
@@ -582,7 +583,7 @@ if needed, they use software linked-list FIND.
 - Update `mp64_dict.v`, instantiated inside `mp64_cpu.v` (tightly coupled,
   like the string engine and multiplier).
 - Interface: `start`, `op[3:0]`, `name_addr`, `name_len`, `xt_in`,
-  `done`, `xt_out`, `found`, `overflow`, bus master signals for
+  `done`, `xt_out`, `matched`, bus master signals for
   name read, BRAM ports for hash table.
 - 4 parallel comparators (one per way) for single-cycle match.
 - Coherence sideband: operation kind, valid/ready backpressure, and enough
@@ -613,10 +614,10 @@ entries and replacement cursors.
 | Layer | Status | Notes |
 |-------|--------|-------|
 | RTL (`mp64_dict.v` plus coherence fabric) | Deferred | Must implement the locked 256×4 replacement/coherence contract |
-| Python emulator (`megapad64.py`) | In progress | Exact bounded reference model |
-| C++ accelerator (`mp64_accel.cpp`) | In progress | Exact native parity model |
-| BIOS/KDOS | In progress | Demand fill, caller-backed index, atomic rollback |
-| Qualification | Pending | Focused host/BIOS first; RTL and broad acceptance deferred |
+| Python emulator (`megapad64.py`) | Implemented | Exact bounded reference model |
+| C++ accelerator (`mp64_accel.cpp`) | Implemented | Exact native parity model |
+| BIOS/KDOS | Implemented | Demand fill, caller-backed index, atomic rollback |
+| Qualification | Focused green | 15 host parity cases and 21 BIOS/definition/boot cases; RTL and broad acceptance deferred |
 
 ---
 
@@ -2536,10 +2537,11 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 - [x] Revised ISA and cache contract locked (FA 00–04, 256 sets × 4 ways)
 - [x] Profile-guided 1,024-entry capacity and caller-backed BIOS index designed
-- [ ] Python and native C++ bounded replacement models plus focused parity tests
-- [ ] BIOS demand fill, update-existing publication, side index, and rollback
+- [x] Python and native C++ bounded replacement models plus focused parity tests
+- [x] BIOS demand fill, update-existing publication, side index, and rollback
 - [ ] RTL replacement geometry and coherent DINS/DUPD/DCLR fabric (separate team)
-- [ ] Layer-appropriate focused and acceptance qualification
+- [x] Focused host-cache and BIOS qualification
+- [ ] RTL and broad acceptance qualification (deferred under current gates)
 
 ### §4 — Other Accelerator Ideas
 

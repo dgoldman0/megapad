@@ -418,7 +418,7 @@ text.
 | `EVALUATE` | `( addr len -- )` | Interpret one string as Forth source.  Retains the legacy stack effect but records any error in `EVAL-STATUS`.  Input above 255 bytes is rejected, never truncated.  Nested calls preserve and restore the caller's complete TIB bytes, length, and `>IN`. |
 | `EVALUATE-CHECKED` | `( addr len -- status )` | BIOS primitive returning status 0–3.  After KDOS defines `CATCH`, KDOS deliberately shadows this name with the transaction-safe wrapper described below, which also returns status 5. |
 | `EVALUATE-FINISH` | `( -- status )` | End a multi-line checked operation, returning 4 if compiler or cross-line conditional state is unfinished, otherwise 0. |
-| `EVALUATOR-RESET` | `( -- )` | Clear compiler bookkeeping after the caller restores `HERE` and `LATEST`.  Does not roll back the dictionary, erase diagnostics, or change the enclosing evaluator depth. |
+| `EVALUATOR-RESET` | `( -- )` | Clear compiler bookkeeping after the caller invokes `DICT-ROLLBACK` with its saved `HERE/LATEST` pair. Does not roll back the dictionary itself, erase diagnostics, or change the enclosing evaluator depth. |
 | `EVALUATOR-UNWIND` | `( depth -- )` | Restore abandoned nested input frames down to a previously captured `EVAL-DEPTH @` checkpoint.  Negative or above-current targets are ignored. |
 | `EVAL-STATUS` | `( -- addr )` | Address of the last status cell. |
 | `EVAL-LINE` | `( -- addr )` | Address of the one-based source-line context/diagnostic cell. |
@@ -456,8 +456,30 @@ ownership in KDOS while making `SOURCE-EVALUATE-CHECKED` transaction-safe.
 Checked evaluation intentionally permits a colon definition or conditional to
 span calls.  Use `EVALUATE-FINISH` once after the last line.  KDOS packages
 that protocol as `SOURCE-EVALUATE-CHECKED` for complete multi-line buffers.
-After any nonzero transactional result, restore `HERE` and `LATEST` before
-calling `EVALUATOR-RESET`; status and diagnostics remain available afterward.
+After any nonzero transactional result, pass the saved `HERE/LATEST` pair to
+`DICT-ROLLBACK` before calling `EVALUATOR-RESET`; status and diagnostics remain
+available afterward.
+
+---
+
+## Dictionary Bounds and Acceleration (8 words)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `DICT-BOUNDS!` | `( base limit -- )` | Install a checked inclusive/exclusive external dictionary interval. Invalid or wrapping bounds fault before publication. |
+| `DICT-BOUNDS-OFF` | `( -- )` | Disable the external interval and restore guarded Bank-0 allocation semantics. |
+| `DICT-BASE@` | `( -- base )` | Return the active external dictionary base, or zero when disabled. |
+| `DICT-LIMIT@` | `( -- limit )` | Return the active exclusive external dictionary limit, or zero when disabled. |
+| `DICT-FAULT-XT!` | `( xt -- )` | Install the caller's dictionary-fault callback used by KDOS to throw `-8`. |
+| `DICT-INDEX!` | `( base slots -- status )` | Install and rebuild a 16-byte-slot, power-of-two caller table, or disable with `0 0`. Returns 0 for authoritative success, 1 for invalid arguments with the old binding unchanged, or 2 for an installed saturated fallback. |
+| `DICT-INDEX@` | `( -- base slots count flags )` | Return table geometry, occupied unique-name slots, and `BOUND=1`, `AUTHORITATIVE=2`, `BUILDING=4`, `SATURATED=8`. |
+| `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | Validate a contiguous active-zone checkpoint, clear cached bindings globally, publish both dictionary pointers, and rebuild the side index. |
+
+The linked list remains authoritative. Names through 31 bytes are eligible for
+the 1,024-entry `EXT.DICT` working-set cache; the BIOS index covers every name
+through the 127-byte header limit when it is bound. See
+[`dictionary-acceleration.md`](dictionary-acceleration.md) for the slot,
+publication-generation, replacement, rollback, and deferred RTL contracts.
 
 ---
 

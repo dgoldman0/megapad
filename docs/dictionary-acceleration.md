@@ -1,8 +1,8 @@
 # Dictionary Acceleration Contract
 
-Status: locked for the host-emulator and BIOS implementation on 2026-08-29.
-RTL implementation is intentionally deferred to the hardware team; its exact
-requirements are recorded below.
+Status: locked and implemented in the host emulator and BIOS/KDOS sources on
+2026-08-29. RTL implementation is intentionally deferred to the hardware
+team; its exact requirements are recorded below.
 
 This contract keeps the Forth linked dictionary authoritative. It separates
 two jobs which the original 256-entry `EXT.DICT` table could not perform at
@@ -86,20 +86,25 @@ thousands of definitions which may never be queried.
 ## Caller-backed BIOS index
 
 The side index uses open addressing with linear probing. `DICT-INDEX!`
-`( base slots -- status )` binds or disables the index, and `DICT-INDEX@`
-`( -- base slots count flags )` exposes bounded diagnostics. Its storage is
-provided by the caller as a 16-byte-aligned base and a power-of-two slot count.
+`( base slots -- status )` binds or disables the index: status 0 means an
+authoritative installation or successful disable, 1 rejects invalid arguments
+without changing the prior binding, and 2 reports an installed but saturated,
+non-authoritative rebuild. `DICT-INDEX@`
+`( -- base slots count flags )` exposes bounded diagnostics, with flag bits 0
+through 3 meaning `BOUND`, `AUTHORITATIVE`, `BUILDING`, and `SATURATED`.
+Storage is provided by the caller as a 16-byte-aligned base and a power-of-two
+slot count.
 The complete non-wrapping span must lie in advertised external memory. The
 BIOS validates the span before publishing it and never owns, grows, or frees
 the allocation. With no valid allocation, lookup remains correct through the
 linked list.
 
-Each 16-byte slot contains an entry pointer, the 32-bit uppercase FNV-1a hash,
-the seven-bit name length, and reserved metadata bytes. An entry pointer of
-zero marks an empty slot. Metadata is written before the entry pointer so the
-pointer is the publication field. Hash equality is only a probe filter: an
-index hit must also compare the stored length and the case-folded name bytes
-at the referenced dictionary header.
+Each 16-byte slot contains the entry pointer at `+0`, the 32-bit uppercase
+FNV-1a hash at `+8`, the seven-bit name length at `+12`, and three zero reserved
+bytes at `+13..+15`. An entry pointer of zero marks an empty slot. Metadata is
+written before the entry pointer so the pointer is the publication field. Hash
+equality is only a probe filter: an index hit must also compare the stored
+length and the case-folded name bytes at the referenced dictionary header.
 
 The index covers dictionary names from one through 127 bytes. Creation of a
 name longer than 127 bytes is rejected before writing a header; otherwise the
@@ -122,18 +127,27 @@ oldest entry using insert-if-absent, so the first (newest) binding wins. A
 normal upsert during that newest-to-oldest walk would incorrectly let an older
 shadowed definition replace the new one.
 
-KDOS allocates its default 1 MiB index after `XMEM-INIT` and before sealing the
-userland dictionary/general-XMEM partition. It installs the bounded span and
-rebuilds all BIOS and KDOS definitions accumulated before installation. If
-external memory is absent or the reservation cannot be made, installation is
-skipped and linked lookup remains the fallback.
+KDOS allocates a capacity-derived index after the one-shot `XMEM-INIT` and
+before sealing the userland dictionary/general-XMEM partition; that table is
+1 MiB in the canonical 128 MiB arrangement. Its own initializer is also
+one-shot. It uses the checked XMEM allocator, installs the bounded span,
+advances `XMEM-FLOOR` after a successful installation, and rebuilds all BIOS
+and KDOS definitions accumulated before installation. If external memory is
+absent or the reservation cannot be made, installation is skipped and linked
+lookup remains the fallback.
 
 ## Publication and rollback
 
 Dictionary publication is single-writer work under the dictionary lock. The
 new header and link must be complete before publishing `LATEST`; the side-index
-upsert follows that publication. Readers may use the index only in a state in
-which its publication rules make hits safe and authoritative misses valid.
+upsert follows that publication. A private 64-bit seqlock epoch is even while
+the dictionary, index, and cache bindings are stable and odd across every
+publication, index installation/disable, and rollback. Readers snapshot an
+even generation and revalidate it after `DFIND` or an index probe. An exact
+index hit is safe in any stable bound state, including saturation; an empty
+slot proves absence only in a stable authoritative generation. If publication
+crosses a late local `DINS`, the reader deletes that possibly stale fill and
+resolves through the linked head without filling again.
 
 Rollback is one BIOS-owned operation, `DICT-ROLLBACK`
 `( saved-here saved-latest -- )`, taking the saved `HERE` and `LATEST` as a
@@ -144,6 +158,12 @@ marks the index authoritative only if the complete rebuild succeeds. `MARKER`,
 `FORGET`, and transactional compiler rollback must use this operation; a raw
 store to `var_latest` is not a supported rollback path. This prevents a
 forgotten entry from surviving as a hardware-cache or side-index hit.
+
+The two-cell checkpoint rewinds one contiguous active dictionary zone. Every
+removed header must lie in `[saved-HERE,current-HERE)`, and no retained header
+may lie there. A rollback whose intervening definitions cross between Bank 0
+and userland is rejected before mutation; reclaiming two independently moving
+allocation cursors would require a wider transaction record.
 
 ## Required RTL follow-up
 
@@ -182,6 +202,11 @@ The implementation slice requires focused, seconds-scale checks for:
   long names, latest-binding shadowing, and pre-install fallback;
 - demand-only cache allocation and update-existing definition publication;
 - `MARKER`, `FORGET`, and transactional rollback rejecting stale bindings.
+
+The landed host-cache selector passes all 15 reference/native cases. The
+focused BIOS selectors pass 21 cases covering index behavior, rollback,
+definition publication, dictionary-chain geometry, and the secondary-core
+boot path affected by BIOS growth.
 
 Cold source-load, Desktop smoke, source/warm equivalence, sustained cadence,
 and RTL qualification remain deferred under the repository's current vertical

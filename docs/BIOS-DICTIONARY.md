@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **472** entries.  The numbered
+The `bios.asm` dictionary link chain contains **480** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -36,10 +36,10 @@ Each entry is a linked list node:
 
 ---
 
-## Hardware Cache and BIOS Index — Locked Target
+## Hardware Cache and BIOS Index
 
-The in-progress dictionary-acceleration implementation keeps the linked
-dictionary authoritative and adds two bounded acceleration layers. Names of at
+The dictionary-acceleration implementation keeps the linked dictionary
+authoritative and adds two bounded acceleration layers. Names of at
 most 31 bytes first probe the per-core
 `EXT.DICT` cache. A cache miss probes the caller-backed BIOS index, which also
 covers names through the dictionary header's 127-byte limit. An exact positive
@@ -60,6 +60,16 @@ canonical 128 MiB arrangement selects 65,536 16-byte slots (1 MiB), keeping the
 measured 30,598-entry Desktop dictionary below 47% load. The caller-bounded
 BIOS interface accepts other valid capacities, and a system without sufficient
 external memory remains correct through the linked fallback.
+
+`DICT-INDEX! ( base slots -- status )` returns 0 after a complete authoritative
+install or disable, 1 for invalid arguments with the old binding unchanged, or
+2 when the new table was installed but its rebuild saturated. `DICT-INDEX@`
+`( -- base slots count flags )` returns occupied unique-name slots and flag bits
+`BOUND=1`, `AUTHORITATIVE=2`, `BUILDING=4`, and `SATURATED=8`. Each 16-byte
+slot stores its published entry pointer at `+0`, uppercase FNV-1a32 hash at
+`+8`, seven-bit length at `+12`, and zero reserved bytes at `+13..+15`.
+The complete table span must be 16-byte aligned, power-of-two sized,
+non-wrapping, and contained in advertised external memory.
 
 Definition publication upserts the side index. `MARKER`, `FORGET`, and
 transactional compiler rollback use `DICT-ROLLBACK` to publish `HERE` and
@@ -143,11 +153,11 @@ input frames to a captured depth; negative and above-current checkpoints are
 ignored.  `EVAL-TOKEN` returns the stable `( addr len )` token copy.  Lines
 are one-based when supplied by the caller and columns are zero-based.
 
-After a transactional compiler caller restores `HERE` and `LATEST`, it must
-call `EVALUATOR-RESET`.  The reset clears `STATE`, cross-line conditionals,
-quotation/noname, LEAVE, and JIT peephole bookkeeping.  It does not perform
-dictionary rollback, disturb an enclosing evaluator frame, or erase the last
-status and diagnostics.
+After a transactional compiler caller passes its saved `HERE/LATEST` pair to
+`DICT-ROLLBACK`, it must call `EVALUATOR-RESET`. The reset clears `STATE`,
+cross-line conditionals, quotation/noname, LEAVE, and JIT peephole bookkeeping.
+It does not perform dictionary rollback, disturb an enclosing evaluator frame,
+or erase the last status and diagnostics.
 
 ---
 
@@ -917,11 +927,29 @@ initialization, lifetime, or freedom from application-level aliases.
 | 470 | `TACC-STATUS@` | `( -- status )` | | Read caller-relative TACC status CSR `0x1D` (`D0 1D`) |
 | 471 | `TACC-CLAIM?` | `( -- flag )` | | Execute `TACC-TRY`, then return canonical true exactly when `TACC_STATUS.MINE` is set; never spins |
 
+### Dictionary Bounds and Fault Control (5 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 472 | `DICT-BOUNDS!` | `( base limit -- )` | | Install a validated inclusive/exclusive external dictionary interval |
+| 473 | `DICT-BOUNDS-OFF` | `( -- )` | | Disable external dictionary allocation and restore guarded Bank-0 allocation |
+| 474 | `DICT-BASE@` | `( -- base )` | | Return the active external dictionary base, or zero when disabled |
+| 475 | `DICT-LIMIT@` | `( -- limit )` | | Return the active exclusive external dictionary limit, or zero when disabled |
+| 476 | `DICT-FAULT-XT!` | `( xt -- )` | | Install the dictionary-fault callback used by the checked allocator |
+
+### Dictionary Acceleration Control (3 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 477 | `DICT-INDEX!` | `( base slots -- status )` | | Install/rebuild or disable the caller-backed dictionary index; invalid arguments leave the prior binding unchanged |
+| 478 | `DICT-INDEX@` | `( -- base slots count flags )` | | Return bounded index geometry, occupied-slot count, and publication flags |
+| 479 | `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | | Validate a contiguous-zone checkpoint, globally clear cached bindings, atomically publish HERE/LATEST, and rebuild the side index |
+
 ### Checked WOTS Chain (1 word)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 472 | `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | | Check capability and complete arguments, run the 64-bit Bank 0 DMA/shared-Keccak chain under crypto guard 8, stage 16 result bytes, prove `CLEAR` reached `IDLE`, then publish and release |
+| 480 | `WOTS-CHAIN` | `( context-64 start steps dst-16 -- status )` | | Check capability and complete arguments, run the 64-bit Bank 0 DMA/shared-Keccak chain under crypto guard 8, stage 16 result bytes, prove `CLEAR` reached `IDLE`, then publish and release |
 
 `context-64` is exactly `PK.seed[16] || ADRS[32] || node[16]`. `start` and
 `steps` are each 0..15; when `steps` is nonzero their widened sum is at most
@@ -977,8 +1005,10 @@ machine reset.
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
+| Dictionary Bounds and Fault Control | 5 |
+| Dictionary Acceleration Control | 3 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **379** |
+| **Catalogued subtotal** | **387** |
 
 ### All Immediate Words (34)
 
@@ -990,7 +1020,9 @@ The complete authoritative link chain is the `.dq` chain in `bios.asm`.
 The checked WOTS word closes the newest appended segment:
 
 ```
-WOTS-CHAIN → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
+WOTS-CHAIN → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
+→ DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
+→ TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 → TACC-CLEAR → TACC-TRY → TAMAC → CALLER-SPAN-STATUS
 → ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS
 → SHA512-CLEAR → SHA512-FINAL → SHA512-UPDATE
