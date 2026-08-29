@@ -4971,7 +4971,7 @@ VARIABLE FR-CHUNK   \ temp: byte count for head copy
 \  §7.6  MP64FS — On-Disk Named File System
 \ =====================================================================
 \
-\  Disk layout (15..8192 x 512-byte sectors, format marker 1):
+\  Disk layout (15..65536 x 512-byte sectors, format marker 1):
 \    Sector 0         Superblock (magic "MP64", marker, geometry)
 \    Sectors 1..B     Allocation bitmap (one bit per sector)
 \    Next 12 sectors  Directory (128 entries x 48 bytes)
@@ -5006,10 +5006,13 @@ VARIABLE FR-CHUNK   \ temp: byte count for head copy
 \ -- Constants --
 128 CONSTANT FS-MAX-FILES
 48  CONSTANT FS-ENTRY-SIZE
+16  CONSTANT FS-MAX-BMAP-SECTORS
+65536 CONSTANT FS-MAX-SECTORS
 
 \ -- RAM caches (loaded from disk by FS-LOAD) --
 VARIABLE FS-SUPER  SECTOR 1- ALLOT            \ 512 bytes — superblock
-VARIABLE FS-BMAP   SECTOR 2 * 1- ALLOT         \ up to 8192 sector bits
+VARIABLE FS-BMAP   SECTOR FS-MAX-BMAP-SECTORS * 1- ALLOT
+                                                \ up to 65536 sector bits
 VARIABLE FS-DIR    SECTOR 12 * 1- ALLOT       \ 6144 bytes — directory
 
 VARIABLE FS-TOTAL  2048 FS-TOTAL !
@@ -5145,7 +5148,7 @@ VARIABLE FF-LEN
         DUP DISK-IO-IOR ! IOR>RAW DISK-IO-STATUS !
         ."  Unable to bind storage" CR EXIT
     THEN
-    FS-VOLUME @ VOL.SECTORS DUP 15 < OVER 8192 > OR IF
+    FS-VOLUME @ VOL.SECTORS DUP 15 < OVER FS-MAX-SECTORS > OR IF
         DROP ."  Unsupported disk size" CR EXIT
     THEN
     FS-TOTAL !

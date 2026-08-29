@@ -33,7 +33,7 @@ module mp64_soc #(
     parameter CORES_PER_CLUSTER = 4,
     parameter MEM_DEPTH         = 16384,    // per-bank depth (×512-bit rows)
     parameter EXT_MEM_SIZE_PARAM = 0,         // ext bytes; 0 = up to VRAM_BASE
-    parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192
+    parameter [31:0] DISK_TOTAL_SECTORS = 32'd65536
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,

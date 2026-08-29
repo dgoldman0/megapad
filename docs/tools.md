@@ -319,7 +319,7 @@ have no implicit wait or scheduler policy.
 ## Disk Utility
 
 `diskutil.py` creates and manages **MP64FS** disk images from 15 through
-8192 sectors.  Every image uses marker 1 with capacity-derived bitmap,
+65536 sectors.  Every image uses marker 1 with capacity-derived bitmap,
 directory, and data geometry.  See the Filesystem Specification for the
 on-disk format.
 
@@ -362,7 +362,7 @@ Use `--type` with the `inject` subcommand:
 
 ```bash
 # Create an empty formatted image
-python diskutil.py format -o myimage.img --sectors 8192
+python diskutil.py format -o myimage.img --sectors 65536
 
 # Add the KDOS source (BIOS auto-boots the first Forth-type file)
 python diskutil.py inject myimage.img kdos.f --type forth

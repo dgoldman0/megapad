@@ -2,7 +2,7 @@
 
 **MP64FS** (Megapad-64 File System) is a sector-based filesystem designed
 for the Megapad-64's storage controller.  One draft format marker (`1`)
-uses the same derived-geometry rule from 15 through 8192 sectors (4 MiB).
+uses the same derived-geometry rule from 15 through 65536 sectors (32 MiB).
 The host utility still defaults to **1 MiB** (2048 × 512-byte sectors) and
 the filesystem supports up to
 **128 named files** with 23-character names, hierarchical subdirectories,
@@ -27,9 +27,9 @@ This document covers:
 
 | Property | Value |
 |----------|-------|
-| Supported size | 15–8192 sectors (up to 4 MiB); host default 2048 sectors |
+| Supported size | 15–65536 sectors (up to 32 MiB); host default 2048 sectors |
 | Sector size | 512 bytes |
-| Bitmap sectors | `ceil(total_sectors / 4096)` (1 or 2) |
+| Bitmap sectors | `ceil(total_sectors / 4096)` (1 through 16) |
 | Directory start | `1 + bitmap_sectors` |
 | Data start | `directory_start + 12` |
 | Max files | 128 |
@@ -37,9 +37,11 @@ This document covers:
 | Directory entry size | 48 bytes |
 | Max extents per file | 2 (primary + one secondary) |
 
-The superblock stores `total_sectors` as a **u32**, but this draft deliberately
-caps it at 8192 sectors because the runtime caches at most two bitmap sectors.
-The 1 MiB default and 4 MiB Desktop image use the same marker and formula.
+The superblock stores `total_sectors` as a **u32**, but marker 1 deliberately
+caps it at 65536 sectors.  Its u16 extent starts can name every valid LBA from
+0 through 65535 at that exact capacity, and the runtime caches at most sixteen
+bitmap sectors.  The 1 MiB host default and 32 MiB Desktop image use the same
+marker and formula.
 
 ---
 
@@ -62,7 +64,7 @@ geometry.  The first 4 bytes are the magic number — if they don't read
 |--------|------|-------|-------|-------------|
 | +0 | 4 | `magic` | `b"MP64"` | Format identifier.  Always the ASCII bytes `4D 50 36 34`. |
 | +4 | 2 | `marker` | 1 (u16 LE) | The single accepted draft format marker. |
-| +6 | 4 | `total_sectors` | u32 LE | Must exactly equal attached media capacity and be ≤8192. |
+| +6 | 4 | `total_sectors` | u32 LE | Must exactly equal attached media capacity and be ≤65536. |
 | +10 | 2 | `bmap_start` | 1 (u16 LE) | Starting sector of the allocation bitmap. |
 | +12 | 2 | `bmap_sectors` | u16 LE | Exactly `ceil(total_sectors / 4096)`. |
 | +14 | 2 | `dir_start` | u16 LE | Exactly `bmap_start + bmap_sectors`. |
@@ -77,8 +79,8 @@ geometry.  The first 4 bytes are the magic number — if they don't read
 The bitmap tracks which sectors are allocated.  It uses **one bit per
 sector** — bit N = 1 means sector N is in use.
 
-- One 512-byte bitmap sector represents 4096 sectors; the 8192-sector
-  geometry uses two bitmap sectors
+- One 512-byte bitmap sector represents 4096 sectors; the 65536-sector
+  geometry uses sixteen bitmap sectors
 - On a freshly formatted disk, sectors 0 through `data_start - 1` are marked
   allocated; everything else is free
 - Bitmap count, directory start, and data start are always derived and
@@ -407,8 +409,8 @@ managing MP64FS disk images from the host system.
 ### Command-Line Usage
 
 ```bash
-# Create a blank, formatted 4 MiB image
-python diskutil.py format -o myimage.img --sectors 8192
+# Create a blank, formatted 32 MiB image
+python diskutil.py format -o myimage.img --sectors 65536
 
 # Inject a file into the image (root directory by default)
 python diskutil.py inject myimage.img myfile.f --type forth

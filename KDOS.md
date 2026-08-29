@@ -316,7 +316,7 @@ Replace the manual sector-range FILE abstraction with a proper named file
 system on disk, providing the storage foundation for docs, tutorials, and
 persistent user data.
 
-*Disk layout (MP64FS, 15–8192 × 512-byte sectors):*
+*Disk layout (MP64FS, 15–65536 × 512-byte sectors):*
 ```
 Sector 0:             Superblock (magic "MP64", marker 1, geometry)
 Sectors 1..B:         Allocation bitmap (one bit per sector)

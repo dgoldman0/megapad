@@ -322,15 +322,16 @@ IRQ vector: `IVEC_RTC` (16).
 ## Storage Controller
 
 A sector-based disk controller supporting DMA transfers.  Sector size is
-**512 bytes**.  The current MP64FS draft supports media through 8192 sectors
-(4 MiB).
+**512 bytes**.  The current MP64FS marker-1 format supports media through
+65536 sectors (32 MiB); this filesystem-format ceiling is smaller than the
+controller's u32 capacity encoding.
 
 The normative command, completion, failure, ordering, and durability behavior
 is defined in [Storage controller and checked block-I/O contract](storage-controller-contract.md).
 
 FPGA builds expose the logical media window through the synthesizable
 `DISK_TOTAL_SECTORS` parameter.  The portable top and SoC default it to the
-canonical 8192 sectors; board integrations using a different window must
+canonical 65536 sectors; board integrations using a different window must
 override the parameter so `TOTAL_SECTORS` remains truthful.
 
 | Register | Offset | R/W | Description |

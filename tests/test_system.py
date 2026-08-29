@@ -2219,6 +2219,22 @@ class TestBIOS(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_mp64fs_validator_accepts_32mib_marker1_geometry(self):
+        """BIOS validates a marker-1 image with all 16 bitmap sectors."""
+        fs = MP64FS(total_sectors=65536)
+        fs.format()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(
+                sys, buf, ['MP64FS-VALID? ."  VALID=" .'],
+            )
+            self.assertIn("VALID=1 ", text)
+        finally:
+            os.unlink(path)
+
     def test_disk_generation_and_capability_queries(self):
         """BIOS exposes the current media identity and controller features."""
         with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
@@ -9267,6 +9283,25 @@ class TestKDOS(_KDOSTestBase):
         finally:
             os.unlink(path)
 
+    def test_fs_load_32mib_geometry(self):
+        """KDOS mounts the marker-1 ceiling without scanning free sectors."""
+        fs = MP64FS(total_sectors=65536)
+        fs.format()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos([
+                "FS-LOAD",
+                "FS-SUPER 4 + W@ . FS-TOTAL @ . FS-BMAP-N @ .",
+                "FS-DIR-START . FS-DSTART .",
+            ], storage_image=path)
+            self.assertIn("MP64FS loaded", text)
+            self.assertIn("1 65536 16 ", text)
+            self.assertIn("17 29 ", text)
+        finally:
+            os.unlink(path)
+
     def test_fs_load_rejects_inconsistent_geometry(self):
         """KDOS leaves FS-OK clear when disk geometry is inconsistent."""
         fs = MP64FS(total_sectors=8192)
@@ -9316,6 +9351,29 @@ class TestKDOS(_KDOSTestBase):
             formatted = MP64FS.load(path)
             self.assertEqual(formatted.marker, 1)
             self.assertEqual(formatted.info()["free_sectors"], 8177)
+        finally:
+            os.unlink(path)
+
+    def test_format_uses_32mib_attached_media_geometry(self):
+        """KDOS FORMAT derives marker-1's maximum 16-sector bitmap."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.truncate(65536 * 512)
+        try:
+            text = self._run_kdos([
+                "FORMAT",
+                "FS-SUPER 4 + W@ . FS-TOTAL @ . FS-BMAP-N @ .",
+                "FS-DIR-START . FS-DSTART .",
+                "DISK-FLUSH",
+            ], storage_image=path)
+            self.assertIn("MP64FS formatted", text)
+            self.assertIn("1 65536 16 ", text)
+            self.assertIn("17 29 ", text)
+            formatted = MP64FS.load(path)
+            self.assertEqual(formatted.marker, 1)
+            self.assertEqual(formatted.bmap_sectors, 16)
+            self.assertEqual(formatted.dir_start, 17)
+            self.assertEqual(formatted.data_start, 29)
         finally:
             os.unlink(path)
 

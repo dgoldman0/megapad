@@ -12,21 +12,22 @@ capacity and robustness limits worth addressing.
 
 | Parameter | Current | Limit Imposed |
 |-----------|---------|---------------|
-| Bitmap | 1–2 sectors (512–1024 bytes) | 8192 sectors max (4 MiB) |
+| Bitmap | 1–16 sectors (512–8192 bytes) | 65536 sectors max (32 MiB) |
 | Image default | 2048 sectors (1 MiB) | Comfortable for small FS |
 | Directory | 128 entries × 48 B | 128 files max, flat scan |
 | Extents per file | 2 | Large files need contiguous runs or fail |
 | Filename | 23 chars | Tight for paths with directories |
-| `total_sectors` in superblock | u32 | Current draft deliberately caps it at 8192 |
+| `total_sectors` in superblock | u32 | Marker 1 deliberately caps it at 65536 |
 
-The two-sector runtime bitmap cache is the current hard ceiling.
+The sixteen-sector runtime bitmap cache and u16 extent starts meet at the
+current marker-1 ceiling: all valid LBAs on a 65536-sector volume are 0..65535.
 
 ---
 
 ## Phase 1 — Multi-Sector Bitmap  ★ highest impact
 
 **Status: implemented.**  Marker 1 now applies one derived geometry rule at
-every supported capacity through 8192 sectors.
+every supported capacity through 65536 sectors.
 
 **Original problem:** `BMAP_SECTORS = 1` capped trackable sectors at 4096.
 Images above 2 MiB hit that wall even though the superblock already stored
@@ -41,7 +42,7 @@ Images above 2 MiB hit that wall even though the superblock already stored
 - `kdos.f`: `FS-LOAD` reads `bmap_sectors` from superblock, DMA-reads
   that many sectors into an appropriately-sized RAM cache.
 - The host default stays 1 MiB / 1-sector bitmap; larger images such as
-  `--sectors 8192` get 2 bitmap sectors automatically under the same format.
+  `--sectors 65536` get 16 bitmap sectors automatically under the same format.
 
 **Risk:** Low — the arithmetic and every derived field are validated against
 the attached media before variable-size DMA.

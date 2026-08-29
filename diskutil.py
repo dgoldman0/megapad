@@ -5,7 +5,7 @@ Provides Python-side tools for creating, formatting, and populating
 MP64FS disk images.  These images can then be attached to the Megapad-64
 emulator via --storage and accessed from KDOS.
 
-Disk layout (512-byte sectors, 15 through 8192 sectors total):
+Disk layout (512-byte sectors, 15 through 65536 sectors total):
     Sector 0                     Superblock
     Sector 1 .. bmap_sectors     Allocation bitmap (one bit per sector)
     Next 12 sectors              Directory (128 entries × 48 bytes)
@@ -67,7 +67,7 @@ BMAP_START = 1
 DIR_SECTORS = 12
 
 BITS_PER_BMAP_SECTOR = SECTOR_SIZE * 8   # 4096
-MAX_BMAP_SECTORS = 2
+MAX_BMAP_SECTORS = 16
 MAX_TOTAL_SECTORS = MAX_BMAP_SECTORS * BITS_PER_BMAP_SECTOR
 
 DIR_ENTRY_SIZE = 48
@@ -1038,7 +1038,7 @@ STORAGE & MP64FS
 ================
 
 KDOS supports persistent storage via the MP64FS
-file system on attached media of 15-8192 sectors.
+file system on attached media of 15-65536 sectors.
 
 DISK BASICS
   DISK?                  Check if disk is attached

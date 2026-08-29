@@ -33,7 +33,7 @@ module mp64_top #(
     parameter MEM_BANKS         = 4,
     parameter ICACHE_LINES      = 256,
     parameter ICACHE_LINE_W     = 128,       // bits per I-cache line
-    parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192
+    parameter [31:0] DISK_TOTAL_SECTORS = 32'd65536
 )(
     input  wire        clk,
     input  wire        rst_n,

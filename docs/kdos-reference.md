@@ -889,7 +889,7 @@ Like `EVALUATE`, source-level data-stack effects are preserved.
 ## §7.6 MP64FS Filesystem
 
 The **MP64FS** is a simple on-disk named filesystem with one draft format
-marker and uniformly derived geometry through 8192 sectors (4 MiB).  It
+marker and uniformly derived geometry through 65536 sectors (32 MiB).  It
 supports 128 entries, 23-character names, and two extents per file.  See
 `docs/filesystem.md` for the full on-disk format specification.
 

@@ -7819,7 +7819,7 @@ mp64fs_geometry:
     ldi r7, 14
     cmp r13, r7
     lbrle mp64fs_geometry_bad
-    ldi64 r7, 8192
+    ldi64 r7, 65536
     cmp r13, r7
     lbrgt mp64fs_geometry_bad
     ldi64 r11, 0xFFFF_FF00_0000_0211
@@ -7830,7 +7830,8 @@ mp64fs_geometry:
     lbrne mp64fs_geometry_bad
 
     ; The bitmap always begins at sector 1.  Apply count=ceil(total/4096)
-    ; uniformly, then derive every following start from that count.
+    ; uniformly through the marker-1 maximum of 16 bitmap sectors, then
+    ; derive every following start from that count.
     mov r11, r9
     addi r11, 10
     ld.h r1, r11
@@ -7838,19 +7839,15 @@ mp64fs_geometry:
     lbrne mp64fs_geometry_bad
     addi r11, 2
     ld.h r12, r11             ; bitmap sector count
-    ldi64 r7, 4096
-    cmp r13, r7
-    lbrgt mp64fs_geometry_large
-    cmpi r12, 1
+    mov r10, r13
+    ldi64 r7, 4095
+    add r10, r7
+    lsri r10, 12              ; expected bitmap count
+    cmp r12, r10
     lbrne mp64fs_geometry_bad
-    ldi r10, 2                ; expected directory start
-    ldi r7, 14                ; expected data start
-    lbr mp64fs_geometry_tail
-mp64fs_geometry_large:
-    cmpi r12, 2
-    lbrne mp64fs_geometry_bad
-    ldi r10, 3                ; expected directory start
-    ldi r7, 15                ; expected data start
+    inc r10                   ; expected directory start
+    mov r7, r10
+    addi r7, 12               ; expected data start
 
 mp64fs_geometry_tail:
     ; Directory start/count, data start, and entry layout are canonical.
@@ -7889,7 +7886,7 @@ mp64fs_geometry_bad:
 
 ; mp64fs_read_metadata: read the accepted bitmap and directory.
 ;   R9 = metadata buffer.  The 6144-byte directory begins there and the
-;   at-most-1024-byte bitmap follows it, so both remain live for validation.
+;   at-most-8192-byte bitmap follows it, so both remain live for validation.
 mp64fs_read_metadata:
     ldi64 r11, var_mp64fs_dir_buf
     str r11, r9
@@ -8181,7 +8178,7 @@ mp64fs_validate_at:
     ldi64 r11, var_mp64fs_media_gen
     st.w r11, r7
 
-    ; Validation keeps the 6144-byte directory and at-most-1024-byte bitmap
+    ; Validation keeps the 6144-byte directory and at-most-8192-byte bitmap
     ; live together.  Reject a buffer without room for that complete span
     ; below the deepest checked-I/O call frame before issuing any DMA.
     mov r10, r15
@@ -8190,7 +8187,7 @@ mp64fs_validate_at:
     cmp r9, r10
     lbrgt mp64fs_validate_at_bad
     sub r10, r9
-    ldi64 r11, 7168
+    ldi64 r11, 14336
     cmp r11, r10
     lbrgt mp64fs_validate_at_bad
 

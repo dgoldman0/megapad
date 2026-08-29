@@ -35,7 +35,7 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM |
 | **C++ Accelerator** | Optional pybind11 CPU fast path |
 | **Tests** | Host, guest, RTL, multicore, and live-network coverage; resource and environment gates are reported separately |
-| **Filesystem** | MP64FS — capacity-derived geometry through 4 MiB, 128 entries, two extents |
+| **Filesystem** | MP64FS — capacity-derived marker-1 geometry through 32 MiB, 128 entries, two extents |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **Devices** | 20 emulator MMIO peripherals, including UART, Timer, Storage, NIC, one-shot PCM Audio, crypto accelerators, Mailbox, Spinlock, SysInfo, and Port I/O Bridge |
 | **FPGA RTL** | 36 Verilog modules + 32 testbenches + 12 target overrides (~430 HW tests), Genesys 2 + VU095 targets |

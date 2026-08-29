@@ -34,11 +34,17 @@ class TestComputeGeometry:
         assert dir_start == 3
         assert data_start == 15
 
-    def test_formula_beyond_supported_runtime_cap(self):
+    def test_8mib(self):
         bmap, dir_start, data_start = _compute_geometry(16384)
         assert bmap == 4
         assert dir_start == 5
         assert data_start == 17
+
+    def test_32mib_marker1_ceiling(self):
+        bmap, dir_start, data_start = _compute_geometry(65536)
+        assert bmap == 16
+        assert dir_start == 17
+        assert data_start == 29
 
     def test_boundary_4097(self):
         """4097 sectors needs 2 bitmap sectors (4096 bits won't suffice)."""
@@ -139,9 +145,28 @@ class TestFormatLargeImage:
         remaining = fs._count_free()
         assert remaining == 8177 - 8000
 
+    def test_32mib_last_lba_is_representable(self):
+        """Marker 1 can allocate its highest valid u16 sector number."""
+        fs = MP64FS(total_sectors=65536)
+        fs.format()
+        assert fs.marker == FS_MARKER
+        assert fs.bmap_sectors == 16
+        assert fs.dir_start == 17
+        assert fs.data_start == 29
+
+        # Leave only LBA 65535 free, in the final bit of the 16th bitmap
+        # sector, then prove the existing u16 extent fields round-trip it.
+        bmap = fs._bmap
+        bmap[:] = b"\xFF" * len(bmap)
+        bmap[-1] &= 0x7F
+        fs._flush_bmap(bmap)
+        entry = fs.inject_file("last.dat", b"X", ftype=FTYPE_DATA)
+        assert entry.start_sector == 65535
+        assert fs.read_file("last.dat") == b"X"
+
     def test_rejects_media_above_runtime_cap(self):
-        fs = MP64FS(total_sectors=8193)
-        with pytest.raises(ValueError, match="at most 8192 sectors"):
+        fs = MP64FS(total_sectors=65537)
+        with pytest.raises(ValueError, match="at most 65536 sectors"):
             fs.format()
 
     def test_rejects_media_without_a_data_sector(self):
@@ -181,6 +206,24 @@ class TestSaveLoadRoundtrip:
             assert fs2.bmap_sectors == 2
             assert fs2.dir_start == 3
             assert fs2.data_start == 15
+            assert fs2.read_file("test.f") == b"hello"
+        finally:
+            os.unlink(path)
+
+    def test_32mib_roundtrip_keeps_marker1_geometry(self):
+        fs = MP64FS(total_sectors=65536)
+        fs.format()
+        fs.inject_file("test.f", b"hello", ftype=FTYPE_FORTH)
+
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            fs.save(path)
+            fs2 = MP64FS.load(path)
+            assert fs2.marker == FS_MARKER
+            assert fs2.bmap_sectors == 16
+            assert fs2.dir_start == 17
+            assert fs2.data_start == 29
             assert fs2.read_file("test.f") == b"hello"
         finally:
             os.unlink(path)

@@ -19,7 +19,7 @@
 `include "mp64_pkg.vh"
 
 module mp64_disk #(
-    parameter [31:0] TOTAL_SECTORS = 32'd8192,
+    parameter [31:0] TOTAL_SECTORS = 32'd65536,
     parameter [63:0] DMA_BASE_ADDR = 64'd0,
     parameter [63:0] DMA_LIMIT_ADDR = 64'h0000_0000_0010_0000,
     parameter [63:0] DMA1_BASE_ADDR = 64'd1,
