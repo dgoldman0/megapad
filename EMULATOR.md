@@ -678,6 +678,43 @@ monitor is still available for debugging.
 | `continue` / `c` | Resume from current PC |
 | `console` | Enter raw UART console (Ctrl-] to exit) |
 
+### Steps, cycles, and hardware time
+
+A single-core emulator **step** is one retired MP64 guest instruction. It is
+not one hardware clock. Step counts are therefore stable work measurements for
+equivalent emulator configurations, while wall time also includes host CPU,
+native-engine, device-model, and reporting overhead.
+
+The emulator's cycle counter applies its architectural timing model to those
+instructions. It is not a claim of cycle parity with the current RTL: the RTL
+has a multi-state fetch/decode/execute path, an instruction cache, shared-bus
+arbitration, and physical memory latency that the functional/native execution
+path does not reproduce globally. Hardware time must be projected from a
+specific implementation's realized CPI:
+
+```text
+seconds = retired guest instructions * realized CPI / clock frequency
+```
+
+For example, the 2026-08-29 stored-source rich Desktop boot reached Desk entry
+after 13.266 billion guest instructions. The following are arithmetic
+scenarios, not timing claims:
+
+| Realized CPI | 2 GHz | 4 GHz |
+| ---: | ---: | ---: |
+| 1.0 | 6.63 s | 3.32 s |
+| 1.2 | 7.96 s | 3.98 s |
+| 2.0 | 13.27 s | 6.63 s |
+| 3.0 | 19.90 s | 9.95 s |
+| 4.0 | 26.53 s | 13.27 s |
+
+That emulator run sustained about 60.2 million guest instructions per host
+second and took 220.34 seconds. A 2--4 GHz result would require a modernized
+ASIC implementation with the corresponding pipeline, cache, SRAM, and memory
+system; it must not be inferred by applying those clocks to the current
+100 MHz FPGA target or by treating the emulator's modeled cycle/step ratio as
+measured RTL CPI.
+
 ### Breakpoints
 
 | Command | Description |

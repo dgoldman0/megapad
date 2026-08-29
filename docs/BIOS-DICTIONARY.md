@@ -36,6 +36,43 @@ Each entry is a linked list node:
 
 ---
 
+## Hardware Lookup Cache and the Growth Boundary
+
+`find_word` uses `EXT.DICT` as a cache in front of the authoritative linked
+list. For names of at most 31 bytes it builds an uppercase counted string and
+executes `DFIND`; a hit returns the entry directly. A miss walks backward from
+`LATEST`, then attempts `DINS` after finding the word. New definitions also
+attempt to seed their latest binding. Longer names remain valid but always use
+the linked-list path.
+
+The hardware cache has 64 sets and four ways, for 256 entries total. `DINS`
+updates an existing match or occupies an empty way. A full set with no matching
+entry reports overflow and does not evict an older entry. This is
+correctness-safe because the linked dictionary remains authoritative, but it
+does not give cold source loading a size-independent lookup cost: once sets
+fill, uncached names can repeatedly traverse an increasingly long latest-first
+chain. The encoding and original design discussion are in
+[`SoC-hardening.md` Section 3](SoC-hardening.md#3-forth-dictionary-search-engine--isa-extension-extdict-prefix-fa).
+
+A 2026-08-29 cold-source measurement made the scale risk concrete. Akashic
+`77f1af9` running on MegaPad `35e52bb` loaded and compiled 3,277,942 source
+bytes in 27 nearly equal chunks from a 32 MiB stored-codec MP64FS image. The
+first nine chunks used 2.4015 billion guest instructions for 1,101,557 bytes,
+or 2,180 instructions per byte. The final nine used 5.9995 billion for
+1,072,108 bytes, or 5,596 instructions per byte: 2.57 times the normalized
+cost despite containing fewer bytes. Chunk 1 used 1,604 instructions per byte
+while the nearly equal-sized chunk 22 used 7,960, a 4.96-times difference.
+
+That observation proves strong order-dependent or module-dependent growth; it
+does not prove that dictionary traversal causes all of it. Token mix and
+load-time initialization differ between chunks. Before selecting a remedy,
+instrument `DFIND` requests, hits and misses, `DINS` overflows, linked-list
+entries visited, and load-time execution by module. Cache replacement or a
+larger/indexed lookup structure can then be evaluated against a validated
+compiled-dictionary or restorable-image path without weakening source boot.
+
+---
+
 ## Boot Sequence
 
 1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled.  The TX ring buffer address is written to UART TX_RING_BASE (`+0x08`).
