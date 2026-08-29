@@ -334,7 +334,7 @@ def _visible_control_core():
     return core, encoder, decoder
 
 
-def test_present_ingress_defines_replaces_and_drops_semantic_controls() -> None:
+def test_present_ingress_defines_updates_state_and_drops_semantic_controls() -> None:
     core, encoder, decoder = _visible_control_core()
     state = core.retained_state
     assert state is not None
@@ -348,8 +348,8 @@ def test_present_ingress_defines_replaces_and_drops_semantic_controls() -> None:
         ControlKind.MENU_ITEM,
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.CHECKED,
         parent=2,
-        label="Open recent",
-        shortcut="Ctrl+Shift+O",
+        label="Open",
+        shortcut="Ctrl+O",
     )
     _commit(
         core,
@@ -372,7 +372,8 @@ def test_present_ingress_defines_replaces_and_drops_semantic_controls() -> None:
     state = core.retained_state
     assert state is not None
     controls = state.active.owners[7].controls
-    assert controls[3].label == "Open recent"
+    assert controls[3].label == "Open"
+    assert controls[3].shortcut == "Ctrl+O"
     assert controls[3].state & ControlState.CHECKED
     assert 4 not in controls
     assert core.owner_state is not None
