@@ -407,12 +407,79 @@ def test_ansi_remains_default_and_non_apt_escapes_pass_byte_exact():
     assert core.view is None
 
 
+def test_transport_diagnostics_account_partial_frame_publications_exactly():
+    core, _offer, request, _encoder, client_ready = _negotiate()
+    open_record = encode_open(request)
+    split = len(client_ready) // 2
+    publications_before = core.machine_publications_received
+    publication_bytes_before = core.machine_publication_bytes_received
+
+    first = core.feed_machine(open_record + client_ready[:split])
+
+    assert first.views == ()
+    assert core.state is TerminalState.OPENING
+    assert core.machine_publications_received == publications_before + 1
+    assert core.machine_publication_bytes_received == (
+        publication_bytes_before + len(open_record) + split
+    )
+    assert core.frames_received == 0
+    assert core.frame_bytes_received == 0
+    assert core.frames_received_by_type == {}
+    assert core.frame_bytes_received_by_type == {}
+    assert core.decoder_buffered_bytes == split
+
+    second = core.feed_machine(client_ready[split:])
+
+    assert second.views == ()
+    assert core.state is TerminalState.ACTIVE
+    assert core.machine_publications_received == publications_before + 2
+    assert core.machine_publication_bytes_received == (
+        publication_bytes_before + len(open_record) + len(client_ready)
+    )
+    assert core.frames_received == 1
+    assert core.frame_bytes_received == len(client_ready)
+    assert core.frames_received_by_type == {int(MessageType.CLIENT_READY): 1}
+    assert core.frame_bytes_received_by_type == {
+        int(MessageType.CLIENT_READY): len(client_ready)
+    }
+    assert core.decoder_buffered_bytes == 0
+
+
 def test_real_negotiation_snapshot_result_credit_view_and_normalized_input():
     core, offer, request, encoder, client_ready = _negotiate()
-    machine_bytes = encode_open(request) + client_ready + _snapshot_frames(encoder)
+    snapshot = _snapshot_frames(encoder)
+    machine_bytes = encode_open(request) + client_ready + snapshot
+    publications_before = core.machine_publications_received
+    publication_bytes_before = core.machine_publication_bytes_received
+    frames_before = core.frames_received
+    frame_bytes_before = core.frame_bytes_received
 
     result = core.feed_machine(machine_bytes)
 
+    assert core.machine_publications_received == publications_before + 1
+    assert (
+        core.machine_publication_bytes_received
+        == publication_bytes_before + len(machine_bytes)
+    )
+    assert core.frames_received == frames_before + 6
+    assert (
+        core.frame_bytes_received
+        == frame_bytes_before + len(client_ready) + len(snapshot)
+    )
+    assert core.frames_received_by_type == {
+        int(MessageType.CLIENT_READY): 1,
+        int(MessageType.SNAPSHOT_BEGIN): 1,
+        int(MessageType.CELL_SPAN): 2,
+        int(MessageType.CURSOR): 1,
+        int(MessageType.SNAPSHOT_COMMIT): 1,
+    }
+    assert sum(core.frame_bytes_received_by_type.values()) == (
+        len(client_ready) + len(snapshot)
+    )
+    assert core.frame_bytes_received_by_type[int(MessageType.CLIENT_READY)] == len(
+        client_ready
+    )
+    assert core.decoder_buffered_bytes == 0
     assert result.ansi_bytes == b""
     assert core.state is TerminalState.ACTIVE
     assert len(result.views) == 1

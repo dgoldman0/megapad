@@ -540,6 +540,12 @@ class RichTerminalCore:
         self._discard_transaction_status: int | None = None
         self._present_wire_state: _PresentWireState | None = None
         self._most_recent_wire_aborted_id = 0
+        self._machine_publications_received = 0
+        self._machine_publication_bytes_received = 0
+        self._frames_received = 0
+        self._frame_bytes_received = 0
+        self._frames_received_by_type: dict[int, int] = {}
+        self._frame_bytes_received_by_type: dict[int, int] = {}
 
     @staticmethod
     def _random_session_id() -> int:
@@ -630,6 +636,48 @@ class RichTerminalCore:
     @property
     def state(self) -> TerminalState:
         return self._state
+
+    @property
+    def machine_publications_received(self) -> int:
+        """Nonempty, in-bound UART publications received by this core."""
+
+        return self._machine_publications_received
+
+    @property
+    def machine_publication_bytes_received(self) -> int:
+        """Bytes carried by received nonempty UART publications."""
+
+        return self._machine_publication_bytes_received
+
+    @property
+    def frames_received(self) -> int:
+        """Structurally complete APT frames decoded from machine output."""
+
+        return self._frames_received
+
+    @property
+    def frame_bytes_received(self) -> int:
+        """Complete wire bytes covered by decoded APT frames."""
+
+        return self._frame_bytes_received
+
+    @property
+    def frames_received_by_type(self) -> dict[int, int]:
+        """A copy of cumulative complete-frame counts keyed by wire type."""
+
+        return dict(self._frames_received_by_type)
+
+    @property
+    def frame_bytes_received_by_type(self) -> dict[int, int]:
+        """A copy of cumulative complete-frame bytes keyed by wire type."""
+
+        return dict(self._frame_bytes_received_by_type)
+
+    @property
+    def decoder_buffered_bytes(self) -> int:
+        """Incomplete framed bytes retained across machine publications."""
+
+        return 0 if self._decoder is None else self._decoder.buffered_bytes
 
     @property
     def active(self) -> bool:
@@ -809,6 +857,9 @@ class RichTerminalCore:
             raise TerminalSessionError("enhanced session has already failed")
         if not raw:
             return CoreResult()
+
+        self._machine_publications_received += 1
+        self._machine_publication_bytes_received += len(raw)
 
         if self._state in {
             TerminalState.OPENING,
@@ -1273,6 +1324,17 @@ class RichTerminalCore:
         outbound: list[OutboundBytes] = []
         views: list[TerminalOutputView] = []
         for index, frame in enumerate(frames):
+            frame_type = int(frame.message_type)
+            frame_bytes = frame.complete_bytes
+            self._frames_received += 1
+            self._frame_bytes_received += frame_bytes
+            self._frames_received_by_type[frame_type] = (
+                self._frames_received_by_type.get(frame_type, 0) + 1
+            )
+            self._frame_bytes_received_by_type[frame_type] = (
+                self._frame_bytes_received_by_type.get(frame_type, 0)
+                + frame_bytes
+            )
             if frame.message_type == MessageType.CLOSE:
                 if index != len(frames) - 1 or decoder.buffered_bytes:
                     self._fatal("client sent bytes after CLOSE before CLOSE_ACK")

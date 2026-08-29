@@ -1102,6 +1102,13 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
         assert "nic" not in lightweight
         assert "host_profile" not in lightweight
         assert lightweight["rich_terminal"]["display_required"] is False
+        assert lightweight["rich_terminal"]["machine_publications"] == 0
+        assert lightweight["rich_terminal"]["machine_publication_bytes"] == 0
+        assert lightweight["rich_terminal"]["frames"] == 0
+        assert lightweight["rich_terminal"]["frame_bytes"] == 0
+        assert lightweight["rich_terminal"]["frames_by_type"] == {}
+        assert lightweight["rich_terminal"]["frame_bytes_by_type"] == {}
+        assert lightweight["rich_terminal"]["decoder_buffered_bytes"] == 0
 
         detailed = machine.status()
         assert calls == [session.system.cpu]
@@ -1109,6 +1116,37 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
         assert "cpu" in detailed
         assert "nic" in detailed
         assert "host_profile" not in detailed
+
+
+def test_lightweight_status_exposes_rich_transport_counters() -> None:
+    with MachineSession(
+        MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2),
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(),
+    ) as session:
+        driver = session.rich_terminal_driver
+        assert driver is not None
+        core = driver.core
+        core._machine_publications_received = 7
+        core._machine_publication_bytes_received = 700
+        core._frames_received = 5
+        core._frame_bytes_received = 500
+        core._frames_received_by_type = {0x0110: 1, 0x0101: 4}
+        core._frame_bytes_received_by_type = {0x0110: 56, 0x0101: 444}
+
+        rich = SharedMachine(session).status(detailed=False)["rich_terminal"]
+
+        assert rich["machine_publications"] == 7
+        assert rich["machine_publication_bytes"] == 700
+        assert rich["frames"] == 5
+        assert rich["frame_bytes"] == 500
+        assert rich["frames_by_type"] == {"0x0101": 4, "0x0110": 1}
+        assert rich["frame_bytes_by_type"] == {
+            "0x0101": 444,
+            "0x0110": 56,
+        }
+        assert rich["decoder_buffered_bytes"] == 0
 
 
 def test_forth_diagnostics_reach_words_beyond_the_old_depth_ceiling():

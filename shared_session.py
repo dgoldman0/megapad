@@ -1100,6 +1100,12 @@ class SharedMachine:
             cpu = system.cpu
             rich_terminal_failure = self.session.rich_terminal_failure
             rich_terminal_pending = self.session.rich_terminal_work_pending
+            rich_terminal_driver = self.session.rich_terminal_driver
+            rich_terminal_core = (
+                None
+                if rich_terminal_driver is None
+                else rich_terminal_driver.core
+            )
             quiescent = not system.uart.has_rx_data and not rich_terminal_pending
             operational = rich_terminal_failure is None
             halted = system.all_halted
@@ -1151,6 +1157,51 @@ class SharedMachine:
                     "pending": rich_terminal_pending,
                     "lost": self.session.rich_terminal_lost,
                     "failure": rich_terminal_failure,
+                    "machine_publications": (
+                        0
+                        if rich_terminal_core is None
+                        else rich_terminal_core.machine_publications_received
+                    ),
+                    "machine_publication_bytes": (
+                        0
+                        if rich_terminal_core is None
+                        else rich_terminal_core.machine_publication_bytes_received
+                    ),
+                    "frames": (
+                        0
+                        if rich_terminal_core is None
+                        else rich_terminal_core.frames_received
+                    ),
+                    "frame_bytes": (
+                        0
+                        if rich_terminal_core is None
+                        else rich_terminal_core.frame_bytes_received
+                    ),
+                    "frames_by_type": (
+                        {}
+                        if rich_terminal_core is None
+                        else {
+                            f"0x{frame_type:04X}": count
+                            for frame_type, count in sorted(
+                                rich_terminal_core.frames_received_by_type.items()
+                            )
+                        }
+                    ),
+                    "frame_bytes_by_type": (
+                        {}
+                        if rich_terminal_core is None
+                        else {
+                            f"0x{frame_type:04X}": byte_count
+                            for frame_type, byte_count in sorted(
+                                rich_terminal_core.frame_bytes_received_by_type.items()
+                            )
+                        }
+                    ),
+                    "decoder_buffered_bytes": (
+                        0
+                        if rich_terminal_core is None
+                        else rich_terminal_core.decoder_buffered_bytes
+                    ),
                 },
             }
             if not detailed:
