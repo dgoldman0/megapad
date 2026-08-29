@@ -219,6 +219,162 @@ bool should_keep_program_counter_live(const BlockView& block) noexcept {
     return saved_bytes >= -1;
 }
 
+bool region_operation_is_helper_free_register_control(
+        DecodedOperation operation) noexcept {
+    switch (operation) {
+        case DecodedOperation::NOP:
+        case DecodedOperation::INCREMENT:
+        case DecodedOperation::DECREMENT:
+        case DecodedOperation::BRANCH_SHORT:
+        case DecodedOperation::BRANCH_LONG:
+        case DecodedOperation::LOAD_IMMEDIATE:
+        case DecodedOperation::ADD_IMMEDIATE:
+        case DecodedOperation::AND_IMMEDIATE:
+        case DecodedOperation::OR_IMMEDIATE:
+        case DecodedOperation::COMPARE_IMMEDIATE:
+        case DecodedOperation::SUBTRACT_IMMEDIATE:
+        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
+        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
+        case DecodedOperation::ADD:
+        case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_AND:
+        case DecodedOperation::BITWISE_XOR:
+        case DecodedOperation::COMPARE:
+        case DecodedOperation::MOVE:
+        case DecodedOperation::UNSIGNED_MULTIPLY_LOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void validate_region_block(
+        const CoreStateLayout& layout,
+        const BlockView& block) {
+    if (
+        block.instructions == nullptr ||
+        block.instruction_count < 2 ||
+        block.instruction_count >
+            static_cast<std::size_t>(
+                NATIVE_BLOCK_COMPLETED_INSTRUCTION_MASK) ||
+        block.psel >= layout.registers.size() ||
+        block.spsel >= layout.registers.size()
+    ) {
+        throw std::logic_error(
+            "x86-64 JIT received an invalid MP64 region block view");
+    }
+
+    for (std::size_t index = 0; index < block.instruction_count; index++) {
+        const DecodedInstruction& decoded = block.instructions[index];
+        if (
+            decoded.rd >= layout.registers.size() ||
+            decoded.rs >= layout.registers.size() ||
+            decoded.encoded_size == 0 ||
+            decoded.is_memory() ||
+            !region_operation_is_helper_free_register_control(
+                decoded.operation)
+        ) {
+            throw std::logic_error(
+                "x86-64 JIT received a non-register/control region block");
+        }
+        if (
+            (decoded.ends_block() ||
+             decoded.operation == DecodedOperation::BRANCH_SHORT ||
+             decoded.operation == DecodedOperation::BRANCH_LONG) &&
+            index + 1 != block.instruction_count
+        ) {
+            throw std::logic_error(
+                "x86-64 JIT received non-terminal region control flow");
+        }
+        if (
+            decoded.operation == DecodedOperation::BRANCH_SHORT ||
+            decoded.operation == DecodedOperation::BRANCH_LONG
+        ) {
+            const bool unconditional = decoded.subop() == CC_AL;
+            const bool supported_conditional =
+                (
+                    decoded.subop() == CC_EQ ||
+                    decoded.subop() == CC_NE ||
+                    decoded.subop() == CC_CC
+                ) &&
+                decoded.conditional_taken_cycle_cost() == 1;
+            if (
+                unconditional
+                    ? decoded.conditional_taken_cycle_cost() != 0
+                    : !supported_conditional
+            ) {
+                throw std::logic_error(
+                    "x86-64 JIT received unsupported region control flow");
+            }
+        }
+    }
+}
+
+uint64_t statically_forced_region_successor(const BlockView& source) {
+    uint64_t successor = source.address;
+    for (std::size_t index = 0; index < source.instruction_count; index++) {
+        const DecodedInstruction& decoded = source.instructions[index];
+        if (
+            (
+                decoded.register_write_mask() &
+                (uint32_t{1} << source.psel)
+            ) != 0
+        ) {
+            throw std::logic_error(
+                "x86-64 JIT region source writes its PC");
+        }
+        successor += decoded.encoded_size;
+    }
+
+    const DecodedInstruction& terminal =
+        source.instructions[source.instruction_count - 1];
+    if (
+        terminal.operation == DecodedOperation::BRANCH_SHORT ||
+        terminal.operation == DecodedOperation::BRANCH_LONG
+    ) {
+        if (
+            terminal.subop() != CC_AL ||
+            terminal.conditional_taken_cycle_cost() != 0
+        ) {
+            throw std::logic_error(
+                "x86-64 JIT region source successor is not forced");
+        }
+        successor += cpu::sign_extend(
+            terminal.immediate,
+            terminal.operation == DecodedOperation::BRANCH_SHORT
+                ? 8
+                : 16);
+        return successor;
+    }
+    if (terminal.ends_block()) {
+        throw std::logic_error(
+            "x86-64 JIT region source successor is not fallthrough");
+    }
+    return successor;
+}
+
+bool region_can_keep_program_counter_live(
+        const RegionView& region) noexcept {
+    const BlockView* const blocks[] = {
+        &region.source,
+        &region.target,
+    };
+    for (const BlockView* const block : blocks) {
+        for (std::size_t index = 0;
+             index < block->instruction_count;
+             index++) {
+            if (operation_uses_program_counter_operand(
+                    block->instructions[index],
+                    block->psel,
+                    block->spsel)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void emit_program_counter_add_imm8(
         X86_64BlockEmitter& emitter,
         const CoreStateLayout& layout,
@@ -585,6 +741,36 @@ void emit_instruction(
     }
 }
 
+void emit_region_block_body(
+        X86_64BlockEmitter& emitter,
+        const CoreStateLayout& layout,
+        const BlockView& block,
+        bool program_counter_live) {
+    uint64_t instruction_address = block.address;
+    for (std::size_t index = 0; index < block.instruction_count; index++) {
+        const DecodedInstruction& decoded = block.instructions[index];
+        emit_instruction(
+            emitter,
+            layout,
+            decoded,
+            instruction_address,
+            block.psel,
+            block.spsel,
+            0,
+            program_counter_live);
+        emitter.bytes({0xFF, 0xC3}); // inc ebx
+        emitter.bytes({
+            0x41,
+            0xBB,
+            decoded.fetch_hit_count(instruction_address),
+            0x00,
+            0x00,
+            0x00,
+        }); // mov r11d, last instruction's fetch hits
+        instruction_address += decoded.encoded_size;
+    }
+}
+
 }  // namespace
 
 bool lowering_available() noexcept {
@@ -725,6 +911,115 @@ std::vector<uint8_t> lower_block(
     }); // mov r10d, interrupt flag
     const std::size_t interrupt_to_common = emitter.jump32();
     emitter.patch32(interrupt_to_common, common_exit);
+
+    return emitter.release_code();
+}
+
+std::vector<uint8_t> lower_region(
+        const CoreStateLayout& layout,
+        const RegionView& region) {
+    if (!lowering_available()) {
+        throw std::logic_error(
+            "x86-64 JIT lowering is unavailable on this host");
+    }
+    validate_layout(layout);
+    validate_region_block(layout, region.source);
+    validate_region_block(layout, region.target);
+    if (
+        region.source.psel != region.target.psel ||
+        region.source.spsel != region.target.spsel
+    ) {
+        throw std::logic_error(
+            "x86-64 JIT region block selectors do not match");
+    }
+    const std::size_t maximum_steps = static_cast<std::size_t>(
+        NATIVE_BLOCK_COMPLETED_INSTRUCTION_MASK);
+    if (
+        region.target.instruction_count >
+            maximum_steps - region.source.instruction_count
+    ) {
+        throw std::logic_error(
+            "x86-64 JIT region exceeds packed step capacity");
+    }
+    if (
+        statically_forced_region_successor(region.source) !=
+            region.target.address
+    ) {
+        throw std::logic_error(
+            "x86-64 JIT region source does not select its target");
+    }
+    const bool program_counter_live =
+        region_can_keep_program_counter_live(region);
+
+    X86_64BlockEmitter emitter;
+    // The region remains one ordinary indirect-entry object. It neither
+    // transfers into another arena slot nor exposes an internal entry point.
+    emitter.bytes({0xF3, 0x0F, 0x1E, 0xFA}); // ENDBR64
+    emitter.bytes({
+        0x53,             // push rbx
+        0x41, 0x57,       // push r15
+        0x31, 0xDB,       // xor ebx, ebx (retired steps)
+        0x45, 0x31, 0xFF, // xor r15d, r15d (fetch hits)
+        0x45, 0x31, 0xD2, // xor r10d, r10d (exit flags)
+    });
+    if (program_counter_live)
+        emitter.mov_r9_immediate(region.source.address);
+
+    // The phase-one caller enters only while interrupts are disabled. Keep
+    // both copies contiguous and carry exact step/fetch state through them
+    // without the ordinary per-instruction interrupt polls.
+    emit_region_block_body(
+        emitter,
+        layout,
+        region.source,
+        program_counter_live);
+
+    // The static successor proof above should make this guard unreachable.
+    // Retain it inside the generated object so a lowering error returns the
+    // complete source prefix for the C++ boundary to reject, rather than
+    // applying target semantics at a mismatched architectural PC.
+    if (program_counter_live) {
+        emitter.compare_r9_immediate(region.target.address);
+    } else {
+        emitter.compare_core_qword_immediate(
+            layout.registers[region.source.psel],
+            region.target.address);
+    }
+    const std::size_t source_pc_mismatch =
+        emitter.branch32(0x85); // jne common exit
+
+    emit_region_block_body(
+        emitter,
+        layout,
+        region.target,
+        program_counter_live);
+
+    const std::size_t common_exit = emitter.position();
+    emitter.patch32(source_pc_mismatch, common_exit);
+    if (program_counter_live) {
+        emitter.mov_core_from_r9(
+            layout.registers[region.source.psel]);
+    }
+    emitter.add_core_r15(layout.icache_hits);
+
+    // Reproduce icache_begin_instruction() for whichever block supplied the
+    // last retired instruction: source on a guard exit, otherwise target.
+    emitter.mov_rax_from_core(layout.icache_hits);
+    emitter.bytes({0x4C, 0x29, 0xD8}); // sub rax, r11
+    emitter.mov_core_from_rax(layout.icache_undo_hits);
+    emitter.mov_rax_from_core(layout.icache_misses);
+    emitter.mov_core_from_rax(layout.icache_undo_misses);
+    emitter.store_core_byte(layout.ifetch_window_valid, 0);
+    emitter.store_core_qword_zero(layout.icache_undo_count);
+    emitter.bytes({
+        0x89, 0xD8,       // mov eax, ebx (cumulative retired steps)
+        0x49, 0xC1, 0xE2,
+        NATIVE_BLOCK_EXIT_SHIFT, // shl r10, 16
+        0x4C, 0x09, 0xD0, // or rax, r10
+        0x41, 0x5F,       // pop r15
+        0x5B,             // pop rbx
+        0xC3,             // ret
+    });
 
     return emitter.release_code();
 }

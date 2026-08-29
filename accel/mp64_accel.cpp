@@ -1583,6 +1583,15 @@ enum class CoreProfile : uint8_t {
 class ResumableBusAccess;
 class ResumableTileAccess;
 
+static constexpr uint8_t SINGLE_CORE_BLOCK_NATIVE_COMPILE_CHECKED =
+    uint8_t{1} << 0;
+static constexpr uint8_t SINGLE_CORE_BLOCK_REGION_SOURCE =
+    uint8_t{1} << 1;
+static constexpr uint8_t SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED =
+    uint8_t{1} << 2;
+static constexpr uint8_t SINGLE_CORE_BLOCK_REGION_AVAILABLE =
+    uint8_t{1} << 3;
+
 struct CPUState {
     CoreProfile profile = CoreProfile::FULL;
     uint64_t regs[32];      // GP registers (R0-R15 base, R16-R31 via REX)
@@ -1895,7 +1904,7 @@ struct CPUState {
         "single-core memory recipes must retain compact storage");
     struct SingleCoreDecodedBlockEntry {
         bool valid = false;
-        bool native_compile_checked = false;
+        uint8_t host_plan_state = 0;
         uint8_t psel = 0;
         uint8_t spsel = 0;
         uint8_t identity_size = 0;
@@ -1947,6 +1956,21 @@ struct CPUState {
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
     };
+    struct SingleCoreJitRegionDescriptor {
+        bool valid = false;
+        bool target_identity_bound = false;
+        uint8_t target_psel = 0;
+        uint8_t target_spsel = 0;
+        uint8_t target_identity_size = 0;
+        uint8_t target_instruction_count = 0;
+        uint8_t target_full_cycle_count = 0;
+        uint8_t reserved = 0;
+        uint32_t target_validated_identity_epoch = 0;
+        uint64_t target_address = 0;
+        std::array<uint8_t, ICACHE_LINE_BYTES> target_identity{};
+        DecodedInstruction target_terminal{};
+        HostExecutableCode native_code;
+    };
     struct SingleCoreExecutionPlanCache {
         // A single monotonically increasing epoch lets an entry prove that
         // none of its at-most-two architectural I-cache lines changed since
@@ -1978,6 +2002,13 @@ struct CPUState {
             SingleCoreBlockMemoryAddressRecipes,
             SINGLE_CORE_BLOCK_CACHE_ENTRIES>
             block_memory_addresses{};
+        // Two-block regions are source-slot-owned host plans. Target bytes
+        // and settlement metadata are copied here, so replacement of the
+        // target's decoded/JIT cache slot cannot retarget published code.
+        std::array<
+            SingleCoreJitRegionDescriptor,
+            SINGLE_CORE_BLOCK_CACHE_ENTRIES>
+            regions{};
     };
     // Only the sole full core in an exact-single topology owns this cache.
     // Multi-core and microcore configurations must not pay per-CPU storage
@@ -1998,8 +2029,12 @@ struct CPUState {
         for (SingleCoreDecodedBlockEntry& entry :
              single_core_execution_plan_cache->blocks) {
             entry.valid = false;
-            entry.native_compile_checked = false;
+            entry.host_plan_state = 0;
             entry.native_code.reset();
+        }
+        for (SingleCoreJitRegionDescriptor& region :
+             single_core_execution_plan_cache->regions) {
+            region = SingleCoreJitRegionDescriptor{};
         }
         for (SingleCoreBlockRejectionEntry& entry :
              single_core_execution_plan_cache->rejections) {
@@ -4297,6 +4332,15 @@ struct ConcurrencyProfileCounters {
     uint64_t uncontended_jit_max_code_bytes = 0;
     uint64_t uncontended_jit_executions = 0;
     uint64_t uncontended_jit_steps = 0;
+    uint64_t uncontended_jit_native_entries = 0;
+    uint64_t uncontended_jit_native_returns = 0;
+    uint64_t uncontended_jit_region_compile_attempts = 0;
+    uint64_t uncontended_jit_region_compilations = 0;
+    uint64_t uncontended_jit_region_compile_failures = 0;
+    uint64_t uncontended_jit_region_entries = 0;
+    uint64_t uncontended_jit_region_blocks = 0;
+    uint64_t uncontended_jit_region_steps = 0;
+    uint64_t uncontended_jit_region_target_identity_misses = 0;
     uint64_t single_core_jit_successor_candidate_block_completions = 0;
     uint64_t single_core_jit_successor_observations = 0;
     uint64_t single_core_jit_successor_replacements = 0;
@@ -5462,8 +5506,9 @@ struct SystemState {
     ExternalEventInbox external_events{};
     MainBusArbiter main_bus{};
     // Declared before CPU ownership so reverse destruction drops every
-    // non-owning block-cache reference before the arena unmaps its aliases.
+    // non-owning block-cache reference before either arena unmaps aliases.
     HostExecutableArena single_core_jit_arena{};
+    HostExecutableArena single_core_jit_region_arena{};
     // Cluster-local arbitration state is declared before CPU ownership so
     // reduced CPU views are destroyed before the shared arbiters they use.
     std::vector<ClusterState> cluster_states;
@@ -5498,6 +5543,10 @@ struct SystemState {
     // while the coordinator owns scheduler_mutex.
     ConcurrencyProfileCounters concurrency_profile{};
     bool concurrency_profile_batch_active = false;
+    // Temporary same-binary phase-one A/B seam. Remove this toggle and its
+    // private binding before retaining regions as the unconditional release
+    // path; it is host-only and never enters architectural state.
+    bool single_core_jit_regions_enabled = true;
     // Test-only exact-singleton injection seam. Negative disables it, zero
     // asserts an IPI after the next warm native-block admission, and a
     // positive value fails after that many successful native step_one calls.
@@ -20350,7 +20399,12 @@ static constexpr std::size_t single_core_block_cache_slot(
 }
 
 static uint64_t single_core_jit_successor_identity_fingerprint(
-        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+        uint8_t psel,
+        uint8_t spsel,
+        uint8_t identity_size,
+        const std::array<
+            uint8_t,
+            CPUState::ICACHE_LINE_BYTES>& identity) noexcept {
     // FNV-1a gives reports and deterministic ranking a compact identity. The
     // profiler still stores and compares every admitted byte, so a hash
     // collision cannot merge records or leave an inexact table marked exact.
@@ -20361,12 +20415,21 @@ static uint64_t single_core_jit_successor_identity_fingerprint(
         fingerprint ^= byte;
         fingerprint *= UINT64_C(1099511628211);
     };
-    mix(block.psel);
-    mix(block.spsel);
-    mix(block.identity_size);
-    for (uint8_t index = 0; index < block.identity_size; index++)
-        mix(block.identity[index]);
+    mix(psel);
+    mix(spsel);
+    mix(identity_size);
+    for (uint8_t index = 0; index < identity_size; index++)
+        mix(identity[index]);
     return fingerprint;
+}
+
+static uint64_t single_core_jit_successor_identity_fingerprint(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    return single_core_jit_successor_identity_fingerprint(
+        block.psel,
+        block.spsel,
+        block.identity_size,
+        block.identity);
 }
 
 static SingleCoreJitSuccessorKey single_core_jit_successor_key(
@@ -20378,6 +20441,22 @@ static SingleCoreJitSuccessorKey single_core_jit_successor_key(
         block.spsel,
         block.identity_size,
         block.identity,
+    };
+}
+
+static SingleCoreJitSuccessorKey single_core_jit_successor_key(
+        const CPUState::SingleCoreJitRegionDescriptor& region) noexcept {
+    return {
+        region.target_address,
+        single_core_jit_successor_identity_fingerprint(
+            region.target_psel,
+            region.target_spsel,
+            region.target_identity_size,
+            region.target_identity),
+        region.target_psel,
+        region.target_spsel,
+        region.target_identity_size,
+        region.target_identity,
     };
 }
 
@@ -20517,7 +20596,9 @@ static bool is_single_core_jit_successor_candidate(
         exit.completed_instructions != block.instruction_count ||
         block.instruction_count < 2 ||
         block.identity_size == 0 ||
-        block.identity_size > block.identity.size()
+        block.identity_size > block.identity.size() ||
+        block.psel >= 32 ||
+        block.spsel >= 32
     ) {
         return false;
     }
@@ -20540,20 +20621,11 @@ static bool is_single_core_jit_successor_candidate(
 
 static void profile_single_core_jit_successor_completion(
         ConcurrencyProfileCounters& profile,
-        const CPUState::SingleCoreDecodedBlockEntry& block,
-        const BlockExit& exit) noexcept {
-    if (!is_single_core_jit_successor_candidate(
-            block, exit)) {
-        profile.single_core_jit_successor_predecessor_valid = false;
-        return;
-    }
-
+        const SingleCoreJitSuccessorKey& current) noexcept {
     single_core_jit_successor_saturating_increment(
         profile
             .single_core_jit_successor_candidate_block_completions,
         profile.single_core_jit_successor_counter_saturated);
-    const SingleCoreJitSuccessorKey current =
-        single_core_jit_successor_key(block);
     if (profile.single_core_jit_successor_predecessor_valid) {
         record_single_core_jit_successor(
             profile,
@@ -20562,6 +20634,20 @@ static void profile_single_core_jit_successor_completion(
     }
     profile.single_core_jit_successor_predecessor = current;
     profile.single_core_jit_successor_predecessor_valid = true;
+}
+
+static void profile_single_core_jit_successor_completion(
+        ConcurrencyProfileCounters& profile,
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        const BlockExit& exit) noexcept {
+    if (!is_single_core_jit_successor_candidate(
+            block, exit)) {
+        profile.single_core_jit_successor_predecessor_valid = false;
+        return;
+    }
+    profile_single_core_jit_successor_completion(
+        profile,
+        single_core_jit_successor_key(block));
 }
 
 static std::size_t single_core_block_entry_slot(
@@ -20789,7 +20875,8 @@ static bool copy_single_core_icache_identity(
     return true;
 }
 
-static bool single_core_block_rejection_matches(
+static CPUState::SingleCoreBlockRejectionEntry*
+find_single_core_block_rejection(
         CPUState& core,
         uint64_t address) noexcept {
     const std::size_t set =
@@ -20818,10 +20905,17 @@ static bool single_core_block_rejection_matches(
                 entry.identity,
                 entry.identity_size,
                 entry.validated_identity_epoch)) {
-            return true;
+            return &entry;
         }
     }
-    return false;
+    return nullptr;
+}
+
+static bool single_core_block_rejection_matches(
+        CPUState& core,
+        uint64_t address) noexcept {
+    return find_single_core_block_rejection(
+        core, address) != nullptr;
 }
 
 enum class SingleCoreBlockRejectionStorage : uint8_t {
@@ -21478,6 +21572,108 @@ compile_single_core_jit_block(
     }
 }
 
+static void
+bind_single_core_jit_region_target(
+        const CPUState::SingleCoreDecodedBlockEntry& target,
+        CPUState::SingleCoreJitRegionDescriptor& region) noexcept {
+    region = {};
+    region.target_identity_bound = true;
+    region.target_psel = target.psel;
+    region.target_spsel = target.spsel;
+    region.target_identity_size = target.identity_size;
+    region.target_instruction_count = target.instruction_count;
+    region.target_full_cycle_count = target.full_cycle_count;
+    region.target_validated_identity_epoch =
+        target.validated_identity_epoch;
+    region.target_address = target.address;
+    region.target_identity = target.identity;
+    region.target_terminal =
+        target.instructions[target.instruction_count - 1];
+}
+
+static void
+bind_single_core_jit_region_target(
+        const CPUState::SingleCoreBlockRejectionEntry& target,
+        CPUState::SingleCoreJitRegionDescriptor& region) noexcept {
+    region = {};
+    region.target_identity_bound = true;
+    region.target_psel = target.psel;
+    region.target_spsel = target.spsel;
+    region.target_identity_size = target.identity_size;
+    region.target_validated_identity_epoch =
+        target.validated_identity_epoch;
+    region.target_address = target.address;
+    region.target_identity = target.identity;
+}
+
+static MP64_NOINLINE SingleCoreJitCompilation
+compile_single_core_jit_region(
+        SystemState& system,
+        const CPUState& core,
+        const CPUState::SingleCoreDecodedBlockEntry& source,
+        const CPUState::SingleCoreDecodedBlockEntry& target,
+        CPUState::SingleCoreJitRegionDescriptor& region) {
+    if (!mp64_x86_64::lowering_available())
+        return SingleCoreJitCompilation::UNAVAILABLE;
+    // Base-block JIT timing/allocation/publication telemetry remains one
+    // reconciled family. Phase-one regions expose their separate attempt and
+    // outcome counters at the caller instead of mixing those denominators.
+    bind_single_core_jit_region_target(target, region);
+    if (system.single_core_jit_region_arena.failed())
+        return SingleCoreJitCompilation::FAILED;
+    try {
+        mp64_x86_64::RegionView lowering_region;
+        lowering_region.source.address = source.address;
+        lowering_region.source.instructions =
+            source.instructions.data();
+        lowering_region.source.instruction_count =
+            source.instruction_count;
+        lowering_region.source.psel = source.psel;
+        lowering_region.source.spsel = source.spsel;
+        lowering_region.target.address = target.address;
+        lowering_region.target.instructions =
+            target.instructions.data();
+        lowering_region.target.instruction_count =
+            target.instruction_count;
+        lowering_region.target.psel = target.psel;
+        lowering_region.target.spsel = target.spsel;
+        std::vector<uint8_t> lowered_code =
+            mp64_x86_64::lower_region(
+                single_core_jit_layout(core),
+                lowering_region);
+
+        bool allocation_attempted = false;
+        bool arena_allocated = false;
+        HostExecutableArena& region_arena =
+            system.single_core_jit_region_arena;
+        const bool arena_ready = region_arena.ensure(
+            CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES,
+            allocation_attempted,
+            arena_allocated);
+        if (!arena_ready)
+            return SingleCoreJitCompilation::FAILED;
+
+        bool rewrote_slot = false;
+        HostExecutableCode code = region_arena.publish(
+            single_core_block_entry_slot(core, &source),
+            lowered_code,
+            rewrote_slot);
+        if (!code)
+            return SingleCoreJitCompilation::FAILED;
+
+        region.native_code = std::move(code);
+        region.valid = true;
+        return SingleCoreJitCompilation::COMPILED;
+    } catch (const std::bad_alloc&) {
+        return SingleCoreJitCompilation::FAILED;
+    } catch (const std::logic_error&) {
+        // Region lowering is opportunistic. A backend rejection disables
+        // only this source identity; the already-published base block remains
+        // the exact execution path.
+        return SingleCoreJitCompilation::FAILED;
+    }
+}
+
 static bool single_core_block_identity_matches(
         CPUState& core,
         CPUState::SingleCoreDecodedBlockEntry& block,
@@ -21834,6 +22030,8 @@ build_single_core_decoded_block(
     CPUState::SingleCoreDecodedBlockEntry& destination =
         core.single_core_execution_plan_cache
             ->blocks[destination_slot];
+    core.single_core_execution_plan_cache
+        ->regions[destination_slot] = {};
     destination = std::move(candidate);
     core.single_core_execution_plan_cache
         ->block_memory_addresses[destination_slot] =
@@ -21878,6 +22076,96 @@ static bool single_core_block_has_terminal_sep(
         block.instruction_count != 0 &&
         block.instructions[block.instruction_count - 1].operation ==
             DecodedOperation::SELECT_PROGRAM_COUNTER;
+}
+
+static bool single_core_region_operation_is_helper_free(
+        DecodedOperation operation) noexcept {
+    switch (operation) {
+        case DecodedOperation::NOP:
+        case DecodedOperation::INCREMENT:
+        case DecodedOperation::DECREMENT:
+        case DecodedOperation::BRANCH_SHORT:
+        case DecodedOperation::BRANCH_LONG:
+        case DecodedOperation::LOAD_IMMEDIATE:
+        case DecodedOperation::ADD_IMMEDIATE:
+        case DecodedOperation::AND_IMMEDIATE:
+        case DecodedOperation::OR_IMMEDIATE:
+        case DecodedOperation::COMPARE_IMMEDIATE:
+        case DecodedOperation::SUBTRACT_IMMEDIATE:
+        case DecodedOperation::SHIFT_LEFT_IMMEDIATE:
+        case DecodedOperation::SHIFT_RIGHT_LOGICAL_IMMEDIATE:
+        case DecodedOperation::ROTATE_LEFT_IMMEDIATE:
+        case DecodedOperation::ADD:
+        case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_AND:
+        case DecodedOperation::BITWISE_XOR:
+        case DecodedOperation::COMPARE:
+        case DecodedOperation::MOVE:
+        case DecodedOperation::UNSIGNED_MULTIPLY_LOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool single_core_block_is_region_register_control(
+        const CPUState::SingleCoreDecodedBlockEntry& block) noexcept {
+    if (
+        block.instruction_count < 2 ||
+        block.identity_size == 0 ||
+        block.identity_size > block.identity.size()
+    ) {
+        return false;
+    }
+    for (uint8_t index = 0; index < block.instruction_count; index++) {
+        const DecodedInstruction& decoded = block.instructions[index];
+        if (
+            decoded.is_memory() ||
+            decoded.is_direct_store() ||
+            decoded.operation == DecodedOperation::CALL_LONG ||
+            decoded.operation == DecodedOperation::RETURN_LONG ||
+            decoded.operation ==
+                DecodedOperation::SELECT_PROGRAM_COUNTER ||
+            (
+                decoded.register_write_mask() &
+                (uint32_t{1} << block.psel)
+            ) != 0 ||
+            !single_core_region_operation_is_helper_free(
+                decoded.operation)
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool single_core_region_forced_successor(
+        const CPUState::SingleCoreDecodedBlockEntry& block,
+        uint64_t& successor) noexcept {
+    if (!single_core_block_is_region_register_control(block))
+        return false;
+
+    successor = block.address + block.identity_size;
+    const DecodedInstruction& terminal =
+        block.instructions[block.instruction_count - 1];
+    if (
+        terminal.operation == DecodedOperation::BRANCH_SHORT ||
+        terminal.operation == DecodedOperation::BRANCH_LONG
+    ) {
+        if (
+            terminal.subop() != CC_AL ||
+            terminal.conditional_taken_cycle_cost() != 0
+        ) {
+            return false;
+        }
+        successor += s64(sign_extend(
+            terminal.immediate,
+            terminal.operation == DecodedOperation::BRANCH_SHORT
+                ? 8
+                : 16));
+        return true;
+    }
+    return !terminal.ends_block();
 }
 
 static MP64_NOINLINE bool preflight_single_core_direct_memory(
@@ -22352,6 +22640,12 @@ admit_single_core_decoded_block(
             }
             return admission;
         }
+        uint64_t forced_successor = 0;
+        if (single_core_region_forced_successor(
+                *block, forced_successor)) {
+            block->host_plan_state |=
+                SINGLE_CORE_BLOCK_REGION_SOURCE;
+        }
         if (destination.advance_victim) {
             core.single_core_execution_plan_cache
                 ->block_next_victim[destination.set] =
@@ -22485,7 +22779,10 @@ execute_single_core_decoded_block_plan(
     // that opportunity.
     if (
         block_cache_hit &&
-        !block->native_compile_checked &&
+        (
+            block->host_plan_state &
+            SINGLE_CORE_BLOCK_NATIVE_COMPILE_CHECKED
+        ) == 0 &&
         native_eligible
     ) {
         const SingleCoreJitCompilation jit_compilation =
@@ -22494,7 +22791,8 @@ execute_single_core_decoded_block_plan(
                 core,
                 *block,
                 profile);
-        block->native_compile_checked = true;
+        block->host_plan_state |=
+            SINGLE_CORE_BLOCK_NATIVE_COMPILE_CHECKED;
         if (profile_enabled) {
             if (
                 jit_compilation ==
@@ -22522,7 +22820,366 @@ execute_single_core_decoded_block_plan(
     }
 
     bool native_executed = false;
+    bool region_executed = false;
+    const bool regions_enabled =
+        system.single_core_jit_regions_enabled;
+    const uint8_t region_relevant_state =
+        block->host_plan_state & static_cast<uint8_t>(
+            SINGLE_CORE_BLOCK_REGION_SOURCE |
+            SINGLE_CORE_BLOCK_REGION_AVAILABLE);
+    CPUState::SingleCoreJitRegionDescriptor* region_plan = nullptr;
+    if (regions_enabled && region_relevant_state != 0) {
+        const std::size_t source_slot =
+            single_core_block_entry_slot(core, block);
+        region_plan = &core.single_core_execution_plan_cache
+            ->regions[source_slot];
+    }
+    const bool region_available_on_entry =
+        region_plan != nullptr &&
+        (
+            block->host_plan_state &
+            SINGLE_CORE_BLOCK_REGION_AVAILABLE
+        ) != 0;
     if (
+        region_available_on_entry &&
+        (
+            !region_plan->valid ||
+            !region_plan->target_identity_bound ||
+            !region_plan->native_code ||
+            region_plan->target_psel != block->psel ||
+            region_plan->target_spsel != block->spsel ||
+            region_plan->target_identity_size == 0 ||
+            region_plan->target_identity_size >
+                region_plan->target_identity.size() ||
+            region_plan->target_instruction_count < 2
+        )
+    ) {
+        throw std::logic_error(
+            "single-core JIT region descriptor is inconsistent");
+    }
+
+    // A negative pair decision belongs to the exact target bytes that made
+    // it ineligible (or made lowering/publication fail), not permanently to
+    // the source slot. A generation proof keeps the hot unchanged-negative
+    // path O(1); a changed or unprovable target releases the source to retry.
+    if (
+        region_plan != nullptr &&
+        !region_available_on_entry &&
+        block->native_code &&
+        native_eligible &&
+        (
+            block->host_plan_state &
+            SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED
+        ) != 0 &&
+        !system.single_core_jit_region_arena.failed()
+    ) {
+        const bool target_identity_matches =
+            region_plan->target_identity_bound &&
+            region_plan->target_psel == block->psel &&
+            region_plan->target_spsel == block->spsel &&
+            single_core_icache_identity_generation_matches(
+                core,
+                region_plan->target_address,
+                region_plan->target_identity,
+                region_plan->target_identity_size,
+                region_plan->target_validated_identity_epoch);
+        if (!target_identity_matches) {
+            *region_plan = {};
+            block->host_plan_state &= static_cast<uint8_t>(
+                ~SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED);
+        }
+    }
+
+    if (
+        region_plan != nullptr &&
+        block->native_code &&
+        native_eligible &&
+        !region_available_on_entry &&
+        (
+            block->host_plan_state &
+            SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED
+        ) == 0
+    ) {
+        uint64_t target_address = 0;
+        if (!single_core_region_forced_successor(
+                *block, target_address)) {
+            // Static source ineligibility cannot change while this exact
+            // source identity remains admitted. Keep it out of the parallel
+            // region table on all later hot visits.
+            block->host_plan_state &=
+                static_cast<uint8_t>(
+                    ~SINGLE_CORE_BLOCK_REGION_SOURCE);
+            block->host_plan_state |=
+                SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED;
+            *region_plan = {};
+        } else {
+            CPUState::SingleCoreDecodedBlockEntry* target =
+                find_single_core_decoded_block(
+                    core, target_address);
+            if (target == nullptr) {
+                CPUState::SingleCoreBlockRejectionEntry*
+                    target_rejection =
+                        find_single_core_block_rejection(
+                            core, target_address);
+                if (target_rejection != nullptr) {
+                    // Zero/one-instruction target rejections are exact
+                    // decoded identities, not ordinary pending misses. Bind
+                    // the negative pair so the source does not probe both
+                    // positive ways forever; changed bytes release it below.
+                    bind_single_core_jit_region_target(
+                        *target_rejection, *region_plan);
+                    block->host_plan_state |=
+                        SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED;
+                }
+            } else if (
+                !target->native_code &&
+                (
+                    target->host_plan_state &
+                    SINGLE_CORE_BLOCK_NATIVE_COMPILE_CHECKED
+                ) != 0
+            ) {
+                // Base lowering has already made its final decision for this
+                // exact target identity. It cannot become a region target
+                // until those bytes change, so bind the negative instead of
+                // repeating the associative lookup on every source visit.
+                bind_single_core_jit_region_target(
+                    *target, *region_plan);
+                block->host_plan_state |=
+                    SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED;
+            } else if (target->native_code) {
+                if (
+                    target->psel != block->psel ||
+                    target->spsel != block->spsel ||
+                    !single_core_block_is_region_register_control(
+                        *target)
+                ) {
+                    block->host_plan_state |=
+                        SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED;
+                    bind_single_core_jit_region_target(
+                        *target, *region_plan);
+                } else {
+                    const SingleCoreJitCompilation region_compilation =
+                        compile_single_core_jit_region(
+                            system,
+                            core,
+                            *block,
+                            *target,
+                            *region_plan);
+                    if (
+                        region_compilation ==
+                            SingleCoreJitCompilation::COMPILED ||
+                        region_compilation ==
+                            SingleCoreJitCompilation::FAILED
+                    ) {
+                        block->host_plan_state |=
+                            SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED;
+                    }
+                    if (
+                        region_compilation ==
+                        SingleCoreJitCompilation::COMPILED
+                    ) {
+                        block->host_plan_state |=
+                            SINGLE_CORE_BLOCK_REGION_AVAILABLE;
+                    }
+                    if (profile_enabled) {
+                        if (
+                            region_compilation ==
+                                SingleCoreJitCompilation::COMPILED ||
+                            region_compilation ==
+                                SingleCoreJitCompilation::FAILED
+                        ) {
+                            host_saturating_increment(
+                                profile
+                                    .uncontended_jit_region_compile_attempts);
+                        }
+                        if (
+                            region_compilation ==
+                            SingleCoreJitCompilation::COMPILED
+                        ) {
+                            host_saturating_increment(
+                                profile
+                                    .uncontended_jit_region_compilations);
+                        } else if (
+                            region_compilation ==
+                            SingleCoreJitCompilation::FAILED
+                        ) {
+                            host_saturating_increment(
+                                profile
+                                    .uncontended_jit_region_compile_failures);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (
+        region_available_on_entry &&
+        region_plan->valid &&
+        region_plan->native_code &&
+        !core.flag_i &&
+        native_eligible &&
+        max_steps >=
+            static_cast<int>(block->instruction_count) +
+            static_cast<int>(region_plan->target_instruction_count)
+    ) {
+        CPUState::SingleCoreJitRegionDescriptor& region =
+            *region_plan;
+        if (!single_core_icache_identity_generation_matches(
+                core,
+                region.target_address,
+                region.target_identity,
+                region.target_identity_size,
+                region.target_validated_identity_epoch)) {
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile
+                        .uncontended_jit_region_target_identity_misses);
+            }
+            region = {};
+            block->host_plan_state &= static_cast<uint8_t>(~(
+                SINGLE_CORE_BLOCK_REGION_COMPILE_CHECKED |
+                SINGLE_CORE_BLOCK_REGION_AVAILABLE));
+        } else {
+            const mp64_x86_64::BlockEntry function =
+                reinterpret_cast<mp64_x86_64::BlockEntry>(
+                    region.native_code.address());
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_jit_native_entries);
+            }
+            const uint64_t packed =
+                function(&core, nullptr, nullptr);
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_jit_native_returns);
+            }
+            const uint32_t steps =
+                static_cast<uint32_t>(
+                    packed &
+                    mp64_x86_64::
+                        NATIVE_BLOCK_COMPLETED_INSTRUCTION_MASK);
+            const uint64_t exit_flags =
+                packed >> mp64_x86_64::NATIVE_BLOCK_EXIT_SHIFT;
+            const uint32_t combined_steps =
+                static_cast<uint32_t>(block->instruction_count) +
+                static_cast<uint32_t>(
+                    region.target_instruction_count);
+            if (
+                (
+                    exit_flags &
+                    ~mp64_x86_64::NATIVE_BLOCK_EXIT_KNOWN_FLAGS
+                ) != 0 ||
+                (
+                    exit_flags &
+                    mp64_x86_64::NATIVE_BLOCK_EXIT_INTERRUPT
+                ) != 0 ||
+                steps != combined_steps
+            ) {
+                throw std::logic_error(
+                    "single-core JIT region did not retire its exact pair");
+            }
+
+            const bool conditional_taken =
+                (
+                    exit_flags &
+                    mp64_x86_64::
+                        NATIVE_BLOCK_EXIT_CONDITIONAL_TAKEN
+                ) != 0;
+            const DecodedInstruction& terminal =
+                region.target_terminal;
+            uint32_t cycles =
+                static_cast<uint32_t>(block->full_cycle_count) +
+                static_cast<uint32_t>(
+                    region.target_full_cycle_count);
+            bool target_branch_taken = false;
+            if (terminal.conditional_taken_cycle_cost() != 0) {
+                target_branch_taken =
+                    eval_cond(core, terminal.subop());
+                if (conditional_taken != target_branch_taken) {
+                    throw std::logic_error(
+                        "single-core JIT region returned invalid target "
+                        "branch outcome");
+                }
+                if (target_branch_taken) {
+                    cycles +=
+                        terminal.conditional_taken_cycle_cost();
+                }
+            } else if (conditional_taken) {
+                throw std::logic_error(
+                    "single-core JIT region returned conditional-taken "
+                    "for a static-cycle target");
+            }
+
+            uint64_t expected_pc =
+                region.target_address +
+                region.target_identity_size;
+            if (
+                terminal.operation ==
+                    DecodedOperation::BRANCH_SHORT ||
+                terminal.operation ==
+                    DecodedOperation::BRANCH_LONG
+            ) {
+                const bool branch_taken =
+                    terminal.subop() == CC_AL ||
+                    target_branch_taken;
+                if (branch_taken) {
+                    expected_pc += s64(sign_extend(
+                        terminal.immediate,
+                        terminal.operation ==
+                                DecodedOperation::BRANCH_SHORT
+                            ? 8
+                            : 16));
+                }
+            }
+            if (pc(core) != expected_pc) {
+                throw std::logic_error(
+                    "single-core JIT region returned invalid target state");
+            }
+
+            core.cycle_count += cycles;
+            if (core.perf_enable)
+                core.perf_cycles += cycles;
+            exit.completed_instructions = combined_steps;
+            exit.completed_cycles = cycles;
+            exit.reason = BlockExitReason::BLOCK_COMPLETE;
+            native_executed = true;
+            region_executed = true;
+            if (profile_enabled) {
+                host_saturating_add(
+                    profile.uncontended_jit_executions,
+                    2);
+                host_saturating_add(
+                    profile.uncontended_jit_steps,
+                    combined_steps);
+                host_saturating_increment(
+                    profile.uncontended_jit_region_entries);
+                host_saturating_add(
+                    profile.uncontended_jit_region_blocks,
+                    2);
+                host_saturating_add(
+                    profile.uncontended_jit_region_steps,
+                    combined_steps);
+                BlockExit source_exit;
+                source_exit.completed_instructions =
+                    block->instruction_count;
+                source_exit.completed_cycles =
+                    block->full_cycle_count;
+                source_exit.reason =
+                    BlockExitReason::BLOCK_COMPLETE;
+                profile_single_core_jit_successor_completion(
+                    profile,
+                    *block,
+                    source_exit);
+                profile_single_core_jit_successor_completion(
+                    profile,
+                    single_core_jit_successor_key(region));
+            }
+        }
+    }
+
+    if (
+        !native_executed &&
         block->native_code &&
         native_eligible
     ) {
@@ -22535,11 +23192,19 @@ execute_single_core_decoded_block_plan(
             const mp64_x86_64::BlockEntry function =
                 reinterpret_cast<mp64_x86_64::BlockEntry>(
                     block->native_code.address());
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_jit_native_entries);
+            }
             const uint64_t packed =
                 function(
                     &core,
                     enabled_ipi_mirror,
                     direct_memory_table);
+            if (profile_enabled) {
+                host_saturating_increment(
+                    profile.uncontended_jit_native_returns);
+            }
             const uint32_t steps =
                 static_cast<uint32_t>(
                     packed &
@@ -22772,8 +23437,9 @@ execute_single_core_decoded_block_plan(
                 : BlockExitReason::INSTRUCTION_LIMIT;
     }
     if (profile_enabled && exit.completed_instructions > 0) {
-        host_saturating_increment(
-            profile.uncontended_block_executions);
+        host_saturating_add(
+            profile.uncontended_block_executions,
+            region_executed ? 2 : 1);
         host_saturating_add(
             profile.uncontended_block_steps,
             exit.completed_instructions);
@@ -25927,6 +26593,24 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.uncontended_jit_executions;
     counts["uncontended_jit_steps"] =
         profile.uncontended_jit_steps;
+    counts["uncontended_jit_native_entries"] =
+        profile.uncontended_jit_native_entries;
+    counts["uncontended_jit_native_returns"] =
+        profile.uncontended_jit_native_returns;
+    counts["uncontended_jit_region_compile_attempts"] =
+        profile.uncontended_jit_region_compile_attempts;
+    counts["uncontended_jit_region_compilations"] =
+        profile.uncontended_jit_region_compilations;
+    counts["uncontended_jit_region_compile_failures"] =
+        profile.uncontended_jit_region_compile_failures;
+    counts["uncontended_jit_region_entries"] =
+        profile.uncontended_jit_region_entries;
+    counts["uncontended_jit_region_blocks"] =
+        profile.uncontended_jit_region_blocks;
+    counts["uncontended_jit_region_steps"] =
+        profile.uncontended_jit_region_steps;
+    counts["uncontended_jit_region_target_identity_misses"] =
+        profile.uncontended_jit_region_target_identity_misses;
     counts["logical_subfrontiers"] =
         profile.logical_subfrontiers;
     counts["round_absorptions"] =
@@ -26060,6 +26744,29 @@ static py::dict concurrency_profile_snapshot_dict(
     jit_storage["mapped_bytes_per_alias"] =
         system.single_core_jit_arena.mapped_bytes();
 
+    py::dict jit_region_storage;
+    if (mp64_x86_64::lowering_available()) {
+        jit_region_storage["kind"] =
+            "memfd-dual-mapped-fixed-slots";
+        jit_region_storage["w_x_model"] =
+            "distinct-rw-and-rx-aliases";
+    } else {
+        jit_region_storage["kind"] = "unavailable";
+        jit_region_storage["w_x_model"] = "unavailable";
+    }
+    jit_region_storage["enabled"] =
+        system.single_core_jit_regions_enabled;
+    jit_region_storage["ready"] =
+        system.single_core_jit_region_arena.ready();
+    jit_region_storage["failed"] =
+        system.single_core_jit_region_arena.failed();
+    jit_region_storage["slot_count"] =
+        system.single_core_jit_region_arena.slot_count();
+    jit_region_storage["slot_bytes"] =
+        system.single_core_jit_region_arena.slot_bytes();
+    jit_region_storage["mapped_bytes_per_alias"] =
+        system.single_core_jit_region_arena.mapped_bytes();
+
     py::dict block_cache;
     block_cache["kind"] =
         "set-associative-exact-icache-span";
@@ -26085,7 +26792,7 @@ static py::dict concurrency_profile_snapshot_dict(
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 16;
+    result["schema_version"] = 17;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -26102,6 +26809,8 @@ static py::dict concurrency_profile_snapshot_dict(
     result["wall_ns"] = std::move(wall_ns);
     result["single_core_jit_storage"] =
         std::move(jit_storage);
+    result["single_core_jit_region_storage"] =
+        std::move(jit_region_storage);
     result["single_core_block_cache"] =
         std::move(block_cache);
     result["single_core_block_rejection_cache"] =
@@ -30918,6 +31627,22 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 result["lanes"] = std::move(lanes);
                 return result;
             })
+        .def(
+            "_set_single_core_jit_regions_enabled_for_test",
+            [](SystemState& system, bool enabled) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(
+                        system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "single-core JIT region A/B mode cannot change "
+                        "during an active native batch");
+                }
+                system.single_core_jit_regions_enabled = enabled;
+                return enabled;
+            },
+            py::arg("enabled"))
         .def(
             "_start_concurrency_profile",
             [](SystemState& system) {

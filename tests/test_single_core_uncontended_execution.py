@@ -58,16 +58,51 @@ JIT_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_max_code_bytes",
     "uncontended_jit_executions",
     "uncontended_jit_steps",
+    "uncontended_jit_native_entries",
+    "uncontended_jit_native_returns",
 )
 JIT_PROFILE_WALL_FIELDS = (
     "uncontended_jit_compile",
     "uncontended_jit_arena_allocation",
     "uncontended_jit_publication",
 )
+JIT_REGION_PROFILE_COUNT_FIELDS = (
+    "uncontended_jit_region_compile_attempts",
+    "uncontended_jit_region_compilations",
+    "uncontended_jit_region_compile_failures",
+    "uncontended_jit_region_entries",
+    "uncontended_jit_region_blocks",
+    "uncontended_jit_region_steps",
+    "uncontended_jit_region_target_identity_misses",
+)
+TWO_BLOCK_REGION_RING_SOURCE = """
+first:
+    inc r4
+    br second
+second:
+    inc r5
+    br first
+"""
+CONDITIONAL_TARGET_REGION_SOURCE = """
+source:
+    inc r4
+    br target
+target:
+    inc r5
+    breq source
+"""
+PSEL_OPERAND_REGION_SOURCE = """
+source:
+    umul r4, r3
+    br target
+target:
+    inc r5
+    br source
+"""
 
 
 def _assert_block_cache_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 16
+    assert snapshot["schema_version"] == 17
     assert dict(snapshot["single_core_block_cache"]) == {
         "kind": "set-associative-exact-icache-span",
         "sets": 1_024,
@@ -104,6 +139,41 @@ def _assert_block_cache_profile_reconciles(snapshot: dict) -> None:
         counts["uncontended_block_rejection_cache_replacements"]
         <= counts["uncontended_block_rejection_cache_stores"]
     )
+    assert counts["uncontended_jit_native_entries"] == (
+        counts["uncontended_jit_native_returns"]
+    )
+    assert counts["uncontended_jit_executions"] == (
+        counts["uncontended_jit_native_entries"]
+        + counts["uncontended_jit_region_entries"]
+    )
+    assert counts["uncontended_jit_region_blocks"] == (
+        2 * counts["uncontended_jit_region_entries"]
+    )
+    assert counts["uncontended_jit_region_blocks"] <= (
+        counts["uncontended_jit_executions"]
+    )
+    assert counts["uncontended_jit_region_steps"] <= (
+        counts["uncontended_jit_steps"]
+    )
+    region_storage = dict(snapshot["single_core_jit_region_storage"])
+    assert isinstance(region_storage["enabled"], bool)
+    assert region_storage["kind"] == (
+        "memfd-dual-mapped-fixed-slots"
+        if snapshot["single_core_jit_backend"] == "x86_64"
+        else "unavailable"
+    )
+    assert region_storage["w_x_model"] == (
+        "distinct-rw-and-rx-aliases"
+        if snapshot["single_core_jit_backend"] == "x86_64"
+        else "unavailable"
+    )
+    if region_storage["ready"]:
+        assert not region_storage["failed"]
+        assert region_storage["slot_count"] == 4_096
+        assert region_storage["slot_bytes"] == 1_344
+        assert region_storage["mapped_bytes_per_alias"] == (
+            region_storage["slot_count"] * region_storage["slot_bytes"]
+        )
     successor_profile = dict(
         snapshot["single_core_jit_successor_profile"]
     )
@@ -830,6 +900,7 @@ loop:
 def test_native_umul_ipi_exit_publishes_four_cycle_prefix() -> None:
     system = _warmed_umul_loop_system(reference=False)
     owner = system._native_system
+    owner._set_single_core_jit_regions_enabled_for_test(True)
     if (
         owner._concurrency_profile_snapshot()[
             "single_core_jit_backend"
@@ -879,6 +950,12 @@ def test_native_umul_ipi_exit_publishes_four_cycle_prefix() -> None:
     assert counts["uncontended_block_steps"] == 1
     assert counts["uncontended_jit_executions"] == 1
     assert counts["uncontended_jit_steps"] == 1
+    assert counts["uncontended_jit_native_entries"] == 1
+    assert counts["uncontended_jit_native_returns"] == 1
+    assert all(
+        counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
 
 
 def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
@@ -2160,9 +2237,12 @@ loop:
     counts = dict(snapshot["counts"])
 
     assert system.cpu.regs[4] == 6
-    assert counts["uncontended_block_lookups"] == 8
+    # The retained self-loop region executes two logical blocks through one
+    # host admission after the refill. The refill still rebuilds no decoded or
+    # native plan; it only changes the physical-entry landmark.
+    assert counts["uncontended_block_lookups"] == 7
     assert counts["uncontended_block_misses"] == 5
-    assert counts["uncontended_block_hits"] == 3
+    assert counts["uncontended_block_hits"] == 2
     assert counts["uncontended_block_builds"] == 1
     assert counts["uncontended_block_executions"] == 4
     assert counts["uncontended_block_steps"] == 8
@@ -2177,6 +2257,18 @@ loop:
         assert counts["uncontended_jit_slot_rewrites"] == 0
         assert counts["uncontended_jit_executions"] == 3
         assert counts["uncontended_jit_steps"] == 6
+        assert counts["uncontended_jit_native_entries"] == 2
+        assert counts["uncontended_jit_native_returns"] == 2
+        assert counts["uncontended_jit_region_compile_attempts"] == 1
+        assert counts["uncontended_jit_region_compilations"] == 1
+        assert counts["uncontended_jit_region_compile_failures"] == 0
+        assert counts["uncontended_jit_region_entries"] == 1
+        assert counts["uncontended_jit_region_blocks"] == 2
+        assert counts["uncontended_jit_region_steps"] == 4
+        assert (
+            counts["uncontended_jit_region_target_identity_misses"]
+            == 0
+        )
     else:
         assert all(
             counts[name] == 0
@@ -2471,6 +2563,795 @@ far:
     _assert_jit_used_when_available(snapshot, counts)
 
 
+def _warmed_two_block_region_ring(
+    *,
+    reference: bool,
+    regions_enabled: bool = True,
+    source: str = TWO_BLOCK_REGION_RING_SOURCE,
+    warm_flags: int | None = None,
+) -> MegapadSystem:
+    system = _system(reference=reference)
+    system.load_binary(0, assemble(source))
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    else:
+        system._native_system._set_single_core_jit_regions_enabled_for_test(
+            regions_enabled
+        )
+    system.cpu.perf_enable = 1
+    if warm_flags is not None:
+        system.cpu.flags_unpack(warm_flags)
+
+    warm = system.run_batch_stats(16)
+    assert warm.instructions_executed == 16
+    assert system.cpu.pc == 0
+    return system
+
+
+def _architectural_batch_signature(stats) -> tuple:
+    return (
+        stats.instructions_executed,
+        stats.system_cycles_advanced,
+        stats.per_core_instructions[0],
+        stats.per_core_cycles[0],
+        stats.per_core_stop_reasons[0],
+        stats.system_stop_reason,
+    )
+
+
+def _assert_one_two_block_region_dispatch(
+    enabled_snapshot: dict,
+    disabled_snapshot: dict,
+) -> None:
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+    if enabled_snapshot["single_core_jit_backend"] != "x86_64":
+        assert all(
+            enabled_counts[name] == disabled_counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+        return
+
+    assert enabled_counts["uncontended_jit_executions"] == 2
+    assert enabled_counts["uncontended_jit_steps"] == 4
+    assert enabled_counts["uncontended_jit_native_entries"] == 1
+    assert enabled_counts["uncontended_jit_native_returns"] == 1
+    assert enabled_counts["uncontended_jit_region_compile_attempts"] == 0
+    assert enabled_counts["uncontended_jit_region_compilations"] == 0
+    assert enabled_counts["uncontended_jit_region_compile_failures"] == 0
+    assert enabled_counts["uncontended_jit_region_entries"] == 1
+    assert enabled_counts["uncontended_jit_region_blocks"] == 2
+    assert enabled_counts["uncontended_jit_region_steps"] == 4
+    assert (
+        enabled_counts["uncontended_jit_region_target_identity_misses"]
+        == 0
+    )
+    assert disabled_counts["uncontended_jit_executions"] == 2
+    assert disabled_counts["uncontended_jit_steps"] == 4
+    assert disabled_counts["uncontended_jit_native_entries"] == 2
+    assert disabled_counts["uncontended_jit_native_returns"] == 2
+    assert all(
+        disabled_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+
+
+def test_warm_two_block_region_halves_native_returns_exactly() -> None:
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+    )
+    reference = _warmed_two_block_region_ring(reference=True)
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+
+    enabled_stats = enabled.run_batch_stats(1_000)
+    disabled_stats = disabled.run_batch_stats(1_000)
+    reference_stats = reference.run_batch_stats(1_000)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert enabled.cpu.regs[4] == enabled.cpu.regs[5] == 254
+    if enabled_snapshot["single_core_jit_backend"] != "x86_64":
+        assert all(
+            enabled_counts[name] == disabled_counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+        return
+
+    assert enabled_counts["uncontended_jit_executions"] == 500
+    assert enabled_counts["uncontended_jit_steps"] == 1_000
+    assert enabled_counts["uncontended_jit_native_entries"] == 250
+    assert enabled_counts["uncontended_jit_native_returns"] == 250
+    assert enabled_counts["uncontended_jit_region_compile_attempts"] == 0
+    assert enabled_counts["uncontended_jit_region_compilations"] == 0
+    assert enabled_counts["uncontended_jit_region_compile_failures"] == 0
+    assert enabled_counts["uncontended_jit_region_entries"] == 250
+    assert enabled_counts["uncontended_jit_region_blocks"] == 500
+    assert enabled_counts["uncontended_jit_region_steps"] == 1_000
+    assert (
+        enabled_counts["uncontended_jit_region_target_identity_misses"]
+        == 0
+    )
+
+    assert disabled_counts["uncontended_jit_executions"] == 500
+    assert disabled_counts["uncontended_jit_steps"] == 1_000
+    assert disabled_counts["uncontended_jit_native_entries"] == 500
+    assert disabled_counts["uncontended_jit_native_returns"] == 500
+    assert all(
+        disabled_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_pc", "expected_cycles"),
+    (
+        pytest.param(0xAB, 0, 6, id="taken"),
+        pytest.param(0xAA, 6, 5, id="not-taken"),
+    ),
+)
+def test_two_block_region_settles_target_conditional_exactly(
+    flags: int,
+    expected_pc: int,
+    expected_cycles: int,
+) -> None:
+    program = assemble(CONDITIONAL_TARGET_REGION_SOURCE)
+    assert len(program) == 6
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+        source=CONDITIONAL_TARGET_REGION_SOURCE,
+        warm_flags=0xAB,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+        source=CONDITIONAL_TARGET_REGION_SOURCE,
+        warm_flags=0xAB,
+    )
+    reference = _warmed_two_block_region_ring(
+        reference=True,
+        source=CONDITIONAL_TARGET_REGION_SOURCE,
+        warm_flags=0xAB,
+    )
+    for system in (enabled, disabled, reference):
+        system.cpu.pc = 0
+        system.cpu.regs[4] = 0x1234
+        system.cpu.regs[5] = 0x5678
+        system.cpu.flags_unpack(flags)
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+
+    enabled_stats = enabled.run_batch_stats(4)
+    disabled_stats = disabled.run_batch_stats(4)
+    reference_stats = reference.run_batch_stats(4)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert enabled_stats.system_cycles_advanced == expected_cycles
+    assert enabled_stats.per_core_cycles[0] == expected_cycles
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert enabled.cpu.regs[4] == 0x1235
+    assert enabled.cpu.regs[5] == 0x5679
+    assert enabled.cpu.pc == expected_pc
+    assert enabled.cpu.flags_pack() == flags
+    _assert_one_two_block_region_dispatch(
+        enabled_snapshot,
+        disabled_snapshot,
+    )
+
+
+def test_two_block_region_preserves_memory_pc_for_psel_operand() -> None:
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+        source=PSEL_OPERAND_REGION_SOURCE,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+        source=PSEL_OPERAND_REGION_SOURCE,
+    )
+    reference = _warmed_two_block_region_ring(
+        reference=True,
+        source=PSEL_OPERAND_REGION_SOURCE,
+    )
+    for system in (enabled, disabled, reference):
+        system.cpu.pc = 0
+        system.cpu.regs[4] = 3
+        system.cpu.regs[5] = 7
+        system.cpu.flags_unpack(0xBF)
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+
+    enabled_stats = enabled.run_batch_stats(4)
+    disabled_stats = disabled.run_batch_stats(4)
+    reference_stats = reference.run_batch_stats(4)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert enabled_stats.system_cycles_advanced == 9
+    assert enabled_stats.per_core_cycles[0] == 9
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert enabled.cpu.regs[4] == 6
+    assert enabled.cpu.regs[5] == 8
+    assert enabled.cpu.pc == 0
+    assert enabled.cpu.psel == 3
+    assert enabled.cpu.flags_pack() == 0xBA
+    _assert_one_two_block_region_dispatch(
+        enabled_snapshot,
+        disabled_snapshot,
+    )
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected_jit_executions", "expected_jit_steps"),
+    (
+        pytest.param(1, 0, 0, id="one-step"),
+        pytest.param(2, 1, 2, id="one-block"),
+        pytest.param(3, 1, 2, id="one-block-plus-prefix"),
+    ),
+)
+def test_two_block_region_declines_budgets_below_combined_size_exactly(
+    budget: int,
+    expected_jit_executions: int,
+    expected_jit_steps: int,
+) -> None:
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+    )
+    reference = _warmed_two_block_region_ring(reference=True)
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+
+    enabled_stats = enabled.run_batch_stats(budget)
+    disabled_stats = disabled.run_batch_stats(budget)
+    reference_stats = reference.run_batch_stats(budget)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    if enabled_snapshot["single_core_jit_backend"] != "x86_64":
+        assert all(
+            enabled_counts[name] == disabled_counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+        return
+
+    for counts in (enabled_counts, disabled_counts):
+        assert counts["uncontended_jit_executions"] == (
+            expected_jit_executions
+        )
+        assert counts["uncontended_jit_steps"] == expected_jit_steps
+        assert counts["uncontended_jit_native_entries"] == (
+            expected_jit_executions
+        )
+        assert counts["uncontended_jit_native_returns"] == (
+            expected_jit_executions
+        )
+        assert all(
+            counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_two_block_region_rechecks_changed_target_identity_exactly() -> None:
+    source = """
+first:
+    inc r4
+    lbr second
+
+    .org 0x20
+second:
+    inc r5
+    lbr first
+"""
+    original = assemble(source)
+    replacement = assemble("dec r5")
+    assert len(replacement) == 1
+    assert original[0x20] != replacement[0]
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+        source=source,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+        source=source,
+    )
+    reference = _warmed_two_block_region_ring(
+        reference=True,
+        source=source,
+    )
+    for system in (enabled, disabled, reference):
+        system.cpu.mem_write8(0x20, replacement[0])
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+
+    enabled_stats = enabled.run_batch_stats(4)
+    disabled_stats = disabled.run_batch_stats(4)
+    reference_stats = reference.run_batch_stats(4)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert enabled.cpu.regs[4] == 5
+    assert enabled.cpu.regs[5] == 3
+    assert enabled.cpu.pc == 0
+    assert all(
+        disabled_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    if enabled_snapshot["single_core_jit_backend"] == "x86_64":
+        assert (
+            enabled_counts[
+                "uncontended_jit_region_target_identity_misses"
+            ]
+            == 1
+        )
+        assert enabled_counts["uncontended_jit_region_entries"] == 0
+        assert enabled_counts["uncontended_jit_region_blocks"] == 0
+        assert enabled_counts["uncontended_jit_region_steps"] == 0
+        assert enabled_counts["uncontended_jit_native_entries"] == (
+            enabled_counts["uncontended_jit_native_returns"]
+        )
+    else:
+        assert all(
+            enabled_counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_two_block_region_reconsiders_identity_bound_negative_target() -> None:
+    ineligible_source = """
+source:
+    inc r4
+    br target
+
+    .org 0x20
+target:
+    ld.b r5, r6
+    br source
+"""
+    eligible_source = """
+source:
+    inc r4
+    br target
+
+    .org 0x20
+target:
+    mov r5, r7
+    br source
+"""
+    ineligible_program = assemble(ineligible_source)
+    eligible_program = assemble(eligible_source)
+    target_address = 0x20
+    assert ineligible_program[:target_address] == (
+        eligible_program[:target_address]
+    )
+    assert len(ineligible_program) == len(eligible_program) == 0x24
+    assert (
+        len(ineligible_program[target_address:])
+        == len(eligible_program[target_address:])
+        == 4
+    )
+    assert ineligible_program[target_address:] != (
+        eligible_program[target_address:]
+    )
+
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+        source=ineligible_source,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+        source=ineligible_source,
+    )
+    reference = _warmed_two_block_region_ring(
+        reference=True,
+        source=ineligible_source,
+    )
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+
+    # The memory target has its own native plan, but it is not an admissible
+    # region constituent. Once that exact target identity has been rejected,
+    # unchanged visits must not repeat a negative region compilation.
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+    enabled_negative = enabled.run_batch_stats(16)
+    disabled_negative = disabled.run_batch_stats(16)
+    reference_negative = reference.run_batch_stats(16)
+    enabled_negative_snapshot = dict(
+        enabled_owner._stop_concurrency_profile()
+    )
+    disabled_negative_snapshot = dict(
+        disabled_owner._stop_concurrency_profile()
+    )
+    enabled_negative_counts = dict(
+        enabled_negative_snapshot["counts"]
+    )
+    disabled_negative_counts = dict(
+        disabled_negative_snapshot["counts"]
+    )
+
+    assert (
+        _architectural_batch_signature(enabled_negative)
+        == _architectural_batch_signature(disabled_negative)
+        == _architectural_batch_signature(reference_negative)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert all(
+        enabled_negative_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    assert all(
+        disabled_negative_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    if enabled_negative_snapshot["single_core_jit_backend"] == "x86_64":
+        for counts in (
+            enabled_negative_counts,
+            disabled_negative_counts,
+        ):
+            assert counts["uncontended_jit_executions"] == 8
+            assert counts["uncontended_jit_steps"] == 16
+            assert counts["uncontended_jit_native_entries"] == 8
+            assert counts["uncontended_jit_native_returns"] == 8
+
+    replacement = eligible_program[target_address:]
+    for system in (enabled, disabled, reference):
+        for offset, byte in enumerate(replacement):
+            system.cpu.mem_write8(target_address + offset, byte)
+        system.cpu.regs[7] = 0xA5
+
+    # Only the target bytes changed. Its ordinary execution-plan refill and
+    # native compilation happen naturally in this batch. The unchanged source
+    # must invalidate the negative result bound to the old target identity,
+    # reconsider the new eligible target, and eventually enter the new region.
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+    enabled_stats = enabled.run_batch_stats(32)
+    disabled_stats = disabled.run_batch_stats(32)
+    reference_stats = reference.run_batch_stats(32)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert enabled.cpu.regs[4] == 16
+    assert enabled.cpu.regs[5] == 0xA5
+    assert enabled.cpu.pc == 0
+    assert all(
+        disabled_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    if enabled_snapshot["single_core_jit_backend"] == "x86_64":
+        # Once the target becomes eligible, both forced directions publish;
+        # this bounded batch reaches one of the two completed pairs.
+        assert enabled_counts["uncontended_jit_region_compile_attempts"] == 2
+        assert enabled_counts["uncontended_jit_region_compilations"] == 2
+        assert enabled_counts["uncontended_jit_region_compile_failures"] == 0
+        assert enabled_counts["uncontended_jit_region_entries"] > 0
+        assert enabled_counts["uncontended_jit_region_blocks"] == (
+            2 * enabled_counts["uncontended_jit_region_entries"]
+        )
+        assert enabled_counts["uncontended_jit_region_steps"] == (
+            4 * enabled_counts["uncontended_jit_region_entries"]
+        )
+        assert (
+            enabled_counts[
+                "uncontended_jit_region_target_identity_misses"
+            ]
+            == 0
+        )
+    else:
+        assert all(
+            enabled_counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_two_block_region_reconsiders_one_instruction_rejection() -> None:
+    rejected_source = """
+source:
+    inc r4
+    nop
+    br target
+
+    .org 0x20
+target:
+    lbr source
+"""
+    eligible_source = """
+source:
+    inc r4
+    nop
+    br target
+
+    .org 0x20
+target:
+    inc r5
+    br source
+"""
+    rejected_program = assemble(rejected_source)
+    eligible_program = assemble(eligible_source)
+    target_address = 0x20
+    assert rejected_program[:target_address] == (
+        eligible_program[:target_address]
+    )
+    assert len(rejected_program) == len(eligible_program) == 0x23
+    assert (
+        len(rejected_program[target_address:])
+        == len(eligible_program[target_address:])
+        == 3
+    )
+    assert rejected_program[target_address:] != (
+        eligible_program[target_address:]
+    )
+
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+        source=rejected_source,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+        source=rejected_source,
+    )
+    reference = _warmed_two_block_region_ring(
+        reference=True,
+        source=rejected_source,
+    )
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+
+    # The exact one-instruction target lives in the rejection cache. The
+    # source-owned negative pair may suppress repeated target probes, but it
+    # must remain bound to these three target bytes rather than to the source.
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+    enabled_negative = enabled.run_batch_stats(16)
+    disabled_negative = disabled.run_batch_stats(16)
+    reference_negative = reference.run_batch_stats(16)
+    enabled_negative_snapshot = dict(
+        enabled_owner._stop_concurrency_profile()
+    )
+    disabled_negative_snapshot = dict(
+        disabled_owner._stop_concurrency_profile()
+    )
+    enabled_negative_counts = dict(
+        enabled_negative_snapshot["counts"]
+    )
+    disabled_negative_counts = dict(
+        disabled_negative_snapshot["counts"]
+    )
+
+    assert (
+        _architectural_batch_signature(enabled_negative)
+        == _architectural_batch_signature(disabled_negative)
+        == _architectural_batch_signature(reference_negative)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert all(
+        enabled_negative_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    assert all(
+        disabled_negative_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    if enabled_negative_snapshot["single_core_jit_backend"] == "x86_64":
+        for counts in (
+            enabled_negative_counts,
+            disabled_negative_counts,
+        ):
+            assert counts["uncontended_jit_executions"] == 4
+            assert counts["uncontended_jit_steps"] == 12
+            assert counts["uncontended_jit_native_entries"] == 4
+            assert counts["uncontended_jit_native_returns"] == 4
+
+    replacement = eligible_program[target_address:]
+    for system in (enabled, disabled, reference):
+        for offset, byte in enumerate(replacement):
+            system.cpu.mem_write8(target_address + offset, byte)
+
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+    enabled_stats = enabled.run_batch_stats(40)
+    disabled_stats = disabled.run_batch_stats(40)
+    reference_stats = reference.run_batch_stats(40)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert enabled.cpu.regs[4] == 16
+    assert enabled.cpu.regs[5] == 8
+    assert enabled.cpu.pc == 0
+    assert all(
+        disabled_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    if enabled_snapshot["single_core_jit_backend"] == "x86_64":
+        # Once the target becomes eligible, both forced directions publish;
+        # this bounded batch reaches one of the two completed pairs.
+        assert enabled_counts["uncontended_jit_region_compile_attempts"] == 2
+        assert enabled_counts["uncontended_jit_region_compilations"] == 2
+        assert enabled_counts["uncontended_jit_region_compile_failures"] == 0
+        assert enabled_counts["uncontended_jit_region_entries"] > 0
+        assert enabled_counts["uncontended_jit_region_blocks"] == (
+            2 * enabled_counts["uncontended_jit_region_entries"]
+        )
+        assert enabled_counts["uncontended_jit_region_steps"] == (
+            5 * enabled_counts["uncontended_jit_region_entries"]
+        )
+        assert (
+            enabled_counts[
+                "uncontended_jit_region_target_identity_misses"
+            ]
+            == 0
+        )
+    else:
+        assert all(
+            enabled_counts[name] == 0
+            for name in JIT_REGION_PROFILE_COUNT_FIELDS
+        )
+
+
+def test_two_block_region_declines_when_interrupts_are_enabled() -> None:
+    enabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=True,
+    )
+    disabled = _warmed_two_block_region_ring(
+        reference=False,
+        regions_enabled=False,
+    )
+    reference = _warmed_two_block_region_ring(reference=True)
+    for system in (enabled, disabled, reference):
+        system.cpu.flag_i = True
+    enabled_owner = enabled._native_system
+    disabled_owner = disabled._native_system
+    enabled_owner._start_concurrency_profile()
+    disabled_owner._start_concurrency_profile()
+
+    enabled_stats = enabled.run_batch_stats(1_000)
+    disabled_stats = disabled.run_batch_stats(1_000)
+    reference_stats = reference.run_batch_stats(1_000)
+    enabled_snapshot = dict(enabled_owner._stop_concurrency_profile())
+    disabled_snapshot = dict(disabled_owner._stop_concurrency_profile())
+    enabled_counts = dict(enabled_snapshot["counts"])
+    disabled_counts = dict(disabled_snapshot["counts"])
+
+    assert (
+        _architectural_batch_signature(enabled_stats)
+        == _architectural_batch_signature(disabled_stats)
+        == _architectural_batch_signature(reference_stats)
+    )
+    assert (
+        _core_signature(enabled)
+        == _core_signature(disabled)
+        == _core_signature(reference)
+    )
+    assert all(
+        enabled_counts[name] == disabled_counts[name] == 0
+        for name in JIT_REGION_PROFILE_COUNT_FIELDS
+    )
+    if enabled_snapshot["single_core_jit_backend"] == "x86_64":
+        for counts in (enabled_counts, disabled_counts):
+            assert counts["uncontended_jit_executions"] == 500
+            assert counts["uncontended_jit_steps"] == 1_000
+            assert counts["uncontended_jit_native_entries"] == 500
+            assert counts["uncontended_jit_native_returns"] == 500
+
+
 def test_jit_successor_profile_counts_warm_two_block_ring_exactly() -> None:
     system = _system()
     program = assemble(
@@ -2620,11 +3501,12 @@ loop:
     system.load_binary(0x210, b"\x01X")
     system.boot(entry=0)
     system.cpu.regs[15] = 0x200
+    owner = system._native_system
+    owner._set_single_core_jit_regions_enabled_for_test(True)
 
     warm = system.run_batch_stats(40)
     assert warm.instructions_executed == 40
     assert system.cpu.pc == 0
-    owner = system._native_system
     owner._start_concurrency_profile()
 
     stats = system.run_batch_stats(1_000)
@@ -2641,11 +3523,16 @@ loop:
     assert successor_profile["exact"]
     assert not successor_profile["counter_saturated"]
     assert successor_profile["edges"] == []
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_jit_region_entries"] == 0
+    assert counts["uncontended_jit_region_blocks"] == 0
+    assert counts["uncontended_jit_region_steps"] == 0
     if snapshot["single_core_jit_backend"] == "x86_64":
-        counts = dict(snapshot["counts"])
         assert successor_profile["candidate_block_completions"] == 250
         assert counts["uncontended_jit_executions"] == 250
         assert counts["uncontended_jit_steps"] == 500
+        assert counts["uncontended_jit_native_entries"] == 250
+        assert counts["uncontended_jit_native_returns"] == 250
     else:
         assert successor_profile["candidate_block_completions"] == 0
 
@@ -2668,11 +3555,12 @@ memory:
     system.load_binary(0x200, b"\xA5")
     system.boot(entry=0)
     system.cpu.regs[9] = 0x200
+    owner = system._native_system
+    owner._set_single_core_jit_regions_enabled_for_test(True)
 
     warm = system.run_batch_stats(16)
     assert warm.instructions_executed == 16
     assert system.cpu.pc == 0
-    owner = system._native_system
     owner._start_concurrency_profile()
 
     stats = system.run_batch_stats(1_000)
@@ -2689,11 +3577,16 @@ memory:
     assert successor_profile["exact"]
     assert not successor_profile["counter_saturated"]
     assert successor_profile["edges"] == []
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_jit_region_entries"] == 0
+    assert counts["uncontended_jit_region_blocks"] == 0
+    assert counts["uncontended_jit_region_steps"] == 0
     if snapshot["single_core_jit_backend"] == "x86_64":
-        counts = dict(snapshot["counts"])
         assert successor_profile["candidate_block_completions"] == 250
         assert counts["uncontended_jit_executions"] == 500
         assert counts["uncontended_jit_steps"] == 1_000
+        assert counts["uncontended_jit_native_entries"] == 500
+        assert counts["uncontended_jit_native_returns"] == 500
     else:
         assert successor_profile["candidate_block_completions"] == 0
 

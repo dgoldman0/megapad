@@ -58,6 +58,11 @@ remains ineligible for both caches.
 Version 18 carries native host-profile schema 16 and its bounded successor-edge
 telemetry. This microcore topology remains ineligible for the exact-single JIT,
 so its successor profile is required to be exact and empty.
+
+Version 19 carries native host-profile schema 17 and its physical native-entry
+and two-block region telemetry. This microcore topology remains ineligible for
+the exact-single path, so the region arena and all region counters remain
+empty.
 """
 
 from __future__ import annotations
@@ -82,7 +87,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 18
+REPORT_SCHEMA_VERSION = 19
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -398,9 +403,15 @@ def _profile_probe(
     jit_successor_profile = normalized[
         "single_core_jit_successor_profile"
     ]
+    jit_region_storage = normalized[
+        "single_core_jit_region_storage"
+    ]
+    jit_backend_available = (
+        normalized["single_core_jit_backend"] == "x86_64"
+    )
     validation = {
-        "schema_is_version_16":
-            normalized["schema_version"] == 16,
+        "schema_is_version_17":
+            normalized["schema_version"] == 17,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -444,6 +455,27 @@ def _profile_probe(
         ),
         "single_core_jit_successor_profile_is_exactly_empty_for_micro_topology": (
             jit_successor_profile == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY
+        ),
+        "single_core_jit_region_storage_backend_matches": (
+            (
+                jit_region_storage["kind"]
+                == "memfd-dual-mapped-fixed-slots"
+                and jit_region_storage["w_x_model"]
+                == "distinct-rw-and-rx-aliases"
+            )
+            if jit_backend_available
+            else (
+                jit_region_storage["kind"] == "unavailable"
+                and jit_region_storage["w_x_model"] == "unavailable"
+            )
+        ),
+        "single_core_jit_region_storage_is_unallocated_for_micro_topology": (
+            isinstance(jit_region_storage["enabled"], bool)
+            and not jit_region_storage["ready"]
+            and not jit_region_storage["failed"]
+            and jit_region_storage["slot_count"] == 0
+            and jit_region_storage["slot_bytes"] == 0
+            and jit_region_storage["mapped_bytes_per_alias"] == 0
         ),
         "one_native_batch":
             counts["batches"] == 1,
@@ -496,6 +528,15 @@ def _profile_probe(
                     "uncontended_jit_max_code_bytes",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
+                    "uncontended_jit_native_entries",
+                    "uncontended_jit_native_returns",
+                    "uncontended_jit_region_compile_attempts",
+                    "uncontended_jit_region_compilations",
+                    "uncontended_jit_region_compile_failures",
+                    "uncontended_jit_region_entries",
+                    "uncontended_jit_region_blocks",
+                    "uncontended_jit_region_steps",
+                    "uncontended_jit_region_target_identity_misses",
                 )
             )
             and normalized["wall_ns"]["uncontended_round"] == 0
@@ -633,7 +674,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 16,
+        "schema_version": 17,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

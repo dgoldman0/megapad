@@ -1390,7 +1390,7 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
 
             detailed = machine.status()
             first = detailed["host_profile"]
-            assert first["schema_version"] == 16
+            assert first["schema_version"] == 17
             assert first["enabled"]
             assert first["generation"] > 0
             assert first["single_core_block_cache"] == {
@@ -1407,6 +1407,13 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
                 "entries": 2_048,
                 "identity_bytes": 16,
             }
+            region_storage = first["single_core_jit_region_storage"]
+            assert isinstance(region_storage["enabled"], bool)
+            assert not region_storage["ready"]
+            assert not region_storage["failed"]
+            assert region_storage["slot_count"] == 0
+            assert region_storage["slot_bytes"] == 0
+            assert region_storage["mapped_bytes_per_alias"] == 0
             assert first["single_core_jit_successor_profile"] == {
                 "kind": "bounded-set-associative-space-saving",
                 "scope": (
@@ -1429,6 +1436,10 @@ def test_opt_in_host_profile_is_detailed_only_and_restarts_on_reset() -> None:
             assert restarted["enabled"]
             assert restarted["generation"] == first["generation"] + 1
             assert restarted["counts"]["batches"] == 0
+            assert (
+                restarted["single_core_jit_region_storage"]
+                == first["single_core_jit_region_storage"]
+            )
             assert (
                 restarted["single_core_jit_successor_profile"]
                 == first["single_core_jit_successor_profile"]

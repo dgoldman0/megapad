@@ -37,6 +37,10 @@ public:
     void decrement_core(int32_t displacement);
     void add_core_r15(int32_t displacement);
     void compare_core_byte(int32_t displacement, uint8_t value);
+    void compare_core_qword_immediate(
+        int32_t displacement,
+        uint64_t value);
+    void compare_r9_immediate(uint64_t value);
     void add_exit_flags(uint8_t flags);
     void store_core_byte(int32_t displacement, uint8_t value);
     void store_core_qword_zero(int32_t displacement);

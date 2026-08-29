@@ -65,15 +65,29 @@ struct BlockView {
     uint8_t spsel = 0;
 };
 
+// A region owns no references beyond its two caller-retained block views.
+// Lowering copies both blocks into one native code object and preserves the
+// ordinary BlockEntry ABI and packed-exit transport.
+struct RegionView {
+    BlockView source{};
+    BlockView target{};
+};
+
 static_assert(std::is_standard_layout_v<CoreStateLayout>);
 static_assert(std::is_trivially_copyable_v<CoreStateLayout>);
 static_assert(std::is_standard_layout_v<BlockView>);
 static_assert(std::is_trivially_copyable_v<BlockView>);
+static_assert(std::is_standard_layout_v<RegionView>);
+static_assert(std::is_trivially_copyable_v<RegionView>);
 
 bool lowering_available() noexcept;
 
 std::vector<uint8_t> lower_block(
     const CoreStateLayout& layout,
     const BlockView& block);
+
+std::vector<uint8_t> lower_region(
+    const CoreStateLayout& layout,
+    const RegionView& region);
 
 }  // namespace mp64::dbt::x86_64

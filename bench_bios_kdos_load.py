@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.bios-kdos-source-load"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 COMPLETION_MARKER = "[megapad-bench] BIOS+KDOS source load complete"
 KDOS_HRULE = "-" * 60
 DEFAULT_MAX_STEPS = 2_000_000_000
@@ -330,6 +330,18 @@ def profile_derived(profile: dict | None) -> dict | None:
             counts["uncontended_jit_steps"],
             counts["uncontended_jit_executions"],
         ),
+        "jit_guest_blocks_per_native_entry": _ratio(
+            counts["uncontended_jit_executions"],
+            counts["uncontended_jit_native_entries"],
+        ),
+        "jit_region_fraction_of_native_entries": _ratio(
+            counts["uncontended_jit_region_entries"],
+            counts["uncontended_jit_native_entries"],
+        ),
+        "jit_region_step_fraction": _ratio(
+            counts["uncontended_jit_region_steps"],
+            counts["uncontended_jit_steps"],
+        ),
         "jit_compile_us_per_attempt": (
             None
             if counts["uncontended_jit_compile_attempts"] == 0
@@ -384,6 +396,7 @@ def _profile_cache_validation(profile: dict) -> dict[str, bool]:
     counts = profile["counts"]
     block_metadata = profile["single_core_block_cache"]
     rejection_metadata = profile["single_core_block_rejection_cache"]
+    region_storage = profile["single_core_jit_region_storage"]
     successor_metadata = profile["single_core_jit_successor_profile"]
     successor_edges = successor_metadata["edges"]
     successor_observations = successor_metadata["observations"]
@@ -413,6 +426,7 @@ def _profile_cache_validation(profile: dict) -> dict[str, bool]:
         "uncontended_block_one_instruction_rejections"
     ]
     stores = counts["uncontended_block_rejection_cache_stores"]
+    jit_backend_available = profile["single_core_jit_backend"] == "x86_64"
     return {
         "block_cache_metadata_supported": (
             block_metadata["kind"]
@@ -429,6 +443,37 @@ def _profile_cache_validation(profile: dict) -> dict[str, bool]:
             and rejection_metadata["ways"] == 4
             and rejection_metadata["entries"] == 2_048
             and rejection_metadata["identity_bytes"] == 16
+        ),
+        "jit_region_storage_metadata_supported": (
+            (
+                region_storage["kind"]
+                == "memfd-dual-mapped-fixed-slots"
+                and region_storage["w_x_model"]
+                == "distinct-rw-and-rx-aliases"
+            )
+            if jit_backend_available
+            else (
+                region_storage["kind"] == "unavailable"
+                and region_storage["w_x_model"] == "unavailable"
+            )
+        )
+        and isinstance(region_storage["enabled"], bool)
+        and (
+            (
+                jit_backend_available
+                and not region_storage["failed"]
+                and region_storage["slot_count"] > 0
+                and region_storage["slot_bytes"] > 0
+                and region_storage["mapped_bytes_per_alias"]
+                == region_storage["slot_count"]
+                * region_storage["slot_bytes"]
+            )
+            if region_storage["ready"]
+            else (
+                region_storage["slot_count"] == 0
+                and region_storage["slot_bytes"] == 0
+                and region_storage["mapped_bytes_per_alias"] == 0
+            )
         ),
         "jit_successor_profile_metadata_supported": (
             successor_metadata["kind"]
@@ -486,6 +531,33 @@ def _profile_cache_validation(profile: dict) -> dict[str, bool]:
         "block_rejection_activity_reconciles_with_misses": (
             counts["uncontended_block_rejection_cache_hits"] + attempts
             == counts["uncontended_block_misses"]
+        ),
+        "jit_native_entries_return_exactly_once": (
+            counts["uncontended_jit_native_entries"]
+            == counts["uncontended_jit_native_returns"]
+        ),
+        "jit_region_compilation_counts_reconcile": (
+            counts["uncontended_jit_region_compile_attempts"]
+            == counts["uncontended_jit_region_compilations"]
+            + counts["uncontended_jit_region_compile_failures"]
+        ),
+        "jit_native_entries_reconcile_logical_blocks": (
+            counts["uncontended_jit_native_entries"]
+            + counts["uncontended_jit_region_entries"]
+            == counts["uncontended_jit_executions"]
+        ),
+        "jit_region_blocks_are_complete_pairs": (
+            counts["uncontended_jit_region_blocks"]
+            == 2 * counts["uncontended_jit_region_entries"]
+        ),
+        "jit_region_entries_are_native_entries": (
+            counts["uncontended_jit_region_entries"]
+            <= counts["uncontended_jit_native_entries"]
+        ),
+        "jit_region_steps_are_bounded": (
+            counts["uncontended_jit_region_blocks"]
+            <= counts["uncontended_jit_region_steps"]
+            <= counts["uncontended_jit_steps"]
         ),
     }
 
@@ -609,13 +681,16 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             if host_profile is not None:
                 profile_counts = host_profile["counts"]
                 jit_storage = host_profile["single_core_jit_storage"]
+                jit_region_storage = host_profile[
+                    "single_core_jit_region_storage"
+                ]
                 jit_available = (
                     host_profile["single_core_jit_backend"] == "x86_64"
                 )
                 validation.update(
                     {
                         "host_profile_schema_supported": (
-                            host_profile["schema_version"] == 16
+                            host_profile["schema_version"] == 17
                         ),
                         "settlement_routes_reconcile": (
                             profile_counts["settle_round_calls"]
@@ -659,6 +734,42 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                             )
                             if jit_available
                             else not jit_storage["ready"]
+                        ),
+                        "jit_region_storage_is_bounded_when_ready": (
+                            (
+                                jit_available
+                                and not jit_region_storage["failed"]
+                                and jit_region_storage["slot_count"] > 0
+                                and jit_region_storage["slot_bytes"] > 0
+                                and jit_region_storage[
+                                    "mapped_bytes_per_alias"
+                                ]
+                                == jit_region_storage["slot_count"]
+                                * jit_region_storage["slot_bytes"]
+                            )
+                            if jit_region_storage["ready"]
+                            else (
+                                jit_region_storage["slot_count"] == 0
+                                and jit_region_storage["slot_bytes"] == 0
+                                and jit_region_storage[
+                                    "mapped_bytes_per_alias"
+                                ] == 0
+                            )
+                        ),
+                        "jit_region_use_has_ready_storage": (
+                            (
+                                profile_counts[
+                                    "uncontended_jit_region_compilations"
+                                ] == 0
+                                and profile_counts[
+                                    "uncontended_jit_region_entries"
+                                ] == 0
+                            )
+                            or (
+                                jit_available
+                                and jit_region_storage["ready"]
+                                and not jit_region_storage["failed"]
+                            )
                         ),
                     }
                 )
@@ -818,6 +929,9 @@ def print_human(result: dict) -> None:
             "  DBT: "
             f"{counts['uncontended_jit_compilations']:,} compilations; "
             f"{counts['uncontended_jit_steps']:,} JIT steps; "
+            f"{counts['uncontended_jit_native_entries']:,} native entries; "
+            f"{counts['uncontended_jit_region_entries']:,} region entries / "
+            f"{counts['uncontended_jit_region_blocks']:,} region blocks; "
             f"{counts['uncontended_block_evictions']:,} block evictions; "
             f"{counts['uncontended_jit_plan_evictions']:,} plan evictions; "
             f"{counts['uncontended_jit_slot_rewrites']:,} slot rewrites"

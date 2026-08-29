@@ -201,6 +201,21 @@ void X86_64BlockEmitter::compare_core_byte(
     byte(value);
 }
 
+void X86_64BlockEmitter::compare_core_qword_immediate(
+        int32_t displacement,
+        uint64_t value) {
+    bytes({0x48, 0xB8}); // movabs rax, imm64
+    u64(value);
+    bytes({0x48, 0x39, 0x87}); // cmp qword ptr [rdi + disp32], rax
+    i32(displacement);
+}
+
+void X86_64BlockEmitter::compare_r9_immediate(uint64_t value) {
+    bytes({0x48, 0xB8}); // movabs rax, imm64
+    u64(value);
+    bytes({0x49, 0x39, 0xC1}); // cmp r9, rax
+}
+
 void X86_64BlockEmitter::add_exit_flags(uint8_t flags) {
     bytes({0x41, 0x83, 0xCA, flags});
 }

@@ -8,7 +8,7 @@ import bench_bios_kdos_load as benchmark
 def test_parser_selects_the_canonical_unprofiled_desktop_boot_shape() -> None:
     args = benchmark.build_parser().parse_args([])
 
-    assert benchmark.SCHEMA_VERSION == 10
+    assert benchmark.SCHEMA_VERSION == 11
     assert args.runtime_root == benchmark.ROOT
     assert not args.host_profile
     assert args.max_steps == 2_000_000_000
@@ -46,6 +46,9 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
             "uncontended_steps": 1_000,
             "uncontended_jit_steps": 400,
             "uncontended_jit_executions": 100,
+            "uncontended_jit_native_entries": 90,
+            "uncontended_jit_region_entries": 10,
+            "uncontended_jit_region_steps": 100,
             "uncontended_jit_compile_attempts": 10,
             "uncontended_jit_compilations": 8,
             "uncontended_block_evictions": 20,
@@ -80,6 +83,9 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
         "decoded_block_step_fraction": 0.6,
         "jit_step_fraction": 0.4,
         "jit_steps_per_execution": 4.0,
+        "jit_guest_blocks_per_native_entry": 100 / 90,
+        "jit_region_fraction_of_native_entries": 10 / 90,
+        "jit_region_step_fraction": 0.25,
         "jit_compile_us_per_attempt": 200.0,
         "jit_arena_allocation_us_per_attempt": 80.0,
         "jit_publication_us_per_compilation": 50.0,
@@ -93,6 +99,7 @@ def test_profile_derivation_exposes_coverage_churn_and_arena_cost() -> None:
 
 def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
     profile = {
+        "single_core_jit_backend": "x86_64",
         "single_core_block_cache": {
             "kind": "set-associative-exact-icache-span",
             "sets": 1_024,
@@ -106,6 +113,16 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
             "ways": 4,
             "entries": 2_048,
             "identity_bytes": 16,
+        },
+        "single_core_jit_region_storage": {
+            "kind": "memfd-dual-mapped-fixed-slots",
+            "w_x_model": "distinct-rw-and-rx-aliases",
+            "enabled": True,
+            "ready": True,
+            "failed": False,
+            "slot_count": 4_096,
+            "slot_bytes": 1_344,
+            "mapped_bytes_per_alias": 4_096 * 1_344,
         },
         "single_core_jit_successor_profile": {
             "kind": "bounded-set-associative-space-saving",
@@ -149,6 +166,17 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
             "uncontended_block_rejection_cache_hits": 10,
             "uncontended_block_rejection_cache_stores": 12,
             "uncontended_block_rejection_cache_replacements": 5,
+            "uncontended_jit_executions": 100,
+            "uncontended_jit_steps": 400,
+            "uncontended_jit_native_entries": 90,
+            "uncontended_jit_native_returns": 90,
+            "uncontended_jit_region_compile_attempts": 4,
+            "uncontended_jit_region_compilations": 3,
+            "uncontended_jit_region_compile_failures": 1,
+            "uncontended_jit_region_entries": 10,
+            "uncontended_jit_region_blocks": 20,
+            "uncontended_jit_region_steps": 60,
+            "uncontended_jit_region_target_identity_misses": 2,
         },
     }
 
@@ -157,6 +185,7 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
     assert validation == {
         "block_cache_metadata_supported": True,
         "block_rejection_cache_metadata_supported": True,
+        "jit_region_storage_metadata_supported": True,
         "jit_successor_profile_metadata_supported": True,
         "jit_successor_profile_counters_are_bounded": True,
         "jit_successor_profile_exactness_is_explicit": True,
@@ -166,6 +195,12 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
         "block_rejection_cache_stores_reconcile": True,
         "block_rejection_cache_replacements_are_bounded": True,
         "block_rejection_activity_reconciles_with_misses": True,
+        "jit_native_entries_return_exactly_once": True,
+        "jit_region_compilation_counts_reconcile": True,
+        "jit_native_entries_reconcile_logical_blocks": True,
+        "jit_region_blocks_are_complete_pairs": True,
+        "jit_region_entries_are_native_entries": True,
+        "jit_region_steps_are_bounded": True,
     }
 
 
