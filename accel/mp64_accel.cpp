@@ -20689,6 +20689,7 @@ static bool single_core_decoded_encoding_is_admissible(
                 encoding[0] == 0xF0;
         case DecodedOperation::ADD:
         case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_AND:
         case DecodedOperation::BITWISE_XOR:
         case DecodedOperation::COMPARE:
         case DecodedOperation::MOVE:
@@ -20709,7 +20710,6 @@ static bool single_core_decoded_encoding_is_admissible(
         case DecodedOperation::SHIFT_RIGHT_ARITHMETIC_IMMEDIATE:
         case DecodedOperation::ADD_WITH_CARRY:
         case DecodedOperation::SUBTRACT_WITH_BORROW:
-        case DecodedOperation::BITWISE_AND:
         case DecodedOperation::BITWISE_OR:
         case DecodedOperation::BITWISE_NOT:
         case DecodedOperation::NEGATE:

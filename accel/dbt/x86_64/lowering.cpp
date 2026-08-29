@@ -163,6 +163,7 @@ bool operation_uses_program_counter_operand(
         case DecodedOperation::STORE_BYTE:
         case DecodedOperation::ADD:
         case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_AND:
         case DecodedOperation::BITWISE_XOR:
         case DecodedOperation::COMPARE:
         case DecodedOperation::MOVE:
@@ -517,6 +518,7 @@ void emit_instruction(
             }
         case DecodedOperation::ADD:
         case DecodedOperation::SUBTRACT:
+        case DecodedOperation::BITWISE_AND:
         case DecodedOperation::BITWISE_XOR:
         case DecodedOperation::COMPARE:
         case DecodedOperation::MOVE:
@@ -532,6 +534,11 @@ void emit_instruction(
                     emitter.bytes({0x48, 0x29, 0xC8});
                     emitter.mov_core_from_rax(layout.registers[decoded.rd]);
                     emit_subtraction_flags(emitter, layout);
+                    return;
+                case DecodedOperation::BITWISE_AND:
+                    emitter.bytes({0x48, 0x21, 0xC8});
+                    emitter.mov_core_from_rax(layout.registers[decoded.rd]);
+                    emit_logic_flags(emitter, layout);
                     return;
                 case DecodedOperation::BITWISE_XOR:
                     emitter.bytes({0x48, 0x31, 0xC8});

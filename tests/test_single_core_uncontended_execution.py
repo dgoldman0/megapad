@@ -342,6 +342,180 @@ def test_decoded_register_blocks_match_generic_reference_across_slices() -> None
         )
 
 
+REGISTER_AND_SOURCE = """
+loop:
+    ldi r7, 0xff
+    and r7, r3
+    and r4, r5
+    and r6, r6
+    br loop
+"""
+REGISTER_AND_SLICES = (1, 1, 2, 1, 5, 10)
+REGISTER_AND_INITIAL_FLAGS = 0xEA
+
+
+def _initialize_register_and_workload(
+    cpu,
+    *,
+    lhs: int,
+    rhs: int,
+    alias_value: int,
+) -> None:
+    cpu.regs[2] = 4096
+    cpu.regs[15] = 4096
+    cpu.regs[4] = lhs
+    cpu.regs[5] = rhs
+    cpu.regs[6] = alias_value
+    cpu.regs[7] = 0
+    cpu.flags_unpack(REGISTER_AND_INITIAL_FLAGS)
+    cpu.perf_enable = 1
+
+
+def _run_register_and_workload(
+    *,
+    reference: bool,
+    lhs: int,
+    rhs: int,
+    alias_value: int,
+) -> tuple:
+    system = _system(reference=reference)
+    system.load_binary(0, assemble(REGISTER_AND_SOURCE))
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    _initialize_register_and_workload(
+        system.cpu,
+        lhs=lhs,
+        rhs=rhs,
+        alias_value=alias_value,
+    )
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+
+    batch_signatures = []
+    for budget in REGISTER_AND_SLICES:
+        stats = system.run_batch_stats(budget)
+        batch_signatures.append(
+            (
+                stats.instructions_executed,
+                stats.system_cycles_advanced,
+                stats.per_core_instructions[0],
+                stats.per_core_cycles[0],
+                stats.per_core_dispatches[0],
+                stats.per_core_stop_reasons[0],
+                stats.native_rounds,
+                stats.native_continuations,
+                stats.system_stop_reason,
+                _core_signature(system),
+            )
+        )
+
+    profile_snapshot = None
+    if not reference:
+        profile_snapshot = dict(owner._stop_concurrency_profile())
+    return (
+        tuple(batch_signatures),
+        _core_signature(system),
+        _cpu_execution_signature(system.cpu),
+        profile_snapshot,
+    )
+
+
+def _run_python_register_and_workload(
+    *,
+    lhs: int,
+    rhs: int,
+    alias_value: int,
+) -> tuple:
+    cpu = PythonMegapad64(mem_size=4096, num_cores=1)
+    cpu.load_bytes(0, assemble(REGISTER_AND_SOURCE))
+    cpu.pc = 0
+    _initialize_register_and_workload(
+        cpu,
+        lhs=lhs,
+        rhs=rhs,
+        alias_value=alias_value,
+    )
+    for budget in REGISTER_AND_SLICES:
+        cpu.run(max_steps=budget)
+    return _cpu_execution_signature(cpu)
+
+
+@pytest.mark.parametrize(
+    ("lhs", "rhs", "alias_value", "expected_flags"),
+    (
+        pytest.param(
+            0xFFFF_0000_F0F0_0F0F,
+            0x0FF0_FFFF_00FF_FF00,
+            0,
+            0xF1,
+            id="zero-alias-result",
+        ),
+        pytest.param(
+            0xFEDC_BA98_7654_3210,
+            0x0F0F_0F0F_F0F0_F0F0,
+            0x8000_0000_0000_0001,
+            0xE4,
+            id="negative-alias-result",
+        ),
+    ),
+)
+def test_register_and_blocks_match_generic_and_python_across_slices(
+    lhs: int,
+    rhs: int,
+    alias_value: int,
+    expected_flags: int,
+) -> None:
+    fast_batches, fast_core, fast_cpu, snapshot = (
+        _run_register_and_workload(
+            reference=False,
+            lhs=lhs,
+            rhs=rhs,
+            alias_value=alias_value,
+        )
+    )
+    reference_batches, reference_core, reference_cpu, _ = (
+        _run_register_and_workload(
+            reference=True,
+            lhs=lhs,
+            rhs=rhs,
+            alias_value=alias_value,
+        )
+    )
+
+    assert fast_batches == reference_batches
+    assert fast_core == reference_core
+    assert fast_cpu == reference_cpu == _run_python_register_and_workload(
+        lhs=lhs,
+        rhs=rhs,
+        alias_value=alias_value,
+    )
+    assert snapshot is not None
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_steps"] == sum(REGISTER_AND_SLICES) == 20
+    assert counts["uncontended_block_steps"] == 18
+    assert fast_cpu[0][4] == lhs & rhs
+    assert fast_cpu[0][6] == alias_value
+    # R3 is the selected PC. AND must sample its post-fetch value even when
+    # generated code would otherwise keep the PC private in host R9.
+    assert fast_cpu[0][7] == 5
+    assert fast_cpu[1] == 0
+    assert fast_cpu[9] == 24
+    assert fast_cpu[10] == 1
+    assert fast_cpu[11] == 24
+    assert fast_cpu[5] == expected_flags
+    assert (expected_flags & 0x08) == 0
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 2
+        assert counts["uncontended_jit_steps"] == 10
+
+
 def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
     system = _system()
     system.load_binary(

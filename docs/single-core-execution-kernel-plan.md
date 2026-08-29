@@ -1023,6 +1023,25 @@ microbenchmarks. The focused 76-case exact-single suite and ten profile-schema
 units pass. Cold source-load and Desktop A/B remain deferred by the active
 rich-terminal vertical gate.
 
+### Profile-guided opcode coverage
+
+The first coverage slice admits the existing register-register `AND` semantic
+into exact-single blocks and lowers it with x86-64 `AND` plus the established
+MP64 logic-flag publication. It also classifies a selected-PC source exactly as
+the already lowered register ALU peers do, preserving complete-fetch-before-
+execute behavior. This adds no encoding or instruction meaning: shared decode,
+the portable interpreter, the Python reference, BIOS, and hardware already
+owned `AND`; only host block admission and lowering had omitted it.
+
+A position-balanced three-instruction `AND; INC; LBR` motif improved from
+52.8--55.0 Msteps/s at the cache-only parent to 126.9--131.4 Msteps/s. Native
+coverage rose from two of every three retired instructions to effectively the
+whole loop and halved block admissions. Exact-single, generic-core, and Python
+state agree across uneven instruction budgets, zero and negative results,
+destination/source aliasing, selected-PC input, and preserved flag bits. The
+78-case exact-single selector passes; production source-load attribution
+remains deferred with the vertical gate.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1096,6 +1115,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D16 | Reject EK-D15 after the ordinary Desktop smoke and replace its two-extrema evidence with a production-calibrated matrix. | The hint's exactness was not sufficient evidence of profitability: it taxed every positive admission, regressed Desktop throughput by 6.261%, and timed out the journey. A future admission change must win the calibrated mix, stable-positive, rejected-scalar, and real BIOS+KDOS comparisons independently before another Desktop run. |
 | EK-D17 | Admit resolver-proved external-RAM scalar spans at native block entry. | External RAM shares Bank 0's pinned, directly contiguous execution contract, while full-span, MMIO, aperture-priority, timing, and I-cache invalidation checks remain authoritative; HBW and VRAM are not admitted. |
 | EK-D18 | Replace the exact-single host plan and rejection direct maps with bounded four-way tables and stable physical JIT slots. | These caches remain host-only and disposable; the guest-visible 1,024-entry `EXT.DICT` cache, architectural state, timing, snapshots, and RTL contract do not change. Full source-load retention still requires the deferred production A/B. |
+| EK-D19 | Admit and lower an opcode only through the existing shared decoded semantic before crediting it as DBT coverage. | Register `AND` is the first slice: its ISA, flags, timing, Python behavior, and hardware contract predate this host-only coverage change. |
 
 ## Deferred findings ledger
 
