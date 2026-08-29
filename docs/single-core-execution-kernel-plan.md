@@ -1133,6 +1133,39 @@ The architectural 256-by-four `EXT.DICT` table, counted-string format, FNV
 hash, replacement policy, opcode behavior, cycles, BIOS ABI, snapshots, and
 RTL requirements remain exactly as before.
 
+### Reject a local `EXT.DICT` terminal continuation
+
+A follow-on experiment tested whether a decoded native prefix should carry a
+host-only hint that the next resident byte was an unprefixed `EXT.DICT`
+header. After the prefix completed with budget remaining, the candidate
+rechecked the live I-cache byte, reproduced the ordinary interrupt, halt, and
+idle boundary, and called the existing authoritative `step_one` helper. The
+hint shared the former compile-checked byte and never entered generated code;
+the opcode tail, faults, dynamic cycles, flags, and dictionary cache remained
+owned by the ordinary extension engine.
+
+The implementation passed exact budget-two, budget-three, and following-
+instruction sentinels, reserved-subop and user-MPU trap settlement, and the
+complete 87-case exact-single selector. Its deterministic replay did remove
+the intended work. Per 20,000 guest steps in a four-instruction BIOS-shaped
+`MOV; ADDI; DFIND; BRNE` miss loop, lookups fell from 15,000 to 10,000 and
+exact rejection hits from 10,000 to 5,000; native block and JIT work remained
+the same 5,000 executions and 10,000 prefix steps.
+
+That lookup reduction was not profitable. Two position-balanced eight-round
+runs pinned to one host CPU timed 20,000,000 steps per arm and interleaved an
+unmarked four-instruction native control in each process. Across the combined
+paired samples, the candidate's median dictionary-to-control CPU-time ratio
+was 4.886 versus 4.801 for its parent, a 1.78% normalized regression. Absolute
+wall rates moved with host frequency and crossed directions, so they do not
+support a contrary speedup claim. The production change and its candidate-
+only tests were discarded.
+
+This negative result concerns only host dispatch organization. The experiment
+never proposed a guest opcode, cache rule, timing change, BIOS ABI, or RTL
+change. Any future successor-edge profiler must also classify an authoritative
+extension helper as a barrier rather than infer a native edge across it.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1210,6 +1243,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D20 | Represent a profiled base-plus-index scalar address with two distinct block-entry sources and a wrapping addend. | Preflight still proves the complete ordinary-RAM span before native entry; generated memory operations and the MP64 ISA gain no addressing mode or unchecked host access. |
 | EK-D21 | Lower the existing four-cycle `UMUL` semantic and settle complete blocks from a precomputed static cycle total. | Two cycle bitplanes retain exact interrupt-prefix timing, while the ordinary complete path gains no extra per-block bitplane check; the ISA, RTL, architectural state, and timing contract are unchanged. |
 | EK-D22 | Resolve one complete nonempty `EXT.DICT` counted-name span before copying its bytes. | Only supervisor non-journaled ordinary memory takes the direct path; byte routing, faults, callbacks, dynamic cycle charge, the architectural cache, BIOS, and RTL remain unchanged. |
+| EK-D23 | Reject the segment-local `EXT.DICT` terminal continuation after exact counters improved but position-balanced control-normalized timing did not. | Avoid retaining host dispatch complexity from a synthetic lookup-count win; the existing authoritative helper boundary and every guest hardware contract remain unchanged. |
 
 ## Deferred findings ledger
 
@@ -1223,3 +1257,4 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |
 | EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |
 | EK-F8 | Four-way host caches collapse two-to-four-way conflict motifs but add work to a set that cycles through five or more live identities. | Retain the bounded implementation as the first profiled candidate, expose exact geometry/churn counters, and decide any associativity or capacity adjustment from a position-balanced cold source-load profile once the rich-terminal gate permits it. |
+| EK-F9 | A decoded native prefix followed by `EXT.DICT` still performs another ordinary admission whose start normally matches an exact rejection. | The local terminal continuation removed that admission but regressed the control-normalized paired timing by 1.78%. Leave the boundary explicit unless a future design eliminates more than the lookup while preserving helper, interrupt, fault, and successor-edge barriers. |
