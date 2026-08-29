@@ -516,6 +516,347 @@ def test_register_and_blocks_match_generic_and_python_across_slices(
         assert counts["uncontended_jit_steps"] == 10
 
 
+@pytest.mark.parametrize(
+    (
+        "instruction",
+        "initial_registers",
+        "initial_flags",
+        "expected_encoding",
+        "expected_register",
+        "expected_value",
+        "expected_flags",
+        "expected_cycles",
+    ),
+    (
+        pytest.param(
+            "umul r4, r4",
+            ((4, 0),),
+            0xBE,
+            bytes((0xC2, 0x44)),
+            4,
+            0,
+            0xBB,
+            4,
+            id="same-register-zero",
+        ),
+        pytest.param(
+            "umul r17, r18",
+            ((17, 0xFFFF_FFFF_FFFF_FFFF), (18, 2)),
+            0xBB,
+            bytes((0xF3, 0xC2, 0x12)),
+            17,
+            0xFFFF_FFFF_FFFF_FFFE,
+            0xBE,
+            5,
+            id="rex-unsigned-wrap",
+        ),
+    ),
+)
+def test_shared_umul_matches_python_semantics_and_prefix_cycles(
+    instruction: str,
+    initial_registers: tuple[tuple[int, int], ...],
+    initial_flags: int,
+    expected_encoding: bytes,
+    expected_register: int,
+    expected_value: int,
+    expected_flags: int,
+    expected_cycles: int,
+) -> None:
+    encoding = bytes(assemble(instruction))
+    assert encoding == expected_encoding
+
+    observed = []
+    for reference in (False, True):
+        system = _system(reference=reference)
+        system.load_binary(0, encoding)
+        system.boot(entry=0)
+        if reference:
+            system.cores[1].halted = True
+            system.cores[1].idle = False
+        for reg, value in initial_registers:
+            system.cpu.regs[reg] = value
+        system.cpu.flags_unpack(initial_flags)
+        system.cpu.perf_enable = 1
+
+        stats = system.run_batch_stats(1)
+        observed.append(
+            (
+                stats.instructions_executed,
+                stats.system_cycles_advanced,
+                system.cpu.pc,
+                system.cpu.regs[expected_register],
+                system.cpu.flags_pack(),
+                system.cpu.cycle_count,
+                system.cpu.perf_cycles,
+                system.cpu.perf_stalls,
+            )
+        )
+
+    python = PythonMegapad64(mem_size=4096, num_cores=1)
+    python.load_bytes(0, encoding)
+    python.pc = 0
+    for reg, value in initial_registers:
+        python.regs[reg] = value
+    python.flags_unpack(initial_flags)
+    python.perf_enable = 1
+    python_cycles = python.run(max_steps=1)
+    expected = (
+        1,
+        expected_cycles,
+        len(encoding),
+        expected_value,
+        expected_flags,
+        expected_cycles,
+        expected_cycles,
+        0,
+    )
+
+    assert observed == [expected, expected]
+    assert (
+        1,
+        python_cycles,
+        python.pc,
+        python.regs[expected_register],
+        python.flags_pack(),
+        python.cycle_count,
+        python.perf_cycles,
+        python.perf_stalls,
+    ) == expected
+
+
+UMUL_PSEL_SOURCE = """
+loop:
+    umul r4, r3
+    br loop
+"""
+UMUL_PSEL_SLICES = (1, 1, 2, 2)
+
+
+def _initialize_umul_psel_workload(cpu) -> None:
+    cpu.regs[2] = 4096
+    cpu.regs[15] = 4096
+    cpu.regs[4] = 3
+    cpu.flags_unpack(0xBF)
+    cpu.perf_enable = 1
+
+
+def _run_umul_psel_workload(*, reference: bool) -> tuple:
+    system = _system(reference=reference)
+    system.load_binary(0, assemble(UMUL_PSEL_SOURCE))
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    _initialize_umul_psel_workload(system.cpu)
+    owner = system._native_system
+    if not reference:
+        owner._start_concurrency_profile()
+
+    batches = []
+    for budget in UMUL_PSEL_SLICES:
+        stats = system.run_batch_stats(budget)
+        batches.append(
+            (
+                stats.instructions_executed,
+                stats.system_cycles_advanced,
+                stats.per_core_cycles[0],
+                _core_signature(system),
+            )
+        )
+    snapshot = (
+        {} if reference else dict(owner._stop_concurrency_profile())
+    )
+    return (
+        tuple(batches),
+        _core_signature(system),
+        _cpu_execution_signature(system.cpu),
+        snapshot,
+    )
+
+
+def _run_python_umul_psel_workload() -> tuple:
+    cpu = PythonMegapad64(mem_size=4096, num_cores=1)
+    cpu.load_bytes(0, assemble(UMUL_PSEL_SOURCE))
+    cpu.pc = 0
+    _initialize_umul_psel_workload(cpu)
+    for budget in UMUL_PSEL_SLICES:
+        cpu.run(max_steps=budget)
+    return _cpu_execution_signature(cpu)
+
+
+def test_umul_psel_source_executes_natively_across_sliced_budgets() -> None:
+    fast_batches, fast_core, fast_cpu, snapshot = (
+        _run_umul_psel_workload(reference=False)
+    )
+    reference_batches, reference_core, reference_cpu, _ = (
+        _run_umul_psel_workload(reference=True)
+    )
+
+    assert fast_batches == reference_batches
+    assert fast_core == reference_core
+    assert fast_cpu == reference_cpu == _run_python_umul_psel_workload()
+    assert tuple(batch[1] for batch in fast_batches) == (4, 2, 6, 6)
+    assert fast_cpu[0][4] == 24
+    assert fast_cpu[1] == 0
+    assert fast_cpu[5] == 0xBA
+    assert fast_cpu[9] == 18
+    assert fast_cpu[10] == 1
+    assert fast_cpu[11] == 18
+    assert fast_cpu[12] == 0
+
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_steps"] == sum(UMUL_PSEL_SLICES) == 6
+    assert counts["uncontended_block_steps"] == 4
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_backend"] == "x86_64":
+        assert counts["uncontended_jit_compile_attempts"] == 1
+        assert counts["uncontended_jit_compilations"] == 1
+        assert counts["uncontended_jit_compile_failures"] == 0
+        assert counts["uncontended_jit_executions"] == 1
+        assert counts["uncontended_jit_steps"] == 2
+
+
+def test_umul_psel_destination_declines_exact_single_block() -> None:
+    encoding = bytes(assemble("nop\numul r3, r4"))
+    observed = []
+    snapshot = None
+    for reference in (False, True):
+        system = _system(reference=reference)
+        system.load_binary(0, encoding)
+        system.boot(entry=0)
+        if reference:
+            system.cores[1].halted = True
+            system.cores[1].idle = False
+        prime = system.run_batch_stats(1)
+        assert prime.instructions_executed == 1
+        assert system.cpu.pc == 1
+        system.cpu.regs[4] = 1
+        system.cpu.flags_unpack(0xBF)
+        system.cpu.perf_enable = 1
+        owner = system._native_system
+        if not reference:
+            owner._start_concurrency_profile()
+
+        stats = system.run_batch_stats(1)
+        if not reference:
+            snapshot = dict(owner._stop_concurrency_profile())
+        observed.append(
+            (
+                stats.instructions_executed,
+                stats.system_cycles_advanced,
+                system.cpu.pc,
+                system.cpu.regs[3],
+                system.cpu.flags_pack(),
+            )
+        )
+
+    python = PythonMegapad64(mem_size=4096, num_cores=1)
+    python.load_bytes(0, encoding)
+    python.pc = 0
+    assert python.run(max_steps=1) == 1
+    assert python.pc == 1
+    python.regs[4] = 1
+    python.flags_unpack(0xBF)
+    python_observed = (
+        1,
+        python.run(max_steps=1),
+        python.pc,
+        python.regs[3],
+        python.flags_pack(),
+    )
+
+    assert observed == [python_observed] * 2
+    assert python_observed == (1, 4, 3, 3, 0xBA)
+    assert snapshot is not None
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_block_zero_instruction_rejections"] == 1
+    assert counts["uncontended_block_steps"] == 0
+    assert counts["uncontended_jit_executions"] == 0
+    assert counts["uncontended_jit_steps"] == 0
+
+
+def _warmed_umul_loop_system(*, reference: bool) -> MegapadSystem:
+    system = _system(reference=reference)
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    umul r4, r5
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+    if reference:
+        system.cores[1].halted = True
+        system.cores[1].idle = False
+    system.cpu.perf_enable = 1
+    for _ in range(3):
+        system.cpu.pc = 0
+        system.cpu.regs[4] = 3
+        system.cpu.regs[5] = 2
+        system.cpu.flags_unpack(0xBF)
+        warm = system.run_batch_stats(2)
+        assert warm.instructions_executed == 2
+        assert warm.system_cycles_advanced == 6
+    return system
+
+
+def test_native_umul_ipi_exit_publishes_four_cycle_prefix() -> None:
+    system = _warmed_umul_loop_system(reference=False)
+    owner = system._native_system
+    if (
+        owner._concurrency_profile_snapshot()[
+            "single_core_jit_backend"
+        ] != "x86_64"
+    ):
+        pytest.skip("native completed-prefix oracle requires x86-64")
+
+    system.cpu.pc = 0
+    system.cpu.regs[4] = 0xFFFF_FFFF_FFFF_FFFF
+    system.cpu.regs[5] = 2
+    system.cpu.flags_unpack(0xBB)
+    system.cpu.flag_i = True
+    deliveries: list[tuple[int, tuple]] = []
+
+    def observe_ipi(vector: int) -> None:
+        deliveries.append((vector, _core_signature(system)))
+        owner.set_ipi_line(0, False)
+        system.cpu.flag_i = False
+        system.cpu.halted = True
+
+    system.cpu._trap = observe_ipi
+    owner._start_concurrency_profile()
+    owner._inject_uncontended_ipi_at_next_native_entry()
+
+    stats = system.run_batch_stats(2)
+    snapshot = dict(owner._stop_concurrency_profile())
+    counts = dict(snapshot["counts"])
+
+    reference = _warmed_umul_loop_system(reference=True)
+    reference.cpu.pc = 0
+    reference.cpu.regs[4] = 0xFFFF_FFFF_FFFF_FFFF
+    reference.cpu.regs[5] = 2
+    reference.cpu.flags_unpack(0xBB)
+    reference.cpu.flag_i = True
+    reference_stats = reference.run_batch_stats(1)
+
+    assert reference_stats.instructions_executed == 1
+    assert reference_stats.system_cycles_advanced == 4
+    assert deliveries == [(IVEC_IPI, _core_signature(reference))]
+    assert stats.instructions_executed == 1
+    assert stats.system_cycles_advanced == 4
+    assert system.cpu.regs[4] == 0xFFFF_FFFF_FFFF_FFFE
+    assert system.cpu.pc == 2
+    assert counts["uncontended_steps"] == 1
+    assert counts["uncontended_interrupt_boundaries"] == 1
+    assert counts["uncontended_block_executions"] == 1
+    assert counts["uncontended_block_steps"] == 1
+    assert counts["uncontended_jit_executions"] == 1
+    assert counts["uncontended_jit_steps"] == 1
+
+
 def test_mmio_asserted_interrupt_stops_before_the_next_instruction() -> None:
     system = _system()
     system.load_binary(

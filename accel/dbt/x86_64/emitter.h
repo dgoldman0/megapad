@@ -27,6 +27,7 @@ public:
     void mov_core_from_rax(int32_t displacement);
     void mov_core_from_rcx(int32_t displacement);
     void mov_core_from_r9(int32_t displacement);
+    void imul_rax_from_core(int32_t displacement);
     void add_r9_imm8(uint8_t immediate);
     void add_r9_imm32(uint32_t immediate);
     void add_core_imm8(int32_t displacement, uint8_t immediate);

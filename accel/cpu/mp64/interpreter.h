@@ -145,6 +145,15 @@ MP64_INTERPRETER_ALWAYS_INLINE int execute_decoded_instruction(
                 decoded.rd,
                 decoded.rs);
             break;
+        case DecodedOperation::UNSIGNED_MULTIPLY_LOW: {
+            const uint64_t first = state.regs[decoded.rd];
+            const uint64_t second = state.regs[decoded.rs];
+            const uint64_t result = first * second;
+            state.regs[decoded.rd] = result;
+            state.flag_z = result == 0 ? 1 : 0;
+            state.flag_n = static_cast<uint8_t>(result >> 63);
+            break;
+        }
         case DecodedOperation::SELECT_PROGRAM_COUNTER:
             if (state.priv_level != 0)
                 throw std::runtime_error("TRAP:PRIV_FAULT");

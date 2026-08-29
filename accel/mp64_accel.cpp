@@ -1876,6 +1876,10 @@ struct CPUState {
     static constexpr std::size_t
         SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS =
             ICACHE_LINE_BYTES;
+    static_assert(
+        SINGLE_CORE_BLOCK_MAX_INSTRUCTIONS * 4 <=
+            std::numeric_limits<uint8_t>::max(),
+        "single-core full static cycle total must fit one byte");
     // Ordinary scalar memory encodings consume at least two identity bytes.
     // CALL.L also consumes two and RET.L remains exclusive, so this bound is
     // derived from the caller-owned identity capacity rather than chosen as a
@@ -1905,6 +1909,15 @@ struct CPUState {
         // Occupies existing alignment padding. Ordinary register/control
         // entries retain an O(1) memory-shape test on every execution hit.
         uint8_t direct_memory_access_count = 0;
+        // Precomputed static cost for the overwhelmingly common complete
+        // native exit. The two bitplanes below are consulted only when an
+        // interrupt truncates the block at an instruction boundary.
+        uint8_t full_cycle_count = 0;
+        // Bit i contributes two additional static cycles for instruction i.
+        // Together with extra_cycle_mask this is a two-bit representation of
+        // costs one through four. It occupies the remaining header padding,
+        // preserving the hot entry stride and exact arbitrary prefixes.
+        uint16_t two_extra_cycle_mask = 0;
         uint64_t address = 0;
         std::array<uint8_t, ICACHE_LINE_BYTES> identity{};
         std::array<
@@ -1917,8 +1930,14 @@ struct CPUState {
         offsetof(
             SingleCoreDecodedBlockEntry,
             direct_memory_access_count) == 12 &&
+        offsetof(
+            SingleCoreDecodedBlockEntry,
+            full_cycle_count) == 13 &&
+        offsetof(
+            SingleCoreDecodedBlockEntry,
+            two_extra_cycle_mask) == 14 &&
         offsetof(SingleCoreDecodedBlockEntry, address) == 16,
-        "single-core memory shape must stay in header padding");
+        "single-core cycle and memory shape must stay in header padding");
     struct SingleCoreBlockRejectionEntry {
         bool valid = false;
         uint8_t psel = 0;
@@ -20633,6 +20652,9 @@ static bool single_core_decoded_encoding_is_admissible(
         mp64::cpu::PREFIXED_ENCODING);
     if (decoded.has_trait(mp64::cpu::NONCANONICAL_ENCODING))
         return false;
+    if (decoded.cycle_cost < 1 || decoded.cycle_cost > 4) {
+        return false;
+    }
 
     switch (decoded.operation) {
         case DecodedOperation::NOP:
@@ -20698,6 +20720,13 @@ static bool single_core_decoded_encoding_is_admissible(
                 decoded.rd < 16 &&
                 decoded.rs < 16 &&
                 decoded.rd != core.psel;
+        case DecodedOperation::UNSIGNED_MULTIPLY_LOW:
+            return
+                !prefixed &&
+                decoded.rd < 16 &&
+                decoded.rs < 16 &&
+                decoded.rd != core.psel &&
+                decoded.cycle_cost == 4;
         case DecodedOperation::SELECT_PROGRAM_COUNTER:
             if (!prefixed)
                 return decoded.rd < 16 && decoded.encoded_size == 1;
@@ -21433,10 +21462,17 @@ build_single_core_decoded_block(
         const uint8_t instruction_index =
             candidate.instruction_count;
         candidate.instructions[instruction_index] = decoded;
-        if (decoded.cycle_cost == 2) {
+        const uint8_t extra_cycles = decoded.cycle_cost - 1;
+        if ((extra_cycles & 1U) != 0) {
             candidate.extra_cycle_mask |= static_cast<uint16_t>(
                 uint16_t{1} << instruction_index);
         }
+        if ((extra_cycles & 2U) != 0) {
+            candidate.two_extra_cycle_mask |= static_cast<uint16_t>(
+                uint16_t{1} << instruction_index);
+        }
+        candidate.full_cycle_count = static_cast<uint8_t>(
+            candidate.full_cycle_count + decoded.cycle_cost);
         candidate.instruction_count++;
         offset += encoded_size;
         address_provenance.apply(
@@ -22240,14 +22276,21 @@ execute_single_core_decoded_block_plan(
                 throw std::logic_error(
                     "single-core JIT returned conditional-taken on a prefix");
             }
-            const uint32_t completed_instruction_mask =
-                (uint32_t{1} << steps) - 1;
-            uint32_t cycles =
-                steps + static_cast<uint32_t>(__builtin_popcount(
+            uint32_t cycles = 0;
+            if (interrupt_boundary) {
+                const uint32_t completed_instruction_mask =
+                    (uint32_t{1} << steps) - 1;
+                cycles =
+                    steps + static_cast<uint32_t>(__builtin_popcount(
+                        static_cast<unsigned int>(
+                            block->extra_cycle_mask) &
+                        completed_instruction_mask));
+                cycles += 2 * static_cast<uint32_t>(__builtin_popcount(
                     static_cast<unsigned int>(
-                        block->extra_cycle_mask) &
+                        block->two_extra_cycle_mask) &
                     completed_instruction_mask));
-            if (steps == block->instruction_count) {
+            } else {
+                cycles = block->full_cycle_count;
                 const auto& terminal =
                     block->instructions[steps - 1];
                 if (terminal.conditional_taken_cycle_cost() != 0) {

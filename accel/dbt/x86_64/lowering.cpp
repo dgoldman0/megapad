@@ -128,6 +128,13 @@ void emit_comparison_flags(
     emitter.set_core_byte(0x97, layout.flag_g);
 }
 
+void emit_zero_negative_flags(
+        X86_64BlockEmitter& emitter,
+        const CoreStateLayout& layout) {
+    emitter.set_core_byte(0x94, layout.flag_z);
+    emitter.set_core_byte(0x98, layout.flag_n);
+}
+
 bool operation_uses_program_counter_operand(
         const DecodedInstruction& decoded,
         uint8_t psel,
@@ -167,6 +174,7 @@ bool operation_uses_program_counter_operand(
         case DecodedOperation::BITWISE_XOR:
         case DecodedOperation::COMPARE:
         case DecodedOperation::MOVE:
+        case DecodedOperation::UNSIGNED_MULTIPLY_LOW:
             return decoded.rd == psel || decoded.rs == psel;
         default:
             return true;
@@ -516,6 +524,15 @@ void emit_instruction(
                     throw std::logic_error(
                         "x86-64 JIT received an unsupported immediate op");
             }
+        case DecodedOperation::UNSIGNED_MULTIPLY_LOW:
+            emitter.mov_rax_from_core(layout.registers[decoded.rd]);
+            emitter.imul_rax_from_core(layout.registers[decoded.rs]);
+            // IMUL leaves host ZF/SF undefined. Test the wrapped low product
+            // before publishing only the two guest flags UMUL owns.
+            emitter.bytes({0x48, 0x85, 0xC0}); // test rax, rax
+            emitter.mov_core_from_rax(layout.registers[decoded.rd]);
+            emit_zero_negative_flags(emitter, layout);
+            return;
         case DecodedOperation::ADD:
         case DecodedOperation::SUBTRACT:
         case DecodedOperation::BITWISE_AND:

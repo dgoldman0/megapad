@@ -1068,6 +1068,44 @@ aperture rejection. The full 79-case exact-single selector passes. This is a
 host proof optimization over existing MP64 `ADD` and `LD.B` semantics, not a
 new indexed-load opcode or hardware addressing mode.
 
+### Profile-guided multiply coverage
+
+The next dictionary-hash boundary was the existing `C2` `UMUL Rd, Rs`
+instruction. Shared decode and portable execution now own its low-64-bit
+product, four-cycle timing, and Z/N-only flag update, and the exact-single
+x86-64 backend lowers that same decoded operation with two-operand `IMUL`.
+Signed and unsigned multiplication have the same low half; an explicit host
+`TEST` publishes only Z/N because x86 does not define the multiply result's
+ZF/SF and MP64 preserves the remaining flags. A destination that aliases PSEL
+continues through the scalar path, while a PSEL source sees the architectural
+post-fetch value.
+
+Costs one through four use two instruction-indexed bitplanes for an exact
+interrupt-truncated prefix. The complete-block path, which is the ordinary
+case, reads a precomputed static cycle total from existing header padding.
+This arrangement was selected by a negative control: consulting the new
+bitplane on every native return slowed the unchanged indexed-load motif by
+8--12%. After moving that work off the complete path, a position-balanced
+control measured 123.6--129.7 Msteps/s for the candidate and 126.1--127.6 for
+its parent, within the host's run-order drift.
+
+On the positive motifs, `UMUL; INC; LBR` improved from 65.7--66.2 to
+141.2--150.3 Msteps/s. Native execution grew from two instructions per loop to
+effectively the full loop and block lookups halved. A nine-instruction
+dictionary-hash loop combining the indexed byte load, XOR, UMUL, AND, and
+counter maintenance improved from 68.2--68.3 to 104.0--107.4 Msteps/s.
+Exact-single, generic shared-C++, and Python execution agree on wrapped and
+zero products, REX timing, flags, PSEL-source slices, PSEL-destination decline,
+and an injected interrupt after exactly the four-cycle native prefix. The full
+84-case exact-single selector passes.
+
+This is not a hardware-design change. `C2`, its register encoding, product,
+flags, and timing already exist in the MP64 ISA, assembler, Python model, and
+both RTL cores. The slice moves that existing semantic into the shared host
+decoder and adds an x86-64 implementation; it adds no opcode, addressing mode,
+architectural cache, register, cycle rule, BIOS ABI, snapshot field, or RTL
+requirement.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1143,6 +1181,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D18 | Replace the exact-single host plan and rejection direct maps with bounded four-way tables and stable physical JIT slots. | These caches remain host-only and disposable; the guest-visible 1,024-entry `EXT.DICT` cache, architectural state, timing, snapshots, and RTL contract do not change. Full source-load retention still requires the deferred production A/B. |
 | EK-D19 | Admit and lower an opcode only through the existing shared decoded semantic before crediting it as DBT coverage. | Register `AND` is the first slice: its ISA, flags, timing, Python behavior, and hardware contract predate this host-only coverage change. |
 | EK-D20 | Represent a profiled base-plus-index scalar address with two distinct block-entry sources and a wrapping addend. | Preflight still proves the complete ordinary-RAM span before native entry; generated memory operations and the MP64 ISA gain no addressing mode or unchecked host access. |
+| EK-D21 | Lower the existing four-cycle `UMUL` semantic and settle complete blocks from a precomputed static cycle total. | Two cycle bitplanes retain exact interrupt-prefix timing, while the ordinary complete path gains no extra per-block bitplane check; the ISA, RTL, architectural state, and timing contract are unchanged. |
 
 ## Deferred findings ledger
 

@@ -138,6 +138,13 @@ void X86_64BlockEmitter::mov_core_from_r9(int32_t displacement) {
     i32(displacement);
 }
 
+void X86_64BlockEmitter::imul_rax_from_core(int32_t displacement) {
+    // The low half of signed and unsigned multiplication is identical. This
+    // two-operand form preserves RDX, which carries the pointer-table ABI.
+    bytes({0x48, 0x0F, 0xAF, 0x87});
+    i32(displacement);
+}
+
 void X86_64BlockEmitter::add_r9_imm8(uint8_t immediate) {
     bytes({0x49, 0x83, 0xC1, immediate});
 }

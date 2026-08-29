@@ -394,6 +394,25 @@ DecodeResult decode_instruction(
             break;
         }
 
+        case 0xC: {  // MULDIV subset
+            if (result.subop != 0x2)  // UMUL Rd, Rs
+                return deferred();
+            uint8_t operands = 0;
+            if (!cursor.read(operands))
+                return unavailable();
+            decoded.operation =
+                DecodedOperation::UNSIGNED_MULTIPLY_LOW;
+            decoded.rd = static_cast<uint8_t>(
+                ((operands >> 4) & 0x0F) |
+                (rex_d(result.modifier) << 4));
+            decoded.rs = static_cast<uint8_t>(
+                (operands & 0x0F) |
+                (rex_s(result.modifier) << 4));
+            decoded.cycle_cost += 3;
+            add_trait(decoded, WRITES_DESTINATION);
+            break;
+        }
+
         case 0xA:  // SEP Rn
             decoded.operation = DecodedOperation::SELECT_PROGRAM_COUNTER;
             decoded.rd = static_cast<uint8_t>(
