@@ -4195,6 +4195,346 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("4242 ", text)
 
+    def test_dict_index_status_geometry_and_invalid_preservation(self):
+        """DICT-INDEX! reports all outcomes and invalid binds are atomic."""
+        preserved_name = "IDX-PRESERVED-LONG-WORD-OVER-CACHE-LIMIT"
+        self.assertGreater(len(preserved_name), 31)
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            'CR ." [IDX-COLD " DICT-INDEX@ . . . . ." ]"',
+            'CR ." [IDX-INSTALL " '
+            '0x100000 1024 DICT-INDEX! . ." ]"',
+            f': {preserved_name} 606 ;',
+            'CR ." [IDX-VALID " DICT-INDEX@ . . . . ." ]"',
+            'CR ." [IDX-INVALID " '
+            '0x100001 1024 DICT-INDEX! . '
+            '0x100000 3 DICT-INDEX! . '
+            '0x1FFFF0 2 DICT-INDEX! . ." ]"',
+            'CR ." [IDX-PRESERVED " DICT-INDEX@ . . . . ." ]"',
+            f'CR ." [IDX-PRESERVED-VALUE " {preserved_name.lower()} . ." ]"',
+            'CR ." [IDX-SATURATED " '
+            '0x100000 1 DICT-INDEX! . '
+            'DICT-INDEX@ . . . . ." ]"',
+            f'CR ." [IDX-SATURATED-VALUE " '
+            f'{preserved_name.lower()} . ." ]"',
+            'CR ." [IDX-DISABLED " '
+            '0 0 DICT-INDEX! . DICT-INDEX@ . . . . ." ]"',
+        ])
+
+        self.assertRegex(text, r"\[IDX-COLD\s+0\s+0\s+0\s+0\s+\]")
+        self.assertRegex(text, r"\[IDX-INSTALL\s+0\s+\]")
+        valid = re.search(
+            r"\[IDX-VALID\s+3\s+(\d+)\s+1024\s+1048576\s+\]",
+            text,
+        )
+        self.assertIsNotNone(valid, f"Missing valid index geometry: {text}")
+        count = int(valid.group(1))
+        self.assertGreater(count, 0)
+        self.assertLessEqual(count, 1024)
+        self.assertRegex(text, r"\[IDX-INVALID\s+1\s+1\s+1\s+\]")
+        preserved = re.search(
+            r"\[IDX-PRESERVED\s+3\s+(\d+)\s+1024\s+1048576\s+\]",
+            text,
+        )
+        self.assertIsNotNone(
+            preserved,
+            f"Invalid bind changed the installed geometry: {text}",
+        )
+        self.assertEqual(int(preserved.group(1)), count)
+        self.assertRegex(text, r"\[IDX-PRESERVED-VALUE\s+606\s+\]")
+        self.assertRegex(
+            text,
+            r"\[IDX-SATURATED\s+2\s+9\s+1\s+1\s+1048576\s+\]",
+        )
+        self.assertRegex(text, r"\[IDX-SATURATED-VALUE\s+606\s+\]")
+        self.assertRegex(
+            text,
+            r"\[IDX-DISABLED\s+0\s+0\s+0\s+0\s+0\s+\]",
+        )
+
+    def test_dict_index_negative_and_saturated_linked_fallback(self):
+        """Authoritative misses terminate; saturation retains linked lookup."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "0x100000 1024 DICT-INDEX! DROP",
+            ": IDX-ABSENT? BL WORD FIND NIP 0= ;",
+            'CR ." [IDX-NEGATIVE " '
+            'IDX-ABSENT? NO-SUCH-INDEXED-NAME . ." ]"',
+            'CR ." [IDX-FALLBACK-STATE " '
+            '0x100000 1 DICT-INDEX! . DICT-INDEX@ . . . . ." ]"',
+            ": IDX-LINKED-FALLBACK 7331 ;",
+            'CR ." [IDX-FALLBACK-VALUE " IDX-LINKED-FALLBACK . ." ]"',
+        ])
+        self.assertRegex(text, r"\[IDX-NEGATIVE\s+-1\s+\]")
+        self.assertRegex(
+            text,
+            r"\[IDX-FALLBACK-STATE\s+2\s+9\s+1\s+1\s+1048576\s+\]",
+        )
+        self.assertRegex(text, r"\[IDX-FALLBACK-VALUE\s+7331\s+\]")
+
+    def test_dict_index_exact_hash_collision_indexes_long_names(self):
+        """Long-name collisions retain exact indexed bindings and metadata."""
+        name_a = "LONGHASHQ63QYHP1VXQNDHO31IQUCHK70XF0BODU"
+        name_b = "LONGHASHE5P0RCIE566AM1S22WO40T7Y2B188QIX"
+        index_base = 0x100000
+        index_slots = 1024
+
+        def fnv1a32(name):
+            value = 0x811C9DC5
+            for byte in name.upper().encode("ascii"):
+                value = ((value ^ byte) * 0x01000193) & 0xFFFFFFFF
+            return value
+
+        self.assertEqual(len(name_a), 40)
+        self.assertEqual(len(name_b), 40)
+        expected_hash = fnv1a32(name_a)
+        self.assertEqual(expected_hash, fnv1a32(name_b))
+
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            f"{index_base} {index_slots} DICT-INDEX! DROP",
+            f": {name_a} 118 ;",
+            f": {name_b} 200 ;",
+            f'CR ." [IDX-COLLISION " '
+            f'{name_a.lower()} . {name_b.lower()} . ." ]"',
+        ])
+        self.assertRegex(text, r"\[IDX-COLLISION\s+118\s+200\s+\]")
+
+        def indexed_name(entry):
+            length = sys.cpu.mem_read8(entry + 8) & 0x7F
+            return bytes(
+                sys.cpu.mem_read8(entry + 9 + offset)
+                for offset in range(length)
+            ).decode("ascii")
+
+        # Both definitions start at the same bucket.  Since A occupies the
+        # first available slot, B must occupy the immediately following slot
+        # in the same linear-probe cluster (including wraparound).
+        wanted = {name_a, name_b}
+        found = {}
+        bucket = expected_hash & (index_slots - 1)
+        for displacement in range(index_slots):
+            slot = (bucket + displacement) & (index_slots - 1)
+            slot_addr = index_base + slot * 16
+            entry = sys.cpu.mem_read64(slot_addr)
+            if entry == 0:
+                break
+            stored_hash = sys.cpu.mem_read32(slot_addr + 8)
+            stored_length = sys.cpu.mem_read8(slot_addr + 12)
+            if stored_hash == expected_hash and stored_length == 40:
+                name = indexed_name(entry)
+                if name in wanted:
+                    found[name] = (slot, slot_addr, entry)
+
+        self.assertEqual(set(found), wanted)
+        slot_a, addr_a, entry_a = found[name_a]
+        slot_b, addr_b, entry_b = found[name_b]
+        self.assertNotEqual(entry_a, entry_b)
+        self.assertEqual((slot_a + 1) & (index_slots - 1), slot_b)
+        for slot_addr in (addr_a, addr_b):
+            self.assertEqual(sys.cpu.mem_read32(slot_addr + 8), expected_hash)
+            self.assertEqual(sys.cpu.mem_read8(slot_addr + 12), 40)
+            self.assertEqual(
+                bytes(sys.cpu.mem_read8(slot_addr + offset)
+                      for offset in range(13, 16)),
+                b"\x00\x00\x00",
+            )
+
+    def test_dict_index_shadow_publication_and_rebuild_keep_newest(self):
+        """DUPD, index upsert, and rebuild all retain newest definitions."""
+        short_name = "IDX-HOT-SHADOW"
+        long_name = "INDEX-SHADOW-LONG-NAME-OVER-CACHE-LIMIT"
+        self.assertLessEqual(len(short_name), 31)
+        self.assertGreater(len(long_name), 31)
+
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "0x100000 1024 DICT-INDEX! DROP",
+            f": {short_name} 17 ;",
+            f"{short_name} DROP",  # demand-fill the old binding
+            f": {short_name} 29 ;",
+            f": {long_name} 31 ;",
+            f"{long_name.lower()} DROP",  # positive side-index lookup
+            f": {long_name} 47 ;",
+            f'CR ." [IDX-SHADOW-PUBLISHED " '
+            f'{short_name.lower()} . {long_name.lower()} . ." ]"',
+            'CR ." [IDX-SHADOW-REBUILD " '
+            '0x100000 1024 DICT-INDEX! . '
+            f'{short_name.lower()} . {long_name.lower()} . ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[IDX-SHADOW-PUBLISHED\s+29\s+47\s+\]",
+        )
+        self.assertRegex(
+            text,
+            r"\[IDX-SHADOW-REBUILD\s+0\s+29\s+47\s+\]",
+        )
+
+    def test_dict_rollback_repairs_accelerators_and_rejects_bios_rewind(self):
+        """Rollback removes a hot binding and rejects a crafted BIOS target."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "VARIABLE DRB-HERE VARIABLE DRB-LATEST",
+            ": DRB-ABSENT? BL WORD FIND NIP 0= ;",
+            "0x100000 1024 DICT-INDEX! DROP",
+            "HERE DRB-HERE ! LATEST DRB-LATEST !",
+            ": DRB-REMOVE 811 ;",
+            "DRB-REMOVE DROP",  # demand-fill the soon-to-be stale binding
+            "DRB-HERE @ DRB-LATEST @ DICT-ROLLBACK",
+            'CR ." [DICT-ROLLBACK-VALID " '
+            'HERE DRB-HERE @ = . LATEST DRB-LATEST @ = . '
+            'DRB-ABSENT? DRB-REMOVE . DICT-INDEX@ . DROP DROP DROP ." ]"',
+            "0 0 DICT-ROLLBACK",
+            'CR ." [DICT-ROLLBACK-INVALID " '
+            'HERE DRB-HERE @ = . LATEST DRB-LATEST @ = . '
+            '40 2 + . ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[DICT-ROLLBACK-VALID\s+-1\s+-1\s+-1\s+3\s+\]",
+        )
+        self.assertIn("dictionary overflow", text)
+        self.assertRegex(
+            text,
+            r"\[DICT-ROLLBACK-INVALID\s+-1\s+-1\s+42\s+\]",
+        )
+
+    def test_dictionary_rejects_names_over_127_without_header(self):
+        """Every native definer rejects 128-byte names before publication."""
+        name = "N" * 128
+        sys, buf = self._boot_bios()
+        commands = [
+            "VARIABLE NAME-LIMIT-HERE VARIABLE NAME-LIMIT-LATEST",
+            "HERE NAME-LIMIT-HERE ! LATEST NAME-LIMIT-LATEST !",
+        ]
+        attempts = [
+            ("COLON", f": {name}"),
+            ("CREATE", f"CREATE {name}"),
+            ("VARIABLE", f"VARIABLE {name}"),
+            ("CONSTANT", f"123 CONSTANT {name}"),
+            ("VALUE", f"456 VALUE {name}"),
+        ]
+        for label, command in attempts:
+            commands.extend([
+                command,
+                f'CR ." [NAME-LIMIT-{label} " '
+                'HERE NAME-LIMIT-HERE @ = . '
+                'LATEST NAME-LIMIT-LATEST @ = . '
+                'STATE @ 0= . ." ]"',
+            ])
+        commands.append('CR ." [NAME-LIMIT-ALIVE " 41 1+ . ." ]"')
+
+        text = self._run_forth(sys, buf, commands)
+        self.assertEqual(text.count("dictionary name exceeds 127 bytes"), 5)
+        for label, _ in attempts:
+            self.assertRegex(
+                text,
+                rf"\[NAME-LIMIT-{label}\s+(-1\s+){{3}}\]",
+            )
+        self.assertRegex(text, r"\[NAME-LIMIT-ALIVE\s+42\s+\]")
+
+    def test_dictionary_acceleration_source_lookup_and_publication_contract(self):
+        """BIOS source keeps authoritative lookup and demand-fill boundaries."""
+        source = Path(BIOS_PATH).read_text(encoding="utf-8")
+
+        def between_labels(body, start, end):
+            start_match = re.search(
+                rf"(?m)^{re.escape(start)}:\s*$",
+                body,
+            )
+            end_match = re.search(
+                rf"(?m)^{re.escape(end)}:\s*$",
+                body,
+            )
+            self.assertIsNotNone(start_match, f"Missing BIOS label {start}")
+            self.assertIsNotNone(end_match, f"Missing BIOS label {end}")
+            self.assertLess(start_match.end(), end_match.start())
+            return body[start_match.end():end_match.start()]
+
+        lookup = between_labels(source, "find_word", "dict_hash_name")
+        routing = between_labels(lookup, "fw_slow", "fw_index_hit")
+        hit = between_labels(lookup, "fw_hit", "fw_hit_return")
+        publication = between_labels(
+            source,
+            "dict_cache_seed",
+            "entry_to_code",
+        )
+
+        bound = re.search(
+            r"(?m)^\s*andi\s+r0,\s*0x01(?:\s+;.*)?$",
+            routing,
+        )
+        linked_fallback = re.search(
+            r"(?m)^\s*breq\s+fw_linked(?:\s+;.*)?$",
+            routing,
+        )
+        index_probe = re.search(
+            r"(?m)^\s*ldi64\s+r11,\s*dict_index_probe(?:\s+;.*)?$",
+            routing,
+        )
+        exact_hit = re.search(
+            r"(?m)^\s*breq\s+fw_index_hit(?:\s+;.*)?$",
+            routing,
+        )
+        full_probe_fallback = re.search(
+            r"(?m)^\s*lbrne\s+fw_linked(?:\s+;.*)?$",
+            routing,
+        )
+        authoritative = re.search(
+            r"(?m)^\s*andi\s+r0,\s*0x02(?:\s+;.*)?$",
+            routing,
+        )
+        empty_fallbacks = list(re.finditer(
+            r"(?m)^\s*lbreq\s+fw_linked(?:\s+;.*)?$",
+            routing,
+        ))
+        authoritative_miss = re.search(
+            r"(?m)^\s*lbr\s+fw_miss(?:\s+;.*)?$",
+            routing,
+        )
+        for match, purpose in (
+            (bound, "BOUND test"),
+            (linked_fallback, "unbound linked fallback"),
+            (index_probe, "side-index probe"),
+            (exact_hit, "stable exact-hit route"),
+            (full_probe_fallback, "full-probe linked fallback"),
+            (authoritative, "AUTHORITATIVE empty-slot test"),
+            (authoritative_miss, "authoritative empty-slot miss"),
+        ):
+            self.assertIsNotNone(match, f"Missing {purpose} in find_word")
+        self.assertTrue(
+            empty_fallbacks,
+            "Missing non-authoritative empty-slot linked fallback",
+        )
+        empty_fallback = empty_fallbacks[-1]
+        self.assertLess(bound.start(), linked_fallback.start())
+        self.assertLess(linked_fallback.start(), index_probe.start())
+        self.assertLess(index_probe.start(), exact_hit.start())
+        self.assertLess(exact_hit.start(), full_probe_fallback.start())
+        self.assertLess(full_probe_fallback.start(), authoritative.start())
+        self.assertLess(authoritative.start(), empty_fallback.start())
+        self.assertLess(empty_fallback.start(), authoritative_miss.start())
+
+        self.assertEqual(
+            len(re.findall(r"(?m)^\s*dins\s+r0,\s*r13\b", lookup)),
+            1,
+        )
+        self.assertRegex(hit, r"(?m)^\s*dins\s+r0,\s*r13\b")
+        self.assertNotRegex(lookup, r"(?m)^\s*dupd\b")
+        index_upsert = re.search(
+            r"(?m)^\s*ldi64\s+r11,\s*dict_index_insert(?:\s+;.*)?$",
+            publication,
+        )
+        coherent_update = re.search(
+            r"(?m)^\s*dupd\s+r0,\s*r13\b",
+            publication,
+        )
+        self.assertIsNotNone(index_upsert)
+        self.assertIsNotNone(coherent_update)
+        self.assertLess(index_upsert.start(), coherent_update.start())
+        self.assertNotRegex(publication, r"(?m)^\s*dins\b")
+
     # --- Phase 1C tests ---
 
     def test_value_basic(self):
@@ -5134,7 +5474,10 @@ class TestBIOSTACC(unittest.TestCase):
         """WOTS appends after the unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
-            ("d_wots_chain", "d_dict_fault_xt_store"),
+            ("d_wots_chain", "d_dict_rollback"),
+            ("d_dict_rollback", "d_dict_index_fetch"),
+            ("d_dict_index_fetch", "d_dict_index_store"),
+            ("d_dict_index_store", "d_dict_fault_xt_store"),
             ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
             ("d_dict_limit_fetch", "d_dict_base_fetch"),
             ("d_dict_base_fetch", "d_dict_bounds_off"),
@@ -5167,7 +5510,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 477)
+        self.assertEqual(len(seen), 480)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -10875,8 +11218,8 @@ class TestKDOSCheckedCompiler(_KDOSTestBase):
             "  HERE CS-SAVE-HERE !  LATEST CS-SAVE-LATEST !",
             '  S" : HALF-BUILT 123" SOURCE-EVALUATE-CHECKED',
             '  CR ." [SOURCE-RESET " DUP . DROP EVAL-STATUS @ . STATE @ .',
-            "  CS-SAVE-HERE @ HERE - ALLOT",
-            "  CS-SAVE-LATEST @ LATEST!  EVALUATOR-RESET",
+            "  CS-SAVE-HERE @ CS-SAVE-LATEST @ DICT-ROLLBACK",
+            "  EVALUATOR-RESET",
             '  EVAL-STATUS @ . STATE @ . EVALUATE-FINISH . ." ]" ;',
             "CS-ROLLBACK-TEST",
         ])
@@ -10894,8 +11237,8 @@ class TestKDOSCheckedCompiler(_KDOSTestBase):
             "  HERE CS-BRACKET-HERE !  LATEST CS-BRACKET-LATEST !",
             '  S" : HALF-BRACKET [ 123 DROP" SOURCE-EVALUATE-CHECKED',
             '  CR ." [SOURCE-BRACKET " . STATE @ . ." ]"',
-            "  CS-BRACKET-HERE @ HERE - ALLOT",
-            "  CS-BRACKET-LATEST @ LATEST!  EVALUATOR-RESET ;",
+            "  CS-BRACKET-HERE @ CS-BRACKET-LATEST @ DICT-ROLLBACK",
+            "  EVALUATOR-RESET ;",
             "CS-BRACKET-TEST",
         ])
         self.assertRegex(text, r"\[SOURCE-BRACKET\s+4\s+0\s+\]")
@@ -10919,8 +11262,7 @@ class TestKDOSCheckedCompiler(_KDOSTestBase):
             "  SOURCE-EVALUATE-CHECKED CST-SOURCE-STATUS !",
             "  EVAL-DEPTH @ CST-AFTER-CATCH !",
             "  STATE @ CST-STATE-BEFORE !",
-            "  CST-SAVE-HERE @ HERE - ALLOT",
-            "  CST-SAVE-LATEST @ LATEST!",
+            "  CST-SAVE-HERE @ CST-SAVE-LATEST @ DICT-ROLLBACK",
             "  EVALUATOR-RESET",
             '  CR ." [SOURCE-THROW " CST-SOURCE-STATUS @ .',
             "  EVAL-THROW @ . CST-SAVED @ . CST-AFTER-CATCH @ .",
@@ -12480,15 +12822,17 @@ class TestKDOSMarkerForget(_KDOSTestBase):
         self.assertIn("ok", text)
 
     def test_marker_forgets_word(self):
-        """After executing marker, defined words are forgotten."""
+        """MARKER clears cache-hot words and its own cache-hot binding."""
         text = self._run_kdos([
+            ": MF-ABSENT? BL WORD FIND NIP 0= ;",
             "MARKER SNAP2",
             ": XYZZY 99 ;",
+            "XYZZY DROP",       # force a hardware-cache demand fill
             "SNAP2",
-            # XYZZY should no longer exist — try with FIND
-            "BL WORD COUNT 2DROP .\" done\"",
+            'CR ." [MARKER-ABSENT " '
+            'MF-ABSENT? XYZZY . MF-ABSENT? SNAP2 . ." ]"',
         ], max_steps=200_000_000)
-        self.assertIn("done", text)
+        self.assertRegex(text, r"\[MARKER-ABSENT\s+-1\s+-1\s+\]")
 
     def test_marker_restores_here(self):
         """MARKER restores HERE to its pre-marker value."""
@@ -12519,15 +12863,17 @@ class TestKDOSMarkerForget(_KDOSTestBase):
         self.assertIn("77 ", text)
 
     def test_forget_basic(self):
-        """FORGET removes a word and everything after it."""
+        """FORGET removes cache-hot target and later bindings."""
         text = self._run_kdos([
+            ": MF-ABSENT? BL WORD FIND NIP 0= ;",
             ": AWORD 10 ;",
             ": BWORD 20 ;",
+            "AWORD DROP BWORD DROP",  # demand-fill both cache entries
             "FORGET AWORD",
-            # AWORD and BWORD should both be gone
-            ".\" ok\"",
+            'CR ." [FORGET-ABSENT " '
+            'MF-ABSENT? AWORD . MF-ABSENT? BWORD . ." ]"',
         ])
-        self.assertIn("ok", text)
+        self.assertRegex(text, r"\[FORGET-ABSENT\s+-1\s+-1\s+\]")
 
     def test_forget_restores_here(self):
         """FORGET moves HERE back to the forgotten word's entry."""
@@ -12553,12 +12899,16 @@ class TestKDOSMarkerForget(_KDOSTestBase):
         ])
         self.assertIn("ok", text)
 
-    def test_var_latest_verified(self):
-        """VAR-LATEST is correctly verified at boot."""
+    def test_dict_rollback_noop_preserves_saved_pair(self):
+        """DICT-ROLLBACK accepts a saved HERE/LATEST pair transactionally."""
         text = self._run_kdos([
-            "VAR-LATEST @ LATEST = .",
+            "VARIABLE DR-HERE VARIABLE DR-LATEST",
+            "HERE DR-HERE ! LATEST DR-LATEST !",
+            "DR-HERE @ DR-LATEST @ DICT-ROLLBACK",
+            'CR ." [DICT-ROLLBACK-NOOP " HERE DR-HERE @ = . '
+            'LATEST DR-LATEST @ = . ." ]"',
         ])
-        self.assertIn("-1 ", text)
+        self.assertRegex(text, r"\[DICT-ROLLBACK-NOOP\s+-1\s+-1\s+\]")
 
 
 # ---------------------------------------------------------------------------
@@ -14900,7 +15250,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 477)
+        self.assertEqual(len(seen), 480)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -16445,7 +16795,10 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
-        dictionary_bound_chain = (
+        dictionary_acceleration_chain = (
+            ("d_dict_rollback", "d_dict_index_fetch"),
+            ("d_dict_index_fetch", "d_dict_index_store"),
+            ("d_dict_index_store", "d_dict_fault_xt_store"),
             ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
             ("d_dict_limit_fetch", "d_dict_base_fetch"),
             ("d_dict_base_fetch", "d_dict_bounds_off"),
@@ -16477,8 +16830,8 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ],
             "little",
         )
-        self.assertEqual(wots_previous, labels["d_dict_fault_xt_store"])
-        for current, previous in dictionary_bound_chain:
+        self.assertEqual(wots_previous, labels["d_dict_rollback"])
+        for current, previous in dictionary_acceleration_chain:
             link = int.from_bytes(
                 self._bios_harness.bios_code[
                     labels[current]:labels[current] + 8

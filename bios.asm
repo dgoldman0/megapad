@@ -70,7 +70,12 @@ boot:
     ; ---- Multicore gate: route secondary cores away ----
     csrr r0, 0x20                       ; R0 = COREID (CSR 0x20)
     cmpi r0, 0
-    lbrne secondary_core_entry          ; cores 1-3 jump away
+    breq .boot_primary_core
+    ; The BIOS now exceeds LBR's signed 16-bit reach.  Transfer through R10,
+    ; then restore the normal R3 program-counter selector at the far entry.
+    ldi64 r10, secondary_core_entry
+    sep r10                             ; cores 1-3 jump away
+.boot_primary_core:
 
     ; ---- Core 0 continues normal BIOS boot ----
     ; R15 = RSP = ram top
@@ -176,6 +181,20 @@ boot:
     ldi64 r11, var_dict_base
     str r11, r1
     ldi64 r11, var_dict_fault_xt
+    str r11, r1
+
+    ; The caller-owned dictionary index may point into external RAM which
+    ; survives a warm reset.  A fresh BIOS must never inherit either that
+    ; binding or an authoritative-miss claim from the previous instance.
+    ldi64 r11, var_dict_index_base
+    str r11, r1
+    ldi64 r11, var_dict_index_slots
+    str r11, r1
+    ldi64 r11, var_dict_index_count
+    str r11, r1
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    ldi64 r11, var_dict_index_epoch
     str r11, r1
 
     ; The portable MMIO-crypto guard is a single machine-wide transaction.
@@ -1016,26 +1035,45 @@ pw_end:
     ret.l
 
 ; =====================================================================
-;  Dictionary Lookup  (with EXT.DICT / DFIND hardware fast-path)
+;  Dictionary Lookup  (EXT.DICT cache plus caller-backed side index)
 ; =====================================================================
 
 ; find_word: search dictionary for word at R9 (len R12).
 ;   Returns R9=entry (0=not found), R1=flags byte.
 ;
-;   Fast path:  Build an uppercase counted-string in dict_pad, then
+;   Fast path:  Build an uppercase counted string in a per-call pad, then
 ;   DFIND into the hardware 4-way set-associative cache.  If hit,
-;   return immediately.  On miss fall through to the traditional
-;   linked-list walk and DINS the result so subsequent lookups hit.
+;   return immediately.  On miss, consult any stable bound side index for an
+;   exact positive; only an empty slot in an authoritative generation proves
+;   absence.  Unbound, non-authoritative-negative, and full-probe results fall
+;   back to the linked list.  Every stable non-cache positive is demand-filled.
 
 find_word:
-    ; EXT.DICT stores at most 31 name bytes and dict_pad is one count byte
-    ; plus those 31 bytes.  Longer dictionary names remain valid, but must
+    ; Save the caller's R10, an even seqlock snapshot, and a private 32-byte
+    ; counted-key pad for the whole lookup.  Index probing clobbers R10, so the
+    ; epoch lives in this return-stack frame; after a miss R10 temporarily keeps
+    ; the original query for late-DINS repair.  Per-call keys prevent readers on
+    ; different cores from corrupting each other's cache operation.
+    subi r15, 48
+    str r15, r10
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    str r11, r0
+    andi r0, 0x01
+    cmpi r0, 0
+    lbrne fw_linked_no_cache
+
+    ; EXT.DICT stores at most 31 name bytes and the private pad is one count
+    ; byte plus those 31 bytes.  Longer dictionary names remain valid, but must
     ; take the linked-list path without touching the accelerator scratch.
     cmpi r12, 32
     brcs fw_slow
-    ; ---- build uppercase counted-string in dict_pad ----
-    ldi64 r11, dict_pad
-    st.b r11, r12             ; dict_pad[0] = name length
+    ; ---- build uppercase counted string in the private pad ----
+    mov r11, r15
+    addi r11, 16              ; private counted-key pad
+    st.b r11, r12             ; pad[0] = name length
     ldi r0, 0                 ; copy index
 fw_build:
     cmp r0, r12
@@ -1053,30 +1091,107 @@ fw_bu_skip:
     mov r1, r11
     inc r1
     add r1, r0
-    st.b r1, r7               ; dict_pad[1+i] = uppercased char
+    st.b r1, r7               ; pad[1+i] = uppercased char
     inc r0
     br fw_build
 
 fw_dfind:
     ; DFIND: R0 ← cached entry addr if hit, Z=1
-    ldi64 r13, dict_pad
+    mov r13, r15
+    addi r13, 16              ; private counted-key pad
     dfind r0, r13
-    brne fw_slow               ; Z=0 → cache miss, linked-list search
-    ; ---- cache hit ----
-    mov r9, r0                 ; R9 = entry address
-    mov r11, r9
+    brne fw_slow               ; Z=0 → cache miss, authoritative lookup
+    ; Read every protected result field before the final epoch sample.  A hit
+    ; is usable only if no writer crossed while DFIND or the header read ran.
+    mov r7, r0
+    mov r11, r7
     addi r11, 8
-    ld.b r1, r11              ; R1 = flags byte
-    ret.l
+    ld.b r1, r11              ; protected flags/length byte
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    ldn r11, r11
+    cmp r0, r11
+    lbrne fw_linked_no_cache
+    ; ---- cache hit ----
+    mov r9, r7                 ; R9 = entry address
+    lbr fw_return
 
 fw_slow:
-    ; ---- slow path: linked-list traversal ----
+    ; DFIND miss and long-name entry both reach here.  If a writer crossed the
+    ; snapshot, bypass both accelerators and avoid demand fill.
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    ldn r11, r11
+    cmp r0, r11
+    lbrne fw_linked_no_cache
+
+    ; A stable bound index is always usable for exact positive hits.  Only an
+    ; authoritative table may turn an empty slot into a definitive negative;
+    ; saturated/non-authoritative tables still avoid linked walks for names
+    ; whose latest binding is present.
+    ldi64 r11, var_dict_index_flags
+    ldn r0, r11
+    andi r0, 0x01              ; DICT_INDEX_BOUND
+    cmpi r0, 0
+    breq fw_linked
+    ldi64 r11, dict_index_probe
+    call.l r11                 ; R0=empty/exact/exhausted, R13=slot/candidate
+    ; Capture all protected state before the final epoch sample.  The epoch
+    ; closes the BUILDING->AUTHORITATIVE ABA case and any binding replacement
+    ; which crossed the potentially long probe.
+    mov r7, r0                 ; preserve probe result
+    ldi64 r11, var_dict_index_flags
+    ldn r10, r11              ; protected flags for result routing
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    ldn r11, r11
+    cmp r0, r11
+    lbrne fw_linked_no_cache
+    mov r0, r10
+    mov r11, r10
+    andi r11, 0x04
+    cmpi r11, 0
+    lbrne fw_linked_no_cache
+    mov r11, r0
+    andi r11, 0x01             ; binding must remain installed
+    cmpi r11, 0
+    lbreq fw_linked
+    mov r0, r7
+    cmpi r0, 1
+    breq fw_index_hit          ; exact hit, already name-verified
+    cmpi r0, 0
+    lbrne fw_linked            ; a bounded full probe cannot prove absence
+    mov r0, r10
+    andi r0, 0x02              ; only AUTH makes an empty slot definitive
+    cmpi r0, 0
+    lbreq fw_linked
+    lbr fw_miss
+
+fw_index_hit:
+    mov r13, r1                ; probe returns the entry separately from slot
+    lbr fw_hit
+
+fw_linked:
+    ldi r0, 0                 ; normal fallback demand-fills a positive result
+    lbr fw_linked_enter
+fw_linked_no_cache:
+    ldi r0, 1                 ; publication barrier: do not touch EXT.DICT
+fw_linked_enter:
+    subi r15, 8
+    str r15, r0
+    ; ---- correctness fallback: linked-list traversal ----
     ldi64 r11, var_latest
     ldn r13, r11              ; current entry
 
 fw_loop:
     cmpi r13, 0
-    breq fw_miss
+    lbreq fw_linked_miss
 
     ; flags+len at entry+8
     mov r11, r13
@@ -1086,7 +1201,7 @@ fw_loop:
     andi r0, 0x7F             ; name length
 
     cmp r0, r12
-    brne fw_next
+    lbrne fw_next
 
     ; Compare names (case-insensitive)
     mov r11, r13
@@ -1094,7 +1209,7 @@ fw_loop:
     ldi r1, 0                 ; index
 fw_cmp:
     cmp r1, r12
-    breq fw_hit
+    breq fw_linked_hit
 
     ; Entry char → R0
     mov r0, r11
@@ -1121,83 +1236,589 @@ fw_eu_skip:
 fw_su_skip:
 
     cmp r0, r7
-    brne fw_next
+    lbrne fw_next
     inc r1
     br fw_cmp
 
-fw_hit:
+fw_linked_hit:
+    ldn r0, r15
+    addi r15, 8
+    cmpi r0, 0
+    lbrne fw_linked_hit_no_cache
+    ; A normal fallback may demand-fill only if it stayed in the same epoch.
+    ; Otherwise a late DINS could overwrite the publisher's newer DUPD value.
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    ldn r11, r11
+    cmp r0, r11
+    lbreq fw_hit
+fw_linked_hit_no_cache:
+    ; An odd or changed epoch forced this traversal.  Return the linked result
+    ; but do not fill a binding which may precede the publisher's coherent DUPD.
     mov r9, r13
+    mov r11, r13
+    addi r11, 8
+    ld.b r1, r11
+    lbr fw_return
+
+fw_hit:
     mov r11, r13
     addi r11, 8
     ld.b r1, r11              ; flags byte
     ; A long name was found through the slow path.  Do not overflow
-    ; dict_pad while attempting to insert it into the 31-byte cache.
+    ; the private pad while attempting to insert it into the 31-byte cache.
     cmpi r12, 32
-    brcs fw_hit_return
+    brcs fw_hit_set_return
     ; ---- populate dict cache (miss-then-find) ----
-    ; dict_pad still holds the uppercase counted-string from above
+    ; The per-call pad still holds the uppercase counted string from above.
+    mov r10, r9               ; preserve query in saved scratch for late repair
+    mov r9, r13
     mov r0, r9                ; R0 = entry addr (stored as XT)
-    ldi64 r13, dict_pad
+    mov r13, r15
+    addi r13, 16              ; private counted-key pad
     dins r0, r13              ; cache: uppercase_name → entry_addr
+    ; A writer may cross the epoch after the pre-DINS check.  If so, remove our
+    ; possibly late stale fill and resolve through the current linked head
+    ; without allocating again.  DDEL is local and ordered with coherent DUPD.
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    ldn r11, r11
+    cmp r0, r11
+    lbreq fw_hit_return
+    ddel r0, r13
+    mov r9, r10               ; restore original query address
+    lbr fw_linked_no_cache
+fw_hit_set_return:
+    ; Long names do not execute DINS, so revalidate after the header-flags read
+    ; here.  Short-name paths perform the equivalent final check after DINS.
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    mov r11, r15
+    addi r11, 8
+    ldn r11, r11
+    cmp r0, r11
+    lbrne fw_linked_no_cache
+    mov r9, r13
 fw_hit_return:
-    ret.l
+    lbr fw_return
 
 fw_next:
     ldn r13, r13              ; follow link
-    br fw_loop
+    lbr fw_loop
+
+fw_linked_miss:
+    addi r15, 8               ; discard linked-mode cell
 
 fw_miss:
     ldi r9, 0
+fw_return:
+    ldn r10, r15
+    addi r15, 48
     ret.l
 
 ; =====================================================================
-;  dict_cache_seed — update DFIND cache after creating a new entry
+;  Dictionary side-index internals
 ; =====================================================================
-;  Input:  R1 = new entry address (entry+0 = link, +8 = flags+len, +9 = name)
-;  Action: builds uppercase counted-string in dict_pad from the entry's
-;          own name field, then DINS R0←R1, R13←dict_pad so that subsequent
-;          DFIND lookups return the *latest* binding (prevents stale-cache
-;          bugs when a new definition shadows an existing one).
-;  Clobbers: R0, R7, R9, R11, R12, R13.   Preserves: R1, R14, R15.
+;
+; Public flags returned by DICT-INDEX@:
+;   bit 0  BOUND          caller storage is installed
+;   bit 1  AUTHORITATIVE  exact misses may terminate lookup
+;   bit 2  BUILDING       table rebuild or named-definition publication active
+;   bit 3  SATURATED      a distinct binding could not be inserted
+;
+; Slot layout (16 bytes):
+;   +0  u64 entry pointer -- zero is empty and this is published last
+;   +8  u32 uppercase FNV-1a hash
+;   +12 u8  name length (1..127)
+;   +13..15 reserved zero
 
-dict_cache_seed:
-    ; Read name length from entry+8 (lower 7 bits)
+; Exact uppercase FNV-1a32 over R9/R12.  Truncation after each multiply is
+; explicit so this agrees byte-for-byte with EXT.DICT.  Returns R7=hash and
+; preserves R9/R12/R13; clobbers R0/R1/R10/R11.
+dict_hash_name:
+    ldi64 r7, 0x0000_0000_811C_9DC5
+    ldi64 r10, 0x0000_0000_0100_0193
+    ldi64 r11, 0x0000_0000_FFFF_FFFF
+    ldi r0, 0
+.dict_hash_loop:
+    cmp r0, r12
+    lbreq .dict_hash_done
+    mov r1, r9
+    add r1, r0
+    ld.b r1, r1
+    cmpi r1, 0x61
+    lbrcc .dict_hash_folded
+    cmpi r1, 0x7B
+    lbrcs .dict_hash_folded
+    subi r1, 0x20
+.dict_hash_folded:
+    xor r7, r1
+    umul r7, r10
+    and r7, r11
+    inc r0
+    lbr .dict_hash_loop
+.dict_hash_done:
+    ret.l
+
+; Compare query R9/R12 with the header at R1, folding ASCII lowercase to
+; uppercase on both sides.  Returns R0=1 for exact equality, else zero.
+; Preserves R1/R9/R12/R13; clobbers R7/R10/R11.
+dict_name_equal:
     mov r11, r1
     addi r11, 8
     ld.b r7, r11
-    andi r7, 0x7F              ; pure name length
-    ; The dictionary supports the full header length, but EXT.DICT does not.
-    ; Leave longer entries uncached instead of overflowing dict_pad.
-    cmpi r7, 32
-    brcs dcs_done
-    ; Build dict_pad[0..N]
-    ldi64 r11, dict_pad
-    st.b r11, r7               ; dict_pad[0] = count
-    ldi r0, 0                  ; index
-dcs_up:
+    andi r7, 0x7F
+    cmp r7, r12
+    lbrne .dict_name_not_equal
+    inc r11                    ; candidate name address
+    ldi r10, 0
+.dict_name_compare:
+    cmp r10, r12
+    lbreq .dict_name_equal
+
+    mov r0, r11
+    add r0, r10
+    ld.b r0, r0
+    cmpi r0, 0x61
+    lbrcc .dict_name_entry_folded
+    cmpi r0, 0x7B
+    lbrcs .dict_name_entry_folded
+    subi r0, 0x20
+.dict_name_entry_folded:
+
+    mov r7, r9
+    add r7, r10
+    ld.b r7, r7
+    cmpi r7, 0x61
+    lbrcc .dict_name_query_folded
+    cmpi r7, 0x7B
+    lbrcs .dict_name_query_folded
+    subi r7, 0x20
+.dict_name_query_folded:
     cmp r0, r7
-    breq dcs_dins
+    lbrne .dict_name_not_equal
+    inc r10
+    lbr .dict_name_compare
+
+.dict_name_equal:
+    ldi r0, 1
+    ret.l
+.dict_name_not_equal:
+    ldi r0, 0
+    ret.l
+
+; Probe the installed linear table for query R9/R12.  Every path examines at
+; most var_dict_index_slots slots.  Returns:
+;   R0=0 empty slot, R1=0, R13=slot
+;   R0=1 exact hit,  R1=entry, R13=slot
+;   R0=2 full probe (caller must use linked fallback)
+; R7 retains the query hash for insertion.  R9/R12 are preserved.
+dict_index_probe:
+    ldi64 r11, dict_hash_name
+    call.l r11
+
+    ldi64 r11, var_dict_index_slots
+    ldn r10, r11              ; bounded remaining-probe count
+    mov r0, r10
+    subi r0, 1                ; mask (slot count is a power of two)
+    and r0, r7
+    lsli r0, 4
+    ldi64 r11, var_dict_index_base
+    ldn r13, r11
+    add r13, r0
+
+.dict_probe_slot:
+    ldn r1, r13               ; entry pointer is the publication field
+    cmpi r1, 0
+    lbreq .dict_probe_empty
+
+    mov r11, r13
+    addi r11, 8
+    ldn r11, r11              ; packed hash/length/reserved metadata
+    ldi64 r0, 0x0000_0000_FFFF_FFFF
+    and r0, r11               ; low u32 hash
+    cmp r0, r7
+    lbrne .dict_probe_next
+    lsri r11, 8
+    lsri r11, 8
+    lsri r11, 8
+    lsri r11, 8
+    andi r11, 0x7F
+    cmp r11, r12
+    lbrne .dict_probe_next
+
+    ; Exact comparison is mandatory even after the hash and length filter.
+    ; Preserve the probe hash/count across the comparison helper.
+    subi r15, 16
+    str r15, r7
+    mov r0, r15
+    addi r0, 8
+    str r0, r10
+    ldi64 r11, dict_name_equal
+    call.l r11
+    mov r11, r15
+    addi r11, 8
+    ldn r10, r11
+    ldn r7, r15
+    addi r15, 16
+    cmpi r0, 0
+    lbrne .dict_probe_exact
+
+.dict_probe_next:
+    dec r10
+    cmpi r10, 0
+    lbreq .dict_probe_exhausted
+    addi r13, 16
+
+    ; Wrap at base + slots*16.  Installation proved this end non-wrapping.
+    ldi64 r11, var_dict_index_slots
+    ldn r0, r11
+    lsli r0, 4
+    ldi64 r11, var_dict_index_base
+    ldn r11, r11
+    add r0, r11
+    cmp r13, r0
+    lbrne .dict_probe_slot
+    mov r13, r11
+    lbr .dict_probe_slot
+
+.dict_probe_empty:
+    ldi r0, 0
+    ret.l
+.dict_probe_exact:
+    ldi r0, 1
+    ret.l
+.dict_probe_exhausted:
+    ldi r0, 2
+    ret.l
+
+; Insert one dictionary entry into the installed table.
+;   R1=entry, R0=0 insert-if-absent / nonzero upsert-latest
+; Returns R0=0 success (including an existing insert-if-absent binding), or
+; R0=1 when no empty slot exists for a distinct name.  Rebuild uses mode zero
+; while walking newest-to-oldest; ordinary publication uses upsert mode.
+dict_index_insert:
+    subi r15, 16
+    str r15, r1               ; +0 new entry
+    mov r11, r15
+    addi r11, 8
+    str r11, r0               ; +8 insertion mode
+
+    mov r11, r1
+    addi r11, 8
+    ld.b r12, r11
+    andi r12, 0x7F
+    cmpi r12, 0
+    lbreq .dict_insert_full    ; named entries must have a nonzero length
     mov r9, r1
-    addi r9, 9                 ; entry name start
+    addi r9, 9
+    ldi64 r11, dict_index_probe
+    call.l r11
+    cmpi r0, 1
+    lbreq .dict_insert_exact
+    cmpi r0, 0
+    lbrne .dict_insert_full
+
+    ; Empty slot: publish metadata first, entry pointer last.
+    mov r11, r12
+    ldi r10, 32
+    shl r11, r10
+    or r11, r7
+    mov r10, r13
+    addi r10, 8
+    str r10, r11
+    ldn r1, r15
+    str r13, r1
+
+    ldi64 r11, var_dict_index_count
+    ldn r1, r11
+    inc r1
+    str r11, r1
+    lbr .dict_insert_ok
+
+.dict_insert_exact:
+    mov r11, r15
+    addi r11, 8
+    ldn r10, r11
+    cmpi r10, 0
+    lbreq .dict_insert_ok      ; newest-to-oldest rebuild keeps first binding
+    ldn r1, r15
+    str r13, r1               ; ordinary publication updates latest binding
+
+.dict_insert_ok:
+    ldi r0, 0
+    addi r15, 16
+    ret.l
+.dict_insert_full:
+    ldi r0, 1
+    addi r15, 16
+    ret.l
+
+; Clear and rebuild an already published binding.  The caller first exposes
+; BOUND|BUILDING, which prevents lookup from observing partial contents.
+; Returns R0=0 for complete/authoritative or 2 for saturated/non-authoritative.
+dict_index_rebuild:
+    ldi64 r11, var_dict_index_count
+    ldi r1, 0
+    str r11, r1
+    ldi64 r11, var_dict_index_base
+    ldn r9, r11
+    ldi64 r11, var_dict_index_slots
+    ldn r12, r11
+
+.dict_rebuild_clear:
+    cmpi r12, 0
+    lbreq .dict_rebuild_walk_start
+    str r9, r1                ; unpublish entry first
+    mov r11, r9
+    addi r11, 8
+    str r11, r1               ; clear hash, length, and reserved bytes
+    addi r9, 16
+    dec r12
+    lbr .dict_rebuild_clear
+
+.dict_rebuild_walk_start:
+    ldi64 r11, var_latest
+    ldn r13, r11
+    mov r10, r13              ; Floyd hare: rebuild must be cycle-safe
+.dict_rebuild_walk:
+    cmpi r13, 0
+    lbreq .dict_rebuild_complete
+    subi r15, 16
+    str r15, r13
+    mov r11, r15
+    addi r11, 8
+    str r11, r10
+    mov r1, r13
+    ldi r0, 0                 ; insert-if-absent: newest shadow wins
+    ldi64 r11, dict_index_insert
+    call.l r11
+    mov r11, r15
+    addi r11, 8
+    ldn r10, r11
+    ldn r13, r15
+    addi r15, 16
+    cmpi r0, 0
+    lbrne .dict_rebuild_saturated
+
+    ; Advance the insertion cursor once and the cycle detector twice.  Links
+    ; may cross Bank 0/XMEM in either address direction, so ordering is not a
+    ; validity condition.  A cycle makes the rebuild incomplete/non-authoritative.
+    ldn r13, r13
+    cmpi r10, 0
+    lbreq .dict_rebuild_walk
+    ldn r10, r10
+    cmpi r10, 0
+    lbreq .dict_rebuild_walk
+    ldn r10, r10
+    cmpi r13, 0
+    lbreq .dict_rebuild_walk
+    cmp r13, r10
+    lbreq .dict_rebuild_saturated
+    lbr .dict_rebuild_walk
+
+.dict_rebuild_complete:
+    ldi r1, 0x03              ; BOUND | AUTHORITATIVE
+    ldi64 r11, var_dict_index_flags
+    str r11, r1               ; final publication of authoritative state
+    ldi r0, 0
+    ret.l
+
+.dict_rebuild_saturated:
+    ldi r1, 0x09              ; BOUND | SATURATED
+    ldi64 r11, var_dict_index_flags
+    str r11, r1               ; BUILDING and AUTHORITATIVE both clear
+    ldi r0, 2
+    ret.l
+
+; Private seqlock writer entry/exit.  The epoch is even while stable and odd
+; throughout every LATEST/index/cache mutation.  All callers are top-level
+; operations under the single-writer dictionary lock; rebuild never nests a
+; second begin/end pair.  Both helpers preserve R0/R11 and every other register.
+dict_epoch_begin:
+    subi r15, 16
+    str r15, r0
+    mov r0, r15
+    addi r0, 8
+    str r0, r11
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    inc r0                     ; even -> odd, before any protected mutation
+    str r11, r0
+    mov r0, r15
+    addi r0, 8
+    ldn r11, r0
+    ldn r0, r15
+    addi r15, 16
+    ret.l
+
+dict_epoch_end:
+    subi r15, 16
+    str r15, r0
+    mov r0, r15
+    addi r0, 8
+    str r0, r11
+    ldi64 r11, var_dict_index_epoch
+    ldn r0, r11
+    inc r0                     ; odd -> even, final publication commit
+    str r11, r0
+    mov r0, r15
+    addi r0, 8
+    ldn r11, r0
+    ldn r0, r15
+    addi r15, 16
+    ret.l
+
+; Enter the named-definition publication barrier before changing LATEST.
+; Clear AUTH and set BUILDING while retaining BOUND/SATURATED.  The
+; post-LATEST publisher below clears BUILDING only after side-index upsert and
+; coherent DUPD complete.  Preserve every builder's live scratch registers.
+dict_publication_begin:
+    ldi64 r11, dict_epoch_begin
+    call.l r11
+    subi r15, 16
+    str r15, r0
+    mov r0, r15
+    addi r0, 8
+    str r0, r11
+    ldi64 r11, var_dict_index_flags
+    ldn r0, r11
+    andi r0, 0xFD             ; clear AUTHORITATIVE
+    ori r0, 0x04              ; set BUILDING/publication barrier
+    str r11, r0
+    mov r0, r15
+    addi r0, 8
+    ldn r11, r0
+    ldn r0, r15
+    addi r15, 16
+    ret.l
+
+; =====================================================================
+;  dict_cache_seed -- publish a newly linked named definition
+; =====================================================================
+; Input R1=new entry.  The historical label is retained for the five native
+; definition builders, but publication is now demand-only for hardware:
+; side-index upsert followed by DUPD (update an existing line, never allocate).
+; All caller work registers are restored, including CREATE/VARIABLE relocation
+; temporaries in R13/R9.
+dict_cache_seed:
+    subi r15, 64
+    str r15, r0
+    mov r0, r15
+    addi r0, 8
+    str r0, r1
+    addi r0, 8
+    str r0, r7
+    addi r0, 8
+    str r0, r9
+    addi r0, 8
+    str r0, r10
+    addi r0, 8
+    str r0, r11
+    addi r0, 8
+    str r0, r12
+    addi r0, 8
+    str r0, r13
+
+    ; Compute the stable flags to publish only after both accelerators are
+    ; updated.  An unbound index returns to flags=0; a saturated table stays
+    ; BOUND|SATURATED even when an existing shadow was successfully updated.
+    ldi r10, 0
+    ldi64 r11, var_dict_index_flags
+    ldn r0, r11
+    mov r7, r0
+    andi r7, 0x01             ; BOUND
+    cmpi r7, 0
+    lbreq .dict_publish_cache
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11
+    ldi r0, 1                 ; ordinary publication upserts latest binding
+    ldi64 r11, dict_index_insert
+    call.l r11
+    cmpi r0, 0
+    lbrne .dict_publish_saturated
+
+    ldi64 r11, var_dict_index_flags
+    ldn r0, r11
+    andi r0, 0x08
+    cmpi r0, 0
+    lbrne .dict_publish_saturated
+    ldi r10, 0x03             ; BOUND | AUTHORITATIVE after complete upsert
+    lbr .dict_publish_cache
+
+    ; A distinct insertion failure invalidates negative answers before any
+    ; subsequent lookup can consume an empty slot as proof of absence.
+.dict_publish_saturated:
+    ldi r10, 0x09             ; BOUND | SATURATED
+
+.dict_publish_cache:
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11               ; restore new entry for cache publication
+    mov r11, r1
+    addi r11, 8
+    ld.b r7, r11
+    andi r7, 0x7F
+    cmpi r7, 32
+    lbrcs .dict_publish_done  ; EXT.DICT accepts at most 31 name bytes
+
+    ldi64 r11, dict_pad
+    st.b r11, r7
+    ldi r0, 0
+.dict_publish_upper:
+    cmp r0, r7
+    lbreq .dict_publish_dupd
+    mov r9, r1
+    addi r9, 9
     add r9, r0
-    ld.b r12, r9               ; source char
+    ld.b r12, r9
     cmpi r12, 0x61
-    brcc dcs_noup
+    lbrcc .dict_publish_folded
     cmpi r12, 0x7B
-    brcs dcs_noup
+    lbrcs .dict_publish_folded
     subi r12, 0x20
-dcs_noup:
+.dict_publish_folded:
     mov r9, r11
     inc r9
     add r9, r0
-    st.b r9, r12               ; dict_pad[1+i] = uppercased char
+    st.b r9, r12
     inc r0
-    br dcs_up
-dcs_dins:
-    mov r0, r1                 ; R0 = entry addr
+    lbr .dict_publish_upper
+
+.dict_publish_dupd:
+    mov r0, r1
     ldi64 r13, dict_pad
-    dins r0, r13               ; cache: name → latest entry
-dcs_done:
+    dupd r0, r13              ; update resident binding only; never allocate
+
+.dict_publish_done:
+    ; Keep BUILDING visible through DUPD, then publish stable flags before the
+    ; epoch commit.  This helper is paired with exactly one publication begin.
+    ldi64 r11, var_dict_index_flags
+    str r11, r10
+    ldi64 r11, dict_epoch_end
+    call.l r11                ; epoch becomes even only after stable flags
+    mov r0, r15
+    addi r0, 8
+    ldn r1, r0
+    addi r0, 8
+    ldn r7, r0
+    addi r0, 8
+    ldn r9, r0
+    addi r0, 8
+    ldn r10, r0
+    addi r0, 8
+    ldn r11, r0
+    addi r0, 8
+    ldn r12, r0
+    addi r0, 8
+    ldn r13, r0
+    ldn r0, r15
+    addi r15, 64
     ret.l
 
 ; =====================================================================
@@ -2267,6 +2888,264 @@ w_dict_fault_xt_store:
     addi r14, 8
     ldi64 r11, var_dict_fault_xt
     str r11, r1
+    ret.l
+
+; DICT-INDEX! ( base slots -- status )
+;   status 0: disabled, or installed and authoritative
+;   status 1: invalid arguments; the previous binding is unchanged
+;   status 2: installed, but rebuild saturated and is non-authoritative
+; 0 0 disables the binding.  Otherwise base must be 16-byte aligned, slots
+; must be a nonzero power of two, and the complete slots*16 span must fit in
+; advertised external RAM without wrapping.
+w_dict_index_store:
+    ldn r12, r14              ; slots
+    mov r11, r14
+    addi r11, 8
+    ldn r7, r11               ; base
+
+    cmpi r12, 0
+    lbrne .dict_index_nonzero
+    cmpi r7, 0
+    lbrne .dict_index_invalid
+
+    ; Disable publication before clearing the retained diagnostics.
+    ldi64 r11, dict_epoch_begin
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    ldi64 r11, var_dict_index_base
+    str r11, r1
+    ldi64 r11, var_dict_index_slots
+    str r11, r1
+    ldi64 r11, var_dict_index_count
+    str r11, r1
+    ldi r0, 0
+    ldi64 r11, dict_epoch_end
+    call.l r11
+    lbr .dict_index_return
+
+.dict_index_nonzero:
+    cmpi r7, 0
+    lbreq .dict_index_invalid
+    mov r0, r7
+    andi r0, 0x0F
+    cmpi r0, 0
+    lbrne .dict_index_invalid  ; base must be 16-byte aligned
+
+    ; Power-of-two slot count.
+    mov r0, r12
+    subi r0, 1
+    mov r1, r12
+    and r1, r0
+    cmpi r1, 0
+    lbrne .dict_index_invalid
+
+    ; Form slots*16 and prove that the shift did not discard high bits.
+    mov r10, r12
+    lsli r10, 4
+    mov r0, r10
+    lsri r0, 4
+    cmp r0, r12
+    lbrne .dict_index_invalid
+    mov r13, r7
+    add r13, r10              ; exclusive requested end
+    cmp r13, r7
+    lbrcc .dict_index_invalid ; base+span wrapped
+
+    ; The complete span must be contained by advertised external memory.
+    ldi64 r11, 0xFFFF_FF00_0000_0338
+    ldn r9, r11               ; external-memory base
+    cmp r7, r9
+    lbrcc .dict_index_invalid ; requested base < external-memory base
+    mov r10, r9
+    ldi64 r11, 0xFFFF_FF00_0000_0340
+    ldn r0, r11               ; external-memory size
+    cmpi r0, 0
+    lbreq .dict_index_invalid
+    add r9, r0                ; exclusive external-memory end
+    cmp r9, r10
+    lbrcc .dict_index_invalid ; advertised base+size wrapped
+    cmp r9, r13
+    lbrcc .dict_index_invalid ; external-memory end < requested end
+
+    ; Disable the old binding before exposing the new base/geometry.  BUILDING
+    ; remains non-authoritative until the complete newest-to-oldest rebuild.
+    ldi64 r11, dict_epoch_begin
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    ldi64 r11, var_dict_index_base
+    str r11, r7
+    ldi64 r11, var_dict_index_slots
+    str r11, r12
+    ldi64 r11, var_dict_index_count
+    str r11, r1
+    ldi r1, 0x05              ; BOUND | BUILDING
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    ldi64 r11, dict_index_rebuild
+    call.l r11                ; R0=0 complete, 2 saturated
+    ldi64 r11, dict_epoch_end
+    call.l r11
+    lbr .dict_index_return
+
+.dict_index_invalid:
+    ldi r0, 1
+.dict_index_return:
+    addi r14, 8               ; consume slots, replace base with status
+    str r14, r0
+    ret.l
+
+; DICT-INDEX@ ( -- base slots count flags )
+w_dict_index_fetch:
+    ldi64 r11, var_dict_index_base
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ldi64 r11, var_dict_index_slots
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ldi64 r11, var_dict_index_count
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ldi64 r11, var_dict_index_flags
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; DICT-ROLLBACK ( saved-here saved-latest -- )
+; Validate both targets and prove saved-latest is an ancestor before mutating
+; any accelerator or dictionary state.  Invalid pairs use the existing
+; DICT-FAULT-XT!/ABORT path.  A successful rollback makes the side index
+; non-authoritative, globally clears EXT.DICT, publishes HERE/LATEST, then
+; rebuilds newest-to-oldest.
+w_dict_rollback:
+    ldn r7, r14               ; saved-latest
+    mov r11, r14
+    addi r11, 8
+    ldn r9, r11               ; saved-here
+
+    mov r0, r9
+    ldi64 r11, dict_target_preflight
+    call.l r11
+    ; A Bank-0 target must not rewind into BIOS code/static data.  External
+    ; targets are naturally above this boot-computed first allocatable byte,
+    ; while DICT-BOUNDS! supplies their tighter active-zone lower bound.
+    ldi64 r11, var_kernel_data_end
+    ldn r0, r11
+    cmp r9, r0
+    lbrcc dict_fault          ; saved-HERE precedes all allocatable storage
+    ldi64 r11, var_here
+    ldn r12, r11              ; current-HERE, retained through validation
+    cmp r12, r9
+    lbrcc dict_fault          ; rollback may not advance HERE
+
+.dict_rollback_ancestry:
+    ldi64 r11, var_latest
+    ldn r13, r11
+    mov r10, r13              ; Floyd hare: links need not follow address order
+    ldi r1, 0                 ; saved-latest ancestry proof
+.dict_rollback_walk:
+    cmp r13, r7
+    lbrne .dict_rollback_not_target
+    ldi r1, 1
+    lbr .dict_rollback_node_ready
+.dict_rollback_not_target:
+    cmpi r13, 0
+    lbreq .dict_rollback_chain_end
+    cmpi r1, 0
+    lbrne .dict_rollback_node_ready
+
+    ; Before reaching saved-latest, every unlinked header must belong to the
+    ; active interval HERE will reclaim.  A mixed Bank0/XMEM history cannot be
+    ; represented safely by the two-cell rollback ABI and is rejected.
+    cmp r13, r9
+    lbrcc dict_fault          ; removed node < saved-HERE
+    cmp r13, r12
+    lbrcs dict_fault          ; removed node >= current-HERE
+
+.dict_rollback_node_ready:
+    cmpi r13, 0
+    lbreq .dict_rollback_chain_end
+    ldn r13, r13              ; full-chain cursor advances once
+    cmpi r10, 0
+    lbreq .dict_rollback_walk
+    ldn r10, r10              ; cycle detector advances twice
+    cmpi r10, 0
+    lbreq .dict_rollback_walk
+    ldn r10, r10
+    cmpi r13, 0
+    lbreq .dict_rollback_walk
+    cmp r13, r10
+    lbreq dict_fault          ; current dictionary chain is cyclic
+    lbr .dict_rollback_walk
+
+.dict_rollback_chain_end:
+    cmpi r1, 0
+    lbreq dict_fault          ; saved head is not an ancestor
+
+    ; The retained suffix may cross Bank 0 and XMEM in either direction, but
+    ; no retained header may live in the bytes HERE is about to reclaim.
+    ; The preceding full traversal proved this suffix terminates, so no cap or
+    ; address-order assumption is needed here.
+    mov r13, r7
+.dict_rollback_retained:
+    cmpi r13, 0
+    lbreq .dict_rollback_valid
+    cmp r13, r9
+    lbrcc .dict_rollback_retained_next ; node < saved-HERE
+    cmp r13, r12
+    lbrcc dict_fault          ; saved-HERE <= node < current-HERE
+.dict_rollback_retained_next:
+    ldn r13, r13
+    lbr .dict_rollback_retained
+
+.dict_rollback_valid:
+    ldi64 r11, dict_epoch_begin
+    call.l r11
+    addi r14, 16              ; consume the validated pair
+
+    ; Clear AUTHORITATIVE and raise BUILDING before the global hardware
+    ; invalidation or pointer publication.  DCLR is a globally ordered
+    ; coherence operation, and lookup uses linked/no-fill mode meanwhile.
+    ldi64 r11, var_dict_index_flags
+    ldn r1, r11
+    andi r1, 0xFD
+    ori r1, 0x04
+    str r11, r1
+    dclr
+
+    ldi64 r11, var_here
+    str r11, r9
+    ldi64 r11, var_latest
+    str r11, r7
+
+    ; With no caller storage bound, the linked dictionary is already the
+    ; complete fallback.  Otherwise replace any old SATURATED state with a
+    ; fresh BUILDING state and repopulate from the restored head.
+    ldi64 r11, var_dict_index_flags
+    ldn r1, r11
+    andi r1, 0x01
+    cmpi r1, 0
+    lbrne .dict_rollback_rebuild
+    ldi r1, 0
+    ldi64 r11, var_dict_index_flags
+    str r11, r1               ; unbound stable state after the barrier
+    lbr .dict_rollback_done
+.dict_rollback_rebuild:
+    ldi r1, 0x05              ; BOUND | BUILDING
+    ldi64 r11, var_dict_index_flags
+    str r11, r1
+    ldi64 r11, dict_index_rebuild
+    call.l r11
+.dict_rollback_done:
+    ldi64 r11, dict_epoch_end
+    call.l r11
     ret.l
 
 ; ALLOT ( n -- )
@@ -4233,6 +5112,9 @@ w_colon_not_compiling:
     ; R9=word addr, R12=word length
     cmpi r12, 0
     lbreq w_colon_err          ; no name given
+    ldi64 r0, 128
+    cmp r12, r0
+    lbrcs w_name_too_long      ; bit 7 is IMMEDIATE, not name length
 
     ; Reserve the complete header before publishing its first byte.  The body
     ; has no known total size; every subsequent compiler emitter preflights
@@ -4294,6 +5176,8 @@ w_colon_name_done:
     str r11, r0
 
     ; Set LATEST to entry start
+    ldi64 r11, dict_publication_begin
+    call.l r11
     ldn r0, r14               ; entry addr
     ldi64 r11, var_latest
     str r11, r0
@@ -4319,6 +5203,12 @@ w_colon_name_done:
 
 w_colon_err:
     ldi64 r10, str_no_name
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+w_name_too_long:
+    ldi64 r10, str_name_too_long
     ldi64 r11, print_str
     call.l r11
     ret.l
@@ -5827,6 +6717,9 @@ w_create:
     call.l r11
     cmpi r12, 0
     lbreq w_create_err
+    ldi64 r0, 128
+    cmp r12, r0
+    lbrcs w_name_too_long
 
     ; Save name info
     mov r13, r9               ; R13 = name addr
@@ -5951,6 +6844,8 @@ w_create_copy:
     str r11, r0
 
     ; Update LATEST
+    ldi64 r11, dict_publication_begin
+    call.l r11
     ldi64 r11, var_latest
     str r11, r1
 
@@ -6396,6 +7291,9 @@ w_variable:
     call.l r11
     cmpi r12, 0
     lbreq w_colon_err
+    ldi64 r0, 128
+    cmp r12, r0
+    lbrcs w_name_too_long
 
     ; Build dictionary entry header (same as : does)
     ldi64 r11, var_here
@@ -6504,6 +7402,8 @@ w_var_name_done:
     ; Update HERE and LATEST
     ldi64 r11, var_here
     str r11, r0
+    ldi64 r11, dict_publication_begin
+    call.l r11
     ldi64 r11, var_latest
     str r11, r13
 
@@ -6535,6 +7435,9 @@ w_constant:
     call.l r11
     cmpi r12, 0
     lbreq w_colon_err
+    ldi64 r0, 128
+    cmp r12, r0
+    lbrcs w_name_too_long
 
     ; Build dictionary entry header
     ldi64 r11, var_here
@@ -6582,6 +7485,8 @@ w_const_name_done:
     ldi64 r11, compile_ret
     call.l r11
     ; Set LATEST
+    ldi64 r11, dict_publication_begin
+    call.l r11
     ldn r1, r14               ; entry start
     addi r14, 8
     ldi64 r11, var_latest
@@ -10475,6 +11380,9 @@ w_value:
     call.l r11
     cmpi r12, 0
     lbreq w_colon_err
+    ldi64 r0, 128
+    cmp r12, r0
+    lbrcs w_name_too_long
 
     ; Build dictionary entry header at HERE
     ldi64 r11, var_here
@@ -10582,6 +11490,8 @@ w_val_name_done:
     ; Update HERE and LATEST
     ldi64 r11, var_here
     str r11, r0
+    ldi64 r11, dict_publication_begin
+    call.l r11
     ldi64 r11, var_latest
     str r11, r13
     ; ---- DFIND cache: seed new entry (R13 = entry start → R1) ----
@@ -12612,6 +13522,11 @@ w_resize_request:
 ; =====================================================================
 
 secondary_core_entry:
+    ; Boot's far transfer runs briefly with R10 as the program counter.  Move
+    ; back to the conventional R3 selector before normal code uses R10.
+    ldi64 r3, .secondary_core_body
+    sep r3
+.secondary_core_body:
     ; ---- Set per-core stacks ----
     ; R2 is already set to per-core stack top by the system
     ; RSP = R2 (return stack at top of zone)
@@ -21784,10 +22699,37 @@ d_dict_fault_xt_store:
     call.l r11
     ret.l
 
+; === DICT-INDEX! ===
+d_dict_index_store:
+    .dq d_dict_fault_xt_store
+    .db 11
+    .ascii "DICT-INDEX!"
+    ldi64 r11, w_dict_index_store
+    call.l r11
+    ret.l
+
+; === DICT-INDEX@ ===
+d_dict_index_fetch:
+    .dq d_dict_index_store
+    .db 11
+    .ascii "DICT-INDEX@"
+    ldi64 r11, w_dict_index_fetch
+    call.l r11
+    ret.l
+
+; === DICT-ROLLBACK ===
+d_dict_rollback:
+    .dq d_dict_index_fetch
+    .db 13
+    .ascii "DICT-ROLLBACK"
+    ldi64 r11, w_dict_rollback
+    call.l r11
+    ret.l
+
 ; === WOTS-CHAIN ===
 latest_entry:
 d_wots_chain:
-    .dq d_dict_fault_xt_store
+    .dq d_dict_rollback
     .db 10
     .ascii "WOTS-CHAIN"
     ldi64 r11, w_wots_chain
@@ -21814,6 +22756,18 @@ var_dict_limit:
     .dq 0
 var_dict_fault_xt:
     .dq 0
+; Caller-backed open-addressed dictionary index state.  Flags use the public
+; DICT-INDEX@ bit assignments documented by w_dict_index_store above.
+var_dict_index_base:
+    .dq 0
+var_dict_index_slots:
+    .dq 0
+var_dict_index_count:
+    .dq 0
+var_dict_index_flags:
+    .dq 0
+var_dict_index_epoch:
+    .dq 0                         ; private seqlock epoch: even=stable, odd=writer
 var_crc_owner_base:
     .dq 0                         ; topology-sized records begin at dict_free
 var_crypto_owner_core:
@@ -22080,6 +23034,8 @@ str_ti_acc:
 
 str_no_name:
     .asciiz " name expected\n"
+str_name_too_long:
+    .asciiz "dictionary name exceeds 127 bytes\n"
 
 str_line_prefix:
     .asciiz "  line "
@@ -22369,7 +23325,7 @@ sha512_contexts:
     .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
 ; =====================================================================
-;  dict_pad — 32-byte scratch for DFIND/DINS counted-strings
+;  dict_pad — serialized definition-publisher scratch for DUPD
 ; =====================================================================
 dict_pad:
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0

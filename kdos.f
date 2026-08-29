@@ -46,6 +46,7 @@ JIT-ON
 \  COMPARE, ABORT, ABORT", LEAVE, EVALUATE, EVALUATE-CHECKED,
 \  EVALUATE-FINISH, EVALUATOR-RESET, EVALUATOR-UNWIND, EVAL-STATUS,
 \  EVAL-LINE, EVAL-COLUMN, EVAL-DEPTH, EVAL-THROW, EVAL-TOKEN,
+\  DICT-INDEX!, DICT-INDEX@, DICT-ROLLBACK,
 \  FIND, SOURCE, >IN, >NUMBER,
 \  VALUE, TO, DOES>, POSTPONE, RECURSE, COUNT, WITHIN, U<, U>, 2/,
 \  CHAR, [CHAR], 2>R, 2R>, 2R@, QUIT, plus the v0.5 set.
@@ -553,30 +554,23 @@ VARIABLE R-NEW     \ new requested size (rounded)
 \  FORGET parses a word name and forgets everything from that
 \  word onward (including the named word itself).
 \
-\  Implementation: var_latest is at STATE + 24 (adjacent BIOS
-\  variables: state(+0), base(+8), here(+16), latest(+24)).
-\  Verified at load time.
-\
-
-\ VAR-LATEST — verified address of the BIOS var_latest variable
-\ BIOS layout: var_state(+0) var_base(+8) var_here(+16) var_latest(+24)
-STATE 24 +  DUP @  LATEST <>
-    IF ." VAR-LATEST offset mismatch" CR ABORT THEN
-CONSTANT VAR-LATEST
-
-\ LATEST! ( entry -- )  set the dictionary head pointer
-: LATEST!  ( entry -- )  VAR-LATEST ! ;
+\  DICT-ROLLBACK validates and publishes HERE/LATEST as one dictionary
+\  operation, then clears the hardware cache and rebuilds the side index.
+\  Its two-cell checkpoint can reclaim only one contiguous active dictionary
+\  zone; mixed Bank-0/userland histories are rejected before mutation.
+\  Raw access to the BIOS LATEST cell is deliberately not exposed.
 
 \ MARKER ( "name" -- )
 \   Create a checkpoint word.  Executing it later forgets everything
 \   defined after (and including) the marker itself.
 : MARKER  ( "name" -- )
+    ?CORE0
     HERE LATEST            ( save-here save-latest )
     CREATE , ,             ( ; data+0=save-latest  data+8=save-here )
     DOES>
+        ?CORE0
         DUP @ SWAP 8 + @  ( save-latest save-here )
-        HERE - ALLOT       ( save-latest ; HERE restored )
-        LATEST!            ( ; LATEST restored )
+        SWAP DICT-ROLLBACK ( ; HERE/LATEST restored coherently )
     ;
 
 \ (ENTRY>NAME) ( entry -- addr len )  inline name accessor
@@ -590,6 +584,7 @@ VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
 \   Forget a word and everything defined after it.
 \   Case-insensitive match (same as the outer interpreter).
 : FORGET  ( "name" -- )
+    ?CORE0
     BL WORD COUNT                    ( c-addr u )
     DUP 0= ABORT" Usage: FORGET <name>"
     FG-L !  FG-A !
@@ -609,8 +604,8 @@ VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
             LOOP                     ( entry ea flag )
             SWAP DROP                ( entry flag )
             IF
-                DUP @ LATEST!        ( entry ; LATEST = entry.link )
-                HERE - ALLOT         ( ; HERE = entry addr )
+                DUP @                ( saved-here saved-latest )
+                DICT-ROLLBACK
                 EXIT
             THEN
         THEN
@@ -2130,8 +2125,9 @@ HBW-INIT      \ initialise at load time
 \  XMEM-FREE    ( -- u )        bytes remaining in ext mem
 \  .XMEM        ( -- )          display ext mem status
 
-VARIABLE XMEM-HERE   0 XMEM-HERE !
-VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
+VARIABLE XMEM-HERE       0 XMEM-HERE !
+VARIABLE XMEM-LIMIT      0 XMEM-LIMIT !
+VARIABLE XMEM-INIT-DONE  0 XMEM-INIT-DONE !
 
 \ -- XMEM free-list for individual block reclaim --
 \   Each freed block stores at its address:
@@ -2225,12 +2221,14 @@ DEFER _XMEM-FREE-SPAN-CHECK
 
 \ XMEM-INIT ( -- )  read base/size from SysInfo, set up pointers
 : XMEM-INIT  ( -- )
+    XMEM-INIT-DONE @ IF EXIT THEN
     XMEM? IF
         EXT-MEM-BASE XMEM-HERE !
         EXT-MEM-BASE EXT-MEM-SIZE + XMEM-LIMIT !
     ELSE
         0 XMEM-HERE !  0 XMEM-LIMIT !
-    THEN ;
+    THEN
+    1 XMEM-INIT-DONE ! ;
 
 \ XMEM-ALLOT ( u -- addr )  allocate u bytes from ext mem
 \   Rounds positive requests to 16 bytes, tries the free-list first
@@ -2386,6 +2384,41 @@ XMEM-INIT      \ initialise at load time
     ELSE
         CREATE ALLOT
     THEN ;
+
+\ _DICT-POW2-FLOOR ( u -- p )  greatest power of two not above u
+: _DICT-POW2-FLOOR  ( u -- p )
+    DUP 0= IF EXIT THEN
+    1 SWAP
+    BEGIN DUP 1 > WHILE
+        2/ SWAP 2* SWAP
+    REPEAT DROP ;
+
+VARIABLE _DICT-INDEX-DONE  0 _DICT-INDEX-DONE !
+
+\ _DICT-INDEX-INIT ( -- )
+\   Permanently reserve at most 1/128 of currently free XMEM for the BIOS
+\   dictionary index.  A power-of-two slot count keeps probing masked; the
+\   canonical 128 MiB arrangement selects 65,536 16-byte slots (1 MiB).
+\   No-XMEM systems explicitly leave the optional index disabled.  A rebuild
+\   may report saturation (status 2) without compromising linked-list lookup.
+\   This boot-only initializer is one-shot so neither its table nor the XMEM
+\   reset floor can be silently replaced later.
+: _DICT-INDEX-INIT  ( -- )
+    ?CORE0
+    _DICT-INDEX-DONE @ IF EXIT THEN
+    1 _DICT-INDEX-DONE !
+    XMEM? 0= IF 0 0 DICT-INDEX! DROP EXIT THEN
+    XMEM-FREE 2048 / _DICT-POW2-FLOOR
+    DUP 0= IF DROP 0 0 DICT-INDEX! DROP EXIT THEN
+    DUP 16 * XMEM-ALLOT?              ( slots base ior )
+    IF 2DROP 0 0 DICT-INDEX! DROP EXIT THEN
+    SWAP                              ( base slots )
+    DICT-INDEX!                       ( status )
+    DUP 1 = ABORT" BIOS rejected dictionary index"
+    DROP                              ( status 0 or safe status 2 fallback )
+    XMEM-HERE @ XMEM-FLOOR ! ;
+
+_DICT-INDEX-INIT
 
 \ =====================================================================
 \  §1.15  Userland Memory Isolation
@@ -5753,8 +5786,9 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
 \ used by hosted tools such as Akashic Pad.  It walks a complete buffer,
 \ evaluates one physical line at a time, stops at the first error, and
 \ then checks that no colon definition or cross-line conditional remains
-\ unfinished.  Callers own dictionary rollback (HERE/LATEST); after that
-\ rollback they must call EVALUATOR-RESET to clear compiler bookkeeping.
+\ unfinished.  Callers pass their saved HERE/LATEST pair to DICT-ROLLBACK;
+\ after a successful rollback they call EVALUATOR-RESET to clear compiler
+\ bookkeeping.
 
 0 CONSTANT EVAL-S-OK
 1 CONSTANT EVAL-S-UNDEFINED
