@@ -252,6 +252,30 @@ the raw intervals, generation, coalescing, overflow, and error fields rather
 than presenting batch-bounded attribution as exact per-word instruction
 accounting.
 
+The first complete consumer of this diagnostic passed the ordinary twelve-offer
+Desk/Pad/Daybook journey at Akashic `c5f2271` with MegaPad `6a9f10e`. Its
+authoritative half-open window covered 933.0M retired guest instructions after
+a separately recorded 3.0M-instruction attachment lag. It completed with no
+observer error, dropped record, end straddle, or open phase, but 246 of 374
+sequence transitions were coalesced at the 500,000-instruction batch boundary.
+The result therefore supports bounded optimization decisions, not exact
+per-phase accounting. Akashic's durable raw-evidence ledger is
+`local_testing/evidence/rich-desktop-phase-profile-20260830.md`.
+
+That profile found one newer logical revision whose complete pixels,
+retained-only pixels, retained text, and draw count exactly matched its
+acknowledged predecessor. It nevertheless spent 38.5--40.5M observed
+instructions in hybrid preflight plus delta comparison. This justifies a
+renderer-neutral certified-unchanged optimization in Akashic while preserving
+the real revision fence, transaction, offer, physical composition, and exact
+acknowledgement. It does not justify a MegaPad opcode, cached executable, cycle
+claim, or emulator timing shortcut.
+
+The successful observer run still used the in-process enhanced host port and
+`pygame.display.flip()`. It did not traverse the RTL UART or an e-paper panel,
+so physical UART status remains **OPEN** and no transport-rate or panel-cadence
+decision follows from it.
+
 ## 5. Terminal consumption
 
 Terminal code polls accepted batches outside scheduler settlement. Polling
