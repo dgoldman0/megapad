@@ -492,7 +492,8 @@ primitives available today:
 
 ### 3.1 CPU Core
 
-* 16 × 64-bit general-purpose registers (R0–R15)
+* 32 × 64-bit general-purpose registers (R0–R31); base encodings address
+  R0–R15 and a REX prefix selects the upper bank
 * Full 16-family ISA: ALU, MEM, BRANCH, MULDIV, CSR, MEX (tile), etc.
 * Flags: Z, C, N, V, P, G, I, S
 * Subroutine calls via CALL.L / RET.L; compiled Forth uses SEP R16/R17 (hybrid STC)

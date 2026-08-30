@@ -30,6 +30,36 @@ The scalar memory bus separately admits the four full-core ports, three
 cluster ports, NIC DMA, and disk DMA. I-cache refill and data traffic are
 time-multiplexed at each full-core bus port.
 
+### 1.1 Scalar CPI and modernization boundary
+
+The checked-in full-core RTL is a correctness-first, in-order, buffered
+fetch/decode state machine. Its current state flow clears the instruction
+buffer after decode and returns through fetch for the next instruction. A
+common warm simple instruction therefore has a roughly four-clock floor by
+inspection, and execute or memory paths take longer. This is an implementation
+description, not a post-route CPI measurement.
+
+The intended modernization target is roughly 1--2 **average** CPI for common
+hot scalar code. It is not a requirement that every operation finish in one
+or two clocks. An in-order pipeline, forwarding, safe branch handling, and a
+more capable cache/SRAM path are compatible with MegaPad's architecture.
+Out-of-order retirement or speculative MMIO and shared side effects are not
+required and would contradict the deterministic machine boundary.
+
+The scalar core is only one term in realized performance. There is no data
+cache in the current full-core path; internal RAM, I-cache refill, shared-bus
+arbitration, XMEM, DMA, and peripherals impose their own latency and
+contention. Any cache or pipeline redesign must preserve precise retirement,
+prefix and PSEL behavior, instruction-boundary interrupts,
+self-modifying-code visibility, deterministic ordering, DMA coherence, and
+the architecturally visible distinctions among Bank 0, XMEM, and HBW.
+
+This target belongs to RTL or silicon. The functional emulator should continue
+to count retired instructions and advance its deterministic virtual-cycle
+model without simulating pipeline bubbles globally. See
+[`EMULATOR.md`](../../EMULATOR.md#steps-cycles-and-hardware-time) for the three
+timing domains and hardware projection formula.
+
 ## 2. Internal and external memory
 
 `mp64_soc` currently defaults `MEM_DEPTH` to 16,384 512-bit rows per bank.

@@ -5,20 +5,21 @@
 // 64-bit CPU with RCA 1802-inspired register architecture and extended ISA.
 //
 // Key features:
-//   - 16 × 64-bit GPRs, selectable PC (PSEL), data pointer (XSEL), SP (SPSEL)
+//   - 32 × 64-bit GPRs, selectable PC (PSEL), data pointer (XSEL), SP (SPSEL)
 //   - Variable-length instructions (1–11 bytes)
 //   - 8-bit flags: [S I G P V N C Z]
 //   - 8-bit D accumulator, Q flip-flop, T register (1802 heritage)
 //   - 16 MEMALU ops on D via M(R(X))
 //   - Hardware MUL (via mp64_mul wrapper, 4-cycle), iterative DIV (64-cycle)
 //   - Vectored interrupts (IVT in memory), privilege levels, MPU
-//   - I-cache interface with prefetch buffer (2-stage pipeline)
+//   - I-cache interface with a 16-byte instruction buffer
 //   - Tile/MEX engine dispatch
 //   - Performance counters, BIST, DMA ring CSRs
 //
-// Pipeline: 2-stage decoupled
-//   IF:  reads 8 bytes/cycle from I-cache into 16-byte ibuf
-//   DEX: decode + execute from ibuf
+// Execution structure: in-order buffered multi-state core
+//   FETCH: requests complete instruction bytes through the I-cache interface
+//   DECODE/execute: retires the buffered instruction or enters a longer path
+// The named responsibilities are not a sustained one-instruction/clock pipe.
 //
 // Coding rules:
 //   - Verilog-2001, synchronous reset (active-high), non-blocking assigns

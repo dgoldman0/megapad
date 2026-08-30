@@ -47,6 +47,19 @@ and ghosting/full-refresh policy, color conversion and dithering, rasterization,
 and all panel-controller buffers. None of those choices belongs in UIDL,
 application state, or the APT wire contract.
 
+This is intentionally stronger than a conventional terminal driver's
+"accepted bytes" boundary. Attachment epochs prove transport ownership;
+bounded queue admission proves complete storage; APT transactions prove a
+logical revision; and the selected sink's offer acknowledgement proves display
+completion at that sink's documented boundary before revision-bound input is
+authorized. For pygame that boundary is only host display-API submission; only
+a physical sink's post-controller, post-settle acknowledgement proves panel
+completion. Those records should be deduplicated when they repeat the same
+assertion, but they cannot be collapsed into one flag because each closes a
+different failure boundary. The extra chain is what makes reconnect/replay,
+slow-panel latest-view coalescing, and exact-revision touch safe rather than
+merely best-effort.
+
 ## 2. Attachment and epochs
 
 There is at most one enhanced primary attachment. Attaching returns an opaque token
@@ -143,6 +156,29 @@ exercise the model/compositor, while the current BIOS rich-terminal path sends
 no bytes to the physical RTL TX pin. Emulator/native viewer success is not
 physical-UART evidence and proves neither baud timing nor board-level
 backpressure.
+
+The recorded `eedcfb9`/`4f074ae` reference journey makes the consequence
+quantifiable, although it is not physical-link evidence. At 8N1, 115,200 baud
+has a nominal payload ceiling of 11,520 bytes/s. Its 744,222-byte first offer
+would therefore require at least 64.60 seconds of uninterrupted serialization,
+and the 24,541 post-first bytes would require another 2.13 seconds. Individual
+post-first updates span 0--6,924 decoded bytes, or 0--601 ms of line time. At
+the optional 1,000,000-baud profile those same no-gap lower bounds are 7.442
+seconds, 245 ms, and 0--69 ms respectively.
+
+Those figures are arithmetic lower bounds from decoded guest-to-terminal wire
+bytes, not measurements. They omit terminal replies, scheduling gaps,
+backpressure, composition, and panel refresh, and the physical TX seam above
+is still open. They do show the likely division of labor: after first load, a
+100 MHz implementation at even a four-clock floor projects the 69.0--123.0M
+post-first instruction intervals to at least 2.76--4.92 seconds before longer
+operations or stalls, so guest execution would still dominate their current
+0--601 ms serialization floors. A GHz-class 1--2-average-CPI CPU instead
+reduces that guest work to tens or low hundreds of milliseconds, at which
+point a large update can become UART-bound and an e-paper endpoint can
+independently remain refresh-bound. Retained deltas, coalescing, faster
+negotiated transport, and the exact post-refresh acknowledgement rule address
+different terms of that latency budget.
 
 The physical TX seam is closed before any faster-rate work. The preferred
 unreleased-system direction is for the architectural BIOS path to poll real

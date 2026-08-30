@@ -421,6 +421,27 @@ traffic fell 41.3% by frame count and 17.7% by byte count. This is a
 steady-state publication win, not a cold-start speed claim: total guest work
 rose 1.8%, while the single-run elapsed time was effectively flat.
 
+### 7.1 Performance interpretation
+
+The eight post-first actions retired 69.0--123.0 million guest instructions,
+averaging 89.4 million. Those are architectural work counts, not emulator
+virtual cycles or RTL clocks. As arithmetic scenarios, a 2 GHz implementation
+at 1--2 average CPI would spend roughly 35--123 ms on that guest work; the
+checked-in portable RTL does not claim that CPI and has a roughly four-clock
+floor for a common warm simple instruction. Hardware usability must then add
+physical transport, composition, and display completion. The current decoded
+byte counts imply materially longer serialization for the first snapshot at
+115,200 baud, and e-paper completion may dominate after arrival; the exact
+derived lower bounds and the still-open UART seam are recorded in
+[`MEGAPAD-TERMINAL-HOST-PORT.md`](MEGAPAD-TERMINAL-HOST-PORT.md#41-physical-uart-status-and-evidence-boundary).
+
+A saved or precompiled Forth dictionary can remove source compilation from
+cold boot, but does not reduce these already-loaded interaction instruction
+counts. Improving them requires ordinary software/code-generation work;
+reaching roughly 1--2 average CPI is a separate MegaPad RTL/ASIC concern. The
+functional emulator may remain instruction-level while its deterministic
+virtual-cycle model continues to drive devices, scheduling, and replay.
+
 The current Pygame acceptance runner also stops after the Daybook task and
 does not exercise the separately implemented ordinary Daybook-to-Pad
 shared-resource handoff. If that handoff remains part of this checkpoint, its

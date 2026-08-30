@@ -152,13 +152,15 @@ per-core QoS weights.  Cores communicate through a hardware mailbox (IPI)
 and 8 spinlocks.  Micro-clusters are gated by the SysInfo CLUSTER_EN
 register.  KDOS automatically routes tile/SIMD work to full cores only.
 
-**Scalar CPU** — Each core has 16 general-purpose 64-bit registers,
-variable-length instructions (1–10 bytes), 16 instruction families,
-heritage from the RCA CDP1802 with modern 64-bit extensions.  Any GPR can
-serve as PC, data pointer, or stack pointer via runtime selectors.
-A 2-stage pipeline (IF + DEX) with a per-core 4 KiB direct-mapped
-instruction cache delivers ~2× throughput over the original FSM design
-with no speculation or out-of-order execution.
+**Scalar CPU** — Each full core has 32 general-purpose 64-bit registers,
+variable-length instructions (1–11 bytes), 16 instruction families, and
+heritage from the RCA CDP1802 with modern 64-bit extensions. Any GPR can
+serve as PC, data pointer, or stack pointer through runtime selectors. The
+checked-in portable RTL is an in-order, IF/DEX-buffered multi-state core with
+a per-core 4 KiB direct-mapped instruction cache. The IF/DEX names describe a
+functional split, not a sustained one-instruction-per-clock pipeline: common
+warm scalar instructions currently have a roughly four-clock floor and
+execute or memory operations take longer.
 
 **Tile Engine** — Per-core SIMD execution unit controlled through CSR
 registers and triggered by MEX instructions.  Each operation processes a
@@ -472,19 +474,23 @@ powerful and surprisingly elegant.
 
 ## Emulator vs. FPGA RTL
 
-The Python emulator is a **functional simulation** — it implements the
-full instruction set and produces correct results, but models memory as
-flat RAM with simplified cycle counting.
+The Python emulator and its native acceleration path are **architectural
+simulations**: they implement the instruction set and devices, but do not
+simulate every edge or pipeline bubble in the portable RTL. One emulator
+step is one retired guest instruction. The separate deterministic virtual
+cycle model advances timers, devices, scheduling, and replay; neither value
+is an automatically measured RTL clock count.
 
 The FPGA RTL (targeting Genesys 2 / Kintex-7 325T) implements the full
-quad-core SoC including the extended tile engine and crypto/PQC
+heterogeneous SoC including the extended tile engine and crypto/PQC
 accelerators.  Key differences from the emulator are cycle-level timing
 and block-RAM-backed memory:
 
 - **1 MiB SRAM** base (4 MiB expanded), backed by FPGA block RAM
-- **2-stage pipeline** (IF + DEX) with per-core 4 KiB direct-mapped
-  instruction cache; no speculation or branch prediction
-- **Quad-core** with round-robin bus arbiter and per-core QoS weights
+- **Buffered in-order IF/DEX state machine** with a per-core 4 KiB
+  direct-mapped instruction cache; no speculation or branch prediction
+- **Four full cores plus three four-microcore clusters** with round-robin bus
+  arbitration and per-core QoS weights
 - **Crypto accelerators**: AES-256-GCM, SHA-3/SHAKE, CRC, TRNG, X25519/
   Field ALU, NTT, KEM (ML-KEM-512)
 - **Fully static design** — retains state down to DC for ultra-low power
@@ -498,8 +504,12 @@ Manual resource estimates (Kintex-7 325T, no Vivado synthesis yet):
 | BRAM36 | ~240 | 445 | 54% |
 | DSP48E1 | ~420–620 | 840 | 50–74% |
 
-Software written for the emulator runs identically on the RTL.
-The simplification affects only timing accuracy, not behavior.
+Software written for the emulator is intended to run identically on the RTL.
+The simplification affects timing, not architectural behavior. A future
+roughly 1--2 average-CPI scalar implementation is an RTL/ASIC and memory-system
+optimization target; it does not require the functional emulator to invent
+pipeline stalls, and it is not a promise that every instruction completes in
+one or two clocks.
 
 ---
 

@@ -674,11 +674,12 @@ task dispatch time:
 | Address mapping | `WAKE-CORE` (pass arena base) | Dispatch time |
 | Protection | Arena bounds + `?CORE0` | Enforced at call boundary |
 
-The cost of a hardware MMU is per-access (TLB lookup, page walk on
-miss).  The cost of the core-0 model is per-task (one setup, one
-teardown).  On a 2-stage pipeline at 100 MHz, that's the difference
-between a 50% IPC hit on every load/store and zero overhead during
-computation.
+The cost of a hardware MMU is attached to translation: a TLB hit is commonly
+part of the access pipeline, while a miss may require a page walk. The cost of
+the core-0 model is paid at task setup and teardown instead of performing a
+translation lookup for every ordinary access. Exact IPC impact depends on the
+concrete MMU, scalar pipeline, cache and workload; the old fixed 50% estimate
+is not a current measurement and is not part of the architectural argument.
 
 ### 8.4 Predictable Timing
 

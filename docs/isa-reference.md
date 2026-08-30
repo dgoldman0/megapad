@@ -152,6 +152,12 @@ The instruction size increases by 1 byte when a REX prefix is present.
 
 ---
 
+> **Timing terminology:** Values in the `Cycles` columns below are base charges
+> in the ISA/emulator timing model. They are not guaranteed RTL clock counts or
+> a universal silicon CPI. Fetch structure, memory region, cache state, bus
+> arbitration, MMIO, and contention determine realized hardware latency. See
+> [Steps, cycles, and hardware time](../EMULATOR.md#steps-cycles-and-hardware-time).
+
 ## Family 0x0 — SYS (System)
 
 Single-byte system operations (except CALL.L which is 2 bytes).

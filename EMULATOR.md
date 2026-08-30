@@ -686,6 +686,14 @@ not one hardware clock. Step counts are therefore stable work measurements for
 equivalent emulator configurations, while wall time also includes host CPU,
 native-engine, device-model, and reporting overhead.
 
+Keep the three timing domains separate:
+
+| Domain | What advances it | What it proves |
+|---|---|---|
+| Retired guest steps | Completed architectural instructions | Stable software work for equivalent configurations |
+| Emulator virtual cycles | The deterministic instruction/device timing model | Timer, device, scheduler, strict-system-cycle, and replay behavior inside the emulator |
+| RTL or silicon clocks | Physical state-machine, pipeline, cache, bus, memory, and peripheral edges | Realized hardware CPI and wall time for one implementation |
+
 The emulator's cycle counter applies its architectural timing model to those
 instructions. It is not a claim of cycle parity with the current RTL: the RTL
 has a multi-state fetch/decode/execute path, an instruction cache, shared-bus
@@ -715,6 +723,24 @@ ASIC implementation with the corresponding pipeline, cache, SRAM, and memory
 system; it must not be inferred by applying those clocks to the current
 100 MHz FPGA target or by treating the emulator's modeled cycle/step ratio as
 measured RTL CPI.
+
+Likewise, a goal of roughly 1--2 **average** CPI applies to common hot scalar
+work on a future MegaPad RTL/ASIC implementation, not to every instruction.
+Cache misses, shared-bus service, XMEM, MMIO, calls and returns, division, and
+accelerator operations can remain multi-cycle. The current portable RTL does
+not establish that target: its buffered fetch/decode state flow gives a common
+warm simple instruction a roughly four-clock floor, with longer execute and
+memory paths.
+
+Reaching the target is a hardware implementation change, not an architectural
+reset. It may add an in-order pipeline, forwarding, prediction that cannot
+leak side effects, and better caches or SRAM while preserving precise
+retirement, non-speculative MMIO and shared effects, complete prefix/PSEL
+semantics, interrupts at instruction boundaries, self-modifying-code
+visibility, deterministic ordering, and the visible costs of Bank 0, XMEM,
+and HBW. The architectural emulator can remain instruction-level; an optional
+silicon timing model may be added separately when cycle-accurate comparison is
+needed.
 
 ### Breakpoints
 

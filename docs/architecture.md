@@ -70,6 +70,37 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 
 ---
 
+## Scalar execution and performance boundary
+
+MegaPad specifies architectural results and ordering, not one permanent CPI.
+The checked-in portable full-core RTL is a correctness-first, in-order,
+buffered fetch/decode state machine; it is not a measured 1--2-CPI core. By
+direct state-flow inspection, even a cache-resident simple instruction has a
+roughly four-clock floor, and execute, memory, MMIO, miss, and contention paths
+take longer. The earlier `IF`/`DEX` names describe responsibility boundaries,
+not sustained one-instruction-per-clock retirement.
+
+A production RTL or ASIC may target roughly 1--2 **average** CPI for ordinary
+hot scalar workloads. This is an implementation optimization, not a design
+reversal and not a universal latency promise. It must preserve complete prefix
+and PSEL semantics, ordered successful effects and precise faults,
+instruction-boundary interrupts, self-modifying-code visibility,
+non-speculative MMIO and shared effects, deterministic ordering, and the
+visible distinctions among Bank 0, XMEM, and HBW. An in-order shallow pipeline,
+forwarding, safe branch handling, and improved cache/SRAM paths are compatible;
+out-of-order execution is not required.
+
+A GHz-class implementation is a whole hardware target, not a change to one
+clock constant. Its SRAM, caches, buses, UART divisors, timers, RTC prescalers,
+accelerators, and clock-domain crossings must all be designed and qualified at
+their realized rates. The architectural emulator remains instruction-level
+and keeps its separate deterministic virtual-cycle model. See
+[`EMULATOR.md`](../EMULATOR.md#steps-cycles-and-hardware-time) for timing
+terminology and [`fpga/docs/fpga.md`](../fpga/docs/fpga.md#11-scalar-cpi-and-modernization-boundary)
+for current implementation detail.
+
+---
+
 ## Memory Map
 
 The CPU uses a 64-bit flat address space.  RAM starts at address 0;
