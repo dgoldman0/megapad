@@ -26,7 +26,23 @@ class ExecutionError(SimulatorError):
 
 
 class ForthAbort(ExecutionError):
-    """The nonreturning BIOS ``ABORT`` word cleared the active task."""
+    """The nonreturning BIOS ``ABORT`` word cleared one active task."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        origin_context: object | None = None,
+    ) -> None:
+        self.origin_context = origin_context
+        super().__init__(message)
+
+    def bind_origin(self, context: object) -> bool:
+        """Bind an untagged host primitive abort to its innermost task."""
+
+        if self.origin_context is None:
+            self.origin_context = context
+        return self.origin_context is context
 
 
 class StepBudgetExceeded(ExecutionError):

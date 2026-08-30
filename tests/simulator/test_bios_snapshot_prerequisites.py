@@ -8,6 +8,18 @@ from simulator.errors import ExecutionError
 from simulator.runtime import MegaForthRuntime
 
 
+def _install_escaping_dictionary_fault(runtime: MegaForthRuntime) -> None:
+    def escape_dictionary_fault(_context) -> None:
+        raise ExecutionError("guarded dictionary rejection")
+
+    hook = runtime.define_primitive(
+        "HOST-DICTIONARY-FAULT",
+        escape_dictionary_fault,
+    )
+    runtime.main_context.data.push(hook.xt)
+    runtime.execute("DICT-FAULT-XT!")
+
+
 def test_latest_tracks_the_newest_live_dictionary_header() -> None:
     runtime = MegaForthRuntime()
     previous = runtime.dictionary.latest
@@ -47,13 +59,14 @@ def test_dict_rollback_consumes_a_valid_numeric_pair_after_publication() -> None
 
 def test_dict_rollback_rejects_an_invalid_pair_without_consuming_it() -> None:
     runtime = MegaForthRuntime()
+    _install_escaping_dictionary_fault(runtime)
     context = runtime.main_context
     active_here = runtime.dictionary.here
     active_latest = runtime.dictionary.latest
     context.data.push(active_here + 1)
     context.data.push(active_latest)
 
-    with pytest.raises(ExecutionError, match="saved HERE is ahead"):
+    with pytest.raises(ExecutionError, match="guarded dictionary rejection"):
         runtime.execute("DICT-ROLLBACK")
 
     assert context.data.snapshot() == (active_here + 1, active_latest)
@@ -63,6 +76,7 @@ def test_dict_rollback_rejects_an_invalid_pair_without_consuming_it() -> None:
 
 def test_dict_rollback_cannot_remove_the_semantic_bios_prefix() -> None:
     runtime = MegaForthRuntime()
+    _install_escaping_dictionary_fault(runtime)
     context = runtime.main_context
     core_word = runtime.find("DUP")
     assert core_word is not None
@@ -72,7 +86,7 @@ def test_dict_rollback_cannot_remove_the_semantic_bios_prefix() -> None:
     context.data.push(core_word.header_address)
     context.data.push(prior_header)
 
-    with pytest.raises(ExecutionError, match="protected dictionary prefix"):
+    with pytest.raises(ExecutionError, match="guarded dictionary rejection"):
         runtime.execute("DICT-ROLLBACK")
 
     assert context.data.snapshot() == (core_word.header_address, prior_header)

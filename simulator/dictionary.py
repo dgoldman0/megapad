@@ -185,10 +185,7 @@ class Dictionary:
         raw_name = _name_bytes(name)
         if not isinstance(initial_body, bytes):
             raise TypeError("dictionary initial body must be bytes")
-        allocation_size = (
-            HEADER_FIXED_BYTES + len(raw_name) + SEMANTIC_CODE_SLOT_BYTES
-            + len(initial_body)
-        )
+        allocation_size = self.definition_size(raw_name, initial_body=initial_body)
         allocation_limit = self._checked_advance(
             allocation_size,
             operation="dictionary definition",
@@ -237,6 +234,24 @@ class Dictionary:
         self._by_xt[xt] = word
         self._here = allocation_limit
         return word
+
+    def definition_size(
+        self,
+        name: bytes | str,
+        *,
+        initial_body: bytes = b"",
+    ) -> int:
+        """Return the exact hosted byte span for one prospective definition."""
+
+        raw_name = _name_bytes(name)
+        if not isinstance(initial_body, bytes):
+            raise TypeError("dictionary initial body must be bytes")
+        return (
+            HEADER_FIXED_BYTES
+            + len(raw_name)
+            + SEMANTIC_CODE_SLOT_BYTES
+            + len(initial_body)
+        )
 
     def allot(self, delta_cell: int) -> None:
         """Move ``HERE`` by one signed-cell delta without touching memory."""

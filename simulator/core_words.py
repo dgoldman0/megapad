@@ -293,15 +293,16 @@ def _dictionary_rollback(
 ) -> None:
     saved_latest = context.data.peek()
     saved_here = context.data.peek(1)
-    try:
-        runtime.dictionary.rollback_to(saved_here, saved_latest)
-    except (TypeError, ValueError, RuntimeError) as exc:
-        # Keep the pair available when validation fails.  The pending
-        # DICT-FAULT-XT! slice will route this failure through the guest fault
-        # callback; until then it remains an explicit hosted execution error.
-        raise ExecutionError(f"DICT-ROLLBACK rejected checkpoint: {exc}") from None
+    runtime.rollback_dictionary(saved_here, saved_latest, context)
     context.data.pop()
     context.data.pop()
+
+
+def _dictionary_fault_xt_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.set_dictionary_fault_xt(context.data.pop())
 
 
 def _dictionary_base_fetch(
@@ -318,20 +319,20 @@ def _dictionary_limit_fetch(
     context.data.push(runtime.dictionary_limit)
 
 
-def _tile_align(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
-    runtime.dictionary.allot((-runtime.dictionary.here) & 63)
+def _tile_align(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.tile_align_dictionary(context)
 
 
 def _allot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
-    runtime.dictionary.allot(context.data.pop())
+    runtime.allot_dictionary(context.data.pop(), context)
 
 
 def _comma(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
-    runtime.dictionary.comma(context.data.pop())
+    runtime.comma_dictionary(context.data.pop(), context)
 
 
 def _c_comma(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
-    runtime.dictionary.c_comma(context.data.pop())
+    runtime.c_comma_dictionary(context.data.pop(), context)
 
 
 def _cells(context: ExecutionContext) -> None:
@@ -409,7 +410,7 @@ def _compare(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _abort(context: ExecutionContext) -> None:
     context.data.clear()
     context.returns.clear()
-    raise ForthAbort("Forth ABORT")
+    raise ForthAbort("Forth ABORT", origin_context=context)
 
 
 def _format_signed_cell(value: int, base: int) -> bytes:
@@ -461,6 +462,36 @@ def _j(context: ExecutionContext) -> None:
 
 def _execute(context: ExecutionContext) -> Invoke:
     return Invoke(context.data.pop())
+
+
+def _task_start_unavailable(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    word_name: str,
+) -> None:
+    xt = context.data.peek()
+    if xt == 0:
+        raise ExecutionError(f"{word_name} requires a nonzero execution token")
+    try:
+        runtime.dictionary.resolve(xt)
+    except KeyError:
+        raise ExecutionError(
+            f"{word_name} requires a live execution token, got 0x{xt:016x}"
+        ) from None
+    raise ExecutionError(
+        f"{word_name} is unavailable until cooperative task scheduling exists; "
+        "the execution token was not consumed"
+    )
+
+
+def _task_stop_unavailable(context: ExecutionContext) -> None:
+    slot = context.data.peek()
+    if slot not in (1, 2, 3):
+        raise ExecutionError("TASK-STOP slot must be 1, 2, or 3")
+    raise ExecutionError(
+        "TASK-STOP is unavailable until cooperative task scheduling exists; "
+        "the slot was not consumed"
+    )
 
 
 def install_core(runtime: MegaForthRuntime) -> None:
@@ -551,6 +582,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _dictionary_rollback(runtime, context),
         ),
         (
+            b"DICT-FAULT-XT!",
+            lambda context: _dictionary_fault_xt_store(runtime, context),
+        ),
+        (
             b"DICT-BASE@",
             lambda context: _dictionary_base_fetch(runtime, context),
         ),
@@ -578,6 +613,31 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"COREID", _push_zero),
         (b"TASK-ID", _push_zero),
+        (
+            b"BACKGROUND",
+            lambda context: _task_start_unavailable(
+                runtime,
+                context,
+                "BACKGROUND",
+            ),
+        ),
+        (
+            b"BACKGROUND2",
+            lambda context: _task_start_unavailable(
+                runtime,
+                context,
+                "BACKGROUND2",
+            ),
+        ),
+        (
+            b"BACKGROUND3",
+            lambda context: _task_start_unavailable(
+                runtime,
+                context,
+                "BACKGROUND3",
+            ),
+        ),
+        (b"TASK-STOP", _task_stop_unavailable),
         (b"'", lambda context: _tick(runtime, context)),
         (b">BODY", lambda context: _to_body(runtime, context)),
         (b"COMPARE", lambda context: _compare(runtime, context)),

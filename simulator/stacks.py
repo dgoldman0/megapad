@@ -97,10 +97,17 @@ class Continuation:
     xt: int
     ip: int
     root: bool = False
+    dispatch_id: int = 0
+    fault_abort: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "xt", u64(self.xt))
         object.__setattr__(self, "ip", u64(self.ip))
+        object.__setattr__(self, "dispatch_id", u64(self.dispatch_id))
+        if self.dispatch_id and not self.root:
+            raise ValueError("only a root continuation may name a dispatch")
+        if self.root and self.fault_abort:
+            raise ValueError("a continuation cannot be both root and fault-abort")
 
 
 ReturnEntry: TypeAlias = int | Continuation
@@ -458,8 +465,16 @@ class ReturnStack:
         ip: int,
         *,
         root: bool = False,
+        dispatch_id: int = 0,
+        fault_abort: bool = False,
     ) -> Continuation:
-        continuation = Continuation(xt=xt, ip=ip, root=root)
+        continuation = Continuation(
+            xt=xt,
+            ip=ip,
+            root=root,
+            dispatch_id=dispatch_id,
+            fault_abort=fault_abort,
+        )
         if self._memory is None:
             assert self._entries is not None
             self._entries.append(continuation)
@@ -482,6 +497,14 @@ class ReturnStack:
             raise self._shape_error("return", "continuation", entry)
         self._discard_entries(1)
         return entry
+
+    def has_fault_abort_continuation(self) -> bool:
+        """Whether a live dictionary-fault fail-closed frame remains."""
+
+        return any(
+            isinstance(entry, Continuation) and entry.fault_abort
+            for entry in self.snapshot()
+        )
 
     def enter_do(self, limit: int, index: int) -> None:
         """Place one ``DO`` loop frame as limit followed by index."""
@@ -600,6 +623,8 @@ class ReturnStack:
                     entry.xt,
                     entry.ip,
                     root=entry.root,
+                    dispatch_id=entry.dispatch_id,
+                    fault_abort=entry.fault_abort,
                 )
             else:
                 self.push(entry)

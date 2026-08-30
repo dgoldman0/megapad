@@ -67,17 +67,27 @@ def test_variable_owns_one_zeroed_cell_and_executes_as_its_body_address() -> Non
 def test_variable_body_capacity_fault_does_not_publish_header_or_metadata() -> None:
     memory = SparseAddressSpace(bank0_size=0x20000)
     runtime = MegaForthRuntime(memory=memory)
+
+    def escape_dictionary_fault(_context) -> None:
+        raise ExecutionError("guarded dictionary capacity")
+
+    hook = runtime.define_primitive(
+        "HOST-DICTIONARY-FAULT",
+        escape_dictionary_fault,
+    )
+    runtime.main_context.data.push(hook.xt)
+    runtime.execute("DICT-FAULT-XT!")
     name = b"NO-ROOM"
     definition_bytes = (
         HEADER_FIXED_BYTES + len(name) + SEMANTIC_CODE_SLOT_BYTES
     )
-    region_limit = memory.regions[0].limit
-    fault_here = region_limit - definition_bytes
+    guarded_ceiling = runtime.main_context.data.pointer - 256
+    fault_here = guarded_ceiling - definition_bytes
     runtime.dictionary.allot(fault_here - runtime.dictionary.here)
     previous_latest = runtime.dictionary.latest_word
     untouched = memory.read_bytes(fault_here, definition_bytes)
 
-    with pytest.raises(OverflowError, match="memory region"):
+    with pytest.raises(ExecutionError, match="guarded dictionary capacity"):
         runtime.evaluate(b"VARIABLE " + name)
 
     assert runtime.dictionary.here == fault_here

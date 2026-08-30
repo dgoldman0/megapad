@@ -32,6 +32,9 @@ The implemented slices provide:
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
 - numeric `HERE`/`LATEST` checkpoint rollback with live-ancestry and contiguous
   reclaimed-zone validation, binding restoration, and stale-byte retention;
+- the installable BIOS dictionary-fault callback, including the dynamic
+  Bank-0 stack margin, exact hosted-span fit acceptance, same-dispatch guest
+  `THROW`, and fail-closed handling when the callback is zero or returns;
 - hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
   the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
 - active-line `WORD` with its transient counted string at `HERE`, forward
@@ -55,14 +58,16 @@ interrupt, snapshot, RTL, or hardware claim. Those remain the architectural
 emulator's and physical implementation's responsibility.
 
 The current stack bounds enforce the canonical mapped Bank 0 halves, and the
-ordinary KDOS `?DICT-ROOM` guard now observes the live stack and heap. BIOS
-dictionary emitters still enforce only their containing memory region; they do
-not yet route every publication through the KDOS dictionary-fault hook. Valid
-`DICT-ROLLBACK` checkpoints have their source-visible behavior, but rejection
-remains a hosted execution error with the pair intact until `DICT-FAULT-XT!`
-installs the ordinary guest callback. Complete automatic
-dictionary-versus-stack/heap overflow fidelity therefore remains pending even
-though the source-defined allocator itself is present.
+ordinary KDOS `?DICT-ROOM` guard observes the live stack and heap. Every
+current guest semantic HERE mutation and transient `WORD` span preflights
+against the live data-stack margin before bytes or dictionary metadata change.
+An installed `DICT-FAULT-XT!` callback receives rejection; zero or a returning
+callback takes the BIOS diagnostic-and-ABORT fallback. Unbacked contexts from
+`new_context()` are host scratch views rather than guest tasks, so their
+dictionary operations use the canonical foreground stack margin. Direct
+`runtime.dictionary` mutation remains a low-level host/test seam outside the
+guest ABI. External user-dictionary bounds, their switching words, and the
+later transactional evaluator remain pending.
 
 ## Run it
 
@@ -159,6 +164,20 @@ through an active loop and deferred `DOES>` action. `ABORT` remains the
 distinct noncatchable BIOS reset path. Loading the intervening snapshot block
 absorbs the former exception island into the monotonic frontier.
 
+Byte-exact logical lines 676 through 719 install KDOS's ordinary
+`_KDOS-DICT-FAULT` and exception-safe task-boundary wrappers. Acceptance drives
+all current dictionary emitters through a real nested guest `CATCH`, proves
+the standard `-8` result and failure atomicity, checks the zero/returning-hook
+fallback abort, and verifies exact hosted semantic spans that fit do not call
+the hook. The four task wrappers capture distinct, live pre-shadow BIOS XTs.
+The shared source helper changes exactly one selected background handler and
+never slot zero. Each start wrapper reaches that reset before its captured
+BIOS entry reports scheduling unavailable. `TASK-STOP` orders its reset after
+the captured entry, so that reset is deliberately unreachable until
+cancellation exists.
+Resumable cooperative task contexts, `PAUSE`, and scheduling have not been
+implemented, so this slice makes no task-execution or cadence claim.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -166,15 +185,16 @@ cell immediately before restoring the `HANDLER` variable. This conservative,
 fail-closed boundary covers that one-operation cleanup window and prevents a
 stale guest handler from reviving abandoned continuations. Transactional
 context recovery belongs to the pending evaluator/rollback slice. Ordinary
-source `THROW` never crosses that host boundary, and guest `RP!` remains a raw
-aligned restore within its caller-owned stack span.
+source `THROW` never escapes the outer public host boundary, including when it
+crosses a nested host primitive's `execute`/`evaluate` call. Guest `RP!`
+remains a raw aligned restore within its caller-owned stack span.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–675 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, and source-defined exception handling; line 70 is blank |
-| 676 onward | Next uncovered frontier | Not yet a simulator source-load claim |
+| 39–719 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, exceptions, dictionary-fault routing, and task-boundary shadowing; line 70 is blank |
+| 720 onward | Next uncovered frontier | CRC source first becomes executable at line 739; `CRC-FEED` is the first missing BIOS primitive reached at line 748 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -186,10 +206,10 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary installs KDOS's dictionary-fault callback and captures
-the BIOS task entry points through logical line 719. Later slices continue the
-same contiguous unchanged prefix toward the persistent evaluator and ordinary
-checked module-loader surface.
+The next source boundary begins KDOS's CRC convenience family. Later slices
+continue the same contiguous unchanged prefix toward the persistent evaluator,
+ordinary checked module-loader surface, and deterministic cooperative task
+scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

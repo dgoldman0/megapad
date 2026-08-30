@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, TypeAlias
+from typing import Callable, NoReturn, TypeAlias
 
-from shared.cells import CELL_BYTES, u64
+from shared.cells import CELL_BYTES, MASK64, s64, u64
 from simulator.dictionary import Dictionary, Word
 from simulator.errors import (
     ExecutionError,
@@ -265,6 +265,39 @@ class _StepMeter:
         self.steps += 1
 
 
+@dataclass(frozen=True, slots=True)
+class _DispatchFrame:
+    """One nested host boundary participating in semantic dispatch."""
+
+    context: ExecutionContext
+    meter: _StepMeter
+    root_id: int
+
+
+class _DictionaryFaultRequest(BaseException):
+    """Nonlocal request to enter the installed guest fault callback."""
+
+    def __init__(
+        self,
+        xt: int,
+        context: ExecutionContext,
+        reason: str,
+    ) -> None:
+        self.xt = u64(xt)
+        self.context = context
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _GuestControlTransfer(BaseException):
+    """A nested dispatcher consumed an older public dispatch root."""
+
+    def __init__(self, root_id: int, context: ExecutionContext) -> None:
+        self.root_id = u64(root_id)
+        self.context = context
+        super().__init__(f"guest control transferred to dispatch {self.root_id}")
+
+
 class MegaForthRuntime:
     """Hosted dictionary, evaluator, and explicit semantic dispatcher."""
 
@@ -297,6 +330,7 @@ class MegaForthRuntime:
         )
         if bank0 is None:
             raise ValueError("hosted runtime requires a mapped Bank 0")
+        self._bank0 = bank0
         data_empty = bank0.base + bank0.size // 2
         return_empty = bank0.limit
         if (
@@ -326,9 +360,11 @@ class MegaForthRuntime:
         # starts with the BIOS interval disabled, represented by two zeros.
         self._dictionary_base = 0
         self._dictionary_limit = 0
+        self._dictionary_fault_xt = 0
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
-        self._active_meters: list[_StepMeter] = []
+        self._active_dispatches: list[_DispatchFrame] = []
+        self._next_dispatch_root_id = 1
         self._uart_output = bytearray()
         if install_core_words:
             from simulator.core_words import install_core
@@ -375,6 +411,12 @@ class MegaForthRuntime:
         return self._dictionary_limit
 
     @property
+    def dictionary_fault_xt(self) -> int:
+        """Return the raw callback installed through ``DICT-FAULT-XT!``."""
+
+        return self._dictionary_fault_xt
+
+    @property
     def uart_output(self) -> bytes:
         """Return an immutable snapshot of bytes written to the hosted UART."""
 
@@ -404,6 +446,232 @@ class MegaForthRuntime:
 
         self._numeric_base = u64(base)
 
+    def set_dictionary_fault_xt(self, xt: int) -> None:
+        """Install a raw guest callback, including zero to disable it."""
+
+        self._dictionary_fault_xt = u64(xt)
+
+    def _dictionary_context(
+        self,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionContext:
+        if context is not None:
+            return context
+        if self._active_dispatches:
+            return self._active_dispatches[-1].context
+        if self._active_input_states:
+            return self._active_input_states[-1].context
+        return self.main_context
+
+    def _has_active_dispatch(self, context: ExecutionContext) -> bool:
+        return any(
+            frame.context is context for frame in self._active_dispatches
+        )
+
+    def _has_active_evaluation(self, context: ExecutionContext) -> bool:
+        return any(
+            state.context is context for state in self._active_input_states
+        )
+
+    def _has_older_dispatch(self, context: ExecutionContext) -> bool:
+        if not self._active_dispatches:
+            return False
+        current = self._active_dispatches[-1]
+        if current.context is not context:
+            raise AssertionError("semantic dispatch context stack is corrupted")
+        return any(
+            frame.context is context for frame in self._active_dispatches[:-1]
+        )
+
+    def _allocate_dispatch_root_id(self) -> int:
+        root_id = self._next_dispatch_root_id
+        self._next_dispatch_root_id += 1
+        if root_id > MASK64:
+            raise ExecutionError("semantic dispatch identity space exhausted")
+        return root_id
+
+    def _request_dictionary_fault(
+        self,
+        context: ExecutionContext,
+        reason: str,
+    ) -> NoReturn:
+        raise _DictionaryFaultRequest(
+            self._dictionary_fault_xt,
+            context,
+            reason,
+        )
+
+    def _preflight_dictionary_growth(
+        self,
+        width: int,
+        context: ExecutionContext,
+    ) -> None:
+        if not isinstance(width, int) or width < 0:
+            raise TypeError("dictionary growth width must be a nonnegative integer")
+
+        start = self.dictionary.here
+        if start > MASK64 - width:
+            self._request_dictionary_fault(context, "dictionary growth wraps uint64")
+        target = start + width
+        if self._dictionary_limit:
+            if (
+                start < self._dictionary_base
+                or start > self._dictionary_limit
+                or target > self._dictionary_limit
+            ):
+                self._request_dictionary_fault(
+                    context,
+                    "dictionary growth exceeds the active user interval",
+                )
+            return
+
+        stack = context.data if context.data.backed else self.main_context.data
+        ceiling = stack.pointer - 256
+        if (
+            start < self._bank0.base
+            or start >= self._bank0.limit
+            or target > self._bank0.limit
+            or target > ceiling
+        ):
+            self._request_dictionary_fault(
+                context,
+                "dictionary growth exceeds the guarded Bank-0 interval",
+            )
+
+    def _preflight_dictionary_target(
+        self,
+        target: int,
+        context: ExecutionContext,
+    ) -> None:
+        if not 0 <= target <= MASK64:
+            self._request_dictionary_fault(context, "dictionary target wraps uint64")
+        if self._dictionary_limit:
+            if not self._dictionary_base <= target <= self._dictionary_limit:
+                self._request_dictionary_fault(
+                    context,
+                    "dictionary target is outside the active user interval",
+                )
+            return
+
+        stack = context.data if context.data.backed else self.main_context.data
+        ceiling = stack.pointer - 256
+        if not self._bank0.base <= target < self._bank0.limit or target > ceiling:
+            self._request_dictionary_fault(
+                context,
+                "dictionary target is outside the guarded Bank-0 interval",
+            )
+
+    def _define_dictionary_word(
+        self,
+        name: bytes | str,
+        implementation: WordImplementation,
+        *,
+        immediate: bool = False,
+        initial_body: bytes = b"",
+        context: ExecutionContext | None = None,
+    ) -> Word:
+        active_context = self._dictionary_context(context)
+        width = self.dictionary.definition_size(name, initial_body=initial_body)
+        self._preflight_dictionary_growth(width, active_context)
+        try:
+            return self.dictionary.define(
+                name,
+                implementation,
+                immediate=immediate,
+                initial_body=initial_body,
+            )
+        except OverflowError as exc:
+            self._request_dictionary_fault(active_context, str(exc))
+
+    def _route_unhandled_dictionary_fault(
+        self,
+        request: _DictionaryFaultRequest,
+    ) -> NoReturn:
+        """Give direct host definition calls the same fail-closed boundary."""
+
+        if self._has_active_dispatch(request.context) or any(
+            state.context is request.context
+            for state in self._active_input_states
+        ):
+            raise request
+        self._execute_dictionary_fault_guarded(
+            request,
+            request.context,
+            _StepMeter(None),
+        )
+        raise AssertionError("dictionary fault callback returned to its caller")
+
+    def _define_public_dictionary_word(
+        self,
+        name: bytes | str,
+        implementation: WordImplementation,
+        *,
+        immediate: bool = False,
+        initial_body: bytes = b"",
+    ) -> Word:
+        try:
+            return self._define_dictionary_word(
+                name,
+                implementation,
+                immediate=immediate,
+                initial_body=initial_body,
+            )
+        except _DictionaryFaultRequest as request:
+            self._route_unhandled_dictionary_fault(request)
+
+    def allot_dictionary(
+        self,
+        delta_cell: int,
+        context: ExecutionContext,
+    ) -> None:
+        if not isinstance(delta_cell, int):
+            self.dictionary.allot(delta_cell)
+            return
+        target = self.dictionary.here + s64(delta_cell)
+        self._preflight_dictionary_target(target, context)
+        try:
+            self.dictionary.allot(delta_cell)
+        except OverflowError as exc:
+            self._request_dictionary_fault(context, str(exc))
+
+    def comma_dictionary(self, cell: int, context: ExecutionContext) -> None:
+        self._preflight_dictionary_growth(CELL_BYTES, context)
+        try:
+            self.dictionary.comma(cell)
+        except OverflowError as exc:
+            self._request_dictionary_fault(context, str(exc))
+
+    def c_comma_dictionary(self, cell: int, context: ExecutionContext) -> None:
+        self._preflight_dictionary_growth(1, context)
+        try:
+            self.dictionary.c_comma(cell)
+        except OverflowError as exc:
+            self._request_dictionary_fault(context, str(exc))
+
+    def tile_align_dictionary(self, context: ExecutionContext) -> None:
+        """Apply BIOS ``TALIGN`` growth semantics to the hosted frontier."""
+
+        width = (-self.dictionary.here) & 63
+        if width == 0:
+            return
+        self._preflight_dictionary_growth(width, context)
+        try:
+            self.dictionary.allot(width)
+        except OverflowError as exc:
+            self._request_dictionary_fault(context, str(exc))
+
+    def rollback_dictionary(
+        self,
+        saved_here: int,
+        saved_latest: int,
+        context: ExecutionContext,
+    ) -> None:
+        self._preflight_dictionary_target(saved_here, context)
+        try:
+            self.dictionary.rollback_to(saved_here, saved_latest)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            self._request_dictionary_fault(context, str(exc))
+
     def new_context(self) -> ExecutionContext:
         """Return an unbacked host scratch context.
 
@@ -426,7 +694,7 @@ class MegaForthRuntime:
     ) -> Word:
         if not callable(callback):
             raise TypeError("primitive callback must be callable")
-        return self.dictionary.define(
+        return self._define_public_dictionary_word(
             name,
             PrimitiveDefinition(callback),
             immediate=immediate,
@@ -439,7 +707,10 @@ class MegaForthRuntime:
         also included in that evaluation's ordered definition ledger.
         """
 
-        word = self.dictionary.define(name, ConstantDefinition(value))
+        word = self._define_public_dictionary_word(
+            name,
+            ConstantDefinition(value),
+        )
         if self._active_input_states:
             self._active_input_states[-1].definitions.append(word)
         return word
@@ -452,7 +723,7 @@ class MegaForthRuntime:
     ) -> Word:
         """Atomically publish one CREATE-family child and initial body bytes."""
 
-        word = self.dictionary.define(
+        word = self._define_public_dictionary_word(
             name,
             CreatedDefinition(),
             initial_body=initial_body,
@@ -464,7 +735,7 @@ class MegaForthRuntime:
     def define_directive(self, name: bytes | str, kind: DirectiveKind) -> Word:
         if not isinstance(kind, DirectiveKind):
             raise TypeError("directive kind must be a DirectiveKind")
-        return self.dictionary.define(
+        return self._define_public_dictionary_word(
             name,
             DirectiveDefinition(kind),
             immediate=True,
@@ -487,7 +758,12 @@ class MegaForthRuntime:
         cursor = self._active_input_states[-1].cursor
         value, next_column = cursor.preview_delimited_word(delimiter)
         counted = bytes((len(value.data) & 0xFF,)) + value.data + b"\0"
-        address = self.dictionary.write_transient(counted)
+        active_context = self._dictionary_context()
+        self._preflight_dictionary_growth(len(counted), active_context)
+        try:
+            address = self.dictionary.write_transient(counted)
+        except OverflowError as exc:
+            self._request_dictionary_fault(active_context, str(exc))
         committed = cursor.parse_delimited_word(delimiter)
         if committed != value or cursor.column != next_column:
             raise AssertionError("WORD cursor preview diverged before commit")
@@ -542,31 +818,108 @@ class MegaForthRuntime:
         active_context._require_reusable()
 
         meter, starting_steps = self._meter_for_public_call(step_budget)
+        capture_checkpoint = (
+            active_context.returns.pointer_capture_checkpoint()
+        )
+        has_enclosing_dispatch = self._has_active_dispatch(active_context)
         state: _EvaluationState | None = None
         line_count = 0
-        for line in SourceBuffer(source, name=source_name):
-            line_count += 1
-            cursor = line.cursor()
-            if state is None:
-                state = _EvaluationState(active_context, cursor, meter)
-            else:
-                state.cursor = cursor
-            self._evaluate_line(state)
+        try:
+            for line in SourceBuffer(source, name=source_name):
+                line_count += 1
+                cursor = line.cursor()
+                if state is None:
+                    state = _EvaluationState(active_context, cursor, meter)
+                else:
+                    state.cursor = cursor
+                self._evaluate_line(state)
 
-        if state is None:
-            return EvaluationResult(source_name, 0, 0, 0, ())
-        if state.compiler is not None:
-            raise SourceError(
-                f"definition {state.compiler.name!r} has no terminating ;",
-                state.compiler.location,
+            if state is None:
+                return EvaluationResult(source_name, 0, 0, 0, ())
+            if state.compiler is not None:
+                raise SourceError(
+                    f"definition {state.compiler.name!r} has no terminating ;",
+                    state.compiler.location,
+                )
+            return EvaluationResult(
+                source_name=source_name,
+                line_count=line_count,
+                token_count=state.token_count,
+                semantic_steps=meter.steps - starting_steps,
+                definitions=tuple(state.definitions),
             )
-        return EvaluationResult(
-            source_name=source_name,
-            line_count=line_count,
-            token_count=state.token_count,
-            semantic_steps=meter.steps - starting_steps,
-            definitions=tuple(state.definitions),
-        )
+        except _DictionaryFaultRequest as request:
+            # Nested evaluation must hand the request back to the suspended
+            # semantic dispatcher so guest THROW can discard its fault
+            # sentinel and resume the existing CATCH continuation.
+            if request.context is not active_context:
+                if active_context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                ):
+                    active_context._mark_host_control_fault(request)
+                raise
+            if self._has_active_dispatch(active_context):
+                raise
+            try:
+                self._execute_dictionary_fault_guarded(
+                    request,
+                    active_context,
+                    meter,
+                )
+            except _GuestControlTransfer as transfer:
+                if (
+                    transfer.context is not active_context
+                    and active_context.returns.has_pointer_captures_after(
+                        capture_checkpoint
+                    )
+                ):
+                    active_context._mark_host_control_fault(transfer)
+                raise
+            except ForthAbort as exc:
+                if active_context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                ):
+                    active_context._mark_host_control_fault(exc)
+                if exc.bind_origin(active_context):
+                    active_context.data.clear()
+                    active_context.returns.clear()
+                raise
+            except BaseException as exc:
+                if active_context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                ):
+                    active_context._mark_host_control_fault(exc)
+                raise
+            raise AssertionError("dictionary fault callback returned to evaluator")
+        except _GuestControlTransfer as transfer:
+            if (
+                transfer.context is not active_context
+                and active_context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                )
+            ):
+                active_context._mark_host_control_fault(transfer)
+            raise
+        except ForthAbort as exc:
+            if active_context.returns.has_pointer_captures_after(
+                capture_checkpoint
+            ):
+                active_context._mark_host_control_fault(exc)
+            if exc.bind_origin(active_context):
+                active_context.data.clear()
+                active_context.returns.clear()
+            raise
+        except BaseException as exc:
+            if active_context.returns.has_pointer_captures_after(
+                capture_checkpoint
+            ):
+                active_context._mark_host_control_fault(exc)
+            raise
+        finally:
+            if not has_enclosing_dispatch:
+                active_context.returns.restore_pointer_captures(
+                    capture_checkpoint
+                )
 
     def execute(
         self,
@@ -668,6 +1021,14 @@ class MegaForthRuntime:
             if state.compiler is not None:
                 self._compile_error(state, "nested : is not supported")
             name = self._parse_required_word(state, ":")
+            # Native ':' proves its header span immediately after consuming
+            # the name.  Hosted IR remains buffered until ';', but the early
+            # preflight prevents later immediate words from running when the
+            # definition could not have been opened by BIOS.
+            self._preflight_dictionary_growth(
+                self.dictionary.definition_size(name),
+                state.context,
+            )
             state.compiler = _Compiler(name, self._token_location(state))
             return
 
@@ -678,10 +1039,11 @@ class MegaForthRuntime:
         if kind is DirectiveKind.SEMICOLON:
             if compiler.controls:
                 self._compile_error(state, "; has unresolved control flow")
-            compiler.operations.append(Return())
-            word = self.dictionary.define(
+            operations = tuple((*compiler.operations, Return()))
+            word = self._define_dictionary_word(
                 compiler.name,
-                ColonDefinition(tuple(compiler.operations)),
+                ColonDefinition(operations),
+                context=state.context,
             )
             state.definitions.append(word)
             state.compiler = None
@@ -804,14 +1166,56 @@ class MegaForthRuntime:
         context._require_reusable()
         return_snapshot = context.returns.snapshot()
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
-        self._active_meters.append(meter)
+        root_id = self._allocate_dispatch_root_id()
+        frame = _DispatchFrame(context, meter, root_id)
+        preserve_capture_evidence = False
+        completed_successfully = False
+        self._active_dispatches.append(frame)
         try:
-            self._execute_top(word, context, meter)
+            self._execute_top(word, context, meter, root_id=root_id)
+            completed_successfully = True
+        except _GuestControlTransfer as transfer:
+            if transfer.context is not context:
+                if context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                ):
+                    context._mark_host_control_fault(transfer)
+                context.returns.restore(return_snapshot)
+                raise
+            if transfer.root_id != root_id:
+                preserve_capture_evidence = True
+                raise
+            # A nested public call executed through this frame's exact guest
+            # root after RP! discarded its own Python dispatch boundary.  The
+            # nested loop has already completed this semantic dispatch.
+            completed_successfully = True
+        except _DictionaryFaultRequest as request:
+            # A nested public execute/evaluate boundary must not install a
+            # fresh fault continuation above an older guest CATCH.  Remove
+            # only this nested dispatch's internal return state and let the
+            # request reach the outer semantic loop that owns that CATCH.
+            capture_generation = context.returns.pointer_capture_checkpoint()
+            if request.context is not context:
+                if context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                ):
+                    context._mark_host_control_fault(request)
+                context.returns.restore(return_snapshot)
+                raise
+            context.returns.restore(return_snapshot)
+            context.returns.restore_pointer_captures(capture_generation)
+            preserve_capture_evidence = True
+            raise
         except ForthAbort as exc:
-            # ABORT deliberately cleared the complete task.  Restoring the
-            # pre-dispatch return stack would resurrect caller continuations.
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
+            if exc.bind_origin(context):
+                # Normalize a direct host primitive ForthAbort to the same
+                # complete-task reset as the BIOS word.
+                context.data.clear()
+                context.returns.clear()
+            else:
+                context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
             if context.returns.has_pointer_captures_after(capture_checkpoint):
@@ -819,45 +1223,213 @@ class MegaForthRuntime:
             context.returns.restore(return_snapshot)
             raise
         finally:
-            context.returns.restore_pointer_captures(capture_checkpoint)
-            active = self._active_meters.pop()
-            if active is not meter:
-                raise AssertionError("active semantic step-meter stack is corrupted")
+            if completed_successfully:
+                if self._has_older_dispatch(
+                    context
+                ) or self._has_active_evaluation(context):
+                    preserve_capture_evidence = True
+            if not preserve_capture_evidence:
+                context.returns.restore_pointer_captures(capture_checkpoint)
+            active = self._active_dispatches.pop()
+            if active is not frame:
+                raise AssertionError("active semantic dispatch stack is corrupted")
 
-    def _execute_top(
+    def _execute_dictionary_fault_guarded(
         self,
-        word: Word,
+        request: _DictionaryFaultRequest,
         context: ExecutionContext,
         meter: _StepMeter,
     ) -> None:
-        target = word
+        """Enter a top-level fault callback with ordinary host escape guards."""
+
+        context._require_reusable()
+        return_snapshot = context.returns.snapshot()
+        capture_checkpoint = context.returns.pointer_capture_checkpoint()
+        root_id = self._allocate_dispatch_root_id()
+        frame = _DispatchFrame(context, meter, root_id)
+        preserve_capture_evidence = False
+        self._active_dispatches.append(frame)
+        try:
+            self._execute_top(
+                None,
+                context,
+                meter,
+                root_id=root_id,
+                fault_request=request,
+            )
+        except _GuestControlTransfer as transfer:
+            if transfer.context is context:
+                preserve_capture_evidence = True
+            else:
+                if context.returns.has_pointer_captures_after(
+                    capture_checkpoint
+                ):
+                    context._mark_host_control_fault(transfer)
+                context.returns.restore(return_snapshot)
+            raise
+        except ForthAbort as exc:
+            if context.returns.has_pointer_captures_after(capture_checkpoint):
+                context._mark_host_control_fault(exc)
+            if exc.bind_origin(context):
+                context.data.clear()
+                context.returns.clear()
+            else:
+                context.returns.restore(return_snapshot)
+            raise
+        except BaseException as exc:
+            if context.returns.has_pointer_captures_after(capture_checkpoint):
+                context._mark_host_control_fault(exc)
+            context.returns.restore(return_snapshot)
+            raise
+        finally:
+            if not preserve_capture_evidence:
+                context.returns.restore_pointer_captures(capture_checkpoint)
+            active = self._active_dispatches.pop()
+            if active is not frame:
+                raise AssertionError("active semantic dispatch stack is corrupted")
+
+    def _abort_returned_dictionary_fault(
+        self,
+        context: ExecutionContext,
+    ) -> None:
+        self.write_uart_bytes(b"dictionary overflow\r\n")
+        context.data.clear()
+        context.returns.clear()
+        raise ForthAbort(
+            "dictionary fault callback returned",
+            origin_context=context,
+        )
+
+    def _begin_dictionary_fault(
+        self,
+        request: _DictionaryFaultRequest,
+        context: ExecutionContext,
+        meter: _StepMeter,
+    ) -> tuple[Word, int]:
+        """Enter the callback behind a THROW-discardable fail-closed frame."""
+
+        if request.context is not context:
+            raise ExecutionError(
+                "dictionary fault crossed into a different execution context"
+            )
+        if context.returns.has_fault_abort_continuation():
+            self._abort_returned_dictionary_fault(context)
+        if request.xt == 0:
+            self._abort_returned_dictionary_fault(context)
+        try:
+            target = self.dictionary.resolve(request.xt)
+        except KeyError:
+            raise ExecutionError(
+                "dictionary fault callback is not a live execution token: "
+                f"0x{request.xt:016x}"
+            ) from None
+
+        context.returns.push_continuation(
+            target.xt,
+            0,
+            fault_abort=True,
+        )
         entry_ip = 0
         while True:
             implementation = target.implementation
             if isinstance(implementation, ConstantDefinition):
                 meter.tick()
                 context.data.push(implementation.value)
-                return
+                self._abort_returned_dictionary_fault(context)
             if isinstance(implementation, CreatedDefinition):
                 meter.tick()
                 context.data.push(target.body_address)
                 if implementation.action is None:
-                    return
+                    self._abort_returned_dictionary_fault(context)
                 target, entry_ip = self._resolve_does_entry(implementation.action)
                 break
             if not isinstance(implementation, PrimitiveDefinition):
                 break
             meter.tick()
-            invocation = implementation.callback(context)
+            try:
+                invocation = implementation.callback(context)
+            except _DictionaryFaultRequest:
+                self._abort_returned_dictionary_fault(context)
             if invocation is None:
-                return
+                self._abort_returned_dictionary_fault(context)
             if not isinstance(invocation, Invoke):
                 raise ExecutionError("primitive returned an invalid control result")
             target = self.dictionary.resolve(invocation.xt)
 
         if not isinstance(target.implementation, ColonDefinition):
+            raise ExecutionError(
+                f"dictionary fault callback {target.name!r} is not executable"
+            )
+        return target, entry_ip
+
+    def _execute_top(
+        self,
+        word: Word | None,
+        context: ExecutionContext,
+        meter: _StepMeter,
+        *,
+        root_id: int,
+        fault_request: _DictionaryFaultRequest | None = None,
+    ) -> None:
+        fault_entry = fault_request is not None
+        if fault_request is not None:
+            target, entry_ip = self._begin_dictionary_fault(
+                fault_request,
+                context,
+                meter,
+            )
+        else:
+            if word is None:
+                raise AssertionError("ordinary dispatch requires a target word")
+            target = word
+            entry_ip = 0
+            while True:
+                implementation = target.implementation
+                if isinstance(implementation, ConstantDefinition):
+                    meter.tick()
+                    context.data.push(implementation.value)
+                    return
+                if isinstance(implementation, CreatedDefinition):
+                    meter.tick()
+                    context.data.push(target.body_address)
+                    if implementation.action is None:
+                        return
+                    target, entry_ip = self._resolve_does_entry(
+                        implementation.action
+                    )
+                    break
+                if not isinstance(implementation, PrimitiveDefinition):
+                    break
+                meter.tick()
+                try:
+                    invocation = implementation.callback(context)
+                except _DictionaryFaultRequest as request:
+                    if request.context is not context:
+                        raise
+                    if self._has_older_dispatch(context):
+                        raise
+                    target, entry_ip = self._begin_dictionary_fault(
+                        request,
+                        context,
+                        meter,
+                    )
+                    fault_entry = True
+                    break
+                if invocation is None:
+                    return
+                if not isinstance(invocation, Invoke):
+                    raise ExecutionError("primitive returned an invalid control result")
+                target = self.dictionary.resolve(invocation.xt)
+
+        if not isinstance(target.implementation, ColonDefinition):
             raise ExecutionError(f"word {target.name!r} is not executable")
-        context.returns.push_continuation(target.xt, entry_ip, root=True)
+        if not fault_entry:
+            context.returns.push_continuation(
+                target.xt,
+                entry_ip,
+                root=True,
+                dispatch_id=root_id,
+            )
         current = target
         ip = entry_ip
 
@@ -950,11 +1522,21 @@ class MegaForthRuntime:
                     self.write_uart_bytes(operation.payload)
                     context.data.clear()
                     context.returns.clear()
-                    raise ForthAbort('Forth ABORT"')
+                    raise ForthAbort(
+                        'Forth ABORT"',
+                        origin_context=context,
+                    )
                 ip += 1
             elif isinstance(operation, Return):
                 continuation = context.returns.pop_continuation()
+                if continuation.fault_abort:
+                    self._abort_returned_dictionary_fault(context)
                 if continuation.root:
+                    if continuation.dispatch_id != root_id:
+                        raise _GuestControlTransfer(
+                            continuation.dispatch_id,
+                            context,
+                        )
                     return
                 caller = self.dictionary.resolve(continuation.xt)
                 if not isinstance(caller.implementation, ColonDefinition):
@@ -990,7 +1572,18 @@ class MegaForthRuntime:
             if not isinstance(implementation, PrimitiveDefinition):
                 break
             meter.tick()
-            invocation = implementation.callback(context)
+            try:
+                invocation = implementation.callback(context)
+            except _DictionaryFaultRequest as request:
+                if request.context is not context:
+                    raise
+                if self._has_older_dispatch(context):
+                    raise
+                return self._begin_dictionary_fault(
+                    request,
+                    context,
+                    meter,
+                )
             if invocation is None:
                 return None
             if not isinstance(invocation, Invoke):
@@ -1022,13 +1615,13 @@ class MegaForthRuntime:
     ) -> tuple[_StepMeter, int]:
         """Select one meter without letting nested dispatch reset its budget."""
 
-        if self._active_meters:
+        if self._active_dispatches:
             if step_budget is not None:
                 raise ValueError(
                     "nested evaluation or execution cannot replace the active "
                     "step budget"
                 )
-            meter = self._active_meters[-1]
+            meter = self._active_dispatches[-1].meter
             return meter, meter.steps
         meter = _StepMeter(step_budget)
         return meter, 0

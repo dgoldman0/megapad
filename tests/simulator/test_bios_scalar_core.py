@@ -119,14 +119,26 @@ def test_bank0_dictionary_reports_the_optional_user_interval_as_disabled() -> No
     assert runtime.main_context.data.snapshot() == (0, 0)
 
 
-def test_talign_rejects_a_target_beyond_the_dictionary_region_atomically() -> None:
+def test_talign_rejects_growth_above_the_guarded_bank0_ceiling_atomically() -> None:
     memory = SparseAddressSpace(bank0_size=0x1_0010)
     runtime = MegaForthRuntime(memory=memory)
-    bank0 = memory.regions[0]
-    runtime.dictionary.allot(bank0.limit - runtime.dictionary.here - 1)
+
+    def escape_dictionary_fault(_context) -> None:
+        raise ExecutionError("guarded dictionary capacity")
+
+    hook = runtime.define_primitive(
+        "HOST-DICTIONARY-FAULT",
+        escape_dictionary_fault,
+    )
+    runtime.main_context.data.push(hook.xt)
+    runtime.execute("DICT-FAULT-XT!")
+    guarded_ceiling = runtime.main_context.data.pointer - 256
+    runtime.dictionary.allot(
+        guarded_ceiling + 1 - runtime.dictionary.here
+    )
     here = runtime.dictionary.here
 
-    with pytest.raises(OverflowError, match="memory region"):
+    with pytest.raises(ExecutionError, match="guarded dictionary capacity"):
         runtime.execute("TALIGN")
 
     assert runtime.dictionary.here == here

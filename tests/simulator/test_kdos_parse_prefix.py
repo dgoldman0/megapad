@@ -197,18 +197,22 @@ def test_word_capacity_failure_does_not_commit_the_input_cursor(
     runtime = loaded_parse_prefix
     observed_after_failure: list[bytes] = []
 
-    def catch_word_capacity(context) -> None:
-        try:
-            runtime.execute("WORD", context=context)
-        except OverflowError:
-            observed_after_failure.append(runtime.parse_input_word())
+    def capture_uncommitted_cursor(_context) -> None:
+        observed_after_failure.append(runtime.parse_input_word())
+        raise ExecutionError("guarded WORD capacity")
 
-    runtime.define_primitive("HOST-CATCH-WORD", catch_word_capacity)
+    hook = runtime.define_primitive(
+        "HOST-CAPTURE-WORD-FAULT",
+        capture_uncommitted_cursor,
+    )
+    runtime.main_context.data.push(hook.xt)
+    runtime.execute("DICT-FAULT-XT!")
     bank0 = runtime.memory.regions[0]
     runtime.dictionary.allot(bank0.limit - runtime.dictionary.here - 1)
     context = runtime.new_context()
 
-    runtime.evaluate(b"32 HOST-CATCH-WORD alpha", context=context)
+    with pytest.raises(ExecutionError, match="guarded WORD capacity"):
+        runtime.evaluate(b"32 WORD alpha", context=context)
 
     assert observed_after_failure == [b"alpha"]
     assert runtime.dictionary.here == bank0.limit - 1
