@@ -14,12 +14,18 @@ from typing import Callable, TypeAlias
 
 from shared.cells import u64
 from simulator.dictionary import Dictionary, Word
-from simulator.errors import ExecutionError, SourceError, StepBudgetExceeded
+from simulator.errors import (
+    ExecutionError,
+    ForthAbort,
+    SourceError,
+    StepBudgetExceeded,
+)
 from simulator.ir import (
     Branch,
     BranchZero,
     Call,
     Do,
+    InstallDoes,
     Literal,
     Loop,
     Operation,
@@ -77,6 +83,35 @@ class ConstantDefinition:
         object.__setattr__(self, "value", u64(self.value))
 
 
+@dataclass(frozen=True, slots=True)
+class DoesBodyRef:
+    """Stable entry point for one CREATE-family word's DOES> behavior."""
+
+    source_xt: int
+    entry_ip: int
+
+    def __post_init__(self) -> None:
+        source_xt = u64(self.source_xt)
+        if source_xt == 0:
+            raise ValueError("DOES> source execution token must be nonzero")
+        if not isinstance(self.entry_ip, int):
+            raise TypeError("DOES> entry instruction pointer must be an integer")
+        if self.entry_ip < 0:
+            raise ValueError("DOES> entry instruction pointer must not be negative")
+        object.__setattr__(self, "source_xt", source_xt)
+
+
+@dataclass(slots=True)
+class CreatedDefinition:
+    """Mutable runtime metadata for one CREATE-family child."""
+
+    action: DoesBodyRef | None = None
+
+    def __post_init__(self) -> None:
+        if self.action is not None and not isinstance(self.action, DoesBodyRef):
+            raise TypeError("created-word action must be a DoesBodyRef or None")
+
+
 class DirectiveKind(Enum):
     COLON = auto()
     SEMICOLON = auto()
@@ -91,6 +126,8 @@ class DirectiveKind(Enum):
     QUESTION_DO = auto()
     LOOP = auto()
     UNLOOP = auto()
+    BRACKET_TICK = auto()
+    DOES = auto()
     PAREN_COMMENT = auto()
     BACKSLASH_COMMENT = auto()
     PROVIDED = auto()
@@ -102,7 +139,11 @@ class DirectiveDefinition:
 
 
 WordImplementation: TypeAlias = (
-    PrimitiveDefinition | ColonDefinition | ConstantDefinition | DirectiveDefinition
+    PrimitiveDefinition
+    | ColonDefinition
+    | ConstantDefinition
+    | CreatedDefinition
+    | DirectiveDefinition
 )
 
 
@@ -181,13 +222,17 @@ class MegaForthRuntime:
     ) -> None:
         if memory is not None and not isinstance(memory, SparseAddressSpace):
             raise TypeError("memory must be a SparseAddressSpace or None")
-        self.dictionary = Dictionary(start_address=dictionary_start)
         self.memory = SparseAddressSpace() if memory is None else memory
+        self.dictionary = Dictionary(
+            start_address=dictionary_start,
+            memory=self.memory,
+        )
         self.main_context = ExecutionContext()
         self._numeric_base = 10
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
         self._active_meters: list[_StepMeter] = []
+        self._uart_output = bytearray()
         if install_core_words:
             from simulator.core_words import install_core
 
@@ -218,6 +263,26 @@ class MegaForthRuntime:
         """Current unsigned cell used by the BIOS-compatible number parser."""
 
         return self._numeric_base
+
+    @property
+    def uart_output(self) -> bytes:
+        """Return an immutable snapshot of bytes written to the hosted UART."""
+
+        return bytes(self._uart_output)
+
+    def write_uart_bytes(self, payload: bytes) -> None:
+        """Append one validated byte string to the hosted UART stream."""
+
+        if not isinstance(payload, bytes):
+            raise TypeError("UART output payload must be bytes")
+        self._uart_output.extend(payload)
+
+    def drain_uart_output(self) -> bytes:
+        """Return all pending UART bytes and clear the runtime-owned buffer."""
+
+        payload = bytes(self._uart_output)
+        self._uart_output.clear()
+        return payload
 
     def set_numeric_base(self, base: int) -> None:
         """Set the source number base as a wrapped guest cell.
@@ -262,6 +327,23 @@ class MegaForthRuntime:
             self._active_input_states[-1].definitions.append(word)
         return word
 
+    def define_created(
+        self,
+        name: bytes | str,
+        *,
+        initial_body: bytes = b"",
+    ) -> Word:
+        """Atomically publish one CREATE-family child and initial body bytes."""
+
+        word = self.dictionary.define(
+            name,
+            CreatedDefinition(),
+            initial_body=initial_body,
+        )
+        if self._active_input_states:
+            self._active_input_states[-1].definitions.append(word)
+        return word
+
     def define_directive(self, name: bytes | str, kind: DirectiveKind) -> Word:
         if not isinstance(kind, DirectiveKind):
             raise TypeError("directive kind must be a DirectiveKind")
@@ -270,6 +352,13 @@ class MegaForthRuntime:
             DirectiveDefinition(kind),
             immediate=True,
         )
+
+    def parse_input_word(self) -> bytes:
+        """Parse an optional word from the active physical input line."""
+
+        if not self._active_input_states:
+            raise ExecutionError("cannot parse a word without an active input line")
+        return self._active_input_states[-1].cursor.parse_word()
 
     def parse_required_input_word(self, owner: bytes | str) -> bytes:
         """Consume a required word from the active physical input line.
@@ -291,14 +380,9 @@ class MegaForthRuntime:
             raise TypeError("input parser owner must be bytes or str")
         if not owner_text:
             raise ValueError("input parser owner must not be empty")
-        if not self._active_input_states:
-            raise ExecutionError(
-                f"{owner_text} cannot parse a word without an active input line"
-            )
-
-        state = self._active_input_states[-1]
-        value = state.cursor.parse_word()
+        value = self.parse_input_word()
         if not value:
+            state = self._active_input_states[-1]
             raise SourceError(
                 f"{owner_text} requires a following word",
                 state.cursor.location,
@@ -494,6 +578,14 @@ class MegaForthRuntime:
                 )
         elif kind is DirectiveKind.UNLOOP:
             compiler.operations.append(Unloop())
+        elif kind is DirectiveKind.BRACKET_TICK:
+            name = self.parse_input_word()
+            word = self.dictionary.find(name) if name else None
+            compiler.operations.append(Literal(0 if word is None else word.xt))
+        elif kind is DirectiveKind.DOES:
+            entry_ip = len(compiler.operations) + 2
+            compiler.operations.append(InstallDoes(entry_ip))
+            compiler.operations.append(Return())
         else:
             raise AssertionError(f"unhandled directive {kind}")
 
@@ -509,6 +601,10 @@ class MegaForthRuntime:
         self._active_meters.append(meter)
         try:
             self._execute_top(word, context, meter)
+        except ForthAbort:
+            # ABORT deliberately cleared the complete task.  Restoring the
+            # pre-dispatch return stack would resurrect caller continuations.
+            raise
         except BaseException:
             context.returns.restore(return_snapshot)
             raise
@@ -524,12 +620,20 @@ class MegaForthRuntime:
         meter: _StepMeter,
     ) -> None:
         target = word
+        entry_ip = 0
         while True:
             implementation = target.implementation
             if isinstance(implementation, ConstantDefinition):
                 meter.tick()
                 context.data.push(implementation.value)
                 return
+            if isinstance(implementation, CreatedDefinition):
+                meter.tick()
+                context.data.push(target.body_address)
+                if implementation.action is None:
+                    return
+                target, entry_ip = self._resolve_does_entry(implementation.action)
+                break
             if not isinstance(implementation, PrimitiveDefinition):
                 break
             meter.tick()
@@ -542,10 +646,9 @@ class MegaForthRuntime:
 
         if not isinstance(target.implementation, ColonDefinition):
             raise ExecutionError(f"word {target.name!r} is not executable")
-
-        context.returns.push_continuation(target.xt, 0, root=True)
+        context.returns.push_continuation(target.xt, entry_ip, root=True)
         current = target
-        ip = 0
+        ip = entry_ip
 
         while True:
             definition = current.implementation
@@ -574,8 +677,7 @@ class MegaForthRuntime:
                 if entered is None:
                     ip += 1
                 else:
-                    current = entered
-                    ip = 0
+                    current, ip = entered
             elif isinstance(operation, Branch):
                 ip = operation.target
             elif isinstance(operation, BranchZero):
@@ -607,6 +709,20 @@ class MegaForthRuntime:
             elif isinstance(operation, Unloop):
                 context.returns.unloop()
                 ip += 1
+            elif isinstance(operation, InstallDoes):
+                latest = self.dictionary.latest_word
+                if latest is None or not isinstance(
+                    latest.implementation,
+                    CreatedDefinition,
+                ):
+                    raise ExecutionError(
+                        "DOES> requires the latest word to be CREATE-family"
+                    )
+                latest.implementation.action = DoesBodyRef(
+                    source_xt=current.xt,
+                    entry_ip=operation.entry_ip,
+                )
+                ip += 1
             elif isinstance(operation, Return):
                 continuation = context.returns.pop_continuation()
                 if continuation.root:
@@ -627,13 +743,21 @@ class MegaForthRuntime:
         return_ip: int,
         context: ExecutionContext,
         meter: _StepMeter,
-    ) -> Word | None:
+    ) -> tuple[Word, int] | None:
         while True:
             implementation = target.implementation
             if isinstance(implementation, ConstantDefinition):
                 meter.tick()
                 context.data.push(implementation.value)
                 return None
+            if isinstance(implementation, CreatedDefinition):
+                meter.tick()
+                context.data.push(target.body_address)
+                if implementation.action is None:
+                    return None
+                entered = self._resolve_does_entry(implementation.action)
+                context.returns.push_continuation(caller.xt, return_ip)
+                return entered
             if not isinstance(implementation, PrimitiveDefinition):
                 break
             meter.tick()
@@ -647,7 +771,13 @@ class MegaForthRuntime:
         if not isinstance(target.implementation, ColonDefinition):
             raise ExecutionError(f"word {target.name!r} is not executable")
         context.returns.push_continuation(caller.xt, return_ip)
-        return target
+        return target, 0
+
+    def _resolve_does_entry(self, action: DoesBodyRef) -> tuple[Word, int]:
+        source = self.dictionary.resolve(action.source_xt)
+        if not isinstance(source.implementation, ColonDefinition):
+            raise ExecutionError("DOES> action does not name a colon definition")
+        return source, action.entry_ip
 
     def _resolve_word(self, name_or_xt: bytes | str | int) -> Word:
         if isinstance(name_or_xt, int):
@@ -750,8 +880,10 @@ class MegaForthRuntime:
 __all__ = [
     "ColonDefinition",
     "ConstantDefinition",
+    "CreatedDefinition",
     "DirectiveDefinition",
     "DirectiveKind",
+    "DoesBodyRef",
     "EvaluationResult",
     "ExecutionContext",
     "ExecutionResult",

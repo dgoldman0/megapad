@@ -93,6 +93,11 @@ class DataStack:
     def depth(self) -> int:
         return len(self._cells)
 
+    def clear(self) -> None:
+        """Discard every guest cell in the active task's data stack."""
+
+        self._cells.clear()
+
     def snapshot(self) -> tuple[int, ...]:
         """Return an immutable bottom-to-top view of the stack."""
 
@@ -199,6 +204,11 @@ class ReturnStack:
 
     def depth(self) -> int:
         return len(self._entries)
+
+    def clear(self) -> None:
+        """Discard user cells, loop frames, and internal continuations."""
+
+        self._entries.clear()
 
     def snapshot(self) -> tuple[ReturnEntry, ...]:
         """Return an immutable bottom-to-top view of the ordered stack."""

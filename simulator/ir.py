@@ -102,6 +102,16 @@ class Unloop:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class InstallDoes:
+    """Attach a suffix entry point to the newest CREATE-family word."""
+
+    entry_ip: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entry_ip", _target(self.entry_ip))
+
+
 Operation: TypeAlias = (
     Literal
     | Call
@@ -115,6 +125,7 @@ Operation: TypeAlias = (
     | QuestionDo
     | Loop
     | Unloop
+    | InstallDoes
 )
 
 
@@ -123,6 +134,7 @@ __all__ = [
     "BranchZero",
     "Call",
     "Do",
+    "InstallDoes",
     "Literal",
     "Loop",
     "Operation",

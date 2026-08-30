@@ -6,16 +6,22 @@ import pytest
 
 from shared.cells import MASK64, TRUE
 from simulator.errors import ExecutionError, SourceError, StepBudgetExceeded
-from simulator.ir import Loop, QuestionDo
+from simulator.ir import Branch, BranchZero, InstallDoes, Loop, QuestionDo
 from simulator.memory import SparseAddressSpace
-from simulator.runtime import ColonDefinition, ConstantDefinition, MegaForthRuntime
+from simulator.runtime import (
+    ColonDefinition,
+    ConstantDefinition,
+    CreatedDefinition,
+    DoesBodyRef,
+    MegaForthRuntime,
+)
 from simulator.stacks import ReturnStackShapeError
 
 
 def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None:
     first = MegaForthRuntime()
     second = MegaForthRuntime()
-    injected = SparseAddressSpace(bank0_size=0x80)
+    injected = SparseAddressSpace(bank0_size=0x4000)
 
     assert isinstance(first.memory, SparseAddressSpace)
     assert first.memory is not second.memory
@@ -23,6 +29,184 @@ def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None
 
     with pytest.raises(TypeError, match="SparseAddressSpace"):
         MegaForthRuntime(memory=object())  # type: ignore[arg-type]
+
+
+def test_created_word_pushes_its_body_in_every_dispatch_path() -> None:
+    runtime = MegaForthRuntime()
+    child = runtime.define_created("BUFFER")
+    runtime.dictionary.allot(8)
+    runtime.evaluate(b": COMPILED BUFFER ;")
+
+    assert isinstance(child.implementation, CreatedDefinition)
+    assert child.implementation.action is None
+
+    direct = runtime.new_context()
+    assert runtime.execute(child.xt, context=direct).semantic_steps == 1
+    assert direct.data.snapshot() == (child.body_address,)
+
+    compiled = runtime.new_context()
+    assert runtime.execute("COMPILED", context=compiled).semantic_steps == 3
+    assert compiled.data.snapshot() == (child.body_address,)
+
+    dynamic = runtime.new_context()
+    dynamic.data.push(child.xt)
+    assert runtime.execute("EXECUTE", context=dynamic).semantic_steps == 2
+    assert dynamic.data.snapshot() == (child.body_address,)
+
+
+def test_two_created_children_keep_distinct_bodies_and_one_does_suffix() -> None:
+    runtime = MegaForthRuntime()
+
+    result = runtime.evaluate(
+        b": BOX CREATE , DOES> @ ; 11 BOX FIRST 22 BOX SECOND"
+    )
+    box = runtime.find("BOX")
+    first = runtime.find("FIRST")
+    second = runtime.find("SECOND")
+    assert box is not None
+    assert first is not None
+    assert second is not None
+    assert [word.name for word in result.definitions] == [
+        b"BOX",
+        b"FIRST",
+        b"SECOND",
+    ]
+    assert isinstance(box.implementation, ColonDefinition)
+    assert isinstance(first.implementation, CreatedDefinition)
+    assert isinstance(second.implementation, CreatedDefinition)
+
+    install_index = next(
+        index
+        for index, operation in enumerate(box.implementation.operations)
+        if isinstance(operation, InstallDoes)
+    )
+    expected_action = DoesBodyRef(box.xt, install_index + 2)
+    assert first.implementation.action == expected_action
+    assert second.implementation.action == expected_action
+    assert first.body_address != second.body_address
+    assert runtime.memory.read64(first.body_address) == 11
+    assert runtime.memory.read64(second.body_address) == 22
+
+    runtime.evaluate(b": PAIR FIRST SECOND ;")
+    context = runtime.new_context()
+    runtime.execute("PAIR", context=context)
+    assert context.data.snapshot() == (11, 22)
+    assert context.returns.snapshot() == ()
+
+
+def test_does_suffix_keeps_absolute_if_and_loop_targets() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": CLASS CREATE , DOES> DUP @ "
+        b"IF 3 1 DO I LOOP ELSE DROP 99 THEN ; "
+        b"1 CLASS HOT 0 CLASS COLD"
+    )
+
+    defining_word = runtime.find("CLASS")
+    hot = runtime.find("HOT")
+    assert defining_word is not None
+    assert hot is not None
+    assert isinstance(defining_word.implementation, ColonDefinition)
+    operations = defining_word.implementation.operations
+    install_index = next(
+        index for index, operation in enumerate(operations)
+        if isinstance(operation, InstallDoes)
+    )
+    install = operations[install_index]
+    assert isinstance(install, InstallDoes)
+    assert install.entry_ip == install_index + 2
+    assert all(
+        operation.target >= install.entry_ip
+        for operation in operations[install.entry_ip :]
+        if isinstance(operation, (Branch, BranchZero, Loop, QuestionDo))
+    )
+
+    true_context = runtime.new_context()
+    runtime.execute("HOT", context=true_context)
+    assert true_context.data.snapshot() == (hot.body_address, 1, 2)
+    assert true_context.returns.snapshot() == ()
+
+    false_context = runtime.new_context()
+    runtime.execute("COLD", context=false_context)
+    assert false_context.data.snapshot() == (99,)
+    assert false_context.returns.snapshot() == ()
+
+
+def test_created_xt_and_does_action_survive_binding_shadowing() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b": BOX CREATE , DOES> @ ; 7 BOX ITEM")
+    old_box = runtime.find("BOX")
+    old_item = runtime.find("ITEM")
+    assert old_box is not None
+    assert old_item is not None
+    assert isinstance(old_item.implementation, CreatedDefinition)
+    old_action = old_item.implementation.action
+    assert isinstance(old_action, DoesBodyRef)
+
+    runtime.evaluate(
+        b"9 BOX item : BOX CREATE , DOES> @ 100 + ; 1 BOX LATER"
+    )
+    shadow_item = runtime.find("ITEM")
+    new_box = runtime.find("BOX")
+    later = runtime.find("LATER")
+    assert shadow_item is not None
+    assert new_box is not None
+    assert later is not None
+    assert shadow_item.xt != old_item.xt
+    assert new_box.xt != old_box.xt
+    assert isinstance(shadow_item.implementation, CreatedDefinition)
+    assert isinstance(later.implementation, CreatedDefinition)
+    assert old_item.implementation.action == old_action
+    assert shadow_item.implementation.action == old_action
+    later_action = later.implementation.action
+    assert isinstance(later_action, DoesBodyRef)
+    assert later_action.source_xt == new_box.xt
+
+    context = runtime.new_context()
+    runtime.execute(old_item.xt, context=context)
+    runtime.execute("ITEM", context=context)
+    runtime.execute("LATER", context=context)
+    assert context.data.snapshot() == (7, 9, 101)
+    assert context.returns.snapshot() == ()
+
+
+def test_bracket_tick_compiles_exact_or_zero_xt_without_crossing_lines() -> None:
+    runtime = MegaForthRuntime()
+    drop = runtime.find("DROP")
+    assert drop is not None
+
+    runtime.evaluate(b": TOKENS ['] DROP ['] MISSING [']\n;")
+    context = runtime.new_context()
+    runtime.execute("TOKENS", context=context)
+
+    assert context.data.snapshot() == (drop.xt, 0, 0)
+
+
+def test_created_action_budget_failure_restores_the_callers_return_stack() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b": STUCK CREATE DOES> 0 0 DO LOOP ; STUCK WAIT")
+    context = runtime.new_context()
+    context.returns.push(0xA5)
+
+    with pytest.raises(StepBudgetExceeded):
+        runtime.execute("WAIT", context=context, step_budget=10)
+
+    assert context.returns.snapshot() == (0xA5,)
+
+
+def test_uart_output_is_immutable_to_callers_and_can_be_drained() -> None:
+    runtime = MegaForthRuntime()
+
+    runtime.write_uart_bytes(b"abc")
+    snapshot = runtime.uart_output
+    runtime.write_uart_bytes(b"def")
+
+    assert snapshot == b"abc"
+    assert runtime.uart_output == b"abcdef"
+    assert runtime.drain_uart_output() == b"abcdef"
+    assert runtime.uart_output == b""
+    with pytest.raises(TypeError, match="must be bytes"):
+        runtime.write_uart_bytes(bytearray(b"x"))  # type: ignore[arg-type]
 
 
 def test_constants_are_real_stable_xt_definitions_in_every_dispatch_path() -> None:

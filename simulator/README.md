@@ -6,7 +6,7 @@ semantics directly instead of executing MP64 instructions.
 
 ## Current slice
 
-The first runnable slice provides:
+The implemented slices provide:
 
 - byte-oriented source parsing, comments, `PROVIDED`, colon definitions, and
   `IF`/`ELSE`/`THEN`, `EXIT`, `DO`/`?DO`/`LOOP`, and `UNLOOP` compilation;
@@ -19,21 +19,26 @@ The first runnable slice provides:
   utility source, with an optional caller-owned semantic step budget;
 - a sparse 64-bit address space with distinct Bank 0, external, VRAM, HBW, and
   reserved MMIO classes, plus a caller-bounded allocator for hosted runtime
-  storage; and
+  storage;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access and byte `FILL` over that
   shared address space, plus the arithmetic and comparison words needed by the
-  next unchanged Akashic source slice; and
+  next unchanged Akashic source slice;
+- memory-backed linked dictionary headers and CREATE-family bodies, including
+  signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
+- hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
+  the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
+  and
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
   KDOS exists, with nested budgets, cycle detection, and registry-only failure
   cleanup.
 
-This is deliberately not yet a complete MegaForth environment. Dictionary
-bodies and task stacks are not yet backed by the sparse memory substrate.
-Persistent compiler state, `CATCH`/`THROW`, the BIOS evaluator surfaces, tasks,
-clocks, UART, media, and an ordinary KDOS load also remain. The simulator does
-not execute ROMs, MP64 binaries, or MF64 native dictionaries, and it makes no
-machine-timing, interrupt, snapshot, RTL, or hardware claim. Those remain the
-architectural emulator's and physical implementation's responsibility.
+This is deliberately not yet a complete MegaForth environment. Task stacks
+are not yet backed by the sparse memory substrate. Persistent compiler state,
+`CATCH`/`THROW`, the BIOS evaluator surfaces, tasks, clocks, complete UART/MMIO
+service, media, and an ordinary complete KDOS load also remain. The simulator
+does not execute ROMs, MP64 binaries, or MF64 native dictionaries, and it makes
+no machine-timing, interrupt, snapshot, RTL, or hardware claim. Those remain
+the architectural emulator's and physical implementation's responsibility.
 
 ## Run it
 
@@ -77,11 +82,18 @@ capacity bounds, adjacency without coalescing, overlapping `PUSH`, disjoint
 `ADD`, malformed geometry, failure atomicity, borrowed bytes, and `CLEAR`.
 There is no simulator-side memory-span substitute.
 
+The first KDOS proof evaluates byte-for-byte `kdos.f` logical lines 39 through
+69 from MegaPad revision `ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+The unchanged source defines `.R`, `DEFER`, `IS`, and `SAMESTR?`. Acceptance
+executes deferred children before and after ordinary `IS` rebinding, including
+a precompiled caller, and checks guest body bytes, stable execution tokens,
+`ABORT`, numeric UART output, and unsigned byte-string comparison. This is a
+staged source-load proof, not yet a claim that complete `kdos.f` loads.
+
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next slice builds the dictionary-body and defining-word spine needed to
-load the first unchanged KDOS source prefix, before advancing to exact
-stack-backed exceptions and evaluator rollback.
+The next slice advances to exact memory-backed stack pointers, `CATCH`/`THROW`,
+and evaluator rollback before extending the unchanged KDOS source frontier.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

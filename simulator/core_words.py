@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from shared.cells import forth_flag, s64, u64
+from shared.cells import CELL_BYTES, forth_flag, s64, u64
+from simulator.errors import ExecutionError, ForthAbort
 from simulator.runtime import (
+    CreatedDefinition,
     DirectiveKind,
     ExecutionContext,
     Invoke,
@@ -153,6 +155,104 @@ def _constant(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.define_constant(name, value)
 
 
+def _create(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+    name = runtime.parse_required_input_word(b"CREATE")
+    runtime.define_created(name)
+
+
+def _variable(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+    name = runtime.parse_required_input_word(b"VARIABLE")
+    runtime.define_created(name, initial_body=bytes(CELL_BYTES))
+
+
+def _here(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.dictionary.here)
+
+
+def _allot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.dictionary.allot(context.data.pop())
+
+
+def _comma(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.dictionary.comma(context.data.pop())
+
+
+def _c_comma(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.dictionary.c_comma(context.data.pop())
+
+
+def _tick(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    name = runtime.parse_input_word()
+    word = runtime.find(name) if name else None
+    context.data.push(0 if word is None else word.xt)
+
+
+def _to_body(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    xt = context.data.pop()
+    try:
+        word = runtime.dictionary.resolve(xt)
+    except KeyError:
+        raise ExecutionError(
+            f">BODY requires a live CREATE-family execution token, got "
+            f"0x{xt:016x}"
+        ) from None
+    if not isinstance(word.implementation, CreatedDefinition):
+        raise ExecutionError(
+            f">BODY requires a CREATE-family execution token, got {word.name!r}"
+        )
+    context.data.push(word.body_address)
+
+
+def _compare(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    right_length = context.data.pop()
+    right_address = context.data.pop()
+    left_length = context.data.pop()
+    left_address = context.data.pop()
+
+    prefix_length = min(left_length, right_length)
+    if prefix_length:
+        left = runtime.memory.read_bytes(left_address, prefix_length)
+        right = runtime.memory.read_bytes(right_address, prefix_length)
+        if left != right:
+            context.data.push(-1 if left < right else 1)
+            return
+    context.data.push((left_length > right_length) - (left_length < right_length))
+
+
+def _abort(context: ExecutionContext) -> None:
+    context.data.clear()
+    context.returns.clear()
+    raise ForthAbort("Forth ABORT")
+
+
+def _format_signed_cell(value: int, base: int) -> bytes:
+    if not 2 <= base <= 36:
+        raise ExecutionError(f". cannot render with numeric base {base}")
+
+    signed = s64(value)
+    magnitude = -signed if signed < 0 else signed
+    digits = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    rendered = bytearray()
+    while True:
+        magnitude, digit = divmod(magnitude, base)
+        rendered.append(digits[digit])
+        if magnitude == 0:
+            break
+    if signed < 0:
+        rendered.append(ord("-"))
+    rendered.reverse()
+    return bytes(rendered)
+
+
+def _dot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    rendered = _format_signed_cell(context.data.pop(), runtime.numeric_base)
+    runtime.write_uart_bytes(rendered + b" ")
+
+
+def _semantic_noop(_context: ExecutionContext) -> None:
+    """A source-visible capability toggle with no hosted native backend."""
+
+
 def _i(context: ExecutionContext) -> None:
     context.data.push(context.returns.i())
 
@@ -182,6 +282,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"?DO", DirectiveKind.QUESTION_DO),
         (b"LOOP", DirectiveKind.LOOP),
         (b"UNLOOP", DirectiveKind.UNLOOP),
+        (b"[']", DirectiveKind.BRACKET_TICK),
+        (b"DOES>", DirectiveKind.DOES),
         (b"(", DirectiveKind.PAREN_COMMENT),
         (b"\\", DirectiveKind.BACKSLASH_COMMENT),
         (b"PROVIDED", DirectiveKind.PROVIDED),
@@ -215,6 +317,19 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"+!", lambda context: _plus_store(runtime, context)),
         (b"FILL", lambda context: _fill(runtime, context)),
         (b"CONSTANT", lambda context: _constant(runtime, context)),
+        (b"CREATE", lambda context: _create(runtime, context)),
+        (b"VARIABLE", lambda context: _variable(runtime, context)),
+        (b"HERE", lambda context: _here(runtime, context)),
+        (b"ALLOT", lambda context: _allot(runtime, context)),
+        (b",", lambda context: _comma(runtime, context)),
+        (b"C,", lambda context: _c_comma(runtime, context)),
+        (b"'", lambda context: _tick(runtime, context)),
+        (b">BODY", lambda context: _to_body(runtime, context)),
+        (b"COMPARE", lambda context: _compare(runtime, context)),
+        (b"JIT-ON", _semantic_noop),
+        (b"JIT-OFF", _semantic_noop),
+        (b"ABORT", _abort),
+        (b".", lambda context: _dot(runtime, context)),
         (b"I", _i),
         (b"J", _j),
         (b"EXECUTE", _execute),

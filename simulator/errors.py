@@ -25,6 +25,10 @@ class ExecutionError(SimulatorError):
     """A semantic definition could not execute coherently."""
 
 
+class ForthAbort(ExecutionError):
+    """The nonreturning BIOS ``ABORT`` word cleared the active task."""
+
+
 class StepBudgetExceeded(ExecutionError):
     """Execution consumed a caller-provided semantic step budget."""
 
@@ -35,6 +39,7 @@ class StepBudgetExceeded(ExecutionError):
 
 __all__ = [
     "ExecutionError",
+    "ForthAbort",
     "SimulatorError",
     "SourceError",
     "StepBudgetExceeded",
