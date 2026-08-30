@@ -27,6 +27,9 @@ The implemented slices provide:
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
 - hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
   the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
+- active-line `WORD` with its transient counted string at `HERE`, forward
+  `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
+  supported compile-state `ABORT"` path;
 - a memory-backed canonical foreground data/return stack with exact downward
   cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`; and
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
@@ -96,6 +99,20 @@ a precompiled caller, and checks guest body bytes, stable execution tokens,
 `ABORT`, numeric UART output, and unsigned byte-string comparison. This is a
 staged source-load proof, not yet a claim that complete `kdos.f` loads.
 
+The contiguous-prefix proof continues with byte-exact logical lines 71 through
+115; the only omitted source byte between fixtures is blank line 70. The
+unchanged definitions allocate `NAMEBUF`, `PATHBUF`, and `PN-LEN`, then compile
+and execute `PARSE-NAME`, `NEEDS`, `ASSERT`, `.DEPTH`, and `0>=`. Acceptance
+checks transient `WORD` geometry without moving `HERE`, path clamping and tail
+clearing, low-to-high `CMOVE` overlap, exact quote payloads and abort output,
+pre-push `DEPTH`, wrapped scalar operations, signed `>`, and the current
+executable BIOS's unsigned `MIN` behavior. That `MIN` behavior mirrors an
+[open documentation/implementation discrepancy](../docs/bios-forth.md), not a
+decision that unsigned comparison is the desired final API. Interpret-state
+`ABORT"` remains outside this supported slice because unchanged KDOS uses its
+compile path; native BIOS currently emits orphan code for that malformed use
+rather than providing useful interpreter semantics.
+
 The first exception proof then evaluates byte-exact `kdos.f` logical lines
 618 through 675 from the same revision. It installs the ordinary KDOS
 per-context `HANDLER` tables and source-defined `CATCH`/`THROW`; the simulator
@@ -114,6 +131,23 @@ stale guest handler from reviving abandoned continuations. Transactional
 context recovery belongs to the pending evaluator/rollback slice. Ordinary
 source `THROW` never crosses that host boundary, and guest `RP!` remains a raw
 aligned restore within its caller-owned stack span.
+
+### KDOS source frontier
+
+| Logical lines | Status | Purpose |
+|---|---|---|
+| 39–115 | Contiguous qualified frontier | Ordinary KDOS bootstrap and utility source; line 70 is blank |
+| 116–617 | Next uncovered frontier | Filled forward from line 116 as BIOS and allocator dependencies land |
+| 618–675 | Qualified semantic island | Source-defined exception handling used to validate real stack unwinding |
+| 676 onward | Pending | Not yet a simulator source-load claim |
+
+The primary progress measure is the monotonically advancing contiguous
+frontier, not the number of isolated fixtures. A later island is admitted only
+when it validates a cross-cutting capability needed by the frontier. As the
+semantic BIOS vocabulary becomes complete, first-failure source loading should
+cross more definitions per slice, the frontier increments should grow, and
+qualified islands should be absorbed until ordinary complete `kdos.f` is one
+continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.

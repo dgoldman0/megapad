@@ -106,6 +106,49 @@ def test_consume_byte_is_raw_and_does_not_advance_on_mismatch() -> None:
     assert cursor.at_end is True
 
 
+def test_delimited_word_skips_leaders_and_consumes_one_trailer() -> None:
+    cursor = SourceCursor(
+        b"   alpha beta",
+        source_name="word.f",
+        line_number=7,
+        offset=50,
+    )
+
+    first = cursor.parse_delimited_word(ord(" "))
+    assert first.data == b"alpha"
+    assert first.terminated
+    assert first.location.offset == 53
+    assert first.location.line == 7
+    assert first.location.column == 3
+    assert cursor.column == 9
+
+    second = cursor.parse_delimited_word(ord(" "))
+    assert second.data == b"beta"
+    assert not second.terminated
+    assert cursor.at_end
+
+    commas = SourceCursor(b",,,one,two")
+    assert commas.parse_delimited_word(ord(",")).data == b"one"
+    assert commas.remaining == b"two"
+
+    wide = SourceCursor(b",one,two")
+    value = wide.parse_delimited_word(0x12C)
+    assert value.data == b",one,two"
+    assert not value.terminated
+
+
+def test_delimited_word_preview_does_not_commit_the_cursor() -> None:
+    cursor = SourceCursor(b"   alpha tail")
+
+    value, next_column = cursor.preview_delimited_word(ord(" "))
+
+    assert value.data == b"alpha"
+    assert next_column == 9
+    assert cursor.column == 0
+    assert cursor.parse_delimited_word(ord(" ")) == value
+    assert cursor.column == next_column
+
+
 def test_parenthesis_comments_nest_within_the_current_line() -> None:
     cursor = SourceCursor(b"( outer (inner (deep) done) tail ) next")
 

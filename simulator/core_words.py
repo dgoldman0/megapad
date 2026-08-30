@@ -68,14 +68,33 @@ def _add(context: ExecutionContext) -> None:
     context.data.push(left + right)
 
 
+def _subtract(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    context.data.push(left - right)
+
+
 def _multiply(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
     context.data.push(u64(left * right))
 
 
+def _minimum(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    # The BIOS documentation calls this signed, but the current MP64 `cmp`
+    # branch uses the architectural unsigned G/LE conditions.  Preserve the
+    # executable BIOS behavior used by unchanged source.
+    context.data.push(left if left <= right else right)
+
+
 def _one_minus(context: ExecutionContext) -> None:
     context.data.push(u64(context.data.pop() - 1))
+
+
+def _one_plus(context: ExecutionContext) -> None:
+    context.data.push(context.data.pop() + 1)
 
 
 def _and(context: ExecutionContext) -> None:
@@ -88,6 +107,10 @@ def _right_shift(context: ExecutionContext) -> None:
     count = context.data.pop()
     value = context.data.pop()
     context.data.push(value >> (count & 0x3F))
+
+
+def _invert(context: ExecutionContext) -> None:
+    context.data.push(~context.data.pop())
 
 
 def _equal(context: ExecutionContext) -> None:
@@ -128,9 +151,19 @@ def _signed_greater_equal(context: ExecutionContext) -> None:
     context.data.push(forth_flag(left >= right))
 
 
+def _signed_greater(context: ExecutionContext) -> None:
+    right = s64(context.data.pop())
+    left = s64(context.data.pop())
+    context.data.push(forth_flag(left > right))
+
+
 def _fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     context.data.push(runtime.memory.read64(address))
+
+
+def _c_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.memory.read8(context.data.pop()))
 
 
 def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -153,6 +186,13 @@ def _fill(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     length = context.data.pop()
     address = context.data.pop()
     runtime.memory.fill(address, length, value)
+
+
+def _cmove(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    destination = context.data.pop()
+    source = context.data.pop()
+    runtime.memory.copy_forward(source, destination, length)
 
 
 def _constant(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -189,6 +229,15 @@ def _c_comma(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 
 def _cells(context: ExecutionContext) -> None:
     context.data.push(context.data.pop() << 3)
+
+
+def _depth(context: ExecutionContext) -> None:
+    context.data.push(context.data.depth())
+
+
+def _word(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    delimiter = context.data.pop()
+    context.data.push(runtime.parse_word_to_dictionary_tail(delimiter))
 
 
 def _stack_pointer_fetch(context: ExecutionContext) -> None:
@@ -316,6 +365,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"(", DirectiveKind.PAREN_COMMENT),
         (b"\\", DirectiveKind.BACKSLASH_COMMENT),
         (b"PROVIDED", DirectiveKind.PROVIDED),
+        (b'."', DirectiveKind.DOT_QUOTE),
+        (b'ABORT"', DirectiveKind.ABORT_QUOTE),
     )
     for name, kind in directives:
         runtime.define_directive(name, kind)
@@ -331,10 +382,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"?DUP", _question_dup),
         (b"PICK", _pick),
         (b"+", _add),
+        (b"-", _subtract),
         (b"*", _multiply),
+        (b"MIN", _minimum),
+        (b"1+", _one_plus),
         (b"1-", _one_minus),
         (b"AND", _and),
         (b"RSHIFT", _right_shift),
+        (b"INVERT", _invert),
         (b"=", _equal),
         (b"0=", _zero_equal),
         (b"0<", _zero_less),
@@ -342,10 +397,13 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"U>", _unsigned_greater),
         (b"<=", _signed_less_equal),
         (b">=", _signed_greater_equal),
+        (b">", _signed_greater),
         (b"@", lambda context: _fetch(runtime, context)),
+        (b"C@", lambda context: _c_fetch(runtime, context)),
         (b"!", lambda context: _store(runtime, context)),
         (b"+!", lambda context: _plus_store(runtime, context)),
         (b"FILL", lambda context: _fill(runtime, context)),
+        (b"CMOVE", lambda context: _cmove(runtime, context)),
         (b"CONSTANT", lambda context: _constant(runtime, context)),
         (b"CREATE", lambda context: _create(runtime, context)),
         (b"VARIABLE", lambda context: _variable(runtime, context)),
@@ -354,6 +412,9 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b",", lambda context: _comma(runtime, context)),
         (b"C,", lambda context: _c_comma(runtime, context)),
         (b"CELLS", _cells),
+        (b"DEPTH", _depth),
+        (b"BL", lambda context: context.data.push(32)),
+        (b"WORD", lambda context: _word(runtime, context)),
         (b"SP@", _stack_pointer_fetch),
         (b"RP@", _return_stack_pointer_fetch),
         (b"NCORES", _push_one),

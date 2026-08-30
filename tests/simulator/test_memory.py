@@ -231,6 +231,46 @@ def test_block_memory_operations_never_expand_into_mmio(operation) -> None:
     assert port.events == []
 
 
+def test_forward_copy_preserves_low_to_high_overlap_semantics() -> None:
+    memory = SparseAddressSpace(bank0_size=0x100)
+    memory.write_bytes(0x20, b"abcdef")
+
+    memory.copy_forward(0x20, 0x21, 5)
+
+    assert memory.read_bytes(0x20, 6) == b"aaaaaa"
+
+    memory.write_bytes(0x20, b"abcdef")
+    memory.copy_forward(0x21, 0x20, 5)
+    assert memory.read_bytes(0x20, 6) == b"bcdeff"
+
+
+def test_forward_copy_zero_length_and_mmio_use_byte_transaction_semantics() -> None:
+    port = RecordingMMIO(values={0: 0x31, 1: 0x32})
+    memory = SparseAddressSpace(bank0_size=0x100, mmio=port)
+
+    memory.copy_forward(MASK64, MASK64, 0)
+    assert port.events == []
+
+    memory.copy_forward(MMIO_BASE, 0x20, 2)
+    assert memory.read_bytes(0x20, 2) == b"12"
+    assert port.events == [
+        ("preflight", 0, 1, False),
+        ("read", 0),
+        ("preflight", 1, 1, False),
+        ("read", 1),
+    ]
+
+
+def test_forward_copy_fault_retains_the_completed_low_byte_prefix() -> None:
+    memory = SparseAddressSpace(bank0_size=0x24)
+    memory.write_bytes(0x10, b"ABCDEFGH")
+
+    with pytest.raises(UnmappedAddressError):
+        memory.copy_forward(0x10, 0x20, 8)
+
+    assert memory.read_bytes(0x20, 4) == b"ABCD"
+
+
 def test_allocator_is_aligned_deterministic_first_fit_and_fully_coalescing() -> None:
     memory = SparseAddressSpace(bank0_size=0x400, page_size=16)
     allocator = RegionAllocator(memory, 0x100, 0x200)

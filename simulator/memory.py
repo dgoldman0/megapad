@@ -395,6 +395,61 @@ class SparseAddressSpace:
         assert resolved.region is not None
         resolved.region.fill(resolved.offset, resolved.length, value)
 
+    def copy_forward(self, source: int, destination: int, length: int) -> None:
+        """Copy bytes low-to-high with BIOS ``CMOVE`` overlap semantics."""
+
+        length = _require_nonnegative(length, label="CMOVE length")
+        if length == 0:
+            return
+
+        try:
+            source_span = self._resolve(
+                source,
+                length,
+                operation="CMOVE source",
+            )
+            destination_span = self._resolve(
+                destination,
+                length,
+                operation="CMOVE destination",
+            )
+        except MemoryAccessError:
+            self._copy_forward_bytes(source, destination, length)
+            return
+
+        assert source_span is not None
+        assert destination_span is not None
+        if (
+            source_span.kind is AddressClass.MMIO
+            or destination_span.kind is AddressClass.MMIO
+        ):
+            self._copy_forward_bytes(source, destination, length)
+            return
+        assert source_span.region is not None
+        assert destination_span.region is not None
+
+        destructive_overlap = (
+            source_span.region is destination_span.region
+            and source_span.offset < destination_span.offset
+            and destination_span.offset < source_span.offset + length
+        )
+        if destructive_overlap:
+            stride = destination_span.offset - source_span.offset
+            seed = source_span.region.read(source_span.offset, stride)
+            payload = (seed * ((length + stride - 1) // stride))[:length]
+        else:
+            payload = source_span.region.read(source_span.offset, length)
+        destination_span.region.write(destination_span.offset, payload)
+
+    def _copy_forward_bytes(
+        self,
+        source: int,
+        destination: int,
+        length: int,
+    ) -> None:
+        for offset in range(length):
+            self.write8(destination + offset, self.read8(source + offset))
+
     def _read_integer(self, address: int, width: int) -> int:
         if width not in _INTEGER_WIDTHS:
             raise ValueError("integer width must be 1, 2, 4, or 8 bytes")

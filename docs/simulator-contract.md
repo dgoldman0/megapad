@@ -309,6 +309,15 @@ branch has an explicit pre-rich-terminal stop line:
    evaluator and module-loading surfaces; and
 6. stop before loading or implementing `rich-terminal.f`.
 
+KDOS qualification maintains one monotonically advancing source frontier.
+Later isolated slices may validate a cross-cutting prerequisite such as real
+exception unwinding, but they do not move that frontier and are not a
+substitute for filling the intervening source. Slice width is determined by
+the next genuine unsupported capability rather than a fixed line count. As
+the BIOS closure grows, each successful increment should span more ordinary
+definitions and the remaining islands should be absorbed into one complete
+`kdos.f` load.
+
 Rich-terminal source loading, host transport integration, and the ordinary
 Desk/Pad/Daybook journey remain part of the compatibility contract, but are a
 later implementation phase.  They resume only after synchronizing this backend

@@ -24,6 +24,12 @@ def _xt(value: int) -> int:
     return value
 
 
+def _payload(value: bytes, *, operation: str) -> bytes:
+    if not isinstance(value, bytes):
+        raise TypeError(f"{operation} payload must be bytes")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Literal:
     value: int
@@ -122,6 +128,34 @@ class RestoreReturnStackPointer:
     """Consume and install one return-stack pointer."""
 
 
+@dataclass(frozen=True, slots=True)
+class WriteOutput:
+    """Append one compile-time literal to the BIOS output stream."""
+
+    payload: bytes
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "payload",
+            _payload(self.payload, operation="output"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AbortIf:
+    """Consume a flag and perform BIOS ABORT after writing a literal."""
+
+    payload: bytes
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "payload",
+            _payload(self.payload, operation='ABORT"'),
+        )
+
+
 Operation: TypeAlias = (
     Literal
     | Call
@@ -138,10 +172,13 @@ Operation: TypeAlias = (
     | InstallDoes
     | RestoreDataStackPointer
     | RestoreReturnStackPointer
+    | WriteOutput
+    | AbortIf
 )
 
 
 __all__ = [
+    "AbortIf",
     "Branch",
     "BranchZero",
     "Call",
@@ -158,4 +195,5 @@ __all__ = [
     "RPop",
     "RPush",
     "Unloop",
+    "WriteOutput",
 ]

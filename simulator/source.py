@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterator
 
+from shared.cells import MASK64
+
 
 _ByteSource = bytes | bytearray | memoryview
 ASCII_SPACE = 0x20
@@ -316,6 +318,67 @@ class SourceCursor:
         )
         self._last_token = SourceSpan(token, location)
         return token
+
+    def parse_delimited_word(self, delimiter: int) -> DelimitedBytes:
+        """Parse one ``WORD`` token using an arbitrary byte delimiter.
+
+        Leading delimiters are skipped.  A trailing delimiter is consumed,
+        while an unterminated token advances to the end of this physical
+        line.  Unlike :meth:`parse_word`, this does not update diagnostic
+        token state because BIOS ``WORD`` publishes a separate transient
+        counted string at ``HERE``.
+        """
+
+        value, next_column = self.preview_delimited_word(delimiter)
+        self._column = next_column
+        return value
+
+    def preview_delimited_word(
+        self,
+        delimiter: int,
+    ) -> tuple[DelimitedBytes, int]:
+        """Scan a ``WORD`` token without committing the input column.
+
+        BIOS publishes ``>IN`` only after its transient dictionary write
+        succeeds.  Returning the proposed next column lets that caller keep
+        source position atomic with its external capacity check and write.
+        """
+
+        if not isinstance(delimiter, int) or not 0 <= delimiter <= MASK64:
+            raise ValueError("WORD delimiter must be a uint64 cell")
+        size = len(self.data)
+        position = self._column
+        if position > size:
+            return (
+                DelimitedBytes(b"", self.location, delimiter, False),
+                position,
+            )
+
+        while position < size and self.data[position] == delimiter:
+            position += 1
+        start = position
+        location = SourceLocation(
+            self.source_name,
+            self.line_offset + start,
+            self.line,
+            start,
+        )
+        while position < size and self.data[position] != delimiter:
+            position += 1
+
+        terminated = position < size
+        end = position
+        if terminated:
+            position += 1
+        return (
+            DelimitedBytes(
+                self.data[start:end],
+                location,
+                delimiter,
+                terminated,
+            ),
+            position,
+        )
 
     def consume_until(self, delimiter: int) -> DelimitedBytes:
         """Consume raw bytes through *delimiter*, without skipping anything.

@@ -21,6 +21,7 @@ from simulator.errors import (
     StepBudgetExceeded,
 )
 from simulator.ir import (
+    AbortIf,
     Branch,
     BranchZero,
     Call,
@@ -37,9 +38,15 @@ from simulator.ir import (
     RPush,
     Return,
     Unloop,
+    WriteOutput,
 )
 from simulator.memory import AddressClass, SparseAddressSpace
-from simulator.source import SourceBuffer, SourceCursor, SourceLocation
+from simulator.source import (
+    ASCII_SPACE,
+    SourceBuffer,
+    SourceCursor,
+    SourceLocation,
+)
 from simulator.stacks import DataStack, ReturnStack
 
 
@@ -159,6 +166,8 @@ class DirectiveKind(Enum):
     PAREN_COMMENT = auto()
     BACKSLASH_COMMENT = auto()
     PROVIDED = auto()
+    DOT_QUOTE = auto()
+    ABORT_QUOTE = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,6 +436,22 @@ class MegaForthRuntime:
             raise ExecutionError("cannot parse a word without an active input line")
         return self._active_input_states[-1].cursor.parse_word()
 
+    def parse_word_to_dictionary_tail(self, delimiter: int) -> int:
+        """Publish one BIOS ``WORD`` value and then commit its input cursor."""
+
+        if not self._active_input_states:
+            raise ExecutionError(
+                "cannot parse a delimited word without an active input line"
+            )
+        cursor = self._active_input_states[-1].cursor
+        value, next_column = cursor.preview_delimited_word(delimiter)
+        counted = bytes((len(value.data) & 0xFF,)) + value.data + b"\0"
+        address = self.dictionary.write_transient(counted)
+        committed = cursor.parse_delimited_word(delimiter)
+        if committed != value or cursor.column != next_column:
+            raise AssertionError("WORD cursor preview diverged before commit")
+        return address
+
     def parse_required_input_word(self, owner: bytes | str) -> bytes:
         """Consume a required word from the active physical input line.
 
@@ -577,6 +602,26 @@ class MegaForthRuntime:
             return
         if kind is DirectiveKind.PROVIDED:
             self._provided.add(self._parse_required_word(state, "PROVIDED"))
+            return
+        if kind is DirectiveKind.DOT_QUOTE:
+            payload = self._parse_quoted_literal(
+                state,
+                unconditionally_skip_next=True,
+            )
+            if state.compiler is None:
+                self.write_uart_bytes(payload)
+            else:
+                state.compiler.operations.append(WriteOutput(payload))
+            return
+        if kind is DirectiveKind.ABORT_QUOTE:
+            if state.compiler is None:
+                self._compile_error(state, 'ABORT" is compile-only')
+            payload = self._parse_quoted_literal(
+                state,
+                unconditionally_skip_next=False,
+            )
+            assert state.compiler is not None
+            state.compiler.operations.append(AbortIf(payload))
             return
         if kind is DirectiveKind.COLON:
             if state.compiler is not None:
@@ -811,6 +856,16 @@ class MegaForthRuntime:
                 context.returns.set_pointer(pointer)
                 context.data.pop()
                 ip += 1
+            elif isinstance(operation, WriteOutput):
+                self.write_uart_bytes(operation.payload)
+                ip += 1
+            elif isinstance(operation, AbortIf):
+                if context.data.pop() != 0:
+                    self.write_uart_bytes(operation.payload)
+                    context.data.clear()
+                    context.returns.clear()
+                    raise ForthAbort('Forth ABORT"')
+                ip += 1
             elif isinstance(operation, Return):
                 continuation = context.returns.pop_continuation()
                 if continuation.root:
@@ -891,6 +946,20 @@ class MegaForthRuntime:
             return meter, meter.steps
         meter = _StepMeter(step_budget)
         return meter, 0
+
+    @staticmethod
+    def _parse_quoted_literal(
+        state: _EvaluationState,
+        *,
+        unconditionally_skip_next: bool,
+    ) -> bytes:
+        """Consume one line-local BIOS quote payload and its closing quote."""
+
+        if unconditionally_skip_next:
+            state.cursor.consume_byte()
+        else:
+            state.cursor.consume_byte(ASCII_SPACE)
+        return state.cursor.consume_until(ord('"')).data
 
     def _parse_number(self, token: bytes) -> int | None:
         """Parse exactly the BIOS ``-``/``0x``/``BASE`` number grammar."""

@@ -1,0 +1,2 @@
+# Byte-exact source fixtures may retain an intentional blank logical EOF line.
+tests/simulator/fixtures/*.f whitespace=-blank-at-eof

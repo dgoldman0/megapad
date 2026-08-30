@@ -245,6 +245,21 @@ def test_comma_and_c_comma_emit_little_endian_low_bits() -> None:
     assert dictionary.here == 0x1009
 
 
+def test_transient_dictionary_tail_write_does_not_advance_here() -> None:
+    memory = SparseAddressSpace(bank0_size=0x3000)
+    dictionary = Dictionary(start_address=0x1000, memory=memory)
+
+    address = dictionary.write_transient(b"\x05alpha\0")
+
+    assert address == 0x1000
+    assert dictionary.here == 0x1000
+    assert memory.read_bytes(address, 7) == b"\x05alpha\0"
+
+    word = dictionary.define("X")
+    assert word.header_address == address
+    assert memory.read64(address) == 0
+
+
 def test_dictionary_store_fault_is_atomic_for_memory_and_here() -> None:
     memory = SparseAddressSpace(bank0_size=0x1004)
     dictionary = Dictionary(start_address=0x1000, memory=memory)

@@ -102,14 +102,23 @@ CPU trap (vector `IVEC_DIV_ZERO`).
 | `/MOD` | `( a b -- rem quot )` | Signed division with remainder. |
 | `NEGATE` | `( n -- -n )` | Two's-complement negation. |
 | `ABS` | `( n -- |n| )` | Absolute value. |
-| `MIN` | `( a b -- min )` | Smaller of two signed values. |
-| `MAX` | `( a b -- max )` | Larger of two signed values. |
+| `MIN` | `( a b -- min )` | Documented signed minimum; current executable behavior has the unresolved signedness discrepancy below. |
+| `MAX` | `( a b -- max )` | Documented signed maximum; current executable behavior has the unresolved signedness discrepancy below. |
 | `1+` | `( n -- n+1 )` | Increment by one. |
 | `1-` | `( n -- n-1 )` | Decrement by one. |
 | `2+` | `( n -- n+2 )` | Increment by two. |
 | `2-` | `( n -- n-2 )` | Decrement by two. |
 | `CELLS` | `( n -- n*8 )` | Convert a cell count to bytes (cells are 8 bytes). |
 | `CELL+` | `( addr -- addr+8 )` | Advance an address by one cell (8 bytes). |
+
+> **Open `MIN`/`MAX` signedness discrepancy.** The public descriptions and
+> BIOS source comments specify signed comparison, but the current `bios.asm`
+> implementations branch on MP64 `G`/`LE`, whose executable ISA and emulator
+> semantics are unsigned. This note records the mismatch; it does not decide
+> whether the API intent or the present implementation should change. The
+> hosted simulator mirrors the current executable behavior for differential
+> work until BIOS, emulator, simulator, tests, and this reference are resolved
+> together.
 
 **Example — computing an average:**
 ```forth

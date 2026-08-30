@@ -245,6 +245,26 @@ class Dictionary:
 
         self._store_and_advance(cell, 1)
 
+    def write_transient(self, payload: bytes) -> int:
+        """Write caller bytes at ``HERE`` without advancing the frontier.
+
+        BIOS ``WORD`` owns this deliberately ephemeral dictionary-tail
+        surface.  A later definition or comma operation may overwrite it.
+        """
+
+        if not isinstance(payload, bytes):
+            raise TypeError("transient dictionary payload must be bytes")
+        if self._memory is None:
+            raise RuntimeError(
+                "transient dictionary writes require a shared address space"
+            )
+        self._checked_advance(
+            len(payload),
+            operation="transient dictionary write",
+        )
+        self._memory.write_bytes(self._here, payload)
+        return self._here
+
     def find(self, name: bytes | str) -> Word | None:
         """Return the newest case-insensitive binding for *name*, if present."""
 
