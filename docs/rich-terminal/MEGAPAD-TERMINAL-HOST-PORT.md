@@ -425,10 +425,11 @@ The additive `RET_CONTROL_COLLECTIONS` model now also crosses the generic view
 boundary as immutable `TextAreaDraw`, `TextGridDraw`, and `TabSetDraw` values.
 That projection preserves exact owner/region authority, independent sibling
 roots, stable item identities, logical viewport and selection state, and
-deterministic draw order without choosing pixels or hit geometry. The Pygame
-sink does not yet rasterize or hit-test those values, and the shared physical
-viewer wire does not yet encode them. Therefore the host must not advertise
-bit 9; this is a model/view checkpoint, not physical rich-rendering or
+deterministic draw order without choosing pixels or hit geometry. The shared
+physical viewer wire now carries those exact draw values, using canonical STX1
+bytes instead of defining another semantic-item schema. The Pygame sink does
+not yet rasterize or hit-test them. Therefore the host must not advertise bit
+9; this is a model/view/transport checkpoint, not physical rich-rendering or
 Desk/Pad/Daybook acceptance evidence.
 
 A region's pixel rectangle is exactly its cell rectangle multiplied by the

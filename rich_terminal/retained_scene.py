@@ -37,11 +37,7 @@ from .retained_model import (
     PreparedOwnerLedgerInstall,
     RetainedFeature,
 )
-from .semantic_content import (
-    SemanticTextContent,
-    SemanticTextRole,
-    SemanticTextState,
-)
+from .semantic_content import SemanticTextContent
 
 
 INT32_MIN = -(1 << 31)
@@ -694,15 +690,7 @@ def validate_control_shape(
                 f"{normalized_kind.name} requires semantic text content"
             )
         elif normalized_kind is ControlKind.TEXT_AREA:
-            if any(
-                item.role is not SemanticTextRole.CONTENT
-                or item.row_span != 1
-                or item.column != 0
-                or item.column_span != content.columns
-                or item.state
-                or len(item.text) > content.columns
-                for item in content.items
-            ):
+            if not content.text_area_compatible:
                 raise ValueError(
                     "TEXT_AREA items must be bounded full-row state-zero CONTENT values"
                 )
@@ -711,13 +699,8 @@ def validate_control_shape(
                 raise ValueError(
                     "TEXT_GRID positions name whole items and require zero offsets"
                 )
-            current_key = 0
-            for item in content.items:
-                if not item.state & SemanticTextState.CURRENT:
-                    continue
-                if current_key:
-                    raise ValueError("TEXT_GRID has more than one current item")
-                current_key = item.item_key
+            if content.current_item_count > 1:
+                raise ValueError("TEXT_GRID has more than one current item")
     else:
         if parent_control_id == 0 or bounds is not None or z_order != 0:
             raise ValueError(

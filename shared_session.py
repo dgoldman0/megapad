@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import operator
 import os
@@ -29,8 +30,23 @@ from rich_terminal.retained_view import (
     MenuSeparatorDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    TabDraw,
+    TabSetDraw,
+    TextAreaDraw,
+    TextGridDraw,
 )
-from rich_terminal.retained_scene import ControlState, ObjectBounds, RGBA
+from rich_terminal.retained_scene import (
+    ControlKind,
+    ControlState,
+    ObjectBounds,
+    RGBA,
+    validate_control_shape,
+)
+from rich_terminal.semantic_content import (
+    SemanticTextContent,
+    decode_semantic_text_content,
+    encode_semantic_text_content,
+)
 from rich_terminal.update_authority import TerminalUpdateError
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import (
@@ -378,6 +394,32 @@ _MENU_SEPARATOR_WIRE_FIELDS = (
     "state",
     "order",
 )
+_TEXT_COLLECTION_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "z_order",
+    "bounds",
+    "content_stx1_base64",
+)
+_TABSET_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "z_order",
+    "bounds",
+    "tabs",
+)
+_TAB_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "label",
+    "shortcut",
+)
 _REGION_WIRE_FIELDS = (
     "owner_id",
     "owner_generation",
@@ -390,6 +432,67 @@ _REGION_WIRE_FIELDS = (
     "clipped",
     "draws",
 )
+
+
+def _semantic_content_to_wire(content: SemanticTextContent) -> str:
+    """Carry the one canonical STX1 schema through JSON without restating it."""
+
+    payload = encode_semantic_text_content(content)
+    return base64.b64encode(payload).decode("ascii")
+
+
+def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
+    encoded = _wire_text(value, name)
+    try:
+        ascii_payload = encoded.encode("ascii", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be canonical base64 ASCII") from exc
+    try:
+        payload = base64.b64decode(ascii_payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"{name} must be canonical base64") from exc
+    if base64.b64encode(payload).decode("ascii") != encoded:
+        raise ValueError(f"{name} must use canonical base64 padding")
+    try:
+        return decode_semantic_text_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical STX1: {exc}") from exc
+
+
+def _validate_collection_draw_shape(
+    kind: ControlKind,
+    state: ControlState,
+    order: int,
+    z_order: int,
+    bounds: ObjectBounds,
+    content: SemanticTextContent,
+) -> None:
+    """Reassert family rules from immutable O(1) content summaries."""
+
+    validate_control_shape(
+        kind=kind,
+        state=state,
+        z_order=z_order,
+        parent_control_id=0,
+        order=order,
+        bounds=bounds,
+        label="",
+        shortcut="",
+        content=content,
+    )
+
+
+def _tab_to_wire(tab: TabDraw) -> dict:
+    if not isinstance(tab, TabDraw):
+        raise TypeError("tab must be TabDraw")
+    return {
+        "kind": "tab",
+        "control_id": tab.control_id,
+        "state": int(tab.state),
+        "order": tab.order,
+        "label": tab.label,
+        "shortcut": tab.shortcut,
+    }
 
 
 def _menu_entry_to_wire(entry: MenuItemDraw | MenuSeparatorDraw) -> dict:
@@ -425,7 +528,9 @@ def _menu_to_wire(menu: MenuDraw) -> dict:
     }
 
 
-def _retained_draw_to_wire(draw: GlyphRunDraw | MenuBarDraw) -> dict:
+def _retained_draw_to_wire(
+    draw: GlyphRunDraw | MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw,
+) -> dict:
     if isinstance(draw, GlyphRunDraw):
         return {
             "kind": "glyph_run",
@@ -467,7 +572,50 @@ def _retained_draw_to_wire(draw: GlyphRunDraw | MenuBarDraw) -> dict:
             ],
             "menus": [_menu_to_wire(menu) for menu in draw.menus],
         }
-    raise TypeError("retained draw must be GlyphRunDraw or MenuBarDraw")
+    if isinstance(draw, (TextAreaDraw, TextGridDraw)):
+        kind = (
+            ControlKind.TEXT_AREA
+            if isinstance(draw, TextAreaDraw)
+            else ControlKind.TEXT_GRID
+        )
+        _validate_collection_draw_shape(
+            kind,
+            draw.state,
+            draw.order,
+            draw.z_order,
+            draw.bounds,
+            draw.content,
+        )
+        return {
+            "kind": "text_area" if kind is ControlKind.TEXT_AREA else "text_grid",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": [
+                draw.bounds.left,
+                draw.bounds.top,
+                draw.bounds.right,
+                draw.bounds.bottom,
+            ],
+            "content_stx1_base64": _semantic_content_to_wire(draw.content),
+        }
+    if isinstance(draw, TabSetDraw):
+        return {
+            "kind": "tabset",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": [
+                draw.bounds.left,
+                draw.bounds.top,
+                draw.bounds.right,
+                draw.bounds.bottom,
+            ],
+            "tabs": [_tab_to_wire(tab) for tab in draw.tabs],
+        }
+    raise TypeError("retained draw is outside the shared-viewer vocabulary")
 
 
 def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
@@ -574,7 +722,122 @@ def _menu_from_wire(data, name: str) -> MenuDraw:
     )
 
 
-def _retained_draw_from_wire(data, name: str) -> GlyphRunDraw | MenuBarDraw:
+def _tab_from_wire(data, name: str) -> TabDraw:
+    wire = _wire_object(data, name, _TAB_WIRE_FIELDS)
+    if wire["kind"] != "tab":
+        raise ValueError(f"{name} kind must be tab")
+    return TabDraw(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(
+            wire["order"],
+            f"{name} order",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        label=_wire_text(wire["label"], f"{name} label"),
+        shortcut=_wire_text(wire["shortcut"], f"{name} shortcut"),
+    )
+
+
+def _text_collection_from_wire(
+    data,
+    name: str,
+    kind: ControlKind,
+) -> TextAreaDraw | TextGridDraw:
+    wire = _wire_object(data, name, _TEXT_COLLECTION_WIRE_FIELDS)
+    expected_tag = (
+        "text_area" if kind is ControlKind.TEXT_AREA else "text_grid"
+    )
+    if wire["kind"] != expected_tag:
+        raise ValueError(f"{name} kind must be {expected_tag}")
+    state = _control_state_from_wire(wire["state"], f"{name} state")
+    order = _wire_integer(
+        wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX
+    )
+    z_order = _wire_integer(
+        wire["z_order"],
+        f"{name} z_order",
+        minimum=INT32_MIN,
+        maximum=INT32_MAX,
+    )
+    bounds = ObjectBounds(
+        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+    )
+    content = _semantic_content_from_wire(
+        wire["content_stx1_base64"],
+        f"{name} content_stx1_base64",
+    )
+    _validate_collection_draw_shape(
+        kind,
+        state,
+        order,
+        z_order,
+        bounds,
+        content,
+    )
+    draw_type = TextAreaDraw if kind is ControlKind.TEXT_AREA else TextGridDraw
+    return draw_type(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=state,
+        order=order,
+        z_order=z_order,
+        bounds=bounds,
+        content=content,
+    )
+
+
+def _tabset_from_wire(data, name: str) -> TabSetDraw:
+    wire = _wire_object(data, name, _TABSET_WIRE_FIELDS)
+    if wire["kind"] != "tabset":
+        raise ValueError(f"{name} kind must be tabset")
+    tabs_wire = wire["tabs"]
+    if not isinstance(tabs_wire, (list, tuple)):
+        raise TypeError(f"{name} tabs must be an array")
+    return TabSetDraw(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(
+            wire["order"],
+            f"{name} order",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        z_order=_wire_integer(
+            wire["z_order"],
+            f"{name} z_order",
+            minimum=INT32_MIN,
+            maximum=INT32_MAX,
+        ),
+        bounds=ObjectBounds(
+            *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        ),
+        tabs=tuple(
+            _tab_from_wire(tab, f"{name} tab {tab_index}")
+            for tab_index, tab in enumerate(tabs_wire)
+        ),
+    )
+
+
+def _retained_draw_from_wire(
+    data,
+    name: str,
+) -> GlyphRunDraw | MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw:
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
     kind = data.get("kind")
@@ -643,6 +906,12 @@ def _retained_draw_from_wire(data, name: str) -> GlyphRunDraw | MenuBarDraw:
                 for menu_index, menu in enumerate(menus_wire)
             ),
         )
+    if kind == "text_area":
+        return _text_collection_from_wire(data, name, ControlKind.TEXT_AREA)
+    if kind == "text_grid":
+        return _text_collection_from_wire(data, name, ControlKind.TEXT_GRID)
+    if kind == "tabset":
+        return _tabset_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
 
 

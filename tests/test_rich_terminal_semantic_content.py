@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 import struct
 
 import pytest
@@ -122,7 +122,17 @@ def test_stx1_collection_has_exact_headers_and_round_trips() -> None:
     expected += struct.pack("<QIIIIHHI", 103, 6, 0, 1, 23, 1, 0, 0)
     assert payload == expected
     assert content.wire_bytes == len(expected)
-    assert decode_semantic_text_content(payload) == content
+    assert content.text_area_compatible
+    assert content.current_item_count == 0
+    decoded = decode_semantic_text_content(payload)
+    assert decoded == content
+    assert decoded.text_area_compatible
+    assert decoded.current_item_count == 0
+
+    derived_fields = {value.name: value for value in fields(SemanticTextContent)}
+    for name in ("text_area_compatible", "current_item_count"):
+        assert not derived_fields[name].init
+        assert not derived_fields[name].compare
 
     reserved_header = bytearray(payload)
     reserved_header[6] = 1
@@ -288,18 +298,17 @@ def test_control_record_carries_one_generic_text_content_body() -> None:
 
     with pytest.raises(ValueError, match="requires semantic text content"):
         _root(ControlKind.TEXT_AREA)
+    mismatched = replace(
+        _text_area_content(),
+        items=(replace(_line(1, 0, "bad"), column_span=19),),
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+    )
+    assert not mismatched.text_area_compatible
     with pytest.raises(ValueError, match="full-row"):
-        _root(
-            ControlKind.TEXT_AREA,
-            replace(
-                _text_area_content(),
-                items=(replace(_line(1, 0, "bad"), column_span=19),),
-                primary_key=0,
-                primary_offset=0,
-                anchor_key=0,
-                anchor_offset=0,
-            ),
-        )
+        _root(ControlKind.TEXT_AREA, mismatched)
 
 
 def test_text_grid_and_tabs_share_control_identity_without_private_layout() -> None:
@@ -359,8 +368,19 @@ def test_text_grid_and_tabs_share_control_identity_without_private_layout() -> N
             ),
         ),
     )
+    assert not content.text_area_compatible
+    assert content.current_item_count == 1
     grid = _root(ControlKind.TEXT_GRID, content)
     assert decode_control_definition(encode_control_definition(grid)) == grid
+
+    two_current = replace(
+        content,
+        items=content.items[:-1]
+        + (replace(content.items[-1], state=SemanticTextState.CURRENT),),
+    )
+    assert two_current.current_item_count == 2
+    with pytest.raises(ValueError, match="more than one current item"):
+        _root(ControlKind.TEXT_GRID, two_current)
 
     tabset = _root(ControlKind.TABSET, control_id=20)
     tab = ControlWireDefinition(

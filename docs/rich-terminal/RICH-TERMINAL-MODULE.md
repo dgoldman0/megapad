@@ -486,9 +486,13 @@ use them.
 
 MegaPad's additive `RET_CONTROL_COLLECTIONS` foundation now admits and projects
 renderer-neutral text-area, text-grid, tabset, and tab draw values, including
-multiple independent roots in one ordinary owner/region. It does not yet have a
-shared-viewer wire value, Pygame raster/hit path, or Akashic producer, so bit 9
-remains unadvertised and this foundation is not evidence that Pad or Daybook
+multiple independent roots in one ordinary owner/region. The exact values now
+also cross the shared-viewer wire, with text content carried as canonical STX1
+rather than a duplicate JSON item schema. Collection-family checks at the
+scene, view, and shared-wire seams use two immutable facts derived during the
+canonical STX1 item pass, so fail-closed reassertion does not add another item
+scan. It does not yet have a Pygame raster/hit path or Akashic producer, so bit
+9 remains unadvertised and this foundation is not evidence that Pad or Daybook
 content crossed the rich physical view.
 
 The early physical renderer deliberately exposes the product direction rather

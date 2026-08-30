@@ -1,11 +1,11 @@
 # SEMANTIC-CONTENT-1 protocol slice
 
 Status: protocol value, wire codec, immutable retained model, server ingress,
-and renderer-neutral immutable draw projection implemented. Pygame
-rasterization/hit maps, Akashic production, and text/grid item input are
-deliberately not implemented in this slice. A physical renderer must not
-advertise `RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement
-path can render every visible kind.
+renderer-neutral immutable draw projection, and exact shared-viewer transport
+implemented. Pygame rasterization/hit maps, Akashic production, and text/grid
+item input are deliberately not implemented in this slice. A physical renderer
+must not advertise `RET_CONTROL_COLLECTIONS` until its compositor and
+acknowledgement path can render every visible kind.
 
 ## Decision
 
@@ -187,11 +187,16 @@ common one-row-span case uses a linear overlap pass; genuine row spans use an
 `O(n log n)` rectangle sweep. They do not compute content hashes, rasterize,
 scan terminal cells, or rebuild a second scene. Immutable values cache their
 validated UTF-8 and wire byte totals, so quota admission and scene freezing do
-not re-encode every string. Wire encoding still makes one necessary UTF-8/body
-pass. Each item uses one existing object-quota slot, so one accepted control
-replaces many per-row GLYPH_RUN definitions without evading the caller's
-retained-value bound. `CONTROL_REPLACE` currently resends the complete small
-collection.
+not re-encode every string. That same canonical item loop derives exactly two
+non-semantic summaries: whether the content has TEXT_AREA shape and how many
+items carry `CURRENT`. Later scene, view, and shared-wire family checks consult
+those immutable facts in `O(1)` instead of rescanning items. They add no hash,
+certificate, cache, traversal, or wire field; canonical STX1 construction and
+decode remain the boundary that proves the facts. Wire encoding still makes
+one necessary UTF-8/body pass. Each item uses one existing object-quota slot,
+so one accepted control replaces many per-row GLYPH_RUN definitions without
+evading the caller's retained-value bound. `CONTROL_REPLACE` currently resends
+the complete small collection.
 
 That full replacement is the bounded first slice, not a claim that it is the
 best steady-state Pad keystroke transport. Before adding machinery, measure its
@@ -200,6 +205,27 @@ the complete visible text area becomes the bottleneck, the next protocol work
 is one generic revision-bound STX1 item patch operation with atomic model
 application—not Pad-specific events, a grid-only message family, hashes, or a
 renderer cache exposed on the wire.
+
+## Shared-viewer transport
+
+The local JSON display-offer wire carries the renderer-facing values with exact
+tags `text_area`, `text_grid`, `tabset`, and nested `tab`. Text collection roots
+use the exact fields `kind`, `control_id`, `state`, `order`, `z_order`,
+`bounds`, and `content_stx1_base64`. A tabset replaces the content field with
+`tabs`; each tab has only `kind`, `control_id`, `state`, `order`, `label`, and
+`shortcut`.
+
+`content_stx1_base64` is canonical padded base64 of the existing STX1 byte
+value. The shared wire deliberately does not restate STX1 items as a second
+JSON schema. Decode first requires canonical base64, then delegates all item,
+UTF-8, geometry, selection, and reserved-field checks to
+`decode_semantic_text_content`, and finally reasserts the TEXT_AREA or TEXT_GRID
+family shape through the common retained-control validator. That reassertion is
+constant-time: it reads the two immutable summaries already derived during
+canonical STX1 content construction, rather than repeating the item scan on
+both outgoing and incoming offers. Unknown or extra JSON fields, mismatched
+tags, malformed STX1, ambiguous tab state, duplicate identities, and
+noncanonical ordering fail closed before a display offer enters the viewer.
 
 ## Implementation boundary
 
@@ -216,12 +242,14 @@ The coherent protocol slice is owned by:
   control-shape validation, and deterministic projection of independent
   sibling roots. The view reuses the deeply immutable STX1 content value
   validated at wire/model admission; it does not rebuild the item graph or
-  repeat UTF-8 and rectangle-overlap validation on every display offer.
+  repeat item-family, UTF-8, or rectangle-overlap scans on every display offer;
+  and
+- `shared_session.py`: exact tagged local-viewer transport, carrying canonical
+  STX1 bytes without defining a parallel item representation.
 
-The next MegaPad slice must carry these draw values through `shared_session.py`,
-then add one ordinary pygame compositor path and immutable hit map. Until both
-exist, the reference sink rejects a visible collection draw rather than
-silently reducing it to CELL or glyphs.
+The next MegaPad slice is one ordinary pygame compositor path and immutable hit
+map. Until that exists, the reference sink rejects a visible collection draw
+rather than silently reducing it to CELL or glyphs.
 Akashic can advertise/use bit 9 only after its generic UIDL semantic provider
 and CONTROL encoder emit these exact records. Pad and Daybook must remain
 ordinary UIDL/TUI sources; neither receives a terminal API or renderer-specific

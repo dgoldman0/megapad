@@ -303,6 +303,8 @@ class SemanticTextContent:
     anchor_key: int
     anchor_offset: int
     items: tuple[SemanticTextItem, ...]
+    text_area_compatible: bool = field(init=False, repr=False, compare=False)
+    current_item_count: int = field(init=False, repr=False, compare=False)
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
     _wire_bytes: int = field(init=False, repr=False, compare=False)
 
@@ -352,12 +354,25 @@ class SemanticTextContent:
         wire_bytes = _CONTENT_HEADER.size
         utf8_bytes = 0
         prior_order: tuple[int, int, int] | None = None
+        text_area_compatible = True
+        current_item_count = 0
         for item in items:
             item_bytes = _ITEM_HEADER.size + item.utf8_bytes
             if item_bytes > UINT32_MAX - wire_bytes:
                 raise ValueError("semantic text content exceeds u32 wire bytes")
             wire_bytes += item_bytes
             utf8_bytes += item.utf8_bytes
+            if (
+                item.role is not SemanticTextRole.CONTENT
+                or item.row_span != 1
+                or item.column != 0
+                or item.column_span != self.columns
+                or item.state
+                or len(item.text) > self.columns
+            ):
+                text_area_compatible = False
+            if item.state & SemanticTextState.CURRENT:
+                current_item_count += 1
             item_order = item.row, item.column, item.item_key
             if prior_order is not None and item_order < prior_order:
                 raise ValueError(
@@ -381,6 +396,8 @@ class SemanticTextContent:
         if self.anchor_key and not self.primary_key:
             raise ValueError("semantic text anchor requires a primary position")
         object.__setattr__(self, "items", items)
+        object.__setattr__(self, "text_area_compatible", text_area_compatible)
+        object.__setattr__(self, "current_item_count", current_item_count)
         object.__setattr__(self, "_utf8_bytes", utf8_bytes)
         object.__setattr__(self, "_wire_bytes", wire_bytes)
 
