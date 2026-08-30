@@ -405,14 +405,20 @@ the ordinary authoritative UIDL action path. The MegaPad model, code-native
 Pygame compositor, shared viewer transport, exact offer acknowledgement, and
 revision-bound hit map carry that same control identity end to end.
 
-A recorded reference-sink journey at Akashic `3404fe9` with MegaPad `8941782`
+A recorded reference-sink journey at Akashic `eedcfb9` with MegaPad `4f074ae`
 shows the complete Desk, Pad File-menu activation/open/close, a real Pad edit,
 and a real Daybook task addition through this path. Its evidence boundary is
 explicitly `pygame.display.flip()`: it proves exact host display-API submission
-and acknowledgement, not hardware scanout or panel refresh. Akashic `e754ac1`
-contains eleven later retained-delta and admission optimizations which have not
-received another full display-backed journey, so that recorded evidence must
-not be silently attributed to the later revision.
+and acknowledgement, not hardware scanout or panel refresh. This rerun
+qualifies the Akashic implementation containing the eleven retained-delta and
+admission optimizations through `e754ac1` for that journey.
+
+Against the earlier `3404fe9`/`8941782` baseline, post-first-offer decoded
+traffic fell from 1,386 frames / 190,131 bytes to 221 frames / 24,541 bytes,
+and the duplicate complete object/control forest disappeared. Total decoded
+traffic fell 41.3% by frame count and 17.7% by byte count. This is a
+steady-state publication win, not a cold-start speed claim: total guest work
+rose 1.8%, while the single-run elapsed time was effectively flat.
 
 The current Pygame acceptance runner also stops after the Daybook task and
 does not exercise the separately implemented ordinary Daybook-to-Pad
