@@ -299,13 +299,23 @@ ordinary UIDL/TUI sources; neither receives a terminal API or renderer-specific
 annotation.
 
 Advertisement is deliberately one final vertical gate, not an isolated policy
-bit flip. The MegaPad guest module still accepts retained mask `0x13f`, kinds
-MENU through MENU_SEPARATOR, and a zero CONTROL content length. Before bit 9 is
-enabled, that same public writer must gain caller-bounded kinds 5 through 8 and
-canonical content copying, validate the bit-9 dependency and payload/transaction
-minima, and pass a target-Forth byte oracle. Akashic's real collection operation
-counts and UTF-8 bytes must also be included in the Desktop caller-owned arena
-derivation.
+bit flip. The MegaPad guest module now accepts mask `0x33f`, requires bit 8 for
+bit 9, and evolves the one public CONTROL writer to copy caller-bounded kinds 5
+through 8 without a parallel message or legacy encoder. It enforces exact root,
+child, state, label, shortcut, and zero/nonzero content shapes; TEXT_AREA and
+TEXT_GRID also reject a body shorter than the fixed 72-byte STX1 header. The
+guest does not repeat canonical STX1 item/graph validation: Akashic supplies
+those bytes, and the terminal validates them before commit. The three source
+spans are checked for nonwrapping storage, staging/session aliasing, and mutual
+overlap, then all source borrows are scrubbed after the guarded call.
+
+Bit-9 discovery now audits the 152-byte peer payload, 192-byte guest TX staging,
+and 352-byte retained-transaction minima, and a focused target-Forth oracle
+locks the complete minimum-content CONTROL frame. No host/product policy
+advertises the capability yet. Akashic's real collection operation counts and
+UTF-8 bytes must still be included in the Desktop caller-owned arena derivation,
+and its ordinary UIDL provider/encoder must drive the real Pad and Daybook
+records before advertisement.
 
 The session configuration derives its transport `max_payload` from both the CELL
 row requirement and the retained client-to-terminal payload policy. This keeps

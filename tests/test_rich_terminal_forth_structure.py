@@ -142,14 +142,26 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     formats = _definition(source, "_PT-RET-FORMATS-VALID?")
 
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
-    assert "0x13F    CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
+    assert "0x33F    CONSTANT _PT-RET-FEATURE-MASK" in source
     assert "_PT-RET-FEATURE-MASK INVERT AND" in caps
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND"
+    ) in caps
     assert "_PT-RV-FEATURES @ 0x11E AND IF" in caps
     controls = caps.index("_PT-RV-FEATURES @ _PT-RET-CONTROLS AND IF")
     assert caps.index("_PT.S.PEER-MAX-PAY @ 80 U<", controls) > controls
     assert caps.index("_PT.S.CLIENT-MAX-PAY @ 40 U<", controls) > controls
     assert caps.index("_PT.S.TX-U @ 120 U<", controls) > controls
     assert caps.index("_PT-RV-RETMAX @ 280 U<", controls) > controls
+
+    collections = caps.index(
+        "_PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND IF"
+    )
+    assert caps.index("_PT.S.PEER-MAX-PAY @ 152 U<", collections) > collections
+    assert caps.index("_PT.S.TX-U @ 192 U<", collections) > collections
+    assert caps.index("_PT-RV-RETMAX @ 352 U<", collections) > collections
 
     no_glyph = formats.index("_PT-RF-FORMATS @ 24 + L@ ?DUP IF")
     assert formats.index("_PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0<>", no_glyph) > (
@@ -532,7 +544,9 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     body = _definition(source, "_PT-CT-DEFINE-BODY")
     fields = _definition(source, "_PT-CT-FIELDS?")
     kinds = _definition(source, "_PT-CT-KIND?")
+    source_span = _definition(source, "_PT-CT-SOURCE?")
     text = _definition(source, "_PT-CT-TEXT?")
+    spans = _definition(source, "_PT-CT-SPANS-DISJOINT?")
     payload = _definition(source, "_PT-CT-PAYLOAD!")
     scrub = _definition(source, "_PT-CT-SCRUB")
 
@@ -542,6 +556,8 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-M-CONTROL-DEFINE _PT-CONTROL-WRITE" in define
     assert "_PT-M-CONTROL-REPLACE _PT-CONTROL-WRITE" in replace
     assert "_PT-RET-CONTROLS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
+    assert "_PT-CT-KIND @ _PT-CT-COLLECTION-KIND? IF" in body
+    assert "_PT-RET-CONTROL-COLLECTIONS? 0= IF" in body
     assert body.index("_PT-PO-ADMIT") < body.index("_PT-CT-PAYLOAD!")
     assert body.index("_PT-CT-PAYLOAD!") < body.index("_PT-PO-SEND")
 
@@ -561,15 +577,18 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "_PT-CT-BOTTOM @ _PT-FRAME-PAYLOAD 64 + L!",
         "_PT-CT-LABEL-U @ _PT-FRAME-PAYLOAD 68 + L!",
         "_PT-CT-SHORTCUT-U @ _PT-FRAME-PAYLOAD 72 + L!",
-        "0 _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-CT-CONTENT-U @ _PT-FRAME-PAYLOAD 76 + L!",
         "_PT-FRAME-PAYLOAD 80 + SWAP MOVE",
         "_PT-FRAME-PAYLOAD 80 + _PT-CT-LABEL-U @ + SWAP MOVE",
+        "_PT-FRAME-PAYLOAD 80 + _PT-CT-LABEL-U @ +",
+        "_PT-CT-SHORTCUT-U @ + SWAP MOVE",
     )
     for store in expected_stores:
         assert store in payload
 
     assert "_PT-CT-LABEL-U @ 80 _PT-UADD?" in fields
     assert "_PT-CT-SHORTCUT-U @ _PT-UADD?" in fields
+    assert "_PT-CT-CONTENT-U @ _PT-UADD?" in fields
     assert "_PT.S.PEER-MAX-PAY @ U>" in fields
     assert "_PT-CT-STATE @ 0x1F INVERT AND" in fields
     assert "PT-CONTROL-OPEN PT-CONTROL-SELECTED OR AND" in fields
@@ -578,20 +597,40 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "PT-CONTROL-MENU",
         "PT-CONTROL-MENU-ITEM",
         "PT-CONTROL-MENU-SEPARATOR",
+        "PT-CONTROL-TEXT-AREA",
+        "PT-CONTROL-TEXT-GRID",
+        "PT-CONTROL-TABSET",
+        "PT-CONTROL-TAB",
     ):
         assert kind in kinds
+    for value, kind in enumerate(
+        (
+            "PT-CONTROL-TEXT-AREA",
+            "PT-CONTROL-TEXT-GRID",
+            "PT-CONTROL-TABSET",
+            "PT-CONTROL-TAB",
+        ),
+        start=5,
+    ):
+        assert f"{value} CONSTANT {kind}" in source
+    assert "_PT-CT-CONTENT-U @ 72 U<" in kinds
     assert "_PT-CT-ROOT-BOUNDS?" in kinds
-    assert kinds.count("_PT-CT-DESCENDANT?") == 3
+    assert kinds.count("_PT-CT-DESCENDANT?") == 4
 
     assert "_PT-UTF8?" in text
     assert "DUP 32 U< SWAP 127 = OR" in text
-    assert text.count("_PT-RANGES-OVERLAP?") == 2
+    assert source_span.count("_PT-RANGES-OVERLAP?") == 2
+    assert spans.count("_PT-RANGES-OVERLAP?") == 3
+    assert "_PT-CT-CONTENT-A @ _PT-CT-CONTENT-U @ _PT-CT-SOURCE?" in fields
+    assert "_PT-CT-SPANS-DISJOINT?" in fields
     assert "CATCH" in write
     assert "_PT-CT-SCRUB" in write
     assert "CREATE" not in write + body + payload
     assert "ALLOT" not in write + body + payload
     assert "0 _PT-CT-LABEL-A !" in scrub
     assert "0 _PT-CT-SHORTCUT-A !" in scrub
+    assert "0 _PT-CT-CONTENT-A !" in scrub
+    assert "_PT-CT-CONTENT-U ! _PT-CT-CONTENT-A !" in write
 
     assert "_PT-M-CONTROL-DROP _PT-PO-TYPE !" in drop
     assert "24 _PT-PO-U !" in drop

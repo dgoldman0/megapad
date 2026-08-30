@@ -9,6 +9,7 @@ boundaries without installing the module in KDOS.
 from __future__ import annotations
 
 import re
+import struct
 from pathlib import Path
 
 from tests.test_system import (
@@ -23,7 +24,9 @@ from rich_terminal.server import (
     TerminalConfig,
     TerminalState,
 )
+from rich_terminal.apt1 import Frame, encode_frame
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
+from rich_terminal.retained_wire import RetainedMessageType
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +181,197 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertEqual(init, b"0 0 0 ")
         self.assertRegex(start, probe)
         self.assertEqual(close, b"0 0 0 ")
+
+    def test_collection_control_writer_emits_exact_target_forth_bytes(self) -> None:
+        """Pack one minimum STX1 control through the production guest word."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-COL-RX 8192 ALLOT",
+                "CREATE PT-COL-TX 8192 ALLOT",
+                "CREATE PT-COL-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-COL-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-COL-SESSION PT-COL-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-COL-CONTENT 72 ALLOT",
+                "VARIABLE PT-COL-INIT-S",
+                "VARIABLE PT-COL-FEATURE-S",
+                "VARIABLE PT-COL-SHORT-S",
+                "VARIABLE PT-COL-WRITE-S",
+                "VARIABLE PT-COL-ALIAS-S",
+                ": PT-COL-CONTENT!",
+                "  PT-COL-CONTENT 72 0 FILL",
+                "  0x31585453 PT-COL-CONTENT L!",
+                "  1 PT-COL-CONTENT 4 + W!",
+                "  1 PT-COL-CONTENT 8 + _PT-U64!",
+                "  1 PT-COL-CONTENT 16 + L!",
+                "  1 PT-COL-CONTENT 20 + L!",
+                "  1 PT-COL-CONTENT 32 + L!",
+                "  1 PT-COL-CONTENT 36 + L! ;",
+                ": PT-COL-PRIME",
+                "  PT-COL-CONTENT!",
+                "  PT-COL-RX 8192 PT-COL-TX 8192",
+                "    PT-COL-EVENT PT-EVENT-SIZE PT-COL-SESSION",
+                "    PT-INIT PT-COL-INIT-S !",
+                "  PT-ST-ACTIVE PT-COL-SESSION _PT.S.STATE !",
+                "  152 PT-COL-SESSION _PT.S.PEER-MAX-PAY !",
+                "  0x4142434445464748 PT-COL-SESSION _PT.S.SESSION-ID !",
+                "  9 PT-COL-SESSION _PT.S.EPOCH !",
+                "  -1 PT-COL-SESSION _PT.S.RET-ENABLED? !",
+                "  _PT-RD-AVAILABLE PT-COL-SESSION _PT.S.RET-STATE !",
+                "  0x301 PT-COL-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  -1 PT-COL-SESSION _PT.S.TX-OPEN? !",
+                "  _PT-TX-PRESENT PT-COL-SESSION _PT.S.TX-KIND !",
+                "  PT-CELL-NONE PT-COL-SESSION _PT.S.TX-CELL-MODE !",
+                "  PT-RET-DELTA PT-COL-SESSION _PT.S.TX-RET-MODE !",
+                "  1 PT-COL-SESSION _PT.S.TX-RET-OPS !",
+                "  192 PT-COL-SESSION _PT.S.TX-RET-BYTES ! ;",
+                ": PT-COL-ARGS",
+                "  0x0102030405060708 0x1112131415161718",
+                "  0x2122232425262728 PT-CONTROL-TEXT-AREA",
+                "  PT-CONTROL-VISIBLE PT-CONTROL-ENABLED OR",
+                "    PT-CONTROL-SELECTED OR",
+                "  -7 0x3132333435363738 0 0",
+                "  0x01020304 0x11121314 0xA1A2A3A4 0xB1B2B3B4",
+                "  0 0 0 0 ;",
+                ": PT-COL-WRITE  ( content-a content-u -- status )",
+                "  >R >R PT-COL-ARGS R> R> PT-COL-SESSION",
+                "  PT-CONTROL-DEFINE ;",
+                ": PT-COL-BEGIN-MARK",
+                "  80 EMIT 84 EMIT 67 EMIT 79 EMIT 76 EMIT",
+                "  66 EMIT 69 EMIT 71 EMIT 73 EMIT 78 EMIT 33 EMIT ;",
+                ": PT-COL-END-MARK",
+                "  80 EMIT 84 EMIT 67 EMIT 79 EMIT 76 EMIT",
+                "  69 EMIT 78 EMIT 68 EMIT 33 EMIT ;",
+                ": PT-COL-RUN",
+                "  PT-COL-PRIME",
+                "  0x101 PT-COL-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  PT-COL-CONTENT 72 PT-COL-WRITE PT-COL-FEATURE-S !",
+                "  0x301 PT-COL-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  PT-COL-CONTENT 71 PT-COL-WRITE PT-COL-SHORT-S !",
+                "  PT-COL-BEGIN-MARK TX-FLUSH",
+                "  PT-COL-CONTENT 72 PT-COL-WRITE PT-COL-WRITE-S !",
+                "  TX-FLUSH",
+                "  PT-COL-END-MARK TX-FLUSH",
+                "  PT-COL-SESSION _PT.S.TX-A @ 72",
+                "    PT-COL-WRITE PT-COL-ALIAS-S !",
+                '  S" PTCOLSTATUS " TYPE',
+                "  PT-COL-INIT-S @ . PT-COL-FEATURE-S @ .",
+                "  PT-COL-SHORT-S @ . PT-COL-WRITE-S @ .",
+                "  PT-COL-ALIAS-S @ . DEPTH . TX-FLUSH ;",
+                "PT-COL-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "collection writer byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "nested definition",
+            "branch out of range",
+            "control-flow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        content = struct.pack(
+            "<IHHQIIIIIIIIQQII",
+            0x31585453,
+            1,
+            0,
+            1,
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        self.assertEqual(len(content), 72)
+        control = struct.pack(
+            "<QQQHHiQQIIIIIIII",
+            0x0102030405060708,
+            0x1112131415161718,
+            0x2122232425262728,
+            5,
+            0x0B,
+            -7,
+            0x3132333435363738,
+            0,
+            0,
+            0x01020304,
+            0x11121314,
+            0xA1A2A3A4,
+            0xB1B2B3B4,
+            0,
+            0,
+            len(content),
+        ) + content
+        expected = encode_frame(
+            Frame(
+                RetainedMessageType.CONTROL_DEFINE,
+                0x4142434445464748,
+                0,
+                9,
+                control,
+            ),
+            max_payload=152,
+        )
+        begin = raw.index(b"PTCOLBEGIN!") + len(b"PTCOLBEGIN!")
+        end = raw.index(b"PTCOLEND!", begin)
+        status = re.search(
+            rb"PTCOLSTATUS ((?:-?[0-9]+ ){6})",
+            raw[end:],
+        )
+        self.assertIsNotNone(status)
+        self.assertEqual(status.group(1), b"0 4 3 0 3 0 ")
+        self.assertEqual(raw[begin:end], expected)
 
     def test_real_core_snapshot_key_resize_and_synchronized_close(self) -> None:
         memory, ext_memory, cpu_state = self._snapshot_data()

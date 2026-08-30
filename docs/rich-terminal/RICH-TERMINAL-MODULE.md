@@ -160,10 +160,10 @@ PT-GLYPH-RUN-REPLACE ( owner generation object region parent
                        text-a text-u session -- status )
 PT-CONTROL-DEFINE   ( owner generation control kind state z region parent order
                       left top right bottom label-a label-u shortcut-a
-                      shortcut-u session -- status )
+                      shortcut-u content-a content-u session -- status )
 PT-CONTROL-REPLACE  ( owner generation control kind state z region parent order
                       left top right bottom label-a label-u shortcut-a
-                      shortcut-u session -- status )
+                      shortcut-u content-a content-u session -- status )
 PT-CONTROL-DROP     ( owner generation control session -- status )
 PT-PRESENT-COMMIT   ( disposition session -- status )
 
@@ -500,17 +500,28 @@ remain deferred because the current event cannot name an STX1 item revision,
 key, or scalar offset. Bit 9 remains unadvertised until the Akashic producer and
 ordinary Desk/Pad/Daybook journey supply these values end to end.
 
-That final advertisement requires an in-place extension of the existing guest
-CONTROL writer, not merely changing the host policy. `rich-terminal.f` still
-accepts retained mask `0x13f`, kinds 1 through 4, and zero content bytes. The
-activation slice must add caller-bounded kinds 5 through 8 and canonical content
-copying, enforce the bit-9 dependency and payload/transaction floors, include
-real collection object/text usage in the Desktop arena derivation, and prove the
-bytes in target Forth. Session configuration now chooses `max_payload` from the
-greater of the CELL-row and retained client-to-terminal requirements, preventing
-an otherwise valid retained policy from silently falling back during discovery.
-The real largest collection must fit both that negotiated payload and the
-guest's existing 8 KiB TX staging before the policy advertises bit 9.
+The guest CONTROL writer is now extended in place rather than split into a
+second encoder. It accepts retained mask `0x33f`, requires bit 8 whenever bit 9
+is present, and admits kinds 5 through 8 only for a negotiated bit-9 session.
+TEXT_AREA and TEXT_GRID require at least the fixed 72-byte STX1 header; the
+caller supplies the complete canonical STX1 body as one bounded span, while the
+terminal remains the authority for its item and graph validation. All three
+borrowed label, shortcut, and content spans must be nonwrapping, mutually
+disjoint, and disjoint from the live session and TX staging; no borrowed
+address from those source spans survives the call. Discovery audits the exact
+152-byte outbound-payload, 192-byte TX-staging, and 352-byte
+retained-transaction minima before accepting bit 9. A focused target-Forth
+oracle locks the resulting 152-byte CONTROL payload and complete APT frame. No
+host or product policy advertises bit 9 yet.
+
+The remaining advertisement work is above this transport seam: Akashic must
+produce and account for the canonical collection bodies through its ordinary
+UIDL lifecycle, and the real Desk/Pad/Daybook journey must pass end to end.
+Session configuration already chooses `max_payload` from the greater of the
+CELL-row and retained client-to-terminal requirements, preventing an otherwise
+valid retained policy from silently falling back during discovery. The real
+largest collection must fit both that negotiated payload and the guest's
+existing 8 KiB TX staging before the policy advertises bit 9.
 
 The early physical renderer deliberately exposes the product direction rather
 than postponing visual judgment until Desktop acceptance: a clean deep-neutral
