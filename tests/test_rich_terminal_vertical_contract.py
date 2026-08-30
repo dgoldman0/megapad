@@ -1,4 +1,4 @@
-"""Fast source/document guards for the still-open rich-terminal seams."""
+"""Fast source/document guards for rich-terminal architecture boundaries."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_semantic_lower_stack_does_not_hide_the_open_uidl_vertical() -> None:
-    """Keep implemented lower rungs and the remaining guest seam explicit."""
+def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> None:
+    """Keep the implemented semantic path and glyph fallback aligned."""
 
     module = _read(RICH_DOCS / "RICH-TERMINAL-MODULE.md")
     retained = _read(RICH_DOCS / "APT-1-RETAINED-1.md")
@@ -29,9 +29,9 @@ def test_semantic_lower_stack_does_not_hide_the_open_uidl_vertical() -> None:
     session = _read(ROOT / "session.py")
     viewer = _read(ROOT / "session_viewer.py")
 
-    # The semantic family and its projection now exist, while glyph transport
-    # remains only the complete visual fallback.  Keep those two claims moving
-    # together as later control families and renderers land.
+    # The semantic family and its renderer now exist, while glyph transport
+    # remains only the complete visual fallback. Keep those implementation
+    # boundaries moving together as later control families and renderers land.
     assert "typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers" in module
     assert "GLYPH_RUN remains the complete visual" in module
     assert "drawing a menu only as" in module
@@ -42,9 +42,6 @@ def test_semantic_lower_stack_does_not_hide_the_open_uidl_vertical() -> None:
     assert "class MenuBarDraw" in projection
     assert "def _project_menu_bar" in projection
     assert "is unsupported by draw-plane rendering" in projection
-    assert "modern Pygame compositor" in module
-    assert "byte-exact semantic-control writers" in module
-    assert "Akashic must map its ordinary" in module
     assert "renderer-owned code-native" in module
     assert "PT-CONTROL-DEFINE" in guest
     assert "PT-CONTROL-REPLACE" in guest

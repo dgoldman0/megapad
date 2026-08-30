@@ -1,6 +1,8 @@
 # MegaPad terminal host-port contract
 
-Status: normative for the APT-1 CELL-1 emulator implementation.
+Status: normative for the APT-1 CELL-1 and selected RETAINED-1
+emulator/reference-host implementation. Physical UART delivery and a hardware
+panel sink remain separate open qualification boundaries.
 
 This document defines the boundary between `MegapadSystem` and a terminal
 session. It does not define the APT-1 wire encoding. The wire contract is
@@ -28,6 +30,22 @@ The guest-side protocol implementation is likewise not part of KDOS. It is a
 separately source-loadable userland module, `rich-terminal.f`, in the
 same architectural role as `networking.f`. BIOS and KDOS continue to expose
 ordinary UART and geometry primitives whether or not that module is present.
+
+### 1.1 Intended physical endpoint
+
+The canonical intended physical rich-terminal endpoint is an e-paper terminal,
+with touch and full-color panels as eventual product capabilities. This is a
+product target, not an APT wire restriction: the protocol and immutable view
+boundary remain hardware-neutral, and the ANSI/CELL fallback remains complete
+for other terminals.
+
+The retained model, latest-view coalescing, and exact offer/acknowledgement
+split let a slow-refresh endpoint continue protocol service while a panel is
+busy and then display the newest eligible complete composite. The selected
+sink owns damage derivation, full-versus-partial refresh choice, panel waveform
+and ghosting/full-refresh policy, color conversion and dithering, rasterization,
+and all panel-controller buffers. None of those choices belongs in UIDL,
+application state, or the APT wire contract.
 
 ## 2. Attachment and epochs
 
@@ -250,10 +268,32 @@ Cadence may select a newer immutable composite without making it displayed.
 Selection creates a monotone offer identifier and does not change the session
 revision, visible output, cadence timestamp, geometry exposed through the
 selected view, or revision-bound input eligibility. Only an exact offer-ID and
-scope acknowledgement after physical composition promotes the privately bound
-composite and advances those boundaries. Sink loss revokes the exact offer;
-cadence then re-offers it or a newer coalesced candidate without reusing an
-offer identifier.
+scope acknowledgement after complete composition and the selected sink's
+documented completion boundary promotes the privately bound composite and
+advances those boundaries. Sink loss revokes the exact offer; cadence then
+re-offers it or a newer coalesced candidate without reusing an offer identifier.
+
+That acknowledgement is a local view-sink attestation, not an APT wire frame.
+The current Pygame reference sink draws the complete offer, calls
+`pygame.display.flip()`, and only then invokes `present`. This is an exact host
+display-API submission boundary; it proves neither scanout completion nor
+panel refresh. Evidence ending there must say post-flip or host-API
+acknowledgement rather than hardware-panel acknowledgement.
+
+A physical e-paper sink must retain the exact offer, its immutable backing,
+scope, and rendered hit map throughout refresh. It may invoke `present` only
+after the panel controller reports that the exact refresh has completed through
+its BUSY/READY transition or equivalent completion signal and any
+panel-required settling interval has elapsed. Composition, a panel-buffer
+write, SPI/DMA completion, or refresh-command acceptance alone is not this
+boundary. Touch sampled before completion may be retained only as bounded raw
+intent; normalized semantic input remains bound to the exact acknowledged
+display revision.
+
+The physical-UART gate in Section 4.1 and this hardware-panel gate are
+independent. Bytes on the real UART pin do not establish panel completion, and
+a reference or hardware sink acknowledgement does not establish that the guest
+bytes reached it through the real UART.
 
 The compositor uses the CELL canvas as its complete fallback base, draws every
 selected rich region and glyph run in deterministic back-to-front order
@@ -264,12 +304,13 @@ raster and acknowledgement seam and keeps a complete styled-terminal fallback.
 It does not complete the rich vertical, even when the ordinary TUI screen
 transaction supplies the full Desk/Pad/Daybook GLYPH_RUN plane.
 
-The next view slice must carry at least one ordinary semantic control from the
-same UIDL/TUI lifecycle without letting applets author protocol scenes. The
-selected renderer renders that control, and normalized input may activate it
-only against the exact selected revision after the complete physical composite
-has been acknowledged. Acceptance observes the resulting normal application
-state change; a glyph imitation of a menu or button is still fallback output.
+The implemented view slice also carries ordinary semantic menu controls from
+the same UIDL/TUI lifecycle without letting applets author protocol scenes. The
+selected renderer renders and hit-tests those controls, and normalized input
+may activate one only against the exact selected revision after the complete
+composite has crossed the sink-specific acknowledgement boundary. A glyph
+imitation of a menu or button remains fallback output rather than semantic
+control evidence.
 
 A region's pixel rectangle is exactly its cell rectangle multiplied by the
 selected cell width and height. For a parentless object's normalized edge, the

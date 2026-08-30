@@ -397,53 +397,63 @@ The lightweight module tests prove:
     CONTROL DEFINE/REPLACE/DROP packing and transaction admission order, and
     typed revision-bound CONTROL_EVENT decoding.
 
-The current end-to-end **guest** conformance still claims only the core
-owner/region and typed GLYPH_RUN journey. `rich-terminal.f` now owns the
-byte-exact semantic-control writers and typed `CONTROL_EVENT` decoder, while
-focused host-side units qualify the retained semantic-control model and wire,
-generic menu projection, modern Pygame compositor, shared viewer transport,
-and revision-bound event path through exact post-flip display acknowledgement.
-Those are real lower-stack rungs, but they do not prove that an ordinary guest
-menu emitted a control or that its UIDL action received one.
+The integrated **guest** path now crosses the semantic-control boundary.
+Akashic captures ordinary UIDL menu trees, combines their semantic claims with
+residual GLYPH_RUN coverage from the same normal draw, publishes the result
+through these typed PT words, and routes a typed `CONTROL_EVENT` back through
+the ordinary authoritative UIDL action path. The MegaPad model, code-native
+Pygame compositor, shared viewer transport, exact offer acknowledgement, and
+revision-bound hit map carry that same control identity end to end.
 
-The open seam is narrower and explicit: Akashic must map its ordinary
-high-level menu lifecycle through these typed PT words and route the typed
-activation back to the same authoritative action path. Until that exists,
-there is no end-to-end semantic-control journey. Other object kinds, resources,
-series, full semantic replay, and retained resize journeys likewise remain
-unqualified.
+A recorded reference-sink journey at Akashic `3404fe9` with MegaPad `8941782`
+shows the complete Desk, Pad File-menu activation/open/close, a real Pad edit,
+and a real Daybook task addition through this path. Its evidence boundary is
+explicitly `pygame.display.flip()`: it proves exact host display-API submission
+and acknowledgement, not hardware scanout or panel refresh. Akashic `e754ac1`
+contains eleven later retained-delta and admission optimizations which have not
+received another full display-backed journey, so that recorded evidence must
+not be silently attributed to the later revision.
+
+The current Pygame acceptance runner also stops after the Daybook task and
+does not exercise the separately implemented ordinary Daybook-to-Pad
+shared-resource handoff. If that handoff remains part of this checkpoint, its
+display-backed evidence is still open. Other object kinds, resources, series,
+full semantic replay, retained resize, physical UART delivery, and a hardware
+panel sink likewise remain unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 
-The typed GLYPH_RUN writer, generic draw-plane projection, immutable display
-offer, and post-flip acknowledgement path are lower-stack foundation. They
-prove that a styled background and terminal glyphs can survive module, model,
-session, shared wire, and physical viewer ownership boundaries. A complete
+The typed GLYPH_RUN and semantic-control writers, hybrid draw-plane projection,
+immutable display offer, and post-flip acknowledgement path now form the
+implemented reference-host semantic path. They prove that ordinary semantic
+menus, styled backgrounds, and terminal glyphs can survive module, model,
+session, shared wire, and selected-viewer ownership boundaries. A complete
 GLYPH_RUN projection remains the renderer-neutral styled-terminal fallback; it
-does not complete the rich vertical, even when the ordinary TUI screen
-transaction supplies every visible Desk, Pad, and Daybook cell.
+does not substitute for a genuine semantic control.
 
-The blocking cross-repository slice is the real Desk composition with the
-canonical Pad and Daybook applets both launched and live through their normal
+The cross-repository slice uses the real Desk composition with the canonical
+Pad and Daybook applets both launched and live through their normal
 descriptors, host/UCTX lifecycle, Desk tiling/focus/input loop, unified
-CELL/rich publisher, and physical viewer. The rich plane must be derived from
-the ordinary TUI draw lifecycle and cover Desk chrome, UIDL renderers, mounted
-widgets, and applet painting through the shared draw boundary. Applications
-must not construct protocol scenes or select terminal mode.
+CELL/rich publisher, and selected reference viewer. The rich plane must be
+derived from the ordinary TUI draw lifecycle and cover Desk chrome, UIDL
+renderers, mounted widgets, and applet painting through the shared draw
+boundary. Applications must not construct protocol scenes or select terminal
+mode.
 
-The next required cross-repository bridge maps RETAINED-1's `RET_CONTROLS`
-menu slice from that same ordinary lifecycle. It must preserve a real
+The implemented cross-repository bridge maps RETAINED-1's `RET_CONTROLS` menu
+slice from that same ordinary lifecycle. It preserves a real
 MENU_BAR/MENU/MENU_ITEM hierarchy, independent control identity, canonical
 state and order, optional bounds, selection/open state, label/shortcut, and
 activation binding without exposing APT IDs to the application or asking the
 applet to author a renderer scene. The selected renderer owns its menu
 geometry, clipping, rasterization, and hit testing. It may publish
 `CONTROL_EVENT ACTIVATE` only after the exact visible/enabled composite revision
-has been physically acknowledged. GLYPH_RUN remains the complete visual
-fallback for content that has no richer projection, but drawing a menu only as
-glyphs does not satisfy this semantic slice. Images, numeric instruments,
-meters, indicator objects, and series are not on this vertical's critical path
-unless the product composition begins to use them.
+has crossed the selected sink's acknowledgement boundary.
+GLYPH_RUN remains the complete visual fallback for content that has no richer
+projection, but drawing a menu only as glyphs does not satisfy this semantic
+slice. Images, numeric instruments, meters, indicator objects, and series are
+not on this vertical's critical path unless the product composition begins to
+use them.
 
 The early physical renderer deliberately exposes the product direction rather
 than postponing visual judgment until Desktop acceptance: a clean deep-neutral
@@ -470,9 +480,8 @@ checkpoint.
 
 The current contract evolves in place; do not add a numbered successor,
 parallel legacy path, Sound Lab fixture, applet-specific scene, or
-renderer-reservation markup. Before vertical acceptance, evidence remains
-limited to seconds-scale structural and byte-oracle selectors, focused state
-machines, and deterministic off-screen compositor units. Full renderer, live
-pygame, Desktop, cold-load, sustained-cadence, persistence, and production
-acceptance qualification remain deferred and sequential under the resource
-gate.
+renderer-reservation markup. The reference Pygame/Desktop journey above has
+crossed the earlier semantic-control and display-sink gate. Current-head replay,
+the remaining shared-resource step, reset/resize and other production cases,
+sustained cadence, persistence, physical UART, and hardware-panel qualification
+remain separate sequential work under the resource gate.

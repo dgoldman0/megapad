@@ -33,6 +33,13 @@ changes that state. The terminal may coalesce physical display refreshes, but
 it may not discard committed model state or samples other than the specified
 bounded-history eviction.
 
+The canonical intended physical product is a slow-refresh e-paper terminal,
+with touch and full-color panels as eventual capabilities. RETAINED-1 remains
+hardware-neutral: panel damage, full-versus-partial refresh, waveform and
+ghosting policy, color conversion, rasterization, controller buffers, and the
+hardware completion signal are all selected-sink concerns rather than wire or
+UIDL semantics.
+
 There is no protocol object called a presentation. `PRESENT_BEGIN` and
 `PRESENT_COMMIT` are the frozen names of the atomic update envelope that can
 carry CELL and retained changes together. Owners are authority and quota
@@ -1233,6 +1240,21 @@ advertised, the terminal may delay or coalesce physical display so the
 interval between retained display refreshes is at least
 `minimum_presentation_interval_us`.
 
+The acknowledgement which advances displayed revision and input eligibility is
+local to the selected view sink; it is not another APT message. The sink must
+consume every nonempty plane and cross its documented completion boundary for
+the exact immutable offer. A software reference sink may define that boundary
+at successful host display-API submission, but such evidence does not establish
+hardware scanout or panel completion. A physical e-paper sink acknowledges only
+after its controller reports completion for the exact refresh and any required
+settling interval has elapsed. It must not acknowledge merely because
+composition, buffer transfer, or refresh-command submission finished.
+
+The exact offered view, referenced backing, scope, and renderer hit map remain
+pinned until acknowledgement or revocation. A touch arriving while the panel
+is busy may be retained only as bounded raw intent; it cannot become normalized
+semantic input for an unacknowledged revision.
+
 Coalescing may omit superseded intermediate property images on screen. It may
 not omit ordered transactions, TX_RESULT, model revisions, owner/resource
 lifecycle, series samples, or bounded-history eviction. A COMMIT_AND_REVEAL is
@@ -1418,14 +1440,13 @@ fixture, Sound Lab path, applet scene API, terminal-mode branch, or renderer
 reservation in UIDL may substitute for that composition.
 
 This profile defines the required first in-place semantic-control contract in
-Section 9.1. At least one ordinary menu control from the real composition must
-cross the generic UIDL projection with semantic kind, CONTROL identity, state,
-hierarchy/order, optional bounds, selection/open state, label/shortcut, and
-activation binding intact. The terminal selects its visual representation;
-neither the applet nor UIDL may carry a protocol control ID, terminal buffer
-reservation, or renderer-specific scene description. Defining the wire family
-does not claim that its module, model, compositor, or UIDL projection is already
-implemented.
+Section 9.1. The selected Desktop implementation now carries ordinary menu
+controls from the real composition across the generic UIDL projection with
+semantic kind, CONTROL identity, state, hierarchy/order, optional bounds,
+selection/open state, label/shortcut, and activation binding intact. The
+terminal selects their visual representation; neither the applet nor UIDL may
+carry a protocol control ID, terminal buffer reservation, or renderer-specific
+scene description.
 
 The generic rich path must carry the substantive Desk chrome, Pad editor, and
 Daybook calendar/agenda state through private owner admission, bounded
@@ -1435,8 +1456,10 @@ then preserve the ordinary Daybook-to-Pad shared-resource route. The required
 semantic control must be visibly rendered from that projection and activated
 by normalized input bound to the exact selected revision. The sink makes that
 revision input-eligible only after every nonempty selected plane has been
-physically composited, flipped, and exactly acknowledged; acceptance also
-observes the resulting ordinary application-state change.
+completely composed and the exact offer has crossed that sink's documented
+acknowledgement boundary; acceptance also observes the resulting ordinary
+application-state change. A software reference boundary at display-API
+submission does not qualify a hardware-panel claim.
 
 CELL remains mandatory complete fallback. Retaining a scene diagnostically,
 promoting a composite, exposing only CELL pixels, projecting the whole screen
@@ -1445,12 +1468,13 @@ CELL-rendered Desk/editor/calendar does not complete this checkpoint.
 Binding-local rich refusal must leave CELL usable, but refused CELL pixels are
 not rich-rendering acceptance evidence.
 
-The checkpoint does not authorize partial capability advertisement.
-`RET_CONTROLS` remains zero until CONTROL transaction storage, model validation,
-renderer ownership/hit testing, physically acknowledged `CONTROL_EVENT`, and
-the generic UIDL projection are all implemented. Dormant instrument, image,
-vector, series, resource, and cadence families remain unadvertised and are not
-acceptance prerequisites for this vertical.
+The checkpoint does not authorize partial capability advertisement. The
+checked-in `desktop-apt1` reference profile advertises exactly `RET_CORE` and
+`RET_CONTROLS`: its CONTROL transaction storage, model validation, renderer
+ownership/hit testing, acknowledgement-bound `CONTROL_EVENT`, and generic UIDL
+projection are implemented as one slice. Instrument, image, vector, series,
+resource, and protocol-advertised cadence families remain disabled in that
+profile and are not acceptance prerequisites for this vertical.
 
 ### 16.2 Production qualification
 

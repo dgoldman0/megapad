@@ -46,7 +46,7 @@ or accepting an older component is an authority violation.
 | APT host/driver | Host lease, ingress/egress queues, terminal core, retained renderer | Decode and atomically apply validated ordered frames; publish immutable views | Infer guest owner authority; run guest code; fall back from structural LOST |
 | Guest retained backend | One PT adapter, discovery, sequence/credit, revision/txid allocators, private UCTX bindings, replay plan | Project validated UIDL semantics and serialize all wire operations | Publish itself as an application service; expose wire IDs or mutation calls; allow concurrent frame writers |
 | Generic UIDL host/projectors | Exact host/slot/CINST/UCTX lifecycle, UIDL tree/layout/dirty state, backend-neutral semantic snapshots | Attach, quiesce, project, relayout, and detach through the internal backend | Let application code acquire retained authority; maintain a second app-authored scene; emit protocol frames from callbacks |
-| Renderer/view sink | Immutable committed CELL and retained views plus shared immutable resources | Consume every nonempty plane of one displayed revision and present/coalesce physical images within cadence rules | Drop a retained plane while claiming its revision displayed; mutate authoritative model; invent samples; release resource backing early |
+| Renderer/view sink | Immutable committed CELL and retained views plus shared immutable resources | Consume every nonempty plane, derive damage, choose sink-local refresh/color policy, and present/coalesce complete images within cadence rules | Drop a retained plane while claiming its revision displayed; mutate authoritative model; expose panel policy through UIDL/wire state; invent samples; release resource backing early |
 | External attachment owner | Machine/session construction and coordinated reset/detach | Recreate a LOST attachment and its caller-owned capacities | Treat LOST as ANSI-safe fallback |
 
 The foreground single-input-owner assumption of CELL-1 is unchanged. RETAINED-1
@@ -74,12 +74,19 @@ it does not add multiple raw UART readers or writers.
 | Active scene quota usage | Terminal from successful DELTA/reveal within an accepted owner reservation | Exact active-target operations or atomic reveal | Exact active drop, replacement reveal, OWNER_DROP status 0, or epoch end | Released | Released |
 | Hidden scene quota usage | Terminal from successful START/CONTINUE within the same owner reservation | Exact hidden-target operations only | Reveal promotion, replacement START, reset/close, or OWNER_DROP status 0 | Released | Released |
 | Owner-wide resource usage | Terminal charges one count/declared bytes on accepted RESOURCE_BEGIN | Exact-upload completion/abort and exact RESOURCE_DROP | Exact-upload abort/rejection, exact RESOURCE_DROP, OWNER_DROP status 0, or epoch end | Released | Released |
-| Retained immutable view | Driver publishes after logical commit/reveal | Never | Replaced after consumers release reference | Released/replaced | Released |
+| Latest pending composite | Cadence scheduler from a logical commit/reveal | Replaced only by a newer immutable same-scope composite | Becomes the exact display offer, is superseded, or its scope retires | Released/rebuilt | Released |
+| Outstanding display offer, backing, scope, and rendered hit map | Cadence scheduler and selected sink | Immutable after offer; sink consumes it only | Exact sink acknowledgement promotes it; revocation requeues it; scope retirement destroys it | Released/rebuilt | Released |
+| Acknowledged displayed composite and input-eligibility scope | Exact selected-sink acknowledgement | Replaced only by a later exact acknowledgement | Sink loss, successor acknowledgement, or scope retirement | Released/rebuilt | Released |
 
 No row authorizes a pointer into application-owned transient memory. UIDL
 semantic snapshots and source output are copied, revision-bound, or consumed
 during the documented host-owned synchronous call. Host immutable views and
 resources may share backing only through explicit immutable lifetime ownership.
+For a slow e-paper sink, a long-running refresh does not shorten the outstanding
+offer lifetime. Controller-confirmed completion plus any required panel settling
+is the acknowledgement boundary; the reference Pygame sink's post-flip host-API
+boundary is not hardware-panel completion. Panel damage, partial/full refresh,
+waveform, ghosting, color conversion, and buffer policy remain sink-local.
 
 ## 4. Private projection-binding lifecycle
 
@@ -272,8 +279,10 @@ publication carries the resulting global revision and geometry generation.
 Keeping that composite for diagnostics while physically rendering only its CELL
 plane is also a split observation and does not satisfy publication. The
 displayed revision, cadence timestamp, and input-release boundary advance only
-after the sink has consumed every nonempty plane of the selected immutable
-composite.
+after the sink has consumed every nonempty plane, completed its documented
+presentation boundary, and acknowledged the exact selected immutable composite.
+Until then the corresponding offer backing and hit map remain pinned, and touch
+may exist only as bounded raw intent rather than normalized semantic input.
 
 ## 8. Semantic resource-source lifetime
 
