@@ -500,6 +500,18 @@ remain deferred because the current event cannot name an STX1 item revision,
 key, or scalar offset. Bit 9 remains unadvertised until the Akashic producer and
 ordinary Desk/Pad/Daybook journey supply these values end to end.
 
+That final advertisement requires an in-place extension of the existing guest
+CONTROL writer, not merely changing the host policy. `rich-terminal.f` still
+accepts retained mask `0x13f`, kinds 1 through 4, and zero content bytes. The
+activation slice must add caller-bounded kinds 5 through 8 and canonical content
+copying, enforce the bit-9 dependency and payload/transaction floors, include
+real collection object/text usage in the Desktop arena derivation, and prove the
+bytes in target Forth. Session configuration must also choose `max_payload` from
+the greater of the CELL-row and retained client-to-terminal requirements; the
+current CELL-only derivation can otherwise make discovery silently fall back.
+The real largest collection must fit both that negotiated payload and the
+guest's existing 8 KiB TX staging before the policy advertises bit 9.
+
 The early physical renderer deliberately exposes the product direction rather
 than postponing visual judgment until Desktop acceptance: a clean deep-neutral
 surface, restrained blue accent, proportional sans-serif control typography,

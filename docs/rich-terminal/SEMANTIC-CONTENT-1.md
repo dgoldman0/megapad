@@ -297,3 +297,20 @@ Akashic can advertise/use bit 9 only after its generic UIDL semantic provider
 and CONTROL encoder emit these exact records. Pad and Daybook must remain
 ordinary UIDL/TUI sources; neither receives a terminal API or renderer-specific
 annotation.
+
+Advertisement is deliberately one final vertical gate, not an isolated policy
+bit flip. The MegaPad guest module still accepts retained mask `0x13f`, kinds
+MENU through MENU_SEPARATOR, and a zero CONTROL content length. Before bit 9 is
+enabled, that same public writer must gain caller-bounded kinds 5 through 8 and
+canonical content copying, validate the bit-9 dependency and payload/transaction
+minima, and pass a target-Forth byte oracle. Akashic's real collection operation
+counts and UTF-8 bytes must also be included in the Desktop caller-owned arena
+derivation.
+
+The session configuration must derive its transport `max_payload` from both the
+CELL row requirement and the retained client-to-terminal payload policy. The
+current CELL-only derivation can otherwise make a valid bit-9 retained policy
+fail discovery and quietly select CELL fallback. The real largest Pad/Daybook
+collection must fit the negotiated payload and the guest's current 8 KiB TX
+staging before advertisement. `MANDATORY_CAPABILITIES` remains the base `0x3f`;
+collection support belongs only to the additive `RET_CAPS` negotiation.
