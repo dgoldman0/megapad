@@ -65,8 +65,10 @@ def _verified_slice() -> bytes:
     return source
 
 
-def _load_hooks() -> tuple[MegaForthRuntime, dict[str, object]]:
-    runtime = _load_exceptions()
+def _load_hooks(
+    runtime: MegaForthRuntime | None = None,
+) -> tuple[MegaForthRuntime, dict[str, object]]:
+    runtime = _load_exceptions(runtime)
     bios_words = {}
     for name, _capture in TASK_CAPTURES:
         word = runtime.find(name)

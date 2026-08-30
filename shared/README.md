@@ -8,6 +8,10 @@ Shared code imports neither `emulator` nor `simulator` and cannot inspect a
 backend's private CPU, bus, scheduler, memory, or device objects.  An adapter
 that does so belongs with that backend even if the model behind it is shared.
 
+The six-mode CRC parameter table and pure byte/cell recurrences are one such
+shared value model. Checked owner records, capability publication, ISA
+execution, and semantic BIOS stack adapters remain in their respective
+backends.
+
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative dependency direction and admission rules.
-

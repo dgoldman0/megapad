@@ -13,6 +13,7 @@ from enum import Enum, auto
 from typing import Callable, NoReturn, TypeAlias
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
+from simulator.crc import GuestIdentity, HostedCRCService
 from simulator.dictionary import Dictionary, Word
 from simulator.errors import (
     ExecutionError,
@@ -40,7 +41,8 @@ from simulator.ir import (
     Unloop,
     WriteOutput,
 )
-from simulator.memory import AddressClass, SparseAddressSpace
+from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
+from simulator.platform import SYSINFO_CRYPTO_CAPS
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -316,6 +318,10 @@ class MegaForthRuntime:
             self.memory = create_one_core_address_space()
         else:
             self.memory = memory
+        crypto_capabilities = self.memory.read64(
+            MMIO_BASE + SYSINFO_CRYPTO_CAPS
+        )
+        self.crc = HostedCRCService(crypto_capabilities)
         self.dictionary = Dictionary(
             start_address=dictionary_start,
             memory=self.memory,
@@ -354,7 +360,8 @@ class MegaForthRuntime:
                 empty_pointer=return_empty,
             ),
         )
-        self._numeric_base = 10
+        self._bootstrap_numeric_base = 10
+        self._numeric_base_address: int | None = None
         # These are the source-visible optional user-dictionary bounds, not
         # Dictionary's ordinary containing-memory ceiling.  Bank-0 source
         # starts with the BIOS interval disabled, represented by two zeros.
@@ -396,7 +403,9 @@ class MegaForthRuntime:
     def numeric_base(self) -> int:
         """Current unsigned cell used by the BIOS-compatible number parser."""
 
-        return self._numeric_base
+        if self._numeric_base_address is None:
+            return self._bootstrap_numeric_base
+        return self.memory.read64(self._numeric_base_address)
 
     @property
     def dictionary_base(self) -> int:
@@ -440,11 +449,32 @@ class MegaForthRuntime:
         """Set the source number base as a wrapped guest cell.
 
         The BIOS exposes ``BASE`` as a mutable cell and does not constrain its
-        contents.  Until hosted memory installs that address, this method is
-        the semantic backing used by ``HEX`` and ``DECIMAL``.
+        contents.  A core-less runtime retains a bootstrap value; the ordinary
+        semantic BIOS binds this method to the live guest cell.
         """
 
-        self._numeric_base = u64(base)
+        value = u64(base)
+        if self._numeric_base_address is None:
+            self._bootstrap_numeric_base = value
+        else:
+            self.memory.write64(self._numeric_base_address, value)
+
+    def bind_numeric_base_address(self, address: int) -> None:
+        """Bind numeric parsing and printers to the semantic BIOS BASE cell."""
+
+        if self._numeric_base_address is not None:
+            raise RuntimeError("numeric BASE is already bound")
+        self.memory.write64(address, self._bootstrap_numeric_base)
+        self._numeric_base_address = address
+
+    def guest_identity(self, context: ExecutionContext) -> GuestIdentity:
+        """Return the checked BIOS caller identity for the initial profile."""
+
+        if not isinstance(context, ExecutionContext):
+            raise TypeError("context must be an ExecutionContext")
+        # Host scratch contexts are not schedulable guest tasks.  Until the
+        # deterministic task layer exists, every dispatch is core 0, task 0.
+        return 0, 0
 
     def set_dictionary_fault_xt(self, xt: int) -> None:
         """Install a raw guest callback, including zero to disable it."""
@@ -1653,7 +1683,7 @@ class MegaForthRuntime:
             if position == len(token):
                 return None
 
-        base = self._numeric_base
+        base = self.numeric_base
         if (
             len(token) - position >= 2
             and token[position] == ord("0")

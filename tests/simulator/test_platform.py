@@ -51,7 +51,7 @@ def test_sysinfo_reports_the_returned_address_spaces_actual_geometry() -> None:
     assert _register(memory, 0x48) == 1
     assert _register(memory, 0x50) == regions[AddressClass.VRAM].base
     assert _register(memory, 0x58) == regions[AddressClass.VRAM].size
-    assert _register(memory, 0x60) == 0
+    assert _register(memory, 0x60) == 1
     assert _register(memory, 0x68) == 1
 
 
@@ -66,6 +66,15 @@ def test_absent_optional_regions_are_not_advertised_from_default_constants() -> 
     assert _register(memory, 0x40) == 0
     assert _register(memory, 0x50) == 0
     assert _register(memory, 0x58) == 0
+
+
+def test_crypto_capability_profile_can_disable_only_the_admitted_crc_bit() -> None:
+    memory = create_one_core_address_space(crypto_capabilities=0)
+
+    assert _register(memory, 0x60) == 0
+
+    with pytest.raises(ValueError, match="unimplemented crypto bits"):
+        create_one_core_address_space(crypto_capabilities=2)
 
 
 def test_exact_window_supports_little_endian_naturally_aligned_reads() -> None:

@@ -7,7 +7,7 @@ import pytest
 from shared.cells import CELL_BYTES, MASK64, s64
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES
 from simulator.errors import ExecutionError, ForthAbort
-from simulator.memory import SparseAddressSpace
+from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
 
 
@@ -65,7 +65,7 @@ def test_variable_owns_one_zeroed_cell_and_executes_as_its_body_address() -> Non
 
 
 def test_variable_body_capacity_fault_does_not_publish_header_or_metadata() -> None:
-    memory = SparseAddressSpace(bank0_size=0x20000)
+    memory = create_one_core_address_space(bank0_size=0x20000)
     runtime = MegaForthRuntime(memory=memory)
 
     def escape_dictionary_fault(_context) -> None:

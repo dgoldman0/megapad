@@ -15,6 +15,7 @@ import struct
 from typing import Callable, Optional
 
 from shared.cells import MASK64, SIGN64, s64, u64
+from shared.crc import CRC_MODE_PARAMETERS, crc_update_byte
 
 # ---------------------------------------------------------------------------
 #  Constants
@@ -2763,14 +2764,7 @@ class Megapad64:
 
     # Complete CRC modes: polynomial used by the selected recurrence, width,
     # and whether bytes are processed least-significant-bit first.
-    _CRC_MODES = {
-        0: (0x04C11DB7, 32, False),          # CRC-32/BZIP2
-        1: (0x1EDC6F41, 32, False),          # Castagnoli, non-reflected
-        2: (0x42F0E1EBA9EA3693, 64, False),  # CRC-64/WE
-        4: (0xEDB88320, 32, True),            # CRC-32/ISO-HDLC
-        5: (0x82F63B78, 32, True),            # CRC-32C
-        6: (0xC96C5795D7870F42, 64, True),    # CRC-64/XZ
-    }
+    _CRC_MODES = CRC_MODE_PARAMETERS
 
     # EXT.CRYPTO sub-operations whose encoding includes a third byte.  This
     # is architectural instruction sizing, so reserved operations remain
@@ -2785,28 +2779,7 @@ class Megapad64:
     def _crypto_instruction_size(cls, sub_op: int) -> int:
         return 3 if sub_op in cls._CRYPTO_THREE_BYTE_SUBOPS else 2
 
-    @staticmethod
-    def _crc_update_byte(acc: int, byte: int, poly: int, width: int,
-                         reflected: bool) -> int:
-        """Process one byte through the selected complete CRC recurrence."""
-        mask = MASK64 if width == 64 else 0xFFFF_FFFF
-        acc &= mask
-        if reflected:
-            acc ^= byte
-            for _ in range(8):
-                if acc & 1:
-                    acc = (acc >> 1) ^ poly
-                else:
-                    acc >>= 1
-        else:
-            acc ^= byte << (width - 8)
-            top = 1 << (width - 1)
-            for _ in range(8):
-                if acc & top:
-                    acc = ((acc << 1) & mask) ^ poly
-                else:
-                    acc = (acc << 1) & mask
-        return acc & mask
+    _crc_update_byte = staticmethod(crc_update_byte)
 
     def _exec_crypto(self) -> int:
         """Execute EXT.CRYPTO (FB) instruction.

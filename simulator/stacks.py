@@ -265,6 +265,19 @@ class DataStack:
         assert self._memory is not None
         return self._memory.read64(self._pointer + offset * CELL_BYTES)
 
+    def replace_top(self, cell: int) -> None:
+        """Replace TOS in place without changing the stack frontier."""
+
+        self._require(1, "replace TOS")
+        value = u64(cell)
+        if self._memory is None:
+            assert self._cells is not None
+            self._cells[-1] = value
+            return
+        assert self._pointer is not None
+        assert self._memory is not None
+        self._memory.write64(self._pointer, value)
+
     def depth(self) -> int:
         if self._memory is None:
             assert self._cells is not None

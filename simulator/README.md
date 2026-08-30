@@ -24,7 +24,9 @@ The implemented slices provide:
   storage;
 - a read-only one-full-core SysInfo profile whose direct MMIO registers and
   BIOS topology words share the same service and report the actual sparse
-  memory geometry;
+  memory geometry, now advertising only the admitted CRC capability bit;
+- fail-closed construction for injected address spaces: their SysInfo
+  capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access and byte `FILL` over that
   shared address space, plus the arithmetic and comparison words needed by the
   next unchanged Akashic source slice;
@@ -37,6 +39,9 @@ The implemented slices provide:
   `THROW`, and fail-closed handling when the callback is zero or returns;
 - hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
   the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
+- a shared bit-exact six-mode CRC value model with simulator-owned checked
+  transaction state, coherent SysInfo capability discovery, exact byte/cell
+  feeds, raw/final release, and source-visible status behavior;
 - active-line `WORD` with its transient counted string at `HERE`, forward
   `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
   supported compile-state `ABORT"` path;
@@ -178,6 +183,16 @@ cancellation exists.
 Resumable cooperative task contexts, `PAUSE`, and scheduling have not been
 implemented, so this slice makes no task-execution or cadence claim.
 
+Byte-exact logical lines 720 through 855 then load the complete KDOS CRC
+convenience and CRC-diagnostic family. The nine BIOS words retain their
+checked status and owner behavior while `_CRC-BUF-CHECKED` remains ordinary
+source, including its qword loop, every exact 1–7-byte tail, and its balanced
+early exits. Acceptance covers all six standard `123456789` vectors, mode-5
+raw state, seeds and release, incremental memory faults, source `CATCH` and
+`THROW`, the real `CRC-DIAG?`/`.CRC-DIAG`, and `.CRC32` through the live
+memory-backed `BASE` cell and unsigned printer. CRC ISA instructions, CSRs,
+hardware locks, and timing remain emulator-only claims.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -193,8 +208,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–719 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, exceptions, dictionary-fault routing, and task-boundary shadowing; line 70 is blank |
-| 720 onward | Next uncovered frontier | CRC source first becomes executable at line 739; `CRC-FEED` is the first missing BIOS primitive reached at line 748 |
+| 39–855 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, exceptions, dictionary-fault routing, task-boundary shadowing, and the complete CRC convenience/diagnostic family; line 70 is blank |
+| 856 onward | Next uncovered frontier | `.PERF` begins at line 857; `PERF-CYCLES` is the first missing BIOS primitive reached at line 859 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -206,10 +221,10 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins KDOS's CRC convenience family. Later slices
-continue the same contiguous unchanged prefix toward the persistent evaluator,
-ordinary checked module-loader surface, and deterministic cooperative task
-scheduler.
+The next source boundary resumes the non-CRC hardware diagnostics. Later
+slices continue the same contiguous unchanged prefix toward the persistent
+evaluator, ordinary checked module-loader surface, and deterministic
+cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

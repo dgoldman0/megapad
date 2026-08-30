@@ -135,7 +135,9 @@ def _verified_slice(
     return source
 
 
-def _load_exceptions() -> MegaForthRuntime:
+def _load_exceptions(
+    runtime: MegaForthRuntime | None = None,
+) -> MegaForthRuntime:
     slices = (
         (
             PREFIX_FIXTURE,
@@ -179,7 +181,8 @@ def _load_exceptions() -> MegaForthRuntime:
         ),
     )
 
-    runtime = MegaForthRuntime()
+    if runtime is None:
+        runtime = MegaForthRuntime()
     for fixture, first, last, sha256, git_blob, definitions in slices:
         source = _verified_slice(
             fixture,

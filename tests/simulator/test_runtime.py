@@ -16,6 +16,7 @@ from simulator.ir import (
     RestoreReturnStackPointer,
 )
 from simulator.memory import AddressClass, SparseAddressSpace
+from simulator.platform import create_one_core_address_space
 from simulator.runtime import (
     ColonDefinition,
     ConstantDefinition,
@@ -30,7 +31,7 @@ from simulator.stacks import ReturnStackShapeError, StackPointerError
 def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None:
     first = MegaForthRuntime()
     second = MegaForthRuntime()
-    injected = SparseAddressSpace(bank0_size=0x4000)
+    injected = create_one_core_address_space(bank0_size=0x4000)
 
     assert isinstance(first.memory, SparseAddressSpace)
     assert first.memory is not second.memory

@@ -51,7 +51,8 @@ are not a permanent compatibility surface for this unreleased project.
 Code moves into `shared/` only after its API is expressed without either
 backend's concrete CPU, bus, scheduler, memory, or device objects.  In
 particular, a filename containing “shared” is not evidence of backend-neutral
-ownership.
+ownership. Pure CRC mode parameters and recurrence/value transforms qualify;
+CRC instruction execution and checked transaction ownership do not.
 
 ## 2. Compatibility claims
 
@@ -144,9 +145,10 @@ are required semantics.  JIT controls may be semantic no-ops only when their
 documented effect is purely optimization.  Capability and status words must
 report the simulator's actual support.
 
-The initial profile advertises one full core.  It does not advertise
-additional cores, accelerators, crypto capabilities, devices, or sinks until
-their public contracts have an implementation and differential evidence.
+The initial profile advertises one full core and crypto capability bit 0 for
+the admitted semantic reflected/raw CRC service. It advertises no additional
+cores, accelerator timing, other crypto bits, devices, or sinks until their
+public contracts have an implementation and differential evidence.
 
 ## 5. Scheduling and time
 
@@ -196,6 +198,15 @@ existing unsupported or absent status.  It never silently reports success.
 Bit-exact results, checked spans, caller ownership, mutation order, status, and
 error behavior are compatibility claims.  Latency and modeled machine cycles
 are not.
+
+The admitted CRC service implements the six public modes, mode-width seeds,
+least-significant-byte-first cell feeds, byte feeds, raw/final reads, checked
+status values, and the BIOS `(COREID,TASK-ID)` owner record. `CRYPTO-CAPS@` and
+the SysInfo `CRYPTO_CAPS` qword expose the same profile. It does not claim CRC
+instructions, CSRs, hardware arbitration, DMA, or accelerator latency.
+Runtime construction requires that qword to be readable and rejects capability
+bits without an admitted service; missing or malformed SysInfo never enables a
+host fallback implicitly.
 
 ## 7. Rich-terminal path
 

@@ -5,7 +5,11 @@ from __future__ import annotations
 from shared.cells import CELL_BYTES, forth_flag, s64, u64
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.memory import MMIO_BASE
-from simulator.platform import SYSINFO_NUM_CORES, SYSINFO_NUM_FULL
+from simulator.platform import (
+    SYSINFO_CRYPTO_CAPS,
+    SYSINFO_NUM_CORES,
+    SYSINFO_NUM_FULL,
+)
 from simulator.runtime import (
     CreatedDefinition,
     DirectiveKind,
@@ -178,6 +182,10 @@ def _zero_not_equal(context: ExecutionContext) -> None:
     context.data.push(forth_flag(context.data.pop() != 0))
 
 
+def _zero_greater(context: ExecutionContext) -> None:
+    context.data.push(forth_flag(s64(context.data.pop()) > 0))
+
+
 def _zero_less(context: ExecutionContext) -> None:
     context.data.push(forth_flag(s64(context.data.pop()) < 0))
 
@@ -219,18 +227,21 @@ def _signed_greater(context: ExecutionContext) -> None:
 
 
 def _fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
-    address = context.data.pop()
-    context.data.push(runtime.memory.read64(address))
+    address = context.data.peek()
+    value = runtime.memory.read64(address)
+    context.data.replace_top(value)
 
 
 def _c_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
-    context.data.push(runtime.memory.read8(context.data.pop()))
+    address = context.data.peek()
+    value = runtime.memory.read8(address)
+    context.data.replace_top(value)
 
 
 def _count(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
-    address = context.data.pop()
+    address = context.data.peek()
     length = runtime.memory.read8(address)
-    context.data.push(address + 1)
+    context.data.replace_top(address + 1)
     context.data.push(length)
 
 
@@ -414,11 +425,17 @@ def _abort(context: ExecutionContext) -> None:
 
 
 def _format_signed_cell(value: int, base: int) -> bytes:
-    if not 2 <= base <= 36:
-        raise ExecutionError(f". cannot render with numeric base {base}")
-
     signed = s64(value)
-    magnitude = -signed if signed < 0 else signed
+    if signed < 0:
+        return b"-" + _format_unsigned_cell(-signed, base)
+    return _format_unsigned_cell(signed, base)
+
+
+def _format_unsigned_cell(value: int, base: int) -> bytes:
+    if not 2 <= base <= 36:
+        raise ExecutionError(f"numeric output cannot render with base {base}")
+
+    magnitude = u64(value)
     digits = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     rendered = bytearray()
     while True:
@@ -426,14 +443,17 @@ def _format_signed_cell(value: int, base: int) -> bytes:
         rendered.append(digits[digit])
         if magnitude == 0:
             break
-    if signed < 0:
-        rendered.append(ord("-"))
     rendered.reverse()
     return bytes(rendered)
 
 
 def _dot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     rendered = _format_signed_cell(context.data.pop(), runtime.numeric_base)
+    runtime.write_uart_bytes(rendered + b" ")
+
+
+def _unsigned_dot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    rendered = _format_unsigned_cell(context.data.pop(), runtime.numeric_base)
     runtime.write_uart_bytes(rendered + b" ")
 
 
@@ -462,6 +482,70 @@ def _j(context: ExecutionContext) -> None:
 
 def _execute(context: ExecutionContext) -> Invoke:
     return Invoke(context.data.pop())
+
+
+def _crc_mode_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    status = runtime.crc.select_mode(
+        runtime.guest_identity(context),
+        context.data.pop(),
+    )
+    context.data.push(status)
+
+
+def _crc_reset(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.crc.reset(runtime.guest_identity(context)))
+
+
+def _crc_init_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    seed = context.data.pop()
+    context.data.push(
+        runtime.crc.seed(runtime.guest_identity(context), seed)
+    )
+
+
+def _crc_feed(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    cell = context.data.pop()
+    context.data.push(
+        runtime.crc.feed_cell(runtime.guest_identity(context), cell)
+    )
+
+
+def _crc_feed_byte(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    byte = context.data.pop()
+    context.data.push(
+        runtime.crc.feed_byte(runtime.guest_identity(context), byte)
+    )
+
+
+def _crc_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value, status = runtime.crc.fetch(runtime.guest_identity(context))
+    context.data.push(value)
+    context.data.push(status)
+
+
+def _crc_raw_final_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    value, status = runtime.crc.raw_final(runtime.guest_identity(context))
+    context.data.push(value)
+    context.data.push(status)
+
+
+def _crc_final_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.crc.final(runtime.guest_identity(context)))
 
 
 def _task_start_unavailable(
@@ -559,6 +643,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"0=", _zero_equal),
         (b"0<>", _zero_not_equal),
         (b"0<", _zero_less),
+        (b"0>", _zero_greater),
         (b"U<", _unsigned_less),
         (b"U>", _unsigned_greater),
         (b"<", _signed_less),
@@ -611,6 +696,31 @@ def install_core(runtime: MegaForthRuntime) -> None:
             b"N-FULL",
             lambda context: _sysinfo_fetch(runtime, context, SYSINFO_NUM_FULL),
         ),
+        (
+            b"CRYPTO-CAPS@",
+            lambda context: _sysinfo_fetch(
+                runtime,
+                context,
+                SYSINFO_CRYPTO_CAPS,
+            ),
+        ),
+        (b"CRC-MODE!", lambda context: _crc_mode_store(runtime, context)),
+        (b"CRC-RESET", lambda context: _crc_reset(runtime, context)),
+        (b"CRC-INIT!", lambda context: _crc_init_store(runtime, context)),
+        (b"CRC-FEED", lambda context: _crc_feed(runtime, context)),
+        (
+            b"CRC-FEED-BYTE",
+            lambda context: _crc_feed_byte(runtime, context),
+        ),
+        (b"CRC@", lambda context: _crc_fetch(runtime, context)),
+        (
+            b"CRC-RAW-FINAL@",
+            lambda context: _crc_raw_final_fetch(runtime, context),
+        ),
+        (
+            b"CRC-FINAL@",
+            lambda context: _crc_final_fetch(runtime, context),
+        ),
         (b"COREID", _push_zero),
         (b"TASK-ID", _push_zero),
         (
@@ -645,6 +755,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"JIT-OFF", _semantic_noop),
         (b"ABORT", _abort),
         (b".", lambda context: _dot(runtime, context)),
+        (b"U.", lambda context: _unsigned_dot(runtime, context)),
         (b"CR", lambda context: _carriage_return(runtime, context)),
         (b"UCHAR", _uppercase_character),
         (b"TRUE", lambda context: context.data.push(-1)),
@@ -657,5 +768,11 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     for name, callback in primitives:
         runtime.define_primitive(name, callback)
+
+    base_word = runtime.define_created(
+        b"BASE",
+        initial_body=(10).to_bytes(CELL_BYTES, "little"),
+    )
+    runtime.bind_numeric_base_address(base_word.body_address)
 
 __all__ = ["install_core"]

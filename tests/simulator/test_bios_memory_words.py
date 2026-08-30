@@ -135,6 +135,19 @@ def test_memory_fault_in_a_colon_word_restores_internal_return_stack() -> None:
         runtime.execute("FAIL-FETCH", context=context)
 
     assert context.returns.snapshot() == ()
+    assert context.data.snapshot() == (0x100000,)
     runtime.execute("STILL-USABLE", context=context)
-    assert context.data.snapshot() == (42,)
+    assert context.data.snapshot() == (0x100000, 42)
+    assert context.returns.snapshot() == ()
+
+
+def test_count_fault_preserves_its_unread_counted_string_address() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(0x100000)
+
+    with pytest.raises(UnmappedAddressError):
+        runtime.execute("COUNT", context=context)
+
+    assert context.data.snapshot() == (0x100000,)
     assert context.returns.snapshot() == ()

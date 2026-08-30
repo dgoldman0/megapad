@@ -8,6 +8,8 @@ the service does not carry an independent copy of the address-space defaults.
 
 from __future__ import annotations
 
+from shared.cells import MASK64
+from shared.crc import CRYPTO_CAP_CRC_REFLECT_RAW
 from simulator.memory import (
     BANK0_DEFAULT_SIZE,
     DEFAULT_PAGE_SIZE,
@@ -22,6 +24,7 @@ SYSINFO_LIMIT = SYSINFO_OFFSET + SYSINFO_SIZE
 SYSINFO_BANK0_SIZE = SYSINFO_OFFSET + 0x08
 SYSINFO_NUM_CORES = SYSINFO_OFFSET + 0x10
 SYSINFO_NUM_FULL = SYSINFO_OFFSET + 0x48
+SYSINFO_CRYPTO_CAPS = SYSINFO_OFFSET + 0x60
 
 BOARD_ID_VERSION = 0x4D50_3634_0002_0001
 
@@ -54,9 +57,25 @@ class OneCoreSysInfo:
     Callers should normally use :func:`create_one_core_address_space`.
     """
 
-    __slots__ = ("_image",)
+    __slots__ = ("_crypto_capabilities", "_image")
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        crypto_capabilities: int = CRYPTO_CAP_CRC_REFLECT_RAW,
+    ) -> None:
+        if (
+            isinstance(crypto_capabilities, bool)
+            or not isinstance(crypto_capabilities, int)
+        ):
+            raise TypeError("crypto capabilities must be a uint64 integer")
+        if not 0 <= crypto_capabilities <= MASK64:
+            raise ValueError("crypto capabilities must be a uint64 integer")
+        if crypto_capabilities & ~CRYPTO_CAP_CRC_REFLECT_RAW:
+            raise ValueError(
+                "hosted profile cannot advertise unimplemented crypto bits"
+            )
+        self._crypto_capabilities = crypto_capabilities
         self._image: bytes | None = None
 
     def bind(self, memory: SparseAddressSpace) -> None:
@@ -93,7 +112,7 @@ class OneCoreSysInfo:
             1,  # NUM_FULL
             vram_base,
             vram_size,
-            0,  # CRYPTO_CAPS: no accelerator is admitted by this profile.
+            self._crypto_capabilities,
             1,  # NUM_BUS_PORTS: the sole full-core requester.
         )
         image = bytearray(SYSINFO_SIZE)
@@ -199,10 +218,11 @@ def create_one_core_address_space(
     vram_size: int = 0,
     hbw_size: int = 0,
     page_size: int = DEFAULT_PAGE_SIZE,
+    crypto_capabilities: int = CRYPTO_CAP_CRC_REFLECT_RAW,
 ) -> SparseAddressSpace:
     """Return sparse guest memory with the one-core SysInfo service attached."""
 
-    sysinfo = OneCoreSysInfo()
+    sysinfo = OneCoreSysInfo(crypto_capabilities=crypto_capabilities)
     memory = SparseAddressSpace(
         bank0_size=bank0_size,
         external_size=external_size,
@@ -218,6 +238,7 @@ def create_one_core_address_space(
 __all__ = [
     "BOARD_ID_VERSION",
     "SYSINFO_BANK0_SIZE",
+    "SYSINFO_CRYPTO_CAPS",
     "SYSINFO_LIMIT",
     "SYSINFO_NUM_CORES",
     "SYSINFO_NUM_FULL",
