@@ -398,7 +398,7 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | File | Purpose |
 |------|---------|
 | `megapad64.py` | CPU and tile-engine emulator, including extended operations and FP16/BF16 |
-| `accel/` | Optional multi-source pybind11 execution kernel |
+| `emulator/accel/` | Optional multi-source pybind11 execution kernel |
 | `accel_wrapper.py` | Drop-in Python wrapper for the C++ CPU core |
 | `system.py` | SoC integration and batched execution |
 | `bios.asm` | Forth BIOS in assembly: boot, devices, multicore, and checked crypto |

@@ -162,7 +162,7 @@ STATE_COMPARISON_SCOPE = {
     ),
     "native_audit_basis": (
         "CPUState, SystemState, and their owned or borrowed device structs in "
-        "the compiled accelerator sources and headers under accel/; native "
+        "the compiled accelerator sources and headers under emulator/accel/; native "
         "fields without "
         "non-destructive pybind readback are exclusions even when they affect "
         "future execution"

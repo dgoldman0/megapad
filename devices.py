@@ -2896,13 +2896,13 @@ class SpinlockDevice(Device):
 
 
 # ---------------------------------------------------------------------------
-#  AES-GCM Accelerator — REMOVED (implemented in C++: accel/mp64_crypto.h)
+#  AES-GCM Accelerator — REMOVED (implemented in C++: emulator/accel/mp64_crypto.h)
 # ---------------------------------------------------------------------------
 # See CryptoAES in mp64_crypto.h. MMIO range: 0x0700 – 0x0770.
 
 
 # ---------------------------------------------------------------------------
-#  SHA-3 Accelerator — REMOVED (implemented in C++: accel/mp64_crypto.h)
+#  SHA-3 Accelerator — REMOVED (implemented in C++: emulator/accel/mp64_crypto.h)
 # ---------------------------------------------------------------------------
 # See CryptoSHA3 in mp64_crypto.h. MMIO range: 0x0780 – 0x07DF.
 

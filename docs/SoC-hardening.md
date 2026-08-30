@@ -1514,7 +1514,7 @@ firmware-level visibility into bus errors or accelerator status.
 
 ### Changes
 
-#### C++ accelerator (`accel/mp64_crypto.h`)
+#### C++ accelerator (`emulator/accel/mp64_crypto.h`)
 
 `CryptoDevices::read8` now injects **bit 2** (`ext_locked`) into the
 SHA3 STATUS register (offset 0x01 from SHA3\_BASE) whenever

@@ -135,7 +135,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | File | Lines | Role |
 |---|---|---|
 | `megapad64.py` | — | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
-| `accel/` | — | Multi-source C++ execution kernel (pybind11), including host DBT support |
+| `emulator/accel/` | — | Multi-source C++ execution kernel (pybind11), including host DBT support |
 | `accel_wrapper.py` | — | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | — | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
 | `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
@@ -867,7 +867,7 @@ unchanged. Namespaced artifacts live in the UID-owned, mode-`0700` directory
 | PyPy + xdist -n 8 | 8 workers | ~24 min | 1.7× |
 | **CPython + C++ accel -n 8** | **8 workers** | **~23 s** | **104×** |
 
-The C++ accelerator (`accel/`) reimplements the CPU step loop as a
+The C++ accelerator (`emulator/accel/`) reimplements the CPU step loop as a
 multi-source pybind11 execution kernel. `system.py` imports it automatically
 when available and falls back to pure Python if not. The accelerator handles
 single-core and multicore execution (C++ for the active core, Python for device I/O

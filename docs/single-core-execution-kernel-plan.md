@@ -94,7 +94,7 @@ isolate the production execution kernel are not Element 8 completion
 requirements. Final names may be refined as dependencies become concrete:
 
 ```text
-accel/
+emulator/accel/
   bindings/
     module.cpp                 pybind registration only
     python_callbacks.cpp       GIL-owning callback adapters
@@ -135,7 +135,7 @@ second consumer proves a broader abstraction.
 Source separation is not itself a speed claim. Small hot helpers may remain in
 internal headers when measured inlining requires it. Moving the remaining CPU
 and machine state, scheduler, callback, snapshot, binding, profile, and device
-integration out of `accel/mp64_accel.cpp` is a separate future organization
+integration out of `emulator/accel/mp64_accel.cpp` is a separate future organization
 project, not an execution-kernel consolidation or acceptance requirement.
 Cross-translation-unit optimization or LTO remains evidence-driven.
 
@@ -240,7 +240,7 @@ and probing a second native slot.
 - Move code without changing behavior, and delete each old definition in the
   same slice that installs its new owner.
 - Update build provenance and source-audit wording that currently assumes one
-  `accel/mp64_accel.cpp` translation unit.
+  `emulator/accel/mp64_accel.cpp` translation unit.
 - End with one extension module, no duplicate implementations, and a materially
   smaller hot execution translation unit.
 
@@ -288,7 +288,7 @@ remains deferred.
   exact cycle advancement.
 
 Completion evidence (2026-08-27): the system clock and typed unbounded-round
-request now live under `accel/machine/settlement.*`, replacing the former
+request now live under `emulator/accel/machine/settlement.*`, replacing the former
 four-position boolean settlement call inside the unbounded scheduler. At each
 unchanged 1,000-instruction exact-single boundary, the scheduler uses the same
 mapping lease, clock validation, and native timer/framebuffer/RTC/crypto tick
@@ -322,7 +322,7 @@ remains deferred.
   exact slow path.
 - Remove redundant prove-then-resolve pairs from the hot path.
 
-First-slice evidence (2026-08-27): `accel/machine/memory.h` now owns the pure,
+First-slice evidence (2026-08-27): `emulator/accel/machine/memory.h` now owns the pure,
 allocation-free guest-memory map and resolved-span algebra, while Python buffer
 ownership and mapping leases remain in the extension bindings. Scalar and
 supervisor-byte priority are explicit policies rather than an accidental
@@ -368,14 +368,14 @@ Full performance qualification remains deferred.
 First-slice evidence (2026-08-27): the condition-code vocabulary, prefix
 register selection, sign extension, flag packing/evaluation/update rules, and
 complete immediate/register ALU effects now have one inline owner in
-`accel/cpu/mp64/semantics.h`. Their former monolithic definitions were deleted;
+`emulator/accel/cpu/mp64/semantics.h`. Their former monolithic definitions were deleted;
 the universal interpreter and exact-single decoded executor consume the same
 implementation without exposing or relocating the mixed `CPUState`. The
 extension built successfully, and focused exact-single/generic/Python state,
 microcore REX/scalar, and native SUBI flag comparisons passed serially (6
 passed). Decoder and exit ownership remain in progress.
 
-Second-slice evidence (2026-08-27): `accel/cpu/mp64/decode.h` and its internal
+Second-slice evidence (2026-08-27): `emulator/accel/cpu/mp64/decode.h` and its internal
 template implementation now own the sole semantic decoder for ordinary
 architectural execution and exact-single block construction. The compact
 16-byte decoded record carries the semantic operation, resolved registers,
@@ -406,7 +406,7 @@ this element; this is construction evidence, not broad qualification or a
 performance claim.
 
 Third-slice evidence (2026-08-27):
-`accel/cpu/mp64/interpreter.h` now owns the authoritative decoded effect switch
+`emulator/accel/cpu/mp64/interpreter.h` now owns the authoritative decoded effect switch
 behind a compile-time machine-operations policy. MP64 keeps register, branch,
 flag, CALL.L/RET.L stack ordering, and privilege semantics; the local adapter
 supplies only existing memory/callback and accelerator-hook boundaries while
@@ -424,7 +424,7 @@ CALL.L/RET.L, branch, SEP, strict-cycle, accepted-hook, and byte-MMIO spine
 passed serially (29 passed). Retirement and shared block-exit ownership remain
 in progress.
 
-Fourth-slice evidence (2026-08-27): `accel/cpu/mp64/block_ir.h` now owns the
+Fourth-slice evidence (2026-08-27): `emulator/accel/cpu/mp64/block_ir.h` now owns the
 shared block-exit reason and result used by decoded C++ and normalized generated
 execution. The former backend-shaped `SingleCoreDecodedBlockRun` was deleted.
 Complete blocks, caller-budget prefixes, between-instruction interrupts, timing
@@ -780,7 +780,7 @@ old/new engine selector, superseded chaining path, duplicate instruction
 semantics, or temporary engine-extraction bridge remains. A forced sequential
 extension build completed without compiler warnings.
 
-`accel/mp64_accel.cpp` remains the integration owner for mixed `CPUState` and
+`emulator/accel/mp64_accel.cpp` remains the integration owner for mixed `CPUState` and
 `SystemState`, scheduling, Python callbacks, snapshots, and pybind registration.
 Its size and mixed responsibilities are real organization debt, but decomposing
 that integration unit is a separate future organization project rather than a

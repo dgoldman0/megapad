@@ -99,8 +99,8 @@ counts below remain historical.
 | `bios.asm` | 15,203 | 396 dictionary entries |
 | `kdos.f` | 11,815 | 962 colon defs, 523 vars/constants, §1–§20 |
 | `megapad64.py` | 3,315 | Full CPU + extended tile + FP16/BF16 |
-| `accel/mp64_accel.cpp` | 3,295 | C++ CPU core (pybind11, ~63× speedup) |
-| `accel/*.h` | 2,436 | Crypto, FB, NIC, timer C++ device accel |
+| `emulator/accel/mp64_accel.cpp` | 3,295 | C++ CPU core (pybind11, ~63× speedup) |
+| `emulator/accel/*.h` | 2,436 | Crypto, FB, NIC, timer C++ device accel |
 | `accel_wrapper.py` | 897 | Drop-in C++ ↔ Python bridge |
 | `system.py` | 1,018 | Multi-core SoC (up to 16 cores + clusters) |
 | `devices.py` | 2,542 | 18 device classes |
@@ -301,7 +301,7 @@ buffers, §19 Hash tables, §20 Module system.
 - `megapad64.py`: 3,315 lines — full ISA including EXT.STRING, EXT.DICT,
   64-lane tile engine with FP16/BF16, BIST, I-cache model
 - `accel_wrapper.py`: 897 lines — transparent C++ ↔ Python bridge
-- `accel/mp64_accel.cpp`: 3,295 lines + 2,436 lines headers — C++ fast
+- `emulator/accel/mp64_accel.cpp`: 3,295 lines + 2,436 lines headers — C++ fast
   path (~63× speedup), crypto device integration, pybind11
 - `system.py`: 1,018 lines — multi-core SoC wiring (up to 16 cores +
   micro-clusters), device bus, IRQ routing
@@ -444,8 +444,8 @@ Compiler Item 49      STC Compiler Checks                     ✅ DONE
 | `tools.f` | 1,534 | ✅ Loadable tools module |
 | `graphics.f` | 64 | ✅ Graphics module |
 | `megapad64.py` | 3,315 | ✅ Full CPU + extended tile + FP16/BF16 |
-| `accel/mp64_accel.cpp` | 3,295 | ✅ C++ CPU core (pybind11, ~63× speedup) |
-| `accel/*.h` | 2,436 | ✅ Crypto, FB, NIC, timer C++ devices |
+| `emulator/accel/mp64_accel.cpp` | 3,295 | ✅ C++ CPU core (pybind11, ~63× speedup) |
+| `emulator/accel/*.h` | 2,436 | ✅ Crypto, FB, NIC, timer C++ devices |
 | `accel_wrapper.py` | 897 | ✅ Drop-in C++ ↔ Python wrapper |
 | `system.py` | 1,018 | ✅ Multi-core SoC (16 cores + clusters) |
 | `devices.py` | 2,542 | ✅ 18 device classes |

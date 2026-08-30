@@ -187,7 +187,7 @@ line or test counts as current qualification evidence.
 | SoC | `system.py` | 1,018 |
 | Devices | `devices.py` | 2,542 |
 | CLI | `cli.py` | 1,557 |
-| C++ accel | `accel/mp64_accel.cpp` | 3,295 |
+| C++ accel | `emulator/accel/mp64_accel.cpp` | 3,295 |
 | Assembler | `asm.py` | 909 |
 | Tests | `tests/test_system.py` | 24,761 (1,634 tests, 77 classes) |
 |       | `tests/test_networking.py` | 187 (13 tests) |

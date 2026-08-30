@@ -1306,6 +1306,6 @@ DMA, and reliability specifications.
 | Tests | `tests/test_system.py` | — | System integration coverage |
 | Tests | `tests/test_networking.py` | — | Real-network coverage |
 | Tests | `tests/test_fs_hardening.py` | — | Filesystem hardening coverage |
-| C++ accel | `accel/` | — | Multi-source native execution and system-state accelerator |
+| C++ accel | `emulator/accel/` | — | Multi-source native execution and system-state accelerator |
 | RTL | `rtl/` | — | Portable Verilog modules and target overrides |
 | RTL tests | `rtl/sim/` | — | Verilog testbenches |

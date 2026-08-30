@@ -16,7 +16,8 @@ import pybind11
 
 
 _ROOT = Path(__file__).resolve().parent
-_CRYPTO_SOURCE = _ROOT / "accel" / "mp64_crypto.h"
+_ACCEL_ROOT = _ROOT / "emulator" / "accel"
+_CRYPTO_SOURCE = _ACCEL_ROOT / "mp64_crypto.h"
 _AES_MODEL_SOURCE_SHA256 = hashlib.sha256(_CRYPTO_SOURCE.read_bytes()).hexdigest()
 
 _SANITIZER = os.environ.get("MP64_ACCEL_SANITIZER", "none")
@@ -64,31 +65,31 @@ else:
 ext = Extension(
     "_mp64_accel",
     sources=[
-        "accel/mp64_accel.cpp",
-        "accel/dbt/executable_arena.cpp",
-        "accel/dbt/x86_64/emitter.cpp",
-        "accel/dbt/x86_64/lowering.cpp",
-        "accel/machine/settlement.cpp",
+        "emulator/accel/mp64_accel.cpp",
+        "emulator/accel/dbt/executable_arena.cpp",
+        "emulator/accel/dbt/x86_64/emitter.cpp",
+        "emulator/accel/dbt/x86_64/lowering.cpp",
+        "emulator/accel/machine/settlement.cpp",
     ],
     depends=[
-        "accel/cpu/mp64/block_ir.h",
-        "accel/cpu/mp64/decode.h",
-        "accel/cpu/mp64/decode_impl.h",
-        "accel/cpu/mp64/interpreter.h",
-        "accel/cpu/mp64/semantics.h",
-        "accel/dbt/executable_arena.h",
-        "accel/dbt/host_jit_config.h",
-        "accel/dbt/x86_64/emitter.h",
-        "accel/dbt/x86_64/lowering.h",
-        "accel/machine/memory.h",
-        "accel/machine/settlement.h",
-        "accel/mp64_crypto.h",
-        "accel/mp64_fb.h",
-        "accel/mp64_nic.h",
-        "accel/mp64_rtc.h",
-        "accel/mp64_timer.h",
-        "accel/mp64_uart.h",
-        "accel/mp64_uart_geom.h",
+        "emulator/accel/cpu/mp64/block_ir.h",
+        "emulator/accel/cpu/mp64/decode.h",
+        "emulator/accel/cpu/mp64/decode_impl.h",
+        "emulator/accel/cpu/mp64/interpreter.h",
+        "emulator/accel/cpu/mp64/semantics.h",
+        "emulator/accel/dbt/executable_arena.h",
+        "emulator/accel/dbt/host_jit_config.h",
+        "emulator/accel/dbt/x86_64/emitter.h",
+        "emulator/accel/dbt/x86_64/lowering.h",
+        "emulator/accel/machine/memory.h",
+        "emulator/accel/machine/settlement.h",
+        "emulator/accel/mp64_crypto.h",
+        "emulator/accel/mp64_fb.h",
+        "emulator/accel/mp64_nic.h",
+        "emulator/accel/mp64_rtc.h",
+        "emulator/accel/mp64_timer.h",
+        "emulator/accel/mp64_uart.h",
+        "emulator/accel/mp64_uart_geom.h",
     ],
     include_dirs=[pybind11.get_include()],
     define_macros=[
