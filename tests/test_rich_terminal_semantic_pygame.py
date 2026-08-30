@@ -1,4 +1,4 @@
-"""Seconds-scale off-screen coverage for the semantic pygame menu path."""
+"""Seconds-scale off-screen coverage for semantic Pygame controls."""
 
 from __future__ import annotations
 
@@ -27,7 +27,10 @@ from rich_terminal.retained_view import (
     MenuSeparatorDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    TabDraw,
+    TabSetDraw,
     TextAreaDraw,
+    TextGridDraw,
 )
 from rich_terminal.semantic_content import (
     SemanticContentFlag,
@@ -67,7 +70,7 @@ class _ControlFont:
 
 
 class _GlyphFont:
-    """Legacy glyph-only font that proves semantic text uses control_font."""
+    """Deterministic terminal monospace font with scalar-only glyph surfaces."""
 
     def __init__(self, pygame_module):
         self.pygame = pygame_module
@@ -314,18 +317,157 @@ def test_legacy_glyph_composition_keeps_surface_return_and_empty_hit_map():
     assert tuple(result_surface_2.get_at((5, 5)))[:3] == (10, 20, 30)
 
 
-def test_collection_draw_fails_before_the_current_pygame_sink_can_present_it():
+def test_text_area_paints_exact_viewport_selection_and_persistent_caret():
     pygame = pytest.importorskip("pygame")
     content = SemanticTextContent(
         content_revision=1,
-        rows=1,
-        columns=8,
-        viewport_row=0,
+        rows=3,
+        columns=5,
+        viewport_row=1,
+        viewport_column=1,
+        viewport_rows=2,
+        viewport_columns=4,
+        flags=SemanticContentFlag(0),
+        primary_key=2,
+        primary_offset=4,
+        anchor_key=2,
+        anchor_offset=2,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                5,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "OFF",
+            ),
+            SemanticTextItem(
+                2,
+                1,
+                0,
+                1,
+                5,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "ABCDE",
+            ),
+        ),
+    )
+    area = TextAreaDraw(
+        30,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, (UINT32_MAX * 3) // 4, UINT32_MAX),
+        content,
+    )
+    plane = _plane(_region(area, cols=8, rows=4))
+
+    surface, result = _render(pygame, plane, size=(80, 40))
+
+    assert result.hit_targets == ()
+    # The semantic root is an opaque semantic representation over the CELL
+    # fallback; pixels outside that root retain the caller-owned CELL raster.
+    assert tuple(surface.get_at((70, 20)))[:3] == (184, 190, 201)
+    assert tuple(surface.get_at((10, 30)))[:3] != (184, 190, 201)
+    # Offsets 2..4 select two exact scalar slots in the first visible row.
+    assert tuple(surface.get_at((20, 3)))[:3] != tuple(
+        surface.get_at((5, 3))
+    )[:3]
+    # The primary position is rendered persistently at viewport-relative edge 3.
+    assert tuple(surface.get_at((45, 5)))[:3] == (78, 139, 246)
+
+
+def test_text_area_clip_does_not_reflow_or_relocate_an_offscreen_endpoint():
+    pygame = pytest.importorskip("pygame")
+
+    class RecordingGlyphFont(_GlyphFont):
+        def __init__(self, pygame_module):
+            super().__init__(pygame_module)
+            self.rendered = []
+
+        def render(self, text, antialias, color):
+            self.rendered.append(text)
+            return super().render(text, antialias, color)
+
+    content = SemanticTextContent(
+        content_revision=2,
+        rows=2,
+        columns=4,
+        viewport_row=1,
         viewport_column=0,
         viewport_rows=1,
-        viewport_columns=8,
+        viewport_columns=4,
         flags=SemanticContentFlag(0),
-        primary_key=1,
+        primary_key=2,
+        primary_offset=2,
+        anchor_key=1,
+        anchor_offset=1,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                4,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "ZZZZ",
+            ),
+            SemanticTextItem(
+                2,
+                1,
+                0,
+                1,
+                4,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "ABCD",
+            ),
+        ),
+    )
+    area = TextAreaDraw(
+        31,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        content,
+    )
+    surface = pygame.Surface((40, 10))
+    surface.fill((184, 190, 201))
+    surface.set_clip(pygame.Rect(10, 0, 20, 10))
+    font = RecordingGlyphFont(pygame)
+
+    result = composite_draw_plane_result(
+        pygame,
+        surface,
+        _plane(_region(area, cols=4, rows=1)),
+        font,
+        10,
+        10,
+    )
+
+    assert result.hit_targets == ()
+    assert font.rendered == ["B", "C"]
+    assert tuple(surface.get_at((5, 5)))[:3] == (184, 190, 201)
+    assert tuple(surface.get_at((20, 5)))[:3] == (78, 139, 246)
+
+
+def test_text_grid_maps_spans_and_states_without_inventing_item_hits():
+    pygame = pytest.importorskip("pygame")
+    content = SemanticTextContent(
+        content_revision=4,
+        rows=4,
+        columns=4,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=4,
+        viewport_columns=4,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=4,
         primary_offset=0,
         anchor_key=0,
         anchor_offset=0,
@@ -335,32 +477,262 @@ def test_collection_draw_fails_before_the_current_pygame_sink_can_present_it():
                 0,
                 0,
                 1,
-                8,
+                4,
+                SemanticTextRole.COLUMN_HEADER,
+                SemanticTextState(0),
+                "Week",
+            ),
+            SemanticTextItem(
+                2,
+                1,
+                0,
+                1,
+                2,
+                SemanticTextRole.CONTENT,
+                SemanticTextState.CURRENT,
+                "Today",
+            ),
+            SemanticTextItem(
+                3,
+                1,
+                2,
+                1,
+                2,
+                SemanticTextRole.CONTENT,
+                SemanticTextState.UNAVAILABLE,
+                "Busy",
+            ),
+            SemanticTextItem(
+                4,
+                2,
+                1,
+                1,
+                2,
                 SemanticTextRole.CONTENT,
                 SemanticTextState(0),
-                "Pad",
+                "Selected",
             ),
         ),
     )
-    area = TextAreaDraw(
-        30,
+    grid = TextGridDraw(
+        40,
         VISIBLE | ENABLED,
         0,
         0,
         ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
         content,
     )
-    plane = _plane(_region(area, cols=8, rows=1))
-    surface = pygame.Surface((80, 10))
-    surface.fill((23, 29, 37))
 
-    with pytest.raises(TypeError, match="unsupported retained draw value"):
-        composite_draw_plane_result(
-            pygame,
-            surface,
-            plane,
-            _GlyphFont(pygame),
-            10,
-            10,
-        )
-    assert tuple(surface.get_at((5, 5)))[:3] == (23, 29, 37)
+    surface, result = _render(
+        pygame,
+        _plane(_region(grid, cols=12, rows=8)),
+        size=(120, 80),
+    )
+
+    assert result.hit_targets == ()
+    header = tuple(surface.get_at((5, 3)))[:3]
+    unavailable = tuple(surface.get_at((65, 23)))[:3]
+    primary = tuple(surface.get_at((35, 43)))[:3]
+    blank = tuple(surface.get_at((5, 65)))[:3]
+    assert len({header, unavailable, primary, blank}) == 4
+    assert tuple(surface.get_at((1, 21)))[:3] == (78, 139, 246)
+
+
+def test_tabset_owns_layout_and_emits_only_enabled_tab_targets():
+    pygame = pytest.importorskip("pygame")
+    tabset = TabSetDraw(
+        50,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        (
+            TabDraw(51, VISIBLE | ENABLED | ControlState.SELECTED, 0, "Pad", ""),
+            TabDraw(52, VISIBLE | ENABLED, 1, "Daybook", "D"),
+            TabDraw(53, VISIBLE, 2, "Disabled", ""),
+        ),
+    )
+    # The labels do not fit this root naturally, so the renderer's generic
+    # overflow policy gives every semantic tab one deterministic partition.
+    plane = _plane(_region(tabset, cols=12, rows=4))
+    hover_identity = ControlIdentity(11, 7, 52)
+
+    idle_surface, idle = _render(pygame, plane, size=(120, 40))
+    hover_surface, hovered = _render(
+        pygame,
+        plane,
+        hovered=hover_identity,
+        size=(120, 40),
+    )
+
+    assert [target.identity.control_id for target in idle.hit_targets] == [51, 52]
+    assert [target.kind for target in idle.hit_targets] == [
+        ControlKind.TAB,
+        ControlKind.TAB,
+    ]
+    assert idle.hit_targets == hovered.hit_targets
+    daybook = _target(idle, 52).rect
+    point = (daybook.left + 2, (daybook.top + daybook.bottom) // 2)
+    assert idle.hit_test(*point).identity == hover_identity
+    assert tuple(idle_surface.get_at(point))[:3] != tuple(
+        hover_surface.get_at(point)
+    )[:3]
+
+
+def test_later_tabset_wins_hit_testing_in_painter_order():
+    pygame = pytest.importorskip("pygame")
+    bounds = ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX)
+    lower = TabSetDraw(
+        70,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        bounds,
+        (TabDraw(71, VISIBLE | ENABLED, 0, "Lower", ""),),
+    )
+    upper = TabSetDraw(
+        80,
+        VISIBLE | ENABLED,
+        0,
+        1,
+        bounds,
+        (TabDraw(81, VISIBLE | ENABLED, 0, "Upper", ""),),
+    )
+
+    _, result = _render(
+        pygame,
+        _plane(_region(lower, upper, cols=12, rows=4)),
+        size=(120, 40),
+    )
+
+    lower_target = _target(result, 71)
+    point = (
+        (lower_target.rect.left + lower_target.rect.right) // 2,
+        (lower_target.rect.top + lower_target.rect.bottom) // 2,
+    )
+    assert result.hit_test(*point).identity.control_id == 81
+
+
+def test_grid_rasterizes_only_visible_scalars_without_a_logical_cell_matrix():
+    pygame = pytest.importorskip("pygame")
+
+    class CountingFont(_ControlFont):
+        def __init__(self, pygame_module):
+            super().__init__(pygame_module)
+            self.render_calls = []
+
+        def render(self, text, antialias, color):
+            self.render_calls.append(text)
+            return super().render(text, antialias, color)
+
+    text = "X" * 10_000
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=10_000,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=10_000,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                10_000,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                text,
+            ),
+        ),
+    )
+    grid = TextGridDraw(
+        60,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        content,
+    )
+    font = CountingFont(pygame)
+    surface = pygame.Surface((40, 10))
+
+    result = composite_draw_plane_result(
+        pygame,
+        surface,
+        _plane(_region(grid, cols=4, rows=1)),
+        _GlyphFont(pygame),
+        10,
+        10,
+        control_font=font,
+    )
+
+    assert result.hit_targets == ()
+    assert 0 < len(font.render_calls) < 10
+    assert all(len(call) == 1 for call in font.render_calls)
+
+
+def test_grid_clips_extreme_u32_spans_before_constructing_pygame_rects():
+    pygame = pytest.importorskip("pygame")
+    content = SemanticTextContent(
+        content_revision=6,
+        rows=UINT32_MAX,
+        columns=UINT32_MAX,
+        viewport_row=UINT32_MAX - 1,
+        viewport_column=UINT32_MAX - 1,
+        viewport_rows=1,
+        viewport_columns=1,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                UINT32_MAX,
+                UINT32_MAX,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "X",
+            ),
+        ),
+    )
+    grid = TextGridDraw(
+        61,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        content,
+    )
+    surface = pygame.Surface((40, 10))
+    surface.fill((184, 190, 201))
+    # Neither the root edge nor any true item edge crosses this interior clip.
+    # Its left edge must therefore remain ordinary item fill, not a border
+    # invented by saturating the item's extreme logical origin to the clip.
+    surface.set_clip(pygame.Rect(10, 1, 20, 8))
+
+    result = composite_draw_plane_result(
+        pygame,
+        surface,
+        _plane(_region(grid, cols=4, rows=1)),
+        _GlyphFont(pygame),
+        10,
+        10,
+        control_font=_ControlFont(pygame),
+    )
+
+    assert result.hit_targets == ()
+    assert tuple(surface.get_at((10, 5)))[:3] == tuple(
+        surface.get_at((20, 5))
+    )[:3]
+    assert tuple(surface.get_at((10, 5)))[:3] != (184, 190, 201)

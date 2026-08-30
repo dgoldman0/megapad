@@ -2,10 +2,11 @@
 
 Status: protocol value, wire codec, immutable retained model, server ingress,
 renderer-neutral immutable draw projection, and exact shared-viewer transport
-implemented. Pygame rasterization/hit maps, Akashic production, and text/grid
-item input are deliberately not implemented in this slice. A physical renderer
-must not advertise `RET_CONTROL_COLLECTIONS` until its compositor and
-acknowledgement path can render every visible kind.
+implemented. The reference Pygame sink now rasterizes every collection kind and
+publishes immutable TAB hit targets from the exact paint pass. Akashic
+production and text/grid item input are deliberately not implemented in this
+slice. A physical renderer must not advertise `RET_CONTROL_COLLECTIONS` until
+its compositor and acknowledgement path can render every visible kind.
 
 ## Decision
 
@@ -227,6 +228,45 @@ both outgoing and incoming offers. Unknown or extra JSON fields, mismatched
 tags, malformed STX1, ambiguous tab state, duplicate identities, and
 noncanonical ordering fail closed before a display offer enters the viewer.
 
+## Reference Pygame renderer
+
+The reference sink paints the mandatory complete CELL image first, paints every
+retained draw in deterministic back-to-front order, and leaves the existing
+cursor overlay last. Collection roots are opaque rich representations over
+that complete fallback; pixels outside their root bounds remain the CELL image.
+
+TEXT_AREA maps the exact declared logical viewport to half-open integer row and
+scalar-column slots. Missing rows remain blank, U+0009 is a renderer-owned blank
+logical slot in this first policy, the anchor-to-primary range receives a
+half-open selection fill, and the primary scalar boundary receives a persistent
+caret. An offscreen endpoint remains authoritative but is never moved to the
+viewport origin. The reference sink uses the terminal monospace font for this
+editor policy.
+
+TEXT_GRID maps item rectangles directly from their logical viewport-relative
+row, column, and span values. It paints role, primary, `CURRENT`, and
+`UNAVAILABLE` states with renderer-owned styling and never materializes a
+rows-by-columns matrix. TABSET uses renderer-owned sans-serif metrics: natural
+tab widths when they fit and deterministic equal partitioning when they do not.
+Only physically visible, effectively enabled TAB children enter the immutable
+hit map. TEXT_AREA and TEXT_GRID emit no hit target because `CONTROL_EVENT`
+cannot name an STX1 item or scalar position.
+
+Raster code consumes the already validated immutable draw/content values. It
+does not encode or decode STX1, rerun family/UTF-8/overlap proofs, or render an
+unbounded whole collection string into one temporary surface. Grid and tab text
+uses one-scalar glyph surfaces and emits only glyph pixels that intersect the
+physical clip. That bounds each raster allocation and render call; it does not
+claim bounded traversal of a long proportional-font prefix. Grid edges are
+intersected as Python integers before constructing SDL-backed rectangles, so
+valid extreme-u32 spans cannot wrap into false geometry. A paint failure occurs
+before flip, hit-map staging, or physical acknowledgement.
+
+The completed pixel surface—not STX1 revision, item geometry, or semantic
+state—is the input to later e-paper damage derivation. Partial/full refresh,
+waveform, ghosting, color conversion, controller completion, and settling remain
+selected-sink policy.
+
 ## Implementation boundary
 
 The coherent protocol slice is owned by:
@@ -245,11 +285,14 @@ The coherent protocol slice is owned by:
   repeat item-family, UTF-8, or rectangle-overlap scans on every display offer;
   and
 - `shared_session.py`: exact tagged local-viewer transport, carrying canonical
-  STX1 bytes without defining a parallel item representation.
+  STX1 bytes without defining a parallel item representation; and
+- `rich_terminal/pygame_view.py` and `session_viewer.py`: generic collection
+  rasterization, same-pass immutable TAB hit geometry, complete CELL/cursor
+  composition order, and exact physical-offer promotion.
 
-The next MegaPad slice is one ordinary pygame compositor path and immutable hit
-map. Until that exists, the reference sink rejects a visible collection draw
-rather than silently reducing it to CELL or glyphs.
+The reference sink no longer blocks collection rendering. Capability bit 9
+remains unadvertised until the synchronized Akashic producer and ordinary
+Desk/Pad/Daybook vertical can supply and exercise these records end to end.
 Akashic can advertise/use bit 9 only after its generic UIDL semantic provider
 and CONTROL encoder emit these exact records. Pad and Daybook must remain
 ordinary UIDL/TUI sources; neither receives a terminal API or renderer-specific

@@ -427,10 +427,26 @@ That projection preserves exact owner/region authority, independent sibling
 roots, stable item identities, logical viewport and selection state, and
 deterministic draw order without choosing pixels or hit geometry. The shared
 physical viewer wire now carries those exact draw values, using canonical STX1
-bytes instead of defining another semantic-item schema. The Pygame sink does
-not yet rasterize or hit-test them. Therefore the host must not advertise bit
-9; this is a model/view/transport checkpoint, not physical rich-rendering or
-Desk/Pad/Daybook acceptance evidence.
+bytes instead of defining another semantic-item schema. The Pygame sink now
+paints text-area, grid, and tabset roots over the mandatory complete CELL base,
+leaves the cursor overlay last, and derives immutable enabled-TAB hit geometry
+from that exact paint pass. An accepted physical offer therefore authorizes TAB
+ACTIVATE through the existing exact-revision path. Text/grid item input remains
+deferred because the current event cannot name content revision, item key, and
+scalar offset. Bit 9 remains unadvertised until the synchronized Akashic
+producer and ordinary Desk/Pad/Daybook journey exercise this physical path.
+
+Collection rasterization consumes the immutable values already validated at
+wire/model admission; it does not repeat UTF-8, ordering, family, or rectangle
+proofs. It maps logical geometry with exact integer edges, allocates no logical
+rows-by-columns matrix, intersects extreme logical grid edges before creating
+SDL-backed rectangles, and gives each emitted grid/tab glyph its own
+single-scalar surface rather than creating an unbounded whole-string surface.
+This bounds glyph allocations and render calls, not traversal of a long clipped
+proportional-font prefix. No Pad or Daybook geometry enters the renderer. A
+future e-paper sink derives damage from the final CELL-plus-rich-plus-cursor
+raster and retains full/partial refresh, waveform, ghosting, controller
+completion, and settling as sink-local policy.
 
 A region's pixel rectangle is exactly its cell rectangle multiplied by the
 selected cell width and height. For a parentless object's normalized edge, the

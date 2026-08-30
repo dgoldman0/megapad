@@ -491,9 +491,14 @@ also cross the shared-viewer wire, with text content carried as canonical STX1
 rather than a duplicate JSON item schema. Collection-family checks at the
 scene, view, and shared-wire seams use two immutable facts derived during the
 canonical STX1 item pass, so fail-closed reassertion does not add another item
-scan. It does not yet have a Pygame raster/hit path or Akashic producer, so bit
-9 remains unadvertised and this foundation is not evidence that Pad or Daybook
-content crossed the rich physical view.
+scan. The reference Pygame sink now paints all three root kinds from the
+complete CELL base, renders persistent TEXT_AREA selection/caret state, and
+publishes only enabled TAB children in the same-pass immutable hit map. TAB
+activation therefore reuses the exact physically acknowledged revision path
+already used by menus. TEXT_AREA and TEXT_GRID item-addressed pointer input
+remain deferred because the current event cannot name an STX1 item revision,
+key, or scalar offset. Bit 9 remains unadvertised until the Akashic producer and
+ordinary Desk/Pad/Daybook journey supply these values end to end.
 
 The early physical renderer deliberately exposes the product direction rather
 than postponing visual judgment until Desktop acceptance: a clean deep-neutral
@@ -502,7 +507,11 @@ rounded menu and popup geometry, clear hover/pressed/selected/disabled states,
 shortcuts, separators, and checked items. These are renderer-owned code-native
 primitives and fonts, not bitmap fixtures and not a return to the text-only
 CELL look. The visual system may be refined as real UIDL menus arrive, while
-the semantic records remain renderer-neutral.
+the semantic records remain renderer-neutral. Collection rasterization likewise
+uses only root bounds, logical viewport geometry, item roles/state, semantic
+order, and renderer-owned font metrics; it contains no Pad or Daybook geometry.
+Later e-paper damage is derived from the completed raster, never from STX1
+revisions or semantic rectangles.
 
 Acceptance requires a complete visible Desk frame, a real Pad edit and visible
 caret/state change, a real Daybook navigation or selection, and the ordinary

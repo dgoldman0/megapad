@@ -110,6 +110,14 @@ def _promote(state, keyboard, offer, targets, *, response_status="presented"):
     return revision
 
 
+def test_only_independently_activatable_controls_can_enter_the_hit_map():
+    assert _target(kind=ControlKind.TAB).kind is ControlKind.TAB
+    with pytest.raises(ValueError, match="MENU, MENU_ITEM, and TAB"):
+        _target(kind=ControlKind.TEXT_AREA)
+    with pytest.raises(ValueError, match="MENU, MENU_ITEM, and TAB"):
+        _target(kind=ControlKind.TEXT_GRID)
+
+
 def test_pending_hit_map_is_not_authority_until_accepted_physical_present():
     client = _RecordingClient()
     keyboard = _GuestKeyboardForwarder(
@@ -253,7 +261,7 @@ def test_generation_transition_clears_promoted_hits_and_pointer_state():
     assert pointer.pressed is None
 
 
-def test_same_target_press_release_reuses_proof_and_backpressure_path():
+def test_tab_press_release_reuses_exact_proof_and_backpressure_path():
     pygame = _Pygame()
     client = _RecordingClient(("backpressured", "progress"))
     keyboard = _GuestKeyboardForwarder(
@@ -265,7 +273,7 @@ def test_same_target_press_release_reuses_proof_and_backpressure_path():
     state = _RetainedDisplayState()
     pointer = _SemanticPointerInteractor(state, keyboard)
     offer = _offer(4, revision=12)
-    target = _target()
+    target = _target(kind=ControlKind.TAB)
     _promote(state, keyboard, offer, (target,))
     modifiers = _pygame_apt_modifiers(
         pygame,
