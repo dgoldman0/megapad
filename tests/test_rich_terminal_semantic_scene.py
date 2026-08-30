@@ -1,4 +1,4 @@
-"""Focused immutable scene tests for the first semantic-control family."""
+"""Focused immutable scene tests for the retained semantic-control family."""
 
 from __future__ import annotations
 
@@ -29,6 +29,13 @@ from rich_terminal.retained_scene import (
     SceneErrorCode,
     SceneModelError,
 )
+from rich_terminal.semantic_content import (
+    SemanticContentFlag,
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
+)
 from rich_terminal.update_authority import (
     TerminalGeometry,
     TerminalUpdateAuthority,
@@ -42,9 +49,16 @@ GEOMETRY = TerminalGeometry(24, 12, 0)
 FULL_BOUNDS = ObjectBounds(0, 0, UINT32_MAX, 0x18000000)
 
 
-def _policy(*, object_capacity: int = 16) -> RetainedPolicy:
+def _policy(
+    *,
+    object_capacity: int = 16,
+    control_collections: bool = False,
+) -> RetainedPolicy:
+    features = RetainedFeature.CORE | RetainedFeature.CONTROLS
+    if control_collections:
+        features |= RetainedFeature.CONTROL_COLLECTIONS
     return RetainedPolicy(
-        features=RetainedFeature.CORE | RetainedFeature.CONTROLS,
+        features=features,
         max_owner_records=2,
         max_live_owners=2,
         max_regions=4,
@@ -71,7 +85,12 @@ def _policy(*, object_capacity: int = 16) -> RetainedPolicy:
     )
 
 
-def _domain(*, object_quota: int = 12, object_capacity: int = 16):
+def _domain(
+    *,
+    object_quota: int = 12,
+    object_capacity: int = 16,
+    control_collections: bool = False,
+):
     clock = TerminalUpdateAuthority(
         presentation_epoch=EPOCH,
         revision=1,
@@ -81,7 +100,10 @@ def _domain(*, object_quota: int = 12, object_capacity: int = 16):
     ledger = OwnerLedger(
         session_id=SESSION_ID,
         presentation_epoch=EPOCH,
-        policy=_policy(object_capacity=object_capacity),
+        policy=_policy(
+            object_capacity=object_capacity,
+            control_collections=control_collections,
+        ),
     )
     ledger.open(
         owner,
@@ -129,6 +151,56 @@ def _control(
         bounds=FULL_BOUNDS if kind is ControlKind.MENU_BAR else None,
         label=label,
         shortcut=shortcut,
+    )
+
+
+def _text_area_content(
+    revision: int,
+    texts: tuple[str, ...] = ("first", "second"),
+) -> SemanticTextContent:
+    return SemanticTextContent(
+        revision,
+        max(1, len(texts)),
+        8,
+        0,
+        0,
+        max(1, len(texts)),
+        8,
+        SemanticContentFlag(0),
+        len(texts),
+        0,
+        0,
+        0,
+        tuple(
+            SemanticTextItem(
+                index + 1,
+                index,
+                0,
+                1,
+                8,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                text,
+            )
+            for index, text in enumerate(texts)
+        ),
+    )
+
+
+def _text_area(owner, content: SemanticTextContent) -> ControlDefinition:
+    return ControlDefinition(
+        owner,
+        1,
+        ControlKind.TEXT_AREA,
+        ControlState.VISIBLE | ControlState.ENABLED,
+        20,
+        1,
+        0,
+        0,
+        FULL_BOUNDS,
+        "",
+        "",
+        content,
     )
 
 
@@ -282,6 +354,72 @@ def test_control_tree_rejects_wrong_parent_duplicate_order_and_two_open_menus():
     clock.settle_result(rejected.transaction_id)
 
 
+def test_tabset_uses_the_control_graph_and_has_one_selected_tab() -> None:
+    clock, _, owner, scene = _domain(control_collections=True)
+
+    def tabset(control_id: int = 1) -> ControlDefinition:
+        return ControlDefinition(
+            owner,
+            control_id,
+            ControlKind.TABSET,
+            ControlState.VISIBLE | ControlState.ENABLED,
+            20,
+            1,
+            0,
+            0,
+            FULL_BOUNDS,
+            "",
+            "",
+        )
+
+    def tab(control_id: int, order: int, *, selected: bool) -> ControlDefinition:
+        state = ControlState.VISIBLE | ControlState.ENABLED
+        if selected:
+            state |= ControlState.SELECTED
+        return ControlDefinition(
+            owner,
+            control_id,
+            ControlKind.TAB,
+            state,
+            0,
+            1,
+            1,
+            order,
+            None,
+            f"Tab {order}",
+            "",
+        )
+
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(tabset())
+    scene.define_control(tab(2, 0, selected=True))
+    scene.define_control(tab(3, 1, selected=True))
+    with pytest.raises(SceneModelError, match="multiple selected tabs"):
+        scene.prepare_commit(CommitDisposition.COMMIT)
+    rejected = scene.reject()
+    clock.settle_result(rejected.transaction_id)
+
+    _begin(clock, scene, 3, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(tabset())
+    scene.define_control(tab(2, 0, selected=True))
+    scene.define_control(tab(3, 1, selected=False))
+    scene.define_control(
+        replace(
+            _text_area(owner, _text_area_content(1, ("body",))),
+            control_id=4,
+            z_order=21,
+        )
+    )
+    _install(clock, scene, CommitDisposition.COMMIT)
+    _begin(clock, scene, 4, RetainedMode.REPLACE_CONTINUE)
+    _install(clock, scene, CommitDisposition.COMMIT_AND_REVEAL)
+    assert scene.require_interactable_control(owner, 2).label == "Tab 0"
+    assert set(scene.state.active.owners[owner.owner_id].controls) == {1, 2, 3, 4}
+    assert scene.state.active.owners[owner.owner_id].usage.objects == 5
+
+
 def test_controls_and_graphical_objects_share_the_declared_object_quota():
     clock, _, owner, scene = _domain(object_quota=2, object_capacity=2)
     _begin(clock, scene, 2, RetainedMode.REPLACE_START)
@@ -309,6 +447,47 @@ def test_controls_and_graphical_objects_share_the_declared_object_quota():
             _control(owner, 2, ControlKind.MENU, parent=1, label="File")
         )
     assert exhausted.value.code is SceneErrorCode.QUOTA
+
+
+def test_semantic_items_consume_the_existing_object_quota() -> None:
+    clock, _, owner, scene = _domain(
+        object_quota=2,
+        object_capacity=4,
+        control_collections=True,
+    )
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    with pytest.raises(SceneModelError) as exhausted:
+        scene.define_control(_text_area(owner, _text_area_content(1)))
+    assert exhausted.value.code is SceneErrorCode.QUOTA
+
+
+def test_text_content_replacement_requires_a_newer_content_revision() -> None:
+    clock, _, owner, scene = _domain(control_collections=True)
+    initial = _text_area_content(7)
+
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(_text_area(owner, initial))
+    _install(clock, scene, CommitDisposition.COMMIT)
+
+    stale_change = replace(
+        initial,
+        items=(initial.items[0], replace(initial.items[1], text="changed")),
+    )
+    _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
+    with pytest.raises(SceneModelError, match="newer content revision"):
+        scene.replace_control(_text_area(owner, stale_change))
+    rejected = scene.reject()
+    clock.settle_result(rejected.transaction_id)
+
+    newer = replace(stale_change, content_revision=8)
+    _begin(clock, scene, 4, RetainedMode.REPLACE_CONTINUE)
+    scene.replace_control(_text_area(owner, newer))
+    _install(clock, scene, CommitDisposition.COMMIT)
+    hidden = scene.state.hidden
+    assert hidden is not None
+    assert hidden.owners[owner.owner_id].controls[1].content == newer
 
 
 def test_control_values_enforce_renderer_owned_child_geometry_and_clean_text():

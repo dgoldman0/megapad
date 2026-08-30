@@ -497,8 +497,9 @@ bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps Lock 4, and Num Lock 5; all
 other bits are zero. The identity is normalized routing and freshness data,
 not application authority. The terminal may emit ACTIVATE only for an exact
 current active CONTROL record whose kind is activatable and whose complete
-ancestor chain is visible and enabled under the canonical RETAINED-1 menu
-rules.
+ancestor chain is visible and enabled under the canonical RETAINED-1 control
+graph rules. `MENU`, `MENU_ITEM`, and (when feature bit 9 is enabled) `TAB` are
+the activatable kinds in this slice.
 
 `model_revision` must be the exact current global revision of the complete
 composite containing the renderer-hit-tested control, after that same revision
@@ -664,7 +665,9 @@ remain outside the CELL-1 implementation gate. The optional additive contract
 `0205`, `1000`–`1003`, `2000`–`2024`, `3000`–`3003`, `4000`–`4002`, and
 `8000`–`8002` only after its deterministic discovery succeeds. Feature bit 8
 `RET_CONTROLS` gates `CONTROL_DEFINE`, `CONTROL_REPLACE`, `CONTROL_DROP`, and
-`CONTROL_EVENT`; `4003`–`4FFF` remains reserved. Every other reserved ID keeps
+`CONTROL_EVENT`; feature bit 9 `RET_CONTROL_COLLECTIONS` gates the additive
+TEXT_AREA/TEXT_GRID/TABSET/TAB kinds and their STX1 content body. `4003`–`4FFF`
+remains reserved. Every other reserved ID keeps
 the behavior defined here; in particular, a sender may not infer a payload
 from its range. CELL-1 alone still defines no semantic controls. A complete
 styled-cell or GLYPH_RUN screen is therefore a foundation and fallback, not
@@ -675,15 +678,17 @@ The retained control mutations use `CONTROL_DEFINE` (`4000`),
 begin with the exact 80-byte prefix `<QQQHHiQQIIIIIIII>` carrying owner ID,
 owner generation, independent control ID, kind, state, z-order, region ID,
 parent control ID, sibling order, optional UNORM32 bounds, label byte count,
-shortcut byte count, and zero reserved; label bytes then shortcut bytes follow
-without padding. REPLACE resends that complete record, but all non-state fields
-must exactly match the retained control; only `state` may change. DROP is exact
-`<QQQ>`. RETAINED-1 Section 9.1 defines the canonical
-MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR graph and state rules.
+shortcut byte count, and semantic-content byte count; label bytes, shortcut
+bytes, and then the optional content body follow without padding. REPLACE
+resends that complete record with the kind-specific immutable and mutable field
+rules. DROP is exact `<QQQ>`. RETAINED-1 Section 9.1 and
+`SEMANTIC-CONTENT-1.md` define the canonical menu, text, grid, and tab graph,
+content, replacement, and state rules.
 Controls have an independent ID high-water but share each owner's existing
-object-count and aggregate UTF-8 quotas. Negotiated inbound payload and
-transaction bounds are the only additional size limits; no fixed control count
-or control-string maximum is introduced.
+object-count and aggregate UTF-8 quotas. One CONTROL record and each
+stable-keyed STX1 item consume one object-count slot. Negotiated inbound
+payload and transaction bounds are the only additional size limits; no fixed
+control, semantic-item, or control-string maximum is introduced.
 
 ## 17. Conformance vectors
 

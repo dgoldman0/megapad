@@ -583,6 +583,10 @@ def _validate_control_value(
         kind = ControlKind(definition.kind)
     except (TypeError, ValueError) as exc:
         raise ValueError("control kind is not a CONTROL-1 kind") from exc
+    if kind not in _CONTROL_ALLOWED_STATES:
+        raise ValueError(
+            f"{kind.name} is not implemented by this retained draw projection"
+        )
     state = _control_state(
         "control state",
         definition.state,
@@ -608,6 +612,8 @@ def _validate_control_value(
         definition.shortcut,
         nonempty=False,
     )
+    if definition.content is not None:
+        raise ValueError(f"{kind.name} carries no semantic text content")
 
     if kind is ControlKind.MENU_BAR:
         if (

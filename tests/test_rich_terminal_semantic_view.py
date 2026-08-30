@@ -37,6 +37,13 @@ from rich_terminal.retained_view import (
     RetainedViewError,
     project_composite_draw_plane,
 )
+from rich_terminal.semantic_content import (
+    SemanticContentFlag,
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
+)
 from rich_terminal.update_authority import TerminalGeometry
 
 
@@ -143,6 +150,12 @@ def _owner_scene(
         control_map = {
             definition.control_id: definition for definition in controls
         }
+    semantic_items = sum(
+        len(definition.content.items)
+        for definition in control_map.values()
+        if isinstance(definition, ControlDefinition)
+        and isinstance(definition.content, SemanticTextContent)
+    )
     return OwnerScene(
         owner=owner,
         regions=MappingProxyType(
@@ -152,7 +165,7 @@ def _owner_scene(
         series=MappingProxyType({}),
         usage=SceneUsage(
             regions=len(regions),
-            objects=len(object_map) + len(control_map),
+            objects=len(object_map) + len(control_map) + semantic_items,
         ),
         controls=MappingProxyType(dict(control_map)),
     )
@@ -323,6 +336,54 @@ def test_projection_preserves_semantics_and_orders_draw_families_deterministical
     )
     with pytest.raises(FrozenInstanceError):
         file_menu.label = "forged"
+
+
+def test_projection_fails_closed_until_semantic_content_draws_exist() -> None:
+    owner = _owner(7, 2)
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=8,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=8,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                8,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "visible",
+            ),
+        ),
+    )
+    area = ControlDefinition(
+        owner=owner,
+        control_id=50,
+        kind=ControlKind.TEXT_AREA,
+        state=ControlState.VISIBLE | ControlState.ENABLED,
+        z_order=10,
+        region_id=1,
+        parent_control_id=0,
+        order=0,
+        bounds=FULL_BOUNDS,
+        label="",
+        shortcut="",
+        content=content,
+    )
+    scene = _owner_scene(owner, (_region(owner),), controls=(area,))
+
+    with pytest.raises(RetainedViewError, match="not implemented"):
+        project_composite_draw_plane(_composite((scene,)))
 
 
 def _menu_item_draw(
@@ -571,6 +632,7 @@ def test_projection_never_traverses_hidden_semantic_target():
         ("missing_parent", "parent"),
         ("wrong_parent", "parent"),
         ("cross_region", "crosses region"),
+        ("content", "semantic text content"),
     ),
 )
 def test_projection_fails_closed_on_forged_control_maps(case: str, message: str):
@@ -605,7 +667,7 @@ def test_projection_fails_closed_on_forged_control_maps(case: str, message: str)
                 label="Wrong level",
             ),
         }
-    else:
+    elif case == "cross_region":
         regions = (_region(owner), _region(owner, 2))
         controls = {
             1: _control(owner, 1, ControlKind.MENU_BAR),
@@ -618,6 +680,10 @@ def test_projection_fails_closed_on_forged_control_maps(case: str, message: str)
                 label="Crossed",
             ),
         }
+    else:
+        root = _control(owner, 1, ControlKind.MENU_BAR)
+        object.__setattr__(root, "content", object())
+        controls = {1: root}
     scene = _owner_scene(
         owner,
         regions,

@@ -41,6 +41,13 @@ from rich_terminal.retained_wire import (
     encode_region_definition,
     encode_ret_query,
 )
+from rich_terminal.semantic_content import (
+    SemanticContentFlag,
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
+)
 from rich_terminal.server import RichTerminalCore, TerminalConfig
 
 
@@ -67,9 +74,12 @@ def _config() -> TerminalConfig:
     )
 
 
-def _policy() -> RetainedPolicy:
+def _policy(*, control_collections: bool = False) -> RetainedPolicy:
+    features = RetainedFeature.CORE | RetainedFeature.CONTROLS
+    if control_collections:
+        features |= RetainedFeature.CONTROL_COLLECTIONS
     return RetainedPolicy(
-        features=RetainedFeature.CORE | RetainedFeature.CONTROLS,
+        features=features,
         max_owner_records=4,
         max_live_owners=2,
         max_regions=8,
@@ -122,11 +132,11 @@ def _consume(decoder: IncrementalFrameDecoder, result):
     return tuple(frames)
 
 
-def _open_core():
+def _open_core(*, control_collections: bool = False):
     core = RichTerminalCore(
         _config(),
         attachment_epoch=9,
-        retained_policy=_policy(),
+        retained_policy=_policy(control_collections=control_collections),
         session_id_factory=lambda: 0x0123456789ABCDEF,
     )
     nonce = 0xFEDCBA9876543210
@@ -378,6 +388,118 @@ def test_present_ingress_defines_updates_state_and_drops_semantic_controls() -> 
     assert 4 not in controls
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.control == 4
+
+
+def test_present_ingress_carries_and_replaces_generic_text_area_content() -> None:
+    core, encoder, decoder = _open_core(control_collections=True)
+    _open_owner(core, encoder, decoder)
+    initial_content = SemanticTextContent(
+        content_revision=1,
+        rows=2,
+        columns=8,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=2,
+        viewport_columns=8,
+        flags=SemanticContentFlag(0),
+        primary_key=2,
+        primary_offset=1,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                8,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "nøte",
+            ),
+            SemanticTextItem(
+                2,
+                1,
+                0,
+                1,
+                8,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "bødy",
+            ),
+        ),
+    )
+    area = ControlWireDefinition(
+        owner_id=7,
+        owner_generation=1,
+        control_id=1,
+        kind=ControlKind.TEXT_AREA,
+        state=ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
+        z_order=20,
+        region_id=1,
+        parent_control_id=0,
+        order=0,
+        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        label="",
+        shortcut="",
+        content=initial_content,
+    )
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    _commit(
+        core,
+        encoder,
+        decoder,
+        transaction_id=2,
+        mode=PresentRetainedMode.REPLACE_START,
+        operations=(
+            (RetainedMessageType.REGION_DEFINE, encode_region_definition(region)),
+            (RetainedMessageType.CONTROL_DEFINE, encode_control_definition(area)),
+        ),
+    )
+    _commit(
+        core,
+        encoder,
+        decoder,
+        transaction_id=3,
+        mode=PresentRetainedMode.REPLACE_CONTINUE,
+        disposition=PresentDisposition.COMMIT_AND_REVEAL,
+    )
+
+    state = core.retained_state
+    assert state is not None
+    retained_area = state.active.owners[7].controls[1]
+    assert retained_area.content == initial_content
+    assert state.active.owners[7].usage.objects == 3
+    assert state.active.owners[7].usage.utf8_bytes == len(
+        "nøtebødy".encode("utf-8")
+    )
+
+    changed_content = replace(
+        initial_content,
+        content_revision=2,
+        primary_offset=2,
+        items=(
+            replace(initial_content.items[1], text="édité"),
+        ),
+    )
+    _commit(
+        core,
+        encoder,
+        decoder,
+        transaction_id=4,
+        mode=PresentRetainedMode.DELTA,
+        operations=(
+            (
+                RetainedMessageType.CONTROL_REPLACE,
+                encode_control_replace(replace(area, content=changed_content)),
+            ),
+        ),
+    )
+    state = core.retained_state
+    assert state is not None
+    assert state.active.owners[7].controls[1].content == changed_content
+    assert state.active.owners[7].usage.objects == 2
+    assert state.active.owners[7].usage.utf8_bytes == len("édité".encode("utf-8"))
 
 
 def test_present_ingress_restarts_live_hidden_replacement_before_reveal() -> None:

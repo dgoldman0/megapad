@@ -37,6 +37,11 @@ from .retained_model import (
     PreparedOwnerLedgerInstall,
     RetainedFeature,
 )
+from .semantic_content import (
+    SemanticTextContent,
+    SemanticTextRole,
+    SemanticTextState,
+)
 
 
 INT32_MIN = -(1 << 31)
@@ -105,12 +110,16 @@ class ObjectKind(IntEnum):
 
 
 class ControlKind(IntEnum):
-    """Renderer-neutral semantic controls in the first CONTROL-1 family."""
+    """Renderer-neutral semantic controls in the CONTROL namespace."""
 
     MENU_BAR = 1
     MENU = 2
     MENU_ITEM = 3
     MENU_SEPARATOR = 4
+    TEXT_AREA = 5
+    TEXT_GRID = 6
+    TABSET = 7
+    TAB = 8
 
 
 class ControlState(IntFlag):
@@ -581,13 +590,168 @@ class ObjectDefinition:
         return _BODY_KIND[type(self.body)]
 
 
+def validate_control_shape(
+    *,
+    kind,
+    state,
+    z_order: int,
+    parent_control_id: int,
+    order: int,
+    bounds: ObjectBounds | None,
+    label: str,
+    shortcut: str,
+    content: SemanticTextContent | None,
+) -> tuple[ControlKind, ControlState]:
+    """Validate the common scene/wire shape of one semantic control.
+
+    Authority, IDs, region existence, graph siblings, policy, and quotas belong
+    to their later boundaries.  Keeping kind/state/content shape here prevents
+    the wire value and immutable scene value from drifting into two schemas.
+    """
+
+    if isinstance(kind, bool):
+        raise TypeError("kind must not be bool")
+    try:
+        normalized_kind = ControlKind(kind)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("kind is not a CONTROL-1 control kind") from exc
+    if isinstance(state, bool):
+        raise TypeError("state must not be bool")
+    try:
+        state_bits = operator.index(state)
+    except TypeError as exc:
+        raise TypeError("state must be ControlState-compatible") from exc
+    if state_bits < 0 or state_bits > 0xFFFF:
+        raise ValueError("state must fit u16")
+    normalized_state = ControlState(state_bits)
+    if int(normalized_state) & ~int(CONTROL_STATE_MASK):
+        raise ValueError("state contains reserved CONTROL-1 bits")
+    if bounds is not None and not isinstance(bounds, ObjectBounds):
+        raise TypeError("bounds must be ObjectBounds or None")
+    label_bytes = _control_text_bytes("label", label)
+    shortcut_bytes = _control_text_bytes("shortcut", shortcut)
+    if content is not None and not isinstance(content, SemanticTextContent):
+        raise TypeError("content must be SemanticTextContent or None")
+
+    allowed = {
+        ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
+        ControlKind.MENU: (
+            ControlState.VISIBLE
+            | ControlState.ENABLED
+            | ControlState.OPEN
+            | ControlState.SELECTED
+        ),
+        ControlKind.MENU_ITEM: (
+            ControlState.VISIBLE
+            | ControlState.ENABLED
+            | ControlState.SELECTED
+            | ControlState.CHECKED
+        ),
+        ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
+        ControlKind.TEXT_AREA: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        ),
+        ControlKind.TEXT_GRID: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        ),
+        ControlKind.TABSET: ControlState.VISIBLE | ControlState.ENABLED,
+        ControlKind.TAB: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        ),
+    }[normalized_kind]
+    if int(normalized_state) & ~int(allowed):
+        raise ValueError(
+            f"state contains bits not defined for {normalized_kind.name}"
+        )
+    if normalized_state & (ControlState.OPEN | ControlState.SELECTED) and not (
+        normalized_state & ControlState.VISIBLE
+        and normalized_state & ControlState.ENABLED
+    ):
+        raise ValueError("open or selected controls must be visible and enabled")
+
+    root_kinds = {
+        ControlKind.MENU_BAR,
+        ControlKind.TEXT_AREA,
+        ControlKind.TEXT_GRID,
+        ControlKind.TABSET,
+    }
+    if normalized_kind in root_kinds:
+        if parent_control_id or order or bounds is None:
+            raise ValueError(
+                f"{normalized_kind.name} requires root order zero and positive bounds"
+            )
+        if label_bytes or shortcut_bytes:
+            raise ValueError(
+                f"{normalized_kind.name} carries no label or shortcut"
+            )
+        if normalized_kind in (ControlKind.MENU_BAR, ControlKind.TABSET):
+            if content is not None:
+                raise ValueError(
+                    f"{normalized_kind.name} carries no semantic text content"
+                )
+        elif content is None:
+            raise ValueError(
+                f"{normalized_kind.name} requires semantic text content"
+            )
+        elif normalized_kind is ControlKind.TEXT_AREA:
+            if any(
+                item.role is not SemanticTextRole.CONTENT
+                or item.row_span != 1
+                or item.column != 0
+                or item.column_span != content.columns
+                or item.state
+                or len(item.text) > content.columns
+                for item in content.items
+            ):
+                raise ValueError(
+                    "TEXT_AREA items must be bounded full-row state-zero CONTENT values"
+                )
+        else:
+            if content.anchor_key or content.anchor_offset or content.primary_offset:
+                raise ValueError(
+                    "TEXT_GRID positions name whole items and require zero offsets"
+                )
+            current_key = 0
+            for item in content.items:
+                if not item.state & SemanticTextState.CURRENT:
+                    continue
+                if current_key:
+                    raise ValueError("TEXT_GRID has more than one current item")
+                current_key = item.item_key
+    else:
+        if parent_control_id == 0 or bounds is not None or z_order != 0:
+            raise ValueError(
+                f"{normalized_kind.name} requires a parent and renderer-owned geometry"
+            )
+        if content is not None:
+            raise ValueError(
+                f"{normalized_kind.name} carries no semantic text content"
+            )
+        if normalized_kind in (
+            ControlKind.MENU,
+            ControlKind.MENU_ITEM,
+            ControlKind.TAB,
+        ):
+            if not label_bytes:
+                raise ValueError(
+                    f"{normalized_kind.name} requires a nonempty label"
+                )
+        elif label_bytes or shortcut_bytes:
+            raise ValueError("MENU_SEPARATOR carries no label or shortcut")
+        if normalized_kind is ControlKind.MENU and shortcut_bytes:
+            raise ValueError("MENU carries no shortcut")
+    return normalized_kind, normalized_state
+
+
 @dataclass(frozen=True, slots=True)
 class ControlDefinition:
     """One semantic control node whose visual representation belongs to the view.
 
-    MENU_BAR alone carries an anchor rectangle and z order.  Its MENU and entry
-    descendants carry semantic ordering and state, leaving typography, padding,
-    popup geometry, clipping, and hit targets to the selected renderer.
+    Root controls carry an anchor rectangle and z order.  Descendants carry
+    semantic ordering and state, leaving typography, padding, clipping,
+    rasterization, and hit targets to the selected renderer.  TEXT_AREA and
+    TEXT_GRID roots use one immutable logical text collection; menu and tab
+    controls carry no renderer-specific payload.
     """
 
     owner: OwnerIdentity
@@ -601,6 +765,7 @@ class ControlDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
+    content: SemanticTextContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -617,70 +782,19 @@ class ControlDefinition:
                 name,
                 _integer(name, getattr(self, name), minimum=minimum, maximum=maximum),
             )
-        if isinstance(self.kind, bool):
-            raise TypeError("kind must not be bool")
-        try:
-            kind = ControlKind(self.kind)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("kind is not a CONTROL-1 control kind") from exc
+        kind, state = validate_control_shape(
+            kind=self.kind,
+            state=self.state,
+            z_order=self.z_order,
+            parent_control_id=self.parent_control_id,
+            order=self.order,
+            bounds=self.bounds,
+            label=self.label,
+            shortcut=self.shortcut,
+            content=self.content,
+        )
         object.__setattr__(self, "kind", kind)
-        if isinstance(self.state, bool):
-            raise TypeError("state must not be bool")
-        try:
-            state_bits = operator.index(self.state)
-        except TypeError as exc:
-            raise TypeError("state must be ControlState-compatible") from exc
-        if state_bits < 0 or state_bits > 0xFFFF:
-            raise ValueError("state must fit u16")
-        state = ControlState(state_bits)
-        if int(state) & ~int(CONTROL_STATE_MASK):
-            raise ValueError("state contains reserved CONTROL-1 bits")
         object.__setattr__(self, "state", state)
-        if self.bounds is not None and not isinstance(self.bounds, ObjectBounds):
-            raise TypeError("bounds must be ObjectBounds or None")
-        label = _control_text_bytes("label", self.label)
-        shortcut = _control_text_bytes("shortcut", self.shortcut)
-
-        allowed = {
-            ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
-            ControlKind.MENU: (
-                ControlState.VISIBLE
-                | ControlState.ENABLED
-                | ControlState.OPEN
-                | ControlState.SELECTED
-            ),
-            ControlKind.MENU_ITEM: (
-                ControlState.VISIBLE
-                | ControlState.ENABLED
-                | ControlState.SELECTED
-                | ControlState.CHECKED
-            ),
-            ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
-        }[kind]
-        if int(state) & ~int(allowed):
-            raise ValueError(f"state contains bits not defined for {kind.name}")
-        if state & (ControlState.OPEN | ControlState.SELECTED) and not (
-            state & ControlState.VISIBLE and state & ControlState.ENABLED
-        ):
-            raise ValueError("open or selected controls must be visible and enabled")
-
-        if kind is ControlKind.MENU_BAR:
-            if self.parent_control_id or self.order or self.bounds is None:
-                raise ValueError("MENU_BAR requires root order zero and positive bounds")
-            if label or shortcut:
-                raise ValueError("MENU_BAR carries no label or shortcut")
-        else:
-            if self.parent_control_id == 0 or self.bounds is not None or self.z_order != 0:
-                raise ValueError(
-                    f"{kind.name} requires a parent and renderer-owned geometry"
-                )
-            if kind in (ControlKind.MENU, ControlKind.MENU_ITEM):
-                if not label:
-                    raise ValueError(f"{kind.name} requires a nonempty label")
-            elif label or shortcut:
-                raise ValueError("MENU_SEPARATOR carries no label or shortcut")
-            if kind is ControlKind.MENU and shortcut:
-                raise ValueError("MENU carries no shortcut")
 
     @property
     def visible(self) -> bool:
@@ -977,6 +1091,24 @@ class RetainedSceneModel:
         region = owner_scene.regions.get(definition.region_id)
         if region is None or not region.visible:
             raise SceneModelError(SceneErrorCode.BOUNDS, "control region is not visible")
+        if definition.kind is ControlKind.TAB:
+            parent = owner_scene.controls.get(definition.parent_control_id)
+            if (
+                parent is None
+                or parent.kind is not ControlKind.TABSET
+                or not parent.visible
+                or not parent.enabled
+            ):
+                raise SceneModelError(
+                    SceneErrorCode.GRAPH,
+                    "TAB parent is not an interactive TABSET",
+                )
+            if not definition.visible or not definition.enabled:
+                raise SceneModelError(
+                    SceneErrorCode.STATE,
+                    "control is hidden or disabled",
+                )
+            return definition
         if definition.kind not in (ControlKind.MENU, ControlKind.MENU_ITEM):
             raise SceneModelError(SceneErrorCode.STATE, "control kind is not activatable")
         if not definition.visible or not definition.enabled:
@@ -1158,7 +1290,7 @@ class RetainedSceneModel:
         )
         usage = self._usage_after(
             owner_scene,
-            object_delta=1,
+            object_delta=self._control_object_slots(definition),
             utf8_add=self._control_utf8_bytes(definition),
         )
         self._admit_operation(staging, owner_scene, usage)
@@ -1174,14 +1306,68 @@ class RetainedSceneModel:
         current = owner_scene.controls.get(definition.control_id)
         if current is None:
             self._fail(SceneErrorCode.MISSING_ID, "control replacement ID is absent")
-        if replace(definition, state=current.state) != current:
+        if definition.kind is not current.kind:
             self._fail(
                 SceneErrorCode.STATE,
-                "control replacement may change only the control state",
+                "control replacement cannot change the control kind",
             )
+        if definition.kind in {
+            ControlKind.MENU_BAR,
+            ControlKind.MENU,
+            ControlKind.MENU_ITEM,
+            ControlKind.MENU_SEPARATOR,
+            ControlKind.TABSET,
+        }:
+            compatible = replace(definition, state=current.state) == current
+            failure = "control replacement may change only the control state"
+        elif definition.kind in {ControlKind.TEXT_AREA, ControlKind.TEXT_GRID}:
+            compatible = (
+                replace(
+                    definition,
+                    state=current.state,
+                    content=current.content,
+                )
+                == current
+            )
+            failure = (
+                "text control replacement may change only state and semantic content"
+            )
+            if (
+                compatible
+                and definition.content != current.content
+                and definition.content is not None
+                and current.content is not None
+                and definition.content.content_revision
+                <= current.content.content_revision
+            ):
+                self._fail(
+                    SceneErrorCode.STATE,
+                    "changed semantic content requires a newer content revision",
+                )
+        else:  # TAB
+            compatible = (
+                replace(
+                    definition,
+                    state=current.state,
+                    label=current.label,
+                    shortcut=current.shortcut,
+                )
+                == current
+            )
+            failure = "TAB replacement may change only state, label, and shortcut"
+        if not compatible:
+            self._fail(SceneErrorCode.STATE, failure)
         self._validate_control_policy(definition)
         self._validate_control_dependencies(owner_scene, definition)
-        usage = owner_scene.usage
+        usage = self._usage_after(
+            owner_scene,
+            object_delta=(
+                self._control_object_slots(definition)
+                - self._control_object_slots(current)
+            ),
+            utf8_remove=self._control_utf8_bytes(current),
+            utf8_add=self._control_utf8_bytes(definition),
+        )
         self._admit_operation(staging, owner_scene, usage)
         owner_scene.controls[definition.control_id] = definition
         self._commit_operation(staging, owner_scene, usage)
@@ -1265,7 +1451,7 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.MISSING_ID, "control drop ID is absent")
         usage = self._usage_after(
             owner_scene,
-            object_delta=-1,
+            object_delta=-self._control_object_slots(definition),
             utf8_remove=self._control_utf8_bytes(definition),
         )
         self._admit_operation(staging, owner_scene, usage)
@@ -1750,9 +1936,18 @@ class RetainedSceneModel:
         return 0
 
     @staticmethod
+    def _control_object_slots(definition: ControlDefinition) -> int:
+        return 1 + (0 if definition.content is None else len(definition.content.items))
+
+    @staticmethod
     def _control_utf8_bytes(definition: ControlDefinition) -> int:
-        return len(_control_text_bytes("label", definition.label)) + len(
-            _control_text_bytes("shortcut", definition.shortcut)
+        content_bytes = (
+            0 if definition.content is None else definition.content.utf8_bytes
+        )
+        return (
+            len(_control_text_bytes("label", definition.label))
+            + len(_control_text_bytes("shortcut", definition.shortcut))
+            + content_bytes
         )
 
     def _usage_after(
@@ -1870,7 +2065,11 @@ class RetainedSceneModel:
             sample_slots = _add_usage("sample-slot usage", sample_slots, definition.history_capacity)
         usage = SceneUsage(
             len(regions),
-            len(objects) + len(controls),
+            len(objects)
+            + sum(
+                self._control_object_slots(definition)
+                for definition in controls.values()
+            ),
             len(series),
             utf8_bytes,
             sample_slots,
@@ -1926,8 +2125,19 @@ class RetainedSceneModel:
                 self._fail(exc.code, exc.detail)
 
     def _validate_control_policy(self, definition: ControlDefinition) -> None:
-        if not self._owners.policy.features & RetainedFeature.CONTROLS:
+        features = self._owners.policy.features
+        if not features & RetainedFeature.CONTROLS:
             self._fail(SceneErrorCode.FEATURE, "semantic controls were not advertised")
+        if definition.kind in {
+            ControlKind.TEXT_AREA,
+            ControlKind.TEXT_GRID,
+            ControlKind.TABSET,
+            ControlKind.TAB,
+        } and not features & RetainedFeature.CONTROL_COLLECTIONS:
+            self._fail(
+                SceneErrorCode.FEATURE,
+                "CONTROL_COLLECTIONS was not advertised",
+            )
 
     def _validate_control_dependencies(
         self,
@@ -1939,14 +2149,20 @@ class RetainedSceneModel:
                 SceneErrorCode.GRAPH,
                 "control region must be defined before the dependent control",
             )
-        if definition.kind is ControlKind.MENU_BAR:
+        if definition.kind in {
+            ControlKind.MENU_BAR,
+            ControlKind.TEXT_AREA,
+            ControlKind.TEXT_GRID,
+            ControlKind.TABSET,
+        }:
             return
         parent = owner_scene.controls.get(definition.parent_control_id)
-        expected = (
-            ControlKind.MENU_BAR
-            if definition.kind is ControlKind.MENU
-            else ControlKind.MENU
-        )
+        expected = {
+            ControlKind.MENU: ControlKind.MENU_BAR,
+            ControlKind.MENU_ITEM: ControlKind.MENU,
+            ControlKind.MENU_SEPARATOR: ControlKind.MENU,
+            ControlKind.TAB: ControlKind.TABSET,
+        }[definition.kind]
         if parent is None or parent.kind is not expected:
             self._fail(
                 SceneErrorCode.GRAPH,
@@ -2027,6 +2243,7 @@ class RetainedSceneModel:
             open_menu_by_bar: set[int] = set()
             selected_menu_by_bar: set[int] = set()
             selected_item_by_menu: set[int] = set()
+            selected_tab_by_tabset: set[int] = set()
             for control_key, definition in owner_scene.controls.items():
                 if (
                     control_key != definition.control_id
@@ -2037,7 +2254,12 @@ class RetainedSceneModel:
                     self._fail(SceneErrorCode.GRAPH, "control refers to an absent region")
                 self._validate_control_policy(definition)
                 self._validate_control_dependencies(owner_scene, definition)
-                if definition.kind is ControlKind.MENU_BAR:
+                if definition.kind in {
+                    ControlKind.MENU_BAR,
+                    ControlKind.TEXT_AREA,
+                    ControlKind.TEXT_GRID,
+                    ControlKind.TABSET,
+                }:
                     continue
                 order_key = (definition.parent_control_id, definition.order)
                 if order_key in sibling_orders:
@@ -2062,6 +2284,16 @@ class RetainedSceneModel:
                     if definition.parent_control_id in selected_item_by_menu:
                         self._fail(SceneErrorCode.GRAPH, "MENU has multiple selected items")
                     selected_item_by_menu.add(definition.parent_control_id)
+                elif (
+                    definition.kind is ControlKind.TAB
+                    and definition.state & ControlState.SELECTED
+                ):
+                    if definition.parent_control_id in selected_tab_by_tabset:
+                        self._fail(
+                            SceneErrorCode.GRAPH,
+                            "TABSET has multiple selected tabs",
+                        )
+                    selected_tab_by_tabset.add(definition.parent_control_id)
 
     def _require_staging(self) -> _SceneStaging:
         if self._staging is None:
@@ -2124,5 +2356,6 @@ __all__ = [
     "StatusBody",
     "TimestampMode",
     "UniformSamples",
+    "validate_control_shape",
     "WaveformBody",
 ]

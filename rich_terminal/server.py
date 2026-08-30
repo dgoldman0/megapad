@@ -2295,6 +2295,7 @@ class RichTerminalCore:
                     bounds=operation.bounds,
                     label=operation.label,
                     shortcut=operation.shortcut,
+                    content=operation.content,
                 )
                 if message_type is RetainedMessageType.CONTROL_DEFINE:
                     model.define_control(definition)

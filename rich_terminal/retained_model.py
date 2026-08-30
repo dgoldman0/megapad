@@ -27,6 +27,7 @@ class RetainedFeature(IntFlag):
     SERIES = 1 << 4
     CADENCE = 1 << 5
     CONTROLS = 1 << 8
+    CONTROL_COLLECTIONS = 1 << 9
 
 
 _ALL_FEATURES = (
@@ -37,6 +38,7 @@ _ALL_FEATURES = (
     | RetainedFeature.SERIES
     | RetainedFeature.CADENCE
     | RetainedFeature.CONTROLS
+    | RetainedFeature.CONTROL_COLLECTIONS
 )
 
 
@@ -237,6 +239,9 @@ class RetainedPolicy:
 
         instrument = bool(features & RetainedFeature.INSTRUMENT)
         controls = bool(features & RetainedFeature.CONTROLS)
+        control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
+        if control_collections and not controls:
+            raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
         glyph_runs = self.max_glyph_run_bytes > 0
         if glyph_runs and self.max_objects == 0:
             raise ValueError("glyph-run capacity requires object capacity")
@@ -304,6 +309,12 @@ class RetainedPolicy:
             if inbound < 80:
                 raise ValueError("CONTROLS requires an 80-byte inbound payload")
             operation_payloads.append(80)
+        if control_collections:
+            if inbound < 152:
+                raise ValueError(
+                    "CONTROL_COLLECTIONS requires a 152-byte inbound payload"
+                )
+            operation_payloads.append(152)
         if instrument:
             readout_payload = _checked_add(
                 "maximum READOUT payload", 104, self.max_glyph_run_bytes

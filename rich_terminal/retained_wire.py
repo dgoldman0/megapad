@@ -35,12 +35,19 @@ from .retained_scene import (
     StatusBody,
     TimestampMode,
     UniformSamples,
+    validate_control_shape,
     WaveformBody,
+)
+from .semantic_content import (
+    SemanticContentError,
+    SemanticTextContent,
+    decode_semantic_text_content,
+    encode_semantic_text_content,
 )
 
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x13F
+_RETAINED_FEATURE_MASK = 0x33F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -269,6 +276,11 @@ class RetainedCaps:
             raise ValueError("RETAINED-1 requires CORE")
         if features & RetainedFeature.SERIES and not features & RetainedFeature.INSTRUMENT:
             raise ValueError("SERIES requires INSTRUMENT")
+        if (
+            features & RetainedFeature.CONTROL_COLLECTIONS
+            and not features & RetainedFeature.CONTROLS
+        ):
+            raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -735,6 +747,7 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
+    content: SemanticTextContent | None = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -764,67 +777,19 @@ class ControlWireDefinition:
             "order",
             _integer("order", self.order, minimum=0, maximum=UINT32_MAX),
         )
-        kind = _enum("kind", ControlKind, self.kind)
+        kind, state = validate_control_shape(
+            kind=self.kind,
+            state=self.state,
+            z_order=self.z_order,
+            parent_control_id=self.parent_control_id,
+            order=self.order,
+            bounds=self.bounds,
+            label=self.label,
+            shortcut=self.shortcut,
+            content=self.content,
+        )
         object.__setattr__(self, "kind", kind)
-
-        if isinstance(self.state, bool):
-            raise TypeError("state must not be bool")
-        try:
-            state_bits = operator.index(self.state)
-        except TypeError as exc:
-            raise TypeError("state must be ControlState-compatible") from exc
-        if not 0 <= state_bits <= UINT16_MAX:
-            raise ValueError("state must fit u16")
-        state = ControlState(state_bits)
-        if int(state) & ~int(CONTROL_STATE_MASK):
-            raise ValueError("state contains reserved CONTROL-1 bits")
         object.__setattr__(self, "state", state)
-
-        if self.bounds is not None and not isinstance(self.bounds, ObjectBounds):
-            raise TypeError("bounds must be ObjectBounds or None")
-        label = _control_text_bytes("label", self.label)
-        shortcut = _control_text_bytes("shortcut", self.shortcut)
-
-        allowed = {
-            ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
-            ControlKind.MENU: (
-                ControlState.VISIBLE
-                | ControlState.ENABLED
-                | ControlState.OPEN
-                | ControlState.SELECTED
-            ),
-            ControlKind.MENU_ITEM: (
-                ControlState.VISIBLE
-                | ControlState.ENABLED
-                | ControlState.SELECTED
-                | ControlState.CHECKED
-            ),
-            ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
-        }[kind]
-        if int(state) & ~int(allowed):
-            raise ValueError(f"state contains bits not defined for {kind.name}")
-        if state & (ControlState.OPEN | ControlState.SELECTED) and not (
-            state & ControlState.VISIBLE and state & ControlState.ENABLED
-        ):
-            raise ValueError("open or selected controls must be visible and enabled")
-
-        if kind is ControlKind.MENU_BAR:
-            if self.parent_control_id or self.order or self.bounds is None:
-                raise ValueError("MENU_BAR requires root order zero and positive bounds")
-            if label or shortcut:
-                raise ValueError("MENU_BAR carries no label or shortcut")
-        else:
-            if self.parent_control_id == 0 or self.bounds is not None or self.z_order != 0:
-                raise ValueError(
-                    f"{kind.name} requires a parent and renderer-owned geometry"
-                )
-            if kind in (ControlKind.MENU, ControlKind.MENU_ITEM):
-                if not label:
-                    raise ValueError(f"{kind.name} requires a nonempty label")
-            elif label or shortcut:
-                raise ValueError("MENU_SEPARATOR carries no label or shortcut")
-            if kind is ControlKind.MENU and shortcut:
-                raise ValueError("MENU carries no shortcut")
 
     @property
     def visible(self) -> bool:
@@ -1700,6 +1665,14 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
     shortcut_bytes = _integer(
         "shortcut_bytes", len(shortcut), minimum=0, maximum=UINT32_MAX
     )
+    content = (
+        b""
+        if definition.content is None
+        else encode_semantic_text_content(definition.content)
+    )
+    content_bytes = _integer(
+        "content_bytes", len(content), minimum=0, maximum=UINT32_MAX
+    )
     if definition.bounds is None:
         bounds = (0, 0, 0, 0)
     else:
@@ -1722,8 +1695,8 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
         *bounds,
         label_bytes,
         shortcut_bytes,
-        0,
-    ) + label + shortcut
+        content_bytes,
+    ) + label + shortcut + content
 
 
 def decode_control_definition(payload) -> ControlWireDefinition:
@@ -1746,17 +1719,13 @@ def decode_control_definition(payload) -> ControlWireDefinition:
             RetainedWireErrorCode.RESERVED,
             "CONTROL state contains reserved bits",
         )
-    if values[15]:
-        raise RetainedWireError(
-            RetainedWireErrorCode.RESERVED,
-            "CONTROL reserved field is nonzero",
-        )
-    label_bytes, shortcut_bytes = values[13:15]
+    label_bytes, shortcut_bytes, content_bytes = values[13:16]
     expected = _checked_add(
         "CONTROL payload bytes",
         _CONTROL_PREFIX.size,
         label_bytes,
         shortcut_bytes,
+        content_bytes,
     )
     _body_size(raw, expected, "CONTROL definition")
     raw_bounds = values[9:13]
@@ -1772,6 +1741,20 @@ def decode_control_definition(payload) -> ControlWireDefinition:
     shortcut = _wire_control_text(
         raw[text_offset : text_offset + shortcut_bytes], "CONTROL shortcut"
     )
+    text_offset += shortcut_bytes
+    try:
+        content = (
+            None
+            if content_bytes == 0
+            else decode_semantic_text_content(
+                raw[text_offset : text_offset + content_bytes]
+            )
+        )
+    except SemanticContentError as exc:
+        raise RetainedWireError(
+            RetainedWireErrorCode(exc.code.value),
+            exc.detail,
+        ) from exc
     try:
         return ControlWireDefinition(
             owner_id=values[0],
@@ -1786,6 +1769,7 @@ def decode_control_definition(payload) -> ControlWireDefinition:
             bounds=bounds,
             label=label,
             shortcut=shortcut,
+            content=content,
         )
     except (TypeError, ValueError) as exc:
         raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc

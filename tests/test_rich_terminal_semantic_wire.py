@@ -269,11 +269,11 @@ def test_control_decoder_rejects_reserved_lengths_bounds_and_text() -> None:
         decode_control_definition(reserved_state)
     assert state.value.code is RetainedWireErrorCode.RESERVED
 
-    reserved_field = bytearray(valid)
-    reserved_field[76:80] = (1).to_bytes(4, "little")
-    with pytest.raises(RetainedWireError) as reserved:
-        decode_control_definition(reserved_field)
-    assert reserved.value.code is RetainedWireErrorCode.RESERVED
+    missing_content = bytearray(valid)
+    missing_content[76:80] = (1).to_bytes(4, "little")
+    with pytest.raises(RetainedWireError) as content:
+        decode_control_definition(missing_content)
+    assert content.value.code is RetainedWireErrorCode.PAYLOAD
 
     bad_length = bytearray(valid)
     bad_length[68:72] = (UINT32_MAX).to_bytes(4, "little")
