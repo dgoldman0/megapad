@@ -548,6 +548,10 @@ def _crc_final_fetch(
     context.data.push(runtime.crc.final(runtime.guest_identity(context)))
 
 
+def _push_diagnostic(context: ExecutionContext, value: int) -> None:
+    context.data.push(value)
+
+
 def _task_start_unavailable(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -720,6 +724,111 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (
             b"CRC-FINAL@",
             lambda context: _crc_final_fetch(runtime, context),
+        ),
+        (
+            b"PERF-CYCLES",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.perf_cycles,
+            ),
+        ),
+        (
+            b"PERF-STALLS",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.perf_stalls,
+            ),
+        ),
+        (
+            b"PERF-TILEOPS",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.perf_tileops,
+            ),
+        ),
+        (
+            b"PERF-EXTMEM",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.perf_extmem,
+            ),
+        ),
+        (
+            b"PERF-RESET",
+            lambda _context: runtime.diagnostics.reset_performance(),
+        ),
+        (
+            b"BIST-FULL",
+            lambda _context: runtime.diagnostics.run_full_bist(),
+        ),
+        (
+            b"BIST-QUICK",
+            lambda _context: runtime.diagnostics.run_quick_bist(),
+        ),
+        (
+            b"BIST-STATUS",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.bist_status,
+            ),
+        ),
+        (
+            b"BIST-FAIL-ADDR",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.bist_fail_address,
+            ),
+        ),
+        (
+            b"BIST-FAIL-DATA",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.bist_fail_data,
+            ),
+        ),
+        (
+            b"TILE-TEST",
+            lambda _context: runtime.diagnostics.run_tile_test(),
+        ),
+        (
+            b"TILE-TEST@",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.tile_status,
+            ),
+        ),
+        (
+            b"TILE-DETAIL@",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.tile_detail,
+            ),
+        ),
+        (
+            b"ICACHE-ON",
+            lambda _context: runtime.diagnostics.enable_icache(),
+        ),
+        (
+            b"ICACHE-OFF",
+            lambda _context: runtime.diagnostics.disable_icache(),
+        ),
+        (
+            b"ICACHE-INV",
+            lambda _context: runtime.diagnostics.invalidate_icache(),
+        ),
+        (
+            b"ICACHE-HITS",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.icache_hits,
+            ),
+        ),
+        (
+            b"ICACHE-MISSES",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.icache_misses,
+            ),
         ),
         (b"COREID", _push_zero),
         (b"TASK-ID", _push_zero),

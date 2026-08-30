@@ -206,7 +206,22 @@ the SysInfo `CRYPTO_CAPS` qword expose the same profile. It does not claim CRC
 instructions, CSRs, hardware arbitration, DMA, or accelerator latency.
 Runtime construction requires that qword to be readable and rejects capability
 bits without an admitted service; missing or malformed SysInfo never enables a
-host fallback implicitly.
+host fallback implicitly. Runtime construction likewise requires the admitted
+one-core topology qwords to report exactly one full core.
+
+The hosted diagnostic profile is intentionally backend-local. `PERF-CYCLES`
+is a persistent, wrapping count of dispatched semantic work, not
+wall time, instructions, or MP64 cycles; stall, tile-operation, and external-
+beat counters remain zero until those specific services exist. BIST getters
+retain the boot/profile snapshot, while destructive `BIST-FULL` and
+`BIST-QUICK` fail before changing guest memory or retained BIST state. Their
+admitted, faulting dispatch still counts as semantic work. The tile
+self-test completes synchronously through the production 64-lane unsigned
+ADD/MUL/DOT/SUM value kernel using host-only buffers. I-cache controls are
+logical optimization state, dispatch remains immediately coherent, and its
+hit/miss observations are zero. None of these diagnostic substitutions is
+evidence for pipeline timing, physical RAM coverage, tile hardware, or a
+physical instruction cache.
 
 ## 7. Rich-terminal path
 
@@ -301,7 +316,9 @@ timing.
 Every admitted feature receives a focused semantic test and, where an emulator
 equivalent exists, a differential vector.  The independent APT byte and state
 oracles are the model for this separation: production encoders and decoders do
-not define their own expected results.
+not define their own expected results. The hosted tile self-test is admitted
+against the architectural Python emulator's corresponding public status,
+failure mask, and scratch-preservation vector.
 
 ## 11. Initial implementation sequence
 

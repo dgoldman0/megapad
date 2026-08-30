@@ -25,6 +25,8 @@ from simulator.memory import (
 )
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
+    SYSINFO_NUM_CORES,
+    SYSINFO_NUM_FULL,
     create_one_core_address_space,
 )
 from simulator.runtime import MegaForthRuntime
@@ -77,20 +79,36 @@ ORACLE_MODES = {
 }
 
 
-class _CapabilityMMIO:
-    def __init__(self, capabilities: int, *, reject: bool = False) -> None:
-        self.capabilities = capabilities
+class _SysInfoProfileMMIO:
+    def __init__(
+        self,
+        capabilities: int,
+        *,
+        num_cores: int = 1,
+        num_full: int = 1,
+        reject: bool = False,
+    ) -> None:
+        self.values = {
+            SYSINFO_NUM_CORES: num_cores,
+            SYSINFO_NUM_FULL: num_full,
+            SYSINFO_CRYPTO_CAPS: capabilities,
+        }
         self.reject = reject
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
         if self.reject:
             raise RuntimeError("rejected SysInfo profile")
-        if write or offset != SYSINFO_CRYPTO_CAPS or width != 8:
-            raise RuntimeError("access is outside the capability qword")
+        if write or offset not in self.values or width != 8:
+            raise RuntimeError("access is outside the admitted SysInfo qwords")
 
     def read8(self, offset: int) -> int:
-        shift = (offset - SYSINFO_CRYPTO_CAPS) * 8
-        return (self.capabilities >> shift) & 0xFF
+        base = next(
+            base
+            for base in self.values
+            if base <= offset < base + 8
+        )
+        shift = (offset - base) * 8
+        return (self.values[base] >> shift) & 0xFF
 
     def write8(self, _offset: int, _value: int) -> None:
         raise RuntimeError("capability profile is read-only")
@@ -225,13 +243,25 @@ def test_runtime_fails_closed_without_one_admitted_sysinfo_profile() -> None:
     with pytest.raises(MMIOAccessError, match="no MMIO service"):
         MegaForthRuntime(memory=missing)
 
-    rejected = SparseAddressSpace(mmio=_CapabilityMMIO(0, reject=True))
+    rejected = SparseAddressSpace(mmio=_SysInfoProfileMMIO(0, reject=True))
     with pytest.raises(MMIOAccessError, match="rejected read preflight"):
         MegaForthRuntime(memory=rejected)
 
-    unsupported = SparseAddressSpace(mmio=_CapabilityMMIO(2))
+    unsupported = SparseAddressSpace(mmio=_SysInfoProfileMMIO(2))
     with pytest.raises(ValueError, match="unimplemented capabilities"):
         MegaForthRuntime(memory=unsupported)
+
+    zero_full = SparseAddressSpace(
+        mmio=_SysInfoProfileMMIO(0, num_full=0)
+    )
+    with pytest.raises(ValueError, match="one advertised full core"):
+        MegaForthRuntime(memory=zero_full)
+
+    multicore = SparseAddressSpace(
+        mmio=_SysInfoProfileMMIO(0, num_cores=2, num_full=1)
+    )
+    with pytest.raises(ValueError, match="one advertised full core"):
+        MegaForthRuntime(memory=multicore)
 
 
 def test_crc_mode_validation_has_range_then_capability_then_owner_priority() -> None:

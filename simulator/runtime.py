@@ -14,6 +14,7 @@ from typing import Callable, NoReturn, TypeAlias
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
 from simulator.crc import GuestIdentity, HostedCRCService
+from simulator.diagnostics import HostedDiagnosticsService
 from simulator.dictionary import Dictionary, Word
 from simulator.errors import (
     ExecutionError,
@@ -42,7 +43,11 @@ from simulator.ir import (
     WriteOutput,
 )
 from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
-from simulator.platform import SYSINFO_CRYPTO_CAPS
+from simulator.platform import (
+    SYSINFO_CRYPTO_CAPS,
+    SYSINFO_NUM_CORES,
+    SYSINFO_NUM_FULL,
+)
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -252,7 +257,11 @@ class _EvaluationState:
 
 
 class _StepMeter:
-    def __init__(self, budget: int | None) -> None:
+    def __init__(
+        self,
+        budget: int | None,
+        on_tick: Callable[[], None],
+    ) -> None:
         if budget is not None:
             if not isinstance(budget, int):
                 raise TypeError("step budget must be an integer or None")
@@ -260,11 +269,13 @@ class _StepMeter:
                 raise ValueError("step budget must be positive")
         self.budget = budget
         self.steps = 0
+        self._on_tick = on_tick
 
     def tick(self) -> None:
         if self.budget is not None and self.steps >= self.budget:
             raise StepBudgetExceeded(self.budget)
         self.steps += 1
+        self._on_tick()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,20 +319,39 @@ class MegaForthRuntime:
         *,
         dictionary_start: int = 0x1000,
         memory: SparseAddressSpace | None = None,
+        diagnostics: HostedDiagnosticsService | None = None,
         install_core_words: bool = True,
     ) -> None:
         if memory is not None and not isinstance(memory, SparseAddressSpace):
             raise TypeError("memory must be a SparseAddressSpace or None")
+        if diagnostics is not None and not isinstance(
+            diagnostics,
+            HostedDiagnosticsService,
+        ):
+            raise TypeError(
+                "diagnostics must be a HostedDiagnosticsService or None"
+            )
         if memory is None:
             from simulator.platform import create_one_core_address_space
 
             self.memory = create_one_core_address_space()
         else:
             self.memory = memory
+        num_cores = self.memory.read64(MMIO_BASE + SYSINFO_NUM_CORES)
+        num_full = self.memory.read64(MMIO_BASE + SYSINFO_NUM_FULL)
+        if (num_cores, num_full) != (1, 1):
+            raise ValueError(
+                "hosted runtime requires exactly one advertised full core"
+            )
         crypto_capabilities = self.memory.read64(
             MMIO_BASE + SYSINFO_CRYPTO_CAPS
         )
         self.crc = HostedCRCService(crypto_capabilities)
+        self.diagnostics = (
+            HostedDiagnosticsService()
+            if diagnostics is None
+            else diagnostics.clone()
+        )
         self.dictionary = Dictionary(
             start_address=dictionary_start,
             memory=self.memory,
@@ -627,7 +657,7 @@ class MegaForthRuntime:
         self._execute_dictionary_fault_guarded(
             request,
             request.context,
-            _StepMeter(None),
+            _StepMeter(None, self.diagnostics.account_work),
         )
         raise AssertionError("dictionary fault callback returned to its caller")
 
@@ -1653,7 +1683,7 @@ class MegaForthRuntime:
                 )
             meter = self._active_dispatches[-1].meter
             return meter, meter.steps
-        meter = _StepMeter(step_budget)
+        meter = _StepMeter(step_budget, self.diagnostics.account_work)
         return meter, 0
 
     @staticmethod

@@ -42,6 +42,9 @@ The implemented slices provide:
 - a shared bit-exact six-mode CRC value model with simulator-owned checked
   transaction state, coherent SysInfo capability discovery, exact byte/cell
   feeds, raw/final release, and source-visible status behavior;
+- a per-runtime pseudo-BIOS diagnostic profile with persistent semantic-work
+  accounting, retained non-destructive BIST observations, a real four-operation
+  tile value self-test, and logical no-cache controls/zero cache counters;
 - active-line `WORD` with its transient counted string at `HERE`, forward
   `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
   supported compile-state `ABORT"` path;
@@ -193,6 +196,20 @@ raw state, seeds and release, incremental memory faults, source `CATCH` and
 memory-backed `BASE` cell and unsigned printer. CRC ISA instructions, CSRs,
 hardware locks, and timing remain emulator-only claims.
 
+Byte-exact logical lines 856 through 902 complete KDOS's hardware-diagnostic
+source family: `.PERF`, `.BIST-STATUS`, `.TILE-DIAG`, `.ICACHE`, and aggregate
+`DIAG`. All 18 BIOS words named by the section are bound. `PERF-CYCLES` counts
+hosted semantic work and is not comparable to an MP64 cycle counter; the other
+unmodeled hardware counters remain zero. Destructive BIST starts fail before
+guest-memory or retained-BIST mutation, while their admitted faulting dispatch
+still counts as work and retained idle/running/pass/fail snapshots remain
+renderable.
+The synchronous tile PASS is produced by the same small ADD/MUL/DOT/SUM value
+kernel intended for later semantic tile adapters, with an architectural-emulator
+differential, independent failure-bit coverage, and no guest scratchpad mutation.
+Exact composed UART output is pinned with both signs of the backend-local
+work-counter field normalized.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -208,8 +225,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–855 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, exceptions, dictionary-fault routing, task-boundary shadowing, and the complete CRC convenience/diagnostic family; line 70 is blank |
-| 856 onward | Next uncovered frontier | `.PERF` begins at line 857; `PERF-CYCLES` is the first missing BIOS primitive reached at line 859 |
+| 39–902 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, exceptions, task hooks, CRC, and the complete KDOS hardware-diagnostic family; line 70 is blank |
+| 903 onward | Next uncovered frontier | AES-256-GCM begins at line 903; its ordinary buffers allocate at lines 922–924 and `AES-DIN!` is the first missing BIOS primitive reached at line 929 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -221,10 +238,9 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary resumes the non-CRC hardware diagnostics. Later
-slices continue the same contiguous unchanged prefix toward the persistent
-evaluator, ordinary checked module-loader surface, and deterministic
-cooperative task scheduler.
+The next source boundary begins AES-256-GCM. Later slices continue the same
+contiguous unchanged prefix toward the persistent evaluator, ordinary checked
+module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

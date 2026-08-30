@@ -861,11 +861,21 @@ Built-in self-test for RAM (March C−, checkerboard, address-as-data patterns).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BIST-FULL` | `( -- )` | Start full memory BIST (all three test patterns). |
+| `BIST-FULL` | `( -- )` | Start the documented full memory BIST (all three test patterns); current implementations differ as noted below. |
 | `BIST-QUICK` | `( -- )` | Start quick BIST (March C− only). |
 | `BIST-STATUS` | `( -- n )` | Read BIST status: 0=idle, 1=running, 2=pass, 3=fail. |
 | `BIST-FAIL-ADDR` | `( -- n )` | Read first failing address (valid after fail). |
-| `BIST-FAIL-DATA` | `( -- n )` | Read expected/actual data (packed, valid after fail). |
+| `BIST-FAIL-DATA` | `( -- n )` | Read documented packed expected/actual data after failure; current implementations differ as noted below. |
+
+> **Open BIST implementation discrepancy.** The public design describes a
+> 1 MiB full test containing March C−, checkerboard, and address-as-data
+> patterns. The pure-Python emulator runs those three patterns over its own
+> bounded range, the current full-core RTL command selects one smaller pattern
+> run over a much smaller interval, and the accelerated emulator reports pass
+> without executing the destructive sweep. `BIST-FAIL-DATA` also differs:
+> documented/Python packing retains expected and actual values, while current
+> RTL retains only the observed read data. This records the mismatch without
+> selecting one implementation as the final contract.
 
 ---
 
@@ -876,8 +886,17 @@ Functional check of the tile engine datapath (~200 cycles).
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TILE-TEST` | `( -- )` | Start tile datapath self-test. |
-| `TILE-TEST@` | `( -- n )` | Read self-test status: 0=idle, 2=pass, 3=fail. |
+| `TILE-TEST@` | `( -- n )` | Read self-test status: 0=idle, 1=running, 2=pass, 3=fail. |
 | `TILE-DETAIL@` | `( -- n )` | Read failed sub-test bitmask (for diagnostics). |
+
+> **Open tile self-test discrepancy.** The public design describes an
+> ADD/MUL/DOT/SUM datapath test and admits status 1 while it is running. The
+> pure-Python emulator performs those four value tests synchronously, current
+> full-core RTL counts down to pass without performing them, and the accelerated
+> emulator passes immediately. Unchanged KDOS currently waits only while the
+> status is 0, so an observable running status is rendered as failure. This note
+> does not decide whether the source, ABI description, or implementations must
+> change before an asynchronous self-test is admitted.
 
 ---
 
