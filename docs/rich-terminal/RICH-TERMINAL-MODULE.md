@@ -484,6 +484,13 @@ slice. Images, numeric instruments, meters, indicator objects, and series are
 not on this vertical's critical path unless the product composition begins to
 use them.
 
+MegaPad's additive `RET_CONTROL_COLLECTIONS` foundation now admits and projects
+renderer-neutral text-area, text-grid, tabset, and tab draw values, including
+multiple independent roots in one ordinary owner/region. It does not yet have a
+shared-viewer wire value, Pygame raster/hit path, or Akashic producer, so bit 9
+remains unadvertised and this foundation is not evidence that Pad or Daybook
+content crossed the rich physical view.
+
 The early physical renderer deliberately exposes the product direction rather
 than postponing visual judgment until Desktop acceptance: a clean deep-neutral
 surface, restrained blue accent, proportional sans-serif control typography,

@@ -32,7 +32,9 @@ from .retained_scene import (
     RegionDefinition,
     RetainedScene,
     SceneModelState,
+    validate_control_shape,
 )
+from .semantic_content import SemanticTextContent
 from .update_authority import TerminalGeometry
 
 
@@ -77,6 +79,16 @@ _CONTROL_ALLOWED_STATES = {
         | ControlState.CHECKED
     ),
     ControlKind.MENU_SEPARATOR: ControlState.VISIBLE,
+    ControlKind.TEXT_AREA: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.TEXT_GRID: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.TABSET: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.TAB: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
 }
 
 
@@ -290,7 +302,9 @@ class MenuSeparatorDraw:
 MenuEntryDraw = MenuItemDraw | MenuSeparatorDraw
 
 
-def _semantic_order_key(draw: MenuEntryDraw | MenuDraw) -> tuple[int, int]:
+def _semantic_order_key(
+    draw: MenuEntryDraw | MenuDraw | TabDraw,
+) -> tuple[int, int]:
     return draw.order, draw.control_id
 
 
@@ -412,15 +426,178 @@ class MenuBarDraw:
         object.__setattr__(self, "menus", menus)
 
 
-def _menu_bar_control_ids(menu_bar: MenuBarDraw) -> set[int]:
-    control_ids = {menu_bar.control_id}
-    for menu in menu_bar.menus:
-        control_ids.add(menu.control_id)
-        control_ids.update(entry.control_id for entry in menu.entries)
+def _root_draw_fields(
+    kind: ControlKind,
+    control_id,
+    state,
+    order,
+    z_order,
+    bounds,
+    content: SemanticTextContent | None,
+) -> tuple[int, ControlState, int, int, ObjectBounds, SemanticTextContent | None]:
+    control_id = _integer(
+        "control_id", control_id, minimum=1, maximum=UINT64_MAX
+    )
+    state = _control_state("state", state, kind, visible_draw=True)
+    order = _integer("order", order, minimum=0, maximum=UINT32_MAX)
+    z_order = _integer(
+        "z_order", z_order, minimum=INT32_MIN, maximum=INT32_MAX
+    )
+    if not isinstance(bounds, ObjectBounds):
+        raise TypeError("bounds must be ObjectBounds")
+    bounds = ObjectBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+    if order:
+        raise ValueError(f"{kind.name} draw order must be zero")
+    if kind in (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID):
+        if not isinstance(content, SemanticTextContent):
+            raise TypeError(f"{kind.name} draw requires SemanticTextContent")
+    elif content is not None:
+        raise ValueError(f"{kind.name} draw carries no semantic text content")
+    return control_id, state, order, z_order, bounds, content
+
+
+@dataclass(frozen=True, slots=True)
+class TextAreaDraw:
+    """One visible logical text area anchored in region-relative geometry."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    content: SemanticTextContent
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.TEXT_AREA,
+            self.control_id,
+            self.state,
+            self.order,
+            self.z_order,
+            self.bounds,
+            self.content,
+        )
+        assert content is not None
+        object.__setattr__(self, "control_id", control_id)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "z_order", z_order)
+        object.__setattr__(self, "bounds", bounds)
+        object.__setattr__(self, "content", content)
+
+
+@dataclass(frozen=True, slots=True)
+class TextGridDraw:
+    """One visible logical text grid anchored in region-relative geometry."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    content: SemanticTextContent
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.TEXT_GRID,
+            self.control_id,
+            self.state,
+            self.order,
+            self.z_order,
+            self.bounds,
+            self.content,
+        )
+        assert content is not None
+        object.__setattr__(self, "control_id", control_id)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "z_order", z_order)
+        object.__setattr__(self, "bounds", bounds)
+        object.__setattr__(self, "content", content)
+
+
+@dataclass(frozen=True, slots=True)
+class TabDraw:
+    """One visible semantic tab with renderer-owned child geometry."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    label: str
+    shortcut: str
+
+    def __post_init__(self) -> None:
+        control_id = _integer(
+            "control_id", self.control_id, minimum=1, maximum=UINT64_MAX
+        )
+        state = _control_state(
+            "state", self.state, ControlKind.TAB, visible_draw=True
+        )
+        order = _integer("order", self.order, minimum=0, maximum=UINT32_MAX)
+        label = _control_text("label", self.label, nonempty=True)
+        shortcut = _control_text("shortcut", self.shortcut, nonempty=False)
+        object.__setattr__(self, "control_id", control_id)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "label", label)
+        object.__setattr__(self, "shortcut", shortcut)
+
+
+@dataclass(frozen=True, slots=True)
+class TabSetDraw:
+    """One visible tabset root and its visible tabs in semantic order."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    tabs: tuple[TabDraw, ...]
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.TABSET,
+            self.control_id,
+            self.state,
+            self.order,
+            self.z_order,
+            self.bounds,
+            None,
+        )
+        assert content is None
+        object.__setattr__(self, "control_id", control_id)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "z_order", z_order)
+        object.__setattr__(self, "bounds", bounds)
+        tabs = tuple(self.tabs)
+        if any(not isinstance(tab, TabDraw) for tab in tabs):
+            raise TypeError("tabs must contain only TabDraw values")
+        if len({tab.order for tab in tabs}) != len(tabs):
+            raise ValueError("tab order is duplicated")
+        if tuple(sorted(tabs, key=_semantic_order_key)) != tabs:
+            raise ValueError("tabs are not in semantic order")
+        if sum(bool(tab.state & ControlState.SELECTED) for tab in tabs) > 1:
+            raise ValueError("TABSET has multiple selected tabs")
+        tab_ids = tuple(tab.control_id for tab in tabs)
+        if len(set(tab_ids)) != len(tab_ids) or self.control_id in tab_ids:
+            raise ValueError("TABSET control IDs are duplicated")
+        object.__setattr__(self, "tabs", tabs)
+
+
+SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
+RetainedDraw = GlyphRunDraw | SemanticRootDraw
+
+
+def _semantic_draw_control_ids(draw: SemanticRootDraw) -> set[int]:
+    control_ids = {draw.control_id}
+    if isinstance(draw, MenuBarDraw):
+        for menu in draw.menus:
+            control_ids.add(menu.control_id)
+            control_ids.update(entry.control_id for entry in menu.entries)
+    elif isinstance(draw, TabSetDraw):
+        control_ids.update(tab.control_id for tab in draw.tabs)
     return control_ids
-
-
-RetainedDraw = GlyphRunDraw | MenuBarDraw
 
 
 def _draw_order_key(draw: RetainedDraw) -> tuple[int, int, int]:
@@ -469,8 +646,14 @@ class RetainedRegionDraw:
         )
         object.__setattr__(self, "clipped", _boolean("clipped", self.clipped))
         draws = tuple(self.draws)
-        if any(not isinstance(draw, (GlyphRunDraw, MenuBarDraw)) for draw in draws):
-            raise TypeError("draws must contain only GlyphRunDraw or MenuBarDraw values")
+        if any(
+            not isinstance(
+                draw,
+                (GlyphRunDraw, MenuBarDraw, TextAreaDraw, TextGridDraw, TabSetDraw),
+            )
+            for draw in draws
+        ):
+            raise TypeError("draws contain a value outside the retained draw vocabulary")
         if tuple(sorted(draws, key=_draw_order_key)) != draws:
             raise ValueError("region draw values are not in back-to-front order")
         object.__setattr__(self, "draws", draws)
@@ -514,9 +697,9 @@ class RetainedDrawPlane:
             owner = region.owner_id, region.owner_generation
             owner_control_ids = control_ids_by_owner.setdefault(owner, set())
             for draw in region.draws:
-                if not isinstance(draw, MenuBarDraw):
+                if isinstance(draw, GlyphRunDraw):
                     continue
-                draw_control_ids = _menu_bar_control_ids(draw)
+                draw_control_ids = _semantic_draw_control_ids(draw)
                 if owner_control_ids & draw_control_ids:
                     raise ValueError("owner semantic control IDs are duplicated")
                 owner_control_ids.update(draw_control_ids)
@@ -574,19 +757,24 @@ def _validate_owner_scope(owner_scene: OwnerScene, owner_key: int, view) -> None
         raise RetainedViewError("retained owner is outside the composite scope")
 
 
+_ValidatedControl = tuple[
+    ControlDefinition,
+    ControlKind,
+    ControlState,
+    SemanticTextContent | None,
+]
+_ValidatedControlMap = dict[int, _ValidatedControl]
+
+
 def _validate_control_value(
     definition: ControlDefinition,
-) -> tuple[ControlKind, ControlState]:
+) -> tuple[ControlKind, ControlState, SemanticTextContent | None]:
     if isinstance(definition.kind, bool):
         raise TypeError("control kind must not be bool")
     try:
         kind = ControlKind(definition.kind)
     except (TypeError, ValueError) as exc:
         raise ValueError("control kind is not a CONTROL-1 kind") from exc
-    if kind not in _CONTROL_ALLOWED_STATES:
-        raise ValueError(
-            f"{kind.name} is not implemented by this retained draw projection"
-        )
     state = _control_state(
         "control state",
         definition.state,
@@ -612,48 +800,30 @@ def _validate_control_value(
         definition.shortcut,
         nonempty=False,
     )
-    if definition.content is not None:
-        raise ValueError(f"{kind.name} carries no semantic text content")
-
-    if kind is ControlKind.MENU_BAR:
-        if (
-            definition.parent_control_id != 0
-            or definition.order != 0
-            or not isinstance(definition.bounds, ObjectBounds)
-        ):
-            raise ValueError("MENU_BAR requires root order zero and positive bounds")
-        try:
-            ObjectBounds(
-                definition.bounds.left,
-                definition.bounds.top,
-                definition.bounds.right,
-                definition.bounds.bottom,
-            )
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise ValueError("MENU_BAR bounds are invalid") from exc
-        if label or shortcut:
-            raise ValueError("MENU_BAR carries no label or shortcut")
-        return kind, state
-
-    if (
-        definition.parent_control_id == 0
-        or definition.bounds is not None
-        or definition.z_order != 0
-    ):
-        raise ValueError(f"{kind.name} requires a parent and renderer-owned geometry")
-    if kind in (ControlKind.MENU, ControlKind.MENU_ITEM) and not label:
-        raise ValueError(f"{kind.name} requires a nonempty label")
-    if kind is ControlKind.MENU and shortcut:
-        raise ValueError("MENU carries no shortcut")
-    if kind is ControlKind.MENU_SEPARATOR and (label or shortcut):
-        raise ValueError("MENU_SEPARATOR carries no label or shortcut")
-    return kind, state
+    bounds = definition.bounds
+    if bounds is not None:
+        if not isinstance(bounds, ObjectBounds):
+            raise TypeError("control bounds must be ObjectBounds or None")
+        bounds = ObjectBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+    content = definition.content
+    validate_control_shape(
+        kind=kind,
+        state=state,
+        z_order=definition.z_order,
+        parent_control_id=definition.parent_control_id,
+        order=definition.order,
+        bounds=bounds,
+        label=label,
+        shortcut=shortcut,
+        content=content,
+    )
+    return kind, state, content
 
 
 def _validate_control_graph(
     owner_scene: OwnerScene,
 ) -> tuple[
-    dict[int, tuple[ControlDefinition, ControlKind, ControlState]],
+    _ValidatedControlMap,
     dict[int, tuple[int, ...]],
     dict[int, tuple[int, ...]],
 ]:
@@ -661,7 +831,7 @@ def _validate_control_graph(
     if not isinstance(controls, Mapping):
         raise RetainedViewError("retained control collection is not a map")
 
-    validated: dict[int, tuple[ControlDefinition, ControlKind, ControlState]] = {}
+    validated: _ValidatedControlMap = {}
     for control_key, definition in controls.items():
         if not isinstance(definition, ControlDefinition):
             raise RetainedViewError("retained control map contains an invalid value")
@@ -672,7 +842,7 @@ def _validate_control_graph(
                 minimum=1,
                 maximum=UINT64_MAX,
             )
-            kind, state = _validate_control_value(definition)
+            kind, state, content = _validate_control_value(definition)
         except (AttributeError, TypeError, ValueError) as exc:
             raise RetainedViewError(f"retained control value is invalid: {exc}") from exc
         if normalized_key != definition.control_id:
@@ -683,24 +853,33 @@ def _validate_control_graph(
             raise RetainedViewError("retained control owner identity is invalid")
         if definition.region_id not in owner_scene.regions:
             raise RetainedViewError("retained control refers to a missing region")
-        validated[normalized_key] = definition, kind, state
+        validated[normalized_key] = definition, kind, state, content
 
     children: dict[int, list[int]] = {}
     sibling_orders: set[tuple[int, int]] = set()
     open_menu_by_bar: set[int] = set()
     selected_menu_by_bar: set[int] = set()
     selected_item_by_menu: set[int] = set()
+    selected_tab_by_tabset: set[int] = set()
     roots_by_region: dict[int, list[int]] = {}
-    for control_id, (definition, kind, state) in validated.items():
-        if kind is ControlKind.MENU_BAR:
+    root_kinds = {
+        ControlKind.MENU_BAR,
+        ControlKind.TEXT_AREA,
+        ControlKind.TEXT_GRID,
+        ControlKind.TABSET,
+    }
+    expected_parent = {
+        ControlKind.MENU: ControlKind.MENU_BAR,
+        ControlKind.MENU_ITEM: ControlKind.MENU,
+        ControlKind.MENU_SEPARATOR: ControlKind.MENU,
+        ControlKind.TAB: ControlKind.TABSET,
+    }
+    for control_id, (definition, kind, state, _) in validated.items():
+        if kind in root_kinds:
             roots_by_region.setdefault(definition.region_id, []).append(control_id)
             continue
         parent = validated.get(definition.parent_control_id)
-        expected_kind = (
-            ControlKind.MENU_BAR
-            if kind is ControlKind.MENU
-            else ControlKind.MENU
-        )
+        expected_kind = expected_parent[kind]
         if parent is None or parent[1] is not expected_kind:
             raise RetainedViewError(
                 f"retained {kind.name} parent is not a live {expected_kind.name}"
@@ -729,6 +908,10 @@ def _validate_control_graph(
             if definition.parent_control_id in selected_item_by_menu:
                 raise RetainedViewError("retained MENU has multiple selected items")
             selected_item_by_menu.add(definition.parent_control_id)
+        elif kind is ControlKind.TAB and state & ControlState.SELECTED:
+            if definition.parent_control_id in selected_tab_by_tabset:
+                raise RetainedViewError("retained TABSET has multiple selected tabs")
+            selected_tab_by_tabset.add(definition.parent_control_id)
 
     ordered_children = {
         parent_id: tuple(
@@ -759,16 +942,16 @@ def _validate_control_graph(
 
 def _project_menu_bar(
     root_id: int,
-    controls: dict[int, tuple[ControlDefinition, ControlKind, ControlState]],
+    controls: _ValidatedControlMap,
     children: dict[int, tuple[int, ...]],
 ) -> MenuBarDraw:
-    root, root_kind, root_state = controls[root_id]
+    root, root_kind, root_state, _ = controls[root_id]
     if root_kind is not ControlKind.MENU_BAR or root.bounds is None:
         raise RetainedViewError("semantic root is not a bounded MENU_BAR")
 
     menus: list[MenuDraw] = []
     for menu_id in children.get(root_id, ()):
-        menu, menu_kind, menu_state = controls[menu_id]
+        menu, menu_kind, menu_state, _ = controls[menu_id]
         if menu_kind is not ControlKind.MENU:
             raise RetainedViewError("semantic MENU_BAR child is not a MENU")
         if not menu_state & ControlState.VISIBLE:
@@ -777,7 +960,7 @@ def _project_menu_bar(
         entries: list[MenuEntryDraw] = []
         if menu_state & ControlState.OPEN:
             for entry_id in children.get(menu_id, ()):
-                entry, entry_kind, entry_state = controls[entry_id]
+                entry, entry_kind, entry_state, _ = controls[entry_id]
                 if not entry_state & ControlState.VISIBLE:
                     continue
                 if entry_kind is ControlKind.MENU_ITEM:
@@ -818,6 +1001,78 @@ def _project_menu_bar(
         bounds=root.bounds,
         menus=tuple(menus),
     )
+
+
+def _project_text_root(
+    root_id: int,
+    controls: _ValidatedControlMap,
+) -> TextAreaDraw | TextGridDraw:
+    root, kind, state, content = controls[root_id]
+    if root.bounds is None or content is None:
+        raise RetainedViewError(f"semantic {kind.name} root is incomplete")
+    draw_type = {
+        ControlKind.TEXT_AREA: TextAreaDraw,
+        ControlKind.TEXT_GRID: TextGridDraw,
+    }.get(kind)
+    if draw_type is None:
+        raise RetainedViewError("semantic text root has the wrong control kind")
+    return draw_type(
+        control_id=root.control_id,
+        state=state,
+        order=root.order,
+        z_order=root.z_order,
+        bounds=root.bounds,
+        content=content,
+    )
+
+
+def _project_tabset(
+    root_id: int,
+    controls: _ValidatedControlMap,
+    children: dict[int, tuple[int, ...]],
+) -> TabSetDraw:
+    root, kind, state, _ = controls[root_id]
+    if kind is not ControlKind.TABSET or root.bounds is None:
+        raise RetainedViewError("semantic root is not a bounded TABSET")
+    tabs: list[TabDraw] = []
+    for tab_id in children.get(root_id, ()):
+        tab, tab_kind, tab_state, _ = controls[tab_id]
+        if tab_kind is not ControlKind.TAB:
+            raise RetainedViewError("semantic TABSET child is not a TAB")
+        if not tab_state & ControlState.VISIBLE:
+            continue
+        tabs.append(
+            TabDraw(
+                control_id=tab.control_id,
+                state=tab_state,
+                order=tab.order,
+                label=tab.label,
+                shortcut=tab.shortcut,
+            )
+        )
+    return TabSetDraw(
+        control_id=root.control_id,
+        state=state,
+        order=root.order,
+        z_order=root.z_order,
+        bounds=root.bounds,
+        tabs=tuple(tabs),
+    )
+
+
+def _project_semantic_root(
+    root_id: int,
+    controls: _ValidatedControlMap,
+    children: dict[int, tuple[int, ...]],
+) -> SemanticRootDraw:
+    kind = controls[root_id][1]
+    if kind is ControlKind.MENU_BAR:
+        return _project_menu_bar(root_id, controls, children)
+    if kind in (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID):
+        return _project_text_root(root_id, controls)
+    if kind is ControlKind.TABSET:
+        return _project_tabset(root_id, controls, children)
+    raise RetainedViewError(f"semantic root has unsupported kind {kind.name}")
 
 
 def project_composite_draw_plane(
@@ -972,7 +1227,7 @@ def project_composite_draw_plane(
             for control_id in control_roots.get(region.region_id, ()):
                 if controls[control_id][2] & ControlState.VISIBLE:
                     draws.append(
-                        _project_menu_bar(
+                        _project_semantic_root(
                             control_id,
                             controls,
                             control_children,
@@ -1016,5 +1271,10 @@ __all__ = [
     "RetainedRegionDraw",
     "RetainedDrawPlane",
     "RetainedViewError",
+    "SemanticRootDraw",
+    "TabDraw",
+    "TabSetDraw",
+    "TextAreaDraw",
+    "TextGridDraw",
     "project_composite_draw_plane",
 ]

@@ -35,6 +35,10 @@ from rich_terminal.retained_view import (
     RetainedDrawPlane,
     RetainedRegionDraw,
     RetainedViewError,
+    TabDraw,
+    TabSetDraw,
+    TextAreaDraw,
+    TextGridDraw,
     project_composite_draw_plane,
 )
 from rich_terminal.semantic_content import (
@@ -115,6 +119,7 @@ def _control(
     z_order: int = 10,
     label: str = "",
     shortcut: str = "",
+    content: SemanticTextContent | None = None,
 ) -> ControlDefinition:
     if state is None:
         state = (
@@ -122,18 +127,25 @@ def _control(
             if kind is ControlKind.MENU_SEPARATOR
             else ControlState.VISIBLE | ControlState.ENABLED
         )
+    root_kinds = {
+        ControlKind.MENU_BAR,
+        ControlKind.TEXT_AREA,
+        ControlKind.TEXT_GRID,
+        ControlKind.TABSET,
+    }
     return ControlDefinition(
         owner=owner,
         control_id=control_id,
         kind=kind,
         state=state,
-        z_order=z_order if kind is ControlKind.MENU_BAR else 0,
+        z_order=z_order if kind in root_kinds else 0,
         region_id=region_id,
         parent_control_id=parent,
         order=order,
-        bounds=FULL_BOUNDS if kind is ControlKind.MENU_BAR else None,
+        bounds=FULL_BOUNDS if kind in root_kinds else None,
         label=label,
         shortcut=shortcut,
+        content=content,
     )
 
 
@@ -338,52 +350,178 @@ def test_projection_preserves_semantics_and_orders_draw_families_deterministical
         file_menu.label = "forged"
 
 
-def test_projection_fails_closed_until_semantic_content_draws_exist() -> None:
-    owner = _owner(7, 2)
-    content = SemanticTextContent(
-        content_revision=1,
-        rows=1,
-        columns=8,
-        viewport_row=0,
-        viewport_column=0,
+def _text_area_content() -> SemanticTextContent:
+    return SemanticTextContent(
+        content_revision=4,
+        rows=3,
+        columns=12,
+        viewport_row=1,
+        viewport_column=2,
         viewport_rows=1,
         viewport_columns=8,
-        flags=SemanticContentFlag.READ_ONLY,
-        primary_key=0,
-        primary_offset=0,
-        anchor_key=0,
-        anchor_offset=0,
+        flags=SemanticContentFlag(0),
+        primary_key=2,
+        primary_offset=3,
+        anchor_key=1,
+        anchor_offset=1,
         items=(
             SemanticTextItem(
                 1,
                 0,
                 0,
                 1,
-                8,
+                12,
                 SemanticTextRole.CONTENT,
                 SemanticTextState(0),
-                "visible",
+                "offscreen",
+            ),
+            SemanticTextItem(
+                2,
+                1,
+                0,
+                1,
+                12,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "visible text",
             ),
         ),
     )
-    area = ControlDefinition(
-        owner=owner,
-        control_id=50,
-        kind=ControlKind.TEXT_AREA,
-        state=ControlState.VISIBLE | ControlState.ENABLED,
-        z_order=10,
-        region_id=1,
-        parent_control_id=0,
-        order=0,
-        bounds=FULL_BOUNDS,
-        label="",
-        shortcut="",
-        content=content,
-    )
-    scene = _owner_scene(owner, (_region(owner),), controls=(area,))
 
-    with pytest.raises(RetainedViewError, match="not implemented"):
-        project_composite_draw_plane(_composite((scene,)))
+
+def _text_grid_content() -> SemanticTextContent:
+    return SemanticTextContent(
+        content_revision=7,
+        rows=4,
+        columns=7,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=3,
+        viewport_columns=7,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=12,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                11,
+                0,
+                0,
+                1,
+                2,
+                SemanticTextRole.COLUMN_HEADER,
+                SemanticTextState(0),
+                "Mo",
+            ),
+            SemanticTextItem(
+                12,
+                1,
+                2,
+                1,
+                1,
+                SemanticTextRole.CONTENT,
+                SemanticTextState.CURRENT,
+                "8",
+            ),
+        ),
+    )
+
+
+def test_projection_carries_multiple_collection_roots_and_tabs_immutably() -> None:
+    owner = _owner(7, 2)
+    area_content = _text_area_content()
+    grid_content = _text_grid_content()
+    controls = (
+        # Independent roots may come from one provider/source; only their stable
+        # CONTROL identities and ordinary owner/region authority reach the view.
+        _control(
+            owner,
+            50,
+            ControlKind.TEXT_AREA,
+            z_order=2,
+            content=area_content,
+        ),
+        _control(owner, 40, ControlKind.TABSET, z_order=2),
+        _control(
+            owner,
+            41,
+            ControlKind.TAB,
+            parent=40,
+            state=(
+                ControlState.VISIBLE
+                | ControlState.ENABLED
+                | ControlState.SELECTED
+            ),
+            label="one.txt",
+        ),
+        _control(
+            owner,
+            42,
+            ControlKind.TAB,
+            parent=40,
+            order=1,
+            label="two.txt",
+            shortcut="Alt+2",
+        ),
+        _control(
+            owner,
+            43,
+            ControlKind.TAB,
+            parent=40,
+            order=2,
+            state=ControlState.ENABLED,
+            label="hidden.txt",
+        ),
+        _control(
+            owner,
+            70,
+            ControlKind.TEXT_GRID,
+            z_order=4,
+            content=grid_content,
+        ),
+    )
+    scene = _owner_scene(owner, (_region(owner),), controls=controls)
+
+    _, plane = project_composite_draw_plane(_composite((scene,)))
+
+    draws = plane.regions[0].draws
+    assert [type(draw) for draw in draws] == [
+        TabSetDraw,
+        TextAreaDraw,
+        TextGridDraw,
+    ]
+    tabset, area, grid = draws
+    assert [tab.control_id for tab in tabset.tabs] == [41, 42]
+    assert (tabset.tabs[0].state, tabset.tabs[1].shortcut) == (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
+        "Alt+2",
+    )
+    assert (area.control_id, area.bounds, area.content) == (
+        50,
+        FULL_BOUNDS,
+        area_content,
+    )
+    # STX1 values are deeply immutable and were validated at wire/model
+    # admission, so the view reuses them without another item graph or overlap
+    # pass on every physical offer.
+    assert area.content is area_content
+    assert area.content.items[0] is area_content.items[0]
+    assert (
+        area.content.viewport_row,
+        area.content.viewport_column,
+        area.content.primary_key,
+        area.content.anchor_key,
+    ) == (1, 2, 2, 1)
+    assert (grid.control_id, grid.content, grid.content.primary_key) == (
+        70,
+        grid_content,
+        12,
+    )
+    with pytest.raises(FrozenInstanceError):
+        tabset.tabs[0].label = "forged"
+    with pytest.raises(FrozenInstanceError):
+        area.content.viewport_rows = 99
 
 
 def _menu_item_draw(
@@ -494,10 +632,63 @@ def test_semantic_draw_dtos_reject_duplicate_ids_within_a_menu_tree():
 
 def test_semantic_draw_plane_rejects_duplicate_ids_across_owner_regions():
     first = RetainedRegionDraw(7, 2, 1, 0, 0, 1, 1, 0, False, (_menu_bar_draw(1),))
-    second = RetainedRegionDraw(7, 2, 2, 1, 0, 1, 1, 1, False, (_menu_bar_draw(1),))
+    area = TextAreaDraw(
+        1,
+        ControlState.VISIBLE | ControlState.ENABLED,
+        0,
+        0,
+        FULL_BOUNDS,
+        _text_area_content(),
+    )
+    second = RetainedRegionDraw(7, 2, 2, 1, 0, 1, 1, 1, False, (area,))
 
     with pytest.raises(ValueError, match="owner semantic control IDs are duplicated"):
         RetainedDrawPlane(True, True, (first, second))
+
+
+def test_tabset_draw_and_projection_reject_ambiguous_selection() -> None:
+    selected = ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    tabs = (
+        TabDraw(2, selected, 0, "One", ""),
+        TabDraw(3, selected, 1, "Two", ""),
+    )
+    with pytest.raises(ValueError, match="multiple selected tabs"):
+        TabSetDraw(
+            1,
+            ControlState.VISIBLE | ControlState.ENABLED,
+            0,
+            0,
+            FULL_BOUNDS,
+            tabs,
+        )
+
+    owner = _owner(7)
+    scene = _owner_scene(
+        owner,
+        (_region(owner),),
+        controls=(
+            _control(owner, 1, ControlKind.TABSET),
+            _control(
+                owner,
+                2,
+                ControlKind.TAB,
+                parent=1,
+                state=selected,
+                label="One",
+            ),
+            _control(
+                owner,
+                3,
+                ControlKind.TAB,
+                parent=1,
+                order=1,
+                state=selected,
+                label="Two",
+            ),
+        ),
+    )
+    with pytest.raises(RetainedViewError, match="multiple selected tabs"):
+        project_composite_draw_plane(_composite((scene,)))
 
 
 def test_projection_applies_closed_open_and_visible_control_cascades():
@@ -631,8 +822,9 @@ def test_projection_never_traverses_hidden_semantic_target():
         ("region", "missing region"),
         ("missing_parent", "parent"),
         ("wrong_parent", "parent"),
+        ("wrong_tab_parent", "TABSET"),
         ("cross_region", "crosses region"),
-        ("content", "semantic text content"),
+        ("content", "SemanticTextContent"),
     ),
 )
 def test_projection_fails_closed_on_forged_control_maps(case: str, message: str):
@@ -665,6 +857,17 @@ def test_projection_fails_closed_on_forged_control_maps(case: str, message: str)
                 ControlKind.MENU_ITEM,
                 parent=1,
                 label="Wrong level",
+            ),
+        }
+    elif case == "wrong_tab_parent":
+        controls = {
+            1: _control(owner, 1, ControlKind.MENU_BAR),
+            2: _control(
+                owner,
+                2,
+                ControlKind.TAB,
+                parent=1,
+                label="Wrong root",
             ),
         }
     elif case == "cross_region":

@@ -946,7 +946,7 @@ def composite_draw_plane_result(
                         pressed=pressed,
                     )
                 )
-            else:  # RetainedDrawPlane validates this, but fail closed if forged.
+            else:  # Legitimate newer kinds remain fail-closed until implemented.
                 raise TypeError("unsupported retained draw value")
     return CompositeDrawResult(surface, tuple(targets))
 

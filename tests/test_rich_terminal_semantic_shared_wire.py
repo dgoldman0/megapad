@@ -15,6 +15,14 @@ from rich_terminal.retained_view import (
     MenuSeparatorDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    TextAreaDraw,
+)
+from rich_terminal.semantic_content import (
+    SemanticContentFlag,
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
 )
 from shared_session import retained_draw_plane_from_wire, retained_draw_plane_to_wire
 
@@ -227,3 +235,48 @@ def test_decoder_reasserts_cross_family_back_to_front_order():
 
     with pytest.raises(ValueError, match="back-to-front order"):
         retained_draw_plane_from_wire(wire)
+
+
+def test_collection_draw_is_explicitly_unavailable_on_the_shared_wire():
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=8,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=8,
+        flags=SemanticContentFlag(0),
+        primary_key=1,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                8,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "Pad",
+            ),
+        ),
+    )
+    area = TextAreaDraw(
+        30,
+        VISIBLE | ENABLED,
+        0,
+        4,
+        FULL_BOUNDS,
+        content,
+    )
+    plane = RetainedDrawPlane(
+        True,
+        True,
+        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (area,)),),
+    )
+
+    with pytest.raises(TypeError, match="GlyphRunDraw or MenuBarDraw"):
+        retained_draw_plane_to_wire(plane)

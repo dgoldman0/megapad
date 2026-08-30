@@ -1,10 +1,11 @@
 # SEMANTIC-CONTENT-1 protocol slice
 
-Status: protocol value, wire codec, immutable retained model, and server ingress
-implemented. Generic draw projection, pygame rasterization/hit maps, Akashic
-production, and text/grid item input are deliberately not implemented in this
-slice. A physical renderer must not advertise `RET_CONTROL_COLLECTIONS` until
-its projection and acknowledgement path can render every visible kind.
+Status: protocol value, wire codec, immutable retained model, server ingress,
+and renderer-neutral immutable draw projection implemented. Pygame
+rasterization/hit maps, Akashic production, and text/grid item input are
+deliberately not implemented in this slice. A physical renderer must not
+advertise `RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement
+path can render every visible kind.
 
 ## Decision
 
@@ -210,12 +211,18 @@ The coherent protocol slice is owned by:
 - `rich_terminal/retained_scene.py`: authority, graph, quota, replacement, and
   content-revision rules;
 - `rich_terminal/server.py`: normal PRESENT ingress; and
-- `rich_terminal/retained_view.py`: explicit fail-closed rejection until the
-  generic draw values exist.
+- `rich_terminal/retained_view.py`: immutable `TextAreaDraw`, `TextGridDraw`,
+  and `TabSetDraw`/`TabDraw` values, exact active owner/region scope, canonical
+  control-shape validation, and deterministic projection of independent
+  sibling roots. The view reuses the deeply immutable STX1 content value
+  validated at wire/model admission; it does not rebuild the item graph or
+  repeat UTF-8 and rectangle-overlap validation on every display offer.
 
-The next slice should add renderer-neutral `TextAreaDraw`, `TextGridDraw`, and
-`TabSetDraw` values to `retained_view.py`, then one ordinary pygame compositor
-path and immutable hit map. Akashic can advertise/use bit 9 only after its
-generic UIDL semantic provider and CONTROL encoder emit these exact records.
-Pad and Daybook must remain ordinary UIDL/TUI sources; neither receives a
-terminal API or renderer-specific annotation.
+The next MegaPad slice must carry these draw values through `shared_session.py`,
+then add one ordinary pygame compositor path and immutable hit map. Until both
+exist, the reference sink rejects a visible collection draw rather than
+silently reducing it to CELL or glyphs.
+Akashic can advertise/use bit 9 only after its generic UIDL semantic provider
+and CONTROL encoder emit these exact records. Pad and Daybook must remain
+ordinary UIDL/TUI sources; neither receives a terminal API or renderer-specific
+annotation.

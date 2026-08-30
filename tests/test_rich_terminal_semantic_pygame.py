@@ -27,6 +27,14 @@ from rich_terminal.retained_view import (
     MenuSeparatorDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    TextAreaDraw,
+)
+from rich_terminal.semantic_content import (
+    SemanticContentFlag,
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
 )
 
 
@@ -304,3 +312,55 @@ def test_legacy_glyph_composition_keeps_surface_return_and_empty_hit_map():
     assert result.surface is result_surface_2
     assert result.hit_targets == ()
     assert tuple(result_surface_2.get_at((5, 5)))[:3] == (10, 20, 30)
+
+
+def test_collection_draw_fails_before_the_current_pygame_sink_can_present_it():
+    pygame = pytest.importorskip("pygame")
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=8,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=8,
+        flags=SemanticContentFlag(0),
+        primary_key=1,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1,
+                0,
+                0,
+                1,
+                8,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "Pad",
+            ),
+        ),
+    )
+    area = TextAreaDraw(
+        30,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        content,
+    )
+    plane = _plane(_region(area, cols=8, rows=1))
+    surface = pygame.Surface((80, 10))
+    surface.fill((23, 29, 37))
+
+    with pytest.raises(TypeError, match="unsupported retained draw value"):
+        composite_draw_plane_result(
+            pygame,
+            surface,
+            plane,
+            _GlyphFont(pygame),
+            10,
+            10,
+        )
+    assert tuple(surface.get_at((5, 5)))[:3] == (23, 29, 37)
