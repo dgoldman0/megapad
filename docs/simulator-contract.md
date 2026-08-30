@@ -294,21 +294,28 @@ not define their own expected results.
 
 ## 11. Initial implementation sequence
 
-The first simulator slices are intentionally vertical:
+The simulator slices are intentionally vertical.  The current implementation
+branch has an explicit pre-rich-terminal stop line:
 
 1. package ownership, dependency guards, cells, source cursor, stacks,
    dictionary, and explicit semantic dispatch;
 2. enough compiler and control-flow semantics to source-load unchanged real
    Akashic utility code, including shared return/loop-stack behavior;
-3. byte memory, allocation, exceptions, module transactions, and source
-   loading;
-4. one-core tasks, deterministic time, UART, geometry, and block media;
-5. real `rich-terminal.f` through the shared host terminal path; and
-6. the ordinary source-mode Desk/Pad/Daybook journey with differential
-   evidence.
+3. sparse byte memory, dictionary/runtime backing, persistent compiler and
+   evaluator state, exceptions, and numeric dictionary rollback;
+4. the complete supported one-core semantic BIOS public vocabulary and
+   platform profile, followed by ordinary `kdos.f` from source;
+5. an unchanged, focused KDOS load followed by qualification of KDOS-owned
+   evaluator and module-loading surfaces; and
+6. stop before loading or implementing `rich-terminal.f`.
+
+Rich-terminal source loading, host transport integration, and the ordinary
+Desk/Pad/Daybook journey remain part of the compatibility contract, but are a
+later implementation phase.  They resume only after synchronizing this backend
+with the then-current rich-terminal vertical, so evolving panels and terminal
+core semantics are not copied prematurely into the simulator branch.
 
 Only seconds-scale structural and focused unit tests run before the real rich
 vertical exists.  Cold source load, Desktop smoke, sustained cadence,
 persistence, full renderer, and physical-viewer qualification remain deferred
 to vertical acceptance under the project's resource rules.
-

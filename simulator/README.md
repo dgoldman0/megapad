@@ -15,15 +15,19 @@ The first runnable slice provides:
 - an explicit dispatcher with colon continuations, loop state, and user
   `>R`/`R@`/`R>` values on one ordered return stack; and
 - a focused core vocabulary sufficient to execute the first unchanged Akashic
-  utility source, with an optional caller-owned semantic step budget.
+  utility source, with an optional caller-owned semantic step budget; and
+- a sparse 64-bit address space with distinct Bank 0, external, VRAM, HBW, and
+  reserved MMIO classes, plus a caller-bounded allocator for hosted runtime
+  storage.
 
-This is deliberately not yet a complete MegaForth environment. Byte-addressed
-memory, allocation, `REQUIRE`, transactional module loading, Forth
-`CATCH`/`THROW`, tasks, clocks, UART, media, and the rich-terminal service path
-are still to be implemented. The simulator does not execute ROMs, MP64
-binaries, or MF64 native dictionaries, and it makes no machine-timing,
-interrupt, snapshot, RTL, or hardware claim. Those remain the architectural
-emulator's and physical implementation's responsibility.
+This is deliberately not yet a complete MegaForth environment. The sparse
+memory substrate is not yet connected to BIOS memory words, dictionary bodies,
+or memory-backed task stacks. Persistent compiler state, `CATCH`/`THROW`, the
+BIOS evaluator surfaces, tasks, clocks, UART, media, and an ordinary KDOS load
+also remain. The simulator does not execute ROMs, MP64 binaries, or MF64 native
+dictionaries, and it makes no machine-timing, interrupt, snapshot, RTL, or
+hardware claim. Those remain the architectural emulator's and physical
+implementation's responsibility.
 
 ## Run it
 
@@ -58,10 +62,14 @@ fixture is revision- and SHA-256-bound; it is test input, not a simulator-side
 rewrite. This proves only the source and runtime semantics exercised by that
 module.
 
-The immediate next slice is byte-addressed memory and allocation together with
-exceptions and transactional `REQUIRE`/source loading. That opens the next
-unchanged source target, `akashic/utils/memory-span.f`, rather than adding a
-host-native substitute for it.
+The immediate next slice connects memory-backed dictionary/runtime state to
+the BIOS-owned memory, defining, comparison, and zero-trip loop words. That
+opens the complete caller-owned set API in unchanged
+`akashic/utils/memory-span.f`, rather than adding a host-native substitute.
+
+This branch stops after the semantic BIOS and ordinary KDOS source load are
+credible. It does not load or implement `rich-terminal.f`; that later work
+must resynchronize with the then-current rich-terminal vertical.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
