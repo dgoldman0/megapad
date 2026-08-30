@@ -92,9 +92,34 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 26
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 12
+
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND = (
+    "bounded-set-associative-space-saving"
+)
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE = (
+    "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+    "within-one-uncontended-segment"
+)
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SETS = 1_024
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_WAYS = 8
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_ENTRIES = 8_192
+SINGLE_CORE_JIT_SUCCESSOR_EDGE_FIELDS = (
+    "source_address",
+    "source_psel",
+    "source_spsel",
+    "source_identity_size",
+    "source_identity_fingerprint",
+    "target_address",
+    "target_psel",
+    "target_spsel",
+    "target_identity_size",
+    "target_identity_fingerprint",
+    "estimated_count",
+    "max_overcount",
+)
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -427,12 +452,13 @@ def _bios_admission_mix_source() -> str:
 
     Thirty three-instruction and four two-instruction positive blocks are
     followed by one short and one long standalone branch. The standalone
-    branches are authoritative one-instruction build rejections. Repeating
-    this circuit ten times therefore matches the production 1,000-step
-    scheduler segment with 360 admissions, 340 positive blocks, and 20 exact
-    rejection hits after the workload is primed. Unreachable NOP padding keeps
-    every start eight-byte aligned so an accidental instruction/I-cache-line
-    crossing cannot change the calibrated admission shape.
+    branches are authoritative one-instruction build rejections. Once primed,
+    the 33 eligible successor edges let phase-1 native regions retire the 34
+    positive blocks as 17 exact pairs per circuit. Repeating the circuit ten
+    times therefore yields 190 outer admissions, 170 region-source hits, 340
+    logical block executions, and 20 exact rejection hits. Unreachable NOP
+    padding keeps every start eight-byte aligned so an accidental
+    instruction/I-cache-line crossing cannot change the calibrated shape.
     """
 
     three_step_labels = [f"mix_three_{index:02d}" for index in range(30)]
@@ -870,11 +896,13 @@ def build_bios_admission_mix(
             "production_segment_instructions": 1_000,
             "primed_aggregate_instructions": primed,
             "expected_per_core_per_segment": {
-                "block_lookups": 360,
-                "positive_block_hits": 340,
+                "block_lookups": 190,
+                "positive_block_hits": 170,
                 "rejection_cache_hits": 20,
                 "block_executions": 340,
                 "block_steps": 980,
+                "native_region_entries": 170,
+                "native_region_blocks": 340,
                 "scalar_steps": 20,
             },
             "reference_bios_kdos_profile": {
@@ -2806,6 +2834,15 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "uncontended_jit_max_code_bytes",
     "uncontended_jit_executions",
     "uncontended_jit_steps",
+    "uncontended_jit_native_entries",
+    "uncontended_jit_native_returns",
+    "uncontended_jit_region_compile_attempts",
+    "uncontended_jit_region_compilations",
+    "uncontended_jit_region_compile_failures",
+    "uncontended_jit_region_entries",
+    "uncontended_jit_region_blocks",
+    "uncontended_jit_region_steps",
+    "uncontended_jit_region_target_identity_misses",
     "logical_subfrontiers",
     "round_absorptions",
     "worker_waves",
@@ -2876,9 +2913,19 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
     raw_counts = dict(raw["counts"])
     raw_wall = dict(raw["wall_ns"])
     raw_jit_storage = dict(raw["single_core_jit_storage"])
+    raw_jit_region_storage = dict(
+        raw["single_core_jit_region_storage"]
+    )
+    raw_block_cache = dict(raw["single_core_block_cache"])
     raw_block_rejection_cache = dict(
         raw["single_core_block_rejection_cache"]
     )
+    raw_jit_successor_profile = dict(
+        raw["single_core_jit_successor_profile"]
+    )
+    raw_jit_successor_edges = [
+        dict(raw_edge) for raw_edge in raw_jit_successor_profile["edges"]
+    ]
     counts = {
         name: int(raw_counts[name])
         for name in _CONCURRENCY_PROFILE_COUNT_FIELDS
@@ -2925,12 +2972,62 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
                 raw_jit_storage["mapped_bytes_per_alias"]
             ),
         },
+        "single_core_jit_region_storage": {
+            "kind": str(raw_jit_region_storage["kind"]),
+            "w_x_model": str(raw_jit_region_storage["w_x_model"]),
+            "enabled": bool(raw_jit_region_storage["enabled"]),
+            "ready": bool(raw_jit_region_storage["ready"]),
+            "failed": bool(raw_jit_region_storage["failed"]),
+            "slot_count": int(raw_jit_region_storage["slot_count"]),
+            "slot_bytes": int(raw_jit_region_storage["slot_bytes"]),
+            "mapped_bytes_per_alias": int(
+                raw_jit_region_storage["mapped_bytes_per_alias"]
+            ),
+        },
+        "single_core_block_cache": {
+            "kind": str(raw_block_cache["kind"]),
+            "sets": int(raw_block_cache["sets"]),
+            "ways": int(raw_block_cache["ways"]),
+            "entries": int(raw_block_cache["entries"]),
+            "identity_bytes": int(raw_block_cache["identity_bytes"]),
+        },
         "single_core_block_rejection_cache": {
             "kind": str(raw_block_rejection_cache["kind"]),
+            "sets": int(raw_block_rejection_cache["sets"]),
+            "ways": int(raw_block_rejection_cache["ways"]),
             "entries": int(raw_block_rejection_cache["entries"]),
             "identity_bytes": int(
                 raw_block_rejection_cache["identity_bytes"]
             ),
+        },
+        "single_core_jit_successor_profile": {
+            "kind": str(raw_jit_successor_profile["kind"]),
+            "scope": str(raw_jit_successor_profile["scope"]),
+            "sets": int(raw_jit_successor_profile["sets"]),
+            "ways": int(raw_jit_successor_profile["ways"]),
+            "entries": int(raw_jit_successor_profile["entries"]),
+            "candidate_block_completions": int(
+                raw_jit_successor_profile[
+                    "candidate_block_completions"
+                ]
+            ),
+            "observations": int(
+                raw_jit_successor_profile["observations"]
+            ),
+            "replacements": int(
+                raw_jit_successor_profile["replacements"]
+            ),
+            "exact": bool(raw_jit_successor_profile["exact"]),
+            "counter_saturated": bool(
+                raw_jit_successor_profile["counter_saturated"]
+            ),
+            "edges": [
+                {
+                    name: int(raw_edge[name])
+                    for name in SINGLE_CORE_JIT_SUCCESSOR_EDGE_FIELDS
+                }
+                for raw_edge in raw_jit_successor_edges
+            ],
         },
         "counts": counts,
         "wall_ns": wall_ns,
@@ -2938,6 +3035,86 @@ def _normalized_concurrency_profile_snapshot(owner) -> dict:
             int(value) for value in raw["lane_active_ns"]
         ],
     }
+
+
+def _single_core_jit_successor_profile_validation(
+    profile: dict,
+    *,
+    require_empty: bool,
+) -> dict[str, bool]:
+    """Validate bounded successor telemetry without interpreting it as ABI."""
+    edges = profile["edges"]
+    observations = profile["observations"]
+    replacements = profile["replacements"]
+    counter_saturated = profile["counter_saturated"]
+    estimates = [edge["estimated_count"] for edge in edges]
+    edge_order = sorted(
+        edges,
+        key=lambda edge: (
+            -edge["estimated_count"],
+            edge["source_address"],
+            edge["source_identity_fingerprint"],
+            edge["target_address"],
+            edge["target_identity_fingerprint"],
+            edge["source_psel"],
+            edge["source_spsel"],
+            edge["target_psel"],
+            edge["target_spsel"],
+            edge["source_identity_size"],
+            edge["target_identity_size"],
+        ),
+    )
+    validation = {
+        "single_core_jit_successor_profile_geometry_supported": (
+            profile["kind"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND
+            and profile["scope"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE
+            and profile["sets"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SETS
+            and profile["ways"] == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_WAYS
+            and profile["entries"]
+            == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_ENTRIES
+            == profile["sets"] * profile["ways"]
+        ),
+        "single_core_jit_successor_profile_counters_are_bounded": (
+            0
+            <= replacements
+            <= observations
+            <= profile["candidate_block_completions"]
+            and len(edges) <= profile["entries"]
+            and bool(edges) == (observations > 0)
+        ),
+        "single_core_jit_successor_profile_exactness_is_explicit": (
+            profile["exact"]
+            == (replacements == 0 and not counter_saturated)
+        ),
+        "single_core_jit_successor_profile_edges_are_valid": (
+            all(
+                edge["estimated_count"] >= 1
+                and 0 <= edge["max_overcount"] <= edge["estimated_count"]
+                for edge in edges
+            )
+            and (counter_saturated or sum(estimates) == observations)
+        ),
+        "single_core_jit_successor_profile_order_is_deterministic": (
+            edges == edge_order
+        ),
+    }
+    if require_empty:
+        validation[
+            "single_core_jit_successor_profile_is_exactly_empty_when_ineligible"
+        ] = profile == {
+            "kind": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_KIND,
+            "scope": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SCOPE,
+            "sets": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_SETS,
+            "ways": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_WAYS,
+            "entries": SINGLE_CORE_JIT_SUCCESSOR_PROFILE_ENTRIES,
+            "candidate_block_completions": 0,
+            "observations": 0,
+            "replacements": 0,
+            "exact": True,
+            "counter_saturated": False,
+            "edges": [],
+        }
+    return validation
 
 
 def _freeze_python_callback_profile(profile: dict) -> dict:
@@ -2983,8 +3160,15 @@ def _host_profile_probe(
     native_counts = native_snapshot["counts"]
     native_wall = native_snapshot["wall_ns"]
     jit_storage = native_snapshot["single_core_jit_storage"]
+    jit_region_storage = native_snapshot[
+        "single_core_jit_region_storage"
+    ]
+    block_cache = native_snapshot["single_core_block_cache"]
     block_rejection_cache = native_snapshot[
         "single_core_block_rejection_cache"
+    ]
+    jit_successor_profile = native_snapshot[
+        "single_core_jit_successor_profile"
     ]
     jit_backend_available = (
         native_snapshot["single_core_jit_backend"] == "x86_64"
@@ -3034,7 +3218,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 14,
+            native_snapshot["schema_version"] == 17,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3088,10 +3272,61 @@ def _host_profile_probe(
                 and not jit_storage["failed"]
             )
         ),
-        "single_core_block_rejection_cache_is_bounded_exact_span": (
+        "single_core_jit_region_storage_backend_matches": (
+            (
+                jit_region_storage["kind"]
+                == "memfd-dual-mapped-fixed-slots"
+                and jit_region_storage["w_x_model"]
+                == "distinct-rw-and-rx-aliases"
+            )
+            if jit_backend_available
+            else (
+                jit_region_storage["kind"] == "unavailable"
+                and jit_region_storage["w_x_model"] == "unavailable"
+            )
+        ),
+        "single_core_jit_region_storage_geometry_is_bounded": (
+            (
+                jit_backend_available
+                and not jit_region_storage["failed"]
+                and jit_region_storage["slot_count"] > 0
+                and jit_region_storage["slot_bytes"] > 0
+                and jit_region_storage["mapped_bytes_per_alias"]
+                == jit_region_storage["slot_count"]
+                * jit_region_storage["slot_bytes"]
+            )
+            if jit_region_storage["ready"]
+            else (
+                jit_region_storage["slot_count"] == 0
+                and jit_region_storage["slot_bytes"] == 0
+                and jit_region_storage["mapped_bytes_per_alias"] == 0
+            )
+        ),
+        "single_core_jit_region_use_has_ready_storage": (
+            (
+                native_counts["uncontended_jit_region_compilations"] == 0
+                and native_counts["uncontended_jit_region_entries"] == 0
+            )
+            or (
+                jit_backend_available
+                and jit_region_storage["ready"]
+                and not jit_region_storage["failed"]
+            )
+        ),
+        "single_core_block_cache_is_bounded_set_associative_exact_span": (
+            block_cache["kind"]
+            == "set-associative-exact-icache-span"
+            and block_cache["sets"] == 1_024
+            and block_cache["ways"] == 4
+            and block_cache["entries"] == 4_096
+            and block_cache["identity_bytes"] == 16
+        ),
+        "single_core_block_rejection_cache_is_bounded_set_associative_exact_span": (
             block_rejection_cache["kind"]
-            == "direct-mapped-exact-icache-span"
-            and block_rejection_cache["entries"] == 512
+            == "set-associative-exact-icache-span"
+            and block_rejection_cache["sets"] == 512
+            and block_rejection_cache["ways"] == 4
+            and block_rejection_cache["entries"] == 2_048
             and block_rejection_cache["identity_bytes"] == 16
         ),
         "native_batches_match_accounting": (
@@ -3155,6 +3390,15 @@ def _host_profile_probe(
                     "uncontended_jit_max_code_bytes",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
+                    "uncontended_jit_native_entries",
+                    "uncontended_jit_native_returns",
+                    "uncontended_jit_region_compile_attempts",
+                    "uncontended_jit_region_compilations",
+                    "uncontended_jit_region_compile_failures",
+                    "uncontended_jit_region_entries",
+                    "uncontended_jit_region_blocks",
+                    "uncontended_jit_region_steps",
+                    "uncontended_jit_region_target_identity_misses",
                 )
             )
         ),
@@ -3220,6 +3464,7 @@ def _host_profile_probe(
             native_counts["uncontended_block_executions"]
             <= native_counts["uncontended_block_hits"]
             + native_counts["uncontended_block_builds"]
+            + native_counts["uncontended_jit_region_entries"]
         ),
         "uncontended_block_steps_within_uncontended_steps": (
             native_counts["uncontended_block_executions"]
@@ -3269,6 +3514,37 @@ def _host_profile_probe(
             native_counts["uncontended_jit_executions"]
             <= native_counts["uncontended_jit_steps"]
             <= native_counts["uncontended_block_steps"]
+        ),
+        "uncontended_jit_native_entries_return_exactly_once": (
+            native_counts["uncontended_jit_native_entries"]
+            == native_counts["uncontended_jit_native_returns"]
+        ),
+        "uncontended_jit_region_compilation_counts_reconcile": (
+            native_counts["uncontended_jit_region_compile_attempts"]
+            == native_counts["uncontended_jit_region_compilations"]
+            + native_counts["uncontended_jit_region_compile_failures"]
+        ),
+        "uncontended_jit_native_entries_reconcile_logical_blocks": (
+            native_counts["uncontended_jit_native_entries"]
+            + native_counts["uncontended_jit_region_entries"]
+            == native_counts["uncontended_jit_executions"]
+        ),
+        "uncontended_jit_region_blocks_are_complete_pairs": (
+            native_counts["uncontended_jit_region_blocks"]
+            == 2 * native_counts["uncontended_jit_region_entries"]
+        ),
+        "uncontended_jit_region_entries_are_native_entries": (
+            native_counts["uncontended_jit_region_entries"]
+            <= native_counts["uncontended_jit_native_entries"]
+        ),
+        "uncontended_jit_region_blocks_within_jit_executions": (
+            native_counts["uncontended_jit_region_blocks"]
+            <= native_counts["uncontended_jit_executions"]
+        ),
+        "uncontended_jit_region_steps_within_jit_steps": (
+            native_counts["uncontended_jit_region_blocks"]
+            <= native_counts["uncontended_jit_region_steps"]
+            <= native_counts["uncontended_jit_steps"]
         ),
         "round_absorptions_match_logical_subfrontiers":
             native_counts["round_absorptions"]
@@ -3406,9 +3682,17 @@ def _host_profile_probe(
             )
         ),
     }
+    validation.update(
+        _single_core_jit_successor_profile_validation(
+            jit_successor_profile,
+            require_empty=(
+                native_counts["uncontended_jit_executions"] == 0
+            ),
+        )
+    )
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 14,
+        "schema_version": 17,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
@@ -3423,6 +3707,15 @@ def _host_profile_probe(
                     native_counts["uncontended_steps"],
                     returned_instructions,
                 ),
+            "uncontended_jit_guest_blocks_per_native_entry":
+                _optional_ratio(
+                    native_counts["uncontended_jit_executions"],
+                    native_counts["uncontended_jit_native_entries"],
+                ),
+            "uncontended_jit_region_step_fraction": _optional_ratio(
+                native_counts["uncontended_jit_region_steps"],
+                native_counts["uncontended_jit_steps"],
+            ),
             "worker_commands_per_wave": _optional_ratio(
                 native_counts["worker_commands"],
                 native_counts["worker_waves"],

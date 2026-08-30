@@ -50,6 +50,19 @@ The native route remains ineligible for this microcore topology.
 Version 16 carries native host-profile schema 14 after removal of the rejected
 exact-single rejection-hint experiment. This microcore topology remains
 ineligible for the exact-single path.
+
+Version 17 carries native host-profile schema 15 and the bounded four-way
+positive-plan and exact-rejection cache geometry. This microcore topology
+remains ineligible for both caches.
+
+Version 18 carries native host-profile schema 16 and its bounded successor-edge
+telemetry. This microcore topology remains ineligible for the exact-single JIT,
+so its successor profile is required to be exact and empty.
+
+Version 19 carries native host-profile schema 17 and its physical native-entry
+and two-block region telemetry. This microcore topology remains ineligible for
+the exact-single path, so the region arena and all region counters remain
+empty.
 """
 
 from __future__ import annotations
@@ -74,9 +87,26 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 16
+REPORT_SCHEMA_VERSION = 19
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
+
+SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY = {
+    "kind": "bounded-set-associative-space-saving",
+    "scope": (
+        "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+        "within-one-uncontended-segment"
+    ),
+    "sets": 1_024,
+    "ways": 8,
+    "entries": 8_192,
+    "candidate_block_completions": 0,
+    "observations": 0,
+    "replacements": 0,
+    "exact": True,
+    "counter_saturated": False,
+    "edges": [],
+}
 
 RAM_SIZE = 1 << 16
 CODE_BASE = 0x100
@@ -366,12 +396,22 @@ def _profile_probe(
     coordinator_origin_total = sum(
         counts["coordinator_boundary_origins"].values()
     )
+    block_cache = normalized["single_core_block_cache"]
     block_rejection_cache = normalized[
         "single_core_block_rejection_cache"
     ]
+    jit_successor_profile = normalized[
+        "single_core_jit_successor_profile"
+    ]
+    jit_region_storage = normalized[
+        "single_core_jit_region_storage"
+    ]
+    jit_backend_available = (
+        normalized["single_core_jit_backend"] == "x86_64"
+    )
     validation = {
-        "schema_is_version_14":
-            normalized["schema_version"] == 14,
+        "schema_is_version_17":
+            normalized["schema_version"] == 17,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -386,11 +426,56 @@ def _profile_probe(
             normalized["timing_semantics"]
             == "inclusive_nested_host_wall_nanoseconds"
         ),
-        "single_core_block_rejection_cache_is_bounded_exact_span": (
+        "single_core_block_cache_is_bounded_set_associative_exact_span": (
+            block_cache["kind"]
+            == "set-associative-exact-icache-span"
+            and block_cache["sets"] == 1_024
+            and block_cache["ways"] == 4
+            and block_cache["entries"] == 4_096
+            and block_cache["identity_bytes"] == 16
+        ),
+        "single_core_block_rejection_cache_is_bounded_set_associative_exact_span": (
             block_rejection_cache["kind"]
-            == "direct-mapped-exact-icache-span"
-            and block_rejection_cache["entries"] == 512
+            == "set-associative-exact-icache-span"
+            and block_rejection_cache["sets"] == 512
+            and block_rejection_cache["ways"] == 4
+            and block_rejection_cache["entries"] == 2_048
             and block_rejection_cache["identity_bytes"] == 16
+        ),
+        "single_core_jit_successor_profile_geometry_is_bounded": (
+            jit_successor_profile["kind"]
+            == "bounded-set-associative-space-saving"
+            and jit_successor_profile["scope"]
+            == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY["scope"]
+            and jit_successor_profile["sets"] == 1_024
+            and jit_successor_profile["ways"] == 8
+            and jit_successor_profile["entries"] == 8_192
+            == jit_successor_profile["sets"]
+            * jit_successor_profile["ways"]
+        ),
+        "single_core_jit_successor_profile_is_exactly_empty_for_micro_topology": (
+            jit_successor_profile == SINGLE_CORE_JIT_SUCCESSOR_PROFILE_EMPTY
+        ),
+        "single_core_jit_region_storage_backend_matches": (
+            (
+                jit_region_storage["kind"]
+                == "memfd-dual-mapped-fixed-slots"
+                and jit_region_storage["w_x_model"]
+                == "distinct-rw-and-rx-aliases"
+            )
+            if jit_backend_available
+            else (
+                jit_region_storage["kind"] == "unavailable"
+                and jit_region_storage["w_x_model"] == "unavailable"
+            )
+        ),
+        "single_core_jit_region_storage_is_unallocated_for_micro_topology": (
+            isinstance(jit_region_storage["enabled"], bool)
+            and not jit_region_storage["ready"]
+            and not jit_region_storage["failed"]
+            and jit_region_storage["slot_count"] == 0
+            and jit_region_storage["slot_bytes"] == 0
+            and jit_region_storage["mapped_bytes_per_alias"] == 0
         ),
         "one_native_batch":
             counts["batches"] == 1,
@@ -443,6 +528,15 @@ def _profile_probe(
                     "uncontended_jit_max_code_bytes",
                     "uncontended_jit_executions",
                     "uncontended_jit_steps",
+                    "uncontended_jit_native_entries",
+                    "uncontended_jit_native_returns",
+                    "uncontended_jit_region_compile_attempts",
+                    "uncontended_jit_region_compilations",
+                    "uncontended_jit_region_compile_failures",
+                    "uncontended_jit_region_entries",
+                    "uncontended_jit_region_blocks",
+                    "uncontended_jit_region_steps",
+                    "uncontended_jit_region_target_identity_misses",
                 )
             )
             and normalized["wall_ns"]["uncontended_round"] == 0
@@ -580,7 +674,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 14,
+        "schema_version": 17,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

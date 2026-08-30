@@ -4,9 +4,9 @@
 
 **Status:** Engine performance correction active after failed Desktop acceptance
 
-**Branch:** `single-core-execution-kernel`
+**Branch:** `single-core-dbt-throughput`
 
-**Isolated worktree:** `.worktrees/megapad-single-core-execution-kernel`
+**Isolated worktree:** `.worktrees/megapad-single-core-dbt-throughput`
 
 **Old DBT comparison baseline:**
 `72e1122adaac3de2bc23d235e58063cd179d43ce`
@@ -209,10 +209,13 @@ one explicit contract without adding redundant hot-path copies.
 
 The x86-64 backend lowers block IR without owning MP64 decoding, guest-cache
 identity, scheduling, or Python callbacks. It keeps profitable guest state live
-across the block and materializes it at exact exits. Element 7 declined direct
-continuation because the measured successor edges do not amortize the required
-invalidation, preflight, and broader entry/exit state; the reverted C++
-successor-probe loop is not restored.
+across the block and materializes it at exact exits. Element 7 originally
+declined direct continuation because its measured edges did not amortize the
+required invalidation, preflight, and broader entry/exit state; the reverted
+C++ successor-probe loop is not restored. EK-D24 later authorized one narrower
+experiment using exact profiled register/control edges. That experiment emits
+the source and target into one generated region rather than returning to C++
+and probing a second native slot.
 
 ## Fixed implementation elements
 
@@ -987,6 +990,304 @@ This selects the existing Python/shared-C++ behavior for PSEL aliases. The RTL
 conformance work is intentionally deferred and no emulator, DBT, or RTL source
 changed in this documentation-only decision.
 
+### Post-dictionary profile: bounded host-plan associativity
+
+The 2026-08-29 Desktop dictionary profile exposed a separate host-engine
+problem after the architectural `EXT.DICT` repair. The exact-single path built
+19,711,250 decoded plans and evicted 19,710,226 of them, compiled 8,537,037
+native plans and evicted 8,536,586, and stored 21,753,554 exact rejections while
+replacing 21,753,042. It republished 2.67 GB of generated code. Those tables
+were direct-mapped host memoization structures; they are unrelated to the
+guest-visible 1,024-entry `EXT.DICT` hardware cache.
+
+The first bounded correction retains the existing hashes and makes decoded
+plans 1,024 sets by four ways (4,096 entries) and exact rejections 512 sets by
+four ways (2,048 entries). A stale entry with the same address and selector
+identity is replaced first, then the lowest invalid way, then an insertion-only
+round-robin victim. Hits do not mutate recency state. Way-major physical slots
+give every plan and memory recipe one stable index, and every such index owns
+one fixed executable-arena slot. Failed construction still leaves a prior
+positive plan untouched.
+
+This is entirely host-only storage. It is neither checkpointed nor included in
+architectural hashes, and reset, discontinuous restore, and identity-epoch wrap
+discard it. No opcode, cycle, guest I-cache, `EXT.DICT`, BIOS, RTL, or snapshot
+contract changes. Host-profile schema 15 publishes both geometries explicitly
+so later profiles cannot confuse the two cache families.
+
+Seconds-scale position-balanced motifs established the intended boundary. Four
+same-set positive plans ran at 79.4--87.6 Msteps/s versus 17.3--17.7 for the
+direct-mapped parent, and two same-set exact rejections ran at 28.2--28.6 versus
+10.1--10.3. A stable primary-way plan remained inside the parent run-to-run
+range. Deliberate five-entry cyclic thrash was slower than the direct-mapped
+parent because it pays the bounded way search without retaining an entry; that
+case remains an explicit warning against claiming a production win from the
+microbenchmarks. The focused 76-case exact-single suite and ten profile-schema
+units pass. Cold source-load and Desktop A/B remain deferred by the active
+rich-terminal vertical gate.
+
+### Profile-guided opcode coverage
+
+The first coverage slice admits the existing register-register `AND` semantic
+into exact-single blocks and lowers it with x86-64 `AND` plus the established
+MP64 logic-flag publication. It also classifies a selected-PC source exactly as
+the already lowered register ALU peers do, preserving complete-fetch-before-
+execute behavior. This adds no encoding or instruction meaning: shared decode,
+the portable interpreter, the Python reference, BIOS, and hardware already
+owned `AND`; only host block admission and lowering had omitted it.
+
+A position-balanced three-instruction `AND; INC; LBR` motif improved from
+52.8--55.0 Msteps/s at the cache-only parent to 126.9--131.4 Msteps/s. Native
+coverage rose from two of every three retired instructions to effectively the
+whole loop and halved block admissions. Exact-single, generic-core, and Python
+state agree across uneven instruction budgets, zero and negative results,
+destination/source aliasing, selected-PC input, and preserved flag bits. The
+78-case exact-single selector passes; production source-load attribution
+remains deferred with the vertical gate.
+
+### Profile-guided indexed-address coverage
+
+The dictionary index then supplied the evidence previously required by EK-F4:
+its byte loops form addresses as `entry base + entry index + constant` before
+ordinary `LD.B`. Address recipes now conservatively carry at most two distinct
+entry-register sources in canonical order plus a wrapping 64-bit addend. The
+existing constant and single entry/prior-read forms remain unchanged. Duplicate
+sources, loaded-value composition, a third source, and nonconstant subtraction
+become unknown and end construction as before.
+
+Preflight resolves both entry values before native entry and sends only the
+final modulo-64-bit address through the unchanged width, MMIO, aperture, and
+ordinary-RAM span proof. Generated code still receives only the proven host
+pointer by access index; its ABI and hot block-entry stride do not grow. The
+parallel eight-access recipe table grows from 72 to 80 bytes, or 32 KiB across
+the 4,096-entry host cache.
+
+A position-balanced `MOV; ADD; LD.B; INC; LBR` motif improved from
+64.4--75.3 Msteps/s at the `AND` parent to 104.2--107.3 Msteps/s, halving
+native admissions while keeping all five guest instructions native. Focused
+oracles prove ordinary and wrapping sums, exact-single/generic equivalence,
+the prior-read and affine Forth forms, zero-progress fallback, and external
+aperture rejection. The full 79-case exact-single selector passes. This is a
+host proof optimization over existing MP64 `ADD` and `LD.B` semantics, not a
+new indexed-load opcode or hardware addressing mode.
+
+### Profile-guided multiply coverage
+
+The next dictionary-hash boundary was the existing `C2` `UMUL Rd, Rs`
+instruction. Shared decode and portable execution now own its low-64-bit
+product, four-cycle timing, and Z/N-only flag update, and the exact-single
+x86-64 backend lowers that same decoded operation with two-operand `IMUL`.
+Signed and unsigned multiplication have the same low half; an explicit host
+`TEST` publishes only Z/N because x86 does not define the multiply result's
+ZF/SF and MP64 preserves the remaining flags. A destination that aliases PSEL
+continues through the scalar path, while a PSEL source sees the architectural
+post-fetch value.
+
+Costs one through four use two instruction-indexed bitplanes for an exact
+interrupt-truncated prefix. The complete-block path, which is the ordinary
+case, reads a precomputed static cycle total from existing header padding.
+This arrangement was selected by a negative control: consulting the new
+bitplane on every native return slowed the unchanged indexed-load motif by
+8--12%. After moving that work off the complete path, a position-balanced
+control measured 123.6--129.7 Msteps/s for the candidate and 126.1--127.6 for
+its parent, within the host's run-order drift.
+
+On the positive motifs, `UMUL; INC; LBR` improved from 65.7--66.2 to
+141.2--150.3 Msteps/s. Native execution grew from two instructions per loop to
+effectively the full loop and block lookups halved. A nine-instruction
+dictionary-hash loop combining the indexed byte load, XOR, UMUL, AND, and
+counter maintenance improved from 68.2--68.3 to 104.0--107.4 Msteps/s.
+Exact-single, generic shared-C++, and Python execution agree on wrapped and
+zero products, REX timing, flags, PSEL-source slices, PSEL-destination decline,
+and an injected interrupt after exactly the four-cycle native prefix. The full
+84-case exact-single selector passes.
+
+This is not a hardware-design change. `C2`, its register encoding, product,
+flags, and timing already exist in the MP64 ISA, assembler, Python model, and
+both RTL cores. The slice moves that existing semantic into the shared host
+decoder and adds an x86-64 implementation; it adds no opcode, addressing mode,
+architectural cache, register, cycle rule, BIOS ABI, snapshot field, or RTL
+requirement.
+
+### Resolve dictionary names as proved spans
+
+The authoritative `EXT.DICT` helper formerly routed the length byte and every
+name byte independently through generic system-memory resolution. It now keeps
+the counted-length read on that exact route, returns the already-optimal empty
+name immediately, and in supervisor non-journaled execution proves the whole
+nonempty counted string once under the same supervisor-byte aperture order.
+Only then does it copy the name bytes from the resolved host span.
+
+User mode, resumable or strict-cycle bus access, MMIO overlap, guest-address
+wrap, Bank 0 aliasing, aperture crossings, and any incomplete proof retain the
+original bytewise path. The FNV result, cache lookup or mutation, flags, and
+the helper's `length + 2` cycle charge are unchanged. Bank 0, external RAM,
+wrap, external-end, MMIO-order, MPU first-fault, empty-name, and checkpointed
+strict-replay oracles pass in the complete 23-case focused EXT.DICT file.
+
+Position-balanced `DFIND; LBR` hit loops show the intended name-length scaling.
+A six-byte Bank 0 name improved from 15.54--15.75 to 19.20--20.04 Msteps/s.
+For a 31-byte name, Bank 0 improved from 5.45--5.49 to 15.78--16.26 Msteps/s
+and external RAM from 6.19--6.22 to 16.12--16.28 Msteps/s. These are focused
+helper measurements rather than a production source-load claim.
+
+The change is a host memory-resolution optimization, not a hardware feature.
+The architectural 256-by-four `EXT.DICT` table, counted-string format, FNV
+hash, replacement policy, opcode behavior, cycles, BIOS ABI, snapshots, and
+RTL requirements remain exactly as before.
+
+### Reject a local `EXT.DICT` terminal continuation
+
+A follow-on experiment tested whether a decoded native prefix should carry a
+host-only hint that the next resident byte was an unprefixed `EXT.DICT`
+header. After the prefix completed with budget remaining, the candidate
+rechecked the live I-cache byte, reproduced the ordinary interrupt, halt, and
+idle boundary, and called the existing authoritative `step_one` helper. The
+hint shared the former compile-checked byte and never entered generated code;
+the opcode tail, faults, dynamic cycles, flags, and dictionary cache remained
+owned by the ordinary extension engine.
+
+The implementation passed exact budget-two, budget-three, and following-
+instruction sentinels, reserved-subop and user-MPU trap settlement, and the
+complete 87-case exact-single selector. Its deterministic replay did remove
+the intended work. Per 20,000 guest steps in a four-instruction BIOS-shaped
+`MOV; ADDI; DFIND; BRNE` miss loop, lookups fell from 15,000 to 10,000 and
+exact rejection hits from 10,000 to 5,000; native block and JIT work remained
+the same 5,000 executions and 10,000 prefix steps.
+
+That lookup reduction was not profitable. Two position-balanced eight-round
+runs pinned to one host CPU timed 20,000,000 steps per arm and interleaved an
+unmarked four-instruction native control in each process. Across the combined
+paired samples, the candidate's median dictionary-to-control CPU-time ratio
+was 4.886 versus 4.801 for its parent, a 1.78% normalized regression. Absolute
+wall rates moved with host frequency and crossed directions, so they do not
+support a contrary speedup claim. The production change and its candidate-
+only tests were discarded.
+
+This negative result concerns only host dispatch organization. The experiment
+never proposed a guest opcode, cache rule, timing change, BIOS ABI, or RTL
+change. Any future successor-edge profiler must also classify an authoritative
+extension helper as a barrier rather than infer a native edge across it.
+
+### Measure native successor edges without chaining
+
+Host-profile schema 16 adds a bounded exact-single JIT successor profile before
+another chaining experiment is attempted. It observes only consecutive,
+complete x86-64 executions of helper-free register/control blocks within one
+uncontended segment. Scalar or interpreted execution, memory operations,
+`CALL.L`, `RET.L`, `SEP`, `EXT.DICT`, interrupt prefixes, timing exits, faults,
+and segment boundaries all clear the predecessor. Straight fallthrough remains
+eligible; requiring a terminal branch would hide exactly the region shapes the
+profile is intended to measure.
+
+The table is allocated only when host profiling starts. Its 1,024 source sets
+match the positive host-plan cache, and eight ways derive from four resident
+source identities times at most two direct successors per register/control
+block. Each set uses deterministic Space-Saving replacement: a new edge takes
+an invalid way when one exists, otherwise replaces the lowest estimate with
+`minimum + 1` and records `minimum` as its maximum overcount. Snapshot metadata
+publishes observations, replacements, saturation, and whether the reported
+counts are exact. The compact FNV-1a fingerprint is only a report and ordering
+field; record equality compares the complete admitted identity bytes, address,
+and selectors, so a fingerprint collision cannot leave an inexact profile
+marked exact. Disabled execution has no per-scalar successor branch: segment
+dispatch selects a profiling or nonprofiling loop specialization once.
+
+Focused evidence validates the boundary rather than claiming a production
+distribution. One 1,000-instruction warmed two-block ring produces exactly 500
+candidate completions and 499 edges; splitting the same work across two batch
+segments produces 498, proving there is no inferred cross-segment edge. The
+warmed BIOS-admission fixture produces 340 candidates and 330 exact observations
+across 33 equally hot straight-line edges with no replacement. BIOS-shaped
+`EXT.DICT` and native-memory rings retain candidates on their register/control
+halves but report zero edges across the helper or memory block. The full
+88-case exact-single selector and focused schema consumers pass. A real
+source-load edge distribution and any region-retention claim remain deferred
+by the rich-terminal vertical gate.
+
+This telemetry is host-only. It changes no MP64 opcode, architectural cache,
+register, memory ordering, interrupt point, cycle count, BIOS ABI, checkpoint,
+or RTL requirement. Its fingerprints are not execution authority, and no
+generated block is linked or entered differently by this slice.
+
+### Fuse exact native pairs into host regions
+
+Commit `04e4898` implements the narrow experiment authorized by EK-D24. A
+source-owned region copies one eligible native source and its exact target into
+one separately published W^X host-code slot. The pair has one generated
+prologue, entry, return, and C++ settlement. It does not jump between ordinary
+native slots and does not restore the rejected C++ successor-probe loop. An
+internal source-PC guard, an immediate target-identity proof before entry, the
+normal source identity proof, and an exact final-PC check keep both copied
+blocks subordinate to the existing admission authority.
+
+Eligibility is intentionally narrow. The source must end in straight
+fallthrough or an unconditional short/long branch; both source and target must
+already have native helper-free register/control plans, use the same PSEL and
+SPSEL, and leave compiled PSEL unchanged. Memory, helpers, `EXT.DICT`,
+`CALL.L`, `RET.L`, `SEP`, active timing, interrupt-enabled entry, insufficient
+combined budget, conditional source control, or either block writing its
+compiled PSEL prevents region entry. The generated pair settles the sum of the
+two blocks' fetched instructions, completed steps, static cycles, and any
+supported target conditional-taken cycle cost exactly once.
+
+Positive and negative pair decisions have exact lifetimes. A positive
+descriptor records the complete target address, selectors, identity bytes, and
+validated identity epoch. An ineligible target, a final base-lowering
+rejection, or a failed pair lowering/publication is likewise bound to that
+exact target identity, avoiding repeated associative probes while the target
+is unchanged. A mutation or unprovable identity clears the decision and
+retries; a globally failed region arena remains terminal. Fingerprints are not
+execution authority. Schema 17 separately reports region compilation, entry,
+logical-block, step, target-identity-miss, native-entry, and native-return
+counts, so eliminating host transitions cannot be hidden inside the older
+logical JIT totals.
+
+The focused exact selectors establish the mechanical result. A warmed
+1,000-step two-block ring retains 500 logical JIT executions and 1,000 JIT
+steps while reducing physical native entries/returns from 500 to 250 through
+250 regions. The warmed BIOS-admission fixture retains 340 logical JIT
+executions and 980 JIT steps while reducing physical native entries/returns
+from 340 to 170 and positive-plan lookups from 360 to 190 through 170 regions.
+A conditional native control reports 400 physical native entries and zero
+regions with the feature both enabled and disabled. All three replays report
+zero target-identity misses and zero timed compilation attempts.
+
+The same-binary synthetic A/B crossed the enabled treatment between two
+physical system instances on every round, pinned the process to one host CPU,
+disabled cyclic GC during timing, gave each arm an equal warm-up in its final
+mode, reversed workload and arm order, and timed eight paired rounds. Each ring
+and BIOS arm ran 10,000,000 guest steps per round; the no-region conditional
+control ran 9,999,996. Raw paired ratios are the decision evidence; division by
+the control ratio is only a secondary drift diagnostic.
+
+The ring reached median wall rates of 161.427 Msteps/s enabled and 105.160
+Msteps/s disabled, with a 1.5328x paired wall geomean and a 1.5330x process-CPU
+geomean; enabled won all eight samples. The BIOS mix reached 167.058 and
+111.142 Msteps/s, respectively, with 1.5028x wall and 1.5028x process-CPU
+geomeans; enabled again won all eight. The no-region control was neutral:
+128.472 versus 128.512 Msteps/s, a 1.0021x wall geomean, a 1.0021x process-CPU
+geomean, and four wins in eight. Control-normalized wall diagnostics were
+1.5296x for the ring and 1.4996x for the BIOS mix. The two physical instances
+had identical architectural-state hashes after all crossed warm and timed
+steps, and fresh enabled/disabled replay pairs remained identical after the
+counter checks.
+
+This is sufficient to retain the implementation as a provisional engine
+candidate rather than reject the mechanism as happened with the old chaining
+loop. It is not yet production-retention evidence: these motifs isolate hot
+region behavior and BIOS-shaped admission but do not include a real source-mode
+BIOS+KDOS load or the complete Desktop mix. EK-F10 therefore remains open until
+the active vertical and resource gates permit that representative same-binary
+exact-equivalent A/B.
+
+The region arena, descriptors, identities, and toggle are host-emulator
+implementation. They change no MP64 instruction, guest-visible dictionary or
+instruction-cache capacity/replacement rule, cycle charge, fault order,
+interrupt point, memory order, BIOS ABI, snapshot state, or RTL requirement.
+Changing any of those would be a hardware-design change; reducing the number
+of host x86 entries and C++ settlements while reproducing them exactly is not.
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1059,6 +1360,14 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D15 | Let a segment-local, rejection-indexed hint change probe order only after that segment has observed an exact resident rejection. | The persistent exact rejection entry remains authoritative; a mismatch forgets the hint and restores positive-first admission, while interrupts, scalar execution, identity proof, and persistent cache ownership remain unchanged. |
 | EK-D16 | Reject EK-D15 after the ordinary Desktop smoke and replace its two-extrema evidence with a production-calibrated matrix. | The hint's exactness was not sufficient evidence of profitability: it taxed every positive admission, regressed Desktop throughput by 6.261%, and timed out the journey. A future admission change must win the calibrated mix, stable-positive, rejected-scalar, and real BIOS+KDOS comparisons independently before another Desktop run. |
 | EK-D17 | Admit resolver-proved external-RAM scalar spans at native block entry. | External RAM shares Bank 0's pinned, directly contiguous execution contract, while full-span, MMIO, aperture-priority, timing, and I-cache invalidation checks remain authoritative; HBW and VRAM are not admitted. |
+| EK-D18 | Replace the exact-single host plan and rejection direct maps with bounded four-way tables and stable physical JIT slots. | These caches remain host-only and disposable; the guest-visible 1,024-entry `EXT.DICT` cache, architectural state, timing, snapshots, and RTL contract do not change. Full source-load retention still requires the deferred production A/B. |
+| EK-D19 | Admit and lower an opcode only through the existing shared decoded semantic before crediting it as DBT coverage. | Register `AND` is the first slice: its ISA, flags, timing, Python behavior, and hardware contract predate this host-only coverage change. |
+| EK-D20 | Represent a profiled base-plus-index scalar address with two distinct block-entry sources and a wrapping addend. | Preflight still proves the complete ordinary-RAM span before native entry; generated memory operations and the MP64 ISA gain no addressing mode or unchecked host access. |
+| EK-D21 | Lower the existing four-cycle `UMUL` semantic and settle complete blocks from a precomputed static cycle total. | Two cycle bitplanes retain exact interrupt-prefix timing, while the ordinary complete path gains no extra per-block bitplane check; the ISA, RTL, architectural state, and timing contract are unchanged. |
+| EK-D22 | Resolve one complete nonempty `EXT.DICT` counted-name span before copying its bytes. | Only supervisor non-journaled ordinary memory takes the direct path; byte routing, faults, callbacks, dynamic cycle charge, the architectural cache, BIOS, and RTL remain unchanged. |
+| EK-D23 | Reject the segment-local `EXT.DICT` terminal continuation after exact counters improved but position-balanced control-normalized timing did not. | Avoid retaining host dispatch complexity from a synthetic lookup-count win; the existing authoritative helper boundary and every guest hardware contract remain unchanged. |
+| EK-D24 | Measure eligible native successor edges with a bounded set-local Space-Saving host profile before building another continuation path. | Full admitted bytes remain the exact internal identity; fingerprints are report-only, all helper/memory/timing/interrupt/segment boundaries break adjacency, and schema 16 telemetry does not authorize execution or alter hardware. |
+| EK-D25 | Reopen EK-D11 only for exact two-block generated regions and retain that implementation as a provisional host candidate after its crossed same-binary synthetic A/B won materially. | The candidate removes host x86 entry/return and C++ settlement work without changing guest behavior or hardware. Its private A/B toggle remains only through representative source-mode qualification; production retention is deferred to EK-F10. |
 
 ## Deferred findings ledger
 
@@ -1067,7 +1376,10 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-F1 | Focused happy-path coverage did not exhaust every branch condition, prefix/fault boundary, CALL.L/RET.L register-alias class, natural-width callback route, or strict-cycle replay form. | Resolved in the fourth Element 8 slice with all condition codes, the unambiguous stack-selector alias, CALL/RET fault ordering, ordered natural-width callbacks including a prefixed later-byte failure, and representative one-cycle strict/unbounded equivalence. Deliberate cross-products remain outside the compact consolidation matrix. |
 | EK-F2 | Inlined positive and rejection identity checks retained predicates already proved by their sole admission caller. | Resolved in the second Element 8 slice: caller-proved eligibility and selector-range predicates were removed, while exact entry identity and dynamic I-cache validation remain. |
 | EK-F3 | The rejection matcher remains behind a positive-cache probe in scalar regions whose starts repeatedly match exact resident rejections. | EK-D15's segment hint is rejected by EK-D16: optimizing the rejection-only extreme imposed a larger production cost. Restore the simpler positive-first path and leave this local inefficiency open unless representative mixed evidence supports a correction that does not tax the common path. |
-| EK-F4 | Address provenance deliberately represents one entry, constant, or prior-read source plus an addend; combining independent live sources can still end construction before a later memory access. | Do not broaden the closed engine without new retained remaining-shape evidence and paired exact justification. |
+| EK-F4 | Address provenance deliberately represented one entry, constant, or prior-read source plus an addend, so the dictionary index's independent base-plus-index calculation ended construction before `LD.B`. | Resolved by EK-D20 after the new dictionary profile supplied a concrete hot shape and the paired indexed-load motif showed a material exact-equivalent gain. Broader source algebra remains excluded. |
 | EK-F5 | Happy-path construction coverage did not inject either a later-span preflight failure or an IPI between instructions of a multi-memory block. | Resolved in the third Element 8 slice: aliased later-span fallback proves zero block progress, and a one-shot real-router diagnostic proves the exact generated completed-prefix exit before a terminal store. |
 | EK-F6 | Multi-memory entry still scans the bounded decoded plan and resolves each scalar span; a prior-read-derived address also rereads its dependency during preflight. | The canonical comparison proves a net engine gain but does not isolate this preflight's contribution. Keep it out of line and change it only if a future focused profile identifies it as material and paired exact evidence supports the change. |
 | EK-F7 | RTL old-value/nonblocking-write behavior differs from the architectural post-fetch register view when an execution operand or destination aliases PSEL; `CALL.L` first exposed the mismatch. | ISA decision resolved by EK-D14 and documented in `isa-reference.md`. Python/shared C++ already implement the selected rule and exact block lowering declines semantic selector aliases; focused RTL conformance and correction remain deliberately unimplemented here. |
+| EK-F8 | Four-way host caches collapse two-to-four-way conflict motifs but add work to a set that cycles through five or more live identities. | Retain the bounded implementation as the first profiled candidate, expose exact geometry/churn counters, and decide any associativity or capacity adjustment from a position-balanced cold source-load profile once the rich-terminal gate permits it. |
+| EK-F9 | A decoded native prefix followed by `EXT.DICT` still performs another ordinary admission whose start normally matches an exact rejection. | The local terminal continuation removed that admission but regressed the control-normalized paired timing by 1.78%. Leave the boundary explicit unless a future design eliminates more than the lookup while preserving helper, interrupt, fault, and successor-edge barriers. |
+| EK-F10 | Schema 17 focused profiles and the synthetic region A/B prove that exact generated pairs are active and materially profitable on the two-block ring and BIOS-calibrated admission mix, but do not establish edge concentration or net source-load benefit in the real BIOS+KDOS journey. | When the active vertical and resource gates permit it, run a source-mode representative BIOS+KDOS same-binary exact-equivalent A/B. Synthetic evidence can reject the mechanism and supports provisional retention here, but it cannot authorize final production retention or removal of the temporary private A/B toggle. |

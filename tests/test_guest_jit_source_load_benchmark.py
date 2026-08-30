@@ -54,6 +54,7 @@ def test_guest_jit_source_parser_keeps_host_profile_opt_in():
     defaults = benchmark.build_parser().parse_args([])
     profiled = benchmark.build_parser().parse_args(["--host-profile"])
 
+    assert benchmark.SCHEMA_VERSION == 2
     assert defaults.definitions == 2_048
     assert defaults.iterations == 2_000_000
     assert not defaults.host_profile

@@ -4,6 +4,64 @@ import bench_phase0_concurrency as phase0
 from devices import SECTOR_SIZE
 
 
+EMPTY_JIT_SUCCESSOR_PROFILE = {
+    "kind": "bounded-set-associative-space-saving",
+    "scope": (
+        "consecutive-complete-helper-free-register-control-x86_64-blocks-"
+        "within-one-uncontended-segment"
+    ),
+    "sets": 1_024,
+    "ways": 8,
+    "entries": 8_192,
+    "candidate_block_completions": 0,
+    "observations": 0,
+    "replacements": 0,
+    "exact": True,
+    "counter_saturated": False,
+    "edges": [],
+}
+
+JIT_REGION_COUNT_FIELDS = (
+    "uncontended_jit_region_compile_attempts",
+    "uncontended_jit_region_compilations",
+    "uncontended_jit_region_compile_failures",
+    "uncontended_jit_region_entries",
+    "uncontended_jit_region_blocks",
+    "uncontended_jit_region_steps",
+    "uncontended_jit_region_target_identity_misses",
+)
+
+
+def _assert_completed_native_region_accounting(counts: dict) -> None:
+    assert (
+        counts["uncontended_jit_native_entries"]
+        == counts["uncontended_jit_native_returns"]
+    )
+    assert (
+        counts["uncontended_jit_region_compile_attempts"]
+        == counts["uncontended_jit_region_compilations"]
+        + counts["uncontended_jit_region_compile_failures"]
+    )
+    assert (
+        counts["uncontended_jit_native_entries"]
+        + counts["uncontended_jit_region_entries"]
+        == counts["uncontended_jit_executions"]
+    )
+    assert (
+        counts["uncontended_jit_region_blocks"]
+        == 2 * counts["uncontended_jit_region_entries"]
+    )
+    assert (
+        counts["uncontended_jit_region_entries"]
+        <= counts["uncontended_jit_native_entries"]
+    )
+    assert (
+        counts["uncontended_jit_region_blocks"]
+        <= counts["uncontended_jit_region_steps"]
+        <= counts["uncontended_jit_steps"]
+    )
+
+
 def test_bios_admission_mix_matches_production_profile_shape_exactly():
     accounting, probe = phase0._accounting_probe(
         phase0.SCENARIOS["bios_admission_mix"],
@@ -16,8 +74,8 @@ def test_bios_admission_mix_matches_production_profile_shape_exactly():
     assert all(probe["validation"].values())
     counts = probe["native_snapshot"]["counts"]
     assert counts["uncontended_steps"] == 1_000
-    assert counts["uncontended_block_lookups"] == 360
-    assert counts["uncontended_block_hits"] == 340
+    assert counts["uncontended_block_lookups"] == 190
+    assert counts["uncontended_block_hits"] == 170
     assert counts["uncontended_block_misses"] == 20
     assert counts["uncontended_block_rejection_cache_hits"] == 20
     assert counts["uncontended_block_build_attempts"] == 0
@@ -27,6 +85,47 @@ def test_bios_admission_mix_matches_production_profile_shape_exactly():
     assert counts["uncontended_block_steps"] == 980
     assert counts["uncontended_jit_compilations"] == 0
     assert counts["uncontended_jit_slot_publications"] == 0
+    assert counts["uncontended_jit_executions"] == 340
+    assert counts["uncontended_jit_steps"] == 980
+    assert counts["uncontended_jit_native_entries"] == 170
+    assert counts["uncontended_jit_native_returns"] == 170
+    assert counts["uncontended_jit_region_compile_attempts"] == 0
+    assert counts["uncontended_jit_region_compilations"] == 0
+    assert counts["uncontended_jit_region_compile_failures"] == 0
+    assert counts["uncontended_jit_region_entries"] == 170
+    assert counts["uncontended_jit_region_blocks"] == 340
+    assert counts["uncontended_jit_region_steps"] == 980
+    assert counts["uncontended_jit_region_target_identity_misses"] == 0
+    _assert_completed_native_region_accounting(counts)
+    region_storage = probe["native_snapshot"][
+        "single_core_jit_region_storage"
+    ]
+    assert region_storage["enabled"]
+    assert region_storage["ready"]
+    assert not region_storage["failed"]
+    assert region_storage["slot_count"] == 4_096
+    assert region_storage["slot_bytes"] > 0
+    assert (
+        region_storage["mapped_bytes_per_alias"]
+        == region_storage["slot_count"] * region_storage["slot_bytes"]
+    )
+    successor = probe["native_snapshot"][
+        "single_core_jit_successor_profile"
+    ]
+    assert successor["candidate_block_completions"] == 340
+    assert successor["observations"] == 330
+    assert successor["replacements"] == 0
+    assert successor["exact"]
+    assert not successor["counter_saturated"]
+    assert len(successor["edges"]) == 33
+    assert sum(
+        edge["estimated_count"] for edge in successor["edges"]
+    ) == 330
+    assert all(
+        edge["estimated_count"] == 10
+        and edge["max_overcount"] == 0
+        for edge in successor["edges"]
+    )
     assert (
         counts["uncontended_steps"]
         - counts["uncontended_block_steps"]
@@ -34,11 +133,13 @@ def test_bios_admission_mix_matches_production_profile_shape_exactly():
     )
     metrics = accounting["observation"]["workload_metrics"]
     assert metrics["expected_per_core_per_segment"] == {
-        "block_lookups": 360,
-        "positive_block_hits": 340,
+        "block_lookups": 190,
+        "positive_block_hits": 170,
         "rejection_cache_hits": 20,
         "block_executions": 340,
         "block_steps": 980,
+        "native_region_entries": 170,
+        "native_region_blocks": 340,
         "scalar_steps": 20,
     }
 
@@ -60,7 +161,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 23
+    assert report["schema_version"] == 26
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -71,7 +172,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 14
+        assert probe["schema_version"] == 17
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -79,8 +180,15 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         native = probe["native_snapshot"]
         counts = native["counts"]
         jit_storage = native["single_core_jit_storage"]
+        jit_region_storage = native[
+            "single_core_jit_region_storage"
+        ]
+        block_cache = native["single_core_block_cache"]
         block_rejection_cache = native[
             "single_core_block_rejection_cache"
+        ]
+        jit_successor_profile = native[
+            "single_core_jit_successor_profile"
         ]
         assert not native["enabled"]
         assert native["generation"] > 0
@@ -157,13 +265,26 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
             "uncontended_jit_slot_rewrites",
             "uncontended_jit_code_bytes",
             "uncontended_jit_max_code_bytes",
+            "uncontended_jit_native_entries",
+            "uncontended_jit_native_returns",
+            *JIT_REGION_COUNT_FIELDS,
         ):
             assert counts[name] == 0
-        assert block_rejection_cache == {
-            "kind": "direct-mapped-exact-icache-span",
-            "entries": 512,
+        assert block_cache == {
+            "kind": "set-associative-exact-icache-span",
+            "sets": 1_024,
+            "ways": 4,
+            "entries": 4_096,
             "identity_bytes": 16,
         }
+        assert block_rejection_cache == {
+            "kind": "set-associative-exact-icache-span",
+            "sets": 512,
+            "ways": 4,
+            "entries": 2_048,
+            "identity_bytes": 16,
+        }
+        assert jit_successor_profile == EMPTY_JIT_SUCCESSOR_PROFILE
         assert native["wall_ns"][
             "uncontended_jit_arena_allocation"
         ] == 0
@@ -172,6 +293,12 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert jit_storage["slot_count"] == 0
         assert jit_storage["slot_bytes"] == 0
         assert jit_storage["mapped_bytes_per_alias"] == 0
+        assert isinstance(jit_region_storage["enabled"], bool)
+        assert not jit_region_storage["ready"]
+        assert not jit_region_storage["failed"]
+        assert jit_region_storage["slot_count"] == 0
+        assert jit_region_storage["slot_bytes"] == 0
+        assert jit_region_storage["mapped_bytes_per_alias"] == 0
 
         callbacks = probe["python_callbacks"]
         assert callbacks["mmio_read_calls"] > 0
@@ -216,17 +343,24 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 23
+    assert report["schema_version"] == 26
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 14
+        assert probe["schema_version"] == 17
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]
         jit_storage = native["single_core_jit_storage"]
+        jit_region_storage = native[
+            "single_core_jit_region_storage"
+        ]
+        block_cache = native["single_core_block_cache"]
         block_rejection_cache = native[
             "single_core_block_rejection_cache"
+        ]
+        jit_successor_profile = native[
+            "single_core_jit_successor_profile"
         ]
         accounting = result["accounting_probe"]
         returned = accounting[
@@ -243,11 +377,44 @@ def test_single_core_profile_attributes_work_across_worker_counts():
         assert counts["private_steps"] == 0
         assert native["wall_ns"]["uncontended_round"] > 0
         assert native["wall_ns"]["uncontended_dispatch"] > 0
-        assert block_rejection_cache == {
-            "kind": "direct-mapped-exact-icache-span",
-            "entries": 512,
+        assert block_cache == {
+            "kind": "set-associative-exact-icache-span",
+            "sets": 1_024,
+            "ways": 4,
+            "entries": 4_096,
             "identity_bytes": 16,
         }
+        assert block_rejection_cache == {
+            "kind": "set-associative-exact-icache-span",
+            "sets": 512,
+            "ways": 4,
+            "entries": 2_048,
+            "identity_bytes": 16,
+        }
+        assert {
+            name: jit_successor_profile[name]
+            for name in ("kind", "scope", "sets", "ways", "entries")
+        } == {
+            "kind": "bounded-set-associative-space-saving",
+            "scope": (
+                "consecutive-complete-helper-free-register-control-x86_64-"
+                "blocks-within-one-uncontended-segment"
+            ),
+            "sets": 1_024,
+            "ways": 8,
+            "entries": 8_192,
+        }
+        assert (
+            0
+            <= jit_successor_profile["replacements"]
+            <= jit_successor_profile["observations"]
+            <= jit_successor_profile["candidate_block_completions"]
+        )
+        assert len(jit_successor_profile["edges"]) <= 8_192
+        assert jit_successor_profile["exact"] == (
+            jit_successor_profile["replacements"] == 0
+            and not jit_successor_profile["counter_saturated"]
+        )
         assert (
             counts["uncontended_block_build_attempts"]
             == counts["uncontended_block_builds"]
@@ -277,6 +444,8 @@ def test_single_core_profile_attributes_work_across_worker_counts():
             counts["uncontended_jit_slot_rewrites"]
             <= counts["uncontended_jit_slot_publications"]
         )
+        _assert_completed_native_region_accounting(counts)
+        assert all(counts[name] == 0 for name in JIT_REGION_COUNT_FIELDS)
         assert (
             counts["uncontended_jit_plan_evictions"]
             <= counts["uncontended_block_builds"]
@@ -311,6 +480,12 @@ def test_single_core_profile_attributes_work_across_worker_counts():
                 counts["uncontended_jit_max_code_bytes"]
                 <= jit_storage["slot_bytes"]
             )
+        assert isinstance(jit_region_storage["enabled"], bool)
+        assert not jit_region_storage["ready"]
+        assert not jit_region_storage["failed"]
+        assert jit_region_storage["slot_count"] == 0
+        assert jit_region_storage["slot_bytes"] == 0
+        assert jit_region_storage["mapped_bytes_per_alias"] == 0
 
         ratios = probe["structural_ratios"]
         assert ratios["uncontended_steps_per_dispatch"] > 0

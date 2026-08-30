@@ -16,7 +16,7 @@ import bench_bios_kdos_load as bios_bench
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.guest-jit-source-load"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 START_MARKER = "[megapad-bench] guest JIT source start"
 COMPILED_MARKER = "[megapad-bench] guest JIT source compiled"
 COMPLETION_PREFIX = "[megapad-bench] guest JIT source complete value="
@@ -291,6 +291,9 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             if host_profile is not None:
                 validation.update(
                     {
+                        "host_profile_schema_supported": (
+                            host_profile["schema_version"] == 17
+                        ),
                         "host_profile_frozen": not host_profile["enabled"],
                         "profiled_steps_match_run": (
                             host_profile["counts"]["uncontended_steps"]

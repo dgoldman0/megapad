@@ -47,6 +47,7 @@ enum class DecodedOperation : uint8_t {
     SHIFT_RIGHT_ARITHMETIC,
     ROTATE_LEFT,
     ROTATE_RIGHT,
+    UNSIGNED_MULTIPLY_LOW,
     SELECT_PROGRAM_COUNTER,
 };
 

@@ -27,6 +27,7 @@ public:
     void mov_core_from_rax(int32_t displacement);
     void mov_core_from_rcx(int32_t displacement);
     void mov_core_from_r9(int32_t displacement);
+    void imul_rax_from_core(int32_t displacement);
     void add_r9_imm8(uint8_t immediate);
     void add_r9_imm32(uint32_t immediate);
     void add_core_imm8(int32_t displacement, uint8_t immediate);
@@ -36,6 +37,10 @@ public:
     void decrement_core(int32_t displacement);
     void add_core_r15(int32_t displacement);
     void compare_core_byte(int32_t displacement, uint8_t value);
+    void compare_core_qword_immediate(
+        int32_t displacement,
+        uint64_t value);
+    void compare_r9_immediate(uint64_t value);
     void add_exit_flags(uint8_t flags);
     void store_core_byte(int32_t displacement, uint8_t value);
     void store_core_qword_zero(int32_t displacement);
