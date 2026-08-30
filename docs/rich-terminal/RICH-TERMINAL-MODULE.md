@@ -411,7 +411,8 @@ and a real Daybook task addition through this path. Its evidence boundary is
 explicitly `pygame.display.flip()`: it proves exact host display-API submission
 and acknowledgement, not hardware scanout or panel refresh. This rerun
 qualifies the Akashic implementation containing the eleven retained-delta and
-admission optimizations through `e754ac1` for that journey.
+admission optimizations through `e754ac1` and two subsequent cold-source
+compatibility corrections in exact `eedcfb9` for that journey.
 
 Against the earlier `3404fe9`/`8941782` baseline, post-first-offer decoded
 traffic fell from 1,386 frames / 190,131 bytes to 221 frames / 24,541 bytes,
@@ -487,7 +488,8 @@ checkpoint.
 The current contract evolves in place; do not add a numbered successor,
 parallel legacy path, Sound Lab fixture, applet-specific scene, or
 renderer-reservation markup. The reference Pygame/Desktop journey above has
-crossed the earlier semantic-control and display-sink gate. Current-head replay,
-the remaining shared-resource step, reset/resize and other production cases,
-sustained cadence, persistence, physical UART, and hardware-panel qualification
-remain separate sequential work under the resource gate.
+crossed the earlier semantic-control and display-sink gate, and the exact
+`eedcfb9`/`4f074ae` current-head reference journey is recorded. The remaining
+shared-resource step, reset/resize and other production cases, sustained
+cadence, persistence, physical UART, and hardware-panel qualification remain
+separate sequential work under the resource gate.
