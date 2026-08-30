@@ -23,12 +23,14 @@ from simulator.ir import (
     Literal,
     Loop,
     Operation,
+    QuestionDo,
     RPeek,
     RPop,
     RPush,
     Return,
     Unloop,
 )
+from simulator.memory import SparseAddressSpace
 from simulator.source import SourceBuffer, SourceCursor, SourceLocation
 from simulator.stacks import DataStack, ReturnStack
 
@@ -67,6 +69,14 @@ class ColonDefinition:
     operations: tuple[Operation, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ConstantDefinition:
+    value: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", u64(self.value))
+
+
 class DirectiveKind(Enum):
     COLON = auto()
     SEMICOLON = auto()
@@ -78,6 +88,7 @@ class DirectiveKind(Enum):
     R_FROM = auto()
     R_FETCH = auto()
     DO = auto()
+    QUESTION_DO = auto()
     LOOP = auto()
     UNLOOP = auto()
     PAREN_COMMENT = auto()
@@ -91,7 +102,7 @@ class DirectiveDefinition:
 
 
 WordImplementation: TypeAlias = (
-    PrimitiveDefinition | ColonDefinition | DirectiveDefinition
+    PrimitiveDefinition | ColonDefinition | ConstantDefinition | DirectiveDefinition
 )
 
 
@@ -118,6 +129,7 @@ class _IfFrame:
 @dataclass(slots=True)
 class _DoFrame:
     body_target: int
+    question_index: int | None = None
 
 
 _ControlFrame: TypeAlias = _IfFrame | _DoFrame
@@ -164,12 +176,18 @@ class MegaForthRuntime:
         self,
         *,
         dictionary_start: int = 0x1000,
+        memory: SparseAddressSpace | None = None,
         install_core_words: bool = True,
     ) -> None:
+        if memory is not None and not isinstance(memory, SparseAddressSpace):
+            raise TypeError("memory must be a SparseAddressSpace or None")
         self.dictionary = Dictionary(start_address=dictionary_start)
+        self.memory = SparseAddressSpace() if memory is None else memory
         self.main_context = ExecutionContext()
         self._numeric_base = 10
         self._provided: set[bytes] = set()
+        self._active_input_states: list[_EvaluationState] = []
+        self._active_meters: list[_StepMeter] = []
         if install_core_words:
             from simulator.core_words import install_core
 
@@ -216,6 +234,18 @@ class MegaForthRuntime:
             immediate=immediate,
         )
 
+    def define_constant(self, name: bytes | str, value: int) -> Word:
+        """Publish an executable cell constant under one stable XT.
+
+        Constants created by a defining primitive during :meth:`evaluate` are
+        also included in that evaluation's ordered definition ledger.
+        """
+
+        word = self.dictionary.define(name, ConstantDefinition(value))
+        if self._active_input_states:
+            self._active_input_states[-1].definitions.append(word)
+        return word
+
     def define_directive(self, name: bytes | str, kind: DirectiveKind) -> Word:
         if not isinstance(kind, DirectiveKind):
             raise TypeError("directive kind must be a DirectiveKind")
@@ -224,6 +254,40 @@ class MegaForthRuntime:
             DirectiveDefinition(kind),
             immediate=True,
         )
+
+    def parse_required_input_word(self, owner: bytes | str) -> bytes:
+        """Consume a required word from the active physical input line.
+
+        This is the source-cursor boundary used by ordinary defining
+        primitives.  It deliberately cannot continue onto a later line and
+        is unavailable to execution that was not reached from
+        :meth:`evaluate`.
+        """
+
+        if isinstance(owner, bytes):
+            try:
+                owner_text = owner.decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise ValueError("input parser owner must be ASCII") from exc
+        elif isinstance(owner, str):
+            owner_text = owner
+        else:
+            raise TypeError("input parser owner must be bytes or str")
+        if not owner_text:
+            raise ValueError("input parser owner must not be empty")
+        if not self._active_input_states:
+            raise ExecutionError(
+                f"{owner_text} cannot parse a word without an active input line"
+            )
+
+        state = self._active_input_states[-1]
+        value = state.cursor.parse_word()
+        if not value:
+            raise SourceError(
+                f"{owner_text} requires a following word",
+                state.cursor.location,
+            )
+        return value
 
     def evaluate(
         self,
@@ -243,7 +307,7 @@ class MegaForthRuntime:
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
 
-        meter = _StepMeter(step_budget)
+        meter, starting_steps = self._meter_for_public_call(step_budget)
         state: _EvaluationState | None = None
         line_count = 0
         for line in SourceBuffer(source, name=source_name):
@@ -266,7 +330,7 @@ class MegaForthRuntime:
             source_name=source_name,
             line_count=line_count,
             token_count=state.token_count,
-            semantic_steps=meter.steps,
+            semantic_steps=meter.steps - starting_steps,
             definitions=tuple(state.definitions),
         )
 
@@ -283,17 +347,23 @@ class MegaForthRuntime:
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
         word = self._resolve_word(name_or_xt)
-        meter = _StepMeter(step_budget)
+        meter, starting_steps = self._meter_for_public_call(step_budget)
         self._execute_guarded(word, active_context, meter)
-        return ExecutionResult(meter.steps)
+        return ExecutionResult(meter.steps - starting_steps)
 
     def _evaluate_line(self, state: _EvaluationState) -> None:
-        while True:
-            token = state.cursor.parse_word()
-            if not token:
-                return
-            state.token_count += 1
-            self._evaluate_token(token, state)
+        self._active_input_states.append(state)
+        try:
+            while True:
+                token = state.cursor.parse_word()
+                if not token:
+                    return
+                state.token_count += 1
+                self._evaluate_token(token, state)
+        finally:
+            active = self._active_input_states.pop()
+            if active is not state:
+                raise AssertionError("active input cursor stack is corrupted")
 
     def _evaluate_token(self, token: bytes, state: _EvaluationState) -> None:
         if token.startswith(b"\\"):
@@ -388,6 +458,12 @@ class MegaForthRuntime:
         elif kind is DirectiveKind.DO:
             compiler.operations.append(Do())
             compiler.controls.append(_DoFrame(len(compiler.operations)))
+        elif kind is DirectiveKind.QUESTION_DO:
+            compiler.operations.append(QuestionDo(0))
+            question_index = len(compiler.operations) - 1
+            compiler.controls.append(
+                _DoFrame(len(compiler.operations), question_index)
+            )
         elif kind is DirectiveKind.LOOP:
             if not compiler.controls or not isinstance(
                 compiler.controls[-1], _DoFrame
@@ -396,6 +472,10 @@ class MegaForthRuntime:
             frame = compiler.controls.pop()
             assert isinstance(frame, _DoFrame)
             compiler.operations.append(Loop(frame.body_target))
+            if frame.question_index is not None:
+                compiler.operations[frame.question_index] = QuestionDo(
+                    len(compiler.operations)
+                )
         elif kind is DirectiveKind.UNLOOP:
             compiler.operations.append(Unloop())
         else:
@@ -410,11 +490,16 @@ class MegaForthRuntime:
         """Execute atomically with respect to internal return-stack state."""
 
         return_snapshot = context.returns.snapshot()
+        self._active_meters.append(meter)
         try:
             self._execute_top(word, context, meter)
         except BaseException:
             context.returns.restore(return_snapshot)
             raise
+        finally:
+            active = self._active_meters.pop()
+            if active is not meter:
+                raise AssertionError("active semantic step-meter stack is corrupted")
 
     def _execute_top(
         self,
@@ -423,9 +508,16 @@ class MegaForthRuntime:
         meter: _StepMeter,
     ) -> None:
         target = word
-        while isinstance(target.implementation, PrimitiveDefinition):
+        while True:
+            implementation = target.implementation
+            if isinstance(implementation, ConstantDefinition):
+                meter.tick()
+                context.data.push(implementation.value)
+                return
+            if not isinstance(implementation, PrimitiveDefinition):
+                break
             meter.tick()
-            invocation = target.implementation.callback(context)
+            invocation = implementation.callback(context)
             if invocation is None:
                 return
             if not isinstance(invocation, Invoke):
@@ -486,6 +578,14 @@ class MegaForthRuntime:
                 limit = context.data.pop()
                 context.returns.enter_do(limit, index)
                 ip += 1
+            elif isinstance(operation, QuestionDo):
+                index = context.data.pop()
+                limit = context.data.pop()
+                if index == limit:
+                    ip = operation.target
+                else:
+                    context.returns.enter_do(limit, index)
+                    ip += 1
             elif isinstance(operation, Loop):
                 ip = operation.target if context.returns.loop() else ip + 1
             elif isinstance(operation, Unloop):
@@ -512,9 +612,16 @@ class MegaForthRuntime:
         context: ExecutionContext,
         meter: _StepMeter,
     ) -> Word | None:
-        while isinstance(target.implementation, PrimitiveDefinition):
+        while True:
+            implementation = target.implementation
+            if isinstance(implementation, ConstantDefinition):
+                meter.tick()
+                context.data.push(implementation.value)
+                return None
+            if not isinstance(implementation, PrimitiveDefinition):
+                break
             meter.tick()
-            invocation = target.implementation.callback(context)
+            invocation = implementation.callback(context)
             if invocation is None:
                 return None
             if not isinstance(invocation, Invoke):
@@ -533,6 +640,23 @@ class MegaForthRuntime:
         if word is None:
             raise KeyError(f"unknown word {name_or_xt!r}")
         return word
+
+    def _meter_for_public_call(
+        self,
+        step_budget: int | None,
+    ) -> tuple[_StepMeter, int]:
+        """Select one meter without letting nested dispatch reset its budget."""
+
+        if self._active_meters:
+            if step_budget is not None:
+                raise ValueError(
+                    "nested evaluation or execution cannot replace the active "
+                    "step budget"
+                )
+            meter = self._active_meters[-1]
+            return meter, meter.steps
+        meter = _StepMeter(step_budget)
+        return meter, 0
 
     def _parse_number(self, token: bytes) -> int | None:
         """Parse exactly the BIOS ``-``/``0x``/``BASE`` number grammar."""
@@ -609,6 +733,7 @@ class MegaForthRuntime:
 
 __all__ = [
     "ColonDefinition",
+    "ConstantDefinition",
     "DirectiveDefinition",
     "DirectiveKind",
     "EvaluationResult",

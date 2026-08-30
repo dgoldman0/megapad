@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shared.cells import forth_flag, s64
+from shared.cells import forth_flag, s64, u64
 from simulator.runtime import (
     DirectiveKind,
     ExecutionContext,
@@ -60,10 +60,26 @@ def _add(context: ExecutionContext) -> None:
     context.data.push(left + right)
 
 
+def _multiply(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    context.data.push(u64(left * right))
+
+
+def _one_minus(context: ExecutionContext) -> None:
+    context.data.push(u64(context.data.pop() - 1))
+
+
 def _and(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
     context.data.push(left & right)
+
+
+def _right_shift(context: ExecutionContext) -> None:
+    count = context.data.pop()
+    value = context.data.pop()
+    context.data.push(value >> (count & 0x3F))
 
 
 def _equal(context: ExecutionContext) -> None:
@@ -84,6 +100,57 @@ def _unsigned_less(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
     context.data.push(forth_flag(left < right))
+
+
+def _unsigned_greater(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    context.data.push(forth_flag(left > right))
+
+
+def _signed_less_equal(context: ExecutionContext) -> None:
+    right = s64(context.data.pop())
+    left = s64(context.data.pop())
+    context.data.push(forth_flag(left <= right))
+
+
+def _signed_greater_equal(context: ExecutionContext) -> None:
+    right = s64(context.data.pop())
+    left = s64(context.data.pop())
+    context.data.push(forth_flag(left >= right))
+
+
+def _fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    context.data.push(runtime.memory.read64(address))
+
+
+def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    value = context.data.pop()
+    runtime.memory.write64(address, value)
+
+
+def _plus_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    increment = context.data.pop()
+    runtime.memory.write64(
+        address,
+        u64(runtime.memory.read64(address) + increment),
+    )
+
+
+def _fill(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = context.data.pop()
+    length = context.data.pop()
+    address = context.data.pop()
+    runtime.memory.fill(address, length, value)
+
+
+def _constant(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = context.data.pop()
+    name = runtime.parse_required_input_word(b"CONSTANT")
+    runtime.define_constant(name, value)
 
 
 def _i(context: ExecutionContext) -> None:
@@ -112,6 +179,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"R>", DirectiveKind.R_FROM),
         (b"R@", DirectiveKind.R_FETCH),
         (b"DO", DirectiveKind.DO),
+        (b"?DO", DirectiveKind.QUESTION_DO),
         (b"LOOP", DirectiveKind.LOOP),
         (b"UNLOOP", DirectiveKind.UNLOOP),
         (b"(", DirectiveKind.PAREN_COMMENT),
@@ -131,11 +199,22 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"2OVER", _two_over),
         (b"PICK", _pick),
         (b"+", _add),
+        (b"*", _multiply),
+        (b"1-", _one_minus),
         (b"AND", _and),
+        (b"RSHIFT", _right_shift),
         (b"=", _equal),
         (b"0=", _zero_equal),
         (b"0<", _zero_less),
         (b"U<", _unsigned_less),
+        (b"U>", _unsigned_greater),
+        (b"<=", _signed_less_equal),
+        (b">=", _signed_greater_equal),
+        (b"@", lambda context: _fetch(runtime, context)),
+        (b"!", lambda context: _store(runtime, context)),
+        (b"+!", lambda context: _plus_store(runtime, context)),
+        (b"FILL", lambda context: _fill(runtime, context)),
+        (b"CONSTANT", lambda context: _constant(runtime, context)),
         (b"I", _i),
         (b"J", _j),
         (b"EXECUTE", _execute),

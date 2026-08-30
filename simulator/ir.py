@@ -82,6 +82,14 @@ class Do:
 
 
 @dataclass(frozen=True, slots=True)
+class QuestionDo:
+    target: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target", _target(self.target))
+
+
+@dataclass(frozen=True, slots=True)
 class Loop:
     target: int
 
@@ -104,6 +112,7 @@ Operation: TypeAlias = (
     | RPop
     | RPeek
     | Do
+    | QuestionDo
     | Loop
     | Unloop
 )
@@ -117,6 +126,7 @@ __all__ = [
     "Literal",
     "Loop",
     "Operation",
+    "QuestionDo",
     "Return",
     "RPeek",
     "RPop",
