@@ -233,7 +233,10 @@ The observed 64-bit cell uses a client-defined low-byte phase and high-56-bit
 sequence. While enabled, the shared owner reads it immediately after each
 retired-instruction batch under the same scheduler lock. A recorded change is
 therefore bounded by the exact cumulative instruction counts before and after
-that batch. A sequence jump reports how many intervening transitions were
+that batch. Tear-free host sampling follows from the synchronous guest batch
+having quiesced while that lock remains held; it is not a claim that concurrent
+guest cores or a physical debug master observe an unaligned 64-bit store
+atomically. A sequence jump reports how many intervening transitions were
 coalesced; it does not invent their phases or divide the interval among them.
 The observer retains the first caller-bounded records, counts later dropped
 records and transitions, and has a host safety ceiling of 65,536 records.

@@ -511,6 +511,30 @@ def test_phase_profile_accepts_unaligned_cell_but_rejects_unsafe_spans():
     assert session.system.cpu.reads == 1
 
 
+def test_phase_profile_contains_unaligned_external_memory_cells():
+    session = _PhaseEventSession([])
+    session.system.ext_mem_base = 0x2_000
+    session.system.ext_mem_size = 0x100
+    session.system.ext_mem_end = 0x2_100
+    machine = SharedMachine(session)
+    _mark_phase_machine_running(machine)
+
+    session.system.cpu.address = 0x2_003
+    started = machine.start_phase_profile(0x2_003, 4, generation=1)
+    assert started["address"] == 0x2_003
+    machine.stop_phase_profile()
+
+    session.system.cpu.address = 0x2_0F8
+    started = machine.start_phase_profile(0x2_0F8, 4, generation=1)
+    assert started["address"] == 0x2_0F8
+    machine.stop_phase_profile()
+    assert session.system.cpu.reads == 2
+
+    with pytest.raises(ValueError, match="complete RAM"):
+        machine.start_phase_profile(0x2_0F9, 4, generation=1)
+    assert session.system.cpu.reads == 2
+
+
 def test_phase_profile_start_is_live_and_generation_bound():
     session = _PhaseEventSession([])
     machine = SharedMachine(session)
