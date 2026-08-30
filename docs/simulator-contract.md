@@ -223,6 +223,26 @@ hit/miss observations are zero. None of these diagnostic substitutions is
 evidence for pipeline timing, physical RAM coverage, tile hardware, or a
 physical instruction cache.
 
+The admitted AES service is one per-runtime transaction engine behind the
+virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
+byte/word accesses against that same object. It implements AES-128/256 block
+values, GHASH, partial final data, commands 0/1, statuses 0/1/2/3, uint32
+length registers, native configuration/fault transitions, and incremental
+BIOS buffer-transfer mutation. Guest contexts share it and guest control
+unwinding does not reset it. A separate focused vector compares its public
+windows directly with the native architectural device. The portable value
+model is not constant-time host cryptography, and synchronous completion makes
+no latency, interrupt, RTL, or side-channel claim.
+
+Unchanged KDOS §1.5 is qualified only in its current safe source domain: plain
+lengths are positive uint32 multiples of 16; AEAD AAD length is 1 through 16
+and data length is a nonnegative uint32. Zero/nonmultiple plain lengths, zero
+AAD, and AAD above 16 have source-level loop, classification, or overwrite
+defects and are explicitly not repaired by a simulator-only cap. Bad-tag
+decryption retains the executable mutation order: already streamed plaintext
+remains published while the final output window is zero. These are recorded
+compatibility findings, not endorsed security properties.
+
 ## 7. Rich-terminal path
 
 The simulator's conforming rich-terminal journey is:

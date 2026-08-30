@@ -301,6 +301,12 @@ class SparseAddressSpace:
         return self._page_size
 
     @property
+    def mmio(self) -> MMIOPort | None:
+        """Return the installed platform port without bypassing its methods."""
+
+        return self._mmio
+
+    @property
     def resident_page_count(self) -> int:
         """Number of ordinary-memory pages materialized by writes."""
 

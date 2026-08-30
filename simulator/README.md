@@ -45,6 +45,9 @@ The implemented slices provide:
 - a per-runtime pseudo-BIOS diagnostic profile with persistent semantic-work
   accounting, retained non-destructive BIST observations, a real four-operation
   tile value self-test, and logical no-cache controls/zero cache counters;
+- a routed per-runtime AES-128/256-GCM service shared by BIOS words and direct
+  virtual MMIO, backed by a portable AES/GHASH value model and exact native
+  command, status, fault, and incremental guest-transfer semantics;
 - active-line `WORD` with its transient counted string at `HERE`, forward
   `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
   supported compile-state `ABORT"` path;
@@ -210,6 +213,24 @@ differential, independent failure-bit coverage, and no guest scratchpad mutation
 Exact composed UART output is pinned with both signs of the backend-local
 work-counter field normalized.
 
+Byte-exact logical lines 903 through 1071 load the complete unchanged KDOS AES
+section and its 14 ordinary source definitions. All 11 adjacent BIOS AES words
+are bound, including the later-facing AES-128 mode selector. Acceptance pins
+AES-128 and AES-256 external known answers, a direct native-MMIO differential,
+mixed BIOS/MMIO state, one/two-block and exact in-place encryption, good/bad
+decryption mutation order, every partial data tail, AAD lengths 1/15/16,
+AAD-only data, scratch/tag lifetimes, status text, guest unwinding, recovery,
+and byte-incremental caller faults. This is value/state compatibility, not a
+hardware timing, RTL, constant-time, or host-secret-protection claim.
+
+The unchanged high-level source is qualified in its defensible current domain:
+plain positive uint32 multiples of 16 and AEAD AAD lengths 1..16 with
+nonnegative uint32 data lengths. Plain zero/nonmultiple/high-cell lengths,
+zero AAD, and AAD above 16 expose source defects; the latter can overwrite live
+dictionary state. Bad-tag multi-block decrypt also leaves previously streamed
+plaintext published. These cases remain explicit findings rather than hidden
+host substitutions or hard-coded simulator capacities.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -225,8 +246,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–902 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, exceptions, task hooks, CRC, and the complete KDOS hardware-diagnostic family; line 70 is blank |
-| 903 onward | Next uncovered frontier | AES-256-GCM begins at line 903; its ordinary buffers allocate at lines 922–924 and `AES-DIN!` is the first missing BIOS primitive reached at line 929 |
+| 39–1071 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics plus the complete unchanged KDOS AES source section in its documented safe input domain; line 70 is blank |
+| 1072 onward | Next uncovered frontier | SHA-3/SHAKE begins at line 1072; its preamble/constants compile through line 1100 and `CALLER-SPAN-STATUS` is the next missing primitive at line 1102 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -238,7 +259,7 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins AES-256-GCM. Later slices continue the same
+The next source boundary begins SHA-3/SHAKE. Later slices continue the same
 contiguous unchanged prefix toward the persistent evaluator, ordinary checked
 module-loader surface, and deterministic cooperative task scheduler.
 

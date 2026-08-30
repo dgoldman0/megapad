@@ -15,6 +15,7 @@ from simulator.platform import (
     SYSINFO_LIMIT,
     SYSINFO_OFFSET,
     OneCoreSysInfo,
+    PlatformMMIOAccessError,
     SysInfoAccessError,
     create_one_core_address_space,
 )
@@ -96,17 +97,18 @@ def test_exact_window_supports_little_endian_naturally_aligned_reads() -> None:
 
 
 @pytest.mark.parametrize(
-    ("offset", "width"),
+    ("offset", "width", "error_type"),
     (
-        (SYSINFO_OFFSET - 1, 1),
-        (SYSINFO_LIMIT, 1),
-        (SYSINFO_OFFSET + 1, 2),
-        (SYSINFO_LIMIT - 1, 2),
+        (SYSINFO_OFFSET - 1, 1, PlatformMMIOAccessError),
+        (SYSINFO_LIMIT, 1, PlatformMMIOAccessError),
+        (SYSINFO_OFFSET + 1, 2, SysInfoAccessError),
+        (SYSINFO_LIMIT - 1, 2, SysInfoAccessError),
     ),
 )
 def test_unmapped_misaligned_and_crossing_reads_fail_in_whole_access_preflight(
     offset: int,
     width: int,
+    error_type: type[ValueError],
 ) -> None:
     memory = create_one_core_address_space(bank0_size=0x1000)
     read = {1: memory.read8, 2: memory.read16}[width]
@@ -115,7 +117,7 @@ def test_unmapped_misaligned_and_crossing_reads_fail_in_whole_access_preflight(
         read(MMIO_BASE + offset)
 
     cause = exc_info.value.__cause__
-    assert isinstance(cause, SysInfoAccessError)
+    assert isinstance(cause, error_type)
     assert cause.offset == offset
     assert cause.width == width
     assert cause.write is False

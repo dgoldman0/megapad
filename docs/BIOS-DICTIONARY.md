@@ -707,13 +707,20 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 253 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
 | 254 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
 | 255 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
-| 256 | `AES-CMD!` | `( cmd -- )` | | Start operation: 1 = encrypt, 2 = decrypt |
-| 257 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done, 2 = auth fail |
-| 258 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
-| 259 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
-| 260 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
-| 261 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
-| 262 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
+| 256 | `AES-CMD!` | `( cmd -- )` | | Start operation: low bit 0 = encrypt, 1 = decrypt |
+| 257 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = idle, 1 = active, 2 = done, 3 = authentication or transaction failure |
+| 258 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
+| 259 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
+| 260 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
+| 261 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
+| 262 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
+
+The executable BIOS/native ABI places key mode at AES offset `+0x3A` inside
+the `+0x700..+0x76F` byte aperture. The native configuration check requires
+all 32 key bytes in either mode, although AES-128 uses the first 16. Integrated
+RTL currently differs in aperture, access shape, byte protocol, status,
+authentication, and qualified timing/interrupt behavior; see
+`docs/bios-forth.md` for the discrepancy record.
 
 ### Checked SHA-3 / SHAKE / raw Keccak (9 words)
 

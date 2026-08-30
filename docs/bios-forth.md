@@ -928,10 +928,10 @@ SUMSQ) use FP32 accumulation for numerical stability.
 
 ---
 
-## AES-256-GCM Engine (10 words)
+## AES-256/128-GCM Engine (11 words)
 
-Hardware-accelerated authenticated encryption via the MMIO AES engine
-at `0xFFFF_FF00_0000_0700`.
+Authenticated encryption via the executable/native MMIO AES ABI at
+`0xFFFF_FF00_0000_0700`.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -939,12 +939,34 @@ at `0xFFFF_FF00_0000_0700`.
 | `AES-IV!` | `( addr -- )` | Load 96-bit IV (12 bytes at addr) into AES engine. |
 | `AES-AAD-LEN!` | `( n -- )` | Set additional authenticated data length (bytes). |
 | `AES-DATA-LEN!` | `( n -- )` | Set plaintext/ciphertext data length (bytes). |
-| `AES-CMD!` | `( cmd -- )` | Start operation: 1 = encrypt, 2 = decrypt. |
-| `AES-STATUS@` | `( -- status )` | Read status: 0 = busy, 1 = done, 2 = auth fail. |
+| `AES-CMD!` | `( cmd -- )` | Start operation: low bit 0 = encrypt, 1 = decrypt. |
+| `AES-STATUS@` | `( -- status )` | Read status: 0 = idle, 1 = active, 2 = done, 3 = authentication or transaction failure. |
+| `AES-KEY-MODE!` | `( n -- )` | Select key mode: low bit 0 = AES-256, 1 = AES-128. The current executable device still requires all 32 key bytes to be written. |
 | `AES-DIN!` | `( addr -- )` | Feed input data block (16 bytes at addr) to engine. |
 | `AES-DOUT@` | `( addr -- )` | Read output data block (16 bytes) from engine. |
 | `AES-TAG@` | `( addr -- )` | Read 128-bit authentication tag (16 bytes) from engine. |
 | `AES-TAG!` | `( addr -- )` | Write expected tag (16 bytes) for decryption verification. |
+
+> **AES ABI discrepancy record.** The table above follows unchanged KDOS,
+> `bios.asm`, and the native architectural device: the byte aperture is
+> `+0x700..+0x76F`, key mode is at `+0x3A`, commands are 0/1, and statuses are
+> 0/1/2/3. Naturally aligned 1-, 2-, 4-, and 8-byte native accesses are
+> preflighted as complete spans and decomposed little-endian; the BIOS uses
+> byte loops for key, IV, data, and tag transfers and 32-bit stores for the two
+> lengths. Older tables published commands 1/2, statuses 0/1/2, a 64-byte
+> aperture, or key mode at `+0x70`.
+>
+> Current integrated RTL is not compatible with that executable byte ABI. The
+> SoC decodes `+0x700..+0x77F`, does not pass access size to the AES leaf, and
+> the leaf recognizes mostly 32-bit register starts plus isolated command,
+> status, and key-mode byte offsets, rather than one callback at every byte;
+> the BIOS byte loops therefore do not configure or transfer the same register
+> image. RTL also exposes a busy/done/auth-fail bitfield rather than statuses
+> 0/1/2/3 and does not implement the executable AAD/length-finalization/tag-
+> comparison and fail-closed transaction protocol. Published throughput and
+> interrupt behavior remain unqualified RTL design targets, not current
+> executable/native ABI guarantees. This records the mismatch without choosing
+> which implementation must ultimately change.
 
 ---
 

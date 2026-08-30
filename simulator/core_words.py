@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 from shared.cells import CELL_BYTES, forth_flag, s64, u64
+from simulator.aes import (
+    AES_AAD_LENGTH,
+    AES_COMMAND,
+    AES_DATA_INPUT,
+    AES_DATA_LENGTH,
+    AES_DATA_OUTPUT,
+    AES_IV,
+    AES_KEY,
+    AES_KEY_MODE,
+    AES_STATUS,
+    AES_TAG,
+)
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.memory import MMIO_BASE
 from simulator.platform import (
@@ -548,6 +560,56 @@ def _crc_final_fetch(
     context.data.push(runtime.crc.final(runtime.guest_identity(context)))
 
 
+def _aes_to_device(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    *,
+    mmio_offset: int,
+    length: int,
+) -> None:
+    address = context.data.pop()
+    for index in range(length):
+        value = runtime.memory.read8(u64(address + index))
+        runtime.memory.write8(MMIO_BASE + mmio_offset + index, value)
+
+
+def _aes_from_device(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    *,
+    mmio_offset: int,
+    length: int,
+) -> None:
+    address = context.data.pop()
+    for index in range(length):
+        value = runtime.memory.read8(MMIO_BASE + mmio_offset + index)
+        runtime.memory.write8(u64(address + index), value)
+
+
+def _aes_scalar_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    *,
+    mmio_offset: int,
+    width: int,
+) -> None:
+    value = context.data.pop()
+    address = MMIO_BASE + mmio_offset
+    if width == 1:
+        runtime.memory.write8(address, value)
+    elif width == 4:
+        runtime.memory.write32(address, value)
+    else:
+        raise AssertionError("unsupported AES BIOS scalar width")
+
+
+def _aes_status_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.memory.read8(MMIO_BASE + AES_STATUS))
+
+
 def _push_diagnostic(context: ExecutionContext, value: int) -> None:
     context.data.push(value)
 
@@ -724,6 +786,97 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (
             b"CRC-FINAL@",
             lambda context: _crc_final_fetch(runtime, context),
+        ),
+        (
+            b"AES-KEY!",
+            lambda context: _aes_to_device(
+                runtime,
+                context,
+                mmio_offset=AES_KEY,
+                length=32,
+            ),
+        ),
+        (
+            b"AES-IV!",
+            lambda context: _aes_to_device(
+                runtime,
+                context,
+                mmio_offset=AES_IV,
+                length=12,
+            ),
+        ),
+        (
+            b"AES-AAD-LEN!",
+            lambda context: _aes_scalar_store(
+                runtime,
+                context,
+                mmio_offset=AES_AAD_LENGTH,
+                width=4,
+            ),
+        ),
+        (
+            b"AES-DATA-LEN!",
+            lambda context: _aes_scalar_store(
+                runtime,
+                context,
+                mmio_offset=AES_DATA_LENGTH,
+                width=4,
+            ),
+        ),
+        (
+            b"AES-CMD!",
+            lambda context: _aes_scalar_store(
+                runtime,
+                context,
+                mmio_offset=AES_COMMAND,
+                width=1,
+            ),
+        ),
+        (b"AES-STATUS@", lambda context: _aes_status_fetch(runtime, context)),
+        (
+            b"AES-KEY-MODE!",
+            lambda context: _aes_scalar_store(
+                runtime,
+                context,
+                mmio_offset=AES_KEY_MODE,
+                width=1,
+            ),
+        ),
+        (
+            b"AES-DIN!",
+            lambda context: _aes_to_device(
+                runtime,
+                context,
+                mmio_offset=AES_DATA_INPUT,
+                length=16,
+            ),
+        ),
+        (
+            b"AES-DOUT@",
+            lambda context: _aes_from_device(
+                runtime,
+                context,
+                mmio_offset=AES_DATA_OUTPUT,
+                length=16,
+            ),
+        ),
+        (
+            b"AES-TAG@",
+            lambda context: _aes_from_device(
+                runtime,
+                context,
+                mmio_offset=AES_TAG,
+                length=16,
+            ),
+        ),
+        (
+            b"AES-TAG!",
+            lambda context: _aes_to_device(
+                runtime,
+                context,
+                mmio_offset=AES_TAG,
+                length=16,
+            ),
         ),
         (
             b"PERF-CYCLES",

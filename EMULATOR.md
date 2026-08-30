@@ -181,7 +181,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0400` | 128 B | NIC (Network Interface) |
 | `+0x0500` | 16 B | Mailbox (inter-core IPI) |
 | `+0x0600` | 64 B | Spinlock (hardware mutexes) |
-| `+0x0700` | 64 B | AES-256/128-GCM (authenticated encryption) |
+| `+0x0700` | 112 B | AES-256/128-GCM (authenticated encryption; key mode at `+0x073A`) |
 | `+0x0780` | 96 B | SHA-3/SHAKE (hashing, key derivation) |
 | `+0x07E0` | 16 B | Reserved; no integrated QoS MMIO device (access faults) |
 | `+0x0800` | 32 B | TRNG (hardware entropy source) |

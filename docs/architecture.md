@@ -147,7 +147,7 @@ device occupies a small range:
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | 16 hardware locks, 4 bytes each; lock 8 is reserved by the checked MMIO crypto guard |
-| **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
+| **AES-256/128-GCM** | `+0x0700` | 112 bytes | Authenticated encryption accelerator (AES-256 and AES-128); executable key-mode byte at `+0x073A` |
 | **SHA-3/SHAKE/raw Keccak** | `+0x0780` | 96 bytes | Checked hash/XOF streaming plus indexed caller-owned Keccak-f[1600] state |
 | **Reserved** | `+0x07E0` | 16 bytes | No integrated QoS MMIO device; accesses fault |
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |

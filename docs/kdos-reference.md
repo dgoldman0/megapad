@@ -215,12 +215,24 @@ AES-256 (default) and AES-128 (via `AES-KEY-MODE!`).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `AES-ENCRYPT` | `( key iv src dst len -- tag-addr )` | Encrypt *len* bytes from *src* to *dst*.  Returns address of 16-byte GCM tag. |
-| `AES-DECRYPT` | `( key iv src dst len tag -- flag )` | Decrypt and verify.  Returns 0 if auth OK, -1 if auth failed. |
+| `AES-ENCRYPT` | `( key iv src dst len -- tag-addr )` | Encrypt a positive uint32 multiple of 16 bytes from *src* to *dst*. Returns the shared 16-byte GCM tag-buffer address. |
+| `AES-DECRYPT` | `( key iv src dst len tag -- flag )` | Decrypt and verify a positive uint32 multiple of 16 bytes. Returns 0 if auth OK, -1 if auth failed. |
 | `AES-ENCRYPT-BLK` | `( src dst -- )` | Process one 16-byte block (key/IV/CMD must already be set). |
-| `AES-ENCRYPT-AEAD` | `( key iv aad aadlen src dst dlen -- tag-addr )` | Full AEAD encrypt with additional authenticated data (AAD). |
-| `AES-DECRYPT-AEAD` | `( key iv aad aadlen src dst dlen tag -- flag )` | Full AEAD decrypt + verify with AAD.  Handles partial blocks correctly. |
+| `AES-ENCRYPT-AEAD` | `( key iv aad aadlen src dst dlen -- tag-addr )` | AEAD encrypt in the current safe source domain: `aadlen` 1..16 and nonnegative uint32 `dlen`; partial data blocks are supported. |
+| `AES-DECRYPT-AEAD` | `( key iv aad aadlen src dst dlen tag -- flag )` | AEAD decrypt + verify in the same current safe domain. |
 | `.AES-STATUS` | `( -- )` | Print human-readable AES status. |
+
+The bounds above describe the unchanged source as it exists, not a desired
+fixed-capacity API. Plain zero/nonmultiple/high-cell lengths do not match the
+32-bit engine length and can enter a nonterminating or incomplete loop.
+The AEAD wrappers always submit exactly one AAD pad: zero AAD is misclassified,
+while more than 16 bytes overruns that pad into live dictionary state and still
+does not authenticate the full AAD. These are open KDOS source defects, not
+simulator-imposed limits. Exact in-place buffers work; arbitrary overlap is not
+qualified. Decryption also streams output before the final tag decision, so a
+bad multi-block tag leaves earlier unauthenticated plaintext in the destination
+and zeroes only the final block/tail. Callers must discard the entire output on
+failure. `AES-TAG-BUF` is shared and overwritten by the next tag fetch.
 
 ---
 

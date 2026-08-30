@@ -251,6 +251,10 @@ def test_runtime_fails_closed_without_one_admitted_sysinfo_profile() -> None:
     with pytest.raises(ValueError, match="unimplemented capabilities"):
         MegaForthRuntime(memory=unsupported)
 
+    sysinfo_only = SparseAddressSpace(mmio=_SysInfoProfileMMIO(0))
+    with pytest.raises(ValueError, match="one-core platform MMIO"):
+        MegaForthRuntime(memory=sysinfo_only)
+
     zero_full = SparseAddressSpace(
         mmio=_SysInfoProfileMMIO(0, num_full=0)
     )

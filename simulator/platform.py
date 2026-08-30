@@ -1,8 +1,9 @@
 """Focused platform services for the hosted one-core simulator profile.
 
-The initial hosted profile exposes only the read-only SysInfo MMIO window.
-Its memory-topology registers are built from the exact
-:class:`~simulator.memory.SparseAddressSpace` returned by the factory below;
+The hosted profile routes read-only SysInfo and the admitted AES service
+through one virtual MMIO port.  Its memory-topology registers are built from
+the exact :class:`~simulator.memory.SparseAddressSpace` returned by the factory
+below;
 the service does not carry an independent copy of the address-space defaults.
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 from shared.cells import MASK64
 from shared.crc import CRYPTO_CAP_CRC_REFLECT_RAW
+from simulator.aes import AES_LIMIT, AES_OFFSET, HostedAESService
 from simulator.memory import (
     BANK0_DEFAULT_SIZE,
     DEFAULT_PAGE_SIZE,
@@ -33,6 +35,23 @@ _INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
 
 class SysInfoAccessError(ValueError):
     """One direct access does not belong to the hosted SysInfo contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        offset: int,
+        width: int,
+        write: bool,
+    ) -> None:
+        self.offset = offset
+        self.width = width
+        self.write = write
+        super().__init__(message)
+
+
+class PlatformMMIOAccessError(ValueError):
+    """One access does not resolve to a hosted platform service window."""
 
     def __init__(
         self,
@@ -211,6 +230,58 @@ class OneCoreSysInfo:
         )
 
 
+class OneCorePlatformMMIO:
+    """Route each admitted one-core MMIO window to its sole service state."""
+
+    __slots__ = ("aes", "sysinfo")
+
+    def __init__(
+        self,
+        *,
+        sysinfo: OneCoreSysInfo,
+        aes: HostedAESService,
+    ) -> None:
+        if not isinstance(sysinfo, OneCoreSysInfo):
+            raise TypeError("platform SysInfo must be a OneCoreSysInfo")
+        if not isinstance(aes, HostedAESService):
+            raise TypeError("platform AES must be a HostedAESService")
+        self.sysinfo = sysinfo
+        self.aes = aes
+
+    def preflight(self, offset: int, width: int, *, write: bool) -> None:
+        self._service(offset, width, write=write).preflight(
+            offset,
+            width,
+            write=write,
+        )
+
+    def read8(self, offset: int) -> int:
+        return self._service(offset, 1, write=False).read8(offset)
+
+    def write8(self, offset: int, value: int) -> None:
+        self._service(offset, 1, write=True).write8(offset, value)
+
+    def _service(
+        self,
+        offset: int,
+        width: int,
+        *,
+        write: bool,
+    ) -> OneCoreSysInfo | HostedAESService:
+        if isinstance(offset, int):
+            if SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
+                # Let the selected service diagnose a crossing span.
+                return self.sysinfo
+            if AES_OFFSET <= offset < AES_LIMIT:
+                return self.aes
+        raise PlatformMMIOAccessError(
+            "access is outside every admitted platform MMIO window",
+            offset=offset,
+            width=width,
+            write=write,
+        )
+
+
 def create_one_core_address_space(
     *,
     bank0_size: int = BANK0_DEFAULT_SIZE,
@@ -220,15 +291,19 @@ def create_one_core_address_space(
     page_size: int = DEFAULT_PAGE_SIZE,
     crypto_capabilities: int = CRYPTO_CAP_CRC_REFLECT_RAW,
 ) -> SparseAddressSpace:
-    """Return sparse guest memory with the one-core SysInfo service attached."""
+    """Return sparse guest memory with the one-core platform router attached."""
 
     sysinfo = OneCoreSysInfo(crypto_capabilities=crypto_capabilities)
+    platform = OneCorePlatformMMIO(
+        sysinfo=sysinfo,
+        aes=HostedAESService(),
+    )
     memory = SparseAddressSpace(
         bank0_size=bank0_size,
         external_size=external_size,
         vram_size=vram_size,
         hbw_size=hbw_size,
-        mmio=sysinfo,
+        mmio=platform,
         page_size=page_size,
     )
     sysinfo.bind(memory)
@@ -245,6 +320,8 @@ __all__ = [
     "SYSINFO_OFFSET",
     "SYSINFO_SIZE",
     "OneCoreSysInfo",
+    "OneCorePlatformMMIO",
+    "PlatformMMIOAccessError",
     "SysInfoAccessError",
     "create_one_core_address_space",
 ]

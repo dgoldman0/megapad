@@ -44,6 +44,7 @@ from simulator.ir import (
 )
 from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
 from simulator.platform import (
+    OneCorePlatformMMIO,
     SYSINFO_CRYPTO_CAPS,
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
@@ -347,6 +348,12 @@ class MegaForthRuntime:
             MMIO_BASE + SYSINFO_CRYPTO_CAPS
         )
         self.crc = HostedCRCService(crypto_capabilities)
+        platform_mmio = self.memory.mmio
+        if not isinstance(platform_mmio, OneCorePlatformMMIO):
+            raise ValueError(
+                "hosted runtime requires the admitted one-core platform MMIO"
+            )
+        self.aes = platform_mmio.aes
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None
